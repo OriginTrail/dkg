@@ -8,14 +8,17 @@ import {
   normalizeContextGraphAuthorityNonNegativeSafeInteger,
   type ContextGraphAuthorityGenerationState,
 } from './context-graph-authority-generation.js';
+import {
+  freezeContextGraphAuthorityIndexState,
+  MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
+  normalizeContextGraphAuthorityAccessPolicy,
+  normalizeContextGraphAuthorityPublishDomain,
+  type ContextGraphAuthorityIndexState,
+} from './context-graph-authority-state.js';
 
-export const CONTEXT_GRAPH_AUTHORITY_INDEX_CHECKPOINT_VERSION = 1 as const;
+export type { ContextGraphAuthorityIndexState } from './context-graph-authority-state.js';
 
-/** One compact authority generation for a ContextGraphStorage token. */
-export interface ContextGraphAuthorityIndexState
-  extends ContextGraphAuthorityGenerationState {
-  readonly contextGraphId: string;
-}
+export const CONTEXT_GRAPH_AUTHORITY_INDEX_CHECKPOINT_VERSION = 2 as const;
 
 /** A contiguous, fully reduced contract-history prefix. */
 export interface ContextGraphAuthorityIndexCursor {
@@ -54,20 +57,37 @@ export interface ContextGraphAuthorityIndexStore {
   invalidate(scope: string, expectedToken: number): Promise<number | undefined>;
 }
 
+const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/i;
+const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
+
 function normalizePositiveDecimal(value: unknown): string | undefined {
   if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return undefined;
   const parsed = BigInt(value);
   return parsed <= ethers.MaxUint256 ? value : undefined;
 }
 
-function compareContextGraphIds(left: string, right: string): number {
-  return left.length - right.length || left.localeCompare(right);
+export function normalizeAuthorityIndexAddress(value: unknown): string | undefined {
+  return typeof value === 'string' && ADDRESS_PATTERN.test(value)
+    ? value.toLowerCase()
+    : undefined;
 }
 
-export function freezeContextGraphAuthorityIndexState(
-  state: ContextGraphAuthorityIndexState,
-): ContextGraphAuthorityIndexState {
-  return Object.freeze({ ...state });
+export function normalizeAuthorityIndexParticipantAgents(
+  value: unknown,
+): readonly string[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS) {
+    return undefined;
+  }
+  const agents = value.map(normalizeAuthorityIndexAddress);
+  if (agents.some((agent) => agent === undefined || agent === ZERO_ADDRESS)) return undefined;
+  const unique = new Set(agents as string[]);
+  return unique.size === agents.length
+    ? Object.freeze([...unique].sort())
+    : undefined;
+}
+
+function compareContextGraphIds(left: string, right: string): number {
+  return left.length - right.length || left.localeCompare(right);
 }
 
 export function sortAndFreezeContextGraphAuthorityIndexStates(
@@ -85,20 +105,42 @@ type ContextGraphAuthorityIndexIntegrityInput = Pick<
   'version' | 'cursor' | 'states'
 >;
 
+function stateIntegrityValues(
+  state: ContextGraphAuthorityIndexState,
+): readonly unknown[] {
+  type MaterializedField = Exclude<
+    keyof ContextGraphAuthorityIndexState,
+    keyof ContextGraphAuthorityGenerationState
+  >;
+  // Generation ordering is canonical across both durable formats. Adding a
+  // materialized field remains a compile-time failure until it is included.
+  const fields = {
+    contextGraphId: state.contextGraphId,
+    owner: state.owner,
+    active: state.active,
+    accessPolicy: state.accessPolicy,
+    publishPolicy: state.publishPolicy,
+    publishAuthority: state.publishAuthority,
+    publishAuthorityAccountId: state.publishAuthorityAccountId,
+    participantAgents: state.participantAgents,
+  } satisfies { [K in MaterializedField]: unknown };
+  return Object.freeze([
+    ...Object.values(fields),
+    ...contextGraphAuthorityGenerationIntegrityValues(state),
+  ]);
+}
+
 function contextGraphAuthorityIndexIntegrity(
   checkpoint: ContextGraphAuthorityIndexIntegrityInput,
 ): string {
   const canonical = JSON.stringify([
-    'dkg-context-graph-authority-index-checkpoint-v1',
+    'dkg-context-graph-authority-index-checkpoint-v2',
     checkpoint.version,
     checkpoint.cursor.deploymentBlockNumber,
     checkpoint.cursor.throughBlockNumber,
     checkpoint.cursor.throughBlockHash,
     checkpoint.cursor.stateCount,
-    ...checkpoint.states.flatMap((state) => [
-      state.contextGraphId,
-      ...contextGraphAuthorityGenerationIntegrityValues(state),
-    ]),
+    ...checkpoint.states.flatMap(stateIntegrityValues),
   ]);
   return ethers.keccak256(ethers.toUtf8Bytes(canonical)).toLowerCase();
 }
@@ -110,9 +152,26 @@ function normalizeIndexState(
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const candidate = value as Partial<Record<keyof ContextGraphAuthorityIndexState, unknown>>;
   const contextGraphId = normalizePositiveDecimal(candidate.contextGraphId);
+  const owner = normalizeAuthorityIndexAddress(candidate.owner);
+  const active = typeof candidate.active === 'boolean' ? candidate.active : undefined;
+  const accessPolicy = normalizeContextGraphAuthorityAccessPolicy(candidate.accessPolicy);
+  const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+    candidate.publishPolicy,
+    candidate.publishAuthority,
+    candidate.publishAuthorityAccountId,
+  );
+  const participantAgents = normalizeAuthorityIndexParticipantAgents(
+    candidate.participantAgents,
+  );
   const generation = normalizeContextGraphAuthorityGenerationState(candidate);
   if (
     contextGraphId === undefined
+    || owner === undefined
+    || owner === ZERO_ADDRESS
+    || active === undefined
+    || accessPolicy === undefined
+    || publishDomain === undefined
+    || participantAgents === undefined
     || generation === undefined
     || generation.sourceBlockNumber < cursor.deploymentBlockNumber
     || generation.sourceBlockNumber > cursor.throughBlockNumber
@@ -121,6 +180,11 @@ function normalizeIndexState(
   ) return undefined;
   return freezeContextGraphAuthorityIndexState({
     contextGraphId,
+    owner,
+    active,
+    accessPolicy,
+    ...publishDomain,
+    participantAgents,
     ...generation,
   });
 }

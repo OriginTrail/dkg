@@ -1,15 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-import type { ContextGraphAuthorityGenerationState } from './context-graph-authority-generation.js';
+import type { ContextGraphPublishDomainV1 } from '@origintrail-official/dkg-core';
 import type { ContextGraphAuthorityHistoryResolution } from './context-graph-authority-history.js';
 import type {
   ContextGraphAuthorityIndexState,
 } from './context-graph-authority-index-checkpoint.js';
 import type { ContextGraphAuthorityIndexEvent } from './context-graph-authority-index-reducer.js';
+import {
+  normalizeContextGraphAuthorityAccessPolicy,
+  normalizeContextGraphAuthorityPublishDomain,
+  normalizeContextGraphAuthorityPublishReference,
+  type ContextGraphAuthorityState,
+} from './context-graph-authority-state.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_EVENT_NAMES = Object.freeze([
   'ContextGraphCreated',
+  'ContextGraphDeactivated',
   'Transfer',
   'PublishPolicyUpdated',
   'PublishAuthorityUpdated',
@@ -17,21 +24,15 @@ export const CONTEXT_GRAPH_AUTHORITY_EVENT_NAMES = Object.freeze([
   'AgentParticipantRemoved',
 ] as const);
 
-export interface EvmContextGraphCurrentAuthorityState {
-  readonly owner: string;
-  readonly active: boolean;
-  readonly accessPolicy: number;
-  readonly publishPolicy: number;
-  readonly publishAuthority: string | null;
-  readonly publishAuthorityAccountId: string;
-  readonly participantAgents: readonly string[];
-}
-
-export type EvmContextGraphAuthorityGeneration = ContextGraphAuthorityGenerationState;
+export type EvmContextGraphCurrentAuthorityState = Readonly<{
+  owner: string;
+  active: boolean;
+  accessPolicy: ContextGraphAuthorityState['accessPolicy'];
+  participantAgents: readonly string[];
+}> & ContextGraphPublishDomainV1;
 
 export interface EvmContextGraphAuthoritySourceResult {
-  readonly current: EvmContextGraphCurrentAuthorityState;
-  readonly generation: EvmContextGraphAuthorityGeneration;
+  readonly state: ContextGraphAuthorityState;
   /** Final cross-read fence or legacy checkpoint publication. */
   stabilize(): Promise<void>;
 }
@@ -39,8 +40,7 @@ export interface EvmContextGraphAuthoritySourceResult {
 export type EvmContextGraphAuthoritySource =
   | Readonly<{
       kind: 'indexed';
-      readCurrent(): Promise<unknown>;
-      readGeneration(): Promise<ContextGraphAuthorityIndexState>;
+      readSnapshot(): Promise<ContextGraphAuthorityIndexState>;
       stabilize(): Promise<void>;
     }>
   | Readonly<{
@@ -54,14 +54,6 @@ function tupleField(value: unknown, name: string, index: number): unknown {
   const named = (value as Record<string, unknown>)[name];
   if (named !== undefined) return named;
   return Array.isArray(value) ? value[index] : undefined;
-}
-
-function normalizePolicy(value: unknown, label: string): number {
-  const policy = Number(BigInt(value as ethers.BigNumberish));
-  if (!Number.isSafeInteger(policy) || policy < 0) {
-    throw new Error(`Context Graph ${label} is invalid`);
-  }
-  return policy;
 }
 
 /** Normalize the ethers named tuple once, at the reader boundary. */
@@ -89,13 +81,21 @@ export function normalizeEvmContextGraphCurrentAuthorityState(
   if (accountId < 0n || accountId > ethers.MaxUint256) {
     throw new Error('Context Graph publish authority account id is invalid');
   }
+  const accessPolicy = normalizeContextGraphAuthorityAccessPolicy(
+    Number(BigInt(tupleField(value, 'accessPolicy', 5) as ethers.BigNumberish)),
+  );
+  if (accessPolicy === undefined) throw new Error('Context Graph access policy is invalid');
+  const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+    Number(BigInt(tupleField(value, 'publishPolicy', 6) as ethers.BigNumberish)),
+    authority,
+    accountId,
+  );
+  if (publishDomain === undefined) throw new Error('Context Graph publish policy is invalid');
   return Object.freeze({
     owner,
     active: Boolean(tupleField(value, 'active', 3)),
-    accessPolicy: normalizePolicy(tupleField(value, 'accessPolicy', 5), 'access policy'),
-    publishPolicy: normalizePolicy(tupleField(value, 'publishPolicy', 6), 'publish policy'),
-    publishAuthority: authority === ethers.ZeroAddress ? null : authority,
-    publishAuthorityAccountId: accountId.toString(10),
+    accessPolicy,
+    ...publishDomain,
     participantAgents: Object.freeze(participantAgents),
   });
 }
@@ -105,13 +105,9 @@ export async function resolveEvmContextGraphAuthoritySource(
   source: EvmContextGraphAuthoritySource,
 ): Promise<EvmContextGraphAuthoritySourceResult> {
   if (source.kind === 'indexed') {
-    const [rawCurrent, generation] = await Promise.all([
-      source.readCurrent(),
-      source.readGeneration(),
-    ]);
+    const indexed = await source.readSnapshot();
     return Object.freeze({
-      current: normalizeEvmContextGraphCurrentAuthorityState(rawCurrent),
-      generation,
+      state: indexed,
       stabilize: source.stabilize,
     });
   }
@@ -119,9 +115,14 @@ export async function resolveEvmContextGraphAuthoritySource(
     source.readCurrent(),
     source.readHistory(),
   ]);
+  const { throughBlockNumber: _number, throughBlockHash: _hash, ...generation } =
+    history.state;
   return Object.freeze({
-    current: normalizeEvmContextGraphCurrentAuthorityState(rawCurrent),
-    generation: history.state,
+    state: Object.freeze(Object.assign(
+      {},
+      normalizeEvmContextGraphCurrentAuthorityState(rawCurrent),
+      generation,
+    )),
     stabilize: history.publish,
   });
 }
@@ -149,13 +150,31 @@ export function normalizeContextGraphAuthorityIndexLog(
     index: log.index,
   };
   switch (parsed.name) {
-    case 'ContextGraphCreated':
+    case 'ContextGraphCreated': {
+      const accessPolicy = normalizeContextGraphAuthorityAccessPolicy(
+        Number(BigInt(parsed.args.accessPolicy ?? parsed.args[5])),
+      );
+      const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+        Number(BigInt(parsed.args.publishPolicy ?? parsed.args[6])),
+        String(parsed.args.publishAuthority ?? parsed.args[7]),
+        BigInt(parsed.args.publishAuthorityAccountId ?? parsed.args[8]),
+      );
+      if (accessPolicy === undefined || publishDomain === undefined) {
+        throw new Error('ContextGraphStorage returned an invalid creation authority domain');
+      }
       return {
         ...base,
         name: parsed.name,
         contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
+        owner: String(parsed.args.owner ?? parsed.args[1]),
         nameHash: String(parsed.args.nameHash ?? parsed.args[2]),
+        participantAgents: [
+          ...(parsed.args.participantAgents ?? parsed.args[3]),
+        ].map((address) => String(address)),
+        accessPolicy,
+        ...publishDomain,
       };
+    }
     case 'Transfer':
       return {
         ...base,
@@ -164,10 +183,46 @@ export function normalizeContextGraphAuthorityIndexLog(
         from: String(parsed.args.from ?? parsed.args[0]),
         to: String(parsed.args.to ?? parsed.args[1]),
       };
-    case 'PublishPolicyUpdated':
-    case 'PublishAuthorityUpdated':
+    case 'PublishPolicyUpdated': {
+      const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+        Number(BigInt(parsed.args.publishPolicy ?? parsed.args[1])),
+        String(parsed.args.publishAuthority ?? parsed.args[2]),
+        BigInt(parsed.args.publishAuthorityAccountId ?? parsed.args[3]),
+      );
+      if (publishDomain === undefined) {
+        throw new Error('ContextGraphStorage returned an invalid publish-policy domain');
+      }
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
+        ...publishDomain,
+      };
+    }
+    case 'PublishAuthorityUpdated': {
+      const publishReference = normalizeContextGraphAuthorityPublishReference(
+        String(parsed.args.newAuthority ?? parsed.args[1]),
+        BigInt(parsed.args.newAuthorityAccountId ?? parsed.args[2]),
+      );
+      if (publishReference === undefined) {
+        throw new Error('ContextGraphStorage returned an invalid publish-authority reference');
+      }
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
+        ...publishReference,
+      };
+    }
     case 'AgentParticipantAdded':
     case 'AgentParticipantRemoved':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
+        agent: String(parsed.args.agent ?? parsed.args[1]),
+      };
+    case 'ContextGraphDeactivated':
       return {
         ...base,
         name: parsed.name,

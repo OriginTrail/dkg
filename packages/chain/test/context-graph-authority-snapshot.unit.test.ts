@@ -55,7 +55,12 @@ interface EvmAuthorityHarness {
 }
 
 function makeEvmAuthorityAdapter(
-  options: { reorg?: boolean; providerRangeLimit?: number; sharedIndex?: boolean } = {},
+  options: {
+    reorg?: boolean;
+    providerRangeLimit?: number;
+    sharedIndex?: boolean;
+    deactivated?: boolean;
+  } = {},
 ): EvmAuthorityHarness {
   let authorityIndexRecord: Readonly<{ token: number; value: unknown | null }> | undefined;
   const authorityIndexStore = {
@@ -113,22 +118,37 @@ function makeEvmAuthorityAdapter(
     release: PromiseWithResolvers<void>;
   }> | undefined;
   const logs: Record<string, ReturnType<typeof event>[]> = {
-    ContextGraphCreated: [event(10, 1, CREATION_HASH, [9n, OWNER, NAME_HASH])],
+    ContextGraphCreated: [event(10, 1, CREATION_HASH, [
+      9n,
+      SECOND_MEMBER,
+      NAME_HASH,
+      [MEMBER, SECOND_MEMBER],
+      0n,
+      1n,
+      0n,
+      AUTHORITY,
+      7n,
+    ])],
+    ContextGraphDeactivated: options.deactivated
+      ? [event(24, 0, `0x${'bc'.repeat(32)}`, [9n])]
+      : [],
     Transfer: [
-      event(10, 0, CREATION_HASH, [ethers.ZeroAddress, OWNER, 9n]),
+      event(10, 0, CREATION_HASH, [ethers.ZeroAddress, SECOND_MEMBER, 9n]),
       event(15, 0, `0x${'99'.repeat(32)}`, [SECOND_MEMBER, OWNER, 9n]),
     ],
-    PublishPolicyUpdated: [event(20, 0, POLICY_HASH)],
-    PublishAuthorityUpdated: [event(21, 0, POLICY_HASH)],
-    AgentParticipantAdded: [event(22, 0, `0x${'aa'.repeat(32)}`)],
-    AgentParticipantRemoved: [event(23, 0, `0x${'bb'.repeat(32)}`)],
+    PublishPolicyUpdated: [event(20, 0, POLICY_HASH, [
+      9n, 0n, SECOND_AUTHORITY, 9n,
+    ])],
+    PublishAuthorityUpdated: [event(21, 0, POLICY_HASH, [9n, AUTHORITY, 7n])],
+    AgentParticipantAdded: [event(22, 0, `0x${'aa'.repeat(32)}`, [9n, OWNER])],
+    AgentParticipantRemoved: [event(23, 0, `0x${'bb'.repeat(32)}`, [9n, SECOND_MEMBER])],
   };
   const current = Object.assign(
-    [OWNER, [MEMBER, OWNER], 0n, true, 0n, 1n, 0n, AUTHORITY, 7n],
+    [OWNER, [MEMBER, OWNER], 0n, !options.deactivated, 0n, 1n, 0n, AUTHORITY, 7n],
     {
       owner: OWNER,
       participantAgents: [MEMBER, OWNER],
-      active: true,
+      active: !options.deactivated,
       accessPolicy: 1n,
       publishPolicy: 0n,
       publishAuthority: AUTHORITY,
@@ -235,8 +255,25 @@ function makeEvmAuthorityAdapter(
           index: 1,
           parsed: {
             name: 'ContextGraphCreated',
-            args: namedArgs([9n, OWNER, NAME_HASH], {
-              contextGraphId: 9n, owner: OWNER, nameHash: NAME_HASH,
+            args: namedArgs([
+              9n,
+              SECOND_MEMBER,
+              NAME_HASH,
+              [MEMBER, SECOND_MEMBER],
+              0n,
+              1n,
+              0n,
+              AUTHORITY,
+              7n,
+            ], {
+              contextGraphId: 9n,
+              owner: SECOND_MEMBER,
+              nameHash: NAME_HASH,
+              participantAgents: [MEMBER, SECOND_MEMBER],
+              accessPolicy: 1n,
+              publishPolicy: 0n,
+              publishAuthority: AUTHORITY,
+              publishAuthorityAccountId: 7n,
             }),
           },
         },
@@ -246,8 +283,8 @@ function makeEvmAuthorityAdapter(
           index: 0,
           parsed: {
             name: 'Transfer',
-            args: namedArgs([ethers.ZeroAddress, OWNER, 9n], {
-              from: ethers.ZeroAddress, to: OWNER, tokenId: 9n,
+            args: namedArgs([ethers.ZeroAddress, SECOND_MEMBER, 9n], {
+              from: ethers.ZeroAddress, to: SECOND_MEMBER, tokenId: 9n,
             }),
           },
         },
@@ -262,21 +299,68 @@ function makeEvmAuthorityAdapter(
             }),
           },
         },
+        {
+          blockNumber: 20,
+          blockHash: POLICY_HASH,
+          index: 0,
+          parsed: {
+            name: 'PublishPolicyUpdated',
+            args: namedArgs([9n, 0n, SECOND_AUTHORITY, 9n], {
+              contextGraphId: 9n,
+              publishPolicy: 0n,
+              publishAuthority: SECOND_AUTHORITY,
+              publishAuthorityAccountId: 9n,
+            }),
+          },
+        },
+        {
+          blockNumber: 21,
+          blockHash: POLICY_HASH,
+          index: 0,
+          parsed: {
+            name: 'PublishAuthorityUpdated',
+            args: namedArgs([9n, AUTHORITY, 7n], {
+              contextGraphId: 9n,
+              newAuthority: AUTHORITY,
+              newAuthorityAccountId: 7n,
+            }),
+          },
+        },
         ...[
-          ['PublishPolicyUpdated', 20, 0, POLICY_HASH],
-          ['PublishAuthorityUpdated', 21, 0, POLICY_HASH],
-          ['AgentParticipantAdded', 22, 0, `0x${'aa'.repeat(32)}`],
-          ['AgentParticipantRemoved', 23, 0, `0x${'bb'.repeat(32)}`],
-          ['PublishPolicyUpdated', 33, 0, NEXT_POLICY_HASH],
-        ].map(([name, blockNumber, index, hash]) => ({
+          ['AgentParticipantAdded', 22, `0x${'aa'.repeat(32)}`, OWNER],
+          ['AgentParticipantRemoved', 23, `0x${'bb'.repeat(32)}`, SECOND_MEMBER],
+        ].map(([name, blockNumber, hash, agent]) => ({
           blockNumber,
           blockHash: hash,
-          index,
+          index: 0,
           parsed: {
             name,
-            args: namedArgs([9n], { contextGraphId: 9n }),
+            args: namedArgs([9n, agent], { contextGraphId: 9n, agent }),
           },
         })),
+        ...(options.deactivated ? [{
+          blockNumber: 24,
+          blockHash: `0x${'bc'.repeat(32)}`,
+          index: 0,
+          parsed: {
+            name: 'ContextGraphDeactivated',
+            args: namedArgs([9n], { contextGraphId: 9n }),
+          },
+        }] : []),
+        {
+          blockNumber: 33,
+          blockHash: NEXT_POLICY_HASH,
+          index: 0,
+          parsed: {
+            name: 'PublishPolicyUpdated',
+            args: namedArgs([9n, 1n, ethers.ZeroAddress, 0n], {
+              contextGraphId: 9n,
+              publishPolicy: 1n,
+              publishAuthority: ethers.ZeroAddress,
+              publishAuthorityAccountId: 0n,
+            }),
+          },
+        },
       ].filter((entry) => (
         Number(entry.blockNumber) >= filter.fromBlock
         && Number(entry.blockNumber) <= filter.toBlock
@@ -308,6 +392,10 @@ function makeEvmAuthorityAdapter(
     logs.PublishPolicyUpdated.push(event(33, 0, NEXT_POLICY_HASH));
     current.publishPolicy = 1n;
     current[6] = 1n;
+    current.publishAuthority = ethers.ZeroAddress;
+    current[7] = ethers.ZeroAddress;
+    current.publishAuthorityAccountId = 0n;
+    current[8] = 0n;
   };
   const replaceCachedAnchor = () => {
     cachedAnchorReplaced = true;
@@ -359,6 +447,13 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     const snapshot = await adapter.getContextGraphAuthoritySnapshot(9n);
     expect(snapshot).toMatchObject({
       contextGraphId: '9',
+      owner: OWNER,
+      active: true,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthority: AUTHORITY,
+      publishAuthorityAccountId: '7',
+      participantAgents: [OWNER, MEMBER],
       ownershipEra: '1',
       policyVersion: '3',
       rosterVersion: '3',
@@ -369,20 +464,22 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     expect(evidence.filters).toEqual([]);
     expect(evidence.indexTopicSets).toEqual(Array(3).fill([
       'topic:ContextGraphCreated',
+      'topic:ContextGraphDeactivated',
       'topic:Transfer',
       'topic:PublishPolicyUpdated',
       'topic:PublishAuthorityUpdated',
       'topic:AgentParticipantAdded',
       'topic:AgentParticipantRemoved',
     ]));
+    expect(evidence.staticCalls).toEqual([]);
 
     await adapter.getContextGraphAuthoritySnapshot(9n);
     expect(evidence.indexRanges).toHaveLength(3);
+    expect(evidence.staticCalls).toEqual([]);
   });
 
   it.each([
     ['finalized head', (harness: EvmAuthorityHarness) => harness.holdBlockRead('finalized')],
-    ['current state', (harness: EvmAuthorityHarness) => harness.holdCurrentStateRead()],
     ['stabilization fence', (harness: EvmAuthorityHarness) => harness.holdBlockRead(30)],
   ] as const)('keeps caller cancellation bound during the indexed %s read', async (
     _stage,
@@ -516,6 +613,21 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       policyVersion: '3',
     });
     expect(attempts).toEqual(['non-archive', 'healthy']);
+  });
+
+  it('materializes deactivation from the shared event index without a point read', async () => {
+    const { adapter, evidence } = makeEvmAuthorityAdapter({
+      sharedIndex: true,
+      deactivated: true,
+    });
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
+      contextGraphId: '9',
+      active: false,
+      owner: OWNER,
+      participantAgents: [OWNER, MEMBER],
+    });
+    expect(evidence.staticCalls).toEqual([]);
   });
 
   it('reads one stable finalized EVM generation and derives monotonic epochs', async () => {
@@ -727,10 +839,10 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     harness.advanceAuthorityHead();
     harness.setPublishAuthorityAccountId('not-a-uint256');
     await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).rejects.toThrow();
-    harness.setPublishAuthorityAccountId(7n);
+    harness.setPublishAuthorityAccountId(0n);
 
     await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
-      publishAuthorityAccountId: '7',
+      publishAuthorityAccountId: '0',
       policyVersion: '4',
     });
     expect(harness.evidence.ranges.slice(18)).toEqual(Array(10).fill([31, 35]));

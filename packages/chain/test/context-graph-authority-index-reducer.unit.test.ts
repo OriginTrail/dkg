@@ -15,11 +15,16 @@ import {
   reduceContextGraphAuthorityIndexPage,
   type ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index-reducer.js';
-import { applyContextGraphAuthorityGenerationEvent } from '../src/context-graph-authority-generation.js';
+import {
+  applyContextGraphAuthorityStateEvent,
+  normalizeContextGraphAuthorityPublishReference,
+  type ContextGraphAuthorityIndexState,
+} from '../src/context-graph-authority-state.js';
 
 const ZERO = `0x${'0'.repeat(40)}`;
 const OWNER = `0x${'11'.repeat(20)}`;
 const NEXT_OWNER = `0x${'22'.repeat(20)}`;
+const AUTHORITY = `0x${'33'.repeat(20)}`;
 const NAME_9 = `0x${'99'.repeat(32)}`;
 const NAME_10 = `0x${'aa'.repeat(32)}`;
 
@@ -32,12 +37,31 @@ function event(
   index: number,
   extra: Record<string, unknown> = {},
 ): ContextGraphAuthorityIndexEvent {
+  const defaults: Record<string, unknown> = (() => {
+    switch (name) {
+      case 'PublishPolicyUpdated':
+        return {
+          publishPolicy: 0,
+          publishAuthority: NEXT_OWNER,
+          publishAuthorityAccountId: 0n,
+        };
+      case 'PublishAuthorityUpdated':
+        return { publishAuthority: NEXT_OWNER, publishAuthorityAccountId: 0n };
+      case 'AgentParticipantAdded':
+        return { agent: NEXT_OWNER };
+      case 'AgentParticipantRemoved':
+        return { agent: OWNER };
+      default:
+        return {};
+    }
+  })();
   return {
     name,
     contextGraphId,
     blockNumber,
     blockHash: blockHash(blockNumber),
     index,
+    ...defaults,
     ...extra,
   } as ContextGraphAuthorityIndexEvent;
 }
@@ -48,7 +72,15 @@ function creation(
   index: number,
   nameHash: string,
 ): ContextGraphAuthorityIndexEvent {
-  return event('ContextGraphCreated', contextGraphId, blockNumber, index, { nameHash });
+  return event('ContextGraphCreated', contextGraphId, blockNumber, index, {
+    owner: OWNER,
+    nameHash,
+    participantAgents: [OWNER],
+    accessPolicy: 1,
+    publishPolicy: 0,
+    publishAuthority: AUTHORITY,
+    publishAuthorityAccountId: 7n,
+  });
 }
 
 const validCursor = Object.freeze({
@@ -60,6 +92,13 @@ const validCursor = Object.freeze({
 
 const validState = Object.freeze({
   contextGraphId: '9',
+  owner: OWNER,
+  active: true,
+  accessPolicy: 1 as const,
+  publishPolicy: 0 as const,
+  publishAuthority: AUTHORITY,
+  publishAuthorityAccountId: '7',
+  participantAgents: Object.freeze([OWNER]),
   nameHash: NAME_9,
   ownershipEra: 0,
   policyVersion: 0,
@@ -94,6 +133,13 @@ describe('contract-wide Context Graph authority index reducer', () => {
     expect(result.checkpoint.states).toEqual([
       {
         contextGraphId: '9',
+        owner: NEXT_OWNER,
+        active: true,
+        accessPolicy: 1,
+        publishPolicy: 0,
+        publishAuthority: NEXT_OWNER,
+        publishAuthorityAccountId: '0',
+        participantAgents: [NEXT_OWNER],
         nameHash: NAME_9,
         ownershipEra: 1,
         policyVersion: 2,
@@ -103,6 +149,13 @@ describe('contract-wide Context Graph authority index reducer', () => {
       },
       {
         contextGraphId: '10',
+        owner: OWNER,
+        active: true,
+        accessPolicy: 1,
+        publishPolicy: 0,
+        publishAuthority: AUTHORITY,
+        publishAuthorityAccountId: '7',
+        participantAgents: [OWNER],
         nameHash: NAME_10,
         ownershipEra: 0,
         policyVersion: 0,
@@ -154,7 +207,17 @@ describe('contract-wide Context Graph authority index reducer', () => {
         PublishPolicyUpdated: [],
       })[name],
     });
-    const { contextGraphId: _, ...indexGeneration } = index;
+    const {
+      contextGraphId: _,
+      owner: _owner,
+      active: _active,
+      accessPolicy: _accessPolicy,
+      publishPolicy: _publishPolicy,
+      publishAuthority: _publishAuthority,
+      publishAuthorityAccountId: _publishAuthorityAccountId,
+      participantAgents: _participantAgents,
+      ...indexGeneration
+    } = index;
     const { throughBlockNumber: _number, throughBlockHash: _hash, ...legacyGeneration } =
       history.state;
     expect(indexGeneration).toEqual(legacyGeneration);
@@ -196,7 +259,45 @@ describe('contract-wide Context Graph authority index reducer', () => {
     expect(emptySuffix.checkpoint.cursor.stateCount).toBe(2);
   });
 
-  it('ignores mint, burn, and self-transfer logs', () => {
+  it('materializes every mutable authority field from ordered contract events', () => {
+    const result = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 20,
+      throughBlockHash: blockHash(20),
+      events: [
+        creation(9n, 10, 1, NAME_9),
+        event('Transfer', 9n, 11, 0, { from: OWNER, to: NEXT_OWNER }),
+        event('PublishPolicyUpdated', 9n, 12, 0, {
+          publishPolicy: 1,
+          publishAuthority: ZERO,
+          publishAuthorityAccountId: 0n,
+        }),
+        event('AgentParticipantRemoved', 9n, 13, 0, { agent: OWNER }),
+        event('AgentParticipantAdded', 9n, 14, 0, { agent: AUTHORITY }),
+        event('ContextGraphDeactivated', 9n, 15, 0),
+      ],
+    });
+
+    expect(result.checkpoint.states[0]).toEqual({
+      contextGraphId: '9',
+      owner: NEXT_OWNER,
+      active: false,
+      accessPolicy: 1,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      participantAgents: [AUTHORITY],
+      nameHash: NAME_9,
+      ownershipEra: 1,
+      policyVersion: 2,
+      rosterVersion: 3,
+      sourceBlockNumber: 12,
+      sourceBlockHash: blockHash(12),
+    });
+    expect(Object.isFrozen(result.checkpoint.states[0]!.participantAgents)).toBe(true);
+  });
+
+  it('ignores mint and self-transfer logs but fails closed on an unexpected burn', () => {
     const result = reduceContextGraphAuthorityIndexPage({
       deploymentBlockNumber: 10,
       throughBlockNumber: 15,
@@ -205,7 +306,6 @@ describe('contract-wide Context Graph authority index reducer', () => {
         event('Transfer', 9n, 10, 0, { from: ZERO, to: OWNER }),
         creation(9n, 10, 1, NAME_9),
         event('Transfer', 9n, 11, 0, { from: OWNER, to: OWNER }),
-        event('Transfer', 9n, 12, 0, { from: OWNER, to: ZERO }),
       ],
     });
     expect(result.checkpoint.states[0]).toMatchObject({
@@ -214,6 +314,15 @@ describe('contract-wide Context Graph authority index reducer', () => {
       rosterVersion: 0,
       sourceBlockNumber: 10,
     });
+    expect(() => reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 15,
+      throughBlockHash: blockHash(15),
+      events: [
+        creation(9n, 10, 1, NAME_9),
+        event('Transfer', 9n, 12, 0, { from: OWNER, to: ZERO }),
+      ],
+    })).toThrow('cannot materialize a burned token');
   });
 
   it('fails closed on gaps, overlaps, deployment changes, and malformed prior state', () => {
@@ -314,6 +423,8 @@ describe('contract-wide Context Graph authority index reducer', () => {
       events: [creation(9n, 10, 1, NAME_9.toUpperCase().replace('0X', '0x'))],
     }).checkpoint;
     expect(normalizeContextGraphAuthorityIndexCheckpoint(valid)).toEqual(valid);
+    expect(normalizeContextGraphAuthorityIndexCheckpoint({ ...valid, version: 1 }))
+      .toBeUndefined();
     expect(normalizeContextGraphAuthorityIndexCheckpoint({
       ...valid,
       cursor: { ...valid.cursor, stateCount: 2 },
@@ -343,6 +454,26 @@ describe('contract-wide Context Graph authority index reducer', () => {
       ...valid,
       states: [{ ...valid.states[0], contextGraphId: (1n << 256n).toString(10) }],
     })).toBeUndefined();
+
+    const integrityMutations: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+      ['owner', { owner: NEXT_OWNER }],
+      ['active', { active: false }],
+      ['access policy', { accessPolicy: 0 }],
+      ['publish policy', {
+        publishPolicy: 1,
+        publishAuthority: null,
+        publishAuthorityAccountId: '0',
+      }],
+      ['publish authority', { publishAuthority: NEXT_OWNER }],
+      ['publish authority account id', { publishAuthorityAccountId: '8' }],
+      ['participant roster', { participantAgents: [OWNER, NEXT_OWNER] }],
+    ];
+    for (const [label, mutation] of integrityMutations) {
+      expect(normalizeContextGraphAuthorityIndexCheckpoint({
+        ...valid,
+        states: [{ ...valid.states[0], ...mutation }],
+      }), `${label} mutation must invalidate the unchanged integrity seal`).toBeUndefined();
+    }
   });
 
   it.each([
@@ -373,6 +504,56 @@ describe('contract-wide Context Graph authority index reducer', () => {
     expect(normalizeContextGraphAuthorityIndexCheckpoint(malformed)).toBeUndefined();
   });
 
+  it.each([
+    ['zero owner', { owner: ZERO }],
+    ['malformed owner', { owner: 'bad' }],
+    ['unsupported access policy', { accessPolicy: 2 }],
+    ['unsupported publish policy', { publishPolicy: 2 }],
+    ['curated domain without authority', {
+      publishPolicy: 0, publishAuthority: null, publishAuthorityAccountId: '0',
+    }],
+    ['open domain with authority', {
+      publishPolicy: 1, publishAuthority: AUTHORITY, publishAuthorityAccountId: '0',
+    }],
+    ['duplicate participants', { participantAgents: [OWNER, OWNER] }],
+    ['zero participant', { participantAgents: [ZERO] }],
+    ['malformed participant', { participantAgents: ['bad'] }],
+    ['over-limit participants', {
+      participantAgents: Array.from(
+        { length: 257 },
+        (_entry, index) => `0x${(index + 1).toString(16).padStart(40, '0')}`,
+      ),
+    }],
+  ] as const)('rejects sealed malformed materialized state: %s', (_label, mutation) => {
+    const malformed = createContextGraphAuthorityIndexCheckpoint(validCursor, [{
+      ...validState,
+      ...mutation,
+    } as ContextGraphAuthorityIndexState]);
+    expect(normalizeContextGraphAuthorityIndexCheckpoint(malformed)).toBeUndefined();
+  });
+
+  it.each([
+    ['canonical authority', AUTHORITY, 7n, {
+      publishAuthority: AUTHORITY, publishAuthorityAccountId: '7',
+    }],
+    ['null sentinel', null, '7', {
+      publishAuthority: null, publishAuthorityAccountId: '7',
+    }],
+    ['zero-address sentinel', ZERO, 7n, {
+      publishAuthority: null, publishAuthorityAccountId: '7',
+    }],
+    ['malformed authority', 'bad', 7n, undefined],
+    ['u256 overflow', AUTHORITY, 1n << 256n, undefined],
+  ] as const)('normalizes publish reference scalars: %s', (
+    _label,
+    authority,
+    accountId,
+    expected,
+  ) => {
+    expect(normalizeContextGraphAuthorityPublishReference(authority, accountId))
+      .toEqual(expected);
+  });
+
   it('decodes opaque durable reads only at the chain-owned boundary', async () => {
     const store: ContextGraphAuthorityIndexStore = {
       load: async () => ({ token: 1, value: { cursor: 'not-a-cursor', states: [] } }),
@@ -383,18 +564,29 @@ describe('contract-wide Context Graph authority index reducer', () => {
       .toBeUndefined();
   });
 
-  it('rejects counter overflow before a checkpoint can be emitted', () => {
-    expect(() => applyContextGraphAuthorityGenerationEvent({
-      nameHash: NAME_9,
-      ownershipEra: 0,
-      policyVersion: Number.MAX_SAFE_INTEGER,
-      rosterVersion: 0,
-      sourceBlockNumber: 10,
-      sourceBlockHash: blockHash(10),
-    }, {
-      name: 'PublishPolicyUpdated',
-      blockNumber: 22,
-      blockHash: blockHash(22),
-    }, 'Context Graph 9')).toThrow('safe integer range');
+  it.each([
+    ['ownership', 'ownershipEra', event('Transfer', 9n, 22, 0, {
+      from: OWNER, to: NEXT_OWNER,
+    })],
+    ['policy', 'policyVersion', event('PublishAuthorityUpdated', 9n, 22, 0)],
+    ['roster', 'rosterVersion', event('AgentParticipantAdded', 9n, 22, 0)],
+  ] as const)('rejects %s counter overflow in the production state transition', (
+    _label,
+    field,
+    transition,
+  ) => {
+    const initial = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 10,
+      throughBlockHash: blockHash(10),
+      events: [creation(9n, 10, 1, NAME_9)],
+    }).checkpoint.states[0]!;
+    const overflowing = {
+      ...initial,
+      [field]: Number.MAX_SAFE_INTEGER,
+    } as ContextGraphAuthorityIndexState;
+
+    expect(() => applyContextGraphAuthorityStateEvent(overflowing, transition))
+      .toThrow('safe integer range');
   });
 });

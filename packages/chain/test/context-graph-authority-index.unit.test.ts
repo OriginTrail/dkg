@@ -11,6 +11,7 @@ import {
 
 const OWNER = `0x${'11'.repeat(20)}`;
 const NEXT_OWNER = `0x${'22'.repeat(20)}`;
+const AUTHORITY = `0x${'33'.repeat(20)}`;
 const NAME_9 = `0x${'99'.repeat(32)}`;
 const NAME_10 = `0x${'aa'.repeat(32)}`;
 
@@ -23,12 +24,31 @@ function event(
   index: number,
   extra: Record<string, unknown> = {},
 ): ContextGraphAuthorityIndexEvent {
+  const defaults: Record<string, unknown> = (() => {
+    switch (name) {
+      case 'PublishPolicyUpdated':
+        return {
+          publishPolicy: 0,
+          publishAuthority: NEXT_OWNER,
+          publishAuthorityAccountId: 0n,
+        };
+      case 'PublishAuthorityUpdated':
+        return { publishAuthority: NEXT_OWNER, publishAuthorityAccountId: 0n };
+      case 'AgentParticipantAdded':
+        return { agent: NEXT_OWNER };
+      case 'AgentParticipantRemoved':
+        return { agent: OWNER };
+      default:
+        return {};
+    }
+  })();
   return {
     name,
     contextGraphId,
     blockNumber,
     blockHash: blockHash(blockNumber),
     index,
+    ...defaults,
     ...extra,
   } as ContextGraphAuthorityIndexEvent;
 }
@@ -39,7 +59,15 @@ function creation(
   index: number,
   nameHash: string,
 ): ContextGraphAuthorityIndexEvent {
-  return event('ContextGraphCreated', contextGraphId, blockNumber, index, { nameHash });
+  return event('ContextGraphCreated', contextGraphId, blockNumber, index, {
+    owner: OWNER,
+    nameHash,
+    participantAgents: [OWNER],
+    accessPolicy: 1,
+    publishPolicy: 0,
+    publishAuthority: AUTHORITY,
+    publishAuthorityAccountId: 7n,
+  });
 }
 
 class MemoryAuthorityIndexStore implements ContextGraphAuthorityIndexStore {
