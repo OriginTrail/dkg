@@ -32,7 +32,6 @@ import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllo
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
 import {
-  ChainRpcTransportError,
   RpcEndpointsExhaustedError,
 } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
