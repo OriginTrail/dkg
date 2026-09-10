@@ -10,65 +10,95 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-it.each([undefined, 'research'])('revalidates a hydrated batch after its writer releases the lock in subgraph %s', async subGraphName => {
-  const WS = `did:dkg:context-graph:${CG}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory`;
-  const META = `${WS}_meta`;
-  const ownershipKey = subGraphName ? `${CG}\0${subGraphName}` : CG;
-  const agent = await DKGAgent.create({ name: 'expiry-revalidation', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 });
-  trackSwmExpiryAgent(agent);
-  const { store, writeLocks } = agent as unknown as SwmExpiryTestInternals;
+it.each([undefined, 'research'])('waits for a real entity share to commit fresh metadata in subgraph %s', async subGraphName => {
+  const ws = `did:dkg:context-graph:${CG}/${subGraphName ? `${subGraphName}/` : ''}_shared_memory`;
+  const meta = `${ws}_meta`;
+  const agent = trackSwmExpiryAgent(await DKGAgent.create({
+    name: 'expiry-real-entity-share', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000,
+  }));
+  const { store, publisher } = agent as unknown as SwmExpiryTestInternals;
   const rdfType = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
   const dkg = 'http://dkg.io/ontology/';
-  const expiredAt = '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>';
-  await store.insert([{ subject: `did:dkg:context-graph:${CG}`, predicate: rdfType, object: `${dkg}ContextGraph`, graph: `did:dkg:context-graph:${CG}/_meta` }]);
-  const rootA = 'urn:expiry:blocked:a';
-  const rootB = 'urn:expiry:blocked:b';
-  const opA = 'urn:expiry:blocked:op:a';
-  const opB = 'urn:expiry:blocked:op:b';
-  const freshOp = 'urn:expiry:fresh:op:b';
-  await store.insert(
-    [opA, opB].flatMap((op, index) => [
-      { subject: op, predicate: rdfType, object: `${dkg}WorkspaceOperation`, graph: META },
-      { subject: op, predicate: `${dkg}publishedAt`, object: expiredAt, graph: META },
-      { subject: op, predicate: `${dkg}rootEntity`, object: index === 0 ? rootA : rootB, graph: META },
-      { subject: index === 0 ? rootA : rootB, predicate: 'urn:value', object: '"expired"', graph: WS },
-    ]),
-  );
-  let releaseWriter!: () => void;
-  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve; });
-  let writerHeld!: () => void;
-  const writerHasLock = new Promise<void>(resolve => { writerHeld = resolve; });
-  const replacement = withKeyedLocks(writeLocks, [`${ownershipKey}\0${rootB}`], async () => {
-    writerHeld();
-    await writerGate;
-    await store.deleteByPattern({ graph: META, subject: opB });
-    await store.deleteByPattern({ graph: WS, subject: rootB });
+  const cgUri = `did:dkg:context-graph:${CG}`;
+  await store.insert([{ subject: cgUri, predicate: rdfType, object: `${dkg}ContextGraph`, graph: `${cgUri}/_meta` }]);
+  if (subGraphName) {
     await store.insert([
-      { subject: freshOp, predicate: rdfType, object: `${dkg}WorkspaceOperation`, graph: META },
-      { subject: freshOp, predicate: `${dkg}publishedAt`, object: `"${new Date().toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: META },
-      { subject: freshOp, predicate: `${dkg}rootEntity`, object: rootB, graph: META },
-      { subject: rootB, predicate: 'urn:value', object: '"fresh"', graph: WS },
+      { subject: `${cgUri}/${subGraphName}`, predicate: rdfType, object: `${dkg}SubGraph`, graph: `${cgUri}/_meta` },
+      { subject: `${cgUri}/${subGraphName}`, predicate: 'http://schema.org/name', object: `"${subGraphName}"`, graph: `${cgUri}/_meta` },
+      { subject: `${cgUri}/${subGraphName}`, predicate: `${dkg}createdBy`, object: 'urn:expiry:publisher', graph: `${cgUri}/_meta` },
     ]);
-  });
-  await writerHasLock;
-  let selected!: () => void;
-  const batchSelected = new Promise<void>(resolve => { selected = resolve; });
+  }
+  const root = 'urn:expiry:real-entity';
+  const share = (value: string) => publisher.share(CG, [
+    { subject: root, predicate: 'urn:value', object: `"${value}"`, graph: '' },
+  ], { publisherPeerId: 'expiry-publisher', subGraphName, localOnly: true });
+  const old = await share('old');
   const query = store.query.bind(store);
-  vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+  const oldMetadata = await query(`SELECT ?op WHERE { GRAPH <${meta}> {
+    ?op a <${dkg}WorkspaceOperation> ; <${dkg}shareOperationId> "${old.shareOperationId}" .
+  } }`);
+  expect(oldMetadata).toMatchObject({ type: 'bindings', bindings: [{ op: expect.any(String) }] });
+  if (oldMetadata.type !== 'bindings') throw new Error('Expected operation metadata');
+  const oldOp = oldMetadata.bindings[0]!.op;
+  await store.deleteByPattern({ graph: meta, subject: oldOp, predicate: `${dkg}publishedAt` });
+  await store.insert([{ subject: oldOp, predicate: `${dkg}publishedAt`, graph: meta,
+    object: '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }]);
+
+  let selected!: () => void, releaseSelection!: () => void;
+  const atSelection = new Promise<void>(resolve => { selected = resolve; });
+  const selectionGate = new Promise<void>(resolve => { releaseSelection = resolve; });
+  let inserted!: () => void, releaseWriter!: () => void;
+  const atFreshInsert = new Promise<void>(resolve => { inserted = resolve; });
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve; });
+  let heldSelection = false;
+  const reads = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
     const result = await query(sparql, options);
-    if (options?.source === 'agent.swmCleanup.expiredOperations' && result.type === 'bindings' && result.bindings.length > 0) selected();
+    if (!heldSelection && options?.source === 'agent.swmCleanup.expiredOperations'
+      && result.type === 'bindings' && result.bindings.some(row => row.op === oldOp)) {
+      heldSelection = true;
+      selected();
+      await selectionGate;
+    }
     return result;
+  });
+  const insert = store.insert.bind(store);
+  vi.spyOn(store, 'insert').mockImplementation(async (quads, options) => {
+    await insert(quads, options);
+    if (quads.some(quad => quad.graph === ws && quad.subject === root && quad.object === '"fresh"')) {
+      // The real writer has replaced the entity but has not committed its new
+      // operation metadata. Cleanup must wait for the whole share transaction.
+      inserted();
+      await writerGate;
+    }
   });
 
   const cleanup = agent.cleanupExpiredSharedMemory();
-  await batchSelected;
-  releaseWriter();
-  await Promise.all([replacement, cleanup]);
-
-  expect(await query(`SELECT ?o WHERE { GRAPH <${WS}> { <${rootB}> <urn:value> ?o } }`))
-    .toMatchObject({ bindings: [{ o: '"fresh"' }] });
-  expect(await query(`SELECT ?p WHERE { GRAPH <${META}> { <${freshOp}> ?p ?o } }`))
-    .toMatchObject({ type: 'bindings' });
+  let writer: ReturnType<typeof share> | undefined;
+  try {
+    await Promise.race([atSelection, cleanup.then(() => { throw new Error('Cleanup did not select the expired operation'); })]);
+    writer = share('fresh');
+    await Promise.race([atFreshInsert, writer.then(() => { throw new Error('Share did not reach the store gate'); })]);
+    expect(await query(`SELECT ?value WHERE { GRAPH <${ws}> { <${root}> <urn:value> ?value } }`))
+      .toMatchObject({ bindings: [{ value: '"fresh"' }] });
+    releaseSelection();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(reads.mock.calls.filter(([, options]) => options?.source === 'agent.swmCleanup.revalidateOperation')).toHaveLength(0);
+    releaseWriter();
+    const [fresh] = await Promise.all([writer, cleanup]);
+    expect(reads.mock.calls.some(([, options]) => options?.source === 'agent.swmCleanup.revalidateOperation')).toBe(true);
+    expect(await query(`SELECT ?value WHERE { GRAPH <${ws}> { <${root}> <urn:value> ?value } }`))
+      .toMatchObject({ bindings: [{ value: '"fresh"' }] });
+    expect(await query(`SELECT ?op WHERE { GRAPH <${meta}> {
+      ?op a <${dkg}WorkspaceOperation> ; <${dkg}shareOperationId> "${fresh.shareOperationId}" ;
+        <${dkg}rootEntity> <${root}> ; <${dkg}publishedAt> ?timestamp .
+    } }`)).toMatchObject({ bindings: [{ op: expect.any(String) }] });
+    expect(await query(`SELECT ?p WHERE { GRAPH <${meta}> { <${oldOp}> ?p ?o } }`))
+      .toMatchObject({ bindings: [] });
+  } finally {
+    releaseSelection();
+    releaseWriter();
+    await Promise.allSettled([cleanup, writer]);
+  }
 });
 
 it('does not let one blocked operation hold an unrelated writer behind the cleanup page', async () => {

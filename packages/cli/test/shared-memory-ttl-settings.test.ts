@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { configPath, loadConfig, saveConfig, type DkgConfig } from '../src/config.js';
+import * as configuration from '../src/config.js';
+import type { SwmExpiryCleanupWorker } from '../../agent/src/swm-expiry-cleanup-worker.js';
 import { handleSharedMemoryTtlSettings } from '../src/daemon/routes/shared-memory-ttl.js';
 import { isPayloadTooLargeError, jsonResponse, SMALL_BODY_BYTES } from '../src/daemon/http-utils.js';
 
@@ -20,6 +22,18 @@ describe('shared-memory TTL settings HTTP boundary', () => {
   let baseUrl: string;
   let bubbledErrors: unknown[];
   const runtimeTtl = () => (agent as unknown as { config: { sharedMemoryTtlMs: number } }).config.sharedMemoryTtlMs;
+
+  async function seedRetainedOperation() {
+    const graph = 'did:dkg:context-graph:ttl-settings/_shared_memory';
+    const operation = 'urn:ttl-settings:operation';
+    await agent.store.insert([
+      { subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation', graph: `${graph}_meta` },
+      { subject: operation, predicate: 'http://dkg.io/ontology/publishedAt', object: `"${new Date(Date.now() - DAY / 2).toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`, graph: `${graph}_meta` },
+      { subject: operation, predicate: 'http://dkg.io/ontology/rootEntity', object: 'urn:ttl-settings:entity', graph: `${graph}_meta` },
+      { subject: 'urn:ttl-settings:entity', predicate: 'urn:value', object: '"retained"', graph },
+    ]);
+    return () => agent.store.query(`SELECT ?g ?s ?p ?o WHERE { GRAPH ?g { ?s ?p ?o } } ORDER BY ?g ?s ?p ?o`);
+  }
 
   beforeEach(async () => {
     bubbledErrors = [];
@@ -104,6 +118,50 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     expect(runtimeTtl()).toBe(DAY);
     expect(await readFile(configPath(), 'utf8')).toBe(persistedBefore);
     expect(bubbledErrors).toEqual([]);
+  });
+
+  it.each(routes)('keeps retention and stored operations unchanged when persistence fails through %s', async route => {
+    const readOperations = await seedRetainedOperation();
+    const operationsBefore = await readOperations();
+    const persistedBefore = await readFile(configPath(), 'utf8');
+    const configBefore = structuredClone(config);
+    const setter = vi.spyOn(agent, 'setSharedMemoryTtlMs');
+    vi.spyOn(configuration, 'saveConfig').mockImplementationOnce(async () => {
+      // Force physical cleanup while persistence is unresolved. The previous
+      // ordering applies the shorter TTL here and irreversibly deletes the row.
+      await agent.cleanupExpiredSharedMemory();
+      throw new Error('disk full');
+    });
+    const response = await fetch(baseUrl + route, { method: 'PUT', body: '{"ttlDays":0.25}' });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'disk full' });
+    expect.soft(setter).not.toHaveBeenCalled();
+    expect.soft(config).toEqual(configBefore);
+    expect.soft(runtimeTtl()).toBe(DAY);
+    expect.soft(await readFile(configPath(), 'utf8')).toBe(persistedBefore);
+    expect.soft(await readOperations()).toEqual(operationsBefore);
+  });
+
+  it.each(routes)('rolls back persisted configuration and runtime after activation fails through %s', async route => {
+    const readOperations = await seedRetainedOperation();
+    const operationsBefore = await readOperations();
+    const persistedBefore = await readFile(configPath(), 'utf8');
+    const configBefore = structuredClone(config);
+    const worker = (agent as unknown as { swmExpiryCleanupWorker: SwmExpiryCleanupWorker }).swmExpiryCleanupWorker;
+    worker.start();
+    const notify = worker.onTtlChanged.bind(worker);
+    vi.spyOn(worker, 'onTtlChanged').mockImplementationOnce(() => {
+      notify();
+      throw new Error('cleanup activation failed');
+    });
+    const response = await fetch(baseUrl + route, { method: 'PUT', body: '{"ttlDays":0.25}' });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'cleanup activation failed' });
+    expect(config).toEqual(configBefore);
+    expect(runtimeTtl()).toBe(DAY);
+    expect(await readFile(configPath(), 'utf8')).toBe(persistedBefore);
+    await agent.cleanupExpiredSharedMemory();
+    expect(await readOperations()).toEqual(operationsBefore);
   });
 
   it.each(routes)('preserves the payload-limit error for the HTTP boundary through %s', async route => {

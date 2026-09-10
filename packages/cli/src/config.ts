@@ -1,4 +1,5 @@
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
+import { writeConfigFile } from './config-file.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
@@ -2326,9 +2327,8 @@ export function exitOnStoreConfigErrors(
   process.exit(1);
 }
 
-export async function saveConfig(config: DkgConfig): Promise<void> {
-  await ensureDkgDir();
-  await writeFile(configPath(), JSON.stringify(config, null, 2) + '\n');
+export async function saveConfig(config: DkgConfig, activate?: () => undefined): Promise<void> {
+  await writeConfigFile(configPath(), JSON.stringify(config, null, 2) + '\n', activate);
 }
 
 export function configExists(): boolean {

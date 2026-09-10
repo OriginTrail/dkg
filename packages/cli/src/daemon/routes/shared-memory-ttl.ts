@@ -1,4 +1,5 @@
 import { resolveSharedMemoryTtlMs, saveConfig } from '../../config.js';
+import { validateSharedMemoryTtlMs } from '@origintrail-official/dkg-agent';
 import { isPayloadTooLargeError, jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
@@ -18,16 +19,19 @@ export async function handleSharedMemoryTtlSettings({ req, res, config, agent }:
     }
     const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
     try {
-      agent.setSharedMemoryTtlMs(ttlMs);
+      validateSharedMemoryTtlMs(ttlMs);
     } catch (error) {
       if (error instanceof RangeError) {
         return jsonResponse(res, 400, { error: error.message });
       }
       throw error;
     }
-    config.sharedMemoryTtlMs = ttlMs;
-    config.workspaceTtlMs = ttlMs;
-    await saveConfig(config);
+    const candidate = { ...config, sharedMemoryTtlMs: ttlMs, workspaceTtlMs: ttlMs };
+    await saveConfig(candidate, () => {
+      agent.setSharedMemoryTtlMs(ttlMs);
+      config.sharedMemoryTtlMs = ttlMs;
+      config.workspaceTtlMs = ttlMs;
+    });
     return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
   } catch (error) {
     if (isPayloadTooLargeError(error)) throw error;

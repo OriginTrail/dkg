@@ -10647,8 +10647,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
     validateSharedMemoryTtlMs(ttlMs);
+    const previous = this.config.sharedMemoryTtlMs;
     this.config.sharedMemoryTtlMs = ttlMs;
-    this.swmExpiryCleanupWorker.onTtlChanged();
+    try {
+      this.swmExpiryCleanupWorker.onTtlChanged();
+    } catch (error) {
+      // Activation is synchronous: restore the policy before a scheduled
+      // cleanup or an in-flight pass can resume with the rejected cutoff.
+      this.config.sharedMemoryTtlMs = previous;
+      throw error;
+    }
   }
 
   /**
