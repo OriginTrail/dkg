@@ -33,10 +33,14 @@ import {
   FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
   FinalizationRecovery,
 } from '../src/finalization-recovery.js';
+import { FinalizationPublisherAuthorityObserver } from '../src/finalization-publisher-authority-observer.js';
 import {
   openSqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
-import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
+import type {
+  FinalizationRecoveryEntry,
+  FinalizationRecoveryStore,
+} from '../src/finalization-recovery-store.js';
 
 const CONTEXT_GRAPH = 'finalization-recovery-admission';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -205,6 +209,53 @@ describe('graph-scoped finalization recovery admission', () => {
     }
     expect(processUnjournaled).toHaveBeenCalledOnce();
     expect(processUnjournaled).toHaveBeenCalledWith(input);
+  });
+
+  it('retries publisher authority on a promoted row and reports store refusal', async () => {
+    const prepared = { publisherPeerId: '12D3KooWPublisher' };
+    const promoted = {
+      state: 'REORGED',
+      generation: 7,
+    } as FinalizationRecoveryEntry;
+    const recordPendingTrustedPublisher = vi.fn(async () => false);
+    const recordTrustedPublisher = vi.fn(async () => false);
+    const get = vi.fn(async () => promoted);
+    const warn = vi.fn();
+    const observer = new FinalizationPublisherAuthorityObserver<void, typeof prepared>({
+      maxFailedProbes: 4,
+      prepare: async () => prepared,
+      log: { info: vi.fn(), warn },
+    });
+    const store = {
+      recordPendingTrustedPublisher,
+      recordTrustedPublisher,
+      get,
+    } as unknown as FinalizationRecoveryStore;
+
+    await expect(observer.observe({
+      store,
+      identity: {
+        entryKey: 'promoted-entry',
+        generation: 'pending',
+        sourcePeerId: prepared.publisherPeerId,
+      },
+      ual: UAL,
+      prepareInput: undefined,
+    })).resolves.toEqual({ prepared });
+
+    expect(recordPendingTrustedPublisher).toHaveBeenCalledWith(
+      'promoted-entry',
+      prepared.publisherPeerId,
+    );
+    expect(get).toHaveBeenCalledWith('promoted-entry');
+    expect(recordTrustedPublisher).toHaveBeenCalledWith(
+      'promoted-entry',
+      promoted.generation,
+      prepared.publisherPeerId,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      `Finalization recovery inbox refused publisher authority for ${UAL}`,
+    );
   });
 
   it('preserves publisher authority when a trusted duplicate arrives while deferred', async () => {
