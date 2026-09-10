@@ -3141,10 +3141,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // sweep is the safety net if this is missed. Only wired when reconciliation
         // is actually possible (chain + ordinal reads present).
         onKARegisteredToContextGraph: this.vmReconcileEnabled()
-          ? async ({ contextGraphId: onChainId, kaId }, options) => {
+          ? async ({ contextGraphId: onChainId, kaId }, context) => {
               // GH #1098 — body extracted to `handleKARegisteredNudge` so the
               // bind-only-the-matching-CG branch is directly testable.
-              await this.handleKARegisteredNudge(onChainId, kaId, ctx, options?.signal);
+              await this.handleKARegisteredNudge(onChainId, kaId, context?.operation ?? ctx, context?.signal);
             }
           : undefined,
       });

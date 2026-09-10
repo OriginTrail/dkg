@@ -91,12 +91,8 @@ describe('ChainEventPoller lane runner and cursors', () => {
     await Promise.all([startPromise, stopping]);
     await new Promise((resolve) => setTimeout(resolve, 30));
 
-    const state = poller as unknown as {
-      timer: ReturnType<typeof setInterval> | null;
-      inFlightPoll: Promise<void> | null;
-    };
-    expect(state.timer).toBeNull();
-    expect(state.inFlightPoll).toBeNull();
+    expect(stopped).toBe(true);
+    await poller.waitForCurrentPoll();
     expect(filters).toEqual([]);
   });
 

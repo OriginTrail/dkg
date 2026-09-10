@@ -40,7 +40,7 @@
  *   `listenForEvents` with the missing branches) cannot silently slip.
  * ======================================================================
  */
-import { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TypedEventBus } from '@origintrail-official/dkg-core';
@@ -426,11 +426,7 @@ describe('ChainEventPoller — fault isolation & lifecycle', () => {
     const ourId = result.contextGraphId;
     const ourBlock = result.blockNumber;
 
-    // Probe the timer count directly on the internal state. A non-idempotent
-    // start() would overwrite `timer` with a second handle, losing the first
-    // (still active) interval — observable as a leaked setInterval only on
-    // real node runtimes. Here we also check the `running` flag flipped
-    // exactly once and that the second start() was a no-op.
+    // Observe scheduling directly: repeated start must not create a second timer.
     const pollCalls: number[] = [];
     const cursor = new InMemoryLaneCursor(new Map([['contextGraphDiscovery', ourBlock - 1]]));
     const poller = new ChainEventPoller({
@@ -448,22 +444,16 @@ describe('ChainEventPoller — fault isolation & lifecycle', () => {
       cursorPersistence: cursor,
     });
 
-    await poller.start();
-    // Capture timer + running snapshot before the second start() call.
-    const firstTimer = (poller as unknown as { timer: unknown }).timer;
-    const firstRunning = (poller as unknown as { running: boolean }).running;
-
-    await poller.start(); // MUST be a no-op — `running === true` short-circuits
-    const secondTimer = (poller as unknown as { timer: unknown }).timer;
-
-    // Give the first (synchronous) poll time to complete its async work.
-    await pollOnce(poller, 400);
-    await poller.stop();
-
-    // Timer handle must be unchanged after the second start() call — proof
-    // that no additional setInterval was scheduled.
-    expect(secondTimer).toBe(firstTimer);
-    expect(firstRunning).toBe(true);
+    const timers = vi.spyOn(globalThis, 'setInterval');
+    try {
+      await poller.start();
+      await poller.start();
+      await pollOnce(poller, 400);
+      expect(timers).toHaveBeenCalledTimes(1);
+    } finally {
+      await poller.stop();
+      timers.mockRestore();
+    }
     // Our event must have been observed exactly once — the synchronous
     // first poll. setInterval's next tick would be at T=60s, so any count
     // above 1 would mean start() double-fired the immediate poll.

@@ -1,3 +1,4 @@
+import type { ChainEventDispatchContext } from './chain-event-dispatch-context.js';
 import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
@@ -35,7 +36,7 @@ export interface ChainEventPollerLaneSpec {
   canUseLegacyAggregateCursor?(): boolean;
   liveSeedLookbackBlocks?: number;
   cadenceMs: number;
-  dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>;
+  dispatch(event: ChainEvent, context: ChainEventDispatchContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
 }
 
@@ -283,10 +284,11 @@ export class ChainEventLaneRunner {
     const caughtUp = head != null && upperBound >= head;
     let advanced = false;
 
+    const context: ChainEventDispatchContext = { operation: ctx, signal };
     try {
       for await (const event of this.chain.listenForEvents(filter)) {
         signal?.throwIfAborted();
-        await lane.spec.dispatch(event, ctx, signal);
+        await lane.spec.dispatch(event, context);
         signal?.throwIfAborted();
       }
       signal?.throwIfAborted();

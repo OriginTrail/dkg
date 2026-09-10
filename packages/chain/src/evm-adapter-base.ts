@@ -2754,8 +2754,8 @@ export class EVMChainAdapterBase {
     return this.hasOperationalPurpose(identityStorage, identityId, address);
   }
 
-  protected async resolveContract(name: string, abiName?: string): Promise<Contract> {
-    const address = await this.resolveContractAddress(name);
+  protected async resolveContract(name: string, abiName?: string, options: ChainReadOptions = {}): Promise<Contract> {
+    const address = await this.resolveContractAddress(name, options);
     // Build the handle fresh every call — a cheap object build (no RPC). Only the
     // ADDRESS is memoized (#1583); reads use staticCall and writes .connect() an
     // explicit signer, so no stale-signer risk from the constant readonly signer.
@@ -2775,9 +2775,12 @@ export class EVMChainAdapterBase {
    * extension point (review of PR #1615, round-2). Unit tests reach it via the
    * usual `any`-cast on the adapter under test.
    */
-  private async resolveContractAddress(name: string): Promise<string> {
-    if (RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED.has(name)) {
-      return this.readHubContractAddress(name);
+  private async resolveContractAddress(name: string, options: ChainReadOptions = {}): Promise<string> {
+    // Cancellable initialization owns its reads. Joining a shared cache load
+    // could attach it to an uncancellable writer, or let its abort cancel one.
+    options.signal?.throwIfAborted();
+    if (options.signal || RESOLVE_CONTRACT_ADDRESS_MEMO_EXCLUDED.has(name)) {
+      return this.readHubContractAddress(name, options);
     }
     const key = `${this.hubAddress}:${this.chainId}:${name}`;
     return this.resolvedContractAddressCache.getOrLoad(
@@ -2787,15 +2790,21 @@ export class EVMChainAdapterBase {
     );
   }
 
-  private async readHubContractAddress(name: string): Promise<string> {
+  private readHubAddress(
+    method: 'getContractAddress' | 'getAssetStorageAddress',
+    name: string,
+    options: ChainReadOptions,
+  ): Promise<string> {
+    const label = `Hub.${method}(${name})`;
+    return options.signal
+      ? this.readContractWithOptions(this.contracts.hub, label, method, [name], { signal: options.signal })
+      : this.readContract(this.contracts.hub, label, method, name);
+  }
+
+  private async readHubContractAddress(name: string, options: ChainReadOptions = {}): Promise<string> {
     let address: string;
     try {
-      address = await this.readContract(
-        this.contracts.hub,
-        `Hub.getContractAddress(${name})`,
-        'getContractAddress',
-        name,
-      );
+      address = await this.readHubAddress('getContractAddress', name, options);
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
         throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
@@ -2808,15 +2817,10 @@ export class EVMChainAdapterBase {
     return address;
   }
 
-  protected async resolveAssetStorage(name: string, abiName?: string): Promise<Contract> {
+  protected async resolveAssetStorage(name: string, abiName?: string, options: ChainReadOptions = {}): Promise<Contract> {
     let address: string;
     try {
-      address = await this.readContract(
-        this.contracts.hub,
-        `Hub.getAssetStorageAddress(${name})`,
-        'getAssetStorageAddress',
-        name,
-      );
+      address = await this.readHubAddress('getAssetStorageAddress', name, options);
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
         throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
@@ -2844,11 +2848,13 @@ export class EVMChainAdapterBase {
       || err.message.includes('AddressDoesNotExist');
   }
 
-  protected async init(): Promise<void> {
+  protected async init(options: ChainReadOptions = {}): Promise<void> {
+    options.signal?.throwIfAborted();
     if (this.initialized) return;
     try {
-      await this.initContracts();
+      await this.initContracts(options);
     } catch (err) {
+      options.signal?.throwIfAborted();
       // `init()` sits on the critical path of every chain write
       // (`createOnChainContextGraph`, publish, verify, …). If the Hub lookups
       // fail because the configured RPC endpoint(s) are exhausted (perpetual
@@ -2869,18 +2875,19 @@ export class EVMChainAdapterBase {
     }
   }
 
-  protected async initContracts(): Promise<void> {
-    this.contracts.identity = await this.resolveContract('Identity');
-    this.contracts.profile = await this.resolveContract('Profile');
-    this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
+  protected async initContracts(options: ChainReadOptions = {}): Promise<void> {
+    this.contracts.identity = await this.resolveContract('Identity', undefined, options);
+    this.contracts.profile = await this.resolveContract('Profile', undefined, options);
+    this.contracts.parametersStorage = await this.resolveContract('ParametersStorage', undefined, options);
 
     // V8 `Staking` is archived (PRD §4.1 — `Staking.sol` moved under
     // contracts/archive/, deploy script 023 archived). Tolerate its absence
     // so the V10 surface still initialises; the contract slot is retained
     // only to keep stale Hub bindings on older deploys resolving cleanly.
     try {
-      this.contracts.staking = await this.resolveContract('Staking');
+      this.contracts.staking = await this.resolveContract('Staking', undefined, options);
     } catch {
+      options.signal?.throwIfAborted();
       // V8 Staking not deployed on this Hub — V10 surface continues.
     }
 
@@ -2889,14 +2896,15 @@ export class EVMChainAdapterBase {
     // Profile 1.2.0 / ProfileStorage 1.1.0 deploy still init cleanly; the
     // relay-registry methods will throw with a clear message at call time.
     try {
-      this.contracts.profileStorage = await this.resolveContract('ProfileStorage');
+      this.contracts.profileStorage = await this.resolveContract('ProfileStorage', undefined, options);
     } catch {
+      options.signal?.throwIfAborted();
       // Older deployments without the relay registry surface.
     }
 
     // V10.1 KA storage. Legacy V8 KnowledgeCollection + V10.0 DKGKnowledgeAssets
     // are deleted in the rc.12 KC->KA rename — no fallback resolution.
-    this.contracts.knowledgeAssetStorage = await this.resolveAssetStorage('DKGKnowledgeAssets');
+    this.contracts.knowledgeAssetStorage = await this.resolveAssetStorage('DKGKnowledgeAssets', undefined, options);
 
     // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
     // (PRD §4.1, deploy scripts 040+041 moved under deploy/archive). Keep
@@ -2905,46 +2913,53 @@ export class EVMChainAdapterBase {
     // split it out so a missing V9 binding doesn't strand AskStorage. The
     // V10 publish-token-amount path depends on AskStorage being resolved.
     try {
-      this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets');
-      this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage');
+      this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets', undefined, options);
+      this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage', undefined, options);
     } catch {
+      options.signal?.throwIfAborted();
       // V9 contracts not deployed — V9 publish/update surface unavailable.
     }
     try {
-      this.contracts.askStorage = await this.resolveContract('AskStorage');
+      this.contracts.askStorage = await this.resolveContract('AskStorage', undefined, options);
     } catch {
+      options.signal?.throwIfAborted();
       // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
     }
 
     try {
-      this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry');
+      this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry', undefined, options);
     } catch {
+      options.signal?.throwIfAborted();
       // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
     }
 
     try {
-      this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
-      this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
+      this.contracts.contextGraphs = await this.resolveContract('ContextGraphs', undefined, options);
+      this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage', undefined, options);
     } catch {
+      options.signal?.throwIfAborted();
       // ContextGraphs not deployed — context graph operations unavailable
     }
 
     try {
-      this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle');
+      this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle', undefined, options);
     } catch {
+      options.signal?.throwIfAborted();
       // Lifecycle not deployed — createKnowledgeAssets unavailable.
       // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
     }
 
     try {
-      this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
+      this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT', undefined, options);
     } catch {
+      options.signal?.throwIfAborted();
       // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
     }
 
     try {
-      this.contracts.chronos = await this.resolveContract('Chronos');
+      this.contracts.chronos = await this.resolveContract('Chronos', undefined, options);
     } catch {
+      options.signal?.throwIfAborted();
       // Chronos not deployed — update-path growth-cost sizing falls back to
       // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
       // Greenfield V10 deployments always have Chronos; this catch is for older
@@ -2952,19 +2967,13 @@ export class EVMChainAdapterBase {
     }
 
     try {
-      await this.resolveAndAssignRandomSamplingPair();
+      await this.resolveAndAssignRandomSamplingPair(options);
     } catch {
+      options.signal?.throwIfAborted();
       // RandomSampling not deployed — proof submission unavailable
     }
 
-    await this.startHubRotationListener();
-
-    const tokenAddress: string = this.tokenAddress ?? await this.readContract(
-      this.contracts.hub,
-      'Hub.getContractAddress(Token)',
-      'getContractAddress',
-      'Token',
-    );
+    const tokenAddress = this.tokenAddress ?? await this.readHubAddress('getContractAddress', 'Token', options);
     if (tokenAddress !== ethers.ZeroAddress) {
       this.contracts.token = new Contract(
         tokenAddress,
@@ -2977,6 +2986,9 @@ export class EVMChainAdapterBase {
       );
     }
 
+    options.signal?.throwIfAborted();
+    await this.startHubRotationListener();
+    options.signal?.throwIfAborted();
     this.initialized = true;
   }
 
@@ -4079,9 +4091,18 @@ export class EVMChainAdapterBase {
    * `UnauthorizedAccess` and re-tries against the freshly resolved
    * pair.
    */
-  protected async resolveAndAssignRandomSamplingPair(): Promise<{ rs: Contract; rss: Contract }> {
+  protected async resolveAndAssignRandomSamplingPair(options: ChainReadOptions = {}): Promise<{ rs: Contract; rss: Contract }> {
     const generationBefore = this.randomSamplingPairCache.currentGeneration();
-    const pair = await this.randomSamplingPairCache.get();
+    // Shared TTL/single-flight loads remain adapter-owned. A cancellable init
+    // owns a separate pair and reads sequentially so even a failed first lookup
+    // cannot leave a sibling physical request running after init has retired.
+    const pair = options.signal
+      ? {
+          rs: await this.resolveContract('RandomSampling', undefined, options),
+          rss: await this.resolveContract('RandomSamplingStorage', undefined, options),
+        }
+      : await this.randomSamplingPairCache.get();
+    options.signal?.throwIfAborted();
     if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
       this.contracts.randomSampling = pair.rs;
       this.contracts.randomSamplingStorage = pair.rss;

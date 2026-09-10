@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { Contract } from 'ethers';
+import { Contract, Interface } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import type { ChainEvent, EventFilter } from '../src/chain-adapter.js';
@@ -76,6 +76,84 @@ describe('event scan RPC cancellation', () => {
   });
 
   it.each([
+    'Identity', 'Staking', 'ProfileStorage', 'DKGKnowledgeAssets',
+    'KnowledgeAssets', 'AskStorage', 'ContextGraphNameRegistry',
+    'ContextGraphs', 'ContextGraphStorage', 'KnowledgeAssetsLifecycle',
+    'DKGPublishingConvictionNFT', 'Chronos', 'RandomSampling',
+    'RandomSamplingStorage', 'Token',
+  ])('physically cancels event-scan initialization at %s without fallback', async stalledName => {
+    const hub = new Interface([
+      'function getContractAddress(string name) view returns (address)',
+      'function getAssetStorageAddress(string name) view returns (address)',
+    ]);
+    const requests: { path: string; name: string }[] = [];
+    let stall = true;
+    let entered!: () => void;
+    const requestEntered = new Promise<void>(resolve => { entered = resolve; });
+    let disconnected!: () => void;
+    const requestDisconnected = new Promise<void>(resolve => { disconnected = resolve; });
+    const server = createServer(async (request, response) => {
+      let body = '';
+      for await (const part of request) body += part;
+      const payload = JSON.parse(body) as { method: string; id: number; params: [{ data: string }] };
+      let result: unknown = '0x7a69';
+      if (payload.method === 'eth_call') {
+        const call = hub.parseTransaction({ data: payload.params[0].data });
+        if (!call) throw new Error('expected Hub lookup');
+        const name = String(call.args[0]);
+        requests.push({ path: request.url ?? '', name });
+        if (stall && name === stalledName) {
+          response.on('close', disconnected);
+          entered();
+          return;
+        }
+        result = hub.encodeFunctionResult(call.fragment, [address]);
+      } else if (payload.method === 'eth_getLogs') {
+        result = [];
+      }
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result }));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const bound = server.address();
+    if (!bound || typeof bound === 'string') throw new Error('missing RPC listener');
+    const rpcUrl = `http://127.0.0.1:${bound.port}`;
+    const adapter = new EVMChainAdapter({ rpcUrl, rpcUrls: [`${rpcUrl}/backup`],
+      privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const controller = new AbortController();
+    const reason = new Error('initializing poll stopped');
+    const pending = collect(adapter, { eventTypes: [], signal: controller.signal })
+      .then(() => ({ failed: false }), error => ({ failed: true, error }));
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await requestEntered;
+      controller.abort(reason);
+      const outcome = await Promise.race([
+        Promise.all([pending, requestDisconnected]),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('initialization did not physically cancel')), 750);
+        }),
+      ]);
+      expect(outcome[0]).toEqual({ failed: true, error: reason });
+      expect(requests.every(request => request.path === '/')).toBe(true);
+      expect(requests.filter(request => request.name === stalledName)).toHaveLength(1);
+      expect((adapter as unknown as { initialized: boolean }).initialized).toBe(false);
+      // A retired initialization must leave lazy initialization usable. The
+      // resumed ordinary caller keeps the existing shared-cache/failover path.
+      stall = false;
+      expect(await collect(adapter, { eventTypes: [] })).toEqual([]);
+      expect((adapter as unknown as { initialized: boolean }).initialized).toBe(true);
+    } finally {
+      clearTimeout(timeout);
+      controller.abort();
+      adapter.destroy();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await pending;
+    }
+  });
+
+  it.each([
     ['KnowledgeBatchCreated', 1], ['ContextGraphExpanded', 1],
     ['KnowledgeAssetRegisteredToContextGraph', 1], ['KCCreated', 3],
     ['KnowledgeAssetCreated', 3], ['NameClaimed', 1], ['ContextGraphNameClaimed', 1],
@@ -96,6 +174,25 @@ describe('event scan RPC cancellation', () => {
       for (const call of reader.mock.calls as unknown as unknown[][]) {
         expect(call[3]).toEqual({ policy: 'wideLogScan', skipPreferred: true, signal: controller.signal });
       }
+    } finally { adapter.destroy(); }
+  });
+
+  it('cancels between yielded logs before parsing or dispatching the next event', async () => {
+    const adapter = adapterAt();
+    const contract = new Contract(address, [
+      'event ContextGraphExpanded(uint256 contextGraphId, uint256 batchId)',
+    ], adapter.getProvider());
+    const encoded = contract.interface.encodeEventLog('ContextGraphExpanded', [1n, 2n]);
+    const parse = vi.spyOn(contract.interface, 'parseLog');
+    const logs = [11, 12].map(blockNumber => ({ ...encoded, blockNumber, transactionHash: `tx-${blockNumber}` }));
+    Object.assign(adapter, { contracts: { contextGraphStorage: contract }, readContractWith: async () => logs });
+    const controller = new AbortController();
+    const iterator = adapter.listenForEvents({ eventTypes: ['ContextGraphExpanded'], signal: controller.signal })[Symbol.asyncIterator]();
+    try {
+      expect(await iterator.next()).toMatchObject({ done: false, value: { blockNumber: 11 } });
+      controller.abort(new Error('stop between events'));
+      await expect(iterator.next()).rejects.toThrow('stop between events');
+      expect(parse).toHaveBeenCalledTimes(1);
     } finally { adapter.destroy(); }
   });
 

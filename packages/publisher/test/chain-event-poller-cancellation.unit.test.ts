@@ -17,7 +17,7 @@ const events: ChainEvent[] = [11, 12].map(blockNumber => ({
 }));
 
 describe('chain event shutdown generation', () => {
-  it('serializes restart behind an interrupted restore and installs only the new generation timer', async () => {
+  it.each([1, 3])('serializes %i restarts behind an interrupted restore and installs only the final timer', async restarts => {
     const entered = deferred();
     const release = deferred();
     const scanned: number[] = [];
@@ -44,25 +44,51 @@ describe('chain event shutdown generation', () => {
     const starting = poller.start();
     let stopping: Promise<void> | undefined;
     let restarting: Promise<void> | undefined;
+    const retired: Promise<void>[] = [];
     try {
       await entered.promise;
       stopping = poller.stop();
+      for (let i = 1; i < restarts; i++) {
+        retired.push(poller.start(), poller.stop());
+      }
       restarting = poller.start();
       await new Promise<void>(resolve => setImmediate(resolve));
       expect(restores).toBe(1);
       expect(scanned).toEqual([]);
       release.resolve();
-      await Promise.all([starting, stopping, restarting]);
+      await Promise.all([starting, stopping, restarting, ...retired]);
       await poller.waitForCurrentPoll();
       expect(restores).toBe(2);
       expect(scanned).toEqual([11]);
       expect(timer).toHaveBeenCalledTimes(1);
     } finally {
       release.resolve();
-      await Promise.all([starting, stopping, restarting]);
+      await Promise.all([starting, stopping, restarting, ...retired]);
       await poller.stop();
       for (const result of timer.mock.results) if (result.type === 'return') clearInterval(result.value);
       timer.mockRestore();
+    }
+  });
+
+  it('keeps repeated start idempotent for an admitted generation', async () => {
+    let heads = 0;
+    class Chain extends MockChainAdapter {
+      async getBlockNumber(): Promise<number> { heads++; return 20; }
+    }
+    const poller = new ChainEventPoller({
+      chain: new Chain(), publishHandler: new PublishHandler(new OxigraphStore(), new TypedEventBus()),
+      onKARegisteredToContextGraph: async () => {}, intervalMs: 60_000,
+    });
+    const timers = vi.spyOn(globalThis, 'setInterval');
+    try {
+      await poller.start();
+      await poller.start();
+      await poller.waitForCurrentPoll();
+      expect(timers).toHaveBeenCalledTimes(1);
+      expect(heads).toBe(1);
+    } finally {
+      await poller.stop();
+      timers.mockRestore();
     }
   });
 
@@ -96,6 +122,7 @@ describe('chain event shutdown generation', () => {
       intervalMs: 60_000,
       cursorPersistence: { loadLane: async () => 10, saveLane: async (_lane, block) => { saved.push(block); } },
       onKARegisteredToContextGraph: async (info, options) => {
+        expect(options?.operation).toEqual({ operationId: expect.any(String), operationName: 'publish' });
         dispatched.push(info.kaId);
         if (paused && boundary === 'callback') await wait(options?.signal);
       },

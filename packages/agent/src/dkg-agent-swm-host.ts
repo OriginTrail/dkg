@@ -661,6 +661,17 @@ function stripBindingQuotes(v: string): string {
   return v;
 }
 
+/** Logical cancellation never releases ownership of an unsettled physical run. */
+function raceTrackedVmReconcile<T>(
+  physicalRuns: Set<Promise<unknown>>,
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  physicalRuns.add(work);
+  void work.finally(() => { physicalRuns.delete(work); }).catch(() => undefined);
+  return raceVmReconcileAbort(work, signal);
+}
+
 async function raceVmReconcileAbort<T>(
   work: Promise<T>,
   signal: AbortSignal | undefined,
@@ -3093,9 +3104,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // Logical cancellation may win before a noncooperative adapter settles.
       // Keep the physical read in the existing retirement drain so backing
       // stores remain quarantined until it actually finishes.
-      this.vmReconcilePhysicalRuns.add(read);
-      void read.finally(() => { this.vmReconcilePhysicalRuns.delete(read); }).catch(() => {});
-      resolved = await raceVmReconcileAbort(read, signal);
+      resolved = await raceTrackedVmReconcile(this.vmReconcilePhysicalRuns, read, signal);
     } catch {
       return null;
     }
@@ -3391,11 +3400,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw error;
     });
 
-    this.vmReconcilePhysicalRuns.add(physicalRun);
-    void physicalRun.finally(() => {
-      this.vmReconcilePhysicalRuns.delete(physicalRun);
-    }).catch(() => undefined);
-    return raceVmReconcileAbort(physicalRun, signal);
+    return raceTrackedVmReconcile(this.vmReconcilePhysicalRuns, physicalRun, signal);
   }
 
   ensureVmReconcileDispatcher(
@@ -3521,11 +3526,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       return response;
     })();
-    this.vmReconcilePhysicalRuns.add(physicalRun);
-    void physicalRun.finally(() => {
-      this.vmReconcilePhysicalRuns.delete(physicalRun);
-    }).catch(() => undefined);
-    return raceVmReconcileAbort(physicalRun, lifecycleSignal);
+    return raceTrackedVmReconcile(this.vmReconcilePhysicalRuns, physicalRun, lifecycleSignal);
   }
 
   async resolveVmReconcileTarget(
