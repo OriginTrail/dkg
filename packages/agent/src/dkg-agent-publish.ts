@@ -4425,7 +4425,13 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
-    const authorSelection = readPublishAuthorSelection(opts);
+    const identityOptions = opts && { ...opts };
+    const authorSelection = readPublishAuthorSelection(identityOptions);
+    // Preserve the flat contract's explicit empty caller precedence over an
+    // author override, and snapshot it before asynchronous author resolution.
+    const callerAgentAddress = identityOptions?.authorSelection === undefined
+      ? identityOptions?.callerAgentAddress ?? identityOptions?.agentAddress
+      : publishAuthorCallerIdentity(authorSelection);
     const callerHint = publishAuthorCallerIdentity(authorSelection)
       ?? this.defaultAgentAddress
       ?? this.peerId;
@@ -4446,7 +4452,6 @@ export class PublishMethods extends DKGAgentBase {
     // (matching the sync lane), NOT the resolved member author. Left undefined
     // for a tokenless enqueue so `stampAddressCurator` falls back to the node
     // default — again exactly as the sync lane does.
-    const callerAgentAddress = publishAuthorCallerIdentity(authorSelection);
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,

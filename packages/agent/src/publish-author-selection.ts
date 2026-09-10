@@ -8,8 +8,8 @@ export type PublishAuthorSelection =
 
 /**
  * The nested model is preferred. The flat variants remain source-compatible
- * with the pre-model API for this patch release, while still rejecting bags
- * that mix authoritative and caller identities.
+ * with the pre-model API for this patch release, including callers whose
+ * options use optional-string annotations. Conflicting flat bags fail at runtime.
  */
 export type PublishAuthorSelectionOptions =
   | {
@@ -20,14 +20,11 @@ export type PublishAuthorSelectionOptions =
   }
   | {
     authorSelection?: never;
-    agentAddress: string;
-    callerAgentAddress?: never;
-    selectedAuthorAgentAddress?: never;
-  }
-  | {
-    authorSelection?: never;
-    agentAddress?: never;
+    /** @deprecated Use authorSelection with mode 'author'. */
+    agentAddress?: string;
+    /** @deprecated Use authorSelection with mode 'callerHint' or 'residentAuthor'. */
     callerAgentAddress?: string;
+    /** @deprecated Use authorSelection with mode 'residentAuthor'. */
     selectedAuthorAgentAddress?: string;
   };
 
@@ -59,26 +56,26 @@ export function readPublishAuthorSelection(options?: PublishAuthorSelectionOptio
     return conflict('VM publish identity fields must use either authorSelection or the compatible flat form');
   }
   if (selection === undefined && hasFlatSelection) {
-    if (agentAddress !== undefined) {
-      if (typeof agentAddress !== 'string' || agentAddress.length === 0
-        || callerAgentAddress !== undefined || selectedAuthorAgentAddress !== undefined) {
+    if ((agentAddress !== undefined && typeof agentAddress !== 'string')
+      || (callerAgentAddress !== undefined && typeof callerAgentAddress !== 'string')) {
+      return conflict('Invalid or conflicting VM publish author selection fields');
+    }
+    // The released flat contract ignores an empty authoritative selector and
+    // permits an empty caller beside a nonempty author override.
+    if (agentAddress) {
+      if (callerAgentAddress || selectedAuthorAgentAddress !== undefined) {
         return conflict('Invalid or conflicting VM publish author selection fields');
       }
       return Object.freeze({ mode: 'author', agentAddress });
     }
     if (selectedAuthorAgentAddress !== undefined) {
-      if (callerAgentAddress !== undefined && typeof callerAgentAddress !== 'string') {
-        return conflict('Invalid or conflicting VM publish author selection fields');
-      }
       return Object.freeze({
         mode: 'residentAuthor',
         selectedAuthorAgentAddress,
         ...(callerAgentAddress === undefined ? {} : { callerAgentAddress }),
       });
     }
-    if (typeof callerAgentAddress !== 'string') {
-      return conflict('Invalid or conflicting VM publish author selection fields');
-    }
+    if (callerAgentAddress === undefined) return Object.freeze({ mode: 'default' });
     return Object.freeze({ mode: 'callerHint', callerAgentAddress });
   }
   if (selection === undefined) return Object.freeze({ mode: 'default' });

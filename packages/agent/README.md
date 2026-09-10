@@ -69,9 +69,12 @@ const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraph
 `author` uses the named author directly. `callerHint` accepts a `callerAgentAddress`
 and resolves the author from stored metadata. `residentAuthor` requires the chosen
 author to exist at that coordinate and preserves the optional caller hint for curator
-stamping. Omit `authorSelection`, or use `{ mode: 'default' }`, to resolve with the
-node identity as the hint. Contradictory selections and populated legacy identity option bags
-are rejected before author lookup. HTTP clients continue to send
+stamping. Omit `authorSelection` to resolve with the node identity as the hint.
+The released flat `agentAddress`, `callerAgentAddress`, and `selectedAuthorAgentAddress`
+options remain supported and are deprecated in favor of the nested form. Flat options
+normalize to the corresponding mode, including resident selection with an optional
+caller hint. Contradictory selections and mixing populated flat fields with
+`authorSelection` are rejected before author lookup. HTTP clients continue to send
 `selectedAuthorAgentAddress`; the daemon constructs the SDK selection.
 
 ## Internal Dependencies

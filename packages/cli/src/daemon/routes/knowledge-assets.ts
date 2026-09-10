@@ -524,7 +524,7 @@ function publishCallerHintLane(agentAddress?: string, selectedAuthorAgentAddress
   if (selectedAuthorAgentAddress !== undefined) {
     return { authorSelection: { mode: "residentAuthor", selectedAuthorAgentAddress, ...(agentAddress ? { callerAgentAddress: agentAddress } : {}) } };
   }
-  return { authorSelection: agentAddress ? { mode: "callerHint", callerAgentAddress: agentAddress } : { mode: "default" } };
+  return agentAddress ? { authorSelection: { mode: "callerHint", callerAgentAddress: agentAddress } } : {};
 }
 
 function resolveBatchRejectionReporterIdentity(
@@ -1148,7 +1148,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           const pub: FinalizedPublishResult = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
             subGraphName,
             ...alsoPublishVmOptions,
-            authorSelection: createAuthorAgentAddress ? { mode: "author", agentAddress: createAuthorAgentAddress } : { mode: "default" },
+            ...(createAuthorAgentAddress ? { authorSelection: { mode: "author" as const, agentAddress: createAuthorAgentAddress } } : {}),
           });
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;

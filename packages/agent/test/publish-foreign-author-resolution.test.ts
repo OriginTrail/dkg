@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, expectTypeOf, vi } from 'vitest';
 import {
   buildAssertionSealQuads,
   contextGraphAssertionUri,
@@ -14,6 +14,7 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { readPublishAuthorSelection, type PublishAuthorSelectionOptions } from '../src/publish-author-selection.js';
 
 /**
  * GH#1778 — a curator publishes a rootless named KA authored by a MEMBER and
@@ -56,6 +57,15 @@ it.each([
   await expect(agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, options as never))
     .rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
   expect(query).not.toHaveBeenCalled();
+});
+
+it.each([null, 42, {}])('keeps a malformed resident selector unvalidated in the internal type: %j', selectedAuthorAgentAddress => {
+  const selection = readPublishAuthorSelection({ authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress } } as never);
+  expect(selection.mode).toBe('residentAuthor');
+  if (selection.mode === 'residentAuthor') {
+    expectTypeOf(selection.selectedAuthorAgentAddress).toEqualTypeOf<unknown>();
+    expect(selection.selectedAuthorAgentAddress).toBe(selectedAuthorAgentAddress);
+  }
 });
 
 it('treats undefined legacy optional fields as the default selection', async () => {
@@ -107,6 +117,76 @@ function stubAgent(store: OxigraphStore, defaultAgentAddress: string) {
   });
   return agent;
 }
+
+/** Real seals and operation heads; only the chain submission and history facade are stubbed. */
+async function publishableAgent() {
+  const store = new OxigraphStore();
+  const graphManager = new GraphManager(store);
+  for (const author of [MEMBER, CURATOR]) {
+    const kaUal = `did:dkg:hardhat:31337/${author}/7`;
+    const scope = { store, graphManager, contextGraphId: CG, kaUal, assertionVersion: 1, shareOperationId: `share-${author}` };
+    await store.insert([...sealFor(author), { ...PUBLIC_QUAD, graph: `${contextGraphSharedMemoryUri(CG)}/${author.toLowerCase()}/7` }]);
+    await storeKnowledgeAssetWorkspaceHead(scope);
+    await storeKnowledgeAssetOperationPublicQuads({ ...scope, quads: [PUBLIC_QUAD], accessPolicy: 'public' });
+  }
+  const agent = stubAgent(store, CURATOR);
+  agent.chain = {};
+  agent.publisher = { hasSwmShareComplete: async () => true, clearSwmShareComplete: async () => {}, clearRemainingSharedMemory: async () => {} };
+  Object.defineProperty(agent, 'assertion', {
+    value: { history: async (_cg: string, _name: string, options: { agentAddress: string }) => ({ events: [], currentShareOperationId: `share-${options.agentAddress}` }) },
+  });
+  agent.publishFromSharedMemory = vi.fn(async () => ({ kaId: RESERVED_KA_ID, ual: KA_UAL, merkleRoot: MERKLE, kaManifest: [], status: 'confirmed', publicQuads: [] }));
+  return { agent, store };
+}
+
+it.each<{ options: PublishAuthorSelectionOptions; author: string; caller?: string }>([
+  { options: { agentAddress: MEMBER }, author: MEMBER, caller: MEMBER },
+  { options: { callerAgentAddress: MEMBER }, author: MEMBER, caller: MEMBER },
+  { options: { selectedAuthorAgentAddress: MEMBER, callerAgentAddress: CURATOR }, author: MEMBER, caller: CURATOR },
+  { options: { selectedAuthorAgentAddress: MEMBER }, author: MEMBER },
+  { options: { agentAddress: '', callerAgentAddress: MEMBER }, author: MEMBER, caller: MEMBER },
+  { options: { agentAddress: MEMBER, callerAgentAddress: '' }, author: MEMBER },
+  { options: { agentAddress: '' }, author: CURATOR },
+  { options: {}, author: CURATOR },
+])('preserves released flat-option behavior across all three public methods: $options', async ({ options, author, caller }) => {
+  const { agent } = await publishableAgent();
+  expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, options)).toBe(author);
+  const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, options);
+  expect(intent.agentAddress).toBe(author);
+  expect(intent.callerAgentAddress).toBe(caller);
+  const published = await agent.publishFromFinalizedAssertion(CG, NAME, options);
+  expect(published.seal.authorAddress).toBe(author);
+  expect(agent.publishFromSharedMemory).toHaveBeenCalledWith(CG, expect.anything(), expect.objectContaining({ precomputedAttestation: expect.objectContaining({ authorAddress: author }) }));
+});
+
+it.each(['callerHint', 'residentAuthor', 'legacy'] as const)('snapshots %s author and caller across an awaited lookup', async mode => {
+  const { agent, store } = await publishableAgent();
+  const authorSelection = { mode: 'residentAuthor' as const, selectedAuthorAgentAddress: MEMBER, callerAgentAddress: CURATOR };
+  const callerSelection = { mode: 'callerHint' as const, callerAgentAddress: MEMBER };
+  const legacy = { callerAgentAddress: MEMBER };
+  const options = mode === 'residentAuthor' ? { authorSelection } : mode === 'callerHint' ? { authorSelection: callerSelection } : legacy;
+  let release!: () => void;
+  let entered!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const lookupStarted = new Promise<void>(resolve => { entered = resolve; });
+  const query = store.query.bind(store);
+  vi.spyOn(store, 'query').mockImplementationOnce(async (...args) => {
+    entered();
+    await blocked;
+    return query(...args);
+  });
+  const pending = agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, options);
+  await lookupStarted;
+  authorSelection.selectedAuthorAgentAddress = CURATOR;
+  authorSelection.callerAgentAddress = OTHER;
+  callerSelection.callerAgentAddress = CURATOR;
+  legacy.callerAgentAddress = CURATOR;
+  release();
+  const intent = await pending;
+  expect(intent.agentAddress).toBe(MEMBER);
+  expect(intent.seal.authorAddress.toLowerCase()).toBe(MEMBER.toLowerCase());
+  expect(intent.callerAgentAddress).toBe(mode === 'residentAuthor' ? CURATOR : MEMBER);
+});
 
 describe('GH#1778 resolveAssertionAuthor', () => {
   it('resolves the sole (member) author when the caller (curator) is not the author', async () => {

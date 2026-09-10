@@ -38,11 +38,24 @@ void agent.publishFromFinalizedAssertion('cg', 'name', { authorSelection: contra
 // @ts-expect-error Resident selection must not carry an authoritative author override.
 const invalidResident: PublishAuthorSelection = { mode: 'residentAuthor', selectedAuthorAgentAddress: 'member', agentAddress: 'other' };
 
-const contradictoryFlatBag = { subGraphName: 'research', agentAddress: 'author', callerAgentAddress: 'caller' };
-// @ts-expect-error Compatible flat fields remain mutually exclusive via widened variables.
-void agent.resolveFinalizedAssertionPublishAuthor('cg', 'name', contradictoryFlatBag);
-// @ts-expect-error The async boundary enforces the same flat-field exclusivity.
-void agent.resolveFinalizedAssertionVmPublishIntent('cg', 'name', contradictoryFlatBag);
-// @ts-expect-error The immediate boundary enforces the same flat-field exclusivity.
-void agent.publishFromFinalizedAssertion('cg', 'name', contradictoryFlatBag);
+// Retain source compatibility with callers using the released optional-string bag.
+const legacyBags: { agentAddress?: string; callerAgentAddress?: string; selectedAuthorAgentAddress?: string; subGraphName?: string }[] = [
+  { agentAddress: 'author' },
+  { callerAgentAddress: 'caller' },
+  { selectedAuthorAgentAddress: 'member', callerAgentAddress: 'curator' },
+  { selectedAuthorAgentAddress: 'member' },
+  { subGraphName: 'research' },
+];
+for (const legacyBag of legacyBags) {
+  void agent.resolveFinalizedAssertionPublishAuthor('cg', 'name', legacyBag);
+  void agent.resolveFinalizedAssertionVmPublishIntent('cg', 'name', legacyBag);
+  void agent.publishFromFinalizedAssertion('cg', 'name', legacyBag);
+}
+const mixedBag = { authorSelection: selections[0], agentAddress: 'other' };
+// @ts-expect-error Nested and flat selection forms cannot be combined.
+void agent.resolveFinalizedAssertionPublishAuthor('cg', 'name', mixedBag);
+// @ts-expect-error Nested and flat selection forms cannot be combined.
+void agent.resolveFinalizedAssertionVmPublishIntent('cg', 'name', mixedBag);
+// @ts-expect-error Nested and flat selection forms cannot be combined.
+void agent.publishFromFinalizedAssertion('cg', 'name', mixedBag);
 void invalidSelection; void invalidResident;
