@@ -3164,14 +3164,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainId: string,
     kaId: bigint,
     ctx: OperationContext,
-    pollSignal?: AbortSignal,
+    pollSignal: AbortSignal,
   ): Promise<string | null> {
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const signals = [this.vmReconcileLifecycleController?.signal, pollSignal]
-      .filter((signal): signal is AbortSignal => signal !== undefined);
-    const lifecycleSignal = signals.length > 0 ? AbortSignal.any(signals) : undefined;
+    const lifecycleSignal = this.vmReconcileLifecycleController
+      ? AbortSignal.any([this.vmReconcileLifecycleController.signal, pollSignal])
+      : pollSignal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
-      && !lifecycleSignal?.aborted
+      && !lifecycleSignal.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     if (!isLifecycleCurrent()) return null;
     let targetOnChain: bigint | null = null;

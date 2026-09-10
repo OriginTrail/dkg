@@ -3144,7 +3144,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? async ({ contextGraphId: onChainId, kaId }, context) => {
               // GH #1098 — body extracted to `handleKARegisteredNudge` so the
               // bind-only-the-matching-CG branch is directly testable.
-              await this.handleKARegisteredNudge(onChainId, kaId, context?.operation ?? ctx, context?.signal);
+              await this.handleKARegisteredNudge(onChainId, kaId, context.operation, context.signal);
             }
           : undefined,
       });

@@ -49,7 +49,7 @@ interface AgentInternals {
     onChainId: string;
     provenance: 'authoritative' | 'reverse-name-hash' | 'ontology';
   } | null>;
-  handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
+  handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown, signal: AbortSignal): Promise<string | null>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
   vmReconcileDispatcher: {
     dispatch: (cg: string, reason: 'live' | 'periodic') => Promise<boolean>;
@@ -1162,7 +1162,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     };
 
     // The event names ON_HIT's on-chain id. None is bound yet.
-    const reconciled = await internals.handleKARegisteredNudge(ON_HIT, 99n, createOperationContext('system'));
+    const reconciled = await internals.handleKARegisteredNudge(ON_HIT, 99n, createOperationContext('system'), new AbortController().signal);
 
     expect(reconciled).toBe(CG_HIT);
     expect(internals.subscribedContextGraphs.get(CG_HIT)?.onChainId).toBe(ON_HIT);
@@ -1193,7 +1193,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       tryTriggerPeriodic: () => true,
     };
 
-    const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, createOperationContext('system'));
+    const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, createOperationContext('system'), new AbortController().signal);
     expect(reconciled).toBe(CG_BOUND);
     expect(triggered).toEqual([`live:${CG_BOUND}`]);
   });

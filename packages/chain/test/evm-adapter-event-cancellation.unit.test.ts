@@ -1,4 +1,4 @@
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { Contract, Interface } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
@@ -72,6 +72,91 @@ describe('event scan RPC cancellation', () => {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
       await pending;
+    }
+  });
+
+  it('keeps a shared Hub-cache request independent from cancellable event initialization', async () => {
+    const hub = new Interface(['function getContractAddress(string name) view returns (address)']);
+    let sharedEntered!: () => void;
+    let eventEntered!: () => void;
+    let eventDisconnected!: () => void;
+    const sharedRequest = new Promise<void>(resolve => { sharedEntered = resolve; });
+    const eventRequest = new Promise<void>(resolve => { eventEntered = resolve; });
+    const disconnected = new Promise<void>(resolve => { eventDisconnected = resolve; });
+    let sharedResponse: ServerResponse | undefined;
+    let releaseShared: (() => void) | undefined;
+    const requests: string[] = [];
+    async function bounded<T>(work: Promise<T>, label: string): Promise<T> {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([work, new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(`${label} did not settle independently`)), 2_000);
+        })]);
+      } finally { clearTimeout(timeout); }
+    }
+    const server = createServer(async (request, response) => {
+      let body = '';
+      for await (const part of request) body += part;
+      const payload = JSON.parse(body) as { method: string; id: number; params: [{ data: string }] };
+      const reply = (result: unknown) => {
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result }));
+      };
+      if (payload.method === 'eth_call') {
+        const call = hub.parseTransaction({ data: payload.params[0].data });
+        if (!call || call.args[0] !== 'ProfileStorage') throw new Error('unexpected event binding');
+        requests.push(request.url ?? '');
+        if (requests.length === 1) {
+          sharedResponse = response;
+          releaseShared = () => {
+            if (!response.writableEnded && !response.destroyed) reply(hub.encodeFunctionResult(call.fragment, [address]));
+          };
+          sharedEntered();
+        } else {
+          response.on('close', eventDisconnected);
+          eventEntered();
+        }
+        return;
+      }
+      reply(payload.method === 'eth_getLogs' ? [] : '0x7a69');
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const bound = server.address();
+    if (!bound || typeof bound === 'string') throw new Error('missing RPC listener');
+    const rpcUrl = `http://127.0.0.1:${bound.port}`;
+    const adapter = new EVMChainAdapter({ rpcUrl, rpcUrls: [`${rpcUrl}/backup`],
+      privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const internal = adapter as unknown as { resolveContract(name: string): Promise<Contract> };
+    const controller = new AbortController();
+    const shared = internal.resolveContract('ProfileStorage');
+    let sharedSettled = false;
+    void shared.then(() => { sharedSettled = true; }, () => { sharedSettled = true; });
+    let pending: Promise<unknown> | undefined;
+    try {
+      await bounded(sharedRequest, 'shared request entry');
+      pending = collect(adapter, { eventTypes: ['RelayCapabilityUpdated'], signal: controller.signal })
+        .then(() => ({ completed: true }), error => ({ error }));
+      await bounded(eventRequest, 'separate event request entry');
+      const reason = new Error('event owner stopped');
+      controller.abort(reason);
+      expect(await bounded(pending, 'event retirement')).toEqual({ error: reason });
+      await bounded(disconnected, 'event socket cancellation');
+      expect(sharedSettled).toBe(false);
+      expect(sharedResponse?.destroyed).toBe(false);
+      expect(requests).toEqual(['/', '/']);
+
+      releaseShared!();
+      expect(await (await bounded(shared, 'original owner completion')).getAddress()).toBe(address);
+      expect(sharedSettled).toBe(true);
+      expect(await collect(adapter, { eventTypes: ['RelayCapabilityUpdated'] })).toEqual([]);
+      expect(requests).toEqual(['/', '/']); // Retry reuses the original owner's completed Hub address.
+    } finally {
+      controller.abort();
+      releaseShared?.();
+      adapter.destroy();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await Promise.allSettled([shared, pending]);
     }
   });
 

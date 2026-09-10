@@ -8,6 +8,21 @@ import { PublishHandler } from '../src/publish-handler.js';
 
 const cases = [
   {
+    type: 'ContextGraphCreated', lane: 'contextGraphDiscovery', callback: 'onContextGraphCreated',
+    data: { contextGraphId: '1', creator: 'creator-1', accessPolicy: 0, publishPolicy: 1 },
+    info: { contextGraphId: '1', creator: 'creator-1', accessPolicy: 0, publishPolicy: 1, nameHash: null },
+  },
+  {
+    type: 'KnowledgeAssetRegisteredToContextGraph', lane: 'vmReconcile', callback: 'onKARegisteredToContextGraph',
+    data: { contextGraphId: '1', kaId: '7', txHash: 'tx-7', txIndex: 0 },
+    info: { contextGraphId: '1', kaId: 7n, txHash: 'tx-7', txIndex: 0 },
+  },
+  {
+    type: 'KCCreated', lane: 'allocatorReconcile', callback: 'onKnowledgeAssetCreated',
+    data: { kaId: '7', author: 'author-1', txHash: 'tx-7', txIndex: 0 },
+    info: { kaId: 7n, number: 7n, author: 'author-1', txHash: 'tx-7', txIndex: 0 },
+  },
+  {
     type: 'KnowledgeAssetUpdated', lane: 'collectionUpdates', callback: 'onCollectionUpdated',
     data: { merkleRoot: '0x1234', batchId: '7' },
     info: { merkleRoot: new Uint8Array([0x12, 0x34]), batchId: 7n },
@@ -24,8 +39,8 @@ const cases = [
 ] as const;
 
 describe('chain event callback dispatch context', () => {
-  // These callbacks are part of the ChainAdapter contract even when the current
-  // EVM deployment does not emit the corresponding legacy events.
+  // Include legacy callbacks even when the current EVM deployment does not
+  // emit their events; all adapters use the same generation-owned context.
   it.each(cases)('retains the generation context and isolates $type callback failures', async testCase => {
     const filters: EventFilter[] = [];
     class Chain extends MockChainAdapter {
@@ -37,8 +52,8 @@ describe('chain event callback dispatch context', () => {
         }
       }
     }
-    const dispatched: Array<{ info: unknown; context: ChainEventDispatchContext | undefined }> = [];
-    const callback = async (info: unknown, context?: ChainEventDispatchContext) => {
+    const dispatched: Array<{ info: unknown; context: ChainEventDispatchContext }> = [];
+    const callback = async (info: unknown, context: ChainEventDispatchContext) => {
       dispatched.push({ info, context });
       if (dispatched.length === 1) throw new Error('callback temporarily unavailable');
     };
@@ -58,18 +73,19 @@ describe('chain event callback dispatch context', () => {
       await poller.waitForCurrentPoll();
       expect(dispatched.map(call => call.info)).toEqual([11, 12].map(blockNumber => ({ ...testCase.info, blockNumber })));
       expect(filters).toHaveLength(1);
-      const signal = filters[0].signal;
+      const signal = dispatched[0].context.signal;
+      expect(filters[0].signal).toBe(signal);
       expect(signal).toBeInstanceOf(AbortSignal);
-      expect(signal?.aborted).toBe(false);
+      expect(signal.aborted).toBe(false);
       for (const call of dispatched) {
-        expect(call.context?.signal).toBe(signal);
-        expect(call.context?.operation).toEqual({ operationId: expect.any(String), operationName: 'publish' });
+        expect(call.context.signal).toBe(signal);
+        expect(call.context.operation).toEqual({ operationId: expect.any(String), operationName: 'publish' });
       }
-      expect(warning).toHaveBeenCalledWith(dispatched[0].context?.operation,
+      expect(warning).toHaveBeenCalledWith(dispatched[0].context.operation,
         `${testCase.callback} callback failed: callback temporarily unavailable`);
       expect(saved).toEqual([{ lane: testCase.lane, block: 20 }]);
       await poller.stop();
-      expect(signal?.aborted).toBe(true);
+      expect(signal.aborted).toBe(true);
     } finally {
       await poller.stop();
       warning.mockRestore();

@@ -31,14 +31,14 @@ export type OnContextGraphCreated = (info: {
    */
   nameHash?: string | null;
   blockNumber: number;
-}, context?: ChainEventDispatchContext) => Promise<void>;
+}, context: ChainEventDispatchContext) => Promise<void>;
 
 /** Callback for KnowledgeAssetUpdated events (spec §5.1). */
 export type OnCollectionUpdated = (info: {
   merkleRoot: Uint8Array;
   batchId: bigint;
   blockNumber: number;
-}, context?: ChainEventDispatchContext) => Promise<void>;
+}, context: ChainEventDispatchContext) => Promise<void>;
 
 /** Callback for AllowListUpdated events (spec §5.1). */
 export type OnAllowListUpdated = (info: {
@@ -46,13 +46,13 @@ export type OnAllowListUpdated = (info: {
   agent: string;
   added: boolean;
   blockNumber: number;
-}, context?: ChainEventDispatchContext) => Promise<void>;
+}, context: ChainEventDispatchContext) => Promise<void>;
 
 /** Callback for ProfileCreated / ProfileUpdated events (spec §5.1). */
 export type OnProfileEvent = (info: {
   identityId: bigint;
   blockNumber: number;
-}, context?: ChainEventDispatchContext) => Promise<void>;
+}, context: ChainEventDispatchContext) => Promise<void>;
 
 /**
  * Callback for `KnowledgeAssetRegisteredToContextGraph` events — the
@@ -68,7 +68,7 @@ export type OnKARegisteredToContextGraph = (info: {
   txHash: string;
   txIndex?: number;
   blockNumber: number;
-}, context?: ChainEventDispatchContext) => Promise<void>;
+}, context: ChainEventDispatchContext) => Promise<void>;
 
 /**
  * Callback for `KnowledgeAssetCreated` events — OT-RFC-43 Option-1 allocator
@@ -77,7 +77,7 @@ export type OnKARegisteredToContextGraph = (info: {
  * `number` is the per-author ordinal extracted from the low 96 bits of `kaId`
  * using full-precision bigint math.
  */
-export type OnKnowledgeAssetCreated = (e: { kaId: bigint; author: string; number: bigint; txHash: string; txIndex: number; blockNumber: number }, context?: ChainEventDispatchContext) => void | Promise<void>;
+export type OnKnowledgeAssetCreated = (e: { kaId: bigint; author: string; number: bigint; txHash: string; txIndex: number; blockNumber: number }, context: ChainEventDispatchContext) => void | Promise<void>;
 
 export interface ChainEventPollerConfig {
   chain: ChainAdapter;
@@ -181,7 +181,7 @@ export class ChainEventPoller {
       // bypass the physical work still retiring from its predecessor.
       await previous;
       if (this.isCurrentGeneration(generation)) {
-        await this.laneRunner.restoreCurrentlyActive(ctx, signal);
+        await this.laneRunner.restoreCurrentlyActive({ operation: ctx, signal });
       }
     })();
     generation.active = restore;
@@ -209,10 +209,11 @@ export class ChainEventPoller {
   private runPoll(generation: ChainEventPollGeneration): void {
     if (!this.isCurrentGeneration(generation) || generation.active) return;
     const { signal } = generation.controller;
-    const pending = this.poll(signal)
+    const context: ChainEventDispatchContext = { operation: createOperationContext('publish'), signal };
+    const pending = this.poll(context)
       .catch(error => {
         if (!signal.aborted) {
-          this.log.error(createOperationContext('system'), `Poll failed: ${error instanceof Error ? error.message : String(error)}`);
+          this.log.error(context.operation, `Poll failed: ${error instanceof Error ? error.message : String(error)}`);
         }
       })
       .finally(() => { if (generation.active === pending) generation.active = null; });
@@ -320,8 +321,8 @@ export class ChainEventPoller {
     ];
   }
 
-  private async poll(signal?: AbortSignal): Promise<void> {
-    await this.laneRunner.poll(signal);
+  private async poll(context: ChainEventDispatchContext): Promise<void> {
+    await this.laneRunner.poll(context);
   }
 
   private async handleBatchCreated(event: ChainEvent, context: ChainEventDispatchContext): Promise<void> {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
@@ -740,7 +741,8 @@ describe('cold current-state Context Graph name binding', () => {
     await expect(fixture.agent.handleKARegisteredNudge(
       '42',
       99n,
-      {},
+      createOperationContext('system'),
+      new AbortController().signal,
     )).resolves.toBe(LOCAL_ID);
     expect(triggerLive).toHaveBeenCalledWith(LOCAL_ID);
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();

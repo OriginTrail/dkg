@@ -1,11 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { TypedEventBus } from '@origintrail-official/dkg-core';
+import { TypedEventBus, createOperationContext } from '@origintrail-official/dkg-core';
 import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
 import { ChainEventPoller, type ChainEventPollerLane, type LaneCursorPersistence } from '../src/chain-event-poller.js';
 import { ChainEventLaneRunner, type ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
 import { PublishHandler } from '../src/publish-handler.js';
+import type { ChainEventDispatchContext } from '../src/chain-event-dispatch-context.js';
 import type { JournalEntry } from '../src/publish-journal.js';
+
+function standaloneRunContext(): ChainEventDispatchContext {
+  return { operation: createOperationContext('publish'), signal: new AbortController().signal };
+}
+
+async function pollOnce(poller: ChainEventPoller): Promise<void> {
+  await (poller as unknown as { poll(context: ChainEventDispatchContext): Promise<void> })
+    .poll(standaloneRunContext());
+}
 
 function makeChain(head: number, events: ChainEvent[]): {
   adapter: ChainAdapter;
@@ -315,7 +325,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       onKARegisteredToContextGraph: async () => { /* sink */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters.map((f) => f.eventTypes)).toEqual([
       ['NameClaimed', 'ContextGraphCreated'],
@@ -329,7 +339,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
 
     failContextLane = false;
     now = 60_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters[2].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
     expect(filters[2].fromBlock).toBe(1);
@@ -618,14 +628,14 @@ describe('ChainEventPoller lane runner and cursors', () => {
       onContextGraphCreated: async () => { /* idle always-on lane */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     expect(filters.map((f) => f.eventTypes)).toEqual([
       ['NameClaimed', 'ContextGraphCreated'],
     ]);
 
     head = 20_000_050;
     markPending(handler, false);
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     const publishFilter = filters.find((f) => f.eventTypes.includes('KCCreated'));
     expect(publishFilter).toBeDefined();
@@ -663,7 +673,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       intervalMs: 60_000,
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters).toHaveLength(1);
     expect(filters[0].eventTypes).toEqual(['KCCreated']);
@@ -726,8 +736,8 @@ describe('ChainEventPoller lane runner and cursors', () => {
       intervalMs: 60_000,
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
+    await pollOnce(poller);
 
     expect(filters).toHaveLength(2);
     expect(filters[0].eventTypes).toEqual(['KCCreated']);
@@ -799,7 +809,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       onKARegisteredToContextGraph: async () => { /* normal-cadence lane */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     expect(filters.map((f) => f.eventTypes)).toEqual([
       ['NameClaimed', 'ContextGraphCreated'],
       ['KnowledgeAssetRegisteredToContextGraph'],
@@ -807,7 +817,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
 
     now = 25;
     head = 1100;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(blockNumberCalls).toBe(2);
     expect(filters.map((f) => f.eventTypes)).toEqual([
@@ -849,13 +859,13 @@ describe('ChainEventPoller lane runner and cursors', () => {
       onContextGraphCreated: async () => { /* sink */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 20;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     expect(filters).toHaveLength(1);
 
     now = 60_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters).toHaveLength(2);
     expect(filters[0].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
@@ -895,13 +905,13 @@ describe('ChainEventPoller lane runner and cursors', () => {
       onContextGraphCreated: async () => { /* sink */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 60_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 120_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 180_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
       [1, 100],
@@ -912,11 +922,11 @@ describe('ChainEventPoller lane runner and cursors', () => {
 
     head = 200;
     now = 180_020;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 240_019;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 240_020;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
       [1, 100],
@@ -952,6 +962,7 @@ describe('ChainEventPoller lane runner and cursors', () => {
       cadenceMs: 20,
       dispatch: async () => { /* sink */ },
     };
+    const context = standaloneRunContext();
     const runner = new ChainEventLaneRunner({
       chain: adapter,
       lanes: [lane],
@@ -960,27 +971,27 @@ describe('ChainEventPoller lane runner and cursors', () => {
       log: { info() {}, warn() {}, error() {} } as any,
     });
 
-    await runner.poll();
+    await runner.poll(context);
     now = 59_999;
-    await runner.poll();
+    await runner.poll(context);
     now = 60_000;
-    await runner.poll();
+    await runner.poll(context);
     now = 179_999;
-    await runner.poll();
+    await runner.poll(context);
     now = 180_000;
-    await runner.poll();
+    await runner.poll(context);
     now = 419_999;
-    await runner.poll();
+    await runner.poll(context);
     now = 420_000;
-    await runner.poll();
+    await runner.poll(context);
     now = 719_999;
-    await runner.poll();
+    await runner.poll(context);
     now = 720_000;
-    await runner.poll();
+    await runner.poll(context);
     now = 1_019_999;
-    await runner.poll();
+    await runner.poll(context);
     now = 1_020_000;
-    await runner.poll();
+    await runner.poll(context);
 
     expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
       [1, 100],
