@@ -47,9 +47,9 @@ import {
 } from './model.js';
 import {
   RFC64_GATE2_DEPLOYMENT,
-  parseFinalizedVmHarnessConfigV1,
-  startFinalizedVmHarnessRuntimeV1,
-  type FinalizedVmHarnessRuntimeV1,
+  parseFinalizedChainHarnessConfigV1,
+  startFinalizedChainHarnessRuntimeV1,
+  type FinalizedChainHarnessRuntimeV1,
 } from './finalized-vm-harness-runtime.ts';
 import { sealGate2ExecutedRuntimeManifestV1 } from './runtime-load-hook.ts';
 import { stagePrivateCatalogBulkPredecessorV1 } from
@@ -60,7 +60,7 @@ const role = process.argv[2];
 const dataDirInput = process.env.DKG_RFC64_GATE2_ADAPTER_DATA_DIR;
 const masterKeyHex = process.env.DKG_RFC64_GATE2_AGENT_MASTER_KEY_HEX;
 const runtimeBuildManifestDigest = process.env.DKG_RFC64_GATE2_RUNTIME_MANIFEST_DIGEST;
-const finalizedVmConfigInput = process.env.DKG_RFC64_GATE2_FINALIZED_VM_CONFIG;
+const finalizedChainConfigInput = process.env.DKG_RFC64_GATE2_FINALIZED_CHAIN_CONFIG;
 const networkChainIdInput = process.env.DKG_RFC64_GATE2_NETWORK_CHAIN_ID;
 const localCatalogAgentAddressInput =
   process.env.DKG_RFC64_GATE2_CATALOG_LOCAL_AGENT_ADDRESS;
@@ -81,7 +81,7 @@ if (!runtimeBuildManifestDigest || !/^0x[0-9a-f]{64}$/u.test(runtimeBuildManifes
 const dataDir = resolve(dataDirInput);
 const pinnedMasterKeyHex = masterKeyHex;
 let agent: DKGAgent | undefined;
-let finalizedVmRuntime: Readonly<FinalizedVmHarnessRuntimeV1> | undefined;
+let finalizedChainRuntime: Readonly<FinalizedChainHarnessRuntimeV1> | undefined;
 let stopping = false;
 let commandTail = Promise.resolve();
 const peerCatalogAgentAddresses = new Map<string, EvmAddressV1>();
@@ -138,11 +138,11 @@ async function ensureDeterministicAgentKey(): Promise<void> {
 
 async function boot(): Promise<void> {
   await ensureDeterministicAgentKey();
-  const finalizedVmConfig = finalizedVmConfigInput === undefined
+  const finalizedChainConfig = finalizedChainConfigInput === undefined
     ? null
-    : parseFinalizedVmHarnessConfigV1(finalizedVmConfigInput);
-  if (finalizedVmConfig !== null && role !== 'receiver') {
-    throw new Error('finalized VM harness runtime is receiver-only');
+    : parseFinalizedChainHarnessConfigV1(finalizedChainConfigInput);
+  if (finalizedChainConfig !== null && role !== 'receiver') {
+    throw new Error('finalized chain harness runtime is receiver-only');
   }
   if (networkChainIdInput !== undefined) {
     assertNetworkIdV1(networkChainIdInput);
@@ -154,15 +154,15 @@ async function boot(): Promise<void> {
         'DKG_RFC64_GATE2_CATALOG_LOCAL_AGENT_ADDRESS',
       );
   if (
-    finalizedVmConfig !== null
+    finalizedChainConfig !== null
     && networkChainIdInput !== RFC64_GATE2_DEPLOYMENT.networkId
   ) {
-    throw new Error('finalized VM harness network chain id differs from its deployment');
+    throw new Error('finalized chain harness network chain id differs from its deployment');
   }
-  if (finalizedVmConfig !== null) {
-    finalizedVmRuntime = await startFinalizedVmHarnessRuntimeV1(finalizedVmConfig);
+  if (finalizedChainConfig !== null) {
+    finalizedChainRuntime = await startFinalizedChainHarnessRuntimeV1(finalizedChainConfig);
   }
-  const networkChainAdapter = finalizedVmRuntime?.chainAdapter
+  const networkChainAdapter = finalizedChainRuntime?.chainAdapter
     ?? (networkChainIdInput === undefined ? undefined : new MockChainAdapter(networkChainIdInput));
   const created = await DKGAgent.create({
     name: `RFC64Gate2${role}`,
@@ -186,16 +186,16 @@ async function boot(): Promise<void> {
       },
     }),
     ...(networkChainAdapter === undefined ? {} : { chainAdapter: networkChainAdapter }),
-    ...(finalizedVmRuntime === undefined ? {} : {
+    ...(finalizedChainRuntime === undefined ? {} : {
       chainConfig: {
-        rpcUrl: finalizedVmRuntime.rpcUrl,
+        rpcUrl: finalizedChainRuntime.rpcUrl,
         hubAddress: '0x3333333333333333333333333333333333333333',
         operationalKeys: [`0x${'12'.repeat(32)}`],
       },
     }),
-    ...(finalizedVmConfig === null ? {} : {
+    ...(finalizedChainConfig === null ? {} : {
       contextGraphSubscriptionStore: createHarnessSubscriptionStore(
-        finalizedVmConfig.contextGraphId,
+        finalizedChainConfig.contextGraphId,
       ),
     }),
   });
@@ -205,7 +205,7 @@ async function boot(): Promise<void> {
   }
   agent = created;
   await created.start();
-  if (finalizedVmConfig !== null) {
+  if (finalizedChainConfig !== null) {
     await created.awaitInitialChainPoll();
   }
   const tcp = created.multiaddrs.find((address) => address.includes('/tcp/'));
@@ -221,7 +221,8 @@ async function boot(): Promise<void> {
     protocolVersion: GATE2_ADAPTER_PROTOCOL_VERSION,
     processId: process.pid,
     runtimeBuildManifestDigest,
-    finalizedVmRuntime: finalizedVmConfig !== null,
+    finalizedChainRuntime: finalizedChainConfig !== null,
+    finalizedVmRuntime: finalizedChainRuntime?.hasVmInventory === true,
     startupRepair: null,
   });
 }
@@ -1108,8 +1109,8 @@ async function stop(exitCode: number, requestId?: string): Promise<never> {
   stopping = true;
   try {
     await agent?.stop();
-    await finalizedVmRuntime?.close();
-    finalizedVmRuntime = undefined;
+    await finalizedChainRuntime?.close();
+    finalizedChainRuntime = undefined;
     if (requestId !== undefined) {
       await emitAndFlush({
         event: 'stopped',

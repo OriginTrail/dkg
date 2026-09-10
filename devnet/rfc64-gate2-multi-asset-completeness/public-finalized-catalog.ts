@@ -4,11 +4,14 @@ import process from 'node:process';
 
 import {
   MemoryLayer,
+  assertAuthorCatalogScopeV1,
   assertCanonicalGraphScopedAuthorSealV1,
+  assertContextGraphPolicyV1,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
   contextGraphLayerUri,
   contextGraphMetaUri,
+  type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -84,19 +87,17 @@ async function execute(): Promise<void> {
       runtimeManifestDigest: launchReceipt.manifest.manifestDigest,
       sourceCommit: headBefore,
     });
-    const finalizedVmConfigJson = JSON.stringify({
-      assertionRoot: ASSERTION_ROOT,
-      assertionVersion: ASSERTION_VERSION,
-      authorAddress: AUTHOR_ADDRESS,
+    const finalizedChainConfigJson = JSON.stringify({
+      accessPolicy: 0,
       contextGraphId: CONTEXT_GRAPH_ID,
-      kaId: KA_ID,
       nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase(),
       onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR_ADDRESS,
     });
     const receiver = spawnGate2HarnessAgentV1({
       role: 'receiver',
       dataDir: dataDirs.receiver,
-      finalizedVmConfigJson,
+      finalizedChainConfigJson,
       networkChainId: NETWORK_ID,
       registry: children,
       repoRoot: REPO_ROOT,
@@ -109,8 +110,10 @@ async function execute(): Promise<void> {
     ]);
     assertGate2HarnessReadyV1(authorReady, 'author', launchReceipt.manifest.manifestDigest);
     assertGate2HarnessReadyV1(receiverReady, 'receiver', launchReceipt.manifest.manifestDigest);
+    exact(authorReady.finalizedChainRuntime, false, 'author finalized chain runtime');
+    exact(receiverReady.finalizedChainRuntime, true, 'receiver finalized chain runtime');
     exact(authorReady.finalizedVmRuntime, false, 'author finalized VM runtime');
-    exact(receiverReady.finalizedVmRuntime, true, 'receiver finalized VM runtime');
+    exact(receiverReady.finalizedVmRuntime, false, 'public receiver VM inventory');
     requireCondition(authorReady.peerId !== receiverReady.peerId, 'peer identities are distinct');
     requireCondition(
       authorReady.processId !== receiverReady.processId
@@ -129,7 +132,9 @@ async function execute(): Promise<void> {
       'operation-completed',
       { contextGraphId: CONTEXT_GRAPH_ID },
     ), 'receiver policy');
-    const policy = record(receiverPolicy.policy, 'receiver policy payload');
+    const policyInput = receiverPolicy.policy;
+    assertContextGraphPolicyV1(policyInput);
+    const policy = policyInput;
     const policyDigest = digest(receiverPolicy.policyDigest, 'receiver policy digest');
     exact(record(policy.source, 'policy source').kind, 'finalized-chain', 'policy source');
     exact(policy.networkId, NETWORK_ID, 'policy network');
@@ -146,18 +151,19 @@ async function execute(): Promise<void> {
     ), 'author policy');
     exact(authorPolicy.policyDigest, policyDigest, 'author policy');
 
-    const scope = Object.freeze({
+    const scopeInput = {
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
       governanceChainId: '20430',
       governanceContractAddress: CG_STORAGE,
-      ownershipTransitionDigest: policy.ownershipTransitionDigest === null
-        ? null : digest(policy.ownershipTransitionDigest, 'policy ownership transition'),
+      ownershipTransitionDigest: policy.ownershipTransitionDigest,
       subGraphName: null,
       authorAddress: AUTHOR_ADDRESS,
-      era: string(policy.era, 'policy era'),
+      era: policy.era,
       bucketCount: '1',
-    });
+    };
+    assertAuthorCatalogScopeV1(scopeInput);
+    const scope: Readonly<AuthorCatalogScopeV1> = Object.freeze(scopeInput);
     const genesis = outputRecord(await author.request(
       'publishCatalogGenesis',
       'public-finalized-catalog-genesis-v1',
@@ -207,7 +213,7 @@ async function execute(): Promise<void> {
       'successor',
     );
 
-    const scopeDigest = computeAuthorCatalogScopeDigestV1(scope as never);
+    const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
     const applied = outputRecord(await receiver.request(
       'appliedHeadReadback',
       'public-finalized-catalog-applied-v1',

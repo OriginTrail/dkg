@@ -22,13 +22,12 @@ export interface FinalizedVmLoopbackAssetV1 {
   readonly publisherAddress: EvmAddressV1;
 }
 
-export interface FinalizedVmLoopbackFixtureConfigV1 {
+/** Finalized authority inputs needed before any VM inventory is considered. */
+export interface FinalizedChainLoopbackFixtureConfigV1 {
   readonly accessPolicy: 0 | 1;
   readonly active: boolean;
   readonly assertedAtChainId: string;
   readonly assertedAtKav10Address: EvmAddressV1;
-  readonly knowledgeAssetStorageAddress: EvmAddressV1;
-  readonly assets: readonly FinalizedVmLoopbackAssetV1[];
   readonly blockHash: Digest32V1;
   readonly blockNumberQuantity: string;
   readonly contextGraphStorageAddress: EvmAddressV1;
@@ -37,6 +36,12 @@ export interface FinalizedVmLoopbackFixtureConfigV1 {
   readonly onChainContextGraphId: string;
   readonly ownerAddress: EvmAddressV1;
   readonly publishPolicy: 0 | 1;
+}
+
+/** Optional VM inventory layered over finalized Context Graph authority. */
+export interface FinalizedVmLoopbackFixtureConfigV1 extends FinalizedChainLoopbackFixtureConfigV1 {
+  readonly knowledgeAssetStorageAddress: EvmAddressV1;
+  readonly assets: readonly FinalizedVmLoopbackAssetV1[];
 }
 
 export interface FinalizedVmLoopbackRpcCallV1 {
@@ -64,72 +69,78 @@ const KNOWLEDGE_ASSET_INTERFACE = new ethers.Interface([
 ]);
 
 /** Mock adapter whose chain identity matches the loopback finalized-RPC lane. */
-export class FinalizedVmLoopbackMockChainAdapterV1 extends MockChainAdapter {
-  readonly #fixture: FinalizedVmLoopbackFixtureConfigV1;
-  readonly #rpcEndpoint: string;
+export class FinalizedChainLoopbackMockChainAdapterV1 extends MockChainAdapter {
+  protected readonly fixture: FinalizedChainLoopbackFixtureConfigV1;
+  protected readonly rpcEndpoint: string;
 
-  constructor(fixture: FinalizedVmLoopbackFixtureConfigV1, rpcEndpoint: string) {
+  constructor(fixture: FinalizedChainLoopbackFixtureConfigV1, rpcEndpoint: string) {
     super(fixture.networkId, MOCK_DEFAULT_SIGNER, {
       initialContextGraphId: BigInt(fixture.onChainContextGraphId),
     });
     if (typeof rpcEndpoint !== 'string' || rpcEndpoint.trim() === '') {
       throw new Error('Finalized VM loopback adapter requires its RPC endpoint');
     }
-    this.#fixture = fixture;
-    this.#rpcEndpoint = rpcEndpoint;
+    this.fixture = fixture;
+    this.rpcEndpoint = rpcEndpoint;
   }
 
   override async createFinalizedEvmReadBinding(
     owner: FinalizedChainReadOwnerV1,
   ): Promise<Readonly<FinalizedEvmReadBindingV1>> {
-    const chainId = this.#fixture.assertedAtChainId;
+    const chainId = this.fixture.assertedAtChainId;
     assertCanonicalChainId(chainId, 'finalized VM fixture chainId');
     return Object.freeze({
       chainId,
       snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
-        chainId, endpoints: [this.#rpcEndpoint], owner,
+        chainId, endpoints: [this.rpcEndpoint], owner,
       }),
     });
   }
 
   override async getEvmChainId(): Promise<bigint> {
-    return BigInt(this.#fixture.assertedAtChainId);
+    return BigInt(this.fixture.assertedAtChainId);
   }
 
   override async getKnowledgeAssetsLifecycleAddress(): Promise<string> {
-    return this.#fixture.assertedAtKav10Address;
-  }
-
-  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
-    return this.#fixture.knowledgeAssetStorageAddress;
+    return this.fixture.assertedAtKav10Address;
   }
 
   override async getContextGraphAuthoritySnapshot(
     contextGraphId: bigint,
   ): Promise<ContextGraphAuthoritySnapshot> {
-    if (contextGraphId.toString(10) !== this.#fixture.onChainContextGraphId) {
+    if (contextGraphId.toString(10) !== this.fixture.onChainContextGraphId) {
       throw new Error(`Finalized VM fixture has no Context Graph ${contextGraphId.toString(10)}`);
     }
     return Object.freeze({
-      chainId: this.#fixture.assertedAtChainId,
-      governanceContract: this.#fixture.contextGraphStorageAddress.toLowerCase(),
-      contextGraphId: this.#fixture.onChainContextGraphId,
-      owner: this.#fixture.ownerAddress.toLowerCase(),
-      active: this.#fixture.active,
-      accessPolicy: this.#fixture.accessPolicy,
-      publishPolicy: this.#fixture.publishPolicy,
-      publishAuthority: this.#fixture.publishPolicy === 1
+      chainId: this.fixture.assertedAtChainId,
+      governanceContract: this.fixture.contextGraphStorageAddress.toLowerCase(),
+      contextGraphId: this.fixture.onChainContextGraphId,
+      owner: this.fixture.ownerAddress.toLowerCase(),
+      active: this.fixture.active,
+      accessPolicy: this.fixture.accessPolicy,
+      publishPolicy: this.fixture.publishPolicy,
+      publishAuthority: this.fixture.publishPolicy === 1
         ? null
-        : this.#fixture.ownerAddress.toLowerCase(),
+        : this.fixture.ownerAddress.toLowerCase(),
       publishAuthorityAccountId: '0',
       participantAgents: Object.freeze([]),
-      nameHash: this.#fixture.nameHash.toLowerCase(),
+      nameHash: this.fixture.nameHash.toLowerCase(),
       ownershipEra: '0',
       policyVersion: '0',
       rosterVersion: '0',
-      sourceBlockNumber: BigInt(this.#fixture.blockNumberQuantity).toString(10),
-      sourceBlockHash: this.#fixture.blockHash.toLowerCase(),
+      sourceBlockNumber: BigInt(this.fixture.blockNumberQuantity).toString(10),
+      sourceBlockHash: this.fixture.blockHash.toLowerCase(),
     });
+  }
+}
+
+export class FinalizedVmLoopbackMockChainAdapterV1 extends FinalizedChainLoopbackMockChainAdapterV1 {
+  constructor(fixture: FinalizedVmLoopbackFixtureConfigV1, rpcEndpoint: string) {
+    super(fixture, rpcEndpoint);
+  }
+
+  override async getDKGKnowledgeAssetsAddress(): Promise<string> {
+    return (this.fixture as FinalizedVmLoopbackFixtureConfigV1).knowledgeAssetStorageAddress;
   }
 }
 
@@ -140,8 +151,22 @@ export class FinalizedVmLoopbackMockChainAdapterV1 extends MockChainAdapter {
 export function createFinalizedVmLoopbackRpcV1(
   fixture: FinalizedVmLoopbackFixtureConfigV1,
 ): FinalizedVmLoopbackRpcV1 {
+  return createFinalizedLoopbackRpcV1(fixture, fixture);
+}
+
+/** Policy-only loopback: Context Graph authority is available; VM inventory is empty. */
+export function createFinalizedChainLoopbackRpcV1(
+  fixture: FinalizedChainLoopbackFixtureConfigV1,
+): FinalizedVmLoopbackRpcV1 {
+  return createFinalizedLoopbackRpcV1(fixture, undefined);
+}
+
+function createFinalizedLoopbackRpcV1(
+  fixture: FinalizedChainLoopbackFixtureConfigV1,
+  vmFixture: FinalizedVmLoopbackFixtureConfigV1 | undefined,
+): FinalizedVmLoopbackRpcV1 {
   const calls: FinalizedVmLoopbackRpcCallV1[] = [];
-  const assets = new Map(fixture.assets.map((asset) => [asset.kaId, asset]));
+  const assets = new Map((vmFixture?.assets ?? []).map((asset) => [asset.kaId, asset]));
   const respond = (method: string, params: readonly unknown[]): unknown => {
     calls.push(Object.freeze({ method, params: Object.freeze([...params]) }));
     switch (method) {
@@ -152,7 +177,7 @@ export function createFinalizedVmLoopbackRpcV1(
       case 'eth_getCode':
         return '0x6000';
       case 'eth_call':
-        return finalizedVmEthCallResult(params, fixture, assets);
+        return finalizedVmEthCallResult(params, fixture, vmFixture, assets);
       default:
         throw new Error(`unexpected finalized VM JSON-RPC method ${method}`);
     }
@@ -162,7 +187,8 @@ export function createFinalizedVmLoopbackRpcV1(
 
 function finalizedVmEthCallResult(
   params: readonly unknown[],
-  fixture: FinalizedVmLoopbackFixtureConfigV1,
+  fixture: FinalizedChainLoopbackFixtureConfigV1,
+  vmFixture: FinalizedVmLoopbackFixtureConfigV1 | undefined,
   assets: ReadonlyMap<string, FinalizedVmLoopbackAssetV1>,
 ): string {
   const call = plainRecord(params[0], 'finalized VM eth_call object');
@@ -173,7 +199,8 @@ function finalizedVmEthCallResult(
   if (CONTEXT_GRAPH_SELECTORS.has(selector)) {
     assertCallTarget(target, fixture.contextGraphStorageAddress, 'context graph');
   } else if (KNOWLEDGE_ASSET_SELECTORS.has(selector)) {
-    assertCallTarget(target, fixture.knowledgeAssetStorageAddress, 'knowledge asset storage');
+    if (vmFixture === undefined) throw new Error('policy-only finalized chain has no VM inventory');
+    assertCallTarget(target, vmFixture.knowledgeAssetStorageAddress, 'knowledge asset storage');
   }
   switch (selector) {
     case CONTEXT_GRAPH_INTERFACE.getFunction('getContextGraph')!.selector:
@@ -202,7 +229,7 @@ function finalizedVmEthCallResult(
       assertContextGraphCall('getContextGraphKaCount', data, fixture.onChainContextGraphId);
       return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult(
         'getContextGraphKaCount',
-        [BigInt(fixture.assets.length)],
+        [BigInt(vmFixture?.assets.length ?? 0)],
       );
     case CONTEXT_GRAPH_INTERFACE.getFunction('getContextGraphKaAt')!.selector: {
       const [contextGraphId, ordinal] = CONTEXT_GRAPH_INTERFACE.decodeFunctionData(
@@ -210,7 +237,7 @@ function finalizedVmEthCallResult(
         data,
       );
       assertNumericId(contextGraphId, fixture.onChainContextGraphId, 'context graph');
-      const asset = fixture.assets[Number(ordinal)];
+      const asset = vmFixture?.assets[Number(ordinal)];
       if (asset === undefined) throw new Error(`unknown finalized VM ordinal ${ordinal}`);
       return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult(
         'getContextGraphKaAt',

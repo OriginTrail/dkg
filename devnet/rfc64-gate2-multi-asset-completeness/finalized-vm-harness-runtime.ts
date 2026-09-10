@@ -9,8 +9,11 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
+  FinalizedChainLoopbackMockChainAdapterV1,
   FinalizedVmLoopbackMockChainAdapterV1,
+  createFinalizedChainLoopbackRpcV1,
   createFinalizedVmLoopbackRpcV1,
+  type FinalizedChainLoopbackFixtureConfigV1,
   type FinalizedVmLoopbackFixtureConfigV1,
 } from '../../packages/agent/test/support/rfc64-finalized-vm-loopback-fixture.js';
 
@@ -25,118 +28,133 @@ const RFC64_GATE2_CONTEXT_GRAPH_STORAGE_ADDRESS =
 const RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS =
   '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 
-export interface FinalizedVmHarnessAssetConfigV1 {
+export interface FinalizedChainHarnessVmAssetConfigV1 {
   readonly assertionRoot: Digest32V1;
   readonly assertionVersion: string;
   readonly authorAddress: EvmAddressV1;
   readonly kaId: string;
 }
 
-export interface FinalizedVmHarnessConfigV1 {
+export interface FinalizedChainHarnessVmInventoryConfigV1 {
+  readonly assets: readonly Readonly<FinalizedChainHarnessVmAssetConfigV1>[];
+}
+
+/** Finalized chain/CG policy baseline; VM inventory is an explicit extension. */
+export interface FinalizedChainHarnessConfigV1 {
   readonly accessPolicy: 0 | 1;
-  readonly assets: readonly Readonly<FinalizedVmHarnessAssetConfigV1>[];
   readonly contextGraphId: string;
   readonly nameHash: Digest32V1;
   readonly onChainContextGraphId: string;
+  readonly ownerAddress: EvmAddressV1;
+  readonly vmInventory?: Readonly<FinalizedChainHarnessVmInventoryConfigV1>;
 }
 
-export interface FinalizedVmHarnessRuntimeV1 {
-  readonly chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
+export interface FinalizedChainHarnessRuntimeV1 {
+  readonly chainAdapter: FinalizedChainLoopbackMockChainAdapterV1;
+  readonly hasVmInventory: boolean;
   readonly rpcUrl: string;
   close(): Promise<void>;
 }
 
 const FINALIZED_BLOCK_HASH = `0x${'77'.repeat(32)}`;
 
-export function parseFinalizedVmHarnessConfigV1(
+export function parseFinalizedChainHarnessConfigV1(
   input: string,
-): Readonly<FinalizedVmHarnessConfigV1> {
+): Readonly<FinalizedChainHarnessConfigV1> {
   if (Buffer.byteLength(input) > 1_000_000) {
-    throw new TypeError('finalized VM harness config exceeds 1 MiB');
+    throw new TypeError('finalized chain harness config exceeds 1 MiB');
   }
-  const parsed = plainRecord(JSON.parse(input), 'finalized VM harness config');
-  const contextGraphId = requiredString(parsed.contextGraphId, 'finalizedVm.contextGraphId');
+  const parsed = plainRecord(JSON.parse(input), 'finalized chain harness config');
+  const contextGraphId = requiredString(parsed.contextGraphId, 'finalizedChain.contextGraphId');
   assertContextGraphIdV1(contextGraphId);
   const accessPolicy = parsed.accessPolicy === undefined
     ? 0
-    : canonicalAccessPolicy(parsed.accessPolicy, 'finalizedVm.accessPolicy');
-  const nameHash = requiredDigest(parsed.nameHash, 'finalizedVm.nameHash');
-  const assetsInput = parsed.assets === undefined
-    ? [{
-        assertionRoot: parsed.assertionRoot,
-        assertionVersion: parsed.assertionVersion,
-        authorAddress: parsed.authorAddress,
-        kaId: parsed.kaId,
-      }]
-    : plainArray(parsed.assets, 'finalizedVm.assets');
-  if (assetsInput.length === 0) {
-    throw new TypeError('finalizedVm.assets must not be empty');
+    : canonicalAccessPolicy(parsed.accessPolicy, 'finalizedChain.accessPolicy');
+  const nameHash = requiredDigest(parsed.nameHash, 'finalizedChain.nameHash');
+  const ownerAddress = canonicalEvmAddress(parsed.ownerAddress, 'finalizedChain.ownerAddress');
+  const vmInventory = parsed.vmInventory === undefined
+    ? undefined
+    : parseVmInventory(parsed.vmInventory);
+  const onChainContextGraphId = canonicalDecimalWire(
+    parsed.onChainContextGraphId,
+    'finalizedChain.onChainContextGraphId',
+  );
+  if (BigInt(onChainContextGraphId) === 0n) {
+    throw new TypeError('finalized chain on-chain context graph id must be non-zero');
   }
+  return Object.freeze({
+    accessPolicy,
+    contextGraphId,
+    nameHash,
+    onChainContextGraphId,
+    ownerAddress,
+    ...(vmInventory === undefined ? {} : { vmInventory }),
+  });
+}
+
+function parseVmInventory(value: unknown): Readonly<FinalizedChainHarnessVmInventoryConfigV1> {
+  const inventory = plainRecord(value, 'finalizedChain.vmInventory');
+  const assetsInput = plainArray(inventory.assets, 'finalizedChain.vmInventory.assets');
+  if (assetsInput.length === 0) throw new TypeError('finalizedChain.vmInventory.assets must not be empty');
   const assets = assetsInput.map((value, index) => {
-    const asset = plainRecord(value, `finalizedVm.assets[${index}]`);
+    const asset = plainRecord(value, `finalizedChain.vmInventory.assets[${index}]`);
     const assertionVersion = canonicalDecimalWire(
       asset.assertionVersion,
-      `finalizedVm.assets[${index}].assertionVersion`,
+      `finalizedChain.vmInventory.assets[${index}].assertionVersion`,
     );
     if (BigInt(assertionVersion) === 0n) {
-      throw new TypeError(`finalizedVm.assets[${index}].assertionVersion must be non-zero`);
+      throw new TypeError(`finalizedChain.vmInventory.assets[${index}].assertionVersion must be non-zero`);
     }
     return Object.freeze({
       assertionRoot: requiredDigest(
         asset.assertionRoot,
-        `finalizedVm.assets[${index}].assertionRoot`,
+        `finalizedChain.vmInventory.assets[${index}].assertionRoot`,
       ),
       assertionVersion,
       authorAddress: canonicalEvmAddress(
         asset.authorAddress,
-        `finalizedVm.assets[${index}].authorAddress`,
+        `finalizedChain.vmInventory.assets[${index}].authorAddress`,
       ),
-      kaId: canonicalDecimalWire(asset.kaId, `finalizedVm.assets[${index}].kaId`),
+      kaId: canonicalDecimalWire(asset.kaId, `finalizedChain.vmInventory.assets[${index}].kaId`),
     });
   });
-  const onChainContextGraphId = canonicalDecimalWire(
-    parsed.onChainContextGraphId,
-    'finalizedVm.onChainContextGraphId',
-  );
-  if (BigInt(onChainContextGraphId) === 0n) {
-    throw new TypeError('finalized VM on-chain context graph id must be non-zero');
-  }
-  return Object.freeze({
-    accessPolicy,
-    assets: Object.freeze(assets),
-    contextGraphId,
-    nameHash,
-    onChainContextGraphId,
-  });
+  return Object.freeze({ assets: Object.freeze(assets) });
 }
 
-export async function startFinalizedVmHarnessRuntimeV1(
-  config: Readonly<FinalizedVmHarnessConfigV1>,
-): Promise<Readonly<FinalizedVmHarnessRuntimeV1>> {
-  const fixture = Object.freeze({
+export async function startFinalizedChainHarnessRuntimeV1(
+  config: Readonly<FinalizedChainHarnessConfigV1>,
+): Promise<Readonly<FinalizedChainHarnessRuntimeV1>> {
+  const baseline = Object.freeze({
     accessPolicy: config.accessPolicy,
     active: true,
     assertedAtChainId: RFC64_GATE2_DEPLOYMENT.assertedAtChainId,
     assertedAtKav10Address:
       RFC64_GATE2_DEPLOYMENT.assertedAtKav10Address as EvmAddressV1,
-    knowledgeAssetStorageAddress: RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS,
-    assets: Object.freeze(config.assets.map((asset) => Object.freeze({
-      assertionRoot: asset.assertionRoot,
-      assertionVersion: asset.assertionVersion,
-      authorAddress: asset.authorAddress,
-      kaId: asset.kaId,
-      publisherAddress: '0x6666666666666666666666666666666666666666' as EvmAddressV1,
-    }))),
     blockHash: FINALIZED_BLOCK_HASH as Digest32V1,
     blockNumberQuantity: '0x7b',
     contextGraphStorageAddress: RFC64_GATE2_CONTEXT_GRAPH_STORAGE_ADDRESS,
     nameHash: config.nameHash,
     networkId: RFC64_GATE2_DEPLOYMENT.networkId as NetworkIdV1,
     onChainContextGraphId: config.onChainContextGraphId,
-    ownerAddress: config.assets[0]!.authorAddress,
+    ownerAddress: config.ownerAddress,
     publishPolicy: 1,
-  } satisfies FinalizedVmLoopbackFixtureConfigV1);
-  const rpcFixture = createFinalizedVmLoopbackRpcV1(fixture);
+  } satisfies FinalizedChainLoopbackFixtureConfigV1);
+  const vmFixture = config.vmInventory === undefined
+    ? undefined
+    : Object.freeze({
+        ...baseline,
+        knowledgeAssetStorageAddress: RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS,
+        assets: Object.freeze(config.vmInventory.assets.map((asset) => Object.freeze({
+          assertionRoot: asset.assertionRoot,
+          assertionVersion: asset.assertionVersion,
+          authorAddress: asset.authorAddress,
+          kaId: asset.kaId,
+          publisherAddress: '0x6666666666666666666666666666666666666666' as EvmAddressV1,
+        }))),
+      } satisfies FinalizedVmLoopbackFixtureConfigV1);
+  const rpcFixture = vmFixture === undefined
+    ? createFinalizedChainLoopbackRpcV1(baseline)
+    : createFinalizedVmLoopbackRpcV1(vmFixture);
   let activeServer: Server | undefined;
   const server = createServer(async (request, response) => {
     try {
@@ -181,9 +199,11 @@ export async function startFinalizedVmHarnessRuntimeV1(
     throw new Error('finalized VM JSON-RPC server has no address');
   }
   const rpcUrl = `http://127.0.0.1:${address.port}`;
-  let chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
+  let chainAdapter: FinalizedChainLoopbackMockChainAdapterV1;
   try {
-    chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpcUrl);
+    chainAdapter = vmFixture === undefined
+      ? new FinalizedChainLoopbackMockChainAdapterV1(baseline, rpcUrl)
+      : new FinalizedVmLoopbackMockChainAdapterV1(vmFixture, rpcUrl);
     const created = await chainAdapter.createOnChainContextGraph({
       accessPolicy: config.accessPolicy,
       publishPolicy: 1,
@@ -198,6 +218,7 @@ export async function startFinalizedVmHarnessRuntimeV1(
   }
   return Object.freeze({
     chainAdapter,
+    hasVmInventory: vmFixture !== undefined,
     rpcUrl,
     close: async () => {
       const current = activeServer;
