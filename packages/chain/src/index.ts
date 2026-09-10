@@ -5,6 +5,9 @@ export {
   type ContextGraphAuthorityHistoryStore,
 } from './context-graph-authority-history.js';
 export {
+  type ContextGraphAuthorityIndexStore,
+} from './context-graph-authority-index-checkpoint.js';
+export {
   bindContextGraphAuthorityReader,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,

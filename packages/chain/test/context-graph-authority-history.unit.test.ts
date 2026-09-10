@@ -681,6 +681,28 @@ describe('ContextGraphAuthorityHistoryCache', () => {
     expect(normalizeContextGraphAuthorityHistoryState({ ...valid, ...patch })).toBeUndefined();
   });
 
+  it('decodes the fixed v1 generation-order compatibility fixture', () => {
+    const state: ContextGraphAuthorityHistoryState = {
+      throughBlockNumber: 30,
+      throughBlockHash: FINALIZED_HASH,
+      nameHash: NAME_HASH,
+      ownershipEra: 0,
+      policyVersion: 0,
+      rosterVersion: 0,
+      sourceBlockNumber: 1,
+      sourceBlockHash: `0x${'01'.repeat(32)}`,
+    };
+    const persistedV1 = {
+      version: 1,
+      state,
+      // Fixed independently from the encoder so changing tuple order breaks
+      // backward compatibility instead of silently updating the assertion.
+      integrity: '0xa6c25f9c288f489861f99e68560160d7aeaca450f9ed151db406bdfb1e50a958',
+    };
+
+    expect(decodeContextGraphAuthorityHistoryCheckpoint(persistedV1)).toEqual(state);
+  });
+
   it('rejects old-version and integrity-less checkpoint envelopes', () => {
     const state: ContextGraphAuthorityHistoryState = {
       throughBlockNumber: 30,

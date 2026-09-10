@@ -24,13 +24,14 @@ import {
 } from './routine-log-retention.js';
 export {
   SqliteChainEventCursorStore,
+  SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
 export { SqliteProtocolOutboxStore, type SqliteProtocolOutboxStoreOptions } from './protocol-outbox-store.js';
 
-export const SCHEMA_VERSION = 35;
+export const SCHEMA_VERSION = 36;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -345,6 +346,14 @@ export class DashboardDB {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
       }
     };
+    const ensureContextGraphAuthorityIndexSchema = () => this.db.exec(`
+      CREATE TABLE IF NOT EXISTS context_graph_authority_indexes (
+        scope TEXT PRIMARY KEY CHECK (length(trim(scope)) > 0),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        checkpoint_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
@@ -352,6 +361,7 @@ export class DashboardDB {
       ensureJoinApprovalRepairMarker();
       ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
+      ensureContextGraphAuthorityIndexSchema();
       installRoutineLogRetentionSchema(this.db);
       return;
     }
@@ -1289,6 +1299,11 @@ export class DashboardDB {
       // row ids, so overflow checks are O(1) and each prune touches at most one
       // configured batch.
       installRoutineLogRetentionSchema(this.db);
+    }
+    if (version < 36) {
+      // One opaque checkpoint per physical ContextGraphStorage deployment.
+      // Chain owns decoding/integrity; SQLite owns atomic revision CAS.
+      ensureContextGraphAuthorityIndexSchema();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
