@@ -33,8 +33,9 @@ export type SyncCheckpointScope =
   | `challenge-exact:${string}`;
 
 /** Runtime-distinct namespaces for retained SWM metadata owners. */
+export type SelectedSwmMetaRetentionScope = `selected-swm-meta:retained:${string}`;
 export type SwmMetaRetentionScope =
-  | `selected-swm-meta:retained:${string}`
+  | SelectedSwmMetaRetentionScope
   | `ordinary-swm-meta:retained:${string}`;
 
 export interface SyncCheckpointStore {

@@ -23,12 +23,12 @@ import {
 } from './requester/manifest-bound-snapshot-walk.js';
 
 /** Exact metadata prefix retained only by one provider/mode transfer owner. */
-interface SwmMetaContinuationState {
+interface SwmMetaContinuationState<Scope extends SwmMetaRetentionScope> {
   quads: Quad[];
   bytesEstimate: number;
   nextOffset: number;
   checkpointKey: string;
-  requesterScope: SwmMetaRetentionScope;
+  requesterScope: Scope;
   /** Incremented whenever the responder restarts this prefix from offset zero. */
   generation: number;
   completed: boolean;
@@ -219,7 +219,7 @@ export interface SwmMetaContinuation {
   readonly completed: boolean;
 }
 
-interface SwmMetaPageFetchRequest {
+interface SwmMetaPageFetchRequest<Scope extends SwmMetaRetentionScope> {
   readonly ctx: OperationContext;
   readonly remotePeerId: string;
   readonly contextGraphId: string;
@@ -227,7 +227,7 @@ interface SwmMetaPageFetchRequest {
   readonly deadline: number;
   readonly workAdmission: SyncWorkAdmission;
   readonly returnAcceptedPrefixOnRetryableTransportFailure: true;
-  readonly requesterScope: SwmMetaRetentionScope;
+  readonly requesterScope: Scope;
   readonly maxAcceptedQuads: number;
   readonly maxAcceptedHeapBytesEstimate: number;
 }
@@ -239,16 +239,16 @@ interface SwmMetaPageFetchRequest {
  * reservations and the one bounded fresh-generation retry. The generic
  * requester sees only a normal metadata page plus a voluntary-yield bit.
  */
-export function createSwmMetaFetcher(options: {
+export function createSwmMetaFetcher<Scope extends SwmMetaRetentionScope>(options: {
   readonly remotePeerId: string;
-  readonly requesterScope: SwmMetaRetentionScope;
+  readonly requesterScope: Scope;
   readonly retentionBudget: { lease(): SwmMetaRetentionLease };
-  readonly fetchPage: (request: SwmMetaPageFetchRequest) => Promise<SyncPageResult>;
+  readonly fetchPage: (request: SwmMetaPageFetchRequest<Scope>) => Promise<SyncPageResult>;
   readonly deleteCheckpoint: (checkpointKey: string) => void;
   readonly now?: () => number;
   readonly retentionTtlMs?: number;
 }): SwmMetaFetcher {
-  const states = new Map<string, SwmMetaContinuationState>();
+  const states = new Map<string, SwmMetaContinuationState<Scope>>();
   const completedContextGraphs = new Set<string>();
   const activeContextGraphs = new Set<string>();
   const now = options.now ?? (() => Date.now());
@@ -267,7 +267,7 @@ export function createSwmMetaFetcher(options: {
     state.retentionLease.release();
   };
 
-  const ensureState = (contextGraphId: string): SwmMetaContinuationState => {
+  const ensureState = (contextGraphId: string): SwmMetaContinuationState<Scope> => {
     const existing = states.get(contextGraphId);
     if (existing) return existing;
     completedContextGraphs.delete(contextGraphId);
@@ -285,7 +285,7 @@ export function createSwmMetaFetcher(options: {
     // A prefix is coordinator-local. A checkpoint without that byte-identical
     // prefix cannot be resumed, even if a previous process left it behind.
     options.deleteCheckpoint(checkpointKey);
-    const state: SwmMetaContinuationState = {
+    const state: SwmMetaContinuationState<Scope> = {
       quads: [],
       bytesEstimate: 0,
       nextOffset: 0,
@@ -300,23 +300,23 @@ export function createSwmMetaFetcher(options: {
     return state;
   };
 
-  const hasRetainedMetadataPrefix = (state: SwmMetaContinuationState): boolean => (
+  const hasRetainedMetadataPrefix = (state: SwmMetaContinuationState<Scope>): boolean => (
     !state.completed
     && state.nextOffset > 0
     && state.quads.length > 0
   );
 
-  const hasIncompleteSnapshotWalk = (state: SwmMetaContinuationState): boolean => {
+  const hasIncompleteSnapshotWalk = (state: SwmMetaContinuationState<Scope>): boolean => {
     const walk = state.snapshotWalk;
     return state.completed && walk?.incomplete === true;
   };
 
-  const hasRetainedContinuation = (state: SwmMetaContinuationState): boolean => (
+  const hasRetainedContinuation = (state: SwmMetaContinuationState<Scope>): boolean => (
     hasRetainedMetadataPrefix(state) || hasIncompleteSnapshotWalk(state)
   );
 
   const retainedContinuationExpiry = (
-    state: SwmMetaContinuationState,
+    state: SwmMetaContinuationState<Scope>,
   ): number | undefined => {
     if (hasRetainedMetadataPrefix(state)) return state.metadataExpiresAtMs;
     if (hasIncompleteSnapshotWalk(state)) return state.snapshotWalk?.expiresAtMs;
@@ -360,7 +360,7 @@ export function createSwmMetaFetcher(options: {
 
   const fetchRetained = async (
     request: SharedMemoryMetadataFetchRequest,
-    state: SwmMetaContinuationState,
+    state: SwmMetaContinuationState<Scope>,
     allowFreshRestartRetry: boolean,
   ): Promise<SyncPageResult> => {
     // Reserve before yielding to transport. Overlapping invocations
