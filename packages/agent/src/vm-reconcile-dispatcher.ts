@@ -75,6 +75,7 @@ export class VmReconcileDispatcher<T> {
   private queued = 0;
   private sequence = 0;
   private foregroundBurst = 0;
+  private periodicCapacityClaims = 0;
   protected closed = false;
   private readonly states = new Map<string, VmReconcileDispatchState<T>>();
   private readonly pending: Array<VmReconcileDispatchWork<T>> = [];
@@ -135,8 +136,9 @@ export class VmReconcileDispatcher<T> {
    *
    * Sweep orchestration retains its round-robin cursor at the first rejected
    * key, so stable iteration order cannot permanently starve the tail. Keep
-   * one pending slot for manual/live work; immediately runnable background work
-   * and coalescing do not consume that reserve.
+   * one pending slot for manual/live work until the foreground burst is spent;
+   * then a retained sweep can claim that slot. Immediately runnable work and
+   * coalescing do not consume either reserve.
    */
   tryTriggerPeriodic(key: string): boolean {
     return this.tryDispatchPeriodic(key) !== undefined;
@@ -161,6 +163,21 @@ export class VmReconcileDispatcher<T> {
       signal?.addEventListener('abort', finish, { once: true });
       if (this.closed || signal?.aborted) finish();
     });
+  }
+
+  /** A sweep owns its capacity claim across notifications, retries, and cancellation. */
+  protected retainPeriodicCapacity(signal: AbortSignal): () => void {
+    if (this.closed || signal.aborted) return () => undefined;
+    this.periodicCapacityClaims++;
+    let retained = true;
+    const release = () => {
+      if (!retained) return;
+      retained = false;
+      this.periodicCapacityClaims--;
+      signal.removeEventListener('abort', release);
+    };
+    signal.addEventListener('abort', release, { once: true });
+    return release;
   }
 
   private resolvePeriodicStateWaiters(): void {
@@ -302,7 +319,11 @@ export class VmReconcileDispatcher<T> {
     placement: 'pending' | 'trailing',
   ): VmReconcileDispatchWork<T> | undefined {
     const immediatelyRunnable = placement === 'pending' && this.active < this.concurrency;
-    const pendingLimit = source === 'periodic' && !immediatelyRunnable
+    const periodicTurn = this.foregroundBurst >= this.maxForegroundBurst;
+    const reservePendingSlot = source === 'periodic'
+      ? !periodicTurn
+      : periodicTurn && this.periodicCapacityClaims > 0;
+    const pendingLimit = reservePendingSlot && !immediatelyRunnable
       ? this.maxPending - 1 : this.maxPending;
     if (this.queued >= pendingLimit) return undefined;
     let resolveWork!: (value: T) => void;
@@ -450,6 +471,7 @@ class VmReconcileRuntimeDispatcher<T> extends VmReconcileDispatcher<T> {
       tryAdmit: (key: string) => this.tryDispatchPeriodic(key),
       waitForChange: (signal?: AbortSignal) => this.waitForPeriodicStateChange(signal),
       isClosed: () => this.closed,
+      retainCapacity: (signal: AbortSignal) => this.retainPeriodicCapacity(signal),
     }));
   }
 }
@@ -479,7 +501,7 @@ export class VmReconcileSchedulingRuntime<T> {
       options,
       (admission) => { sweepAdmission = admission; },
     );
-    this.planner = new VmReconcileSweepPlanner(discoveryBatchSize);
+    this.planner = new VmReconcileSweepPlanner(discoveryBatchSize, sweepAdmission.retainCapacity);
     this.sweepAdmission = sweepAdmission;
   }
 

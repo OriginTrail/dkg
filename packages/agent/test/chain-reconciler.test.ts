@@ -1311,6 +1311,85 @@ describe('RecentUalSet', () => {
 });
 
 describe('capacity-aware periodic admission', () => {
+  it.each(['no sweep', 'abort', 'reset'] as const)('keeps foreground capacity after its burst with %s', async action => {
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    let paused = true;
+    const runtime = new VmReconcileSchedulingRuntime(async key => {
+      started.push(key);
+      if (paused) await new Promise<void>(resolve => releases.push(resolve));
+    }, () => undefined, { concurrency: 1, maxPending: 1, maxForegroundBurst: 1 });
+    const controller = new AbortController();
+    const first = runtime.triggerManual('first');
+    const second = runtime.triggerManual('second');
+    const sweep = action === 'no sweep' ? Promise.resolve()
+      : runtime.completeSweep(['periodic'], [], () => true, controller.signal);
+    if (action === 'abort') controller.abort();
+    if (action === 'reset') runtime.resetSweep();
+    try {
+      await sweep;
+      await vi.waitFor(() => expect(releases).toHaveLength(1));
+      releases.shift()!();
+      await vi.waitFor(() => expect(started).toEqual(['first', 'second']));
+      const third = runtime.triggerManual('third');
+      void third.catch(() => undefined);
+      expect(runtime.isInFlight('third')).toBe(true);
+      paused = false;
+      for (const release of releases.splice(0)) release();
+      await Promise.all([first, second, third]);
+      expect(started).toEqual(['first', 'second', 'third']);
+    } finally {
+      paused = false;
+      for (const release of releases.splice(0)) release();
+      await runtime.close();
+    }
+  });
+
+  it.each([1, 2, 8].flatMap(maxForegroundBurst =>
+    (['completion', 'timer'] as const).flatMap(mode =>
+      (['live', 'manual'] as const).map(source => ({ maxForegroundBurst, mode, source }))),
+  ))('$mode serves a waiting sweep under sustained $source foreground backlog with one pending slot and burst $maxForegroundBurst', async ({ maxForegroundBurst, mode, source }) => {
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    let producing = true;
+    let nextForeground = 0;
+    const runtime = new VmReconcileSchedulingRuntime(async (key, source) => {
+      started.push(key);
+      // Refill synchronously when each foreground job starts, before the
+      // waiting sweep's promise continuation can retry admission.
+      if (producing && source !== 'periodic') enqueueForeground(`foreground-${++nextForeground}`);
+      expect(runtime.snapshot().active).toBeLessThanOrEqual(1);
+      expect(runtime.snapshot().queued).toBeLessThanOrEqual(1);
+      await new Promise<void>(resolve => releases.push(resolve));
+    }, () => undefined, { concurrency: 1, maxPending: 1, maxForegroundBurst });
+    const enqueueForeground = (key: string) => {
+      if (source === 'live') runtime.triggerLive(key);
+      else void runtime.triggerManual(key).catch(() => undefined);
+    };
+    enqueueForeground('foreground-0');
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    const sweep = mode === 'completion'
+      ? runtime.completeSweep(['periodic'], [], () => true)
+      : Promise.resolve(runtime.scheduleSweep(['periodic'], [], () => true));
+    try {
+      for (let turn = 0; turn <= maxForegroundBurst && !started.includes('periodic'); turn++) {
+        releases.shift()!();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        if (mode === 'timer') runtime.scheduleSweep(['periodic'], [], () => true);
+        await vi.waitFor(() => expect(releases).toHaveLength(1));
+      }
+      expect(started).toContain('periodic');
+      // The initial foreground pass predates the sweep request. Any foreground
+      // work already queued still counts toward the subsequent burst bound.
+      expect(started.indexOf('periodic') - 1).toBeLessThanOrEqual(maxForegroundBurst);
+    } finally {
+      producing = false;
+      const closing = runtime.close();
+      for (const release of releases.splice(0)) release();
+      await Promise.all([closing, sweep]);
+    }
+  });
+
   it.each(['abort', 'close'] as const)('releases a one-slot wait on %s while active work stays owned', async action => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });

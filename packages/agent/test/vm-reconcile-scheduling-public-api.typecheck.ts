@@ -9,13 +9,15 @@ const targeted: Promise<string | null> = agent.selfPrimeSubscriptionOnChainId(
   'cg', { subscribed: true, synced: false, syncMode: 'always-on' }, 500n,
 );
 const completed: Promise<void> = agent.runVmReconcileSweep();
-const targets: readonly string[] = agent.getVmReconcileTargetIds();
-// @ts-expect-error Candidate bucketing stays internal; diagnostics expose only IDs.
+const selected: boolean = agent.isVmReconcileTargetSelected('cg');
+// @ts-expect-error Complete scheduling target inventory is not a public diagnostic API.
+agent.getVmReconcileTargetIds();
+// @ts-expect-error Candidate bucketing stays internal; the public query answers membership only.
 agent.selectVmReconcileTargets();
 void admitted;
 void targeted;
 void completed;
-void targets;
+void selected;
 
 // @ts-expect-error Sweep capacity waiting is internal, not a supported dispatcher operation.
 dispatcher.schedulePeriodicWhenAvailable('cg');

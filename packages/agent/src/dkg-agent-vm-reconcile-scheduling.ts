@@ -21,12 +21,12 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
     };
   }
 
-  /** Current VM target intent, including subscriptions that still need binding.
-   * This snapshot performs no admission, chain reads, or lifecycle transition.
+  /** Whether a graph is selected for VM reconciliation, including unbound subscriptions.
+   * This query performs no admission, chain reads, or lifecycle transition.
    */
-  getVmReconcileTargetIds(this: DKGAgent): readonly string[] {
+  isVmReconcileTargetSelected(this: DKGAgent, contextGraphId: string): boolean {
     const { bound, unbound } = this.selectVmReconcileTargets();
-    return [...bound, ...unbound];
+    return bound.includes(contextGraphId) || unbound.includes(contextGraphId);
   }
 
   protected prepareVmReconcileSweep(this: DKGAgent) {

@@ -102,10 +102,10 @@ test('routes every registered rollout command through its own output decoder', (
 
 test('rollout VM evidence reflects the running agent selection', () => {
   const selected = {
-    getVmReconcileTargetIds: () => [CONTEXT_GRAPH_ID],
+    isVmReconcileTargetSelected: (contextGraphId: string) => contextGraphId === CONTEXT_GRAPH_ID,
   };
   const unselected = {
-    getVmReconcileTargetIds: () => [],
+    isVmReconcileTargetSelected: () => false,
   };
   assert.equal(
     isGate1VmChainInventorySelected(selected, CONTEXT_GRAPH_ID),

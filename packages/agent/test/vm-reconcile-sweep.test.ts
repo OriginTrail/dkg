@@ -44,14 +44,14 @@ it.each(['explicit', 'empty'])('resets after %s lifecycle reset', (kind) => {
 });
 
 it('admits bound first, up to eight discovery candidates, then the rest of the bound rotation once', () => {
-  const planner = new VmReconcileSweepPlanner(8);
+  const planner = new VmReconcileSweepPlanner(8, () => () => undefined);
   const admitted: string[] = [];
   planner.admit(['b0', 'b1', 'b2'], Array.from({ length: 10 }, (_, i) => `u${i}`), key => { admitted.push(key); return Promise.resolve(); });
   expect(admitted).toEqual(['b0', ...Array.from({ length: 8 }, (_, i) => `u${i}`), 'b1', 'b2']);
 });
 
 it('keeps a partial discovery turn ahead of bound fills, then resumes bound progress', () => {
-  const planner = new VmReconcileSweepPlanner(2);
+  const planner = new VmReconcileSweepPlanner(2, () => () => undefined);
   const admitted: string[] = [];
   let capacity = 2;
   const admit = (key: string): Promise<void> | undefined => {
@@ -71,7 +71,7 @@ it('keeps a partial discovery turn ahead of bound fills, then resumes bound prog
 });
 
 it('does not repeat the leading bound graph when discovery finishes on a later call', () => {
-  const planner = new VmReconcileSweepPlanner(2);
+  const planner = new VmReconcileSweepPlanner(2, () => () => undefined);
   const admitted: string[] = [];
   planner.admit(['b0', 'b1'], ['u0', 'u1'], key => {
     if (admitted.length === 2) return undefined;
@@ -83,7 +83,7 @@ it('does not repeat the leading bound graph when discovery finishes on a later c
 });
 
 it('resets an unfinished discovery turn on lifecycle restart', () => {
-  const planner = new VmReconcileSweepPlanner(8);
+  const planner = new VmReconcileSweepPlanner(8, () => () => undefined);
   planner.admit(['b0', 'b1'], ['u0', 'u1'], key => key === 'b0' ? Promise.resolve() : undefined);
   planner.reset();
   const admitted: string[] = [];
@@ -92,7 +92,7 @@ it('resets an unfinished discovery turn on lifecycle restart', () => {
 });
 
 it('handles disappearing discovery candidates and retains a rejected bound candidate', () => {
-  const planner = new VmReconcileSweepPlanner(8);
+  const planner = new VmReconcileSweepPlanner(8, () => () => undefined);
   planner.admit(['b0', 'b1'], ['u0', 'u1'], key => key === 'b0' ? Promise.resolve() : undefined);
   const admitted: string[] = [];
   planner.admit(['b0', 'b1'], [], key => { admitted.push(key); return Promise.resolve(); });
@@ -107,7 +107,7 @@ it.each([
   { name: 'reordered', keys: ['b2', 'b0', 'b1', 'b3'], expected: ['b1', 'b2', 'b3'] },
   { name: 'removed', keys: ['b1', 'b2', 'b3'], expected: ['b1', 'b2', 'b3'] },
 ])('handles a $name leading bound key while discovery is paused', ({ keys, expected }) => {
-  const planner = new VmReconcileSweepPlanner(2);
+  const planner = new VmReconcileSweepPlanner(2, () => () => undefined);
   let capacity = 2;
   planner.admit(['b0', 'b1', 'b2'], ['u0', 'u1'], () => capacity-- > 0 ? Promise.resolve() : undefined);
   const admitted: string[] = [];
@@ -117,7 +117,7 @@ it.each([
 });
 
 it('does not advance after rejection but advances accepted or coalesced work', () => {
-  const planner = new VmReconcileSweepPlanner(2);
+  const planner = new VmReconcileSweepPlanner(2, () => () => undefined);
   const attempted: string[] = [];
   planner.admit(['b0', 'b1'], [], key => {
     attempted.push(key);
@@ -130,7 +130,7 @@ it('does not advance after rejection but advances accepted or coalesced work', (
 });
 
 it('does not admit a discovery key twice when it binds before the retained tail resumes', () => {
-  const planner = new VmReconcileSweepPlanner(2);
+  const planner = new VmReconcileSweepPlanner(2, () => () => undefined);
   const admitted: string[] = [];
   let capacity = 2;
   planner.admit(['b'], ['u0', 'u1'], key => {

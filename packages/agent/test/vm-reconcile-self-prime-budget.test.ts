@@ -65,15 +65,19 @@ async function fixture(unbound: number, maxPending = 64) {
   return { agent, internals, resolve, canRead, order, triggerLive, installDispatcher };
 }
 
-it('reports the same bound and discovery targets that a sweep selects without admitting work', async () => {
+it('answers selected membership for subscribed, hosted, discovery and catalog targets without admitting work', async () => {
   const { agent, internals, resolve, canRead, order } = await fixture(2);
   internals.subscribedContextGraphs.set('bound', { subscribed: true, onChainId: '31' });
   internals.subscribedContextGraphs.set('hosted', { subscribed: false, coreHosted: true, onChainId: '32' });
   internals.subscribedContextGraphs.set('hosted-unbound', { subscribed: false, coreHosted: true });
   internals.subscribedContextGraphs.set('inactive', { subscribed: false, onChainId: '33' });
   vi.spyOn(agent, 'rfc64SelectedVmReconcileTargetIds').mockReturnValue(['catalog', 'cg-0']);
-  const selected = agent.getVmReconcileTargetIds();
-  expect(selected).toEqual(['bound', 'hosted', 'catalog', 'cg-0', 'cg-1']);
+  for (const key of ['bound', 'hosted', 'catalog', 'cg-0', 'cg-1']) {
+    expect(agent.isVmReconcileTargetSelected(key)).toBe(true);
+  }
+  for (const key of ['hosted-unbound', 'inactive', 'missing']) {
+    expect(agent.isVmReconcileTargetSelected(key)).toBe(false);
+  }
   expect(resolve).not.toHaveBeenCalled();
   expect(canRead).not.toHaveBeenCalled();
   expect(order).toEqual([]);
@@ -81,8 +85,7 @@ it('reports the same bound and discovery targets that a sweep selects without ad
   internals.scheduleVmReconcileSweep();
   expect(schedule).toHaveBeenCalledWith(['bound', 'hosted', 'catalog', 'cg-0'], ['cg-1'], expect.any(Function));
   internals.subscribedContextGraphs.delete('bound');
-  expect(agent.getVmReconcileTargetIds()).not.toContain('bound');
-  expect(selected).toContain('bound');
+  expect(agent.isVmReconcileTargetSelected('bound')).toBe(false);
 });
 
 it('performs zero unbound resolution calls for a burst of unmatched live events', async () => {

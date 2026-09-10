@@ -32,6 +32,7 @@ interface SweepTurnBase {
   readonly admittedKeys: Set<string>;
   readonly completions: Promise<unknown>[];
   readonly finished: AbortController;
+  releaseTimerCapacity?: () => void;
 }
 
 type SweepTurnState =
@@ -58,7 +59,10 @@ export class VmReconcileSweepPlanner {
   private readonly unbound = new VmReconcileSweepSelector();
   private turn: SweepTurn | undefined;
 
-  constructor(private readonly discoveryBatchSize: number) {}
+  constructor(
+    private readonly discoveryBatchSize: number,
+    private readonly retainCapacity: VmReconcileSweepAdmission['retainCapacity'],
+  ) {}
 
   reset(): void {
     if (this.turn) this.finish(this.turn);
@@ -72,7 +76,12 @@ export class VmReconcileSweepPlanner {
     unboundKeys: readonly string[],
     tryAdmit: (key: string) => Promise<unknown> | undefined,
   ): void {
-    this.advance(this.currentTurn(), boundKeys, unboundKeys, tryAdmit);
+    const turn = this.currentTurn();
+    this.releaseTimerCapacity(turn);
+    this.advance(turn, boundKeys, unboundKeys, tryAdmit);
+    if (!turn.finished.signal.aborted) {
+      turn.releaseTimerCapacity = this.retainCapacity(turn.finished.signal);
+    }
   }
 
   /**
@@ -92,13 +101,18 @@ export class VmReconcileSweepPlanner {
     const turn = this.claimForCompletion(boundKeys);
     const waitingSignal = signal
       ? AbortSignal.any([signal, turn.finished.signal]) : turn.finished.signal;
-    while (!turn.finished.signal.aborted && isActive() && !admission.isClosed()) {
-      this.advance(turn, boundKeys, unboundKeys,
-        key => isActive() ? admission.tryAdmit(key) : undefined);
-      if (turn.finished.signal.aborted || !isActive() || admission.isClosed()) break;
-      // Successful admissions may wake another caller finishing this turn.
-      // Finishing/resetting the turn also retires the capacity waiter.
-      await admission.waitForChange(waitingSignal);
+    const releaseCapacity = this.retainCapacity(waitingSignal);
+    try {
+      while (!turn.finished.signal.aborted && isActive() && !admission.isClosed()) {
+        this.advance(turn, boundKeys, unboundKeys,
+          key => isActive() ? admission.tryAdmit(key) : undefined);
+        if (turn.finished.signal.aborted || !isActive() || admission.isClosed()) break;
+        // Successful admissions may wake another caller finishing this turn.
+        // Finishing/resetting the turn also retires the capacity waiter.
+        await admission.waitForChange(waitingSignal);
+      }
+    } finally {
+      releaseCapacity();
     }
     await Promise.all(turn.completions);
   }
@@ -113,6 +127,7 @@ export class VmReconcileSweepPlanner {
 
   private claimForCompletion(boundKeys: readonly string[]): SweepTurn {
     const current = this.currentTurn();
+    this.releaseTimerCapacity(current);
     if (current.owner === 'completion') return current;
     const claimed: SweepTurn = {
       ...current,
@@ -121,6 +136,11 @@ export class VmReconcileSweepPlanner {
     };
     this.turn = claimed;
     return claimed;
+  }
+
+  private releaseTimerCapacity(turn: SweepTurn): void {
+    turn.releaseTimerCapacity?.();
+    turn.releaseTimerCapacity = undefined;
   }
 
   private finish(turn: SweepTurn): void {
