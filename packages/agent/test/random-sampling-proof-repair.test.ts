@@ -47,7 +47,7 @@ function processDurableBatchWithRealVerifier(
 }
 
 describe('Random Sampling proof-time exact repair', () => {
-  it('rotates through the bounded provider window until an exact asset is found', async () => {
+  it('exhausts the chain-local Core roster until an exact asset is found', async () => {
     const peers = ['peer-0001', 'peer-0002', 'peer-0003', 'peer-0004'];
     const expectedUal = 'did:dkg:base:8453/0x0000000000000000000000000000000000001234/7';
     const historicalQuad = {
@@ -65,9 +65,9 @@ describe('Random Sampling proof-time exact repair', () => {
       privateRoots: [],
     };
     const syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async (peerId: string) => ({
-      disposition: peerId === 'peer-0003' ? 'found' : 'clean-absent',
+      disposition: peerId === 'peer-0004' ? 'found' : 'clean-absent',
       result: { insertedTriples: 0 },
-      ...(peerId === 'peer-0003'
+      ...(peerId === 'peer-0004'
         ? {
             authenticatedAssets: [{
               asset: {
@@ -95,10 +95,19 @@ describe('Random Sampling proof-time exact repair', () => {
       resolveLocalCgIdByOnChainId: vi.fn(() => 'food-safety'),
       resolveRandomSamplingLocalContextGraphId: vi.fn(async () => 'food-safety'),
       resolveCuratorPeerIdsForCg: vi.fn(async () => ({ peerIds: [] })),
-      vmReconcileObservedCandidatePeerIds: vi.fn(() => peers),
+      discovery: {
+        findAgents: vi.fn(async () => [
+          ...peers.map((peerId) => ({ peerId, nodeRole: 'core' })),
+          { peerId: 'edge-0001', nodeRole: 'edge' },
+          { peerId: 'self', nodeRole: 'core' },
+        ]),
+      },
+      vmReconcileObservedCandidatePeerIds: vi.fn(() => []),
       preferredSyncPeers: new Map(),
-      selectCatchupPeerWindow: vi.fn((candidates: Array<{ toString(): string }>) =>
-        candidates.slice(0, 3)),
+      selectCatchupPeerWindow: vi.fn((
+        candidates: Array<{ toString(): string }>,
+        options: { maxPeers: number },
+      ) => candidates.slice(0, options.maxPeers)),
       ensurePeerAdmittedForRecovery: vi.fn(async () => true),
       ensurePeerConnected: vi.fn(async () => undefined),
       waitForSyncProtocol: vi.fn(async () => true),
@@ -114,13 +123,19 @@ describe('Random Sampling proof-time exact repair', () => {
       ).result,
     ).resolves.toEqual(proofMaterial);
 
-    expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(3);
+    expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(4);
     expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
-      .toEqual(['peer-0001', 'peer-0002', 'peer-0003']);
+      .toEqual(peers);
     expect(agentLike.selectCatchupPeerWindow).toHaveBeenCalledWith(
       expect.any(Array),
-      expect.objectContaining({ maxPeers: 3, peerRotationKey: 'rs-proof:food-safety' }),
+      expect.objectContaining({
+        maxPeers: DKGAgentBase.RANDOM_SAMPLING_EXACT_PEER_MAX,
+        peerRotationKey: 'rs-proof:food-safety',
+      }),
     );
+    expect(agentLike.discovery.findAgents).toHaveBeenCalledWith({
+      signal: expect.any(AbortSignal),
+    });
     for (const call of syncExactKnowledgeAssetsFromPeerDetailed.mock.calls) {
       expect(call[1]).toBe('food-safety');
       expect(call[2]).toEqual({
@@ -177,6 +192,7 @@ describe('Random Sampling proof-time exact repair', () => {
       resolveLocalCgIdByOnChainId: vi.fn(() => 'food-safety'),
       resolveRandomSamplingLocalContextGraphId: vi.fn(async () => 'food-safety'),
       resolveCuratorPeerIdsForCg,
+      discovery: { findAgents: vi.fn(async () => []) },
       vmReconcileObservedCandidatePeerIds: vi.fn(() => []),
       preferredSyncPeers: new Map(),
       selectCatchupPeerWindow: vi.fn((peers: Array<{ toString(): string }>) => peers),
@@ -410,6 +426,7 @@ describe('Random Sampling proof-time exact repair', () => {
         resolveLocalCgIdByOnChainId: vi.fn(() => localContextGraphId),
         resolveRandomSamplingLocalContextGraphId: vi.fn(async () => localContextGraphId),
         resolveCuratorPeerIdsForCg: vi.fn(async () => ({ peerIds: [] })),
+        discovery: { findAgents: vi.fn(async () => []) },
         vmReconcileObservedCandidatePeerIds: vi.fn(() => ['peer-history']),
         preferredSyncPeers: new Map(),
         selectCatchupPeerWindow: vi.fn((peers: Array<{ toString(): string }>) => peers),
@@ -531,6 +548,7 @@ describe('Random Sampling proof-time exact repair', () => {
       log: { info: vi.fn() },
       resolveRandomSamplingLocalContextGraphId,
       resolveCuratorPeerIdsForCg,
+      discovery: { findAgents: vi.fn(async () => []) },
       vmReconcileObservedCandidatePeerIds: vi.fn(() => []),
       preferredSyncPeers: new Map(),
       selectCatchupPeerWindow: vi.fn((peers: Array<{ toString(): string }>) => peers),

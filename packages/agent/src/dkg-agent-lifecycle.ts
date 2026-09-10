@@ -4287,7 +4287,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     const dependencies = {
       chainId: this.chain.chainId,
-      maxPeers: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
+      maxPeers: DKGAgentBase.RANDOM_SAMPLING_EXACT_PEER_MAX,
       stopSignal: this.node.stopSignal,
       resolveStorageAddress: (_signal) => this.chain.getDKGKnowledgeAssetsAddress
         ? this.chain.getDKGKnowledgeAssetsAddress()
@@ -4312,6 +4312,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Random Sampling provider discovery for ${localContextGraphId} is no longer current`,
           ));
         }
+        // The local Agent Registry is scoped to this node's DKG network.
+        // Include its complete Core roster so proof-time repair is not limited
+        // to curators, observed providers, or currently-connected peers.
+        // Admission and sync-protocol checks remain enforced below.
+        const corePeerIds = await this.discovery.findAgents({ signal })
+          .then((agents) => agents
+            .filter((agent) => agent.nodeRole === 'core')
+            .map((agent) => agent.peerId))
+          .catch((error) => {
+            if (signal.aborted) throw signal.reason ?? error;
+            this.log.info(
+              ctx,
+              `Random Sampling Core-roster discovery failed for ${localContextGraphId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return [] as string[];
+          });
+        if (!isCurrent()) {
+          throw signal.reason ?? asSyncFetchAbortError(new Error(
+            `Random Sampling provider discovery for ${localContextGraphId} is no longer current`,
+          ));
+        }
         const observedPeerIds = this.vmReconcileObservedCandidatePeerIds(
           localContextGraphId,
         );
@@ -4319,6 +4340,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           .map((connection) => connection.remotePeer.toString());
         return [...new Set([
           ...curatorResolution.peerIds,
+          ...corePeerIds,
           ...observedPeerIds,
           this.preferredSyncPeers.get(localContextGraphId),
           ...connectedPeerIds,

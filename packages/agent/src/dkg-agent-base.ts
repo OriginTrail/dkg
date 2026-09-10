@@ -995,6 +995,8 @@ export class DKGAgentBase {
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
   /** Bounded proof universe retained across passes; transport still uses the cap above. */
   static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
+  /** Random Sampling is proof-critical, so its exact repair may exhaust the Core roster. */
+  static readonly RANDOM_SAMPLING_EXACT_PEER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
     Math.max(1, Number(process.env['DKG_VM_RECONCILE_QUEUE_MAX_PENDING']) || 256);
   /**
