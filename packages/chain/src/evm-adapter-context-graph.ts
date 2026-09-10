@@ -22,6 +22,7 @@ import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextG
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveContextGraphAuthorityHistory,
+  type ContextGraphAuthorityHistoryCreationEvent,
   type ContextGraphAuthorityHistoryEvent,
   type ContextGraphAuthorityHistoryEventQuery,
 } from './context-graph-authority-history.js';
@@ -932,6 +933,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         const cache = this.contextGraphAuthorityHistory;
         const cacheKey = `${contractAddress}:${contextGraphId.toString(10)}`;
         const authorityFilters = new Map<string, ethers.DeferredTopicFilter>();
+        const readAuthorityEvents = async (
+          name: 'ContextGraphCreated' | ContextGraphAuthorityHistoryEventQuery['name'],
+          targetContextGraphId: bigint,
+          fromBlock: number,
+          toBlock: number,
+        ): Promise<ethers.EventLog[]> => {
+          let filter = authorityFilters.get(name);
+          if (filter === undefined) {
+            filter = name === 'Transfer'
+              ? filters[name]!(null, null, targetContextGraphId)
+              : filters[name]!(targetContextGraphId);
+            authorityFilters.set(name, filter);
+          }
+          return (await contract.queryFilter(filter, fromBlock, toBlock))
+            .map((rawEvent) => rawEvent as ethers.EventLog);
+        };
         const [current, historyResolution] = await Promise.all([
           (contract as any).getContextGraph.staticCall(
             contextGraphId,
@@ -952,19 +969,30 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             readBlockHash: async (blockNumber) => (
               (await provider.getBlock(blockNumber))?.hash ?? null
             ),
+            readCreationEvents: async (targetContextGraphId, fromBlock, toBlock) => (
+              readAuthorityEvents(
+                'ContextGraphCreated',
+                targetContextGraphId,
+                fromBlock,
+                toBlock,
+              ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => ({
+                blockNumber: event.blockNumber,
+                blockHash: event.blockHash,
+                index: event.index,
+                nameHash: String(event.args.nameHash ?? event.args[2]).toLowerCase(),
+              })))
+            ),
             readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
               const { name } = query;
-              let filter = authorityFilters.get(name);
-              if (filter === undefined) {
-                filter = name === 'Transfer'
-                  ? filters[name]!(null, null, query.contextGraphId)
-                  : filters[name]!(query.contextGraphId);
-                authorityFilters.set(name, filter);
-              }
-              const rawEvents = await contract.queryFilter(filter, fromBlock, toBlock);
+              const rawEvents = await readAuthorityEvents(
+                name,
+                query.contextGraphId,
+                fromBlock,
+                toBlock,
+              );
               const normalized: ContextGraphAuthorityHistoryEvent[] = [];
               for (const rawEvent of rawEvents) {
-                const event = rawEvent as ethers.EventLog;
+                const event = rawEvent;
                 if (name === 'Transfer') {
                   const from = String(event.args.from ?? event.args[0]).toLowerCase();
                   const to = String(event.args.to ?? event.args[1]).toLowerCase();
@@ -975,13 +1003,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
                     || from === to) continue;
                 }
                 normalized.push({
-                  name,
                   blockNumber: event.blockNumber,
                   blockHash: event.blockHash,
                   index: event.index,
-                  ...(name === 'ContextGraphCreated'
-                    ? { nameHash: String(event.args.nameHash ?? event.args[2]).toLowerCase() }
-                    : {}),
                 });
               }
               return normalized;
@@ -998,11 +1022,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         const publishPolicy = Number(BigInt(current.publishPolicy ?? current[6]));
         const authorityRaw = String(current.publishAuthority ?? current[7]).toLowerCase();
         const chainId = (await provider.getNetwork()).chainId.toString(10);
-        // Publish the watermark only after the complete snapshot decoded. A
-        // transient failure in current-state parsing must leave the next call
-        // free to replay the same suffix.
-        historyResolution.commit();
-        return Object.freeze({
+        const snapshot: ContextGraphAuthoritySnapshot = Object.freeze({
           chainId,
           governanceContract: contractAddress,
           contextGraphId: contextGraphId.toString(10),
@@ -1021,6 +1041,10 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           sourceBlockNumber: nextHistory.sourceBlockNumber.toString(10),
           sourceBlockHash: nextHistory.sourceBlockHash,
         });
+        // Publish only after every returned field is decoded, and perform the
+        // final anchor check after the concurrent current-state read settles.
+        await historyResolution.publish();
+        return snapshot;
       },
       { signal: options.signal },
     );

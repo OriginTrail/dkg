@@ -8,7 +8,9 @@ import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import {
   ContextGraphAuthorityHistoryCache,
-  type ContextGraphAuthorityHistoryState,
+  resolveContextGraphAuthorityHistory,
+  type ContextGraphAuthorityHistoryCreationEvent,
+  type ResolveContextGraphAuthorityHistoryInput,
 } from '../src/context-graph-authority-history.js';
 
 const OWNER = '0x1111111111111111111111111111111111111111';
@@ -33,6 +35,45 @@ function event(
   return { blockNumber, index, blockHash, args };
 }
 
+function directHistoryInput(params: Readonly<{
+  cache: ContextGraphAuthorityHistoryCache;
+  cacheKey: string;
+  blockNumber: number;
+  blockHash: string;
+  coldReads?: { count: number };
+  ordinaryRanges?: Array<readonly [number, number]>;
+  blockHashes?: Readonly<Record<number, string>>;
+  creationGate?: Readonly<{ entered(): void; wait: Promise<void> }>;
+}>): ResolveContextGraphAuthorityHistoryInput {
+  return {
+    cache: params.cache,
+    cacheKey: params.cacheKey,
+    contextGraphId: 9n,
+    finalized: { number: params.blockNumber, hash: params.blockHash },
+    pageSize: 100,
+    loadColdFromBlock: async () => {
+      if (params.coldReads) params.coldReads.count += 1;
+      return 1;
+    },
+    readBlockHash: async (blockNumber) => params.blockHashes?.[blockNumber]
+      ?? (blockNumber === params.blockNumber ? params.blockHash : null),
+    readCreationEvents: async () => {
+      params.creationGate?.entered();
+      if (params.creationGate) await params.creationGate.wait;
+      return [{
+        blockNumber: 1,
+        blockHash: `0x${'01'.repeat(32)}`,
+        index: 0,
+        nameHash: NAME_HASH,
+      }];
+    },
+    readEvents: async (_query, fromBlock, toBlock) => {
+      params.ordinaryRanges?.push([fromBlock, toBlock]);
+      return [];
+    },
+  };
+}
+
 interface AuthorityEvidence {
   readonly filters: Array<readonly [string, ...unknown[]]>;
   readonly ranges: Array<readonly [number, number]>;
@@ -45,6 +86,9 @@ interface EvmAuthorityHarness {
   readonly evidence: AuthorityEvidence;
   advanceAuthorityHead(): void;
   replaceCachedAnchor(): void;
+  replaceFinalizedHead(): void;
+  holdCurrentStateRead(): Readonly<{ entered: Promise<void>; release(): void }>;
+  setPublishAuthorityAccountId(value: unknown): void;
   rotateContextGraphStorage(): void;
 }
 
@@ -69,6 +113,7 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
   let finalizedNumber = 30;
   let finalizedHash = FINALIZED_HASH;
   let cachedAnchorReplaced = false;
+  let currentReadGate: PromiseWithResolvers<void> | undefined;
   const logs: Record<string, ReturnType<typeof event>[]> = {
     ContextGraphCreated: [event(10, 1, CREATION_HASH, [9n, OWNER, NAME_HASH])],
     Transfer: [
@@ -116,6 +161,12 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
         evidence.staticCalls.push([contextGraphId, readOptions]);
         expect(contextGraphId).toBe(9n);
         expect(readOptions).toEqual({ blockTag: finalizedNumber });
+        const gate = currentReadGate;
+        if (gate !== undefined) {
+          currentReadGate = undefined;
+          gate.resolve();
+          await gate.promise;
+        }
         return current;
       },
     },
@@ -168,6 +219,24 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
     evidence,
     advanceAuthorityHead,
     replaceCachedAnchor,
+    replaceFinalizedHead: () => {
+      finalizedHash = `0x${'cc'.repeat(32)}`;
+      cachedAnchorReplaced = true;
+    },
+    holdCurrentStateRead: () => {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      currentReadGate = {
+        promise: release.promise,
+        resolve: entered.resolve,
+        reject: release.reject,
+      };
+      return { entered: entered.promise, release: release.resolve };
+    },
+    setPublishAuthorityAccountId: (value) => {
+      current.publishAuthorityAccountId = value;
+      current[8] = value;
+    },
     rotateContextGraphStorage: () => adapter.applyHubRotationEventName('ContextGraphStorage'),
   };
 }
@@ -250,6 +319,19 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       .rejects.toThrow('anchor changed');
   });
 
+  it('rechecks the anchor after a delayed concurrent current-state read', async () => {
+    const harness = makeEvmAuthorityAdapter();
+    const gate = harness.holdCurrentStateRead();
+    const pending = harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    await gate.entered;
+    // History can finish while the static call is held. Replacing the anchor
+    // here must still invalidate the combined snapshot and its watermark.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    harness.replaceFinalizedHead();
+    gate.release();
+    await expect(pending).rejects.toThrow('anchor changed');
+  });
+
   it('discards the incremental watermark when its finalized anchor was replaced', async () => {
     const { adapter, evidence, advanceAuthorityHead, replaceCachedAnchor } =
       makeEvmAuthorityAdapter();
@@ -278,27 +360,143 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     expect(evidence.ranges).toHaveLength(36);
   });
 
-  it('bounds authority history with LRU retention', () => {
-    const cache = new ContextGraphAuthorityHistoryCache(2);
-    const state = (throughBlockNumber: number): ContextGraphAuthorityHistoryState => ({
-      throughBlockNumber,
-      throughBlockHash: `0x${throughBlockNumber}`,
-      nameHash: NAME_HASH,
-      ownershipEra: 0,
-      policyVersion: 0,
-      rosterVersion: 0,
-      sourceBlockNumber: throughBlockNumber,
-      sourceBlockHash: `0x${throughBlockNumber}`,
-      sourceLogIndex: 0,
+  it('does not advance the history watermark when a late snapshot field fails to decode', async () => {
+    const harness = makeEvmAuthorityAdapter();
+    await harness.adapter.getContextGraphAuthoritySnapshot(9n);
+    harness.advanceAuthorityHead();
+    harness.setPublishAuthorityAccountId('not-a-uint256');
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).rejects.toThrow();
+    harness.setPublishAuthorityAccountId(7n);
+
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
+      publishAuthorityAccountId: '7',
+      policyVersion: '4',
     });
-    cache.set('a', state(1));
-    cache.set('b', state(2));
-    expect(cache.get('a')).toEqual(state(1));
-    cache.set('c', state(3));
+    expect(harness.evidence.ranges.slice(18)).toEqual(Array(10).fill([31, 35]));
+  });
+
+  it('coalesces overlapping resolutions for the same finalized head', async () => {
+    const cache = new ContextGraphAuthorityHistoryCache();
+    const coldReads = { count: 0 };
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const input = directHistoryInput({
+      cache,
+      cacheKey: 'same-head',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      coldReads,
+      creationGate: { entered: entered.resolve, wait: release.promise },
+    });
+    const first = resolveContextGraphAuthorityHistory(input);
+    await entered.promise;
+    const second = resolveContextGraphAuthorityHistory(input);
+    release.resolve();
+    const [firstResolution, secondResolution] = await Promise.all([first, second]);
+    expect(coldReads.count).toBe(1);
+    expect(firstResolution.state).toBe(secondResolution.state);
+    await Promise.all([firstResolution.publish(), secondResolution.publish()]);
+  });
+
+  it('retains a newer watermark when an older load publishes last', async () => {
+    const cache = new ContextGraphAuthorityHistoryCache();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const older = resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'out-of-order',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      creationGate: { entered: entered.resolve, wait: release.promise },
+    }));
+    await entered.promise;
+    const newer = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'out-of-order',
+      blockNumber: 35,
+      blockHash: NEXT_FINALIZED_HASH,
+    }));
+    await newer.publish();
+    release.resolve();
+    await (await older).publish();
+
+    const ranges: Array<readonly [number, number]> = [];
+    const next = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'out-of-order',
+      blockNumber: 36,
+      blockHash: `0x${'57'.repeat(32)}`,
+      blockHashes: { 35: NEXT_FINALIZED_HASH },
+      ordinaryRanges: ranges,
+    }));
+    expect(ranges).toEqual(Array(5).fill([36, 36]));
+    await next.publish();
+  });
+
+  it('prevents clear from being undone by an in-flight load', async () => {
+    const cache = new ContextGraphAuthorityHistoryCache();
+    const coldReads = { count: 0 };
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const pending = resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'cleared',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      coldReads,
+      creationGate: { entered: entered.resolve, wait: release.promise },
+    }));
+    await entered.promise;
+    cache.clear();
+    release.resolve();
+    const stale = await pending;
+    await expect(stale.publish()).rejects.toThrow('invalidated');
+
+    const fresh = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'cleared',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      coldReads,
+    }));
+    await fresh.publish();
+    expect(coldReads.count).toBe(2);
+  });
+
+  it('bounds authority history with LRU retention', async () => {
+    const cache = new ContextGraphAuthorityHistoryCache(2);
+    const coldReads = new Map<string, { count: number }>();
+    const publish = async (cacheKey: string) => {
+      const counter = coldReads.get(cacheKey) ?? { count: 0 };
+      coldReads.set(cacheKey, counter);
+      const resolution = await resolveContextGraphAuthorityHistory(directHistoryInput({
+        cache,
+        cacheKey,
+        blockNumber: 30,
+        blockHash: FINALIZED_HASH,
+        coldReads: counter,
+      }));
+      await resolution.publish();
+    };
+    await publish('a');
+    await publish('b');
+    await publish('a');
+    await publish('c');
     expect(cache.size).toBe(2);
-    expect(cache.get('b')).toBeUndefined();
-    expect(cache.get('a')).toEqual(state(1));
-    expect(cache.get('c')).toEqual(state(3));
+    await publish('b');
+    expect(coldReads.get('a')?.count).toBe(1);
+    expect(coldReads.get('b')?.count).toBe(2);
+    expect(coldReads.get('c')?.count).toBe(1);
+  });
+
+  it('requires a name hash at the creation-event boundary', () => {
+    // @ts-expect-error Creation events cannot cross this boundary without nameHash.
+    const invalid: ContextGraphAuthorityHistoryCreationEvent = {
+      blockNumber: 1,
+      blockHash: CREATION_HASH,
+      index: 0,
+    };
+    expect(invalid).toBeDefined();
   });
 
   it('provides the same authority surface in offline mock-chain mode', async () => {
