@@ -12,6 +12,8 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/mcp-config-document.test.ts',
+          'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
@@ -70,6 +72,7 @@ export default defineConfig({
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
+          'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/dkg-doctor.test.ts',
           'test/metrics-collector-config.test.ts',
@@ -175,6 +178,7 @@ export default defineConfig({
           'test/oxigraph-binary.test.ts',
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
+          'test/oxigraph-parent-watchdog.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
