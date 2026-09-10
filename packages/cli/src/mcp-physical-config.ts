@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import type { McpClientConfigShape } from './mcp-config-document.js';
 import { mcpConfigPersistenceStrategy } from './mcp-config-metadata.js';
 import {
@@ -15,6 +15,18 @@ export type McpPhysicalConfigPath = Readonly<{
 }> & McpClientConfigShape;
 
 const MCP_PHYSICAL_CONFIG_OWNER: unique symbol = Symbol('McpPhysicalConfig owner');
+
+function selectedDestination(configPath: string): string {
+  try {
+    return resolveMcpConfigDestination(configPath);
+  } catch {
+    // Selection must remain possible when a malformed parent (for example, a
+    // regular file where a directory is expected) makes live resolution fail.
+    // readSource() still performs the authoritative live-path validation and
+    // lets the caller isolate that client without aborting all registration.
+    return resolve(configPath);
+  }
+}
 
 /** A source snapshot is a capability owned by exactly one physical selection. */
 export interface McpPhysicalConfigSourceSnapshot extends McpConfigSourceSnapshot {
@@ -37,7 +49,7 @@ export class McpPhysicalConfig {
   static create(paths: readonly McpPhysicalConfigPath[]): McpPhysicalConfig {
     const first = paths[0];
     if (!first) throw new Error('An MCP config requires a selected path');
-    const destination = resolveMcpConfigDestination(first.configPath);
+    const destination = selectedDestination(first.configPath);
     for (const path of paths) {
       if (
         path.format !== first.format
@@ -45,7 +57,7 @@ export class McpPhysicalConfig {
       ) {
         throw new Error('MCP config aliases disagree about their document shape');
       }
-      if (resolveMcpConfigDestination(path.configPath) !== destination) {
+      if (selectedDestination(path.configPath) !== destination) {
         throw new Error('MCP config aliases resolve to different destinations');
       }
     }
