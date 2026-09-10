@@ -123,3 +123,47 @@ export class SqliteContextGraphRegistryScanCursorStore {
     ].join(':');
   }
 }
+
+/**
+ * Opaque, SQLite-backed authority-history checkpoints.
+ *
+ * SQLite makes each replacement atomic. The chain package exclusively owns
+ * the versioned codec, integrity check, and authority-state model; this adapter
+ * intentionally only persists and returns JSON values.
+ */
+export class SqliteContextGraphAuthorityHistoryStore {
+  static readonly KEY_PREFIX = 'contextGraphAuthorityHistory.checkpoint:v1:';
+
+  private readonly db: Database.Database;
+
+  constructor(dashboard: DashboardDB) {
+    this.db = dashboard.db;
+  }
+
+  async load(cacheKey: string): Promise<unknown> {
+    const row = this.db.prepare(
+      `SELECT value FROM settings WHERE key = ?`,
+    ).get(this.key(cacheKey)) as { value: string } | undefined;
+    if (row === undefined) return undefined;
+    try {
+      return JSON.parse(row.value) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async save(cacheKey: string, checkpoint: unknown): Promise<void> {
+    const value = JSON.stringify(checkpoint);
+    this.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run(this.key(cacheKey), value);
+  }
+
+  async delete(cacheKey: string): Promise<void> {
+    this.db.prepare(`DELETE FROM settings WHERE key = ?`).run(this.key(cacheKey));
+  }
+
+  private key(cacheKey: string): string {
+    return `${SqliteContextGraphAuthorityHistoryStore.KEY_PREFIX}${cacheKey}`;
+  }
+}

@@ -2,6 +2,7 @@
 
 /** Stable public/private target executor for graph-complete SWM recovery. */
 
+import { selectSharedMemoryMetadataFetcher } from './shared-memory-metadata-fetcher.js';
 import {
   DKG_ONTOLOGY,
   assertSafeIri,
@@ -77,16 +78,24 @@ interface PublicSwmTargetBaseV1 {
   readonly includeRootScope?: boolean;
 }
 
-/** The only two valid public synchronization contracts. */
-export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & {
-  readonly metadataFetcher: SharedMemoryMetadataFetcher;
-  readonly mode:
-    | Readonly<{ kind: 'ordinary' }>
-    | Readonly<{
-      kind: 'selected-recovery';
-      recoveryGuard: RecoveryExecutionGuard;
-    }>;
-}>;
+interface SelectedPublicSwmModeV1 {
+  readonly kind: 'selected-recovery';
+  readonly recoveryGuard: RecoveryExecutionGuard;
+  /** @deprecated Put metadataFetcher on the target. Both locations must use the same instance. */
+  readonly metadataFetcher?: SharedMemoryMetadataFetcher;
+}
+
+/** Ordinary targets require an explicit session; selected targets also accept the former nested layout. */
+export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & (
+  | {
+    readonly metadataFetcher: SharedMemoryMetadataFetcher;
+    readonly mode: Readonly<{ kind: 'ordinary' }> | Readonly<SelectedPublicSwmModeV1>;
+  }
+  | {
+    readonly metadataFetcher?: undefined;
+    readonly mode: Readonly<SelectedPublicSwmModeV1 & { metadataFetcher: SharedMemoryMetadataFetcher }>;
+  }
+)>;
 
 export interface PrivateSwmRecoveryTargetV1 {
   readonly remotePeerId: string;
@@ -181,6 +190,8 @@ export class SwmTargetExecutorV1 {
   async syncPublicTarget(
     target: PublicSwmTargetV1,
   ): Promise<SharedMemorySyncSummary> {
+    const metadataFetcher = selectSharedMemoryMetadataFetcher(target);
+    if (!metadataFetcher) throw new TypeError('Public SWM targets require a metadata fetcher');
     const mode = target.mode.kind === 'selected-recovery'
       ? {
         kind: 'selected-recovery' as const,
@@ -216,7 +227,7 @@ export class SwmTargetExecutorV1 {
     };
     return runSharedMemorySync({
       mode,
-      metadataFetcher: target.metadataFetcher,
+      metadataFetcher,
       ctx: target.ctx,
       remotePeerId: target.remotePeerId,
       contextGraphIds: [target.contextGraphId],

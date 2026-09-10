@@ -140,7 +140,7 @@ describe('runSharedMemorySync ownership hydration', () => {
       logDebug: () => {},
     });
 
-    expect(inserted).toEqual([[dataQuad], [metadataQuad]]);
+    expect(inserted).toEqual([[dataQuad, metadataQuad]]);
     expect(owned.get(ROOT_ENTITY)).toBe('peer-atomic');
     expect(summary.failedPhases).toBe(1);
   });

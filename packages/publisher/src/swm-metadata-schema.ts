@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertSafeIri, createGraphKnowledgeAssetScope, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { assertSafeIri, isSafeIri, validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import {
+  workspaceOperationSubject as swmOperationSubject,
+  workspaceOperationPublicSliceSubject as swmPublicSliceSubject,
+  workspaceKnowledgeAssetHeadSubject as swmKnowledgeAssetHeadSubject,
+} from './workspace-metadata-subjects.js';
+export { swmOperationSubject, swmPublicSliceSubject, swmKnowledgeAssetHeadSubject };
 
 const DKG = 'http://dkg.io/ontology/';
 export const SWM_WORKSPACE_OPERATION = `${DKG}WorkspaceOperation`;
@@ -63,9 +69,11 @@ export type SwmRecordRole = keyof typeof SWM_READ_FIELDS;
 
 type WriteCardinality = 'one' | 'optional' | 'many' | 'optionalMany';
 type WriteFieldDescriptor = readonly [keyof typeof P, WriteCardinality];
-const CURRENT_OPERATION_FIELDS = [
-  ['contextGraphId', 'one'], ['shareOperationId', 'one'], ['publisherPeerId', 'one'],
-  ['wasAttributedTo', 'one'], ['publishedAt', 'one'], ['subGraphName', 'optional'],
+const CURRENT_IDENTITY_FIELDS = [
+  ['contextGraphId', 'one'], ['shareOperationId', 'one'],
+] as const satisfies readonly WriteFieldDescriptor[];
+const CURRENT_PROVENANCE_FIELDS = [
+  ['publisherPeerId', 'one'], ['wasAttributedTo', 'one'], ['publishedAt', 'one'],
 ] as const satisfies readonly WriteFieldDescriptor[];
 
 /**
@@ -74,20 +82,25 @@ const CURRENT_OPERATION_FIELDS = [
  * validation. Historical read-only fields intentionally appear only above.
  */
 const SWM_WRITE_SCHEMAS = {
-  legacyOperationV1: [...CURRENT_OPERATION_FIELDS, ['type', 'one'], ['rootEntity', 'many']],
+  legacyOperationV1: [
+    ['type', 'one'], ...CURRENT_IDENTITY_FIELDS, ...CURRENT_PROVENANCE_FIELDS,
+    ['subGraphName', 'optional'], ['rootEntity', 'many'],
+  ],
   headV2: [
     ['contentScopeVersion', 'one'], ['kaUal', 'one'], ['assertionVersion', 'one'],
     ['assertionGraph', 'one'], ['shareOperationId', 'one'],
   ],
   publicSliceV1: [
-    ...CURRENT_OPERATION_FIELDS, ['publicSliceRootEntity', 'one'], ['publicQuadsDigest', 'one'],
-    ['publicQuadsCount', 'one'], ['publicSnapshotGraph', 'optional'],
+    ...CURRENT_IDENTITY_FIELDS, ['publicSliceRootEntity', 'one'], ['publicQuadsDigest', 'one'],
+    ['publicQuadsCount', 'one'], ...CURRENT_PROVENANCE_FIELDS,
+    ['publicSnapshotGraph', 'optional'], ['subGraphName', 'optional'],
   ],
   ownershipV1: [['workspaceOwner', 'one']],
   graphOperationHeader: [
-    ...CURRENT_OPERATION_FIELDS, ['type', 'one'], ['contentScopeVersion', 'one'], ['kaUal', 'one'],
+    ['type', 'one'], ...CURRENT_IDENTITY_FIELDS, ['contentScopeVersion', 'one'], ['kaUal', 'one'],
     ['assertionVersion', 'one'], ['publicQuadsCount', 'one'], ['privateTripleCount', 'one'],
-    ['privateMerkleRoot', 'optional'], ['accessPolicy', 'optional'], ['allowedPeer', 'optionalMany'],
+    ...CURRENT_PROVENANCE_FIELDS, ['privateMerkleRoot', 'optional'],
+    ['accessPolicy', 'optional'], ['allowedPeer', 'optionalMany'], ['subGraphName', 'optional'],
   ],
   graphSnapshotFragment: [['publicQuadsDigest', 'one'], ['publicSnapshotGraph', 'optional']],
 } as const satisfies Record<string, readonly WriteFieldDescriptor[]>;
@@ -172,27 +185,6 @@ export function isSwmRecordRowAllowed(role: SwmRecordRole, row: Quad): boolean {
 /** Preserve row order and duplicates while excluding fields from other roles. */
 export function selectSwmRecordRows(role: SwmRecordRole, rows: readonly Quad[]): Quad[] {
   return rows.filter(row => isSwmRecordRowAllowed(role, row));
-}
-
-export function swmOperationSubject(contextGraphId: string, shareOperationId: string): string {
-  const cg = safeWorkspaceIdPart(contextGraphId, 'contextGraphId');
-  const id = safeWorkspaceIdPart(shareOperationId, 'shareOperationId');
-  return assertSafeIri(`urn:dkg:share:${cg}:${id}`);
-}
-
-function safeWorkspaceIdPart(value: string, fieldName: 'contextGraphId' | 'shareOperationId'): string {
-  const normalized = value.trim();
-  if (normalized.length === 0) throw new Error(`Shared-memory resolution requires a non-empty ${fieldName}`);
-  if (/[\s<>"{}|^`\\]/.test(normalized)) throw new Error(`Shared-memory resolution rejected unsafe ${fieldName}: ${value}`);
-  return normalized;
-}
-
-export function swmKnowledgeAssetHeadSubject(kaUal: string): string {
-  return assertSafeIri(`${createGraphKnowledgeAssetScope(kaUal, 1).ual}${SWM_HEAD_SUFFIX}`);
-}
-
-export function swmPublicSliceSubject(contextGraphId: string, shareOperationId: string, rootEntity: string, subGraphName?: string): string {
-  return assertSafeIri(`urn:dkg:public-stage:${[contextGraphId, subGraphName ?? '_', shareOperationId, rootEntity].map(encodeURIComponent).join(':')}`);
 }
 
 export function decodeSwmPublicSliceSubject(subject: string): {

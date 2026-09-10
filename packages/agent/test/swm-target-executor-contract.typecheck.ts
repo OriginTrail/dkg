@@ -104,7 +104,7 @@ const ordinaryModeWithMetadata: SharedMemorySyncContext['mode'] = {
 const selectedModeWithMetadata: SharedMemorySyncContext['mode'] = {
   kind: 'selected-recovery',
   recoveryGuard,
-  // @ts-expect-error Selected recovery does not change the retrieval dependency boundary.
+  // Deprecated selected layout remains source-compatible.
   metadataFetcher,
 };
 
@@ -116,3 +116,13 @@ void ordinaryRequesterDefault;
 void selectedRequesterDefault;
 void ordinaryModeWithMetadata;
 void selectedModeWithMetadata;
+
+// Former selected targets retain their required nested session without a top-level field.
+const legacySelectedTarget: PublicSwmTargetV1 = {
+  ...base, mode: { kind: 'selected-recovery', recoveryGuard, metadataFetcher },
+};
+const legacySelectedRequester: SharedMemorySyncContext = {
+  ...requesterBase, mode: { kind: 'selected-recovery', recoveryGuard, metadataFetcher },
+};
+void legacySelectedTarget;
+void legacySelectedRequester;

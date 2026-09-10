@@ -31,7 +31,7 @@
  * count/digest guard, MAX head read, head-metadata swap) is covered against a
  * real OxigraphStore in `swm-snapshot-materializer.test.ts`.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -121,6 +121,7 @@ function fixture(subGraphName?: string, publisherPeerId = 'peer-source') {
 }
 
 interface HarnessOverrides {
+  snapshotStore?: WorkspacePublicSnapshotStore;
   storedHead?: () => StoredWorkspaceHeadState;
   contentPresent?: () => boolean;
   replaceImpl?: (graphUri: string, quads: Quad[]) => Promise<void>;
@@ -136,12 +137,13 @@ interface HarnessOverrides {
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
   metadataFetcher?: SharedMemoryMetadataFetcher;
+  metadataFetcherPlacement?: 'context' | 'mode';
   recoveryGuard?: RecoveryExecutionGuard;
 }
 
 function harness(overrides: HarnessOverrides = {}) {
   const fx = fixture(overrides.subGraphName, overrides.publisherPeerId);
-  const snapshotStore = new MemorySnapshotStore();
+  const snapshotStore = overrides.snapshotStore ?? new MemorySnapshotStore();
   const events: string[] = [];
   const replaced: Array<{ graphUri: string; quads: Quad[] }> = [];
   const headSwaps: Array<{ contextGraphId: string; headSubject: string }> = [];
@@ -159,11 +161,12 @@ function harness(overrides: HarnessOverrides = {}) {
       await snapshotStore.putSnapshot({ digest: fx.digest, quads: fx.payload });
     }
     return runSharedMemorySync({
-      metadataFetcher: overrides.metadataFetcher,
+      metadataFetcher: overrides.metadataFetcherPlacement === 'mode' ? undefined : overrides.metadataFetcher,
       mode: overrides.recoveryGuard
         ? {
           kind: 'selected-recovery',
           recoveryGuard: overrides.recoveryGuard,
+          ...(overrides.metadataFetcherPlacement === 'mode' ? { metadataFetcher: overrides.metadataFetcher } : {}),
           snapshotRecoveryOrder: 'recent-balanced',
         }
         : { kind: 'ordinary' },
@@ -173,7 +176,10 @@ function harness(overrides: HarnessOverrides = {}) {
       createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
       fetchSyncPages: async (_c, _p, _cg, _inc, phase, _g, _dl, fetchOptions): Promise<SyncPageResult> => {
         const snapshotRef = fetchOptions?.snapshotRef;
-        if (phase === 'meta') return page([...fx.meta, ...(overrides.additionalVerifiedMeta ?? [])]);
+        if (phase === 'meta') {
+          events.push('direct-metadata-fetch');
+          return page([...fx.meta, ...(overrides.additionalVerifiedMeta ?? [])]);
+        }
         if (phase === 'snapshot') {
           events.push('snapshot-fetched');
           snapshotFetches.push(String(snapshotRef));
@@ -270,6 +276,44 @@ function harness(overrides: HarnessOverrides = {}) {
 }
 
 describe('public SWM snapshot materialization', () => {
+  it.each(['valid', 'invalid', 'throws'] as const)('uses optional validation capability (%s) with the store receiver', async (outcome) => {
+    const store: WorkspacePublicSnapshotStore = new MemorySnapshotStore();
+    const load = vi.spyOn(store, 'getSnapshot');
+    const validate = vi.fn(async function (this: WorkspacePublicSnapshotStore) {
+      expect(this).toBe(store);
+      if (outcome === 'throws') throw new Error('snapshot unreadable');
+      return outcome === 'valid';
+    });
+    store.validateSnapshot = validate;
+    const h = harness({
+      snapshotStore: store,
+      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }),
+      contentPresent: () => true,
+    });
+    const summary = await h.run();
+    expect(validate).toHaveBeenCalledExactlyOnceWith(h.fx.digest, h.fx.digest, h.fx.payload.length);
+    expect(load).not.toHaveBeenCalled();
+    expect(h.snapshotFetches).toEqual(outcome === 'valid' ? [] : [h.fx.digest]);
+    expect(summary.failedPhases).toBe(0);
+  });
+
+  it.each(['valid', 'wrong-count', 'wrong-digest', 'throws'] as const)('fully validates legacy stores without the capability (%s)', async (outcome) => {
+    const store = new MemorySnapshotStore();
+    const load = vi.spyOn(store, 'getSnapshot');
+    if (outcome === 'wrong-count') load.mockResolvedValue([]);
+    if (outcome === 'wrong-digest') load.mockResolvedValue(fixture().payload.map(q => ({ ...q, object: '"changed"' })));
+    if (outcome === 'throws') load.mockRejectedValue(new Error('snapshot unreadable'));
+    const h = harness({
+      snapshotStore: store,
+      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }),
+      contentPresent: () => true,
+    });
+    await h.run();
+    await h.run();
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(h.snapshotFetches).toEqual(outcome === 'valid' ? [] : [h.fx.digest, h.fx.digest]);
+  });
+
   it('materializes a cached snapshot into the assertion graph for a held-out node', async () => {
     const h = harness();
     const summary = await h.run();
@@ -343,10 +387,23 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events.slice(reconciliation + 1)).not.toContain('meta-inserted');
   });
 
-  it.each(['ordinary', 'selected-recovery'] as const)('captures suppression and reapplies it on resume with a %s metadata session', async kind => {
-    const recoveryGuard = kind === 'selected-recovery'
+  it.each(['ordinary', 'selected-recovery'] as const)('preserves one-page direct metadata retrieval for %s callers', async kind => {
+    const subject = harness({
+      recoveryGuard: kind === 'selected-recovery'
+        ? { signal: new AbortController().signal, assertCurrent: () => undefined }
+        : undefined,
+    });
+    const summary = await subject.run();
+    expect(summary.failedPhases).toBe(0);
+    expect(subject.events.filter(event => event === 'direct-metadata-fetch')).toHaveLength(1);
+    expect(subject.replaced).toHaveLength(1);
+  });
+
+  it.each(['ordinary', 'selected-recovery', 'legacy-selected'] as const)('captures suppression and reapplies it on resume with a %s metadata session', async kind => {
+    const recoveryGuard = kind !== 'ordinary'
       ? { signal: new AbortController().signal, assertCurrent: () => undefined }
       : undefined;
+    const metadataFetcherPlacement = kind === 'legacy-selected' ? 'mode' : 'context';
     const fx = fixture();
     const manifest = [{ ref: fx.digest, digest: fx.digest, count: fx.payload.length }];
     const resolved = new Set<string>();
@@ -370,12 +427,14 @@ describe('public SWM snapshot materialization', () => {
     const first = harness({
       reconcileDisposition: 'suppress-metadata',
       metadataFetcher,
+      metadataFetcherPlacement,
       recoveryGuard,
     });
 
     const firstSummary = await first.run();
 
     expect(firstSummary.failedPhases).toBe(0);
+    expect(first.events).not.toContain('direct-metadata-fetch');
     expect(first.replaced).toHaveLength(1);
     expect(resolved).toEqual(new Set([fx.digest]));
     const retiredSubjects = new Set([
@@ -388,6 +447,7 @@ describe('public SWM snapshot materialization', () => {
 
     const resumed = harness({
       recoveryGuard,
+      metadataFetcherPlacement,
       metadataFetcher: {
         ...metadataFetcher,
       },
@@ -396,6 +456,7 @@ describe('public SWM snapshot materialization', () => {
     const resumedSummary = await resumed.run();
 
     expect(resumedSummary.failedPhases).toBe(0);
+    expect(resumed.events).not.toContain('direct-metadata-fetch');
     expect(resumed.replaced).toHaveLength(0);
     expect(resumed.events).not.toContain('finalized-twin-reconciled');
     expect(resumed.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))

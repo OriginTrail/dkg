@@ -1,4 +1,5 @@
-import { emitLegacySwmOperation, emitGraphSwmOperationHeader, emitSwmOwnership, swmOperationSubject, SWM_WORKSPACE_OPERATION } from './swm-metadata-schema.js';
+import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-subjects.js';
+import { emitLegacySwmOperation, emitGraphSwmOperationHeader, emitSwmOwnership, SWM_WORKSPACE_OPERATION } from './swm-metadata-schema.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {
@@ -1082,7 +1083,7 @@ export function generateShareMetadata(
   meta: ShareMetadata,
   swmMetaGraph: string,
 ): Quad[] {
-  return emitLegacySwmOperation(swmOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
+  return emitLegacySwmOperation(formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
     type: SWM_WORKSPACE_OPERATION,
     contextGraphId: lit(meta.contextGraphId), shareOperationId: lit(meta.shareOperationId),
     publisherPeerId: lit(meta.publisherPeerId),
@@ -1153,7 +1154,7 @@ export function generateKnowledgeAssetShareMetadata(
   ) {
     throw new Error('Graph-scoped KA share has an invalid access-policy peer envelope');
   }
-  return emitGraphSwmOperationHeader(swmOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
+  return emitGraphSwmOperationHeader(formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
     type: SWM_WORKSPACE_OPERATION,
     contextGraphId: lit(meta.contextGraphId), shareOperationId: lit(meta.shareOperationId),
     contentScopeVersion: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), kaUal: scope.ual,

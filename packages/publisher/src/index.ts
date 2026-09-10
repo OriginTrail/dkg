@@ -1,3 +1,14 @@
+export {
+  decodeEntityShareMetadata,
+  ENTITY_SHARE_METADATA_PREDICATES,
+  ENTITY_SHARE_METADATA_SIDECAR_PREDICATES,
+  ENTITY_SHARE_SNAPSHOT_CONTENT_DIGEST_PREDICATE,
+  ENTITY_SHARE_SNAPSHOT_MERKLE_ROOT_PREDICATE,
+  type EntityShareSliceDescriptor,
+  type EntityShareOperationDescriptor,
+  type EntityShareMetadataRecord,
+} from './entity-share-metadata.js';
+export { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject, isWorkspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export * from './publisher.js';
 export * from './publication-pricing.js';
 export * from './publication-payload-measurement.js';
@@ -56,7 +67,6 @@ export {
   KnowledgeAssetWorkspaceHeadCorruptError,
   isKnowledgeAssetWorkspaceHeadCorruptError,
   isDecodableWorkspaceOperationRows,
-  workspaceKnowledgeAssetHeadSubject,
   type KnowledgeAssetWorkspaceHead,
   type PublishedKnowledgeAssetWorkspaceHead,
   type ResolveKnowledgeAssetWorkspaceHeadParams,
