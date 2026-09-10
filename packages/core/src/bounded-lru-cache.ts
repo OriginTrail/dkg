@@ -31,6 +31,10 @@ export class BoundedLruCache<K, V> {
     return this.entries.delete(key);
   }
 
+  clear(): void {
+    this.entries.clear();
+  }
+
   set(key: K, value: V): void {
     if (!this.shouldAdmit(key)) return;
     this.entries.delete(key);

@@ -160,6 +160,18 @@ describe('bounded SPARQL analysis cache policy', () => {
     expect(cache.has('blocked')).toBe(false);
   });
 
+  it('supports explicit entry and lifecycle invalidation', () => {
+    const cache = createCache();
+    cache.set('first', {});
+    cache.set('second', {});
+    expect(cache.delete('first')).toBe(true);
+    expect(cache.delete('missing')).toBe(false);
+    expect(cache.has('first')).toBe(false);
+    cache.clear();
+    expect(cache.size).toBe(0);
+    expect(cache.has('second')).toBe(false);
+  });
+
   const smallMaxSourceLength = 64 * 1024;
   const largeMaxSourceLength = 2 * 1024 * 1024;
   const largeQuery = (suffix: string, padding = smallMaxSourceLength) => (
