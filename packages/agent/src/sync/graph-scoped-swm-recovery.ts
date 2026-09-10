@@ -17,6 +17,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { selectGraphScopedSwmDescriptorMetadata } from './shared-memory-metadata-admission.js';
 import {
   formatCanonicalRdfLiteralTerm,
   parseRdfLiteralTerm,
@@ -259,19 +260,20 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       publisherPeerId: semantics.publisherIdentity,
       ...(subGraphName ? { subGraphName } : {}),
       metadataQuads: [
-        ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
-        // EVERY lexical form of the selected id, not just the one selected
-        // row: RDF 1.1 admits the same value as a plain and an
-        // xsd:string-typed literal, and downstream withhold plans are built
-        // from these rows BYTE-keyed — a variant left out here passes the
-        // value-based insert canonicalization and re-stacks the losing id
-        // beside a just-preserved head.
-        ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
-          && stripLiteral(row.object).trim() === shareOperationId),
-        ...operationRows,
+        ...selectGraphScopedSwmDescriptorMetadata([
+          ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
+          // EVERY lexical form of the selected id, not just the one selected
+          // row: RDF 1.1 admits the same value as a plain and an
+          // xsd:string-typed literal, and downstream withhold plans are built
+          // from these rows BYTE-keyed — a variant left out here passes the
+          // value-based insert canonicalization and re-stacks the losing id
+          // beside a just-preserved head.
+          ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
+            && stripLiteral(row.object).trim() === shareOperationId),
+        ], operationRows),
         ...(snapshotSource.operationSubject === operationSubject
           ? []
-          : snapshotSource.operationRows),
+          : selectGraphScopedSwmDescriptorMetadata([], snapshotSource.operationRows)),
       ],
     });
   }
