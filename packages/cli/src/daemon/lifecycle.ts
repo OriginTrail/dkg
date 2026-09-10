@@ -1538,21 +1538,7 @@ async function runDaemonInnerWithStartupOwnership(
     // namespace silently corrupt each other. Fires BEFORE
     // chainResetWipe so a mismatched tag never triggers a wipe of
     // someone else's data.
-    const identity = await checkOrSetStoreIdentity({
-      storeConfig: runtimeStore,
-      nodeName: config.name,
-    });
-    if (!identity.ok) {
-      if (identity.action === 'mismatch') {
-        log(formatIdentityTagMismatch(identity));
-      } else {
-        log(`[STORE-IDENTITY] failed to verify namespace ownership: ${identity.error}`);
-      }
-      process.exit(1);
-    }
-    if (identity.action === 'tagged') {
-      log(`Tagged triple-store namespace for node "${identity.nodeName}".`);
-    }
+    await ensureStoreIdentityOrExit(runtimeStore, config.name, log, 'startup');
   }
 
   const wipeResult = await chainResetWipe({
@@ -1581,21 +1567,7 @@ async function runDaemonInnerWithStartupOwnership(
     // Re-tag even when cleanup or marker persistence failed: the remote
     // request can take effect independently of those local outcomes.
     if (isExternalBackend(runtimeStore?.backend)) {
-      const identity = await checkOrSetStoreIdentity({
-        storeConfig: runtimeStore,
-        nodeName: config.name,
-      });
-      if (!identity.ok) {
-        if (identity.action === 'mismatch') {
-          log(formatIdentityTagMismatch(identity));
-        } else {
-          log(`[STORE-IDENTITY] failed to re-tag namespace after wipe: ${identity.error}`);
-        }
-        process.exit(1);
-      }
-      if (identity.action === 'tagged') {
-        log(`Re-tagged triple-store namespace for node "${identity.nodeName}" after chain-state wipe.`);
-      }
+      await ensureStoreIdentityOrExit(runtimeStore, config.name, log, 'post-wipe');
     }
   }
 
@@ -3880,4 +3852,28 @@ async function runDaemonInnerWithStartupOwnership(
 
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+}
+type StoreIdentityPhase = 'startup' | 'post-wipe';
+
+async function ensureStoreIdentityOrExit(
+  storeConfig: Parameters<typeof checkOrSetStoreIdentity>[0]['storeConfig'],
+  nodeName: string,
+  log: (message: string) => void,
+  phase: StoreIdentityPhase,
+): Promise<void> {
+  const identity = await checkOrSetStoreIdentity({ storeConfig, nodeName });
+  if (!identity.ok) {
+    if (identity.action === 'mismatch') {
+      log(formatIdentityTagMismatch(identity));
+    } else {
+      const action = phase === 'post-wipe' ? 're-tag' : 'verify namespace ownership';
+      log(`[STORE-IDENTITY] failed to ${action}: ${identity.error}`);
+    }
+    process.exit(1);
+  }
+  if (identity.action === 'tagged') {
+    log(phase === 'post-wipe'
+      ? `Re-tagged triple-store namespace for node "${identity.nodeName}" after chain-state wipe.`
+      : `Tagged triple-store namespace for node "${identity.nodeName}".`);
+  }
 }

@@ -243,8 +243,9 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
     mocks.chainResetWipe.mockResolvedValue({
-      wiped: false,
-      skipped: false,
+      status: 'inactive',
+      attempted: false,
+      requiresStoreRetag: false,
       prevMarker: null,
       removedFiles: [],
       backedUpFiles: [],
@@ -316,6 +317,38 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     closeDashboardDbFromAgentCreateArg(createArg);
     return createArg;
   }
+
+  it('re-tags managed store ownership after an incomplete wipe requests it', async () => {
+    mocks.chainResetWipe.mockResolvedValueOnce({
+      status: 'incomplete',
+      attempted: true,
+      requiresStoreRetag: true,
+      prevMarker: 'old-chain',
+      removedFiles: ['<sparql:drop-all http://127.0.0.1:7878/update>'],
+      backedUpFiles: [],
+      failedFiles: [{ file: '<external-wipe>', error: 'response lost after DROP' }],
+    });
+    mocks.checkOrSetStoreIdentity
+      .mockResolvedValueOnce({ ok: true, action: 'matched', nodeName: 'storage-ack-timing-core-test' })
+      .mockResolvedValueOnce({ ok: true, action: 'tagged', nodeName: 'storage-ack-timing-core-test' });
+
+    await captureCreateArg({
+      store: {
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://127.0.0.1:7878/query',
+          updateEndpoint: 'http://127.0.0.1:7878/update',
+          managedByDkg: true,
+        },
+      },
+    });
+
+    expect(mocks.checkOrSetStoreIdentity).toHaveBeenCalledTimes(2);
+    expect(mocks.checkOrSetStoreIdentity.mock.calls[1]?.[0]).toMatchObject({
+      nodeName: 'storage-ack-timing-core-test',
+      storeConfig: { options: { managedByDkg: true } },
+    });
+  });
 
   it('round-trips deployment-scoped selected VM cursors through the daemon DashboardDB wiring', async () => {
     const record = {

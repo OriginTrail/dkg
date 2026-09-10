@@ -719,11 +719,6 @@ export async function chainResetWipe(
 
   const firstFailure = failedFiles[0];
   if (firstFailure) {
-    log(
-      `WARN: chain-state wipe incomplete (${failedFiles.length} failure${failedFiles.length === 1 ? '' : 's'}). ` +
-      'Chain reset marker was not persisted; wipe will retry on next boot.',
-    );
-    log('Chain-state wipe incomplete. Continuing boot so operator can repair filesystem state.');
     return { status: 'incomplete', attempted: true, requiresStoreRetag, prevMarker, removedFiles, backedUpFiles, failedFiles: [firstFailure, ...failedFiles.slice(1)] };
   }
 
@@ -731,13 +726,8 @@ export async function chainResetWipe(
     saveState(opts.dataDir, opts.currentMarker);
   } catch (err) {
     const markerError = (err as Error).message;
-    log(
-      `WARN: failed to persist chain reset marker (${opts.currentMarker}): ${markerError}. Wipe will retry on next boot.`,
-    );
-    log('Chain-state wipe complete, but marker was not persisted. Continuing boot; wipe will retry on next boot.');
     return { status: 'marker-write-failed', attempted: true, requiresStoreRetag, prevMarker, removedFiles, backedUpFiles, failedFiles: [], markerError };
   }
-  log('Chain-state wipe complete. Continuing boot.');
   return { status: 'completed', attempted: true, requiresStoreRetag, prevMarker, removedFiles, backedUpFiles, failedFiles: [] };
 }
 

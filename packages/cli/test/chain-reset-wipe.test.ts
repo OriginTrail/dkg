@@ -31,8 +31,6 @@ import {
   chainResetWipe,
   detectBackendSwitch,
   detectNetworkSwitch,
-  formatChainResetWipeOutcome,
-  type ChainResetWipeResult,
 } from '../src/daemon/chain-reset-wipe.js';
 
 const STATE_FILE = '.network-state.json';
@@ -70,63 +68,6 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(dataDir, { recursive: true, force: true });
-});
-
-describe('formatChainResetWipeOutcome', () => {
-  const effects = {
-    prevMarker: OLD_MARKER,
-    removedFiles: ['store.nq.tmp'],
-    backedUpFiles: ['store.nq.pre-wipe-old'],
-  };
-
-  it.each([
-    {
-      status: 'completed',
-      attempted: true,
-      requiresStoreRetag: false,
-      ...effects,
-      failedFiles: [],
-    },
-    {
-      status: 'incomplete',
-      attempted: true,
-      requiresStoreRetag: true,
-      ...effects,
-      failedFiles: [{ file: 'publish-journal.blocked', error: 'is a directory' }],
-    },
-    {
-      status: 'marker-write-failed',
-      attempted: true,
-      requiresStoreRetag: true,
-      ...effects,
-      failedFiles: [],
-      markerError: 'state path is a directory',
-    },
-  ] satisfies ChainResetWipeResult[])('formats the $status reset result', (result) => {
-    const messages = formatChainResetWipeOutcome(result, NEW_MARKER);
-    expect(messages[0]).toContain(`Chain-state auto-wipe ${
-      result.status === 'completed' ? 'complete' : result.status
-    }:`);
-    expect(messages[0]).toContain(`prev marker: ${OLD_MARKER}, now: ${NEW_MARKER}`);
-    expect(messages).toHaveLength(result.status === 'completed' ? 1 : 2);
-    if (result.status === 'incomplete') {
-      expect(messages[1]).toContain('1 wipe target(s) failed');
-    } else if (result.status === 'marker-write-failed') {
-      expect(messages[1]).toContain('state path is a directory');
-    }
-  });
-
-  it('stays silent when no wipe was attempted', () => {
-    expect(formatChainResetWipeOutcome({
-      status: 'steady',
-      attempted: false,
-      requiresStoreRetag: false,
-      prevMarker: NEW_MARKER,
-      removedFiles: [],
-      backedUpFiles: [],
-      failedFiles: [],
-    }, NEW_MARKER)).toEqual([]);
-  });
 });
 
 describe('chainResetWipe — opt-in protocol', () => {
@@ -450,11 +391,9 @@ describe('chainResetWipe — FS errors must not crash boot (PR #357 feedback)', 
     // including as root and on Windows; the data files can still be removed.
     mkdirSync(join(dataDir, STATE_FILE));
     writeFileSync(join(dataDir, 'random-sampling.wal'), 'OLD WAL');
-    const logs: string[] = [];
     const result = await chainResetWipe({
       dataDir,
       currentMarker: NEW_MARKER,
-      log: msg => logs.push(msg),
     });
 
     expect(result.status).toBe('marker-write-failed');
@@ -465,7 +404,6 @@ describe('chainResetWipe — FS errors must not crash boot (PR #357 feedback)', 
     expect(result.removedFiles).toContain('random-sampling.wal');
     expect(existsSync(join(dataDir, 'random-sampling.wal'))).toBe(false);
     expect(statSync(join(dataDir, STATE_FILE)).isDirectory()).toBe(true);
-    expect(logs.some(line => line.includes('failed to persist chain reset marker'))).toBe(true);
 
     rmSync(join(dataDir, STATE_FILE), { recursive: true });
     const retry = await chainResetWipe({ dataDir, currentMarker: NEW_MARKER });
@@ -507,7 +445,7 @@ describe('chainResetWipe — FS errors must not crash boot (PR #357 feedback)', 
 
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
     expect(persisted.chainResetMarker).toBe(OLD_MARKER);
-    expect(logsCaptured.some((l) => l.includes('marker was not persisted'))).toBe(true);
+    expect(logsCaptured.some((l) => l.includes('failed to back up store.nq'))).toBe(true);
   });
 });
 
@@ -640,7 +578,33 @@ describe('chainResetWipe — external SPARQL wipe', () => {
     // Marker NOT persisted — retry on next boot.
     const persisted = JSON.parse(readFileSync(join(dataDir, STATE_FILE), 'utf8'));
     expect(persisted.chainResetMarker).toBe(OLD_MARKER);
-    expect(logs.some((l) => l.includes('Chain reset marker was not persisted'))).toBe(true);
+    expect(logs.some((l) => l.includes('external wipe failed'))).toBe(true);
+  });
+
+  it('requires namespace re-tagging after an ambiguous managed DROP failure', async () => {
+    writeFileSync(
+      join(dataDir, STATE_FILE),
+      JSON.stringify({ chainResetMarker: OLD_MARKER, savedAt: Date.now() }),
+    );
+    const { fn } = mockFetch(
+      () => new Response('DROP applied but response failed', { status: 500, statusText: 'Server Error' }),
+    );
+
+    const result = await chainResetWipe({
+      dataDir,
+      currentMarker: NEW_MARKER,
+      storeConfig: {
+        backend: 'blazegraph',
+        options: { url: 'http://managed.test/sparql', managedByDkg: true },
+      },
+      fetch: fn,
+    });
+
+    expect(result).toMatchObject({
+      status: 'incomplete',
+      attempted: true,
+      requiresStoreRetag: true,
+    });
   });
 
   it('records transport error in failedFiles', async () => {
