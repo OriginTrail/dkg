@@ -68,14 +68,16 @@ export function selectCoreAgents(
   return out;
 }
 
-/** Discover the complete de-duplicated Core peer roster for recovery work. */
+/** Discover a stable, complete, de-duplicated Core peer roster for recovery work. */
 export async function findCorePeerIds(options: {
   findAgents: (options?: { signal?: AbortSignal }) => Promise<readonly WarmCoreAgent[]>;
   selfPeerId: string;
   signal?: AbortSignal;
 }): Promise<string[]> {
   const agents = await options.findAgents({ signal: options.signal });
-  return selectCoreAgents(agents, options.selfPeerId).map(({ peerId }) => peerId);
+  return selectCoreAgents(agents, options.selfPeerId)
+    .map(({ peerId }) => peerId)
+    .sort();
 }
 
 /**
