@@ -186,8 +186,6 @@ export function createDaemonLocalLlmService(
     if (settings.probeConfigurationError) {
       return Promise.resolve(Object.freeze({
         status: 'offline',
-        reachable: false,
-        detected: false,
         error: `Local LLM endpoint configuration is invalid: ${settings.probeConfigurationError}`,
       }));
     }
@@ -203,7 +201,7 @@ export function createDaemonLocalLlmService(
   const unavailableError = (
     availability: Exclude<LocalModelEndpointAvailability, { status: 'ready' }>,
   ): DaemonLocalLlmError => new DaemonLocalLlmError(
-    availability.status === 'not-ready' ? 'LOCAL_LLM_NOT_READY' : 'LOCAL_LLM_OFFLINE',
+    availability.status === 'offline' ? 'LOCAL_LLM_OFFLINE' : 'LOCAL_LLM_NOT_READY',
     503,
     availability.error,
   );
@@ -220,11 +218,12 @@ export function createDaemonLocalLlmService(
     async health() {
       const availability = await probe();
       const reachable = availability.status !== 'offline';
+      const detected = availability.status === 'ready' || availability.status === 'not-ready';
       const ready = availability.status === 'ready' && !initFailure && !closed;
       return {
         ok: ready,
         configured: settings.configured,
-        detected: availability.detected,
+        detected,
         ready,
         reachable,
         offline: !reachable,

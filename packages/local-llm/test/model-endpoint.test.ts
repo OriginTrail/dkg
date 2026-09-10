@@ -19,13 +19,13 @@ describe('local model endpoint probing', () => {
       chatCompletionsUrl: 'http://127.0.0.1:8080/v1/chat/completions?ignored=yes',
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true, detected: true });
+    })).resolves.toEqual({ status: 'ready' });
     await expect(probeLocalModelEndpoint({
       ...DEFAULT_OPTIONS,
       chatCompletionsUrl: 'http://localhost:9000/proxy/v1/chat/completions#ignored',
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true, detected: true });
+    })).resolves.toEqual({ status: 'ready' });
 
     expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
       '/v1/models',
@@ -47,7 +47,7 @@ describe('local model endpoint probing', () => {
       model: 'qwen3',
       strategy: { kind: 'ollama' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true, detected: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
@@ -60,7 +60,7 @@ describe('local model endpoint probing', () => {
     await expect(probeLocalModelEndpoint({
       ...DEFAULT_OPTIONS,
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true, detected: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
@@ -73,7 +73,7 @@ describe('local model endpoint probing', () => {
     await expect(probeLocalModelEndpoint({
       ...DEFAULT_OPTIONS,
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true, detected: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
@@ -87,7 +87,7 @@ describe('local model endpoint probing', () => {
     await expect(probeLocalModelEndpoint({
       ...DEFAULT_OPTIONS,
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true, detected: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
       .toEqual(['/v1/models', '/health']);
   });
@@ -106,8 +106,6 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'not-ready',
-      reachable: true,
-      detected: true,
       error: expect.stringContaining("Configured model 'qwen3:8b' is not listed"),
     });
     expect(fetcher).toHaveBeenCalledOnce();
@@ -126,7 +124,7 @@ describe('local model endpoint probing', () => {
       ...DEFAULT_OPTIONS,
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true, detected: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
@@ -148,8 +146,6 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'not-ready',
-      reachable: true,
-      detected: true,
       error: expect.stringContaining('does not report the configured model as loaded'),
     });
     expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
@@ -172,7 +168,7 @@ describe('local model endpoint probing', () => {
       ...DEFAULT_OPTIONS,
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true, detected: true });
+    })).resolves.toEqual({ status: 'ready' });
     expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
       .toEqual(['/v1/models', '/health']);
   });
@@ -188,7 +184,7 @@ describe('local model endpoint probing', () => {
       ...DEFAULT_OPTIONS,
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
-    })).resolves.toEqual({ status: 'ready', reachable: true, detected: true });
+    })).resolves.toEqual({ status: 'ready' });
   });
 
   it('keeps a recognized but non-ready llama.cpp health response detected', async () => {
@@ -204,9 +200,43 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'not-ready',
-      reachable: true,
-      detected: true,
-      error: expect.stringContaining('health fallback'),
+      error: expect.stringContaining('model is still loading'),
+    });
+  });
+
+  it('recognizes llama.cpp documented 503 response while a model is loading', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
+      return Response.json({
+        error: { code: 503, message: 'Loading model', type: 'unavailable_error' },
+      }, { status: 503 });
+    });
+
+    await expect(probeLocalModelEndpoint({
+      ...DEFAULT_OPTIONS,
+      strategy: { kind: 'llama.cpp' },
+      fetch: fetcher as typeof fetch,
+    })).resolves.toEqual({
+      status: 'not-ready',
+      error: expect.stringContaining('Loading model'),
+    });
+  });
+
+  it('does not treat an arbitrary string health status as llama.cpp detection', async () => {
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
+      return Response.json({ status: 'healthy' });
+    });
+
+    await expect(probeLocalModelEndpoint({
+      ...DEFAULT_OPTIONS,
+      strategy: { kind: 'llama.cpp' },
+      fetch: fetcher as typeof fetch,
+    })).resolves.toEqual({
+      status: 'incompatible',
+      error: expect.stringContaining('No compatible local LLM server was detected'),
     });
   });
 
@@ -225,9 +255,7 @@ describe('local model endpoint probing', () => {
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
-      status: 'not-ready',
-      reachable: true,
-      detected: false,
+      status: 'incompatible',
       error: expect.stringContaining('No compatible local LLM server was detected'),
     });
   });
@@ -239,9 +267,7 @@ describe('local model endpoint probing', () => {
       ...DEFAULT_OPTIONS,
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
-      status: 'not-ready',
-      reachable: true,
-      detected: false,
+      status: 'incompatible',
       error: expect.stringContaining('No compatible local LLM server was detected'),
     });
     expect(fetcher.mock.calls.map(([input]) => new URL(String(input)).pathname))
@@ -256,8 +282,6 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'offline',
-      reachable: false,
-      detected: false,
       error: expect.stringContaining('endpoint configuration is invalid'),
     });
     expect(fetcher).not.toHaveBeenCalled();
@@ -273,8 +297,6 @@ describe('local model endpoint probing', () => {
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
       status: 'offline',
-      reachable: false,
-      detected: false,
       error: expect.stringContaining('Local LLM server is offline'),
     });
   });

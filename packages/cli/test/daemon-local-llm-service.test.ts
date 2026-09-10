@@ -267,7 +267,9 @@ describe('daemon local LLM service', () => {
       if (url.endsWith('/health')) {
         return healthy
           ? Response.json({ status: 'ok' })
-          : new Response('loading model', { status: 503 });
+          : Response.json({
+            error: { code: 503, message: 'Loading model', type: 'unavailable_error' },
+          }, { status: 503 });
       }
       return new Response('not found', { status: 404 });
     });
@@ -280,7 +282,7 @@ describe('daemon local LLM service', () => {
     });
 
     expect(await service.health()).toEqual(expect.objectContaining({
-      ok: false, ready: false, reachable: true, offline: false,
+      ok: false, detected: true, ready: false, reachable: true, offline: false,
     }));
     await expect(service.chat({ message: 'hello' })).rejects.toMatchObject({
       code: 'LOCAL_LLM_NOT_READY', status: 503,

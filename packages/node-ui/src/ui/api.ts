@@ -2306,8 +2306,23 @@ interface LocalLlmChatWireResponse {
   readOnly: true;
 }
 
-export const fetchLocalLlmHealth = () =>
-  get<LocalAgentHealthResponse>('/api/local-llm/health');
+interface LocalLlmHealthWireResponse extends Omit<LocalAgentHealthResponse, 'detected'> {
+  detected?: boolean;
+}
+
+function normalizeLocalLlmHealth(
+  health: LocalLlmHealthWireResponse,
+): LocalAgentHealthResponse & { detected: boolean } {
+  return {
+    ...health,
+    // v10.0.16 daemons did not expose detection separately. Their ready bit is
+    // the only positive evidence that the conventional endpoint was compatible.
+    detected: typeof health.detected === 'boolean' ? health.detected : health.ready === true,
+  };
+}
+
+export const fetchLocalLlmHealth = async () =>
+  normalizeLocalLlmHealth(await get<LocalLlmHealthWireResponse>('/api/local-llm/health'));
 
 export async function sendLocalLlmChat(
   text: string,
@@ -2518,6 +2533,9 @@ interface LocalAgentSurface {
     profile?: string;
   }) => Record<string, unknown>;
   fetchHealth?: () => Promise<LocalAgentHealthResponse>;
+  isVisible?: (args: {
+    health: LocalAgentHealthResponse | null;
+  }) => boolean;
   streamChat?: typeof streamOpenClawLocalChat;
 }
 
@@ -2528,6 +2546,13 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
     defaultSessionId: () => 'local-llm:dkg-ui',
     resolveChatContext: () => ({}),
     fetchHealth: fetchLocalLlmHealth,
+    // Keep an explicitly configured endpoint visible even while unavailable.
+    // For convention-based discovery, show only a backend the daemon recognized.
+    isVisible: ({ health }) => (
+      health === null
+      || health.configured !== false
+      || health.detected === true
+    ),
     streamChat: streamLocalLlmChat,
   },
   openclaw: {
@@ -2817,14 +2842,7 @@ async function mapLocalAgentIntegrationRecord(
   const health = configured && hasChatBridge && surface?.fetchHealth
     ? normalizeLocalAgentHealth(await surface.fetchHealth().catch(() => null))
     : null;
-  // The daemon-owned integration exists in the registry on every node. Keep it
-  // out of the UI when the operator supplied no local-LLM configuration and
-  // the conventional local endpoint was not recognized as a supported backend.
-  // An explicit but temporarily unavailable configuration remains visible so
-  // its error is useful. `ready` is the safe fallback for v10.0.16 daemons,
-  // which did not expose `detected` and treated any HTTP response as reachable.
-  const localLlmDetected = health?.detected ?? health?.ready === true;
-  if (id === 'local-llm' && health?.configured === false && !localLlmDetected) {
+  if (surface?.isVisible?.({ health }) === false) {
     return null;
   }
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
