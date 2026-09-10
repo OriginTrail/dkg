@@ -44,7 +44,6 @@ import {
   ROLLOUT_STORE_BACKEND_ENV,
   rolloutStoreBindingToEnv,
 } from './rollout-store-config.js';
-import { isGate1VmChainInventorySelected } from './rollout-adapter-fixture.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
@@ -98,23 +97,6 @@ test('routes every registered rollout command through its own output decoder', (
       assert.throws(() => parseGate1RolloutCommandOutput(command, outputs[otherCommand]));
     }
   }
-});
-
-test('rollout VM evidence reflects the running agent selection', () => {
-  const selected = {
-    isVmReconcileTargetSelected: (contextGraphId: string) => contextGraphId === CONTEXT_GRAPH_ID,
-  };
-  const unselected = {
-    isVmReconcileTargetSelected: () => false,
-  };
-  assert.equal(
-    isGate1VmChainInventorySelected(selected, CONTEXT_GRAPH_ID),
-    true,
-  );
-  assert.equal(
-    isGate1VmChainInventorySelected(unselected, CONTEXT_GRAPH_ID),
-    false,
-  );
 });
 
 test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy authority on ${STORE_BACKEND}`, {
@@ -207,6 +189,11 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     manualTargets: 1,
     bootstrap: true,
   }));
+  const unselectedStatus = await shadow.child.requestRollout('rolloutStatus', 'shadow-unselected-status', {
+    contextGraphId: `${CONTEXT_GRAPH_ID}-unselected`,
+    completeProviderPeerId: authorReady.peerId as string,
+  });
+  assert.equal(unselectedStatus.vmChainInventorySelected, false);
   const seededVmSource = await shadow.child.requestRollout(
     'seedVmSourceSwm',
     'shadow-seed-vm-source',
