@@ -176,7 +176,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     });
   });
 
-  it('does not trip for deterministic failures and respects an aborted waiter', async () => {
+  it('does not trip for deterministic failures', async () => {
     let calls = 0;
     const breaker = new Rfc64AuthorityReadCoordinatorV1({
       baseBackoffMs: 100,
@@ -190,12 +190,6 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     })).rejects.toMatchObject({ code: 'CALL_EXCEPTION' });
     expect(breaker.snapshot().state).toBe('closed');
 
-    const controller = new AbortController();
-    controller.abort(new Error('agent stopping'));
-    await expect(breaker.run(controller.signal, async () => {
-      calls += 1;
-      return 'must-not-run';
-    })).rejects.toThrow('agent stopping');
     expect(calls).toBe(1);
   });
 
@@ -217,11 +211,16 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     await started;
 
     const controller = new AbortController();
-    const second = breaker.run(controller.signal, async () => 'must-not-run');
+    let cancelledCalls = 0;
+    const second = breaker.run(controller.signal, async () => {
+      cancelledCalls += 1;
+      return 'must-not-run';
+    });
     const third = breaker.run(undefined, async () => 'third');
     controller.abort(new Error('queued read cancelled'));
 
     await expect(second).rejects.toThrow('queued read cancelled');
+    expect(cancelledCalls).toBe(0);
     await expect(Promise.race([
       third.then(() => 'overtook'),
       new Promise<string>((resolve) => setTimeout(() => resolve('still-queued'), 10)),
@@ -229,6 +228,7 @@ describe('RFC-64 authority RPC circuit breaker', () => {
     releaseFirst();
     await expect(first).resolves.toBe('first');
     await expect(third).resolves.toBe('third');
+    expect(cancelledCalls).toBe(0);
   });
 
   it('rejects unsafe timing configuration', () => {

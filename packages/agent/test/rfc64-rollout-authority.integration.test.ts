@@ -988,6 +988,39 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
+  it('propagates caller cancellation into the registered authority snapshot read', async () => {
+    let readSignal: AbortSignal | undefined;
+    const readAuthority = vi.fn(async (
+      _contextGraphId: bigint,
+      options?: { signal?: AbortSignal },
+    ) => {
+      readSignal = options?.signal;
+      return Object.freeze({
+        ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [], '0'),
+        accessPolicy: 0,
+      });
+    });
+    const edge = await startAgent({
+      name: 'registered-authority-signal-propagation',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+    const controller = new AbortController();
+
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      controller.signal,
+    )).resolves.toMatchObject({ policy: { contextGraphId: CONTEXT_GRAPH_ID } });
+    expect(readSignal).toBeInstanceOf(AbortSignal);
+    const reason = new Error('caller stopped');
+    controller.abort(reason);
+    expect(readSignal).toMatchObject({ aborted: true, reason });
+  });
+
   it('opens the shared circuit when cold numeric binding discovery exhausts providers', async () => {
     const readAuthority = vi.fn();
     const edge = await startAgent({
