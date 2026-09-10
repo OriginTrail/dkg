@@ -166,11 +166,6 @@ function inspectLlamaCppHealth(
   if (httpStatus >= 200 && httpStatus < 300 && record.status === 'ok') {
     return { status: 'ready' };
   }
-  // llama.cpp has used this compact shape for an initialized server whose
-  // model is not ready yet.
-  if (httpStatus >= 200 && httpStatus < 300 && record.status === 'loading') {
-    return { status: 'not-ready', reason: 'llama.cpp model is still loading' };
-  }
   const error = record.error;
   if (httpStatus === 503 && typeof error === 'object' && error !== null && !Array.isArray(error)) {
     const detail = error as Record<string, unknown>;

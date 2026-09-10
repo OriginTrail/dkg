@@ -187,7 +187,7 @@ describe('local model endpoint probing', () => {
     })).resolves.toEqual({ status: 'ready' });
   });
 
-  it('keeps a recognized but non-ready llama.cpp health response detected', async () => {
+  it('does not treat a generic string health status as llama.cpp detection', async () => {
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/v1/models')) return new Response('not found', { status: 404 });
@@ -199,8 +199,8 @@ describe('local model endpoint probing', () => {
       strategy: { kind: 'llama.cpp' },
       fetch: fetcher as typeof fetch,
     })).resolves.toEqual({
-      status: 'not-ready',
-      error: expect.stringContaining('model is still loading'),
+      status: 'incompatible',
+      error: expect.stringContaining('No compatible local LLM server was detected'),
     });
   });
 
