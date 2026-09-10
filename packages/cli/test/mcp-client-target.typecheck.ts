@@ -1,4 +1,4 @@
-import type { ClientTarget, McpConfigEndpoint, McpConfigSelection } from '../src/mcp-client-registry.js';
+import type { ClientTarget, McpConfigSelection } from '../src/mcp-client-registry.js';
 
 declare const paths: Pick<ClientTarget, 'name' | 'configPath' | 'displayPath'>;
 const standard: ClientTarget = { ...paths, id: 'cursor', location: 'native', format: 'json', serverContainer: 'mcpServers' };
@@ -18,12 +18,33 @@ const implicit: ClientTarget = { ...paths, id: 'cursor', location: 'native' };
 const arbitrary: ClientTarget = { ...standard, serverContainer: 'unrelated.setting' };
 void [standard, vscode, codex, wrongCodex, wrongCursor, unsupportedCodexLocation, unsupportedClaudeLocation, implicit, arbitrary];
 
-// Physical persistence and selected logical identities are separate contracts.
+// Mutation requires a selected physical config; a logical target cannot bypass it.
+import { readRegisteredServerKeys, writeRegistration, removeRegistration } from '../src/mcp-client-config.js';
+import type { McpPhysicalConfig } from '../src/mcp-physical-config.js';
+import type { McpConfigSourceSnapshot } from '../src/mcp-config-file.js';
 declare const selection: McpConfigSelection;
-const endpoint: McpConfigEndpoint = selection.endpoint;
+declare const registration: Parameters<typeof writeRegistration>[1];
+const file: McpPhysicalConfig = selection.file;
 const selectedClient: ClientTarget | undefined = selection.aliases[0];
-// @ts-expect-error A physical endpoint does not represent a logical client.
-const identity: ClientTarget = selection.endpoint;
-// @ts-expect-error Client identity is not available on the persistence endpoint.
-const endpointId = selection.endpoint.id;
-void [endpoint, selectedClient, identity, endpointId];
+writeRegistration(selection.file, registration);
+removeRegistration(selection.file);
+readRegisteredServerKeys(selection.file);
+// @ts-expect-error Readers also require a selected physical config.
+readRegisteredServerKeys(standard);
+// @ts-expect-error A raw logical target cannot bypass destination ownership.
+writeRegistration(standard, registration);
+// @ts-expect-error Removal also requires the physical mutation boundary.
+removeRegistration(standard);
+// @ts-expect-error Physical configs carry no synthesized logical location.
+const location = selection.file.location;
+// @ts-expect-error A physical config is not a logical client.
+const identity: ClientTarget = selection.file;
+void [file, selectedClient, location, identity];
+
+// @ts-expect-error Transaction snapshots cannot be forged without the factory's path validation.
+const unboundSource: McpConfigSourceSnapshot = {
+  destination: '/tmp/config.json',
+  content: undefined,
+  assertCurrent() {},
+};
+void unboundSource;

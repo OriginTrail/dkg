@@ -18,9 +18,10 @@ function serializeConfigFileOperation(
   });
 }
 
-/** Persist configuration only; runtime activation is deliberately separate. */
-export function writeConfigFile(path: string, contents: string): Promise<void> {
+/** Snapshot mutable configuration after prior queued settings have activated. */
+export function writeConfigFile(path: string, serialize: () => string): Promise<void> {
   return serializeConfigFileOperation(path, async () => {
+    const contents = serialize();
     await mkdir(dirname(path), { recursive: true });
     await writeFileAtomic(path, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
   });

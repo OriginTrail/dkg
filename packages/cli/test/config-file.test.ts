@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { copyFile, rename, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -76,10 +76,12 @@ describe('configuration file publication', () => {
   });
 
   it('restores the exact previous file if synchronous activation fails', async () => {
+    if (process.platform !== 'win32') await fs.chmod(path, 0o640);
     await expect(writeConfigSettingsTransaction(path, 'new configuration\n', () => {
       expect(readFileSync(path, 'utf8')).toBe('new configuration\n');
       throw new Error('activation failed');
     })).rejects.toThrow('activation failed');
+    if (process.platform !== 'win32') expect((await fs.stat(path)).mode & 0o777).toBe(0o640);
     expect(await fs.readFile(path, 'utf8')).toBe('old configuration\n');
     expect(await fs.readdir(directory)).toEqual(['config.json']);
   });
@@ -118,7 +120,7 @@ describe('configuration file publication', () => {
       throw new Error('first failed');
     });
     let ordinaryCompleted = false;
-    const second = writeConfigFile(path, 'ordinary').then(() => {
+    const second = writeConfigFile(path, () => 'ordinary').then(() => {
       ordinaryCompleted = true;
     });
     const completions = Promise.allSettled([first, second]);
@@ -133,9 +135,27 @@ describe('configuration file publication', () => {
   });
 
   it('keeps ordinary config writes focused on atomic persistence', async () => {
-    await writeConfigFile(path, 'persisted only\n');
+    await writeConfigFile(path, () => 'persisted only\n');
     expect(await fs.readFile(path, 'utf8')).toBe('persisted only\n');
     expect(copyFile).not.toHaveBeenCalled();
     expect(await fs.readdir(directory)).toEqual(['config.json']);
   });
+
+  it.each(['ordinary', 'transactional'] as const)(
+    'publishes %s configuration with 0600 permissions', async kind => {
+      if (process.platform !== 'win32') await fs.chmod(path, 0o644);
+      if (kind === 'ordinary') {
+        await writeConfigFile(path, () => 'private configuration\n');
+      } else {
+        await writeConfigSettingsTransaction(path, 'private configuration\n', () => {
+          if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600);
+          expect(readFileSync(path, 'utf8')).toBe('private configuration\n');
+          return undefined;
+        });
+      }
+      if (process.platform !== 'win32') expect((await fs.stat(path)).mode & 0o777).toBe(0o600);
+      expect(await fs.readFile(path, 'utf8')).toBe('private configuration\n');
+    },
+  );
+
 });
