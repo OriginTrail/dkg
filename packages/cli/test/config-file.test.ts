@@ -105,7 +105,7 @@ describe('configuration file publication', () => {
     expect(await fs.readFile(join(directory, backup!), 'utf8')).toBe('old configuration\n');
   });
 
-  it('serializes a later save behind publication and rollback of a failed activation', async () => {
+  it('serializes an ordinary save behind publication and rollback of a failed activation', async () => {
     let release!: () => void;
     const blocked = new Promise<void>(resolve => { release = resolve; });
     vi.mocked(writeFile).mockImplementationOnce(async (...args) => {
@@ -117,15 +117,18 @@ describe('configuration file publication', () => {
       activationOrder.push(readFileSync(path, 'utf8'));
       throw new Error('first failed');
     });
-    const second = writeConfigSettingsTransaction(path, 'second', () => {
-      activationOrder.push(readFileSync(path, 'utf8'));
+    let ordinaryCompleted = false;
+    const second = writeConfigFile(path, 'ordinary').then(() => {
+      ordinaryCompleted = true;
     });
     const completions = Promise.allSettled([first, second]);
     expect(activationOrder).toEqual([]);
+    expect(ordinaryCompleted).toBe(false);
     release();
     expect(await completions).toMatchObject([{ status: 'rejected' }, { status: 'fulfilled' }]);
-    expect(activationOrder).toEqual(['first', 'second']);
-    expect(await fs.readFile(path, 'utf8')).toBe('second');
+    expect(activationOrder).toEqual(['first']);
+    expect(ordinaryCompleted).toBe(true);
+    expect(await fs.readFile(path, 'utf8')).toBe('ordinary');
     expect(await fs.readdir(directory)).toEqual(['config.json']);
   });
 

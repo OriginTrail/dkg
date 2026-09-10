@@ -7,7 +7,7 @@ export interface AtomicWriteIo {
     data: string,
     options?: { flag?: string; mode?: number },
   ): Promise<unknown>;
-  rename?(from: string, to: string): Promise<unknown>;
+  rename(from: string, to: string): Promise<unknown>;
   unlink?(path: string): Promise<unknown>;
 }
 
@@ -25,10 +25,6 @@ export async function writeFileAtomic(
   options: AtomicWriteOptions = {},
 ): Promise<void> {
   const io = options.io ?? nodeIo;
-  if (typeof io.rename !== 'function') {
-    await io.writeFile(path, data, options.writeOptions);
-    return;
-  }
   const staged = `${path}.tmp.${process.pid}.${Date.now().toString(36)}.${randomUUID()}`;
   try {
     await io.writeFile(staged, data, options.writeOptions);
