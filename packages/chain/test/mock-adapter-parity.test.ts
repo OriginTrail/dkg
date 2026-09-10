@@ -425,6 +425,18 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(mock.isV10Ready()).toBe(true);
   });
 
+  it('keeps authority delta refresh on the full-snapshot fallback in offline mock mode', async () => {
+    const mock = new MockChainAdapter();
+
+    await expect(mock.getContextGraphAuthorityIndexRevisions([1n])).resolves.toBeNull();
+
+    const controller = new AbortController();
+    controller.abort(new Error('authority refresh cancelled'));
+    await expect(mock.getContextGraphAuthorityIndexRevisions([1n], {
+      signal: controller.signal,
+    })).rejects.toThrow(/authority refresh cancelled/);
+  });
+
   // Codex PR #595 round-4: isShardingTableMember gates VM ACK eligibility.
   // The mock can't model a real sharding table, so it treats every
   // registered (non-zero) identity as a member; tests needing
