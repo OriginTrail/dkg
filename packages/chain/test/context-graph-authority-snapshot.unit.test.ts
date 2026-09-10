@@ -807,10 +807,10 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     harness.advanceAuthorityHead();
     harness.setPublishAuthorityAccountId('not-a-uint256');
     await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).rejects.toThrow();
-    harness.setPublishAuthorityAccountId(7n);
+    harness.setPublishAuthorityAccountId(0n);
 
     await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
-      publishAuthorityAccountId: '7',
+      publishAuthorityAccountId: '0',
       policyVersion: '4',
     });
     expect(harness.evidence.ranges.slice(18)).toEqual(Array(10).fill([31, 35]));

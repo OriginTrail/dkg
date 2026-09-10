@@ -15,7 +15,10 @@ import {
   reduceContextGraphAuthorityIndexPage,
   type ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index-reducer.js';
-import { applyContextGraphAuthorityGenerationEvent } from '../src/context-graph-authority-generation.js';
+import {
+  applyContextGraphAuthorityStateEvent,
+  type ContextGraphAuthorityIndexState,
+} from '../src/context-graph-authority-state.js';
 
 const ZERO = `0x${'0'.repeat(40)}`;
 const OWNER = `0x${'11'.repeat(20)}`;
@@ -503,18 +506,29 @@ describe('contract-wide Context Graph authority index reducer', () => {
       .toBeUndefined();
   });
 
-  it('rejects counter overflow before a checkpoint can be emitted', () => {
-    expect(() => applyContextGraphAuthorityGenerationEvent({
-      nameHash: NAME_9,
-      ownershipEra: 0,
-      policyVersion: Number.MAX_SAFE_INTEGER,
-      rosterVersion: 0,
-      sourceBlockNumber: 10,
-      sourceBlockHash: blockHash(10),
-    }, {
-      name: 'PublishPolicyUpdated',
-      blockNumber: 22,
-      blockHash: blockHash(22),
-    }, 'Context Graph 9')).toThrow('safe integer range');
+  it.each([
+    ['ownership', 'ownershipEra', event('Transfer', 9n, 22, 0, {
+      from: OWNER, to: NEXT_OWNER,
+    })],
+    ['policy', 'policyVersion', event('PublishAuthorityUpdated', 9n, 22, 0)],
+    ['roster', 'rosterVersion', event('AgentParticipantAdded', 9n, 22, 0)],
+  ] as const)('rejects %s counter overflow in the production state transition', (
+    _label,
+    field,
+    transition,
+  ) => {
+    const initial = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 10,
+      throughBlockHash: blockHash(10),
+      events: [creation(9n, 10, 1, NAME_9)],
+    }).checkpoint.states[0]!;
+    const overflowing = {
+      ...initial,
+      [field]: Number.MAX_SAFE_INTEGER,
+    } as ContextGraphAuthorityIndexState;
+
+    expect(() => applyContextGraphAuthorityStateEvent(overflowing, transition))
+      .toThrow('safe integer range');
   });
 });

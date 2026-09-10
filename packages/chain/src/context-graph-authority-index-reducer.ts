@@ -7,13 +7,14 @@ import {
   normalizeAuthorityIndexHash,
   normalizeAuthorityIndexNonNegativeSafeInteger,
   normalizeAuthorityIndexParticipantAgents,
-  normalizeAuthorityIndexPolicy,
-  normalizeAuthorityIndexUint256,
   normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexCheckpoint,
 } from './context-graph-authority-index-checkpoint.js';
 import {
   applyContextGraphAuthorityStateEvent,
+  normalizeContextGraphAuthorityAccessPolicy,
+  normalizeContextGraphAuthorityPublishDomain,
+  normalizeContextGraphAuthorityPublishReference,
   type ContextGraphAuthorityIndexEvent,
   type ContextGraphAuthorityIndexState,
 } from './context-graph-authority-state.js';
@@ -83,10 +84,10 @@ function normalizePageEvent(
       const participantAgents = normalizeAuthorityIndexParticipantAgents(
         event.participantAgents,
       );
-      const accessPolicy = normalizeAuthorityIndexPolicy(event.accessPolicy);
-      const publishPolicy = normalizeAuthorityIndexPolicy(event.publishPolicy);
-      const publishAuthority = normalizeAuthorityIndexAddress(event.publishAuthority);
-      const publishAuthorityAccountId = normalizeAuthorityIndexUint256(
+      const accessPolicy = normalizeContextGraphAuthorityAccessPolicy(event.accessPolicy);
+      const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+        event.publishPolicy,
+        event.publishAuthority,
         event.publishAuthorityAccountId,
       );
       if (
@@ -95,13 +96,7 @@ function normalizePageEvent(
         || nameHash === undefined
         || participantAgents === undefined
         || accessPolicy === undefined
-        || publishPolicy === undefined
-        || publishAuthority === undefined
-        || publishAuthorityAccountId === undefined
-        || (publishPolicy === 0 && publishAuthority === ZERO_ADDRESS)
-        || (publishPolicy === 1 && (
-          publishAuthority !== ZERO_ADDRESS || publishAuthorityAccountId !== 0n
-        ))
+        || publishDomain === undefined
       ) {
         throw new Error('Context Graph authority index creation event has invalid authority state');
       }
@@ -112,9 +107,7 @@ function normalizePageEvent(
         nameHash,
         participantAgents,
         accessPolicy,
-        publishPolicy,
-        publishAuthority,
-        publishAuthorityAccountId,
+        ...publishDomain,
       });
     }
     case 'Transfer': {
@@ -126,43 +119,32 @@ function normalizePageEvent(
       return Object.freeze({ ...base, name: event.name, from, to });
     }
     case 'PublishPolicyUpdated': {
-      const publishPolicy = normalizeAuthorityIndexPolicy(event.publishPolicy);
-      const publishAuthority = normalizeAuthorityIndexAddress(event.publishAuthority);
-      const publishAuthorityAccountId = normalizeAuthorityIndexUint256(
+      const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+        event.publishPolicy,
+        event.publishAuthority,
         event.publishAuthorityAccountId,
       );
-      if (
-        publishPolicy === undefined
-        || publishAuthority === undefined
-        || publishAuthorityAccountId === undefined
-        || (publishPolicy === 0 && publishAuthority === ZERO_ADDRESS)
-        || (publishPolicy === 1 && (
-          publishAuthority !== ZERO_ADDRESS || publishAuthorityAccountId !== 0n
-        ))
-      ) {
+      if (publishDomain === undefined) {
         throw new Error('Context Graph authority index policy event has invalid authority state');
       }
       return Object.freeze({
         ...base,
         name: event.name,
-        publishPolicy,
-        publishAuthority,
-        publishAuthorityAccountId,
+        ...publishDomain,
       });
     }
     case 'PublishAuthorityUpdated': {
-      const publishAuthority = normalizeAuthorityIndexAddress(event.publishAuthority);
-      const publishAuthorityAccountId = normalizeAuthorityIndexUint256(
+      const publishReference = normalizeContextGraphAuthorityPublishReference(
+        event.publishAuthority,
         event.publishAuthorityAccountId,
       );
-      if (publishAuthority === undefined || publishAuthorityAccountId === undefined) {
+      if (publishReference === undefined) {
         throw new Error('Context Graph authority index publisher event has invalid authority state');
       }
       return Object.freeze({
         ...base,
         name: event.name,
-        publishAuthority,
-        publishAuthorityAccountId,
+        ...publishReference,
       });
     }
     case 'AgentParticipantAdded':

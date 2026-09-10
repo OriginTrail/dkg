@@ -4,6 +4,8 @@ import { ethers } from 'ethers';
 import {
   freezeContextGraphAuthorityIndexState,
   MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS,
+  normalizeContextGraphAuthorityAccessPolicy,
+  normalizeContextGraphAuthorityPublishDomain,
   type ContextGraphAuthorityIndexState,
 } from './context-graph-authority-state.js';
 
@@ -74,22 +76,6 @@ export function normalizeAuthorityIndexAddress(value: unknown): string | undefin
   return typeof value === 'string' && ADDRESS_PATTERN.test(value)
     ? value.toLowerCase()
     : undefined;
-}
-
-export function normalizeAuthorityIndexUint256(value: unknown): bigint | undefined {
-  return typeof value === 'bigint' && value >= 0n && value <= ethers.MaxUint256
-    ? value
-    : undefined;
-}
-
-function normalizeUint256Decimal(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !/^(0|[1-9][0-9]*)$/.test(value)) return undefined;
-  const parsed = BigInt(value);
-  return parsed <= ethers.MaxUint256 ? value : undefined;
-}
-
-export function normalizeAuthorityIndexPolicy(value: unknown): number | undefined {
-  return value === 0 || value === 1 ? value : undefined;
 }
 
 export function normalizeAuthorityIndexParticipantAgents(
@@ -173,12 +159,10 @@ function normalizeIndexState(
   const contextGraphId = normalizePositiveDecimal(candidate.contextGraphId);
   const owner = normalizeAuthorityIndexAddress(candidate.owner);
   const active = typeof candidate.active === 'boolean' ? candidate.active : undefined;
-  const accessPolicy = normalizeAuthorityIndexPolicy(candidate.accessPolicy);
-  const publishPolicy = normalizeAuthorityIndexPolicy(candidate.publishPolicy);
-  const publishAuthority = candidate.publishAuthority === null
-    ? null
-    : normalizeAuthorityIndexAddress(candidate.publishAuthority);
-  const publishAuthorityAccountId = normalizeUint256Decimal(
+  const accessPolicy = normalizeContextGraphAuthorityAccessPolicy(candidate.accessPolicy);
+  const publishDomain = normalizeContextGraphAuthorityPublishDomain(
+    candidate.publishPolicy,
+    candidate.publishAuthority,
     candidate.publishAuthorityAccountId,
   );
   const participantAgents = normalizeAuthorityIndexParticipantAgents(
@@ -198,10 +182,7 @@ function normalizeIndexState(
     || owner === ZERO_ADDRESS
     || active === undefined
     || accessPolicy === undefined
-    || publishPolicy === undefined
-    || publishAuthority === undefined
-    || publishAuthority === ZERO_ADDRESS
-    || publishAuthorityAccountId === undefined
+    || publishDomain === undefined
     || participantAgents === undefined
     || nameHash === undefined
     || ownershipEra === undefined
@@ -213,19 +194,13 @@ function normalizeIndexState(
     || sourceBlockNumber > cursor.throughBlockNumber
     || policyVersion < ownershipEra
     || rosterVersion < ownershipEra
-    || (publishPolicy === 0 && publishAuthority === null)
-    || (publishPolicy === 1 && (
-      publishAuthority !== null || publishAuthorityAccountId !== '0'
-    ))
   ) return undefined;
   return freezeContextGraphAuthorityIndexState({
     contextGraphId,
     owner,
     active,
     accessPolicy,
-    publishPolicy,
-    publishAuthority,
-    publishAuthorityAccountId,
+    ...publishDomain,
     participantAgents,
     nameHash,
     ownershipEra,

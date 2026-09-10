@@ -1100,14 +1100,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         const snapshot: ContextGraphAuthoritySnapshot = Object.freeze({
           chainId,
           governanceContract: contractAddress,
+          ...authority.state,
           contextGraphId: contextGraphId.toString(10),
-          ...authority.current,
-          nameHash: authority.generation.nameHash,
-          ownershipEra: authority.generation.ownershipEra.toString(10),
-          policyVersion: authority.generation.policyVersion.toString(10),
-          rosterVersion: authority.generation.rosterVersion.toString(10),
-          sourceBlockNumber: authority.generation.sourceBlockNumber.toString(10),
-          sourceBlockHash: authority.generation.sourceBlockHash,
+          ownershipEra: authority.state.ownershipEra.toString(10),
+          policyVersion: authority.state.policyVersion.toString(10),
+          rosterVersion: authority.state.rosterVersion.toString(10),
+          sourceBlockNumber: authority.state.sourceBlockNumber.toString(10),
         });
         // Verify the combined current-state + generation view only after both
         // reads settle. The legacy reader publishes its checkpoint here; the
