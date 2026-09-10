@@ -27,6 +27,21 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
     expect(r?.body).toMatchObject({ code: 'RPC_RECEIPT_LOOKUP_FAILED', txHash: '0xabc' });
   });
 
+  it('maps local RPC governor saturation to retryable 503/not-started', () => {
+    expect(classifyChainRpcTransportStatus({
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+      message: 'local queue is full',
+    })).toEqual({
+      status: 503,
+      body: {
+        error: 'local queue is full',
+        code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+        retryable: true,
+        outcome: 'not_started',
+      },
+    });
+  });
+
   it('maps an RPC_TIMEOUT -> 504 with the public/legacy `code: TIMEOUT` body', () => {
     const r = classifyChainRpcTransportStatus(new ChainRpcTransportError('RPC_TIMEOUT', 'm'));
     expect(r?.status).toBe(504);

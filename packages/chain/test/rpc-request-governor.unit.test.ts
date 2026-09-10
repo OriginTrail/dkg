@@ -114,6 +114,47 @@ describe('RpcRequestGovernor', () => {
     });
   });
 
+  it('defers only background work for the deterministic startup-jitter window', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 2,
+      foregroundReservePercent: 50,
+      burstRequests: 2,
+      maxQueueSize: 8,
+      startupJitterMs: 30_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 0.5,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+
+    let backgroundAdmitted = false;
+    const background = governor.acquire('background').then(() => {
+      backgroundAdmitted = true;
+    });
+    await governor.acquire('foreground');
+    expect(backgroundAdmitted).toBe(false);
+    expect(governor.snapshot()).toMatchObject({
+      foregroundAdmitted: 1,
+      backgroundQueued: 1,
+      startupDelayRemainingMs: 15_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(backgroundAdmitted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await background;
+    expect(governor.snapshot()).toMatchObject({
+      backgroundAdmitted: 1,
+      backgroundQueued: 0,
+      startupDelayRemainingMs: 0,
+    });
+  });
+
   it('validates every operator-facing limit', () => {
     expect(() => resolveRpcRequestGovernorPolicy({ maxRequestsPerSecond: 0 }))
       .toThrow(/maxRequestsPerSecond/);

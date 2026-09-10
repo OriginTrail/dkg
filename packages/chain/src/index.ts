@@ -131,6 +131,7 @@ export {
 // downstream formatters so producer and consumer use one bounded vocabulary.
 export {
   emptyRpcUsageWindow,
+  createGovernedJsonRpcProvider,
   mergeRpcUsageWindows,
   RPC_ENDPOINT_SLOT_LABELS,
   normalizeRpcUsageWindow,
@@ -141,11 +142,17 @@ export {
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
   type RpcUsageWindow,
+  type GovernedJsonRpcProviderConfig,
 } from './rpc-usage.js';
+export {
+  withRpcRequestAbortSignal,
+  withRpcRequestTimeout,
+} from './rpc-request-transport.js';
 export {
   DEFAULT_RPC_REQUEST_GOVERNOR_POLICY,
   RpcRequestGovernor,
   RpcRequestGovernorQueueFullError,
+  isRpcRequestGovernorQueueFullError,
   resolveRpcRequestGovernorPolicy,
   withRpcRequestClass,
   type RpcRequestClass,

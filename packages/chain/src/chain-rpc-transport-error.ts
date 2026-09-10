@@ -11,9 +11,10 @@
  * over a single set of chain-NAMESPACED codes:
  *   - `RPC_ENDPOINTS_EXHAUSTED`   — every configured RPC failed over (writes)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` — receipt lookup failed on every endpoint
+ *   - `RPC_REQUEST_GOVERNOR_QUEUE_FULL` — local admission queue has no capacity
  *   - `RPC_TIMEOUT`               — receipt wait / bounded RPC request timed out
  *
- * All three are chain-OWNED, namespaced codes — only the chain/CLI failover
+ * All four are chain-OWNED, namespaced codes — only the chain/CLI failover
  * stack ever stamps them — so the guard is ONE simple structural check (`code`),
  * with no `instanceof`/prototype coupling and identical behaviour for every
  * transport case (each survives a plain-object re-wrap that preserves `.code`).
@@ -30,6 +31,7 @@
 export const CHAIN_RPC_TRANSPORT_CODES = [
   'RPC_ENDPOINTS_EXHAUSTED',
   'RPC_RECEIPT_LOOKUP_FAILED',
+  'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
   'RPC_TIMEOUT',
 ] as const;
 

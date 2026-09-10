@@ -151,6 +151,8 @@ export interface RequestContext {
   admission: AdmissionStatsView;
   /** Daemon-owned, read-only local LLM session used by the Node UI. */
   localLlm?: DaemonLocalLlmService;
+  /** Daemon-owned capacity budget shared by adapters and direct route probes. */
+  rpcRequestGovernor?: import('@origintrail-official/dkg-chain').RpcRequestGovernor;
   // Derived per-request. The correlated authentication decision is carried unchanged; identity
   // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;

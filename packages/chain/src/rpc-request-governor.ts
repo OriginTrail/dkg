@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { activeRpcRequestAbortSignal } from './rpc-request-transport.js';
+import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import {
+  activeRpcRequestAbortSignal,
+  throwRpcRequestAbortReason,
+} from './rpc-request-transport.js';
 
 export type RpcRequestClass = 'foreground' | 'background';
 
@@ -106,20 +110,24 @@ function activeRpcRequestClass(): RpcRequestClass {
   return rpcRequestClassContext.getStore() ?? 'foreground';
 }
 
-function throwAbortReason(signal: AbortSignal): never {
-  if (signal.reason instanceof Error) throw signal.reason;
-  const error = new Error(typeof signal.reason === 'string' ? signal.reason : 'RPC request aborted');
-  error.name = 'AbortError';
-  throw error;
-}
-
-export class RpcRequestGovernorQueueFullError extends Error {
-  readonly code = 'RPC_REQUEST_GOVERNOR_QUEUE_FULL';
+export class RpcRequestGovernorQueueFullError extends ChainRpcTransportError {
+  declare readonly code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL';
 
   constructor(readonly maxQueueSize: number) {
-    super(`RPC request governor queue is full (${maxQueueSize} requests)`);
+    super(
+      'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+      `RPC request governor queue is full (${maxQueueSize} requests)`,
+    );
     this.name = 'RpcRequestGovernorQueueFullError';
   }
+}
+
+export function isRpcRequestGovernorQueueFullError(
+  error: unknown,
+): error is RpcRequestGovernorQueueFullError {
+  return error !== null
+    && typeof error === 'object'
+    && (error as { code?: unknown }).code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL';
 }
 
 export interface RpcRequestGovernorWindow {
@@ -206,7 +214,6 @@ export class RpcRequestGovernor {
   #lastRefillMs: number;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #window = zeroGovernorCounters();
-  #telemetryOwnerClaimed = false;
 
   constructor(
     input?: RpcRequestGovernorPolicyInput,
@@ -227,13 +234,6 @@ export class RpcRequestGovernor {
       + Math.floor(this.#clock.random() * this.#policy.startupJitterMs);
   }
 
-  /** Only one tracker should drain telemetry when adapters share this governor. */
-  claimTelemetryOwner(): boolean {
-    if (this.#telemetryOwnerClaimed) return false;
-    this.#telemetryOwnerClaimed = true;
-    return true;
-  }
-
   async acquireActiveRequest(signal = activeRpcRequestAbortSignal()): Promise<void> {
     return this.acquire(activeRpcRequestClass(), signal);
   }
@@ -242,7 +242,7 @@ export class RpcRequestGovernor {
     requestClass: RpcRequestClass,
     signal?: AbortSignal,
   ): Promise<void> {
-    if (signal?.aborted) throwAbortReason(signal);
+    if (signal?.aborted) throwRpcRequestAbortReason(signal);
     this.#refill();
     if (this.#canAdmitImmediately(requestClass)) {
       this.#admit(requestClass);
@@ -263,7 +263,7 @@ export class RpcRequestGovernor {
           if (!this.#removeWaiter(waiter)) return;
           this.#window.cancelled += 1;
           try {
-            throwAbortReason(signal);
+            throwRpcRequestAbortReason(signal);
           } catch (error) {
             reject(error);
           }

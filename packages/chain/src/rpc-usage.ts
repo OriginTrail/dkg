@@ -420,16 +420,11 @@ export class RpcUsageTracker {
     { consumer: string; endpointSlot: RpcEndpointSlotLabel; count: number }
   >();
   private lifetime = 0;
-  private readonly ownsGovernorTelemetry: boolean;
-
   constructor(
     // Live thunk (matches RpcFailoverClient): the adapter assigns `chainId`
     // after construction, so resolve it at record time.
     private readonly chainId: () => string,
-    private readonly requestGovernor?: RpcRequestGovernor,
-  ) {
-    this.ownsGovernorTelemetry = requestGovernor?.claimTelemetryOwner() ?? false;
-  }
+  ) {}
 
   /**
    * Count one raw JSON-RPC request. Called from the provider's `_send` and the
@@ -530,9 +525,6 @@ export class RpcUsageTracker {
       ethCallByConsumer,
       attributions,
       lifetimeTotal: this.lifetime,
-      ...(this.ownsGovernorTelemetry && this.requestGovernor !== undefined
-        ? { requestGovernor: this.requestGovernor.drainWindow() }
-        : {}),
     };
   }
 }
@@ -577,6 +569,45 @@ export interface CountingJsonRpcProviderConfig {
   readonly network?: Networkish;
   readonly endpointSlot?: number;
   readonly requestGovernor?: RpcRequestGovernor;
+}
+
+export interface GovernedJsonRpcProviderConfig {
+  readonly maxRetries?: number;
+  readonly providerOptions?: JsonRpcApiProviderOptions;
+  readonly network?: Networkish;
+  readonly requestGovernor: RpcRequestGovernor;
+}
+
+/**
+ * Build a direct daemon-side provider on the same process governor as adapter
+ * traffic. This is intentionally separate from usage tracking: the shared
+ * governor owns admission telemetry, while adapter trackers continue to own
+ * their billable-method accounting.
+ */
+export function createGovernedJsonRpcProvider(
+  url: string,
+  config: GovernedJsonRpcProviderConfig,
+): CountingJsonRpcProvider {
+  const fetchRequest = boundedRetryFetchRequest(url, config.maxRetries);
+  const pureRetry = fetchRequest.retryFunc!;
+  fetchRequest.retryFunc = async (attemptReq, response, attempt) => {
+    const retry = await pureRetry(attemptReq, response, attempt);
+    if (retry) await config.requestGovernor.acquireActiveRequest();
+    return retry;
+  };
+  const providerOptions = config.network == null
+    ? config.providerOptions
+    : {
+        ...config.providerOptions,
+        staticNetwork: config.network as JsonRpcApiProviderOptions['staticNetwork'],
+      };
+  return new CountingJsonRpcProvider(
+    fetchRequest,
+    config.network,
+    providerOptions,
+    () => undefined,
+    config.requestGovernor,
+  );
 }
 
 /**

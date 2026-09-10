@@ -29,7 +29,8 @@ import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializ
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
-import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
+import { resolveRpcUrls, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
+import { withRpcRequestTimeout } from './rpc-request-transport.js';
 import { rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
@@ -1111,7 +1112,7 @@ export class EVMChainAdapterBase {
     // tracker (the PROVIDER-BILLING unit — see rpc-usage.ts). With
     // `batchMaxCount: 1` below, one send() == one HTTP request, so the count is
     // exact. `this.chainId` is assigned later in this constructor → live thunk.
-    this.rpcUsage = new RpcUsageTracker(() => this.chainId, config.rpcRequestGovernor);
+    this.rpcUsage = new RpcUsageTracker(() => this.chainId);
     // One transport factory wires BOTH billing-exact accounting hooks (first
     // attempt at `_send` + every ethers-internal retry attempt) to the tracker —
     // see createCountingJsonRpcProvider for the invariant.
@@ -3206,10 +3207,10 @@ export class EVMChainAdapterBase {
         let pageError: unknown;
         for (const { provider } of ordered) {
           try {
-            await withTimeout(
-              this.ensureConfiguredStaticChainIdValidated(provider),
+            await withRpcRequestTimeout(
               RPC_READ_STALL_TIMEOUT_MS,
               `${label} chainId validation`,
+              () => this.ensureConfiguredStaticChainIdValidated(provider),
             );
             let contract = connected.get(provider);
             if (!contract) {
@@ -3221,10 +3222,10 @@ export class EVMChainAdapterBase {
             // bounded consumer scope explicitly so a large historical crawl
             // (notably the pre-10.0.4 KA high-water fallback) cannot collapse
             // into `consumer=unattributed` in raw eth_getLogs telemetry.
-            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withTimeout(
-              contract.queryFilter(filter as any, lo, hi),
+            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withRpcRequestTimeout(
               KA_HIGH_WATER_PAGE_TIMEOUT_MS,
               `${label} getLogs [${lo}, ${hi}]`,
+              () => contract!.queryFilter(filter as any, lo, hi),
             ));
             metrics.chainRpcTotal.add(1, {
               rpc_method: 'eth_getLogs', outcome: 'ok', retryable: false, chain_id: this.chainId,
@@ -3311,15 +3312,15 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
-        await withTimeout(
-          this.ensureConfiguredStaticChainIdValidated(provider),
+        await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
+          () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
-        const backendHead = await withTimeout(
-          provider.getBlockNumber(),
+        const backendHead = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} backend head probe`,
+          () => provider.getBlockNumber(),
         );
         reachable.push({ provider, backendHead });
       } catch (err) {
@@ -3352,19 +3353,19 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
-        await withTimeout(
-          this.ensureConfiguredStaticChainIdValidated(provider),
+        await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
+          () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
         // Bound the probe: these are direct per-backend reads (not via the
         // FallbackProvider), so without a timeout a hung `getBlockNumber()` would
         // stall the whole resolution instead of failing over. A stall rejects and
         // is treated like any other unreachable-backend error below.
-        const backendHead = await withTimeout(
-          provider.getBlockNumber(),
+        const backendHead = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} backend head probe`,
+          () => provider.getBlockNumber(),
         );
         reachable.push({ provider, backendHead });
       } catch (err) {
@@ -3485,10 +3486,10 @@ export class EVMChainAdapterBase {
         // fits (the heavier getLogs scan page gets the larger
         // `KA_HIGH_WATER_PAGE_TIMEOUT_MS`); the 3 attempts also absorb a transient
         // blip before failing over.
-        const code = await withTimeout(
-          provider.getCode(address, block),
+        const code = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} eth_getCode at block ${block}`,
+          () => provider.getCode(address, block),
         );
         return code && code !== '0x' ? code : '0x';
       } catch (err) {
@@ -3550,8 +3551,10 @@ export class EVMChainAdapterBase {
 
     let validation = this.configuredStaticChainIdValidationsByProvider.get(provider);
     if (!validation) {
-      validation = withTimeout(
-        (async () => {
+      validation = withRpcRequestTimeout(
+        RPC_READ_STALL_TIMEOUT_MS,
+        'configured chainId validation',
+        async () => {
           const raw = await provider.send('eth_chainId', []);
           const live = BigInt(raw);
           if (live !== this.configuredStaticChainId) {
@@ -3562,9 +3565,7 @@ export class EVMChainAdapterBase {
           this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
           this.cachedChainId = { value: live, cachedAt: Date.now() };
           return live;
-        })(),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'configured chainId validation',
+        },
       ).finally(() => {
         this.configuredStaticChainIdValidationsByProvider.delete(provider);
       });
