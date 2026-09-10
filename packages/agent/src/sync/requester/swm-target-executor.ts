@@ -79,12 +79,12 @@ interface PublicSwmTargetBaseV1 {
 
 /** The only two valid public synchronization contracts. */
 export type PublicSwmTargetV1 = Readonly<PublicSwmTargetBaseV1 & {
+  readonly metadataFetcher: SharedMemoryMetadataFetcher;
   readonly mode:
-    | Readonly<{ kind: 'ordinary'; metadataFetcher?: SharedMemoryMetadataFetcher }>
+    | Readonly<{ kind: 'ordinary' }>
     | Readonly<{
       kind: 'selected-recovery';
       recoveryGuard: RecoveryExecutionGuard;
-      metadataFetcher: SharedMemoryMetadataFetcher;
     }>;
 }>;
 
@@ -185,7 +185,7 @@ export class SwmTargetExecutorV1 {
       ? {
         kind: 'selected-recovery' as const,
         recoveryGuard: target.mode.recoveryGuard,
-        metadataFetcher: target.mode.metadataFetcher,
+        metadataFetcher: target.metadataFetcher,
         snapshotEvidencePolicy: {
           accepts: ({
             verifiedMetadataTriples,
@@ -202,7 +202,7 @@ export class SwmTargetExecutorV1 {
         },
         snapshotRecoveryOrder: 'recent-balanced' as const,
       }
-      : { kind: 'ordinary' as const, metadataFetcher: target.mode.metadataFetcher };
+      : { kind: 'ordinary' as const, metadataFetcher: target.metadataFetcher };
     const storeInsert = async (quads: Quad[]) => {
       const inserted = await insertWithOversizeGuard(
         (kept) => this.#ports.store.insert(kept, {

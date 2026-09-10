@@ -333,6 +333,7 @@ import {
   selectSwmSnapshotCoverage,
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
+import type { SwmMetaTransferMode } from './sync/swm-meta-transfer-coordinator.js';
 import {
   createSwmMetaFetcher,
   type SwmMetaFetcher,
@@ -1220,9 +1221,9 @@ function swmMetaRetentionBudgetFor(
   return budget;
 }
 
-function nextSwmMetaRequesterScope(selected: boolean): SwmMetaRetentionScope {
+function nextSwmMetaRequesterScope(mode: SwmMetaTransferMode): SwmMetaRetentionScope {
   swmMetaInvocationSequence += 1;
-  return `${selected ? 'selected' : 'ordinary'}-swm-meta:retained:${swmMetaInvocationSequence}`;
+  return `${mode}-swm-meta:retained:${swmMetaInvocationSequence}`;
 }
 
 function asSyncFetchAbortError(reason: unknown): Error {
@@ -7555,36 +7556,141 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     const selectedPublicTargets = sharedMemoryPlanTargets(plan, 'selected-public');
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
-    const selectedSwmEnabled = Boolean(
-      options?.selectedSwmPriority && selectedPublicTargets.length > 0,
-    );
-    const selectedBootstrapOwner = selectedSwmEnabled
+    const transferMode = selectedPublicTargets.length === 0
+      ? 'private'
+      : options?.selectedSwmPriority ? 'selected' : 'ordinary';
+    const singleFlightKey = sharedMemorySyncSingleFlightKey({
+      remotePeerId,
+      contextGraphIds,
+      stopOnBackoffWorthyFailure,
+      targets: orderedTargets,
+      priority: options?.priority,
+      selectedSwm: transferMode === 'selected',
+      requestedScope,
+    });
+    const completedTargetKeys = new Set<string>();
+    const privateWork = (target: Rfc64SwmRecoveryTargetV1): ContextGraphSyncWork<SharedMemorySyncResult> => {
+      const { contextGraphId } = target;
+      return {
+        contextGraphId,
+        lane: 'swm_recovery',
+        operationId: `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
+        run: async (): Promise<SharedMemorySyncResult> => {
+          const recoveryLease = recoveryLeaseFor(contextGraphId);
+          try {
+            const recovered = await recoverContextGraphSwmWithProgressRetries({
+              recover: () => recoverPrivateContextGraph(contextGraphId, recoveryLease),
+              onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
+                this.log.info(
+                  ctx,
+                  `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
+                  + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
+                );
+              },
+            });
+            const result = emptySharedMemorySyncResult();
+            result.insertedDataTriples = recovered.insertedDataQuads;
+            result.insertedMetaTriples = recovered.insertedMetaQuads;
+            result.insertedTriples = recovered.insertedDataQuads + recovered.insertedMetaQuads;
+            result.droppedDataTriples = recovered.droppedDataTriples;
+            // A deadline-bounded recovery returns `completed=false` without
+            // mutating the store. Keep that retry signal inside this work item
+            // so every requester lane shares the same orchestration loop.
+            if (recovered.completed) {
+              result.completedPhases = 1;
+              completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
+            } else {
+              result.failedPhases = 1;
+              result.backoffWorthyFailures = 1;
+            }
+            return result;
+          } catch (error) {
+            if (getSyncBackpressureBusyError(error)) throw error;
+            this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${error instanceof Error ? error.message : String(error)}`);
+            return {
+              ...emptySharedMemorySyncResult(),
+              failedPeers: 1,
+              backoffWorthyFailures: 1,
+            };
+          }
+        },
+      };
+    };
+    const runOrderedWork = (
+      work: ContextGraphSyncWork<SharedMemorySyncResult>[],
+      onResult: (item: ContextGraphSyncWork<SharedMemorySyncResult>, result: SharedMemorySyncResult) => void = () => {},
+    ) => {
+      return runOrderedContextGraphSyncs({
+        work,
+        priorities: this.config.syncContextGraphPriorities,
+        emptyResult: emptySharedMemorySyncResult,
+        runWithAdmission: (item, run) => {
+          const selectedPublicWork = transferMode === 'selected'
+            && item.lane === 'shared_memory';
+          return this.runContextGraphSyncWithBackpressure(
+            ctx,
+            item.contextGraphId,
+            item.lane,
+            item.operationId,
+            run,
+            {
+              priorityOverride: selectedPublicWork ? options?.priority : undefined,
+              source: options?.source,
+              selectedSwmPriority: selectedPublicWork,
+            },
+          );
+        },
+        merge: mergeSharedMemorySyncResults,
+        onResult,
+        markDeferred: (summary) => ({
+          ...summary,
+          deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
+        }),
+        // Mirrors the durable fanout: a failed CG round is already recorded in
+        // the merged counters and must not cost the remaining CGs their turn.
+        // `failedPeers` is the peer-never-responded signal on the public lane;
+        // the private curator-recovery lane also reports it for its whole-round
+        // failures, which the consecutive-failure guard bounds instead of
+        // aborting on the first one.
+        isPeerTransportFailure: (part) => Boolean(
+          stopOnBackoffWorthyFailure && part.failedPeers > 0,
+        ),
+        onDeferred: (item, error) => this.log.info(
+          ctx,
+          `Deferring ${item.lane} at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
+        ),
+      });
+    };
+
+    if (transferMode === 'private') {
+      return runSyncSingleFlight(this, singleFlightKey, async () => execution(
+        await runOrderedWork(orderedTargets.map(privateWork)),
+        completedTargetKeys,
+      ), { scope: 'shared-memory', source: options?.source });
+    }
+
+    const selectedBootstrapOwner = transferMode === 'selected'
       ? this.selectedSwmBootstrapAdmission.beginTransfer(
         remotePeerId,
         selectedPublicTargets.map(({ contextGraphId }) => contextGraphId),
       )
       : null;
-    const metaRetentionEnabled = selectedPublicTargets.length > 0;
-    const metaRetentionBudget = metaRetentionEnabled
-      ? (() => {
-        const budget = resolveSyncResponderSnapshotPolicy(
-          this.config.syncResponderSnapshotLimits,
-          process.env,
-        ).budget;
-        return swmMetaRetentionBudgetFor(this, {
-          maxRows: budget.maxRows,
-          maxBytesEstimate: budget.maxBytesEstimate,
-          maxPrefixRows: budget.maxSnapshotRows,
-          maxPrefixBytesEstimate: budget.maxSnapshotBytesEstimate,
-        });
-      })()
-      : undefined;
+    const budget = resolveSyncResponderSnapshotPolicy(
+      this.config.syncResponderSnapshotLimits,
+      process.env,
+    ).budget;
+    const metaRetentionBudget = swmMetaRetentionBudgetFor(this, {
+      maxRows: budget.maxRows,
+      maxBytesEstimate: budget.maxBytesEstimate,
+      maxPrefixRows: budget.maxSnapshotRows,
+      maxPrefixBytesEstimate: budget.maxSnapshotBytesEstimate,
+    });
     const createMetaFetcher = (): SwmMetaFetcher => {
-      const requesterScope = nextSwmMetaRequesterScope(selectedSwmEnabled);
+      const requesterScope = nextSwmMetaRequesterScope(transferMode);
       return createSwmMetaFetcher({
         remotePeerId,
         requesterScope,
-        retentionBudget: metaRetentionBudget!,
+        retentionBudget: metaRetentionBudget,
         deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
         fetchPage: (request) => {
           const lease = recoveryLeaseFor(request.contextGraphId);
@@ -7608,27 +7714,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
       });
     };
-    const singleFlightKey = sharedMemorySyncSingleFlightKey({
-      remotePeerId,
-      contextGraphIds,
-      stopOnBackoffWorthyFailure,
-      targets: orderedTargets,
-      priority: options?.priority,
-      selectedSwm: selectedSwmEnabled,
-      requestedScope,
-    });
-
     const runSync = async (
-      metaFetcher?: SwmMetaFetcher,
+      metaFetcher: SwmMetaFetcher,
     ): Promise<SharedMemorySyncExecution> => {
       const syncPublicContextGraph = async (
         contextGraphId: string,
         remainingContextGraphs: number,
       ): Promise<SharedMemorySyncResult> => {
-        const mode = selectedSwmEnabled
+        const mode = transferMode === 'selected'
           ? (() => {
             const recoveryGuard = recoveryLeaseFor(contextGraphId);
-            if (recoveryGuard === undefined || metaFetcher === undefined) {
+            if (recoveryGuard === undefined) {
               throw new Error(
                 `Selected SWM target "${contextGraphId}" is missing its recovery capability`,
               );
@@ -7636,10 +7732,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             return {
               kind: 'selected-recovery' as const,
               recoveryGuard,
-              metadataFetcher: metaFetcher.strategy,
             };
           })()
-          : { kind: 'ordinary' as const, metadataFetcher: metaFetcher?.strategy };
+          : { kind: 'ordinary' as const };
         return recoveryExecutor.syncPublicTarget({
           ctx,
           remotePeerId,
@@ -7649,144 +7744,54 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
           stopOnBackoffWorthyFailure,
           mode,
+          metadataFetcher: metaFetcher.strategy,
         });
       };
 
-      const completedTargetKeys = new Set<string>();
       const selectedContinuationUnits: SelectedSwmContinuationUnit[] = [];
-      const work: ContextGraphSyncWork<SharedMemorySyncResult>[] = [];
-      for (const target of orderedTargets) {
-        const { contextGraphId } = target;
-        if (target.lane === 'selected-public') {
-          work.push({
-            contextGraphId,
+      const work: ContextGraphSyncWork<SharedMemorySyncResult>[] = orderedTargets.map((target) => (
+        target.lane === 'selected-public'
+          ? {
+            contextGraphId: target.contextGraphId,
             lane: 'shared_memory',
-            operationId: `shared-memory:${contextGraphId}:${remotePeerId.slice(-8)}`,
-            run: (remainingContextGraphs: number) => syncPublicContextGraph(
-              contextGraphId,
-              remainingContextGraphs,
-            ),
-          });
-          continue;
-        }
-        work.push({
-          contextGraphId,
-          lane: 'swm_recovery',
-          operationId: `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
-          run: async (): Promise<SharedMemorySyncResult> => {
-            const recoveryLease = recoveryLeaseFor(contextGraphId);
-            try {
-              const recovered = await recoverContextGraphSwmWithProgressRetries({
-                recover: () => recoverPrivateContextGraph(contextGraphId, recoveryLease),
-                onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
-                  this.log.info(
-                    ctx,
-                    `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
-                    + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
-                  );
-                },
-              });
-              const result = emptySharedMemorySyncResult();
-              result.insertedDataTriples = recovered.insertedDataQuads;
-              result.insertedMetaTriples = recovered.insertedMetaQuads;
-              result.insertedTriples = recovered.insertedDataQuads + recovered.insertedMetaQuads;
-              result.droppedDataTriples = recovered.droppedDataTriples;
-              // A deadline-bounded recovery returns `completed=false` without
-              // mutating the store. Keep that retry signal inside this work item
-              // so every requester lane shares the same orchestration loop.
-              if (recovered.completed) {
-                result.completedPhases = 1;
-                completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
-              } else {
-                result.failedPhases = 1;
-                result.backoffWorthyFailures = 1;
-              }
-              return result;
-            } catch (error) {
-              if (getSyncBackpressureBusyError(error)) throw error;
-              this.log.warn(ctx, `Curator-recovery for private CG "${contextGraphId}" from ${remotePeerId} failed: ${error instanceof Error ? error.message : String(error)}`);
-              return {
-                ...emptySharedMemorySyncResult(),
-                failedPeers: 1,
-                backoffWorthyFailures: 1,
-              };
-            }
-          },
-        });
-      }
-
-      const initialSummary = await runOrderedContextGraphSyncs({
-        work,
-        priorities: this.config.syncContextGraphPriorities,
-        emptyResult: emptySharedMemorySyncResult,
-        runWithAdmission: (item, run) => {
-          const selectedPublicWork = selectedSwmEnabled
-            && item.lane === 'shared_memory';
-          return this.runContextGraphSyncWithBackpressure(
-            ctx,
-            item.contextGraphId,
-            item.lane,
-            item.operationId,
-            run,
-            {
-              priorityOverride: selectedPublicWork ? options?.priority : undefined,
-              source: options?.source,
-              selectedSwmPriority: selectedPublicWork,
-            },
-          );
-        },
-        merge: mergeSharedMemorySyncResults,
-        onResult: (item, result) => {
-          if (
-            selectedSwmEnabled
-            && item.lane === 'shared_memory'
-            && recoveryLeaseFor(item.contextGraphId)?.isCurrent() !== false
-          ) {
-            const metadataContinuation = metaFetcher!.continuation(
-              item.contextGraphId,
-            );
-            selectedContinuationUnits.push({
-              work: {
-                ...item,
-                run: async (remainingContextGraphs) => {
-                  const nextResult = await item.run(remainingContextGraphs);
-                  return {
-                    result: nextResult,
-                    metadataContinuation: metaFetcher!.continuation(
-                      item.contextGraphId,
-                    ),
-                  };
-                },
-              },
-              initialRound: { result, metadataContinuation },
-            });
+            operationId: `shared-memory:${target.contextGraphId}:${remotePeerId.slice(-8)}`,
+            run: (remainingContextGraphs: number) => syncPublicContextGraph(target.contextGraphId, remainingContextGraphs),
           }
-        },
-        markDeferred: (summary) => ({
-          ...summary,
-          deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
-        }),
-        // Mirrors the durable fanout: a failed CG round is already recorded in
-        // the merged counters and must not cost the remaining CGs their turn.
-        // `failedPeers` is the peer-never-responded signal on the public lane;
-        // the private curator-recovery lane also reports it for its whole-round
-        // failures, which the consecutive-failure guard bounds instead of
-        // aborting on the first one.
-        isPeerTransportFailure: (part) => Boolean(
-          stopOnBackoffWorthyFailure && part.failedPeers > 0,
-        ),
-        onDeferred: (item, error) => this.log.info(
-          ctx,
-          `Deferring ${item.lane} at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
-        ),
+          : privateWork(target)
+      ));
+      const initialSummary = await runOrderedWork(work, (item, result) => {
+        if (
+          transferMode === 'selected'
+          && item.lane === 'shared_memory'
+          && recoveryLeaseFor(item.contextGraphId)?.isCurrent() !== false
+        ) {
+          const metadataContinuation = metaFetcher.continuation(
+            item.contextGraphId,
+          );
+          selectedContinuationUnits.push({
+            work: {
+              ...item,
+              run: async (remainingContextGraphs) => {
+                const nextResult = await item.run(remainingContextGraphs);
+                return {
+                  result: nextResult,
+                  metadataContinuation: metaFetcher.continuation(
+                    item.contextGraphId,
+                  ),
+                };
+              },
+            },
+            initialRound: { result, metadataContinuation },
+          });
+        }
       });
 
       if (
-        !selectedSwmEnabled
+        transferMode !== 'selected'
         || selectedContinuationUnits.length === 0
         || (initialSummary.deferredBackpressure ?? 0) > 0
       ) {
-        if (selectedSwmEnabled && (initialSummary.deferredBackpressure ?? 0) > 0) {
+        if (transferMode === 'selected' && (initialSummary.deferredBackpressure ?? 0) > 0) {
           this.log.info(
             ctx,
             `Selected RFC-64 SWM continuation from ${remotePeerId.slice(-8)} stopped on local backpressure`,
@@ -7892,13 +7897,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
 
     return runSyncSingleFlight(this, singleFlightKey, () => (
-      metaRetentionEnabled
-        ? this.getSwmMetaTransfers().run(
-          `${selectedSwmEnabled ? 'selected' : 'ordinary'}\0${remotePeerId}`,
-          createMetaFetcher,
-          (metaFetcher) => runSync(metaFetcher),
-        )
-        : runSync()
+      this.getSwmMetaTransfers().run(
+        { mode: transferMode, remotePeerId },
+        createMetaFetcher,
+        runSync,
+      )
     ), {
       scope: 'shared-memory',
       source: options?.source,
