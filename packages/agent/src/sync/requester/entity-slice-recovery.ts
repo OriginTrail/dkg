@@ -1,6 +1,5 @@
 import { decodeEntityShareMetadata, type EntityShareSliceDescriptor } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { RecoveryExecutionAdmission } from './recovery-execution-guard.js';
 
 export interface EntityRecoveryBatch {
   readonly rows: Quad[];
@@ -8,29 +7,69 @@ export interface EntityRecoveryBatch {
   readonly refs: readonly string[];
 }
 
-/** Write the admitted batch before publishing its resolved refs and coverage. */
-export async function commitEntityRecoveryBatch(
-  batch: EntityRecoveryBatch,
-  effects: {
-    readonly admission: RecoveryExecutionAdmission;
-    ensureContextGraph(): Promise<void>;
-    insert(rows: Quad[]): Promise<void>;
-    hydrateOwnership(): void;
-    markResolved(ref: string): void;
-    recordCoverage(): void;
-  },
-): Promise<void> {
-  if (batch.rows.length > 0) {
-    await effects.admission.admitAsyncMutation(async () => {
-      await effects.ensureContextGraph();
-      await effects.insert(batch.rows);
-      // Once admitted, ownership drains with the durable write even if the
-      // caller's selection is revoked while storage is awaited.
-      effects.hydrateOwnership();
-    });
-    for (const ref of batch.refs) effects.markResolved(ref);
-  }
-  effects.recordCoverage();
+export interface EntitySliceRecoveryAuthority {
+  readonly refs: ReadonlySet<string>;
+  batchFor(readyRefs: ReadonlySet<string>): EntityRecoveryBatch;
+}
+
+export type EntityRecoveryPhaseOutcome =
+  | { readonly kind: 'usable'; readonly metadataRows: readonly Quad[]; readonly newlyCountedMetadataRows: number }
+  | { readonly kind: 'parse-failed' }
+  | { readonly kind: 'evidence-rejected' }
+  | { readonly kind: 'incomplete' };
+
+export interface EntityRecoveryCounterEffects {
+  readonly insertedTriples: number;
+  readonly insertedMetaTriples: number;
+  readonly insertedDataTriples: number;
+}
+
+export type EntityRecoveryPlan = {
+  readonly rows: Quad[];
+  /** Publish these refs only after rows and ownership are durable. */
+  readonly postCommitRefs: readonly string[];
+  readonly counters: EntityRecoveryCounterEffects;
+  readonly recordDataPhase: boolean;
+} & (
+  | { readonly kind: 'usable'; readonly recordMetaPhase: true }
+  | { readonly kind: Exclude<EntityRecoveryPhaseOutcome['kind'], 'usable'>; readonly recordMetaPhase: false }
+);
+
+/**
+ * Reduce the correlated snapshot flags to one explicit recovery transaction.
+ * This function is deliberately pure: the requester keeps the short, visible
+ * durability sequence and applies these post-commit effects only afterwards.
+ */
+export function planEntityRecovery(input: {
+  readonly phase: EntityRecoveryPhaseOutcome;
+  readonly verifiedDataRows: readonly Quad[];
+  readonly entityAuthority: EntitySliceRecoveryAuthority;
+  readonly readyRefs: ReadonlySet<string>;
+}): EntityRecoveryPlan {
+  const readyBatch = input.entityAuthority.batchFor(input.readyRefs);
+  const entityBatch = input.phase.kind === 'usable' || input.phase.kind === 'parse-failed'
+    ? readyBatch
+    : { rows: [], refs: [] };
+  const metadataRows = input.phase.kind === 'usable'
+    ? [...input.phase.metadataRows]
+    : entityBatch.rows;
+  const rows = [...input.verifiedDataRows, ...metadataRows];
+  const insertedMetaTriples = input.phase.kind === 'usable'
+    ? input.phase.newlyCountedMetadataRows
+    : metadataRows.length;
+  const common = {
+    rows,
+    postCommitRefs: metadataRows.length > 0 ? entityBatch.refs : [],
+    counters: {
+      insertedTriples: input.verifiedDataRows.length + insertedMetaTriples,
+      insertedMetaTriples,
+      insertedDataTriples: input.verifiedDataRows.length,
+    },
+    recordDataPhase: input.phase.kind === 'usable' || input.verifiedDataRows.length > 0,
+  };
+  return input.phase.kind === 'usable'
+    ? { ...common, kind: 'usable', recordMetaPhase: true }
+    : { ...common, kind: input.phase.kind, recordMetaPhase: false };
 }
 
 /** Apply reference authority and whole-operation readiness to decoded metadata. */
@@ -38,7 +77,7 @@ export function createEntitySliceRecoveryPlan(
   contextGraphId: string,
   metaQuads: readonly Quad[],
   sourcesByRef: ReadonlyMap<string, ReadonlySet<string>>,
-): { refs: ReadonlySet<string>; batchFor(readyRefs: ReadonlySet<string>): EntityRecoveryBatch } {
+): EntitySliceRecoveryAuthority {
   const records = decodeEntityShareMetadata(contextGraphId, metaQuads);
   const key = (graph: string, subject: string) => `${graph}\u0000${subject}`;
   const headClaims = new Set(records.filter(record => record.kind === 'head')

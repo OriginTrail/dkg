@@ -13,7 +13,8 @@ const cg = 'entity-decoder';
 const operationId = 'operation';
 const roots = ['urn:entity:1', 'urn:entity:2'];
 const dkg = 'http://dkg.io/ontology/';
-async function fixture(subGraphName?: string) {
+type SnapshotBacking = 'snapshot-store' | 'snapshot-graph';
+async function fixture(subGraphName?: string, backing: SnapshotBacking = 'snapshot-store') {
   const store = new OxigraphStore();
   const graphManager = new GraphManager(store);
   const graph = graphManager.sharedMemoryMetaUri(cg, subGraphName);
@@ -21,7 +22,9 @@ async function fixture(subGraphName?: string) {
     await storeWorkspaceOperationPublicQuads({ store, graphManager, contextGraphId: cg, shareOperationId: operationId,
       rootEntities: roots, subGraphName, publisherPeerId: 'peer', timestamp: new Date(0),
       quads: roots.map(subject => ({ subject, predicate: 'urn:name', object: '"entity"', graph: '' })),
-      publicSnapshotStore: { getSnapshot: async () => null, putSnapshot: async ({ digest }) => ({ ref: digest, byteLength: 0 }) },
+      ...(backing === 'snapshot-store' ? {
+        publicSnapshotStore: { getSnapshot: async () => null, putSnapshot: async ({ digest }: { digest: string }) => ({ ref: digest, byteLength: 0 }) },
+      } : {}),
     });
     const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
     if (result.type !== 'quads') throw new Error('Expected fixture metadata');
@@ -31,8 +34,13 @@ async function fixture(subGraphName?: string) {
   } finally { await store.close(); }
 }
 
-it.each([undefined, 'research'])('decodes publisher output in subgraph %s', async subGraphName => {
-  const { metadata, graph } = await fixture(subGraphName);
+it.each([
+  { subGraphName: undefined, backing: 'snapshot-store' as const },
+  { subGraphName: 'research', backing: 'snapshot-store' as const },
+  { subGraphName: undefined, backing: 'snapshot-graph' as const },
+  { subGraphName: 'research', backing: 'snapshot-graph' as const },
+])('decodes $backing publisher output in subgraph $subGraphName', async ({ subGraphName, backing }) => {
+  const { metadata, graph } = await fixture(subGraphName, backing);
   const records = decodeEntityShareMetadata(cg, metadata);
   const operation = records.find(record => record.kind === 'operation');
   expect(operation).toMatchObject({ kind: 'operation', graph, subGraphName, rootEntities: expect.arrayContaining(roots) });
@@ -40,6 +48,11 @@ it.each([undefined, 'research'])('decodes publisher output in subgraph %s', asyn
   expect(slices).toHaveLength(2);
   expect(slices.map(slice => slice.rootEntity).sort()).toEqual(roots);
   expect(slices.every(slice => slice.ref.length > 0 && slice.operationSubject === operation?.subject)).toBe(true);
+  for (const slice of slices) {
+    expect(slice.metadataRows).toEqual(metadata.filter(row => row.subject === slice.subject));
+    expect(slice.metadataRows.some(row => row.predicate === dkg + 'publicSnapshotGraph'))
+      .toBe(backing === 'snapshot-graph');
+  }
 });
 
 it.each([undefined, 'research'])('recovers a valid legacy explicit snapshot reference in subgraph %s', async subGraphName => {

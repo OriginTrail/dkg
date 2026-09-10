@@ -1,4 +1,8 @@
-import { commitEntityRecoveryBatch, createEntitySliceRecoveryPlan, type EntityRecoveryBatch } from './entity-slice-recovery.js';
+import {
+  createEntitySliceRecoveryPlan,
+  planEntityRecovery,
+  type EntityRecoveryPhaseOutcome,
+} from './entity-slice-recovery.js';
 import { stripMetadataLiteral as stripLiteral } from '../metadata-literal.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
@@ -1403,7 +1407,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // while graph-scoped assets or selected evidence remain unproven.
         summary.failedPhases += 1;
       }
-      const readyEntityBatch = entitySnapshotAuthority.batchFor(readyEntityRefs);
       const storeStartedAt = Date.now();
       let metaForBulkInsert: Quad[] = [];
       let newlyCountedMeta = 0;
@@ -1436,54 +1439,55 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
       }
 
-      // Failed descriptor parsing can still admit independent entity slices.
-      // A selected evidence rejection admits no entity metadata or refs.
-      const recoveredEntityBatch: EntityRecoveryBatch = !descriptorsAuthoritativeForCg && snapshotEvidenceAccepted
-        ? readyEntityBatch
-        : { rows: [], refs: [] };
-      const metadataRows = snapshotPhaseUsable ? metaForBulkInsert : recoveredEntityBatch.rows;
-      const recoveryBatch: EntityRecoveryBatch = {
-        rows: [...validWsQuads, ...metadataRows],
-        refs: snapshotPhaseUsable ? readyEntityBatch.refs : recoveredEntityBatch.refs,
-      };
-      await commitEntityRecoveryBatch(recoveryBatch, {
-        admission: recoveryBoundary,
-        ensureContextGraph: () => ensureContextGraph(pid),
-        insert: storeInsert,
-        hydrateOwnership,
-        markResolved(ref) {
+      const entityRecoveryPhase: EntityRecoveryPhaseOutcome = snapshotPhaseUsable
+        ? { kind: 'usable', metadataRows: metaForBulkInsert, newlyCountedMetadataRows: newlyCountedMeta }
+        : !snapshotEvidenceAccepted
+          ? { kind: 'evidence-rejected' }
+          : !descriptorsAuthoritativeForCg
+            ? { kind: 'parse-failed' }
+            : { kind: 'incomplete' };
+      const entityRecovery = planEntityRecovery({
+        phase: entityRecoveryPhase,
+        verifiedDataRows: validWsQuads,
+        entityAuthority: entitySnapshotAuthority,
+        readyRefs: readyEntityRefs,
+      });
+
+      // One admitted durability boundary, followed in order by ownership,
+      // resolved refs, and coverage publication. The pure plan above owns the
+      // policy; this small sequence owns the observable transition.
+      if (entityRecovery.rows.length > 0) {
+        await recoveryBoundary.admitAsyncMutation(async () => {
+          await ensureContextGraph(pid);
+          await storeInsert(entityRecovery.rows);
+          hydrateOwnership();
+        });
+        for (const ref of entityRecovery.postCommitRefs) {
           materializedRefs.add(ref);
           snapshotWalk?.markResolved(ref);
           materializedRefsForCg = materializedRefs.size;
-        },
-        recordCoverage: () => recordSnapshotCoverage(
-          snapshotSync,
-          wsMetaResult.completed,
-          descriptorsAuthoritativeForCg,
-          materializationFailures,
-          materializedRefs.size,
-          unresolvedRefSample,
-          pid,
-        ),
-      });
+        }
+      }
+      recordSnapshotCoverage(
+        snapshotSync,
+        wsMetaResult.completed,
+        descriptorsAuthoritativeForCg,
+        materializationFailures,
+        materializedRefs.size,
+        unresolvedRefSample,
+        pid,
+      );
+      summary.insertedTriples += entityRecovery.counters.insertedTriples;
+      summary.insertedMetaTriples += entityRecovery.counters.insertedMetaTriples;
+      summary.insertedDataTriples += entityRecovery.counters.insertedDataTriples;
+      if (entityRecovery.recordDataPhase) recordPhaseOutcome(wsDataResult);
 
-      if (!snapshotPhaseUsable) {
-        summary.insertedTriples += recoveryBatch.rows.length;
-        summary.insertedMetaTriples += metadataRows.length;
-        summary.insertedDataTriples += validWsQuads.length;
-        if (validWsQuads.length > 0) recordPhaseOutcome(wsDataResult);
+      if (entityRecovery.kind !== 'usable') {
         if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) break;
         continue;
       }
 
-      if (validWsQuads.length > 0) {
-        summary.insertedTriples += validWsQuads.length;
-        summary.insertedDataTriples += validWsQuads.length;
-      }
-      summary.insertedTriples += newlyCountedMeta;
-      summary.insertedMetaTriples += newlyCountedMeta;
-      recordPhaseOutcome(wsMetaResult);
-      recordPhaseOutcome(wsDataResult);
+      if (entityRecovery.recordMetaPhase) recordPhaseOutcome(wsMetaResult);
       if (metadataFetcher) {
         recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
       }
