@@ -559,7 +559,7 @@ describe('RFC-64 private catalog activation', () => {
     } as never, chainIdentity)).toMatchObject({
       enabled: false,
       selectedContextGraphs: [],
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
     });
     expect(resolveRfc64CatalogActivationInputV1({
       enabled: false,
@@ -569,7 +569,7 @@ describe('RFC-64 private catalog activation', () => {
     } as never, chainIdentity)).toMatchObject({
       enabled: false,
       selectedContextGraphs: [],
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
     });
   });
 
@@ -639,6 +639,34 @@ describe('RFC-64 private catalog activation', () => {
       ...privateActivation(),
       rollout: { killSwitch: 'yes' },
     } as never, chainIdentity)).toThrow(/killSwitch must be a boolean/u);
+
+    expect(() => resolveRfc64CatalogActivationConfigV1({
+      rollout: { defaultMode: 'automatic' },
+    } as never, chainIdentity)).toThrow(/defaultMode must be legacy, shadow, or catalog/u);
+    expect(() => resolveRfc64PublicCatalogActivationInputV1({
+      rollout: { defaultMode: 'legacy' },
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: policyEnvelope(policy(PUBLIC_CG, 0)),
+          targets: [],
+        }],
+      },
+    } as never, chainIdentity)).toThrow(/configure lifecycle defaults under rfc64Catalog/u);
+  });
+
+  it('uses a validated unified default mode for unlisted responsibilities', () => {
+    const resolved = resolveRfc64CatalogActivationConfigV1({
+      rollout: {
+        defaultMode: 'legacy',
+        contextGraphModes: { [PUBLIC_CG]: 'shadow' },
+      },
+    }, chainIdentity);
+
+    expect(resolved.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [PUBLIC_CG]: 'shadow' },
+    });
   });
 
   it('treats omitted unified activation as enabled with an optional seed', () => {
@@ -651,7 +679,7 @@ describe('RFC-64 private catalog activation', () => {
       selectedPublicContextGraphs: [],
       selectedPrivateContextGraphs: [],
       selectedCatalogAuthoringControls: [],
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
     });
   });
 

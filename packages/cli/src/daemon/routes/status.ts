@@ -615,6 +615,7 @@ export interface Rfc64CatalogConfigurationEvidenceV1 {
   readonly activationManifestPresent: boolean;
   readonly deprecatedDisabledOverride: boolean;
   readonly killSwitch: boolean;
+  readonly defaultMode: 'legacy' | 'shadow' | 'catalog';
   readonly legacyOverrideCount: number;
   readonly shadowOverrideCount: number;
   readonly digest: string;
@@ -629,6 +630,7 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
   config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
   effectiveRollout: Readonly<{
     killSwitch: boolean;
+    defaultMode?: 'legacy' | 'shadow' | 'catalog';
     contextGraphModes: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
   }>,
 ): Rfc64CatalogConfigurationEvidenceV1 {
@@ -642,6 +644,7 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
     || publicCatalog?.bootstrap !== undefined;
   const modes = Object.entries(effectiveRollout.contextGraphModes)
     .sort(([left], [right]) => left.localeCompare(right));
+  const defaultMode = effectiveRollout.defaultMode ?? 'catalog';
   const source = !catalogControlPresent && !deprecatedPublicControlPresent
     ? 'default-omitted' as const
     : deprecatedDisabledOverride
@@ -656,6 +659,7 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
     activationManifestPresent,
     deprecatedDisabledOverride,
     killSwitch: effectiveRollout.killSwitch,
+    defaultMode,
     contextGraphModes: modes,
   };
   return Object.freeze({
@@ -666,8 +670,11 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
     activationManifestPresent,
     deprecatedDisabledOverride,
     killSwitch: effectiveRollout.killSwitch,
-    legacyOverrideCount: modes.filter(([, mode]) => mode === 'legacy').length,
-    shadowOverrideCount: modes.filter(([, mode]) => mode === 'shadow').length,
+    defaultMode,
+    legacyOverrideCount:
+      defaultMode === 'legacy' ? 0 : modes.filter(([, mode]) => mode === 'legacy').length,
+    shadowOverrideCount:
+      defaultMode === 'shadow' ? 0 : modes.filter(([, mode]) => mode === 'shadow').length,
     digest: `sha256:${createHash('sha256')
       .update(JSON.stringify(digestPayload))
       .digest('hex')}`,
@@ -864,6 +871,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // rollout plan. Preserve the package-boundary compatibility behavior for
       // older direct JS callers that still pass the pre-rollout shape.
       killSwitch: rfc64CatalogKillSwitchActiveV1(rfc64CatalogActivation),
+      defaultMode: 'catalog' as const,
       contextGraphModes: Object.fromEntries(
         rfc64CatalogActivation.selectedContextGraphs.map((contextGraphId) => [
           contextGraphId,

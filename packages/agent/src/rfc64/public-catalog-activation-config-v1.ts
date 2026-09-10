@@ -563,6 +563,7 @@ export function resolveRfc64CatalogActivationInputV1(
         || resolvedInput.autoPublish !== undefined
         || (resolvedInput.selectedCatalogAuthoringControls?.length ?? 0) !== 0
         || rollout.killSwitch
+        || rollout.defaultMode !== 'catalog'
         || Object.keys(rollout.contextGraphModes).length !== 0
       ) {
         throw new TypeError('disabled rfc64Catalog activation must not carry controls');
@@ -1060,6 +1061,7 @@ export function snapshotResolvedRfc64PublicCatalogActivationConfigV1(
       || autoPublishInput !== undefined
       || bootstrapInput !== undefined
       || rolloutInput.killSwitch
+      || rolloutInput.defaultMode !== 'catalog'
       || Object.keys(rolloutInput.contextGraphModes).length !== 0
     ) {
       throw new TypeError('disabled rfc64PublicCatalogActivation must not carry controls');

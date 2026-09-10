@@ -1246,7 +1246,7 @@ export class DKGAgent extends DKGAgentBase {
       responsibilityDefaultMode:
         rfc64CatalogExplicitlyDisabled || rfc64CatalogEphemeralLegacyFallback
           ? 'legacy'
-          : 'catalog',
+          : catalogActivation.rollout.defaultMode,
       standaloneTrack2ContextGraphs:
         normalizedConfig.rfc64PublicCatalogActivation === undefined
           ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(
