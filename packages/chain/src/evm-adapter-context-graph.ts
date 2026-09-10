@@ -18,7 +18,7 @@ import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityIndexRevision, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveContextGraphAuthorityHistory,
@@ -36,6 +36,10 @@ import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
+import { contextGraphAuthorityIndexStateRevision } from
+  './context-graph-authority-index-checkpoint.js';
+
+const CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS = 4_096;
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -1131,6 +1135,118 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         // A cold authority resolution performs a bounded historical log scan;
         // the default 4s point-read cap aborts healthy fallback providers before
         // they can finish. Warm checkpoint suffixes remain fast under this cap.
+        policy: 'wideLogScan',
+      },
+    );
+  }
+
+  /**
+   * Advance the daemon-owned materialized authority index once and return only
+   * opaque per-CG revisions. This is an opportunistic scheduling capability:
+   * SDK adapters without a local index return `null` and keep legacy refreshes.
+   */
+  async getContextGraphAuthorityIndexRevisions(
+    contextGraphIds: readonly bigint[],
+    options: ChainReadOptions = {},
+  ): Promise<readonly ContextGraphAuthorityIndexRevision[] | null> {
+    await this.init();
+    options.signal?.throwIfAborted();
+    const index = this.contextGraphAuthorityIndex;
+    if (index === undefined) return null;
+    if (
+      !Array.isArray(contextGraphIds)
+      || contextGraphIds.length > CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS
+    ) {
+      throw new Error('Context Graph authority revision target set is invalid');
+    }
+    const targetIds = new Set<string>();
+    for (const contextGraphId of contextGraphIds) {
+      if (
+        typeof contextGraphId !== 'bigint'
+        || contextGraphId <= 0n
+        || contextGraphId > ethers.MaxUint256
+      ) {
+        throw new Error('Context Graph authority revision target id is invalid');
+      }
+      targetIds.add(contextGraphId.toString(10));
+    }
+    if (targetIds.size === 0) return Object.freeze([]);
+
+    const base = this.requireContextGraphStorage();
+    return this.readTipProvider(
+      'getContextGraphAuthorityIndexRevisions',
+      async (provider) => {
+        options.signal?.throwIfAborted();
+        const finalized = await provider.getBlock('finalized');
+        if (finalized === null || finalized.hash === null) {
+          throw new Error('finalized Context Graph authority block is unavailable');
+        }
+        const finalizedHash = finalized.hash;
+        const contract = base.connect(provider) as Contract;
+        const contractAddress = (await contract.getAddress()).toLowerCase();
+        const deploymentBlockNumber = (await this.resolveContractDeployBlock(
+          contractAddress,
+          'getContextGraphAuthorityIndexRevisions',
+          'ContextGraphStorage',
+        )).fromBlock;
+        const authorityTopics = contextGraphAuthorityEventTopics(contract.interface);
+        const checkpoint = await index.snapshot({
+          scope: [this.deploymentId, contractAddress].join(':'),
+          readScope: provider,
+          deploymentBlockNumber,
+          finalized: { number: finalized.number, hash: finalizedHash },
+          pageSize: this.cgRegistryScanPageSize,
+          signal: options.signal,
+          readBlockHash: async (blockNumber, lifecycleSignal) => (
+            (await withRpcRequestAbortSignal(
+              lifecycleSignal,
+              () => provider.getBlock(blockNumber),
+            ))?.hash ?? null
+          ),
+          readPage: async (fromBlock, toBlock, lifecycleSignal) => {
+            const logs = await readAdaptiveEvmLogRange({
+              read: (rangeFrom, rangeTo) => withRpcRequestAbortSignal(
+                lifecycleSignal,
+                () => provider.getLogs({
+                  address: contractAddress,
+                  topics: [[...authorityTopics]],
+                  fromBlock: rangeFrom,
+                  toBlock: rangeTo,
+                }),
+              ),
+              fromBlock,
+              toBlock,
+              signal: lifecycleSignal,
+            });
+            return logs.map((log) => normalizeContextGraphAuthorityIndexLog(
+              contract.interface,
+              log,
+            ));
+          },
+        });
+        options.signal?.throwIfAborted();
+        const revisions = checkpoint.states
+          .filter(({ contextGraphId }) => targetIds.has(contextGraphId))
+          .map((state) => Object.freeze({
+            contextGraphId: state.contextGraphId,
+            revision: contextGraphAuthorityIndexStateRevision(state),
+          }));
+        const stable = await provider.getBlock(finalized.number);
+        if (stable?.hash?.toLowerCase() !== finalizedHash.toLowerCase()) {
+          throw new Error(
+            'finalized Context Graph authority anchor changed during revision scan',
+          );
+        }
+        return Object.freeze(revisions);
+      },
+      {
+        signal: options.signal,
+        isRetryable: (error: unknown) => (
+          !options.signal?.aborted && (
+            isContextGraphAuthorityIndexRetryableError(error)
+            || isRetryableRpcError(error)
+          )
+        ),
         policy: 'wideLogScan',
       },
     );

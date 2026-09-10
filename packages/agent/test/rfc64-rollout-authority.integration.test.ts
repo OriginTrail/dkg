@@ -1231,6 +1231,44 @@ describe('RFC-64 rollout authority integration', () => {
       });
   });
 
+  it('maps locally bound responsibilities onto one shared authority revision read', async () => {
+    const revision = `0x${'ab'.repeat(32)}`;
+    const readRevisions = vi.fn(async () => Object.freeze([Object.freeze({
+      contextGraphId: '9',
+      revision,
+    })]));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      getContextGraphAuthoritySnapshot: vi.fn(async () => (
+        finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0')
+      )),
+      getContextGraphAuthorityIndexRevisions: readRevisions,
+    });
+    const edge = await startAgent({
+      name: 'registered-authority-revision-projection',
+      config: { chainAdapter },
+    });
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Authority revision projection',
+      callerAgentAddress: AUTHOR,
+    });
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
+    readRevisions.mockClear();
+
+    const revisions = await edge.readRfc64CatalogAuthorityIndexRevisionsV1(
+      [CONTEXT_GRAPH_ID, `${AUTHOR}/unbound`],
+      new AbortController().signal,
+    );
+
+    expect(revisions).toEqual(new Map([[CONTEXT_GRAPH_ID, revision]]));
+    expect(readRevisions).toHaveBeenCalledOnce();
+    expect(readRevisions).toHaveBeenCalledWith([9n], {
+      signal: expect.any(AbortSignal),
+    });
+  });
+
   it('shares provider-pool exhaustion across registered authority reconciliations', async () => {
     const readAuthority = vi.fn(async () => {
       throw new RpcEndpointsExhaustedError(
@@ -1442,6 +1480,7 @@ describe('RFC-64 rollout authority integration', () => {
     vi.useFakeTimers();
     try {
       runtime.start(createOperationContext('system'));
+      await runtime.whenIdle();
       expect(reconcile).toHaveBeenCalledTimes(1);
       expect(reconcile).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(AbortSignal));
       reconcile.mockClear();
@@ -1449,6 +1488,7 @@ describe('RFC-64 rollout authority integration', () => {
       await vi.advanceTimersByTimeAsync(
         RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
       );
+      await runtime.whenIdle();
       expect(reconcile).toHaveBeenCalledTimes(1);
       expect(reconcile).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(AbortSignal));
       await runtime.close();

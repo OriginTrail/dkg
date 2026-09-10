@@ -1298,6 +1298,50 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
+  /**
+   * Project local RFC-64 responsibilities onto opaque revisions from the
+   * daemon-owned contract-wide authority index. Missing local bindings remain
+   * absent so the refresh loop keeps their legacy full-reconciliation path.
+   */
+  async readRfc64CatalogAuthorityIndexRevisionsV1(
+    this: DKGAgent,
+    contextGraphIds: readonly string[],
+    signal: AbortSignal,
+  ): Promise<ReadonlyMap<string, string> | null> {
+    const readRevisions = this.chain.getContextGraphAuthorityIndexRevisions;
+    if (typeof readRevisions !== 'function') return null;
+
+    const localIdsByOnChainId = new Map<string, string[]>();
+    for (const contextGraphId of contextGraphIds) {
+      const knownOnChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
+        ?? (/^[1-9][0-9]*$/u.test(contextGraphId) ? contextGraphId : undefined);
+      if (knownOnChainId === undefined || !/^[1-9][0-9]*$/u.test(knownOnChainId)) continue;
+      const numericId = BigInt(knownOnChainId);
+      if (numericId > ethers.MaxUint256) continue;
+      const locals = localIdsByOnChainId.get(knownOnChainId) ?? [];
+      locals.push(contextGraphId);
+      localIdsByOnChainId.set(knownOnChainId, locals);
+    }
+    if (localIdsByOnChainId.size === 0) return new Map();
+
+    const revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
+      signal,
+      (readSignal) => readRevisions.call(
+        this.chain,
+        [...localIdsByOnChainId.keys()].map((id) => BigInt(id)),
+        { signal: readSignal },
+      ),
+    );
+    if (revisions === null) return null;
+    const byLocalContextGraph = new Map<string, string>();
+    for (const { contextGraphId, revision } of revisions) {
+      for (const localContextGraphId of localIdsByOnChainId.get(contextGraphId) ?? []) {
+        byLocalContextGraph.set(localContextGraphId, revision);
+      }
+    }
+    return byLocalContextGraph;
+  }
+
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */
   async readRfc64CatalogOperationalStatusV1(
     this: DKGAgent,

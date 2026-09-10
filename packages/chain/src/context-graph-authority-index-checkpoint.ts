@@ -141,6 +141,23 @@ function stateIntegrityValues(
   ]);
 }
 
+/**
+ * Opaque, deterministic revision for one materialized authority state.
+ *
+ * Consumers can compare this value without learning which authority field
+ * changed. The domain tag keeps it independent from the checkpoint integrity
+ * encoding even though both deliberately cover the complete state.
+ */
+export function contextGraphAuthorityIndexStateRevision(
+  state: ContextGraphAuthorityIndexState,
+): string {
+  const canonical = JSON.stringify([
+    'dkg-context-graph-authority-index-state-revision-v1',
+    ...stateIntegrityValues(state),
+  ]);
+  return ethers.keccak256(ethers.toUtf8Bytes(canonical)).toLowerCase();
+}
+
 function contextGraphAuthorityIndexIntegrity(
   checkpoint: ContextGraphAuthorityIndexIntegrityInput,
 ): string {

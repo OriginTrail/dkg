@@ -1071,10 +1071,19 @@ export class DKGAgent extends DKGAgentBase {
       readActiveContextGraphIds: () => this.readRfc64CatalogResponsibilitiesV1()
         .filter(({ active, mode }) => active && mode !== 'legacy')
         .map(({ contextGraphId }) => contextGraphId),
+      readAuthorityRevisions: (contextGraphIds, signal) => (
+        this.readRfc64CatalogAuthorityIndexRevisionsV1(contextGraphIds, signal)
+      ),
       onActiveContextGraphIdsReadFailure: (error) => {
         this.log.warn(
           createOperationContext('system'),
           `RFC-64 authority refresh could not enumerate active context graphs: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+      onAuthorityRevisionsReadFailure: (error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 authority revision scan incomplete: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
       refreshContextGraph: (contextGraphId, signal) => (

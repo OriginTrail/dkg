@@ -516,6 +516,12 @@ export interface ContextGraphAuthoritySnapshot {
   readonly sourceBlockHash: string;
 }
 
+/** Opaque per-CG revision projected from the durable materialized authority index. */
+export interface ContextGraphAuthorityIndexRevision {
+  readonly contextGraphId: string;
+  readonly revision: string;
+}
+
 export class ContextGraphChainScanPartialError extends Error {
   readonly partialResults: ContextGraphOnChain[];
   readonly scannedToBlock: number;
@@ -1367,6 +1373,15 @@ export interface ChainAdapter {
       contextGraphId: bigint,
       options?: ChainReadOptions,
     ): Promise<ContextGraphAuthoritySnapshot>;
+    /**
+     * Advance the shared authority index once and project revisions for the
+     * requested registered CGs. Returns `null` when no local index is bound so
+     * callers can retain their legacy full-refresh behavior.
+     */
+    getContextGraphAuthorityIndexRevisions?(
+      contextGraphIds: readonly bigint[],
+      options?: ChainReadOptions,
+    ): Promise<readonly ContextGraphAuthorityIndexRevision[] | null>;
 
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.

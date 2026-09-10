@@ -323,4 +323,100 @@ describe('RFC-64 catalog authority refresh loop', () => {
     expect(attempts).toEqual(['cg-a', 'cg-a']);
     await loop.close();
   });
+
+  it('refreshes only changed revisions between periodic safety passes', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    let revisions = new Map([
+      ['cg-a', 'revision-a-1'],
+      ['cg-b', 'revision-b-1'],
+    ]);
+    const attempts: string[] = [];
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      readAuthorityRevisions: async () => revisions,
+      refreshContextGraph: async (contextGraphId) => { attempts.push(contextGraphId); },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b']);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b']);
+
+    revisions = new Map([
+      ['cg-a', 'revision-a-2'],
+      ['cg-b', 'revision-b-1'],
+    ]);
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-a']);
+
+    // Three ordinary intervals after startup retain a full revalidation
+    // before the four-interval freshness deadline.
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-a', 'cg-a', 'cg-b']);
+    await loop.close();
+  });
+
+  it('keeps unindexed responsibilities on the legacy every-pass path', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const attempts: string[] = [];
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['registered', 'unregistered'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      readAuthorityRevisions: async () => new Map([['registered', 'revision-1']]),
+      refreshContextGraph: async (contextGraphId) => { attempts.push(contextGraphId); },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['registered', 'unregistered', 'unregistered']);
+    await loop.close();
+  });
+
+  it('contains a failed ordinary delta scan but preserves full safety revalidation', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const failure = new Error('shared index unavailable');
+    const readFailures: unknown[] = [];
+    const attempts: string[] = [];
+    let reads = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      readAuthorityRevisions: async () => {
+        reads += 1;
+        if (reads === 1) return new Map([['cg-a', 'a-1'], ['cg-b', 'b-1']]);
+        throw failure;
+      },
+      onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
+      refreshContextGraph: async (contextGraphId) => { attempts.push(contextGraphId); },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b']);
+    expect(readFailures).toEqual([failure, failure]);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-a', 'cg-b']);
+    expect(readFailures).toEqual([failure, failure, failure]);
+    await loop.close();
+  });
 });

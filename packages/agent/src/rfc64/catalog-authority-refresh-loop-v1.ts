@@ -29,6 +29,15 @@ const rfc64CatalogAuthorityRefreshSchedulerV1:
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
   readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
+  /**
+   * Optional shared-index projection. A `null` result retains legacy all-CG
+   * refreshes; omitted CGs are also refreshed so incomplete bindings fail safe.
+   */
+  readonly readAuthorityRevisions?: (
+    contextGraphIds: readonly string[],
+    signal: AbortSignal,
+  ) => Promise<ReadonlyMap<string, string> | null>;
+  readonly onAuthorityRevisionsReadFailure?: (error: unknown) => void;
   readonly refreshContextGraph: (
     contextGraphId: string,
     signal: AbortSignal,
@@ -42,6 +51,13 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
   readonly #lanes = new Map<string, CoalescingRecurringTask>();
   readonly #retirements = new Set<Promise<void>>();
+  readonly #acceptedRevisions = new Map<string, string>();
+  readonly #targetRevisions = new Map<
+    string,
+    Readonly<{ revision: string | null }>
+  >();
+  #passOwner: CoalescingRecurringTask | null = null;
+  #pass = 0;
   #timer: ReturnType<typeof setInterval> | null = null;
   #started = false;
   #close: Promise<void> | null = null;
@@ -50,13 +66,31 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     this.#scheduler = options.scheduler ?? rfc64CatalogAuthorityRefreshSchedulerV1;
   }
 
+  #createPassOwner(): CoalescingRecurringTask {
+    return new CoalescingRecurringTask({
+      // Preserve one follow-up tick so responsibility changes observed while
+      // the selector is settling cannot leave a retired CG lane alive.
+      requestWhileRunning: 'coalesce',
+      runPass: (signal) => this.#runRefreshPass(signal),
+      onError: (error) => {
+        if (!this.#started) return;
+        this.options.onAuthorityRevisionsReadFailure?.(error);
+      },
+      closingMessage: 'RFC-64 authority refresh selection stopped during agent shutdown',
+    });
+  }
+
   #createLane(contextGraphId: string): CoalescingRecurringTask {
     return new CoalescingRecurringTask({
-      requestWhileRunning: 'drop',
+      requestWhileRunning: 'coalesce',
       runPass: async (signal) => {
+        const target = this.#targetRevisions.get(contextGraphId);
         try {
           await this.options.refreshContextGraph(contextGraphId, signal);
           if (signal.aborted) return;
+          if (target?.revision !== null && target?.revision !== undefined) {
+            this.#acceptedRevisions.set(contextGraphId, target.revision);
+          }
         } catch (error) {
           if (signal.aborted) return;
           this.options.onRefreshFailure(contextGraphId, error);
@@ -74,6 +108,8 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
   ): void {
     if (this.#lanes.get(contextGraphId) !== lane) return;
     this.#lanes.delete(contextGraphId);
+    this.#acceptedRevisions.delete(contextGraphId);
+    this.#targetRevisions.delete(contextGraphId);
     const retirement = lane.close();
     this.#retirements.add(retirement);
     void retirement.then(
@@ -88,6 +124,8 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     }
     if (this.#started) return;
     this.#started = true;
+    this.#pass = 0;
+    this.#passOwner = this.#createPassOwner();
     this.#timer = this.#scheduler.setInterval(
       this.trigger,
       RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
@@ -97,6 +135,10 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
 
   readonly trigger = (): void => {
     if (!this.#started) return;
+    this.#passOwner?.request();
+  };
+
+  async #runRefreshPass(signal: AbortSignal): Promise<void> {
     let activeContextGraphIds: readonly string[];
     try {
       activeContextGraphIds = this.options.readActiveContextGraphIds();
@@ -104,24 +146,63 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       this.options.onActiveContextGraphIdsReadFailure(error);
       return;
     }
+    signal.throwIfAborted();
     const desiredContextGraphIds = new Set(activeContextGraphIds);
     for (const [contextGraphId, lane] of this.#lanes) {
       if (!desiredContextGraphIds.has(contextGraphId)) {
         this.#retireLane(contextGraphId, lane);
       }
     }
+
+    this.#pass += 1;
+    const pass = this.#pass;
+    const initial = pass === 1;
+    const safety = !initial && (pass - 1)
+      % RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.safetyRevalidationIntervalCount === 0;
+    let revisions: ReadonlyMap<string, string> | null = null;
+    if (this.options.readAuthorityRevisions !== undefined) {
+      try {
+        revisions = await this.options.readAuthorityRevisions(
+          Object.freeze([...desiredContextGraphIds]),
+          signal,
+        );
+      } catch (error) {
+        if (signal.aborted) return;
+        this.options.onAuthorityRevisionsReadFailure?.(error);
+        // A failed delta read cannot identify a safe subset. The initial and
+        // safety passes still revalidate everything; ordinary passes retry the
+        // one shared scan at the next cadence without fanning out per-CG reads.
+        if (!initial && !safety) return;
+      }
+    }
+    signal.throwIfAborted();
+
     for (const contextGraphId of desiredContextGraphIds) {
       let lane = this.#lanes.get(contextGraphId);
       if (lane === undefined || lane.closed) {
         lane = this.#createLane(contextGraphId);
         this.#lanes.set(contextGraphId, lane);
       }
+      const revision = revisions?.get(contextGraphId) ?? null;
+      const changed = revision === null
+        || this.#acceptedRevisions.get(contextGraphId) !== revision;
+      if (!initial && !safety && !changed) continue;
+
+      const previousTarget = this.#targetRevisions.get(contextGraphId);
+      if (lane.running && previousTarget?.revision === revision) {
+        // The active pass already validates this exact revision. Repeated
+        // cadence and safety ticks must not manufacture duplicate work.
+        continue;
+      }
+      this.#targetRevisions.set(contextGraphId, Object.freeze({ revision }));
       lane.request();
     }
-  };
+  }
 
   async whenIdle(): Promise<void> {
     for (;;) {
+      const passOwner = this.#passOwner;
+      await passOwner?.whenIdle();
       const lanes = [...this.#lanes.values()];
       const retirements = [...this.#retirements];
       await Promise.all([
@@ -130,13 +211,14 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       ]);
       const currentLanes = [...this.#lanes.values()];
       const currentRetirements = [...this.#retirements];
+      const samePassOwner = passOwner === this.#passOwner;
       const sameLanes = lanes.length === currentLanes.length
         && lanes.every((lane, index) => lane === currentLanes[index]);
       const sameRetirements = retirements.length === currentRetirements.length
         && retirements.every((retirement, index) => (
           retirement === currentRetirements[index]
         ));
-      if (sameLanes && sameRetirements) return;
+      if (samePassOwner && sameLanes && sameRetirements) return;
     }
   }
 
@@ -147,17 +229,24 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       this.#scheduler.clearInterval(this.#timer);
       this.#timer = null;
     }
-    const lanes = [...this.#lanes.values()];
-    const retirements = [...this.#retirements];
-    const closing = Promise.all([
-      ...lanes.map((lane) => lane.close()),
-      ...retirements,
-    ]).then(() => undefined);
+    const passOwner = this.#passOwner;
+    const closing = (async () => {
+      await passOwner?.close();
+      const lanes = [...this.#lanes.values()];
+      const retirements = [...this.#retirements];
+      await Promise.all([
+        ...lanes.map((lane) => lane.close()),
+        ...retirements,
+      ]);
+    })();
     this.#close = closing;
     void closing.then(() => {
       if (this.#close !== closing) return;
       this.#lanes.clear();
       this.#retirements.clear();
+      this.#acceptedRevisions.clear();
+      this.#targetRevisions.clear();
+      if (this.#passOwner === passOwner) this.#passOwner = null;
       this.#close = null;
     });
     return closing;

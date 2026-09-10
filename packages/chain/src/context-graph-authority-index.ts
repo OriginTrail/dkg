@@ -50,6 +50,10 @@ export interface ContextGraphAuthorityIndexScanInput {
   ) => Promise<readonly ContextGraphAuthorityIndexEvent[]>;
 }
 
+export type ContextGraphAuthorityIndexSnapshotInput = Omit<
+  ContextGraphAuthorityIndexScanInput,
+  'contextGraphId'
+>;
 /**
  * Process-local owner for the durable contract-wide authority index.
  *
@@ -79,9 +83,6 @@ export class ContextGraphAuthorityIndex {
   async resolve(
     input: ContextGraphAuthorityIndexScanInput,
   ): Promise<ContextGraphAuthorityIndexState> {
-    input.signal?.throwIfAborted();
-    const scope = input.scope.trim();
-    if (scope.length === 0) throw new Error('Context Graph authority index scope is empty');
     if (
       typeof input.contextGraphId !== 'bigint'
       || input.contextGraphId <= 0n
@@ -89,6 +90,19 @@ export class ContextGraphAuthorityIndex {
     ) {
       throw new Error('Context Graph authority index target id is invalid');
     }
+    const checkpoint = await this.snapshot(input);
+    // Target lookup intentionally happens after the shared contract scan, so
+    // every waiter resolves its own graph from the same complete checkpoint.
+    return this.#requireState(checkpoint, input.contextGraphId);
+  }
+
+  /** Resolve the complete materialized index at one finalized chain anchor. */
+  async snapshot(
+    input: ContextGraphAuthorityIndexSnapshotInput,
+  ): Promise<ContextGraphAuthorityIndexCheckpoint> {
+    input.signal?.throwIfAborted();
+    const scope = input.scope.trim();
+    if (scope.length === 0) throw new Error('Context Graph authority index scope is empty');
     if (input.readScope === null || typeof input.readScope !== 'object') {
       throw new Error('Context Graph authority index read scope is invalid');
     }
@@ -104,14 +118,11 @@ export class ContextGraphAuthorityIndex {
         hash: finalizedHash,
       } }, lifecycleSignal);
     });
-    const checkpoint = await waitForSharedAuthorityIndexScan(pending, input.signal);
-    // Target lookup intentionally happens after the shared contract scan, so
-    // every waiter resolves its own graph from the same complete checkpoint.
-    return this.#requireState(checkpoint, input.contextGraphId);
+    return waitForSharedAuthorityIndexScan(pending, input.signal);
   }
 
   async #scan(
-    input: ContextGraphAuthorityIndexScanInput,
+    input: ContextGraphAuthorityIndexSnapshotInput,
     lifecycleSignal: AbortSignal,
   ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     const scope = input.scope;
