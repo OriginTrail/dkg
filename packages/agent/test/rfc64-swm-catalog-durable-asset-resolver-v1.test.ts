@@ -60,25 +60,41 @@ describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
   it('accepts an inventory operation id retained as an equivalent head alias', async () => {
     const graphManager = new GraphManager(store);
     const selectedAlias = 'newer-storage-ack-alias';
-    for (const [shareOperationId, timestamp] of [
-      [row.shareOperationId, new Date('2026-09-01T00:00:00.000Z')],
-      [selectedAlias, new Date('2026-09-01T00:00:01.000Z')],
-    ] as const) {
-      await storeKnowledgeAssetOperationPublicQuads({
-        store,
-        graphManager,
-        contextGraphId: CONTEXT_GRAPH_ID,
-        shareOperationId,
-        kaUal: seal.kaUal,
-        assertionVersion: seal.assertionVersion,
-        quads: PROJECTION_QUADS,
-        privateTripleCount: 0,
-        publisherPeerId: 'rfc64-finalized-catalog-test',
-        accessPolicy: 'public',
-        agentAddress: AUTHOR,
-        timestamp,
-      });
-    }
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: row.shareOperationId,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+      quads: PROJECTION_QUADS,
+      privateTripleCount: 0,
+      publisherPeerId: 'rfc64-finalized-catalog-test',
+      accessPolicy: 'public',
+      agentAddress: AUTHOR,
+      timestamp: new Date('2026-09-01T00:00:00.000Z'),
+    });
+    const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH_ID);
+    const originalSubject = `urn:dkg:share:${CONTEXT_GRAPH_ID}:${row.shareOperationId}`;
+    const aliasSubject = `urn:dkg:share:${CONTEXT_GRAPH_ID}:${selectedAlias}`;
+    const originalMetadata = await store.query(
+      `CONSTRUCT { <${originalSubject}> ?p ?o } WHERE { GRAPH <${metaGraph}> { `
+        + `<${originalSubject}> ?p ?o } }`,
+    );
+    if (originalMetadata.type !== 'quads') throw new Error('expected operation metadata');
+    await store.insert(originalMetadata.quads
+      .filter((quad) => !quad.predicate.endsWith('publicSnapshotGraph')
+        && !quad.predicate.endsWith('publicSnapshotRef'))
+      .map((quad) => ({
+        ...quad,
+        graph: metaGraph,
+        subject: aliasSubject,
+        object: quad.predicate.endsWith('shareOperationId')
+          ? JSON.stringify(selectedAlias)
+          : quad.predicate.endsWith('publishedAt')
+            ? JSON.stringify('2026-09-01T00:00:01.000Z')
+            : quad.object,
+      })));
     await storeKnowledgeAssetWorkspaceHead({
       store,
       graphManager,
@@ -91,7 +107,7 @@ describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
       subject: `${seal.kaUal}#dkg-swm-head`,
       predicate: 'http://dkg.io/ontology/shareOperationId',
       object: JSON.stringify(selectedAlias),
-      graph: graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH_ID),
+      graph: metaGraph,
     }]);
 
     await expect(resolve('public')).resolves.toMatchObject({

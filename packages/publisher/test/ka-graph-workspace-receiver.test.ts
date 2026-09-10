@@ -19,6 +19,8 @@ import {
   computeFlatKCRootV10,
   readLocallyTrustedKnowledgeAssetControlEnvelope,
   readLocallyTrustedKnowledgeAssetControls,
+  resolveKnowledgeAssetWorkspaceHead,
+  storeKnowledgeAssetOperationPublicQuads,
 } from '../src/index.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 
@@ -364,6 +366,77 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     expect(drift).toMatchObject({ applied: false, retryable: false });
     if (drift.applied) throw new Error('expected policy-drift rejection');
     expect(drift.reason).toContain('CONFLICTING_KA_ASSERTION_VERSION');
+  });
+
+  it('acknowledges an older equivalent alias without churning SWM state and refreshes controls', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const original = v2Request({ timestampMs: Date.parse('2026-09-10T00:00:00.000Z') });
+    expect((await handler.handle(original, PEER_ID)).applied).toBe(true);
+
+    const selectedAlias = 'rootless-storage-ack-alias';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: selectedAlias,
+      kaUal: UAL,
+      assertionVersion: 1,
+      quads: [{
+        subject: 'urn:entity:1',
+        predicate: 'urn:predicate:value',
+        object: '"one"',
+        graph: '',
+      }],
+      privateTripleCount: 0,
+      publisherPeerId: PEER_ID,
+      accessPolicy: 'public',
+      timestamp: new Date('2026-09-10T00:00:01.000Z'),
+    });
+    const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
+    await store.insert([{
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(selectedAlias),
+      graph: metaGraph,
+    }]);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    })).resolves.toMatchObject({
+      shareOperationId: selectedAlias,
+      shareOperationIds: ['rootless-op-1', selectedAlias],
+    });
+
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const snapshot = async (graph: string): Promise<string[]> => {
+      const result = await store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
+      );
+      if (result.type !== 'quads') throw new Error(`expected quads for ${graph}`);
+      return result.quads.map(({ subject, predicate, object }) => (
+        `${subject}\u0000${predicate}\u0000${object}`
+      )).sort();
+    };
+    const swmBefore = await snapshot(swmGraph);
+    const metadataBefore = await snapshot(metaGraph);
+    await store.deleteByPattern({ graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH });
+
+    const replay = await new SharedMemoryHandler(
+      store,
+      new TypedEventBus(),
+    ).handle(original, PEER_ID);
+    expect(replay.applied).toBe(true);
+    expect(await snapshot(swmGraph)).toEqual(swmBefore);
+    expect(await snapshot(metaGraph)).toEqual(metadataBefore);
+    expect(await store.countQuads(LOCAL_TRUSTED_KA_CONTROLS_GRAPH)).toBeGreaterThan(0);
   });
 
   it('keeps one KA-level transport owner across assertion versions', async () => {

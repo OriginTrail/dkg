@@ -7,10 +7,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   selectEquivalentWorkspaceOperation,
-  workspaceOperationSemanticsKey,
   workspacePublicQuadsDigest,
   type WorkspaceOperationModel,
-  type WorkspaceOperationSemantics,
+  type WorkspaceOperationCommitment,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -41,6 +40,50 @@ const ACCESS_POLICY = `${DKG}accessPolicy`;
 const ALLOWED_PEER = `${DKG}allowedPeer`;
 const SUB_GRAPH_NAME = `${DKG}subGraphName`;
 const HEAD_SUFFIX = '#dkg-swm-head';
+
+interface RecoveryWorkspaceOperationIdentity {
+  readonly contextGraphId: string;
+  readonly contentScopeVersion: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly subGraphName?: string;
+  readonly authorIdentities: readonly string[];
+}
+
+interface RecoveryWorkspaceOperationSemantics extends WorkspaceOperationCommitment {
+  readonly publisherIdentity: string;
+  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers: readonly string[];
+  readonly recoveryIdentity: RecoveryWorkspaceOperationIdentity;
+}
+
+/** Same-payload aliases are compared after the recovery decoder validates them. */
+function samePayloadOperationEquivalenceKey(
+  semantics: RecoveryWorkspaceOperationSemantics,
+): string {
+  const normalizeSet = (values: readonly string[]) => [...new Set(values)].sort();
+  return JSON.stringify({
+    publicQuadsDigest: semantics.publicQuadsDigest.trim().toLowerCase(),
+    publicTripleCount: semantics.publicTripleCount,
+    ...(semantics.privateMerkleRoot === undefined
+      ? {}
+      : { privateMerkleRoot: semantics.privateMerkleRoot.toLowerCase() }),
+    privateTripleCount: semantics.privateTripleCount,
+    publisherIdentity: semantics.publisherIdentity.trim(),
+    accessPolicy: semantics.accessPolicy,
+    allowedPeers: normalizeSet(semantics.allowedPeers.map((peer) => peer.trim())),
+    recoveryIdentity: {
+      contextGraphId: semantics.recoveryIdentity.contextGraphId,
+      contentScopeVersion: semantics.recoveryIdentity.contentScopeVersion,
+      kaUal: semantics.recoveryIdentity.kaUal,
+      assertionVersion: semantics.recoveryIdentity.assertionVersion,
+      ...(semantics.recoveryIdentity.subGraphName === undefined
+        ? {}
+        : { subGraphName: semantics.recoveryIdentity.subGraphName }),
+      authorIdentities: normalizeSet(semantics.recoveryIdentity.authorIdentities),
+    },
+  });
+}
 
 export interface GraphScopedSwmRecoveryDescriptor {
   readonly metaGraph: string;
@@ -318,14 +361,14 @@ const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
  * stale-intent machinery must see).
  *
  * CROSS-STORE IDENTITY policy — deliberately NOT the same model as the
- * parser's `samePayloadByteEquivalenceKey` (see the resolver above): that
- * key byte-compares candidates from ONE payload and throws on ambiguity;
+ * parser's `samePayloadOperationEquivalenceKey` above: that key compares
+ * decoded candidates from ONE payload and throws on ambiguity;
  * this one compares wire rows against store read-backs and therefore
  * normalizes lexical forms over an explicit allow-list. A new operation
  * predicate is classified per policy: byte-safe rows join the parser key
- * automatically (it is predicate-agnostic); it joins THIS key only if it is
- * part of share identity under the allow-list rationale above. Unification
- * into one policy module = follow-up F3.
+ * automatically through the decoder; it joins THIS key only if it is part of
+ * share identity under the allow-list rationale above. The two policies stay
+ * explicit here so cross-store normalization cannot leak into publisher code.
  */
 export const OPERATION_IDENTITY_PREDICATES = {
   required: [
@@ -442,15 +485,19 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
     if (privateCountValues.size !== 1) return null;
     effectivePolicy = BigInt([...privateCountValues][0]!) > 0n ? 'ownerOnly' : 'public';
   }
-  return workspaceOperationSemanticsKey({
-    publicQuadsDigest: stripLiteral(required[PUBLIC_QUADS_DIGEST]!).trim(),
+  // CROSS-STORE policy: own every RDF lexical normalization here. This key is
+  // deliberately separate from samePayloadOperationEquivalenceKey because it
+  // compares wire rows with store read-backs and excludes transport provenance.
+  return JSON.stringify({
+    publicQuadsDigest: stripLiteral(required[PUBLIC_QUADS_DIGEST]!).trim().toLowerCase(),
     publicTripleCount,
     ...(privateMerkleRoot === undefined
       ? {}
-      : { privateMerkleRoot: stripLiteral(privateMerkleRoot).trim() }),
+      : { privateMerkleRoot: stripLiteral(privateMerkleRoot).trim().toLowerCase() }),
     privateTripleCount,
     accessPolicy: effectivePolicy as 'public' | 'ownerOnly' | 'allowList',
-    allowedPeers: values(ALLOWED_PEER).map((value) => stripLiteral(value).trim()),
+    allowedPeers: [...new Set(values(ALLOWED_PEER)
+      .map((value) => stripLiteral(value).trim()))].sort(),
     recoveryIdentity: {
       contextGraphId: normalizeIdentityObject(required[CONTEXT_GRAPH_ID]!),
       contentScopeVersion: normalizeIdentityObject(required[CONTENT_SCOPE_VERSION]!),
@@ -459,9 +506,9 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
       ...(subGraphName === undefined
         ? {}
         : { subGraphName: normalizeIdentityObject(subGraphName) }),
-      authorIdentities: attributedTo,
+      authorIdentities: [...new Set(attributedTo)].sort(),
     },
-  }, 'cross-store');
+  });
 }
 
 interface ResolvedHeadOperation {
@@ -530,15 +577,17 @@ function resolveEquivalentHeadOperation(params: {
       provenance: { shareOperationId, publishedAtMs },
       operationSubject,
       operationRows,
-    } satisfies WorkspaceOperationModel & {
+    } satisfies WorkspaceOperationModel<RecoveryWorkspaceOperationSemantics> & {
       readonly operationSubject: string;
       readonly operationRows: readonly Quad[];
     };
   });
 
-  const { selected } = selectEquivalentWorkspaceOperation(candidates, {
-    ambiguityError: () => new Error('ambiguous shareOperationId'),
-  });
+  const { selected } = selectEquivalentWorkspaceOperation(
+    candidates,
+    samePayloadOperationEquivalenceKey,
+    { ambiguityError: () => new Error('ambiguous shareOperationId') },
+  );
   return {
     shareOperationId: selected.provenance.shareOperationId,
     operationSubject: selected.operationSubject,
@@ -594,7 +643,7 @@ function validateOperationRows(params: {
   kaUal: string;
   assertionVersion: string;
   subGraphName?: string;
-}): WorkspaceOperationSemantics {
+}): RecoveryWorkspaceOperationSemantics {
   const rows = params.rows;
   if (rows.length === 0) {
     throw new Error(`Graph-scoped SWM head references missing operation ${params.operationSubject}`);
@@ -657,9 +706,9 @@ function validateOperationRows(params: {
     ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
     privateTripleCount,
     publisherIdentity,
-    ...(accessPolicy === undefined
-      ? {}
-      : { accessPolicy: accessPolicy as 'public' | 'ownerOnly' | 'allowList' }),
+    accessPolicy: (accessPolicy
+      ?? (privateTripleCount > 0 ? 'ownerOnly' : 'public')) as
+      'public' | 'ownerOnly' | 'allowList',
     allowedPeers,
     recoveryIdentity: {
       contextGraphId: params.contextGraphId,

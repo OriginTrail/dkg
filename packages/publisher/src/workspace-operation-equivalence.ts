@@ -1,26 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/** Content and access facts that make a workspace operation one logical share. */
-export interface WorkspaceOperationSemantics {
+/** Content commitment shared by the publisher and recovery comparison policies. */
+export interface WorkspaceOperationCommitment {
   readonly publicQuadsDigest: string;
   readonly publicTripleCount: number;
   readonly privateMerkleRoot?: string;
   readonly privateTripleCount: number;
-  readonly publisherIdentity?: string;
-  readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-  readonly allowedPeers: readonly string[];
-  /** Recovery-only identity facts, absent from publisher-local head selection. */
-  readonly recoveryIdentity?: WorkspaceOperationRecoveryIdentity;
 }
 
-/** Finite recovery profile shared by decoded and cross-store comparisons. */
-export interface WorkspaceOperationRecoveryIdentity {
-  readonly contextGraphId: string;
-  readonly contentScopeVersion: string;
-  readonly kaUal: string;
-  readonly assertionVersion: string;
-  readonly subGraphName?: string;
-  readonly authorIdentities: readonly string[];
+/** Publisher-owned facts that make two decoded operations one logical share. */
+export interface PublisherWorkspaceOperationSemantics
+  extends WorkspaceOperationCommitment {
+  readonly publisherIdentity: string;
+  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers: readonly string[];
 }
 
 /** Persistence facts that may legitimately differ between equivalent aliases. */
@@ -29,67 +22,46 @@ export interface WorkspaceOperationProvenance {
   readonly publishedAtMs?: number;
 }
 
-export interface WorkspaceOperationModel {
-  readonly semantics: WorkspaceOperationSemantics;
+export interface WorkspaceOperationModel<TSemantics> {
+  readonly semantics: TSemantics;
   readonly provenance: WorkspaceOperationProvenance;
 }
 
-export type WorkspaceOperationEquivalenceMode = 'decoded' | 'cross-store';
-
 /**
- * The canonical equality boundary for workspace-operation aliases. Provenance
- * is deliberately absent. Both modes share the same semantic field list;
- * cross-store mode additionally normalizes values that RDF stores commonly
- * canonicalize while decoded mode preserves already-validated values.
+ * Publisher-local equality for decoded workspace operations. RDF lexical
+ * normalization belongs to the recovery policy that compares wire and stored
+ * rows; this boundary receives validated publisher values only.
  */
-export function workspaceOperationSemanticsKey(
-  semantics: WorkspaceOperationSemantics,
-  mode: WorkspaceOperationEquivalenceMode = 'decoded',
+export function publisherWorkspaceOperationSemanticsKey(
+  semantics: PublisherWorkspaceOperationSemantics,
 ): string {
   const normalizeSet = (values: readonly string[]) => [...new Set(values)].sort();
-  const normalized = {
-    publicQuadsDigest: mode === 'cross-store'
-      ? semantics.publicQuadsDigest.trim().toLowerCase()
-      : semantics.publicQuadsDigest,
+  return JSON.stringify({
+    publicQuadsDigest: semantics.publicQuadsDigest,
     publicTripleCount: semantics.publicTripleCount,
     ...(semantics.privateMerkleRoot === undefined
       ? {}
-      : { privateMerkleRoot: semantics.privateMerkleRoot.toLowerCase() }),
+      : { privateMerkleRoot: semantics.privateMerkleRoot }),
     privateTripleCount: semantics.privateTripleCount,
-    ...(semantics.publisherIdentity === undefined
-      ? {}
-      : { publisherIdentity: semantics.publisherIdentity.trim() }),
-    accessPolicy: semantics.accessPolicy
-      ?? (semantics.privateTripleCount > 0 ? 'ownerOnly' : 'public'),
-    allowedPeers: normalizeSet(semantics.allowedPeers.map((peer) => peer.trim())),
-    ...(semantics.recoveryIdentity === undefined ? {} : {
-      recoveryIdentity: {
-        contextGraphId: semantics.recoveryIdentity.contextGraphId,
-        contentScopeVersion: semantics.recoveryIdentity.contentScopeVersion,
-        kaUal: semantics.recoveryIdentity.kaUal,
-        assertionVersion: semantics.recoveryIdentity.assertionVersion,
-        ...(semantics.recoveryIdentity.subGraphName === undefined
-          ? {}
-          : { subGraphName: semantics.recoveryIdentity.subGraphName }),
-        authorIdentities: normalizeSet(semantics.recoveryIdentity.authorIdentities),
-      },
-    }),
-  };
-  return JSON.stringify(normalized);
+    publisherIdentity: semantics.publisherIdentity,
+    accessPolicy: semantics.accessPolicy,
+    allowedPeers: normalizeSet(semantics.allowedPeers),
+  });
 }
 
 /** Validate one equivalence class and select its deterministic display alias. */
-export function selectEquivalentWorkspaceOperation<T extends WorkspaceOperationModel>(
+export function selectEquivalentWorkspaceOperation<
+  TSemantics,
+  T extends WorkspaceOperationModel<TSemantics>,
+>(
   candidates: readonly T[],
+  equivalenceKey: (semantics: TSemantics) => string,
   options: Readonly<{
-    mode?: WorkspaceOperationEquivalenceMode;
     ambiguityError?: () => Error;
   }> = {},
 ): Readonly<{ selected: T; shareOperationIds: readonly string[] }> {
   if (candidates.length === 0) throw new Error('Workspace operation candidates are empty');
-  const keys = new Set(candidates.map((candidate) => (
-    workspaceOperationSemanticsKey(candidate.semantics, options.mode)
-  )));
+  const keys = new Set(candidates.map((candidate) => equivalenceKey(candidate.semantics)));
   if (keys.size !== 1) {
     throw options.ambiguityError?.() ?? new Error('ambiguous shareOperationId');
   }

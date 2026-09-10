@@ -23,8 +23,10 @@ import {
 } from './merkle.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import {
+  publisherWorkspaceOperationSemanticsKey,
   selectEquivalentWorkspaceOperation,
   type WorkspaceOperationModel,
+  type PublisherWorkspaceOperationSemantics,
 } from './workspace-operation-equivalence.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -343,7 +345,7 @@ function decodeWorkspaceOperationRows(input: {
   readonly operationValues: Map<string, string[]>;
   readonly scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
   readonly shareOperationId: string;
-}): WorkspaceOperationModel {
+}): WorkspaceOperationModel<PublisherWorkspaceOperationSemantics> {
   const ual = input.scope.ual;
   const operation = makeSingletonReader(input.operationValues, ual, 'operation');
   const echoedIds = (input.operationValues.get(`${DKG}shareOperationId`) ?? [])
@@ -365,6 +367,8 @@ function decodeWorkspaceOperationRows(input: {
     || rawAccessPolicy === 'allowList'
     ? rawAccessPolicy
     : undefined;
+  const effectiveAccessPolicy = accessPolicy
+    ?? (privateTripleCount > 0 ? 'ownerOnly' : 'public');
   const publishedAtStamps = (input.operationValues.get(`${DKG}publishedAt`) ?? [])
     .map((value) => Date.parse(stripLiteral(value)?.trim() ?? ''));
   const publishedAtMs = publishedAtStamps.length === 0
@@ -414,7 +418,7 @@ function decodeWorkspaceOperationRows(input: {
       ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
       privateTripleCount,
       publisherIdentity: publisherPeerId,
-      ...(accessPolicy === undefined ? {} : { accessPolicy }),
+      accessPolicy: effectiveAccessPolicy,
       allowedPeers,
     },
     provenance: {
@@ -544,11 +548,15 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     });
     return operation;
   });
-  const { selected, shareOperationIds } = selectEquivalentWorkspaceOperation(candidates, {
+  const { selected, shareOperationIds } = selectEquivalentWorkspaceOperation(
+    candidates,
+    publisherWorkspaceOperationSemanticsKey,
+    {
     ambiguityError: () => new KnowledgeAssetWorkspaceHeadCorruptError(
       `Corrupt graph-scoped SWM head for ${scope.ual}: ambiguous shareOperationId values`,
     ),
-  });
+    },
+  );
   const decodedOperation = selected.semantics;
   return {
     kaUal: decodedHead.scope.ual,
@@ -563,8 +571,8 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     ...(selected.provenance.publishedAtMs === undefined
       ? {}
       : { publishedAt: selected.provenance.publishedAtMs.toString() as TimestampMsV1 }),
-    publisherPeerId: decodedOperation.publisherIdentity!,
-    ...(decodedOperation.accessPolicy ? { accessPolicy: decodedOperation.accessPolicy } : {}),
+    publisherPeerId: decodedOperation.publisherIdentity,
+    accessPolicy: decodedOperation.accessPolicy,
     allowedPeers: [...decodedOperation.allowedPeers],
   };
 }

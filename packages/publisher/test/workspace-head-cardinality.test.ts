@@ -12,9 +12,9 @@ import {
 // corruption policy) and is not exported for external consumers.
 import { tryResolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
 import {
+  publisherWorkspaceOperationSemanticsKey,
   selectEquivalentWorkspaceOperation,
-  workspaceOperationSemanticsKey,
-  type WorkspaceOperationSemantics,
+  type PublisherWorkspaceOperationSemantics,
 } from '../src/workspace-operation-equivalence.js';
 
 // GH#2273: SWM catch-up union-inserts a peer's head `shareOperationId` row
@@ -142,7 +142,7 @@ function resolveHead(h: Harness) {
 }
 
 describe('workspace operation semantic model', () => {
-  const semantics: WorkspaceOperationSemantics = Object.freeze({
+  const semantics: PublisherWorkspaceOperationSemantics = Object.freeze({
     publicQuadsDigest: `sha256:${'1'.repeat(64)}`,
     publicTripleCount: 2,
     privateMerkleRoot: `0x${'2'.repeat(64)}`,
@@ -160,10 +160,13 @@ describe('workspace operation semantic model', () => {
     ['publisherIdentity', 'peer-c'],
     ['accessPolicy', 'ownerOnly'],
     ['allowedPeers', ['peer-a', 'peer-c']],
-  ] satisfies ReadonlyArray<readonly [keyof WorkspaceOperationSemantics, unknown]>) (
+  ] satisfies ReadonlyArray<readonly [keyof PublisherWorkspaceOperationSemantics, unknown]>) (
     'includes semantic field %s in equivalence', (field, value) => {
-      expect(workspaceOperationSemanticsKey({ ...semantics, [field]: value } as WorkspaceOperationSemantics))
-        .not.toBe(workspaceOperationSemanticsKey(semantics));
+      expect(publisherWorkspaceOperationSemanticsKey({
+        ...semantics,
+        [field]: value,
+      } as PublisherWorkspaceOperationSemantics))
+        .not.toBe(publisherWorkspaceOperationSemanticsKey(semantics));
     },
   );
 
@@ -171,33 +174,22 @@ describe('workspace operation semantic model', () => {
     expect(selectEquivalentWorkspaceOperation([
       { semantics, provenance: { shareOperationId: 'originator', publishedAtMs: 1 } },
       { semantics, provenance: { shareOperationId: 'storage-ack', publishedAtMs: 2 } },
-    ])).toMatchObject({
+    ], publisherWorkspaceOperationSemanticsKey)).toMatchObject({
       selected: { provenance: { shareOperationId: 'storage-ack' } },
       shareOperationIds: ['originator', 'storage-ack'],
     });
   });
 
-  it('uses the finite recovery identity profile without open-ended extensions', () => {
-    const recoveryIdentity = {
-      contextGraphId: 'cg',
-      contentScopeVersion: '2',
-      kaUal: UAL,
-      assertionVersion: '1',
-      subGraphName: 'wing-a',
-      authorIdentities: ['did:example:author'],
-    } as const;
-    const key = workspaceOperationSemanticsKey({ ...semantics, recoveryIdentity });
-    for (const field of ['contextGraphId', 'contentScopeVersion', 'kaUal',
-      'assertionVersion', 'subGraphName'] as const) {
-      expect(workspaceOperationSemanticsKey({
-        ...semantics,
-        recoveryIdentity: { ...recoveryIdentity, [field]: `${recoveryIdentity[field]}-other` },
-      })).not.toBe(key);
-    }
-    expect(workspaceOperationSemanticsKey({
-      ...semantics,
-      recoveryIdentity: { ...recoveryIdentity, authorIdentities: ['did:example:other'] },
-    })).not.toBe(key);
+  it('requires publisher identity at the publisher comparison boundary', () => {
+    // @ts-expect-error Publisher semantics cannot admit an identity-less candidate.
+    const missingPublisher: PublisherWorkspaceOperationSemantics = {
+      publicQuadsDigest: semantics.publicQuadsDigest,
+      publicTripleCount: semantics.publicTripleCount,
+      privateTripleCount: semantics.privateTripleCount,
+      accessPolicy: semantics.accessPolicy,
+      allowedPeers: semantics.allowedPeers,
+    };
+    expect(missingPublisher).toBeDefined();
   });
 });
 

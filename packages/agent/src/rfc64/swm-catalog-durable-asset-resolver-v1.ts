@@ -154,11 +154,17 @@ async function resolveDurableCatalogAssetV1(
     && !inventoryRowDiffers;
   let projectionQuads: readonly Quad[];
   if (workspaceHeadMatches) {
+    // An inventory row names the immutable snapshot that was signed into that
+    // row. The resolver may select a newer equivalent head alias for display,
+    // but that alias is not required to carry its own snapshot locator.
+    const snapshotOperationId = resolution.kind === 'inventory-row'
+      ? resolution.row.shareOperationId
+      : head.shareOperationId;
     const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
       store: params.store,
       graphManager,
       contextGraphId: params.contextGraphId,
-      shareOperationId: head.shareOperationId,
+      shareOperationId: snapshotOperationId,
       kaUal: identity.kaUal,
       assertionVersion: identity.assertionVersion,
       publicSnapshotStore: params.publicSnapshotStore,
