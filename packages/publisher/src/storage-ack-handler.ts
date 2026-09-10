@@ -58,6 +58,7 @@ import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storeKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -392,6 +393,8 @@ export interface StorageACKHandlerConfig {
    * of the H5 prefix on the V10 ACK digest.
    */
   kav10Address: string;
+  /** Shared publisher/agent lock domain for graph-scoped SWM KA writes. */
+  workspaceWriteLocks?: Map<string, Promise<void>>;
   /**
    * Optional live confirmation hook. When provided, the handler calls it
    * immediately before signing so removed/unregistered operational keys stop
@@ -892,7 +895,7 @@ export class StorageACKHandler {
       graph: metaGraph,
     });
 
-    const result = await this.runStoreOpOrDecline(cgId, async () => {
+    const persist = async () => this.runStoreOpOrDecline(cgId, async () => {
       if (replaceGraph) {
         const replaced = await tryReplaceGraphAtomically(
           this.store,
@@ -943,6 +946,17 @@ export class StorageACKHandler {
         ackStoreOptions('storage-ack.persistGraphScoped.flush'),
       );
     }, signal);
+    const result = this.config.workspaceWriteLocks
+      ? await withKeyedLocks(
+        this.config.workspaceWriteLocks,
+        [swmKaWriteLockKey(
+          swmGraphId,
+          graphPublish.subGraphName,
+          graphPublish.scope.ual,
+        )],
+        persist,
+      )
+      : await persist();
     return result.ok ? { ok: true } : result;
   }
 

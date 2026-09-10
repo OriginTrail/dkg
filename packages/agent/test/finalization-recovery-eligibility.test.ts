@@ -48,6 +48,28 @@ describe('durable finalization recovery eligibility', () => {
     })).resolves.toBe(true);
   });
 
+  it('recognizes only the requested target-context VM metadata', async () => {
+    const store = new OxigraphStore();
+    await store.insert([{
+      subject: UAL,
+      predicate: 'http://dkg.io/ontology/transactionHash',
+      object: `"0x${'cd'.repeat(32)}"`,
+      graph: contextGraphMetaUri(CONTEXT_GRAPH_ID, '42'),
+    }]);
+
+    const eligible = createDurableFinalizationRecoveryEligibility({ store });
+    await expect(eligible({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ual: UAL,
+      targetContextGraphId: '42',
+    })).resolves.toBe(true);
+    await expect(eligible({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ual: UAL,
+      targetContextGraphId: '43',
+    })).resolves.toBe(false);
+  });
+
   it('rejects an absent local durable record', async () => {
     const store = new OxigraphStore();
     await expect(createDurableFinalizationRecoveryEligibility({ store })({
