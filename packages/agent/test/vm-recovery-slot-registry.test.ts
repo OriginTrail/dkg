@@ -79,6 +79,32 @@ describe('active VM recovery slot ownership', () => {
     replacementScope?.release();
   });
 
+  it.each(['same', 'different'] as const)('preserves a %s-fingerprint replacement when unconfirmed proof is discarded', fingerprint => {
+    const registry = new VmRecoverySlotRegistry(1);
+    const original = admitFor(registry);
+    registry.settleAttempt(target, 'peer-a', 'clean-absent', ['peer-a'], original, {
+      now: 0, getLocalPeerId: () => 'local', baseBackoffMs: 100, maxBackoffMs: 100,
+    });
+    const originalScope = registry.begin();
+    originalScope.track([target]);
+    const replacement = fingerprint === 'same' ? target : { ...target, merkleRoot: 'new-owner' };
+    let replacementRecord: VmReconcileRotationRecord | undefined;
+    let replacementScope: VmRecoverySlotScope | undefined;
+    originalScope.signal.addEventListener('abort', () => {
+      replacementRecord = admitFor(registry, replacement);
+      replacementScope = registry.begin();
+      replacementScope.track([replacement]);
+    }, { once: true });
+    expect.soft(registry.prepare(target, {
+      candidatePeerIds: ['peer-b'], curatorRosterConfirmed: false, collectionDeadlineAt: 101,
+    }, 1)).toEqual({ suppressed: true });
+    expect(registry.peekRecord(replacement)).toBe(replacementRecord);
+    expect(replacementRecord?.candidatePeerIds).toEqual(new Set(['peer-a']));
+    expect(replacementScope?.signal.aborted).toBe(false);
+    originalScope.release();
+    replacementScope?.release();
+  });
+
   it('binds one validated capacity to every admission path', () => {
     expect(() => new VmRecoverySlotRegistry(0)).toThrow(/positive safe integer/);
     const registry = new VmRecoverySlotRegistry(1);

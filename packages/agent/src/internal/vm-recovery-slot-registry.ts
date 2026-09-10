@@ -362,6 +362,12 @@ export class VmRecoverySlotRegistry {
       // Absence gathered while curator discovery was unavailable must not
       // suppress the next lookup: that lookup may reveal the only holder.
       this.invalidate(target);
+      if (this.slots.has(vmRecoverySlotKey(target))) {
+        // Abort callbacks may already have installed a new owner, including
+        // one with the same fingerprint. Do not re-observe or adopt it here.
+        reservation?.release();
+        return { suppressed: true };
+      }
       record = undefined;
     }
     if (candidatePeerIds.length === 0 && !record) {
