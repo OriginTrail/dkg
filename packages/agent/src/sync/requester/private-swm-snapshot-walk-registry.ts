@@ -123,10 +123,6 @@ export class PrivateSwmSnapshotWalkRegistry {
     return this.#retainedLease(ownerKey, progress);
   }
 
-  release(owner: PrivateSwmSnapshotWalkOwner): void {
-    this.#walks.delete(privateSnapshotWalkOwnerKey(owner));
-  }
-
   get retainedTargetCount(): number {
     this.#pruneExpired();
     return this.#walks.size;

@@ -75,7 +75,22 @@ export class ManifestBoundSnapshotProgress {
     return Object.freeze([...this.#resolvedRefs]);
   }
 
-  /** Start one retained-evidence validation sweep once the manifest is materialized. */
+  /**
+   * Start a new outer recovery job without losing a budget-interrupted
+   * validation sweep. A fully completed sweep is deliberately reset so the
+   * next job proves that every retained graph is still materialized.
+   */
+  beginRecoveryJob(): void {
+    const completedValidationSweep = this.#resolvedValidationStarted
+      && !this.incomplete
+      && this.#validatedResolvedRefs.size === this.#resolvedRefs.size;
+    if (!completedValidationSweep) return;
+    this.#resolvedValidationStarted = false;
+    this.#validatedResolvedRefs.clear();
+    this.#touch();
+  }
+
+  /** Start this job's retained-evidence sweep once the manifest is materialized. */
   beginResolvedValidation(): boolean {
     if (this.#resolvedValidationStarted || this.incomplete) return false;
     this.#resolvedValidationStarted = true;

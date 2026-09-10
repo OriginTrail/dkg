@@ -4,11 +4,20 @@ import {
   createSwmCatchupPeerSelector,
   SWM_CATCHUP_PEER_NEGATIVE_TTL_MS,
 } from '../src/swm/swm-catchup-peer-selection.js';
-import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
+import {
+  sharedMemoryCompletionFields,
+  sharedMemoryWorkOutcome,
+  type SharedMemoryWorkOutcome,
+} from '../src/sync/shared-memory-completion.js';
 
 describe('SWM catchup peer selection', () => {
-  it('keeps the local-yield reason plane-neutral', () => {
-    expect(sharedMemoryLocalYield()).toEqual({ kind: 'local-budget-yield' });
+  it('round-trips every coherent work outcome through compatibility fields', () => {
+    const outcomes: SharedMemoryWorkOutcome[] = [
+      'completed', 'timed-out', 'local-budget-yield', 'incomplete',
+    ];
+    expect(outcomes.map((outcome) => (
+      sharedMemoryWorkOutcome(sharedMemoryCompletionFields(outcome))
+    ))).toEqual(outcomes);
   });
 
   it('filters peers known not to advertise the current sync protocol', () => {
@@ -100,13 +109,12 @@ describe('SWM catchup peer selection', () => {
   it('keeps direct classifier-to-record composition neutral for local yields', () => {
     const selector = createSwmCatchupPeerSelector({ maxEntries: 1 });
     selector.record('cg', 'known-peer', 'good', 100);
-    const outcome = classifySwmCatchupPeerOutcome({ localYield: sharedMemoryLocalYield() });
-    // Runtime regression also covers old JavaScript callers without a guard.
-    selector.record('cg', 'new-peer', outcome, 101);
+    const outcome = classifySwmCatchupPeerOutcome({ localYield: true as const });
+    if (outcome) selector.record('cg', 'new-peer', outcome, 101);
     expect(selector.get('cg', 'known-peer', 102)).toBe('good');
     expect(selector.select({ contextGraphId: 'cg', candidatePeers: ['new-peer'], now: 102 }).skippedNegativePeers).toEqual([]);
     expect(selector.get('cg', 'new-peer', 102)).toBeUndefined();
-    selector.record('cg', 'known-peer', outcome, 103);
+    if (outcome) selector.record('cg', 'known-peer', outcome, 103);
     expect(selector.get('cg', 'known-peer', 104)).toBe('good');
   });
 
@@ -115,11 +123,11 @@ describe('SWM catchup peer selection', () => {
     expect(classifySwmCatchupPeerOutcome({ deniedPhases: 1 })).toBe('denied');
     expect(classifySwmCatchupPeerOutcome({ failedPeers: 1 })).toBe('transportFailed');
     const localYield = classifySwmCatchupPeerOutcome({
-      localYield: sharedMemoryLocalYield(),
+      localYield: true as const,
     });
     expect(localYield).toBeUndefined();
     expect(classifySwmCatchupPeerOutcome({
-      localYield: sharedMemoryLocalYield(),
+      localYield: true as const,
       fetchedMetaTriples: 1,
       failedPhases: 1,
     })).toBe('good');

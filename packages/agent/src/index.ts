@@ -97,9 +97,11 @@ export {
 } from './chain-reconciler.js';
 export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
 export {
-  mergeSharedMemoryLocalYield,
-  sharedMemoryLocalYield,
-  type SharedMemoryLocalYield,
+  mergeLocalBudgetYieldEvidence,
+  sharedMemoryCompletionFields,
+  sharedMemoryWorkOutcome,
+  type SharedMemoryCompletionFields,
+  type SharedMemoryWorkOutcome,
 } from './sync/shared-memory-completion.js';
 export {
   classifySharedMemoryFreshness,

@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
-import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 import {
   PEER,
   callSelectedSharedMemorySummary,
@@ -361,7 +360,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
     const shared = {
       ...result(ordinaryContextGraphId, 3, 3),
       failedPhases: 2,
-      localYield: sharedMemoryLocalYield(),
+      localYield: true as const,
       snapshotPlaneIncomplete: 1,
       resolvedSnapshotPlaneIncomplete: 1,
     };

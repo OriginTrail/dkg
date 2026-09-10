@@ -48,9 +48,8 @@ import {
   isNamedSubgraphSharedMemoryMetaGraph,
 } from '../shared-memory-graphs.js';
 import {
-  mergeSharedMemoryLocalYield,
-  sharedMemoryLocalYield,
-  type SharedMemoryLocalYield,
+  sharedMemoryWorkOutcome,
+  type SharedMemoryWorkOutcome,
 } from '../shared-memory-completion.js';
 
 /**
@@ -197,7 +196,7 @@ interface RecoverContextGraphSwmResultFields {
 /** Recovery completion cannot simultaneously carry a local-yield outcome. */
 export type RecoverContextGraphSwmResult = RecoverContextGraphSwmResultFields & (
   | { readonly completed: true; readonly localYield?: never }
-  | { readonly completed: false; readonly localYield?: SharedMemoryLocalYield }
+  | { readonly completed: false; readonly localYield?: true }
 );
 
 export interface SwmRecoveryProgress {
@@ -305,17 +304,16 @@ async function fetchPhaseFully(
   graphUri: string,
 ): Promise<{
   quads: Quad[];
-  completed: boolean;
-  localYield?: SharedMemoryLocalYield;
+  outcome: SharedMemoryWorkOutcome;
 }> {
   const workAdmission = deps.workAdmission;
-  let localYield: SharedMemoryLocalYield | undefined;
+  let outcome: SharedMemoryWorkOutcome = 'incomplete';
   const maxPages = deps.maxPagesPerPhase ?? DEFAULT_MAX_PAGES_PER_PHASE;
   const all: Quad[] = [];
   let lastCheckpointKey: string | undefined;
   for (let i = 0; i < maxPages; i++) {
     if (!workAdmission.canAdmitWork()) {
-      localYield = sharedMemoryLocalYield();
+      outcome = 'local-budget-yield';
       break;
     }
     const page = await boundary.read(() => deps.fetchSyncPages(
@@ -328,15 +326,18 @@ async function fetchPhaseFully(
       deps.deadline,
       { signal: boundary.signal, workAdmission },
     ));
-    localYield = mergeSharedMemoryLocalYield(localYield, page.localYield);
+    const pageOutcome = sharedMemoryWorkOutcome(page);
     appendInPlace(all, page.quads);
     lastCheckpointKey = page.checkpointKey;
-    if (page.completed) {
+    if (pageOutcome === 'completed') {
       boundary.admitSyncMutation(() => deps.deleteCheckpoint(page.checkpointKey));
-      return { quads: all, completed: true };
+      return { quads: all, outcome: 'completed' };
+    }
+    if (pageOutcome === 'local-budget-yield' || pageOutcome === 'timed-out') {
+      outcome = pageOutcome;
     }
     // Not completed (deadline or partial). Stop if no forward progress.
-    if (page.localYield || page.timedOut || page.nextOffset <= page.resumedFromOffset) break;
+    if (pageOutcome !== 'incomplete' || page.nextOffset <= page.resumedFromOffset) break;
     boundary.admitSyncMutation(() => deps.setCheckpoint(page.checkpointKey, page.nextOffset));
   }
   // Incomplete: the accumulated `all` is a prefix that the caller MUST NOT
@@ -350,8 +351,7 @@ async function fetchPhaseFully(
   }
   return {
     quads: all,
-    completed: false,
-    ...(localYield ? { localYield } : {}),
+    outcome,
   };
 }
 
@@ -395,7 +395,7 @@ async function recoverContextGraphSwmUnlocked(
   // graph-scoped assets. Fetch it before deciding whether an aggregate SWM data
   // scan is necessary.
   const meta = await fetchPhaseFully(deps, boundary, 'meta', wsMetaGraph);
-  if (!meta.completed) {
+  if (meta.outcome !== 'completed') {
     deps.logInfo?.(
       deps.ctx,
       `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
@@ -409,7 +409,7 @@ async function recoverContextGraphSwmUnlocked(
       droppedDataTriples: 0,
       readySnapshots: 0,
       totalSnapshots: 0,
-      ...(meta.localYield ? { localYield: meta.localYield } : {}),
+      ...(meta.outcome === 'local-budget-yield' ? { localYield: true as const } : {}),
       completed: false,
     };
   }
@@ -569,7 +569,7 @@ async function recoverContextGraphSwmUnlocked(
         + 'retained snapshot validation exhausted the local budget — will retry',
       );
       return {
-        localYield: sharedMemoryLocalYield(),
+        localYield: true,
         replacedRoots: 0,
         replacedGraphs: 0,
         insertedDataQuads: 0,
@@ -637,12 +637,12 @@ async function recoverContextGraphSwmUnlocked(
   const needsAggregateData = hasLegacyRoots || hasGraphBackedSnapshots;
   const data = needsAggregateData
     ? await fetchPhaseFully(deps, boundary, 'data', wsGraph)
-    : { quads: [] as Quad[], completed: true };
+    : { quads: [] as Quad[], outcome: 'completed' as const };
 
   // Legacy row pagination can cut a root (or a graph-backed snapshot) in the
   // middle. Preserve the existing all-or-nothing gate for that compatibility
   // path; store-backed exact assets above do not depend on it.
-  if (!data.completed) {
+  if (data.outcome !== 'completed') {
     deps.logInfo?.(
       deps.ctx,
       `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: ` +
@@ -655,7 +655,7 @@ async function recoverContextGraphSwmUnlocked(
       insertedMetaQuads: incrementallyInsertedMetaQuads,
       droppedDataTriples: 0,
       ...snapshotProgress,
-      ...(data.localYield ? { localYield: data.localYield } : {}),
+      ...(data.outcome === 'local-budget-yield' ? { localYield: true as const } : {}),
       completed: false,
     };
   }

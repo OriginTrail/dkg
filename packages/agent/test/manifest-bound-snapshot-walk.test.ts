@@ -158,6 +158,26 @@ describe('private snapshot-walk coordinator', () => {
     expect(second.plan.reusableRefs).toEqual(['a', 'b']);
     expect(validateRef.mock.calls.map(([ref]) => ref)).toEqual(['a', 'b']);
   });
+
+  it('starts a fresh validation epoch only after the prior sweep completes', async () => {
+    const state = progress();
+    state.markResolved('a');
+    state.markResolved('b');
+    state.beginRecoveryJob();
+    const admission = createSyncWorkAdmission(
+      () => 1_000,
+      { sharing: 'exclusive', owner: 'validation-epochs' },
+    );
+    const validateRef = vi.fn(async () => true);
+
+    await preparePrivateSwmSnapshotWalk(state, { workAdmission: admission, validateRef });
+    await preparePrivateSwmSnapshotWalk(state, { workAdmission: admission, validateRef });
+    expect(validateRef.mock.calls.map(([ref]) => ref)).toEqual(['a', 'b']);
+
+    state.beginRecoveryJob();
+    await preparePrivateSwmSnapshotWalk(state, { workAdmission: admission, validateRef });
+    expect(validateRef.mock.calls.map(([ref]) => ref)).toEqual(['a', 'b', 'a', 'b']);
+  });
 });
 
 it('prepares plans without adding owner policy to the progress core', () => {

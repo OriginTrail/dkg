@@ -22,7 +22,6 @@ import {
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { UNRESTRICTED_SYNC_WORK, createSyncWorkAdmission } from '../src/sync/work-admission.js';
-import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -1668,7 +1667,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     // aggregate preserves the documented identity
     // `replayPhaseBytesReceived + snapshotPhaseBytesReceived === bytesReceived`.
     const peerARound = {
-      localYield: sharedMemoryLocalYield(),
+      localYield: true as const,
       snapshotPlaneIncomplete: 1,
       swmCoverage: peerACoverage(),
       replayPhaseBytesReceived: 4_096,
@@ -1677,7 +1676,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     };
     const peerBRound = {
       swmCoverage: peerBCoverage(),
-      localYield: sharedMemoryLocalYield(),
+      localYield: true as const,
       snapshotPlaneIncomplete: 2,
       replayPhaseBytesReceived: 1_024,
       snapshotPhaseBytesReceived: 16_384,
@@ -1749,7 +1748,7 @@ describe('DKGAgent sync fetch coalescing', () => {
 
       // SUMMATION across both peers. Each expected value differs from both
       // operands, so neither `=` (last write) nor a dropped forward can produce it.
-      expect(swm.localYield).toEqual({ kind: 'local-budget-yield' });
+      expect(swm.localYield).toBe(true);
       expect(swm.snapshotPlaneIncomplete).toBe(3);
       expect(swm.replayPhaseBytesReceived).toBe(5_120); // 4_096 + 1_024
       expect(swm.snapshotPhaseBytesReceived).toBe(81_920); // 65_536 + 16_384
@@ -1845,7 +1844,7 @@ describe('DKGAgent sync fetch coalescing', () => {
           ...(resolved < 3
             ? {
               failedPhases: 1,
-              localYield: sharedMemoryLocalYield(),
+              localYield: true as const,
               snapshotPlaneIncomplete: 1,
             }
             : {}),

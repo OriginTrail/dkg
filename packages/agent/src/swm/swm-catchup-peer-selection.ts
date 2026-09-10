@@ -1,5 +1,3 @@
-import type { SharedMemoryLocalYield } from '../sync/shared-memory-completion.js';
-
 export type SwmCatchupPeerOutcome = 'good' | 'empty' | 'denied' | 'unsupported' | 'transportFailed';
 
 export const SWM_CATCHUP_PEER_GOOD_TTL_MS = 10 * 60_000;
@@ -52,10 +50,7 @@ export class SwmCatchupPeerSelector {
     this.maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
   }
 
-  record(contextGraphId: string, peerId: string, outcome: SwmCatchupPeerOutcome | undefined, now = Date.now()): void {
-    // A local scheduler yield supplies no evidence and must not evict or
-    // overwrite an existing peer entry, including for direct JS composition.
-    if (outcome === undefined) return;
+  record(contextGraphId: string, peerId: string, outcome: SwmCatchupPeerOutcome, now = Date.now()): void {
     const ttl = outcome === 'good' ? this.goodTtlMs : this.negativeTtlMs;
     if (ttl <= 0) {
       this.entries.delete(cacheKey(contextGraphId, peerId));
@@ -160,7 +155,7 @@ interface SwmCatchupPeerTelemetry {
 
 export type SwmCatchupPeerOutcomeInput = SwmCatchupPeerTelemetry & {
   /** A local scheduler decision is not itself peer-health evidence. */
-  localYield?: SharedMemoryLocalYield;
+  localYield?: true;
 };
 
 export function classifySwmCatchupPeerOutcome(

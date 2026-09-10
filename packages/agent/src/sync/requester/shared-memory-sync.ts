@@ -20,9 +20,7 @@ export {
   type SharedMemorySyncSummary,
 } from '../shared-memory-diagnostics.js';
 import {
-  mergeSharedMemoryLocalYield,
-  sharedMemoryLocalYield,
-  type SharedMemoryLocalYield,
+  mergeLocalBudgetYieldEvidence,
 } from '../shared-memory-completion.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
@@ -1297,7 +1295,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // the plane, and without that the round classifies as clean and reports
       // the graph `done` while Knowledge Assets are still missing.
       if (snapshotSync.localYield) {
-        summary.localYield = mergeSharedMemoryLocalYield(
+        summary.localYield = mergeLocalBudgetYieldEvidence(
           summary.localYield,
           snapshotSync.localYield,
         );
@@ -1560,7 +1558,7 @@ export async function syncPublicSnapshotsForMeta(params: {
    * a local-yield completion and must NOT fold it into `timedOutPhases`, which
    * marks the peer backoff-worthy (`durable-progress.ts` `backoffWorthyFailure`).
    */
-  localYield?: SharedMemoryLocalYield;
+  localYield?: true;
 }> {
   const workAdmission = params.workAdmission;
   const executionBoundary = params.executionBoundary
@@ -1601,7 +1599,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   let checkpointAdvances = 0;
   let readySnapshots = 0;
   let missingCount = 0;
-  let localYield: SharedMemoryLocalYield | undefined;
+  let localYield: true | undefined;
   const missingSample: string[] = [];
   const noteMissing = (ref: string): void => {
     missingCount += 1;
@@ -1658,7 +1656,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
     // can never leave a partially materialized asset.
     if (!workAdmission.canAdmitWork()) {
-      localYield = sharedMemoryLocalYield();
+      localYield = true;
       abandonFrom(index);
       break;
     }
@@ -1678,7 +1676,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       // Cache validation can consume the allowance without producing a hit.
       // Admit no new transport after that local work exhausts the budget.
       if (!workAdmission.canAdmitWork()) {
-        localYield = sharedMemoryLocalYield();
+        localYield = true;
         abandonFrom(index);
         break;
       }
@@ -1701,7 +1699,7 @@ export async function syncPublicSnapshotsForMeta(params: {
       bytesReceived += result.bytesReceived;
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
       timedOutPhases += result.timedOut ? 1 : 0;
-      localYield = mergeSharedMemoryLocalYield(localYield, result.localYield);
+      localYield = mergeLocalBudgetYieldEvidence(localYield, result.localYield);
       if (result.completed) {
         executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
       }

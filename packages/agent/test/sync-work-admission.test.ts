@@ -93,7 +93,7 @@ describe('page and transport admission within one operation', () => {
     expect(result).toMatchObject({
       completed: false,
       timedOut: false,
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
     });
     expect(result.quads).toHaveLength(2);
   });
@@ -111,7 +111,7 @@ describe('page and transport admission within one operation', () => {
     expect(result).toMatchObject({
       completed: false,
       timedOut: false,
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
     });
   });
 
@@ -201,7 +201,7 @@ describe('page and transport admission within one operation', () => {
     expect(send).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       completed: false,
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
     });
   });
 });

@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { CatchupPassDecisionReason } from './catchup-pass-policy.js';
-import {
-  mergeSharedMemoryLocalYield,
-  type SharedMemoryLocalYield,
-} from './shared-memory-completion.js';
+import { mergeLocalBudgetYieldEvidence } from './shared-memory-completion.js';
 
 /** One peer and one round of public-SWM snapshot coverage, reduced as a unit. */
 export interface SwmSnapshotCoverage {
@@ -22,7 +19,7 @@ export interface SwmSnapshotCoverage {
 
 /** Compatibility-facing diagnostic result accepted from workers and older producers. */
 interface SharedMemorySyncDiagnosticsShape {
-  readonly localYield?: SharedMemoryLocalYield;
+  readonly localYield?: true;
   readonly snapshotPlaneIncomplete?: number;
   readonly fetchedMetaTriples: number;
   readonly fetchedDataTriples: number;
@@ -158,7 +155,7 @@ function mergeSharedMemoryDiagnostics(
     (a[key] ?? 0) + (b[key] ?? 0);
   const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
   return {
-    localYield: mergeSharedMemoryLocalYield(a.localYield, b.localYield),
+    localYield: mergeLocalBudgetYieldEvidence(a.localYield, b.localYield),
     snapshotPlaneIncomplete: sum('snapshotPlaneIncomplete'),
     insertedTriples: sum('insertedTriples'),
     fetchedMetaTriples: sum('fetchedMetaTriples'),

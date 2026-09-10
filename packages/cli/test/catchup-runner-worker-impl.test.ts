@@ -297,9 +297,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
                 bytesReceived: 0,
                 emptyResponses: 1,
                 failedPhases: 1,
-                localYield: {
-                  kind: 'local-budget-yield',
-                },
+                localYield: true,
                 snapshotPlaneIncomplete: 1,
                 resolvedSnapshotPlaneIncomplete: 1,
                 timedOutPhases: 1,
@@ -329,9 +327,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.sharedMemorySynced).toBe(0);
     expect(result.diagnostics?.sharedMemory.failedPhases).toBe(1);
     expect(result.diagnostics?.sharedMemory.timedOutPhases).toBe(1);
-    expect(result.diagnostics?.sharedMemory.localYield).toEqual({
-      kind: 'local-budget-yield',
-    });
+    expect(result.diagnostics?.sharedMemory.localYield).toBe(true);
     expect(result.diagnostics?.sharedMemory.snapshotPlaneIncomplete).toBe(1);
     expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(0);
     expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers).toBe(1);

@@ -4,7 +4,6 @@ import {
   classifySelectedSwmRoundFreshness,
   classifySharedMemoryFreshness,
 } from '../src/sync/shared-memory-freshness.js';
-import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
 import {
   cleanDurableResult,
   result,
@@ -58,7 +57,7 @@ describe('shared-memory freshness classification', () => {
     const finalRaw = {
       ...complete,
       failedPhases: 1,
-      localYield: sharedMemoryLocalYield(),
+      localYield: true as const,
       snapshotPlaneIncomplete: 1,
     };
     const resolved = applySelectedSwmFreshnessResolution(finalRaw, {

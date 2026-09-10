@@ -85,7 +85,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       completed: false,
       readySnapshots: 0,
       timedOutPhases: 0,
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
     });
   });
 
@@ -341,7 +341,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       });
 
       expect(result).toMatchObject({
-        localYield: { kind: 'local-budget-yield' },
+        localYield: true as const,
         // A yield is not a clean round: `completed` is derived from
         // `missingCount === 0`, so the abandoned tail keeps the graph from
         // being stamped caught-up while Knowledge Assets are still missing.
@@ -398,7 +398,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       deleteCheckpoint: (key) => { checkpoints.delete(key); },
     });
     expect(result.completed).toBe(false);
-    expect(result.localYield).toEqual({ kind: 'local-budget-yield' });
+    expect(result.localYield).toBe(true);
     expect(fetchSyncPages).toHaveBeenCalledTimes(1);
     expect(checkpoints.size).toBe(0);
     expect(await statusValues(store)).toEqual(['"old"']);

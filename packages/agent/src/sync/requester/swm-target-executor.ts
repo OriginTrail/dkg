@@ -29,7 +29,10 @@ import {
   createSharedMemorySnapshotMaterializer,
   type SharedMemorySnapshotMaterializer,
 } from './swm-snapshot-materializer.js';
-import { createPrivateSwmRecoveryWindow } from './private-swm-recovery-budget.js';
+import {
+  createPrivateSwmRecoveryWindow,
+  normalizePrivateSwmRecoveryBudgetMs,
+} from './private-swm-recovery-budget.js';
 import {
   recoverContextGraphSwm,
   recoverContextGraphSwmWithProgressRetries,
@@ -48,7 +51,8 @@ import {
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
 export interface SwmTargetExecutorPortsV1 {
-  readonly privateRecoveryBudgetMs: number;
+  /** Defaults to ten minutes for callers composed before this port existed. */
+  readonly privateRecoveryBudgetMs?: number;
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly listSubGraphs: (
@@ -113,6 +117,7 @@ export interface PrivateSwmRecoveryTargetV1 {
  */
 export class SwmTargetExecutorV1 {
   readonly #ports: SwmTargetExecutorPortsV1;
+  readonly #privateRecoveryBudgetMs: number;
   readonly #snapshotMaterializer: SharedMemorySnapshotMaterializer;
   readonly #recoveryMutation: SwmRecoveryMutationRuntimeV1;
   readonly #subGraphAdmission = new Map<
@@ -125,6 +130,9 @@ export class SwmTargetExecutorV1 {
     private readonly privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
   ) {
     this.#ports = ports;
+    this.#privateRecoveryBudgetMs = normalizePrivateSwmRecoveryBudgetMs(
+      ports.privateRecoveryBudgetMs,
+    );
     this.#snapshotMaterializer = createSharedMemorySnapshotMaterializer({
       store: ports.store,
       writeLocks: ports.writeLocks,
@@ -136,7 +144,7 @@ export class SwmTargetExecutorV1 {
   async recoverPrivateTarget(
     target: PrivateSwmRecoveryTargetV1,
   ): Promise<RecoverContextGraphSwmResult> {
-    const window = createPrivateSwmRecoveryWindow(this.#ports.privateRecoveryBudgetMs);
+    const window = createPrivateSwmRecoveryWindow(this.#privateRecoveryBudgetMs);
     const ctx = createOperationContext('sync');
     const admission = () => this.#getSubGraphAdmission(target.contextGraphId);
     let snapshotLease: PrivateSwmSnapshotWalkLease | undefined;
@@ -184,15 +192,13 @@ export class SwmTargetExecutorV1 {
       getExcludedSubGraphNames: async () => (await admission()).excluded,
       includeRootScope: target.includeRootScope,
       ensureOwnedMap: this.#ports.ensureOwnedMap,
-      snapshotWalkProgress: (orderedManifest) => (
-        snapshotLease?.progress.matches(orderedManifest)
-          ? snapshotLease.progress
-          : (() => {
-              snapshotLease?.release();
-              snapshotLease = this.privateSnapshotWalks.open(target, orderedManifest);
-              return snapshotLease.progress;
-            })()
-      ),
+      snapshotWalkProgress: (orderedManifest) => {
+        if (snapshotLease?.progress.matches(orderedManifest)) return snapshotLease.progress;
+        snapshotLease?.release();
+        snapshotLease = this.privateSnapshotWalks.open(target, orderedManifest);
+        snapshotLease.progress.beginRecoveryJob();
+        return snapshotLease.progress;
+      },
       logInfo: this.#ports.logInfo,
       logWarn: this.#ports.logWarn,
       recoveryGuard: target.recoveryGuard,

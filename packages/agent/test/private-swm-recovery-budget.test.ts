@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createPrivateSwmRecoveryWindow, resolvePrivateSwmRecoveryBudgetMs } from '../src/sync/requester/private-swm-recovery-budget.js';
+import { createPrivateSwmRecoveryWindow, normalizePrivateSwmRecoveryBudgetMs, resolvePrivateSwmRecoveryBudgetMs } from '../src/sync/requester/private-swm-recovery-budget.js';
 import { recoverContextGraphSwmWithProgressRetries, type RecoverContextGraphSwmResult } from '../src/sync/requester/swm-recovery.js';
 
 function recoveryResult(
@@ -28,6 +28,14 @@ describe('private SWM recovery budget', () => {
   it.each(['0', ' 15 ', '600000'])('accepts the configured duration %j', (raw) => {
     expect(resolvePrivateSwmRecoveryBudgetMs(raw)).toBe(Number(raw));
   });
+  it.each([undefined, -1, Number.NaN, Infinity, 0.1])(
+    'defaults invalid programmatic value %s',
+    value => expect(normalizePrivateSwmRecoveryBudgetMs(value)).toBe(600_000),
+  );
+  it.each([0, 15, 600_000])(
+    'accepts programmatic duration %i',
+    value => expect(normalizePrivateSwmRecoveryBudgetMs(value)).toBe(value),
+  );
   it('shares one frozen monotonic allowance and caps each transport deadline', () => {
     let now = 100;
     vi.spyOn(performance, 'now').mockImplementation(() => now);

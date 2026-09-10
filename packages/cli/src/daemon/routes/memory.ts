@@ -61,7 +61,6 @@ import {
   classifySwmCatchupPeerOutcome,
   createSwmCatchupPeerSelector,
   loadOpWallets,
-  type SharedMemoryLocalYield,
 } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
@@ -443,7 +442,7 @@ function decodeReservedKaId(val: unknown): bigint | undefined {
 const swmCatchupPeerSelector = createSwmCatchupPeerSelector();
 
 type SwmCatchupDetailedResult = {
-  localYield?: SharedMemoryLocalYield;
+  localYield?: true;
   insertedTriples: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;

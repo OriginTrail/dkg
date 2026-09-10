@@ -1,9 +1,16 @@
-import type { SharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
-import { sharedMemoryLocalYield } from '../src/sync/shared-memory-completion.js';
+import {
+  sharedMemoryCompletionFields,
+  sharedMemoryWorkOutcome,
+  type SharedMemoryWorkOutcome,
+} from '../src/sync/shared-memory-completion.js';
 import { classifySwmCatchupPeerOutcome, createSwmCatchupPeerSelector, type DKGAgent, type SharedMemorySyncResult, type SwmCatchupPeerOutcome } from '@origintrail-official/dkg-agent';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
-const localYield = sharedMemoryLocalYield();
+const localYield = true as const;
+const workOutcome: SharedMemoryWorkOutcome = sharedMemoryWorkOutcome(
+  sharedMemoryCompletionFields('local-budget-yield'),
+);
+void workOutcome;
 
 classifySwmCatchupPeerOutcome({ localYield });
 
@@ -11,14 +18,9 @@ classifySwmCatchupPeerOutcome({ localYield });
 // decides peer health from the telemetry while the yield itself remains neutral.
 classifySwmCatchupPeerOutcome({ localYield, failedPhases: 1 });
 
-// Plane-specific counts cannot be embedded in the generic completion reason.
-const invalidLocalYield: SharedMemoryLocalYield = {
-  kind: 'local-budget-yield',
-  // @ts-expect-error snapshot cardinality belongs to shared-memory diagnostics
-  snapshotPlaneIncomplete: 1,
-};
-
-void invalidLocalYield;
+// @ts-expect-error arbitrary strings are not coherent work outcomes
+const invalidOutcome: SharedMemoryWorkOutcome = 'yielded';
+void invalidOutcome;
 
 // @ts-expect-error a completed page cannot also be a local scheduler yield
 const contradictoryPage: SyncPageResult = {
@@ -34,6 +36,20 @@ const contradictoryPage: SyncPageResult = {
 
 void contradictoryPage;
 
+// @ts-expect-error a page cannot be both peer-timed-out and locally yielded
+const timedOutAndYieldedPage: SyncPageResult = {
+  quads: [],
+  bytesReceived: 0,
+  resumedFromOffset: 0,
+  nextOffset: 0,
+  checkpointKey: 'timed-out-and-yielded',
+  completed: false,
+  timedOut: true,
+  localYield,
+};
+
+void timedOutAndYieldedPage;
+
 // Existing public consumers can classify an old-shaped result and pass the
 // guaranteed outcome directly to the selector, without an undefined guard.
 const selector = createSwmCatchupPeerSelector();
@@ -44,8 +60,11 @@ const emptyOutcome: SwmCatchupPeerOutcome = classifySwmCatchupPeerOutcome({});
 void legacyOutcome;
 void emptyOutcome;
 
-// New local-yield inputs also compose safely; the selector treats no evidence as a no-op.
-selector.record('cg', 'peer', classifySwmCatchupPeerOutcome({ localYield }));
+// A neutral local yield must be guarded before reaching the strict selector.
+const neutralOutcome = classifySwmCatchupPeerOutcome({ localYield });
+if (neutralOutcome) selector.record('cg', 'peer', neutralOutcome);
+// @ts-expect-error selector records only real peer-health evidence
+selector.record('cg', 'peer', neutralOutcome);
 
 // Public compatibility counters may be absent on older producer results.
 declare const detailed: SharedMemorySyncResult;

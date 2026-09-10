@@ -13,7 +13,6 @@ import {
   type DurableSyncDiagnostics,
   type DurableSyncResult,
   type SwmSnapshotCoverage,
-  type SharedMemoryLocalYield,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC, createOperationContext } from '@origintrail-official/dkg-core';
@@ -119,8 +118,8 @@ export interface CatchupJobResult {
        * are attributed to and the missing sample are never mixed across peers.
        */
       swmCoverage?: SwmSnapshotCoverage;
-      /** Plane-neutral local-yield completion reason. */
-      localYield?: SharedMemoryLocalYield;
+      /** Plane-neutral evidence that local admission yielded. */
+      localYield?: true;
       /** Snapshot phases left incomplete specifically by a local yield; zero on clean results. */
       snapshotPlaneIncomplete: number;
       /** Extra passes over the peer set beyond the first. */

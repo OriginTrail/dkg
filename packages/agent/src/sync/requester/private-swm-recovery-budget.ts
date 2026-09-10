@@ -27,6 +27,15 @@ export function resolvePrivateSwmRecoveryBudgetMs(
     : DEFAULT_PRIVATE_SWM_RECOVERY_BUDGET_MS;
 }
 
+/** Normalize programmatic/legacy executor composition at its compatibility edge. */
+export function normalizePrivateSwmRecoveryBudgetMs(
+  value: number | undefined,
+): number {
+  return Number.isSafeInteger(value) && (value ?? -1) >= 0
+    ? value!
+    : DEFAULT_PRIVATE_SWM_RECOVERY_BUDGET_MS;
+}
+
 /** Zero disables extra rounds; the initial round retains its existing deadline. */
 export function createPrivateSwmRecoveryWindow(budgetMs: number): PrivateSwmRecoveryWindow {
   if (budgetMs === 0) return Object.freeze({

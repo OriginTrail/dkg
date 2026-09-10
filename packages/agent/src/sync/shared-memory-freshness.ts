@@ -11,10 +11,8 @@ import {
   type DurableProgressClassificationOptions,
   type DurableProgressSummary,
 } from './durable-progress.js';
-import type { SharedMemoryLocalYield } from './shared-memory-completion.js';
-
 export interface SharedMemoryFreshnessSummary extends DurableProgressSummary {
-  readonly localYield?: SharedMemoryLocalYield;
+  readonly localYield?: true;
   readonly snapshotPlaneIncomplete?: number;
   readonly resolvedSnapshotPlaneIncomplete?: number;
   readonly metadataContinuationYields?: number;

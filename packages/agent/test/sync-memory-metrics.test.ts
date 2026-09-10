@@ -316,7 +316,7 @@ describe('sync memory attribution metrics', () => {
     expect(result).toMatchObject({
       completed: false,
       timedOut: false,
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
     });
     expect(result.quads).toHaveLength(2);
     expect(sends).toBe(1);

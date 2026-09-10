@@ -49,8 +49,8 @@ import {
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
 import {
-  sharedMemoryLocalYield,
-  type SharedMemoryLocalYield,
+  sharedMemoryCompletionFields,
+  type SharedMemoryCompletionFields,
 } from '../shared-memory-completion.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
@@ -197,17 +197,13 @@ interface SyncPageResultFields {
   /** Raw responder-session coordinate after the last accepted page. */
   rawNextOffset?: number;
   checkpointKey: string;
-  timedOut: boolean;
 }
 
 /**
  * Page completion prevents a local scheduler yield from being paired with a
  * contradictory successful completion at construction time.
  */
-export type SyncPageResult = SyncPageResultFields & (
-  | { completed: true; localYield?: never }
-  | { completed: false; localYield?: SharedMemoryLocalYield }
-);
+export type SyncPageResult = SyncPageResultFields & SharedMemoryCompletionFields;
 
 export interface SyncPageProgress {
   readonly resumedFromOffset: number;
@@ -215,12 +211,11 @@ export interface SyncPageProgress {
 }
 
 function acceptedIncompletePrefixResult(
-  result: Omit<SyncPageResult, 'completed' | 'timedOut'>,
+  result: SyncPageResultFields,
 ): SyncPageResult {
   return {
     ...result,
-    completed: false,
-    timedOut: true,
+    ...sharedMemoryCompletionFields('timed-out'),
   };
 }
 
@@ -1087,7 +1082,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
           bytesReceived, resumedFromOffset, rawResumedFromOffset, responderSessionStartedFresh,
           ...(manifestDigest ? { manifestDigest } : {}),
           nextOffset: offset, rawNextOffset: offset, checkpointKey,
-          completed: false, timedOut: false, localYield: sharedMemoryLocalYield(),
+          ...sharedMemoryCompletionFields('local-budget-yield'),
         };
       }
     }
@@ -1343,7 +1338,8 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     nextOffset: offset,
     rawNextOffset: offset,
     checkpointKey,
-    completed: !timedOut && !yielded,
-    timedOut,
+    ...sharedMemoryCompletionFields(
+      timedOut ? 'timed-out' : yielded ? 'incomplete' : 'completed',
+    ),
   };
 }

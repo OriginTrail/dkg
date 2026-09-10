@@ -25,6 +25,7 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
     { limit: 'job window', budgetMs: 50, roundMs: 500, outcome: 'local_yield' },
     { limit: 'round deadline', budgetMs: 500, roundMs: 50, outcome: 'timed_out' },
     { limit: 'initial round only', budgetMs: 0, roundMs: 50, outcome: 'timed_out' },
+    { limit: 'legacy omitted budget port', budgetMs: undefined, roundMs: 50, outcome: 'timed_out' },
   ])('pins authorization, lease signal and $limit on private page fetches', async ({ budgetMs, roundMs, outcome }) => {
     let elapsedMs = 0;
     const startedAt = Date.now();
@@ -45,7 +46,7 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       }),
     );
     const executor = new SwmTargetExecutorV1({
-      privateRecoveryBudgetMs: budgetMs,
+      ...(budgetMs === undefined ? {} : { privateRecoveryBudgetMs: budgetMs }),
       store,
       writeLocks: new Map(),
       listSubGraphs: async () => [],

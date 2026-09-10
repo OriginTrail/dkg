@@ -205,7 +205,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     expect(getSnapshot).toHaveBeenCalledTimes(1);
     expect(fetchSyncPages).toHaveBeenCalledTimes(1); // Metadata only; zero snapshot requests.
     expect(result).toMatchObject({
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
       completedPhases: 0, failedPhases: 1,
       failedPeers: 0, backoffWorthyFailures: 0, insertedTriples: 0,
     });
@@ -267,7 +267,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     expect(await recover()).toMatchObject({
       completed: false,
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
       readySnapshots: 1,
       totalSnapshots: 3,
     });
@@ -278,7 +278,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     canAdmit = true;
     expect(await recover()).toMatchObject({
       completed: false,
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
       readySnapshots: 2,
       totalSnapshots: 3,
     });
@@ -321,7 +321,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     const first = await run();
     expect(first).toMatchObject({
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
       failedPhases: 1,
     });
     expect(getSnapshot).toHaveBeenCalledTimes(2);
@@ -346,6 +346,59 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       .toHaveLength(1);
   });
 
+  it('starts a fresh retained validation sweep in the next incomplete recovery job', async () => {
+    vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const fixture = snapshotFixture(8, 'repair-after-complete-validation');
+    const snapshots = new Map([[fixture.digest, fixture.payload]]);
+    const getSnapshot = vi.fn(async (ref: string) => (
+      snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null
+    ));
+    const { run, fetchSyncPages, store } = harness({
+      getSnapshot,
+      putSnapshot: async () => { throw new Error('The snapshot is already cached'); },
+    }, true);
+    fetchSyncPages.mockImplementation(async (_ctx, _peer, _cg, _swm, phase) => {
+      if (phase === 'meta') return page([...fixture.metadata, ...legacyMetadata()]);
+      expect(phase).toBe('data');
+      elapsed += 100;
+      return {
+        ...page([], false),
+        localYield: true as const,
+      };
+    });
+
+    // Materialize the snapshot, then retain it because the legacy aggregate
+    // phase keeps the outer recovery job incomplete.
+    await expect(run()).resolves.toMatchObject({
+      completedPhases: 0,
+      localYield: true as const,
+    });
+    expect(await store.countQuads(fixture.assertionGraph)).toBe(1);
+
+    // The next job completes a full retained-validation epoch but remains
+    // incomplete for the independent legacy aggregate phase.
+    await expect(run()).resolves.toMatchObject({
+      completedPhases: 0,
+      localYield: true as const,
+    });
+    await store.dropGraph(fixture.assertionGraph);
+    expect(await store.countQuads(fixture.assertionGraph)).toBe(0);
+
+    // A new outer job must not trust the prior job's completed sweep.
+    await expect(run()).resolves.toMatchObject({
+      completedPhases: 0,
+      localYield: true as const,
+    });
+    expect(await store.countQuads(fixture.assertionGraph)).toBe(1);
+    expect(fetchSyncPages.mock.calls.filter((call) => call[4] === 'snapshot'))
+      .toHaveLength(0);
+    expect(getSnapshot).toHaveBeenCalledTimes(4);
+    expect(getSnapshot.mock.calls.map(([ref]) => ref))
+      .toEqual(Array.from({ length: 4 }, () => fixture.digest));
+  });
+
   it('revalidates retained progress and repairs an assertion graph deleted between jobs', async () => {
     vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
     let elapsed = 0;
@@ -368,7 +421,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     await expect(run()).resolves.toMatchObject({
       completedPhases: 0,
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
     });
     expect(await store.countQuads(fixtures[0].assertionGraph)).toBe(1);
     await store.dropGraph(fixtures[0].assertionGraph);
@@ -376,7 +429,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     await expect(run()).resolves.toMatchObject({
       completedPhases: 0,
-      localYield: { kind: 'local-budget-yield' },
+      localYield: true as const,
     });
     // The still-unresolved tail is admitted before the retained prefix, so the
     // deleted prefix remains fail-closed until the following validation job.
@@ -443,7 +496,9 @@ describe('private recovery job ownership and lifecycle outcome', () => {
 
     reversedA.markResolved('a');
     reversedA.markResolved('b');
-    registry.release(ownerA);
+    const currentLeaseA = registry.open(ownerA, [...manifest].reverse());
+    expect(currentLeaseA.progress).toBe(reversedA);
+    currentLeaseA.release();
     expect(registry.retainedTargetCount).toBe(1);
     const completing = registry.open(ownerC, [{ ref: 'only', digest: 'only', count: 1 }]);
     expect(completing.kind).toBe('retained');
@@ -502,7 +557,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         return {
           ...page([], false),
           completed: false,
-          localYield: { kind: 'local-budget-yield' },
+          localYield: true as const,
         };
       });
 
@@ -511,7 +566,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       expect(fetchSyncPages.mock.calls.map(call => call[4]))
         .toEqual(yieldedPhase === 'meta' ? ['meta'] : ['meta', 'data']);
       expect(result).toMatchObject({
-        localYield: { kind: 'local-budget-yield' },
+        localYield: true as const,
         completedPhases: 0,
         failedPhases: 1,
         failedPeers: 0,
