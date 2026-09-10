@@ -632,11 +632,14 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
   });
 
-  it('clears cached retry backoff after a successful signed probe', async () => {
+  it.each(['transport error', 'empty response'])('clears transient backoff after %s and a successful signed probe', async (failure) => {
     let attempt = 0;
     const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
       attempt += 1;
-      if (attempt === 1) throw new Error('stream timeout');
+      if (attempt === 1) {
+        if (failure === 'empty response') return new Uint8Array();
+        throw new Error('stream timeout');
+      }
 
       const request = JSON.parse(new TextDecoder().decode(data));
       const response = await signNetworkIdentityResponse({
@@ -652,7 +655,9 @@ describe('NetworkAdmissionCoordinator', () => {
     await expect(
       fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, createOperationContext('connect')),
     ).rejects.toMatchObject({ code: 'NETWORK_ADMISSION_PROBE_FAILED' });
-    expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID)).toBeDefined();
+    expect(fixture.admission.getRetryableProbeBackoff(REMOTE_PEER_ID)).toMatchObject({ kind: 'transient' });
+    expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(false);
+    expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
 
     await expect(
       fixture.coordinator.ensureExplicitConnectAdmitted(

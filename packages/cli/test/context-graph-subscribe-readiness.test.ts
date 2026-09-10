@@ -199,7 +199,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
 
     const agent = {
-      resolveContextGraphReadAuthority: async () => ({
+      resolveContextGraphSubscriptionBootstrapAuthority: async () => ({
         outcome: 'allowed' as const,
         source: 'legacy-local' as const,
         reason: 'test-public',

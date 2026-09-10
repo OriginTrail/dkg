@@ -18,8 +18,7 @@ import type { Rfc64CatalogBootstrapPartitionV1 } from
   './dkg-agent-rfc64-catalog-bootstrap.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64CatalogWorkloadOwnerV1 } from './rfc64/catalog-runtime-v1.js';
-import { Rfc64CoalescingSupervisorV1 } from
-  './rfc64/coalescing-supervisor-v1.js';
+import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   './rfc64/finalized-private-placement-repair-store-v1.js';
 import {
@@ -73,8 +72,8 @@ interface MutableAuthorRepairStatusV1 {
 interface ProjectionSupervisorStateV1 {
   readonly retryIntervalMs?: number;
   readonly repairs: MutableAuthorRepairStatusV1[];
-  readonly runner: Rfc64CoalescingSupervisorV1;
-  readonly finalizedPrivateRunner: Rfc64CoalescingSupervisorV1;
+  readonly runner: CoalescingRecurringTask;
+  readonly finalizedPrivateRunner: CoalescingRecurringTask;
   readonly finalizedPrivateAttemptWaiters: Map<string, Set<() => void>>;
   pass: number;
   lastPassStartedAtMs: number | null;
@@ -297,7 +296,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     ctx: OperationContext,
   ): ProjectionSupervisorStateV1 {
     let state!: ProjectionSupervisorStateV1;
-    const runner = new Rfc64CoalescingSupervisorV1({
+    const runner = new CoalescingRecurringTask({
       retryIntervalMs,
       runPass: (signal) => this.#runPass(state, signal),
       onError: (error) => {
@@ -316,7 +315,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       },
       closingMessage: 'RFC-64 SWM catalog projection closing',
     });
-    const finalizedPrivateRunner = new Rfc64CoalescingSupervisorV1({
+    const finalizedPrivateRunner = new CoalescingRecurringTask({
       retryIntervalMs: finalizedPrivateRetryIntervalMs,
       runPass: (signal) => this.#runFinalizedPrivatePass(state, signal),
       onError: (error) => {

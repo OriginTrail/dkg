@@ -25,6 +25,13 @@ export {
 } from './profile.js';
 export { ProfileManager } from './profile-manager.js';
 export {
+  MAX_AGENT_PEER_PAGE_SIZE,
+  type AgentPeerDiscovery,
+  type AgentPeerPage,
+  type AgentPeerPageRequest,
+} from './agent-peer-discovery.js';
+export type { CuratorPeerIdsResolution } from './dkg-agent-lifecycle.js';
+export {
   DiscoveryClient,
   discoveredAgentIdentityKey,
   discoveredAgentRowKey,
@@ -308,6 +315,8 @@ export {
   type Rfc64CatalogBootstrapConfigV1,
   type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
+  type MessengerOutboxDrainOptions,
+  type MessengerOutboxStats,
   type ContextGraphSub,
   type ContextGraphSyncMode,
   type ContextGraphDiscoveryMetadata,

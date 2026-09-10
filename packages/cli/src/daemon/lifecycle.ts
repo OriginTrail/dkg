@@ -97,6 +97,7 @@ import {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
+  SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
   type MetricsSource,
@@ -357,6 +358,7 @@ import {
   chainResetWipe,
   detectBackendSwitch,
   detectNetworkSwitch,
+  formatChainResetWipeOutcome,
   skipChainResetWipe,
 } from './chain-reset-wipe.js';
 import {
@@ -1537,21 +1539,7 @@ async function runDaemonInnerWithStartupOwnership(
     // namespace silently corrupt each other. Fires BEFORE
     // chainResetWipe so a mismatched tag never triggers a wipe of
     // someone else's data.
-    const identity = await checkOrSetStoreIdentity({
-      storeConfig: runtimeStore,
-      nodeName: config.name,
-    });
-    if (!identity.ok) {
-      if (identity.action === 'mismatch') {
-        log(formatIdentityTagMismatch(identity));
-      } else {
-        log(`[STORE-IDENTITY] failed to verify namespace ownership: ${identity.error}`);
-      }
-      process.exit(1);
-    }
-    if (identity.action === 'tagged') {
-      log(`Tagged triple-store namespace for node "${identity.nodeName}".`);
-    }
+    await ensureStoreIdentityOrExit(runtimeStore, config.name, log, 'startup');
   }
 
   const wipeResult = await chainResetWipe({
@@ -1572,31 +1560,15 @@ async function runDaemonInnerWithStartupOwnership(
     storeConfig: runtimeStore,
     log,
   });
-  if (wipeResult.wiped) {
-    log(
-      `Chain-state auto-wipe complete: ${wipeResult.removedFiles.length} file(s) removed, ` +
-      `${wipeResult.backedUpFiles.length} backed up ` +
-      `(prev marker: ${wipeResult.prevMarker ?? '<none>'}, now: ${network?.chainResetMarker})`,
-    );
-    // A DKG-managed external wipe uses DROP ALL, which also removes the
-    // namespace ownership tag verified above. Re-tag before continuing so
-    // this daemon never runs against an unclaimed namespace.
+  for (const message of formatChainResetWipeOutcome(wipeResult, network?.chainResetMarker)) {
+    log(message);
+  }
+  if (wipeResult.requiresStoreRetag) {
+    // A DKG-managed DROP ALL may have removed the namespace ownership tag.
+    // Re-tag even when cleanup or marker persistence failed: the remote
+    // request can take effect independently of those local outcomes.
     if (isExternalBackend(runtimeStore?.backend)) {
-      const identity = await checkOrSetStoreIdentity({
-        storeConfig: runtimeStore,
-        nodeName: config.name,
-      });
-      if (!identity.ok) {
-        if (identity.action === 'mismatch') {
-          log(formatIdentityTagMismatch(identity));
-        } else {
-          log(`[STORE-IDENTITY] failed to re-tag namespace after wipe: ${identity.error}`);
-        }
-        process.exit(1);
-      }
-      if (identity.action === 'tagged') {
-        log(`Re-tagged triple-store namespace for node "${identity.nodeName}" after chain-state wipe.`);
-      }
+      await ensureStoreIdentityOrExit(runtimeStore, config.name, log, 'post-wipe');
     }
   }
 
@@ -1790,6 +1762,12 @@ async function runDaemonInnerWithStartupOwnership(
   const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
+  // DashboardDB is process-owned local state under the same integrity boundary
+  // as the node identity/configuration. Authority generations cannot be proven
+  // from a watermark hash alone, so this composition-root admission is
+  // deliberately explicit rather than inferred from a structural store type.
+  const localContextGraphAuthorityHistoryStore =
+    new SqliteContextGraphAuthorityHistoryStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1919,6 +1897,7 @@ async function runDaemonInnerWithStartupOwnership(
     changelogCursorStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
+    localContextGraphAuthorityHistoryStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -2085,6 +2064,7 @@ async function runDaemonInnerWithStartupOwnership(
       commitAutomaticApproval: async (input) =>
         dashDb.commitContextGraphAutomaticApproval(input),
     },
+    messengerOutboxDrain: config.messengerOutboxDrain,
     messengerStores: {
       idempotencyStore: messengerIdempotencyStore,
       outboxStore: messengerOutboxStore,
@@ -3881,4 +3861,28 @@ async function runDaemonInnerWithStartupOwnership(
 
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+}
+type StoreIdentityPhase = 'startup' | 'post-wipe';
+
+async function ensureStoreIdentityOrExit(
+  storeConfig: Parameters<typeof checkOrSetStoreIdentity>[0]['storeConfig'],
+  nodeName: string,
+  log: (message: string) => void,
+  phase: StoreIdentityPhase,
+): Promise<void> {
+  const identity = await checkOrSetStoreIdentity({ storeConfig, nodeName });
+  if (!identity.ok) {
+    if (identity.action === 'mismatch') {
+      log(formatIdentityTagMismatch(identity));
+    } else {
+      const action = phase === 'post-wipe' ? 're-tag' : 'verify namespace ownership';
+      log(`[STORE-IDENTITY] failed to ${action}: ${identity.error}`);
+    }
+    process.exit(1);
+  }
+  if (identity.action === 'tagged') {
+    log(phase === 'post-wipe'
+      ? `Re-tagged triple-store namespace for node "${identity.nodeName}" after chain-state wipe.`
+      : `Tagged triple-store namespace for node "${identity.nodeName}".`);
+  }
 }
