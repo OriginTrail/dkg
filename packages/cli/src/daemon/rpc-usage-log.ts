@@ -13,6 +13,9 @@
  *
  * `eth_getLogs` additionally identifies the non-secret configured endpoint slot:
  *   rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=fallback_1 count=7 window_s=60 chain=base:8453
+ *
+ * The shared transport budget emits one state + delta line per window:
+ *   rpc_request_governor max_rps=10 background_max_rps=2 foreground_queued=0 background_queued=4 ...
  */
 
 import {
@@ -40,7 +43,7 @@ export function formatRpcUsageLines(
 ): string[] {
   if (!usage) return [];
   const normalized = normalizeRpcUsageWindow(usage);
-  if (rpcUsageWindowTotal(normalized) <= 0) return [];
+  if (rpcUsageWindowTotal(normalized) <= 0 && normalized.requestGovernor === undefined) return [];
   const chain = chainId ? ` chain=${safeToken(chainId, 'unknown')}` : '';
   const lines: string[] = [];
   for (const [method, count] of Object.entries(normalized.byMethod)) {
@@ -76,6 +79,29 @@ export function formatRpcUsageLines(
       `rpc_usage_by_consumer method=${method} consumer=${consumer} ` +
       `${endpointSlot ? `endpoint_slot=${endpointSlot} ` : ''}` +
       `count=${count} window_s=${windowSeconds}${chain}`,
+    );
+  }
+  const governor = normalized.requestGovernor;
+  if (governor !== undefined) {
+    const decimal = (value: number) => Number.isFinite(value)
+      ? Math.max(0, value).toFixed(3).replace(/\.?0+$/u, '')
+      : '0';
+    const integer = (value: number) => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+    lines.push(
+      `rpc_request_governor max_rps=${decimal(governor.maxRequestsPerSecond)} `
+      + `background_max_rps=${decimal(governor.backgroundMaxRequestsPerSecond)} `
+      + `available=${decimal(governor.availableTokens)} `
+      + `background_available=${decimal(governor.backgroundAvailableTokens)} `
+      + `foreground_queued=${integer(governor.foregroundQueued)} `
+      + `background_queued=${integer(governor.backgroundQueued)} `
+      + `foreground_admitted=${integer(governor.foregroundAdmitted)} `
+      + `background_admitted=${integer(governor.backgroundAdmitted)} `
+      + `foreground_deferred=${integer(governor.foregroundDeferred)} `
+      + `background_deferred=${integer(governor.backgroundDeferred)} `
+      + `rejected=${integer(governor.rejected)} `
+      + `cancelled=${integer(governor.cancelled)} `
+      + `startup_delay_ms=${integer(governor.startupDelayRemainingMs)} `
+      + `window_s=${windowSeconds}${chain}`,
     );
   }
   return lines;

@@ -15,7 +15,7 @@ export function withRpcRequestAbortSignal<T>(signal: AbortSignal, fn: () => T): 
   return rpcRequestAbortContext.run(signal, fn);
 }
 
-function activeRpcRequestAbortSignal(): AbortSignal | undefined {
+export function activeRpcRequestAbortSignal(): AbortSignal | undefined {
   return rpcRequestAbortContext.getStore();
 }
 

@@ -11,7 +11,7 @@ const CHAIN_FIELD_OWNER = {
   walletRpcUrls: 'network', tokenAddress: 'network', approvalPolicy: 'network',
   minPublisherNativeWei: 'network', minPublisherTracWei: 'network',
   finalityConfirmations: 'network', maxFeePerGasWei: 'network',
-  cgRegistryScanPageSize: 'operator', receiptTimeoutMs: 'operator',
+  cgRegistryScanPageSize: 'operator', receiptTimeoutMs: 'operator', rpcRequestBudget: 'operator',
 } as const satisfies Record<keyof ChainConfig, ChainFieldOwner>;
 
 function copyField<K extends keyof ChainConfig>(target: Partial<ChainConfig>, source: Partial<ChainConfig>, key: K): void {

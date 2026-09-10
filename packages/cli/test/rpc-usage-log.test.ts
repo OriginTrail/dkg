@@ -25,6 +25,35 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     expect(formatRpcUsageLines({ byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 123 }, 60, 'base:8453')).toEqual([]);
   });
 
+  it('emits transport-governor state even when the raw-request window is idle', () => {
+    const lines = formatRpcUsageLines({
+      byMethod: {},
+      lifetimeTotal: 12,
+      requestGovernor: {
+        maxRequestsPerSecond: 10,
+        backgroundMaxRequestsPerSecond: 2,
+        availableTokens: 8.5,
+        backgroundAvailableTokens: 0.25,
+        foregroundQueued: 0,
+        backgroundQueued: 4,
+        foregroundAdmitted: 3,
+        backgroundAdmitted: 2,
+        foregroundDeferred: 0,
+        backgroundDeferred: 5,
+        rejected: 1,
+        cancelled: 2,
+        startupDelayRemainingMs: 900,
+      },
+    }, 60, 'base:84532');
+    expect(lines).toEqual([
+      'rpc_request_governor max_rps=10 background_max_rps=2 available=8.5 ' +
+      'background_available=0.25 foreground_queued=0 background_queued=4 ' +
+      'foreground_admitted=3 background_admitted=2 foreground_deferred=0 ' +
+      'background_deferred=5 rejected=1 cancelled=2 startup_delay_ms=900 ' +
+      'window_s=60 chain=base:84532',
+    ]);
+  });
+
   it('preserves aggregate lines for legacy windows without consumer attribution', () => {
     expect(formatRpcUsageLines({ byMethod: { eth_call: 2 }, lifetimeTotal: 2 }, 60, 'base:8453')).toEqual([
       'rpc_usage method=eth_call count=2 window_s=60 chain=base:8453',
