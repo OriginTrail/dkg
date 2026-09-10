@@ -76,6 +76,34 @@ describe('coalescing recurring task', () => {
     await runner.close();
   });
 
+  it('lets the workload owner explicitly pause periodic rearming', async () => {
+    vi.useFakeTimers();
+    let passes = 0;
+    let runner: CoalescingRecurringTask;
+    runner = new CoalescingRecurringTask({
+      retryIntervalMs: 1_000,
+      runPass: async () => {
+        passes += 1;
+        runner.pause();
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    expect(runner.schedule()).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    await runner.whenIdle();
+    expect(passes).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes).toBe(1);
+
+    expect(runner.request()).toBe(true);
+    await runner.whenIdle();
+    expect(passes).toBe(2);
+    await runner.close();
+  });
+
   it('normalizes current and legacy bootstrap fields through one boundary', () => {
     const current = Object.freeze({
       acceptedPolicies: Object.freeze([]),

@@ -4245,18 +4245,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.vmReconcileStartupTimer.unref) this.vmReconcileStartupTimer.unref();
       this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
     }
-    this.contextGraphSubscriptionAuthorityRecoveryRuntime =
-      new CoalescingRecurringTask({
+    const authorityRecovery = new CoalescingRecurringTask({
         retryIntervalMs: 30_000,
         requestWhileRunning: 'drop',
-        shouldRun: () => (
-          this.started
-          && Boolean(
-            this.getContextGraphSubscriptionRehydrationStatus()
-              ?.dormantReasons.authorityUnavailable.length,
-          )
-        ),
-        runPass: (signal) => this.retryUnavailableContextGraphSubscriptionAuthorities(signal),
+        runPass: async (signal) => {
+          await this.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+          if (!this.getContextGraphSubscriptionRehydrationStatus()
+            ?.dormantReasons.authorityUnavailable.length) {
+            authorityRecovery.pause();
+          }
+        },
         onError: (error) => {
           this.log.warn(
             ctx,
@@ -4267,7 +4265,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
         closingMessage: 'Context Graph subscription authority recovery closing',
       });
-    this.contextGraphSubscriptionAuthorityRecoveryRuntime.schedule();
+    this.contextGraphSubscriptionAuthorityRecoveryRuntime = authorityRecovery;
+    if (this.getContextGraphSubscriptionRehydrationStatus()
+      ?.dormantReasons.authorityUnavailable.length) {
+      authorityRecovery.schedule();
+    }
   }
 
   /**

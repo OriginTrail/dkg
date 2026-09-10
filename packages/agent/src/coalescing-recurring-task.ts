@@ -6,8 +6,6 @@ export interface CoalescingRecurringTaskOptions {
   readonly retryIntervalMs?: number;
   /** Default queues one follow-up pass; periodic owners may instead drop overlap. */
   readonly requestWhileRunning?: 'coalesce' | 'drop';
-  /** A false result retires the periodic loop until an owner requests it again. */
-  readonly shouldRun?: () => boolean;
   readonly runPass: (signal: AbortSignal) => Promise<void>;
   readonly onError: (error: unknown) => void;
   readonly beforePeriodicPass?: () => void;
@@ -18,6 +16,7 @@ export interface CoalescingRecurringTaskOptions {
 export class CoalescingRecurringTask {
   readonly #options: CoalescingRecurringTaskOptions;
   #closed = false;
+  #paused = false;
   #requested = false;
   #running = false;
   #timer: ReturnType<typeof setTimeout> | null = null;
@@ -42,8 +41,9 @@ export class CoalescingRecurringTask {
 
   /** Admit or coalesce a pass without creating concurrent workload owners. */
   request(): boolean {
-    if (this.#closed || this.#options.shouldRun?.() === false) return false;
+    if (this.#closed) return false;
     if (this.#run !== null && this.#options.requestWhileRunning === 'drop') return false;
+    this.#paused = false;
     this.#requested = true;
     this.#launch();
     return true;
@@ -51,12 +51,8 @@ export class CoalescingRecurringTask {
 
   /** Schedule one initial or externally delayed request through the same timer owner. */
   schedule(delayMs = 0): boolean {
-    if (
-      this.#closed
-      || this.#timer !== null
-      || this.#run !== null
-      || this.#options.shouldRun?.() === false
-    ) return false;
+    if (this.#closed || this.#timer !== null || this.#run !== null) return false;
+    this.#paused = false;
     this.#timer = setTimeout(() => {
       this.#timer = null;
       this.request();
@@ -67,7 +63,8 @@ export class CoalescingRecurringTask {
 
   /** Abort a stale active pass and guarantee one fresh pass afterward. */
   invalidateAndRequest(reason: string): boolean {
-    if (this.#closed || this.#options.shouldRun?.() === false) return false;
+    if (this.#closed) return false;
+    this.#paused = false;
     this.#requested = true;
     if (this.#timer !== null) {
       clearTimeout(this.#timer);
@@ -76,6 +73,19 @@ export class CoalescingRecurringTask {
     this.#abortController?.abort(new Error(reason));
     this.#launch();
     return true;
+  }
+
+  /** Stop follow-up and periodic admission after the current physical pass. */
+  pause(): boolean {
+    if (this.#closed) return false;
+    const changed = !this.#paused || this.#requested || this.#timer !== null;
+    this.#paused = true;
+    this.#requested = false;
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+    return changed;
   }
 
   async whenIdle(): Promise<void> {
@@ -101,16 +111,16 @@ export class CoalescingRecurringTask {
   #launch(): void {
     if (
       this.#closed
+      || this.#paused
       || this.#run !== null
       || !this.#requested
-      || this.#options.shouldRun?.() === false
     ) return;
     const run = this.#drainRequestedPasses()
       .catch(this.#options.onError)
       .finally(() => {
         if (this.#run === run) this.#run = null;
-        if (this.#closed) return;
-        if (this.#requested && this.#options.shouldRun?.() !== false) {
+        if (this.#closed || this.#paused) return;
+        if (this.#requested) {
           this.#launch();
           return;
         }
@@ -127,7 +137,7 @@ export class CoalescingRecurringTask {
       retryIntervalMs <= 0
       || this.#timer !== null
       || this.#closed
-      || this.#options.shouldRun?.() === false
+      || this.#paused
     ) return;
     this.#timer = setTimeout(() => {
       this.#timer = null;
@@ -144,9 +154,9 @@ export class CoalescingRecurringTask {
     try {
       while (
         !this.#closed
+        && !this.#paused
         && !abortController.signal.aborted
         && this.#requested
-        && this.#options.shouldRun?.() !== false
       ) {
         this.#requested = false;
         await this.#options.runPass(abortController.signal);
