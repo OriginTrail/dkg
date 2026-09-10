@@ -97,6 +97,79 @@ it('rejects a legacy store before any unbounded fallback read', () => {
   expect(forbidden).not.toHaveBeenCalled();
 });
 
+it.each(['batchSize', 'concurrency', 'maxPayloadBytes'] as const)(
+  'rejects invalid %s before networking and permits corrected startup', async setting => {
+    const limits = { batchSize: 3, concurrency: 1, maxPayloadBytes: 128 };
+    limits[setting] = 0;
+    const agent = await DKGAgent.create({
+      name: `invalid-outbox-${setting}`, listenHost: '127.0.0.1', listenPort: 0,
+      chainAdapter: new MockChainAdapter(), rfc64CatalogActivation: { enabled: false },
+      messengerOutboxDrain: limits,
+    });
+    const startNode = vi.spyOn(agent.node, 'start');
+    try {
+      await expect(agent.start()).rejects.toThrow(`${setting} must be a positive integer`);
+      expect(startNode).not.toHaveBeenCalled();
+      expect(agent.node.isStarted).toBe(false);
+      limits[setting] = setting === 'maxPayloadBytes' ? 128 : 3;
+      await agent.start();
+      expect(startNode).toHaveBeenCalledOnce();
+      expect(agent.node.isStarted).toBe(true);
+      expect(agent.node.multiaddrs.some(address => address.startsWith('/ip4/127.0.0.1/tcp/'))).toBe(true);
+      expect(agent.getMessengerOutboxStats()).toMatchObject({ batchSize: limits.batchSize, maxPayloadBytes: limits.maxPayloadBytes });
+    } finally { await agent.stop(); }
+  },
+);
+
+it('rejects a missing bounded-store capability before networking and permits corrected startup', async () => {
+  const outboxStore = new InMemoryProtocolOutboxStore();
+  Object.defineProperty(outboxStore, 'readDuePage', { configurable: true, value: undefined });
+  const unboundedRead = vi.spyOn(outboxStore, 'due');
+  const agent = await DKGAgent.create({
+    name: 'invalid-outbox-store-startup', listenHost: '127.0.0.1', listenPort: 0,
+    chainAdapter: new MockChainAdapter(), rfc64CatalogActivation: { enabled: false },
+    messengerStores: { outboxStore, idempotencyStore: new InMemoryMessageIdempotencyStore() },
+  });
+  const startNode = vi.spyOn(agent.node, 'start');
+  try {
+    await expect(agent.start()).rejects.toThrow('readDuePage');
+    expect(startNode).not.toHaveBeenCalled();
+    expect(agent.node.isStarted).toBe(false);
+    expect(unboundedRead).not.toHaveBeenCalled();
+    Reflect.deleteProperty(outboxStore, 'readDuePage');
+    await agent.start();
+    expect(startNode).toHaveBeenCalledOnce();
+    expect(agent.node.isStarted).toBe(true);
+    expect(agent.node.multiaddrs.some(address => address.startsWith('/ip4/127.0.0.1/tcp/'))).toBe(true);
+    expect(agent.getMessengerOutboxStats()).toMatchObject({ queuedEntries: 0 });
+  } finally { await agent.stop(); }
+});
+
+it('uses the validated outbox settings and store captured before asynchronous startup', async () => {
+  const limits = { batchSize: 3, concurrency: 1, maxPayloadBytes: 128 };
+  const outboxStore = new InMemoryProtocolOutboxStore();
+  const stores = { outboxStore, idempotencyStore: new InMemoryMessageIdempotencyStore() };
+  const invalidStore = new InMemoryProtocolOutboxStore();
+  Object.defineProperty(invalidStore, 'readDuePage', { value: undefined });
+  const agent = await DKGAgent.create({
+    name: 'outbox-startup-capture', listenHost: '127.0.0.1', listenPort: 0,
+    chainAdapter: new MockChainAdapter(), rfc64CatalogActivation: { enabled: false },
+    messengerOutboxDrain: limits, messengerStores: stores,
+  });
+  const realStart = agent.node.start.bind(agent.node);
+  vi.spyOn(agent.node, 'start').mockImplementation(async () => {
+    limits.batchSize = 0;
+    stores.outboxStore = invalidStore;
+    await realStart();
+  });
+  try {
+    await agent.start();
+    outboxStore.enqueue(peer, protocol, 'captured-store', envelope('captured-store'), 'offline', Date.now());
+    expect(agent.getMessengerOutboxStats()).toMatchObject({ batchSize: 3, maxPayloadBytes: 128, queuedEntries: 1 });
+    expect(agent.node.isStarted).toBe(true);
+  } finally { await agent.stop(); }
+});
+
 it('carries SDK outbox limits into the real Messenger and exposes queue gauges', async () => {
   const outboxStore = new InMemoryProtocolOutboxStore();
   const agent = await DKGAgent.create({ name: 'outbox-budget-sdk', listenHost: '127.0.0.1', listenPort: 0,

@@ -119,6 +119,7 @@ export default defineConfig({
       "test/selected-swm-meta-budget.test.ts",
       "test/legacy-sync-graph-candidate.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
+      "test/outbox-drainer.test.ts",
       "test/sync-checkpoint-key.test.ts",
       "test/map-with-concurrency.test.ts",
       "test/peer-selection.test.ts",

@@ -82,6 +82,7 @@ import {
   type WorkspaceRecipientEncryptionKey,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
+  assertBoundedProtocolOutboxStore,
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
@@ -204,6 +205,7 @@ import {
 } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import { resolveOutboxDrainerOptions } from './p2p/outbox-drainer.js';
 import { createSingleUseSyncSender } from './p2p/sync-transport.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
@@ -2002,6 +2004,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    // Validate and capture the substrate before persistence/network startup.
+    // Caller changes during awaits cannot introduce a late configuration error.
+    const outboxDrain = resolveOutboxDrainerOptions(this.config.messengerOutboxDrain);
+    // The daemon supplies durable stores. SDK embedders default to process-local
+    // stores whose reliability state lasts only for this agent lifetime.
+    const idempotencyStore =
+      this.config.messengerStores?.idempotencyStore ??
+      new InMemoryMessageIdempotencyStore();
+    const outboxStore =
+      this.config.messengerStores?.outboxStore ??
+      new InMemoryProtocolOutboxStore();
+    assertBoundedProtocolOutboxStore(outboxStore);
     this.contextGraphMembershipPersistence.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
@@ -2230,26 +2244,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...createNetworkAdmissionRouterPolicy(this.networkAdmissionCoordinator),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
     });
-    // Default to in-memory substrate stores when no durable stores
-    // are supplied. The production daemon (`cli/src/daemon/
-    // lifecycle.ts`) always wires SQLite-backed stores against the
-    // shared DashboardDB; the in-memory fallback exists so that
-    // test fixtures and ad-hoc DKGAgent embedders get working
-    // reliability semantics without having to plumb a database.
-    // In-memory means: substrate works correctly within one daemon
-    // lifetime, but outbox entries don't survive restart.
-    // Production picks up the SQLite path via `messengerStores`.
-    const idempotencyStore =
-      this.config.messengerStores?.idempotencyStore ??
-      new InMemoryMessageIdempotencyStore();
-    const outboxStore =
-      this.config.messengerStores?.outboxStore ??
-      new InMemoryProtocolOutboxStore();
     this.messenger = new Messenger({
       router: this.router,
       idempotencyStore,
       outboxStore,
-      outboxDrain: this.config.messengerOutboxDrain,
+      outboxDrain,
       // PR feat/chain-agents-cg-phonebook: stall-recovery now routes
       // through the full PeerResolver instead of raw DHT findPeer.
       // The dial fast-path (ProtocolRouter) already uses the canonical

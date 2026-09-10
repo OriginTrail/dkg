@@ -26,6 +26,23 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
   return resolved;
 }
 
+/** Resolve and validate a scalar snapshot before admitting startup work. */
+export function resolveOutboxDrainerOptions(options: OutboxDrainerOptions = {}): ResolvedOutboxDrainerOptions {
+  return {
+    batchSize: positiveInteger(
+      options.batchSize,
+      DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
+      'batchSize',
+    ),
+    concurrency: positiveInteger(
+      options.concurrency,
+      DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
+      'concurrency',
+    ),
+    maxPayloadBytes: positiveInteger(options.maxPayloadBytes, DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES, 'maxPayloadBytes'),
+  };
+}
+
 /** Shutdown-safe bounded scheduler: its active promise covers every started worker. */
 export class OutboxDrainer {
   private active: Promise<void> | null = null;
@@ -43,19 +60,7 @@ export class OutboxDrainer {
     private readonly processEntry: (entry: ProtocolOutboxEntry) => Promise<void>,
     options: OutboxDrainerOptions = {},
   ) {
-    this.options = {
-      batchSize: positiveInteger(
-        options.batchSize,
-        DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
-        'batchSize',
-      ),
-      concurrency: positiveInteger(
-        options.concurrency,
-        DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
-        'concurrency',
-      ),
-      maxPayloadBytes: positiveInteger(options.maxPayloadBytes, DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES, 'maxPayloadBytes'),
-    };
+    this.options = resolveOutboxDrainerOptions(options);
   }
 
   tick(now: number): Promise<void> {
