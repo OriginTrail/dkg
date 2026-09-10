@@ -859,6 +859,24 @@ function recordPublishOutcome(
   getMetrics().publishDuration.record(Date.now() - startedAt, attrs);
 }
 
+/** Resolve one immutable selection without presenting an unvalidated resident selector as a string. */
+async function resolvePublishAuthorSelection(
+  agent: DKGAgent,
+  contextGraphId: string,
+  name: string,
+  selection: ReturnType<typeof readPublishAuthorSelection>,
+  defaultCallerHint: string,
+  subGraphName?: string,
+): Promise<string> {
+  if (selection.mode === 'author') return selection.agentAddress;
+  const callerHint = publishAuthorCallerIdentity(selection) ?? defaultCallerHint;
+  return (await resolveFinalizedAssertionAuthor(agent.store, {
+    contextGraphId, name, subGraphName,
+    callerAgentAddress: callerHint,
+    selectedAuthorAgentAddress: selection.mode === 'residentAuthor' ? selection.selectedAuthorAgentAddress : undefined,
+  })) ?? callerHint;
+}
+
 // Only finalized-assertion / durable-queue replay paths may submit payloads
 // that already contain our canonical `urn:dkg:ka-skolem:c14nN` terms. The
 // symbol is module-private so a public `agent.update(...)` caller cannot opt
@@ -4381,16 +4399,10 @@ export class PublishMethods extends DKGAgentBase {
     name: string,
     opts?: PublishAuthorSelectionOptions & { subGraphName?: string },
   ): Promise<string> {
-    const selection = readPublishAuthorSelection(opts);
-    if (selection.mode === 'author') return selection.agentAddress;
-    const callerHint = publishAuthorCallerIdentity(selection) ?? this.defaultAgentAddress ?? this.peerId;
-    return (await resolveFinalizedAssertionAuthor(this.store, {
-      contextGraphId,
-      name,
-      subGraphName: opts?.subGraphName,
-      callerAgentAddress: callerHint,
-      selectedAuthorAgentAddress: selection.mode === 'residentAuthor' ? selection.selectedAuthorAgentAddress : undefined,
-    })) ?? callerHint;
+    return resolvePublishAuthorSelection(
+      this, contextGraphId, name, readPublishAuthorSelection(opts),
+      this.defaultAgentAddress ?? this.peerId, opts?.subGraphName,
+    );
   }
 
   /**
@@ -4427,31 +4439,21 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<KnowledgeAssetVmPublishRequest> {
     const identityOptions = opts && { ...opts };
     const authorSelection = readPublishAuthorSelection(identityOptions);
-    // Preserve the flat contract's explicit empty caller precedence over an
-    // author override, and snapshot it before asynchronous author resolution.
-    const callerAgentAddress = identityOptions?.authorSelection === undefined
-      ? identityOptions?.callerAgentAddress ?? identityOptions?.agentAddress
-      : publishAuthorCallerIdentity(authorSelection);
-    const callerHint = publishAuthorCallerIdentity(authorSelection)
-      ?? this.defaultAgentAddress
-      ?? this.peerId;
-    const agentAddress = authorSelection.mode === 'author'
-      ? authorSelection.agentAddress
-      : (await resolveFinalizedAssertionAuthor(this.store, {
-        contextGraphId,
-        name,
-        subGraphName: opts?.subGraphName,
-        callerAgentAddress: callerHint,
-        selectedAuthorAgentAddress: authorSelection.mode === 'residentAuthor'
-          ? authorSelection.selectedAuthorAgentAddress
-          : undefined,
-      })) ?? callerHint;
     // GH#1778 — the ENQUEUING caller (token holder for the route path, or an
     // explicit author selector for a direct caller), persisted alongside the
     // resolved author so the async worker stamps the CG curator with the caller
     // (matching the sync lane), NOT the resolved member author. Left undefined
     // for a tokenless enqueue so `stampAddressCurator` falls back to the node
     // default — again exactly as the sync lane does.
+    // Preserve the flat contract's explicit empty caller precedence over an
+    // author override, and snapshot it before asynchronous author resolution.
+    const callerAgentAddress = identityOptions?.authorSelection === undefined
+      ? identityOptions?.callerAgentAddress ?? identityOptions?.agentAddress
+      : publishAuthorCallerIdentity(authorSelection);
+    const agentAddress = await resolvePublishAuthorSelection(
+      this, contextGraphId, name, authorSelection,
+      this.defaultAgentAddress ?? this.peerId, opts?.subGraphName,
+    );
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,
