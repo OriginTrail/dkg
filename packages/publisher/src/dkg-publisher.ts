@@ -18,7 +18,7 @@ import {
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
-import { withKeyedLocks } from './keyed-lock.js';
+import { withKeyedLocks, swmEntityWriteLockKey } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
@@ -1790,8 +1790,7 @@ export class DKGPublisher implements Publisher {
     rejectUserAuthoredProtocolMetadata(quads);
     rejectOversizedRdfLiterals(quads, 'share.quads');
     const subjects = [...new Set(quads.map(q => q.subject))];
-    const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-    const lockKeys = subjects.map(s => `${lockPrefix}\0${s}`);
+    const lockKeys = subjects.map(s => swmEntityWriteLockKey(contextGraphId, options.subGraphName, s));
     return this.withWriteLocks(lockKeys, () => this._shareImpl(contextGraphId, quads, options));
   }
 
@@ -2102,8 +2101,8 @@ export class DKGPublisher implements Publisher {
 
     const conditionSubjects = options.conditions.map(c => c.subject);
     const quadSubjects = [...new Set(quads.map(q => q.subject))];
-    const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])].map(s => `${lockPrefix}\0${s}`);
+    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])]
+      .map(s => swmEntityWriteLockKey(contextGraphId, options.subGraphName, s));
 
     return this.withWriteLocks(lockKeys, () => this._executeConditionalWrite(contextGraphId, quads, options));
   }

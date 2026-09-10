@@ -3,7 +3,7 @@ import {
   createOperationContext, GRAPH_KA_CONTENT_SCOPE_VERSION, isSafeIri,
   type Logger,
 } from '@origintrail-official/dkg-core';
-import { swmKaWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import { swmEntityWriteLockKey, swmKaWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import { stripLiteral } from './dkg-agent-utils.js';
 import {
   describeSharedMemoryGraphs,
@@ -241,7 +241,7 @@ async function cleanupExpiredBatch(
 
 function cleanupWriteLockKeys(target: CleanupTarget, operation: ExpiredOperation): string[] {
   return [
-    ...operation.roots.map(root => `${target.ownershipKey}\0${root}`),
+    ...operation.roots.map(root => swmEntityWriteLockKey(target.contextGraphId, target.subGraphName, root)),
     ...(operation.scope.kind === 'graph-v2' && operation.scope.kaUal
       ? [swmKaWriteLockKey(target.contextGraphId, target.subGraphName, operation.scope.kaUal)]
       : []),
