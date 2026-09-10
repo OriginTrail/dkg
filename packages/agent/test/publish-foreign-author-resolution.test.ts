@@ -7,8 +7,12 @@ import {
   ASSERTION_SEAL_PREDICATES,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  computeFlatKCRootV10,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 /**
@@ -38,11 +42,14 @@ const MERKLE = computeFlatKCRootV10([PUBLIC_QUAD], []);
 it.each([
   { authorSelection: null },
   { authorSelection: { mode: 'unknown' } },
-  { authorSelection: { mode: 'default', agentAddress: OTHER } },
+  { authorSelection: { mode: 'default' } },
   { authorSelection: { mode: 'callerHint' } },
   { authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR } },
+  { authorSelection: { mode: 'callerHint', callerAgentAddress: CURATOR }, callerAgentAddress: CURATOR },
+  { callerAgentAddress: 7 },
+  { callerAgentAddress: 7, selectedAuthorAgentAddress: MEMBER },
   { subGraphName: 'research', agentAddress: OTHER, callerAgentAddress: CURATOR },
-])('rejects malformed or legacy untyped author selection before looking up an author: %j', async options => {
+])('rejects malformed or contradictory untyped author selection before looking up an author: %j', async options => {
   const store = new OxigraphStore();
   const query = vi.spyOn(store, 'query');
   const agent = stubAgent(store, CURATOR);
@@ -269,7 +276,7 @@ describe('GH#1778 an explicit agentAddress is an authoritative author selector',
       clearSwmShareComplete: async () => {},
       clearRemainingSharedMemory: async () => {},
     };
-    await expect(agent.publishFromFinalizedAssertion(CG, NAME, { authorSelection: { mode: 'author', agentAddress: OTHER } }))
+    await expect(agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: OTHER }))
       .rejects.toThrow(/is not finalized/);
   });
 
@@ -278,8 +285,14 @@ describe('GH#1778 an explicit agentAddress is an authoritative author selector',
     await store.insert(sealFor(MEMBER));
     const agent = stubAgent(store, CURATOR);
     // Explicit selector wins over resolution, even when MEMBER is the sole seal.
-    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { authorSelection: { mode: 'author', agentAddress: OTHER } })).toBe(OTHER);
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { agentAddress: OTHER })).toBe(OTHER);
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      authorSelection: { mode: 'author', agentAddress: OTHER },
+    })).toBe(OTHER);
     // A caller hint (no explicit selector) resolves the sole member author.
+    expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
+      callerAgentAddress: CURATOR,
+    })).toBe(MEMBER);
     expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, { authorSelection: { mode: 'callerHint', callerAgentAddress: CURATOR } })).toBe(MEMBER);
   });
 
@@ -300,8 +313,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     const agent = stubAgent(store, CURATOR);
     // Without a selector this same fixture throws AMBIGUOUS_ASSERTION_AUTHOR.
     expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, {
-      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: OTHER },
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: OTHER,
     })).toBe(OTHER);
   });
 
@@ -523,8 +536,8 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
     });
 
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, {
-      authorSelection: { mode: 'residentAuthor', callerAgentAddress: CURATOR,
-      selectedAuthorAgentAddress: MEMBER },
+      callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER,
     })).rejects.toBe(PAST_THE_GATE);
     expect(historyAgent).toBe(MEMBER);
   });
@@ -722,6 +735,76 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
 });
 
 describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {
+  it('snapshots author selection before an asynchronous author lookup', async () => {
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const graphManager = new GraphManager(store);
+    const shareOperationId = 'selection-snapshot';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId,
+      kaUal: KA_UAL,
+      assertionVersion: 1,
+      quads: [PUBLIC_QUAD],
+      privateTripleCount: 0,
+      publisherPeerId: 'publisher-peer',
+      accessPolicy: 'ownerOnly',
+      agentAddress: MEMBER,
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId,
+      kaUal: KA_UAL,
+      assertionVersion: 1,
+    });
+
+    const agent = stubAgent(store, CURATOR);
+    agent.publisher = { hasSwmShareComplete: async () => true };
+    agent.getCustodialAgentPrivateKey = () => undefined;
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async () => ({ events: [], currentShareOperationId: shareOperationId }),
+      },
+      configurable: true,
+    });
+
+    let beginLookup!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => { beginLookup = resolve; });
+    let finishLookup!: () => void;
+    const lookupReleased = new Promise<void>((resolve) => { finishLookup = resolve; });
+    const query = store.query.bind(store);
+    let deferred = false;
+    vi.spyOn(store, 'query').mockImplementation((async (sparql: string, ...args: unknown[]) => {
+      if (!deferred && sparql.includes('SELECT DISTINCT ?s')) {
+        deferred = true;
+        beginLookup();
+        await lookupReleased;
+      }
+      return query(sparql, ...args as never[]);
+    }) as typeof store.query);
+
+    const options = {
+      authorSelection: {
+        mode: 'residentAuthor' as const,
+        callerAgentAddress: CURATOR,
+        selectedAuthorAgentAddress: MEMBER,
+      },
+    };
+    const pending = agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, options);
+    await lookupStarted;
+    options.authorSelection.callerAgentAddress = OTHER;
+    options.authorSelection.selectedAuthorAgentAddress = OTHER;
+    finishLookup();
+
+    const intent = await pending;
+    expect(intent.agentAddress).toBe(MEMBER);
+    expect(intent.callerAgentAddress).toBe(CURATOR);
+  });
+
   it('resolves the member author from _meta when the caller (curator) is not the author', async () => {
     const store = new OxigraphStore();
     await store.insert(sealFor(MEMBER));

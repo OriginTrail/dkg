@@ -4384,7 +4384,9 @@ export class PublishMethods extends DKGAgentBase {
     const selection = readPublishAuthorSelection(opts);
     if (selection.mode === 'author') return selection.agentAddress;
     const callerHint = publishAuthorCallerIdentity(selection) ?? this.defaultAgentAddress ?? this.peerId;
-    return (await this.resolveAssertionAuthor(contextGraphId, name, {
+    return (await resolveFinalizedAssertionAuthor(this.store, {
+      contextGraphId,
+      name,
       subGraphName: opts?.subGraphName,
       callerAgentAddress: callerHint,
       selectedAuthorAgentAddress: selection.mode === 'residentAuthor' ? selection.selectedAuthorAgentAddress : undefined,
@@ -4424,9 +4426,20 @@ export class PublishMethods extends DKGAgentBase {
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
     const authorSelection = readPublishAuthorSelection(opts);
-    const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, {
-      subGraphName: opts?.subGraphName, authorSelection,
-    });
+    const callerHint = publishAuthorCallerIdentity(authorSelection)
+      ?? this.defaultAgentAddress
+      ?? this.peerId;
+    const agentAddress = authorSelection.mode === 'author'
+      ? authorSelection.agentAddress
+      : (await resolveFinalizedAssertionAuthor(this.store, {
+        contextGraphId,
+        name,
+        subGraphName: opts?.subGraphName,
+        callerAgentAddress: callerHint,
+        selectedAuthorAgentAddress: authorSelection.mode === 'residentAuthor'
+          ? authorSelection.selectedAuthorAgentAddress
+          : undefined,
+      })) ?? callerHint;
     // GH#1778 — the ENQUEUING caller (token holder for the route path, or an
     // explicit author selector for a direct caller), persisted alongside the
     // resolved author so the async worker stamps the CG curator with the caller

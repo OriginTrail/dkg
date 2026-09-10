@@ -4,50 +4,116 @@ import { PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE } from '@origintrail-official/dk
 export type PublishAuthorSelection =
   | { readonly mode: 'author'; readonly agentAddress: string; readonly callerAgentAddress?: never; readonly selectedAuthorAgentAddress?: never }
   | { readonly mode: 'callerHint'; readonly callerAgentAddress: string; readonly agentAddress?: never; readonly selectedAuthorAgentAddress?: never }
-  | { readonly mode: 'residentAuthor'; readonly selectedAuthorAgentAddress: string; readonly callerAgentAddress?: string; readonly agentAddress?: never }
-  | { readonly mode: 'default'; readonly agentAddress?: never; readonly callerAgentAddress?: never; readonly selectedAuthorAgentAddress?: never };
+  | { readonly mode: 'residentAuthor'; readonly selectedAuthorAgentAddress: string; readonly callerAgentAddress?: string; readonly agentAddress?: never };
 
-export interface PublishAuthorSelectionOptions {
-  authorSelection?: PublishAuthorSelection;
-  // Reject old identity bags even when passed through a widened variable.
-  agentAddress?: never;
-  callerAgentAddress?: never;
-  selectedAuthorAgentAddress?: never;
-}
+/**
+ * The nested model is preferred. The flat variants remain source-compatible
+ * with the pre-model API for this patch release, while still rejecting bags
+ * that mix authoritative and caller identities.
+ */
+export type PublishAuthorSelectionOptions =
+  | {
+    authorSelection?: PublishAuthorSelection;
+    agentAddress?: never;
+    callerAgentAddress?: never;
+    selectedAuthorAgentAddress?: never;
+  }
+  | {
+    authorSelection?: never;
+    agentAddress: string;
+    callerAgentAddress?: never;
+    selectedAuthorAgentAddress?: never;
+  }
+  | {
+    authorSelection?: never;
+    agentAddress?: never;
+    callerAgentAddress?: string;
+    selectedAuthorAgentAddress?: string;
+  };
+
+type NormalizedPublishAuthorSelection =
+  | PublishAuthorSelection
+  | {
+    readonly mode: 'residentAuthor';
+    readonly selectedAuthorAgentAddress: unknown;
+    readonly callerAgentAddress?: string;
+    readonly agentAddress?: never;
+  }
+  | { readonly mode: 'default' };
 
 function conflict(message: string): never {
   throw Object.assign(new Error(message), { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE });
 }
 
 /** Snapshot the selection before author lookup; reject contradictory untyped input. */
-export function readPublishAuthorSelection(options?: PublishAuthorSelectionOptions): PublishAuthorSelection {
-  if (options && (['agentAddress', 'callerAgentAddress', 'selectedAuthorAgentAddress'] as const).some(key => options[key] !== undefined)) {
-    return conflict('VM publish identity fields belong in authorSelection; choose one selection mode');
+export function readPublishAuthorSelection(options?: PublishAuthorSelectionOptions): NormalizedPublishAuthorSelection {
+  const rawOptions = options as Record<string, unknown> | undefined;
+  const selection = rawOptions?.authorSelection;
+  const agentAddress = rawOptions?.agentAddress;
+  const callerAgentAddress = rawOptions?.callerAgentAddress;
+  const selectedAuthorAgentAddress = rawOptions?.selectedAuthorAgentAddress;
+  const hasFlatSelection = agentAddress !== undefined
+    || callerAgentAddress !== undefined
+    || selectedAuthorAgentAddress !== undefined;
+  if (selection !== undefined && hasFlatSelection) {
+    return conflict('VM publish identity fields must use either authorSelection or the compatible flat form');
   }
-  const selection = options?.authorSelection;
+  if (selection === undefined && hasFlatSelection) {
+    if (agentAddress !== undefined) {
+      if (typeof agentAddress !== 'string' || agentAddress.length === 0
+        || callerAgentAddress !== undefined || selectedAuthorAgentAddress !== undefined) {
+        return conflict('Invalid or conflicting VM publish author selection fields');
+      }
+      return Object.freeze({ mode: 'author', agentAddress });
+    }
+    if (selectedAuthorAgentAddress !== undefined) {
+      if (callerAgentAddress !== undefined && typeof callerAgentAddress !== 'string') {
+        return conflict('Invalid or conflicting VM publish author selection fields');
+      }
+      return Object.freeze({
+        mode: 'residentAuthor',
+        selectedAuthorAgentAddress,
+        ...(callerAgentAddress === undefined ? {} : { callerAgentAddress }),
+      });
+    }
+    if (typeof callerAgentAddress !== 'string') {
+      return conflict('Invalid or conflicting VM publish author selection fields');
+    }
+    return Object.freeze({ mode: 'callerHint', callerAgentAddress });
+  }
   if (selection === undefined) return Object.freeze({ mode: 'default' });
   if (selection === null || typeof selection !== 'object') return conflict('Invalid VM publish authorSelection');
-  const { mode, agentAddress, callerAgentAddress, selectedAuthorAgentAddress } = selection;
+  const {
+    mode,
+    agentAddress: nestedAgentAddress,
+    callerAgentAddress: nestedCallerAgentAddress,
+    selectedAuthorAgentAddress: nestedSelectedAuthorAgentAddress,
+  } = selection as Record<string, unknown>;
   switch (mode) {
     case 'author':
-      if (typeof agentAddress !== 'string' || agentAddress.length === 0 || callerAgentAddress !== undefined || selectedAuthorAgentAddress !== undefined) break;
-      return Object.freeze({ mode, agentAddress });
+      if (typeof nestedAgentAddress !== 'string' || nestedAgentAddress.length === 0
+        || nestedCallerAgentAddress !== undefined || nestedSelectedAuthorAgentAddress !== undefined) break;
+      return Object.freeze({ mode, agentAddress: nestedAgentAddress });
     case 'callerHint':
-      if (typeof callerAgentAddress !== 'string' || agentAddress !== undefined || selectedAuthorAgentAddress !== undefined) break;
-      return Object.freeze({ mode, callerAgentAddress });
+      if (typeof nestedCallerAgentAddress !== 'string'
+        || nestedAgentAddress !== undefined || nestedSelectedAuthorAgentAddress !== undefined) break;
+      return Object.freeze({ mode, callerAgentAddress: nestedCallerAgentAddress });
     case 'residentAuthor':
-      if (agentAddress !== undefined || selectedAuthorAgentAddress === undefined || (callerAgentAddress !== undefined && typeof callerAgentAddress !== 'string')) break;
+      if (nestedAgentAddress !== undefined || nestedSelectedAuthorAgentAddress === undefined
+        || (nestedCallerAgentAddress !== undefined && typeof nestedCallerAgentAddress !== 'string')) break;
       // Resident-selector validation stays with the canonical assertion-author
       // resolver, including its existing ASSERTION_AUTHOR_NOT_RESIDENT errors.
-      return Object.freeze({ mode, selectedAuthorAgentAddress, ...(callerAgentAddress === undefined ? {} : { callerAgentAddress }) });
-    case 'default':
-      if (agentAddress !== undefined || callerAgentAddress !== undefined || selectedAuthorAgentAddress !== undefined) break;
-      return Object.freeze({ mode });
+      return Object.freeze({
+        mode,
+        selectedAuthorAgentAddress: nestedSelectedAuthorAgentAddress,
+        ...(nestedCallerAgentAddress === undefined ? {} : { callerAgentAddress: nestedCallerAgentAddress }),
+      });
   }
   return conflict('Invalid or conflicting VM publish authorSelection fields');
 }
 
 /** Preserve the enqueuing caller separately from the resolved member author. */
-export function publishAuthorCallerIdentity(selection: PublishAuthorSelection): string | undefined {
-  return selection.mode === 'author' ? selection.agentAddress : selection.callerAgentAddress;
+export function publishAuthorCallerIdentity(selection: NormalizedPublishAuthorSelection): string | undefined {
+  if (selection.mode === 'author') return selection.agentAddress;
+  return selection.mode === 'default' ? undefined : selection.callerAgentAddress;
 }

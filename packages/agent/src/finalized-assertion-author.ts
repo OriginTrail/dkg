@@ -52,7 +52,7 @@ export interface ResolveFinalizedAssertionAuthorParams {
    * authorship (an address that is not resident fails closed) and it never
    * changes the caller identity used for CG registration / curator stamping.
    */
-  selectedAuthorAgentAddress?: string;
+  selectedAuthorAgentAddress?: unknown;
 }
 
 /**
@@ -151,9 +151,9 @@ export async function resolveFinalizedAssertionAuthor(
   // HTTP boundary, which 400s every other malformed value. Anything present that names no
   // resident candidate fails closed below.
   if (selectedAuthorAgentAddress !== undefined) {
-    const selected = candidates.find(
-      (a) => knowledgeAssetAgentAddressesEqual(a, selectedAuthorAgentAddress),
-    );
+    const selected = typeof selectedAuthorAgentAddress === 'string'
+      ? candidates.find((a) => knowledgeAssetAgentAddressesEqual(a, selectedAuthorAgentAddress))
+      : undefined;
     if (selected) return selected;
     throw Object.assign(
       new Error(

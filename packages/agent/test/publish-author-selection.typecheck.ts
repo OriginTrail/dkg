@@ -6,7 +6,6 @@ const selections: PublishAuthorSelection[] = [
   { mode: 'callerHint', callerAgentAddress: 'caller' },
   { mode: 'residentAuthor', selectedAuthorAgentAddress: 'member', callerAgentAddress: 'curator' },
   { mode: 'residentAuthor', selectedAuthorAgentAddress: 'member' },
-  { mode: 'default' },
 ];
 for (const authorSelection of selections) {
   void agent.resolveFinalizedAssertionPublishAuthor('cg', 'name', { authorSelection });
@@ -15,6 +14,17 @@ for (const authorSelection of selections) {
 }
 void agent.publishFromFinalizedAssertion('cg', 'name', { publishEpochs: 2 });
 void agent.resolveFinalizedAssertionPublishAuthor('cg', 'name', { agentAddress: undefined, callerAgentAddress: undefined });
+
+const compatibleFlatOptions = [
+  { agentAddress: 'author' },
+  { callerAgentAddress: 'caller' },
+  { callerAgentAddress: 'caller', selectedAuthorAgentAddress: 'member' },
+] as const;
+for (const options of compatibleFlatOptions) {
+  void agent.resolveFinalizedAssertionPublishAuthor('cg', 'name', options);
+  void agent.resolveFinalizedAssertionVmPublishIntent('cg', 'name', options);
+  void agent.publishFromFinalizedAssertion('cg', 'name', options);
+}
 
 const contradictory = { mode: 'author' as const, agentAddress: 'author', callerAgentAddress: 'caller' };
 // @ts-expect-error A widened variable cannot combine authoritative author and caller hint.
@@ -28,11 +38,11 @@ void agent.publishFromFinalizedAssertion('cg', 'name', { authorSelection: contra
 // @ts-expect-error Resident selection must not carry an authoritative author override.
 const invalidResident: PublishAuthorSelection = { mode: 'residentAuthor', selectedAuthorAgentAddress: 'member', agentAddress: 'other' };
 
-const legacyBag = { subGraphName: 'research', agentAddress: 'author', callerAgentAddress: 'caller' };
-// @ts-expect-error Legacy identity bags cannot bypass the model via widened variables.
-void agent.resolveFinalizedAssertionPublishAuthor('cg', 'name', legacyBag);
-// @ts-expect-error Legacy identity bags cannot bypass the async boundary.
-void agent.resolveFinalizedAssertionVmPublishIntent('cg', 'name', legacyBag);
-// @ts-expect-error Legacy identity bags cannot bypass the immediate boundary.
-void agent.publishFromFinalizedAssertion('cg', 'name', legacyBag);
+const contradictoryFlatBag = { subGraphName: 'research', agentAddress: 'author', callerAgentAddress: 'caller' };
+// @ts-expect-error Compatible flat fields remain mutually exclusive via widened variables.
+void agent.resolveFinalizedAssertionPublishAuthor('cg', 'name', contradictoryFlatBag);
+// @ts-expect-error The async boundary enforces the same flat-field exclusivity.
+void agent.resolveFinalizedAssertionVmPublishIntent('cg', 'name', contradictoryFlatBag);
+// @ts-expect-error The immediate boundary enforces the same flat-field exclusivity.
+void agent.publishFromFinalizedAssertion('cg', 'name', contradictoryFlatBag);
 void invalidSelection; void invalidResident;
