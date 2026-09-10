@@ -63,7 +63,12 @@
           "expectedMode": { "const": "catalog" },
           "sourceNodeId": { "type": "string" },
           "receiverNodeId": { "type": "string" },
-          "vmAskSparql": { "type": "string", "minLength": 1, "maxLength": 32768 }
+          "vmAskSparql": { "type": "string", "minLength": 1, "maxLength": 32768 },
+          "catalogSwmAskSparql": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768
+          }
         }
       }
     },
