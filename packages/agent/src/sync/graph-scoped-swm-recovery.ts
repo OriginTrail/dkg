@@ -92,6 +92,14 @@ function samePayloadOperationEquivalenceKey(
   });
 }
 
+export type RecoverySnapshotLocator =
+  | Readonly<{ kind: 'graph'; graph: string }>
+  | Readonly<{
+      kind: 'store';
+      ref: string;
+      provenance: 'persisted-ref' | 'digest-fallback';
+    }>;
+
 export interface GraphScopedSwmRecoveryDescriptor {
   readonly metaGraph: string;
   readonly headSubject: string;
@@ -101,16 +109,16 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly assertionGraph: string;
   /** Deterministic newest alias used as the logical head identity. */
   readonly shareOperationId: string;
-  /** Equivalent operation whose immutable snapshot locator is materialized. */
-  readonly snapshotSourceOperationId: string;
+  /** Equivalent operation and immutable locator selected for materialization. */
+  readonly snapshotSource: Readonly<{
+    shareOperationId: string;
+    locator: RecoverySnapshotLocator;
+  }>;
   readonly publicQuadsDigest: string;
   readonly publicQuadsCount: number;
   /** Authenticated private-content commitment carried by the active operation. */
   readonly privateTripleCount: number;
   readonly privateMerkleRoot?: string;
-  readonly publicSnapshotRef?: string;
-  readonly publicSnapshotGraph?: string;
-  readonly snapshotLocatorProvenance: 'graph' | 'persisted-ref' | 'digest-fallback';
   readonly publisherPeerId: string;
   readonly subGraphName?: string;
   /** Only the active head and its referenced operation, for snapshot fetch. */
@@ -218,12 +226,6 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     const publicQuadsCount = semantics.publicTripleCount;
     const privateTripleCount = semantics.privateTripleCount;
     const privateRoot = semantics.privateMerkleRoot;
-    const publicSnapshotGraph = snapshotSource.locator.kind === 'graph'
-      ? snapshotSource.locator.graph
-      : undefined;
-    const publicSnapshotRef = snapshotSource.locator.kind === 'store'
-      ? snapshotSource.locator.ref
-      : undefined;
     descriptors.push({
       metaGraph,
       headSubject,
@@ -232,16 +234,14 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       assertionVersion: scope.assertionVersion,
       assertionGraph,
       shareOperationId,
-      snapshotSourceOperationId: snapshotSource.shareOperationId,
+      snapshotSource: {
+        shareOperationId: snapshotSource.shareOperationId,
+        locator: snapshotSource.locator,
+      },
       publicQuadsDigest,
       publicQuadsCount,
       privateTripleCount,
       ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
-      ...(publicSnapshotRef ? { publicSnapshotRef } : {}),
-      ...(publicSnapshotGraph ? { publicSnapshotGraph } : {}),
-      snapshotLocatorProvenance: snapshotSource.locator.kind === 'graph'
-        ? 'graph'
-        : snapshotSource.locator.provenance,
       publisherPeerId: semantics.publisherIdentity,
       ...(subGraphName ? { subGraphName } : {}),
       metadataQuads: [
@@ -467,14 +467,6 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
   });
 }
 
-type RecoverySnapshotLocator =
-  | Readonly<{ kind: 'graph'; graph: string }>
-  | Readonly<{
-      kind: 'store';
-      ref: string;
-      provenance: 'persisted-ref' | 'digest-fallback';
-    }>;
-
 interface RecoveryOperationCandidate extends WorkspaceOperationModel<RecoveryWorkspaceOperationSemantics> {
   readonly shareOperationId: string;
   readonly operationSubject: string;
@@ -659,16 +651,17 @@ export async function materializeGraphScopedSwmRecoveryAsset(params: {
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }): Promise<MaterializedGraphScopedSwmRecoveryAsset> {
   const descriptor = params.descriptor;
+  const { locator } = descriptor.snapshotSource;
   let raw: Quad[] | null;
-  if (descriptor.publicSnapshotGraph) {
+  if (locator.kind === 'graph') {
     raw = params.fetchedDataQuads
-      .filter((quad) => quad.graph === descriptor.publicSnapshotGraph)
+      .filter((quad) => quad.graph === locator.graph)
       .map((quad) => ({ ...quad, graph: '' }));
   } else {
-    if (!params.publicSnapshotStore || !descriptor.publicSnapshotRef) {
+    if (!params.publicSnapshotStore) {
       throw new Error(`Graph-scoped SWM recovery requires a public snapshot store for ${descriptor.kaUal}`);
     }
-    raw = await params.publicSnapshotStore.getSnapshot(descriptor.publicSnapshotRef);
+    raw = await params.publicSnapshotStore.getSnapshot(locator.ref);
   }
   if (!raw) {
     throw new Error(`Graph-scoped SWM snapshot is missing for ${descriptor.kaUal}`);

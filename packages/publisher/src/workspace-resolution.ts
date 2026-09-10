@@ -167,17 +167,27 @@ export interface KnowledgeAssetWorkspaceHead {
   readonly publicTripleCount: number;
   readonly privateMerkleRoot?: string;
   readonly privateTripleCount: number;
+  /** @deprecated Derived from operationAliases[0]; retained for patch compatibility. */
   readonly shareOperationId: string;
-  /** Every operation id proven equivalent to the selected display alias. */
+  /** @deprecated Derived from operationAliases; retained for patch compatibility. */
   readonly shareOperationIds: readonly string[];
-  /** Every validated alias together with the immutable snapshot it can locate. */
-  readonly operationAliases: readonly KnowledgeAssetWorkspaceOperationAlias[];
-  /** Canonical durable operation timestamp, normalized to decimal milliseconds. */
+  /**
+   * The authoritative, non-empty alias class. The selected display alias is
+   * always first; every identity/timestamp compatibility view derives from it.
+   */
+  readonly operationAliases: KnowledgeAssetWorkspaceOperationAliasClass;
+  /** @deprecated Derived from operationAliases[0]; retained for patch compatibility. */
   readonly publishedAt?: TimestampMsV1;
   /** Transport owner retained at KA granularity; replaces per-subject ownership rows. */
   readonly publisherPeerId: string;
   /** Effective access and whether it came from durable metadata or a legacy default. */
   readonly access: WorkspaceOperationAccessEnvelope;
+  /** @deprecated Use access.accessPolicy; retained for patch compatibility. */
+  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  /** @deprecated Use access.kind === 'persisted'; retained for patch compatibility. */
+  readonly accessPolicyExplicit: boolean;
+  /** @deprecated Use access.allowedPeers; retained for patch compatibility. */
+  readonly allowedPeers: string[];
 }
 
 export type KnowledgeAssetWorkspaceSnapshotLocator =
@@ -188,6 +198,54 @@ export interface KnowledgeAssetWorkspaceOperationAlias {
   readonly shareOperationId: string;
   readonly publishedAt?: TimestampMsV1;
   readonly snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator;
+}
+
+export type KnowledgeAssetWorkspaceOperationAliasClass = readonly [
+  KnowledgeAssetWorkspaceOperationAlias,
+  ...KnowledgeAssetWorkspaceOperationAlias[],
+];
+
+type KnowledgeAssetWorkspaceHeadFields = Omit<
+  KnowledgeAssetWorkspaceHead,
+  | 'shareOperationId'
+  | 'shareOperationIds'
+  | 'publishedAt'
+  | 'accessPolicy'
+  | 'accessPolicyExplicit'
+  | 'allowedPeers'
+>;
+
+/** Build the exported compatibility surface from its two authoritative values. */
+function createKnowledgeAssetWorkspaceHead(
+  fields: KnowledgeAssetWorkspaceHeadFields,
+): KnowledgeAssetWorkspaceHead {
+  const operationAliases = fields.operationAliases;
+  const selected = operationAliases[0];
+  const shareOperationIds = Object.freeze(
+    operationAliases.map((alias) => alias.shareOperationId).sort(),
+  );
+  const head = {
+    ...fields,
+    operationAliases,
+    accessPolicy: fields.access.accessPolicy,
+    accessPolicyExplicit: fields.access.kind === 'persisted',
+    allowedPeers: [...fields.access.allowedPeers],
+  } as KnowledgeAssetWorkspaceHead;
+  Object.defineProperties(head, {
+    shareOperationId: {
+      enumerable: true,
+      get: () => selected.shareOperationId,
+    },
+    shareOperationIds: {
+      enumerable: true,
+      get: () => shareOperationIds,
+    },
+    publishedAt: {
+      enumerable: true,
+      get: () => selected.publishedAt,
+    },
+  });
+  return Object.freeze(head);
 }
 
 export interface PublishedKnowledgeAssetWorkspaceHead extends KnowledgeAssetWorkspaceHead {
@@ -615,7 +673,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     });
     return operation;
   });
-  const { selected, shareOperationIds } = selectEquivalentWorkspaceOperation(
+  const { selected } = selectEquivalentWorkspaceOperation(
     candidates,
     publisherWorkspaceOperationSemanticsKey,
     {
@@ -629,16 +687,29 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     (candidate) => candidate.semantics.access.kind === 'persisted',
   )?.semantics.access;
   const access = persistedAccess ?? decodedOperation.access;
-  const operationAliases = Object.freeze(candidates
+  const aliasesById = candidates
     .map((candidate): KnowledgeAssetWorkspaceOperationAlias => Object.freeze({
       shareOperationId: candidate.provenance.shareOperationId,
       ...(candidate.provenance.publishedAtMs === undefined
         ? {}
         : { publishedAt: candidate.provenance.publishedAtMs.toString() as TimestampMsV1 }),
       snapshotLocator: candidate.snapshotLocator,
-    }))
-    .sort((left, right) => left.shareOperationId.localeCompare(right.shareOperationId)));
-  return {
+    }));
+  const selectedAlias = aliasesById.find(
+    (alias) => alias.shareOperationId === selected.provenance.shareOperationId,
+  );
+  if (selectedAlias === undefined) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${decodedHead.scope.ual}: selected alias is missing`,
+    );
+  }
+  const operationAliases = Object.freeze([
+    selectedAlias,
+    ...aliasesById
+      .filter((alias) => alias !== selectedAlias)
+      .sort((left, right) => left.shareOperationId.localeCompare(right.shareOperationId)),
+  ]) as KnowledgeAssetWorkspaceOperationAliasClass;
+  return createKnowledgeAssetWorkspaceHead({
     kaUal: decodedHead.scope.ual,
     assertionVersion: decodedHead.scope.assertionVersion,
     assertionGraph: decodedHead.assertionGraph,
@@ -646,15 +717,10 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     publicTripleCount: decodedOperation.publicTripleCount,
     privateMerkleRoot: decodedOperation.privateMerkleRoot,
     privateTripleCount: decodedOperation.privateTripleCount,
-    shareOperationId: selected.provenance.shareOperationId,
-    shareOperationIds,
     operationAliases,
-    ...(selected.provenance.publishedAtMs === undefined
-      ? {}
-      : { publishedAt: selected.provenance.publishedAtMs.toString() as TimestampMsV1 }),
     publisherPeerId: decodedOperation.publisherIdentity,
     access,
-  };
+  });
 }
 
 /** Resolve an inventory-ready SWM head with its canonical operation timestamp. */
@@ -668,7 +734,7 @@ export async function resolvePublishedKnowledgeAssetWorkspaceHead(
       `Corrupt graph-scoped SWM head for ${head.kaUal}: missing canonical publishedAt`,
     );
   }
-  return Object.freeze({ ...head, publishedAt: head.publishedAt });
+  return head as PublishedKnowledgeAssetWorkspaceHead;
 }
 
 /** Replace the durable current-assertion pointer after data and snapshot land. */
@@ -1080,13 +1146,8 @@ export async function resolveKnowledgeAssetWorkspaceHeadPublicQuads(params: {
   readonly subGraphName?: string;
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }): Promise<KnowledgeAssetOperationPublicSnapshot> {
-  const ordered = [...params.head.operationAliases].sort((left, right) => (
-    Number(right.shareOperationId === params.head.shareOperationId)
-      - Number(left.shareOperationId === params.head.shareOperationId)
-    || left.shareOperationId.localeCompare(right.shareOperationId)
-  ));
   let lastMissing: KnowledgeAssetOperationPublicSnapshotNotFoundError | undefined;
-  for (const alias of ordered) {
+  for (const alias of params.head.operationAliases) {
     if (alias.snapshotLocator.kind === 'store' && params.publicSnapshotStore === undefined) {
       continue;
     }

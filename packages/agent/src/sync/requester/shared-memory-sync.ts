@@ -875,8 +875,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             descriptors,
           });
           for (const descriptor of descriptors) {
-            const ref = descriptor.publicSnapshotRef;
-            if (!ref) continue; // no immutable snapshot for this KA
+            if (descriptor.snapshotSource.locator.kind !== 'store') continue;
+            const { ref } = descriptor.snapshotSource.locator;
             const list = snapshotDescriptorsByRef.get(ref) ?? [];
             list.push(descriptor);
             snapshotDescriptorsByRef.set(ref, list);

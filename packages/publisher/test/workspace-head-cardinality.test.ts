@@ -15,6 +15,7 @@ import { tryResolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resoluti
 import {
   publisherWorkspaceOperationSemanticsKey,
   selectEquivalentWorkspaceOperation,
+  workspaceHeadIncludesShareOperationId,
   type PublisherWorkspaceOperationSemantics,
 } from '../src/workspace-operation-equivalence.js';
 
@@ -290,6 +291,9 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     expect(head?.assertionVersion).toBe('1');
     expect(head).toMatchObject({
       access: { kind: 'legacy-default', accessPolicy: 'public', allowedPeers: [] },
+      accessPolicy: 'public',
+      accessPolicyExplicit: false,
+      allowedPeers: [],
     });
   });
 
@@ -301,6 +305,14 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     const head = await resolveHead(h);
     // Equal timestamps use the operation id as a deterministic final tie-break.
     expect(head?.shareOperationId).toBe(REMOTE_OP);
+    expect(head?.operationAliases.map((alias) => alias.shareOperationId)).toEqual([
+      REMOTE_OP,
+      LOCAL_OP,
+    ]);
+    expect(head?.shareOperationIds).toEqual([LOCAL_OP, REMOTE_OP]);
+    expect(workspaceHeadIncludesShareOperationId(head!, LOCAL_OP)).toBe(true);
+    expect(workspaceHeadIncludesShareOperationId(head!, REMOTE_OP)).toBe(true);
+    expect(workspaceHeadIncludesShareOperationId(head!, 'unrelated-op')).toBe(false);
     expect(head?.publicTripleCount).toBe(CONTENT.length);
   });
 
@@ -339,6 +351,9 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
         accessPolicy: 'allowList',
         allowedPeers: ['peer-a', 'peer-b'],
       },
+      accessPolicy: 'allowList',
+      accessPolicyExplicit: true,
+      allowedPeers: ['peer-a', 'peer-b'],
     });
   });
 

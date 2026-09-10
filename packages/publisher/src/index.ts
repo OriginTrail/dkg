@@ -62,6 +62,7 @@ export {
   type ResolveKnowledgeAssetWorkspaceHeadParams,
   type KnowledgeAssetOperationPublicSnapshot,
   type KnowledgeAssetWorkspaceOperationAlias,
+  type KnowledgeAssetWorkspaceOperationAliasClass,
   type KnowledgeAssetWorkspaceSnapshotLocator,
 } from './workspace-resolution.js';
 export {

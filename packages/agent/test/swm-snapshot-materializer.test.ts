@@ -527,9 +527,10 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       });
       expect(descriptor).toMatchObject({
         shareOperationId: storageAck.operationId,
-        snapshotSourceOperationId: v1.operationId,
-        publicSnapshotGraph: snapshotGraph,
-        snapshotLocatorProvenance: 'graph',
+        snapshotSource: {
+          shareOperationId: v1.operationId,
+          locator: { kind: 'graph', graph: snapshotGraph },
+        },
       });
       await expect(materializeGraphScopedSwmRecoveryAsset({
         descriptor: descriptor!,

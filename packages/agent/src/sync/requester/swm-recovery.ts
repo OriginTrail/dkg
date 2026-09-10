@@ -373,7 +373,7 @@ async function recoverContextGraphSwmUnlocked(
   ));
   const hasLegacyRoots = metadataOnlyProcessed.entityCreators.length > 0;
   const hasGraphBackedSnapshots = graphScopedDescriptors.some(
-    (descriptor) => descriptor.publicSnapshotGraph !== undefined,
+    (descriptor) => descriptor.snapshotSource.locator.kind === 'graph',
   );
   let snapshotProgress = { readySnapshots: 0, totalSnapshots: 0 };
   const incrementallyReadyGraphs = new Set<string>();
@@ -385,10 +385,11 @@ async function recoverContextGraphSwmUnlocked(
 
   const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
   for (const descriptor of graphScopedDescriptors) {
-    if (!descriptor.publicSnapshotRef) continue;
-    const descriptors = snapshotDescriptorsByRef.get(descriptor.publicSnapshotRef) ?? [];
+    if (descriptor.snapshotSource.locator.kind !== 'store') continue;
+    const { ref } = descriptor.snapshotSource.locator;
+    const descriptors = snapshotDescriptorsByRef.get(ref) ?? [];
     descriptors.push(descriptor);
-    snapshotDescriptorsByRef.set(descriptor.publicSnapshotRef, descriptors);
+    snapshotDescriptorsByRef.set(ref, descriptors);
   }
   const verifiedMetaKeys = new Set(metadataOnlyProcessed.verifiedMeta.map(canonicalQuadKey));
   let contextGraphEnsured = false;
@@ -538,8 +539,8 @@ async function recoverContextGraphSwmUnlocked(
   const graphScopedTransportGraphs = new Set<string>();
   for (const descriptor of graphScopedDescriptors) {
     graphScopedTransportGraphs.add(descriptor.assertionGraph);
-    if (descriptor.publicSnapshotGraph) {
-      graphScopedTransportGraphs.add(descriptor.publicSnapshotGraph);
+    if (descriptor.snapshotSource.locator.kind === 'graph') {
+      graphScopedTransportGraphs.add(descriptor.snapshotSource.locator.graph);
     }
   }
   const legacyDataQuads = dataQuads.filter(

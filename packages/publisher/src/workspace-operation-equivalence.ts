@@ -108,9 +108,14 @@ export function selectEquivalentWorkspaceOperation<
 
 /** Exact-intent consumers accept any alias in the resolver-validated class. */
 export function workspaceHeadIncludesShareOperationId(
-  head: Readonly<{ shareOperationId: string; shareOperationIds?: readonly string[] }>,
+  head: Readonly<{
+    operationAliases: readonly [
+      Readonly<{ shareOperationId: string }>,
+      ...Readonly<{ shareOperationId: string }>[],
+    ];
+  }>,
   shareOperationId: string,
 ): boolean {
   const expected = shareOperationId.trim();
-  return (head.shareOperationIds ?? [head.shareOperationId]).includes(expected);
+  return head.operationAliases.some((alias) => alias.shareOperationId === expected);
 }
