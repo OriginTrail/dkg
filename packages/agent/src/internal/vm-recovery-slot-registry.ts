@@ -37,18 +37,40 @@ export interface VmRecoverySlotScope {
   readonly signal: AbortSignal;
   /** Attach selected targets before discovery and after preparation, including unowned fallback targets. */
   track(targets: readonly Target[]): void;
+  reserveAdmission(target: Target, now: number, maxEntries: number): VmRecoverySlotReservation;
   release(): void;
 }
 
-export interface VmRecoverySlotPreparation {
-  readonly record?: VmReconcileRotationRecord;
-  readonly suppressed: boolean;
+export type VmRecoverySlotAdmission =
+  | { readonly kind: 'existing'; readonly record: VmReconcileRotationRecord }
+  | { readonly kind: 'admitted'; readonly record: VmReconcileRotationRecord }
+  | { readonly kind: 'deferred' };
+
+export interface VmRecoverySlotAdmissionReservation {
+  commit(params: {
+    readonly candidatePeerIds: readonly string[];
+    readonly curatorRosterConfirmed: boolean;
+    readonly collectionDeadlineAt: number;
+  }): VmRecoverySlotAdmission;
+  release(): void;
 }
+
+export type VmRecoverySlotReservation =
+  | { readonly kind: 'existing'; readonly record: VmReconcileRotationRecord }
+  | { readonly kind: 'reserved'; readonly reservation: VmRecoverySlotAdmissionReservation }
+  | { readonly kind: 'deferred' };
+
+type InternalVmRecoverySlotReservation = VmRecoverySlotReservation & {
+  /** Registry-only ownership detail used to avoid observing our own donor. */
+  readonly donorKey?: string;
+};
 
 /** Owns retained proof records and active generations, including record-less recovery. */
 export class VmRecoverySlotRegistry {
   private readonly slots = new Map<string, SlotGeneration>();
   private readonly retained = new Map<string, VmReconcileRotationRecord>();
+  private readonly reservedDonorKeys = new Set<string>();
+  private openCapacityReservations = 0;
 
   get recordCount(): number { return this.retained.size; }
 
@@ -57,17 +79,14 @@ export class VmRecoverySlotRegistry {
     return new Map(this.retained);
   }
 
-  /** @deprecated Use target-based APIs; this is a detached diagnostic snapshot. */
-  get records(): ReadonlyMap<string, VmReconcileRotationRecord> { return this.snapshot(); }
-
-  currentRecord(target: Target): VmReconcileRotationRecord | undefined {
-    this.observe(target);
+  /** Pure lookup: target observation/invalidation is an explicit command. */
+  peekRecord(target: Target): VmReconcileRotationRecord | undefined {
     const record = this.retained.get(vmRecoverySlotKey(target));
     return record?.fingerprint === vmRecoveryTargetFingerprint(target) ? record : undefined;
   }
 
   isCurrent(target: Target, record: VmReconcileRotationRecord): boolean {
-    return this.currentRecord(target) === record;
+    return this.peekRecord(target) === record;
   }
 
   /** Successful ordinal completion retires evidence without aborting its shared batch. */
@@ -88,6 +107,7 @@ export class VmRecoverySlotRegistry {
   ): [string, VmReconcileRotationRecord] | undefined {
     if (this.retained.size < maxEntries) return undefined;
     for (const entry of this.retained) {
+      if (this.reservedDonorKeys.has(entry[0])) continue;
       const [, record] = entry;
       if ((record.phase === 'backoff' && now < record.nextRetryAt)
         || (record.phase === 'collecting' && now < record.collectionDeadlineAt)) continue;
@@ -100,21 +120,14 @@ export class VmRecoverySlotRegistry {
     }
     if ((countsByCg.get(requestingCgId) ?? 0) !== 0) return undefined;
     for (const entry of this.retained) {
+      if (this.reservedDonorKeys.has(entry[0])) continue;
       if ((countsByCg.get(entry[1].localCgId) ?? 0) > 1) return entry;
     }
     return undefined;
   }
 
-  findReplacement(
-    requestingCgId: string | undefined,
-    now: number,
-    maxEntries: number,
-  ): VmReconcileRotationRecord | undefined {
-    return this.findReplacementEntry(requestingCgId, now, maxEntries)?.[1];
-  }
-
   /** Donation cancels the donor only after the requester owns its retained slot. */
-  install(record: VmReconcileRotationRecord, now: number, maxEntries: number): boolean {
+  private install(record: VmReconcileRotationRecord, now: number, maxEntries: number): boolean {
     const key = vmRecoverySlotKey(record);
     if (this.retained.has(key)) return false;
     const replacement = this.findReplacementEntry(record.localCgId, now, maxEntries);
@@ -136,7 +149,7 @@ export class VmRecoverySlotRegistry {
     }
   }
 
-  createRecord(target: Target, params: {
+  private createRecord(target: Target, params: {
     readonly candidatePeerIds: readonly string[];
     readonly curatorRosterConfirmed: boolean;
     readonly collectionDeadlineAt: number;
@@ -157,6 +170,103 @@ export class VmRecoverySlotRegistry {
     };
   }
 
+  /**
+   * Observe a target and atomically admit its proof record, including any
+   * fair donor replacement. The host never sees capacity or donor internals.
+   */
+  admit(target: Target, params: {
+    readonly candidatePeerIds: readonly string[];
+    readonly curatorRosterConfirmed: boolean;
+    readonly collectionDeadlineAt: number;
+  }, now: number, maxEntries: number): VmRecoverySlotAdmission {
+    this.observeTarget(target);
+    const existing = this.peekRecord(target);
+    if (existing) return { kind: 'existing', record: existing };
+    const record = this.createRecord(target, params);
+    return this.install(record, now, maxEntries)
+      ? { kind: 'admitted', record }
+      : { kind: 'deferred' };
+  }
+
+  private reserveAdmission(
+    target: Target,
+    now: number,
+    maxEntries: number,
+  ): InternalVmRecoverySlotReservation {
+    this.observeTarget(target);
+    const existing = this.peekRecord(target);
+    if (existing) return { kind: 'existing', record: existing };
+
+    const targetKey = vmRecoverySlotKey(target);
+    const targetFingerprint = vmRecoveryTargetFingerprint(target);
+    const hasOpenCapacity = this.retained.size + this.openCapacityReservations < maxEntries;
+    const donorEntry = hasOpenCapacity
+      ? undefined
+      : this.findReplacementEntry(target.localCgId, now, maxEntries);
+    if (!hasOpenCapacity && !donorEntry) return { kind: 'deferred' };
+    if (donorEntry) this.reservedDonorKeys.add(donorEntry[0]);
+    else this.openCapacityReservations += 1;
+
+    let active = true;
+    const release = () => {
+      if (!active) return;
+      active = false;
+      if (donorEntry) this.reservedDonorKeys.delete(donorEntry[0]);
+      else this.openCapacityReservations -= 1;
+    };
+    const reservation: VmRecoverySlotAdmissionReservation = {
+      release,
+      commit: (params) => {
+        if (!active) return { kind: 'deferred' };
+        const concurrentlyInstalled = this.peekRecord(target);
+        if (concurrentlyInstalled) {
+          release();
+          return { kind: 'existing', record: concurrentlyInstalled };
+        }
+        // A replacement fingerprint observed while discovery was pending owns
+        // a different lifecycle; this reservation cannot install into it.
+        if (vmRecoveryTargetFingerprint(target) !== targetFingerprint) {
+          release();
+          return { kind: 'deferred' };
+        }
+        const record = this.createRecord(target, params);
+        if (!donorEntry) {
+          if (this.retained.size >= maxEntries || this.retained.has(targetKey)) {
+            release();
+            return { kind: 'deferred' };
+          }
+          try {
+            this.retainRecord(targetKey, record);
+            release();
+            return { kind: 'admitted', record };
+          } catch (error) {
+            release();
+            throw error;
+          }
+        }
+
+        const [donorKey, donor] = donorEntry;
+        if (this.retained.get(donorKey) !== donor || this.retained.has(targetKey)) {
+          release();
+          return { kind: 'deferred' };
+        }
+        let installed = false;
+        this.retained.delete(donorKey);
+        try {
+          this.retainRecord(targetKey, record);
+          installed = this.retained.get(targetKey) === record;
+          if (!installed) return { kind: 'deferred' };
+          return { kind: 'admitted', record };
+        } finally {
+          release();
+          if (installed) this.invalidateKey(donorKey);
+          else if (!this.retained.has(donorKey)) this.retainRecord(donorKey, donor);
+        }
+      },
+    };
+    return { kind: 'reserved', reservation, donorKey: donorEntry?.[0] };
+  }
+
   protected retainRecord(key: string, record: VmReconcileRotationRecord): void {
     this.retained.set(key, record);
   }
@@ -164,15 +274,21 @@ export class VmRecoverySlotRegistry {
   begin(): VmRecoverySlotScope {
     const controller = new AbortController();
     const held = new Map<string, { generation: SlotGeneration; onAbort: () => void }>();
+    const reservations = new Set<VmRecoverySlotAdmissionReservation>();
+    const pendingDonorKeys = new Set<string>();
     let released = false;
     return {
       signal: controller.signal,
       track: targets => {
         if (released || controller.signal.aborted) return;
         for (const target of targets) {
-          this.observe(target);
+          this.observeTarget(target);
           if (controller.signal.aborted) break;
           const key = vmRecoverySlotKey(target);
+          // A donor reserved by this scope remains valid while discovery is in
+          // flight, but its eventual replacement is an intentional local
+          // transition rather than a reason to cancel the admitting batch.
+          if (pendingDonorKeys.has(key)) continue;
           if (held.has(key)) continue;
           let generation = this.slots.get(key);
           if (!generation) {
@@ -190,9 +306,38 @@ export class VmRecoverySlotRegistry {
           generation.controller.signal.addEventListener('abort', onAbort, { once: true });
         }
       },
+      reserveAdmission: (target, now, maxEntries) => {
+        if (released || controller.signal.aborted) return { kind: 'deferred' };
+        const result = this.reserveAdmission(target, now, maxEntries);
+        if (result.kind !== 'reserved') return result;
+        const donorKey = result.donorKey;
+        if (donorKey) pendingDonorKeys.add(donorKey);
+        const inner = result.reservation;
+        const reservation: VmRecoverySlotAdmissionReservation = {
+          commit: params => {
+            try {
+              return inner.commit(params);
+            } finally {
+              if (donorKey) pendingDonorKeys.delete(donorKey);
+            }
+          },
+          release: () => {
+            try {
+              inner.release();
+            } finally {
+              if (donorKey) pendingDonorKeys.delete(donorKey);
+            }
+          },
+        };
+        reservations.add(reservation);
+        return { kind: 'reserved', reservation };
+      },
       release: () => {
         if (released) return;
         released = true;
+        for (const reservation of reservations) reservation.release();
+        reservations.clear();
+        pendingDonorKeys.clear();
         for (const [key, { generation, onAbort }] of held) {
           generation.controller.signal.removeEventListener('abort', onAbort);
           generation.users--;
@@ -204,7 +349,7 @@ export class VmRecoverySlotRegistry {
   }
 
   /** Observing a replacement fingerprint invalidates only the superseded generation. */
-  private observe(target: Target): void {
+  observeTarget(target: Target): void {
     const key = vmRecoverySlotKey(target);
     const generation = this.slots.get(key);
     const record = this.retained.get(key);

@@ -4,7 +4,10 @@ import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { waitForPeerProtocol } from '../src/p2p/protocol-readiness.js';
 import type { ContextGraphSub, VmReconcileRotationRecord } from '../src/dkg-agent-types.js';
-import type { VmRecoverySlotRegistry } from '../src/internal/vm-recovery-slot-registry.js';
+import {
+  vmRecoverySlotKey,
+  type VmRecoverySlotRegistry,
+} from '../src/internal/vm-recovery-slot-registry.js';
 import {
   getSyncBackpressureSnapshot,
   resolveSyncGlobalBackpressure,
@@ -74,9 +77,9 @@ describe('exact VM recovery slot cancellation', () => {
       await entered.promise;
       Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', { ...descriptor, value: 2 });
       host.prepareVmReconcileRotationTarget(targetFor(localCgId, 1), [peer], host.vmReconcileRotationNow());
-      const original = [...host.vmRecoverySlots.records.entries()];
+      const original = [...host.vmRecoverySlots.snapshot().entries()];
       const waitingTarget = targetFor('waiting-cg');
-      const waitingKey = host.vmReconcileRotationSlotKey(waitingTarget);
+      const waitingKey = vmRecoverySlotKey(waitingTarget);
       // Fault injection targets the registry's retention seam; its maps stay private.
       const registry = host.vmRecoverySlots as VmRecoverySlotRegistry & {
         retainRecord(key: string, record: VmReconcileRotationRecord): void;
@@ -90,8 +93,8 @@ describe('exact VM recovery slot cancellation', () => {
         expect(() => host.prepareVmReconcileRotationTarget(waitingTarget, [peer], host.vmReconcileRotationNow()))
           .toThrow('injected install failure');
       } finally { failInstall.mockRestore(); }
-      expect(host.vmRecoverySlots.records.size).toBe(original.length);
-      for (const [key, record] of original) expect(host.vmRecoverySlots.records.get(key)).toBe(record);
+      expect(host.vmRecoverySlots.snapshot().size).toBe(original.length);
+      for (const [key, record] of original) expect(host.vmRecoverySlots.snapshot().get(key)).toBe(record);
       expect(signal?.aborted).toBe(false);
       release.release();
       expect((await recovery).attemptedOrdinals).toEqual([0]);
@@ -127,7 +130,7 @@ describe('exact VM recovery slot cancellation', () => {
       expect(harness.fetched.map(fetch => fetch.uals.length)).toEqual([1, 2]);
       expect([...result.outcomes.values()]).toEqual(Array.from({ length: 3 }, () => ({ status: 'reconciled', blockNumber: 100 })));
       expect(signals.every(signal => !signal.aborted)).toBe(true);
-      expect(host.vmRecoverySlots.records.size).toBe(0);
+      expect(host.vmRecoverySlots.snapshot().size).toBe(0);
     } finally { await harness.agent.stop().catch(() => undefined); }
   });
 
@@ -173,7 +176,7 @@ describe('exact VM recovery slot cancellation', () => {
     expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 0, queued: 0 });
   });
 
-  it('cancels a fallback transfer that has no retained proof record', async () => {
+  it('cancels an admitted transfer and retires its retained proof record', async () => {
     const localCgId = '0x0000000000000000000000000000000000000001/unowned';
     const entered = barrier();
     const release = barrier();
@@ -191,18 +194,14 @@ describe('exact VM recovery slot cancellation', () => {
     });
     const host = harness.internals as CancellationHost;
     host.subscribedContextGraphs.set(localCgId, { subscribed: true, synced: false, syncMode: 'always-on', onChainId: '1' });
-    // Expired collection/cache pressure can intentionally produce this supported preparation result.
-    vi.spyOn(host, 'prepareVmReconcileRotationTarget').mockImplementation(() => ({
-      suppressed: false,
-    }));
     const recovery = harness.run();
     try {
       await entered.promise;
-      expect(host.vmRecoverySlots.records.size).toBe(0);
+      expect(host.vmRecoverySlots.snapshot().size).toBe(1);
       harness.agent.unsubscribeFromContextGraph(localCgId, { persist: false });
       expect(receivedSignal?.aborted).toBe(true);
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
-      expect(host.vmRecoverySlots.records.size).toBe(0);
+      expect(host.vmRecoverySlots.snapshot().size).toBe(0);
     } finally {
       release.release();
       await recovery;
@@ -238,7 +237,7 @@ describe('exact VM recovery slot cancellation', () => {
       expect(current?.()).toBe(false);
       release.release();
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
-      expect(host.vmRecoverySlots.records.get(host.vmReconcileRotationSlotKey(harness.targets[0]!))).toBe(replacement);
+      expect(host.vmRecoverySlots.snapshot().get(vmRecoverySlotKey(harness.targets[0]!))).toBe(replacement);
       expect(replacement?.phase).toBe('collecting');
       expect(replacement?.attemptedPeerIds.size).toBe(0);
       expect(replacement?.cleanAbsentPeerIds.size).toBe(0);
@@ -277,7 +276,7 @@ describe('exact VM recovery slot cancellation', () => {
       await entered.promise;
       expect(harness.fetched.map(fetch => fetch.uals.length)).toEqual([1, 2]);
       const survivor = harness.targets[2]!;
-      const record = host.vmRecoverySlots.records.get(host.vmReconcileRotationSlotKey(survivor));
+      const record = host.vmRecoverySlots.snapshot().get(vmRecoverySlotKey(survivor));
       expect(record?.attemptedPeerIds.size).toBe(0);
       host.prepareVmReconcileRotationTarget(
         { ...harness.targets[1]!, merkleRoot: 'replacement-root' }, [peer], host.vmReconcileRotationNow(),
@@ -421,15 +420,15 @@ describe('exact VM recovery slot cancellation', () => {
     try {
       await entered;
       const target = harness.targets[0]!;
-      const slotKey = host.vmReconcileRotationSlotKey(target);
-      const originalRecord = host.vmRecoverySlots.records.get(slotKey);
+      const slotKey = vmRecoverySlotKey(target);
+      const originalRecord = host.vmRecoverySlots.snapshot().get(slotKey);
       expect(originalRecord).toBeDefined();
       if (stage === 'transport') expect(getSyncBackpressureSnapshot(policy).inflight).toBe(1);
       else expect(harness.fetched).toHaveLength(0);
       restoreCapacity = applyVmRecoveryInvalidation({
         invalidation, agent: harness.agent, host, localCgId, target, peerId: peer,
       });
-      expect(host.vmRecoverySlots.records.get(slotKey)).not.toBe(originalRecord);
+      expect(host.vmRecoverySlots.snapshot().get(slotKey)).not.toBe(originalRecord);
       expect(boundarySignal?.aborted).toBe(true);
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
       expect(reconcile).not.toHaveBeenCalled();

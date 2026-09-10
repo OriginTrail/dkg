@@ -51,7 +51,6 @@ export interface VmRecoveryHostInternals {
   preferredSyncPeers: Map<string, string>;
   vmRecoverySlots: VmRecoverySlotRegistry;
   vmReconcileRotationNow(): number;
-  vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;
   installVmReconcileActiveFetchCooldown(localCgId: string, now: number): symbol;
   readVmReconcileActiveFetchCooldown(

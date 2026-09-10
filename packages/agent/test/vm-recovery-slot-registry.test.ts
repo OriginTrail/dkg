@@ -4,18 +4,24 @@ import type { VmReconcileRotationRecord } from '../src/dkg-agent-types.js';
 
 const target = { localCgId: 'cg-a', onChainCgId: '1', ordinal: 0, ual: 'ka-0', merkleRoot: '0xABC' };
 
-function recordFor(registry: VmRecoverySlotRegistry, value = target): VmReconcileRotationRecord {
-  return registry.createRecord(value, {
+function admitFor(
+  registry: VmRecoverySlotRegistry,
+  value = target,
+  now = 0,
+  maxEntries = 2,
+): VmReconcileRotationRecord {
+  const admission = registry.admit(value, {
     candidatePeerIds: ['peer-a'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
-  });
+  }, now, maxEntries);
+  if (admission.kind === 'deferred') throw new Error('expected slot admission');
+  return admission.record;
 }
 
 describe('active VM recovery slot ownership', () => {
   it('keeps snapshot membership fixed while later reads reflect slot transitions', () => {
     const registry = new VmRecoverySlotRegistry();
     const empty = registry.snapshot();
-    const record = recordFor(registry);
-    expect(registry.install(record, 0, 1)).toBe(true);
+    const record = admitFor(registry, target, 0, 1);
     const installed = registry.snapshot();
     expect(empty.size).toBe(0);
     expect([...installed.values()]).toEqual([record]);
@@ -26,8 +32,7 @@ describe('active VM recovery slot ownership', () => {
 
   it('retires evidence on completion while preserving cancellation ownership until physical release', () => {
     const registry = new VmRecoverySlotRegistry();
-    const record = recordFor(registry);
-    registry.install(record, 0, 2);
+    const record = admitFor(registry);
     const scope = registry.begin();
     scope.track([target]);
     registry.touch(target, record);
@@ -43,9 +48,8 @@ describe('active VM recovery slot ownership', () => {
     const registry = new VmRecoverySlotRegistry();
     const unowned = { ...target, ordinal: 1 };
     const other = { ...target, localCgId: 'cg-b' };
-    registry.install(recordFor(registry), 0, 2);
-    const otherRecord = recordFor(registry, other);
-    registry.install(otherRecord, 0, 2);
+    admitFor(registry);
+    const otherRecord = admitFor(registry, other);
     const local = registry.begin();
     const remote = registry.begin();
     local.track([target, unowned]);
@@ -61,27 +65,33 @@ describe('active VM recovery slot ownership', () => {
     remote.release();
   });
 
-  it('replaces a cached fingerprint even when no active generation was retained', () => {
+  it('keeps reads pure and replaces a fingerprint only at explicit observation', () => {
     const registry = new VmRecoverySlotRegistry();
-    registry.install(recordFor(registry), 0, 1);
+    const oldRecord = admitFor(registry, target, 0, 1);
+    const active = registry.begin();
+    active.track([target]);
     const replacement = { ...target, merkleRoot: '0xdef' };
-    expect(registry.currentRecord(replacement)).toBeUndefined();
+    expect(registry.peekRecord(replacement)).toBeUndefined();
+    expect(registry.isCurrent(replacement, oldRecord)).toBe(false);
+    expect(registry.recordCount).toBe(1);
+    expect(active.signal.aborted).toBe(false);
+    registry.observeTarget(replacement);
     expect(registry.recordCount).toBe(0);
-    const record = recordFor(registry, replacement);
-    expect(registry.install(record, 0, 1)).toBe(true);
-    expect(registry.currentRecord(replacement)).toBe(record);
+    expect(active.signal.aborted).toBe(true);
+    const record = admitFor(registry, replacement, 0, 1);
+    expect(registry.peekRecord(replacement)).toBe(record);
+    active.release();
   });
 
   it('aborts an expired donor only after installing the waiting record within capacity', () => {
     const registry = new VmRecoverySlotRegistry();
-    registry.install(recordFor(registry), 0, 1);
+    admitFor(registry, target, 0, 1);
     const donor = registry.begin();
     donor.track([target]);
     const waitingTarget = { ...target, localCgId: 'cg-b' };
-    const waiting = recordFor(registry, waitingTarget);
     let recordsAtAbort: VmReconcileRotationRecord[] | undefined;
     donor.signal.addEventListener('abort', () => { recordsAtAbort = [...registry.snapshot().values()]; });
-    expect(registry.install(waiting, 100, 1)).toBe(true);
+    const waiting = admitFor(registry, waitingTarget, 100, 1);
     expect(donor.signal.aborted).toBe(true);
     expect(recordsAtAbort).toEqual([waiting]);
     donor.release();

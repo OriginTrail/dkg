@@ -4,6 +4,7 @@ import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { vmRecoverySlotKey } from '../src/internal/vm-recovery-slot-registry.js';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 
 interface RecoveryTarget extends OrdinalRecoveryTarget {
@@ -256,8 +257,8 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
     for (const target of harness.targets.slice(1)) {
       expect(result.outcomes.get(target.ordinal)?.status).toBe('pending');
-      const record = harness.internals.vmRecoverySlots.records.get(
-        harness.internals.vmReconcileRotationSlotKey(target),
+      const record = harness.internals.vmRecoverySlots.snapshot().get(
+        vmRecoverySlotKey(target),
       );
       expect(record).toMatchObject({
         phase: 'backoff',
@@ -642,7 +643,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     });
     agents.push(harness.agent);
     const target = harness.targets[0]!;
-    const slotKey = harness.internals.vmReconcileRotationSlotKey(target);
+    const slotKey = vmRecoverySlotKey(target);
     const replication = vi.spyOn(
       harness.agent as unknown as { emitReplication(event: unknown): void },
       'emitReplication',
@@ -669,7 +670,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
 
     expect(result).toEqual({ kind: 'not-started-stale' });
     expect(harness.fetched).toEqual([]);
-    expect(harness.internals.vmRecoverySlots.records.size).toBe(0);
+    expect(harness.internals.vmRecoverySlots.snapshot().size).toBe(0);
     expect(replication).not.toHaveBeenCalled();
   });
 
