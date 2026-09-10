@@ -1,0 +1,31 @@
+publish completed ual=did:dkg:base:84532/0xabc/41 in 4210 ms
+listGraphs query timed out after 30000 ms
+sync round complete in 1200 ms
+TimeoutError while running listGraphs against store
+sync request to core-2 timed out (30s)
+GET /api/status 200 in 3 ms
+deadline exceeded during sync catch-up
+store_scheduler_busy: queue depth 128
+operation rejected: queue_wait_timeout after 5000ms
+enqueue failed: queue_full
+worker heartbeat seq=4290 ok
+publish job failed: quorum exhausted after 5 attempts
+QuorumUnmetError: replication quorum impossible
+storage_ack_timeout waiting for member ack
+harmless mention of quorum reached on first attempt
+process killed by cgroup limit: memory.events oom_kill incremented
+oxigraph worker exited with SIGKILL
+A process of this unit has been killed by the OOM killer.
+rejected duplicate publish for ual did:dkg:base:84532/0xabc/7
+transaction already known: duplicate nonce detected
+info: accepted new connection from peer
+forced redial of peer after stall
+watchdog: forced-redial triggered for relay peer
+rpc provider returned HTTP 429 Too Many Requests
+full-pool throttling engaged for provider quota
+listen backlog saturated: accept queue overflow suspected
+changelog.headSeq recomputed via MAX(?seq) full scan
+deleteByPattern.countBefore=182931 countAfter=182930
+store compaction finished before deadline
+store write deadline exceeded (write lane)
+SPARQL probe queryBytes=71 timed out
