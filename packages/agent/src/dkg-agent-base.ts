@@ -1215,6 +1215,10 @@ export class DKGAgentBase {
   protected readonly finalizationRuntime = new FinalizationRuntime();
   /** Single owner for RFC-64 public transport, authority refresh, and persistence. */
   protected rfc64PublicCatalogOwnerV1!: Rfc64PublicCatalogWorkloadOwnerV1;
+  /** Authority-read scheduling is owned by the public-catalog workload owner. */
+  protected get rfc64AuthorityReadCoordinatorV1() {
+    return this.rfc64PublicCatalogOwnerV1.authorityReads;
+  }
   /** Compatibility view for catalog methods that operate on the active service. */
   protected get rfc64PublicCatalogServiceV1(): Rfc64PublicCatalogServiceV1 | undefined {
     return this.rfc64PublicCatalogOwnerV1?.service;

@@ -31,7 +31,9 @@ import { loadAbi } from './evm-adapter-abi.js';
 import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
-import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import {
+  RpcEndpointsExhaustedError,
+} from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import {
@@ -2851,8 +2853,7 @@ export class EVMChainAdapterBase {
       // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
       // its original shape.
       if (isRetryableRpcError(err)) {
-        throw new ChainRpcTransportError(
-          'RPC_ENDPOINTS_EXHAUSTED',
+        throw new RpcEndpointsExhaustedError(
           `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
           { cause: err, rpcUrls: this.rpcUrls },
         );
