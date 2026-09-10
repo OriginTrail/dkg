@@ -100,10 +100,11 @@ export interface EVMAdapterBaseConfig {
    */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /**
-   * Optional durable finalized authority-history checkpoints. Checkpoints are
-   * block-hash revalidated before use and only reduce restart-time log scans.
+   * Optional durable finalized authority-history checkpoints. This explicitly
+   * named composition input must point to process-owned local storage; the
+   * structural interface itself does not pretend to enforce locality.
    */
-  contextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
+  localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

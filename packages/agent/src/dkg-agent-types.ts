@@ -1894,8 +1894,8 @@ export interface DKGAgentConfig {
   chainEventCursorStore?: ChainEventCursorPersistence;
   /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
-  /** Durable finalized Context Graph authority-history checkpoints. */
-  contextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
+  /** Process-owned local durable finalized Context Graph authority-history checkpoints. */
+  localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.

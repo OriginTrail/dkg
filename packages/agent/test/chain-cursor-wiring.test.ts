@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+} from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 
 const OPERATIONAL_KEY =
@@ -37,11 +39,11 @@ describe('DKGAgent chain cursor wiring', () => {
         minPublisherTracWei: 456n,
       },
       contextGraphRegistryScanCursorStore: registryCursorStore,
-      contextGraphAuthorityHistoryStore: authorityHistoryStore,
+      localContextGraphAuthorityHistoryStore: authorityHistoryStore,
     });
 
     expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
-    expect((agent as any).chain.contextGraphAuthorityHistory?.store).toBe(authorityHistoryStore);
+    expect((agent as any).chain.contextGraphAuthorityHistory?.localStore).toBe(authorityHistoryStore);
     expect((agent as any).chain.minPublisherNativeWei).toBe(123n);
     expect((agent as any).chain.minPublisherTracWei).toBe(456n);
     expect((agent as any).chain.receiptTimeoutMs).toBe(1_200_000);
