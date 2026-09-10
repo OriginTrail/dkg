@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, relative, sep } from 'node:path';
@@ -20,6 +21,66 @@ const registeredAuthorityContract = await import(
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
 const packageExports = packageManifest.exports;
+
+// Existing deep paths must resolve to the same implementation and ownership
+// state as the generalized ordinary/selected metadata modules.
+const [legacyMetaBudget, metaBudget, legacyMetaFetcher, metaFetcher, legacyMetaCoordinator, metaCoordinator] = await Promise.all([
+  import('@origintrail-official/dkg-agent/dist/sync/selected-swm-meta-budget.js'),
+  import('@origintrail-official/dkg-agent/dist/sync/swm-meta-budget.js'),
+  import('@origintrail-official/dkg-agent/dist/sync/selected-swm-meta-fetcher.js'),
+  import('@origintrail-official/dkg-agent/dist/sync/swm-meta-fetcher.js'),
+  import('@origintrail-official/dkg-agent/dist/sync/selected-swm-meta-transfer-coordinator.js'),
+  import('@origintrail-official/dkg-agent/dist/sync/swm-meta-transfer-coordinator.js'),
+]);
+for (const [legacy, current] of [
+  [legacyMetaBudget.createSelectedSwmMetaRetentionBudget, metaBudget.createSwmMetaRetentionBudget],
+  [legacyMetaBudget.SelectedSwmMetaRetentionBudgetError, metaBudget.SwmMetaRetentionBudgetError],
+  [legacyMetaFetcher.createSelectedSwmMetaFetcher, metaFetcher.createSwmMetaFetcher],
+  [legacyMetaFetcher.SelectedSwmMetaTransferOwner, metaFetcher.SwmMetaTransferOwner],
+  [legacyMetaCoordinator.SelectedSwmMetaTransferCoordinator, metaCoordinator.SwmMetaTransferCoordinator],
+]) {
+  assert.equal(typeof legacy, 'function');
+  assert.equal(legacy, current);
+}
+const compatibilityBudget = legacyMetaBudget.createSelectedSwmMetaRetentionBudget({
+  maxRows: 1, maxPrefixRows: 1, maxBytesEstimate: 4096, maxPrefixBytesEstimate: 4096,
+});
+const retained = compatibilityBudget.lease();
+const waiting = compatibilityBudget.lease();
+retained.replace(1, 64);
+const blocked = waiting.reserve();
+assert.equal(blocked.maxRows, 0);
+assert.throws(() => blocked.commitReplace(1, 64), error => (
+  error instanceof legacyMetaBudget.SelectedSwmMetaRetentionBudgetError
+  && error instanceof metaBudget.SwmMetaRetentionBudgetError
+  && error.code === 'SELECTED_SWM_META_RETENTION_LIMIT'
+));
+retained.release();
+const available = waiting.reserve();
+assert.equal(available.maxRows, 1);
+available.release();
+waiting.release();
+const compatibilityCoordinator = new legacyMetaCoordinator.SelectedSwmMetaTransferCoordinator();
+const compatibilityFetcher = metaFetcher.createSwmMetaFetcher({
+  remotePeerId: 'compatibility-peer', requesterScope: 'selected-swm-meta:retained:compatibility',
+  retentionBudget: compatibilityBudget, deleteCheckpoint: () => {},
+  fetchPage: async () => ({
+    quads: [], bytesReceived: 0, resumedFromOffset: 0, nextOffset: 0,
+    checkpointKey: 'compatibility-checkpoint', completed: true, timedOut: false,
+  }),
+});
+try {
+  await compatibilityCoordinator.run('compatibility-peer', () => compatibilityFetcher, async fetcher => {
+    const page = await fetcher.strategy.fetch({
+      ctx: { operationId: 'module-compatibility', operationName: 'sync' },
+      remotePeerId: 'compatibility-peer', contextGraphId: 'compatibility-cg',
+      graphUri: 'urn:compatibility:meta', deadline: Date.now() + 1_000,
+    });
+    assert.equal(page.result.completed, true);
+    assert.deepEqual(page.result.quads, []);
+  });
+} finally { await compatibilityCoordinator.close(); }
+
 const expectedRfc64PolicyCells = [
   'public-open',
   'public-curated',
