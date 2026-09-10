@@ -1,4 +1,4 @@
-import { DKGAgent, type DKGAgentConfig } from '@origintrail-official/dkg-agent';
+import { DKGAgent, type DKGAgentConfig, type MessengerOutboxDrainOptions, type MessengerOutboxStats } from '@origintrail-official/dkg-agent';
 import { Messenger } from '@origintrail-official/dkg-agent/dist/p2p/messenger.js';
 import { BoundedProtocolOutbox, ProtocolOutbox, type ProtocolOutboxStore, type BoundedProtocolOutboxStore,
   type ProtocolRouter, type ProtocolOutboxEntry, type ProtocolOutboxMetadata } from '@origintrail-official/dkg-core';
@@ -17,12 +17,15 @@ void rejected; void accepted;
 
 declare const agent: DKGAgent;
 declare const messenger: Messenger;
-const legacyChat: ProtocolOutboxEntry[] = agent.listMessageOutbox();
+const legacyChat: ProtocolOutboxEntry[] | undefined = agent.listMessageOutbox();
 const chatMetadata: ProtocolOutboxMetadata[] = agent.listMessageOutboxMetadata();
+const publicDrainOptions: MessengerOutboxDrainOptions = { batchSize: 2, concurrency: 1, maxPayloadBytes: 1024 };
+const publicStats: MessengerOutboxStats | undefined = agent.getMessengerOutboxStats();
 const legacyMessenger: ProtocolOutboxEntry[] | undefined = messenger.listOutbox();
 const messengerMetadata: ProtocolOutboxMetadata[] = messenger.listOutboxMetadata();
 const legacyDue: ProtocolOutboxEntry[] = new ProtocolOutbox(unboundedStore).duePage(Date.now());
-void legacyChat; void chatMetadata; void legacyMessenger; void messengerMetadata; void legacyDue;
+void legacyChat; void chatMetadata; void publicDrainOptions; void publicStats;
+void legacyMessenger; void messengerMetadata; void legacyDue;
 
 // Automatic retries do not require legacy full-payload inspection methods.
 type AutomaticStore = Pick<BoundedProtocolOutboxStore,

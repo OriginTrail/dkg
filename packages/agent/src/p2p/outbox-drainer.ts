@@ -1,5 +1,6 @@
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 import { DEFAULT_MAX_READ_BYTES, type ProtocolOutboxEntry, type ProtocolOutboxPage, type ProtocolOutboxPageBudget } from '@origintrail-official/dkg-core';
+import type { MessengerOutboxDrainOptions, MessengerOutboxStats } from '../dkg-agent-types.js';
 
 export const DEFAULT_OUTBOX_DRAIN_BATCH_SIZE = 100;
 export const DEFAULT_OUTBOX_DRAIN_CONCURRENCY = 4;
@@ -7,11 +8,8 @@ export const DEFAULT_OUTBOX_DRAIN_CONCURRENCY = 4;
 // default transport frame rather than only the SWM application payload.
 export const DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES = DEFAULT_MAX_READ_BYTES;
 
-export interface OutboxDrainerOptions {
-  batchSize?: number;
-  concurrency?: number;
-  maxPayloadBytes?: number;
-}
+/** @deprecated Import MessengerOutboxDrainOptions from the package root. */
+export type OutboxDrainerOptions = MessengerOutboxDrainOptions;
 
 interface ResolvedOutboxDrainerOptions {
   batchSize: number;
@@ -19,18 +17,9 @@ interface ResolvedOutboxDrainerOptions {
   maxPayloadBytes: number;
 }
 
-export interface OutboxDrainStats {
-  batchSize: number;
-  maxPayloadBytes: number;
-  /** Bytes/entries reserved by the active in-process page, not a durable lease. */
-  claimedEntries: number;
-  claimedBytes: number;
-  lastBatchEntries: number;
-  lastBatchPayloadBytes: number;
-  /** Repeated skips of the same oversized row are counted once per observed page. */
-  skippedOversizedEntriesTotal: number;
-  byteBudgetDeferralsTotal: number;
-}
+/** Internal scheduler subset of the public aggregate statistics. */
+export type OutboxDrainStats = Omit<MessengerOutboxStats,
+  'queuedEntries' | 'queuedBytes' | 'oldestDueAgeMs' | 'oversizedDueEntries'>;
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
   const resolved = value ?? fallback;

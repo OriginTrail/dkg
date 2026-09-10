@@ -390,6 +390,8 @@ import {
   type ImportedArtifactByteStore,
   type ReplicationEvent,
   type ResolvedDKGAgentConfig,
+  type MessengerOutboxDrainOptions,
+  type MessengerOutboxStats,
 } from './dkg-agent-types.js';
 import {
   normalizePublishContextGraphId,
@@ -535,6 +537,8 @@ export type {
   Rfc64CatalogBootstrapPolicyV1,
   Rfc64PublicCatalogBootstrapConfigV1,
   DKGAgentACKTransportOptions,
+  MessengerOutboxDrainOptions,
+  MessengerOutboxStats,
   ImportedArtifactByteStore,
 };
 
@@ -1702,7 +1706,7 @@ export class DKGAgent extends DKGAgentBase {
     return this.messenger.getSloStats();
   }
 
-  getMessengerOutboxStats() {
+  getMessengerOutboxStats(): MessengerOutboxStats | undefined {
     return this.messenger.getOutboxStats();
   }
 

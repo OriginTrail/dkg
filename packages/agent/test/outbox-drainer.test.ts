@@ -29,6 +29,7 @@ describe('OutboxDrainer', () => {
     expect(waitSettled).toBe(false);
     release();
     await expect(tick).rejects.toThrow('outbox retry worker');
+    expect(drainer.getStats()).toMatchObject({ claimedEntries: 0, claimedBytes: 0 });
     await waiting;
     expect(waitSettled).toBe(true);
   });

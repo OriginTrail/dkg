@@ -1833,10 +1833,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
    * protocol so the existing operator surface still talks about
    * "the chat outbox".
    */
-  listMessageOutbox(this: DKGAgent): ProtocolOutboxEntry[] {
+  listMessageOutbox(this: DKGAgent): ProtocolOutboxEntry[] | undefined {
     return this.messenger
       .listOutbox()
-      ?.filter((entry) => entry.protocol === PROTOCOL_MESSAGE) ?? [];
+      ?.filter((entry) => entry.protocol === PROTOCOL_MESSAGE);
   }
 
   /** Chat retry diagnostics without loading queued envelope payloads. */

@@ -11,15 +11,13 @@ import {
   type ProtocolOutboxEntry,
   type ProtocolOutboxMetadata,
   type ProtocolOutboxPayloadInspection,
-  type ProtocolOutboxQueueStats,
   type ProtocolRouter,
   type SendOptions,
 } from '@origintrail-official/dkg-core';
 import {
   OutboxDrainer,
-  type OutboxDrainerOptions,
-  type OutboxDrainStats,
 } from './outbox-drainer.js';
+import type { MessengerOutboxDrainOptions, MessengerOutboxStats } from '../dkg-agent-types.js';
 export {
   DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
   DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
@@ -186,7 +184,7 @@ export interface MessengerDeps {
    * Periodic retry scheduler bounds. Defaults and validation are owned by
    * `OutboxDrainer` (`batchSize: 100`, `concurrency: 4`).
    */
-  outboxDrain?: OutboxDrainerOptions;
+  outboxDrain?: MessengerOutboxDrainOptions;
 }
 
 /** Router options exposed by Messenger's legacy pass-through send. */
@@ -1192,7 +1190,7 @@ export class Messenger {
   }
 
   /** Fixed-cardinality queue/admission gauges and skip counters for /api/slo. */
-  getOutboxStats(): (OutboxDrainStats & ProtocolOutboxQueueStats) | undefined {
+  getOutboxStats(): MessengerOutboxStats | undefined {
     const stats = this.outboxDrainer?.getStats();
     if (!stats || !this.outbox) return undefined;
     return { ...stats, ...this.outbox.queueStats(this.clock(), stats.maxPayloadBytes) };

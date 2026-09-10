@@ -108,11 +108,41 @@ it('carries SDK outbox limits into the real Messenger and exposes queue gauges',
     outboxStore.enqueue(peer, protocol, 'entry', envelope('entry'), 'offline', 0);
     expect(agent.getMessengerOutboxStats()).toMatchObject({ batchSize: 3, maxPayloadBytes: 128,
       queuedEntries: 1, queuedBytes: envelope('entry').byteLength, claimedBytes: 0 });
-    expect(agent.listMessageOutbox()[0].payload).toEqual(new Uint8Array(envelope('entry')));
+    expect(agent.listMessageOutbox()![0].payload).toEqual(new Uint8Array(envelope('entry')));
     vi.spyOn(outboxStore, 'list').mockImplementation(() => { throw new Error('metadata diagnostics loaded payloads'); });
     expect(agent.listMessageOutboxMetadata()[0]).toMatchObject({ messageId: 'entry', payloadBytes: envelope('entry').byteLength });
     expect(agent.listMessageOutboxMetadata()[0]).not.toHaveProperty('payload');
   } finally { await agent.stop(); }
+});
+
+it('reports payload inspection as unsupported for a bounded-only configured store', async () => {
+  const backing = new InMemoryProtocolOutboxStore({ backoffs: [1_000_000_000] });
+  const store: BoundedProtocolOutboxStore = {
+    enqueue: backing.enqueue.bind(backing), markDelivered: backing.markDelivered.bind(backing),
+    hasEntry: backing.hasEntry.bind(backing), size: backing.size.bind(backing),
+    hasPendingFor: backing.hasPendingFor.bind(backing), readDuePage: backing.readDuePage.bind(backing),
+    listMetadata: backing.listMetadata.bind(backing), dropExpiredMetadata: backing.dropExpiredMetadata.bind(backing),
+    recordRetryFailure: backing.recordRetryFailure.bind(backing), queueStats: backing.queueStats.bind(backing),
+  };
+  const agent = await DKGAgent.create({
+    name: 'bounded-only-outbox-inspection',
+    listenHost: '127.0.0.1',
+    listenPort: 0,
+    chainAdapter: new MockChainAdapter(),
+    rfc64CatalogActivation: { enabled: false },
+    messengerStores: {
+      outboxStore: store,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+    },
+  });
+  try {
+    await agent.start();
+    store.enqueue(peer, protocol, 'bounded-only', envelope('bounded-only'), 'offline', Date.now());
+    expect(agent.listMessageOutbox()).toBeUndefined();
+    expect(agent.listMessageOutboxMetadata()).toMatchObject([{ messageId: 'bounded-only' }]);
+  } finally {
+    await agent.stop();
+  }
 });
 
 it('retries a maximum-size SWM application payload with default drain settings', async () => {

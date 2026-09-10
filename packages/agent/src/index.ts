@@ -308,6 +308,8 @@ export {
   type Rfc64CatalogBootstrapConfigV1,
   type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
+  type MessengerOutboxDrainOptions,
+  type MessengerOutboxStats,
   type ContextGraphSub,
   type ContextGraphSyncMode,
   type ContextGraphDiscoveryMetadata,

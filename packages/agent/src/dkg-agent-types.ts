@@ -28,6 +28,7 @@ import type {
   DkgNetworkIdentity,
   BoundedProtocolOutboxStore,
   MessageIdempotencyStore,
+  ProtocolOutboxQueueStats,
   SwmSenderKeyPackageAckReasonCode,
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
   ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
@@ -1931,11 +1932,32 @@ export interface DKGAgentConfig {
    */
   onReplicationEvent?: ReplicationEventSink;
   /** In-process outbox admission bounds; default 100 entries / 10 MiB / 4 workers (DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES). */
-  messengerOutboxDrain?: import('./p2p/outbox-drainer.js').OutboxDrainerOptions;
+  messengerOutboxDrain?: MessengerOutboxDrainOptions;
   messengerStores?: {
     idempotencyStore: MessageIdempotencyStore;
     outboxStore: BoundedProtocolOutboxStore;
   };
+}
+
+/** Public scheduler bounds for Universal Messenger durable retries. */
+export interface MessengerOutboxDrainOptions {
+  batchSize?: number;
+  concurrency?: number;
+  maxPayloadBytes?: number;
+}
+
+/** Fixed-cardinality Universal Messenger retry and queue statistics. */
+export interface MessengerOutboxStats extends ProtocolOutboxQueueStats {
+  batchSize: number;
+  maxPayloadBytes: number;
+  /** Bytes/entries reserved by the active in-process page, not a durable lease. */
+  claimedEntries: number;
+  claimedBytes: number;
+  lastBatchEntries: number;
+  lastBatchPayloadBytes: number;
+  /** Repeated skips of the same oversized row are counted once per observed page. */
+  skippedOversizedEntriesTotal: number;
+  byteBudgetDeferralsTotal: number;
 }
 
 export interface DKGAgentACKTransportOptions {
