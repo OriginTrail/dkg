@@ -64,10 +64,9 @@ function lastSeenMs(iso?: string): number {
  * `lastSeen` are kept (freshness unknown) and, because the sort is stable,
  * retain their relative phonebook order behind any timestamped Cores.
  */
-export function selectWarmCoreCandidates(
-  agents: WarmCoreAgent[],
+export function selectCoreAgents(
+  agents: readonly WarmCoreAgent[],
   selfPeerId: string,
-  opts?: { nowMs?: number; staleThresholdMs?: number },
 ): WarmCoreAgent[] {
   const seen = new Set<string>();
   const out: WarmCoreAgent[] = [];
@@ -78,6 +77,25 @@ export function selectWarmCoreCandidates(
     seen.add(agent.peerId);
     out.push(agent);
   }
+  return out;
+}
+
+/** Discover the complete de-duplicated Core peer roster for recovery work. */
+export async function findCorePeerIds(options: {
+  findAgents: (options?: { signal?: AbortSignal }) => Promise<readonly WarmCoreAgent[]>;
+  selfPeerId: string;
+  signal?: AbortSignal;
+}): Promise<string[]> {
+  const agents = await options.findAgents({ signal: options.signal });
+  return selectCoreAgents(agents, options.selfPeerId).map(({ peerId }) => peerId);
+}
+
+export function selectWarmCoreCandidates(
+  agents: WarmCoreAgent[],
+  selfPeerId: string,
+  opts?: { nowMs?: number; staleThresholdMs?: number },
+): WarmCoreAgent[] {
+  const out = selectCoreAgents(agents, selfPeerId);
   const nowMs = opts?.nowMs;
   const staleThresholdMs = opts?.staleThresholdMs;
   const filtered =

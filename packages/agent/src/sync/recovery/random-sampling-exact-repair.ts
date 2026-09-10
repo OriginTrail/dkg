@@ -26,7 +26,6 @@ export type RandomSamplingExactRepairResult =
 
 export interface RandomSamplingExactRepairDependencies {
   readonly chainId: string;
-  readonly maxPeers: number;
   readonly stopSignal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly createTimeoutSignal?: (timeoutMs: number) => AbortSignal;
@@ -103,7 +102,10 @@ async function executeRandomSamplingExactRepair(
   }
   const traversal = await runBoundedPreparedPeerTraversal<RandomSamplingExactRepairResult>({
     candidatePeerIds,
-    maxPeers: deps.maxPeers,
+    // The operation-wide timeout is the resource ceiling. Do not truncate the
+    // already bounded/discovered candidate universe: proof correctness may
+    // depend on the final Core in the registry roster.
+    maxPeers: candidatePeerIds.length,
     operationLabel: `RS exact repair for ${assetUal} from`,
     assertCurrent: () => {
       if (signal.aborted) throw abortReason(signal);

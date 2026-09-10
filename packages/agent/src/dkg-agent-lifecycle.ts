@@ -269,7 +269,11 @@ import {
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
-import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
+import {
+  findCorePeerIds,
+  reconcileWarmCoreConnections,
+  type WarmCoreAgent,
+} from './p2p/warm-core-connections.js';
 import {
   deleteSyncPageCheckpoint,
   fetchSyncPages,
@@ -4287,7 +4291,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     const dependencies = {
       chainId: this.chain.chainId,
-      maxPeers: DKGAgentBase.RANDOM_SAMPLING_EXACT_PEER_MAX,
       stopSignal: this.node.stopSignal,
       resolveStorageAddress: (_signal) => this.chain.getDKGKnowledgeAssetsAddress
         ? this.chain.getDKGKnowledgeAssetsAddress()
@@ -4296,38 +4299,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.resolveRandomSamplingLocalContextGraphId(cgId, signal),
       resolveCandidatePeerIds: async (localContextGraphId, signal) => {
         const isCurrent = () => this.started && !signal.aborted;
-        const curatorResolution = await this.resolveCuratorPeerIdsForCg(
-          localContextGraphId,
-          {
-            maxPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+        const [curatorResolution, corePeerIds] = await Promise.all([
+          this.resolveCuratorPeerIdsForCg(
+            localContextGraphId,
+            {
+              maxPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+              signal,
+              isCurrent,
+            },
+          ).catch((error) => {
+            if (signal.aborted) throw signal.reason ?? error;
+            return { peerIds: [] as string[] };
+          }),
+          // Registry Core discovery and graph-specific curator discovery are
+          // independent. Resolve them together, then preserve graph-specific
+          // providers ahead of this broad fallback roster.
+          findCorePeerIds({
+            findAgents: (options) => this.discovery.findAgents(options),
+            selfPeerId: this.peerId,
             signal,
-            isCurrent,
-          },
-        ).catch((error) => {
-          if (signal.aborted) throw signal.reason ?? error;
-          return { peerIds: [] as string[] };
-        });
-        if (!isCurrent()) {
-          throw signal.reason ?? asSyncFetchAbortError(new Error(
-            `Random Sampling provider discovery for ${localContextGraphId} is no longer current`,
-          ));
-        }
-        // The local Agent Registry is scoped to this node's DKG network.
-        // Include its complete Core roster so proof-time repair is not limited
-        // to curators, observed providers, or currently-connected peers.
-        // Admission and sync-protocol checks remain enforced below.
-        const corePeerIds = await this.discovery.findAgents({ signal })
-          .then((agents) => agents
-            .filter((agent) => agent.nodeRole === 'core')
-            .map((agent) => agent.peerId))
-          .catch((error) => {
+          }).catch((error) => {
             if (signal.aborted) throw signal.reason ?? error;
             this.log.info(
               ctx,
               `Random Sampling Core-roster discovery failed for ${localContextGraphId}: ${error instanceof Error ? error.message : String(error)}`,
             );
             return [] as string[];
-          });
+          }),
+        ]);
         if (!isCurrent()) {
           throw signal.reason ?? asSyncFetchAbortError(new Error(
             `Random Sampling provider discovery for ${localContextGraphId} is no longer current`,
@@ -4340,10 +4339,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           .map((connection) => connection.remotePeer.toString());
         return [...new Set([
           ...curatorResolution.peerIds,
-          ...corePeerIds,
           ...observedPeerIds,
           this.preferredSyncPeers.get(localContextGraphId),
           ...connectedPeerIds,
+          ...corePeerIds,
         ].filter((peerId): peerId is string => Boolean(
           peerId && peerId !== this.peerId,
         )))];
