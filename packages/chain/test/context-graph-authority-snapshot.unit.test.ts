@@ -25,6 +25,7 @@ const CREATION_HASH = `0x${'66'.repeat(32)}`;
 const POLICY_HASH = `0x${'77'.repeat(32)}`;
 const NEXT_POLICY_HASH = `0x${'78'.repeat(32)}`;
 const NAME_HASH = `0x${'88'.repeat(32)}`;
+const DIRECT_READ_SCOPE = {};
 
 function event(
   blockNumber: number,
@@ -44,13 +45,18 @@ function directHistoryInput(params: Readonly<{
   ordinaryRanges?: Array<readonly [number, number]>;
   blockHashes?: Readonly<Record<number, string>>;
   creationGate?: Readonly<{ entered(): void; wait: Promise<void> }>;
+  readScope?: object;
+  signal?: AbortSignal;
+  omitCreationNameHash?: boolean;
 }>): ResolveContextGraphAuthorityHistoryInput {
   return {
     cache: params.cache,
     cacheKey: params.cacheKey,
+    readScope: params.readScope ?? DIRECT_READ_SCOPE,
     contextGraphId: 9n,
     finalized: { number: params.blockNumber, hash: params.blockHash },
     pageSize: 100,
+    signal: params.signal,
     loadColdFromBlock: async () => {
       if (params.coldReads) params.coldReads.count += 1;
       return 1;
@@ -64,8 +70,8 @@ function directHistoryInput(params: Readonly<{
         blockNumber: 1,
         blockHash: `0x${'01'.repeat(32)}`,
         index: 0,
-        nameHash: NAME_HASH,
-      }];
+        ...(params.omitCreationNameHash ? {} : { nameHash: NAME_HASH }),
+      }] as unknown as readonly ContextGraphAuthorityHistoryCreationEvent[];
     },
     readEvents: async (_query, fromBlock, toBlock) => {
       params.ordinaryRanges?.push([fromBlock, toBlock]);
@@ -398,6 +404,64 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     await Promise.all([firstResolution.publish(), secondResolution.publish()]);
   });
 
+  it('does not let a stalled provider attempt capture same-head failover', async () => {
+    const cache = new ContextGraphAuthorityHistoryCache();
+    const stalledScope = {};
+    const healthyScope = {};
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const stalled = resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'provider-failover',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      readScope: stalledScope,
+      creationGate: { entered: entered.resolve, wait: release.promise },
+    }));
+    await entered.promise;
+
+    const healthy = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'provider-failover',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      readScope: healthyScope,
+    }));
+    expect(healthy.state.nameHash).toBe(NAME_HASH);
+    await healthy.publish();
+
+    release.resolve();
+    await expect(stalled).resolves.toMatchObject({ state: healthy.state });
+  });
+
+  it('does not let one reader abort an independent same-head reader', async () => {
+    const cache = new ContextGraphAuthorityHistoryCache();
+    const readScope = {};
+    const firstAbort = new AbortController();
+    const secondAbort = new AbortController();
+    firstAbort.abort();
+
+    const cancelled = resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'independent-abort',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      readScope,
+      signal: firstAbort.signal,
+    }));
+    const healthy = resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'independent-abort',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      readScope,
+      signal: secondAbort.signal,
+    }));
+
+    await expect(cancelled).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(healthy).resolves.toMatchObject({ state: { nameHash: NAME_HASH } });
+  });
+
   it('retains a newer watermark when an older load publishes last', async () => {
     const cache = new ContextGraphAuthorityHistoryCache();
     const entered = Promise.withResolvers<void>();
@@ -489,14 +553,14 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     expect(coldReads.get('c')?.count).toBe(1);
   });
 
-  it('requires a name hash at the creation-event boundary', () => {
-    // @ts-expect-error Creation events cannot cross this boundary without nameHash.
-    const invalid: ContextGraphAuthorityHistoryCreationEvent = {
-      blockNumber: 1,
-      blockHash: CREATION_HASH,
-      index: 0,
-    };
-    expect(invalid).toBeDefined();
+  it('rejects a malformed creation event without a name hash at runtime', async () => {
+    await expect(resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache: new ContextGraphAuthorityHistoryCache(),
+      cacheKey: 'malformed-creation',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      omitCreationNameHash: true,
+    }))).rejects.toThrow('creation event has no name hash');
   });
 
   it('provides the same authority surface in offline mock-chain mode', async () => {

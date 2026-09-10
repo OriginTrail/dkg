@@ -4255,9 +4255,6 @@ export class EVMChainAdapterBase {
     // may have moved; flushing all of them is correct and keeps the 30s TTL as a
     // pure missed-rotation backstop.
     this.resolvedContractAddressCache.invalidateAll();
-    if (name === 'ContextGraphStorage') {
-      this.contextGraphAuthorityHistory.clear();
-    }
     if (name === 'RandomSampling' || name === 'RandomSamplingStorage') {
       this.invalidateRandomSamplingPair();
       return;

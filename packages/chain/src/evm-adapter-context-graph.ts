@@ -957,6 +957,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           resolveContextGraphAuthorityHistory({
             cache,
             cacheKey,
+            readScope: provider,
             contextGraphId,
             finalized: { number: finalized.number, hash: finalized.hash },
             pageSize: this.cgRegistryScanPageSize,

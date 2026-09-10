@@ -42,6 +42,8 @@ export interface ContextGraphAuthorityHistoryEventQuery {
 
 export interface ContextGraphAuthorityHistoryLoadInput {
   readonly cacheKey: string;
+  /** Stable identity of the physical RPC reader used for this provider attempt. */
+  readonly readScope: object;
   readonly contextGraphId: bigint;
   readonly finalized: Readonly<{ number: number; hash: string }>;
   readonly pageSize: number;
@@ -74,6 +76,8 @@ export interface ContextGraphAuthorityHistoryResolution {
 export class ContextGraphAuthorityHistoryCache {
   readonly #entries: BoundedLruCache<string, ContextGraphAuthorityHistoryState>;
   readonly #inflight = new Map<string, Promise<ContextGraphAuthorityHistoryState>>();
+  readonly #identityIds = new WeakMap<object, number>();
+  #nextIdentityId = 1;
   #epoch = 0;
 
   constructor(
@@ -94,7 +98,18 @@ export class ContextGraphAuthorityHistoryCache {
       ...input,
       finalized: { number: input.finalized.number, hash: finalizedHash },
     };
-    const loadKey = `${input.cacheKey}\u0000${input.finalized.number}\u0000${finalizedHash}`;
+    // A failover retry at the same finalized head must be able to leave a
+    // stalled endpoint behind. Likewise, callers with independent abort
+    // signals must not inherit one another's cancellation. Readers only share
+    // work when the logical head, physical endpoint, and cancellation domain
+    // are all compatible.
+    const loadKey = [
+      input.cacheKey,
+      input.finalized.number,
+      finalizedHash,
+      this.#identityId(input.readScope),
+      input.signal === undefined ? 'no-signal' : this.#identityId(input.signal),
+    ].join('\u0000');
     let pending = this.#inflight.get(loadKey);
     if (pending === undefined) {
       pending = this.#load(normalizedInput);
@@ -136,6 +151,15 @@ export class ContextGraphAuthorityHistoryCache {
 
   get size(): number {
     return this.#entries.size;
+  }
+
+  #identityId(identity: object): number {
+    const existing = this.#identityIds.get(identity);
+    if (existing !== undefined) return existing;
+    const assigned = this.#nextIdentityId;
+    this.#nextIdentityId += 1;
+    this.#identityIds.set(identity, assigned);
+    return assigned;
   }
 
   async #load(
