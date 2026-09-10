@@ -39,9 +39,9 @@ const peer = '12D3KooWPhysicalSlotPeer';
 const address = '0x0000000000000000000000000000000000000001';
 const policyConfig = { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 };
 
-async function physicalHarness(localCgId: string, targetCount = 1) {
+async function physicalHarness(localCgId: string, targetCount = 1, peerIds = [peer]) {
   const harness = await createVmRecoveryHostHarness({
-    name: 'PhysicalSlotCancellation', localCgId, peers: [peer], targetCount,
+    name: 'PhysicalSlotCancellation', localCgId, peers: peerIds, targetCount,
     useRegisteredChainFootprints: true,
     targetForOrdinal: ordinal => ({
       localCgId, onChainCgId: '1', ordinal,
@@ -78,6 +78,27 @@ async function physicalHarness(localCgId: string, targetCount = 1) {
 }
 
 describe('VM slot cancellation through the physical exact requester', () => {
+  it('rotates physical requesters after completed responses and inconclusive chain rereads', async () => {
+    const peerIds = [peer, '12D3KooWPhysicalSlotSecondPeer'];
+    const localCgId = 'physical-inconclusive-reread';
+    const harness = await physicalHarness(localCgId, 1, peerIds);
+    const { host } = harness;
+    const send = vi.fn<Messenger['sendToPeer']>(async () => new Uint8Array());
+    host.messenger = { sendToPeer: send };
+    const reconcile = vi.spyOn(host, 'reconcileChainOrdinal')
+      .mockResolvedValue({ status: 'pending' });
+    try {
+      await harness.run();
+      expect(new Set(send.mock.calls.map(call => call[0]))).toEqual(new Set([peerIds[0]]));
+      expect(harness.pressure()).toMatchObject({ inflight: 0, queued: 0 });
+      host.clearVmReconcileActiveFetchCooldown(localCgId);
+      await harness.run();
+      expect(new Set(send.mock.calls.map(call => call[0]))).toEqual(new Set(peerIds));
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      expect(harness.pressure()).toMatchObject({ inflight: 0, queued: 0 });
+    } finally { await harness.dispose(); }
+  });
+
   it.each(VM_RECOVERY_INVALIDATIONS)(
     '%s aborts a real page request and returns global capacity without another send',
     async invalidation => {

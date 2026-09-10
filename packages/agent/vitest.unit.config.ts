@@ -158,6 +158,7 @@ export default defineConfig({
       "test/vm-recovery-slot-cancellation.test.ts",
       "test/vm-recovery-slot-registry.test.ts",
       "test/vm-recovery-physical-cancellation.test.ts",
+      "test/vm-recovery-physical-attempts.test.ts",
       "test/vm-recovery-footprint-bridge.test.ts",
       "test/vm-recovery-footprint-bridge-adversarial.test.ts",
       "test/finalization-reconcile-negative-memo.test.ts",
