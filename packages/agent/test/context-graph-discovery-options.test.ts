@@ -47,12 +47,28 @@ describe('context graph discovery compatibility boundary (#1485)', () => {
     [{ mode: 'incremental', pageBudget: 4 }, { mode: 'incremental', pageBudget: 4 }],
     [{ mode: 'seedFull', pageBudget: 4 }, { mode: 'seedFull' }],
     [{ mode: 'seedFromCursor', pageBudget: 4 }, { mode: 'seedFromCursor', pageBudget: 4 }],
-  ])('normalizes %j to one canonical mode', (input, expected) => {
+    [{ incremental: true, pageBudget: 3.9 }, { mode: 'incremental', pageBudget: 3 }],
+    [{ seedIncrementalWatermark: true, resumeFromCursor: true, pageBudget: 0.5 }, { mode: 'seedFromCursor' }],
+  ])('normalizes %j to one canonical mode', async (input, expected) => {
     const scan = normalizeContextGraphDiscoveryScan(input as DiscoverContextGraphsFromChainOptions);
     expect(scan).toEqual(expected);
     // A legacy-only adapter sees the equivalent request, never a mixed shape.
     const legacy = legacyChainListScanOptions(scan);
     expect(normalizeContextGraphDiscoveryScan((legacy ?? {}) as DiscoverContextGraphsFromChainOptions)).toEqual(expected);
+    const dispatched: unknown[] = [];
+    const chain = Object.assign(new MockChainAdapter(), {
+      async listContextGraphsFromChain() { dispatched.push({ mode: 'listAll' }); return []; },
+      async *scanContextGraphRegistryPages(options: ContextGraphRegistryScanOptions) {
+        dispatched.push(options);
+        yield { contextGraphs: [], ack: async () => {} };
+      },
+    });
+    const agent = await DKGAgent.create({ name: 'ScanCompatibility', nodeRole: 'edge', chainAdapter: chain });
+    try {
+      await agent.discoverContextGraphsFromChain(input as DiscoverContextGraphsFromChainOptions);
+      expect(dispatched).toEqual([expected]);
+    } finally { await agent.stop(); }
+
   });
   it.each([
     { mode: 'listAll', incremental: true },
@@ -61,7 +77,21 @@ describe('context graph discovery compatibility boundary (#1485)', () => {
     { resumeFromCursor: true },
     { incremental: true, resumeFromCursor: true },
     { mode: 'unknown' },
-  ])('rejects ambiguous or unsupported input %j', (input) => {
-    expect(() => normalizeContextGraphDiscoveryScan(input as unknown as DiscoverContextGraphsFromChainOptions)).toThrow();
+    null, [], false, 'incremental',
+    { incremental: 'true' }, { seedIncrementalWatermark: 1 },
+    { resumeFromCursor: 'false' }, { mode: null },
+  ])('rejects ambiguous or unsupported input %j', async (input) => {
+    const chain = new MockChainAdapter();
+    const dispatched: unknown[] = [];
+    chain.listContextGraphsFromChain = async () => { dispatched.push('list'); return []; };
+    chain.scanContextGraphRegistryPages = async function* () {
+      dispatched.push('pages');
+      yield { contextGraphs: [], ack: async () => {} };
+    };
+    const agent = await DKGAgent.create({ name: 'InvalidScan', nodeRole: 'edge', chainAdapter: chain });
+    try {
+      await expect(agent.discoverContextGraphsFromChain(input as unknown as DiscoverContextGraphsFromChainOptions)).rejects.toThrow();
+      expect(dispatched).toEqual([]);
+    } finally { await agent.stop(); }
   });
 });

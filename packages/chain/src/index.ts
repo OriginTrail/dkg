@@ -1,4 +1,5 @@
 export * from './chain-adapter.js';
+export { decodeContextGraphScanRequest, type NormalizedContextGraphScanRequest } from './context-graph-scan-request.js';
 export {
   bindContextGraphAuthorityReader,
   type ContextGraphAuthorityReader,
