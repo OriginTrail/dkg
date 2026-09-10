@@ -200,6 +200,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
   let exitListeners: NodeJS.ExitListener[] = [];
   let sigintListeners: NodeJS.SignalsListener[] = [];
   let sigtermListeners: NodeJS.SignalsListener[] = [];
+  let stdoutLines: string[] = [];
 
   beforeEach(async () => {
     tempHome = await mkdtemp(join(tmpdir(), 'dkg-storage-ack-timing-wiring-'));
@@ -212,6 +213,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     exitListeners = process.listeners('exit') as NodeJS.ExitListener[];
     sigintListeners = process.listeners('SIGINT') as NodeJS.SignalsListener[];
     sigtermListeners = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
+    stdoutLines = [];
 
     mocks.createServer.mockImplementation(createFakeServer);
     mocks.startPublisherRuntimeWithOutcome.mockResolvedValue({
@@ -252,7 +254,10 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       failedFiles: [],
     });
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
-    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => {
+      stdoutLines.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
     vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
       throw new Error(`process.exit:${code}`);
     }) as never);
@@ -348,6 +353,57 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       nodeName: 'storage-ack-timing-core-test',
       storeConfig: { options: { managedByDkg: true } },
     });
+  });
+
+  it('fails closed when managed store ownership cannot be re-tagged after a wipe', async () => {
+    mocks.chainResetWipe.mockResolvedValueOnce({
+      status: 'incomplete',
+      attempted: true,
+      requiresStoreRetag: true,
+      prevMarker: 'old-chain',
+      removedFiles: ['<sparql:drop-all http://127.0.0.1:7878/update>'],
+      backedUpFiles: [],
+      failedFiles: [{ file: '<external-wipe>', error: 'response lost after DROP' }],
+    });
+    mocks.checkOrSetStoreIdentity
+      .mockResolvedValueOnce({
+        ok: true,
+        action: 'matched',
+        nodeName: 'storage-ack-timing-core-test',
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        action: 'transport-error',
+        error: 'endpoint unavailable',
+      });
+
+    await expect(runDaemonInner(true, {
+      name: 'storage-ack-timing-core-test',
+      networkConfig: 'mainnet-gnosis',
+      listenPort: 0,
+      nodeRole: 'core',
+      chain: {
+        type: 'evm',
+        rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+        chainId: 'evm:100',
+      },
+      store: {
+        backend: 'sparql-http',
+        options: {
+          queryEndpoint: 'http://127.0.0.1:7878/query',
+          updateEndpoint: 'http://127.0.0.1:7878/update',
+          managedByDkg: true,
+        },
+      },
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
+
+    expect(mocks.checkOrSetStoreIdentity).toHaveBeenCalledTimes(2);
+    expect(process.exit).toHaveBeenCalledWith(1);
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+    expect(stdoutLines.join('')).toContain(
+      '[STORE-IDENTITY] failed to re-tag: endpoint unavailable',
+    );
   });
 
   it('round-trips deployment-scoped selected VM cursors through the daemon DashboardDB wiring', async () => {
