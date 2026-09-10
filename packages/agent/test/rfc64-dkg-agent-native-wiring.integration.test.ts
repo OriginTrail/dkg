@@ -2481,6 +2481,16 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       assertionVersion: canonicalSeal.assertionVersion,
       shareOperationId,
     });
+    // The corruption probe above replaces the complete head. Restore the
+    // equivalent storage-ACK alias as well so restart reconciliation still
+    // exercises the intended two-ID head instead of silently falling back to
+    // the originator-only case.
+    await author.store.insert([{
+      subject: `${canonicalSeal.kaUal}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(selectedAlias),
+      graph: graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH_ID),
+    }]);
 
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
