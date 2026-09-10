@@ -9,6 +9,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-swm-catalog-durable-asset-resolver-v1.test.ts",
   "test/rfc64-swm-inventory-catalog-reconciler-v1.test.ts",
   "test/rfc64-swm-inventory-shadow-runtime-v1.test.ts",
+  "test/rfc64-catalog-shadow-observability-v1.test.ts",
   "test/rfc64-catalog-upsert-planner-v1.test.ts",
   "test/rfc64-inventory-v1-candidate-plans.test.ts",
   "test/rfc64-inventory-v1-candidate-latency.test.ts",

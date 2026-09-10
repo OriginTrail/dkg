@@ -200,6 +200,9 @@ export type {
   Rfc64SwmCatalogProjectionSupervisorStatusV1,
 } from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 export type {
+  Rfc64CatalogShadowExecutionStatusV1,
+} from './rfc64/catalog-shadow-observability-v1.js';
+export type {
   Rfc64PublicCatalogBootstrapStatusV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
 export type {
