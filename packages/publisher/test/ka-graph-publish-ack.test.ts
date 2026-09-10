@@ -276,8 +276,11 @@ describe('graph-scoped publish storage ACKs', () => {
       publicTripleCount: quads.length,
       privateTripleCount: 0,
       publisherPeerId: 'publisher-peer',
-      accessPolicy: 'allowList',
-      allowedPeers: ['12D3KooWReader'],
+      access: {
+        kind: 'persisted',
+        accessPolicy: 'allowList',
+        allowedPeers: ['12D3KooWReader'],
+      },
     });
   });
 

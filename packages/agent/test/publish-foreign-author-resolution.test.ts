@@ -746,7 +746,7 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
     })).resolves.toMatchObject({
       shareOperationId: selectedAlias,
       shareOperationIds: [originalId, selectedAlias],
-      accessPolicy: 'public',
+      access: { kind: 'persisted', accessPolicy: 'public', allowedPeers: [] },
     });
 
     const sealRoot = `0x${Buffer.from(MERKLE).toString('hex')}`;
