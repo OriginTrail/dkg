@@ -7,7 +7,7 @@
  */
 import { Contract } from 'ethers';
 import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
-import type { TrustedContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
+import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
@@ -100,12 +100,11 @@ export interface EVMAdapterBaseConfig {
    */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /**
-   * Optional durable finalized authority-history checkpoints from an explicitly
-   * trusted, process-owned backend. The finalized watermark is block-hash
-   * revalidated before use; the historical aggregate remains authority-bearing
-   * within that local integrity boundary.
+   * Optional durable finalized authority-history checkpoints. This explicitly
+   * named composition input must point to process-owned local storage; the
+   * structural interface itself does not pretend to enforce locality.
    */
-  contextGraphAuthorityHistoryStore?: TrustedContextGraphAuthorityHistoryStore;
+  localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

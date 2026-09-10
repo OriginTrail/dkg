@@ -66,7 +66,6 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
-  trustContextGraphAuthorityHistoryStore,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -1796,9 +1795,8 @@ async function runDaemonInnerWithStartupOwnership(
   // as the node identity/configuration. Authority generations cannot be proven
   // from a watermark hash alone, so this composition-root admission is
   // deliberately explicit rather than inferred from a structural store type.
-  const contextGraphAuthorityHistoryStore = trustContextGraphAuthorityHistoryStore(
-    new SqliteContextGraphAuthorityHistoryStore(dashDb),
-  );
+  const localContextGraphAuthorityHistoryStore =
+    new SqliteContextGraphAuthorityHistoryStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1928,7 +1926,7 @@ async function runDaemonInnerWithStartupOwnership(
     changelogCursorStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
-    contextGraphAuthorityHistoryStore,
+    localContextGraphAuthorityHistoryStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
