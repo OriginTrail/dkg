@@ -85,6 +85,7 @@ describe('Random Sampling proof-time exact repair', () => {
           }
         : {}),
     }));
+    let nextPeerIndex = 0;
     const agentLike = {
       started: true,
       peerId: 'self',
@@ -113,7 +114,14 @@ describe('Random Sampling proof-time exact repair', () => {
       selectCatchupPeerWindow: vi.fn((
         candidates: Array<{ toString(): string }>,
         options: { maxPeers: number },
-      ) => candidates.slice(0, options.maxPeers)),
+      ) => {
+        const selected = Array.from(
+          { length: Math.min(options.maxPeers, candidates.length) },
+          (_, offset) => candidates[(nextPeerIndex + offset) % candidates.length]!,
+        );
+        nextPeerIndex = (nextPeerIndex + selected.length) % candidates.length;
+        return selected;
+      }),
       ensurePeerAdmittedForRecovery: vi.fn(async () => true),
       ensurePeerConnected: vi.fn(async () => undefined),
       waitForSyncProtocol: vi.fn(async () => true),
@@ -122,23 +130,28 @@ describe('Random Sampling proof-time exact repair', () => {
     const kaId = (0x1234n << 96n) | 7n;
     const expectedRoot = new Uint8Array(32).fill(0x11);
 
-    await expect(
+    const repair = () => (
       (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
         agentLike,
         { kaId, cgId: 1n, expectedRoot, expectedLeafCount: 12n },
-      ).result,
-    ).resolves.toEqual(proofMaterial);
+      ).result
+    );
+    const repairCount = Math.ceil(peers.length / DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX);
+    for (let index = 1; index < repairCount; index += 1) {
+      await expect(repair()).rejects.toThrow('did not recover');
+    }
+    await expect(repair()).resolves.toEqual(proofMaterial);
 
     expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(peers.length);
     expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
       .toEqual(peers);
-    expect(agentLike.selectCatchupPeerWindow).toHaveBeenCalledWith(
-      expect.any(Array),
-      expect.objectContaining({
-        maxPeers: peers.length,
+    expect(agentLike.selectCatchupPeerWindow).toHaveBeenCalledTimes(repairCount);
+    for (const [, options] of agentLike.selectCatchupPeerWindow.mock.calls) {
+      expect(options).toEqual(expect.objectContaining({
+        maxPeers: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
         peerRotationKey: 'rs-proof:food-safety',
-      }),
-    );
+      }));
+    }
     expect(agentLike.discovery.findAgents).toHaveBeenCalledWith({
       signal: expect.any(AbortSignal),
     });
@@ -443,6 +456,7 @@ describe('Random Sampling proof-time exact repair', () => {
 
     const repaired = await runRandomSamplingExactRepair({
       chainId: 'base:8453',
+      maxPeers: 2,
       stopSignal: stopController.signal,
       timeoutMs: 30_000,
       resolveStorageAddress: async (signal) => {
@@ -704,6 +718,7 @@ describe('Random Sampling proof-time exact repair', () => {
     let setupSignal: AbortSignal | undefined;
     const repair = runRandomSamplingExactRepair({
       chainId: 'base:8453',
+      maxPeers: 1,
       timeoutMs: 10,
       resolveStorageAddress: async () =>
         '0x00000000000000000000000000000000000000aa',
@@ -737,6 +752,7 @@ describe('Random Sampling proof-time exact repair', () => {
     let addressSignal: AbortSignal | undefined;
     const repair = runRandomSamplingExactRepair({
       chainId: 'base:8453',
+      maxPeers: 1,
       timeoutMs: 10,
       resolveStorageAddress: (signal) => {
         addressSignal = signal;
@@ -769,6 +785,7 @@ describe('Random Sampling proof-time exact repair', () => {
     const resolveCandidatePeerIds = vi.fn(async () => ['unreachable']);
     const repair = startRandomSamplingExactRepair({
       chainId: 'base:8453',
+      maxPeers: 1,
       timeoutMs: 60_000,
       resolveStorageAddress: () => {
         addressStarted();

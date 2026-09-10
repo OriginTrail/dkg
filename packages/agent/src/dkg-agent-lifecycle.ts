@@ -4291,6 +4291,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     const dependencies = {
       chainId: this.chain.chainId,
+      maxPeers: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
       stopSignal: this.node.stopSignal,
       resolveStorageAddress: (_signal) => this.chain.getDKGKnowledgeAssetsAddress
         ? this.chain.getDKGKnowledgeAssetsAddress()

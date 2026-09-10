@@ -51,19 +51,7 @@ function lastSeenMs(iso?: string): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-/**
- * From the phonebook agent list, the Cores worth warm-pinning: role
- * `core`, not ourselves, de-duplicated by peerId.
- *
- * The phonebook (`discovery.findAgents()`) is unordered and freshness-blind,
- * but `reconcileWarmCoreConnections` only pins up to `maxCores`. So this
- * function ranks **freshest-first** by `lastSeen` and (when `staleThresholdMs`
- * + `nowMs` are supplied) drops Cores we can prove are stale — otherwise the
- * capped set would be an arbitrary slice that churns between ticks and keeps
- * dialing long-dead registry entries forever. Cores without a parseable
- * `lastSeen` are kept (freshness unknown) and, because the sort is stable,
- * retain their relative phonebook order behind any timestamped Cores.
- */
+/** Select every de-duplicated Core except this node, preserving input order. */
 export function selectCoreAgents(
   agents: readonly WarmCoreAgent[],
   selfPeerId: string,
@@ -90,6 +78,19 @@ export async function findCorePeerIds(options: {
   return selectCoreAgents(agents, options.selfPeerId).map(({ peerId }) => peerId);
 }
 
+/**
+ * From the phonebook agent list, the Cores worth warm-pinning: role
+ * `core`, not ourselves, de-duplicated by peerId.
+ *
+ * The phonebook (`discovery.findAgents()`) is unordered and freshness-blind,
+ * but `reconcileWarmCoreConnections` only pins up to `maxCores`. So this
+ * function ranks **freshest-first** by `lastSeen` and (when `staleThresholdMs`
+ * + `nowMs` are supplied) drops Cores we can prove are stale — otherwise the
+ * capped set would be an arbitrary slice that churns between ticks and keeps
+ * dialing long-dead registry entries forever. Cores without a parseable
+ * `lastSeen` are kept (freshness unknown) and, because the sort is stable,
+ * retain their relative phonebook order behind any timestamped Cores.
+ */
 export function selectWarmCoreCandidates(
   agents: WarmCoreAgent[],
   selfPeerId: string,
