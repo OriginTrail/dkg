@@ -148,6 +148,128 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     ]);
   });
 
+  it('exposes bounded shadow execution evidence without raw supervisor identities', async () => {
+    const shadowContextGraph =
+      '0x1111111111111111111111111111111111111111/private-shadow-status';
+    const privateProvider = '12D3KooPrivateShadowProviderMustNotLeak';
+    const privateAuthor = '0x2222222222222222222222222222222222222222';
+    const privateDigest = `0x${'33'.repeat(32)}`;
+    const readShadowExecution = vi.fn(() => ({
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 4,
+        attemptedRemovals: 1,
+        committedMutations: 3,
+        noOpMutations: 1,
+        failedMutations: 1,
+        casRetries: 2,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 2,
+        trackedAuthorScopes: 1,
+        pending: 0,
+        reconciled: 1,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+      },
+      receiverStaging: {
+        running: false,
+        passes: 3,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: 30,
+        lastPassCompletedAtMs: 40,
+      },
+      // A route boundary must not forward unknown fields introduced by a
+      // mismatched package or unsafe test double.
+      repairs: [{ authorAddress: privateAuthor }],
+      providers: [privateProvider],
+      lastHeadDigest: privateDigest,
+    }));
+    const response = await requestStatusWithAgent(
+      { readRfc64CatalogShadowExecutionStatusV1: readShadowExecution },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [shadowContextGraph],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [shadowContextGraph],
+        rollout: {
+          killSwitch: false,
+          contextGraphModes: { [shadowContextGraph]: 'shadow' },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(readShadowExecution).toHaveBeenCalledOnce();
+    expect(response.body.rfc64Catalog.shadowExecution).toEqual({
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 4,
+        attemptedRemovals: 1,
+        committedMutations: 3,
+        noOpMutations: 1,
+        failedMutations: 1,
+        casRetries: 2,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 2,
+        trackedAuthorScopes: 1,
+        pending: 0,
+        reconciled: 1,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+      },
+      receiverStaging: {
+        running: false,
+        passes: 3,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: 30,
+        lastPassCompletedAtMs: 40,
+      },
+    });
+    const serialized = JSON.stringify(response.body.rfc64Catalog.shadowExecution);
+    expect(serialized).not.toContain(privateProvider);
+    expect(serialized).not.toContain(privateAuthor);
+    expect(serialized).not.toContain(privateDigest);
+    expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('repairs');
+    expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('providers');
+  });
+
   it('projects live mixed edge selection without leaking private ids into public status', async () => {
     const publicContextGraph = 'runtime-selected-public';
     const privateContextGraph =

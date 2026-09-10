@@ -681,6 +681,59 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
   });
 }
 
+/**
+ * Keep the daemon boundary fail-closed even if an older/newer agent adds fields
+ * to its internal status object. Only fixed-cardinality counters and invariant
+ * flags are copied; identifiers and diagnostic strings cannot cross the route.
+ */
+function buildPublicRfc64CatalogShadowExecutionStatusV1(
+  status: ReturnType<DKGAgent['readRfc64CatalogShadowExecutionStatusV1']>,
+) {
+  if (status === null) return null;
+  return {
+    schemaVersion: status.schemaVersion,
+    contextGraphCount: status.contextGraphCount,
+    legacyAuthorityRetained: status.legacyAuthorityRetained,
+    authoritativeApplyAllowed: status.authoritativeApplyAllowed,
+    inventoryObserver: {
+      scope: status.inventoryObserver.scope,
+      inFlight: status.inventoryObserver.inFlight,
+      attemptedUpserts: status.inventoryObserver.attemptedUpserts,
+      attemptedRemovals: status.inventoryObserver.attemptedRemovals,
+      committedMutations: status.inventoryObserver.committedMutations,
+      noOpMutations: status.inventoryObserver.noOpMutations,
+      failedMutations: status.inventoryObserver.failedMutations,
+      casRetries: status.inventoryObserver.casRetries,
+    },
+    projectionSupervisor: {
+      running: status.projectionSupervisor.running,
+      passes: status.projectionSupervisor.passes,
+      trackedAuthorScopes: status.projectionSupervisor.trackedAuthorScopes,
+      pending: status.projectionSupervisor.pending,
+      reconciled: status.projectionSupervisor.reconciled,
+      noInventory: status.projectionSupervisor.noInventory,
+      failed: status.projectionSupervisor.failed,
+      lastPassStartedAtMs: status.projectionSupervisor.lastPassStartedAtMs,
+      lastPassCompletedAtMs: status.projectionSupervisor.lastPassCompletedAtMs,
+    },
+    receiverStaging: {
+      running: status.receiverStaging.running,
+      passes: status.receiverStaging.passes,
+      trackedTargets: status.receiverStaging.trackedTargets,
+      pending: status.receiverStaging.pending,
+      staged: status.receiverStaging.staged,
+      notFound: status.receiverStaging.notFound,
+      knownIncomplete: status.receiverStaging.knownIncomplete,
+      failed: status.receiverStaging.failed,
+      authoritativeApplyCount: status.receiverStaging.authoritativeApplyCount,
+      stagingObserved: status.receiverStaging.stagingObserved,
+      stageOnlyInvariantSatisfied: status.receiverStaging.stageOnlyInvariantSatisfied,
+      lastPassStartedAtMs: status.receiverStaging.lastPassStartedAtMs,
+      lastPassCompletedAtMs: status.receiverStaging.lastPassCompletedAtMs,
+    },
+  };
+}
+
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -916,6 +969,13 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       typeof agent.readRfc64CatalogOperationalStatusV1 === 'function'
         ? await agent.readRfc64CatalogOperationalStatusV1()
         : [];
+    const rfc64CatalogShadowExecution =
+      rfc64CatalogActivation.enabled
+      && typeof agent.readRfc64CatalogShadowExecutionStatusV1 === 'function'
+        ? buildPublicRfc64CatalogShadowExecutionStatusV1(
+            agent.readRfc64CatalogShadowExecutionStatusV1(),
+          )
+        : null;
     const selectedPublicContextGraphs = new Set(
       rfc64CatalogActivation.selectedPublicContextGraphs,
     );
@@ -1124,6 +1184,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         responsibilities: rfc64CatalogResponsibilities,
         authorityRpcCircuit: rfc64AuthorityRpcCircuit,
         contextGraphs: rfc64CatalogContextGraphs,
+        shadowExecution: rfc64CatalogShadowExecution,
         configuration: rfc64CatalogConfiguration,
         autoPublishEnabled: rfc64CatalogActivation.autoPublish !== undefined,
         rollout: rfc64CatalogRollout,
