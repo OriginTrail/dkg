@@ -1147,9 +1147,16 @@ export class FinalizationHandler {
           `source=${sourcePeerId ?? '(missing)'} owner=${head.publisherPeerId}`,
       );
     }
-    const requestedAccessPolicy = head.accessPolicy
-      ?? (trustedWireAccess ? wireAccessPolicy : undefined);
-    const requestedAllowedPeers = head.accessPolicy
+    // Alias comparison needs the canonical effective policy even when legacy
+    // metadata omitted the row. Finalization must separately preserve that
+    // omission: only an explicitly durable policy outranks an authenticated
+    // publisher envelope carried by the finalization message.
+    const requestedAccessPolicy = head.accessPolicyExplicit
+      ? head.accessPolicy
+      : trustedWireAccess
+        ? wireAccessPolicy
+        : undefined;
+    const requestedAllowedPeers = head.accessPolicyExplicit
       ? head.allowedPeers
       : trustedWireAccess
         ? allowedPeers

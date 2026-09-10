@@ -295,6 +295,10 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     const head = await resolveHead(h);
     expect(head?.shareOperationId).toBe(LOCAL_OP);
     expect(head?.assertionVersion).toBe('1');
+    expect(head).toMatchObject({
+      accessPolicy: 'public',
+      accessPolicyExplicit: false,
+    });
   });
 
   it('collapses two operation ids that prove the same exact record', async () => {
@@ -313,6 +317,7 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
       label: 'public for a public-only assertion',
       local: {},
       remote: { accessPolicy: 'public' as const },
+      effectivePolicy: 'public' as const,
     },
     {
       label: 'ownerOnly for a private assertion',
@@ -322,8 +327,13 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
         privateMerkleRoot: new Uint8Array(32).fill(1),
         accessPolicy: 'ownerOnly' as const,
       },
+      effectivePolicy: 'ownerOnly' as const,
     },
-  ])('treats an omitted policy as effective $label', async ({ local, remote }) => {
+  ])('treats an omitted policy as effective $label', async ({
+    local,
+    remote,
+    effectivePolicy,
+  }) => {
     const h = makeHarness();
     await seedHealthyHead(h, local);
     await seedOperation(h, REMOTE_OP, remote);
@@ -331,6 +341,8 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     await expect(resolveHead(h)).resolves.toMatchObject({
       shareOperationId: REMOTE_OP,
       shareOperationIds: [LOCAL_OP, REMOTE_OP],
+      accessPolicy: effectivePolicy,
+      accessPolicyExplicit: true,
     });
   });
 

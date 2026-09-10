@@ -173,7 +173,10 @@ export interface KnowledgeAssetWorkspaceHead {
   readonly publishedAt?: TimestampMsV1;
   /** Transport owner retained at KA granularity; replaces per-subject ownership rows. */
   readonly publisherPeerId: string;
-  readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
+  /** Canonical effective policy, including the legacy omitted-policy default. */
+  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  /** True when at least one equivalent operation explicitly persisted the policy. */
+  readonly accessPolicyExplicit: boolean;
   readonly allowedPeers: string[];
 }
 
@@ -341,11 +344,15 @@ function decodeWorkspaceHeadRows(input: {
  * orders RFC64 inventory). The operation must echo the head's id (mirrors the
  * pre-refactor join); extra id rows on the operation stay tolerated.
  */
+type DecodedPublisherWorkspaceOperation = WorkspaceOperationModel<
+  PublisherWorkspaceOperationSemantics
+> & Readonly<{ accessPolicyExplicit: boolean }>;
+
 function decodeWorkspaceOperationRows(input: {
   readonly operationValues: Map<string, string[]>;
   readonly scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
   readonly shareOperationId: string;
-}): WorkspaceOperationModel<PublisherWorkspaceOperationSemantics> {
+}): DecodedPublisherWorkspaceOperation {
   const ual = input.scope.ual;
   const operation = makeSingletonReader(input.operationValues, ual, 'operation');
   const echoedIds = (input.operationValues.get(`${DKG}shareOperationId`) ?? [])
@@ -425,6 +432,7 @@ function decodeWorkspaceOperationRows(input: {
       shareOperationId: input.shareOperationId,
       ...(publishedAtMs === undefined ? {} : { publishedAtMs }),
     },
+    accessPolicyExplicit: accessPolicy !== undefined,
   };
 }
 
@@ -573,6 +581,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
       : { publishedAt: selected.provenance.publishedAtMs.toString() as TimestampMsV1 }),
     publisherPeerId: decodedOperation.publisherIdentity,
     accessPolicy: decodedOperation.accessPolicy,
+    accessPolicyExplicit: candidates.some((candidate) => candidate.accessPolicyExplicit),
     allowedPeers: [...decodedOperation.allowedPeers],
   };
 }
