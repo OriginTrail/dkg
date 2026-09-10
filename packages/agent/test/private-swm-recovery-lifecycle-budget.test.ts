@@ -211,7 +211,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     });
   });
 
-  it('bounds retained-reference revalidation and discards unvalidated completion evidence', async () => {
+  it('bounds retained-reference revalidation without discarding unvalidated progress', async () => {
     const fixtures = [snapshotFixture(9), snapshotFixture(8), snapshotFixture(7)];
     const meta = fixtures.flatMap(({ metadata }) => metadata);
     const manifest = collectPublicSnapshotMetadata(meta);
@@ -228,7 +228,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       return true;
     });
     const store = new OxigraphStore(); stores.push(store);
-    const result = await recoverContextGraphSwm({
+    const recover = () => recoverContextGraphSwm({
       ctx: { operationName: 'sync', operationId: 'retained-revalidation-budget' },
       remotePeerId: owner.remotePeerId,
       contextGraphId: owner.contextGraphId,
@@ -253,6 +253,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       },
       snapshotMaterializer: {
         isGraphAssetMaterialized,
+        preserveStoredIdentityForSkippedAsset: async () => ({ outcome: 'replace' }),
       } as unknown as SharedMemorySnapshotMaterializer,
       snapshotWalkProgress: () => retained,
       store,
@@ -264,14 +265,32 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       ensureOwnedMap: () => new Map(),
     });
 
-    expect(result).toMatchObject({
+    expect(await recover()).toMatchObject({
       completed: false,
       localYield: { kind: 'local-budget-yield' },
       readySnapshots: 1,
       totalSnapshots: 3,
     });
     expect(isGraphAssetMaterialized).toHaveBeenCalledOnce();
-    expect(retained.resolvedCount()).toBe(1);
+    expect(retained.resolvedCount()).toBe(3);
+    expect(retained.validatedResolvedCount()).toBe(1);
+
+    canAdmit = true;
+    expect(await recover()).toMatchObject({
+      completed: false,
+      localYield: { kind: 'local-budget-yield' },
+      readySnapshots: 2,
+      totalSnapshots: 3,
+    });
+    canAdmit = true;
+    expect(await recover()).toMatchObject({
+      completed: true,
+      readySnapshots: 3,
+      totalSnapshots: 3,
+    });
+    expect(isGraphAssetMaterialized).toHaveBeenCalledTimes(3);
+    expect(retained.resolvedCount()).toBe(3);
+    expect(retained.validatedResolvedCount()).toBe(3);
   });
 
   it('skips a verified cached prefix across jobs and eventually fetches the manifest tail', async () => {

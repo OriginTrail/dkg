@@ -125,23 +125,38 @@ describe('private snapshot-walk coordinator', () => {
     expect(state.isResolved('b')).toBe(false);
   });
 
-  it('returns local yield and invalidates unvalidated retained evidence', async () => {
+  it('retains validation progress across jobs smaller than the resolved manifest', async () => {
     const state = progress();
     state.markResolved('a');
     state.markResolved('b');
     let remaining = 1;
-    const result = await preparePrivateSwmSnapshotWalk(state, {
+    const validateRef = vi.fn(async () => {
+      remaining = 0;
+      return true;
+    });
+    const first = await preparePrivateSwmSnapshotWalk(state, {
       workAdmission: createSyncWorkAdmission(
         () => remaining,
         { sharing: 'exclusive', owner: 'bounded-validation' },
       ),
-      validateRef: async () => {
-        remaining = 0;
-        return true;
-      },
+      validateRef,
     });
-    expect(result).toEqual({ kind: 'local-budget-yield', validatedRefs: 1 });
-    expect(state.resolvedCount()).toBe(1);
+    expect(first).toEqual({ kind: 'local-budget-yield', validatedRefs: 1 });
+    expect(state.resolvedCount()).toBe(2);
+
+    remaining = 1;
+    const second = await preparePrivateSwmSnapshotWalk(state, {
+      workAdmission: createSyncWorkAdmission(
+        () => remaining,
+        { sharing: 'exclusive', owner: 'bounded-validation-retry' },
+      ),
+      validateRef,
+    });
+    expect(second.kind).toBe('prepared');
+    if (second.kind !== 'prepared') throw new Error('Expected completed validation walk');
+    expect(second.validatedRefs).toBe(2);
+    expect(second.plan.reusableRefs).toEqual(['a', 'b']);
+    expect(validateRef.mock.calls.map(([ref]) => ref)).toEqual(['a', 'b']);
   });
 });
 

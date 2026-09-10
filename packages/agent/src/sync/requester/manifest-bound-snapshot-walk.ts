@@ -18,9 +18,11 @@ export class ManifestBoundSnapshotProgress {
   readonly #manifest: readonly PublicSnapshotMetadata[];
   readonly #allowedRefs: ReadonlySet<string>;
   readonly #resolvedRefs = new Set<string>();
+  readonly #validatedResolvedRefs = new Set<string>();
   readonly #now: () => number;
   readonly #retentionTtlMs: number;
   #expiresAtMs: number;
+  #resolvedValidationStarted = false;
 
   constructor(
     orderedManifest: readonly PublicSnapshotMetadata[],
@@ -73,8 +75,43 @@ export class ManifestBoundSnapshotProgress {
     return Object.freeze([...this.#resolvedRefs]);
   }
 
+  /** Start one retained-evidence validation sweep once the manifest is materialized. */
+  beginResolvedValidation(): boolean {
+    if (this.#resolvedValidationStarted || this.incomplete) return false;
+    this.#resolvedValidationStarted = true;
+    this.#touch();
+    return true;
+  }
+
+  resolvedRefsAwaitingValidationSnapshot(): readonly string[] {
+    if (!this.#resolvedValidationStarted) return Object.freeze([]);
+    return Object.freeze(this.#manifest
+      .map(({ ref }) => ref)
+      .filter((ref) => this.#resolvedRefs.has(ref) && !this.#validatedResolvedRefs.has(ref)));
+  }
+
+  isResolvedValidated(ref: string): boolean {
+    return this.#validatedResolvedRefs.has(ref);
+  }
+
+  validatedResolvedCount(): number {
+    return this.#validatedResolvedRefs.size;
+  }
+
+  markResolvedValidated(ref: string): boolean {
+    if (
+      !this.#resolvedValidationStarted
+      || !this.#resolvedRefs.has(ref)
+      || this.#validatedResolvedRefs.has(ref)
+    ) return false;
+    this.#validatedResolvedRefs.add(ref);
+    this.#touch();
+    return true;
+  }
+
   invalidateResolved(ref: string): boolean {
     if (!this.#resolvedRefs.delete(ref)) return false;
+    this.#validatedResolvedRefs.delete(ref);
     this.#touch();
     return true;
   }
@@ -82,6 +119,9 @@ export class ManifestBoundSnapshotProgress {
   markResolved(ref: string): boolean {
     if (!this.#allowedRefs.has(ref) || this.#resolvedRefs.has(ref)) return false;
     this.#resolvedRefs.add(ref);
+    // Once retained validation has started, a failed ref is re-established by
+    // a fresh materialization in the current job and needs no second read.
+    if (this.#resolvedValidationStarted) this.#validatedResolvedRefs.add(ref);
     this.#touch();
     return true;
   }

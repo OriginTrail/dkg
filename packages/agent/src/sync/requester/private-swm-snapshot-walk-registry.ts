@@ -35,28 +35,26 @@ export async function preparePrivateSwmSnapshotWalk(
     readonly validateRef: (ref: string) => Promise<boolean>;
   },
 ): Promise<PrivateSwmSnapshotWalkPreparation> {
-  const manifest = progress.orderedManifestSnapshot();
-  const hasUnresolved = manifest.some(({ ref }) => !progress.isResolved(ref));
-  const validatedRefs = new Set<string>();
-  if (!hasUnresolved) {
-    const retainedRefs = progress.resolvedRefsSnapshot();
-    for (const [index, ref] of retainedRefs.entries()) {
+  progress.beginResolvedValidation();
+  const retainedRefs = progress.resolvedRefsAwaitingValidationSnapshot();
+  if (retainedRefs.length > 0) {
+    for (const ref of retainedRefs) {
       if (!options.workAdmission.canAdmitWork()) {
-        for (const unvalidatedRef of retainedRefs.slice(index)) {
-          progress.invalidateResolved(unvalidatedRef);
-        }
-        return { kind: 'local-budget-yield', validatedRefs: validatedRefs.size };
+        return {
+          kind: 'local-budget-yield',
+          validatedRefs: progress.validatedResolvedCount(),
+        };
       }
-      if (await options.validateRef(ref)) validatedRefs.add(ref);
+      if (await options.validateRef(ref)) progress.markResolvedValidated(ref);
       else progress.invalidateResolved(ref);
     }
   }
   return {
     kind: 'prepared',
-    validatedRefs: validatedRefs.size,
+    validatedRefs: progress.validatedResolvedCount(),
     plan: prepareManifestBoundSnapshotWalk(progress, {
       order: 'unresolved-first',
-      canReuseResolved: ref => validatedRefs.has(ref),
+      canReuseResolved: ref => progress.isResolvedValidated(ref),
     }),
   };
 }
