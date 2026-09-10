@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter, type ChainEvent, type EventFilter } from '@origintrail-official/dkg-chain';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
@@ -10,12 +10,14 @@ const remote = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const self = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 interface NudgeHost {
   subscribedContextGraphs: Map<string, { subscribed: boolean; onChainId?: string }>;
-  resolveContextGraphOnChainIdBinding: (id: string, options?: { signal?: AbortSignal }) => Promise<{ onChainId: string; provenance: 'ontology' } | null>;
+  resolveCurrentNameHashContextGraphBinding: (id: string, options?: { signal?: AbortSignal }) => Promise<{ onChainId: string; provenance: 'reverse-name-hash'; nameHash: string } | undefined>;
+  contextGraphNameCommitment(id: string): string;
+  bindSubscriptionReverseNameHashOnChainId(id: string, sub: { subscribed: boolean }, onChainId: string, nameHash: string): void;
   vmReconcilePhysicalRuns: Set<Promise<unknown>>;
 }
 
-describe('chain event generation at existing recovery waits', () => {
-  it.each(['admission', 'protocol'] as const)('cancels a %s wait and prevents late binding or cursor advancement', async boundary => {
+describe('event-admitted VM recovery at existing waits', () => {
+  it.each(['admission', 'protocol'] as const)('cancels a scheduled %s wait without late binding or post-shutdown cursor advancement', async boundary => {
     let enter!: () => void;
     const entered = new Promise<void>(resolve => { enter = resolve; });
     let release!: () => void;
@@ -54,10 +56,15 @@ describe('chain event generation at existing recovery waits', () => {
     });
     const host = agent as unknown as NudgeHost;
     host.subscribedContextGraphs.clear();
-    host.subscribedContextGraphs.set('unbound', { subscribed: true });
-    const resolveBinding = host.resolveContextGraphOnChainIdBinding.bind(host);
-    host.resolveContextGraphOnChainIdBinding = async (id, options) => {
-      if (id !== 'unbound' || !options?.signal) return resolveBinding(id, options);
+    const subscription = { subscribed: true };
+    host.subscribedContextGraphs.set('candidate', subscription);
+    const nameHash = host.contextGraphNameCommitment('candidate');
+    host.bindSubscriptionReverseNameHashOnChainId('candidate', subscription, '7', nameHash);
+    // The recovery boundary is under test; read authority is already granted.
+    const canRead = vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+    const resolveBinding = host.resolveCurrentNameHashContextGraphBinding.bind(host);
+    host.resolveCurrentNameHashContextGraphBinding = async (id, options) => {
+      if (id !== 'candidate' || !options?.signal) return resolveBinding(id, options);
       calls++;
       readSignal = options?.signal;
       const signal = readSignal ? AbortSignal.any([readSignal, cleanup.signal]) : cleanup.signal;
@@ -67,23 +74,27 @@ describe('chain event generation at existing recovery waits', () => {
         await waitForPeerProtocol({ get: async () => { enter(); return { protocols: [] }; } },
           { toString: () => remote }, '/dkg/test/sync', 3, 60_000, signal);
       }
-      return { onChainId: '7', provenance: 'ontology' };
+      return { onChainId: '7', provenance: 'reverse-name-hash', nameHash };
     };
     try {
       await agent.start();
       await entered;
+      // The nudge has durably handed off to the VM scheduler. Its poll may
+      // checkpoint even though the separately owned recovery is still active.
+      await agent.awaitInitialChainPoll();
+      expect(saved).toEqual([20]);
       agent.closeChainEventAdmission();
-      const stopped = agent.stop();
       expect(readSignal?.aborted).toBe(true);
+      const stopped = agent.stop();
       await stopped;
       if (boundary === 'admission') expect(probeSignal?.aborted).toBe(true);
       release();
       await new Promise<void>(resolve => setImmediate(resolve));
       expect(calls).toBe(1);
-      expect(saved).toEqual([]);
-      expect(host.subscribedContextGraphs.get('unbound')?.onChainId).toBeUndefined();
+      expect(saved).toEqual([20]);
+      expect(host.subscribedContextGraphs.get('candidate')?.onChainId).toBeUndefined();
       expect(host.vmReconcilePhysicalRuns.size).toBe(0);
       expect(admission.snapshot()).toMatchObject({ verifiedPeerIds: [], quarantinedPeerIds: [] });
-    } finally { cleanup.abort(); release(); await agent.stop(); }
+    } finally { cleanup.abort(); release(); await agent.stop(); canRead.mockRestore(); }
   });
 });

@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   reconcileContextGraph,
+  VmReconcileSchedulingRuntime,
   VmReconcileDispatcher,
   RecentUalSet,
   type ChainReconcilerDeps,
@@ -924,6 +925,32 @@ describe('VmReconcileDispatcher scheduling', () => {
     await scheduler.waitForIdle('cg');
   });
 
+  it('does not let a stale active failure re-block live work released by a rebind', async () => {
+    const runs: string[] = [];
+    let rejectStale!: (error: Error) => void;
+    const scheduler = new VmReconcileDispatcher(
+      async (_key, source) => {
+        runs.push(source);
+        if (runs.length === 1) {
+          await new Promise<void>((_resolve, reject) => { rejectStale = reject; });
+        }
+      },
+      () => undefined,
+    );
+
+    scheduler.triggerPeriodic('cg');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    scheduler.releaseLiveHold('cg');
+    scheduler.triggerLive('cg');
+    rejectStale(new Error('old binding became stale'));
+    await scheduler.waitForIdle('cg');
+
+    expect(runs).toEqual(['periodic', 'live']);
+    scheduler.triggerLive('cg');
+    await scheduler.waitForIdle('cg');
+    expect(runs).toEqual(['periodic', 'live', 'live']);
+  });
+
   it('preserves a periodic retry queued behind a failing live pass', async () => {
     let runs = 0;
     let resolveCurrent!: () => void;
@@ -975,6 +1002,65 @@ describe('VmReconcileDispatcher scheduling', () => {
 });
 
 describe('VmReconcileDispatcher admission', () => {
+  it.each((['tryTriggerPeriodic', 'triggerPeriodic', 'dispatch'] as const).flatMap(entry =>
+    (['manual', 'live'] as const).map(source => ({ entry, source })),
+  ))('keeps the $source foreground reserve through $entry', async ({ entry, source }) => {
+    let release!: () => void;
+    const blocked = new Promise<void>(done => { release = done; });
+    const ran: string[] = [];
+    const dispatcher = new VmReconcileDispatcher(async key => { ran.push(key); await blocked; }, () => undefined, { maxPending: 2 });
+    const admit = (key: string) => entry === 'dispatch'
+      ? void dispatcher.dispatch(key, 'periodic').catch(() => undefined)
+      : void dispatcher[entry](key);
+    try {
+      admit('active'); admit('queued'); admit('overflow');
+      expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
+      expect(dispatcher.tryTriggerPeriodic('overflow')).toBe(false);
+      const foreground = source === 'manual'
+        ? dispatcher.triggerManual('foreground')
+        : (dispatcher.triggerLive('foreground'), dispatcher.waitForIdle('foreground'));
+      expect(dispatcher.isInFlight('foreground')).toBe(true);
+      release();
+      await foreground;
+      await dispatcher.waitForIdle();
+      expect(ran).toEqual(['active', 'foreground', 'queued']);
+      await dispatcher.close();
+      expect(dispatcher.tryTriggerPeriodic('closed')).toBe(false);
+    } finally { release(); await dispatcher.close(); }
+  });
+
+  it('returns boolean periodic admission outcomes and preserves the foreground reserve', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 2 });
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('overflow')).toBe(false);
+    expect(dispatcher.snapshot()).toEqual({ active: 1, queued: 1, closed: false });
+    const foreground = dispatcher.triggerManual('foreground').catch(error => error);
+    expect(dispatcher.snapshot().queued).toBe(2);
+    expect(dispatcher.tryTriggerPeriodic('queued')).toBe(true);
+    const closed = dispatcher.close();
+    expect(dispatcher.tryTriggerPeriodic('new')).toBe(false);
+    expect(await foreground).toBeInstanceOf(VmReconcileQueueClosedError);
+    release();
+    await closed;
+  });
+
+  it('reports one new trailing admission and subsequent coalescing without spending another slot', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const dispatcher = new VmReconcileDispatcher(async () => blocked, () => undefined, { maxPending: 2 });
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('active')).toBe(true);
+    expect(dispatcher.tryTriggerPeriodic('other')).toBe(false);
+    expect(dispatcher.snapshot().queued).toBe(1);
+    release();
+    await dispatcher.waitForIdle();
+  });
+
   it('serializes cross-CG work and lets foreground work pass periodic backlog', async () => {
     const order: string[] = [];
     let releaseFirst!: () => void;
@@ -1222,4 +1308,143 @@ describe('RecentUalSet', () => {
     expect(set.has('cg-a\0ual#02')).toBe(false);
     expect(set.has('cg-b\0ual#01')).toBe(true);
   });
+});
+
+describe('capacity-aware periodic admission', () => {
+  it.each(['no sweep', 'abort', 'reset'] as const)('keeps foreground capacity after its burst with %s', async action => {
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    let paused = true;
+    const runtime = new VmReconcileSchedulingRuntime(async key => {
+      started.push(key);
+      if (paused) await new Promise<void>(resolve => releases.push(resolve));
+    }, () => undefined, { concurrency: 1, maxPending: 1, maxForegroundBurst: 1 });
+    const controller = new AbortController();
+    const first = runtime.triggerManual('first');
+    const second = runtime.triggerManual('second');
+    const sweep = action === 'no sweep' ? Promise.resolve()
+      : runtime.completeSweep(['periodic'], [], () => true, controller.signal);
+    if (action === 'abort') controller.abort();
+    if (action === 'reset') runtime.resetSweep();
+    try {
+      await sweep;
+      await vi.waitFor(() => expect(releases).toHaveLength(1));
+      releases.shift()!();
+      await vi.waitFor(() => expect(started).toEqual(['first', 'second']));
+      const third = runtime.triggerManual('third');
+      void third.catch(() => undefined);
+      expect(runtime.isInFlight('third')).toBe(true);
+      paused = false;
+      for (const release of releases.splice(0)) release();
+      await Promise.all([first, second, third]);
+      expect(started).toEqual(['first', 'second', 'third']);
+    } finally {
+      paused = false;
+      for (const release of releases.splice(0)) release();
+      await runtime.close();
+    }
+  });
+
+  it.each([1, 2, 8].flatMap(maxForegroundBurst =>
+    (['completion', 'timer'] as const).flatMap(mode =>
+      (['live', 'manual'] as const).map(source => ({ maxForegroundBurst, mode, source }))),
+  ))('$mode serves a waiting sweep under sustained $source foreground backlog with one pending slot and burst $maxForegroundBurst', async ({ maxForegroundBurst, mode, source }) => {
+    const started: string[] = [];
+    const releases: Array<() => void> = [];
+    let producing = true;
+    let nextForeground = 0;
+    const runtime = new VmReconcileSchedulingRuntime(async (key, source) => {
+      started.push(key);
+      // Refill synchronously when each foreground job starts, before the
+      // waiting sweep's promise continuation can retry admission.
+      if (producing && source !== 'periodic') enqueueForeground(`foreground-${++nextForeground}`);
+      expect(runtime.snapshot().active).toBeLessThanOrEqual(1);
+      expect(runtime.snapshot().queued).toBeLessThanOrEqual(1);
+      await new Promise<void>(resolve => releases.push(resolve));
+    }, () => undefined, { concurrency: 1, maxPending: 1, maxForegroundBurst });
+    const enqueueForeground = (key: string) => {
+      if (source === 'live') runtime.triggerLive(key);
+      else void runtime.triggerManual(key).catch(() => undefined);
+    };
+    enqueueForeground('foreground-0');
+    await vi.waitFor(() => expect(releases).toHaveLength(1));
+    const sweep = mode === 'completion'
+      ? runtime.completeSweep(['periodic'], [], () => true)
+      : Promise.resolve(runtime.scheduleSweep(['periodic'], [], () => true));
+    try {
+      for (let turn = 0; turn <= maxForegroundBurst && !started.includes('periodic'); turn++) {
+        releases.shift()!();
+        await new Promise<void>(resolve => setImmediate(resolve));
+        if (mode === 'timer') runtime.scheduleSweep(['periodic'], [], () => true);
+        await vi.waitFor(() => expect(releases).toHaveLength(1));
+      }
+      expect(started).toContain('periodic');
+      // The initial foreground pass predates the sweep request. Any foreground
+      // work already queued still counts toward the subsequent burst bound.
+      expect(started.indexOf('periodic') - 1).toBeLessThanOrEqual(maxForegroundBurst);
+    } finally {
+      producing = false;
+      const closing = runtime.close();
+      for (const release of releases.splice(0)) release();
+      await Promise.all([closing, sweep]);
+    }
+  });
+
+  it.each(['abort', 'close'] as const)('releases a one-slot wait on %s while active work stays owned', async action => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    const runtime = new VmReconcileSchedulingRuntime(
+      async () => blocked,
+      () => undefined,
+      { maxPending: 1 },
+    );
+    const controller = new AbortController();
+    const active = runtime.triggerManual('active');
+    const sweep = runtime.completeSweep(['waiting'], [], () => true, controller.signal);
+    const closing = action === 'close' ? runtime.close() : undefined;
+    if (action === 'abort') controller.abort();
+    try {
+      await expect(sweep).resolves.toBeUndefined();
+      expect(runtime.isInFlight('waiting')).toBe(false);
+      expect(runtime.isInFlight('active')).toBe(true);
+    } finally { release(); await active; await closing; await runtime.close(); }
+    expect(runtime.tryTriggerPeriodic('closed')).toBe(false);
+  });
+
+  it('admits no work for an already-aborted caller', async () => {
+    const run = vi.fn(async () => undefined);
+    const runtime = new VmReconcileSchedulingRuntime(
+      run,
+      () => undefined,
+    );
+    const controller = new AbortController(); controller.abort();
+    await runtime.completeSweep(['cancelled'], [], () => true, controller.signal);
+    expect(run).not.toHaveBeenCalled();
+    await runtime.close();
+  });
+});
+
+
+it('coalesces a waiting periodic request when a foreground trailing pass becomes available', async () => {
+  const gates = new Map<string, () => void>();
+  const counts = new Map<string, number>();
+  const runtime = new VmReconcileSchedulingRuntime(async key => {
+    const count = (counts.get(key) ?? 0) + 1; counts.set(key, count);
+    if (count === 1) await new Promise<void>(resolve => { gates.set(key, resolve); });
+    return key;
+  }, () => undefined, { concurrency: 3, maxPending: 2 });
+  for (const key of ['A', 'B', 'C']) runtime.triggerLive(key);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  runtime.triggerLive('A');
+  gates.get('C')!(); await runtime.waitForIdle('C');
+  const sweep = runtime.completeSweep(['B'], [], () => true);
+  const manual = runtime.triggerManual('B');
+  try {
+    await new Promise(resolve => setTimeout(resolve, 5));
+    expect(counts.get('B')).toBe(1);
+  } finally {
+    gates.get('A')!(); gates.get('B')!();
+    await manual; await sweep; await runtime.close();
+  }
+  expect(counts.get('B')).toBe(2);
 });

@@ -29,16 +29,24 @@ import { ALL_EVM_EVENT_CONTRACT_KEYS, EvmEventContractGroup, optionalEvmContract
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
 import { rpcHost } from './rpc-failover-log.js';
-import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
+import {
+  RpcEndpointsExhaustedError,
+} from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
-import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
+import {
+  RpcUsageTracker,
+  createCountingJsonRpcProvider,
+  withRpcUsageConsumer,
+  type RpcUsageWindow,
+} from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
@@ -213,59 +221,6 @@ const KA_HIGH_WATER_VIEW_SIGNATURE = 'getMaxKaNumberForAuthor(address)';
 // their existing gas policy.
 const V10_WRITE_GAS_LIMIT_BUFFER_BPS = 2_500;
 
-type IdentityIdCacheEntry = {
-  identityId: bigint;
-  ttlMs: number;
-};
-
-class IdentityIdCache {
-  private readonly values = new ReadThroughTtlCache<string, IdentityIdCacheEntry>({
-    ttlMs: (entry) => entry.ttlMs,
-  });
-
-  constructor(
-    private readonly signerCacheKey: string,
-    private readonly positiveTtlMs: number,
-    private readonly signerZeroTtlMs: number,
-  ) {}
-
-  async getOrLoad(
-    address: string,
-    load: (checksumAddress: string) => Promise<bigint>,
-  ): Promise<bigint> {
-    if (!ethers.isAddress(address)) return 0n;
-    const checksum = ethers.getAddress(address);
-    const cacheKey = checksum.toLowerCase();
-    const entry = await this.values.getOrLoad(cacheKey, cacheKey, async () => {
-      const identityId = await load(checksum);
-      return this.entry(cacheKey, identityId);
-    });
-    return entry.identityId;
-  }
-
-  seed(address: string, identityId: bigint): void {
-    const cacheKey = ethers.getAddress(address).toLowerCase();
-    this.values.seed(cacheKey, this.entry(cacheKey, identityId));
-  }
-
-  invalidate(address: string): void {
-    const cacheKey = ethers.getAddress(address).toLowerCase();
-    this.values.invalidate(cacheKey);
-  }
-
-  invalidateAll(): void {
-    this.values.invalidateAll();
-  }
-
-  private entry(cacheKey: string, identityId: bigint): IdentityIdCacheEntry {
-    const ttlMs = identityId > 0n
-      ? this.positiveTtlMs
-      : cacheKey === this.signerCacheKey
-        ? this.signerZeroTtlMs
-        : 0;
-    return { identityId, ttlMs };
-  }
-}
 
 /**
  * Upper bound on the pre-10.0.4 KnowledgeAssetCreated fallback scan, in
@@ -455,30 +410,6 @@ function kaHighWaterViewSelectorInCode(storage: Contract, code: string): boolean
  * the common provider phrasings (geth/erigon/nethermind/managed endpoints).
  */
 /**
- * Flatten an error into a single lowercased string across the nested fields
- * ethers v6 / managed RPCs actually populate — `message`, `shortMessage`,
- * `reason`, `body`, and recursively `error` / `info` / `cause` / `data`. The
- * plain `errorMessage` reads only `.message`, so a managed-RPC denial whose text
- * lives in `err.info.error.message` / `err.body` would otherwise be invisible.
- */
-function allErrorText(err: unknown): string {
-  const parts: string[] = [];
-  const seen = new Set<unknown>();
-  const visit = (e: any, depth: number): void => {
-    if (e == null || depth > 5 || seen.has(e)) return;
-    if (typeof e === 'string') { parts.push(e); return; }
-    if (typeof e !== 'object') return;
-    seen.add(e);
-    for (const k of ['message', 'shortMessage', 'reason', 'body']) {
-      if (typeof e[k] === 'string') parts.push(e[k]);
-    }
-    for (const k of ['error', 'info', 'cause', 'data']) visit(e[k], depth + 1);
-  };
-  visit(err, 0);
-  return parts.join(' ').toLowerCase();
-}
-
-/**
  * True when `err` is a TRANSIENT rate-limit / throttle from the RPC provider —
  * keyed on the provider HTTP status (`429`; `errorStatus` recurses nested
  * `cause`/`info`/`error` fields) plus a rate-limit / quota / compute-unit
@@ -497,7 +428,7 @@ function allErrorText(err: unknown): string {
  */
 function isTransientThrottle(err: unknown): boolean {
   if (errorStatus(err) === 429) return true;
-  const msg = allErrorText(err);
+  const msg = collectEvmErrorText(err);
   return /\b(too many requests|rate[ -]?limit|throttl|compute units?|capacity|quota|credits?|(daily|monthly|request|compute)[^.]{0,12}\blimit|limit reached|over (the )?limit)\b/.test(msg);
 }
 
@@ -511,7 +442,7 @@ function isTransientThrottle(err: unknown): boolean {
 function isHistoricalStateUnavailable(err: unknown): boolean {
   if (isTransientThrottle(err)) return false;
 
-  const msg = allErrorText(err);
+  const msg = collectEvmErrorText(err);
 
   // Genuine "node lacks historical state" shapes → degrade to the genesis log scan.
   // NOTE: a bare `header not found` is intentionally NOT here — nodes also return
@@ -790,10 +721,6 @@ export class EVMChainAdapterBase {
    */
   protected readonly randomSamplingPairCache: HubResolutionCache<{ rs: Contract; rss: Contract }>;
 
-  protected static readonly IDENTITY_ID_POSITIVE_TTL_MS = 5 * 60 * 1000;
-
-  protected static readonly SIGNER_IDENTITY_ID_ZERO_TTL_MS = 15 * 1000;
-
   /**
    * OT-RFC-39 — per-process identity-id cache. Positive hits are memoised with
    * a bounded TTL; arbitrary-address negative hits are only single-flighted so
@@ -802,6 +729,12 @@ export class EVMChainAdapterBase {
    * self `0n` lookup per page.
    */
   protected identityIdCache!: IdentityIdCache;
+
+  /** @deprecated Retained for subclasses; cache policy is owned by IdentityIdCache. */
+  protected static readonly IDENTITY_ID_POSITIVE_TTL_MS = IDENTITY_ID_POSITIVE_TTL_MS;
+
+  /** @deprecated Retained for subclasses; cache policy is owned by IdentityIdCache. */
+  protected static readonly SIGNER_IDENTITY_ID_ZERO_TTL_MS = SIGNER_IDENTITY_ID_ZERO_TTL_MS;
 
   protected readonly pcaReadCache = new PcaReadCache();
 
@@ -967,6 +900,7 @@ export class EVMChainAdapterBase {
           connected,
           label,
           preferred,
+          rpcUsageConsumer,
         ) => this.queryEventLogsPage(
           baseContract,
           filter,
@@ -976,6 +910,7 @@ export class EVMChainAdapterBase {
           connected,
           label,
           preferred,
+          rpcUsageConsumer,
         ),
       }),
     });
@@ -985,7 +920,7 @@ export class EVMChainAdapterBase {
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
   /** Finalized authority scan watermarks owned by this adapter lifecycle. */
-  protected readonly contextGraphAuthorityHistory = new ContextGraphAuthorityHistoryCache();
+  protected readonly contextGraphAuthorityHistory: ContextGraphAuthorityHistoryCache;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -1187,11 +1122,16 @@ export class EVMChainAdapterBase {
       ? undefined
       : ethers.Network.from(this.configuredStaticChainId);
     this.providers = this.rpcUrls.map(
-      (url) => createCountingJsonRpcProvider(url, perEndpointRetries, this.rpcUsage, {
-        cacheTimeout: -1,
-        polling: true,
-        batchMaxCount: 1,
-      }, staticNetwork),
+      (url, endpointSlot) => createCountingJsonRpcProvider(url, this.rpcUsage, {
+        maxRetries: perEndpointRetries,
+        providerOptions: {
+          cacheTimeout: -1,
+          polling: true,
+          batchMaxCount: 1,
+        },
+        network: staticNetwork,
+        endpointSlot,
+      }),
     );
     this.primaryProvider = this.providers[0];
     // No `FallbackProvider`: reads route through the `RpcFailoverClient` read
@@ -1302,11 +1242,7 @@ export class EVMChainAdapterBase {
         throw new Error('EVM adminPrivateKey must be distinct from operational keys');
       }
     }
-    this.identityIdCache = new IdentityIdCache(
-      this.signer.address.toLowerCase(),
-      EVMChainAdapterBase.IDENTITY_ID_POSITIVE_TTL_MS,
-      EVMChainAdapterBase.SIGNER_IDENTITY_ID_ZERO_TTL_MS,
-    );
+    this.identityIdCache = new IdentityIdCache(this.signer.address);
     // #1583 — resolved-contract-address memo, 30s TTL backstop
     // (RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS — bounds a poller-missed rotation).
     this.resolvedContractAddressCache = new ReadThroughTtlCache<string, string>({
@@ -1323,6 +1259,10 @@ export class EVMChainAdapterBase {
       deploymentId: this.deploymentId,
       store: config.contextGraphRegistryScanCursorStore,
     });
+    this.contextGraphAuthorityHistory = new ContextGraphAuthorityHistoryCache(
+      undefined,
+      config.localContextGraphAuthorityHistoryStore,
+    );
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;
@@ -2865,8 +2805,7 @@ export class EVMChainAdapterBase {
       // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
       // its original shape.
       if (isRetryableRpcError(err)) {
-        throw new ChainRpcTransportError(
-          'RPC_ENDPOINTS_EXHAUSTED',
+        throw new RpcEndpointsExhaustedError(
           `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
           { cause: err, rpcUrls: this.rpcUrls },
         );
@@ -3176,6 +3115,7 @@ export class EVMChainAdapterBase {
       connected,
       'getMaxKaNumberForAuthor KnowledgeAssetCreated',
       preferred,
+      'getMaxKaNumberForAuthor',
     );
   }
 
@@ -3188,6 +3128,7 @@ export class EVMChainAdapterBase {
     connected: Map<JsonRpcProvider, Contract>,
     label: string,
     preferred?: JsonRpcProvider,
+    rpcUsageConsumer = 'eventLogPageScan',
   ): Promise<{ logs: ReadonlyArray<ethers.EventLog | ethers.Log>; provider: JsonRpcProvider }> {
     return withSpan(
       'chain.eth_getLogs',
@@ -3218,11 +3159,16 @@ export class EVMChainAdapterBase {
               contract = baseContract.connect(provider) as Contract;
               connected.set(provider, contract);
             }
-            const logs = await withTimeout(
+            // This scan bypasses RpcFailoverClient intentionally because it
+            // owns a page-aware provider order and timeout. Establish the same
+            // bounded consumer scope explicitly so a large historical crawl
+            // (notably the pre-10.0.4 KA high-water fallback) cannot collapse
+            // into `consumer=unattributed` in raw eth_getLogs telemetry.
+            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withTimeout(
               contract.queryFilter(filter as any, lo, hi),
               KA_HIGH_WATER_PAGE_TIMEOUT_MS,
               `${label} getLogs [${lo}, ${hi}]`,
-            );
+            ));
             metrics.chainRpcTotal.add(1, {
               rpc_method: 'eth_getLogs', outcome: 'ok', retryable: false, chain_id: this.chainId,
             });

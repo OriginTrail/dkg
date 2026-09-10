@@ -34,6 +34,7 @@ interface AuthorityEvidence {
   readonly ranges: Array<readonly [number, number]>;
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly deploymentReads: Array<readonly [string, string, string]>;
+  readonly readOptions: Array<Readonly<{ policy?: string }>>;
 }
 
 interface EvmAuthorityHarness {
@@ -47,7 +48,9 @@ interface EvmAuthorityHarness {
   rotateContextGraphStorage(): void;
 }
 
-function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorityHarness {
+function makeEvmAuthorityAdapter(
+  options: { reorg?: boolean; providerRangeLimit?: number } = {},
+): EvmAuthorityHarness {
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
     hubAddress: GOVERNANCE,
@@ -63,6 +66,7 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
     ranges: [] as Array<readonly [number, number]>,
     staticCalls: [] as Array<readonly [bigint, { blockTag: number }]>,
     deploymentReads: [] as Array<readonly [string, string, string]>,
+    readOptions: [],
   };
 
   let finalizedNumber = 30;
@@ -106,7 +110,20 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
     ])),
     queryFilter: async (filter: { name: string }, fromBlock: number, toBlock: number) => {
       evidence.ranges.push([fromBlock, toBlock]);
-      if (toBlock - fromBlock + 1 > 10) throw new Error('oversized log range');
+      if (
+        options.providerRangeLimit !== undefined
+        && toBlock - fromBlock + 1 > options.providerRangeLimit
+      ) {
+        throw {
+          cause: {
+            info: {
+              error: {
+                message: `eth_getLogs is limited to ${options.providerRangeLimit} blocks`,
+              },
+            },
+          },
+        };
+      }
       return (logs[filter.name] ?? []).filter(
         (entry) => entry.blockNumber >= fromBlock && entry.blockNumber <= toBlock,
       );
@@ -150,7 +167,11 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
   adapter.readTipProvider = async (
     _label: string,
     read: (selectedProvider: typeof provider) => Promise<unknown>,
-  ) => read(provider);
+    readOptions: Readonly<{ policy?: string }>,
+  ) => {
+    evidence.readOptions.push(readOptions);
+    return read(provider);
+  };
   adapter.resolveContractDeployBlock = async (
     address: string,
     operation: string,
@@ -227,6 +248,7 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       'getContextGraphAuthoritySnapshot',
       'ContextGraphStorage',
     ]]);
+    expect(evidence.readOptions[0]).toMatchObject({ policy: 'wideLogScan' });
     expect(evidence.filters).toEqual([
       ['ContextGraphCreated', 9n],
       ['Transfer', null, null, 9n],
@@ -266,6 +288,31 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     // immutable and is never scanned again.
     expect(evidence.ranges.slice(18)).toEqual(Array(5).fill([31, 35]));
     expect(evidence.deploymentReads).toHaveLength(1);
+  });
+
+  it('splits provider-capped ranges through the real adapter queryFilter boundary', async () => {
+    const { adapter, evidence } = makeEvmAuthorityAdapter({ providerRangeLimit: 10 });
+    (adapter as any).cgRegistryScanPageSize = 30;
+
+    const snapshot = await adapter.getContextGraphAuthoritySnapshot(9n);
+
+    expect(snapshot).toMatchObject({
+      contextGraphId: '9',
+      owner: OWNER,
+      publishPolicy: 0,
+      ownershipEra: '1',
+      policyVersion: '3',
+      rosterVersion: '3',
+    });
+    expect(evidence.ranges).toEqual(expect.arrayContaining([
+      [7, 30],
+      [7, 18],
+      [7, 12],
+      [13, 18],
+      [19, 30],
+      [19, 24],
+      [25, 30],
+    ]));
   });
 
   it('rejects a finalized anchor that changes while the generation is read', async () => {
@@ -360,11 +407,9 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       policyVersion: '4',
     });
     expect(evidence.deploymentReads).toHaveLength(2);
-    expect(evidence.ranges.slice(18)).toEqual([
-      ...Array(6).fill([7, 16]),
-      ...Array(6).fill([17, 26]),
-      ...Array(6).fill([27, 35]),
-    ]);
+    expect(evidence.ranges.slice(18)).toEqual(
+      Array.from({ length: 6 }, () => [[7, 16], [17, 26], [27, 35]]).flat(),
+    );
   });
 
   it('clears cached generations when ContextGraphStorage rotates', async () => {

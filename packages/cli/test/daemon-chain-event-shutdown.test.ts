@@ -11,7 +11,8 @@ async function evidence(daemon: LiveDaemon): Promise<Evidence[]> {
 }
 
 // Real built CLI worker + loopback libp2p + persistent Oxigraph worker + DashboardDB.
-// The preload stalls only the chain adapter and records production teardown events.
+// The preload grants read authority for its fixture graph, stalls the chain
+// adapter, and records production scheduling and teardown events.
 // No Hardhat or external RPC is used.
 describe('daemon chain event shutdown', () => {
   it.each(['scan', 'callback', 'noncooperative'] as const)('retires %s chain work before closing backing stores', async scenario => {
@@ -31,6 +32,11 @@ describe('daemon chain event shutdown', () => {
       await worker.owner.ready(async () => (await evidence(worker)).some(row => row.event === 'entered') ? true : undefined);
       const entered = (await evidence(worker)).find(row => row.event === 'entered');
       expect(entered).toMatchObject({ hasSignal: true });
+      if (scenario !== 'scan') {
+        // Live callbacks now hand off to the bounded VM scheduler. Wait for
+        // the poll checkpoint independently of the stalled recovery lookup.
+        await worker.owner.ready(async () => (await evidence(worker)).some(row => row.event === 'poll-retired') ? true : undefined);
+      }
       worker.child.kill('SIGTERM');
       if (scenario === 'noncooperative') {
         await worker.owner.ready(async () => (await evidence(worker)).some(row => row.event === 'agent-stop-error') ? true : undefined);
@@ -45,9 +51,13 @@ describe('daemon chain event shutdown', () => {
       const events = rows.map(row => row.event);
       expect(rows.find(row => row.event === 'aborted')).toMatchObject({ apiPortStillPresent: true });
       expect(rows.find(row => row.event === 'daemon-fence-return')).toMatchObject({ aborted: true });
+      // The outer daemon fence also owns event-admitted VM recovery.
+      expect(events.indexOf('aborted')).toBeLessThan(events.indexOf('store-close'));
       expect(rows.filter(row => row.event === 'entered')).toHaveLength(1);
-      expect(rows.find(row => row.event === 'store-close')).toMatchObject({ bound: null, candidate: false, physicalRuns: 0 });
-      expect(rows.find(row => row.event === 'dashboard-close')).toMatchObject({ cursor: 10 });
+      expect(rows.find(row => row.event === 'store-close')).toMatchObject({
+        bound: null, binding: rows.find(row => row.event === 'initial-binding')?.binding, physicalRuns: 0,
+      });
+      expect(rows.find(row => row.event === 'dashboard-close')).toMatchObject({ cursor: scenario === 'scan' ? 10 : 20 });
       const physicalReadSettled = events.indexOf('physical-read-settled');
       expect(physicalReadSettled).toBeGreaterThanOrEqual(0);
       expect(physicalReadSettled).toBeLessThan(events.indexOf('store-close'));

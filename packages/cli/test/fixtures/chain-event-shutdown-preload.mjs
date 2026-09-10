@@ -1,5 +1,6 @@
 // Fault injection only in the real daemon worker, never its store/worker children.
-// Agent, poller, callback, binding resolver, retirement and daemon teardown remain production code.
+// The selected fixture graph has explicit read authority. Poller, scheduling,
+// binding resolver, retirement and daemon teardown remain production code.
 if (process.argv.includes('daemon-worker')) {
   const { appendFileSync, existsSync, watch } = await import('node:fs');
   const { join } = await import('node:path');
@@ -50,6 +51,11 @@ if (process.argv.includes('daemon-worker')) {
     await pause(options?.signal);
     return 7n; // A late valid result must not restore the subscription binding.
   };
+  const originalCanRead = DKGAgent.prototype.canReadContextGraph;
+  DKGAgent.prototype.canReadContextGraph = async function (id, ...args) {
+    if (id === localId) return true;
+    return originalCanRead.call(this, id, ...args);
+  };
   const originalStart = DKGAgent.prototype.start;
   DKGAgent.prototype.start = async function (...args) {
     await originalStart.apply(this, args);
@@ -58,12 +64,17 @@ if (process.argv.includes('daemon-worker')) {
     // Keep this case focused on the event-triggered producer.
     clearTimeout(this.vmReconcileStartupTimer);
     this.vmReconcileStartupTimer = null;
-    this.subscribedContextGraphs.set(localId, { subscribed: true });
+    const subscription = { subscribed: true };
+    this.subscribedContextGraphs.set(localId, subscription);
+    this.bindSubscriptionReverseNameHashOnChainId(
+      localId, subscription, '7', this.contextGraphNameCommitment(localId),
+    );
+    record('initial-binding', { binding: this.contextGraphBindingState.currentBindingFor(localId, subscription) });
     const closeStore = this.store.close.bind(this.store);
     this.store.close = async () => {
       record('store-close', {
         bound: this.subscribedContextGraphs.get(localId)?.onChainId ?? null,
-        candidate: this.contextGraphBindingState.hasBindingCandidate(localId, this.subscribedContextGraphs.get(localId)),
+        binding: this.contextGraphBindingState.currentBindingFor(localId, this.subscribedContextGraphs.get(localId)),
         physicalRuns: this.vmReconcilePhysicalRuns.size,
       });
       return closeStore();
@@ -71,6 +82,7 @@ if (process.argv.includes('daemon-worker')) {
     await this.chainPoller.stop();
     armed = true;
     await this.chainPoller.start();
+    void this.awaitInitialChainPoll().then(() => record('poll-retired'));
   };
   const originalFence = DKGAgent.prototype.closeChainEventAdmission;
   DKGAgent.prototype.closeChainEventAdmission = function () {

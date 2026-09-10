@@ -23,46 +23,7 @@ import {
   workspacePublicQuadsDigest,
 } from '../src/workspace-snapshot-store.js';
 
-const DIGEST = `sha256:${'b'.repeat(64)}`;
-
-class MemoryPageIndexStore implements SnapshotPageIndexStore {
-  readonly records = new Map<string, SnapshotPageIndexRecord>();
-  reads = 0;
-  writes = 0;
-
-  async get(snapshotDigest: string): Promise<SnapshotPageIndexRecord | null> {
-    this.reads += 1;
-    return this.records.get(snapshotDigest) ?? null;
-  }
-
-  async upsert(record: SnapshotPageIndexRecord): Promise<void> {
-    this.writes += 1;
-    this.records.set(record.snapshotDigest, record);
-  }
-}
-
-function makeQuads(count: number, label = 'entity') {
-  return Array.from({ length: count }, (_, index) => ({
-    subject: `urn:snapshot:${label}:${index.toString().padStart(3, '0')}`,
-    predicate: 'http://schema.org/value',
-    object: `"${index}"`,
-    graph: '',
-  }));
-}
-
-function digestFor(index: number): string {
-  return `sha256:${index.toString(16).padStart(64, '0')}`;
-}
-
-function snapshotDirectory(directory: string, digest = DIGEST): string {
-  const hash = digest.slice('sha256:'.length);
-  return join(directory, hash.slice(0, 2), hash.slice(2, 4));
-}
-
-function snapshotPath(directory: string, digest = DIGEST): string {
-  const hash = digest.slice('sha256:'.length);
-  return join(snapshotDirectory(directory, digest), `${hash}.nq`);
-}
+import { DIGEST, MemoryPageIndexStore, makeQuads, digestFor, snapshotDirectory, snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
 function decodeOffsets(blob: Uint8Array): number[] {
   const buffer = Buffer.from(blob);
@@ -422,7 +383,7 @@ describe('FileWorkspacePublicSnapshotStore paging', () => {
     }
   });
 
-  it('serves an already-open snapshot when rebuilding its page index fails', async () => {
+  it('rejects a source pathname change during index building', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-page-'));
     const quads = makeQuads(3, 'rebuild-failure');
     const nquadsPath = snapshotPath(directory);
@@ -444,7 +405,7 @@ describe('FileWorkspacePublicSnapshotStore paging', () => {
         disruptivePageIndexes,
       );
       await expect(reopenedStore.getSnapshotPage(DIGEST, 1, 1))
-        .resolves.toEqual(quads.slice(1, 2));
+        .rejects.toThrow('Snapshot source changed');
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
