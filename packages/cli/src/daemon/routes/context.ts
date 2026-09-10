@@ -25,6 +25,10 @@ import type {
   ResolvedRfc64PublicCatalogActivationConfig,
   loadNetworkConfig,
 } from '../../config.js';
+import {
+  mutableConfigSnapshot,
+  type DkgConfigStore,
+} from '../../daemon-config-store.js';
 import type { VmPublisherControl } from '@origintrail-official/dkg-publisher';
 import type { PublisherState } from '../../publisher-runner.js';
 import type { ExtractionStatusRecord } from '../../extraction-status.js';
@@ -116,7 +120,9 @@ export interface RequestContext {
   publisherControl: VmPublisherControl;
   /** Lifecycle-owned runtime and readiness as one correlated state. */
   publisherState: PublisherState;
-  config: DkgConfig;
+  config: Readonly<DkgConfig>;
+  /** Canonical owner of the daemon's immutable committed configuration. */
+  configStore: DkgConfigStore;
   /** Immutable RFC-64 activation resolved once during daemon startup. */
   rfc64Catalog?: ResolvedRfc64CatalogActivationConfig;
   /** Compatibility projection for the selected-public operator surface. */
@@ -167,3 +173,40 @@ export interface RequestContext {
 
 /** Unbranded input fields accepted only by the daemon's request-context factory. */
 export type RequestContextInputFields = Omit<RequestContext, typeof REQUEST_CONTEXT_BRAND>;
+
+export function currentDaemonConfig(
+  ctx: Pick<RequestContext, 'config' | 'configStore'>,
+): Readonly<DkgConfig> {
+  return ctx.configStore?.current ?? ctx.config;
+}
+
+/**
+ * Run one daemon mutation against an isolated draft and publish it through the
+ * canonical configuration owner.
+ */
+export async function updateDaemonConfig<T>(
+  ctx: Pick<RequestContext, 'config' | 'configStore'>,
+  mutate: (draft: DkgConfig) => T | Promise<T>,
+  options: { commitOnError?: boolean } = {},
+): Promise<T> {
+  const store = ctx.configStore;
+  if (!store) throw new Error('Canonical daemon configuration store is required');
+
+  let result!: T;
+  let completed = false;
+  let deferredError: unknown;
+  await store.update(async current => {
+    const draft = mutableConfigSnapshot(current);
+    try {
+      result = await mutate(draft);
+      completed = true;
+    } catch (error) {
+      if (!options.commitOnError) throw error;
+      deferredError = error;
+    }
+    return draft;
+  });
+  if (deferredError !== undefined) throw deferredError;
+  if (!completed) throw new Error('Configuration update did not complete');
+  return result;
+}

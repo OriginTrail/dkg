@@ -320,3 +320,71 @@ it.each([
     await cleanup;
   }
 });
+
+it('preserves a newly retained operation queued behind a counted cleanup mutation', async () => {
+  const hour = 60 * 60 * 1000;
+  const agent = trackSwmExpiryAgent(await DKGAgent.create({
+    name: 'expiry-extend-queued-mutation', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 0,
+  }));
+  const { store } = agent as unknown as SwmExpiryTestInternals;
+  const roots = ['urn:ttl:queued:a', 'urn:ttl:queued:b'];
+  const operations = roots.map((root, index) => (
+    workspaceOpQuads(CG, `queued-${index}`, root, META, new Date(Date.now() - 2 * hour).toISOString())
+  ));
+  await store.insert([
+    ...operations.flat(),
+    ...roots.map((root, index) => ({ subject: root, predicate: 'urn:p', object: `"queued-${index}"`, graph: WS })),
+  ]);
+
+  let releaseFirstMutation!: () => void;
+  const firstMutationGate = new Promise<void>(resolve => { releaseFirstMutation = resolve; });
+  let firstMutationEntered!: () => void;
+  const firstMutation = new Promise<void>(resolve => { firstMutationEntered = resolve; });
+  let blockedRoot: string | undefined;
+  const remove = store.deleteByPattern.bind(store);
+  const deletes = vi.spyOn(store, 'deleteByPattern').mockImplementation(async pattern => {
+    if (!blockedRoot && pattern.graph === WS && roots.includes(pattern.subject ?? '')) {
+      blockedRoot = pattern.subject;
+      firstMutationEntered();
+      await firstMutationGate;
+    }
+    return remove(pattern);
+  });
+
+  const listFamilyGraphs = store.listGraphsByPrefix?.bind(store);
+  if (!listFamilyGraphs) throw new Error('expiry race test requires indexed graph enumeration');
+  let familyResolutions = 0;
+  let bothFamiliesResolved!: () => void;
+  const familiesResolved = new Promise<void>(resolve => { bothFamiliesResolved = resolve; });
+  vi.spyOn(store, 'listGraphsByPrefix').mockImplementation(async (prefix, options) => {
+    const result = await listFamilyGraphs(prefix, options);
+    if (prefix === `${WS}/` && ++familyResolutions === 2) bothFamiliesResolved();
+    return result;
+  });
+
+  agent.setSharedMemoryTtlMs(hour);
+  const cleanup = agent.cleanupExpiredSharedMemory();
+  try {
+    await Promise.all([firstMutation, familiesResolved]);
+    // Both candidates have completed lock-protected revalidation and graph
+    // discovery. The second now waits behind the first counted mutation.
+    await Promise.resolve();
+    await Promise.resolve();
+    const retainedRoot = roots.find(root => root !== blockedRoot)!;
+    const retainedOperation = operations[roots.indexOf(retainedRoot)]![0]!.subject;
+
+    agent.setSharedMemoryTtlMs(48 * hour);
+    releaseFirstMutation();
+    await cleanup;
+
+    expect(deletes.mock.calls.some(([pattern]) => pattern.subject === retainedRoot)).toBe(false);
+    expect(deletes.mock.calls.some(([pattern]) => pattern.subject === retainedOperation)).toBe(false);
+    expect(await store.query(`ASK { GRAPH <${META}> { <${retainedOperation}> ?p ?o } }`))
+      .toEqual({ type: 'boolean', value: true });
+    expect(await store.query(`ASK { GRAPH <${WS}> { <${retainedRoot}> <urn:p> ?o } }`))
+      .toEqual({ type: 'boolean', value: true });
+  } finally {
+    releaseFirstMutation();
+    await cleanup;
+  }
+});

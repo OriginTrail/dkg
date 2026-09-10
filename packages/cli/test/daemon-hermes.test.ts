@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi, afterEach } from 'vitest';
-import type { DkgConfig } from '../src/config.js';
+import { DkgHomeFiles, type DkgConfig } from '../src/config.js';
+import { DkgConfigStore } from '../src/daemon-config-store.js';
 import {
   buildHermesChannelHeaders,
   buildStableHermesTurnId,
@@ -1129,6 +1130,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         },
       },
     });
+    const configStore = new DkgConfigStore(new DkgHomeFiles(dkgHome), config);
     const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
       enabled: false,
       runtime: { status: 'disconnected' },
@@ -1140,6 +1142,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         req,
         res,
         config,
+        configStore,
         path: '/api/local-agent-integrations/hermes',
       } as any);
     } finally {
@@ -1156,7 +1159,8 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(res.statusCode).toBe(200);
     expect(body.integration.enabled).toBe(false);
     expect(body.integration.runtime.status).toBe('disconnected');
-    expect(config.localAgentIntegrations?.hermes?.enabled).toBe(false);
+    expect(configStore.current.localAgentIntegrations?.hermes?.enabled).toBe(false);
+    expect(config.localAgentIntegrations?.hermes?.enabled).toBe(true);
   });
 
   it('keeps Hermes chat attached and records an error when UI reverse setup fails', async () => {
@@ -1178,6 +1182,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         },
       },
     });
+    const configStore = new DkgConfigStore(new DkgHomeFiles(dkgHome), config);
     const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
       enabled: false,
       runtime: { status: 'disconnected' },
@@ -1189,6 +1194,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         req,
         res,
         config,
+        configStore,
         path: '/api/local-agent-integrations/hermes',
       } as any);
     } finally {
@@ -1204,6 +1210,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(body.integration.runtime.ready).toBe(false);
     expect(body.integration.runtime.lastError).toContain('Hermes disconnect failed: profile locked');
     expect(body.integration.metadata.userDisabled).toBeUndefined();
+    expect(configStore.current.localAgentIntegrations?.hermes?.runtime?.status).toBe('error');
     expect(config.localAgentIntegrations?.hermes?.enabled).toBe(true);
     expect(getHermesChannelTargets(config)).not.toEqual([]);
   });
@@ -1222,6 +1229,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         },
       },
     });
+    const configStore = new DkgConfigStore(new DkgHomeFiles(dkgHome), config);
     const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
       enabled: false,
       runtime: { status: 'disconnected' },
@@ -1233,6 +1241,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         req,
         res,
         config,
+        configStore,
         path: '/api/local-agent-integrations/hermes',
       } as any);
     } finally {
@@ -1249,6 +1258,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(body.integration.runtime.ready).toBe(false);
     expect(body.integration.runtime.lastError).toContain('Hermes profile metadata is missing');
     expect(body.integration.metadata.userDisabled).toBeUndefined();
+    expect(configStore.current.localAgentIntegrations?.hermes?.runtime?.status).toBe('error');
     expect(config.localAgentIntegrations?.hermes?.enabled).toBe(true);
     expect(getHermesChannelTargets(config)).not.toEqual([]);
   });

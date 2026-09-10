@@ -104,8 +104,6 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
-  saveConfig,
-  DkgConfigStore,
   DkgHomeFiles,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
@@ -149,6 +147,7 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
+import { DkgConfigStore, mutableConfigSnapshot } from '../daemon-config-store.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import {
   resolveOtlpLogEndpoint,
@@ -2924,9 +2923,16 @@ async function runDaemonInnerWithStartupOwnership(
     log,
   });
 
+  const telemetryRuntimeConfig = mutableConfigSnapshot(configStore.current);
   const telemetryRuntime = createTelemetryRuntime({
-    config,
-    persist: saveConfig,
+    config: telemetryRuntimeConfig,
+    persist: async submitted => {
+      await configStore.update(current => {
+        const next = mutableConfigSnapshot(current);
+        next.telemetry = submitted.telemetry ? { ...submitted.telemetry } : undefined;
+        return next;
+      });
+    },
     signals: telemetrySignals,
     onBootStartFailure: (error) => {
       // Boot remains best-effort per signal: a failed log shipper must not
@@ -3262,20 +3268,19 @@ async function runDaemonInnerWithStartupOwnership(
   else log('Memory enrichment LLM not configured');
 
   const llmSettings = {
-    getLlm: () => config.llm,
+    getLlm: () => configStore.current.llm,
     setLlm: async (
       llm: { apiKey: string; model?: string; baseURL?: string } | null,
     ) => {
-      if (llm) {
-        config.llm = llm;
-        memoryManager.updateConfig(llm);
-        log("LLM config updated via settings");
-      } else {
-        delete config.llm;
-        memoryManager.updateConfig({ apiKey: '' });
-        log('LLM config cleared via settings');
-      }
-      await saveConfig(config);
+      await configStore.update(current => {
+        const next = mutableConfigSnapshot(current);
+        if (llm) next.llm = llm;
+        else delete next.llm;
+        return next;
+      }, () => {
+        memoryManager.updateConfig(llm ?? { apiKey: '' });
+      });
+      log(llm ? "LLM config updated via settings" : 'LLM config cleared via settings');
     },
   };
 
@@ -3599,6 +3604,7 @@ async function runDaemonInnerWithStartupOwnership(
         publisherControl,
         publisherState,
         config,
+        configStore,
         rfc64Catalog,
         rfc64PublicCatalog,
         startedAt,

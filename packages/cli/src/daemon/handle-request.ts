@@ -362,6 +362,7 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   );
   const ctxBase = {
     ...contextInput,
+    config: contextInput.configStore?.current ?? contextInput.config,
     req,
     res,
     agent,

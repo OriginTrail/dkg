@@ -1,5 +1,5 @@
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
-import { configFileStore, writeConfigFile } from './config-file.js';
+import { writeConfigFile } from './config-file.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
@@ -2129,8 +2129,6 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
 }
 
 /** Immutable filesystem context for one selected local daemon home. */
-const configStoresByConfig = new WeakMap<DkgConfig, DkgConfigStore>();
-
 export class DkgHomeFiles {
   constructor(readonly home: string = dkgDir()) { Object.freeze(this); }
 
@@ -2163,12 +2161,10 @@ export class DkgHomeFiles {
   }
 
   async saveConfig(config: DkgConfig): Promise<void> {
-    const owner = configStoresByConfig.get(config);
-    if (owner?.files.configPath === this.configPath) {
-      await owner.save(config);
-      return;
-    }
-    const contents = serializedConfig(config);
+    // Capture before entering the per-path publication queue. Standalone CLI
+    // callers get ordinary full-snapshot persistence with no daemon-specific
+    // object-identity routing hidden behind this boundary.
+    const contents = JSON.stringify(config, null, 2) + '\n';
     await writeConfigFile(this.configPath, contents);
   }
 
@@ -2187,54 +2183,6 @@ export class DkgHomeFiles {
   private async removeControlFile(path: string): Promise<void> {
     try { await unlink(path); }
     catch (err) { if (!isEnoent(err)) throw err; }
-  }
-}
-
-export type DkgConfigUpdate = (current: Readonly<DkgConfig>) => DkgConfig;
-export type DkgConfigActivation = (
-  next: Readonly<DkgConfig>,
-  previous: Readonly<DkgConfig>,
-) => undefined;
-
-/**
- * Owns one daemon's in-memory configuration and its ordered file transitions.
- * Updates always derive from the latest committed immutable snapshot.
- */
-export class DkgConfigStore {
-  #snapshot: DkgConfig;
-
-  constructor(
-    readonly files: DkgHomeFiles,
-    readonly config: DkgConfig,
-  ) {
-    this.#snapshot = snapshotConfig(config);
-    configStoresByConfig.set(config, this);
-  }
-
-  /** Capture external legacy mutations now and apply only that immutable delta in order. */
-  save(config: DkgConfig = this.config): Promise<DkgConfig> {
-    const submitted = snapshotConfig(config);
-    const patch = diffConfig(this.#snapshot, submitted);
-    return this.update(current => applyConfigPatch(current, patch));
-  }
-
-  update(
-    update: DkgConfigUpdate,
-    activate: DkgConfigActivation = () => undefined,
-  ): Promise<DkgConfig> {
-    return configFileStore(this.files.configPath).transition(() => {
-      const previous = snapshotConfig(this.#snapshot);
-      const next = snapshotConfig(update(Object.freeze(previous)));
-      return {
-        contents: serializedConfig(next),
-        activate: () => {
-          activate(Object.freeze(snapshotConfig(next)), Object.freeze(snapshotConfig(previous)));
-          replaceConfig(this.config, next);
-          this.#snapshot = next;
-          return snapshotConfig(next);
-        },
-      };
-    });
   }
 }
 
@@ -2395,82 +2343,6 @@ export function exitOnStoreConfigErrors(
     log(`  ${err.field}: ${err.message}`);
   }
   process.exit(1);
-}
-
-function serializedConfig(config: DkgConfig): string {
-  return JSON.stringify(config, null, 2) + '\n';
-}
-
-function snapshotConfig(config: DkgConfig): DkgConfig {
-  return JSON.parse(JSON.stringify(config)) as DkgConfig;
-}
-
-function replaceConfig(target: DkgConfig, next: DkgConfig): void {
-  const mutable = target as unknown as Record<string, unknown>;
-  for (const key of Object.keys(mutable)) delete mutable[key];
-  Object.assign(mutable, snapshotConfig(next));
-}
-
-type ConfigPatchOperation =
-  | { readonly kind: 'set'; readonly path: readonly string[]; readonly value: unknown }
-  | { readonly kind: 'delete'; readonly path: readonly string[] };
-
-function diffConfig(previous: DkgConfig, next: DkgConfig): readonly ConfigPatchOperation[] {
-  const operations: ConfigPatchOperation[] = [];
-  diffConfigValue(previous, next, [], operations);
-  return operations;
-}
-
-function diffConfigValue(
-  previous: unknown,
-  next: unknown,
-  path: readonly string[],
-  operations: ConfigPatchOperation[],
-): void {
-  if (isConfigRecord(previous) && isConfigRecord(next)) {
-    for (const key of new Set([...Object.keys(previous), ...Object.keys(next)])) {
-      const childPath = [...path, key];
-      if (!Object.hasOwn(next, key)) {
-        operations.push({ kind: 'delete', path: childPath });
-      } else if (!Object.hasOwn(previous, key)) {
-        operations.push({ kind: 'set', path: childPath, value: snapshotConfigValue(next[key]) });
-      } else {
-        diffConfigValue(previous[key], next[key], childPath, operations);
-      }
-    }
-    return;
-  }
-  if (JSON.stringify(previous) !== JSON.stringify(next)) {
-    operations.push({ kind: 'set', path, value: snapshotConfigValue(next) });
-  }
-}
-
-function applyConfigPatch(
-  current: Readonly<DkgConfig>,
-  operations: readonly ConfigPatchOperation[],
-): DkgConfig {
-  const result = snapshotConfig(current as DkgConfig) as unknown as Record<string, unknown>;
-  for (const operation of operations) {
-    let parent = result;
-    for (const segment of operation.path.slice(0, -1)) {
-      const child = parent[segment];
-      if (!isConfigRecord(child)) parent[segment] = {};
-      parent = parent[segment] as Record<string, unknown>;
-    }
-    const key = operation.path.at(-1);
-    if (key === undefined) continue;
-    if (operation.kind === 'delete') delete parent[key];
-    else parent[key] = snapshotConfigValue(operation.value);
-  }
-  return result as unknown as DkgConfig;
-}
-
-function isConfigRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function snapshotConfigValue<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 export async function saveConfig(config: DkgConfig): Promise<void> { await new DkgHomeFiles().saveConfig(config); }

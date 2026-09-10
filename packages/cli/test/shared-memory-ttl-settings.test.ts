@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DkgConfigStore, DkgHomeFiles, configPath, loadConfig, saveConfig, type DkgConfig } from '../src/config.js';
+import { DkgHomeFiles, configPath, loadConfig, saveConfig, type DkgConfig } from '../src/config.js';
+import { DkgConfigStore } from '../src/daemon-config-store.js';
 import * as filePublication from '../src/fs-utils.js';
 import type { SwmExpiryCleanupWorker } from '../../agent/src/swm-expiry-cleanup-worker.js';
 import { handleSharedMemoryTtlSettings } from '../src/daemon/routes/shared-memory-ttl.js';
@@ -75,6 +76,36 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     if (directory) await rm(directory, { recursive: true, force: true });
   });
 
+  it('exposes immutable snapshots and orders updates from the latest committed state', async () => {
+    const initial = configStore.current;
+    expect(Object.isFrozen(initial)).toBe(true);
+    expect(Object.values(initial)
+      .filter(value => value !== null && typeof value === 'object')
+      .every(value => Object.isFrozen(value))).toBe(true);
+    expect(() => { (initial as DkgConfig).name = 'illegal external mutation'; }).toThrow(TypeError);
+
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>(resolve => { releaseFirst = resolve; });
+    let firstEntered!: () => void;
+    const entered = new Promise<void>(resolve => { firstEntered = resolve; });
+    const first = configStore.update(async current => {
+      firstEntered();
+      await firstGate;
+      return { ...current, name: 'first ordered update' };
+    });
+    await entered;
+    const second = configStore.update(current => ({ ...current, workspaceTtlMs: 2 * DAY }));
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(configStore.current).toMatchObject({
+      name: 'first ordered update', sharedMemoryTtlMs: DAY, workspaceTtlMs: 2 * DAY,
+    });
+    expect(configStore.current).not.toBe(config);
+    expect(JSON.parse(await readFile(configStore.files.configPath, 'utf8')))
+      .toMatchObject(configStore.current);
+  });
+
   it.each(routes.flatMap(route => [100000001, Number.MAX_VALUE].map(ttlDays => ({ route, ttlDays }))))(
     'rejects $ttlDays days through $route without changing runtime or persisted config', async ({ route, ttlDays }) => {
       const persistedBefore = await readFile(configPath(), 'utf8');
@@ -82,14 +113,13 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       const response = await fetch(baseUrl + route, { method: 'PUT', body: JSON.stringify({ ttlDays }) });
       expect.soft(response.status).toBe(400);
       expect.soft(await response.json()).toMatchObject({ error: expect.stringContaining('sharedMemoryTtlMs') });
-      expect.soft(config).toEqual(configBefore);
+      expect.soft(configStore.current).toEqual(configBefore);
       expect.soft(runtimeTtl()).toBe(DAY);
       expect.soft(await readFile(configPath(), 'utf8')).toBe(persistedBefore);
       for (const alias of routes) {
         expect.soft(await (await fetch(baseUrl + alias)).json()).toMatchObject({ ttlMs: DAY, ttlDays: 1 });
       }
-      config.name = 'unrelated later edit';
-      await saveConfig(config);
+      await configStore.update(current => ({ ...current, name: 'unrelated later edit' }));
       expect.soft(JSON.parse(await readFile(configPath(), 'utf8'))).toMatchObject({ sharedMemoryTtlMs: DAY, workspaceTtlMs: DAY });
     },
   );
@@ -103,7 +133,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       const response = await fetch(baseUrl + route, { method: 'PUT', body });
       expect(response.status).toBe(400);
       expect(await response.json()).toEqual({ error: 'ttlDays must be a finite non-negative number' });
-      expect(config).toEqual(configBefore);
+      expect(configStore.current).toEqual(configBefore);
       expect(runtimeTtl()).toBe(DAY);
       expect(await readFile(configPath(), 'utf8')).toBe(persistedBefore);
     },
@@ -116,7 +146,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     const response = await fetch(baseUrl + route, { method: 'PUT', body: '{"ttlDays":2}' });
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: 'worker failure' });
-    expect(config).toEqual(configBefore);
+    expect(configStore.current).toEqual(configBefore);
     expect(runtimeTtl()).toBe(DAY);
     expect(await readFile(configPath(), 'utf8')).toBe(persistedBefore);
     expect(bubbledErrors).toEqual([]);
@@ -138,18 +168,14 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: 'disk full' });
     expect.soft(setter).not.toHaveBeenCalled();
-    expect.soft(config).toEqual(configBefore);
+    expect.soft(configStore.current).toEqual(configBefore);
     expect.soft(runtimeTtl()).toBe(DAY);
     expect.soft(await readFile(configPath(), 'utf8')).toBe(persistedBefore);
     expect.soft(await readOperations()).toEqual(operationsBefore);
   });
 
-  it.each(routes.flatMap(route => [
-    'owner update',
-    'compatibility save',
-    'retained-home save',
-  ].map(saveBoundary => ({ route, saveBoundary }))))(
-    'preserves a queued unrelated $saveBoundary behind $route', async ({ route, saveBoundary }) => {
+  it.each(routes)(
+    'preserves a queued unrelated explicit owner update behind %s', async route => {
       const publish = filePublication.writeFileAtomic;
       let entered!: () => void;
       let release!: () => void;
@@ -162,20 +188,12 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       });
       const changingTtl = fetch(baseUrl + route, { method: 'PUT', body: '{"ttlDays":2}' });
       await publicationEntered;
-      let saving: Promise<unknown>;
-      if (saveBoundary === 'owner update') {
-        saving = configStore.update(current => ({ ...current, name: 'concurrent unrelated edit' }));
-      } else {
-        config.name = 'concurrent unrelated edit';
-        saving = saveBoundary === 'retained-home save'
-          ? configStore.files.saveConfig(config)
-          : saveConfig(config);
-      }
+      const saving = configStore.update(current => ({ ...current, name: 'concurrent unrelated edit' }));
       const otherHome = join(directory, 'other-home');
       vi.stubEnv('DKG_HOME', otherHome);
       try {
         expect(runtimeTtl()).toBe(DAY);
-        expect(config.sharedMemoryTtlMs).toBe(DAY);
+        expect(configStore.current.sharedMemoryTtlMs).toBe(DAY);
       } finally {
         release();
         await Promise.allSettled([changingTtl, saving]);
@@ -185,7 +203,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       await saving;
       expect(response.status).toBe(200);
       expect(runtimeTtl()).toBe(2 * DAY);
-      expect(config).toMatchObject({ sharedMemoryTtlMs: 2 * DAY, workspaceTtlMs: 2 * DAY });
+      expect(configStore.current).toMatchObject({ sharedMemoryTtlMs: 2 * DAY, workspaceTtlMs: 2 * DAY });
       const persisted = JSON.parse(await readFile(configStore.files.configPath, 'utf8'));
       expect(persisted).toMatchObject({
         name: 'concurrent unrelated edit', sharedMemoryTtlMs: 2 * DAY, workspaceTtlMs: 2 * DAY,
@@ -210,7 +228,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     const response = await fetch(baseUrl + route, { method: 'PUT', body: '{"ttlDays":0.25}' });
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: 'cleanup activation failed' });
-    expect(config).toEqual(configBefore);
+    expect(configStore.current).toEqual(configBefore);
     expect(runtimeTtl()).toBe(DAY);
     expect(await readFile(configPath(), 'utf8')).toBe(persistedBefore);
     await agent.cleanupExpiredSharedMemory();

@@ -9,6 +9,9 @@ export interface ConfigFileTransition<T> {
   readonly activate: () => T;
 }
 
+export type ConfigFileTransitionPreparation<T> =
+  () => ConfigFileTransition<T> | Promise<ConfigFileTransition<T>>;
+
 /** One explicit serialization and publication owner for a configuration path. */
 export class ConfigFileStore {
   #tail: Promise<unknown> = Promise.resolve();
@@ -27,9 +30,9 @@ export class ConfigFileStore {
   }
 
   /** Prepare an ordered state transition from the latest committed owner state. */
-  transition<T>(prepare: () => ConfigFileTransition<T>): Promise<T> {
+  transition<T>(prepare: ConfigFileTransitionPreparation<T>): Promise<T> {
     return this.#serialize(async () => {
-      const transition = prepare();
+      const transition = await prepare();
       return this.#publishTransaction(transition.contents, transition.activate);
     });
   }
