@@ -55,7 +55,15 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats } from '@origintrail-official/dkg-chain';
+import {
+  createGovernedJsonRpcProvider,
+  enrichEvmError,
+  MockChainAdapter,
+  resolveRpcUrls,
+  getRpcFailoverStats,
+  withRpcRequestTimeout,
+  type RpcRequestGovernor,
+} from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
   loadOpWallets,
@@ -352,17 +360,11 @@ interface RegistryCacheSnapshot {
 let registryCache: RegistryCacheSnapshot | null = null;
 let registryCacheInflight: Promise<RegistryCacheSnapshot> | null = null;
 
-function routeWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  }) as Promise<T>;
-}
-
-async function probeRpcEndpoint(rpcUrl: string, index: number): Promise<{
+export async function probeRpcEndpoint(
+  rpcUrl: string,
+  index: number,
+  requestGovernor?: RpcRequestGovernor,
+): Promise<{
   index: number;
   role: 'primary' | 'backup';
   ok: boolean;
@@ -370,10 +372,20 @@ async function probeRpcEndpoint(rpcUrl: string, index: number): Promise<{
   blockNumber: number | null;
   error?: string;
 }> {
-  const provider = new ethers.JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 });
+  const provider = requestGovernor === undefined
+    ? new ethers.JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 })
+    : createGovernedJsonRpcProvider(rpcUrl, {
+        maxRetries: 0,
+        providerOptions: { cacheTimeout: -1, batchMaxCount: 1 },
+        requestGovernor,
+      });
   const start = Date.now();
   try {
-    const blockNumber = await routeWithTimeout(provider.getBlockNumber(), 3_000, 'RPC health probe');
+    const blockNumber = await withRpcRequestTimeout(
+      3_000,
+      'RPC health probe',
+      () => provider.getBlockNumber(),
+    );
     return {
       index,
       role: index === 0 ? 'primary' : 'backup',
@@ -392,6 +404,8 @@ async function probeRpcEndpoint(rpcUrl: string, index: number): Promise<{
         ? 'RPC health probe timed out'
         : 'RPC health probe failed',
     };
+  } finally {
+    provider.destroy();
   }
 }
 
@@ -453,9 +467,19 @@ function buildPublicInfoChainSummary(
   };
 }
 
-function createRouteEvmProvider(rpcUrl: string, rpcUrls?: string[]): ethers.JsonRpcProvider | ethers.FallbackProvider {
-  const providers = resolveRpcUrls(rpcUrl, rpcUrls)
-    .map((url) => new ethers.JsonRpcProvider(url, undefined, { cacheTimeout: -1 }));
+function createRouteEvmProvider(
+  rpcUrl: string,
+  rpcUrls: string[] | undefined,
+  requestGovernor?: RpcRequestGovernor,
+): ethers.JsonRpcProvider | ethers.FallbackProvider {
+  const urls = resolveRpcUrls(rpcUrl, rpcUrls);
+  const providers = urls.map((url) => requestGovernor === undefined
+    ? new ethers.JsonRpcProvider(url, undefined, { cacheTimeout: -1 })
+    : createGovernedJsonRpcProvider(url, {
+        maxRetries: urls.length > 1 ? 0 : undefined,
+        providerOptions: { cacheTimeout: -1, batchMaxCount: 1 },
+        requestGovernor,
+      }));
   if (providers.length === 1) return providers[0];
   return new ethers.FallbackProvider(
     providers.map((provider, index) => ({
@@ -702,6 +726,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     apiHost,
     apiPortRef,
     admission,
+    rpcRequestGovernor,
     url,
     path,
     requestAgentAddress,
@@ -904,6 +929,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       typeof agent.readRfc64CatalogOperationalStatusV1 === 'function'
         ? await agent.readRfc64CatalogOperationalStatusV1()
         : [];
+    const rfc64AuthorityRpcCircuit =
+      typeof agent.readRfc64AuthorityRpcCircuitStatusV1 === 'function'
+        ? agent.readRfc64AuthorityRpcCircuitStatusV1()
+        : null;
     const selectedPublicContextGraphs = new Set(
       rfc64CatalogActivation.selectedPublicContextGraphs,
     );
@@ -1111,6 +1140,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         runtimeSelection: rfc64CatalogRuntimeSelection,
         responsibilities: rfc64CatalogResponsibilities,
         contextGraphs: rfc64CatalogContextGraphs,
+        authorityRpcCircuit: rfc64AuthorityRpcCircuit,
         configuration: rfc64CatalogConfiguration,
         autoPublishEnabled: rfc64CatalogActivation.autoPublish !== undefined,
         rollout: rfc64CatalogRollout,
@@ -1366,7 +1396,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     }
     try {
-      const provider = createRouteEvmProvider(rpcUrl, chain?.rpcUrls);
+      const provider = createRouteEvmProvider(rpcUrl, chain?.rpcUrls, rpcRequestGovernor);
       const tokenAddr = chain?.tokenAddress
         ?? (await new ethers.Contract(
           hubAddress,
@@ -1441,7 +1471,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     }
     const rpcUrls = resolveRpcUrls(rpcUrl, chain?.rpcUrls);
-    const rpcs = await Promise.all(rpcUrls.map((url, index) => probeRpcEndpoint(url, index)));
+    const rpcs = await Promise.all(
+      rpcUrls.map((rpc, index) => probeRpcEndpoint(rpc, index, rpcRequestGovernor)),
+    );
     const primary = rpcs[0];
     const healthy = rpcs.find((rpc) => rpc.ok);
     return jsonResponse(res, 200, {

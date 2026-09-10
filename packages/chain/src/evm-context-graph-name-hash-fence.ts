@@ -12,9 +12,8 @@ import {
   CG_REGISTRY_MAX_SCAN_PAGES,
   RPC_READ_STALL_TIMEOUT_MS,
 } from './evm-adapter-constants.js';
-import { withTimeout } from './evm-adapter-rpc.js';
+import { withRpcRequestAbortSignal, withRpcRequestTimeout } from './rpc-request-transport.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
-import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 
 /**
  * Maximum current high-water id for the fast getNameHash enumeration. Above
@@ -825,10 +824,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const scanProviders: T[] = [];
     for (const candidate of headProviders) {
       try {
-        const block = await withTimeout(
-          candidate.provider.getBlock(head),
+        const block = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           'resolveContextGraphIdByNameHash historical head anchor',
+          () => candidate.provider.getBlock(head),
         );
         const candidateHash = block?.hash?.toLowerCase() ?? null;
         if (candidateHash === null) continue;
@@ -858,10 +857,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     usedProviders: ReadonlySet<JsonRpcProvider>,
   ): Promise<void> {
     for (const provider of usedProviders) {
-      const block = await withTimeout(
-        provider.getBlock(anchor.head),
+      const block = await withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'resolveContextGraphIdByNameHash historical head revalidation',
+        () => provider.getBlock(anchor.head),
       );
       if (block?.hash?.toLowerCase() !== anchor.headHash) {
         throw new Error(
@@ -878,18 +877,18 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     lane: 'current' | 'historical',
     blockTag?: number,
   ): Promise<bigint> {
-    await withTimeout(
-      this.dependencies.ensureConfiguredStaticChainIdValidated(provider),
+    await withRpcRequestTimeout(
       RPC_READ_STALL_TIMEOUT_MS,
       `resolveContextGraphIdByNameHash ${lane} high-water chainId validation`,
+      () => this.dependencies.ensureConfiguredStaticChainIdValidated(provider),
     );
     const connected = this.dependencies.rebindContract(contextGraphStorage, provider);
-    const raw = await withTimeout(
-      blockTag === undefined
-        ? connected.getLatestContextGraphId()
-        : connected.getLatestContextGraphId({ blockTag }),
+    const raw = await withRpcRequestTimeout(
       RPC_READ_STALL_TIMEOUT_MS,
       `resolveContextGraphIdByNameHash ${lane} high-water read`,
+      () => blockTag === undefined
+        ? connected.getLatestContextGraphId()
+        : connected.getLatestContextGraphId({ blockTag }),
     );
     const highWater = BigInt(raw);
     if (highWater < 0n) {
@@ -915,13 +914,15 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
         provider,
       ).getNameHash(contextGraphId) as Promise<string>,
     );
-    const physicalRead = signal
-      ? withRpcRequestAbortSignal(signal, startRead)
-      : startRead();
-    const raw: string = await withTimeout(
-      waitForContextGraphSlotRead(physicalRead, signal),
+    const raw: string = await withRpcRequestTimeout(
       RPC_READ_STALL_TIMEOUT_MS,
       `resolveContextGraphIdByNameHash current-slot getNameHash(${contextGraphId.toString()})`,
+      () => {
+        const physicalRead = signal
+          ? withRpcRequestAbortSignal(signal, startRead)
+          : startRead();
+        return waitForContextGraphSlotRead(physicalRead, signal);
+      },
     );
     return !raw || raw === ethers.ZeroHash ? null : raw.toLowerCase();
   }

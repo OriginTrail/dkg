@@ -35,6 +35,7 @@ import {
   withRpcUsageConsumer,
 } from '../src/rpc-usage.js';
 import { withRpcRequestAbortSignal } from '../src/rpc-request-transport.js';
+import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
 import type { ChainAdapter } from '../src/chain-adapter.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
@@ -150,6 +151,115 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       if (!controller.signal.aborted) controller.abort(timeoutError);
       await pending.catch(() => {});
       provider.destroy();
+    }
+  });
+
+  it('removes an aborted request while it is waiting for governor capacity', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 0.1,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+    const provider = createCountingJsonRpcProvider(
+      rpc.url,
+      new RpcUsageTracker(() => 'evm:31337'),
+      {
+        maxRetries: 0,
+        providerOptions: { batchMaxCount: 1 },
+        requestGovernor: governor,
+      },
+    );
+    const controller = new AbortController();
+    const timeoutError = createRpcTimeoutError('caller deadline expired');
+    const pending = withRpcRequestAbortSignal(
+      controller.signal,
+      () => provider._send({
+        id: 1,
+        jsonrpc: '2.0',
+        method: 'eth_blockNumber',
+        params: [],
+      }),
+    );
+    try {
+      await expect.poll(() => governor.snapshot().foregroundQueued).toBe(1);
+      controller.abort(timeoutError);
+      await expect(pending).rejects.toBe(timeoutError);
+      expect(rpc.totalHits()).toBe(0);
+      expect(governor.snapshot()).toMatchObject({
+        foregroundQueued: 0,
+        cancelled: 1,
+      });
+    } finally {
+      if (!controller.signal.aborted) controller.abort(timeoutError);
+      await pending.catch(() => {});
+      provider.destroy();
+    }
+  });
+
+  it('does not dispatch failover attempts after their admission deadlines expire', async () => {
+    const primary = await startLoopbackRpc();
+    const backup = await startLoopbackRpc();
+    servers.push(primary, backup);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 0.1,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+    const adapter = new EVMChainAdapter(minimalConfig({
+      rpcUrl: primary.url,
+      rpcUrls: [backup.url],
+      rpcRequestGovernor: governor,
+    }));
+    adapters.push(adapter);
+
+    await expect(adapter.getBlockNumber()).rejects.toBeTruthy();
+    expect(governor.snapshot()).toMatchObject({
+      foregroundQueued: 0,
+      cancelled: 2,
+    });
+    // The first abandoned waiter would receive the 10-second refill here if
+    // the attempt timeout had merely raced it instead of aborting admission.
+    await new Promise<void>((resolve) => setTimeout(resolve, 2_500));
+    expect(primary.totalHits() + backup.totalHits()).toBe(0);
+  }, 15_000);
+
+  it('surfaces queue saturation without failing over across the shared governor', async () => {
+    const primary = await startLoopbackRpc();
+    const backup = await startLoopbackRpc();
+    servers.push(primary, backup);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 0.1,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 1,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+    const queuedController = new AbortController();
+    const queued = governor.acquire('foreground', queuedController.signal);
+    const adapter = new EVMChainAdapter(minimalConfig({
+      rpcUrl: primary.url,
+      rpcUrls: [backup.url],
+      rpcRequestGovernor: governor,
+    }));
+    adapters.push(adapter);
+    try {
+      await expect(adapter.getBlockNumber()).rejects.toMatchObject({
+        code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+      });
+      expect(primary.totalHits() + backup.totalHits()).toBe(0);
+      expect(governor.snapshot().rejected).toBe(1);
+    } finally {
+      queuedController.abort(new Error('test cleanup'));
+      await queued.catch(() => {});
     }
   });
 
@@ -336,7 +446,18 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     // must match exactly (this is the undercount the review flagged).
     const rpc = await startLoopbackRpc({ throttle: ['eth_chainId'] });
     servers.push(rpc);
-    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url, staticNetwork: false }));
+    const rpcRequestGovernor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 10_000,
+      foregroundReservePercent: 0,
+      burstRequests: 100_000,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: rpc.url,
+      staticNetwork: false,
+      rpcRequestGovernor,
+    }));
     adapters.push(a);
 
     await expect(a.getEvmChainId()).rejects.toBeTruthy(); // perpetual 429 → bounded failure
@@ -345,6 +466,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(rpc.hits('eth_chainId')).toBeGreaterThanOrEqual(2); // initial + ≥1 retry actually happened
     expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpc.hits('eth_chainId'));
     expect(rpcUsageWindowTotal(usage)).toBe(rpc.totalHits());
+    const admission = rpcRequestGovernor.snapshot();
+    expect(admission.foregroundAdmitted + admission.backgroundAdmitted)
+      .toBe(rpc.totalHits());
   }, 30_000);
 
   it('bounds unknown methods to "other" for the metric label', () => {

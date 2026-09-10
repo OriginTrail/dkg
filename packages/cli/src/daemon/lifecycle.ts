@@ -66,6 +66,7 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
+  RpcRequestGovernor,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -147,7 +148,10 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
-import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
+import {
+  bindRuntimeRpcRequestGovernor,
+  projectRuntimeEvmChainConfig,
+} from '../runtime-chain-config.js';
 import {
   resolveOtlpLogEndpoint,
   type ActiveLogExporterMode,
@@ -1588,7 +1592,16 @@ async function runDaemonInnerWithStartupOwnership(
   // Field-level merge of CLI config + network/<env>.json#chain.
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
-  const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
+  const projectedRuntimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
+  // Process-owned runtime service: every daemon RPC consumer receives this
+  // exact instance. Keep it out of the value-only config projection so call
+  // ordering can never silently create independent budgets.
+  const rpcRequestGovernor = projectedRuntimeEvmChainConfig === undefined
+    ? undefined
+    : new RpcRequestGovernor(chainBase?.rpcRequestBudget);
+  const runtimeEvmChainConfig = projectedRuntimeEvmChainConfig === undefined
+    ? undefined
+    : bindRuntimeRpcRequestGovernor(projectedRuntimeEvmChainConfig, rpcRequestGovernor!);
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC
@@ -2993,6 +3006,13 @@ async function runDaemonInnerWithStartupOwnership(
       drainRpcUsage: () => mergeRpcUsageWindows(
         agent.drainRpcUsage(),
         publisherState.runtime?.drainRpcUsage(),
+        rpcRequestGovernor === undefined
+          ? undefined
+          : {
+              byMethod: {},
+              lifetimeTotal: 0,
+              requestGovernor: rpcRequestGovernor.drainWindow(),
+            },
       ),
     },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
@@ -3662,6 +3682,7 @@ async function runDaemonInnerWithStartupOwnership(
         routePlugins,
         admission: admissionStats,
         localLlm,
+        rpcRequestGovernor,
         emitMemoryGraphChanged,
         emitNotification,
       });

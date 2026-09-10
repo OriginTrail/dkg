@@ -24,6 +24,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
   ChainRpcTransportError,
+  RpcRequestGovernor,
   noteRpcFailover,
   noteRpcExhaustion,
   notePreferredEndpoint,
@@ -42,6 +43,7 @@ import {
 import {
   buildRfc64CatalogConfigurationEvidenceV1,
   handleStatusRoutes,
+  probeRpcEndpoint,
 } from '../src/daemon/routes/status.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
@@ -62,6 +64,41 @@ const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
   enabled: false,
   selectedContextGraphs: [],
 };
+
+describe('daemon direct RPC probe admission', () => {
+  it('uses the shared governor and cancels before transport when capacity is unavailable', async () => {
+    let hits = 0;
+    const rpc = createServer((_req, res) => {
+      hits += 1;
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 0.1,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+    try {
+      const result = await probeRpcEndpoint(
+        `http://127.0.0.1:${address.port}`,
+        0,
+        governor,
+      );
+      expect(result).toMatchObject({ ok: false, error: 'RPC health probe timed out' });
+      expect(hits).toBe(0);
+      expect(governor.snapshot().foregroundQueued).toBe(0);
+      expect(governor.snapshot().cancelled).toBeGreaterThan(0);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+});
 
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
@@ -152,6 +189,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           authorityState: 'accepted',
           policySource: 'owner-signed-unregistered',
         }],
+        readRfc64AuthorityRpcCircuitStatusV1: () => ({
+          state: 'open',
+          consecutiveExhaustions: 2,
+          retryAtMs: 1_725_987_654_321,
+        }),
       },
       {
         rfc64PublicCatalog: {
@@ -200,6 +242,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       phase: 'bootstrapping',
       authorityState: 'accepted',
     })]);
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 2,
+      retryAtMs: 1_725_987_654_321,
+    });
     expect(response.body.rfc64Catalog.configuration).toMatchObject({
       schemaVersion: 1,
       source: 'compatibility-seed',

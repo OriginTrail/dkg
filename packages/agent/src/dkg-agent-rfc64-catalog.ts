@@ -54,6 +54,7 @@ import {
 import {
   resolveRpcUrls,
   verifyControlEnvelopeIssuerSignatureV1,
+  withRpcRequestClass,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
 } from '@origintrail-official/dkg-chain';
@@ -1245,6 +1246,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
+  /** Shared authority-RPC circuit state for local operator status. */
+  readRfc64AuthorityRpcCircuitStatusV1(this: DKGAgent) {
+    return this.rfc64AuthorityReadCoordinatorV1.snapshot();
+  }
+
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */
   async readRfc64CatalogOperationalStatusV1(
     this: DKGAgent,
@@ -1586,41 +1592,43 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     agentAddress: EvmAddressV1;
     authorityEra: DecimalU64V1;
   }> | null> {
-    const onChainId = await this.getContextGraphOnChainId(contextGraphId);
-    if (onChainId !== null) {
-      const reader = requireRfc64ContextGraphAuthorityReaderV1(
-        this.contextGraphAuthorityReaderCapability,
-      );
-      const expectedOnChainId = BigInt(onChainId);
-      const snapshot = parseRfc64AuthoritySnapshotV1(
-        await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
-        expectedOnChainId,
-      );
-      const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
-      const expectedNameHash = explicitNameHash === undefined
-        ? this.contextGraphNameCommitment(contextGraphId)
-        : this.contextGraphWireId(explicitNameHash);
-      if (
-        !snapshot.active
-        || snapshot.nameHash !== expectedNameHash
-      ) return null;
-      return Object.freeze({
-        agentAddress: snapshot.owner,
-        authorityEra: snapshot.ownershipEra,
-      });
-    }
-    const ownerDid = await this.getContextGraphOwner(contextGraphId);
-    const owner = ownerDid
-      ?.trim()
-      .replace(/^<|>$/gu, '')
-      .replace(/^did:dkg:agent:/u, '')
-      .toLowerCase();
-    return owner !== undefined && ethers.isAddress(owner) && owner !== ethers.ZeroAddress
-      ? Object.freeze({
-        agentAddress: owner as EvmAddressV1,
-        authorityEra: '0' as DecimalU64V1,
-      })
-      : null;
+    return withRpcRequestClass('background', async () => {
+      const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+      if (onChainId !== null) {
+        const reader = requireRfc64ContextGraphAuthorityReaderV1(
+          this.contextGraphAuthorityReaderCapability,
+        );
+        const expectedOnChainId = BigInt(onChainId);
+        const snapshot = parseRfc64AuthoritySnapshotV1(
+          await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
+          expectedOnChainId,
+        );
+        const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
+        const expectedNameHash = explicitNameHash === undefined
+          ? this.contextGraphNameCommitment(contextGraphId)
+          : this.contextGraphWireId(explicitNameHash);
+        if (
+          !snapshot.active
+          || snapshot.nameHash !== expectedNameHash
+        ) return null;
+        return Object.freeze({
+          agentAddress: snapshot.owner,
+          authorityEra: snapshot.ownershipEra,
+        });
+      }
+      const ownerDid = await this.getContextGraphOwner(contextGraphId);
+      const owner = ownerDid
+        ?.trim()
+        .replace(/^<|>$/gu, '')
+        .replace(/^did:dkg:agent:/u, '')
+        .toLowerCase();
+      return owner !== undefined && ethers.isAddress(owner) && owner !== ethers.ZeroAddress
+        ? Object.freeze({
+          agentAddress: owner as EvmAddressV1,
+          authorityEra: '0' as DecimalU64V1,
+        })
+        : null;
+    });
   }
 
   /**
@@ -1807,7 +1815,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return Promise.resolve(inactive);
     }
 
-    const run = (async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
+    const run = withRpcRequestClass('background', async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
       let accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
       if (accessPolicy === null && subscription.onChainId !== undefined) {
         const onChainPolicy = await this.getContextGraphOnChainPolicy(contextGraphId);
@@ -1844,7 +1852,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         });
       }
       return next;
-    })().catch((error) => {
+    }).catch((error) => {
       if (isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
         commit(null);
       }
@@ -1881,202 +1889,204 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphId: string,
     signal?: AbortSignal,
   ): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | null> {
-    const service = this.rfc64PublicCatalogServiceV1;
-    if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
-      return null;
-    }
-    const authorityRevision = nextRfc64CatalogAuthorityRevisionV1(this, contextGraphId);
-    setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
-      state: 'resolving',
-      source: null,
-      policyDigest: null,
-      policyEra: null,
-      reason: null,
-      updatedAtMs: Date.now(),
-    });
-    try {
-      if (signal?.aborted) throw signal.reason;
-      if (service === undefined) {
-        throw new Rfc64CatalogAuthorityResolutionErrorV1(
-          'catalog-service-unavailable',
-          'RFC-64 catalog service is unavailable',
-        );
+    return withRpcRequestClass('background', async () => {
+      const service = this.rfc64PublicCatalogServiceV1;
+      if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
+        return null;
       }
-      const networkId = (
-        this.config.rfc64CatalogDeploymentProfile?.networkId
-        ?? this.config.networkIdentity?.chainId
-      ) as NetworkIdV1 | undefined;
-      if (networkId === undefined || networkId === 'none') {
-        throw new Error('RFC-64 release-native authority requires a trusted chain network');
-      }
-      const registeredAuthorityRead = await this.rfc64AuthorityReadCoordinatorV1.run(
-        signal,
-        async (readSignal) => {
-          const onChainId = await this.getContextGraphOnChainId(contextGraphId);
-          if (readSignal?.aborted) throw readSignal.reason;
-          if (onChainId === null) return null;
-          const reader = requireRfc64ContextGraphAuthorityReaderV1(
-            this.contextGraphAuthorityReaderCapability,
-          );
-          const expectedOnChainId = BigInt(onChainId);
-          const snapshot = parseRfc64AuthoritySnapshotV1(
-            await reader.getContextGraphAuthoritySnapshot(
-              expectedOnChainId,
-              { signal: readSignal },
-            ),
-            expectedOnChainId,
-          );
-          return { expectedOnChainId, snapshot } as const;
-        },
-      );
-      let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
-      if (registeredAuthorityRead !== null) {
-        const { snapshot } = registeredAuthorityRead;
-        if (signal?.aborted) throw signal.reason;
-        const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
-        const expectedNameHash = explicitNameHash === undefined
-          ? this.contextGraphNameCommitment(contextGraphId)
-          : this.contextGraphWireId(explicitNameHash);
-        if (!snapshot.active || snapshot.nameHash !== expectedNameHash) {
-          throw new Rfc64CatalogAuthorityResolutionErrorV1(
-            'registered-authority-binding-mismatch',
-            'registered RFC-64 Context Graph authority is inactive or name-bound elsewhere',
-          );
-        }
-        let authoritativeSnapshot = snapshot;
-        if (snapshot.accessPolicy === 1) {
-          const localRoster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
-          if (localRoster === null) {
-            throw new Error(
-              'registered private RFC-64 Context Graph has no authenticated lifecycle roster',
-            );
-          }
-          // The finalized chain snapshot can lag an authenticated local
-          // removal. Never union a chain participant back into the catalog
-          // roster after the curator has durably revoked that address.
-          const revokedAgents = new Set(
-            (await this.getCgMeta(contextGraphId)).revokedAgents
-              .map((address) => address.toLowerCase()),
-          );
-          const localRosterVersion = await this.readRfc64PrivateRosterVersionV1(contextGraphId);
-          authoritativeSnapshot = Object.freeze({
-            ...snapshot,
-            participantAgents: Object.freeze([
-              ...new Set([
-                ...snapshot.participantAgents,
-                ...localRoster,
-              ].filter((address) => !revokedAgents.has(address))),
-            ].sort()),
-            rosterVersion: composeRfc64RegisteredRosterVersionV1(
-              snapshot.rosterVersion,
-              localRosterVersion,
-            ),
-          });
-        }
-        authority = composeRfc64FinalizedCatalogAuthorityV1({
-          networkId,
-          contextGraphId: contextGraphId as ContextGraphIdV1,
-          snapshot: authoritativeSnapshot,
-        });
-      } else {
-        const ownerDid = await this.getContextGraphOwner(contextGraphId);
-        if (signal?.aborted) throw signal.reason;
-        const normalizedOwnerDid = ownerDid
-          ?.trim()
-          .replace(/^<|>$/gu, '')
-          .replace(/^did:dkg:agent:/u, '')
-          .toLowerCase();
-        // An unregistered graph's owner is an authority fact, not something
-        // that may be inferred from an untrusted graph name or this node's
-        // wallet. Missing authenticated owner metadata must fail closed.
-        const ownerAddress = normalizedOwnerDid;
-        if (ownerAddress === undefined || !/^0x[0-9a-f]{40}$/u.test(ownerAddress)) {
-          throw new Rfc64CatalogAuthorityResolutionErrorV1(
-            'unregistered-owner-unresolved',
-            'unregistered RFC-64 Context Graph has no canonical owner address',
-          );
-        }
-        const accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
-        if (signal?.aborted) throw signal.reason;
-        if (accessPolicy === null) {
-          throw new Rfc64CatalogAuthorityResolutionErrorV1(
-            'access-policy-unresolved',
-            'unregistered RFC-64 Context Graph access policy is unresolved',
-          );
-        }
-        const stored = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
-        const publishPolicy = stored.publishPolicy === 0 || stored.publishPolicy === 1
-          ? stored.publishPolicy
-          : accessPolicy === 'private' ? 0 : 1;
-        const members = accessPolicy === 'private'
-          ? await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId)
-          : [];
-        if (accessPolicy === 'private' && members === null) {
-          throw new Error(
-            'unregistered private RFC-64 Context Graph has no authenticated lifecycle roster',
-          );
-        }
-        const rosterVersion = await this.readRfc64PrivateRosterVersionV1(contextGraphId);
-        if (signal?.aborted) throw signal.reason;
-        authority = composeRfc64UnregisteredCatalogAuthorityV1({
-          networkId,
-          contextGraphId: contextGraphId as ContextGraphIdV1,
-          ownerAddress: ownerAddress as EvmAddressV1,
-          accessPolicy: accessPolicy === 'private' ? 1 : 0,
-          publishPolicy,
-          publishAuthorityAccountId: stored.publishAuthorityAccountId?.toString(10) ?? '0',
-          memberAddresses: (members ?? [])
-            .map((address) => address.toLowerCase())
-            .filter((address) => /^0x[0-9a-f]{40}$/u.test(address)) as EvmAddressV1[],
-          rosterVersion,
-        });
-      }
-      const previousAuthority = service.acceptedPolicySnapshot(
-        authority.policy.networkId,
-        authority.policy.contextGraphId,
-      );
-      if (!isCurrentRfc64CatalogAuthorityRevisionV1(
-        this,
-        contextGraphId,
-        authorityRevision,
-      )) return null;
-      const acceptedAuthority = service.acceptAuthoritativePolicySnapshot({
-        policy: authority.policy,
-        policyDigest: authority.policyDigest,
-        roster: authority.roster,
-      });
-      if (rfc64CatalogAuthorityGenerationChangedV1(previousAuthority, acceptedAuthority)) {
-        service.deactivateReceiverContextGraph(contextGraphId);
-        this.clearRfc64CatalogOperationalTargetsV1(contextGraphId);
-      }
+      const authorityRevision = nextRfc64CatalogAuthorityRevisionV1(this, contextGraphId);
       setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
-        state: 'accepted',
-        source: authority.source,
-        policyDigest: authority.policyDigest,
-        policyEra: authority.policy.era,
+        state: 'resolving',
+        source: null,
+        policyDigest: null,
+        policyEra: null,
         reason: null,
         updatedAtMs: Date.now(),
       });
-      await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
-      return authority;
-    } catch (error) {
-      if (signal?.aborted) throw signal.reason;
-      if (isCurrentRfc64CatalogAuthorityRevisionV1(
-        this,
-        contextGraphId,
-        authorityRevision,
-      )) {
+      try {
+        if (signal?.aborted) throw signal.reason;
+        if (service === undefined) {
+          throw new Rfc64CatalogAuthorityResolutionErrorV1(
+            'catalog-service-unavailable',
+            'RFC-64 catalog service is unavailable',
+          );
+        }
+        const networkId = (
+          this.config.rfc64CatalogDeploymentProfile?.networkId
+          ?? this.config.networkIdentity?.chainId
+        ) as NetworkIdV1 | undefined;
+        if (networkId === undefined || networkId === 'none') {
+          throw new Error('RFC-64 release-native authority requires a trusted chain network');
+        }
+        const registeredAuthorityRead = await this.rfc64AuthorityReadCoordinatorV1.run(
+          signal,
+          async (readSignal) => {
+            const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+            if (readSignal?.aborted) throw readSignal.reason;
+            if (onChainId === null) return null;
+            const reader = requireRfc64ContextGraphAuthorityReaderV1(
+              this.contextGraphAuthorityReaderCapability,
+            );
+            const expectedOnChainId = BigInt(onChainId);
+            const snapshot = parseRfc64AuthoritySnapshotV1(
+              await reader.getContextGraphAuthoritySnapshot(
+                expectedOnChainId,
+                { signal: readSignal },
+              ),
+              expectedOnChainId,
+            );
+            return { expectedOnChainId, snapshot } as const;
+          },
+        );
+        let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
+        if (registeredAuthorityRead !== null) {
+          const { snapshot } = registeredAuthorityRead;
+          if (signal?.aborted) throw signal.reason;
+          const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
+          const expectedNameHash = explicitNameHash === undefined
+            ? this.contextGraphNameCommitment(contextGraphId)
+            : this.contextGraphWireId(explicitNameHash);
+          if (!snapshot.active || snapshot.nameHash !== expectedNameHash) {
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'registered-authority-binding-mismatch',
+              'registered RFC-64 Context Graph authority is inactive or name-bound elsewhere',
+            );
+          }
+          let authoritativeSnapshot = snapshot;
+          if (snapshot.accessPolicy === 1) {
+            const localRoster = await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId);
+            if (localRoster === null) {
+              throw new Error(
+                'registered private RFC-64 Context Graph has no authenticated lifecycle roster',
+              );
+            }
+            // The finalized chain snapshot can lag an authenticated local
+            // removal. Never union a chain participant back into the catalog
+            // roster after the curator has durably revoked that address.
+            const revokedAgents = new Set(
+              (await this.getCgMeta(contextGraphId)).revokedAgents
+                .map((address) => address.toLowerCase()),
+            );
+            const localRosterVersion = await this.readRfc64PrivateRosterVersionV1(contextGraphId);
+            authoritativeSnapshot = Object.freeze({
+              ...snapshot,
+              participantAgents: Object.freeze([
+                ...new Set([
+                  ...snapshot.participantAgents,
+                  ...localRoster,
+                ].filter((address) => !revokedAgents.has(address))),
+              ].sort()),
+              rosterVersion: composeRfc64RegisteredRosterVersionV1(
+                snapshot.rosterVersion,
+                localRosterVersion,
+              ),
+            });
+          }
+          authority = composeRfc64FinalizedCatalogAuthorityV1({
+            networkId,
+            contextGraphId: contextGraphId as ContextGraphIdV1,
+            snapshot: authoritativeSnapshot,
+          });
+        } else {
+          const ownerDid = await this.getContextGraphOwner(contextGraphId);
+          if (signal?.aborted) throw signal.reason;
+          const normalizedOwnerDid = ownerDid
+            ?.trim()
+            .replace(/^<|>$/gu, '')
+            .replace(/^did:dkg:agent:/u, '')
+            .toLowerCase();
+          // An unregistered graph's owner is an authority fact, not something
+          // that may be inferred from an untrusted graph name or this node's
+          // wallet. Missing authenticated owner metadata must fail closed.
+          const ownerAddress = normalizedOwnerDid;
+          if (ownerAddress === undefined || !/^0x[0-9a-f]{40}$/u.test(ownerAddress)) {
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'unregistered-owner-unresolved',
+              'unregistered RFC-64 Context Graph has no canonical owner address',
+            );
+          }
+          const accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
+          if (signal?.aborted) throw signal.reason;
+          if (accessPolicy === null) {
+            throw new Rfc64CatalogAuthorityResolutionErrorV1(
+              'access-policy-unresolved',
+              'unregistered RFC-64 Context Graph access policy is unresolved',
+            );
+          }
+          const stored = await this.getStoredContextGraphRegistrationOptions(contextGraphId);
+          const publishPolicy = stored.publishPolicy === 0 || stored.publishPolicy === 1
+            ? stored.publishPolicy
+            : accessPolicy === 'private' ? 0 : 1;
+          const members = accessPolicy === 'private'
+            ? await this.resolveRfc64VerifiedPrivateRosterV1(contextGraphId)
+            : [];
+          if (accessPolicy === 'private' && members === null) {
+            throw new Error(
+              'unregistered private RFC-64 Context Graph has no authenticated lifecycle roster',
+            );
+          }
+          const rosterVersion = await this.readRfc64PrivateRosterVersionV1(contextGraphId);
+          if (signal?.aborted) throw signal.reason;
+          authority = composeRfc64UnregisteredCatalogAuthorityV1({
+            networkId,
+            contextGraphId: contextGraphId as ContextGraphIdV1,
+            ownerAddress: ownerAddress as EvmAddressV1,
+            accessPolicy: accessPolicy === 'private' ? 1 : 0,
+            publishPolicy,
+            publishAuthorityAccountId: stored.publishAuthorityAccountId?.toString(10) ?? '0',
+            memberAddresses: (members ?? [])
+              .map((address) => address.toLowerCase())
+              .filter((address) => /^0x[0-9a-f]{40}$/u.test(address)) as EvmAddressV1[],
+            rosterVersion,
+          });
+        }
+        const previousAuthority = service.acceptedPolicySnapshot(
+          authority.policy.networkId,
+          authority.policy.contextGraphId,
+        );
+        if (!isCurrentRfc64CatalogAuthorityRevisionV1(
+          this,
+          contextGraphId,
+          authorityRevision,
+        )) return null;
+        const acceptedAuthority = service.acceptAuthoritativePolicySnapshot({
+          policy: authority.policy,
+          policyDigest: authority.policyDigest,
+          roster: authority.roster,
+        });
+        if (rfc64CatalogAuthorityGenerationChangedV1(previousAuthority, acceptedAuthority)) {
+          service.deactivateReceiverContextGraph(contextGraphId);
+          this.clearRfc64CatalogOperationalTargetsV1(contextGraphId);
+        }
         setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
-          state: 'blocked',
-          source: null,
-          policyDigest: null,
-          policyEra: null,
-          reason: rfc64CatalogAuthorityFailureCodeV1(error),
+          state: 'accepted',
+          source: authority.source,
+          policyDigest: authority.policyDigest,
+          policyEra: authority.policy.era,
+          reason: null,
           updatedAtMs: Date.now(),
         });
+        await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
+        return authority;
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason;
+        if (isCurrentRfc64CatalogAuthorityRevisionV1(
+          this,
+          contextGraphId,
+          authorityRevision,
+        )) {
+          setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
+            state: 'blocked',
+            source: null,
+            policyDigest: null,
+            policyEra: null,
+            reason: rfc64CatalogAuthorityFailureCodeV1(error),
+            updatedAtMs: Date.now(),
+          });
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   /**
@@ -3395,12 +3405,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           },
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogReceiverReconcilerV1 = {
-          isHeadApplied: (announcement) => {
+          isHeadApplied: (announcement) => withRpcRequestClass('background', () => {
             this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
             return reconciler.isHeadApplied(announcement);
-          },
+          }),
           reconcileHead: (remotePeerId, announcement, signal) =>
-            reconciler.reconcileHead(remotePeerId, announcement, signal),
+            withRpcRequestClass(
+              'background',
+              () => reconciler.reconcileHead(remotePeerId, announcement, signal),
+            ),
         };
         return Object.freeze(deploymentAwareReconciler);
       },

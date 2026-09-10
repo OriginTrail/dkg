@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { projectRuntimeEvmChainConfig } from '../src/runtime-chain-config.js';
+import { RpcRequestGovernor } from '@origintrail-official/dkg-chain';
+import {
+  bindRuntimeRpcRequestGovernor,
+  projectRuntimeEvmChainConfig,
+} from '../src/runtime-chain-config.js';
 
 describe('publisher runtime chain config projection', () => {
   it('preserves every adapter-facing runtime knob for standalone startup', () => {
@@ -23,7 +27,7 @@ describe('publisher runtime chain config projection', () => {
       minPublisherTracWei: 456n,
     });
 
-    expect(projected).toEqual({
+    expect(projected).toMatchObject({
       rpcUrl: 'http://127.0.0.1:8545',
       rpcUrls: ['https://backup.example'],
       walletRpcUrls: ['https://wallet.example'],
@@ -42,6 +46,7 @@ describe('publisher runtime chain config projection', () => {
       minPublisherNativeWei: 123n,
       minPublisherTracWei: 456n,
     });
+    expect(projected).not.toHaveProperty('rpcRequestGovernor');
   });
 
   it('requires both adapter endpoint and Hub address', () => {
@@ -49,5 +54,31 @@ describe('publisher runtime chain config projection', () => {
       rpcUrl: 'http://127.0.0.1:8545',
       receiptTimeoutMs: 1_200_000,
     })).toBeUndefined();
+  });
+
+  it('binds configured policy and one shared governor identity to all consumers', () => {
+    const projected = projectRuntimeEvmChainConfig({
+      rpcUrl: 'http://127.0.0.1:8545',
+      hubAddress: '0x1111111111111111111111111111111111111111',
+    });
+    expect(projected).toBeDefined();
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 7,
+      foregroundReservePercent: 60,
+      burstRequests: 11,
+      maxQueueSize: 13,
+      startupJitterMs: 0,
+    });
+    const agentConfig = bindRuntimeRpcRequestGovernor(projected!, governor);
+    const publisherConfig = bindRuntimeRpcRequestGovernor(projected!, governor);
+
+    expect(agentConfig.rpcRequestGovernor).toBe(governor);
+    expect(publisherConfig.rpcRequestGovernor).toBe(governor);
+    expect(governor.snapshot()).toMatchObject({
+      maxRequestsPerSecond: 7,
+      availableTokens: 11,
+      startupDelayRemainingMs: 0,
+    });
+    expect(governor.snapshot().backgroundMaxRequestsPerSecond).toBeCloseTo(2.8);
   });
 });

@@ -32,6 +32,10 @@ import type {
 } from 'ethers';
 import { getMetrics } from '@origintrail-official/dkg-core';
 import { boundedRetryFetchRequest } from './evm-adapter-rpc.js';
+import {
+  RpcRequestGovernor,
+  type RpcRequestGovernorWindow,
+} from './rpc-request-governor.js';
 
 /**
  * The JSON-RPC methods our own code (via ethers v6) can issue. Used to BOUND
@@ -197,6 +201,7 @@ export function normalizeRpcUsageWindow(window: RpcUsageWindow): ConcreteRpcUsag
     ethCallByConsumer,
     attributions,
     lifetimeTotal: window.lifetimeTotal,
+    ...(window.requestGovernor === undefined ? {} : { requestGovernor: window.requestGovernor }),
   };
 }
 
@@ -229,6 +234,7 @@ export function mergeRpcUsageWindows(
   if (defined.length === 0) return emptyRpcUsageWindow();
   const byMethod: Record<string, number> = {};
   const attributions = new Map<string, RpcUsageAttribution>();
+  const requestGovernors: RpcRequestGovernorWindow[] = [];
   let lifetimeTotal = 0;
   for (const input of defined) {
     const w = normalizeRpcUsageWindow(input);
@@ -244,6 +250,7 @@ export function mergeRpcUsageWindows(
       } as RpcUsageAttribution);
     }
     lifetimeTotal += w.lifetimeTotal;
+    if (w.requestGovernor !== undefined) requestGovernors.push(w.requestGovernor);
   }
   const mergedAttributions = [...attributions.values()];
   const ethCallByConsumer: Record<string, number> = {};
@@ -256,6 +263,34 @@ export function mergeRpcUsageWindows(
     ethCallByConsumer,
     attributions: mergedAttributions,
     lifetimeTotal,
+    ...(requestGovernors.length === 0
+      ? {}
+      : { requestGovernor: mergeRpcRequestGovernorWindows(requestGovernors) }),
+  };
+}
+
+function mergeRpcRequestGovernorWindows(
+  windows: readonly RpcRequestGovernorWindow[],
+): RpcRequestGovernorWindow {
+  const sum = (field: keyof RpcRequestGovernorWindow) => (
+    windows.reduce((total, window) => total + window[field], 0)
+  );
+  return {
+    maxRequestsPerSecond: sum('maxRequestsPerSecond'),
+    backgroundMaxRequestsPerSecond: sum('backgroundMaxRequestsPerSecond'),
+    availableTokens: sum('availableTokens'),
+    backgroundAvailableTokens: sum('backgroundAvailableTokens'),
+    foregroundQueued: sum('foregroundQueued'),
+    backgroundQueued: sum('backgroundQueued'),
+    foregroundAdmitted: sum('foregroundAdmitted'),
+    backgroundAdmitted: sum('backgroundAdmitted'),
+    foregroundDeferred: sum('foregroundDeferred'),
+    backgroundDeferred: sum('backgroundDeferred'),
+    rejected: sum('rejected'),
+    cancelled: sum('cancelled'),
+    startupDelayRemainingMs: Math.max(
+      ...windows.map((window) => window.startupDelayRemainingMs),
+    ),
   };
 }
 
@@ -298,6 +333,8 @@ export interface RpcUsageWindow {
   ethGetLogsByConsumerAndEndpointSlot?: Record<string, Record<string, number>>;
   /** Raw requests since process start (monotonic; NOT reset by drain). */
   lifetimeTotal: number;
+  /** Transport-budget state and delta counters when this source owns a governor. */
+  requestGovernor?: RpcRequestGovernorWindow;
 }
 
 /** Concrete package-owned telemetry window after legacy inputs are normalized. */
@@ -383,7 +420,6 @@ export class RpcUsageTracker {
     { consumer: string; endpointSlot: RpcEndpointSlotLabel; count: number }
   >();
   private lifetime = 0;
-
   constructor(
     // Live thunk (matches RpcFailoverClient): the adapter assigns `chainId`
     // after construction, so resolve it at record time.
@@ -508,6 +544,7 @@ export class CountingJsonRpcProvider extends JsonRpcProvider {
     network: Networkish | undefined,
     options: JsonRpcApiProviderOptions | undefined,
     private readonly onRpcRequest: (method: string) => void,
+    private readonly requestGovernor?: RpcRequestGovernor,
   ) {
     super(url, network, options);
   }
@@ -515,8 +552,9 @@ export class CountingJsonRpcProvider extends JsonRpcProvider {
   override async _send(
     payload: JsonRpcPayload | Array<JsonRpcPayload>,
   ): Promise<Array<JsonRpcResult>> {
+    const entries = Array.isArray(payload) ? payload : [payload];
+    for (const _entry of entries) await this.requestGovernor?.acquireActiveRequest();
     try {
-      const entries = Array.isArray(payload) ? payload : [payload];
       for (const entry of entries) this.onRpcRequest(String(entry?.method ?? 'unknown'));
     } catch {
       /* accounting must never break an RPC call */
@@ -530,6 +568,46 @@ export interface CountingJsonRpcProviderConfig {
   readonly providerOptions: JsonRpcApiProviderOptions;
   readonly network?: Networkish;
   readonly endpointSlot?: number;
+  readonly requestGovernor?: RpcRequestGovernor;
+}
+
+export interface GovernedJsonRpcProviderConfig {
+  readonly maxRetries?: number;
+  readonly providerOptions?: JsonRpcApiProviderOptions;
+  readonly network?: Networkish;
+  readonly requestGovernor: RpcRequestGovernor;
+}
+
+/**
+ * Build a direct daemon-side provider on the same process governor as adapter
+ * traffic. This is intentionally separate from usage tracking: the shared
+ * governor owns admission telemetry, while adapter trackers continue to own
+ * their billable-method accounting.
+ */
+export function createGovernedJsonRpcProvider(
+  url: string,
+  config: GovernedJsonRpcProviderConfig,
+): CountingJsonRpcProvider {
+  const fetchRequest = boundedRetryFetchRequest(url, config.maxRetries);
+  const pureRetry = fetchRequest.retryFunc!;
+  fetchRequest.retryFunc = async (attemptReq, response, attempt) => {
+    const retry = await pureRetry(attemptReq, response, attempt);
+    if (retry) await config.requestGovernor.acquireActiveRequest();
+    return retry;
+  };
+  const providerOptions = config.network == null
+    ? config.providerOptions
+    : {
+        ...config.providerOptions,
+        staticNetwork: config.network as JsonRpcApiProviderOptions['staticNetwork'],
+      };
+  return new CountingJsonRpcProvider(
+    fetchRequest,
+    config.network,
+    providerOptions,
+    () => undefined,
+    config.requestGovernor,
+  );
 }
 
 /**
@@ -551,12 +629,13 @@ export function createCountingJsonRpcProvider(
   // HTTP attempts under 429/5xx) and every attempt bills at the provider, so
   // the retryFunc is decorated to record each RE-attempt's methods; the first
   // attempt is counted at _send by CountingJsonRpcProvider.
-  const { maxRetries, providerOptions: options, network, endpointSlot } = config;
+  const { maxRetries, providerOptions: options, network, endpointSlot, requestGovernor } = config;
   const fetchRequest = boundedRetryFetchRequest(url, maxRetries);
   const pureRetry = fetchRequest.retryFunc!;
   fetchRequest.retryFunc = async (attemptReq, response, attempt) => {
     const retry = await pureRetry(attemptReq, response, attempt);
     if (retry) {
+      await requestGovernor?.acquireActiveRequest();
       try {
         for (const method of jsonRpcMethodsFromBody(attemptReq?.body)) {
           tracker.record(method, endpointSlot);
@@ -580,5 +659,6 @@ export function createCountingJsonRpcProvider(
     network,
     providerOptions,
     (method) => tracker.record(method, endpointSlot),
+    requestGovernor,
   );
 }
