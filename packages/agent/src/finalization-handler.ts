@@ -118,6 +118,10 @@ import type {
   RetireConfirmedGraphScopedSwmTwinIfOrphaned,
 } from
   './sync/requester/finalized-swm-twin-reconciliation.js';
+import {
+  createDurableFinalizationRecoveryEligibility,
+  type FinalizationRecoveryEligibility,
+} from './finalization-recovery-eligibility.js';
 
 /**
  * Predicate for the durable per-root keep-root-copy signal the publisher
@@ -328,6 +332,8 @@ export interface FinalizationHandlerOptions {
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
   runtime?: FinalizationRuntime;
+  workspaceWriteLocks?: Map<string, Promise<void>>;
+  finalizationRecoveryEligibility?: FinalizationRecoveryEligibility;
 }
 
 function isLegacyFinalizationEventBus(
@@ -453,6 +459,7 @@ export class FinalizationHandler {
   /** Equivalent finalization/reconcile reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
   private readonly recoveryWorker: FinalizationRecoveryWorker;
+  private readonly finalizationRecoveryEligibility: FinalizationRecoveryEligibility;
 
   constructor(
     store: TripleStore,
@@ -492,6 +499,11 @@ export class FinalizationHandler {
       options.retireConfirmedGraphScopedSwmTwinIfOrphaned;
     this.reconcileConfirmedGraphScopedSwmTwin =
       options.reconcileConfirmedGraphScopedSwmTwin;
+    this.finalizationRecoveryEligibility = options.finalizationRecoveryEligibility
+      ?? createDurableFinalizationRecoveryEligibility({
+        store,
+        writeLocks: options.workspaceWriteLocks,
+      });
     this.lifecycle = new FinalizationLifecycleLogger(
       this.log,
       options.runtime ?? options.lifecycleLogOptions,
@@ -560,7 +572,35 @@ export class FinalizationHandler {
     let envelope: DecodedFinalizationEnvelope | undefined;
     let candidate: ParsedGraphScopedFinalization | undefined;
     if (liveAdmission.status === 'admitted') {
-      candidate = liveAdmission.input.candidate;
+      const liveCandidate = liveAdmission.input.candidate;
+      candidate = liveCandidate;
+      const recoveryEligible = await this.finalizationRecoveryEligibility({
+        contextGraphId,
+        ual: liveCandidate.scope.ual,
+        subGraphName: liveCandidate.msg.subGraphName || undefined,
+        targetContextGraphId: liveCandidate.msg.targetContextGraphId || undefined,
+        onProbeError: (error) => {
+          const ctx = liveCandidate.msg.operationId
+            ? createOperationContext('gossip', liveCandidate.msg.operationId)
+            : createOperationContext('gossip');
+          this.log.warn(
+            ctx,
+            `Finalization: local workspace ownership probe failed for `
+              + `${liveCandidate.scope.ual}; retaining recovery eligibility: `
+              + `${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      });
+      if (!recoveryEligible) {
+        const ctx = liveCandidate.msg.operationId
+          ? createOperationContext('gossip', liveCandidate.msg.operationId)
+          : createOperationContext('gossip');
+        this.log.info(
+          ctx,
+          `Finalization: ignoring ${liveCandidate.scope.ual}; this node has no local workspace record`,
+        );
+        return;
+      }
       let recoveryResult: FinalizationRecoveryLiveProcessResult;
       try {
         recoveryResult = await this.recovery.processLiveOutcome(liveAdmission.input);

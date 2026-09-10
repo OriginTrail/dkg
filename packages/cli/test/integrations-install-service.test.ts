@@ -1,3 +1,4 @@
+import type { ClientTarget } from '../src/mcp-client-registry.js';
 import { describe, it, expect } from 'vitest';
 
 import { installService } from '../src/integrations/install-service.js';
@@ -261,9 +262,9 @@ describe('detectInstalled', () => {
     ({ ...baseEntry, slug, install }) as unknown as IntegrationEntry;
 
   const clients = [
-    { name: 'Cursor', configPath: '/fake/cursor.json', displayPath: '~/cursor.json' },
-    { name: 'Windsurf', configPath: '/fake/windsurf.json', displayPath: '~/windsurf.json' },
-  ] as never;
+    { id: 'cursor', location: 'native', format: 'json', serverContainer: 'mcpServers', name: 'Cursor', configPath: '/fake/cursor.json', displayPath: '~/cursor.json' },
+    { id: 'windsurf', location: 'native', format: 'json', serverContainer: 'mcpServers', name: 'Windsurf', configPath: '/fake/windsurf.json', displayPath: '~/windsurf.json' },
+  ] satisfies ClientTarget[];
 
   it('reports cli and npm-global service entries from the global npm map', async () => {
     const rows = await detectInstalled(

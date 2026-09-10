@@ -2818,9 +2818,11 @@ async function mapLocalAgentIntegrationRecord(
     : null;
   // The daemon-owned integration exists in the registry on every node. Keep it
   // out of the UI when the operator supplied no local-LLM configuration and
-  // the conventional local endpoint was not auto-detected. An explicit but
-  // temporarily offline configuration remains visible so its error is useful.
-  if (id === 'local-llm' && health?.configured === false && health.reachable !== true) {
+  // the conventional local endpoint did not pass the LLM readiness probe.
+  // Reachability alone is insufficient: an unrelated HTTP service can occupy
+  // the default port. An explicit but temporarily offline configuration
+  // remains visible so its error is useful.
+  if (id === 'local-llm' && health?.configured === false && health.ready !== true) {
     return null;
   }
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);

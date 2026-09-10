@@ -1,4 +1,5 @@
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
+export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 import { encodeEntityShareSliceMetadata } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
@@ -1421,6 +1422,7 @@ function normalizeOptionalSubGraphName(subGraphName: string | undefined): string
   }
   return normalized;
 }
+
 
 
 
