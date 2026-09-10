@@ -71,7 +71,10 @@ export class FinalizationPublisherAuthorityObserver<
       );
       return {};
     }
-    if (!prepared || input.identity.sourcePeerId !== prepared.publisherPeerId) {
+    // Preparation can be temporarily unavailable while the workspace arrives.
+    // Do not turn that transient absence into a generation-scoped negative probe.
+    if (!prepared) return {};
+    if (input.identity.sourcePeerId !== prepared.publisherPeerId) {
       this.failedProbes.set(probeKey, true);
       return { prepared };
     }

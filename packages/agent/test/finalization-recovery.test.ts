@@ -279,6 +279,7 @@ describe('graph-scoped finalization recovery admission', () => {
       });
       const preparedSources: Array<string | undefined> = [];
       let appliedAccess: { policy: string; peers: string[] } | undefined;
+      let workspaceAvailable = false;
       const recovery = new FinalizationRecovery(
         store,
         recoveryChain(),
@@ -287,6 +288,7 @@ describe('graph-scoped finalization recovery admission', () => {
           ...recoveryMaterializer(),
           prepare: async (input) => {
             preparedSources.push(input.sourcePeerId);
+            if (!workspaceAvailable) return undefined;
             return {
               onChainContextGraphId: '42',
               localTopicOnChainContextGraphId: '42',
@@ -314,6 +316,11 @@ describe('graph-scoped finalization recovery admission', () => {
         ...baseInput,
         sourcePeerId: '12D3KooWRelay',
       });
+      await recovery.processLiveOutcome({
+        ...baseInput,
+        sourcePeerId: '12D3KooWPublisher',
+      });
+      workspaceAvailable = true;
       await recovery.processLiveOutcome({
         ...baseInput,
         sourcePeerId: '12D3KooWPublisher',
