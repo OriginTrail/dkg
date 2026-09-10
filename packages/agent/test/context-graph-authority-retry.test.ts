@@ -188,6 +188,10 @@ describe('Context Graph subscription authority retry', () => {
         delete: async (id) => { rows.delete(id); },
       },
       contextGraphSubscriptionRehydrationEnabled: true,
+      // This fixture owns one deliberately pending name-hash lookup. Keep the
+      // unrelated VM startup sweep from issuing another lookup and replacing
+      // the resolver that represents the authority-recovery attempt.
+      syncReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const retry = vi.spyOn(agent, 'retryUnavailableContextGraphSubscriptionAuthorities');

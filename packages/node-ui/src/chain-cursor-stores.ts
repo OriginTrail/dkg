@@ -167,3 +167,88 @@ export class SqliteContextGraphAuthorityHistoryStore {
     return `${SqliteContextGraphAuthorityHistoryStore.KEY_PREFIX}${cacheKey}`;
   }
 }
+
+/**
+ * Opaque SQLite persistence for the chain-owned contract-wide authority index.
+ *
+ * Authority-bearing JSON is never interpreted here. The store owns the
+ * monotonic CAS token, and JSON `null` is its durable invalidation tombstone.
+ * Tokens therefore never repeat, including across corruption/reorg recovery.
+ */
+export class SqliteContextGraphAuthorityIndexStore {
+  private readonly db: Database.Database;
+
+  constructor(dashboard: DashboardDB) {
+    this.db = dashboard.db;
+  }
+
+  async load(scope: string): Promise<Readonly<{ token: number; value: unknown | null }> | undefined> {
+    const row = this.db.prepare(`
+      SELECT revision, checkpoint_json
+        FROM context_graph_authority_indexes
+       WHERE scope = ?
+    `).get(scope) as { revision: number; checkpoint_json: string } | undefined;
+    if (row === undefined) return undefined;
+    try {
+      return Object.freeze({
+        token: row.revision,
+        value: JSON.parse(row.checkpoint_json) as unknown,
+      });
+    } catch {
+      // Preserve the durable token even when the opaque payload is corrupt, so
+      // chain can conditionally invalidate this exact row without racing a
+      // newer compare-and-swap winner.
+      return Object.freeze({
+        token: row.revision,
+        value: Object.freeze({ invalidCheckpointJson: row.checkpoint_json }),
+      });
+    }
+  }
+
+  async compareAndSwap(
+    scope: string,
+    expectedToken: number | undefined,
+    checkpoint: unknown,
+  ): Promise<number | undefined> {
+    if (scope.trim().length === 0) throw new Error('Authority index scope is empty');
+    const value = JSON.stringify(checkpoint);
+    if (value === undefined) throw new Error('Authority index checkpoint is not serializable');
+    if (expectedToken === undefined) {
+      const inserted = this.db.prepare(`
+        INSERT OR IGNORE INTO context_graph_authority_indexes (
+          scope, revision, checkpoint_json, updated_at
+        ) VALUES (?, ?, ?, ?)
+      `).run(scope, 1, value, Date.now()).changes === 1;
+      return inserted ? 1 : undefined;
+    }
+    if (!Number.isSafeInteger(expectedToken) || expectedToken < 1) {
+      throw new Error('Authority index expected token is invalid');
+    }
+    const nextToken = expectedToken + 1;
+    if (!Number.isSafeInteger(nextToken)) {
+      throw new Error('Authority index token exceeds the safe integer range');
+    }
+    const updated = this.db.prepare(`
+      UPDATE context_graph_authority_indexes
+         SET revision = ?, checkpoint_json = ?, updated_at = ?
+       WHERE scope = ? AND revision = ?
+    `).run(nextToken, value, Date.now(), scope, expectedToken).changes === 1;
+    return updated ? nextToken : undefined;
+  }
+
+  async invalidate(scope: string, expectedToken: number): Promise<number | undefined> {
+    if (!Number.isSafeInteger(expectedToken) || expectedToken < 1) {
+      throw new Error('Authority index expected token is invalid');
+    }
+    const nextToken = expectedToken + 1;
+    if (!Number.isSafeInteger(nextToken)) {
+      throw new Error('Authority index token exceeds the safe integer range');
+    }
+    const invalidated = this.db.prepare(`
+      UPDATE context_graph_authority_indexes
+         SET revision = ?, checkpoint_json = 'null', updated_at = ?
+       WHERE scope = ? AND revision = ?
+    `).run(nextToken, Date.now(), scope, expectedToken).changes === 1;
+    return invalidated ? nextToken : undefined;
+  }
+}
