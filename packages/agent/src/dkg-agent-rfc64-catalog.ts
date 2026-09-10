@@ -2836,19 +2836,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ) {
       return Object.freeze({ requested: 0, failed: 0 });
     }
-    const fullReplay = request.kind === 'connected-peers';
-    const seedPeers = fullReplay
-      ? this.node.libp2p.getPeers().map((peer) => peer.toString())
-      : Object.freeze([]);
-    return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+    const scope = {
       contextGraphId,
       policyDigest: accepted.policyDigest,
-      seedPeers,
-      fullReplay,
-      replayDemands: request.kind !== 'connection-demand'
-        ? undefined
-        : [request.replayDemand],
-    });
+    } as const;
+    switch (request.kind) {
+      case 'connected-peers':
+        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+          ...scope,
+          kind: 'full-connected-peers',
+          connectedPeerIds: this.node.libp2p.getPeers().map((peer) => peer.toString()),
+        });
+      case 'pending-recovery':
+        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+          ...scope,
+          kind: 'pending-recovery',
+        });
+      case 'connection-demand':
+        return this.rfc64CatalogReplayRecoveryRuntimeV1().request({
+          ...scope,
+          kind: 'connection-demand',
+          demand: request.replayDemand,
+        });
+    }
   }
 
   /**

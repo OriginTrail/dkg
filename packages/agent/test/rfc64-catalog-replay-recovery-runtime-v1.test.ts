@@ -11,12 +11,18 @@ function run(
   policyDigest: string,
   fullReplay = false,
 ) {
-  return runtime.request({
-    contextGraphId: 'public-cg',
-    policyDigest,
-    seedPeers: Object.freeze([]),
-    fullReplay,
-  });
+  return fullReplay
+    ? runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest,
+      kind: 'full-connected-peers',
+      connectedPeerIds: Object.freeze([]),
+    })
+    : runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest,
+      kind: 'pending-recovery',
+    });
 }
 
 describe('RFC-64 catalog replay recovery runtime', () => {

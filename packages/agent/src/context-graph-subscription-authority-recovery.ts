@@ -9,73 +9,6 @@ import type {
 } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 
-const AUTHORITY_RETRY_INTERVAL_MS = 30_000;
-
-export interface ContextGraphSubscriptionAuthorityRecoveryRuntimePorts {
-  shouldRun(): boolean;
-  run(signal: AbortSignal): Promise<void>;
-  onFailure(error: unknown): void;
-}
-
-/** Owns the timer, cancellation, recurring run, and physical drain boundary. */
-export class ContextGraphSubscriptionAuthorityRecoveryRuntime {
-  readonly #ports: ContextGraphSubscriptionAuthorityRecoveryRuntimePorts;
-  #timer: ReturnType<typeof setTimeout> | null = null;
-  #controller: AbortController | null = null;
-  #completion: Promise<void> | null = null;
-
-  constructor(ports: ContextGraphSubscriptionAuthorityRecoveryRuntimePorts) {
-    this.#ports = ports;
-  }
-
-  start(): void {
-    if (this.#controller !== null) return;
-    this.#controller = new AbortController();
-    this.#schedule(0);
-  }
-
-  owns(signal: AbortSignal): boolean {
-    return this.#controller?.signal === signal && !signal.aborted;
-  }
-
-  closeAndDrain(): Promise<void> | null {
-    if (this.#timer !== null) {
-      clearTimeout(this.#timer);
-      this.#timer = null;
-    }
-    this.#controller?.abort();
-    this.#controller = null;
-    return this.#completion;
-  }
-
-  #schedule(delayMs: number): void {
-    const controller = this.#controller;
-    if (
-      controller === null
-      || controller.signal.aborted
-      || this.#timer !== null
-      || this.#completion !== null
-      || !this.#ports.shouldRun()
-    ) return;
-
-    this.#timer = setTimeout(() => {
-      this.#timer = null;
-      if (this.#controller !== controller || controller.signal.aborted) return;
-      const completion = this.#ports.run(controller.signal)
-        .catch((error: unknown) => {
-          if (!controller.signal.aborted) this.#ports.onFailure(error);
-        })
-        .finally(() => {
-          if (this.#completion === completion) this.#completion = null;
-          if (this.#controller !== controller || controller.signal.aborted) return;
-          this.#schedule(AUTHORITY_RETRY_INTERVAL_MS);
-        });
-      this.#completion = completion;
-    }, Math.max(0, delayMs));
-    this.#timer.unref?.();
-  }
-}
-
 export interface PersistedContextGraphSubscriptionActivationPorts {
   install(
     row: ContextGraphSubscriptionRecord,
@@ -87,6 +20,8 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
   ): ContextGraphSub;
   current(contextGraphId: string): ContextGraphSub | undefined;
   remove(contextGraphId: string): void;
+  /** Compensate sync scope and every partially installed network handler. */
+  rollbackNetworkEffects(contextGraphId: string): void;
   trackSync(contextGraphId: string): void;
   subscribe(contextGraphId: string): void;
   persistMembership(contextGraphId: string): void;
@@ -112,8 +47,17 @@ export async function activatePersistedContextGraphSubscription(
     restorePendingMeta,
     updateRehydrationStatus: options.updateRehydrationStatus !== false,
   });
+  let networkEffectsStarted = false;
   const rollback = (): void => {
-    if (ports.current(row.id) === subscription) ports.remove(row.id);
+    // Before network activation, preserve a concurrently replaced generation.
+    // After it begins, every port is synchronous: any changed object is the
+    // activation's own transition and must be compensated as part of this call.
+    if (!networkEffectsStarted && ports.current(row.id) !== subscription) return;
+    try {
+      ports.rollbackNetworkEffects(row.id);
+    } finally {
+      ports.remove(row.id);
+    }
   };
 
   try {
@@ -121,17 +65,17 @@ export async function activatePersistedContextGraphSubscription(
     if (options.isCurrent && !options.isCurrent(subscription)) {
       throw new Error(`Persisted subscription activation for "${row.id}" became stale`);
     }
+    if (!restorePendingMeta) {
+      networkEffectsStarted = true;
+      if (row.syncScoped) ports.trackSync(row.id);
+      if (row.subscribed) {
+        ports.subscribe(row.id);
+        ports.persistMembership(row.id);
+      }
+    }
   } catch (error) {
     rollback();
     throw error;
-  }
-
-  if (!restorePendingMeta) {
-    if (row.syncScoped) ports.trackSync(row.id);
-    if (row.subscribed) {
-      ports.subscribe(row.id);
-      ports.persistMembership(row.id);
-    }
   }
   return subscription;
 }

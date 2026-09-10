@@ -672,11 +672,11 @@ import {
   projectContextGraphDormancy,
 } from './context-graph-subscription-dormancy.js';
 import {
-  ContextGraphSubscriptionAuthorityRecoveryRuntime,
   activatePersistedContextGraphSubscription as activatePersistedContextGraphSubscriptionTransaction,
   recoverDeferredContextGraphSubscriptionAuthorities,
   type PersistedContextGraphSubscriptionActivationOptions,
 } from './context-graph-subscription-authority-recovery.js';
+import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import {
   isRfc64PrivateRecoveryOwnerV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
@@ -2007,7 +2007,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
-    await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.closeAndDrain();
+    await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
     this.contextGraphMembershipPersistence.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
@@ -4175,7 +4175,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.info(ctx, `Chain-driven VM reconciliation armed (startupDelay ${startupDelayMs}ms, sweep ${DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS}ms, depth ${DKGAgentBase.VM_RECONCILE_CONFIRMATION_DEPTH})`);
     }
     this.contextGraphSubscriptionAuthorityRecoveryRuntime =
-      new ContextGraphSubscriptionAuthorityRecoveryRuntime({
+      new CoalescingRecurringTask({
+        retryIntervalMs: 30_000,
+        requestWhileRunning: 'drop',
         shouldRun: () => (
           this.started
           && Boolean(
@@ -4183,8 +4185,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               ?.dormantReasons.authorityUnavailable.length,
           )
         ),
-        run: (signal) => this.retryUnavailableContextGraphSubscriptionAuthorities(signal),
-        onFailure: (error) => {
+        runPass: (signal) => this.retryUnavailableContextGraphSubscriptionAuthorities(signal),
+        onError: (error) => {
           this.log.warn(
             ctx,
             `Background context-graph subscription authority retry failed: ${
@@ -4192,8 +4194,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }`,
           );
         },
+        closingMessage: 'Context Graph subscription authority recovery closing',
       });
-    this.contextGraphSubscriptionAuthorityRecoveryRuntime.start();
+    this.contextGraphSubscriptionAuthorityRecoveryRuntime.schedule();
   }
 
   /**
@@ -10082,6 +10085,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }),
       current: (contextGraphId) => this.subscribedContextGraphs.get(contextGraphId),
       remove: (contextGraphId) => this.deleteContextGraphSubscription(contextGraphId),
+      rollbackNetworkEffects: (contextGraphId) => this.unsubscribeFromContextGraph(
+        contextGraphId,
+        { persist: false, updateRehydrationStatus: false },
+      ),
       trackSync: (contextGraphId) => this.trackSyncContextGraph(contextGraphId),
       subscribe: (contextGraphId) => this.subscribeToContextGraph(contextGraphId, {
         trackSyncScope: false,

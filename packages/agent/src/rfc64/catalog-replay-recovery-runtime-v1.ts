@@ -26,14 +26,21 @@ export type Rfc64CatalogReplayPeerResultV1<Target> = Readonly<{
   status: 'not-provider';
 }>;
 
-export interface Rfc64CatalogReplayRecoveryRunV1 {
+/** Closed runtime commands; peer seeding and full-replay evidence cannot diverge. */
+export type Rfc64CatalogReplayRecoveryCommandV1 = Readonly<{
   readonly contextGraphId: string;
   readonly policyDigest: string;
-  readonly seedPeers: readonly string[];
-  /** A successful run with this flag clears an unattributed full-replay witness. */
-  readonly fullReplay: boolean;
-  readonly replayDemands?: readonly Rfc64CatalogReplayPeerDemandV1[];
-}
+} & (
+  | {
+      readonly kind: 'full-connected-peers';
+      readonly connectedPeerIds: readonly string[];
+    }
+  | { readonly kind: 'pending-recovery' }
+  | {
+      readonly kind: 'connection-demand';
+      readonly demand: Rfc64CatalogReplayPeerDemandV1;
+    }
+)>;
 
 export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
   requestPeer(
@@ -222,16 +229,19 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   request(
-    input: Rfc64CatalogReplayRecoveryRunV1,
+    input: Rfc64CatalogReplayRecoveryCommandV1,
   ): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
     const progress = this.#progressFor(input.contextGraphId, input.policyDigest);
-    const seedPeers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
-      input.seedPeers.slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1),
-    );
-    for (const peer of seedPeers) progress.peerWorklist.seed(peer);
-    for (const demand of input.replayDemands ?? []) progress.peerWorklist.seedDemand(demand);
+    if (input.kind === 'full-connected-peers') {
+      const connectedPeers = snapshotRfc64PublicCatalogAnnouncementPeersV1(
+        input.connectedPeerIds.slice(0, RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1),
+      );
+      for (const peer of connectedPeers) progress.peerWorklist.seed(peer);
+      progress.requestedFullReplay = true;
+    } else if (input.kind === 'connection-demand') {
+      progress.peerWorklist.seedDemand(input.demand);
+    }
     for (const peer of progress.unresolvedPeers) progress.peerWorklist.seed(peer);
-    progress.requestedFullReplay ||= input.fullReplay;
     // A drained worklist can still have an in-flight provider/parity pass.
     if (progress.completion !== null) return progress.completion;
     if (!progress.peerWorklist.hasPending) {
@@ -248,7 +258,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   async #execute(
-    input: Rfc64CatalogReplayRecoveryRunV1,
+    input: Rfc64CatalogReplayRecoveryCommandV1,
     progress: ReplayProgressV1,
     token: number,
   ): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {

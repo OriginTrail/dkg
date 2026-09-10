@@ -120,7 +120,7 @@ import {
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
   snapshotRfc64RemoteCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
-import { Rfc64CoalescingSupervisorV1 } from './coalescing-supervisor-v1.js';
+import { CoalescingRecurringTask } from '../coalescing-recurring-task.js';
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 
 export {
@@ -353,7 +353,7 @@ export class Rfc64PublicCatalogServiceV1 {
   ) => Rfc64CatalogAuthorityPolicyV1;
   readonly #localPeerId: string | undefined;
   readonly #announcedCurrentHeadTargets = new Map<string, AnnouncedCurrentHeadTargetV1>();
-  readonly #announcedCurrentHeadSupervisor: Rfc64CoalescingSupervisorV1 | undefined;
+  readonly #announcedCurrentHeadSupervisor: CoalescingRecurringTask | undefined;
   #started = false;
   #closed = false;
 
@@ -506,7 +506,7 @@ export class Rfc64PublicCatalogServiceV1 {
       this.#currentHeadDiscoveryTransport === undefined || nativeReconciler === undefined
     )
       ? undefined
-      : new Rfc64CoalescingSupervisorV1({
+      : new CoalescingRecurringTask({
         runPass: (signal) => this.#synchronizeAnnouncedCurrentHeads(signal),
         onError: () => undefined,
         closingMessage: 'RFC-64 announced current-head synchronization closing',

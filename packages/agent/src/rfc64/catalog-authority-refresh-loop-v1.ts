@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { Rfc64CoalescingSupervisorV1 } from './coalescing-supervisor-v1.js';
+import { CoalescingRecurringTask } from '../coalescing-recurring-task.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   './catalog-authority-config-v1.js';
 import type { Rfc64CatalogWorkloadOwnerV1 } from './catalog-runtime-v1.js';
@@ -105,7 +105,7 @@ class Rfc64AuthorityRefreshPermitPoolV1 {
 export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadOwnerV1 {
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
   readonly #permits: Rfc64AuthorityRefreshPermitPoolV1;
-  readonly #lanes = new Map<string, Rfc64CoalescingSupervisorV1>();
+  readonly #lanes = new Map<string, CoalescingRecurringTask>();
   readonly #retirements = new Set<Promise<void>>();
   #timer: ReturnType<typeof setInterval> | null = null;
   #started = false;
@@ -121,8 +121,8 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     this.#permits = new Rfc64AuthorityRefreshPermitPoolV1(maxConcurrentReads);
   }
 
-  #createLane(contextGraphId: string): Rfc64CoalescingSupervisorV1 {
-    return new Rfc64CoalescingSupervisorV1({
+  #createLane(contextGraphId: string): CoalescingRecurringTask {
+    return new CoalescingRecurringTask({
       requestWhileRunning: 'drop',
       runPass: async (signal) => {
         const admission = this.#permits.acquire(signal);
@@ -148,7 +148,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
 
   #retireLane(
     contextGraphId: string,
-    lane: Rfc64CoalescingSupervisorV1,
+    lane: CoalescingRecurringTask,
   ): void {
     if (this.#lanes.get(contextGraphId) !== lane) return;
     this.#lanes.delete(contextGraphId);
