@@ -5217,10 +5217,12 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       localCgId, 1n, [target], 100, () => true, controller.signal,
     );
     await entered;
+    expect(receivedSignal?.aborted).toBe(false);
     controller.abort();
 
     await expect(recovery).resolves.toMatchObject({ outcomes: new Map() });
-    expect(receivedSignal).toBe(controller.signal);
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(receivedSignal?.reason).toBe(controller.signal.reason);
   });
 
   it('keeps the main VM slice ahead of repair and abandons a rebind during repair', async () => {

@@ -8,7 +8,11 @@ import type {
 } from '../../src/chain-reconciler.js';
 import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
 import { DKGAgent } from '../../src/index.js';
-import type { ExactAssetSelection } from '../../src/sync/exact-assets.js';
+import {
+  exactAssetUalsForSelection,
+  requireExactAssetSelection,
+  type ExactAssetSelection,
+} from '../../src/sync/exact-assets.js';
 import type {
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-provider-policy.js';
@@ -24,7 +28,7 @@ interface ExactFetchResult {
     insertedTriples: number;
     failedPeers: number;
     failedPhases: number;
-    deferredBackpressure: number;
+    deferredBackpressure?: number;
   };
   disposition: VmRecoveryUalDisposition;
 }
@@ -82,7 +86,7 @@ export interface VmRecoveryHostInternals {
   syncExactKnowledgeAssetsFromPeerDetailed(
     peerId: string,
     contextGraphId: string,
-    selection: ExactAssetSelection,
+    selection: ExactAssetSelection | readonly string[],
     options?: { signal?: AbortSignal; isCurrent?: () => boolean },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(
@@ -218,10 +222,11 @@ export async function createVmRecoveryHostHarness<
     chainAdapter.getKnowledgeAssetUpdateContext = async (kaId) => {
       const ordinal = Number(kaId);
       if (options.sizingUnavailable) {
-        return { merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0 };
+        return { minted: 0n, endEpoch: 0n, tokenAmount: 0n, isImmutable: false, merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0 };
       }
       const footprint = options.footprintForOrdinal?.(ordinal);
       return {
+        minted: 1n, endEpoch: 100n, tokenAmount: 0n, isImmutable: false,
         merkleRootsCount: footprint?.merkleRootsCount ?? 1n,
         byteSize: footprint?.byteSize ?? 1_024n,
         merkleLeafCount: Number(footprint?.merkleLeafCount ?? 8),
@@ -237,12 +242,14 @@ export async function createVmRecoveryHostHarness<
     activeFetches += 1;
     maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
     try {
-      const requested = uals.map((ual) => {
+      const requestedUals: readonly string[] = Array.isArray(uals)
+        ? uals : exactAssetUalsForSelection(requireExactAssetSelection(uals));
+      const requested = requestedUals.map((ual) => {
         const target = targetsByUal.get(ual);
         if (!target) throw new Error(`unexpected UAL ${ual}`);
         return target;
       });
-      fetched.push({ peerId, uals: [...uals] });
+      fetched.push({ peerId, uals: [...requestedUals] });
       const disposition = await options.onFetch(
         peerId,
         requested,
