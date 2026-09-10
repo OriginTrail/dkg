@@ -309,6 +309,12 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
       LOCAL_OP,
     ]);
     expect(head?.shareOperationIds).toEqual([LOCAL_OP, REMOTE_OP]);
+    const idDescriptor = Object.getOwnPropertyDescriptor(head, 'shareOperationId');
+    expect(idDescriptor?.value).toBe(REMOTE_OP);
+    expect(idDescriptor?.get).toBeUndefined();
+    const idsDescriptor = Object.getOwnPropertyDescriptor(head, 'shareOperationIds');
+    expect(idsDescriptor?.value).toEqual([LOCAL_OP, REMOTE_OP]);
+    expect(idsDescriptor?.get).toBeUndefined();
     expect(workspaceHeadIncludesShareOperationId(head!, LOCAL_OP)).toBe(true);
     expect(workspaceHeadIncludesShareOperationId(head!, REMOTE_OP)).toBe(true);
     expect(workspaceHeadIncludesShareOperationId(head!, 'unrelated-op')).toBe(false);
@@ -413,6 +419,38 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
       contextGraphId: CONTEXT_GRAPH,
       head,
     })).rejects.toThrow(KnowledgeAssetOperationPublicSnapshotNotFoundError);
+  });
+
+  it('classifies malformed commitment metadata as corruption before a missing graph', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    const head = await resolveHead(h);
+    if (!head) throw new Error('expected resolved workspace head');
+    const operationSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${LOCAL_OP}`;
+    await h.store.deleteByPattern({
+      graph: h.metaGraph,
+      subject: operationSubject,
+      predicate: `${DKG}publicQuadsCount`,
+    });
+    await h.store.insert([{
+      subject: operationSubject,
+      predicate: `${DKG}publicQuadsCount`,
+      object: '"not-an-integer"',
+      graph: h.metaGraph,
+    }]);
+    const locator = head.operationAliases[0].snapshotLocator;
+    if (locator.kind !== 'graph') throw new Error('expected graph locator');
+    await h.store.dropGraph(locator.graph);
+
+    const error = await resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+      store: h.store,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      head,
+    }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(KnowledgeAssetOperationPublicSnapshotNotFoundError);
+    expect((error as Error).message).toContain('snapshot is missing or corrupt');
   });
 
   it('exposes an explicit allow-list as a persisted access-envelope state', async () => {

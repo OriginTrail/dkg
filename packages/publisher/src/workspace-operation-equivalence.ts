@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type {
+  GraphKnowledgeAssetAccessEnvelope,
+} from '@origintrail-official/dkg-core';
+
 /** Content commitment shared by the publisher and recovery comparison policies. */
 export interface WorkspaceOperationCommitment {
   readonly publicQuadsDigest: string;
@@ -8,20 +12,16 @@ export interface WorkspaceOperationCommitment {
   readonly privateTripleCount: number;
 }
 
-export type WorkspaceAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
-
 /**
  * Effective access plus the durable provenance that established it. Legacy
  * operations omitted the policy row, so that state must remain distinct from
  * an explicitly persisted default even though the two compare equivalently.
  */
 export type WorkspaceOperationAccessEnvelope =
-  | Readonly<{
+  | Readonly<GraphKnowledgeAssetAccessEnvelope & {
       kind: 'persisted';
-      accessPolicy: WorkspaceAccessPolicy;
-      allowedPeers: readonly string[];
     }>
-  | Readonly<{
+  | Readonly<GraphKnowledgeAssetAccessEnvelope & {
       kind: 'legacy-default';
       accessPolicy: 'public' | 'ownerOnly';
       allowedPeers: readonly [];

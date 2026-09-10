@@ -74,7 +74,6 @@ export {
   type WorkspaceOperationProvenance,
   type WorkspaceOperationCommitment,
   type PublisherWorkspaceOperationSemantics,
-  type WorkspaceAccessPolicy,
   type WorkspaceOperationAccessEnvelope,
 } from './workspace-operation-equivalence.js';
 export {

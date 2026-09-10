@@ -227,24 +227,13 @@ function createKnowledgeAssetWorkspaceHead(
   const head = {
     ...fields,
     operationAliases,
+    shareOperationId: selected.shareOperationId,
+    shareOperationIds,
+    publishedAt: selected.publishedAt,
     accessPolicy: fields.access.accessPolicy,
     accessPolicyExplicit: fields.access.kind === 'persisted',
     allowedPeers: [...fields.access.allowedPeers],
-  } as KnowledgeAssetWorkspaceHead;
-  Object.defineProperties(head, {
-    shareOperationId: {
-      enumerable: true,
-      get: () => selected.shareOperationId,
-    },
-    shareOperationIds: {
-      enumerable: true,
-      get: () => shareOperationIds,
-    },
-    publishedAt: {
-      enumerable: true,
-      get: () => selected.publishedAt,
-    },
-  });
+  } satisfies KnowledgeAssetWorkspaceHead;
   return Object.freeze(head);
 }
 
@@ -1082,6 +1071,17 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
   const snapshotGraph = row?.['snapshotGraph'];
   const snapshotRef = stripLiteral(row?.['snapshotRef'])?.trim()
     ?? (snapshotGraph ? undefined : expectedDigest);
+  if (
+    !expectedDigest
+    || typeof expectedCount !== 'number'
+    || !Number.isSafeInteger(expectedCount)
+    || expectedCount < 0
+  ) {
+    throw new Error(
+      `Immutable graph-scoped public snapshot is missing or corrupt for ` +
+      `share operation ${params.shareOperationId}`,
+    );
+  }
   let quads: Quad[] | null = null;
   if (snapshotRef) {
     if (!params.publicSnapshotStore) {
@@ -1115,8 +1115,6 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
     );
   }
   if (
-    !expectedDigest ||
-    !Number.isInteger(expectedCount) ||
     quads.length !== expectedCount ||
     workspacePublicQuadsDigest(quads) !== expectedDigest
   ) {
