@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { applyContextGraphAuthorityGenerationEvent } from './context-graph-authority-generation.js';
+
 /**
  * One compact authority generation for a ContextGraphStorage token.
  *
@@ -143,14 +145,6 @@ function sortAndFreezeStates(
       .sort((left, right) => compareContextGraphIds(left.contextGraphId, right.contextGraphId))
       .map(freezeState),
   );
-}
-
-function increment(value: number, label: string): number {
-  const next = value + 1;
-  if (!Number.isSafeInteger(next)) {
-    throw new Error(`Context Graph authority index ${label} exceeds the safe integer range`);
-  }
-  return next;
 }
 
 function normalizeIndexState(
@@ -352,22 +346,6 @@ export function reduceContextGraphAuthorityIndexPage(
   for (const event of normalizedEvents) {
     const contextGraphId = event.contextGraphId.toString(10);
     const prior = states.get(contextGraphId);
-    if (event.name === 'ContextGraphCreated') {
-      if (prior !== undefined) {
-        throw new Error(`Context Graph ${contextGraphId} has more than one creation event`);
-      }
-      states.set(contextGraphId, freezeState({
-        contextGraphId,
-        nameHash: event.nameHash,
-        ownershipEra: 0,
-        policyVersion: 0,
-        rosterVersion: 0,
-        sourceBlockNumber: event.blockNumber,
-        sourceBlockHash: event.blockHash,
-      }));
-      changedIds.add(contextGraphId);
-      continue;
-    }
     if (
       event.name === 'Transfer'
       && (event.from === ZERO_ADDRESS || event.to === ZERO_ADDRESS || event.from === event.to)
@@ -375,39 +353,12 @@ export function reduceContextGraphAuthorityIndexPage(
       // ERC-721 mint/burn/self-transfer does not create an ownership generation.
       continue;
     }
-    if (prior === undefined) {
-      throw new Error(`Context Graph ${contextGraphId} authority event precedes creation`);
-    }
-    let next: ContextGraphAuthorityIndexState;
-    switch (event.name) {
-      case 'Transfer':
-        next = {
-          ...prior,
-          ownershipEra: increment(prior.ownershipEra, 'ownership era'),
-          policyVersion: increment(prior.policyVersion, 'policy version'),
-          rosterVersion: increment(prior.rosterVersion, 'roster version'),
-          sourceBlockNumber: event.blockNumber,
-          sourceBlockHash: event.blockHash,
-        };
-        break;
-      case 'PublishPolicyUpdated':
-      case 'PublishAuthorityUpdated':
-        next = {
-          ...prior,
-          policyVersion: increment(prior.policyVersion, 'policy version'),
-          sourceBlockNumber: event.blockNumber,
-          sourceBlockHash: event.blockHash,
-        };
-        break;
-      case 'AgentParticipantAdded':
-      case 'AgentParticipantRemoved':
-        next = {
-          ...prior,
-          rosterVersion: increment(prior.rosterVersion, 'roster version'),
-        };
-        break;
-    }
-    states.set(contextGraphId, freezeState(next));
+    const next = applyContextGraphAuthorityGenerationEvent(
+      prior,
+      event,
+      `Context Graph ${contextGraphId}`,
+    );
+    states.set(contextGraphId, freezeState({ contextGraphId, ...next }));
     changedIds.add(contextGraphId);
   }
 

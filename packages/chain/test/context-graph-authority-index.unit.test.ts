@@ -3,10 +3,15 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  ContextGraphAuthorityHistoryCache,
+  resolveContextGraphAuthorityHistory,
+} from '../src/context-graph-authority-history.js';
+import {
   normalizeContextGraphAuthorityIndexCheckpoint,
   reduceContextGraphAuthorityIndexPage,
   type ContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexEvent,
+  type ContextGraphAuthorityIndexStore,
 } from '../src/context-graph-authority-index.js';
 
 const ZERO = `0x${'0'.repeat(40)}`;
@@ -90,6 +95,50 @@ describe('contract-wide Context Graph authority index reducer', () => {
     expect(Object.isFrozen(result.checkpoint)).toBe(true);
     expect(Object.isFrozen(result.checkpoint.states)).toBe(true);
     expect(result.checkpoint.states.every(Object.isFrozen)).toBe(true);
+  });
+
+  it('matches the legacy per-graph reducer for the same event history', async () => {
+    const index = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 20,
+      throughBlockHash: blockHash(20),
+      events: [
+        event('AgentParticipantRemoved', 9n, 13, 0),
+        event('PublishAuthorityUpdated', 9n, 12, 2),
+        event('AgentParticipantAdded', 9n, 11, 2),
+        creation(9n, 10, 1, NAME_9),
+        event('Transfer', 9n, 12, 1, { from: OWNER, to: NEXT_OWNER }),
+      ],
+    }).checkpoint.states[0]!;
+    const history = await resolveContextGraphAuthorityHistory({
+      cache: new ContextGraphAuthorityHistoryCache(),
+      cacheKey: 'parity:9',
+      readScope: {},
+      contextGraphId: 9n,
+      finalized: { number: 20, hash: blockHash(20) },
+      pageSize: 100,
+      loadColdFromBlock: async () => 10,
+      readBlockHash: async (blockNumber) => blockHash(blockNumber),
+      readCreationEvents: async () => [{
+        blockNumber: 10,
+        blockHash: blockHash(10),
+        index: 1,
+        nameHash: NAME_9,
+      }],
+      readEvents: async ({ name }) => ({
+        Transfer: [{ blockNumber: 12, blockHash: blockHash(12), index: 1 }],
+        PublishAuthorityUpdated: [{
+          blockNumber: 12, blockHash: blockHash(12), index: 2,
+        }],
+        AgentParticipantAdded: [{ blockNumber: 11, blockHash: blockHash(11), index: 2 }],
+        AgentParticipantRemoved: [{ blockNumber: 13, blockHash: blockHash(13), index: 0 }],
+        PublishPolicyUpdated: [],
+      })[name],
+    });
+    const { contextGraphId: _, ...indexGeneration } = index;
+    const { throughBlockNumber: _number, throughBlockHash: _hash, ...legacyGeneration } =
+      history.state;
+    expect(indexGeneration).toEqual(legacyGeneration);
   });
 
   it('reduces an exactly contiguous suffix and emits only changed replacement rows', () => {
@@ -263,6 +312,16 @@ describe('contract-wide Context Graph authority index reducer', () => {
       ...valid,
       cursor: { ...valid.cursor, throughBlockHash: 'bad' },
     })).toBeUndefined();
+  });
+
+  it('decodes opaque durable reads only at the chain-owned boundary', async () => {
+    const store: ContextGraphAuthorityIndexStore = {
+      load: async () => ({ cursor: 'not-a-cursor', states: [] }),
+      commitPage: async () => true,
+      delete: async () => undefined,
+    };
+    expect(normalizeContextGraphAuthorityIndexCheckpoint(await store.load('scope')))
+      .toBeUndefined();
   });
 
   it('rejects counter overflow before a checkpoint can be emitted', () => {
