@@ -756,6 +756,7 @@ function constructConfiguredChainAdapter(
       minPublisherTracWei: config.chainConfig.minPublisherTracWei,
       contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       contextGraphAuthorityHistoryStore: config.contextGraphAuthorityHistoryStore,
+      contextGraphAuthorityIndexStore: config.contextGraphAuthorityIndexStore,
     };
     const chain = config.chainConfig.adminPrivateKey
       ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })

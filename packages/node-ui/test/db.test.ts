@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphAuthorityHistoryStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
+import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphAuthorityIndexStore, SqliteContextGraphAuthorityHistoryStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -2361,6 +2361,208 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     expect(await reopened.load(key)).toEqual(checkpoint);
     await reopened.delete(key);
     expect(await reopened.load(key)).toBeUndefined();
+  });
+
+  it('atomically advances a contract-wide Context Graph authority index', async () => {
+    const store = new SqliteContextGraphAuthorityIndexStore(db);
+    const scope = 'evm:84532:hub=0xabc:0x3333333333333333333333333333333333333333';
+    const firstCursor = {
+      deploymentBlockNumber: 100,
+      throughBlockNumber: 149,
+      throughBlockHash: `0x${'11'.repeat(32)}`,
+      stateCount: 2,
+    };
+    const state9 = {
+      contextGraphId: '9',
+      nameHash: `0x${'99'.repeat(32)}`,
+      ownershipEra: 0,
+      policyVersion: 0,
+      rosterVersion: 0,
+      sourceBlockNumber: 110,
+      sourceBlockHash: `0x${'12'.repeat(32)}`,
+    };
+    const state10 = {
+      contextGraphId: '10',
+      nameHash: `0x${'aa'.repeat(32)}`,
+      ownershipEra: 1,
+      policyVersion: 2,
+      rosterVersion: 3,
+      sourceBlockNumber: 140,
+      sourceBlockHash: `0x${'13'.repeat(32)}`,
+    };
+
+    expect(await store.load(scope)).toBeUndefined();
+    expect(await store.commitPage(scope, undefined, firstCursor, [state10, state9])).toBe(true);
+    expect(await store.load(scope)).toEqual({
+      cursor: firstCursor,
+      states: [state9, state10],
+    });
+
+    const nextCursor = {
+      ...firstCursor,
+      throughBlockNumber: 199,
+      throughBlockHash: `0x${'22'.repeat(32)}`,
+    };
+    const updatedState10 = {
+      ...state10,
+      policyVersion: 3,
+      sourceBlockNumber: 180,
+      sourceBlockHash: `0x${'23'.repeat(32)}`,
+    };
+    expect(await store.commitPage(scope, firstCursor, nextCursor, [updatedState10])).toBe(true);
+    expect(await store.load(scope)).toEqual({
+      cursor: nextCursor,
+      states: [state9, updatedState10],
+    });
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteContextGraphAuthorityIndexStore(db);
+    expect(await reopened.load(scope)).toEqual({
+      cursor: nextCursor,
+      states: [state9, updatedState10],
+    });
+  });
+
+  it('rejects stale index writers and rolls a state-count failure back atomically', async () => {
+    const store = new SqliteContextGraphAuthorityIndexStore(db);
+    const scope = 'scope-a';
+    const cursor = {
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 20,
+      throughBlockHash: `0x${'11'.repeat(32)}`,
+      stateCount: 1,
+    };
+    const state = {
+      contextGraphId: '9',
+      nameHash: `0x${'99'.repeat(32)}`,
+      ownershipEra: 0,
+      policyVersion: 0,
+      rosterVersion: 0,
+      sourceBlockNumber: 10,
+      sourceBlockHash: `0x${'12'.repeat(32)}`,
+    };
+    await store.commitPage(scope, undefined, cursor, [state]);
+    const staleNext = {
+      ...cursor,
+      throughBlockNumber: 30,
+      throughBlockHash: `0x${'22'.repeat(32)}`,
+    };
+    expect(await store.commitPage(scope, undefined, staleNext, [{
+      ...state,
+      policyVersion: 99,
+    }])).toBe(false);
+    expect(await store.load(scope)).toEqual({ cursor, states: [state] });
+
+    const mismatchedCount = { ...staleNext, stateCount: 2 };
+    await expect(store.commitPage(scope, cursor, mismatchedCount, [{
+      ...state,
+      policyVersion: 1,
+    }])).rejects.toThrow('state count 1 does not match cursor 2');
+    expect(await store.load(scope)).toEqual({ cursor, states: [state] });
+  });
+
+  it('rejects malformed or non-advancing authority-index page commits', async () => {
+    const store = new SqliteContextGraphAuthorityIndexStore(db);
+    const cursor = {
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 20,
+      throughBlockHash: `0x${'11'.repeat(32)}`,
+      stateCount: 0,
+    };
+    await expect(store.commitPage('', undefined, cursor, []))
+      .rejects.toThrow('scope must not be empty');
+    await store.commitPage('scope', undefined, cursor, []);
+    await expect(store.commitPage('scope', cursor, cursor, []))
+      .rejects.toThrow('must advance within one deployment');
+    await expect(store.commitPage('scope', cursor, {
+      ...cursor,
+      throughBlockNumber: 30,
+      throughBlockHash: 'bad',
+    }, [])).rejects.toThrow('Invalid Context Graph authority index next cursor');
+    await expect(store.commitPage('scope', cursor, {
+      ...cursor,
+      throughBlockNumber: 30,
+      throughBlockHash: `0x${'22'.repeat(32)}`,
+      stateCount: 1,
+    }, [{
+      contextGraphId: '09',
+      nameHash: `0x${'99'.repeat(32)}`,
+      ownershipEra: 0,
+      policyVersion: 0,
+      rosterVersion: 0,
+      sourceBlockNumber: 12,
+      sourceBlockHash: `0x${'12'.repeat(32)}`,
+    }])).rejects.toThrow('Invalid Context Graph authority index changed state');
+    expect(await store.load('scope')).toEqual({ cursor, states: [] });
+  });
+
+  it('deletes one authority-index scope without touching another or the v1 store', async () => {
+    const index = new SqliteContextGraphAuthorityIndexStore(db);
+    const history = new SqliteContextGraphAuthorityHistoryStore(db);
+    const cursor = {
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 20,
+      throughBlockHash: `0x${'11'.repeat(32)}`,
+      stateCount: 0,
+    };
+    await index.commitPage('scope-a', undefined, cursor, []);
+    await index.commitPage('scope-b', undefined, cursor, []);
+    await history.save('legacy', {
+      version: 1,
+      state: {
+        throughBlockNumber: 20,
+        throughBlockHash: `0x${'11'.repeat(32)}`,
+        nameHash: `0x${'99'.repeat(32)}`,
+        ownershipEra: 0,
+        policyVersion: 0,
+        rosterVersion: 0,
+        sourceBlockNumber: 10,
+        sourceBlockHash: `0x${'12'.repeat(32)}`,
+      },
+      integrity: `0x${'13'.repeat(32)}`,
+    });
+
+    await index.delete('scope-a');
+    expect(await index.load('scope-a')).toBeUndefined();
+    expect(await index.load('scope-b')).toEqual({ cursor, states: [] });
+    expect(await history.load('legacy')).toBeDefined();
+  });
+
+  it('adds and repairs the V36 authority-index schema without deleting v1 checkpoints', async () => {
+    const legacyKey = `${SqliteContextGraphAuthorityHistoryStore.KEY_PREFIX}legacy`;
+    db.db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)')
+      .run(legacyKey, JSON.stringify({ version: 1, state: { marker: true } }));
+    db.db.exec(`
+      DROP TABLE context_graph_authority_index_states;
+      DROP TABLE context_graph_authority_index_cursors;
+    `);
+    db.db.pragma('user_version = 35');
+    db.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    const tables = new Set(
+      (db.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as
+        Array<{ name: string }>).map(({ name }) => name),
+    );
+    expect(tables.has('context_graph_authority_index_cursors')).toBe(true);
+    expect(tables.has('context_graph_authority_index_states')).toBe(true);
+    const preservedLegacy = db.db.prepare(
+      'SELECT value FROM settings WHERE key = ?',
+    ).get(legacyKey) as { value: string };
+    expect(preservedLegacy.value).toContain('"version":1');
+
+    db.db.exec(`
+      DROP TABLE context_graph_authority_index_states;
+      DROP TABLE context_graph_authority_index_cursors;
+    `);
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.prepare(`
+      SELECT count(*) AS count FROM sqlite_master
+      WHERE type = 'table' AND name LIKE 'context_graph_authority_index_%'
+    `).get()).toEqual({ count: 2 });
   });
 });
 

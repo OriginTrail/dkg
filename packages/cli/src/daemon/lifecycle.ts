@@ -66,6 +66,7 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
+  trustContextGraphAuthorityIndexStore,
   trustContextGraphAuthorityHistoryStore,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
@@ -99,6 +100,7 @@ import {
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
   SqliteContextGraphAuthorityHistoryStore,
+  SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
   type MetricsSource,
@@ -1799,6 +1801,9 @@ async function runDaemonInnerWithStartupOwnership(
   const contextGraphAuthorityHistoryStore = trustContextGraphAuthorityHistoryStore(
     new SqliteContextGraphAuthorityHistoryStore(dashDb),
   );
+  const contextGraphAuthorityIndexStore = trustContextGraphAuthorityIndexStore(
+    new SqliteContextGraphAuthorityIndexStore(dashDb),
+  );
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1929,6 +1934,7 @@ async function runDaemonInnerWithStartupOwnership(
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
     contextGraphAuthorityHistoryStore,
+    contextGraphAuthorityIndexStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,

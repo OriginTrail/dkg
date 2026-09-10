@@ -57,6 +57,7 @@ import type {
   ApprovalPolicy,
   ChainAdapter,
   TrustedContextGraphAuthorityHistoryStore,
+  TrustedContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
 } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
@@ -1896,6 +1897,8 @@ export interface DKGAgentConfig {
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /** Durable finalized Context Graph authority-history checkpoints. */
   contextGraphAuthorityHistoryStore?: TrustedContextGraphAuthorityHistoryStore;
+  /** Durable contract-wide authority index (scanner cutover is additive). */
+  contextGraphAuthorityIndexStore?: TrustedContextGraphAuthorityIndexStore;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.
