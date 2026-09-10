@@ -1,5 +1,10 @@
 export * from './chain-adapter.js';
 export {
+  type ContextGraphAuthorityHistoryCheckpointV1,
+  type ContextGraphAuthorityHistoryState,
+  type ContextGraphAuthorityHistoryStore,
+} from './context-graph-authority-history.js';
+export {
   bindContextGraphAuthorityReader,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
@@ -122,14 +127,17 @@ export {
 } from './publisher-plan.js';
 // RPC-usage accounting: ONLY the typed window contract is public API (consumed
 // by the ChainAdapter.drainRpcUsage capability, the agent boundary, and the
-// daemon's rpc_usage log emission). The parsing/label-bounding helpers stay
-// package-internal (imported via ./rpc-usage.js) so the transport accounting
-// implementation can change without a public-API break.
+// daemon's rpc_usage log emission). Endpoint-slot normalization is shared with
+// downstream formatters so producer and consumer use one bounded vocabulary.
 export {
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
+  RPC_ENDPOINT_SLOT_LABELS,
   normalizeRpcUsageWindow,
+  normalizeRpcEndpointSlotLabel,
   rpcUsageWindowTotal,
+  type RpcEndpointSlotLabel,
+  type RpcUsageAttribution,
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
   type RpcUsageWindow,
@@ -155,10 +163,14 @@ export {
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
   ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
   isChainRpcTransportError,
+  isRpcEndpointsExhaustedError,
   createRpcTimeoutError,
   type ChainRpcTransportCode,
   type ChainRpcTransportErrorLike,
+  type RpcEndpointExhaustionKind,
+  type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
 export {
   // Surfaced for the daemon /api/status counter + the CLI failover loop.

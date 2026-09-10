@@ -24,6 +24,7 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
   NoChainAdapter,
+  RpcEndpointsExhaustedError,
   type ChainAdapter,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -35,6 +36,8 @@ import { Rfc64PublicCatalogSuccessorProducerV1 } from
   '../src/rfc64/public-catalog-successor-producer-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
+import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
+  '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 import type { Rfc64CatalogRuntimeV1 } from '../src/rfc64/catalog-runtime-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
   '../src/rfc64/catalog-semantic-authority-transition-v1.js';
@@ -1226,6 +1229,94 @@ describe('RFC-64 rollout authority integration', () => {
         name: 'Rfc64CatalogAuthorityResolutionErrorV1',
         code: 'registered-authority-adapter-unsupported',
       });
+  });
+
+  it('shares provider-pool exhaustion across registered authority reconciliations', async () => {
+    const readAuthority = vi.fn(async () => {
+      throw new RpcEndpointsExhaustedError(
+        'authority read failed on every provider',
+        { exhaustionKind: 'mixed', retryAfterMs: 30_000 },
+      );
+    });
+    const edge = await startAgent({
+      name: 'registered-authority-shared-rpc-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+      `${AUTHOR}/second-registered-authority` as ContextGraphIdV1,
+    )).rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+
+    expect(readAuthority).toHaveBeenCalledOnce();
+    expect(readAuthority).toHaveBeenCalledWith(9n, {
+      signal: expect.any(AbortSignal),
+    });
+  });
+
+  it('propagates caller cancellation into the registered authority snapshot read', async () => {
+    let readSignal: AbortSignal | undefined;
+    const readAuthority = vi.fn(async (
+      _contextGraphId: bigint,
+      options?: { signal?: AbortSignal },
+    ) => {
+      readSignal = options?.signal;
+      return Object.freeze({
+        ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [], '0'),
+        accessPolicy: 0,
+      });
+    });
+    const edge = await startAgent({
+      name: 'registered-authority-signal-propagation',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+    const controller = new AbortController();
+
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      controller.signal,
+    )).resolves.toMatchObject({ policy: { contextGraphId: CONTEXT_GRAPH_ID } });
+    expect(readSignal).toBeInstanceOf(AbortSignal);
+    const reason = new Error('caller stopped');
+    controller.abort(reason);
+    expect(readSignal).toMatchObject({ aborted: true, reason });
+  });
+
+  it('opens the shared circuit when cold numeric binding discovery exhausts providers', async () => {
+    const readAuthority = vi.fn();
+    const edge = await startAgent({
+      name: 'registered-authority-id-discovery-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    const resolveOnChainId = vi.spyOn(edge, 'getContextGraphOnChainId')
+      .mockRejectedValue(new RpcEndpointsExhaustedError(
+        'numeric context graph lookup exhausted every provider',
+        { exhaustionKind: 'mixed', retryAfterMs: 30_000 },
+      ));
+
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
+      .rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+      `${AUTHOR}/second-cold-binding` as ContextGraphIdV1,
+    )).rejects.toSatisfy(isRfc64AuthorityRpcCircuitOpenErrorV1);
+
+    expect(resolveOnChainId).toHaveBeenCalledOnce();
+    expect(readAuthority).not.toHaveBeenCalled();
   });
 
   it('rejects a curator binding returned for a different registered Context Graph ID', async () => {

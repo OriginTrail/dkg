@@ -1,3 +1,6 @@
+import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
+export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
+import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -714,30 +717,24 @@ export async function storeWorkspaceOperationPublicQuads(params: {
       }
     }
     snapshotQuads.push(
-      { subject, predicate: `${DKG}contextGraphId`, object: lit(params.contextGraphId), graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}shareOperationId`, object: lit(params.shareOperationId), graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}publicSliceRootEntity`, object: root, graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}publicQuadsDigest`, object: lit(digest), graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}publicQuadsCount`, object: intLit(rootQuads.length), graph: workspaceMetaGraph },
-      // GH #748: dedicated `dkg:publisherPeerId` field for peer-ID-bound reads
-      // (resolveCompactWorkspaceOperationPublicQuads / Legacy variant + finalization);
-      // `prov:wasAttributedTo` carries the durable agent DID URI when known.
-      { subject, predicate: `${DKG}publisherPeerId`, object: lit(publisherPeerId), graph: workspaceMetaGraph },
-      { subject, predicate: `${PROV}wasAttributedTo`, object: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId), graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}publishedAt`, object: dateLit(timestamp), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.contextGraphId, object: lit(params.contextGraphId), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.shareOperationId, object: lit(params.shareOperationId), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.publicSliceRootEntity, object: root, graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.publicQuadsDigest, object: lit(digest), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.publicQuadsCount, object: intLit(rootQuads.length), graph: workspaceMetaGraph },
+      // Peer-bound readers use the dedicated field; attribution uses the durable agent DID when known.
+      { subject, predicate: ENTITY_SHARE.publisherPeerId, object: lit(publisherPeerId), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.wasAttributedTo, object: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.publishedAt, object: dateLit(timestamp), graph: workspaceMetaGraph },
     );
+    if (snapshotGraph) snapshotQuads.push({ subject, predicate: ENTITY_SHARE.publicSnapshotGraph, object: snapshotGraph, graph: workspaceMetaGraph });
+    if (subGraphName) snapshotQuads.push({ subject, predicate: ENTITY_SHARE.subGraphName, object: lit(subGraphName), graph: workspaceMetaGraph });
     // RFC ka-metadata-trim Phase 2: `dkg:publicSnapshotRef` is no longer
     // written — `FileWorkspacePublicSnapshotStore.putSnapshot` returns
     // `ref === digest`, so the row was byte-identical to
     // `dkg:publicQuadsDigest`. A store-backed snapshot row is now identified
     // by "digest present AND no `dkg:publicSnapshotGraph` row"; readers are
     // read-both (an explicit legacy ref row wins when present).
-    if (snapshotGraph) {
-      snapshotQuads.push({ subject, predicate: `${DKG}publicSnapshotGraph`, object: snapshotGraph, graph: workspaceMetaGraph });
-    }
-    if (subGraphName) {
-      snapshotQuads.push({ subject, predicate: `${DKG}subGraphName`, object: lit(subGraphName), graph: workspaceMetaGraph });
-    }
   }
   await params.store.insert(snapshotQuads);
 }
@@ -1424,34 +1421,8 @@ function normalizeOptionalSubGraphName(subGraphName: string | undefined): string
   return normalized;
 }
 
-function workspaceOperationSubject(contextGraphId: string, shareOperationId: string): string {
-  const normalizedContextGraphId = safeWorkspaceIdPart(contextGraphId, 'contextGraphId');
-  const normalizedShareOperationId = safeWorkspaceIdPart(shareOperationId, 'shareOperationId');
-  const subject = `urn:dkg:share:${normalizedContextGraphId}:${normalizedShareOperationId}`;
-  assertSafeIri(subject);
-  return subject;
-}
 
-/** Canonical durable SWM head locator shared by writers and recovery admission. */
-export function workspaceKnowledgeAssetHeadSubject(kaUal: string): string {
-  const scope = createGraphKnowledgeAssetScope(kaUal, 1);
-  const subject = `${scope.ual}#dkg-swm-head`;
-  assertSafeIri(subject);
-  return subject;
-}
 
-function workspaceOperationPublicSliceSubject(
-  contextGraphId: string,
-  shareOperationId: string,
-  rootEntity: string,
-  subGraphName?: string,
-): string {
-  const parts = [contextGraphId, subGraphName ?? '_', shareOperationId, rootEntity]
-    .map((part) => encodeURIComponent(part));
-  const subject = `urn:dkg:public-stage:${parts.join(':')}`;
-  assertSafeIri(subject);
-  return subject;
-}
 
 function workspaceOperationPublicSnapshotGraph(
   contextGraphId: string,
@@ -1564,17 +1535,4 @@ function parsePositiveBigIntLiteral(value: string | undefined): bigint {
 
 function isPresent<T>(value: T | undefined): value is T {
   return value !== undefined;
-}
-
-function safeWorkspaceIdPart(value: string, fieldName: 'contextGraphId' | 'shareOperationId'): string {
-  const normalized = value.trim();
-  if (normalized.length === 0) {
-    throw new Error(`Shared-memory resolution requires a non-empty ${fieldName}`);
-  }
-
-  if (/[\s<>"{}|^`\\]/.test(normalized)) {
-    throw new Error(`Shared-memory resolution rejected unsafe ${fieldName}: ${value}`);
-  }
-
-  return normalized;
 }

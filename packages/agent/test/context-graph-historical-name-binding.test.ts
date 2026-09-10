@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
 import { projectContextGraphSubscriptionPersistence } from '../src/context-graph-subscription-policy.js';
 import {
   LOCAL_ID,
@@ -439,6 +440,43 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.agent.forceClearVmReconcileStateForContextGraph).toHaveBeenCalledOnce();
   });
 
+  it('lets a fresh reverse binding release a failed-live hold before the periodic sweep', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.vmReconcileEnabled = () => true;
+    fixture.agent.vmReconcileLifecycleGeneration = 1;
+    fixture.agent.vmReconcileRotationClosed = false;
+    fixture.agent.resolveLocalCgIdByOnChainId = () => null;
+    const sources: string[] = [];
+    const runtime = new VmReconcileSchedulingRuntime<boolean>(async (_key, source) => {
+      sources.push(source);
+      if (sources.length === 1) throw new Error('transient discovery miss');
+      return true;
+    }, () => undefined);
+    fixture.agent.vmReconcileScheduling = runtime;
+
+    try {
+      runtime.triggerLive(LOCAL_ID);
+      await runtime.waitForIdle(LOCAL_ID);
+      runtime.triggerLive(LOCAL_ID);
+      await runtime.waitForIdle(LOCAL_ID);
+      expect(sources).toEqual(['live']);
+
+      fixture.agent.bindSubscriptionReverseNameHashOnChainId(
+        LOCAL_ID,
+        fixture.subscription,
+        '42',
+        NAME_HASH,
+      );
+      await expect(fixture.agent.handleKARegisteredNudge('42', 99n, {}))
+        .resolves.toBe(LOCAL_ID);
+      await runtime.waitForIdle(LOCAL_ID);
+
+      expect(sources).toEqual(['live', 'live']);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('invalidates the reverse candidate and cursor when the subscription commitment changes', () => {
     const fixture = selectedFixture();
     fixture.agent.bindSubscriptionReverseNameHashOnChainId(
@@ -573,7 +611,10 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.agent.vmReconcileRotationClosed = false;
     fixture.agent.resolveLocalCgIdByOnChainId = () => null;
     const triggerLive = vi.fn();
-    fixture.agent.vmReconcileDispatcher = { triggerLive };
+    fixture.agent.vmReconcileScheduling = {
+      triggerLive,
+      releaseLiveHold: vi.fn(),
+    };
 
     await expect(fixture.agent.handleKARegisteredNudge(
       '42',
