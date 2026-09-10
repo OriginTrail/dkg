@@ -188,7 +188,9 @@ const PINNED_DIGESTS: Record<string, string> = {
   // Merged surface: OT-RFC-53 deposit events/functions + main's KC→KA getter
   // rename (getContextGraphKCCount/At/List → getContextGraphKaCount/At/List).
   // Digests recomputed post-merge from the combined ABI.
-  ContextGraphs:                '54583e20167c37f4356247cb6bc657b0dccf6f17f99a3267427674a35a151bcf',
+  // Updated issue #2440: independent registration PCA coverage adds
+  // createContextGraphWithPcaCoverage and ContextGraphRegistrationDepositWaived.
+  ContextGraphs:                'f9bf3663862732c43e402055638d43e799a01268908807e0430bd381cb9fc3f3',
   // Repinned: decoupled sampling list (10.0.6). Adds getSamplingKaCount/At
   // (the compacted per-CG list the within-CG draw + keeper use) alongside the
   // RandomSampling-gated `swapRemoveSamplingKnowledgeAssetAt` pruning primitive

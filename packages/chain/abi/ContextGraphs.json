@@ -194,6 +194,31 @@
       },
       {
         "indexed": true,
+        "internalType": "uint256",
+        "name": "accountId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "creator",
+        "type": "address"
+      }
+    ],
+    "name": "ContextGraphRegistrationDepositWaived",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
         "internalType": "address",
         "name": "payer",
         "type": "address"
@@ -304,6 +329,60 @@
       }
     ],
     "name": "createContextGraph",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "contextGraphId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address[]",
+        "name": "participantAgents",
+        "type": "address[]"
+      },
+      {
+        "internalType": "uint256",
+        "name": "metadataBatchId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint8",
+        "name": "accessPolicy",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint8",
+        "name": "publishPolicy",
+        "type": "uint8"
+      },
+      {
+        "internalType": "address",
+        "name": "publishAuthority",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "publishAuthorityAccountId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "nameHash",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "registrationPcaAccountId",
+        "type": "uint256"
+      }
+    ],
+    "name": "createContextGraphWithPcaCoverage",
     "outputs": [
       {
         "internalType": "uint256",
