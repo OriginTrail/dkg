@@ -931,7 +931,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         >;
         const contractAddress = (await contract.getAddress()).toLowerCase();
         const cache = this.contextGraphAuthorityHistory;
-        const cacheKey = `${contractAddress}:${contextGraphId.toString(10)}`;
+        const cacheKey = [
+          this.deploymentId,
+          contractAddress,
+          contextGraphId.toString(10),
+        ].join(':');
         const authorityFilters = new Map<string, ethers.DeferredTopicFilter>();
         const readAuthorityEvents = async (
           name: 'ContextGraphCreated' | ContextGraphAuthorityHistoryEventQuery['name'],

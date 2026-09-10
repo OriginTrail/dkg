@@ -7,6 +7,7 @@
  */
 import { Contract } from 'ethers';
 import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
+import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
@@ -98,6 +99,11 @@ export interface EVMAdapterBaseConfig {
    * repeating a historical `eth_getLogs` walk.
    */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /**
+   * Optional durable finalized authority-history checkpoints. Checkpoints are
+   * block-hash revalidated before use and only reduce restart-time log scans.
+   */
+  contextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

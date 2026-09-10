@@ -27,6 +27,20 @@ export interface ContextGraphAuthorityHistoryState {
   readonly sourceBlockHash: string;
 }
 
+/**
+ * Optional durable backing for finalized authority-history watermarks.
+ *
+ * Keys are already scoped by chain deployment, ContextGraphs contract, and
+ * context-graph id by the adapter. Implementations must treat values as
+ * replaceable checkpoints: the cache revalidates the recorded finalized block
+ * hash before using one and falls back to a cold scan on any mismatch.
+ */
+export interface ContextGraphAuthorityHistoryStore {
+  load(cacheKey: string): Promise<ContextGraphAuthorityHistoryState | undefined>;
+  save(cacheKey: string, state: ContextGraphAuthorityHistoryState): Promise<void>;
+  delete(cacheKey: string): Promise<void>;
+}
+
 export type ContextGraphAuthorityHistoryEventName =
   | 'Transfer'
   | 'PublishPolicyUpdated'
@@ -75,12 +89,14 @@ export interface ContextGraphAuthorityHistoryResolution {
 export class ContextGraphAuthorityHistoryCache {
   readonly #entries: BoundedLruCache<string, ContextGraphAuthorityHistoryState>;
   readonly #inflight = new Map<string, Promise<ContextGraphAuthorityHistoryState>>();
+  readonly #persistence = new Map<string, Promise<void>>();
   readonly #identityIds = new WeakMap<object, number>();
   #nextIdentityId = 1;
   #epoch = 0;
 
   constructor(
     readonly maxEntries: number = CONTEXT_GRAPH_AUTHORITY_HISTORY_MAX_ENTRIES,
+    readonly store?: ContextGraphAuthorityHistoryStore,
   ) {
     if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
       throw new Error('Context Graph authority history cache must retain at least one entry');
@@ -138,6 +154,7 @@ export class ContextGraphAuthorityHistoryCache {
           && current.throughBlockHash === state.throughBlockHash
         ) return;
         this.#entries.set(input.cacheKey, state);
+        await this.#saveCheckpoint(input.cacheKey, state);
       },
     });
   }
@@ -165,6 +182,10 @@ export class ContextGraphAuthorityHistoryCache {
     input: ContextGraphAuthorityHistoryLoadInput,
   ): Promise<ContextGraphAuthorityHistoryState> {
     let previous = this.#entries.get(input.cacheKey);
+    if (previous === undefined) {
+      previous = await this.#loadCheckpoint(input.cacheKey);
+      if (previous !== undefined) this.#entries.set(input.cacheKey, previous);
+    }
     if (previous !== undefined) {
       const anchorHash = previous.throughBlockNumber === input.finalized.number
         ? input.finalized.hash
@@ -177,11 +198,122 @@ export class ContextGraphAuthorityHistoryCache {
         if (this.#entries.get(input.cacheKey) === previous) {
           this.#entries.delete(input.cacheKey);
         }
+        // A null historical lookup can be a transient/non-archive provider
+        // limitation. Fail closed for this attempt without destroying a
+        // checkpoint that a failover provider may still validate. A concrete
+        // hash mismatch (or a watermark from the future) is genuinely stale.
+        if (anchorHash !== null || previous.throughBlockNumber > input.finalized.number) {
+          await this.#deleteCheckpoint(input.cacheKey);
+        }
         previous = undefined;
       }
     }
     return loadContextGraphAuthorityHistory({ ...input, previous });
   }
+
+  async #loadCheckpoint(
+    cacheKey: string,
+  ): Promise<ContextGraphAuthorityHistoryState | undefined> {
+    if (this.store === undefined) return undefined;
+    try {
+      return normalizeContextGraphAuthorityHistoryState(await this.store.load(cacheKey));
+    } catch (err) {
+      console.warn(
+        `[chain] Context Graph authority history checkpoint load failed: ${formatError(err)}`,
+      );
+      return undefined;
+    }
+  }
+
+  async #saveCheckpoint(
+    cacheKey: string,
+    state: ContextGraphAuthorityHistoryState,
+  ): Promise<void> {
+    if (this.store === undefined) return;
+    const previousSave = this.#persistence.get(cacheKey) ?? Promise.resolve();
+    const pending = previousSave.catch(() => {}).then(async () => {
+      // A newer publication can arrive while an older store write is queued.
+      // Persist only the current watermark so async stores cannot regress it.
+      if (this.#entries.get(cacheKey) !== state) return;
+      try {
+        await this.store!.save(cacheKey, state);
+      } catch (err) {
+        // Persistence is an RPC-load optimization, never an authority boundary.
+        // The verified in-memory state remains usable for this process lifetime.
+        console.warn(
+          `[chain] Context Graph authority history checkpoint save failed: ${formatError(err)}`,
+        );
+      }
+    });
+    this.#persistence.set(cacheKey, pending);
+    try {
+      await pending;
+    } finally {
+      if (this.#persistence.get(cacheKey) === pending) this.#persistence.delete(cacheKey);
+    }
+  }
+
+  async #deleteCheckpoint(cacheKey: string): Promise<void> {
+    if (this.store === undefined) return;
+    try {
+      await this.store.delete(cacheKey);
+    } catch (err) {
+      console.warn(
+        `[chain] Context Graph authority history checkpoint delete failed: ${formatError(err)}`,
+      );
+    }
+  }
+}
+
+function formatError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function normalizeHash(value: unknown): string | undefined {
+  return typeof value === 'string' && /^0x[0-9a-f]{64}$/i.test(value)
+    ? value.toLowerCase()
+    : undefined;
+}
+
+function normalizeNonNegativeSafeInteger(value: unknown): number | undefined {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
+}
+
+/** Reject malformed/corrupt durable input before it can influence scan bounds. */
+export function normalizeContextGraphAuthorityHistoryState(
+  value: unknown,
+): ContextGraphAuthorityHistoryState | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<Record<keyof ContextGraphAuthorityHistoryState, unknown>>;
+  const throughBlockNumber = normalizeNonNegativeSafeInteger(candidate.throughBlockNumber);
+  const throughBlockHash = normalizeHash(candidate.throughBlockHash);
+  const nameHash = normalizeHash(candidate.nameHash);
+  const ownershipEra = normalizeNonNegativeSafeInteger(candidate.ownershipEra);
+  const policyVersion = normalizeNonNegativeSafeInteger(candidate.policyVersion);
+  const rosterVersion = normalizeNonNegativeSafeInteger(candidate.rosterVersion);
+  const sourceBlockNumber = normalizeNonNegativeSafeInteger(candidate.sourceBlockNumber);
+  const sourceBlockHash = normalizeHash(candidate.sourceBlockHash);
+  if (
+    throughBlockNumber === undefined
+    || throughBlockHash === undefined
+    || nameHash === undefined
+    || ownershipEra === undefined
+    || policyVersion === undefined
+    || rosterVersion === undefined
+    || sourceBlockNumber === undefined
+    || sourceBlockHash === undefined
+    || sourceBlockNumber > throughBlockNumber
+  ) return undefined;
+  return Object.freeze({
+    throughBlockNumber,
+    throughBlockHash,
+    nameHash,
+    ownershipEra,
+    policyVersion,
+    rosterVersion,
+    sourceBlockNumber,
+    sourceBlockHash,
+  });
 }
 
 export interface ResolveContextGraphAuthorityHistoryInput

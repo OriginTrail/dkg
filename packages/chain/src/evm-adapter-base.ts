@@ -983,7 +983,7 @@ export class EVMChainAdapterBase {
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
   /** Finalized authority scan watermarks owned by this adapter lifecycle. */
-  protected readonly contextGraphAuthorityHistory = new ContextGraphAuthorityHistoryCache();
+  protected readonly contextGraphAuthorityHistory: ContextGraphAuthorityHistoryCache;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -1321,6 +1321,10 @@ export class EVMChainAdapterBase {
       deploymentId: this.deploymentId,
       store: config.contextGraphRegistryScanCursorStore,
     });
+    this.contextGraphAuthorityHistory = new ContextGraphAuthorityHistoryCache(
+      undefined,
+      config.contextGraphAuthorityHistoryStore,
+    );
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;

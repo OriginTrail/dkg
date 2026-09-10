@@ -6,6 +6,8 @@ import {
   ContextGraphAuthorityHistoryCache,
   resolveContextGraphAuthorityHistory,
   type ContextGraphAuthorityHistoryCreationEvent,
+  type ContextGraphAuthorityHistoryState,
+  type ContextGraphAuthorityHistoryStore,
   type ResolveContextGraphAuthorityHistoryInput,
 } from '../src/context-graph-authority-history.js';
 
@@ -13,6 +15,24 @@ const FINALIZED_HASH = `0x${'55'.repeat(32)}`;
 const NEXT_FINALIZED_HASH = `0x${'56'.repeat(32)}`;
 const NAME_HASH = `0x${'88'.repeat(32)}`;
 const DIRECT_READ_SCOPE = {};
+
+class MemoryHistoryStore implements ContextGraphAuthorityHistoryStore {
+  readonly states = new Map<string, ContextGraphAuthorityHistoryState>();
+  readonly deleted: string[] = [];
+
+  async load(cacheKey: string): Promise<ContextGraphAuthorityHistoryState | undefined> {
+    return this.states.get(cacheKey);
+  }
+
+  async save(cacheKey: string, state: ContextGraphAuthorityHistoryState): Promise<void> {
+    this.states.set(cacheKey, state);
+  }
+
+  async delete(cacheKey: string): Promise<void> {
+    this.deleted.push(cacheKey);
+    this.states.delete(cacheKey);
+  }
+}
 
 function directHistoryInput(params: Readonly<{
   cache: ContextGraphAuthorityHistoryCache;
@@ -229,6 +249,106 @@ describe('ContextGraphAuthorityHistoryCache', () => {
     expect(coldReads.get('a')?.count).toBe(1);
     expect(coldReads.get('b')?.count).toBe(2);
     expect(coldReads.get('c')?.count).toBe(1);
+  });
+
+  it('hydrates a verified durable checkpoint and scans only its suffix', async () => {
+    const store = new MemoryHistoryStore();
+    const firstColdReads = { count: 0 };
+    const initial = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache: new ContextGraphAuthorityHistoryCache(1_024, store),
+      cacheKey: 'durable',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      coldReads: firstColdReads,
+    }));
+    expect(store.states.size).toBe(0);
+    await initial.publish();
+    expect(firstColdReads.count).toBe(1);
+
+    const restartedColdReads = { count: 0 };
+    const ranges: Array<readonly [number, number]> = [];
+    const restarted = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache: new ContextGraphAuthorityHistoryCache(1_024, store),
+      cacheKey: 'durable',
+      blockNumber: 35,
+      blockHash: NEXT_FINALIZED_HASH,
+      blockHashes: { 30: FINALIZED_HASH },
+      coldReads: restartedColdReads,
+      ordinaryRanges: ranges,
+    }));
+    expect(restartedColdReads.count).toBe(0);
+    expect(ranges).toEqual(Array(5).fill([31, 35]));
+    await restarted.publish();
+    expect(store.states.get('durable')?.throughBlockNumber).toBe(35);
+  });
+
+  it('deletes a durable checkpoint whose finalized anchor changed', async () => {
+    const store = new MemoryHistoryStore();
+    const initial = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache: new ContextGraphAuthorityHistoryCache(1_024, store),
+      cacheKey: 'reorged',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+    }));
+    await initial.publish();
+
+    const coldReads = { count: 0 };
+    const replacement = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache: new ContextGraphAuthorityHistoryCache(1_024, store),
+      cacheKey: 'reorged',
+      blockNumber: 35,
+      blockHash: NEXT_FINALIZED_HASH,
+      blockHashes: { 30: `0x${'99'.repeat(32)}` },
+      coldReads,
+    }));
+    expect(coldReads.count).toBe(1);
+    expect(store.deleted).toEqual(['reorged']);
+    await replacement.publish();
+  });
+
+  it('retains a checkpoint when one provider cannot read its historical anchor', async () => {
+    const store = new MemoryHistoryStore();
+    const initial = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache: new ContextGraphAuthorityHistoryCache(1_024, store),
+      cacheKey: 'non-archive-provider',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+    }));
+    await initial.publish();
+
+    await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache: new ContextGraphAuthorityHistoryCache(1_024, store),
+      cacheKey: 'non-archive-provider',
+      blockNumber: 35,
+      blockHash: NEXT_FINALIZED_HASH,
+    }));
+    expect(store.deleted).toEqual([]);
+    expect(store.states.get('non-archive-provider')?.throughBlockNumber).toBe(30);
+  });
+
+  it('ignores malformed durable input before choosing a scan bound', async () => {
+    const store = new MemoryHistoryStore();
+    store.states.set('malformed', {
+      throughBlockNumber: 30,
+      throughBlockHash: 'not-a-hash',
+      nameHash: NAME_HASH,
+      ownershipEra: 0,
+      policyVersion: 0,
+      rosterVersion: 0,
+      sourceBlockNumber: 1,
+      sourceBlockHash: `0x${'01'.repeat(32)}`,
+    });
+    const coldReads = { count: 0 };
+    const resolution = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache: new ContextGraphAuthorityHistoryCache(1_024, store),
+      cacheKey: 'malformed',
+      blockNumber: 35,
+      blockHash: NEXT_FINALIZED_HASH,
+      coldReads,
+    }));
+    expect(coldReads.count).toBe(1);
+    await resolution.publish();
+    expect(store.states.get('malformed')?.throughBlockHash).toBe(NEXT_FINALIZED_HASH);
   });
 
   it('rejects a malformed creation event without a name hash at runtime', async () => {

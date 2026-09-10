@@ -97,6 +97,7 @@ import {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
+  SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
   type MetricsSource,
@@ -1790,6 +1791,7 @@ async function runDaemonInnerWithStartupOwnership(
   const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
+  const contextGraphAuthorityHistoryStore = new SqliteContextGraphAuthorityHistoryStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1919,6 +1921,7 @@ async function runDaemonInnerWithStartupOwnership(
     changelogCursorStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
+    contextGraphAuthorityHistoryStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,

@@ -233,9 +233,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await closing;
   });
 
-  it('uses the production four-read concurrency cap by default', async () => {
+  it('serializes production authority reads by default to bound cold-start RPC load', async () => {
     const limit = RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.maxConcurrentReads;
-    expect(limit).toBe(4);
+    expect(limit).toBe(1);
     const contextGraphIds = Array.from(
       { length: limit + 1 },
       (_, index) => `cg-${index + 1}`,
@@ -265,10 +265,10 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await Promise.all(started.slice(0, limit));
     expect(attempts).toEqual(contextGraphIds.slice(0, limit));
 
-    let fifthStarted = false;
-    void started[limit]!.then(() => { fifthStarted = true; });
+    let nextStarted = false;
+    void started[limit]!.then(() => { nextStarted = true; });
     await Promise.resolve();
-    expect(fifthStarted).toBe(false);
+    expect(nextStarted).toBe(false);
 
     releases[0]!();
     await started[limit];
