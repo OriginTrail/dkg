@@ -81,6 +81,7 @@ export default defineConfig({
           'test/init-command.test.ts',
           'test/init-chain-config.test.ts',
           'test/start-store-preflight.test.ts',
+          'test/daemon-startup-validation.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
           'test/random-sampling-status.test.ts',

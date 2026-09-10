@@ -62,7 +62,12 @@ export function findReleaseVersionMismatches(version, rootDir = ROOT_DIR) {
 // conservative (type-only imports count too), so adding a new consumer cannot
 // silently publish a package that advertises an unsupported runtime.
 export function findNodeSqliteEngineMismatches(rootDir = ROOT_DIR) {
-  const required = '>=22.13.0 <23.0.0 || >=23.4.0';
+  // CLI package metadata ships with every daemon and is also the source of its
+  // capability diagnostic. Other publishable SQLite consumers must match it.
+  const required = readJson(path.join(rootDir, 'packages', 'cli', 'package.json')).engines?.node;
+  if (typeof required !== 'string' || required.trim() === '') {
+    throw new Error('CLI package.json must declare the Node runtime policy in engines.node');
+  }
   function usesSqlite(dir) {
     if (!fs.existsSync(dir)) return false;
     return fs.readdirSync(dir, { withFileTypes: true }).some((entry) => {

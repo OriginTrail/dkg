@@ -1,5 +1,14 @@
-/** Capability check kept free of daemon, configuration and database imports. */
-export const NODE_SQLITE_SUPPORTED_RANGE = '>=22.13.0 <23.0.0 || >=23.4.0';
+import { readFileSync } from 'node:fs';
+
+// The CLI manifest is the packaged runtime-policy source, shared with release
+// validation. This path is identical from src/ and the published dist/ module.
+const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+  engines?: { node?: unknown };
+};
+if (typeof manifest.engines?.node !== 'string' || manifest.engines.node.trim() === '') {
+  throw new Error('DKG package.json must declare the Node runtime policy in engines.node');
+}
+export const NODE_SQLITE_SUPPORTED_RANGE = manifest.engines.node;
 
 export interface NodeRuntimeHost {
   version: string;
