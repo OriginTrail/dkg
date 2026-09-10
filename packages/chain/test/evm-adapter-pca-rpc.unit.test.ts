@@ -201,9 +201,11 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
 
     expect(contracts.rpcUrls).toEqual(['https://wallet-rpc.example/base-sepolia']);
     expect(contracts.walletRpcUrls).toEqual(['https://wallet-rpc.example/base-sepolia']);
-    expect(contracts.profile).toBe('0x' + '33'.repeat(20));
-    expect(contracts.identity).toBe('0x' + '44'.repeat(20));
-    expect(contracts.identityStorage).toBe('0x' + '55'.repeat(20));
+    expect(contracts.identityWallets).toEqual({
+      profile: '0x' + '33'.repeat(20),
+      identity: '0x' + '44'.repeat(20),
+      storage: '0x' + '55'.repeat(20),
+    });
     expect(JSON.stringify(contracts)).not.toContain('SECRETKEY');
     expect(JSON.stringify(contracts)).not.toContain('private-rpc.example');
   });

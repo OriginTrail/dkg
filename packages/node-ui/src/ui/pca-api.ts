@@ -269,12 +269,15 @@ export interface PcaContracts {
   nft: string;
   /** TRAC ERC-20 address (EIP-55) — `approve`/`allowance`. */
   token: string;
-  /** Profile entrypoint for admin-signed operational-key registration. */
-  profile?: string;
-  /** Identity entrypoint for admin-key registration and key removal. */
-  identity?: string;
-  /** Identity key-purpose read surface. */
-  identityStorage?: string;
+  /** Identity-key management capability. Omitted as a unit on older deployments. */
+  identityWallets?: {
+    /** Profile entrypoint for admin-signed operational-key registration. */
+    profile: string;
+    /** Identity entrypoint for admin-key registration and key removal. */
+    identity: string;
+    /** Identity key-purpose read surface. */
+    storage: string;
+  };
   /** Chain id; may be the compound `"slug:chainId"` form (e.g. `"base:84532"`) — extract the numeric
    *  tail for the viem `Chain.id`. */
   chainId: string | number;

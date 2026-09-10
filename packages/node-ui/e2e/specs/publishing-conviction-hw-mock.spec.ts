@@ -194,6 +194,15 @@ async function installMockApis(page: Page) {
         symbol: 'ETH',
       });
     }
+    if (path === '/api/operational-wallets') {
+      return fulfillJson(route, 200, {
+        identityId: '11',
+        hasProfile: true,
+        adminKeyConfigured: false,
+        canManage: false,
+        wallets: [],
+      });
+    }
     if (path === '/api/pca/contracts') {
       return fulfillJson(route, 200, {
         nft: NFT,
@@ -351,7 +360,10 @@ async function openPca(page: Page) {
 }
 
 async function connectWallet(page: Page, root?: Locator) {
-  const scope = root ?? page.locator('body');
+  // The identity-management section deliberately has its own connect control.
+  // Default PCA-owner flows must target the owner section instead of matching
+  // both controls and tripping Playwright strict-mode resolution.
+  const scope = root ?? page.getByTestId('pca-owned-section');
   await expect(scope.getByTestId('pca-wallet-connect')).toBeVisible();
   await scope.getByTestId('pca-wallet-connect').click();
   await expect(page.getByText(/via Mock Hardware Wallet/i).first()).toBeVisible();

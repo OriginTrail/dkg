@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { getAddress, type Address, type Hex, type TransactionReceipt } from 'viem';
+import { getAddress, zeroAddress, type Address, type Hex, type TransactionReceipt } from 'viem';
 import type { PcaContracts } from '../src/ui/api.js';
 import type { Eip1193Provider } from '../src/ui/web3/eip6963.js';
 import {
@@ -9,9 +9,11 @@ import {
   OPERATIONAL_KEY_PURPOSE,
   identityWalletActionSubmitter,
   identityWalletKey,
+  identityStorageWalletAbi,
   readIdentityWalletSummary,
   type IdentityWalletPublicClient,
   type IdentityWalletClient,
+  type IdentityWalletProgressEvent,
 } from '../src/ui/web3/identityWalletActions.js';
 
 const ADMIN = getAddress(`0x${'11'.repeat(20)}`) as Address;
@@ -27,9 +29,11 @@ const TX_HASH = `0x${'ab'.repeat(32)}` as Hex;
 const CONTRACTS: PcaContracts = {
   nft: NFT,
   token: TOKEN,
-  profile: PROFILE,
-  identity: IDENTITY,
-  identityStorage: IDENTITY_STORAGE,
+  identityWallets: {
+    profile: PROFILE,
+    identity: IDENTITY,
+    storage: IDENTITY_STORAGE,
+  },
   chainId: 'base:84532',
   rpcUrls: ['/api/pca/rpc'],
 };
@@ -77,7 +81,14 @@ function makeHarness(options: {
     [ADMIN_KEY_PURPOSE, adminAddresses],
     [OPERATIONAL_KEY_PURPOSE, operationalAddresses],
   ]);
-  const readContract = vi.fn(async (args: any) => {
+  const readContract = vi.fn(async (args: {
+    address: Address;
+    abi: unknown;
+    functionName: string;
+    args: readonly unknown[];
+  }) => {
+    if (args.address !== IDENTITY_STORAGE) throw new Error(`Unexpected read target ${args.address}`);
+    if (args.abi !== identityStorageWalletAbi) throw new Error('Unexpected read ABI');
     if (args.functionName === 'keyHasPurpose') {
       const [, key, purpose] = args.args as [bigint, Hex, bigint];
       return (byPurpose.get(purpose) ?? []).some((address) => identityWalletKey(address) === key);
@@ -89,9 +100,9 @@ function makeHarness(options: {
     throw new Error(`Unexpected read ${args.functionName}`);
   });
   const waitForTransactionReceipt = vi.fn(async () => receipt());
-  const writeContract = vi.fn(async () => TX_HASH);
-  const publicClient: IdentityWalletPublicClient = { readContract, waitForTransactionReceipt };
-  const walletClient: IdentityWalletClient = { writeContract };
+  const writeContract = vi.fn(async (_args: unknown) => TX_HASH);
+  const publicClient = { readContract, waitForTransactionReceipt } as unknown as IdentityWalletPublicClient;
+  const walletClient = { writeContract } as unknown as IdentityWalletClient;
   const state = {
     provider,
     address: options.stateAddress ?? ADMIN,
@@ -99,12 +110,14 @@ function makeHarness(options: {
     expectedChainId: 84532,
     bootstrap: CONTRACTS,
   };
+  const progress: IdentityWalletProgressEvent[] = [];
   const submitter = identityWalletActionSubmitter({
     getWalletState: () => state,
     publicClientFor: () => publicClient,
     walletClientFromProvider: () => walletClient,
+    onProgress: (event) => progress.push(event),
   });
-  return { provider, state, submitter, readContract, writeContract, waitForTransactionReceipt, publicClient };
+  return { provider, state, submitter, readContract, writeContract, waitForTransactionReceipt, publicClient, progress };
 }
 
 describe('identity wallet key reads', () => {
@@ -127,6 +140,16 @@ describe('identity wallet key reads', () => {
       { address: PRIMARY, admin: false, operational: true },
     ]);
   });
+
+  it('fails if the bootstrap routes identity reads to any other contract', async () => {
+    const h = makeHarness();
+    const wrongContracts: PcaContracts = {
+      ...CONTRACTS,
+      identityWallets: { ...CONTRACTS.identityWallets!, storage: PROFILE },
+    };
+    await expect(readIdentityWalletSummary(wrongContracts, h.publicClient, '61', [ADMIN]))
+      .rejects.toThrow(/Unexpected read target/);
+  });
 });
 
 describe('identity wallet hardware-signed writes', () => {
@@ -141,6 +164,11 @@ describe('identity wallet hardware-signed writes', () => {
       args: [61n, [TARGET]],
     });
     expect(result).toMatchObject({ action: 'add-operational', address: TARGET, txHash: TX_HASH, blockNumber: 9 });
+    expect(h.progress).toEqual([
+      { action: 'add-operational', state: 'signing' },
+      { action: 'add-operational', state: 'submitted', txHash: TX_HASH },
+      { action: 'add-operational', state: 'confirmed', txHash: TX_HASH },
+    ]);
   });
 
   it('refuses every write when the connected wallet is not an admin key', async () => {
@@ -175,6 +203,19 @@ describe('identity wallet hardware-signed writes', () => {
       functionName: 'addKey',
       args: [61n, identityWalletKey(TARGET), ADMIN_KEY_PURPOSE, ECDSA_KEY_TYPE],
     });
+  });
+
+  it('rejects the zero admin address before any chain read or wallet prompt', async () => {
+    const h = makeHarness({ operationalAddresses: [PRIMARY] });
+    await expect(h.submitter.addAdmin('61', zeroAddress)).rejects.toThrow(/zero address/);
+    expect(h.readContract).not.toHaveBeenCalled();
+    expect(h.writeContract).not.toHaveBeenCalled();
+  });
+
+  it('requires a replacement before removing the final operational key', async () => {
+    const h = makeHarness({ operationalAddresses: [TARGET] });
+    await expect(h.submitter.removeOperational('61', TARGET)).rejects.toThrow(/final operational key/);
+    expect(h.writeContract).not.toHaveBeenCalled();
   });
 
   it('requires a replacement before removing the final admin key', async () => {

@@ -1280,9 +1280,11 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
   const CONTRACTS_FIXTURE = {
     nft: ethers.getAddress('0x' + 'ab'.repeat(20)),
     token: ethers.getAddress('0x' + 'cd'.repeat(20)),
-    profile: ethers.getAddress('0x' + '12'.repeat(20)),
-    identity: ethers.getAddress('0x' + '23'.repeat(20)),
-    identityStorage: ethers.getAddress('0x' + '34'.repeat(20)),
+    identityWallets: {
+      profile: ethers.getAddress('0x' + '12'.repeat(20)),
+      identity: ethers.getAddress('0x' + '23'.repeat(20)),
+      storage: ethers.getAddress('0x' + '34'.repeat(20)),
+    },
     chainId: 'base:84532',
     rpcUrls: ['https://rpc.example/v2/SECRETKEY', 'https://rpc.example/2'],
     walletRpcUrls: ['https://wallet-rpc.example/base-sepolia', '/api/pca/rpc', 'ws://wallet-rpc.example'],
@@ -1529,7 +1531,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     };
 
     for (const [index, data] of allowed.entries()) {
-      const params = [{ to: CONTRACTS_FIXTURE.identityStorage, data }, 'latest'];
+      const params = [{ to: CONTRACTS_FIXTURE.identityWallets.storage, data }, 'latest'];
       const request = runCtx('POST', '/api/pca/rpc', agent, {
         jsonrpc: '2.0', id: index + 1, method: 'eth_call', params,
       });
@@ -1544,7 +1546,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
       id: 3,
       method: 'eth_call',
       params: [{
-        to: CONTRACTS_FIXTURE.identityStorage,
+        to: CONTRACTS_FIXTURE.identityWallets.storage,
         data: identityStorage.encodeFunctionData('getIdentityId', [ethers.getAddress('0x' + '45'.repeat(20))]),
       }, 'latest'],
     });

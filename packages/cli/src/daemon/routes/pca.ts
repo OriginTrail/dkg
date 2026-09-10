@@ -110,7 +110,7 @@ function supportsPcaRpcBridge(agent: RequestContext['agent']): boolean {
 
 function pcaRpcEthCallError(
   params: unknown[] | undefined,
-  contracts: Pick<PcaContracts, 'nft' | 'token' | 'identityStorage'>,
+  contracts: Pick<PcaContracts, 'nft' | 'token' | 'identityWallets'>,
 ): string | null {
   if (!Array.isArray(params) || params.length === 0) return 'PCA RPC eth_call params must include a transaction object';
   const tx = params[0];
@@ -127,8 +127,8 @@ function pcaRpcEthCallError(
     target = ethers.getAddress(to).toLowerCase();
     nft = ethers.getAddress(contracts.nft).toLowerCase();
     token = ethers.getAddress(contracts.token).toLowerCase();
-    identityStorage = contracts.identityStorage
-      ? ethers.getAddress(contracts.identityStorage).toLowerCase()
+    identityStorage = contracts.identityWallets
+      ? ethers.getAddress(contracts.identityWallets.storage).toLowerCase()
       : null;
   } catch {
     return 'PCA RPC eth_call target address is invalid';

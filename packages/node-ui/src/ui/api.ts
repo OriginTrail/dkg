@@ -721,8 +721,8 @@ export async function fetchAssertionUals(contextGraphId: string): Promise<Record
   const data = await executeQuery(sparql, { contextGraphId });
   const map: Record<string, string> = {};
   for (const b of (data?.result?.bindings ?? [])) {
-    const name = typeof b.name === 'string' ? b.name : b.name?.value;
-    const ual = typeof b.ual === 'string' ? b.ual : b.ual?.value;
+    const name = bv(b.name);
+    const ual = bv(b.ual);
     if (name && ual && !map[name]) map[name] = ual;
   }
   return map;
@@ -1423,8 +1423,8 @@ export async function listAssertions(
   const bindings: any[] = listData?.result?.bindings ?? [];
   const countByGraph = new Map<string, number>();
   for (const b of (countData?.result?.bindings ?? [])) {
-    const g = typeof b.g === 'string' ? b.g : b.g?.value;
-    const cntRaw = typeof b.cnt === 'string' ? b.cnt : b.cnt?.value;
+    const g = bv(b.g);
+    const cntRaw = bv(b.cnt);
     // The aggregate comes back as a typed RDF literal whose lexical form can be
     // wrapped: `"21"^^<http://www.w3.org/2001/XMLSchema#integer>`. A bare
     // `parseInt('"21"^^…')` reads the leading quote and yields NaN, which the

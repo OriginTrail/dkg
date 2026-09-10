@@ -20,6 +20,7 @@ import {
   WalletOwnerActionUnavailableError,
   type MinimalPublicClient,
   type MinimalWalletClient,
+  type WalletTxProgressEvent,
 } from '../src/ui/web3/walletOwnerActionSubmitter.js';
 import { WalletReceiptRevertedError, WalletReceiptWaitError, WalletTxStepError } from '../src/ui/web3/walletTxError.js';
 
@@ -135,12 +136,14 @@ function makeHarness(opts: {
   });
   const publicClient: MinimalPublicClient = { readContract, waitForTransactionReceipt };
   const walletClient: MinimalWalletClient = { writeContract };
+  const progress: WalletTxProgressEvent[] = [];
   const submitter = walletOwnerActionSubmitter({
     getWalletState: () => state,
     publicClientFor: () => publicClient,
     walletClientFromProvider: () => walletClient,
+    onProgress: (event) => progress.push(event),
   });
-  return { submitter, state, provider, readContract, waitForTransactionReceipt, writeContract };
+  return { submitter, state, provider, readContract, waitForTransactionReceipt, writeContract, progress };
 }
 
 beforeEach(() => {
@@ -319,6 +322,11 @@ describe('walletOwnerActionSubmitter action shapes', () => {
       txHash: ACTION_HASH,
       blockNumber: 2,
     });
+    expect(h.progress).toEqual([
+      { step: 'action', state: 'active' },
+      { step: 'action', state: 'submitted', txHash: ACTION_HASH },
+      { step: 'action', state: 'confirmed', txHash: ACTION_HASH },
+    ]);
   });
 
   it('deregisterAgent does not approve and returns the daemon-compatible shape', async () => {

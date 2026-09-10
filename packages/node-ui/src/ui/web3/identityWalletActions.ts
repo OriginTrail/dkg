@@ -1,23 +1,25 @@
 import {
   encodePacked,
-  getAddress,
   keccak256,
+  zeroAddress,
+  type Abi,
   type Address,
-  type Chain,
+  type ContractFunctionArgs,
+  type ContractFunctionName,
   type Hex,
-  type TransactionReceipt,
 } from 'viem';
 import type { PcaContracts } from '../api.js';
 import { eqAddress } from '../pca/address.js';
-import { useWalletStore, type WalletState } from '../stores/wallet.js';
 import {
-  publicClientFor as defaultPublicClientFor,
-  synthesizeChain,
-  walletClientFromProvider as defaultWalletClientFromProvider,
-} from './clients.js';
-import { numericChainId } from './chainId.js';
-import type { Eip1193Provider } from './eip6963.js';
-import { WalletReceiptRevertedError, WalletReceiptWaitError, WalletTxStepError } from './walletTxError.js';
+  browserWalletAddress,
+  loadBrowserWalletRuntime,
+  submitBrowserWalletTransaction,
+  type BrowserWalletClient,
+  type BrowserWalletConnectionPolicy,
+  type BrowserWalletPublicClient,
+  type BrowserWalletRuntimeContext,
+  type BrowserWalletRuntimeDeps,
+} from './browserWalletTransaction.js';
 
 export const ADMIN_KEY_PURPOSE = 1n;
 export const OPERATIONAL_KEY_PURPOSE = 2n;
@@ -87,24 +89,10 @@ export const identityStorageWalletAbi = [
 
 const MAX_UINT72 = (1n << 72n) - 1n;
 
-type WalletRuntimeState = Pick<
-  WalletState,
-  'provider' | 'address' | 'chainId' | 'expectedChainId' | 'bootstrap'
->;
+export type IdentityWalletPublicClient = BrowserWalletPublicClient;
+export type IdentityWalletClient = BrowserWalletClient;
 
-export interface IdentityWalletPublicClient {
-  readContract: (args: any) => Promise<unknown>;
-  waitForTransactionReceipt: (args: { hash: Hex }) => Promise<TransactionReceipt>;
-}
-
-export interface IdentityWalletClient {
-  writeContract: (args: any) => Promise<Hex>;
-}
-
-export interface IdentityWalletActionDeps {
-  getWalletState?: () => WalletRuntimeState;
-  publicClientFor?: (chainId: string | number, rpcUrls: string[]) => IdentityWalletPublicClient;
-  walletClientFromProvider?: (chain: Chain, provider: Eip1193Provider) => IdentityWalletClient;
+export interface IdentityWalletActionDeps extends BrowserWalletRuntimeDeps {
   onProgress?: (event: IdentityWalletProgressEvent) => void;
 }
 
@@ -140,13 +128,8 @@ export interface IdentityWalletSummary {
   addresses: IdentityWalletRoleState[];
 }
 
-interface IdentityWalletContext {
-  provider: Eip1193Provider;
+interface IdentityWalletContext extends BrowserWalletRuntimeContext {
   signer: Address;
-  expectedChainId: number;
-  chain: Chain;
-  publicClient: IdentityWalletPublicClient;
-  walletClient: IdentityWalletClient;
   profile: Address;
   identity: Address;
   identityStorage: Address;
@@ -159,16 +142,8 @@ export class IdentityWalletActionError extends Error {
   }
 }
 
-function currentState(deps: IdentityWalletActionDeps): WalletRuntimeState {
-  return deps.getWalletState?.() ?? useWalletStore.getState();
-}
-
 function normalizedAddress(value: string, field: string): Address {
-  try {
-    return getAddress(value.trim()) as Address;
-  } catch {
-    throw new IdentityWalletActionError(`${field} must be a valid EVM address.`);
-  }
+  return browserWalletAddress(value, field, (message) => new IdentityWalletActionError(message));
 }
 
 function parsedIdentityId(value: string | bigint): bigint {
@@ -188,65 +163,48 @@ export function identityWalletKey(address: string): Hex {
   return keccak256(encodePacked(['address'], [normalized]));
 }
 
-function requiredContract(contracts: PcaContracts, field: 'profile' | 'identity' | 'identityStorage'): Address {
-  const value = contracts[field];
-  if (!value) {
+function requiredIdentityContracts(contracts: PcaContracts): {
+  profile: Address;
+  identity: Address;
+  storage: Address;
+} {
+  if (!contracts.identityWallets) {
     throw new IdentityWalletActionError(
       'This node does not expose identity-wallet contracts yet. Upgrade the daemon and reload the page.',
     );
   }
-  return normalizedAddress(value, `${field} contract`);
-}
-
-function loadContext(deps: IdentityWalletActionDeps): IdentityWalletContext {
-  const state = currentState(deps);
-  if (!state.provider || !state.address) {
-    throw new IdentityWalletActionError('Connect an existing admin wallet before signing.');
-  }
-  if (!state.bootstrap) {
-    throw new IdentityWalletActionError('Wallet contract addresses are not bootstrapped yet.');
-  }
-  const expectedChainId = numericChainId(state.bootstrap.chainId);
-  if (state.chainId !== expectedChainId) {
-    throw new IdentityWalletActionError("Switch the connected wallet to this node's network.");
-  }
-  const chain = synthesizeChain(state.bootstrap.chainId, state.bootstrap.rpcUrls);
   return {
-    provider: state.provider,
-    signer: normalizedAddress(state.address, 'Connected wallet'),
-    expectedChainId,
-    chain,
-    publicClient:
-      deps.publicClientFor?.(state.bootstrap.chainId, state.bootstrap.rpcUrls) ??
-      defaultPublicClientFor(state.bootstrap.chainId, state.bootstrap.rpcUrls),
-    walletClient:
-      deps.walletClientFromProvider?.(chain, state.provider) ??
-      defaultWalletClientFromProvider(chain, state.provider),
-    profile: requiredContract(state.bootstrap, 'profile'),
-    identity: requiredContract(state.bootstrap, 'identity'),
-    identityStorage: requiredContract(state.bootstrap, 'identityStorage'),
+    profile: normalizedAddress(contracts.identityWallets.profile, 'profile contract'),
+    identity: normalizedAddress(contracts.identityWallets.identity, 'identity contract'),
+    storage: normalizedAddress(contracts.identityWallets.storage, 'identityStorage contract'),
   };
 }
 
-async function assertStillConnected(ctx: IdentityWalletContext, deps: IdentityWalletActionDeps): Promise<void> {
-  const state = currentState(deps);
-  if (state.provider !== ctx.provider) {
-    throw new IdentityWalletActionError('Wallet provider changed before the signature prompt. Reconnect and retry.');
-  }
-  if (!eqAddress(state.address, ctx.signer)) {
-    throw new IdentityWalletActionError('Connected wallet changed before the signature prompt. Reconnect the admin wallet.');
-  }
-  if (state.chainId !== ctx.expectedChainId) {
-    throw new IdentityWalletActionError('Wallet network changed before the signature prompt. Switch back and retry.');
-  }
-  const accounts = (await ctx.provider.request({ method: 'eth_accounts' })) as string[];
-  if (!eqAddress(accounts?.[0], ctx.signer)) {
-    throw new IdentityWalletActionError('Wallet account changed before the signature prompt. Reconnect the admin wallet.');
-  }
-  const chainHex = (await ctx.provider.request({ method: 'eth_chainId' })) as string;
-  if (parseInt(chainHex, 16) !== ctx.expectedChainId) {
-    throw new IdentityWalletActionError('Wallet network changed before the signature prompt. Switch back and retry.');
-  }
+const connectionPolicy: BrowserWalletConnectionPolicy = {
+  error: (message) => new IdentityWalletActionError(message),
+  unavailableError: (message) => new IdentityWalletActionError(message),
+  abortedError: (message) => new IdentityWalletActionError(message),
+  messages: {
+    disconnected: 'Connect an existing admin wallet before signing.',
+    bootstrapUnavailable: 'Wallet contract addresses are not bootstrapped yet.',
+    wrongNetwork: "Switch the connected wallet to this node's network.",
+    providerChanged: 'Wallet provider changed before the signature prompt. Reconnect and retry.',
+    addressChanged: 'Connected wallet changed before the signature prompt. Reconnect the admin wallet.',
+    networkChanged: 'Wallet network changed before the signature prompt. Switch back and retry.',
+    accountChanged: 'Wallet account changed before the signature prompt. Reconnect the admin wallet.',
+  },
+};
+
+function loadContext(deps: IdentityWalletActionDeps): IdentityWalletContext {
+  const runtime = loadBrowserWalletRuntime(deps, connectionPolicy);
+  const contracts = requiredIdentityContracts(runtime.bootstrap);
+  return {
+    ...runtime,
+    signer: runtime.account,
+    profile: contracts.profile,
+    identity: contracts.identity,
+    identityStorage: contracts.storage,
+  };
 }
 
 async function hasPurpose(
@@ -285,7 +243,7 @@ export async function readIdentityWalletSummary(
   addresses: string[],
 ): Promise<IdentityWalletSummary> {
   const identityId = parsedIdentityId(identityIdValue);
-  const identityStorage = requiredContract(contracts, 'identityStorage');
+  const identityStorage = requiredIdentityContracts(contracts).storage;
   const normalized = [...new Map(addresses.map((address) => {
     const item = normalizedAddress(address, 'Wallet address');
     return [item.toLowerCase(), item] as const;
@@ -316,59 +274,39 @@ async function assertAdmin(ctx: IdentityWalletContext, identityId: bigint): Prom
   }
 }
 
-async function waitForSuccess(
-  ctx: IdentityWalletContext,
-  hash: Hex,
-): Promise<TransactionReceipt> {
-  let receipt: TransactionReceipt;
-  try {
-    receipt = await ctx.publicClient.waitForTransactionReceipt({ hash });
-  } catch (cause) {
-    throw new WalletReceiptWaitError(hash, cause, 'action');
-  }
-  if (receipt.status !== 'success') throw new WalletReceiptRevertedError(hash);
-  return receipt;
-}
-
-function blockNumberOf(receipt: Pick<TransactionReceipt, 'blockNumber'>): number | undefined {
+function blockNumberOf(receipt: { blockNumber: bigint | null }): number | undefined {
   return receipt.blockNumber == null ? undefined : Number(receipt.blockNumber);
 }
 
-async function write(
+async function write<
+  const TAbi extends Abi,
+  TFunctionName extends ContractFunctionName<TAbi, 'nonpayable' | 'payable'>,
+>(
   ctx: IdentityWalletContext,
   deps: IdentityWalletActionDeps,
   action: IdentityWalletAction,
   address: Address,
-  target: Address,
-  abi: typeof profileIdentityWalletAbi | typeof identityWalletAbi,
-  functionName: 'addOperationalWallets' | 'addKey' | 'removeKey',
-  args: readonly unknown[],
+  request: {
+    address: Address;
+    abi: TAbi;
+    functionName: TFunctionName;
+    args: ContractFunctionArgs<TAbi, 'nonpayable' | 'payable', TFunctionName>;
+  },
 ): Promise<IdentityWalletTxResult> {
-  await assertStillConnected(ctx, deps);
-  deps.onProgress?.({ action, state: 'signing' });
-  let hash: Hex;
-  try {
-    hash = await ctx.walletClient.writeContract({
-      account: ctx.signer,
-      chain: ctx.chain,
-      address: target,
-      abi,
-      functionName,
-      args,
-    });
-  } catch (cause) {
-    deps.onProgress?.({ action, state: 'failed', error: cause });
-    throw new WalletTxStepError('action', cause);
-  }
-  deps.onProgress?.({ action, state: 'submitted', txHash: hash });
-  try {
-    const receipt = await waitForSuccess(ctx, hash);
-    deps.onProgress?.({ action, state: 'confirmed', txHash: hash });
-    return { action, address, txHash: receipt.transactionHash ?? hash, blockNumber: blockNumberOf(receipt) };
-  } catch (cause) {
-    deps.onProgress?.({ action, state: 'failed', txHash: hash, error: cause });
-    throw cause;
-  }
+  const { hash, receipt } = await submitBrowserWalletTransaction(
+    ctx,
+    deps,
+    connectionPolicy,
+    request,
+    'action',
+    {
+      signing: () => deps.onProgress?.({ action, state: 'signing' }),
+      submitted: (txHash) => deps.onProgress?.({ action, state: 'submitted', txHash }),
+      confirmed: (txHash) => deps.onProgress?.({ action, state: 'confirmed', txHash }),
+      failed: (error, txHash) => deps.onProgress?.({ action, state: 'failed', txHash, error }),
+    },
+  );
+  return { action, address, txHash: receipt.transactionHash ?? hash, blockNumber: blockNumberOf(receipt) };
 }
 
 /** Hardware/browser-wallet submitter for node identity key rotation. */
@@ -377,6 +315,9 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
     async addOperational(identityIdValue: string | bigint, addressValue: string): Promise<IdentityWalletTxResult> {
       const identityId = parsedIdentityId(identityIdValue);
       const address = normalizedAddress(addressValue, 'Operational wallet');
+      if (eqAddress(address, zeroAddress)) {
+        throw new IdentityWalletActionError('Operational wallet cannot be the zero address.');
+      }
       const ctx = loadContext(deps);
       await assertAdmin(ctx, identityId);
       const [alreadyOperational, isAdmin] = await Promise.all([
@@ -385,7 +326,12 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
       ]);
       if (alreadyOperational) throw new IdentityWalletActionError(`${address} is already an operational key.`);
       if (isAdmin) throw new IdentityWalletActionError(`${address} is already an admin key and cannot also be operational.`);
-      return write(ctx, deps, 'add-operational', address, ctx.profile, profileIdentityWalletAbi, 'addOperationalWallets', [identityId, [address]]);
+      return write(ctx, deps, 'add-operational', address, {
+        address: ctx.profile,
+        abi: profileIdentityWalletAbi,
+        functionName: 'addOperationalWallets',
+        args: [identityId, [address]],
+      });
     },
 
     async removeOperational(
@@ -410,12 +356,20 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
       if (operationalKeys.length <= 1) {
         throw new IdentityWalletActionError('The final operational key cannot be removed.');
       }
-      return write(ctx, deps, 'remove-operational', address, ctx.identity, identityWalletAbi, 'removeKey', [identityId, identityWalletKey(address)]);
+      return write(ctx, deps, 'remove-operational', address, {
+        address: ctx.identity,
+        abi: identityWalletAbi,
+        functionName: 'removeKey',
+        args: [identityId, identityWalletKey(address)],
+      });
     },
 
     async addAdmin(identityIdValue: string | bigint, addressValue: string): Promise<IdentityWalletTxResult> {
       const identityId = parsedIdentityId(identityIdValue);
       const address = normalizedAddress(addressValue, 'Admin wallet');
+      if (eqAddress(address, zeroAddress)) {
+        throw new IdentityWalletActionError('Admin wallet cannot be the zero address.');
+      }
       const ctx = loadContext(deps);
       await assertAdmin(ctx, identityId);
       const [alreadyAdmin, isOperational] = await Promise.all([
@@ -424,12 +378,12 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
       ]);
       if (alreadyAdmin) throw new IdentityWalletActionError(`${address} is already an admin key.`);
       if (isOperational) throw new IdentityWalletActionError(`${address} is already an operational key and cannot also be an admin.`);
-      return write(ctx, deps, 'add-admin', address, ctx.identity, identityWalletAbi, 'addKey', [
-        identityId,
-        identityWalletKey(address),
-        ADMIN_KEY_PURPOSE,
-        ECDSA_KEY_TYPE,
-      ]);
+      return write(ctx, deps, 'add-admin', address, {
+        address: ctx.identity,
+        abi: identityWalletAbi,
+        functionName: 'addKey',
+        args: [identityId, identityWalletKey(address), ADMIN_KEY_PURPOSE, ECDSA_KEY_TYPE],
+      });
     },
 
     async removeAdmin(identityIdValue: string | bigint, addressValue: string): Promise<IdentityWalletTxResult> {
@@ -445,7 +399,12 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
       if (adminKeys.length <= 1) {
         throw new IdentityWalletActionError('The final admin key cannot be removed. Add its replacement first.');
       }
-      return write(ctx, deps, 'remove-admin', address, ctx.identity, identityWalletAbi, 'removeKey', [identityId, identityWalletKey(address)]);
+      return write(ctx, deps, 'remove-admin', address, {
+        address: ctx.identity,
+        abi: identityWalletAbi,
+        functionName: 'removeKey',
+        args: [identityId, identityWalletKey(address)],
+      });
     },
   };
 }
