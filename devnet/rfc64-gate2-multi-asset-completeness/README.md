@@ -87,7 +87,10 @@ two verifier invocations over them must produce byte-identical verdicts.
 
 `pnpm live:public-finalized-catalog` clean-builds the exact repository HEAD,
 then starts an author and receiver as distinct real `DKGAgent` OS processes.
-The legacy command `pnpm live:public-vm` remains an alias.
+Both this command and the legacy `pnpm live:public-vm` alias execute
+`launch-public-finalized-catalog.ts`, which loads `public-finalized-catalog.ts`.
+Set `DKG_RFC64_PUBLIC_FINALIZED_CATALOG_ARTIFACT` to override the artifact path;
+the old `DKG_RFC64_M2_PUBLIC_VM_ARTIFACT` variable remains a fallback alias.
 
 The receiver learns numeric Context Graph id `14` from a production
 `ContextGraphCreated` poller event and resolves its current chain authority.

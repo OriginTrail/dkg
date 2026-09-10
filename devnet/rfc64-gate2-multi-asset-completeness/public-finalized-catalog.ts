@@ -13,10 +13,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
-import {
-  atomicWriteExactBytes,
-  readCleanRepositoryHead,
-} from '../rfc64-persistence-lifecycle/evidence.js';
+import { atomicWriteExactBytes } from '../rfc64-persistence-lifecycle/evidence.js';
 import {
   ChildProcessRegistry,
   cleanupPreservingPrimaryFailure,
@@ -40,11 +37,10 @@ const REPO_ROOT = resolve(import.meta.dirname, '../..');
 const DEFAULT_ARTIFACT = join(import.meta.dirname, 'artifacts/public-finalized-catalog-result.json');
 const NETWORK_ID = 'otp:20430';
 const CONTEXT_GRAPH_ID =
-  '0x1111111111111111111111111111111111111111/m2-public-vm-process';
+  '0x1111111111111111111111111111111111111111/public-finalized-catalog-process';
 const ON_CHAIN_CONTEXT_GRAPH_ID = '14';
 const CG_STORAGE = '0x3333333333333333333333333333333333333333';
 const KAV10 = '0x4444444444444444444444444444444444444444';
-const KA_STORAGE = '0x5555555555555555555555555555555555555555';
 const AUTHOR_PRIVATE_KEY = `0x${'64'.repeat(32)}`;
 const AUTHOR_WALLET = new ethers.Wallet(AUTHOR_PRIVATE_KEY);
 const AUTHOR_ADDRESS = AUTHOR_WALLET.address.toLowerCase();
@@ -74,7 +70,7 @@ async function execute(): Promise<void> {
     launchReceipt.sourceCommit,
     launchReceipt.manifest,
   );
-  const dataDirs = createGate2TwoAgentDataDirsV1('m2-public-vm');
+  const dataDirs = createGate2TwoAgentDataDirsV1('public-finalized-catalog');
   const children = new ChildProcessRegistry(20_000);
   let operationFailed = true;
   let primaryFailure: unknown;
@@ -122,7 +118,7 @@ async function execute(): Promise<void> {
         && receiverReady.processId !== process.pid,
       'author, receiver, and harness use distinct OS processes',
     );
-    await connectGate2HarnessAgentsV1(author, receiver, authorReady, receiverReady, 'm2-public-vm');
+    await connectGate2HarnessAgentsV1(author, receiver, authorReady, receiverReady, 'public-finalized-catalog');
 
     // Startup has already installed release-native authority from the chain
     // event. Reuse that exact policy instead of overwriting its lineage with a
@@ -164,7 +160,7 @@ async function execute(): Promise<void> {
     });
     const genesis = outputRecord(await author.request(
       'publishCatalogGenesis',
-      'm2-public-vm-genesis-v1',
+      'public-finalized-catalog-genesis-v1',
       'operation-completed',
       {
         scope,
@@ -184,7 +180,7 @@ async function execute(): Promise<void> {
 
     const successor = outputRecord(await author.request(
       'publishCatalogExactSetSuccessor',
-      'm2-public-vm-successor-v1',
+      'public-finalized-catalog-successor-v1',
       'operation-completed',
       {
         previousHead: stagedHead(genesis, 'genesis'),
@@ -194,7 +190,7 @@ async function execute(): Promise<void> {
           'genesis authorization',
         ),
         assets: [{
-          assertionCoordinate: 'm2-public-vm-process-object',
+          assertionCoordinate: 'public-finalized-catalog-process-object',
           projectionNQuads: PROJECTION_NQUADS,
           seal: await authorSeal(),
         }],
@@ -214,13 +210,13 @@ async function execute(): Promise<void> {
     const scopeDigest = computeAuthorCatalogScopeDigestV1(scope as never);
     const applied = outputRecord(await receiver.request(
       'appliedHeadReadback',
-      'm2-public-vm-applied-v1',
+      'public-finalized-catalog-applied-v1',
       'operation-completed',
       { catalogScopeDigest: scopeDigest, authorAddress: AUTHOR_ADDRESS },
     ), 'applied head');
     const terminalFailure = await receiver.request(
       'terminalFailureReadback',
-      'm2-public-vm-failure-v1',
+      'public-finalized-catalog-failure-v1',
       'operation-completed',
       { catalogHeadDigest: successorDigest },
     );
@@ -236,7 +232,7 @@ async function execute(): Promise<void> {
 
     const synchronization = outputRecord(await receiver.request(
       'exactInventoryReadback',
-      'm2-public-vm-inventory-v1',
+      'public-finalized-catalog-inventory-v1',
       'operation-completed',
       { catalogHeadDigest: successorDigest },
     ), 'synchronization evidence');
@@ -246,7 +242,7 @@ async function execute(): Promise<void> {
 
     const numericId = await receiver.request(
       'contextGraphOnChainIdReadback',
-      'm2-public-vm-numeric-id-v1',
+      'public-finalized-catalog-numeric-id-v1',
       'operation-completed',
       { contextGraphId: CONTEXT_GRAPH_ID },
     );
@@ -273,7 +269,7 @@ async function execute(): Promise<void> {
     const metaGraph = contextGraphMetaUri(CONTEXT_GRAPH_ID);
     const vm = outputRecord(await receiver.request(
       'vmGraphReadback',
-      'm2-public-vm-readback-v1',
+      'public-finalized-catalog-readback-v1',
       'operation-completed',
       { vmGraph, metaGraph, ual: KA_UAL },
     ), 'VM readback');
@@ -286,8 +282,8 @@ async function execute(): Promise<void> {
     exact(terminalFailure.output, null, 'receiver terminal failure');
 
     const [receiverBoundary, authorBoundary] = await Promise.all([
-      receiver.stop('m2-public-vm-receiver-stop-v1'),
-      author.stop('m2-public-vm-author-stop-v1'),
+      receiver.stop('public-finalized-catalog-receiver-stop-v1'),
+      author.stop('public-finalized-catalog-author-stop-v1'),
     ]);
     const receiverManifest = executedManifest(receiverBoundary.event, 'receiver');
     const authorManifest = executedManifest(authorBoundary.event, 'author');

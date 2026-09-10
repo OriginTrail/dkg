@@ -19,10 +19,10 @@ export const M0_ACCEPTANCE_ROWS = Object.freeze([
   commandRow('public-swm-policy-parity', 'Public SWM policy parity', [
     'test:m1:rfc64-public-swm-parity',
   ]),
-  commandRow('finalized-public-vm', 'Finalized public VM', [
+  commandRow('finalized-public-catalog', 'Finalized public catalog policy', [
     '--filter',
     '@devnet/rfc64-gate2-multi-asset-completeness',
-    'live:public-vm',
+    'live:public-finalized-catalog',
   ]),
   ...RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map((scenario) => commandRow(
     scenario.rowId,

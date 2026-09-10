@@ -112,6 +112,7 @@ import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,
   sendJsonRpcResult,
+  type LoopbackJsonRpcHandler,
 } from '../../chain/test/loopback-rpc-harness.js';
 import {
   FinalizedVmLoopbackMockChainAdapterV1,
@@ -250,10 +251,7 @@ async function startNativeAgent(
   deployment: CatalogSealDeploymentProfileV1 = NATIVE_DEPLOYMENT,
   existingDataDir?: string,
   accessPolicyAuthority?: Rfc64CatalogAccessPolicyAuthorityConfigV1,
-  finalizedRuntime?: Readonly<{
-    chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
-    initialSubscription?: ContextGraphIdV1;
-  }>,
+  finalizedRuntime?: NativeAgentStartOptionsV1['finalizedRuntime'],
   autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1,
 ): Promise<DKGAgent> {
   return startNativeAgentWithOptions({
@@ -274,6 +272,7 @@ interface NativeAgentStartOptionsV1 {
   readonly finalizedRuntime?: Readonly<{
     chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
     initialSubscription?: ContextGraphIdV1;
+    configuredRpcUrl?: string;
   }>;
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
@@ -363,7 +362,7 @@ async function startNativeAgentWithOptions(
       chainAdapter: finalizedRuntime.chainAdapter,
       chainConfig: {
         // The chain config supplies fixture operational keys; the adapter owns RPC.
-        rpcUrl: finalizedRuntime.chainAdapter.getRpcUrls()[0]!,
+        rpcUrl: finalizedRuntime.configuredRpcUrl ?? finalizedRuntime.chainAdapter.getRpcUrls()[0]!,
         hubAddress: CONTEXT_GRAPH_STORAGE,
         operationalKeys: [`0x${'12'.repeat(32)}`],
       },
@@ -8398,7 +8397,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toBeNull();
   }, 60_000);
 
-  it('applies a finalized-policy SWM successor through production wiring without VM writes', async () => {
+  it('applies a finalized-policy SWM successor using the injected adapter RPC when chainConfig points elsewhere', async () => {
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
     const fixture = Object.freeze({
       accessPolicy: 0,
@@ -8417,7 +8416,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       publishPolicy: 1,
     } satisfies FinalizedVmLoopbackFixtureConfigV1);
     const finalizedRpc = createFinalizedVmLoopbackRpcV1(fixture);
-    const rpc = await rpcHarness.start((call, response) => {
+    const respond: LoopbackJsonRpcHandler = (call, response) => {
       try {
         sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
       } catch (cause) {
@@ -8428,8 +8427,14 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           cause instanceof Error ? cause.message : String(cause),
         );
       }
+    };
+    const rpc = await rpcHarness.start(respond);
+    const authorRpc = await rpcHarness.start(respond);
+    const configuredRpc = await rpcHarness.start((call, response) => {
+      sendJsonRpcError(response, call, -32603, 'chainConfig RPC must not own finalized catalog reads');
     });
     const receiverChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpc.url);
+    const readBinding = vi.spyOn(receiverChain, 'createFinalizedEvmReadBinding');
     const privateVmDependencyLookup = vi.spyOn(
       receiverChain,
       'getDKGKnowledgeAssetsAddress',
@@ -8447,6 +8452,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       {
         chainAdapter: receiverChain,
         initialSubscription: CONTEXT_GRAPH_ID,
+        configuredRpcUrl: configuredRpc.url,
       },
     );
     const author = await startNativeAgent(
@@ -8455,7 +8461,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       undefined,
       undefined,
       {
-        chainAdapter: new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpc.url),
+        chainAdapter: new FinalizedVmLoopbackMockChainAdapterV1(fixture, authorRpc.url),
       },
       {
         peers: [receiver.peerId],
@@ -8482,6 +8488,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       });
     }
     await connectBothWays(author, receiver);
+    const readsBeforePublication = rpc.calls.length;
 
     const publicQuads = [{
       subject: 'https://example.org/policy-only',
@@ -8514,6 +8521,31 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       published.currentCatalogHeadDigest,
     )).toBeNull();
     expect(privateVmDependencyLookup).not.toHaveBeenCalled();
+    expect(configuredRpc.calls).toEqual([]);
+    expect(readBinding).toHaveBeenCalledWith('rfc64');
+    // Only the receiver uses this endpoint. Require the actual policy read for
+    // numeric CG 14 after publication; startup probes cannot satisfy this check.
+    const policyReadData = new ethers.Interface([
+      'function getContextGraph(uint256 contextGraphId)',
+    ]).encodeFunctionData('getContextGraph', [onChainContextGraphId]);
+    expect(rpc.calls.slice(readsBeforePublication)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        method: 'eth_getBlockByNumber', params: ['finalized', false],
+      }),
+      expect.objectContaining({
+        method: 'eth_call',
+        params: expect.arrayContaining([
+          expect.objectContaining({ to: CONTEXT_GRAPH_STORAGE, data: policyReadData }),
+        ]),
+      }),
+    ]));
+    expect(authority.policy).toMatchObject({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      source: { kind: 'finalized-chain' },
+    });
+    await expect(receiver.getContextGraphOnChainId(CONTEXT_GRAPH_ID))
+      .resolves.toBe(ON_CHAIN_CONTEXT_GRAPH_ID);
     expect(receiver.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,

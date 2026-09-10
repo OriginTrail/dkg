@@ -12,8 +12,8 @@ const sourceCommit = readCleanRepositoryHead(repoRoot);
 runGate2CleanRuntimeBuildV1(repoRoot);
 const headAfterBuild = readCleanRepositoryHead(repoRoot);
 if (headAfterBuild !== sourceCommit) {
-  throw new Error('RFC-64 M2 source HEAD changed during the clean runtime build');
+  throw new Error('RFC-64 public finalized catalog source HEAD changed during the clean runtime build');
 }
 const manifest = buildGate2RuntimeManifestV1(repoRoot, sourceCommit);
 installGate2RuntimeLaunchReceiptV1({ manifest, sourceCommit });
-await import('./public-vm.ts');
+await import('./public-finalized-catalog.ts');

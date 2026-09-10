@@ -20,12 +20,12 @@ const expectedRows = Object.freeze([
     args: ['test:m1:rfc64-public-swm-parity'],
   },
   {
-    id: 'finalized-public-vm',
-    label: 'Finalized public VM',
+    id: 'finalized-public-catalog',
+    label: 'Finalized public catalog policy',
     args: [
       '--filter',
       '@devnet/rfc64-gate2-multi-asset-completeness',
-      'live:public-vm',
+      'live:public-finalized-catalog',
     ],
   },
   ...RFC64_M0_RECOVERY_SCENARIO_MANIFEST.map((scenario) => ({
@@ -97,7 +97,7 @@ test('fails the composed gate immediately when a child row fails', async () => {
     runM0Rows({
       execute: async (row) => {
         invoked.push(row.id);
-        if (row.id === 'finalized-public-vm') {
+        if (row.id === 'finalized-public-catalog') {
           throw failure;
         }
       },
