@@ -1,6 +1,9 @@
 import { expect, it } from 'vitest';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { decodeEntityShareMetadata } from '../src/entity-share-metadata.js';
+import {
+  decodeEntityShareMetadata,
+  ENTITY_SHARE_METADATA_SIDECAR_PREDICATES,
+} from '../src/entity-share-metadata.js';
 import { storeWorkspaceOperationPublicQuads } from '../src/workspace-resolution.js';
 import { workspaceKnowledgeAssetHeadSubject, workspaceOperationPublicSliceSubject, workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 
@@ -35,6 +38,27 @@ it.each([undefined, 'research'])('decodes publisher output in subgraph %s', asyn
   expect(slices).toHaveLength(2);
   expect(slices.map(slice => slice.rootEntity).sort()).toEqual(roots);
   expect(slices.every(slice => slice.ref.length > 0 && slice.operationSubject === operation?.subject)).toBe(true);
+});
+
+it('round-trips publisher metadata while classifying supported sidecars separately', async () => {
+  const f = await fixture();
+  const sidecars = [...ENTITY_SHARE_METADATA_SIDECAR_PREDICATES].map(predicate => ({
+    subject: f.operation,
+    predicate,
+    object: '"local cache annotation"',
+    graph: f.graph,
+  }));
+  const operation = decodeEntityShareMetadata(cg, [...f.metadata, ...sidecars])
+    .find(record => record.subject === f.operation);
+
+  expect(operation?.kind).toBe('operation');
+  if (operation?.kind !== 'operation') throw new Error('Expected operation record');
+  expect(operation.metadataRows).toEqual(
+    f.metadata.filter(row => row.subject === f.operation),
+  );
+  expect(operation.metadataRows.every(
+    row => !ENTITY_SHARE_METADATA_SIDECAR_PREDICATES.has(row.predicate),
+  )).toBe(true);
 });
 
 it('rejects otherwise-valid entity rows from a non-canonical metadata graph', async () => {

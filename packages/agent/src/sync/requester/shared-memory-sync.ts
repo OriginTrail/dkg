@@ -678,6 +678,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     let materializedFailuresForCg = 0;
     let materializedRefsForCg = 0;
     let descriptorsAuthoritativeForCg = true;
+    let snapshotProgressForCg: PublicSnapshotWalkProgress | undefined;
     const unresolvedRefSampleForCg: string[] = [];
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
@@ -901,7 +902,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializedQuads = 0;
       const manifest = collectPublicSnapshotManifest(processed.verifiedMeta);
       const manifestSnapshots = manifest.snapshots;
-      const entitySnapshotAuthority = descriptorsAuthoritativeForCg ? undefined : createEntitySliceRecoveryPlan(
+      const entitySnapshotAuthority = createEntitySliceRecoveryPlan(
         pid, processed.verifiedMeta, manifest.sourceSubjectsByRef,
       );
       const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
@@ -912,6 +913,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       /** Snapshot refs whose every descriptor is locally present. */
       const materializedRefs = new Set<string>(snapshotWalk?.resolvedRefsSnapshot() ?? []);
       materializedRefsForCg = materializedRefs.size;
+      /** Entity refs whose blobs are ready but whose metadata is not committed yet. */
+      const readyEntityRefs = new Set<string>();
+      const commitReadyEntityRefs = (): void => {
+        for (const ref of readyEntityRefs) {
+          materializedRefs.add(ref);
+          snapshotWalk?.markResolved(ref);
+        }
+        materializedRefsForCg = materializedRefs.size;
+      };
       /** Refs that fetched but could not be written; named in the shortfall. */
       const unresolvedRefSample: string[] = [];
 
@@ -1043,14 +1053,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // UNRESOLVED: a fetched-but-unwritten ref must never look like progress
         // to the continuation loop.
         if (!snapshotMaterializer || !publicSnapshotStore) return;
-        // A complete, successfully parsed manifest can resolve an undescribed
-        // ref by vacuity. If parsing failed, only refs sourced exclusively from
-        // entity slices have that authority: they never describe per-KA graphs.
-        // Other sources (including a KA sharing the same digest) stay unresolved.
+        // Entity refs are only READY here. They become resolved after the
+        // canonical metadata rows are durably inserted below. A complete,
+        // successfully parsed manifest can still resolve a genuinely
+        // undescribed non-entity ref by vacuity. If parsing failed, other
+        // sources (including a KA sharing the same digest) stay unresolved.
         if (!descriptors?.length) {
-          if (manifestComplete && (
-            descriptorsAuthoritativeForCg || entitySnapshotAuthority?.refs.has(snapshotRef)
-          )) {
+          if (manifestComplete && entitySnapshotAuthority.refs.has(snapshotRef)) {
+            readyEntityRefs.add(snapshotRef);
+          } else if (manifestComplete && descriptorsAuthoritativeForCg) {
             materializedRefs.add(snapshotRef);
             materializedRefsForCg = materializedRefs.size;
           }
@@ -1327,6 +1338,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           }
         },
       });
+      snapshotProgressForCg = snapshotSync;
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
         // write lock, so they survive a snapshot-phase throw. Adding them again
@@ -1340,31 +1352,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.timedOutPhases += snapshotSync.timedOutPhases;
       summary.completedPhases += snapshotSync.completedPhases;
       summary.checkpointAdvances += snapshotSync.checkpointAdvances;
-      // Coverage is recorded HERE — above the incomplete branch below — because
-      // a partial round is exactly the round whose coverage the caller needs.
-      // The counts, the peer they are attributed to and the missing sample all
-      // come from this one round and stay together from here on.
-      //
-      // No record for a non-empty graph that declared no snapshot refs. That
-      // shape can contain graph-backed assets and is not terminal until their
-      // count/digest-bound transport is implemented. Only the clean
-      // two-phase-empty branch above emits explicit 0/0 completion.
-      //
-      // Across a MULTI-CG call the reduction keeps exactly ONE graph's record,
-      // named by its `contextGraphId`; the others are dropped. Foreground
-      // catch-up always passes a single CG (`syncPublicContextGraph` in
-      // `dkg-agent-lifecycle.ts`, the only caller of this function), so that
-      // only bites the on-connect fan-out, where this field is a diagnostic
-      // rather than a decision input.
-      recordSnapshotCoverage(
-        snapshotSync,
-        wsMetaResult.completed,
-        descriptorsAuthoritativeForCg,
-        materializationFailures,
-        materializedRefs.size,
-        unresolvedRefSample,
-        pid,
-      );
       // A voluntary yield is OUR budget decision, not the peer's fault. It is
       // recorded here and deliberately kept out of `timedOutPhases`, which
       // feeds `backoffWorthyFailure` and would back the peer off for it. It is
@@ -1430,7 +1417,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // otherwise certify. Only independently ready entity refs may publish
         // their metadata; an unrelated snapshot timeout cannot suppress them.
         const entityMeta = !descriptorsAuthoritativeForCg && snapshotEvidenceAccepted
-          ? entitySnapshotAuthority?.metadataFor(materializedRefs) ?? []
+          ? entitySnapshotAuthority.metadataFor(readyEntityRefs)
           : [];
         const recoveredRows = [...validWsQuads, ...entityMeta];
         if (recoveredRows.length > 0) {
@@ -1447,7 +1434,17 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           summary.insertedMetaTriples += entityMeta.length;
           summary.insertedDataTriples += validWsQuads.length;
           if (validWsQuads.length > 0) recordPhaseOutcome(wsDataResult);
+          if (entityMeta.length > 0) commitReadyEntityRefs();
         }
+        recordSnapshotCoverage(
+          snapshotSync,
+          wsMetaResult.completed,
+          descriptorsAuthoritativeForCg,
+          materializationFailures,
+          materializedRefs.size,
+          unresolvedRefSample,
+          pid,
+        );
         if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) {
           break;
         }
@@ -1497,6 +1494,20 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         if (metaForBulkInsert.length > 0) await storeInsert(metaForBulkInsert);
         hydrateOwnership();
       });
+      if (readyEntityRefs.size > 0) commitReadyEntityRefs();
+
+      // Coverage is committed only after every ref it calls resolved has made
+      // its corresponding durable write. A failed entity metadata insert must
+      // leave the ref retryable rather than advancing the continuation.
+      recordSnapshotCoverage(
+        snapshotSync,
+        wsMetaResult.completed,
+        descriptorsAuthoritativeForCg,
+        materializationFailures,
+        materializedRefs.size,
+        unresolvedRefSample,
+        pid,
+      );
 
       if (validWsQuads.length > 0) {
         summary.insertedTriples += validWsQuads.length;
@@ -1527,7 +1538,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // threw would report NOTHING — and the continuation loop reads
       // `snapshotsResolved`, so it would see a converging peer as stalled and
       // drop it. Recover the walk's own counts and record them here.
-      const thrownProgress = readPublicSnapshotWalkProgress(err);
+      const thrownProgress = readPublicSnapshotWalkProgress(err) ?? snapshotProgressForCg;
       if (thrownProgress) {
         // Same builder as the success path — the counts arrive as one coherent
         // group attached by the walk, never reassembled here.

@@ -1,4 +1,5 @@
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
+import { encodeEntityShareSliceMetadata } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -714,31 +715,27 @@ export async function storeWorkspaceOperationPublicQuads(params: {
         await params.store.insert(rootQuads.map((quad) => ({ ...quad, graph: snapshotGraph! })));
       }
     }
-    snapshotQuads.push(
-      { subject, predicate: `${DKG}contextGraphId`, object: lit(params.contextGraphId), graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}shareOperationId`, object: lit(params.shareOperationId), graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}publicSliceRootEntity`, object: root, graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}publicQuadsDigest`, object: lit(digest), graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}publicQuadsCount`, object: intLit(rootQuads.length), graph: workspaceMetaGraph },
+    snapshotQuads.push(...encodeEntityShareSliceMetadata(subject, workspaceMetaGraph, {
+      contextGraphId: lit(params.contextGraphId),
+      shareOperationId: lit(params.shareOperationId),
+      rootEntity: root,
+      publicQuadsDigest: lit(digest),
+      publicQuadsCount: intLit(rootQuads.length),
       // GH #748: dedicated `dkg:publisherPeerId` field for peer-ID-bound reads
       // (resolveCompactWorkspaceOperationPublicQuads / Legacy variant + finalization);
       // `prov:wasAttributedTo` carries the durable agent DID URI when known.
-      { subject, predicate: `${DKG}publisherPeerId`, object: lit(publisherPeerId), graph: workspaceMetaGraph },
-      { subject, predicate: `${PROV}wasAttributedTo`, object: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId), graph: workspaceMetaGraph },
-      { subject, predicate: `${DKG}publishedAt`, object: dateLit(timestamp), graph: workspaceMetaGraph },
-    );
+      publisherPeerId: lit(publisherPeerId),
+      wasAttributedTo: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId),
+      publishedAt: dateLit(timestamp),
+      ...(snapshotGraph ? { publicSnapshotGraph: snapshotGraph } : {}),
+      ...(subGraphName ? { subGraphName: lit(subGraphName) } : {}),
+    }));
     // RFC ka-metadata-trim Phase 2: `dkg:publicSnapshotRef` is no longer
     // written — `FileWorkspacePublicSnapshotStore.putSnapshot` returns
     // `ref === digest`, so the row was byte-identical to
     // `dkg:publicQuadsDigest`. A store-backed snapshot row is now identified
     // by "digest present AND no `dkg:publicSnapshotGraph` row"; readers are
     // read-both (an explicit legacy ref row wins when present).
-    if (snapshotGraph) {
-      snapshotQuads.push({ subject, predicate: `${DKG}publicSnapshotGraph`, object: snapshotGraph, graph: workspaceMetaGraph });
-    }
-    if (subGraphName) {
-      snapshotQuads.push({ subject, predicate: `${DKG}subGraphName`, object: lit(subGraphName), graph: workspaceMetaGraph });
-    }
   }
   await params.store.insert(snapshotQuads);
 }

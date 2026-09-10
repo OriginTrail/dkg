@@ -1,6 +1,5 @@
 import { decodeEntityShareMetadata, type EntityShareSliceDescriptor } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { SWM_FINALIZATION_ANNOTATION_PREDICATES } from '../../finalization-annotations.js';
 
 /** Apply reference authority and whole-operation readiness to decoded metadata. */
 export function createEntitySliceRecoveryPlan(
@@ -8,11 +7,7 @@ export function createEntitySliceRecoveryPlan(
   metaQuads: readonly Quad[],
   sourcesByRef: ReadonlyMap<string, ReadonlySet<string>>,
 ): { refs: ReadonlySet<string>; metadataFor(readyRefs: ReadonlySet<string>): Quad[] } {
-  const records = decodeEntityShareMetadata(
-    contextGraphId,
-    metaQuads.filter(({ predicate }) =>
-      !SWM_FINALIZATION_ANNOTATION_PREDICATES.has(predicate)),
-  );
+  const records = decodeEntityShareMetadata(contextGraphId, metaQuads);
   const key = (graph: string, subject: string) => `${graph}\u0000${subject}`;
   const headClaims = new Set(records.filter(record => record.kind === 'head')
     .flatMap(record => record.operationSubjects.map(subject => key(record.graph, subject))));

@@ -1,4 +1,5 @@
 import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-subjects.js';
+import { encodeEntityShareOperationMetadata } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {
@@ -1082,37 +1083,16 @@ export function generateShareMetadata(
   meta: ShareMetadata,
   swmMetaGraph: string,
 ): Quad[] {
-  const quads: Quad[] = [];
   const subject = formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId);
-
-  quads.push(
-    mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
-    mq(subject, `${DKG}contextGraphId`, lit(meta.contextGraphId), swmMetaGraph),
-    mq(subject, `${DKG}shareOperationId`, lit(meta.shareOperationId), swmMetaGraph),
-    mq(subject, `${DKG}publisherPeerId`, lit(meta.publisherPeerId), swmMetaGraph),
-    mq(
-      subject,
-      `${PROV}wasAttributedTo`,
-      meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId),
-      swmMetaGraph,
-    ),
-    mq(
-      subject,
-      `${DKG}publishedAt`,
-      dateLit(meta.timestamp),
-      swmMetaGraph,
-    ),
-  );
-
-  if (meta.subGraphName) {
-    quads.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), swmMetaGraph));
-  }
-
-  for (const rootEntity of meta.rootEntities) {
-    quads.push(...entityMemberQuads(subject, rootEntity, swmMetaGraph));
-  }
-
-  return quads;
+  return encodeEntityShareOperationMetadata(subject, swmMetaGraph, {
+    contextGraphId: lit(meta.contextGraphId),
+    shareOperationId: lit(meta.shareOperationId),
+    publisherPeerId: lit(meta.publisherPeerId),
+    wasAttributedTo: meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId),
+    publishedAt: dateLit(meta.timestamp),
+    rootEntities: meta.rootEntities,
+    ...(meta.subGraphName ? { subGraphName: lit(meta.subGraphName) } : {}),
+  });
 }
 
 /** @deprecated Use generateShareMetadata */

@@ -121,9 +121,13 @@ describe('entity-share recovery beside malformed KA heads', () => {
     });
     const aliasHead = duplicateHead.map(quad => quad.subject === ka.headSubject && quad.predicate.endsWith('/shareOperationId')
       ? { ...quad, object: `"${shareOperationId}"` } : quad);
+    const malformedNonManifestHead = duplicateHead.filter(quad =>
+      !quad.predicate.endsWith('/publicSnapshotRef')
+      && !quad.predicate.endsWith('/publicQuadsDigest')
+      && !quad.predicate.endsWith('/publicQuadsCount'));
     return {
       metaGraph, namedMetaGraph, namedMeta, shareOperationId, root, payload, digest, siblingDigest, cached, ka, entityMeta, twoRootMeta, sliceSubject, siblingSubject,
-      duplicateHead, futureHead, sharedHead, aliasHead,
+      duplicateHead, futureHead, sharedHead, aliasHead, malformedNonManifestHead,
       sliceMeta: entityMeta.filter(quad => quad.subject === sliceSubject),
       siblingMeta: twoRootMeta.filter(quad => quad.subject === siblingSubject),
       data: payload.map(quad => ({ ...quad, graph: contextGraphWorkspaceGraphUri(COVERAGE_CG) })),
@@ -304,12 +308,24 @@ describe('entity-share recovery beside malformed KA heads', () => {
     {
       name: 'selected recovery rejects entity evidence', parseError: ambiguousVersion,
       arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: [], mode: selectedMode(false) }),
-      expected: () => recovered([], [], coverage(1, 2, 1)),
+      expected: () => recovered([], [], coverage(0, 2, 2)),
     },
     {
       name: 'a rejected combined write exposes neither data nor metadata', parseError: ambiguousVersion,
       arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: f.data, rejectMetadataInsert: true }),
-      expected: f => ({ ...recovered([], [], coverage(1, 2, 1), 2), attemptedRows: [...f.data, ...f.entityMeta] }),
+      expected: f => ({ ...recovered([], [], coverage(0, 2, 2), 2), attemptedRows: [...f.data, ...f.entityMeta] }),
+    },
+    {
+      name: 'a rejected entity metadata write remains retryable', parseError: ambiguousVersion,
+      arrange: f => ({
+        meta: [...f.entityMeta, ...f.malformedNonManifestHead],
+        data: [],
+        rejectMetadataInsert: true,
+      }),
+      expected: f => ({
+        ...recovered([], [], coverage(0, 1, 1), 2),
+        attemptedRows: f.entityMeta,
+      }),
     },
   ];
 
