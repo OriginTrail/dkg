@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, realpathSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
@@ -39,10 +39,9 @@ function configFile(format: 'json' | 'jsonc' | 'toml', source: string): McpPhysi
   directories.push(dir);
   const configPath = join(dir, `config.${format}`);
   writeFileSync(configPath, source);
-  const paths = [{ configPath, displayPath: configPath }];
-  if (format === 'toml') return new McpPhysicalConfig(realpathSync(configPath), { format, serverContainer: 'mcp_servers' }, paths);
-  if (format === 'jsonc') return new McpPhysicalConfig(realpathSync(configPath), { format, serverContainer: 'servers' }, paths);
-  return new McpPhysicalConfig(realpathSync(configPath), { format, serverContainer: 'mcpServers' }, paths);
+  if (format === 'toml') return McpPhysicalConfig.create([{ configPath, displayPath: configPath, format, serverContainer: 'mcp_servers' }]);
+  if (format === 'jsonc') return McpPhysicalConfig.create([{ configPath, displayPath: configPath, format, serverContainer: 'servers' }]);
+  return McpPhysicalConfig.create([{ configPath, displayPath: configPath, format, serverContainer: 'mcpServers' }]);
 }
 afterEach(() => { for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 

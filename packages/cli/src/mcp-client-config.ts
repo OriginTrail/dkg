@@ -1,6 +1,8 @@
 import { isDeepStrictEqual } from 'node:util';
-import type { McpConfigSourceSnapshot } from './mcp-config-file.js';
-import type { McpPhysicalConfig } from './mcp-physical-config.js';
+import type {
+  McpPhysicalConfig,
+  McpPhysicalConfigSourceSnapshot,
+} from './mcp-physical-config.js';
 import { tomlDocumentAdapter } from './mcp-toml-document.js';
 import { jsonDocumentAdapter, jsoncDocumentAdapter } from './mcp-json-document.js';
 import { isPlainRecord, type DesiredRegistration, type PersistedRegistration, type RegistrationEdit, type McpConfigDocumentAdapter } from './mcp-config-document.js';
@@ -49,7 +51,7 @@ const documentAdapters: Record<McpPhysicalConfig['shape']['format'], McpConfigDo
 
 function readConfigBody(
   target: McpPhysicalConfig,
-  source: McpConfigSourceSnapshot = target.readSource(),
+  source: McpPhysicalConfigSourceSnapshot = target.readSource(),
 ): Record<string, unknown> {
   try { return documentAdapters[target.shape.format].parse(source.content ?? ''); }
   catch {
@@ -159,7 +161,7 @@ export function readRegisteredServerKeys(target: McpPhysicalConfig): ServerKeyPr
 function applyRegistrationEdit(
   target: McpPhysicalConfig,
   edit: RegistrationEdit,
-  source: McpConfigSourceSnapshot,
+  source: McpPhysicalConfigSourceSnapshot,
 ): void {
   const result = documentAdapters[target.shape.format].applyEdit(source.content ?? '', edit, target.shape.serverContainer);
   if (result.warning) {

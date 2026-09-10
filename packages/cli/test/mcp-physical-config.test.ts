@@ -80,6 +80,31 @@ it('rejects a source snapshot owned by another physical config', () => {
   assertUnchanged();
 });
 
+it('rejects snapshots exchanged between owners of the same destination', () => {
+  const original = join(directory, 'shared.json');
+  const aliasA = join(directory, 'alias-a.json');
+  const aliasB = join(directory, 'alias-b.json');
+  writeFileSync(original, '{}\n');
+  symlinkSync(original, aliasA);
+  symlinkSync(original, aliasB);
+  const base: ClientTarget = {
+    id: 'cursor', name: 'Cursor', location: 'native', format: 'json',
+    serverContainer: 'mcpServers', configPath: aliasA, displayPath: aliasA,
+  };
+  const first = selectMcpClientTargets([base])[0]!.file;
+  const second = selectMcpClientTargets([{
+    ...base,
+    configPath: aliasB,
+    displayPath: aliasB,
+  }])[0]!.file;
+
+  const firstSource = first.readSource();
+  expect(first.destination).toBe(second.destination);
+  expect(() => second.write('{"changed":true}\n', firstSource))
+    .toThrow('different physical config owner');
+  expect(readFileSync(original, 'utf8')).toBe('{}\n');
+});
+
 it('constructs and reads physical configs without detecting process runtime', () => {
   const { file } = fixture(false);
   expect(readRegistration(file).kind).toBe('entry');

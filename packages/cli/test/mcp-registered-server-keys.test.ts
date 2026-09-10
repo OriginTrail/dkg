@@ -3,7 +3,6 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { realpathSync } from 'node:fs';
 import { McpPhysicalConfig } from '../src/mcp-physical-config.js';
 
 import {
@@ -34,7 +33,7 @@ async function target(
 ): Promise<McpPhysicalConfig> {
   const configPath = join(dir, filename);
   await writeFile(configPath, body, 'utf8');
-  return new McpPhysicalConfig(realpathSync(configPath), shape, [{ configPath, displayPath: configPath }]);
+  return McpPhysicalConfig.create([{ configPath, displayPath: configPath, ...shape }]);
 }
 
 /** Fails loudly with the probe's own reason instead of a bare undefined. */

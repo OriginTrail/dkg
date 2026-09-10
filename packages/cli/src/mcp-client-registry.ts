@@ -99,7 +99,7 @@ export function selectMcpClientTargets(
     let physicalPath: string;
     try { physicalPath = resolveMcpConfigDestination(target.configPath); }
     catch { physicalPath = resolve(target.configPath); }
-    const leaf = JSON.stringify([physicalPath, target.serverContainer, DKG_SERVER_KEY]);
+    const leaf = JSON.stringify([physicalPath, target.format, target.serverContainer, DKG_SERVER_KEY]);
     const group = groups.get(leaf) ?? { path: physicalPath, aliases: [] };
     group.aliases.push(target);
     groups.set(leaf, group);
@@ -109,7 +109,7 @@ export function selectMcpClientTargets(
     const aliases = group.aliases.filter(target => !selector || (target.id === selector.id
       && (!selector.location || target.location === selector.location)));
     if (aliases.length === 0) continue;
-    selected.push({ file: new McpPhysicalConfig(group.path, aliases[0]!, aliases), aliases });
+    selected.push({ file: McpPhysicalConfig.create(aliases), aliases });
   }
   return selected;
 }
