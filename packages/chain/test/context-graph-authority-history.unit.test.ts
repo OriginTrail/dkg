@@ -48,6 +48,7 @@ function directHistoryInput(params: Readonly<{
   omitCreationNameHash?: boolean;
   rangeLimit?: number;
   rangeAttempts?: { count: number };
+  readConcurrency?: { active: number; peak: number };
 }>): ResolveContextGraphAuthorityHistoryInput {
   const enforceRangeLimit = (fromBlock: number, toBlock: number) => {
     if (params.rangeAttempts) params.rangeAttempts.count += 1;
@@ -55,6 +56,20 @@ function directHistoryInput(params: Readonly<{
       throw new Error(
         `Block range too large: maximum allowed is ${params.rangeLimit} blocks`,
       );
+    }
+  };
+  const trackRead = async <T>(read: () => T): Promise<T> => {
+    if (params.readConcurrency === undefined) return read();
+    params.readConcurrency.active += 1;
+    params.readConcurrency.peak = Math.max(
+      params.readConcurrency.peak,
+      params.readConcurrency.active,
+    );
+    await Promise.resolve();
+    try {
+      return read();
+    } finally {
+      params.readConcurrency.active -= 1;
     }
   };
   return {
@@ -72,21 +87,27 @@ function directHistoryInput(params: Readonly<{
     readBlockHash: async (blockNumber) => params.blockHashes?.[blockNumber]
       ?? (blockNumber === params.blockNumber ? params.blockHash : null),
     readCreationEvents: async (_contextGraphId, fromBlock, toBlock) => {
-      enforceRangeLimit(fromBlock, toBlock);
-      params.creationGate?.entered();
-      if (params.creationGate) await params.creationGate.wait;
-      if (fromBlock > 1 || toBlock < 1) return [];
-      return [{
-        blockNumber: 1,
-        blockHash: `0x${'01'.repeat(32)}`,
-        index: 0,
-        ...(params.omitCreationNameHash ? {} : { nameHash: NAME_HASH }),
-      }] as unknown as readonly ContextGraphAuthorityHistoryCreationEvent[];
+      return trackRead(() => {
+        enforceRangeLimit(fromBlock, toBlock);
+        params.creationGate?.entered();
+        if (fromBlock > 1 || toBlock < 1) return [];
+        return [{
+          blockNumber: 1,
+          blockHash: `0x${'01'.repeat(32)}`,
+          index: 0,
+          ...(params.omitCreationNameHash ? {} : { nameHash: NAME_HASH }),
+        }] as unknown as readonly ContextGraphAuthorityHistoryCreationEvent[];
+      }).then(async (events) => {
+        if (params.creationGate) await params.creationGate.wait;
+        return events;
+      });
     },
     readEvents: async (_query, fromBlock, toBlock) => {
-      enforceRangeLimit(fromBlock, toBlock);
-      params.ordinaryRanges?.push([fromBlock, toBlock]);
-      return [];
+      return trackRead(() => {
+        enforceRangeLimit(fromBlock, toBlock);
+        params.ordinaryRanges?.push([fromBlock, toBlock]);
+        return [];
+      });
     },
   };
 }
@@ -379,6 +400,32 @@ describe('ContextGraphAuthorityHistoryCache', () => {
     // is retried as two accepted 50-block reads.
     expect(rangeAttempts.count).toBe(36);
     await resolution.publish();
+  });
+
+  it('serializes cold event streams but keeps warm suffix streams parallel', async () => {
+    const cache = new ContextGraphAuthorityHistoryCache();
+    const coldConcurrency = { active: 0, peak: 0 };
+    const cold = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'cold-concurrency',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+      readConcurrency: coldConcurrency,
+    }));
+    expect(coldConcurrency.peak).toBe(1);
+    await cold.publish();
+
+    const warmConcurrency = { active: 0, peak: 0 };
+    const warm = await resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'cold-concurrency',
+      blockNumber: 35,
+      blockHash: NEXT_FINALIZED_HASH,
+      blockHashes: { 30: FINALIZED_HASH },
+      readConcurrency: warmConcurrency,
+    }));
+    expect(warmConcurrency.peak).toBe(5);
+    await warm.publish();
   });
 
   it('rejects a malformed creation event without a name hash at runtime', async () => {

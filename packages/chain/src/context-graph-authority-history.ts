@@ -384,15 +384,28 @@ async function loadContextGraphAuthorityHistory(
     }
     return events;
   };
+  // A cold history may span thousands of pages. Serialize its event streams so
+  // a node with no checkpoint cannot saturate every fallback endpoint with six
+  // independent walks. Once a verified checkpoint exists, retain parallel
+  // one-page suffix reads for the steady-state path.
   const [created, transfers, publishPolicy, publishAuthority, participantAdds,
-    participantRemoves] = await Promise.all([
-    previous === undefined ? readCreation() : Promise.resolve([]),
-    read('Transfer'),
-    read('PublishPolicyUpdated'),
-    read('PublishAuthorityUpdated'),
-    read('AgentParticipantAdded'),
-    read('AgentParticipantRemoved'),
-  ]);
+    participantRemoves] = previous === undefined
+    ? [
+        await readCreation(),
+        await read('Transfer'),
+        await read('PublishPolicyUpdated'),
+        await read('PublishAuthorityUpdated'),
+        await read('AgentParticipantAdded'),
+        await read('AgentParticipantRemoved'),
+      ]
+    : await Promise.all([
+        Promise.resolve([] as ContextGraphAuthorityHistoryCreationEvent[]),
+        read('Transfer'),
+        read('PublishPolicyUpdated'),
+        read('PublishAuthorityUpdated'),
+        read('AgentParticipantAdded'),
+        read('AgentParticipantRemoved'),
+      ]);
   const baseline: Readonly<{
     nameHash: string;
     ownershipEra: number;
