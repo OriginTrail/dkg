@@ -224,9 +224,10 @@ type GraphScopedMaterializationEnvelope = Pick<
   | 'privateMerkleRoot'
   | 'privateTripleCount'
   | 'publisherPeerId'
-  | 'accessPolicy'
-  | 'allowedPeers'
->;
+> & Readonly<{
+  accessPolicy: GraphScopedAccessPolicy;
+  allowedPeers: readonly string[];
+}>;
 
 /** Immutable queued assertion envelope supplied only after receipt/seal validation. */
 type TrustedGraphScopedAssertionEvidence = VerifiedGraphScopedFinalizationEvidence;
@@ -245,7 +246,7 @@ function resolveGraphScopedAccessEnvelope(
   if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
     return { accessPolicy: 'ownerOnly', allowedPeers: [] };
   }
-  return { accessPolicy, allowedPeers };
+  return { accessPolicy, allowedPeers: [...allowedPeers] };
 }
 
 function normalizedHex(value: string): string {
@@ -407,7 +408,7 @@ interface PreparedGraphScopedMaterialization
   ctxGraphId?: string;
   subGraphName?: string;
   ctx: OperationContext;
-  head: KnowledgeAssetWorkspaceHead;
+  head: GraphScopedMaterializationEnvelope;
   vmVerification: ExactGraphScopedLayerVerification;
   layerVerification: Extract<ExactGraphScopedLayerVerification, { status: 'verified' }>;
 }
@@ -1151,13 +1152,13 @@ export class FinalizationHandler {
     // metadata omitted the row. Finalization must separately preserve that
     // omission: only an explicitly durable policy outranks an authenticated
     // publisher envelope carried by the finalization message.
-    const requestedAccessPolicy = head.accessPolicyExplicit
-      ? head.accessPolicy
+    const requestedAccessPolicy = head.access.kind === 'persisted'
+      ? head.access.accessPolicy
       : trustedWireAccess
         ? wireAccessPolicy
         : undefined;
-    const requestedAllowedPeers = head.accessPolicyExplicit
-      ? head.allowedPeers
+    const requestedAllowedPeers = head.access.kind === 'persisted'
+      ? [...head.access.allowedPeers]
       : trustedWireAccess
         ? allowedPeers
         : [];
@@ -1202,8 +1203,16 @@ export class FinalizationHandler {
       }
     }
 
+    const materializationHead: GraphScopedMaterializationEnvelope = {
+      publicTripleCount: head.publicTripleCount,
+      privateMerkleRoot: head.privateMerkleRoot,
+      privateTripleCount: head.privateTripleCount,
+      publisherPeerId: head.publisherPeerId,
+      accessPolicy: head.access.accessPolicy,
+      allowedPeers: [...head.access.allowedPeers],
+    };
     const verifiedAccess = resolveGraphScopedAccessEnvelope(
-      head,
+      materializationHead,
       requestedAccessPolicy,
       requestedAllowedPeers,
     );
@@ -1216,7 +1225,7 @@ export class FinalizationHandler {
         : {}),
       ...(subGraphName ? { subGraphName, workspaceSubGraphName: subGraphName } : {}),
       ctx,
-      head,
+      head: materializationHead,
       vmVerification,
       layerVerification,
       ...(head.publicQuadsDigest ? { publicQuadsDigest: head.publicQuadsDigest } : {}),
@@ -1710,7 +1719,14 @@ export class FinalizationHandler {
           accessPolicy: trustedAssertionEvidence.accessPolicy,
           allowedPeers: [...trustedAssertionEvidence.allowedPeers],
         }
-      : workspaceHead!;
+      : {
+          publicTripleCount: workspaceHead!.publicTripleCount,
+          privateMerkleRoot: workspaceHead!.privateMerkleRoot,
+          privateTripleCount: workspaceHead!.privateTripleCount,
+          publisherPeerId: workspaceHead!.publisherPeerId,
+          accessPolicy: workspaceHead!.access.accessPolicy,
+          allowedPeers: [...workspaceHead!.access.allowedPeers],
+        };
     const evidencePublisherAddress = trustedAssertionEvidence?.publisherAddress ?? publisherAddress;
     const evidenceAuthorAddress = trustedAssertionEvidence?.authorAddress ?? authorAddress;
     const evidenceBlockNumber = trustedAssertionEvidence?.blockNumber ?? versionBlock;

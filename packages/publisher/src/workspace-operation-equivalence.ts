@@ -8,12 +8,51 @@ export interface WorkspaceOperationCommitment {
   readonly privateTripleCount: number;
 }
 
+export type WorkspaceAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
+
+/**
+ * Effective access plus the durable provenance that established it. Legacy
+ * operations omitted the policy row, so that state must remain distinct from
+ * an explicitly persisted default even though the two compare equivalently.
+ */
+export type WorkspaceOperationAccessEnvelope =
+  | Readonly<{
+      kind: 'persisted';
+      accessPolicy: WorkspaceAccessPolicy;
+      allowedPeers: readonly string[];
+    }>
+  | Readonly<{
+      kind: 'legacy-default';
+      accessPolicy: 'public' | 'ownerOnly';
+      allowedPeers: readonly [];
+    }>;
+
 /** Publisher-owned facts that make two decoded operations one logical share. */
 export interface PublisherWorkspaceOperationSemantics
   extends WorkspaceOperationCommitment {
   readonly publisherIdentity: string;
-  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
-  readonly allowedPeers: readonly string[];
+  readonly access: WorkspaceOperationAccessEnvelope;
+}
+
+/** Canonical publisher-owned semantic record, reusable by recovery extensions. */
+export function canonicalPublisherWorkspaceOperationSemantics(
+  semantics: PublisherWorkspaceOperationSemantics,
+): Readonly<Record<string, unknown>> {
+  const normalizeSet = (values: readonly string[]) => [...new Set(values)].sort();
+  return Object.freeze({
+    publicQuadsDigest: semantics.publicQuadsDigest,
+    publicTripleCount: semantics.publicTripleCount,
+    ...(semantics.privateMerkleRoot === undefined
+      ? {}
+      : { privateMerkleRoot: semantics.privateMerkleRoot }),
+    privateTripleCount: semantics.privateTripleCount,
+    publisherIdentity: semantics.publisherIdentity,
+    // Equivalence is intentionally effective-policy based. The discriminant
+    // survives on the decoded model for precedence decisions but an omitted
+    // legacy default remains the same access semantics as an explicit default.
+    accessPolicy: semantics.access.accessPolicy,
+    allowedPeers: normalizeSet(semantics.access.allowedPeers),
+  });
 }
 
 /** Persistence facts that may legitimately differ between equivalent aliases. */
@@ -35,18 +74,7 @@ export interface WorkspaceOperationModel<TSemantics> {
 export function publisherWorkspaceOperationSemanticsKey(
   semantics: PublisherWorkspaceOperationSemantics,
 ): string {
-  const normalizeSet = (values: readonly string[]) => [...new Set(values)].sort();
-  return JSON.stringify({
-    publicQuadsDigest: semantics.publicQuadsDigest,
-    publicTripleCount: semantics.publicTripleCount,
-    ...(semantics.privateMerkleRoot === undefined
-      ? {}
-      : { privateMerkleRoot: semantics.privateMerkleRoot }),
-    privateTripleCount: semantics.privateTripleCount,
-    publisherIdentity: semantics.publisherIdentity,
-    accessPolicy: semantics.accessPolicy,
-    allowedPeers: normalizeSet(semantics.allowedPeers),
-  });
+  return JSON.stringify(canonicalPublisherWorkspaceOperationSemantics(semantics));
 }
 
 /** Validate one equivalence class and select its deterministic display alias. */

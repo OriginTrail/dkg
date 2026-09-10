@@ -4,6 +4,7 @@ import {
   KnowledgeAssetWorkspaceHeadCorruptError,
   isKnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
+  resolveKnowledgeAssetWorkspaceHeadPublicQuads,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from '../src/index.js';
@@ -148,8 +149,11 @@ describe('workspace operation semantic model', () => {
     privateMerkleRoot: `0x${'2'.repeat(64)}`,
     privateTripleCount: 1,
     publisherIdentity: 'peer-a',
-    accessPolicy: 'allowList',
-    allowedPeers: Object.freeze(['peer-a', 'peer-b']),
+    access: Object.freeze({
+      kind: 'persisted',
+      accessPolicy: 'allowList',
+      allowedPeers: Object.freeze(['peer-a', 'peer-b']),
+    }),
   });
 
   it.each([
@@ -158,8 +162,8 @@ describe('workspace operation semantic model', () => {
     ['privateMerkleRoot', `0x${'4'.repeat(64)}`],
     ['privateTripleCount', 2],
     ['publisherIdentity', 'peer-c'],
-    ['accessPolicy', 'ownerOnly'],
-    ['allowedPeers', ['peer-a', 'peer-c']],
+    ['access', { kind: 'persisted', accessPolicy: 'ownerOnly', allowedPeers: [] }],
+    ['access', { kind: 'persisted', accessPolicy: 'allowList', allowedPeers: ['peer-a', 'peer-c'] }],
   ] satisfies ReadonlyArray<readonly [keyof PublisherWorkspaceOperationSemantics, unknown]>) (
     'includes semantic field %s in equivalence', (field, value) => {
       expect(publisherWorkspaceOperationSemanticsKey({
@@ -180,17 +184,6 @@ describe('workspace operation semantic model', () => {
     });
   });
 
-  it('requires publisher identity at the publisher comparison boundary', () => {
-    // @ts-expect-error Publisher semantics cannot admit an identity-less candidate.
-    const missingPublisher: PublisherWorkspaceOperationSemantics = {
-      publicQuadsDigest: semantics.publicQuadsDigest,
-      publicTripleCount: semantics.publicTripleCount,
-      privateTripleCount: semantics.privateTripleCount,
-      accessPolicy: semantics.accessPolicy,
-      allowedPeers: semantics.allowedPeers,
-    };
-    expect(missingPublisher).toBeDefined();
-  });
 });
 
 describe('isKnowledgeAssetWorkspaceHeadCorruptError boundary predicate', () => {
@@ -296,8 +289,7 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     expect(head?.shareOperationId).toBe(LOCAL_OP);
     expect(head?.assertionVersion).toBe('1');
     expect(head).toMatchObject({
-      accessPolicy: 'public',
-      accessPolicyExplicit: false,
+      access: { kind: 'legacy-default', accessPolicy: 'public', allowedPeers: [] },
     });
   });
 
@@ -310,6 +302,44 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     // Equal timestamps use the operation id as a deterministic final tie-break.
     expect(head?.shareOperationId).toBe(REMOTE_OP);
     expect(head?.publicTripleCount).toBe(CONTENT.length);
+  });
+
+  it('resolves snapshot bytes through a locator-bearing alias when the display alias has none', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await seedOperation(h, REMOTE_OP);
+    await unionInsertSecondHeadId(h);
+    const remoteSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${REMOTE_OP}`;
+    await h.store.deleteByPattern({
+      graph: h.metaGraph,
+      subject: remoteSubject,
+      predicate: `${DKG}publicSnapshotGraph`,
+    });
+    const head = await resolveHead(h);
+    expect(head?.shareOperationId).toBe(REMOTE_OP);
+    expect(head?.operationAliases).toHaveLength(2);
+    if (!head) throw new Error('expected resolved workspace head');
+    const snapshot = await resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+      store: h.store,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      head,
+    });
+    expect(snapshot.publicQuadsDigest).toBe(head.publicQuadsDigest);
+    expect(snapshot.quads).toHaveLength(CONTENT.length);
+    expect(snapshot.quads).toEqual(expect.arrayContaining(CONTENT));
+  });
+
+  it('exposes an explicit allow-list as a persisted access-envelope state', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h, { accessPolicy: 'allowList', allowedPeers: ['peer-b', 'peer-a'] });
+    await expect(resolveHead(h)).resolves.toMatchObject({
+      access: {
+        kind: 'persisted',
+        accessPolicy: 'allowList',
+        allowedPeers: ['peer-a', 'peer-b'],
+      },
+    });
   });
 
   it.each([
@@ -341,8 +371,7 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     await expect(resolveHead(h)).resolves.toMatchObject({
       shareOperationId: REMOTE_OP,
       shareOperationIds: [LOCAL_OP, REMOTE_OP],
-      accessPolicy: effectivePolicy,
-      accessPolicyExplicit: true,
+      access: { kind: 'persisted', accessPolicy: effectivePolicy, allowedPeers: [] },
     });
   });
 

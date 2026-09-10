@@ -37,7 +37,11 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { operationIdentityKey, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import {
+  materializeGraphScopedSwmRecoveryAsset,
+  operationIdentityKey,
+  parseGraphScopedSwmRecoveryDescriptors,
+} from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -392,6 +396,145 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       expect(summary.failedPhases).toBe(0);
       expect(await distinctObjects(store, WS_META, storageAck.headSubject, `${DKG}shareOperationId`))
         .toEqual(['"storage-ack-equivalent"']);
+    });
+
+    it('accepts an omitted legacy policy and an explicitly persisted effective default', () => {
+      const storageAck = share(1, 'storage-ack-explicit-default', 'version-one');
+      const legacyOriginator = v1.meta.filter((row) => !(
+        row.subject === v1.operationSubject && row.predicate === `${DKG}accessPolicy`
+      ));
+      const servedMeta = [
+        ...legacyOriginator,
+        ...storageAck.meta.filter((row) => row.subject === storageAck.operationSubject),
+        ...storageAck.meta.filter((row) =>
+          row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+
+      expect(parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      })).toHaveLength(1);
+    });
+
+    it.each([
+      'canonical commitment',
+      'access policy',
+      'allowed peers',
+      'publisher identity',
+      'author identity',
+    ])('rejects equivalent aliases that disagree on %s', (field) => {
+      const storageAck = share(1, `storage-ack-${field.replaceAll(' ', '-')}`, 'version-one');
+      let localRows = [...v1.meta];
+      let remoteRows = [...storageAck.meta];
+      const replace = (rows: Quad[], subject: string, predicate: string, object: string) => rows.map(
+        (row) => row.subject === subject && row.predicate === predicate ? { ...row, object } : row,
+      );
+      if (field === 'canonical commitment') {
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          `${DKG}publicQuadsCount`,
+          `"3"^^<${XSD_INTEGER}>`,
+        );
+      } else if (field === 'access policy') {
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          `${DKG}accessPolicy`,
+          '"ownerOnly"',
+        );
+      } else if (field === 'allowed peers') {
+        localRows = replace(localRows, v1.operationSubject, `${DKG}accessPolicy`, '"allowList"');
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          `${DKG}accessPolicy`,
+          '"allowList"',
+        );
+        localRows.push({
+          subject: v1.operationSubject,
+          predicate: `${DKG}allowedPeer`,
+          object: '"peer-a"',
+          graph: WS_META,
+        });
+        remoteRows.push({
+          subject: storageAck.operationSubject,
+          predicate: `${DKG}allowedPeer`,
+          object: '"peer-b"',
+          graph: WS_META,
+        });
+      } else if (field === 'publisher identity') {
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          `${DKG}publisherPeerId`,
+          '"peer-other"',
+        );
+      } else {
+        remoteRows = replace(
+          remoteRows,
+          storageAck.operationSubject,
+          'http://www.w3.org/ns/prov#wasAttributedTo',
+          '"peer-other"',
+        );
+      }
+      const servedMeta = [
+        ...localRows,
+        ...remoteRows.filter((row) => row.subject === storageAck.operationSubject),
+        ...remoteRows.filter((row) =>
+          row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+
+      expect(() => parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      })).toThrow(/ambiguous shareOperationId/);
+    });
+
+    it('materializes from an older graph locator while retaining the newer display alias', async () => {
+      const storageAck = share(1, 'storage-ack-locatorless', 'version-one');
+      const snapshotGraph = `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${v1.operationId}/ka`;
+      const graphBackedOriginator = [
+        ...v1.meta.filter((row) => !(
+          row.subject === v1.operationSubject && row.predicate === `${DKG}publicSnapshotRef`
+        )),
+        {
+          subject: v1.operationSubject,
+          predicate: `${DKG}publicSnapshotGraph`,
+          object: snapshotGraph,
+          graph: WS_META,
+        },
+      ];
+      const locatorlessStorageAck = storageAck.meta
+        .filter((row) => !(
+          row.subject === storageAck.operationSubject
+          && (row.predicate === `${DKG}publicSnapshotRef`
+            || row.predicate === `${DKG}publicSnapshotGraph`)
+        ))
+        .map((row) => row.subject === storageAck.operationSubject
+          && row.predicate === `${DKG}publishedAt`
+          ? { ...row, object: '"1970-01-01T00:00:01.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }
+          : row);
+      const servedMeta = [
+        ...graphBackedOriginator,
+        ...locatorlessStorageAck.filter((row) => row.subject === storageAck.operationSubject),
+        ...locatorlessStorageAck.filter((row) =>
+          row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+      const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      });
+      expect(descriptor).toMatchObject({
+        shareOperationId: storageAck.operationId,
+        snapshotSourceOperationId: v1.operationId,
+        publicSnapshotGraph: snapshotGraph,
+        snapshotLocatorProvenance: 'graph',
+      });
+      await expect(materializeGraphScopedSwmRecoveryAsset({
+        descriptor: descriptor!,
+        fetchedDataQuads: inGraph(v1.payload, snapshotGraph),
+      })).resolves.toMatchObject({ quads: inGraph(v1.payload, v1.assertionGraph) });
     });
 
     it('still fails closed when two head operations disagree on content', () => {

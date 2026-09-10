@@ -361,10 +361,10 @@ export class AccessHandler {
         ? hexToBytes(head.privateMerkleRoot)
         : undefined,
       privateTripleCount: head.privateTripleCount,
-      accessPolicy: head.accessPolicy,
+      accessPolicy: head.access.accessPolicy,
       hasInvalidExplicitPolicy: false,
       publisherPeerId: head.publisherPeerId,
-      allowedPeers: [...head.allowedPeers],
+      allowedPeers: [...head.access.allowedPeers],
     };
   }
 

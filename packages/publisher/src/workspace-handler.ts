@@ -1532,9 +1532,8 @@ export class SharedMemoryHandler {
               currentHead.privateTripleCount === (privateTripleCount ?? 0) &&
               currentHead.privateMerkleRoot?.toLowerCase() === incomingPrivateRootHex &&
               currentHead.assertionGraph === swmGraph &&
-              (currentHead.accessPolicy
-                ?? (currentHead.privateTripleCount > 0 ? 'ownerOnly' : 'public')) === graphAccessPolicy &&
-              currentHead.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
+              currentHead.access.accessPolicy === graphAccessPolicy &&
+              currentHead.access.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
             if (sameAssertion) {
               // Exact replay: acknowledge idempotently without churning the
               // graph or immutable operation snapshot. Refresh the local-only

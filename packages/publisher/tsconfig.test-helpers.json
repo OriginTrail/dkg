@@ -13,7 +13,8 @@
     "test/_helpers/promote-operation-intent-types.ts",
     "test/_helpers/publication-options-types.ts",
     "test/_helpers/promote-replay-safety-public-api.ts",
-    "test/_helpers/receipt-hint-scenario.ts"
+    "test/_helpers/receipt-hint-scenario.ts",
+    "test/_helpers/workspace-operation-equivalence-types.ts"
   ],
   "references": [
     { "path": "../core" },

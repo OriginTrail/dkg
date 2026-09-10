@@ -540,7 +540,6 @@ export class GossipPublishHandler {
           || workspaceHead.publicQuadsDigest !== publicDigest
           || workspaceHead.privateTripleCount !== graphPublish.privateTripleCount
           || workspaceHead.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
-          || workspaceHead.accessPolicy === undefined
         ) {
           this.log.warn(
             ctx,
@@ -550,8 +549,8 @@ export class GossipPublishHandler {
           return;
         }
         if (
-          graphPublish.accessPolicy !== workspaceHead.accessPolicy
-          || graphPublish.allowedPeers.join('\0') !== workspaceHead.allowedPeers.join('\0')
+          graphPublish.accessPolicy !== workspaceHead.access.accessPolicy
+          || graphPublish.allowedPeers.join('\0') !== workspaceHead.access.allowedPeers.join('\0')
           || (fromPeerId !== undefined && fromPeerId !== workspaceHead.publisherPeerId)
         ) {
           this.log.warn(
@@ -581,9 +580,9 @@ export class GossipPublishHandler {
             contextGraphId: request.contextGraphId,
             merkleRoot,
             publisherPeerId: workspaceHead.publisherPeerId,
-            accessPolicy: workspaceHead.accessPolicy,
-            ...(workspaceHead.accessPolicy === 'allowList'
-              ? { allowedPeers: workspaceHead.allowedPeers }
+            accessPolicy: workspaceHead.access.accessPolicy,
+            ...(workspaceHead.access.accessPolicy === 'allowList'
+              ? { allowedPeers: [...workspaceHead.access.allowedPeers] }
               : {}),
             timestamp: new Date(),
             subGraphName,

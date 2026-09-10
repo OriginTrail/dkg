@@ -690,7 +690,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       // Public catalogs never reveal restricted individual shares. A selected
       // private CG instead carries the same public projection only through its
       // roster-authenticated V2 catalog transport.
-      if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.accessPolicy)) {
+      if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.access.accessPolicy)) {
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
           shadowResult('dormant', 'upsert', 0, null, null, 'policy-mismatch'),
           params.contextGraphId,

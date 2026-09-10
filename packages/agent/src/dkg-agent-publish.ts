@@ -4592,7 +4592,6 @@ export class PublishMethods extends DKGAgentBase {
       !head
       || !workspaceHeadIncludesShareOperationId(head, shareOperationId)
       || head.assertionVersion !== seal.assertionVersion
-      || head.accessPolicy === undefined
     ) {
       throw Object.assign(
         new Error(
@@ -4602,8 +4601,8 @@ export class PublishMethods extends DKGAgentBase {
         { code: 'PUBLISH_INTENT_STALE' },
       );
     }
-    const accessPolicy = head.accessPolicy;
-    const allowedPeers = [...new Set(head.allowedPeers.map((peerId) => peerId.trim()).filter(Boolean))].sort();
+    const accessPolicy = head.access.accessPolicy;
+    const allowedPeers = [...new Set(head.access.allowedPeers.map((peerId) => peerId.trim()).filter(Boolean))].sort();
     const explicitAllowedPeers = [...new Set(
       (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
     )].sort();
@@ -4844,14 +4843,13 @@ export class PublishMethods extends DKGAgentBase {
       (request.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
     )].sort();
     const liveAllowedPeers = [...new Set(
-      (liveHead?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+      (liveHead?.access.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
     )].sort();
     if (
       !liveHead
       || !workspaceHeadIncludesShareOperationId(liveHead, request.shareOperationId)
       || liveHead.assertionVersion !== request.assertionVersion
-      || liveHead.accessPolicy === undefined
-      || liveHead.accessPolicy !== request.accessPolicy
+      || liveHead.access.accessPolicy !== request.accessPolicy
       || JSON.stringify(liveAllowedPeers) !== JSON.stringify(queuedAllowedPeers)
     ) {
       throw stale(

@@ -6,10 +6,12 @@ import {
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
+  canonicalPublisherWorkspaceOperationSemantics,
   selectEquivalentWorkspaceOperation,
   workspacePublicQuadsDigest,
   type WorkspaceOperationModel,
-  type WorkspaceOperationCommitment,
+  type PublisherWorkspaceOperationSemantics,
+  type WorkspaceOperationAccessEnvelope,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -50,10 +52,7 @@ interface RecoveryWorkspaceOperationIdentity {
   readonly authorIdentities: readonly string[];
 }
 
-interface RecoveryWorkspaceOperationSemantics extends WorkspaceOperationCommitment {
-  readonly publisherIdentity: string;
-  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
-  readonly allowedPeers: readonly string[];
+interface RecoveryWorkspaceOperationSemantics extends PublisherWorkspaceOperationSemantics {
   readonly recoveryIdentity: RecoveryWorkspaceOperationIdentity;
 }
 
@@ -62,16 +61,24 @@ function samePayloadOperationEquivalenceKey(
   semantics: RecoveryWorkspaceOperationSemantics,
 ): string {
   const normalizeSet = (values: readonly string[]) => [...new Set(values)].sort();
+  const access: WorkspaceOperationAccessEnvelope = semantics.access.kind === 'persisted'
+    ? {
+        kind: 'persisted',
+        accessPolicy: semantics.access.accessPolicy,
+        allowedPeers: normalizeSet(semantics.access.allowedPeers.map((peer) => peer.trim())),
+      }
+    : semantics.access;
   return JSON.stringify({
-    publicQuadsDigest: semantics.publicQuadsDigest.trim().toLowerCase(),
-    publicTripleCount: semantics.publicTripleCount,
-    ...(semantics.privateMerkleRoot === undefined
-      ? {}
-      : { privateMerkleRoot: semantics.privateMerkleRoot.toLowerCase() }),
-    privateTripleCount: semantics.privateTripleCount,
-    publisherIdentity: semantics.publisherIdentity.trim(),
-    accessPolicy: semantics.accessPolicy,
-    allowedPeers: normalizeSet(semantics.allowedPeers.map((peer) => peer.trim())),
+    publisherSemantics: canonicalPublisherWorkspaceOperationSemantics({
+      publicQuadsDigest: semantics.publicQuadsDigest.trim().toLowerCase(),
+      publicTripleCount: semantics.publicTripleCount,
+      ...(semantics.privateMerkleRoot === undefined
+        ? {}
+        : { privateMerkleRoot: semantics.privateMerkleRoot.toLowerCase() }),
+      privateTripleCount: semantics.privateTripleCount,
+      publisherIdentity: semantics.publisherIdentity.trim(),
+      access,
+    }),
     recoveryIdentity: {
       contextGraphId: semantics.recoveryIdentity.contextGraphId,
       contentScopeVersion: semantics.recoveryIdentity.contentScopeVersion,
@@ -92,7 +99,10 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly kaUal: string;
   readonly assertionVersion: string;
   readonly assertionGraph: string;
+  /** Deterministic newest alias used as the logical head identity. */
   readonly shareOperationId: string;
+  /** Equivalent operation whose immutable snapshot locator is materialized. */
+  readonly snapshotSourceOperationId: string;
   readonly publicQuadsDigest: string;
   readonly publicQuadsCount: number;
   /** Authenticated private-content commitment carried by the active operation. */
@@ -100,6 +110,7 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly privateMerkleRoot?: string;
   readonly publicSnapshotRef?: string;
   readonly publicSnapshotGraph?: string;
+  readonly snapshotLocatorProvenance: 'graph' | 'persisted-ref' | 'digest-fallback';
   readonly publisherPeerId: string;
   readonly subGraphName?: string;
   /** Only the active head and its referenced operation, for snapshot fetch. */
@@ -202,77 +213,17 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       assertionVersion: scope.assertionVersion,
       subGraphName,
     });
-    const { shareOperationId, operationSubject, operationRows } = operation;
-
-    const publicQuadsDigest = requireLiteral(
-      operationRows,
-      PUBLIC_QUADS_DIGEST,
-      'publicQuadsDigest',
-    ).trim().toLowerCase();
-    if (!/^sha256:[0-9a-f]{64}$/.test(publicQuadsDigest)) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publicQuadsDigest`);
-    }
-    const publicQuadsCount = requireSafeInteger(
-      operationRows,
-      PUBLIC_QUADS_COUNT,
-      'publicQuadsCount',
-    );
-    if (publicQuadsCount < 0) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has a negative publicQuadsCount`);
-    }
-    const privateTripleCount = requireSafeInteger(
-      operationRows,
-      PRIVATE_TRIPLE_COUNT,
-      'privateTripleCount',
-    );
-    if (privateTripleCount < 0 || (privateTripleCount === 0 && publicQuadsCount === 0)) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has invalid public/private counts`);
-    }
-    const privateRoot = optionalSingle(operationRows, PRIVATE_MERKLE_ROOT, 'privateMerkleRoot');
-    if (
-      (privateTripleCount > 0 && !/^0x[0-9a-fA-F]{64}$/.test(stripLiteral(privateRoot ?? '')))
-      || (privateTripleCount === 0 && privateRoot !== undefined)
-    ) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid private commitment`);
-    }
-
-    const publicSnapshotGraph = optionalSingle(
-      operationRows,
-      PUBLIC_SNAPSHOT_GRAPH,
-      'publicSnapshotGraph',
-    );
-    const explicitSnapshotRef = optionalLiteral(
-      operationRows,
-      PUBLIC_SNAPSHOT_REF,
-      'publicSnapshotRef',
-    )?.trim();
-    if (publicSnapshotGraph && explicitSnapshotRef) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has two public snapshot locations`);
-    }
-    if (publicSnapshotGraph) {
-      const expectedSnapshotGraph = knowledgeAssetSnapshotGraph(
-        params.contextGraphId,
-        shareOperationId,
-        subGraphName,
-      );
-      if (publicSnapshotGraph !== expectedSnapshotGraph) {
-        throw new Error(
-          `Graph-scoped SWM operation ${operationSubject} snapshot graph mismatch: ` +
-          `expected ${expectedSnapshotGraph}, found ${publicSnapshotGraph}`,
-        );
-      }
-    }
-    const publicSnapshotRef = publicSnapshotGraph
-      ? undefined
-      : (explicitSnapshotRef || publicQuadsDigest);
-    if (publicSnapshotRef && !/^sha256:[0-9a-f]{64}$/i.test(publicSnapshotRef)) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publicSnapshotRef`);
-    }
-
-    const publisherPeerId = requireLiteral(operationRows, PUBLISHER_PEER_ID, 'publisherPeerId').trim();
-    if (!publisherPeerId) {
-      throw new Error(`Graph-scoped SWM operation ${operationSubject} has an empty publisherPeerId`);
-    }
+    const { shareOperationId, operationSubject, operationRows, semantics, snapshotSource } = operation;
+    const publicQuadsDigest = semantics.publicQuadsDigest;
+    const publicQuadsCount = semantics.publicTripleCount;
+    const privateTripleCount = semantics.privateTripleCount;
+    const privateRoot = semantics.privateMerkleRoot;
+    const publicSnapshotGraph = snapshotSource.locator.kind === 'graph'
+      ? snapshotSource.locator.graph
+      : undefined;
+    const publicSnapshotRef = snapshotSource.locator.kind === 'store'
+      ? snapshotSource.locator.ref
+      : undefined;
     descriptors.push({
       metaGraph,
       headSubject,
@@ -281,15 +232,17 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       assertionVersion: scope.assertionVersion,
       assertionGraph,
       shareOperationId,
+      snapshotSourceOperationId: snapshotSource.shareOperationId,
       publicQuadsDigest,
       publicQuadsCount,
       privateTripleCount,
-      ...(privateRoot === undefined
-        ? {}
-        : { privateMerkleRoot: stripLiteral(privateRoot).toLowerCase() }),
+      ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
       ...(publicSnapshotRef ? { publicSnapshotRef } : {}),
       ...(publicSnapshotGraph ? { publicSnapshotGraph } : {}),
-      publisherPeerId,
+      snapshotLocatorProvenance: snapshotSource.locator.kind === 'graph'
+        ? 'graph'
+        : snapshotSource.locator.provenance,
+      publisherPeerId: semantics.publisherIdentity,
       ...(subGraphName ? { subGraphName } : {}),
       metadataQuads: [
         ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
@@ -302,6 +255,9 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
         ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
           && stripLiteral(row.object).trim() === shareOperationId),
         ...operationRows,
+        ...(snapshotSource.operationSubject === operationSubject
+          ? []
+          : snapshotSource.operationRows),
       ],
     });
   }
@@ -511,10 +467,78 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
   });
 }
 
+type RecoverySnapshotLocator =
+  | Readonly<{ kind: 'graph'; graph: string }>
+  | Readonly<{
+      kind: 'store';
+      ref: string;
+      provenance: 'persisted-ref' | 'digest-fallback';
+    }>;
+
+interface RecoveryOperationCandidate extends WorkspaceOperationModel<RecoveryWorkspaceOperationSemantics> {
+  readonly shareOperationId: string;
+  readonly operationSubject: string;
+  readonly operationRows: readonly Quad[];
+  readonly snapshotLocator: RecoverySnapshotLocator;
+}
+
 interface ResolvedHeadOperation {
   readonly shareOperationId: string;
   readonly operationSubject: string;
   readonly operationRows: readonly Quad[];
+  readonly semantics: RecoveryWorkspaceOperationSemantics;
+  readonly snapshotSource: Readonly<{
+    shareOperationId: string;
+    operationSubject: string;
+    operationRows: readonly Quad[];
+    locator: RecoverySnapshotLocator;
+  }>;
+}
+
+function recoverySnapshotLocator(params: {
+  readonly rows: readonly Quad[];
+  readonly contextGraphId: string;
+  readonly operationSubject: string;
+  readonly shareOperationId: string;
+  readonly subGraphName?: string;
+  readonly publicQuadsDigest: string;
+}): RecoverySnapshotLocator {
+  const publicSnapshotGraph = optionalSingle(
+    params.rows,
+    PUBLIC_SNAPSHOT_GRAPH,
+    'publicSnapshotGraph',
+  );
+  const explicitSnapshotRef = optionalLiteral(
+    params.rows,
+    PUBLIC_SNAPSHOT_REF,
+    'publicSnapshotRef',
+  )?.trim();
+  if (publicSnapshotGraph && explicitSnapshotRef) {
+    throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has two public snapshot locations`);
+  }
+  if (publicSnapshotGraph) {
+    const expectedSnapshotGraph = knowledgeAssetSnapshotGraph(
+      params.contextGraphId,
+      params.shareOperationId,
+      params.subGraphName,
+    );
+    if (publicSnapshotGraph !== expectedSnapshotGraph) {
+      throw new Error(
+        `Graph-scoped SWM operation ${params.operationSubject} snapshot graph mismatch: ` +
+        `expected ${expectedSnapshotGraph}, found ${publicSnapshotGraph}`,
+      );
+    }
+    return { kind: 'graph', graph: publicSnapshotGraph };
+  }
+  const ref = explicitSnapshotRef || params.publicQuadsDigest;
+  if (!/^sha256:[0-9a-f]{64}$/i.test(ref)) {
+    throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid publicSnapshotRef`);
+  }
+  return {
+    kind: 'store',
+    ref,
+    provenance: explicitSnapshotRef ? 'persisted-ref' : 'digest-fallback',
+  };
 }
 
 /**
@@ -546,7 +570,7 @@ function resolveEquivalentHeadOperation(params: {
     throw new Error(`Graph-scoped SWM head ${params.headSubject} has an empty shareOperationId`);
   }
 
-  const candidates = shareOperationIds.map((shareOperationId) => {
+  const candidates: RecoveryOperationCandidate[] = shareOperationIds.map((shareOperationId) => {
     const operationSubject = `urn:dkg:share:${params.contextGraphId}:${shareOperationId}`;
     const operationRows = params.byGraphAndSubject.get(
       `${params.metaGraph}\u0000${operationSubject}`,
@@ -575,11 +599,17 @@ function resolveEquivalentHeadOperation(params: {
     return {
       semantics,
       provenance: { shareOperationId, publishedAtMs },
+      shareOperationId,
       operationSubject,
       operationRows,
-    } satisfies WorkspaceOperationModel<RecoveryWorkspaceOperationSemantics> & {
-      readonly operationSubject: string;
-      readonly operationRows: readonly Quad[];
+      snapshotLocator: recoverySnapshotLocator({
+        rows: operationRows,
+        contextGraphId: params.contextGraphId,
+        operationSubject,
+        shareOperationId,
+        ...(params.subGraphName === undefined ? {} : { subGraphName: params.subGraphName }),
+        publicQuadsDigest: semantics.publicQuadsDigest,
+      }),
     };
   });
 
@@ -588,10 +618,37 @@ function resolveEquivalentHeadOperation(params: {
     samePayloadOperationEquivalenceKey,
     { ambiguityError: () => new Error('ambiguous shareOperationId') },
   );
+  // Logical display ordering and snapshot capability are intentionally
+  // independent. Prefer a self-contained graph locator from any equivalent
+  // alias; otherwise prefer the selected alias, then an explicitly persisted
+  // store ref, before using the modern digest fallback convention.
+  const graphSource = candidates
+    .filter((candidate) => candidate.snapshotLocator.kind === 'graph')
+    .sort((left, right) => (
+      (right.provenance.publishedAtMs ?? Number.NEGATIVE_INFINITY)
+        - (left.provenance.publishedAtMs ?? Number.NEGATIVE_INFINITY)
+      || right.shareOperationId.localeCompare(left.shareOperationId)
+    ))[0];
+  const persistedRefSource = candidates.find(
+    (candidate) => candidate.snapshotLocator.kind === 'store'
+      && candidate.snapshotLocator.provenance === 'persisted-ref',
+  );
+  const snapshotSource = graphSource
+    ?? (selected.snapshotLocator.kind === 'store'
+      && selected.snapshotLocator.provenance === 'persisted-ref'
+      ? selected
+      : persistedRefSource ?? selected);
   return {
     shareOperationId: selected.provenance.shareOperationId,
     operationSubject: selected.operationSubject,
     operationRows: selected.operationRows,
+    semantics: selected.semantics,
+    snapshotSource: {
+      shareOperationId: snapshotSource.shareOperationId,
+      operationSubject: snapshotSource.operationSubject,
+      operationRows: snapshotSource.operationRows,
+      locator: snapshotSource.snapshotLocator,
+    },
   };
 }
 
@@ -675,7 +732,11 @@ function validateOperationRows(params: {
   if (accessPolicy && !['public', 'ownerOnly', 'allowList'].includes(accessPolicy)) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid accessPolicy`);
   }
-  const allowedPeers = distinctObjects(rows, ALLOWED_PEER).map(stripLiteral).filter(Boolean);
+  const allowedPeers = distinctObjects(rows, ALLOWED_PEER)
+    .map(stripLiteral)
+    .map((peer) => peer.trim())
+    .filter(Boolean)
+    .sort();
   if (
     (accessPolicy === 'allowList' && allowedPeers.length === 0)
     || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
@@ -689,9 +750,20 @@ function validateOperationRows(params: {
   }
   const publicTripleCount = requireSafeInteger(rows, PUBLIC_QUADS_COUNT, 'publicQuadsCount');
   const privateTripleCount = requireSafeInteger(rows, PRIVATE_TRIPLE_COUNT, 'privateTripleCount');
-  const privateMerkleRoot = optionalLiteral(rows, PRIVATE_MERKLE_ROOT, 'privateMerkleRoot');
-  const publisherIdentity = requireLiteral(rows, PUBLISHER_PEER_ID, 'publisherPeerId');
-  if (publicTripleCount < 0 || privateTripleCount < 0 || !publisherIdentity) {
+  const publicQuadsDigest = requireLiteral(rows, PUBLIC_QUADS_DIGEST, 'publicQuadsDigest')
+    .trim()
+    .toLowerCase();
+  const privateMerkleRoot = optionalLiteral(rows, PRIVATE_MERKLE_ROOT, 'privateMerkleRoot')
+    ?.trim()
+    .toLowerCase();
+  const publisherIdentity = requireLiteral(rows, PUBLISHER_PEER_ID, 'publisherPeerId').trim();
+  if (
+    publicTripleCount < 0
+    || privateTripleCount < 0
+    || (publicTripleCount === 0 && privateTripleCount === 0)
+    || !/^sha256:[0-9a-f]{64}$/.test(publicQuadsDigest)
+    || !publisherIdentity
+  ) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has invalid commitment metadata`);
   }
   if (
@@ -700,16 +772,27 @@ function validateOperationRows(params: {
   ) {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid private commitment`);
   }
+  const effectiveAccessPolicy = (accessPolicy
+    ?? (privateTripleCount > 0 ? 'ownerOnly' : 'public')) as
+    'public' | 'ownerOnly' | 'allowList';
+  const access: WorkspaceOperationAccessEnvelope = accessPolicy === undefined
+    ? {
+        kind: 'legacy-default',
+        accessPolicy: effectiveAccessPolicy as 'public' | 'ownerOnly',
+        allowedPeers: [],
+      }
+    : {
+        kind: 'persisted',
+        accessPolicy: effectiveAccessPolicy,
+        allowedPeers,
+      };
   return {
-    publicQuadsDigest: requireLiteral(rows, PUBLIC_QUADS_DIGEST, 'publicQuadsDigest'),
+    publicQuadsDigest,
     publicTripleCount,
     ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
     privateTripleCount,
     publisherIdentity,
-    accessPolicy: (accessPolicy
-      ?? (privateTripleCount > 0 ? 'ownerOnly' : 'public')) as
-      'public' | 'ownerOnly' | 'allowList',
-    allowedPeers,
+    access,
     recoveryIdentity: {
       contextGraphId: params.contextGraphId,
       contentScopeVersion: requireLiteral(rows, CONTENT_SCOPE_VERSION, 'contentScopeVersion'),

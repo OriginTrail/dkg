@@ -26,7 +26,8 @@ import {
 import {
   computeFlatKCRootV10,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
-  resolveKnowledgeAssetOperationPublicQuads,
+  KnowledgeAssetOperationPublicSnapshotNotFoundError,
+  resolveKnowledgeAssetWorkspaceHeadPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
   workspaceHeadIncludesShareOperationId,
   type WorkspacePublicSnapshotStore,
@@ -150,27 +151,40 @@ async function resolveDurableCatalogAssetV1(
     && head.assertionVersion === identity.assertionVersion
     && head.publicTripleCount === Number(seal.publicTripleCount)
     && head.privateTripleCount === Number(seal.privateTripleCount)
-    && laneAcceptsWorkspaceHeadV1(laneKind, head.accessPolicy)
+    && laneAcceptsWorkspaceHeadV1(laneKind, head.access.accessPolicy)
     && !inventoryRowDiffers;
+  const resolveVerifiedVmProjection = () => resolveFinalizedVmProjectionQuadsV1(
+    params,
+    identity,
+    seal,
+    resolution.kind === 'inventory-row'
+      ? 'agent.rfc64.swmInventory.catalogReconcile.vmProjection'
+      : 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection',
+  );
   let projectionQuads: readonly Quad[];
   if (workspaceHeadMatches) {
-    // An inventory row names the immutable snapshot that was signed into that
-    // row. The resolver may select a newer equivalent head alias for display,
-    // but that alias is not required to carry its own snapshot locator.
-    const snapshotOperationId = resolution.kind === 'inventory-row'
-      ? resolution.row.shareOperationId
-      : head.shareOperationId;
-    const snapshot = await resolveKnowledgeAssetOperationPublicQuads({
-      store: params.store,
-      graphManager,
-      contextGraphId: params.contextGraphId,
-      shareOperationId: snapshotOperationId,
-      kaUal: identity.kaUal,
-      assertionVersion: identity.assertionVersion,
-      publicSnapshotStore: params.publicSnapshotStore,
-    });
-    throwIfAbortedV1(params.signal);
-    projectionQuads = snapshot.quads;
+    try {
+      const snapshot = await resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+        store: params.store,
+        graphManager,
+        contextGraphId: params.contextGraphId,
+        head,
+        ...(params.publicSnapshotStore === undefined
+          ? {}
+          : { publicSnapshotStore: params.publicSnapshotStore }),
+      });
+      throwIfAbortedV1(params.signal);
+      projectionQuads = snapshot.quads;
+    } catch (error) {
+      if (
+        resolution.kind !== 'confirmed-vm-repair'
+        || !(error instanceof KnowledgeAssetOperationPublicSnapshotNotFoundError)
+      ) throw error;
+      // Confirmed repair is independently anchored by the durable metadata
+      // envelope and author seal, so an unusable equivalent SWM locator may
+      // safely fall back to the exact verified VM projection.
+      projectionQuads = await resolveVerifiedVmProjection();
+    }
   } else {
     // A finalized private lift may replace or retire its SWM workspace head
     // before the detached inventory/catalog observer runs. Only this private
@@ -179,14 +193,7 @@ async function resolveDurableCatalogAssetV1(
     if (laneKind !== 'private') {
       throw new Error(`durable RFC-64 workspace head differs for ${identity.kaUal}`);
     }
-    projectionQuads = await resolveFinalizedVmProjectionQuadsV1(
-      params,
-      identity,
-      seal,
-      resolution.kind === 'inventory-row'
-        ? 'agent.rfc64.swmInventory.catalogReconcile.vmProjection'
-        : 'agent.rfc64.finalizedPrivateCatalogRepair.vmProjection',
-    );
+    projectionQuads = await resolveVerifiedVmProjection();
   }
 
   assertProjectionMatchesSealV1(projectionQuads, seal, identity.kaUal);

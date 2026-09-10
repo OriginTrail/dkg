@@ -26,6 +26,7 @@ import {
   publisherWorkspaceOperationSemanticsKey,
   selectEquivalentWorkspaceOperation,
   type WorkspaceOperationModel,
+  type WorkspaceOperationAccessEnvelope,
   type PublisherWorkspaceOperationSemantics,
 } from './workspace-operation-equivalence.js';
 
@@ -169,15 +170,24 @@ export interface KnowledgeAssetWorkspaceHead {
   readonly shareOperationId: string;
   /** Every operation id proven equivalent to the selected display alias. */
   readonly shareOperationIds: readonly string[];
+  /** Every validated alias together with the immutable snapshot it can locate. */
+  readonly operationAliases: readonly KnowledgeAssetWorkspaceOperationAlias[];
   /** Canonical durable operation timestamp, normalized to decimal milliseconds. */
   readonly publishedAt?: TimestampMsV1;
   /** Transport owner retained at KA granularity; replaces per-subject ownership rows. */
   readonly publisherPeerId: string;
-  /** Canonical effective policy, including the legacy omitted-policy default. */
-  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
-  /** True when at least one equivalent operation explicitly persisted the policy. */
-  readonly accessPolicyExplicit: boolean;
-  readonly allowedPeers: string[];
+  /** Effective access and whether it came from durable metadata or a legacy default. */
+  readonly access: WorkspaceOperationAccessEnvelope;
+}
+
+export type KnowledgeAssetWorkspaceSnapshotLocator =
+  | Readonly<{ kind: 'graph'; graph: string }>
+  | Readonly<{ kind: 'store'; ref: string }>;
+
+export interface KnowledgeAssetWorkspaceOperationAlias {
+  readonly shareOperationId: string;
+  readonly publishedAt?: TimestampMsV1;
+  readonly snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator;
 }
 
 export interface PublishedKnowledgeAssetWorkspaceHead extends KnowledgeAssetWorkspaceHead {
@@ -346,12 +356,15 @@ function decodeWorkspaceHeadRows(input: {
  */
 type DecodedPublisherWorkspaceOperation = WorkspaceOperationModel<
   PublisherWorkspaceOperationSemantics
-> & Readonly<{ accessPolicyExplicit: boolean }>;
+> & Readonly<{ snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator }>;
 
 function decodeWorkspaceOperationRows(input: {
   readonly operationValues: Map<string, string[]>;
   readonly scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
   readonly shareOperationId: string;
+  /** Present for full head resolution; omitted by the decoder-only acceptance gate. */
+  readonly contextGraphId?: string;
+  readonly subGraphName?: string;
 }): DecodedPublisherWorkspaceOperation {
   const ual = input.scope.ual;
   const operation = makeSingletonReader(input.operationValues, ual, 'operation');
@@ -418,6 +431,51 @@ function decodeWorkspaceOperationRows(input: {
       `Corrupt graph-scoped SWM head for ${ual}: invalid access envelope`,
     );
   }
+  const publicSnapshotGraph = operation.optional(
+    `${DKG}publicSnapshotGraph`,
+    'publicSnapshotGraph',
+  );
+  const explicitSnapshotRef = stripLiteral(operation.optional(
+    `${DKG}publicSnapshotRef`,
+    'publicSnapshotRef',
+  ))?.trim();
+  if (publicSnapshotGraph !== undefined && explicitSnapshotRef !== undefined) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${ual}: operation carries two public snapshot locations`,
+    );
+  }
+  let snapshotLocator: KnowledgeAssetWorkspaceSnapshotLocator;
+  if (publicSnapshotGraph !== undefined) {
+    const expectedSnapshotGraph = input.contextGraphId === undefined
+      ? undefined
+      : workspaceKnowledgeAssetOperationSnapshotGraph(
+          input.contextGraphId,
+          input.shareOperationId,
+          input.subGraphName,
+        );
+    if (expectedSnapshotGraph !== undefined && publicSnapshotGraph !== expectedSnapshotGraph) {
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${ual}: public snapshot graph mismatch`,
+      );
+    }
+    snapshotLocator = Object.freeze({ kind: 'graph', graph: publicSnapshotGraph });
+  } else {
+    snapshotLocator = Object.freeze({
+      kind: 'store',
+      ref: explicitSnapshotRef || publicQuadsDigest,
+    });
+  }
+  const access: WorkspaceOperationAccessEnvelope = accessPolicy === undefined
+    ? Object.freeze({
+        kind: 'legacy-default',
+        accessPolicy: effectiveAccessPolicy as 'public' | 'ownerOnly',
+        allowedPeers: [] as const,
+      })
+    : Object.freeze({
+        kind: 'persisted',
+        accessPolicy,
+        allowedPeers: Object.freeze(allowedPeers),
+      });
   return {
     semantics: {
       publicQuadsDigest,
@@ -425,14 +483,13 @@ function decodeWorkspaceOperationRows(input: {
       ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
       privateTripleCount,
       publisherIdentity: publisherPeerId,
-      accessPolicy: effectiveAccessPolicy,
-      allowedPeers,
+      access,
     },
     provenance: {
       shareOperationId: input.shareOperationId,
       ...(publishedAtMs === undefined ? {} : { publishedAtMs }),
     },
-    accessPolicyExplicit: accessPolicy !== undefined,
+    snapshotLocator,
   };
 }
 
@@ -553,6 +610,8 @@ export async function resolveKnowledgeAssetWorkspaceHead(
       operationValues: collectSubjectValues(operationRows),
       scope: decodedHead.scope,
       shareOperationId,
+      contextGraphId: params.contextGraphId,
+      ...(subGraphName === undefined ? {} : { subGraphName }),
     });
     return operation;
   });
@@ -566,6 +625,19 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     },
   );
   const decodedOperation = selected.semantics;
+  const persistedAccess = candidates.find(
+    (candidate) => candidate.semantics.access.kind === 'persisted',
+  )?.semantics.access;
+  const access = persistedAccess ?? decodedOperation.access;
+  const operationAliases = Object.freeze(candidates
+    .map((candidate): KnowledgeAssetWorkspaceOperationAlias => Object.freeze({
+      shareOperationId: candidate.provenance.shareOperationId,
+      ...(candidate.provenance.publishedAtMs === undefined
+        ? {}
+        : { publishedAt: candidate.provenance.publishedAtMs.toString() as TimestampMsV1 }),
+      snapshotLocator: candidate.snapshotLocator,
+    }))
+    .sort((left, right) => left.shareOperationId.localeCompare(right.shareOperationId)));
   return {
     kaUal: decodedHead.scope.ual,
     assertionVersion: decodedHead.scope.assertionVersion,
@@ -576,13 +648,12 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     privateTripleCount: decodedOperation.privateTripleCount,
     shareOperationId: selected.provenance.shareOperationId,
     shareOperationIds,
+    operationAliases,
     ...(selected.provenance.publishedAtMs === undefined
       ? {}
       : { publishedAt: selected.provenance.publishedAtMs.toString() as TimestampMsV1 }),
     publisherPeerId: decodedOperation.publisherIdentity,
-    accessPolicy: decodedOperation.accessPolicy,
-    accessPolicyExplicit: candidates.some((candidate) => candidate.accessPolicyExplicit),
-    allowedPeers: [...decodedOperation.allowedPeers],
+    access,
   };
 }
 
@@ -994,6 +1065,52 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
     publicQuadsDigest: expectedDigest,
     publisherPeerId: stripLiteral(row?.['publisherPeerId'])?.trim() || undefined,
   };
+}
+
+/**
+ * Resolve a workspace head through its validated alias set. The display alias
+ * is tried first when its locator is usable in this process; equivalent aliases
+ * then provide deterministic recovery from a missing or unavailable locator.
+ */
+export async function resolveKnowledgeAssetWorkspaceHeadPublicQuads(params: {
+  readonly store: TripleStore;
+  readonly graphManager: GraphManager;
+  readonly contextGraphId: string;
+  readonly head: KnowledgeAssetWorkspaceHead;
+  readonly subGraphName?: string;
+  readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+}): Promise<KnowledgeAssetOperationPublicSnapshot> {
+  const ordered = [...params.head.operationAliases].sort((left, right) => (
+    Number(right.shareOperationId === params.head.shareOperationId)
+      - Number(left.shareOperationId === params.head.shareOperationId)
+    || left.shareOperationId.localeCompare(right.shareOperationId)
+  ));
+  let lastMissing: KnowledgeAssetOperationPublicSnapshotNotFoundError | undefined;
+  for (const alias of ordered) {
+    if (alias.snapshotLocator.kind === 'store' && params.publicSnapshotStore === undefined) {
+      continue;
+    }
+    try {
+      return await resolveKnowledgeAssetOperationPublicQuads({
+        store: params.store,
+        graphManager: params.graphManager,
+        contextGraphId: params.contextGraphId,
+        shareOperationId: alias.shareOperationId,
+        kaUal: params.head.kaUal,
+        assertionVersion: params.head.assertionVersion,
+        ...(params.subGraphName === undefined ? {} : { subGraphName: params.subGraphName }),
+        ...(params.publicSnapshotStore === undefined
+          ? {}
+          : { publicSnapshotStore: params.publicSnapshotStore }),
+      });
+    } catch (error) {
+      if (!(error instanceof KnowledgeAssetOperationPublicSnapshotNotFoundError)) throw error;
+      lastMissing = error;
+    }
+  }
+  throw lastMissing ?? new KnowledgeAssetOperationPublicSnapshotNotFoundError(
+    `No usable graph-scoped public snapshot locator for ${params.head.kaUal}`,
+  );
 }
 
 /**
