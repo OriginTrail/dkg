@@ -8,6 +8,7 @@ import {
 } from './random-sampling-bind.js';
 import { RANDOM_SAMPLING_BIND_RETRY_MS } from './dkg-agent-constants.js';
 import { type RandomSamplingEligibility, type RandomSamplingUnavailable } from './random-sampling-eligibility.js';
+import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 
 type State =
   | { kind: 'stopped'; identityId: bigint }
@@ -92,46 +93,43 @@ export function classifyRandomSamplingUnavailableTransition(
 /** One node lifetime owns eligibility, reconciliation, binding and physical retirement. */
 export class RandomSamplingRuntime {
   private state: State = { kind: 'waiting', identityId: 0n, reason: 'not_started' };
-  private readonly lifecycle = new AbortController();
-  private inFlight: Promise<void> | null = null;
+  private readonly reconciler: CoalescingRecurringTask;
   private shutdownDrain: Promise<void> | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
   /** Explicit lifecycle history: a later deployment miss is retryable after one observed deployment. */
   private deploymentObserved = false;
 
-  constructor(private readonly options: RandomSamplingRuntimeOptions) {}
+  constructor(private readonly options: RandomSamplingRuntimeOptions) {
+    this.reconciler = new CoalescingRecurringTask({
+      retryIntervalMs: RANDOM_SAMPLING_BIND_RETRY_MS,
+      requestWhileRunning: 'drop',
+      runPass: async (signal) => {
+        await this.reconcileOnce(signal);
+        return this.state.kind === 'disabled' || this.state.kind === 'stopped'
+          ? 'idle'
+          : 'rearm';
+      },
+      onError: (error) => this.options.log.warn(
+        `V10 Random Sampling reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+      closingMessage: 'V10 Random Sampling reconciliation closing',
+    });
+  }
 
   start(): Promise<void> {
     return this.reconcile();
   }
 
   reconcile(): Promise<void> {
-    if (this.lifecycle.signal.aborted || this.state.kind === 'disabled') return Promise.resolve();
-    if (this.inFlight) return this.inFlight;
-    this.inFlight = this.reconcileOnce().finally(() => {
-      this.inFlight = null;
-      this.updateTimer();
-    });
-    return this.inFlight;
-  }
-
-  private updateTimer(): void {
-    if (this.lifecycle.signal.aborted || this.state.kind === 'disabled' || this.state.kind === 'stopped') {
-      this.clearTimer();
-    } else if (!this.timer) {
-      this.timer = setInterval(() => {
-        void this.reconcile().catch((error: unknown) => this.options.log.warn(
-          `V10 Random Sampling reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
-        ));
-      }, RANDOM_SAMPLING_BIND_RETRY_MS);
-      this.timer.unref?.();
-    }
+    if (this.reconciler.closed || this.state.kind === 'disabled') return Promise.resolve();
+    this.reconciler.request();
+    return this.reconciler.whenIdle();
   }
 
   /** Fence synchronously before the agent starts awaiting other shutdown work. */
   cancel(): void {
-    this.lifecycle.abort();
-    this.clearTimer();
+    // close() fences requests, clears the timer, and aborts the active pass
+    // synchronously before its first await.
+    void this.reconciler.close();
   }
 
   stop(): Promise<void> {
@@ -142,8 +140,8 @@ export class RandomSamplingRuntime {
 
   getStatus(): RandomSamplingStatus {
     const state = this.state;
-    if (state.kind === 'running' && !this.lifecycle.signal.aborted) return state.handle.getStatus();
-    const retiring = state.kind === 'retiring' || (state.kind === 'running' && this.lifecycle.signal.aborted);
+    if (state.kind === 'running' && !this.reconciler.closed) return state.handle.getStatus();
+    const retiring = state.kind === 'retiring' || (state.kind === 'running' && this.reconciler.closed);
     return {
       enabled: false, role: this.options.role, identityId: state.identityId.toString(),
       disabledReason: retiring ? 'retiring' : (state.kind === 'waiting' || state.kind === 'disabled') ? state.reason : 'not_started',
@@ -155,15 +153,10 @@ export class RandomSamplingRuntime {
   getDiagnostics(): RandomSamplingRuntimeDiagnostics {
     return {
       phase: this.state.kind,
-      reconciliationScheduled: this.timer !== null,
-      reconciliationInFlight: this.inFlight !== null,
+      reconciliationScheduled: this.reconciler.scheduled,
+      reconciliationInFlight: this.reconciler.running,
       deploymentObserved: this.deploymentObserved,
     };
-  }
-
-  private clearTimer(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
   }
 
   private beginRetirement(handle: RandomSamplingHandle, identityId: bigint): Extract<State, { kind: 'retiring' }> {
@@ -192,7 +185,7 @@ export class RandomSamplingRuntime {
   private async drain(): Promise<void> {
     // A bind may own a WAL before it has returned a handle. Joining the task
     // also joins cleanup of any unused handle it creates after cancellation.
-    await this.inFlight;
+    await this.reconciler.close();
     await this.finishRetirement(false);
     this.state = { kind: 'stopped', identityId: this.state.identityId };
   }
@@ -212,8 +205,7 @@ export class RandomSamplingRuntime {
     };
   }
 
-  private async reconcileOnce(): Promise<void> {
-    const { signal } = this.lifecycle;
+  private async reconcileOnce(signal: AbortSignal): Promise<void> {
     try {
       // A retired handle cannot be reused even if admission has since returned.
       if (this.state.kind === 'retiring') await this.finishRetirement(true);
