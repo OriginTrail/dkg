@@ -19,9 +19,11 @@ import {
 import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
+import { createVmReconcileLifecycleFixture } from './_helpers/vm-reconcile-lifecycle.js';
 
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
+  Object.assign(agent, createVmReconcileLifecycleFixture());
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   return agent;
 }

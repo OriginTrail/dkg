@@ -1,4 +1,5 @@
 import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
+import type { VmReconcileRotationRecord } from '../dkg-agent-types.js';
 
 type Target = Pick<OrdinalRecoveryTarget, 'localCgId' | 'onChainCgId' | 'ordinal' | 'ual' | 'merkleRoot'>;
 
@@ -19,14 +20,73 @@ interface SlotGeneration {
 
 export interface VmRecoverySlotScope {
   readonly signal: AbortSignal;
-  /** Attach the selected targets after proof-cache preparation, including unowned fallback targets. */
+  /** Attach selected targets before discovery and after preparation, including unowned fallback targets. */
   track(targets: readonly Target[]): void;
   release(): void;
 }
 
-/** Cancellation belongs to active slot generations, independently of cached absence evidence. */
-export class VmRecoverySlotLifetimes {
+/** Owns retained proof records and active generations, including record-less recovery. */
+export class VmRecoverySlotRegistry {
   private readonly slots = new Map<string, SlotGeneration>();
+  private readonly retained = new Map<string, VmReconcileRotationRecord>();
+
+  get records(): ReadonlyMap<string, VmReconcileRotationRecord> { return this.retained; }
+
+  /** Successful ordinal completion retires evidence without aborting its shared batch. */
+  complete(key: string): void { this.retained.delete(key); }
+
+  touch(key: string, record: VmReconcileRotationRecord): void {
+    if (this.retained.get(key) !== record) return;
+    this.retained.delete(key);
+    this.retained.set(key, record);
+  }
+
+  findReplacement(
+    requestingCgId: string | undefined,
+    now: number,
+    maxEntries: number,
+  ): [string, VmReconcileRotationRecord] | undefined {
+    if (this.retained.size < maxEntries) return undefined;
+    for (const entry of this.retained) {
+      const [, record] = entry;
+      if ((record.phase === 'backoff' && now < record.nextRetryAt)
+        || (record.phase === 'collecting' && now < record.collectionDeadlineAt)) continue;
+      return entry;
+    }
+    if (!requestingCgId) return undefined;
+    const countsByCg = new Map<string, number>();
+    for (const record of this.retained.values()) {
+      countsByCg.set(record.localCgId, (countsByCg.get(record.localCgId) ?? 0) + 1);
+    }
+    if ((countsByCg.get(requestingCgId) ?? 0) !== 0) return undefined;
+    for (const entry of this.retained) {
+      if ((countsByCg.get(entry[1].localCgId) ?? 0) > 1) return entry;
+    }
+    return undefined;
+  }
+
+  /** Donation cancels the donor only after the requester owns its retained slot. */
+  install(record: VmReconcileRotationRecord, now: number, maxEntries: number): boolean {
+    const key = vmRecoverySlotKey(record);
+    if (this.retained.has(key)) return false;
+    const replacement = this.findReplacement(record.localCgId, now, maxEntries);
+    if (!replacement) {
+      if (this.retained.size >= maxEntries) return false;
+      this.retained.set(key, record);
+      return this.retained.get(key) === record;
+    }
+    const [donorKey, donor] = replacement;
+    let installed = false;
+    this.retained.delete(donorKey);
+    try {
+      this.retained.set(key, record);
+      installed = this.retained.get(key) === record;
+      return installed;
+    } finally {
+      if (installed) this.invalidateSlot(donorKey);
+      else if (!this.retained.has(donorKey)) this.retained.set(donorKey, donor);
+    }
+  }
 
   begin(): VmRecoverySlotScope {
     const controller = new AbortController();
@@ -74,10 +134,14 @@ export class VmRecoverySlotLifetimes {
   observe(target: Target): void {
     const key = vmRecoverySlotKey(target);
     const generation = this.slots.get(key);
-    if (generation && generation.fingerprint !== vmRecoveryTargetFingerprint(target)) this.invalidateSlot(key);
+    const record = this.retained.get(key);
+    const fingerprint = vmRecoveryTargetFingerprint(target);
+    if ((generation && generation.fingerprint !== fingerprint)
+      || (record && record.fingerprint !== fingerprint)) this.invalidateSlot(key);
   }
 
   invalidateSlot(key: string): void {
+    this.retained.delete(key);
     const generation = this.slots.get(key);
     if (!generation) return;
     this.slots.delete(key);
@@ -85,6 +149,9 @@ export class VmRecoverySlotLifetimes {
   }
 
   invalidateContextGraph(localCgId: string): void {
+    for (const [key, record] of this.retained) {
+      if (record.localCgId === localCgId) this.retained.delete(key);
+    }
     // Abort listeners run synchronously and can acquire a new generation.
     const generations = [...this.slots];
     for (const [key, generation] of generations) {
@@ -93,6 +160,7 @@ export class VmRecoverySlotLifetimes {
   }
 
   close(): void {
+    this.retained.clear();
     const keys = [...this.slots.keys()];
     for (const key of keys) this.invalidateSlot(key);
   }

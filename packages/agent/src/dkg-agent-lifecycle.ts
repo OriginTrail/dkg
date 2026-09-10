@@ -9050,11 +9050,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId);
   }
 
-  async resolvePreferredSyncPeerId(this: DKGAgent, contextGraphId: string): Promise<string | undefined> {
+  async resolvePreferredSyncPeerId(
+    this: DKGAgent,
+    contextGraphId: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
     // Deliberately NOT routed through the sibling method: each of these is one
     // resolution on its own, and going through `this` would make them
     // unusable against the hand-built receivers several suites call them on.
-    return (await resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId)).peerId;
+    return (await resolveCuratorSyncPeer(this, this.preferredSyncPeers, contextGraphId, { signal })).peerId;
   }
 
   /**

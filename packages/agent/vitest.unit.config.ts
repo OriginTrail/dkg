@@ -156,7 +156,7 @@ export default defineConfig({
       "test/vm-recovery-provider-policy.test.ts",
       "test/vm-recovery-microbatch-host.test.ts",
       "test/vm-recovery-slot-cancellation.test.ts",
-      "test/vm-recovery-slot-lifetimes.test.ts",
+      "test/vm-recovery-slot-registry.test.ts",
       "test/vm-recovery-physical-cancellation.test.ts",
       "test/vm-recovery-footprint-bridge.test.ts",
       "test/vm-recovery-footprint-bridge-adversarial.test.ts",

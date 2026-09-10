@@ -7,6 +7,7 @@ import type {
   PendingOrdinalRecoveryResult,
 } from '../../src/chain-reconciler.js';
 import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
+import type { VmRecoverySlotRegistry } from '../../src/internal/vm-recovery-slot-registry.js';
 import { DKGAgent } from '../../src/index.js';
 import {
   exactAssetUalsForSelection,
@@ -48,7 +49,7 @@ export interface VmRecoveryHostInternals {
     };
   };
   preferredSyncPeers: Map<string, string>;
-  vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
+  vmRecoverySlots: VmRecoverySlotRegistry;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;

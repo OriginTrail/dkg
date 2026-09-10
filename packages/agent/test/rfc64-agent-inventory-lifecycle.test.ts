@@ -32,6 +32,7 @@ import {
   RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1,
 } from '../src/rfc64/persistence-layout-v1.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
+import { createVmReconcileLifecycleFixture } from './_helpers/vm-reconcile-lifecycle.js';
 
 const temporaryDirectories: string[] = [];
 const childProcesses = new Set<ChildProcessWithoutNullStreams>();
@@ -50,6 +51,7 @@ function temporaryDataDirectory(): string {
 function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.assign(agent, {
+    ...createVmReconcileLifecycleFixture(),
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),

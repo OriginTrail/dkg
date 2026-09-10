@@ -40,7 +40,7 @@ function barrier() {
   return { promise, release };
 }
 
-const cases = (['discovery', 'protocol', 'admission', 'transport'] as const).flatMap(stage =>
+const cases = (['discovery', 'legacy-meta', 'legacy-registry', 'dial', 'protocol', 'admission', 'transport'] as const).flatMap(stage =>
   (['unsubscribe', 'rebind', 'fingerprint', 'eviction', 'shutdown'] as const)
     .map(invalidation => ({ stage, invalidation })),
 );
@@ -69,11 +69,13 @@ describe('exact VM recovery slot cancellation', () => {
       await entered.promise;
       Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', { ...descriptor, value: 2 });
       host.prepareVmReconcileRotationTarget(targetFor(localCgId, 1), [peer], host.vmReconcileRotationNow());
-      const original = [...host.vmReconcileRotationState.entries()];
+      const original = [...host.vmRecoverySlots.records.entries()];
       const waitingTarget = targetFor('waiting-cg');
       const waitingKey = host.vmReconcileRotationSlotKey(waitingTarget);
-      const set = host.vmReconcileRotationState.set.bind(host.vmReconcileRotationState);
-      const failInstall = vi.spyOn(host.vmReconcileRotationState, 'set').mockImplementation((key, record) => {
+      // Fault injection below the registry's public readonly inspection boundary.
+      const retained = host.vmRecoverySlots.records as Map<string, VmReconcileRotationRecord>;
+      const set = retained.set.bind(retained);
+      const failInstall = vi.spyOn(retained, 'set').mockImplementation((key, record) => {
         if (key === waitingKey) throw new Error('injected install failure');
         return set(key, record);
       });
@@ -81,8 +83,8 @@ describe('exact VM recovery slot cancellation', () => {
         expect(() => host.prepareVmReconcileRotationTarget(waitingTarget, [peer], host.vmReconcileRotationNow()))
           .toThrow('injected install failure');
       } finally { failInstall.mockRestore(); }
-      expect(host.vmReconcileRotationState.size).toBe(original.length);
-      for (const [key, record] of original) expect(host.vmReconcileRotationState.get(key)).toBe(record);
+      expect(host.vmRecoverySlots.records.size).toBe(original.length);
+      for (const [key, record] of original) expect(host.vmRecoverySlots.records.get(key)).toBe(record);
       expect(signal?.aborted).toBe(false);
       release.release();
       expect((await recovery).attemptedOrdinals).toEqual([0]);
@@ -118,7 +120,7 @@ describe('exact VM recovery slot cancellation', () => {
       expect(harness.fetched.map(fetch => fetch.uals.length)).toEqual([1, 2]);
       expect([...result.outcomes.values()]).toEqual(Array.from({ length: 3 }, () => ({ status: 'reconciled', blockNumber: 100 })));
       expect(signals.every(signal => !signal.aborted)).toBe(true);
-      expect(host.vmReconcileRotationState.size).toBe(0);
+      expect(host.vmRecoverySlots.records.size).toBe(0);
     } finally { await harness.agent.stop().catch(() => undefined); }
   });
 
@@ -189,11 +191,11 @@ describe('exact VM recovery slot cancellation', () => {
     const recovery = harness.run();
     try {
       await entered.promise;
-      expect(host.vmReconcileRotationState.size).toBe(0);
+      expect(host.vmRecoverySlots.records.size).toBe(0);
       harness.agent.unsubscribeFromContextGraph(localCgId, { persist: false });
       expect(receivedSignal?.aborted).toBe(true);
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
-      expect(host.vmReconcileRotationState.size).toBe(0);
+      expect(host.vmRecoverySlots.records.size).toBe(0);
     } finally {
       release.release();
       await recovery;
@@ -229,7 +231,7 @@ describe('exact VM recovery slot cancellation', () => {
       expect(current?.()).toBe(false);
       release.release();
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
-      expect(host.vmReconcileRotationState.get(host.vmReconcileRotationSlotKey(harness.targets[0]!))).toBe(replacement);
+      expect(host.vmRecoverySlots.records.get(host.vmReconcileRotationSlotKey(harness.targets[0]!))).toBe(replacement);
       expect(replacement?.phase).toBe('collecting');
       expect(replacement?.attemptedPeerIds.size).toBe(0);
       expect(replacement?.cleanAbsentPeerIds.size).toBe(0);
@@ -268,7 +270,7 @@ describe('exact VM recovery slot cancellation', () => {
       await entered.promise;
       expect(harness.fetched.map(fetch => fetch.uals.length)).toEqual([1, 2]);
       const survivor = harness.targets[2]!;
-      const record = host.vmReconcileRotationState.get(host.vmReconcileRotationSlotKey(survivor));
+      const record = host.vmRecoverySlots.records.get(host.vmReconcileRotationSlotKey(survivor));
       expect(record?.attemptedPeerIds.size).toBe(0);
       host.prepareVmReconcileRotationTarget(
         { ...harness.targets[1]!, merkleRoot: 'replacement-root' }, [peer], host.vmReconcileRotationNow(),
@@ -332,6 +334,40 @@ describe('exact VM recovery slot cancellation', () => {
         return { peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false };
       };
     }
+    if (stage === 'legacy-meta' || stage === 'legacy-registry') {
+      host.prepareVmReconcileRotationTarget(harness.targets[0]!, [peer], host.vmReconcileRotationNow());
+      host.resolveCuratorPeerIdsForCg = async () => ({
+        peerIds: [], curatorIsLocal: false, legacyTripleResolved: false,
+      });
+      const meta = await harness.agent.getCgMeta(localCgId);
+      let firstMetaRead = true;
+      vi.spyOn(harness.agent, 'getCgMeta').mockImplementation(async (_cg, options) => {
+        if (stage === 'legacy-meta') {
+          // Unsubscribe/rebind may independently reconcile host metadata.
+          // Pause only the recovery's first read, whose signal we are testing.
+          if (!firstMetaRead) return meta;
+          firstMetaRead = false;
+          await wait(options?.signal);
+          options?.signal?.throwIfAborted();
+          return meta;
+        }
+        return { ...meta, curator: 'did:dkg:agent:0x0000000000000000000000000000000000000001', creators: [] };
+      });
+      if (stage === 'legacy-registry') {
+        vi.spyOn(harness.agent.discovery, 'findAgents').mockImplementation(async options => {
+          await wait(options?.signal);
+          options?.signal?.throwIfAborted();
+          return [];
+        });
+      }
+    }
+    if (stage === 'dial') {
+      host.node.libp2p.getConnections = () => [];
+      host.ensurePeerConnected = async (_peer, options) => {
+        await wait(options?.signal);
+        options?.signal?.throwIfAborted();
+      };
+    }
     if (stage === 'protocol') host.waitForSyncProtocol = async (_peer, signal) => {
       await wait(signal);
       return !signal?.aborted;
@@ -341,6 +377,7 @@ describe('exact VM recovery slot cancellation', () => {
       return !signal?.aborted;
     };
     const reconcile = vi.spyOn(host, 'reconcileChainOrdinal');
+    const protocol = vi.spyOn(host, 'waitForSyncProtocol');
     const recovery = host.recoverVmReconcileBatch(
       localCgId, 1n, harness.targets, 100, () => true,
       host.vmReconcileLifecycleController.signal,
@@ -350,7 +387,7 @@ describe('exact VM recovery slot cancellation', () => {
       await entered;
       const target = harness.targets[0]!;
       const slotKey = host.vmReconcileRotationSlotKey(target);
-      const originalRecord = host.vmReconcileRotationState.get(slotKey);
+      const originalRecord = host.vmRecoverySlots.records.get(slotKey);
       expect(originalRecord).toBeDefined();
       if (stage === 'transport') expect(getSyncBackpressureSnapshot(policy).inflight).toBe(1);
       else expect(harness.fetched).toHaveLength(0);
@@ -376,10 +413,11 @@ describe('exact VM recovery slot cancellation', () => {
           host.closeVmReconcileRotationState();
           break;
       }
-      expect(host.vmReconcileRotationState.get(slotKey)).not.toBe(originalRecord);
+      expect(host.vmRecoverySlots.records.get(slotKey)).not.toBe(originalRecord);
       expect(boundarySignal?.aborted).toBe(true);
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
       expect(reconcile).not.toHaveBeenCalled();
+      if (stage === 'dial' || stage.startsWith('legacy-')) expect(protocol).not.toHaveBeenCalled();
       expect(host.readVmReconcileActiveFetchCooldown(localCgId)).toBeUndefined();
       expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 0, queued: 0 });
       if (stage !== 'transport') expect(harness.fetched).toHaveLength(0);

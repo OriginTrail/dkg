@@ -256,7 +256,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
     for (const target of harness.targets.slice(1)) {
       expect(result.outcomes.get(target.ordinal)?.status).toBe('pending');
-      const record = harness.internals.vmReconcileRotationState.get(
+      const record = harness.internals.vmRecoverySlots.records.get(
         harness.internals.vmReconcileRotationSlotKey(target),
       );
       expect(record).toMatchObject({
@@ -669,7 +669,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
 
     expect(result).toEqual({ kind: 'not-started-stale' });
     expect(harness.fetched).toEqual([]);
-    expect(harness.internals.vmReconcileRotationState.size).toBe(0);
+    expect(harness.internals.vmRecoverySlots.records.size).toBe(0);
     expect(replication).not.toHaveBeenCalled();
   });
 
