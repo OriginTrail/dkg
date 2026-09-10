@@ -27,7 +27,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { chainResetWipe, detectBackendSwitch, detectNetworkSwitch } from '../src/daemon/chain-reset-wipe.js';
+import {
+  chainResetWipe,
+  detectBackendSwitch,
+  detectNetworkSwitch,
+  formatChainResetWipeOutcome,
+  type ChainResetWipeResult,
+} from '../src/daemon/chain-reset-wipe.js';
 
 const STATE_FILE = '.network-state.json';
 const NEW_MARKER = 'v10-rs-staking-consolidation-2026-04-30';
@@ -64,6 +70,55 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(dataDir, { recursive: true, force: true });
+});
+
+describe('formatChainResetWipeOutcome', () => {
+  const effects = {
+    prevMarker: OLD_MARKER,
+    removedFiles: ['store.nq.tmp'],
+    backedUpFiles: ['store.nq.pre-wipe-old'],
+  };
+
+  it.each([
+    {
+      status: 'completed',
+      ...effects,
+      failedFiles: [],
+    },
+    {
+      status: 'incomplete',
+      ...effects,
+      failedFiles: [{ file: 'publish-journal.blocked', error: 'is a directory' }],
+    },
+    {
+      status: 'marker-write-failed',
+      ...effects,
+      failedFiles: [],
+      markerError: 'state path is a directory',
+    },
+  ] satisfies ChainResetWipeResult[])('formats the $status reset result', (result) => {
+    const messages = formatChainResetWipeOutcome(result, NEW_MARKER);
+    expect(messages[0]).toContain(`Chain-state auto-wipe ${
+      result.status === 'completed' ? 'complete' : result.status
+    }:`);
+    expect(messages[0]).toContain(`prev marker: ${OLD_MARKER}, now: ${NEW_MARKER}`);
+    expect(messages).toHaveLength(result.status === 'completed' ? 1 : 2);
+    if (result.status === 'incomplete') {
+      expect(messages[1]).toContain('1 wipe target(s) failed');
+    } else if (result.status === 'marker-write-failed') {
+      expect(messages[1]).toContain('state path is a directory');
+    }
+  });
+
+  it('stays silent when no wipe was attempted', () => {
+    expect(formatChainResetWipeOutcome({
+      status: 'steady',
+      prevMarker: NEW_MARKER,
+      removedFiles: [],
+      backedUpFiles: [],
+      failedFiles: [],
+    }, NEW_MARKER)).toEqual([]);
+  });
 });
 
 describe('chainResetWipe — opt-in protocol', () => {

@@ -187,6 +187,36 @@ export type ChainResetWipeResult =
   | ({ status: 'incomplete'; prevMarker: string | null; failedFiles: [ChainResetWipeFailure, ...ChainResetWipeFailure[]]; markerError?: never } & ChainResetWipeEffects)
   | ({ status: 'marker-write-failed'; prevMarker: string | null; failedFiles: []; markerError: string } & ChainResetWipeEffects);
 
+/** Operator-facing summary for reset outcomes that performed a wipe. */
+export function formatChainResetWipeOutcome(
+  result: ChainResetWipeResult,
+  currentMarker: string | undefined,
+): string[] {
+  if (
+    result.status !== 'completed'
+    && result.status !== 'incomplete'
+    && result.status !== 'marker-write-failed'
+  ) return [];
+
+  const outcome = result.status === 'completed' ? 'complete' : result.status;
+  const messages = [
+    `Chain-state auto-wipe ${outcome}: ${result.removedFiles.length} file(s) removed, `
+      + `${result.backedUpFiles.length} backed up `
+      + `(prev marker: ${result.prevMarker ?? '<none>'}, now: ${currentMarker})`,
+  ];
+  if (result.status === 'incomplete') {
+    messages.push(
+      `WARN: ${result.failedFiles.length} wipe target(s) failed; the reset will retry on next boot.`,
+    );
+  } else if (result.status === 'marker-write-failed') {
+    messages.push(
+      `WARN: reset marker could not be saved: ${result.markerError}. `
+        + 'The reset will retry on next boot.',
+    );
+  }
+  return messages;
+}
+
 export interface ChainResetWipeOptions {
   /** Node data directory (e.g. `~/.dkg`). */
   dataDir: string;
