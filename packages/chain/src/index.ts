@@ -1,5 +1,10 @@
 export * from './chain-adapter.js';
 export {
+  type ContextGraphAuthorityHistoryCheckpointV1,
+  type ContextGraphAuthorityHistoryState,
+  type ContextGraphAuthorityHistoryStore,
+} from './context-graph-authority-history.js';
+export {
   bindContextGraphAuthorityReader,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
