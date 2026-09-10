@@ -83,6 +83,9 @@ export async function createSwmExpiryFixture(
   });
   vi.spyOn(store, 'hasGraph').mockResolvedValue(true);
   vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+    if (options?.source === 'agent.swmCleanup.verifyOperationDeletion') {
+      return { type: 'boolean', value: [...operations].some(op => sparql.includes(`<${op}>`)) };
+    }
     if (options?.source === 'agent.swmCleanup.revalidateOperation') {
       const op = [...operations].find(candidate => sparql.includes(`<${candidate}>`));
       return { type: 'bindings', bindings: op ? [{ op, re: 'urn:expiry:root' }] : [] };

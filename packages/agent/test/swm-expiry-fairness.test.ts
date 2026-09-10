@@ -15,6 +15,7 @@ it('rotates graph priority so a continuously busy graph cannot starve another CG
   vi.mocked(f.store.listGraphsByPrefix!).mockImplementation(async prefix =>
     [META, otherMeta].filter(graph => graph.startsWith(prefix)));
   vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
+    if (options?.source === 'agent.swmCleanup.verifyOperationDeletion') return { type: 'boolean', value: false };
     if (options?.source === 'agent.swmCleanup.revalidateOperation') return { type: 'bindings', bindings: [{ op: 'urn:busy' }] };
     if (options?.source !== 'agent.swmCleanup.expiredOperations') return { type: 'bindings', bindings: [] };
     const graph = sparql.includes(`<${otherMeta}>`) ? otherMeta : META;
@@ -45,6 +46,7 @@ it('discovers a newly added graph while an older graph continuously fills its pa
   vi.mocked(f.store.listGraphsByPrefix!).mockImplementation(async prefix =>
     (added ? [META, otherMeta] : [META]).filter(graph => graph.startsWith(prefix)));
   vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
+    if (options?.source === 'agent.swmCleanup.verifyOperationDeletion') return { type: 'boolean', value: false };
     if (options?.source === 'agent.swmCleanup.revalidateOperation') return { type: 'bindings', bindings: [{ op: 'urn:busy' }] };
     if (options?.source !== 'agent.swmCleanup.expiredOperations') return { type: 'bindings', bindings: [] };
     return { type: 'bindings', bindings: !sparql.includes(`<${otherMeta}>`) || pending ? [{ op: 'urn:busy' }] : [] };

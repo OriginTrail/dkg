@@ -48,7 +48,7 @@ type ExpiredOperationSelector =
   | { readonly kind: 'batch'; readonly limit: number }
   | { readonly kind: 'uris'; readonly uris: readonly string[] };
 
-interface CleanupOutcome { triplesDeleted: number; metadataDeleted: number }
+interface CleanupOutcome { triplesDeleted: number; operationRemoved: boolean }
 interface CleanupBatchResult { outcomes: CleanupOutcome[]; errors: unknown[] }
 
 /** At most four nonempty pages per invocation; continuation rotates graph priority. */
@@ -92,7 +92,7 @@ export async function runSwmExpiryCleanup(
           result.triplesDeleted += outcome.triplesDeleted;
           const count = counts.get(target.contextGraphId) ?? { triples: 0, operations: 0 };
           count.triples += outcome.triplesDeleted;
-          if (outcome.metadataDeleted > 0) { count.operations++; metadataProgress++; }
+          if (outcome.operationRemoved) { count.operations++; metadataProgress++; }
           counts.set(target.contextGraphId, count);
         }
         // Account for successful siblings before ending a failed pass. The batch
@@ -104,7 +104,7 @@ export async function runSwmExpiryCleanup(
         madeProgress = metadataProgress > 0;
         if (isClosed()) break;
         if (!madeProgress) {
-          log.warn(ctx, `SWM cleanup stopped for "${target.metaGraph}": batch of ${operations.length} expired operation(s) deleted no operation metadata`);
+          log.warn(ctx, `SWM cleanup stopped for "${target.metaGraph}": batch of ${operations.length} expired operation(s) confirmed no operation metadata removals`);
           break;
         }
       }
@@ -270,11 +270,19 @@ async function cleanupExpiredOperation(
   }
   const metadataDeleted = await store.deleteByPattern({ graph: target.metaGraph, subject: operation.uri });
   triplesDeleted += metadataDeleted;
+  // Remote delete counts are graph-wide deltas: unrelated writes can offset
+  // them. Establish progress from this exact operation while its locks remain
+  // held; keep the reported count only as a metric.
+  const remaining = await store.query(
+    `ASK { GRAPH <${target.metaGraph}> { <${operation.uri}> ?predicate ?object } }`,
+    { source: 'agent.swmCleanup.verifyOperationDeletion' },
+  );
+  const operationRemoved = remaining.type === 'boolean' && remaining.value === false;
   for (const root of operation.roots) {
     triplesDeleted += await store.deleteByPattern({ graph: target.metaGraph, subject: root, predicate: 'http://dkg.io/ontology/workspaceOwner' });
     workspaceOwnedEntities.get(target.ownershipKey)?.delete(root);
   }
-  return { triplesDeleted, metadataDeleted };
+  return { triplesDeleted, operationRemoved };
 }
 
 async function cleanupLegacyRoots(store: TripleStore, graphs: readonly string[], roots: readonly string[]): Promise<number> {

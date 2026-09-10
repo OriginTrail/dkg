@@ -128,6 +128,10 @@ it.each([
   const selected: string[] = [];
   vi.mocked(f.store.listGraphsByPrefix!).mockImplementation(async prefix => graphs.filter(graph => graph.startsWith(prefix)));
   vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
+    if (options?.source === 'agent.swmCleanup.verifyOperationDeletion') {
+      const graph = graphs.find(value => sparql.includes(`<${value}>`));
+      return { type: 'boolean', value: graph !== last || !deletable || pending };
+    }
     if (options?.source === 'agent.swmCleanup.revalidateOperation') {
       const graph = graphs.find(value => sparql.includes(`<${value}>`));
       return { type: 'bindings', bindings: graph ? [{ op: `urn:stalled:${graphs.indexOf(graph)}` }] : [] };
@@ -345,4 +349,16 @@ it.each([false, true])('waits for an admitted deletion after a sibling revalidat
     expect(await agent.cleanupExpiredSharedMemory()).toBe(2);
     expect(await store.query(`SELECT ?op WHERE { GRAPH <${META}> { ?op ?p ?o } }`)).toMatchObject({ bindings: [] });
   }
+});
+
+
+it('stops when operation metadata survives despite a positive adapter deletion count', async () => {
+  const f = await createSwmExpiryFixture(1, true);
+  const originalDelete = vi.mocked(f.store.deleteByPattern).getMockImplementation()!;
+  vi.mocked(f.store.deleteByPattern).mockImplementation(async pattern =>
+    pattern.graph === META && pattern.subject === 'urn:expiry:op:0' ? 3 : originalDelete(pattern));
+  expect(await f.agent.cleanupExpiredSharedMemory()).toBe(3);
+  expect(f.operations.size).toBe(1);
+  expect(f.stats.selections).toBe(1);
+  expect(f.warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('no operation metadata removals'));
 });
