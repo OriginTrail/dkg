@@ -1,4 +1,5 @@
 import type { DKGAgent, PublishAuthorSelection } from '@origintrail-official/dkg-agent';
+import type { FinalizedPublishIdentityPlan } from '../src/internal/finalized-publish-identity.js';
 
 declare const agent: DKGAgent;
 const selections: PublishAuthorSelection[] = [
@@ -59,3 +60,12 @@ void agent.resolveFinalizedAssertionVmPublishIntent('cg', 'name', mixedBag);
 // @ts-expect-error Nested and flat selection forms cannot be combined.
 void agent.publishFromFinalizedAssertion('cg', 'name', mixedBag);
 void invalidSelection; void invalidResident;
+
+// @ts-expect-error A resident plan cannot omit its parsed selector.
+const incompleteResidentPlan: FinalizedPublishIdentityPlan = { kind: 'residentAuthor', enqueueCaller: undefined };
+declare const untrustedSelector: unknown;
+// @ts-expect-error Unknown selector input must be parsed before resident resolution.
+const uncheckedResidentPlan: FinalizedPublishIdentityPlan = { kind: 'residentAuthor', selectedAuthor: untrustedSelector, enqueueCaller: undefined };
+// @ts-expect-error A caller plan must carry its resolved hint, including the empty-string case.
+const incompleteCallerPlan: FinalizedPublishIdentityPlan = { kind: 'callerHint', enqueueCaller: undefined };
+void incompleteResidentPlan; void uncheckedResidentPlan; void incompleteCallerPlan;

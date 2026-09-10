@@ -34,30 +34,30 @@ export interface AssertionAuthorQueryStore {
   }>;
 }
 
-export interface FinalizedAssertionAuthorLookupParams {
-  contextGraphId: string;
-  name: string;
-  subGraphName?: string;
-  /**
-   * The effective caller identity (VM publish routes pass the token holder;
-   * direct callers may omit it). NOT an author selector — see
-   * `resolveFinalizedAssertionPublishAuthor` for the selector-vs-hint split.
-   */
-  callerAgentAddress?: string;
-  /**
-   * GH#1786 — an explicit choice among the authors who ALREADY have a finalized
-   * assertion at this coordinate, so a curator can act on an
-   * `AMBIGUOUS_ASSERTION_AUTHOR` response. It selects; it never confers
-   * authorship (an address that is not resident fails closed) and it never
-   * changes the caller identity used for CG registration / curator stamping.
-   */
-  selectedAuthorAgentAddress?: unknown;
+export interface AssertionAuthorCoordinate {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly subGraphName?: string;
 }
 
-type AssertionAuthorCoordinate = Pick<
-  FinalizedAssertionAuthorLookupParams,
-  'contextGraphId' | 'name' | 'subGraphName'
->;
+export type ResidentAuthorBoundarySelection =
+  | { readonly kind: 'address'; readonly agentAddress: string }
+  | { readonly kind: 'invalid'; readonly displayValue: string };
+
+export type ResidentAssertionAuthorSelection =
+  | { readonly kind: 'callerHint'; readonly callerAgentAddress?: string }
+  | { readonly kind: 'residentAuthor'; readonly selectedAuthor: ResidentAuthorBoundarySelection };
+
+export interface FinalizedAssertionAuthorLookupParams extends AssertionAuthorCoordinate {
+  readonly selection: ResidentAssertionAuthorSelection;
+}
+
+/** Snapshot malformed input for the candidate diagnostic without retaining unknown state. */
+export function readResidentAuthorBoundarySelection(value: unknown): ResidentAuthorBoundarySelection {
+  return typeof value === 'string'
+    ? { kind: 'address', agentAddress: value }
+    : { kind: 'invalid', displayValue: String(value) };
+}
 
 async function findResidentFinalizedAssertionAuthors(
   store: AssertionAuthorQueryStore,
@@ -152,61 +152,48 @@ function authorNotResidentError(
  */
 export async function resolveResidentFinalizedAssertionAuthor(
   store: AssertionAuthorQueryStore,
-  {
-    contextGraphId,
-    name,
-    subGraphName,
-    callerAgentAddress,
-    selectedAuthorAgentAddress,
-  }: FinalizedAssertionAuthorLookupParams,
+  { contextGraphId, name, subGraphName, selection }: FinalizedAssertionAuthorLookupParams,
 ): Promise<string | undefined> {
   const candidates = await findResidentFinalizedAssertionAuthors(
     store,
     { contextGraphId, name, subGraphName },
   );
   if (candidates === undefined) return undefined;
-  // 0. GH#1786 — an explicit resident-candidate selection is authoritative. It is
-  // evaluated BEFORE both the zero-candidate return and the caller-preference rule
-  // below, for two reasons: it is what lets a curator who ALSO owns a same-named KA
-  // publish the member's instead of silently self-publishing, and it guarantees a
-  // supplied selector can never be silently ignored — a dropped selector spends real
-  // TRAC/gas on the wrong author. Matching is case-insensitive but the STORED case is
-  // returned, because `contextGraphAssertionUri` does not canonicalise address case.
-  // Presence, NOT truthiness: a caller supplying `''` — or `null` from untyped JS — has
-  // still SUPPLIED a selector, and silently falling back to normal resolution is the exact
-  // silent-drop this option exists to prevent. Only `undefined` is absent, matching the
-  // HTTP boundary, which 400s every other malformed value. Anything present that names no
-  // resident candidate fails closed below.
-  if (selectedAuthorAgentAddress !== undefined) {
-    if (typeof selectedAuthorAgentAddress !== 'string') {
-      throw authorNotResidentError(
-        contextGraphId,
-        name,
-        String(selectedAuthorAgentAddress),
-        candidates,
+  switch (selection.kind) {
+    case 'residentAuthor': {
+      const selected = selection.selectedAuthor;
+      if (selected.kind === 'invalid') {
+        throw authorNotResidentError(contextGraphId, name, selected.displayValue, candidates);
+      }
+      const author = candidates.find(candidate => knowledgeAssetAgentAddressesEqual(
+        candidate, selected.agentAddress,
+      ));
+      if (author) return author;
+      throw authorNotResidentError(contextGraphId, name, selected.agentAddress, candidates);
+    }
+    case 'callerHint': {
+      if (candidates.length === 0) return undefined;
+      const callerAgentAddress = selection.callerAgentAddress;
+      if (callerAgentAddress) {
+        const own = candidates.find(author => knowledgeAssetAgentAddressesEqual(
+          author, callerAgentAddress,
+        ));
+        if (own) return own;
+      }
+      const distinct = distinctAuthors(candidates);
+      if (distinct.length === 1) return distinct[0];
+      throw Object.assign(
+        new Error(
+          `Cannot publish "${name}" in context graph "${contextGraphId}": ` +
+            `${distinct.length} authors have a knowledge asset with this name. ` +
+            `Publish is unambiguous only for a single author.`,
+        ),
+        { code: AMBIGUOUS_ASSERTION_AUTHOR_CODE, candidates: distinct },
       );
     }
-    const selected = candidates.find((a) => knowledgeAssetAgentAddressesEqual(
-      a,
-      selectedAuthorAgentAddress,
-    ));
-    if (selected) return selected;
-    throw authorNotResidentError(contextGraphId, name, selectedAuthorAgentAddress, candidates);
+    default: {
+      const unreachable: never = selection;
+      throw new Error(`Unsupported resident-author selection: ${unreachable}`);
+    }
   }
-  if (candidates.length === 0) return undefined;
-  // 1. Prefer the caller's own KA (preserves today's self-publish exactly).
-  if (callerAgentAddress) {
-    const own = candidates.find((a) => knowledgeAssetAgentAddressesEqual(a, callerAgentAddress));
-    if (own) return own;
-  }
-  const distinct = distinctAuthors(candidates);
-  if (distinct.length === 1) return distinct[0];
-  throw Object.assign(
-    new Error(
-      `Cannot publish "${name}" in context graph "${contextGraphId}": ` +
-        `${distinct.length} authors have a knowledge asset with this name. ` +
-        `Publish is unambiguous only for a single author.`,
-    ),
-    { code: AMBIGUOUS_ASSERTION_AUTHOR_CODE, candidates: distinct },
-  );
 }

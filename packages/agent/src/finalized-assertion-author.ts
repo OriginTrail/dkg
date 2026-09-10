@@ -1,4 +1,5 @@
 import {
+  readResidentAuthorBoundarySelection,
   resolveResidentFinalizedAssertionAuthor,
   type AssertionAuthorQueryStore,
 } from './internal/finalized-assertion-author.js';
@@ -26,7 +27,9 @@ export async function resolveFinalizedAssertionAuthor(
 ): Promise<string | undefined> {
   const { contextGraphId, name, subGraphName, callerAgentAddress, selectedAuthorAgentAddress } = params;
   return resolveResidentFinalizedAssertionAuthor(store, {
-    contextGraphId, name, subGraphName, callerAgentAddress,
-    selectedAuthorAgentAddress,
+    contextGraphId, name, subGraphName,
+    selection: selectedAuthorAgentAddress === undefined
+      ? { kind: 'callerHint', callerAgentAddress }
+      : { kind: 'residentAuthor', selectedAuthor: readResidentAuthorBoundarySelection(selectedAuthorAgentAddress) },
   });
 }

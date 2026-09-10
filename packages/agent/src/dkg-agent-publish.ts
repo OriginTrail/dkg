@@ -187,8 +187,8 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
 import {
-  resolveResidentFinalizedAssertionAuthor,
-} from './internal/finalized-assertion-author.js';
+  resolveFinalizedAssertionAuthor,
+} from './finalized-assertion-author.js';
 
 /**
  * Public options for {@link DKGAgentPublishMixin.resolveAssertionAuthor}. Declared
@@ -4331,9 +4331,8 @@ export class PublishMethods extends DKGAgentBase {
    * GH#1778 — resolve the AUTHOR of a named assertion for VM publish, when the
    * caller may not be the author (a curator publishing a member-shared rootless
    * KA whose seal was delivered under the member's coordinate by durable sync).
-   * Thin delegate to {@link resolveResidentFinalizedAssertionAuthor}, which owns the
-   * store/URI/EVM lookup so it lives beside the coordinate helpers rather than
-   * in this publish mixin. See that function for the full resolution rule.
+   * Adapt legacy arguments through {@link resolveFinalizedAssertionAuthor}; the
+   * internal resolver owns candidate discovery and typed selection policy.
    */
   async resolveAssertionAuthor(this: DKGAgent,
     contextGraphId: string,
@@ -4362,7 +4361,7 @@ export class PublishMethods extends DKGAgentBase {
     // than the one the caller named, on the exported DKGAgent surface. The required
     // coordinate must always win, and a future option added to the params type must be
     // forwarded deliberately rather than by accident.
-    return resolveResidentFinalizedAssertionAuthor(this.store, {
+    return resolveFinalizedAssertionAuthor(this.store, {
       contextGraphId,
       name,
       subGraphName: opts.subGraphName,
