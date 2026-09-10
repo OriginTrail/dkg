@@ -44,6 +44,7 @@ import type {
   ProtocolOutboxPayloadInspection,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
+import { compareCodePoint } from './code-point-order.js';
 
 export interface ProtocolOutboxOptions {
   /**
@@ -101,9 +102,9 @@ function cloneOutboxEntry(entry: ProtocolOutboxEntry): ProtocolOutboxEntry {
 function compareDueEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
   return a.nextAttemptAt - b.nextAttemptAt
     || a.firstFailureAt - b.firstFailureAt
-    || Buffer.compare(Buffer.from(a.peer), Buffer.from(b.peer))
-    || Buffer.compare(Buffer.from(a.protocol), Buffer.from(b.protocol))
-    || Buffer.compare(Buffer.from(a.messageId), Buffer.from(b.messageId));
+    || compareCodePoint(a.peer, b.peer)
+    || compareCodePoint(a.protocol, b.protocol)
+    || compareCodePoint(a.messageId, b.messageId);
 }
 
 function entryMetadata(entry: ProtocolOutboxEntry): ProtocolOutboxMetadata {
@@ -121,8 +122,8 @@ export function validateProtocolOutboxPageBudget(budget: ProtocolOutboxPageBudge
 
 function comparePendingEntries(a: ProtocolOutboxEntry, b: ProtocolOutboxEntry): number {
   return a.firstFailureAt - b.firstFailureAt
-    || a.protocol.localeCompare(b.protocol)
-    || a.messageId.localeCompare(b.messageId);
+    || compareCodePoint(a.protocol, b.protocol)
+    || compareCodePoint(a.messageId, b.messageId);
 }
 
 function normalizeDuePageLimit(limit: number): number {

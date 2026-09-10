@@ -1266,4 +1266,45 @@ describe('Messenger DHT-walk-on-stall recovery (rc.9 PR-5)', () => {
 
     expect(resolvePeer.calls).toHaveLength(1);
   });
+
+  it('does not schedule peer recovery when a concurrent delivery removes the retry row', async () => {
+    let markSendStarted!: () => void;
+    let rejectSend!: (error: Error) => void;
+    const sendStarted = new Promise<void>(resolve => { markSendStarted = resolve; });
+    const router = makeRouter(async () => {
+      markSendStarted();
+      return new Promise<Uint8Array>((_resolve, reject) => { rejectSend = reject; });
+    });
+    const outboxStore = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      outboxStore.enqueue(
+        PEER_A,
+        PROTO,
+        FIXED_MSG_ID,
+        new Uint8Array([1]),
+        'no valid addresses for peer',
+        0,
+      );
+    }
+    const resolvePeer = recorder(
+      async (_peerId: string, _opts: { signal: AbortSignal }): Promise<void> => undefined,
+    );
+    const messenger = new Messenger({
+      router: router as unknown as ProtocolRouter,
+      idempotencyStore: new InMemoryMessageIdempotencyStore(),
+      outboxStore,
+      backoffs: [10],
+      clock: () => 10,
+      resolvePeer,
+    });
+
+    const retry = messenger.processOutboxTick(10);
+    await sendStarted;
+    expect(outboxStore.markDelivered(PEER_A, PROTO, FIXED_MSG_ID)).toBe(true);
+    rejectSend(new Error('no valid addresses for peer'));
+    await retry;
+
+    expect(outboxStore.size()).toBe(0);
+    expect(resolvePeer.calls).toEqual([]);
+  });
 });

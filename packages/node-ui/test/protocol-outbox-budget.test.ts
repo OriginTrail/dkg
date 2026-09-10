@@ -31,6 +31,31 @@ describe('production SQLite byte-bounded outbox', () => {
     expect(sqlite.queueStats(15, 6)).toEqual({ queuedEntries: 5, queuedBytes: 31, oldestDueAgeMs: 5, oversizedDueEntries: 1 });
   });
 
+  it('matches SQLite BINARY ordering for ASCII, accented, and emoji identities', () => {
+    const sqlite = new SqliteProtocolOutboxStore(db, { backoffFor: () => 10 });
+    const memory = new InMemoryProtocolOutboxStore({ backoffs: [10] });
+    const identities = [
+      ['peer-a', '/a', 'a'],
+      ['peer-a', '/a', 'Ä'],
+      ['peer-a', '/a', '😀'],
+      ['peer-a', '/Ä', 'a'],
+      ['peer-a', '/😀', 'a'],
+      ['peer-Ä', '/a', 'a'],
+      ['peer-😀', '/a', 'a'],
+    ] as const;
+    for (const store of [sqlite, memory]) {
+      for (const [peer, protocol, messageId] of [...identities].reverse()) {
+        store.enqueue(peer, protocol, messageId, new Uint8Array([7]), 'offline', 0);
+      }
+    }
+
+    const budget = { maxEntries: identities.length, maxPayloadBytes: identities.length };
+    expect(memory.readDuePage(10, budget)).toEqual(sqlite.readDuePage(10, budget));
+    expect(memory.readDuePage(10, budget).entries.map(({ peer, protocol, messageId }) => (
+      [peer, protocol, messageId]
+    ))).toEqual(identities);
+  });
+
   it('loads admitted payloads with a constant query count as the page grows', () => {
     const store = new SqliteProtocolOutboxStore(db, { backoffFor: () => 10 });
     for (let i = 0; i < 100; i++) store.enqueue('peer', '/test', String(i).padStart(3, '0'), new Uint8Array(4), 'offline', 0);
