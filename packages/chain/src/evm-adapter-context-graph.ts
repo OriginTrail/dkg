@@ -1051,7 +1051,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         await historyResolution.publish();
         return snapshot;
       },
-      { signal: options.signal },
+      {
+        signal: options.signal,
+        // A cold authority resolution performs a bounded historical log scan;
+        // the default 4s point-read cap aborts healthy fallback providers before
+        // they can finish. Warm checkpoint suffixes remain fast under this cap.
+        policy: 'wideLogScan',
+      },
     );
   }
 

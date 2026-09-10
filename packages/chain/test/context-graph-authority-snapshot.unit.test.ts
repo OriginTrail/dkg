@@ -34,6 +34,7 @@ interface AuthorityEvidence {
   readonly ranges: Array<readonly [number, number]>;
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly deploymentReads: Array<readonly [string, string, string]>;
+  readonly readOptions: Array<Readonly<{ policy?: string }>>;
 }
 
 interface EvmAuthorityHarness {
@@ -63,6 +64,7 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
     ranges: [] as Array<readonly [number, number]>,
     staticCalls: [] as Array<readonly [bigint, { blockTag: number }]>,
     deploymentReads: [] as Array<readonly [string, string, string]>,
+    readOptions: [],
   };
 
   let finalizedNumber = 30;
@@ -150,7 +152,11 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
   adapter.readTipProvider = async (
     _label: string,
     read: (selectedProvider: typeof provider) => Promise<unknown>,
-  ) => read(provider);
+    readOptions: Readonly<{ policy?: string }>,
+  ) => {
+    evidence.readOptions.push(readOptions);
+    return read(provider);
+  };
   adapter.resolveContractDeployBlock = async (
     address: string,
     operation: string,
@@ -227,6 +233,7 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       'getContextGraphAuthoritySnapshot',
       'ContextGraphStorage',
     ]]);
+    expect(evidence.readOptions[0]).toMatchObject({ policy: 'wideLogScan' });
     expect(evidence.filters).toEqual([
       ['ContextGraphCreated', 9n],
       ['Transfer', null, null, 9n],
@@ -360,11 +367,9 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       policyVersion: '4',
     });
     expect(evidence.deploymentReads).toHaveLength(2);
-    expect(evidence.ranges.slice(18)).toEqual([
-      ...Array(6).fill([7, 16]),
-      ...Array(6).fill([17, 26]),
-      ...Array(6).fill([27, 35]),
-    ]);
+    expect(evidence.ranges.slice(18)).toEqual(
+      Array.from({ length: 6 }, () => [[7, 16], [17, 26], [27, 35]]).flat(),
+    );
   });
 
   it('clears cached generations when ContextGraphStorage rotates', async () => {
