@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import { describe, it, expect } from 'vitest';
+import type { ServerResponse } from 'node:http';
+import { describe, it, expect, vi } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import { classifyChainRpcTransportStatus } from '../src/daemon/http-utils.js';
+import {
+  classifyChainRpcTransportStatus,
+  respondIfChainRpcTransportError,
+} from '../src/daemon/http-utils.js';
 import { cliWithTimeout } from '../src/cli-rpc.js';
 
 describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', () => {
@@ -40,6 +44,23 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
         outcome: 'not_started',
       },
     });
+  });
+
+  it('emits Retry-After when responding to local RPC governor saturation', () => {
+    const response = {
+      setHeader: vi.fn(),
+      writeHead: vi.fn(),
+      end: vi.fn(),
+    } as unknown as ServerResponse;
+    expect(respondIfChainRpcTransportError(response, {
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+      message: 'local queue is full',
+    })).toBe(true);
+    expect(response.setHeader).toHaveBeenCalledWith('Retry-After', '1');
+    expect(response.writeHead).toHaveBeenCalledWith(
+      503,
+      expect.objectContaining({ 'Content-Type': 'application/json' }),
+    );
   });
 
   it('maps an RPC_TIMEOUT -> 504 with the public/legacy `code: TIMEOUT` body', () => {
