@@ -94,8 +94,9 @@ export type ReadPolicy =
   | 'failOpenFundingRead';
 
 /** Per-read options: timeout/failover behavior plus an explicit low-cardinality
- *  telemetry consumer key for `eth_call` attribution. `label` remains a human
- *  failover/span label and is not implicitly part of the daemon log contract. */
+ *  telemetry consumer key for raw-read attribution (`eth_call` and
+ *  `eth_getLogs`). `label` remains a human failover/span label and is not
+ *  implicitly part of the daemon log contract. */
 export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
