@@ -62,6 +62,30 @@ it('uses one runtime TTL update for the registered responder cutoff and automati
   } finally { vi.useRealTimers(); }
 });
 
+it('starts automatic expiry cleanup when the initial TTL is enabled', async () => {
+  const agent = trackSwmExpiryAgent(await DKGAgent.create({
+    name: 'expiry-enabled-at-start',
+    chainAdapter: new MockChainAdapter(),
+    sharedMemoryTtlMs: 60_000,
+  }));
+  const { store } = agent as unknown as SwmExpiryTestInternals;
+  const operation = 'urn:expiry:enabled-at-start';
+  await store.insert([
+    { subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation', graph: META },
+    { subject: operation, predicate: 'http://dkg.io/ontology/publishedAt', object: '"2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>', graph: META },
+  ]);
+  const query = vi.spyOn(store, 'query');
+
+  await agent.start();
+
+  await vi.waitFor(async () => {
+    expect(query.mock.calls.some(([, options]) =>
+      options?.source === 'agent.swmCleanup.expiredOperations')).toBe(true);
+    expect(await store.query(`SELECT ?p WHERE { GRAPH <${META}> { <${operation}> ?p ?o } }`))
+      .toMatchObject({ type: 'bindings', bindings: [] });
+  });
+});
+
 it('clears single-flight state after a store failure so the next call can recover', async () => {
   const f = await createSwmExpiryFixture(1);
   vi.mocked(f.store.query).mockRejectedValueOnce(new Error('store temporarily unavailable'));

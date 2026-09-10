@@ -4,6 +4,7 @@ import { copyFile, rename, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeConfigFile, writeConfigSettingsTransaction } from '../src/config-file.js';
+import { DkgHomeFiles, type DkgConfig } from '../src/config.js';
 
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -120,7 +121,7 @@ describe('configuration file publication', () => {
       throw new Error('first failed');
     });
     let ordinaryCompleted = false;
-    const second = writeConfigFile(path, () => 'ordinary').then(() => {
+    const second = writeConfigFile(path, 'ordinary').then(() => {
       ordinaryCompleted = true;
     });
     const completions = Promise.allSettled([first, second]);
@@ -135,7 +136,7 @@ describe('configuration file publication', () => {
   });
 
   it('keeps ordinary config writes focused on atomic persistence', async () => {
-    await writeConfigFile(path, () => 'persisted only\n');
+    await writeConfigFile(path, 'persisted only\n');
     expect(await fs.readFile(path, 'utf8')).toBe('persisted only\n');
     expect(copyFile).not.toHaveBeenCalled();
     expect(await fs.readdir(directory)).toEqual(['config.json']);
@@ -145,7 +146,7 @@ describe('configuration file publication', () => {
     'publishes %s configuration with 0600 permissions', async kind => {
       if (process.platform !== 'win32') await fs.chmod(path, 0o644);
       if (kind === 'ordinary') {
-        await writeConfigFile(path, () => 'private configuration\n');
+        await writeConfigFile(path, 'private configuration\n');
       } else {
         await writeConfigSettingsTransaction(path, 'private configuration\n', () => {
           if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600);
@@ -157,5 +158,21 @@ describe('configuration file publication', () => {
       expect(await fs.readFile(path, 'utf8')).toBe('private configuration\n');
     },
   );
+
+  it('captures an ordinary configuration snapshot before queued publication', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(writeFile).mockImplementationOnce(async (...args) => {
+      await blocked;
+      return fs.writeFile(...args);
+    });
+    const first = writeConfigSettingsTransaction(path, 'first', () => undefined);
+    const config = { name: 'captured at call time' } as DkgConfig;
+    const saving = new DkgHomeFiles(directory).saveConfig(config);
+    config.name = 'mutated after saveConfig';
+    release();
+    await Promise.all([first, saving]);
+    expect(JSON.parse(await fs.readFile(path, 'utf8'))).toMatchObject({ name: 'captured at call time' });
+  });
 
 });

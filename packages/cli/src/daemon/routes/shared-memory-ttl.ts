@@ -1,14 +1,16 @@
-import { resolveSharedMemoryTtlMs, saveConfigSettingsTransaction } from '../../config.js';
+import { resolveSharedMemoryTtlMs, type DkgConfigStore } from '../../config.js';
 import { validateSharedMemoryTtlMs } from '@origintrail-official/dkg-agent';
 import { isPayloadTooLargeError, jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
-type TtlSettingsContext = Pick<RequestContext, 'req' | 'res' | 'config' | 'agent'>;
+type TtlSettingsContext = Pick<RequestContext, 'req' | 'res' | 'agent'> & {
+  configStore: DkgConfigStore;
+};
 
 /** Shared handler for the V10 and legacy workspace TTL settings routes. */
-export async function handleSharedMemoryTtlSettings({ req, res, config, agent }: TtlSettingsContext): Promise<void> {
+export async function handleSharedMemoryTtlSettings({ req, res, configStore, agent }: TtlSettingsContext): Promise<void> {
   if (req.method === 'GET') {
-    const ttlMs = resolveSharedMemoryTtlMs(config) ?? 30 * 24 * 60 * 60 * 1000;
+    const ttlMs = resolveSharedMemoryTtlMs(configStore.config) ?? 30 * 24 * 60 * 60 * 1000;
     return jsonResponse(res, 200, { ttlMs, ttlDays: Math.round(ttlMs / (24 * 60 * 60 * 1000)) });
   }
   try {
@@ -26,12 +28,13 @@ export async function handleSharedMemoryTtlSettings({ req, res, config, agent }:
       }
       throw error;
     }
-    const candidate = { ...config, sharedMemoryTtlMs: ttlMs, workspaceTtlMs: ttlMs };
-    await saveConfigSettingsTransaction(candidate, () => {
-      agent.setSharedMemoryTtlMs(ttlMs);
-      config.sharedMemoryTtlMs = ttlMs;
-      config.workspaceTtlMs = ttlMs;
-    });
+    await configStore.update(
+      current => ({ ...current, sharedMemoryTtlMs: ttlMs, workspaceTtlMs: ttlMs }),
+      () => {
+        agent.setSharedMemoryTtlMs(ttlMs);
+        return undefined;
+      },
+    );
     return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
   } catch (error) {
     if (isPayloadTooLargeError(error)) throw error;

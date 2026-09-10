@@ -105,6 +105,8 @@ import {
 import {
   loadConfig,
   saveConfig,
+  DkgConfigStore,
+  DkgHomeFiles,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
   resolveAutoUpdateConfig,
@@ -1118,6 +1120,7 @@ async function runDaemonInnerWithStartupOwnership(
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
+  const configStore = new DkgConfigStore(new DkgHomeFiles(), config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
       config.contextGraphSubscriptionRehydrationEnabled,
@@ -3559,7 +3562,7 @@ async function runDaemonInnerWithStartupOwnership(
       // Shared memory (workspace) TTL settings — V10 and legacy routes
       if ((req.method === "GET" || req.method === "PUT") &&
           (reqUrl.pathname === "/api/settings/shared-memory-ttl" || reqUrl.pathname === "/api/settings/workspace-ttl")) {
-        return handleSharedMemoryTtlSettings({ req, res, config, agent });
+        return handleSharedMemoryTtlSettings({ req, res, configStore, agent });
       }
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)

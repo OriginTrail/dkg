@@ -2247,6 +2247,8 @@ export class DKGAgent extends DKGAgentBase {
     // Explicit cleanup can own physical work even before start().
     const swmCleanupDrain = this.swmExpiryCleanupWorker?.stop();
     if (!this.started) { await swmCleanupDrain; return; }
+    const authorityRetryDrain =
+      this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
     // Fence membership persistence before any network callback can enqueue
     // more work; the physical drain below completes before store teardown.
     const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()
@@ -2322,6 +2324,7 @@ export class DKGAgent extends DKGAgentBase {
       }
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns()];
+    if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
     if (swmCleanupDrain) drains.push(swmCleanupDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));

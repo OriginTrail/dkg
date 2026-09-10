@@ -5,8 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DkgHomeFiles, configPath, loadConfig, saveConfig, type DkgConfig } from '../src/config.js';
-import * as configuration from '../src/config.js';
+import { DkgConfigStore, DkgHomeFiles, configPath, loadConfig, saveConfig, type DkgConfig } from '../src/config.js';
 import * as filePublication from '../src/fs-utils.js';
 import type { SwmExpiryCleanupWorker } from '../../agent/src/swm-expiry-cleanup-worker.js';
 import { handleSharedMemoryTtlSettings } from '../src/daemon/routes/shared-memory-ttl.js';
@@ -18,6 +17,7 @@ const routes = ['/api/settings/shared-memory-ttl', '/api/settings/workspace-ttl'
 describe('shared-memory TTL settings HTTP boundary', () => {
   let directory: string;
   let config: DkgConfig;
+  let configStore: DkgConfigStore;
   let agent: DKGAgent;
   let server: Server;
   let baseUrl: string;
@@ -45,12 +45,13 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     config.sharedMemoryTtlMs = DAY;
     config.workspaceTtlMs = DAY;
     await saveConfig(config);
+    configStore = new DkgConfigStore(new DkgHomeFiles(directory), config);
     agent = await DKGAgent.create({ name: 'ttl-settings', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: DAY });
     server = createServer((req, res) => {
       if (!routes.includes(new URL(req.url ?? '/', 'http://localhost').pathname)) {
         res.writeHead(404); res.end(); return;
       }
-      void handleSharedMemoryTtlSettings({ req, res, config, agent }).catch(error => {
+      void handleSharedMemoryTtlSettings({ req, res, configStore, agent }).catch(error => {
         bubbledErrors.push(error);
         if (isPayloadTooLargeError(error)) {
           jsonResponse(res, 413, { error: error.message });
@@ -127,7 +128,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     const persistedBefore = await readFile(configPath(), 'utf8');
     const configBefore = structuredClone(config);
     const setter = vi.spyOn(agent, 'setSharedMemoryTtlMs');
-    vi.spyOn(configuration, 'saveConfigSettingsTransaction').mockImplementationOnce(async () => {
+    vi.spyOn(configStore, 'update').mockImplementationOnce(async () => {
       // Force physical cleanup while persistence is unresolved. The previous
       // ordering applies the shorter TTL here and irreversibly deletes the row.
       await agent.cleanupExpiredSharedMemory();
@@ -143,9 +144,12 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     expect.soft(await readOperations()).toEqual(operationsBefore);
   });
 
-  it.each(routes.flatMap(route => ['compatibility helper', 'retained home'].map(saveBoundary => ({ route, saveBoundary }))))(
-    'preserves committed TTL when an unrelated $saveBoundary save queues behind $route', async ({ route, saveBoundary }) => {
-      const home = new DkgHomeFiles(directory);
+  it.each(routes.flatMap(route => [
+    'owner update',
+    'compatibility save',
+    'retained-home save',
+  ].map(saveBoundary => ({ route, saveBoundary }))))(
+    'preserves a queued unrelated $saveBoundary behind $route', async ({ route, saveBoundary }) => {
       const publish = filePublication.writeFileAtomic;
       let entered!: () => void;
       let release!: () => void;
@@ -158,8 +162,15 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       });
       const changingTtl = fetch(baseUrl + route, { method: 'PUT', body: '{"ttlDays":2}' });
       await publicationEntered;
-      config.name = 'concurrent unrelated edit';
-      const saving = saveBoundary === 'retained home' ? home.saveConfig(config) : saveConfig(config);
+      let saving: Promise<unknown>;
+      if (saveBoundary === 'owner update') {
+        saving = configStore.update(current => ({ ...current, name: 'concurrent unrelated edit' }));
+      } else {
+        config.name = 'concurrent unrelated edit';
+        saving = saveBoundary === 'retained-home save'
+          ? configStore.files.saveConfig(config)
+          : saveConfig(config);
+      }
       const otherHome = join(directory, 'other-home');
       vi.stubEnv('DKG_HOME', otherHome);
       try {
@@ -175,7 +186,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       expect(response.status).toBe(200);
       expect(runtimeTtl()).toBe(2 * DAY);
       expect(config).toMatchObject({ sharedMemoryTtlMs: 2 * DAY, workspaceTtlMs: 2 * DAY });
-      const persisted = JSON.parse(await readFile(home.configPath, 'utf8'));
+      const persisted = JSON.parse(await readFile(configStore.files.configPath, 'utf8'));
       expect(persisted).toMatchObject({
         name: 'concurrent unrelated edit', sharedMemoryTtlMs: 2 * DAY, workspaceTtlMs: 2 * DAY,
       });
