@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { planVmRecoveryAdmission, type VmRecoveryBatchPlan, type VmRecoveryPreparedEntry } from './vm-recovery-batch-plan.js';
 import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
 
 type Target = Pick<OrdinalRecoveryTarget, 'localCgId' | 'onChainCgId' | 'ordinal' | 'ual' | 'merkleRoot'>;
@@ -47,14 +46,6 @@ export interface VmRecoveryRotationPolicy {
   readonly maxBackoffMs: number;
 }
 
-interface VmRecoveryBatchOptions {
-  readonly targets: readonly OrdinalRecoveryTarget[];
-  readonly admissionCursor: number;
-  readonly observedCandidatePeerIds: readonly string[];
-  readonly now: number;
-  readonly collectionDeadlineAt: number;
-  readonly scope: VmRecoverySlotScope;
-}
 
 function membershipMatches(left: ReadonlySet<string>, right: readonly string[]): boolean {
   return left.size === right.length && right.every(peer => left.has(peer));
@@ -90,7 +81,7 @@ interface SlotAdmission {
   active: boolean;
 }
 
-interface AdmissionParams {
+export interface VmRecoveryAdmissionParams {
   readonly candidatePeerIds: readonly string[];
   readonly curatorRosterConfirmed: boolean;
   readonly collectionDeadlineAt: number;
@@ -110,7 +101,7 @@ export type VmRecoverySlotAdmission =
   | { readonly kind: 'deferred' };
 
 export interface VmRecoverySlotAdmissionReservation {
-  commit(params: AdmissionParams): VmRecoverySlotAdmission;
+  commit(params: VmRecoveryAdmissionParams): VmRecoverySlotAdmission;
   release(): void;
 }
 
@@ -252,7 +243,7 @@ export class VmRecoverySlotRegistry {
   }
 
   /** Immediate and delayed admission use the same reserved-capacity transition. */
-  admit(target: Target, params: AdmissionParams, now: number): VmRecoverySlotAdmission {
+  admit(target: Target, params: VmRecoveryAdmissionParams, now: number): VmRecoverySlotAdmission {
     if (params.candidatePeerIds.length === 0) return { kind: 'deferred' };
     const admission = this.reserveAdmission(target, now);
     return admission.kind === 'reserved' ? admission.reservation.commit(params) : admission;
@@ -296,7 +287,7 @@ export class VmRecoverySlotRegistry {
     }
   }
 
-  private commitAdmission(admission: SlotAdmission, params: AdmissionParams): VmRecoverySlotAdmission {
+  private commitAdmission(admission: SlotAdmission, params: VmRecoveryAdmissionParams): VmRecoverySlotAdmission {
     const { key, slot, donor, target } = admission;
     let record: MutableRotationRecord | undefined;
     let installed = false;
@@ -349,7 +340,7 @@ export class VmRecoverySlotRegistry {
   /** One roster transition for immediate callers, existing owners and delayed reservations. */
   prepare(
     target: Target,
-    params: AdmissionParams,
+    params: VmRecoveryAdmissionParams,
     now: number,
     reservation?: VmRecoverySlotAdmissionReservation,
   ): VmRecoveryPreparation {
@@ -566,72 +557,16 @@ export class VmRecoverySlotRegistry {
     this.touch(target, record.handle);
   }
 
-  prepareBatch(options: VmRecoveryBatchOptions): VmRecoveryBatchPlan {
-    const originals = new Map<OrdinalRecoveryTarget, VmRecoverySlotCapture>();
-    const reservations = new Map<OrdinalRecoveryTarget, VmRecoverySlotAdmissionReservation>();
-    for (const target of options.targets) {
-      this.observeTarget(target);
-      const slot = this.capture(target);
-      if (slot) originals.set(target, slot);
-    }
-    const order = planVmRecoveryAdmission(options.targets, options.admissionCursor, new Set(originals.keys()));
-    const initial = order.map(({ target, index }): VmRecoveryPreparedEntry => {
-      const original = originals.get(target);
-      if (original) {
-        // Reserving a donor cannot refresh or discard its evidence before the
-        // requester's roster commits. Rollback must retain the exact old owner.
-        if (this.slots.get(vmRecoverySlotKey(target))?.reservation?.kind === 'donor') {
-          return { index, target, prepared: { slot: original, suppressed: false } };
-        }
-        return { index, target, prepared: this.prepare(target, {
-          candidatePeerIds: options.observedCandidatePeerIds,
-          curatorRosterConfirmed: original.snapshot.curatorRosterConfirmed,
-          collectionDeadlineAt: options.collectionDeadlineAt,
-        }, options.now) };
-      }
-      const admission = options.scope.reserveAdmission(target, options.now);
-      if (admission.kind === 'reserved') {
-        reservations.set(target, admission.reservation);
-        return { index, target, prepared: { suppressed: false } };
-      }
-      if (admission.kind === 'existing') {
-        originals.set(target, admission.slot);
-        return { index, target, prepared: this.prepare(target, {
-          candidatePeerIds: options.observedCandidatePeerIds,
-          curatorRosterConfirmed: admission.slot.snapshot.curatorRosterConfirmed,
-          collectionDeadlineAt: options.collectionDeadlineAt,
-        }, options.now) };
-      }
-      return { index, target, prepared: { suppressed: true } };
-    }).sort((left, right) => left.index - right.index);
-    return Object.freeze({
-      initiallyEligibleTargets: initial.filter(entry => !entry.prepared.suppressed).map(entry => entry.target),
-      suppressedRecords: initial.flatMap(entry => entry.prepared.slot ? [entry.prepared.slot.snapshot] : []),
-      commit: (commitOptions: Parameters<VmRecoveryBatchPlan['commit']>[0]) => {
-        const prepared = order.map(({ target, index }): VmRecoveryPreparedEntry => {
-          const original = originals.get(target);
-          if (!commitOptions.isCurrent() || (original && !this.isCurrent(target, original.handle))) {
-            reservations.get(target)?.release();
-            return { index, target, prepared: { suppressed: true } };
-          }
-          return { index, target, prepared: this.prepare(target, {
-            candidatePeerIds: commitOptions.candidatePeerIds,
-            curatorRosterConfirmed: commitOptions.curatorRosterConfirmed,
-            collectionDeadlineAt: commitOptions.collectionDeadlineAt,
-          }, commitOptions.now, reservations.get(target)) };
-        });
-        const newlyAdmitted = prepared.filter(entry => entry.prepared.slot && !originals.has(entry.target));
-        const lastAdmitted = [...order].reverse().find(entry => newlyAdmitted.some(candidate => candidate.index === entry.index));
-        const eligible = prepared.filter(entry => !entry.prepared.suppressed
-          && (!entry.prepared.slot || this.isCurrent(entry.target, entry.prepared.slot.handle)))
-          .sort((left, right) => Number(Boolean(right.prepared.slot)) - Number(Boolean(left.prepared.slot))
-            || left.index - right.index);
-        return {
-          eligible,
-          ...(lastAdmitted ? { nextAdmissionCursor: (lastAdmitted.index + 1) % options.targets.length } : {}),
-        };
-      },
-    });
+  /** Observe a selected target once before a planner captures its admission owner. */
+  observeForAdmission(target: Target): VmRecoverySlotCapture | undefined {
+    this.observeTarget(target);
+    return this.capture(target);
+  }
+
+  /** Reserved donor evidence is immutable until its atomic donation commits or rolls back. */
+  isReservedDonor(target: Target, handle: VmRecoverySlotHandle): boolean {
+    const slot = this.slots.get(vmRecoverySlotKey(target));
+    return slot?.record?.handle === handle && slot.reservation?.kind === 'donor';
   }
 
   begin(): VmRecoverySlotScope {

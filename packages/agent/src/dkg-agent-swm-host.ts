@@ -260,6 +260,7 @@ import {
 import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
 import type { VmRecoverySlotScope } from './internal/vm-recovery-slot-registry.js';
 import {
+  VmRecoveryBatchPlan,
   type VmRecoveryPreparedEntry,
 } from './internal/vm-recovery-batch-plan.js';
 import {
@@ -5301,7 +5302,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // production ordinal/finalization check proved it still pending locally.
     const observedCandidatePeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
     const now = this.vmReconcileRotationNow();
-    const batchPlan = this.vmRecoverySlots.prepareBatch({
+    const batchPlan = new VmRecoveryBatchPlan(this.vmRecoverySlots, {
       targets: currentTargets,
       admissionCursor: this.vmReconcileRotationAdmissionCursorByCg.get(localCgId) ?? 0,
       observedCandidatePeerIds,
@@ -5339,7 +5340,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     // Discovery is already asynchronous work for these slots. Invalidation
     // here must abort its lookup and prevent the later transport from starting.
-    scope.track(initiallyEligible);
     if (!isRecoveryCurrent()) return staleRecovery();
 
     // Capture the authenticated join-approval hint before consulting metadata:
@@ -5501,7 +5501,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     const eligible = committedPlan.eligible;
 
-    scope.track(eligible.map(({ target }) => target));
     if (!isRecoveryCurrent()) return staleRecovery();
 
     const outcomes = new Map<number, OrdinalOutcome>();
