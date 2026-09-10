@@ -47,10 +47,10 @@ void emptyOutcome;
 // New local-yield inputs also compose safely; the selector treats no evidence as a no-op.
 selector.record('cg', 'peer', classifySwmCatchupPeerOutcome({ localYield }));
 
-// Existing callers can use the exported result counters directly in arithmetic.
+// Public compatibility counters may be absent on older producer results.
 declare const detailed: SharedMemorySyncResult;
 declare const catchup: NonNullable<Awaited<ReturnType<DKGAgent['syncContextGraphFromConnectedPeers']>>['diagnostics']>;
-const detailedCounter: number = detailed.snapshotPlaneIncomplete;
-const catchupCounter: number = catchup.sharedMemory.snapshotPlaneIncomplete;
+const detailedCounter: number = detailed.snapshotPlaneIncomplete ?? 0;
+const catchupCounter: number = catchup.sharedMemory.snapshotPlaneIncomplete ?? 0;
 void detailedCounter;
 void catchupCounter;

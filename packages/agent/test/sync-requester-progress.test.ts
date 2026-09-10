@@ -29,7 +29,7 @@ import {
 } from '../src/sync/shared-memory-diagnostics.js';
 import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
-import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
+import type { SharedMemorySyncDiagnostics, SharedMemorySyncResult, SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import {
   SyncPageAccumulationLimitError,
   type SyncPageResult,
@@ -54,6 +54,34 @@ const noop = () => {};
 const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
 
 describe('canonical shared-memory diagnostics reduction', () => {
+  it.each([
+    ['same peer', mergeSamePeerSharedMemoryDiagnostics, 3],
+    ['fleet', mergeFleetSharedMemoryDiagnostics, 5],
+  ] as const)('normalizes legacy diagnostics and preserves result counters for %s', (_name, merge, failedPeers) => {
+    const legacy: SharedMemorySyncDiagnostics = {
+      fetchedMetaTriples: 0, fetchedDataTriples: 0,
+      insertedMetaTriples: 0, insertedDataTriples: 0,
+      bytesReceived: 0, resumedPhases: 0, timedOutPhases: 0,
+      completedPhases: 0, checkpointAdvances: 0, emptyResponses: 0,
+      droppedDataTriples: 0, failedPeers: 2, failedPhases: 0,
+    };
+    expect(merge(legacy, legacy)).toMatchObject({
+      snapshotPlaneIncomplete: 0, insertedTriples: 0, deniedPhases: 0,
+    });
+    const legacyResult: SharedMemorySyncResult = {
+      ...legacy, insertedTriples: 2, deniedPhases: 3,
+    };
+    const current = {
+      ...emptySharedMemorySyncResult(3),
+      snapshotPlaneIncomplete: 4, insertedTriples: 9, deniedPhases: 7,
+    };
+    expect(merge(legacyResult, current)).toMatchObject({
+      snapshotPlaneIncomplete: 4, insertedTriples: 11, deniedPhases: 10, failedPeers,
+    });
+    expect(legacy).not.toHaveProperty('snapshotPlaneIncomplete');
+    expect(legacyResult).not.toHaveProperty('snapshotPlaneIncomplete');
+  });
+
   it('adds counters, preserves optionality, selects whole coverage, and makes peer semantics explicit', () => {
     const largerPartial = {
       contextGraphId: 'cg-diagnostics', peerIdSuffix: 'peer-a',

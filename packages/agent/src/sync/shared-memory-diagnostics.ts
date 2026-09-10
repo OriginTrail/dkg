@@ -23,7 +23,7 @@ export interface SwmSnapshotCoverage {
 /** Compatibility-facing diagnostic result accepted from workers and older producers. */
 interface SharedMemorySyncDiagnosticsShape {
   readonly localYield?: SharedMemoryLocalYield;
-  readonly snapshotPlaneIncomplete: number;
+  readonly snapshotPlaneIncomplete?: number;
   readonly fetchedMetaTriples: number;
   readonly fetchedDataTriples: number;
   readonly insertedMetaTriples: number;
@@ -58,6 +58,7 @@ export type SharedMemorySyncResult = SharedMemorySyncDiagnostics & {
 
 /** Canonical in-process accumulator/result: every additive counter is concrete. */
 export type SharedMemorySyncAggregate = SharedMemorySyncResult & {
+  snapshotPlaneIncomplete: number;
   backoffWorthyFailures: number;
   deferredBackpressure: number;
   metadataContinuationYields: number;
@@ -70,6 +71,15 @@ export type SharedMemorySyncAggregate = SharedMemorySyncResult & {
 
 /** Requester terminology retained as an alias of the canonical aggregate. */
 export type SharedMemorySyncSummary = SharedMemorySyncAggregate;
+
+/** Older diagnostics may omit counters that are present on detailed results. */
+type SharedMemorySyncMergeInput = SharedMemorySyncDiagnostics
+  & Partial<Pick<SharedMemorySyncResult, 'insertedTriples' | 'deniedPhases'>>;
+
+type NumericDiagnosticKey = {
+  [Key in keyof SharedMemorySyncMergeInput]-?:
+    NonNullable<SharedMemorySyncMergeInput[Key]> extends number ? Key : never;
+}[keyof SharedMemorySyncMergeInput];
 
 /**
  * Select a whole coverage record: authority, complete manifest, largest
@@ -125,33 +135,32 @@ export function emptySharedMemorySyncResult(failedPeers = 0): SharedMemorySyncAg
 
 /** Merge rounds belonging to one peer; peer failure is a maximum. */
 export function mergeSamePeerSharedMemoryDiagnostics(
-  a: SharedMemorySyncDiagnostics,
-  b: SharedMemorySyncDiagnostics,
+  a: SharedMemorySyncMergeInput,
+  b: SharedMemorySyncMergeInput,
 ): SharedMemorySyncAggregate {
   return mergeSharedMemoryDiagnostics(a, b, 'max');
 }
 
 /** Merge observations across a fleet; each failed peer is counted. */
 export function mergeFleetSharedMemoryDiagnostics(
-  a: SharedMemorySyncDiagnostics,
-  b: SharedMemorySyncDiagnostics,
+  a: SharedMemorySyncMergeInput,
+  b: SharedMemorySyncMergeInput,
 ): SharedMemorySyncAggregate {
   return mergeSharedMemoryDiagnostics(a, b, 'sum');
 }
 
 function mergeSharedMemoryDiagnostics(
-  a: SharedMemorySyncDiagnostics,
-  b: SharedMemorySyncDiagnostics,
+  a: SharedMemorySyncMergeInput,
+  b: SharedMemorySyncMergeInput,
   failedPeers: 'max' | 'sum',
 ): SharedMemorySyncAggregate {
-  const sum = (key: keyof SharedMemorySyncDiagnostics): number =>
-    Number(a[key] ?? 0) + Number(b[key] ?? 0);
+  const sum = (key: NumericDiagnosticKey): number =>
+    (a[key] ?? 0) + (b[key] ?? 0);
   const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
   return {
     localYield: mergeSharedMemoryLocalYield(a.localYield, b.localYield),
     snapshotPlaneIncomplete: sum('snapshotPlaneIncomplete'),
-    insertedTriples: Number('insertedTriples' in a ? a.insertedTriples : 0)
-      + Number('insertedTriples' in b ? b.insertedTriples : 0),
+    insertedTriples: sum('insertedTriples'),
     fetchedMetaTriples: sum('fetchedMetaTriples'),
     fetchedDataTriples: sum('fetchedDataTriples'),
     insertedMetaTriples: sum('insertedMetaTriples'),
@@ -167,8 +176,7 @@ function mergeSharedMemoryDiagnostics(
       ? a.failedPeers + b.failedPeers
       : Math.max(a.failedPeers, b.failedPeers),
     failedPhases: sum('failedPhases'),
-    deniedPhases: Number('deniedPhases' in a ? a.deniedPhases : 0)
-      + Number('deniedPhases' in b ? b.deniedPhases : 0),
+    deniedPhases: sum('deniedPhases'),
     backoffWorthyFailures: sum('backoffWorthyFailures'),
     deferredBackpressure: sum('deferredBackpressure'),
     metadataContinuationYields: sum('metadataContinuationYields'),
