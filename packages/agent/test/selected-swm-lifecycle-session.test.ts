@@ -11,6 +11,40 @@ import {
 } from './selected-swm-test-helpers.js';
 
 describe('selected RFC-64 SWM lifecycle retained sessions', () => {
+  it('completes private-only recovery without creating a public metadata transfer', async () => {
+    const publicCg = 'private-only-public-control';
+    const privateCg = '0x1111111111111111111111111111111111111111/private-only';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg, private: privateCg },
+      manifest: snapshotManifest(publicCg, 0),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      reportEmptyResponse: true,
+    });
+    const getTransfers = vi.spyOn(harness.agent, 'getSwmMetaTransfers');
+
+    try {
+      const recovery = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [privateCg],
+        {
+          selectedSwmPriority: true,
+          requestedScope: { kind: 'rfc64-recovery-plan' },
+          recoveryTargets: [{ contextGraphId: privateCg, lane: 'ordinary-private' }],
+        },
+      );
+
+      expect(recovery.scopeComplete).toBe(true);
+      expect(recovery.targetDiagnostics.ordinaryPrivate).toEqual({ completed: 1, total: 1 });
+      expect(getTransfers).not.toHaveBeenCalled();
+      // Private recovery still reads its own metadata page without allocating
+      // a public retained-transfer scope.
+      expect(harness.probes.metaRequesterScopes).toEqual([undefined]);
+    } finally {
+      getTransfers.mockRestore();
+      await harness.close();
+    }
+  });
+
   it('releases retained prefixes on node-lifecycle cleanup', async () => {
     const publicCg = 'selected-cross-outer-node-close';
     const manifest = snapshotManifest(publicCg, 2);
