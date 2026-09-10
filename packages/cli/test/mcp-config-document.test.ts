@@ -6,7 +6,7 @@ import TOML from '@iarna/toml';
 import { jsonDocumentAdapter, jsoncDocumentAdapter } from '../src/mcp-json-document.js';
 import { tomlDocumentAdapter } from '../src/mcp-toml-document.js';
 import { readRegisteredServerKeys, removeRegistration, writeRegistration } from '../src/mcp-client-config.js';
-import type { McpConfigEndpoint } from '../src/mcp-client-registry.js';
+import { McpPhysicalConfig } from '../src/mcp-physical-config.js';
 import type { DesiredRegistration, McpConfigDocumentAdapter, PersistedRegistration } from '../src/mcp-config-document.js';
 
 const previous = { command: 'old', args: ['old'], cwd: '/keep', env: { DKG_HOME: '/old', KEEP: 'value' } };
@@ -34,15 +34,14 @@ const formats: {
 ];
 
 const directories: string[] = [];
-function configFile(format: 'json' | 'jsonc' | 'toml', source: string): McpConfigEndpoint {
+function configFile(format: 'json' | 'jsonc' | 'toml', source: string): McpPhysicalConfig {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-mcp-document-'));
   directories.push(dir);
   const configPath = join(dir, `config.${format}`);
   writeFileSync(configPath, source);
-  const paths = { configPath, displayPath: configPath, location: 'native' as const };
-  if (format === 'toml') return { ...paths, format, serverContainer: 'mcp_servers' };
-  if (format === 'jsonc') return { ...paths, format, serverContainer: 'servers' };
-  return { ...paths, format, serverContainer: 'mcpServers' };
+  if (format === 'toml') return McpPhysicalConfig.create([{ configPath, displayPath: configPath, format, serverContainer: 'mcp_servers' }]);
+  if (format === 'jsonc') return McpPhysicalConfig.create([{ configPath, displayPath: configPath, format, serverContainer: 'servers' }]);
+  return McpPhysicalConfig.create([{ configPath, displayPath: configPath, format, serverContainer: 'mcpServers' }]);
 }
 afterEach(() => { for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
@@ -80,9 +79,9 @@ describe.each(formats)('$format document edit contract', ({ format, container, a
   it('merges extension fields and preserves unrelated entries through the coordinator', () => {
     const target = configFile(format, source);
     writeRegistration(target, desired);
-    expect(adapter.parse(readFileSync(target.configPath, 'utf8'))).toEqual({ title: 'keep', [container]: { other, dkg: merged } });
+    expect(adapter.parse(readFileSync(target.destination, 'utf8'))).toEqual({ title: 'keep', [container]: { other, dkg: merged } });
     expect(removeRegistration(target)).toBe(true);
-    expect(adapter.parse(readFileSync(target.configPath, 'utf8'))).toEqual({ title: 'keep', [container]: { other } });
+    expect(adapter.parse(readFileSync(target.destination, 'utf8'))).toEqual({ title: 'keep', [container]: { other } });
     expect(removeRegistration(target)).toBe(false);
   });
 });
@@ -97,7 +96,7 @@ describe.each(formats.filter(({ format }) => format !== 'toml'))('$format record
     expect(readRegisteredServerKeys(target).ok).toBe(false);
     expect(() => writeRegistration(target, desired)).toThrow(/not valid/);
     expect(() => removeRegistration(target)).toThrow(/not valid/);
-    expect(readFileSync(target.configPath, 'utf8')).toBe(source);
+    expect(readFileSync(target.destination, 'utf8')).toBe(source);
     expect(readdirSync(dir)).toEqual(entries);
   });
 

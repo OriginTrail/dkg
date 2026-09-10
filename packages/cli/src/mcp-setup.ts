@@ -1,4 +1,4 @@
-import { detectClients, selectMcpClientTargets, assertMcpConfigSelectionCurrent, mcpConfigClientNames, tildify, clientSkillPath, type ClientTarget, type McpConfigSelection } from './mcp-client-registry.js';
+import { detectClients, selectMcpClientTargets, mcpConfigClientNames, tildify, clientSkillPath, type ClientTarget, type McpConfigSelection } from './mcp-client-registry.js';
 import { readRegistration, classifyRegistration, writeRegistration, type DesiredRegistration } from './mcp-client-config.js';
 /**
  * `dkg mcp setup` — bundled init + daemon-start + MCP-client registration.
@@ -389,7 +389,7 @@ export async function confirmPlan(
       const verb = { register: 'Register', refresh: 'Refresh' }[p.action];
       const ans = (
         await rl.question(
-          `${verb} DKG MCP with ${mcpConfigClientNames(p.s.target)} (${p.s.target.endpoint.displayPath})? [Y/n] `,
+          `${verb} DKG MCP with ${mcpConfigClientNames(p.s.target)} (${p.s.target.file.displayPath})? [Y/n] `,
         )
       )
         .trim()
@@ -505,7 +505,7 @@ function classify(
   target: McpConfigSelection,
   expected: DesiredRegistration,
 ): ClientState {
-  const current = readRegistration(target.endpoint);
+  const current = readRegistration(target.file);
   return { target, state: classifyRegistration(current, expected) };
 }
 
@@ -1032,7 +1032,7 @@ export async function mcpSetupAction(
         : action === 'refresh'
           ? 'will refresh'
           : 'leaving alone';
-    console.log(`  ${mcpConfigClientNames(s.target).padEnd(13)} (${s.target.endpoint.displayPath}) — ${stateLabel}; ${actionLabel}`);
+    console.log(`  ${mcpConfigClientNames(s.target).padEnd(13)} (${s.target.file.displayPath}) — ${stateLabel}; ${actionLabel}`);
   }
 
   // F31: per-client interactive confirm. Skipped on `--yes`, in
@@ -1079,9 +1079,8 @@ export async function mcpSetupAction(
     console.log('');
     for (const { s, action } of writes) {
       try {
-        assertMcpConfigSelectionCurrent(s.target);
-        writeRegistration(s.target.endpoint, expectedEntry);
-        console.log(`  ${action === 'register' ? 'Registered' : 'Refreshed'} ${mcpConfigClientNames(s.target)} → ${s.target.endpoint.displayPath}`);
+        writeRegistration(s.target.file, expectedEntry);
+        console.log(`  ${action === 'register' ? 'Registered' : 'Refreshed'} ${mcpConfigClientNames(s.target)} → ${s.target.file.displayPath}`);
         // RFC-41 §4.5: explicit SKILL.md delivery for Cursor + Claude Code,
         // which don't walk node_modules for skill discovery. Returns null
         // for clients that don't support skill delivery; logs a warning

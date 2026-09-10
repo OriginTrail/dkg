@@ -1005,7 +1005,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     };
     const stagedTarget = catalogOperationalTarget(0, 0, 10_000);
     const stagedReceiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async () => 'staged-only',
     }, observers);
     await expect(stagedReceiver.scheduleVerifiedCurrentHeadAndWait([{
@@ -1022,7 +1022,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const closingTarget = catalogOperationalTarget(0, 1, 20_000);
     const queuedTarget = catalogOperationalTarget(1, 2, 30_000);
     const closingReceiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_remotePeerId, _announcement, signal) => {
         if (!signal.aborted) {
           await new Promise<void>((resolve) => {
@@ -1076,7 +1076,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
     const reconciled: Digest32V1[] = [];
     const receiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_peer, announcement) => {
         reconciled.push(announcement.catalogHeadObjectDigest);
         if (announcement.catalogHeadObjectDigest === activeAmbient.catalogHeadObjectDigest) {
@@ -1105,7 +1105,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
 
     const rejected: Digest32V1[] = [];
     const blockingReceiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_peer, _announcement, signal) => {
         if (!signal.aborted) {
           await new Promise<void>((resolve) => {
@@ -1148,7 +1148,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const activeAfterDeferral = catalogOperationalTarget(4, 4, 80_000);
     const verifiedAfterDeferral = catalogOperationalTarget(5, 5, 90_000);
     const deferredReceiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_peer, announcement) => {
         if (announcement.catalogHeadObjectDigest === deferredAmbient.catalogHeadObjectDigest) {
           deferredAttempted = true;
@@ -1200,7 +1200,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
     const reconciled: Digest32V1[] = [];
     const receiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_peer, announcement) => {
         reconciled.push(announcement.catalogHeadObjectDigest);
         if (announcement.catalogHeadObjectDigest === deferredAmbient.catalogHeadObjectDigest) {
