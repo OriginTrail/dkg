@@ -869,13 +869,27 @@ async function resolvePublishAuthorSelection(
   selection: PublishIdentityPlan['author'],
   subGraphName?: string,
 ): Promise<string> {
-  if (selection.mode === 'author') return selection.agentAddress;
-  const { callerHint } = selection;
-  return (await resolveResidentFinalizedAssertionAuthor(agent.store, {
-    contextGraphId, name, subGraphName,
-    callerAgentAddress: callerHint,
-    selectedAuthor: selection.residentSelection,
-  })) ?? callerHint;
+  switch (selection.mode) {
+    case 'author':
+      return selection.agentAddress;
+    case 'callerHint':
+      return (await resolveResidentFinalizedAssertionAuthor(agent.store, {
+        contextGraphId, name, subGraphName, callerAgentAddress: selection.callerHint,
+      })) ?? selection.callerHint;
+    case 'residentAuthor': {
+      const author = await resolveResidentFinalizedAssertionAuthor(agent.store, {
+        contextGraphId, name, subGraphName, selectedAuthor: selection.residentSelection,
+      });
+      // An invalid assertion name has no resident coordinate. Do not substitute
+      // a caller identity when this policy requires the selected resident author.
+      if (author === undefined) {
+        throw new Error(
+          `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
+        );
+      }
+      return author;
+    }
+  }
 }
 
 // Only finalized-assertion / durable-queue replay paths may submit payloads

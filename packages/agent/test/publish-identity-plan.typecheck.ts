@@ -28,6 +28,17 @@ const malformed: ResolveFinalizedAssertionAuthorParams = {
 const plan = readPublishIdentityPlan(undefined, 'caller');
 // @ts-expect-error The enqueue decision is immutable after normalization.
 plan.enqueueCaller = 'other';
+if (plan.author.mode === 'residentAuthor') {
+  const requiredSelector: 'address' | 'malformed' = plan.author.residentSelection.kind;
+  void requiredSelector;
+  // @ts-expect-error Resident selection has no caller-hint policy or fallback.
+  void plan.author.callerHint;
+} else if (plan.author.mode === 'callerHint') {
+  const requiredHint: string = plan.author.callerHint;
+  void requiredHint;
+  // @ts-expect-error Caller-hint resolution cannot also select a resident author.
+  void plan.author.residentSelection;
+}
 void malformed;
 
 // @ts-expect-error The normalized model is not re-exported by the released deep resolver.

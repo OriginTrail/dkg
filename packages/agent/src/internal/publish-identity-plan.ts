@@ -9,10 +9,10 @@ import {
 export interface PublishIdentityPlan {
   readonly author:
     | { readonly mode: 'author'; readonly agentAddress: string }
+    | { readonly mode: 'callerHint'; readonly callerHint: string }
     | {
-        readonly mode: 'resolve';
-        readonly callerHint: string;
-        readonly residentSelection: ResidentAssertionAuthorSelection | undefined;
+        readonly mode: 'residentAuthor';
+        readonly residentSelection: ResidentAssertionAuthorSelection;
       };
   readonly enqueueCaller: string | undefined;
 }
@@ -21,20 +21,12 @@ function conflict(message: string): never {
   throw Object.assign(new Error(message), { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE });
 }
 
-function authorPlan(agentAddress: string, enqueueCaller: string | undefined): PublishIdentityPlan {
-  return Object.freeze({
-    author: Object.freeze({ mode: 'author', agentAddress }),
-    enqueueCaller: enqueueCaller || undefined,
-  });
-}
-
-function lookupPlan(
-  callerHint: string,
+function identityPlan(
+  author: PublishIdentityPlan['author'],
   enqueueCaller: string | undefined,
-  residentSelection?: ResidentAssertionAuthorSelection,
 ): PublishIdentityPlan {
   return Object.freeze({
-    author: Object.freeze({ mode: 'resolve', callerHint, residentSelection }),
+    author: Object.freeze(author),
     enqueueCaller: enqueueCaller || undefined,
   });
 }
@@ -57,12 +49,14 @@ function readLegacyPublishIdentityPlan(
     if (callerAgentAddress || selectedAuthorAgentAddress !== undefined) {
       return conflict('Invalid or conflicting VM publish author selection fields');
     }
-    return authorPlan(agentAddress, enqueueCaller);
+    return identityPlan({ mode: 'author', agentAddress }, enqueueCaller);
   }
-  return lookupPlan(
-    callerAgentAddress ?? defaultCallerHint,
+  const residentSelection = readResidentAuthorSelection(selectedAuthorAgentAddress);
+  return identityPlan(
+    residentSelection === undefined
+      ? { mode: 'callerHint', callerHint: callerAgentAddress ?? defaultCallerHint }
+      : { mode: 'residentAuthor', residentSelection },
     enqueueCaller,
-    readResidentAuthorSelection(selectedAuthorAgentAddress),
   );
 }
 
@@ -98,18 +92,21 @@ export function readPublishIdentityPlan(
     case 'author':
       if (typeof nestedAgentAddress !== 'string' || nestedAgentAddress.length === 0
         || nestedCallerAgentAddress !== undefined || nestedSelectedAuthorAgentAddress !== undefined) break;
-      return authorPlan(nestedAgentAddress, nestedAgentAddress);
+      return identityPlan({ mode: 'author', agentAddress: nestedAgentAddress }, nestedAgentAddress);
     case 'callerHint':
       if (typeof nestedCallerAgentAddress !== 'string'
         || nestedAgentAddress !== undefined || nestedSelectedAuthorAgentAddress !== undefined) break;
-      return lookupPlan(nestedCallerAgentAddress, nestedCallerAgentAddress);
+      return identityPlan({ mode: 'callerHint', callerHint: nestedCallerAgentAddress }, nestedCallerAgentAddress);
     case 'residentAuthor':
       if (nestedAgentAddress !== undefined || nestedSelectedAuthorAgentAddress === undefined
         || (nestedCallerAgentAddress !== undefined && typeof nestedCallerAgentAddress !== 'string')) break;
-      return lookupPlan(
-        nestedCallerAgentAddress ?? defaultCallerHint,
+      return identityPlan(
+        {
+          mode: 'residentAuthor',
+          // Presence was checked above; malformed values remain explicit selectors.
+          residentSelection: readResidentAuthorSelection(nestedSelectedAuthorAgentAddress)!,
+        },
         nestedCallerAgentAddress,
-        readResidentAuthorSelection(nestedSelectedAuthorAgentAddress),
       );
   }
   return conflict('Invalid or conflicting VM publish authorSelection fields');

@@ -16,6 +16,9 @@ it.each([
   { callerAgentAddress: 7 },
   { callerAgentAddress: 7, selectedAuthorAgentAddress: MEMBER },
   { subGraphName: 'research', agentAddress: OTHER, callerAgentAddress: CURATOR },
+  { agentAddress: OTHER, selectedAuthorAgentAddress: MEMBER },
+  { agentAddress: OTHER, selectedAuthorAgentAddress: '' },
+  { agentAddress: OTHER, selectedAuthorAgentAddress: null },
 ])('rejects malformed or contradictory untyped author selection before looking up an author: %j', async options => {
   const store = new OxigraphStore();
   const query = vi.spyOn(store, 'query');
@@ -27,11 +30,12 @@ it.each([
 
 it.each([null, 42, {}])('represents a malformed resident selector explicitly in the immutable plan: %j', selectedAuthorAgentAddress => {
   const plan = readPublishIdentityPlan({ authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress } } as never, CURATOR);
-  expect(plan.author.mode).toBe('resolve');
-  if (plan.author.mode === 'resolve') {
+  expect(plan.author.mode).toBe('residentAuthor');
+  if (plan.author.mode === 'residentAuthor') {
     const selection = plan.author.residentSelection;
     expect(selection).toEqual({ kind: 'malformed', displayValue: String(selectedAuthorAgentAddress) });
-    if (selection?.kind === 'malformed') expectTypeOf(selection.displayValue).toEqualTypeOf<string>();
+    if (selection.kind === 'malformed') expectTypeOf(selection.displayValue).toEqualTypeOf<string>();
+    expect(plan.author).not.toHaveProperty('callerHint');
     expect(Object.isFrozen(selection)).toBe(true);
   }
   expect(Object.isFrozen(plan.author)).toBe(true);
@@ -78,6 +82,23 @@ async function publishableAgent() {
   return { agent, store };
 }
 
+it.each<PublishAuthorSelectionOptions>([
+  { selectedAuthorAgentAddress: MEMBER, callerAgentAddress: CURATOR },
+  { authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress: MEMBER, callerAgentAddress: CURATOR } },
+])('rejects an invalid resident coordinate before lookup or publication: %j', async options => {
+  const { agent, store } = await publishableAgent();
+  const query = vi.spyOn(store, 'query');
+  for (const resolve of [
+    () => agent.resolveFinalizedAssertionPublishAuthor(CG, 'invalid/name', options),
+    () => agent.resolveFinalizedAssertionVmPublishIntent(CG, 'invalid/name', options),
+    () => agent.publishFromFinalizedAssertion(CG, 'invalid/name', options),
+  ]) {
+    await expect(resolve()).rejects.toThrow('is not finalized or does not exist');
+  }
+  expect(query).not.toHaveBeenCalled();
+  expect(agent.publishFromSharedMemory).not.toHaveBeenCalled();
+});
+
 it.each([null, 42, {}])('preserves candidate diagnostics for malformed selectors across public APIs: %j', async selectedAuthorAgentAddress => {
   const { agent } = await publishableAgent();
   const expected = {
@@ -109,7 +130,11 @@ it.each<{ options: PublishAuthorSelectionOptions; author: string; caller?: strin
   { options: { agentAddress: MEMBER, callerAgentAddress: '' }, author: MEMBER },
   { options: { agentAddress: '' }, author: CURATOR },
   { options: {}, author: CURATOR },
-])('preserves released flat-option behavior across all three public methods: $options', async ({ options, author, caller }) => {
+  { options: { authorSelection: { mode: 'author', agentAddress: MEMBER } }, author: MEMBER, caller: MEMBER },
+  { options: { authorSelection: { mode: 'callerHint', callerAgentAddress: MEMBER } }, author: MEMBER, caller: MEMBER },
+  { options: { authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress: MEMBER, callerAgentAddress: CURATOR } }, author: MEMBER, caller: CURATOR },
+  { options: { authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress: MEMBER } }, author: MEMBER },
+])('preserves nested and released flat-option behavior across all three public methods: $options', async ({ options, author, caller }) => {
   const { agent } = await publishableAgent();
   expect(await agent.resolveFinalizedAssertionPublishAuthor(CG, NAME, options)).toBe(author);
   const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME, options);

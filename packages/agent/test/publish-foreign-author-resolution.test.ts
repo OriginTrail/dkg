@@ -16,6 +16,16 @@ describe.each([
   ['source', sourceResolveAuthor],
   ['published deep subpath', publishedResolveAuthor],
 ] as const)('%s finalized author resolver compatibility', (_entryPoint, resolveAuthor) => {
+  it('preserves the released undefined result for an invalid assertion name', async () => {
+    const store = new OxigraphStore();
+    const query = vi.spyOn(store, 'query');
+    await expect(resolveAuthor(store, {
+      contextGraphId: CG, name: 'invalid/name',
+      callerAgentAddress: CURATOR, selectedAuthorAgentAddress: MEMBER,
+    })).resolves.toBeUndefined();
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, 'wing-a'])('honors the legacy member selector over a resident caller in scope %s', async (subGraphName) => {
     const store = new OxigraphStore();
     await store.insert([
