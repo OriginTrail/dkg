@@ -45,7 +45,7 @@ export interface ContextGraphAuthorityIndexScanInput {
     blockNumber: number,
     lifecycleSignal: AbortSignal,
   ) => Promise<string | null>;
-  /** Read all six indexed authority event signatures for one inclusive range. */
+  /** Read all seven indexed authority event signatures for one inclusive range. */
   readonly readPage: (
     fromBlockNumber: number,
     throughBlockNumber: number,

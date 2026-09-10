@@ -2,53 +2,32 @@
 
 import { ethers } from 'ethers';
 import {
-  applyContextGraphAuthorityGenerationEvent,
-  normalizeContextGraphAuthorityHash,
-  normalizeContextGraphAuthorityNonNegativeSafeInteger,
-} from './context-graph-authority-generation.js';
-import {
   createContextGraphAuthorityIndexCheckpoint,
-  freezeContextGraphAuthorityIndexState,
+  normalizeAuthorityIndexAddress,
+  normalizeAuthorityIndexHash,
+  normalizeAuthorityIndexNonNegativeSafeInteger,
+  normalizeAuthorityIndexParticipantAgents,
+  normalizeAuthorityIndexPolicy,
+  normalizeAuthorityIndexUint256,
   normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexCheckpoint,
-  type ContextGraphAuthorityIndexState,
 } from './context-graph-authority-index-checkpoint.js';
+import {
+  applyContextGraphAuthorityStateEvent,
+  type ContextGraphAuthorityIndexEvent,
+  type ContextGraphAuthorityIndexState,
+} from './context-graph-authority-state.js';
 
-interface ContextGraphAuthorityIndexEventBase {
-  readonly contextGraphId: bigint;
-  readonly blockNumber: number;
-  readonly blockHash: string;
-  readonly index: number;
-}
-
-export interface ContextGraphAuthorityIndexCreationEvent
-  extends ContextGraphAuthorityIndexEventBase {
-  readonly name: 'ContextGraphCreated';
-  readonly nameHash: string;
-}
-
-export interface ContextGraphAuthorityIndexTransferEvent
-  extends ContextGraphAuthorityIndexEventBase {
-  readonly name: 'Transfer';
-  readonly from: string;
-  readonly to: string;
-}
-
-export interface ContextGraphAuthorityIndexPolicyEvent
-  extends ContextGraphAuthorityIndexEventBase {
-  readonly name: 'PublishPolicyUpdated' | 'PublishAuthorityUpdated';
-}
-
-export interface ContextGraphAuthorityIndexRosterEvent
-  extends ContextGraphAuthorityIndexEventBase {
-  readonly name: 'AgentParticipantAdded' | 'AgentParticipantRemoved';
-}
-
-export type ContextGraphAuthorityIndexEvent =
-  | ContextGraphAuthorityIndexCreationEvent
-  | ContextGraphAuthorityIndexTransferEvent
-  | ContextGraphAuthorityIndexPolicyEvent
-  | ContextGraphAuthorityIndexRosterEvent;
+export type {
+  ContextGraphAuthorityIndexCreationEvent,
+  ContextGraphAuthorityIndexDeactivationEvent,
+  ContextGraphAuthorityIndexEvent,
+  ContextGraphAuthorityIndexPolicyEvent,
+  ContextGraphAuthorityIndexPublishAuthorityEvent,
+  ContextGraphAuthorityIndexPublishPolicyEvent,
+  ContextGraphAuthorityIndexRosterEvent,
+  ContextGraphAuthorityIndexTransferEvent,
+} from './context-graph-authority-state.js';
 
 export interface ReduceContextGraphAuthorityIndexPageInput {
   readonly deploymentBlockNumber: number;
@@ -57,19 +36,11 @@ export interface ReduceContextGraphAuthorityIndexPageInput {
   readonly previous?: ContextGraphAuthorityIndexCheckpoint;
   readonly events: readonly ContextGraphAuthorityIndexEvent[];
 }
-
 export interface ContextGraphAuthorityIndexPageReduction {
   readonly checkpoint: ContextGraphAuthorityIndexCheckpoint;
 }
 
-const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/i;
 const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
-
-function normalizeAddress(value: unknown): string | undefined {
-  return typeof value === 'string' && ADDRESS_PATTERN.test(value)
-    ? value.toLowerCase()
-    : undefined;
-}
 
 function normalizePageEvent(
   event: ContextGraphAuthorityIndexEvent,
@@ -84,9 +55,9 @@ function normalizePageEvent(
   ) {
     throw new Error('Context Graph authority index event has an invalid context graph id');
   }
-  const blockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(event.blockNumber);
-  const blockHash = normalizeContextGraphAuthorityHash(event.blockHash);
-  const index = normalizeContextGraphAuthorityNonNegativeSafeInteger(event.index);
+  const blockNumber = normalizeAuthorityIndexNonNegativeSafeInteger(event.blockNumber);
+  const blockHash = normalizeAuthorityIndexHash(event.blockHash);
+  const index = normalizeAuthorityIndexNonNegativeSafeInteger(event.index);
   if (
     blockNumber === undefined
     || blockNumber < fromBlockNumber
@@ -107,24 +78,102 @@ function normalizePageEvent(
   };
   switch (event.name) {
     case 'ContextGraphCreated': {
-      const nameHash = normalizeContextGraphAuthorityHash(event.nameHash);
-      if (nameHash === undefined) {
-        throw new Error('Context Graph authority index creation event has an invalid name hash');
+      const owner = normalizeAuthorityIndexAddress(event.owner);
+      const nameHash = normalizeAuthorityIndexHash(event.nameHash);
+      const participantAgents = normalizeAuthorityIndexParticipantAgents(
+        event.participantAgents,
+      );
+      const accessPolicy = normalizeAuthorityIndexPolicy(event.accessPolicy);
+      const publishPolicy = normalizeAuthorityIndexPolicy(event.publishPolicy);
+      const publishAuthority = normalizeAuthorityIndexAddress(event.publishAuthority);
+      const publishAuthorityAccountId = normalizeAuthorityIndexUint256(
+        event.publishAuthorityAccountId,
+      );
+      if (
+        owner === undefined
+        || owner === ZERO_ADDRESS
+        || nameHash === undefined
+        || participantAgents === undefined
+        || accessPolicy === undefined
+        || publishPolicy === undefined
+        || publishAuthority === undefined
+        || publishAuthorityAccountId === undefined
+        || (publishPolicy === 0 && publishAuthority === ZERO_ADDRESS)
+        || (publishPolicy === 1 && (
+          publishAuthority !== ZERO_ADDRESS || publishAuthorityAccountId !== 0n
+        ))
+      ) {
+        throw new Error('Context Graph authority index creation event has invalid authority state');
       }
-      return Object.freeze({ ...base, name: event.name, nameHash });
+      return Object.freeze({
+        ...base,
+        name: event.name,
+        owner,
+        nameHash,
+        participantAgents,
+        accessPolicy,
+        publishPolicy,
+        publishAuthority,
+        publishAuthorityAccountId,
+      });
     }
     case 'Transfer': {
-      const from = normalizeAddress(event.from);
-      const to = normalizeAddress(event.to);
+      const from = normalizeAuthorityIndexAddress(event.from);
+      const to = normalizeAuthorityIndexAddress(event.to);
       if (from === undefined || to === undefined) {
         throw new Error('Context Graph authority index transfer event has an invalid address');
       }
       return Object.freeze({ ...base, name: event.name, from, to });
     }
-    case 'PublishPolicyUpdated':
-    case 'PublishAuthorityUpdated':
+    case 'PublishPolicyUpdated': {
+      const publishPolicy = normalizeAuthorityIndexPolicy(event.publishPolicy);
+      const publishAuthority = normalizeAuthorityIndexAddress(event.publishAuthority);
+      const publishAuthorityAccountId = normalizeAuthorityIndexUint256(
+        event.publishAuthorityAccountId,
+      );
+      if (
+        publishPolicy === undefined
+        || publishAuthority === undefined
+        || publishAuthorityAccountId === undefined
+        || (publishPolicy === 0 && publishAuthority === ZERO_ADDRESS)
+        || (publishPolicy === 1 && (
+          publishAuthority !== ZERO_ADDRESS || publishAuthorityAccountId !== 0n
+        ))
+      ) {
+        throw new Error('Context Graph authority index policy event has invalid authority state');
+      }
+      return Object.freeze({
+        ...base,
+        name: event.name,
+        publishPolicy,
+        publishAuthority,
+        publishAuthorityAccountId,
+      });
+    }
+    case 'PublishAuthorityUpdated': {
+      const publishAuthority = normalizeAuthorityIndexAddress(event.publishAuthority);
+      const publishAuthorityAccountId = normalizeAuthorityIndexUint256(
+        event.publishAuthorityAccountId,
+      );
+      if (publishAuthority === undefined || publishAuthorityAccountId === undefined) {
+        throw new Error('Context Graph authority index publisher event has invalid authority state');
+      }
+      return Object.freeze({
+        ...base,
+        name: event.name,
+        publishAuthority,
+        publishAuthorityAccountId,
+      });
+    }
     case 'AgentParticipantAdded':
-    case 'AgentParticipantRemoved':
+    case 'AgentParticipantRemoved': {
+      const agent = normalizeAuthorityIndexAddress(event.agent);
+      if (agent === undefined || agent === ZERO_ADDRESS) {
+        throw new Error('Context Graph authority index roster event has an invalid agent');
+      }
+      return Object.freeze({ ...base, name: event.name, agent });
+    }
+    case 'ContextGraphDeactivated':
       return Object.freeze({ ...base, name: event.name });
     default:
       throw new Error('Context Graph authority index event has an unsupported name');
@@ -135,13 +184,13 @@ function normalizePageEvent(
 export function reduceContextGraphAuthorityIndexPage(
   input: ReduceContextGraphAuthorityIndexPageInput,
 ): ContextGraphAuthorityIndexPageReduction {
-  const deploymentBlockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(
+  const deploymentBlockNumber = normalizeAuthorityIndexNonNegativeSafeInteger(
     input.deploymentBlockNumber,
   );
-  const throughBlockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(
+  const throughBlockNumber = normalizeAuthorityIndexNonNegativeSafeInteger(
     input.throughBlockNumber,
   );
-  const throughBlockHash = normalizeContextGraphAuthorityHash(input.throughBlockHash);
+  const throughBlockHash = normalizeAuthorityIndexHash(input.throughBlockHash);
   if (
     deploymentBlockNumber === undefined
     || throughBlockNumber === undefined
@@ -189,20 +238,8 @@ export function reduceContextGraphAuthorityIndexPage(
   );
   for (const event of normalizedEvents) {
     const contextGraphId = event.contextGraphId.toString(10);
-    const prior = states.get(contextGraphId);
-    if (
-      event.name === 'Transfer'
-      && (event.from === ZERO_ADDRESS || event.to === ZERO_ADDRESS || event.from === event.to)
-    ) continue;
-    const next = applyContextGraphAuthorityGenerationEvent(
-      prior,
-      event,
-      `Context Graph ${contextGraphId}`,
-    );
-    states.set(contextGraphId, freezeContextGraphAuthorityIndexState({
-      contextGraphId,
-      ...next,
-    }));
+    const next = applyContextGraphAuthorityStateEvent(states.get(contextGraphId), event);
+    if (next !== undefined) states.set(contextGraphId, next);
   }
 
   return Object.freeze({

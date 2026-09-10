@@ -956,8 +956,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           const authorityTopics = contextGraphAuthorityEventTopics(contract.interface);
           return Object.freeze({
             kind: 'indexed' as const,
-            readCurrent: readCurrentState,
-            readGeneration: () => this.contextGraphAuthorityIndex!.resolve({
+            readSnapshot: () => this.contextGraphAuthorityIndex!.resolve({
               scope: [this.deploymentId, contractAddress].join(':'),
               contextGraphId,
               readScope: provider,

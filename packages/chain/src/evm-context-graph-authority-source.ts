@@ -10,6 +10,7 @@ import type { ContextGraphAuthorityIndexEvent } from './context-graph-authority-
 
 export const CONTEXT_GRAPH_AUTHORITY_EVENT_NAMES = Object.freeze([
   'ContextGraphCreated',
+  'ContextGraphDeactivated',
   'Transfer',
   'PublishPolicyUpdated',
   'PublishAuthorityUpdated',
@@ -39,8 +40,7 @@ export interface EvmContextGraphAuthoritySourceResult {
 export type EvmContextGraphAuthoritySource =
   | Readonly<{
       kind: 'indexed';
-      readCurrent(): Promise<unknown>;
-      readGeneration(): Promise<ContextGraphAuthorityIndexState>;
+      readSnapshot(): Promise<ContextGraphAuthorityIndexState>;
       stabilize(): Promise<void>;
     }>
   | Readonly<{
@@ -105,13 +105,18 @@ export async function resolveEvmContextGraphAuthoritySource(
   source: EvmContextGraphAuthoritySource,
 ): Promise<EvmContextGraphAuthoritySourceResult> {
   if (source.kind === 'indexed') {
-    const [rawCurrent, generation] = await Promise.all([
-      source.readCurrent(),
-      source.readGeneration(),
-    ]);
+    const indexed = await source.readSnapshot();
     return Object.freeze({
-      current: normalizeEvmContextGraphCurrentAuthorityState(rawCurrent),
-      generation,
+      current: Object.freeze({
+        owner: indexed.owner,
+        active: indexed.active,
+        accessPolicy: indexed.accessPolicy,
+        publishPolicy: indexed.publishPolicy,
+        publishAuthority: indexed.publishAuthority,
+        publishAuthorityAccountId: indexed.publishAuthorityAccountId,
+        participantAgents: indexed.participantAgents,
+      }),
+      generation: indexed,
       stabilize: source.stabilize,
     });
   }
@@ -154,7 +159,17 @@ export function normalizeContextGraphAuthorityIndexLog(
         ...base,
         name: parsed.name,
         contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
+        owner: String(parsed.args.owner ?? parsed.args[1]),
         nameHash: String(parsed.args.nameHash ?? parsed.args[2]),
+        participantAgents: [
+          ...(parsed.args.participantAgents ?? parsed.args[3]),
+        ].map((address) => String(address)),
+        accessPolicy: Number(BigInt(parsed.args.accessPolicy ?? parsed.args[5])),
+        publishPolicy: Number(BigInt(parsed.args.publishPolicy ?? parsed.args[6])),
+        publishAuthority: String(parsed.args.publishAuthority ?? parsed.args[7]),
+        publishAuthorityAccountId: BigInt(
+          parsed.args.publishAuthorityAccountId ?? parsed.args[8],
+        ),
       };
     case 'Transfer':
       return {
@@ -165,9 +180,35 @@ export function normalizeContextGraphAuthorityIndexLog(
         to: String(parsed.args.to ?? parsed.args[1]),
       };
     case 'PublishPolicyUpdated':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
+        publishPolicy: Number(BigInt(parsed.args.publishPolicy ?? parsed.args[1])),
+        publishAuthority: String(parsed.args.publishAuthority ?? parsed.args[2]),
+        publishAuthorityAccountId: BigInt(
+          parsed.args.publishAuthorityAccountId ?? parsed.args[3],
+        ),
+      };
     case 'PublishAuthorityUpdated':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
+        publishAuthority: String(parsed.args.newAuthority ?? parsed.args[1]),
+        publishAuthorityAccountId: BigInt(
+          parsed.args.newAuthorityAccountId ?? parsed.args[2],
+        ),
+      };
     case 'AgentParticipantAdded':
     case 'AgentParticipantRemoved':
+      return {
+        ...base,
+        name: parsed.name,
+        contextGraphId: BigInt(parsed.args.contextGraphId ?? parsed.args[0]),
+        agent: String(parsed.args.agent ?? parsed.args[1]),
+      };
+    case 'ContextGraphDeactivated':
       return {
         ...base,
         name: parsed.name,
