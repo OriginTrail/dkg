@@ -25,7 +25,7 @@
 // `(agent, number)` addressing is layered on by Option 1 later, on these same
 // routes, as an additional accepted identifier form.
 import type { RequestContext } from "./context.js";
-import { reportBatchRejectionWithLifecycle } from "@origintrail-official/dkg-agent";
+import { reportBatchRejectionWithLifecycle, type PublishAuthorSelectionOptions } from "@origintrail-official/dkg-agent";
 import {
   isPayloadTooLargeError,
   jsonResponse,
@@ -519,14 +519,12 @@ function scopedTokenStorageLane(agentAddress?: string): { agentAddress?: string 
   return agentAddress ? { agentAddress } : {};
 }
 
-/**
- * GH#1778 — the VM-publish caller hint. The token holder is the CALLER, not
- * necessarily the KA author, so it is passed as `callerAgentAddress` (a
- * resolution hint), never as `agentAddress` (an authoritative author selector).
- * Centralised so both publish routes construct the same option.
- */
-function publishCallerHintLane(agentAddress?: string): { callerAgentAddress?: string } {
-  return agentAddress ? { callerAgentAddress: agentAddress } : {};
+/** Both publish routes preserve the caller when selecting a resident author. */
+function publishCallerHintLane(agentAddress?: string, selectedAuthorAgentAddress?: string): PublishAuthorSelectionOptions {
+  if (selectedAuthorAgentAddress !== undefined) {
+    return { authorSelection: { mode: "residentAuthor", selectedAuthorAgentAddress, ...(agentAddress ? { callerAgentAddress: agentAddress } : {}) } };
+  }
+  return agentAddress ? { authorSelection: { mode: "callerHint", callerAgentAddress: agentAddress } } : {};
 }
 
 function resolveBatchRejectionReporterIdentity(
@@ -1150,7 +1148,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           const pub: FinalizedPublishResult = await agent.publishFromFinalizedAssertion(resolvedContextGraphId, name, {
             subGraphName,
             ...alsoPublishVmOptions,
-            ...atomicAuthorLane,
+            ...(createAuthorAgentAddress ? { authorSelection: { mode: "author" as const, agentAddress: createAuthorAgentAddress } } : {}),
           });
           result.kaId = pub?.kaId;
           result.ual = pub?.ual;
@@ -1607,10 +1605,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const publishOptions = opts;
         const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
-          ...publishCallerHintLane(writePreflightCallerAgentAddress),
-          ...(asyncSelectedAuthor.value !== undefined
-            ? { selectedAuthorAgentAddress: asyncSelectedAuthor.value }
-            : {}),
+          ...publishCallerHintLane(writePreflightCallerAgentAddress, asyncSelectedAuthor.value),
           ...(publishOptions.publishEpochs !== undefined ? { publishEpochs: publishOptions.publishEpochs } : {}),
           ...(publishOptions.pricingPolicy !== undefined ? { pricingPolicy: publishOptions.pricingPolicy } : {}),
           ...(publishOptions.clearSharedMemoryAfter !== undefined
@@ -1748,10 +1743,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // per-call-site key would be dropped on the retry and publish the wrong
         // author with HTTP 200 and real spend (the unregistered-CG first publish is
         // exactly the curator's first publish of a member KA).
-        const publishStorageLane = {
-          ...publishCallerHintLane(writePreflightCallerAgentAddress),
-          ...(selectedAuthor.value !== undefined ? { selectedAuthorAgentAddress: selectedAuthor.value } : {}),
-        };
+        const publishStorageLane = publishCallerHintLane(writePreflightCallerAgentAddress, selectedAuthor.value);
         try {
           pub = await agent.publishFromFinalizedAssertion(contextGraphId, name, { subGraphName, ...opts, ...publishStorageLane });
         } catch (firstErr: any) {

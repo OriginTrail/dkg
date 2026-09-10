@@ -1,3 +1,4 @@
+export type { PublishAuthorSelection, PublishAuthorSelectionOptions } from './publish-author-selection.js';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
