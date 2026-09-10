@@ -84,6 +84,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getBlockNumber',         // the mock exposes its own block counter differently (advanceBlock)
   'getProvider',            // returns a JsonRpcProvider; mock has none
   'getReadProvider',        // @deprecated bare-primary accessor; mock has no RPC provider
+  // Optional ChainAdapter capability backed by the EVM adapter's RPC pool.
+  // Mock/no-chain adapters report unsupported through the capability binder.
+  'createFinalizedEvmReadBinding',
   'getSignerAddress',       // mock exposes `signerAddress` as a field
   'getSignerAddresses',     // pool not applicable to mock
   'getAuthorizedPublisherAddress', // pool-specific signer selection; mock has one signerAddress

@@ -83,14 +83,25 @@ node --experimental-strip-types src/cli/verify.ts raw.json > verdict.json
 Two identical generator invocations must produce byte-identical raw artifacts;
 two verifier invocations over them must produce byte-identical verdicts.
 
-## M2 public finalized-VM process proof
+## Public catalog finalized-policy process proof
 
-`pnpm live:public-vm` clean-builds the exact repository HEAD, then starts an
-author and receiver as distinct real `DKGAgent` OS processes. The receiver
-learns numeric Context Graph id `14` from a production `ContextGraphCreated`
-poller event, receives one policy-bound public catalog successor over the
-production router, reads one finalized on-chain inventory snapshot, writes the
-exact projection to VM, and only then commits the catalog head. The emitted
-`artifacts/m2-public-vm-result.json` proves exact projection/count, confirmed
-metadata, no synthetic transaction hash, durable head equality, peer/process
-identity separation, and the clean-build runtime manifest.
+`pnpm live:public-finalized-catalog` clean-builds the exact repository HEAD,
+then starts an author and receiver as distinct real `DKGAgent` OS processes.
+Both this command and the legacy `pnpm live:public-vm` alias execute
+`launch-public-finalized-catalog.ts`, which loads `public-finalized-catalog.ts`.
+Set `DKG_RFC64_PUBLIC_FINALIZED_CATALOG_ARTIFACT` to override the artifact path;
+the old `DKG_RFC64_M2_PUBLIC_VM_ARTIFACT` variable remains a fallback alias.
+
+The receiver learns numeric Context Graph id `14` from a production
+`ContextGraphCreated` poller event and resolves its current chain authority.
+The author uses that exact policy and ownership scope for its catalog. The
+receiver verifies finalized policy through its adapter-owned loopback RPC
+before committing the public catalog head.
+
+`artifacts/public-finalized-catalog-result.json` proves the exact two-quad SWM
+projection, durable applied-head equality, peer/process identity separation,
+and the clean-build runtime manifest. It also requires zero VM rows and no
+fabricated confirmed VM metadata: public catalog reconciliation is policy-only,
+as specified by the production applied-head coordinator. This proof does not
+claim public VM materialization. Private finalized-VM recovery has its separate
+CP2/CP3 harnesses.

@@ -60,7 +60,7 @@ export function spawnGate2HarnessAgentV1(input: {
   readonly catalogLocalAgentAddress?: string;
   readonly dataDir: string;
   readonly eventTimeoutMs?: number;
-  readonly finalizedVmConfigJson?: string;
+  readonly finalizedChainConfigJson?: string;
   readonly masterKeyHex?: string;
   /** Harness-only provider delay used to prove mid-transfer failover. */
   readonly bundleServeDelayMs?: number;
@@ -121,9 +121,9 @@ export function spawnGate2HarnessAgentV1(input: {
         ...(input.networkChainId === undefined
           ? {}
           : { DKG_RFC64_GATE2_NETWORK_CHAIN_ID: input.networkChainId }),
-        ...(input.finalizedVmConfigJson === undefined
+        ...(input.finalizedChainConfigJson === undefined
           ? {}
-          : { DKG_RFC64_GATE2_FINALIZED_VM_CONFIG: input.finalizedVmConfigJson }),
+          : { DKG_RFC64_GATE2_FINALIZED_CHAIN_CONFIG: input.finalizedChainConfigJson }),
         NODE_ENV: 'production',
       },
     },

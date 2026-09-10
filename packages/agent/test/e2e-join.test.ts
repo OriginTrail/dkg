@@ -193,16 +193,20 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
           `SELECT ?name WHERE { <${subject}> <http://schema.org/name> ?name . }`,
           CG,
         );
+        const catalog = (await joiner.readRfc64CatalogOperationalStatusV1())
+          .find(status => status.contextGraphId === CG);
         return {
           subscribed: joiner.getSubscribedContextGraphs().get(CG)?.subscribed === true,
           hasData: data.bindings.length > 0,
+          catalogApplied: catalog?.appliedRowCount === '1'
+            && catalog.appliedCatalogHeadDigest !== null,
         };
       },
-      (state) => state.subscribed && state.hasData,
+      (state) => state.subscribed && state.hasData && state.catalogApplied,
       60_000,
     );
 
-    expect(caughtUp).toEqual({ subscribed: true, hasData: true });
+    expect(caughtUp).toEqual({ subscribed: true, hasData: true, catalogApplied: true });
     // The 10.0.16 default installs RFC-64 catalog responsibility for an
     // approved private member. Catch-up must complete without reviving the
     // legacy GossipSub or durable-sync receiver lanes.

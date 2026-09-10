@@ -1,3 +1,4 @@
+import { unavailableFinalizedReads } from './support/rfc64-finalized-vm-precommit-fixture.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2334,7 +2335,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       ),
     );
     const getOnChainContextGraphId = vi.fn(async () => '14');
-    const getEvmChainId = vi.fn(async () => 20_430n);
+    const finalizedReads = unavailableFinalizedReads;
     const getKnowledgeAssetStorageAddress = vi.fn(async () => KAV10);
     const policy = Object.freeze({
       networkId: NETWORK_ID,
@@ -2367,9 +2368,8 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
         policyDigest: POLICY_DIGEST,
         roster: null,
       }),
-      rpcEndpoints: [],
       getOnChainContextGraphId,
-      getEvmChainId,
+      finalizedReads,
       getKnowledgeAssetStorageAddress,
       getKnowledgeAssetsLifecycleAddress: async () => KAV10,
       store: fixture.receiverStore,
@@ -2388,7 +2388,6 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     });
 
     expect(getOnChainContextGraphId).not.toHaveBeenCalled();
-    expect(getEvmChainId).not.toHaveBeenCalled();
     expect(getKnowledgeAssetStorageAddress).not.toHaveBeenCalled();
     expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(

@@ -125,24 +125,27 @@ async function execute(): Promise<void> {
         seal,
       });
     }));
-    const finalizedVmConfigJson = JSON.stringify({
+    const finalizedChainConfigJson = JSON.stringify({
       accessPolicy: 1,
-      assets: assets.map(({ seal }) => ({
-        assertionRoot: seal.assertionMerkleRoot,
-        assertionVersion: seal.assertionVersion,
-        authorAddress: seal.authorAddress,
-        kaId: seal.reservedKaId,
-      })),
       contextGraphId: CONTEXT_GRAPH_ID,
       nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase(),
       onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+      vmInventory: {
+        assets: assets.map(({ seal }) => ({
+          assertionRoot: seal.assertionMerkleRoot,
+          assertionVersion: seal.assertionVersion,
+          authorAddress: seal.authorAddress,
+          kaId: seal.reservedKaId,
+        })),
+      },
     });
     const receiver = spawnGate2HarnessAgentV1({
       role: 'receiver',
       catalogLocalAgentAddress: RECEIVER,
       dataDir: dataDirs.receiver,
       eventTimeoutMs: PROCESS_EVENT_TIMEOUT_MS,
-      finalizedVmConfigJson,
+      finalizedChainConfigJson,
       networkChainId: NETWORK_ID,
       registry,
       repoRoot: REPO_ROOT,
@@ -155,6 +158,8 @@ async function execute(): Promise<void> {
     ]);
     assertGate2HarnessReadyV1(authorReady, 'author', launch.manifest.manifestDigest);
     assertGate2HarnessReadyV1(receiverReady, 'receiver', launch.manifest.manifestDigest);
+    exact(authorReady.finalizedChainRuntime, false, 'author finalized chain runtime');
+    exact(receiverReady.finalizedChainRuntime, true, 'receiver finalized chain runtime');
     exact(authorReady.finalizedVmRuntime, false, 'author finalized VM runtime');
     exact(receiverReady.finalizedVmRuntime, true, 'receiver finalized VM runtime');
     const authorPeerId = requiredString(authorReady.peerId, 'author peer ID');

@@ -9,6 +9,12 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
+  FinalizedChainLoopbackMockChainAdapterV1,
+  createFinalizedChainLoopbackRpcV1,
+  type FinalizedChainLoopbackFixtureConfigV1,
+  type FinalizedChainLoopbackRpcV1,
+} from '../../packages/agent/test/support/rfc64-finalized-chain-loopback-fixture.js';
+import {
   FinalizedVmLoopbackMockChainAdapterV1,
   createFinalizedVmLoopbackRpcV1,
   type FinalizedVmLoopbackFixtureConfigV1,
@@ -25,128 +31,160 @@ const RFC64_GATE2_CONTEXT_GRAPH_STORAGE_ADDRESS =
 const RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS =
   '0x5555555555555555555555555555555555555555' as EvmAddressV1;
 
-export interface FinalizedVmHarnessAssetConfigV1 {
+export interface FinalizedChainHarnessVmAssetConfigV1 {
   readonly assertionRoot: Digest32V1;
   readonly assertionVersion: string;
   readonly authorAddress: EvmAddressV1;
   readonly kaId: string;
 }
 
-export interface FinalizedVmHarnessConfigV1 {
+export interface FinalizedChainHarnessVmInventoryConfigV1 {
+  readonly assets: readonly Readonly<FinalizedChainHarnessVmAssetConfigV1>[];
+}
+
+/** Finalized chain/CG policy baseline; VM inventory is an explicit extension. */
+interface FinalizedChainAuthorityHarnessConfigV1 {
   readonly accessPolicy: 0 | 1;
-  readonly assets: readonly Readonly<FinalizedVmHarnessAssetConfigV1>[];
   readonly contextGraphId: string;
   readonly nameHash: Digest32V1;
   readonly onChainContextGraphId: string;
+  readonly ownerAddress: EvmAddressV1;
 }
 
-export interface FinalizedVmHarnessRuntimeV1 {
-  readonly chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
+export type FinalizedChainHarnessConfigV1 =
+  | Readonly<FinalizedChainAuthorityHarnessConfigV1 & { kind: 'policy' }>
+  | Readonly<FinalizedChainAuthorityHarnessConfigV1 & {
+      kind: 'vm'; vmInventory: Readonly<FinalizedChainHarnessVmInventoryConfigV1>;
+    }>;
+
+interface FinalizedChainHarnessServerV1<T extends FinalizedChainLoopbackMockChainAdapterV1> {
+  readonly chainAdapter: T;
   readonly rpcUrl: string;
   close(): Promise<void>;
 }
 
+export type FinalizedChainHarnessRuntimeV1 =
+  | Readonly<FinalizedChainHarnessServerV1<FinalizedChainLoopbackMockChainAdapterV1> & { kind: 'policy' }>
+  | Readonly<FinalizedChainHarnessServerV1<FinalizedVmLoopbackMockChainAdapterV1> & { kind: 'vm' }>;
+
 const FINALIZED_BLOCK_HASH = `0x${'77'.repeat(32)}`;
 
-export function parseFinalizedVmHarnessConfigV1(
+export function parseFinalizedChainHarnessConfigV1(
   input: string,
-): Readonly<FinalizedVmHarnessConfigV1> {
+): Readonly<FinalizedChainHarnessConfigV1> {
   if (Buffer.byteLength(input) > 1_000_000) {
-    throw new TypeError('finalized VM harness config exceeds 1 MiB');
+    throw new TypeError('finalized chain harness config exceeds 1 MiB');
   }
-  const parsed = plainRecord(JSON.parse(input), 'finalized VM harness config');
-  const contextGraphId = requiredString(parsed.contextGraphId, 'finalizedVm.contextGraphId');
+  const parsed = plainRecord(JSON.parse(input), 'finalized chain harness config');
+  const contextGraphId = requiredString(parsed.contextGraphId, 'finalizedChain.contextGraphId');
   assertContextGraphIdV1(contextGraphId);
   const accessPolicy = parsed.accessPolicy === undefined
     ? 0
-    : canonicalAccessPolicy(parsed.accessPolicy, 'finalizedVm.accessPolicy');
-  const nameHash = requiredDigest(parsed.nameHash, 'finalizedVm.nameHash');
-  const assetsInput = parsed.assets === undefined
-    ? [{
-        assertionRoot: parsed.assertionRoot,
-        assertionVersion: parsed.assertionVersion,
-        authorAddress: parsed.authorAddress,
-        kaId: parsed.kaId,
-      }]
-    : plainArray(parsed.assets, 'finalizedVm.assets');
-  if (assetsInput.length === 0) {
-    throw new TypeError('finalizedVm.assets must not be empty');
+    : canonicalAccessPolicy(parsed.accessPolicy, 'finalizedChain.accessPolicy');
+  const nameHash = requiredDigest(parsed.nameHash, 'finalizedChain.nameHash');
+  const ownerAddress = canonicalEvmAddress(parsed.ownerAddress, 'finalizedChain.ownerAddress');
+  const onChainContextGraphId = canonicalDecimalWire(
+    parsed.onChainContextGraphId,
+    'finalizedChain.onChainContextGraphId',
+  );
+  if (BigInt(onChainContextGraphId) === 0n) {
+    throw new TypeError('finalized chain on-chain context graph id must be non-zero');
   }
+  const authority = { accessPolicy, contextGraphId, nameHash, onChainContextGraphId, ownerAddress };
+  // Normalize the legacy wire shape once; all runtime consumers use the mode.
+  return parsed.vmInventory === undefined
+    ? Object.freeze({ ...authority, kind: 'policy' })
+    : Object.freeze({ ...authority, kind: 'vm', vmInventory: parseVmInventory(parsed.vmInventory) });
+}
+
+function parseVmInventory(value: unknown): Readonly<FinalizedChainHarnessVmInventoryConfigV1> {
+  const inventory = plainRecord(value, 'finalizedChain.vmInventory');
+  const assetsInput = plainArray(inventory.assets, 'finalizedChain.vmInventory.assets');
+  if (assetsInput.length === 0) throw new TypeError('finalizedChain.vmInventory.assets must not be empty');
   const assets = assetsInput.map((value, index) => {
-    const asset = plainRecord(value, `finalizedVm.assets[${index}]`);
+    const asset = plainRecord(value, `finalizedChain.vmInventory.assets[${index}]`);
     const assertionVersion = canonicalDecimalWire(
       asset.assertionVersion,
-      `finalizedVm.assets[${index}].assertionVersion`,
+      `finalizedChain.vmInventory.assets[${index}].assertionVersion`,
     );
     if (BigInt(assertionVersion) === 0n) {
-      throw new TypeError(`finalizedVm.assets[${index}].assertionVersion must be non-zero`);
+      throw new TypeError(`finalizedChain.vmInventory.assets[${index}].assertionVersion must be non-zero`);
     }
     return Object.freeze({
       assertionRoot: requiredDigest(
         asset.assertionRoot,
-        `finalizedVm.assets[${index}].assertionRoot`,
+        `finalizedChain.vmInventory.assets[${index}].assertionRoot`,
       ),
       assertionVersion,
       authorAddress: canonicalEvmAddress(
         asset.authorAddress,
-        `finalizedVm.assets[${index}].authorAddress`,
+        `finalizedChain.vmInventory.assets[${index}].authorAddress`,
       ),
-      kaId: canonicalDecimalWire(asset.kaId, `finalizedVm.assets[${index}].kaId`),
+      kaId: canonicalDecimalWire(asset.kaId, `finalizedChain.vmInventory.assets[${index}].kaId`),
     });
   });
-  const onChainContextGraphId = canonicalDecimalWire(
-    parsed.onChainContextGraphId,
-    'finalizedVm.onChainContextGraphId',
-  );
-  if (BigInt(onChainContextGraphId) === 0n) {
-    throw new TypeError('finalized VM on-chain context graph id must be non-zero');
-  }
-  return Object.freeze({
-    accessPolicy,
-    assets: Object.freeze(assets),
-    contextGraphId,
-    nameHash,
-    onChainContextGraphId,
-  });
+  return Object.freeze({ assets: Object.freeze(assets) });
 }
 
-export async function startFinalizedVmHarnessRuntimeV1(
-  config: Readonly<FinalizedVmHarnessConfigV1>,
-): Promise<Readonly<FinalizedVmHarnessRuntimeV1>> {
-  const fixture = Object.freeze({
+export async function startFinalizedChainHarnessRuntimeV1(
+  config: Readonly<FinalizedChainHarnessConfigV1>,
+): Promise<Readonly<FinalizedChainHarnessRuntimeV1>> {
+  switch (config.kind) {
+    case 'policy': {
+      const fixture = authorityLoopbackFixture(config);
+      const runtime = await startFinalizedChainHarnessServerV1(config,
+        createFinalizedChainLoopbackRpcV1(fixture),
+        rpcUrl => new FinalizedChainLoopbackMockChainAdapterV1(fixture, rpcUrl));
+      return Object.freeze({ ...runtime, kind: 'policy' });
+    }
+    case 'vm': {
+      const fixture = vmLoopbackFixture(config);
+      const runtime = await startFinalizedChainHarnessServerV1(config,
+        createFinalizedVmLoopbackRpcV1(fixture),
+        rpcUrl => new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpcUrl));
+      return Object.freeze({ ...runtime, kind: 'vm' });
+    }
+  }
+}
+
+function authorityLoopbackFixture(
+  config: FinalizedChainAuthorityHarnessConfigV1,
+): FinalizedChainLoopbackFixtureConfigV1 {
+  return Object.freeze({
     accessPolicy: config.accessPolicy,
     active: true,
     assertedAtChainId: RFC64_GATE2_DEPLOYMENT.assertedAtChainId,
     assertedAtKav10Address:
       RFC64_GATE2_DEPLOYMENT.assertedAtKav10Address as EvmAddressV1,
-    knowledgeAssetStorageAddress: RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS,
-    assets: Object.freeze(config.assets.map((asset) => Object.freeze({
-      assertionRoot: asset.assertionRoot,
-      assertionVersion: asset.assertionVersion,
-      authorAddress: asset.authorAddress,
-      kaId: asset.kaId,
-      publisherAddress: '0x6666666666666666666666666666666666666666' as EvmAddressV1,
-    }))),
     blockHash: FINALIZED_BLOCK_HASH as Digest32V1,
     blockNumberQuantity: '0x7b',
     contextGraphStorageAddress: RFC64_GATE2_CONTEXT_GRAPH_STORAGE_ADDRESS,
     nameHash: config.nameHash,
     networkId: RFC64_GATE2_DEPLOYMENT.networkId as NetworkIdV1,
     onChainContextGraphId: config.onChainContextGraphId,
-    ownerAddress: config.assets[0]!.authorAddress,
+    ownerAddress: config.ownerAddress,
     publishPolicy: 1,
-  } satisfies FinalizedVmLoopbackFixtureConfigV1);
-  const rpcFixture = createFinalizedVmLoopbackRpcV1(fixture);
-  const chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
-  const created = await chainAdapter.createOnChainContextGraph({
-    accessPolicy: config.accessPolicy,
-    publishPolicy: 1,
-    nameHash: config.nameHash,
-  });
-  if (created.contextGraphId.toString() !== config.onChainContextGraphId) {
-    throw new Error('mock chain created a different numeric context graph id');
-  }
+  } satisfies FinalizedChainLoopbackFixtureConfigV1);
+}
 
+function vmLoopbackFixture(
+  config: Extract<FinalizedChainHarnessConfigV1, { kind: 'vm' }>,
+): FinalizedVmLoopbackFixtureConfigV1 {
+  return Object.freeze({
+    ...authorityLoopbackFixture(config),
+    knowledgeAssetStorageAddress: RFC64_GATE2_KNOWLEDGE_ASSET_STORAGE_ADDRESS,
+    assets: Object.freeze(config.vmInventory.assets.map(asset => Object.freeze({
+      ...asset, publisherAddress: '0x6666666666666666666666666666666666666666' as EvmAddressV1,
+    }))),
+  });
+}
+
+/** Shared HTTP ownership and adapter initialization for either explicit composition. */
+async function startFinalizedChainHarnessServerV1<T extends FinalizedChainLoopbackMockChainAdapterV1>(
+  config: FinalizedChainAuthorityHarnessConfigV1,
+  rpcFixture: FinalizedChainLoopbackRpcV1,
+  createAdapter: (rpcUrl: string) => T,
+): Promise<Readonly<FinalizedChainHarnessServerV1<T>>> {
   let activeServer: Server | undefined;
   const server = createServer(async (request, response) => {
     try {
@@ -165,10 +203,10 @@ export async function startFinalizedVmHarnessRuntimeV1(
       }
       const call = plainRecord(
         JSON.parse(Buffer.concat(chunks).toString('utf8')),
-        'finalized VM JSON-RPC call',
+        'finalized chain JSON-RPC call',
       );
-      const method = requiredString(call.method, 'finalized VM JSON-RPC method');
-      const params = plainArray(call.params, 'finalized VM JSON-RPC params');
+      const method = requiredString(call.method, 'finalized chain JSON-RPC method');
+      const params = plainArray(call.params, 'finalized chain JSON-RPC params');
       const result = rpcFixture.respond(method, params);
       sendRpcResponse(response, call.id, { result });
     } catch (error) {
@@ -188,11 +226,27 @@ export async function startFinalizedVmHarnessRuntimeV1(
   const address = server.address() as AddressInfo | null;
   if (address === null) {
     await closeServer(server);
-    throw new Error('finalized VM JSON-RPC server has no address');
+    throw new Error('finalized chain JSON-RPC server has no address');
+  }
+  const rpcUrl = `http://127.0.0.1:${address.port}`;
+  let chainAdapter: T;
+  try {
+    chainAdapter = createAdapter(rpcUrl);
+    const created = await chainAdapter.createOnChainContextGraph({
+      accessPolicy: config.accessPolicy,
+      publishPolicy: 1,
+      nameHash: config.nameHash,
+    });
+    if (created.contextGraphId.toString() !== config.onChainContextGraphId) {
+      throw new Error('mock chain created a different numeric context graph id');
+    }
+  } catch (error) {
+    await closeServer(server);
+    throw error;
   }
   return Object.freeze({
     chainAdapter,
-    rpcUrl: `http://127.0.0.1:${address.port}`,
+    rpcUrl,
     close: async () => {
       const current = activeServer;
       activeServer = undefined;

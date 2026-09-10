@@ -1,12 +1,6 @@
-import {
-  assertCanonicalEvmAddress,
-  type AuthorCatalogScopeV1,
-  type ContextGraphIdV1,
-} from '@origintrail-official/dkg-core';
-import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
+import { assertCanonicalEvmAddress } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
-import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
 import type {
   Rfc64PublicCatalogNativePrimaryPrecommitHandlerV1,
   Rfc64PublicCatalogNativePrecommitTransactionV1,
@@ -14,6 +8,7 @@ import type {
 import {
   assertRfc64FinalizedPolicyAgentPrecommitSnapshotCurrentV1,
   resolveRfc64FinalizedPolicyAgentPrecommitV1,
+  type Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1,
 } from './finalized-policy-agent-precommit-v1.js';
 import { createFinalizedVmRuntimeV1 } from './finalized-vm-runtime-v1.js';
 import type {
@@ -26,13 +21,8 @@ import {
   createFinalizedVmStoreMaterializerV1,
 } from './finalized-vm-store-materializer-v1.js';
 
-export interface Rfc64FinalizedVmAgentPrecommitOptionsV1 {
-  readonly acceptedPolicySnapshotForCatalogScope:
-    (scope: Readonly<AuthorCatalogScopeV1>) => AcceptedRfc64CatalogAccessSnapshotV1;
-  readonly rpcEndpoints: readonly string[] | null;
-  readonly getOnChainContextGraphId:
-    (contextGraphId: ContextGraphIdV1, signal: AbortSignal) => Promise<string | null>;
-  readonly getEvmChainId: () => Promise<bigint>;
+export interface Rfc64FinalizedVmAgentPrecommitOptionsV1
+  extends Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1 {
   readonly getKnowledgeAssetStorageAddress: () => Promise<string>;
   readonly getKnowledgeAssetsLifecycleAddress: () => Promise<string>;
   readonly store: TripleStore;
@@ -131,15 +121,7 @@ export function createRfc64FinalizedVmAgentPrecommitV1(
       contextGraphStorageAddress: resolved.contextGraphStorageAddress,
       knowledgeAssetStorageAddress: canonicalKnowledgeAssetStorageAddress,
       knowledgeAssetsLifecycleAddress: canonicalKnowledgeAssetsLifecycleAddress,
-      snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
-        chainId: resolved.chainId,
-        endpoints: resolved.rpcEndpoints,
-        // This scope is constructed PER precommit invocation, so its admission
-        // must come from the process-wide per-chain registry — a gate private
-        // to this instance would have contended with nothing, and two
-        // concurrent precommits on one chain would both admit.
-        owner: 'rfc64',
-      }),
+      snapshot: resolved.snapshot,
       materialize: materializer,
       verifyExistingMaterialization:
         createFinalizedVmStoreExistingMaterializationVerifierV1({

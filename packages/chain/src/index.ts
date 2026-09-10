@@ -1,5 +1,10 @@
 export * from './chain-adapter.js';
 export {
+  bindFinalizedEvmReadBindingProvider,
+  type FinalizedEvmReadBindingProvider,
+  type FinalizedEvmReadBindingCapability,
+} from './finalized-evm-read-binding-provider.js';
+export {
   type ContextGraphAuthorityHistoryCheckpointV1,
   type ContextGraphAuthorityHistoryState,
   type ContextGraphAuthorityHistoryStore,

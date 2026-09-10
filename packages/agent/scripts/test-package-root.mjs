@@ -277,6 +277,7 @@ const blockedRfc64Modules = [
   'inventory-v1/swm-author-inventory-mutation.js',
   'inventory-v1/swm-author-inventory-persistence.js',
   'inventory-v1/swm-author-inventory-sql-codec.js',
+  'finalized-agent-precommits-v1.js',
   'finalized-policy-agent-precommit-v1.js',
   'finalized-policy-verifier-v1.js',
   'finalized-private-placement-repair-store-v1.js',

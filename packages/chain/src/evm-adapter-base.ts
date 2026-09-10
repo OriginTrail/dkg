@@ -26,7 +26,12 @@ import type {
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
-import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
+import {
+  assertCanonicalChainId,
+  floorPublishTokenAmount,
+  withSpan,
+  getMetrics,
+} from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
@@ -35,6 +40,9 @@ import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './rpc-failover-client.js';
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
+import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from './strict-current-finalized-evm-snapshot-factory.js';
+import type { FinalizedEvmReadBindingV1 } from './chain-adapter.js';
+import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
@@ -3992,6 +4000,19 @@ export class EVMChainAdapterBase {
 
   getRpcUrls(): string[] {
     return [...this.rpcUrls];
+  }
+
+  async createFinalizedEvmReadBinding(
+    owner: FinalizedChainReadOwnerV1,
+  ): Promise<Readonly<FinalizedEvmReadBindingV1>> {
+    const chainId = (await this.getEvmChainId()).toString(10);
+    assertCanonicalChainId(chainId, 'finalized snapshot chainId');
+    return Object.freeze({
+      chainId,
+      snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
+        chainId, endpoints: this.rpcUrls, owner,
+      }),
+    });
   }
 
   /**
