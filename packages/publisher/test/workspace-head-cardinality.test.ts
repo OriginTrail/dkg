@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
+  KnowledgeAssetOperationPublicSnapshotNotFoundError,
   KnowledgeAssetWorkspaceHeadCorruptError,
   isKnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
@@ -340,6 +341,57 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     expect(snapshot.publicQuadsDigest).toBe(head.publicQuadsDigest);
     expect(snapshot.quads).toHaveLength(CONTENT.length);
     expect(snapshot.quads).toEqual(expect.arrayContaining(CONTENT));
+  });
+
+  it('fails closed when an operation carries both graph and store snapshot locators', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await h.store.insert([{
+      subject: `urn:dkg:share:${CONTEXT_GRAPH}:${LOCAL_OP}`,
+      predicate: `${DKG}publicSnapshotRef`,
+      object: JSON.stringify(`sha256:${'a'.repeat(64)}`),
+      graph: h.metaGraph,
+    }]);
+    await expect(resolveHead(h)).rejects.toThrow(/two public snapshot locations/);
+  });
+
+  it('fails closed when an operation snapshot graph does not match its operation id', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    const operationSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${LOCAL_OP}`;
+    await h.store.deleteByPattern({
+      graph: h.metaGraph,
+      subject: operationSubject,
+      predicate: `${DKG}publicSnapshotGraph`,
+    });
+    await h.store.insert([{
+      subject: operationSubject,
+      predicate: `${DKG}publicSnapshotGraph`,
+      object: 'urn:dkg:workspace:wrong-operation:snapshot',
+      graph: h.metaGraph,
+    }]);
+    await expect(resolveHead(h)).rejects.toThrow(/public snapshot graph mismatch/);
+  });
+
+  it('reports a missing snapshot only after exhausting every equivalent alias', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await seedOperation(h, REMOTE_OP);
+    await unionInsertSecondHeadId(h);
+    const head = await resolveHead(h);
+    if (!head) throw new Error('expected resolved workspace head');
+    for (const alias of head.operationAliases) {
+      await h.store.deleteByPattern({
+        graph: h.metaGraph,
+        subject: `urn:dkg:share:${CONTEXT_GRAPH}:${alias.shareOperationId}`,
+      });
+    }
+    await expect(resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+      store: h.store,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      head,
+    })).rejects.toThrow(KnowledgeAssetOperationPublicSnapshotNotFoundError);
   });
 
   it('exposes an explicit allow-list as a persisted access-envelope state', async () => {
