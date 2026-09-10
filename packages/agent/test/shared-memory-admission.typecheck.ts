@@ -1,3 +1,4 @@
+import type { GraphScopedSwmRecoveryDescriptor } from '../src/sync/graph-scoped-swm-recovery.js';
 import { projectStrictSwmRecovery } from '../src/sync/shared-memory-metadata-projections.js';
 import { admitSharedMemoryMetadata } from '../src/sync/shared-memory-metadata-admission.js';
 
@@ -9,6 +10,8 @@ admitSharedMemoryMetadata([], { kind: 'context', contextGraphId: 'cg' });
 admitSharedMemoryMetadata([], { kind: 'allGraphs', registeredSubGraphNames: new Set(['code']) });
 // @ts-expect-error Strict recovery requires an explicitly bound context scope.
 projectStrictSwmRecovery(admitSharedMemoryMetadata([], { kind: 'allGraphs' }));
-projectStrictSwmRecovery(admitSharedMemoryMetadata([], {
+const descriptors: readonly GraphScopedSwmRecoveryDescriptor[] = projectStrictSwmRecovery(admitSharedMemoryMetadata([], {
   kind: 'context', contextGraphId: 'cg', registeredSubGraphNames: new Set(),
 }));
+
+void descriptors;

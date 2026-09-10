@@ -58,6 +58,50 @@ describe('shared-memory metadata protocol admission', () => {
     return result.bindings.map((row) => q(row.s, row.p, row.o, graph));
   }
 
+  it('projects a complete recovery descriptor for a slash-shaped context graph', () => {
+    const contextGraphId = 'owner/project';
+    const share = swmFixtures(contextGraphId).share({
+      ual: UAL, version: 2, operationId: 'decoded', marker: 'complete',
+      privateTripleCount: 3, privateMerkleRoot: new Uint8Array(32).fill(0xab),
+    });
+    const model = admitSharedMemoryMetadata(share.meta, contextScope(contextGraphId));
+
+    expect(projectStrictSwmRecovery(model)).toEqual([{
+      metaGraph: contextGraphSharedMemoryMetaUri(contextGraphId),
+      headSubject: share.headSubject,
+      operationSubject: share.operationSubject,
+      kaUal: UAL,
+      assertionVersion: '2',
+      assertionGraph: share.assertionGraph,
+      shareOperationId: 'decoded',
+      publicQuadsDigest: share.digest,
+      publicQuadsCount: 2,
+      privateTripleCount: 3,
+      privateMerkleRoot: `0x${'ab'.repeat(32)}`,
+      publicSnapshotRef: share.digest,
+      publisherPeerId: 'peer-source',
+      metadataQuads: [
+        ...share.meta.filter(row => row.subject === share.headSubject),
+        ...share.meta.filter(row => row.subject === share.operationSubject),
+      ],
+    }]);
+  });
+
+  it.each([
+    ['publicQuadsDigest', '"invalid"', 'invalid publicQuadsDigest'],
+    ['publicQuadsCount', '"9007199254740992"', 'unsafe publicQuadsCount'],
+    ['privateTripleCount', '"-1"', 'invalid public/private counts'],
+    ['publicSnapshotRef', '"invalid"', 'invalid publicSnapshotRef'],
+    ['publishedAt', '"invalid"', 'invalid publishedAt'],
+    ['accessPolicy', '"invalid"', 'invalid accessPolicy'],
+  ])('enforces strict recovery error behavior for %s in the projection', (field, object, error) => {
+    const share = swmFixtures(CG).share({ ual: UAL, version: 1, operationId: 'invalid', marker: 'invalid' });
+    const rows = share.meta.map(row => row.subject === share.operationSubject && row.predicate === `${DKG}${field}`
+      ? { ...row, object } : row);
+    expect(() => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: rows })).toThrow(error);
+    expect(() => projectStrictSwmRecovery(admitSharedMemoryMetadata(rows, contextScope(CG)))).toThrow(error);
+  });
+
   it.each([
     'urn:dkg:share:customer:42',
     `urn:dkg:share:${CG}:user-entity`,
@@ -131,20 +175,37 @@ describe('shared-memory metadata protocol admission', () => {
     expect(result).toEqual({ validQuads: [], dropped: 1, entityCreators: [] });
   });
 
-  it.each([undefined, 'code'])('retains real legacy and graph-scoped producer output for subgraph %s after a store round trip', async (subGraphName) => {
+  it.each([
+    { contextGraphId: CG, subGraphName: undefined },
+    { contextGraphId: CG, subGraphName: 'code' },
+    { contextGraphId: 'owner/project', subGraphName: undefined },
+    { contextGraphId: 'owner/project', subGraphName: 'code' },
+  ])('retains producer output and decodes the $contextGraphId / $subGraphName lane after a store round trip', async ({ contextGraphId, subGraphName }) => {
     const store = new OxigraphStore(); stores.push(store);
     const graphManager = new GraphManager(store);
     const common = {
-      store, graphManager, contextGraphId: CG, subGraphName,
+      store, graphManager, contextGraphId, subGraphName,
       publisherPeerId: 'peer-source', timestamp: new Date(0),
       quads: [q(ROOT, 'urn:data:name', '"published"', '')],
     };
     await storeWorkspaceOperationPublicQuads({ ...common, shareOperationId: 'legacy-op', rootEntities: [ROOT] });
     await storeKnowledgeAssetOperationPublicQuads({ ...common, shareOperationId: 'modern-op', kaUal: UAL, assertionVersion: 1 });
     await storeKnowledgeAssetWorkspaceHead({ ...common, shareOperationId: 'modern-op', kaUal: UAL, assertionVersion: 1 });
-    const rows = await readGraph(store, contextGraphSharedMemoryMetaUri(CG, subGraphName));
+    const metaGraph = contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName);
+    const rows = await readGraph(store, metaGraph);
+    const model = admitSharedMemoryMetadata(rows, contextScope(contextGraphId, subGraphName ? [subGraphName] : []));
     expect(rows.length).toBeGreaterThan(20);
-    expect(projectMetadata(rows, contextScope(CG, subGraphName ? [subGraphName] : [])).metadata).toEqual(rows);
+    expect(projectSwmPersistence(model)).toEqual(rows);
+    expect(model.records.find(record => record.role === 'head')?.lane).toEqual({
+      kind: 'context', contextGraphId, ...(subGraphName ? { subGraphName } : {}),
+    });
+    const descriptors = projectStrictSwmRecovery(model);
+    expect(descriptors).toHaveLength(1);
+    expect(descriptors[0]).toMatchObject({
+      metaGraph, kaUal: UAL, assertionVersion: '1', shareOperationId: 'modern-op',
+      publicQuadsCount: 1, privateTripleCount: 0, publisherPeerId: 'peer-source',
+    });
+    expect(descriptors[0].subGraphName).toBe(subGraphName);
   });
 
   it('preserves producer metadata and drops unknown predicates, subjects, and misplaced protocol fields', () => {

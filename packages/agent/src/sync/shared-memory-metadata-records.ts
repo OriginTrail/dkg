@@ -19,19 +19,20 @@ export type SharedMemoryAdmissionScope = {
   readonly contextGraphId?: never;
   readonly registeredSubGraphNames?: never;
 } | SharedMemoryContextScope;
+/** A context-bound lane is resolved during admission, including slash-shaped IDs. */
+export type SwmMetadataLane =
+  | Readonly<{ kind: 'allGraphs' }>
+  | Readonly<{ kind: 'context'; contextGraphId: string; subGraphName?: string }>;
+
 export interface IndexedSwmRow { readonly sourceIndex: number; readonly quad: Quad }
 export interface SwmRecordSource {
   readonly subject: string;
   readonly metaGraph: string;
   readonly dataGraph: string;
+  readonly lane: SwmMetadataLane;
   readonly rows: readonly IndexedSwmRow[];
 }
-export interface AdmittedSwmRecord {
-  readonly subject: string;
-  readonly metaGraph: string;
-  readonly dataGraph: string;
-  readonly rows: readonly IndexedSwmRow[];
-}
+export type AdmittedSwmRecord = SwmRecordSource;
 interface OperationIdentity {
   readonly contextGraphId: string;
   readonly shareOperationId: string;
@@ -72,18 +73,23 @@ export function swmRecordKey(metaGraph: string, subject: string): string {
 }
 
 /** Graph scope is checked once, before any record decoder sees a source. */
-function swmDataGraphFromMetaGraph(metaGraph: string, scope: SharedMemoryAdmissionScope): string | undefined {
+function swmGraphIdentityFromMetaGraph(metaGraph: string, scope: SharedMemoryAdmissionScope):
+  Pick<SwmRecordSource, 'dataGraph' | 'lane'> | undefined {
   const prefix = 'did:dkg:context-graph:';
   const suffix = '/_shared_memory_meta';
   if (!isSafeIri(metaGraph) || !metaGraph.startsWith(prefix) || !metaGraph.endsWith(suffix)
     || metaGraph.length <= prefix.length + suffix.length) return undefined;
-  if (scope.kind === 'allGraphs') return metaGraph.slice(0, -'_meta'.length);
+  const dataGraph = metaGraph.slice(0, -'_meta'.length);
+  if (scope.kind === 'allGraphs') return { dataGraph, lane: { kind: 'allGraphs' } };
   const root = `did:dkg:context-graph:${scope.contextGraphId}`;
-  if (metaGraph === `${root}${suffix}`) return metaGraph.slice(0, -'_meta'.length);
+  if (metaGraph === `${root}${suffix}`) {
+    return { dataGraph, lane: { kind: 'context', contextGraphId: scope.contextGraphId } };
+  }
   if (!metaGraph.startsWith(`${root}/`)) return undefined;
   const name = metaGraph.slice(root.length + 1, -suffix.length);
   return validateSubGraphName(name).valid && scope.registeredSubGraphNames.has(name)
-    ? metaGraph.slice(0, -'_meta'.length) : undefined;
+    ? { dataGraph, lane: { kind: 'context', contextGraphId: scope.contextGraphId, subGraphName: name } }
+    : undefined;
 }
 
 /** A suffix alone is a valid user IRI, not evidence of a protocol head. */
@@ -105,18 +111,18 @@ export function indexSwmMetadata(quads: readonly Quad[], scope: SharedMemoryAdmi
   const sources: SwmRecordSource[] = [];
   const rejections: SwmRecordRejection[] = [];
   for (const group of groups.values()) {
-    const dataGraph = swmDataGraphFromMetaGraph(group.metaGraph, scope);
-    if (dataGraph !== undefined && isSafeIri(group.subject)) sources.push({ ...group, dataGraph });
+    const graphIdentity = swmGraphIdentityFromMetaGraph(group.metaGraph, scope);
+    if (graphIdentity !== undefined && isSafeIri(group.subject)) sources.push({ ...group, ...graphIdentity });
     else if (hasSwmHeadEnvelope(group)) rejections.push({
       role: 'rejected', recordRole: 'head', subject: group.subject, metaGraph: group.metaGraph,
-      reason: dataGraph === undefined ? 'outOfScope' : 'unsafeSubject',
+      reason: graphIdentity === undefined ? 'outOfScope' : 'unsafeSubject',
     });
   }
   return { sources, rejections };
 }
 
 function recordRows(source: SwmRecordSource, rows: readonly IndexedSwmRow[]): AdmittedSwmRecord {
-  return { subject: source.subject, metaGraph: source.metaGraph, dataGraph: source.dataGraph, rows };
+  return { subject: source.subject, metaGraph: source.metaGraph, dataGraph: source.dataGraph, lane: source.lane, rows };
 }
 export function swmRecordQuads(record: Pick<AdmittedSwmRecord, 'rows'>): readonly Quad[] {
   return record.rows.map(row => row.quad);
@@ -157,12 +163,19 @@ function legacyRoot(object: string): string | undefined {
   const root = object.startsWith('"') ? parseRdfLiteralTerm(object)?.value : object;
   return root && isSafeIri(root) ? root : undefined;
 }
-function operationIdentity(subject: string, metaGraph: string): OperationIdentity | undefined {
-  const graphId = metaGraph.slice('did:dkg:context-graph:'.length, -'/_shared_memory_meta'.length);
-  const candidates: Array<{ contextGraphId: string; subGraphName?: string }> = [{ contextGraphId: graphId }];
-  const slash = graphId.lastIndexOf('/');
-  if (slash > 0 && validateSubGraphName(graphId.slice(slash + 1)).valid) {
-    candidates.push({ contextGraphId: graphId.slice(0, slash), subGraphName: graphId.slice(slash + 1) });
+function operationIdentity(subject: string, source: Pick<SwmRecordSource, 'metaGraph' | 'lane'>): OperationIdentity | undefined {
+  const candidates: Array<{ contextGraphId: string; subGraphName?: string }> = [];
+  if (source.lane.kind === 'context') {
+    candidates.push(source.lane);
+  } else {
+    // Broad persistence has no requested context to disambiguate a slash-shaped
+    // root from a named lane; the operation subject supplies that identity.
+    const graphId = source.metaGraph.slice('did:dkg:context-graph:'.length, -'/_shared_memory_meta'.length);
+    candidates.push({ contextGraphId: graphId });
+    const slash = graphId.lastIndexOf('/');
+    if (slash > 0 && validateSubGraphName(graphId.slice(slash + 1)).valid) {
+      candidates.push({ contextGraphId: graphId.slice(0, slash), subGraphName: graphId.slice(slash + 1) });
+    }
   }
   for (const candidate of candidates) {
     const prefix = `urn:dkg:share:${candidate.contextGraphId}:`;
@@ -188,13 +201,13 @@ function operationCreator(rows: readonly Quad[]): string | undefined {
   return peer ?? legacy;
 }
 
-export function decodeSwmOperation(source: SwmRecordSource, scope: SharedMemoryAdmissionScope):
+export function decodeSwmOperation(source: SwmRecordSource):
   AdmittedLegacySwmOperation | AdmittedGraphSwmOperation | SwmRecordRejection | undefined {
   if (!source.subject.startsWith('urn:dkg:share:')) return undefined;
   const rows = source.rows.map(row => row.quad);
   if (!rows.some(row => row.predicate === P.type && row.object === SWM_WORKSPACE_OPERATION)) return undefined;
-  const identity = operationIdentity(source.subject, source.metaGraph);
-  if (!identity || (scope.kind === 'context' && identity.contextGraphId !== scope.contextGraphId)) return rejection(source, 'operation', 'nonCanonicalSubject');
+  const identity = operationIdentity(source.subject, source);
+  if (!identity) return rejection(source, 'operation', 'nonCanonicalSubject');
   const modern = rows.some(row => row.predicate === P.contentScopeVersion);
   if (!matchesIdentity(rows, identity, modern)) return rejection(source, 'operation', 'identityMismatch');
   if (modern) {
@@ -260,4 +273,16 @@ export function decodeSwmOwnership(source: SwmRecordSource, isLegacyRoot: boolea
   if (!isLegacyRoot) return undefined;
   const rows = selectRows(source, 'ownershipV1');
   return rows.length ? { ...recordRows(source, rows), role: 'ownership' } : undefined;
+}
+
+/** Preserve the established recovery and cross-store identity literal semantics. */
+export function swmRecoveryLiteralValue(value: string): string {
+  const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[-A-Za-z0-9]+|\^\^<[^>]+>)?$/);
+  if (!match) return value;
+  return match[1]!
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, '\t')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\');
 }

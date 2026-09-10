@@ -28,7 +28,7 @@ export function admitSharedMemoryMetadata<Scope extends SharedMemoryAdmissionSco
   const roots = new Set<string>();
   const protocolSubjects = new Set<string>();
   for (const source of sources) {
-    const operation = decodeSwmOperation(source, scope);
+    const operation = decodeSwmOperation(source);
     const decoded = operation && operation.role !== 'rejected' ? operation : decodeSwmHead(source) ?? operation;
     if (!decoded) continue;
     const key = swmRecordKey(source.metaGraph, source.subject);
