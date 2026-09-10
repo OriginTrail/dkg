@@ -7,6 +7,7 @@ import {
   resolveContextGraphAuthorityHistory,
 } from '../src/context-graph-authority-history.js';
 import {
+  createContextGraphAuthorityIndexCheckpoint,
   normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexStore,
 } from '../src/context-graph-authority-index-checkpoint.js';
@@ -49,6 +50,23 @@ function creation(
 ): ContextGraphAuthorityIndexEvent {
   return event('ContextGraphCreated', contextGraphId, blockNumber, index, { nameHash });
 }
+
+const validCursor = Object.freeze({
+  deploymentBlockNumber: 10,
+  throughBlockNumber: 20,
+  throughBlockHash: blockHash(20),
+  stateCount: 1,
+});
+
+const validState = Object.freeze({
+  contextGraphId: '9',
+  nameHash: NAME_9,
+  ownershipEra: 0,
+  policyVersion: 0,
+  rosterVersion: 0,
+  sourceBlockNumber: 10,
+  sourceBlockHash: blockHash(10),
+});
 
 describe('contract-wide Context Graph authority index reducer', () => {
   it('groups unsorted logs by graph and preserves the authority generation semantics', () => {
@@ -327,6 +345,34 @@ describe('contract-wide Context Graph authority index reducer', () => {
     })).toBeUndefined();
   });
 
+  it.each([
+    ['source above cursor', (state: typeof validState) => [{
+      ...state, sourceBlockNumber: 21,
+    }]],
+    ['source below deployment', (state: typeof validState) => [{
+      ...state, sourceBlockNumber: 9,
+    }]],
+    ['policy before ownership', (state: typeof validState) => [{
+      ...state, ownershipEra: 1, policyVersion: 0, rosterVersion: 1,
+    }]],
+    ['roster before ownership', (state: typeof validState) => [{
+      ...state, ownershipEra: 1, policyVersion: 1, rosterVersion: 0,
+    }]],
+    ['leading-zero id', (state: typeof validState) => [{
+      ...state, contextGraphId: '09',
+    }]],
+    ['out-of-range id', (state: typeof validState) => [{
+      ...state, contextGraphId: (1n << 256n).toString(10),
+    }]],
+    ['duplicate id', (state: typeof validState) => [state, { ...state }]],
+  ] as const)('rejects self-consistent malformed checkpoint: %s', (_label, mutate) => {
+    const malformed = createContextGraphAuthorityIndexCheckpoint(
+      validCursor,
+      mutate(validState),
+    );
+    expect(normalizeContextGraphAuthorityIndexCheckpoint(malformed)).toBeUndefined();
+  });
+
   it('decodes opaque durable reads only at the chain-owned boundary', async () => {
     const store: ContextGraphAuthorityIndexStore = {
       load: async () => ({ token: 1, value: { cursor: 'not-a-cursor', states: [] } }),
@@ -352,4 +398,3 @@ describe('contract-wide Context Graph authority index reducer', () => {
     }, 'Context Graph 9')).toThrow('safe integer range');
   });
 });
-

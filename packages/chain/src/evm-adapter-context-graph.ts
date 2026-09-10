@@ -35,6 +35,7 @@ import {
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
+import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -1124,7 +1125,10 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         signal: options.signal,
         ...(this.contextGraphAuthorityIndex === undefined ? {} : {
           isRetryable: (error: unknown) => (
-            !options.signal?.aborted && isRetryableRpcError(error)
+            !options.signal?.aborted && (
+              isContextGraphAuthorityIndexRetryableError(error)
+              || isRetryableRpcError(error)
+            )
           ),
         }),
         // A cold authority resolution performs a bounded historical log scan;

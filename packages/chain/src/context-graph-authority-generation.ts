@@ -10,6 +10,69 @@ export interface ContextGraphAuthorityGenerationState {
   readonly sourceBlockHash: string;
 }
 
+const AUTHORITY_HASH_PATTERN = /^0x[0-9a-f]{64}$/i;
+
+/** Canonical hash scalar shared by every durable authority envelope. */
+export function normalizeContextGraphAuthorityHash(value: unknown): string | undefined {
+  return typeof value === 'string' && AUTHORITY_HASH_PATTERN.test(value)
+    ? value.toLowerCase()
+    : undefined;
+}
+
+/** Canonical counter/block scalar shared by every durable authority envelope. */
+export function normalizeContextGraphAuthorityNonNegativeSafeInteger(
+  value: unknown,
+): number | undefined {
+  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
+}
+
+/** Decode only the shared generation payload; envelopes add their own bounds. */
+export function normalizeContextGraphAuthorityGenerationState(
+  value: unknown,
+): ContextGraphAuthorityGenerationState | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<Record<keyof ContextGraphAuthorityGenerationState, unknown>>;
+  const nameHash = normalizeContextGraphAuthorityHash(candidate.nameHash);
+  const ownershipEra = normalizeContextGraphAuthorityNonNegativeSafeInteger(candidate.ownershipEra);
+  const policyVersion = normalizeContextGraphAuthorityNonNegativeSafeInteger(candidate.policyVersion);
+  const rosterVersion = normalizeContextGraphAuthorityNonNegativeSafeInteger(candidate.rosterVersion);
+  const sourceBlockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(
+    candidate.sourceBlockNumber,
+  );
+  const sourceBlockHash = normalizeContextGraphAuthorityHash(candidate.sourceBlockHash);
+  if (
+    nameHash === undefined
+    || ownershipEra === undefined
+    || policyVersion === undefined
+    || rosterVersion === undefined
+    || sourceBlockNumber === undefined
+    || sourceBlockHash === undefined
+  ) return undefined;
+  return Object.freeze({
+    nameHash,
+    ownershipEra,
+    policyVersion,
+    rosterVersion,
+    sourceBlockNumber,
+    sourceBlockHash,
+  });
+}
+
+/** Stable field order shared by both authority checkpoint integrity encodings. */
+export function contextGraphAuthorityGenerationIntegrityValues(
+  state: ContextGraphAuthorityGenerationState,
+): readonly unknown[] {
+  const fields = {
+    nameHash: state.nameHash,
+    ownershipEra: state.ownershipEra,
+    policyVersion: state.policyVersion,
+    rosterVersion: state.rosterVersion,
+    sourceBlockNumber: state.sourceBlockNumber,
+    sourceBlockHash: state.sourceBlockHash,
+  } satisfies { [K in keyof ContextGraphAuthorityGenerationState]: unknown };
+  return Object.freeze(Object.values(fields));
+}
+
 interface ContextGraphAuthorityGenerationEventBase {
   readonly blockNumber: number;
   readonly blockHash: string;

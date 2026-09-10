@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-import { applyContextGraphAuthorityGenerationEvent } from './context-graph-authority-generation.js';
+import {
+  applyContextGraphAuthorityGenerationEvent,
+  normalizeContextGraphAuthorityHash,
+  normalizeContextGraphAuthorityNonNegativeSafeInteger,
+} from './context-graph-authority-generation.js';
 import {
   createContextGraphAuthorityIndexCheckpoint,
   freezeContextGraphAuthorityIndexState,
-  normalizeAuthorityIndexHash,
-  normalizeAuthorityIndexNonNegativeSafeInteger,
   normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexState,
@@ -82,9 +84,9 @@ function normalizePageEvent(
   ) {
     throw new Error('Context Graph authority index event has an invalid context graph id');
   }
-  const blockNumber = normalizeAuthorityIndexNonNegativeSafeInteger(event.blockNumber);
-  const blockHash = normalizeAuthorityIndexHash(event.blockHash);
-  const index = normalizeAuthorityIndexNonNegativeSafeInteger(event.index);
+  const blockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(event.blockNumber);
+  const blockHash = normalizeContextGraphAuthorityHash(event.blockHash);
+  const index = normalizeContextGraphAuthorityNonNegativeSafeInteger(event.index);
   if (
     blockNumber === undefined
     || blockNumber < fromBlockNumber
@@ -105,7 +107,7 @@ function normalizePageEvent(
   };
   switch (event.name) {
     case 'ContextGraphCreated': {
-      const nameHash = normalizeAuthorityIndexHash(event.nameHash);
+      const nameHash = normalizeContextGraphAuthorityHash(event.nameHash);
       if (nameHash === undefined) {
         throw new Error('Context Graph authority index creation event has an invalid name hash');
       }
@@ -133,13 +135,13 @@ function normalizePageEvent(
 export function reduceContextGraphAuthorityIndexPage(
   input: ReduceContextGraphAuthorityIndexPageInput,
 ): ContextGraphAuthorityIndexPageReduction {
-  const deploymentBlockNumber = normalizeAuthorityIndexNonNegativeSafeInteger(
+  const deploymentBlockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(
     input.deploymentBlockNumber,
   );
-  const throughBlockNumber = normalizeAuthorityIndexNonNegativeSafeInteger(
+  const throughBlockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(
     input.throughBlockNumber,
   );
-  const throughBlockHash = normalizeAuthorityIndexHash(input.throughBlockHash);
+  const throughBlockHash = normalizeContextGraphAuthorityHash(input.throughBlockHash);
   if (
     deploymentBlockNumber === undefined
     || throughBlockNumber === undefined

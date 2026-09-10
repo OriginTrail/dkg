@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-import type { ContextGraphAuthorityGenerationState } from './context-graph-authority-generation.js';
+import {
+  contextGraphAuthorityGenerationIntegrityValues,
+  normalizeContextGraphAuthorityGenerationState,
+  normalizeContextGraphAuthorityHash,
+  normalizeContextGraphAuthorityNonNegativeSafeInteger,
+  type ContextGraphAuthorityGenerationState,
+} from './context-graph-authority-generation.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_CHECKPOINT_VERSION = 1 as const;
 
@@ -48,20 +54,6 @@ export interface ContextGraphAuthorityIndexStore {
   invalidate(scope: string, expectedToken: number): Promise<number | undefined>;
 }
 
-const HASH_PATTERN = /^0x[0-9a-f]{64}$/i;
-
-export function normalizeAuthorityIndexHash(value: unknown): string | undefined {
-  return typeof value === 'string' && HASH_PATTERN.test(value)
-    ? value.toLowerCase()
-    : undefined;
-}
-
-export function normalizeAuthorityIndexNonNegativeSafeInteger(
-  value: unknown,
-): number | undefined {
-  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
-}
-
 function normalizePositiveDecimal(value: unknown): string | undefined {
   if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return undefined;
   const parsed = BigInt(value);
@@ -93,22 +85,6 @@ type ContextGraphAuthorityIndexIntegrityInput = Pick<
   'version' | 'cursor' | 'states'
 >;
 
-function generationIntegrityValues(
-  state: ContextGraphAuthorityGenerationState,
-): readonly unknown[] {
-  // The mapped object makes adding a canonical generation field a compile-time
-  // failure here until the durable integrity encoding explicitly includes it.
-  const fields = {
-    nameHash: state.nameHash,
-    ownershipEra: state.ownershipEra,
-    policyVersion: state.policyVersion,
-    rosterVersion: state.rosterVersion,
-    sourceBlockNumber: state.sourceBlockNumber,
-    sourceBlockHash: state.sourceBlockHash,
-  } satisfies { [K in keyof ContextGraphAuthorityGenerationState]: unknown };
-  return Object.values(fields);
-}
-
 function contextGraphAuthorityIndexIntegrity(
   checkpoint: ContextGraphAuthorityIndexIntegrityInput,
 ): string {
@@ -121,7 +97,7 @@ function contextGraphAuthorityIndexIntegrity(
     checkpoint.cursor.stateCount,
     ...checkpoint.states.flatMap((state) => [
       state.contextGraphId,
-      ...generationIntegrityValues(state),
+      ...contextGraphAuthorityGenerationIntegrityValues(state),
     ]),
   ]);
   return ethers.keccak256(ethers.toUtf8Bytes(canonical)).toLowerCase();
@@ -134,35 +110,18 @@ function normalizeIndexState(
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const candidate = value as Partial<Record<keyof ContextGraphAuthorityIndexState, unknown>>;
   const contextGraphId = normalizePositiveDecimal(candidate.contextGraphId);
-  const nameHash = normalizeAuthorityIndexHash(candidate.nameHash);
-  const ownershipEra = normalizeAuthorityIndexNonNegativeSafeInteger(candidate.ownershipEra);
-  const policyVersion = normalizeAuthorityIndexNonNegativeSafeInteger(candidate.policyVersion);
-  const rosterVersion = normalizeAuthorityIndexNonNegativeSafeInteger(candidate.rosterVersion);
-  const sourceBlockNumber = normalizeAuthorityIndexNonNegativeSafeInteger(
-    candidate.sourceBlockNumber,
-  );
-  const sourceBlockHash = normalizeAuthorityIndexHash(candidate.sourceBlockHash);
+  const generation = normalizeContextGraphAuthorityGenerationState(candidate);
   if (
     contextGraphId === undefined
-    || nameHash === undefined
-    || ownershipEra === undefined
-    || policyVersion === undefined
-    || rosterVersion === undefined
-    || sourceBlockNumber === undefined
-    || sourceBlockHash === undefined
-    || sourceBlockNumber < cursor.deploymentBlockNumber
-    || sourceBlockNumber > cursor.throughBlockNumber
-    || policyVersion < ownershipEra
-    || rosterVersion < ownershipEra
+    || generation === undefined
+    || generation.sourceBlockNumber < cursor.deploymentBlockNumber
+    || generation.sourceBlockNumber > cursor.throughBlockNumber
+    || generation.policyVersion < generation.ownershipEra
+    || generation.rosterVersion < generation.ownershipEra
   ) return undefined;
   return freezeContextGraphAuthorityIndexState({
     contextGraphId,
-    nameHash,
-    ownershipEra,
-    policyVersion,
-    rosterVersion,
-    sourceBlockNumber,
-    sourceBlockHash,
+    ...generation,
   });
 }
 
@@ -187,15 +146,15 @@ export function normalizeContextGraphAuthorityIndexCheckpoint(
   const rawCursor = candidate.cursor as Partial<
     Record<keyof ContextGraphAuthorityIndexCursor, unknown>
   >;
-  const deploymentBlockNumber = normalizeAuthorityIndexNonNegativeSafeInteger(
+  const deploymentBlockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(
     rawCursor.deploymentBlockNumber,
   );
-  const throughBlockNumber = normalizeAuthorityIndexNonNegativeSafeInteger(
+  const throughBlockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(
     rawCursor.throughBlockNumber,
   );
-  const throughBlockHash = normalizeAuthorityIndexHash(rawCursor.throughBlockHash);
-  const stateCount = normalizeAuthorityIndexNonNegativeSafeInteger(rawCursor.stateCount);
-  const integrity = normalizeAuthorityIndexHash(candidate.integrity);
+  const throughBlockHash = normalizeContextGraphAuthorityHash(rawCursor.throughBlockHash);
+  const stateCount = normalizeContextGraphAuthorityNonNegativeSafeInteger(rawCursor.stateCount);
+  const integrity = normalizeContextGraphAuthorityHash(candidate.integrity);
   if (
     deploymentBlockNumber === undefined
     || throughBlockNumber === undefined

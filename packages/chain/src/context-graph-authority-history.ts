@@ -4,6 +4,10 @@ import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import {
   applyContextGraphAuthorityGenerationEvent,
+  contextGraphAuthorityGenerationIntegrityValues,
+  normalizeContextGraphAuthorityGenerationState,
+  normalizeContextGraphAuthorityHash,
+  normalizeContextGraphAuthorityNonNegativeSafeInteger,
   type ContextGraphAuthorityGenerationEvent,
   type ContextGraphAuthorityGenerationState,
 } from './context-graph-authority-generation.js';
@@ -414,50 +418,27 @@ function formatError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function normalizeHash(value: unknown): string | undefined {
-  return typeof value === 'string' && /^0x[0-9a-f]{64}$/i.test(value)
-    ? value.toLowerCase()
-    : undefined;
-}
-
-function normalizeNonNegativeSafeInteger(value: unknown): number | undefined {
-  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
-}
-
 /** Reject malformed/corrupt durable input before it can influence scan bounds. */
 export function normalizeContextGraphAuthorityHistoryState(
   value: unknown,
 ): ContextGraphAuthorityHistoryState | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const candidate = value as Partial<Record<keyof ContextGraphAuthorityHistoryState, unknown>>;
-  const throughBlockNumber = normalizeNonNegativeSafeInteger(candidate.throughBlockNumber);
-  const throughBlockHash = normalizeHash(candidate.throughBlockHash);
-  const nameHash = normalizeHash(candidate.nameHash);
-  const ownershipEra = normalizeNonNegativeSafeInteger(candidate.ownershipEra);
-  const policyVersion = normalizeNonNegativeSafeInteger(candidate.policyVersion);
-  const rosterVersion = normalizeNonNegativeSafeInteger(candidate.rosterVersion);
-  const sourceBlockNumber = normalizeNonNegativeSafeInteger(candidate.sourceBlockNumber);
-  const sourceBlockHash = normalizeHash(candidate.sourceBlockHash);
+  const throughBlockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(
+    candidate.throughBlockNumber,
+  );
+  const throughBlockHash = normalizeContextGraphAuthorityHash(candidate.throughBlockHash);
+  const generation = normalizeContextGraphAuthorityGenerationState(candidate);
   if (
     throughBlockNumber === undefined
     || throughBlockHash === undefined
-    || nameHash === undefined
-    || ownershipEra === undefined
-    || policyVersion === undefined
-    || rosterVersion === undefined
-    || sourceBlockNumber === undefined
-    || sourceBlockHash === undefined
-    || sourceBlockNumber > throughBlockNumber
+    || generation === undefined
+    || generation.sourceBlockNumber > throughBlockNumber
   ) return undefined;
   return Object.freeze({
     throughBlockNumber,
     throughBlockHash,
-    nameHash,
-    ownershipEra,
-    policyVersion,
-    rosterVersion,
-    sourceBlockNumber,
-    sourceBlockHash,
+    ...generation,
   });
 }
 
@@ -468,12 +449,7 @@ function contextGraphAuthorityHistoryStateIntegrity(
     'dkg-context-graph-authority-history-checkpoint-v1',
     state.throughBlockNumber,
     state.throughBlockHash,
-    state.nameHash,
-    state.ownershipEra,
-    state.policyVersion,
-    state.rosterVersion,
-    state.sourceBlockNumber,
-    state.sourceBlockHash,
+    ...contextGraphAuthorityGenerationIntegrityValues(state),
   ]);
   return ethers.keccak256(ethers.toUtf8Bytes(canonical)).toLowerCase();
 }
@@ -501,7 +477,7 @@ export function decodeContextGraphAuthorityHistoryCheckpoint(
   const candidate = value as Partial<Record<keyof ContextGraphAuthorityHistoryCheckpointV1, unknown>>;
   if (candidate.version !== CONTEXT_GRAPH_AUTHORITY_HISTORY_CHECKPOINT_VERSION) return undefined;
   const state = normalizeContextGraphAuthorityHistoryState(candidate.state);
-  const integrity = normalizeHash(candidate.integrity);
+  const integrity = normalizeContextGraphAuthorityHash(candidate.integrity);
   if (
     state === undefined
     || integrity === undefined

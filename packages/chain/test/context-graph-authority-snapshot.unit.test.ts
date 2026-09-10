@@ -486,6 +486,38 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     expect(attempts).toEqual(['lagging', 'healthy']);
   });
 
+  it('fails over when a provider cannot supply an intermediate page anchor', async () => {
+    const { adapter, provider } = makeEvmAuthorityAdapter({ sharedIndex: true });
+    const attempts: string[] = [];
+    const nonArchive = {
+      ...provider,
+      getBlock: async (tag: string | number) => {
+        if (tag === 16) return null;
+        return (provider.getBlock as (block: string | number) => Promise<unknown>)(tag);
+      },
+    };
+    (adapter as any).readTipProvider = async (
+      _label: string,
+      read: (selected: typeof nonArchive) => Promise<unknown>,
+      options: Readonly<{ isRetryable?: (error: unknown) => boolean }>,
+    ) => {
+      try {
+        attempts.push('non-archive');
+        return await read(nonArchive);
+      } catch (error) {
+        expect(options.isRetryable?.(error)).toBe(true);
+        attempts.push('healthy');
+        return read(provider as typeof nonArchive);
+      }
+    };
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
+      contextGraphId: '9',
+      policyVersion: '3',
+    });
+    expect(attempts).toEqual(['non-archive', 'healthy']);
+  });
+
   it('reads one stable finalized EVM generation and derives monotonic epochs', async () => {
     const { adapter, evidence, advanceAuthorityHead } = makeEvmAuthorityAdapter();
     const snapshot = await adapter.getContextGraphAuthoritySnapshot(9n);

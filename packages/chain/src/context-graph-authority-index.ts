@@ -2,21 +2,33 @@
 
 import { ethers } from 'ethers';
 import {
-  normalizeAuthorityIndexHash as normalizeHash,
-  normalizeAuthorityIndexNonNegativeSafeInteger as normalizeNonNegativeSafeInteger,
   normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexState,
   type ContextGraphAuthorityIndexStore,
 } from './context-graph-authority-index-checkpoint.js';
 import {
+  normalizeContextGraphAuthorityHash as normalizeHash,
+  normalizeContextGraphAuthorityNonNegativeSafeInteger as normalizeNonNegativeSafeInteger,
+} from './context-graph-authority-generation.js';
+import {
   reduceContextGraphAuthorityIndexPage,
   type ContextGraphAuthorityIndexEvent,
 } from './context-graph-authority-index-reducer.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 
+export class ContextGraphAuthorityIndexRetryableError extends Error {
+  override readonly name = 'ContextGraphAuthorityIndexRetryableError';
+}
+
+export function isContextGraphAuthorityIndexRetryableError(
+  error: unknown,
+): error is ContextGraphAuthorityIndexRetryableError {
+  return error instanceof ContextGraphAuthorityIndexRetryableError;
+}
+
 function retryableAuthorityIndexReadError(message: string): Error {
-  return Object.assign(new Error(message), { code: 'NETWORK_ERROR' });
+  return new ContextGraphAuthorityIndexRetryableError(message);
 }
 
 export interface ContextGraphAuthorityIndexScanInput {
@@ -166,7 +178,7 @@ export class ContextGraphAuthorityIndex {
         ? finalizedHash
         : normalizeHash(await input.readBlockHash(throughBlockNumber, lifecycleSignal));
       if (throughBlockHash === undefined) {
-        throw new Error(
+        throw retryableAuthorityIndexReadError(
           `Context Graph authority index block ${throughBlockNumber} is unavailable`,
         );
       }
