@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { copyFile, rename, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeConfigFile } from '../src/config-file.js';
+import { writeConfigFile, writeConfigSettingsTransaction } from '../src/config-file.js';
 
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -37,7 +37,7 @@ describe('configuration file publication', () => {
       expect(readFileSync(path, 'utf8')).toBe('new configuration\n');
       return undefined;
     });
-    await writeConfigFile(path, 'new configuration\n', activate);
+    await writeConfigSettingsTransaction(path, 'new configuration\n', activate);
     expect(activate).toHaveBeenCalledOnce();
     expect(await fs.readdir(directory)).toEqual(['config.json']);
   });
@@ -48,7 +48,7 @@ describe('configuration file publication', () => {
       throw new Error('disk full');
     });
     const activate = vi.fn(() => undefined);
-    await expect(writeConfigFile(path, 'new configuration\n', activate)).rejects.toThrow('disk full');
+    await expect(writeConfigSettingsTransaction(path, 'new configuration\n', activate)).rejects.toThrow('disk full');
     expect(activate).not.toHaveBeenCalled();
     expect(await fs.readFile(path, 'utf8')).toBe('old configuration\n');
     expect(await fs.readdir(directory)).toEqual(['config.json']);
@@ -60,7 +60,7 @@ describe('configuration file publication', () => {
       throw new Error('backup full');
     });
     const activate = vi.fn(() => undefined);
-    await expect(writeConfigFile(path, 'new configuration\n', activate)).rejects.toThrow('backup full');
+    await expect(writeConfigSettingsTransaction(path, 'new configuration\n', activate)).rejects.toThrow('backup full');
     expect(activate).not.toHaveBeenCalled();
     expect(await fs.readFile(path, 'utf8')).toBe('old configuration\n');
     expect(await fs.readdir(directory)).toEqual(['config.json']);
@@ -69,14 +69,14 @@ describe('configuration file publication', () => {
   it('does not activate if atomic publication fails', async () => {
     vi.mocked(rename).mockRejectedValueOnce(new Error('rename denied'));
     const activate = vi.fn(() => undefined);
-    await expect(writeConfigFile(path, 'new configuration\n', activate)).rejects.toThrow('rename denied');
+    await expect(writeConfigSettingsTransaction(path, 'new configuration\n', activate)).rejects.toThrow('rename denied');
     expect(activate).not.toHaveBeenCalled();
     expect(await fs.readFile(path, 'utf8')).toBe('old configuration\n');
     expect(await fs.readdir(directory)).toEqual(['config.json']);
   });
 
   it('restores the exact previous file if synchronous activation fails', async () => {
-    await expect(writeConfigFile(path, 'new configuration\n', () => {
+    await expect(writeConfigSettingsTransaction(path, 'new configuration\n', () => {
       expect(readFileSync(path, 'utf8')).toBe('new configuration\n');
       throw new Error('activation failed');
     })).rejects.toThrow('activation failed');
@@ -86,7 +86,7 @@ describe('configuration file publication', () => {
 
   it('restores an absent JSON file after activation fails', async () => {
     await fs.unlink(path);
-    await expect(writeConfigFile(path, 'new configuration\n', () => {
+    await expect(writeConfigSettingsTransaction(path, 'new configuration\n', () => {
       throw new Error('activation failed');
     })).rejects.toThrow('activation failed');
     expect(await fs.readdir(directory)).toEqual([]);
@@ -94,7 +94,7 @@ describe('configuration file publication', () => {
 
   it('retains the recovery copy and reports both errors if rollback fails', async () => {
     vi.mocked(rename).mockImplementationOnce(fs.rename).mockRejectedValueOnce(new Error('rollback denied'));
-    await expect(writeConfigFile(path, 'new configuration\n', () => {
+    await expect(writeConfigSettingsTransaction(path, 'new configuration\n', () => {
       throw new Error('activation failed');
     })).rejects.toMatchObject({
       message: expect.stringContaining('configuration rollback failed'),
@@ -113,11 +113,11 @@ describe('configuration file publication', () => {
       return fs.writeFile(...args);
     });
     const activationOrder: string[] = [];
-    const first = writeConfigFile(path, 'first', () => {
+    const first = writeConfigSettingsTransaction(path, 'first', () => {
       activationOrder.push(readFileSync(path, 'utf8'));
       throw new Error('first failed');
     });
-    const second = writeConfigFile(path, 'second', () => {
+    const second = writeConfigSettingsTransaction(path, 'second', () => {
       activationOrder.push(readFileSync(path, 'utf8'));
     });
     const completions = Promise.allSettled([first, second]);
@@ -126,6 +126,13 @@ describe('configuration file publication', () => {
     expect(await completions).toMatchObject([{ status: 'rejected' }, { status: 'fulfilled' }]);
     expect(activationOrder).toEqual(['first', 'second']);
     expect(await fs.readFile(path, 'utf8')).toBe('second');
+    expect(await fs.readdir(directory)).toEqual(['config.json']);
+  });
+
+  it('keeps ordinary config writes focused on atomic persistence', async () => {
+    await writeConfigFile(path, 'persisted only\n');
+    expect(await fs.readFile(path, 'utf8')).toBe('persisted only\n');
+    expect(copyFile).not.toHaveBeenCalled();
     expect(await fs.readdir(directory)).toEqual(['config.json']);
   });
 });

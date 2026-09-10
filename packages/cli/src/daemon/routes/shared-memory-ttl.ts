@@ -1,4 +1,4 @@
-import { resolveSharedMemoryTtlMs, saveConfig } from '../../config.js';
+import { resolveSharedMemoryTtlMs, saveConfigSettingsTransaction } from '../../config.js';
 import { validateSharedMemoryTtlMs } from '@origintrail-official/dkg-agent';
 import { isPayloadTooLargeError, jsonResponse, readBody, SMALL_BODY_BYTES } from '../http-utils.js';
 import type { RequestContext } from './context.js';
@@ -27,7 +27,7 @@ export async function handleSharedMemoryTtlSettings({ req, res, config, agent }:
       throw error;
     }
     const candidate = { ...config, sharedMemoryTtlMs: ttlMs, workspaceTtlMs: ttlMs };
-    await saveConfig(candidate, () => {
+    await saveConfigSettingsTransaction(candidate, () => {
       agent.setSharedMemoryTtlMs(ttlMs);
       config.sharedMemoryTtlMs = ttlMs;
       config.workspaceTtlMs = ttlMs;

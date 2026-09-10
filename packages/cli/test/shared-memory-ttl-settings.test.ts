@@ -126,7 +126,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     const persistedBefore = await readFile(configPath(), 'utf8');
     const configBefore = structuredClone(config);
     const setter = vi.spyOn(agent, 'setSharedMemoryTtlMs');
-    vi.spyOn(configuration, 'saveConfig').mockImplementationOnce(async () => {
+    vi.spyOn(configuration, 'saveConfigSettingsTransaction').mockImplementationOnce(async () => {
       // Force physical cleanup while persistence is unresolved. The previous
       // ordering applies the shorter TTL here and irreversibly deletes the row.
       await agent.cleanupExpiredSharedMemory();

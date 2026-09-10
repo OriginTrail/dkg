@@ -1,37 +1,56 @@
 import { constants } from 'node:fs';
-import { copyFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { writeFileAtomic } from './fs-utils.js';
 
 const saves = new Map<string, Promise<void>>();
 
-/** Publish complete configuration before synchronous runtime activation. */
-export function writeConfigFile(
+function serializeConfigFileOperation(
   path: string,
-  contents: string,
-  activate?: () => undefined,
+  run: () => Promise<void>,
 ): Promise<void> {
   const previous = saves.get(path) ?? Promise.resolve();
-  const operation = previous.catch(() => undefined).then(async () => {
-    const staged = `${path}.${randomUUID()}.tmp`;
+  const operation = previous.catch(() => undefined).then(run);
+  saves.set(path, operation);
+  return operation.finally(() => {
+    if (saves.get(path) === operation) saves.delete(path);
+  });
+}
+
+/** Persist configuration only; runtime activation is deliberately separate. */
+export function writeConfigFile(path: string, contents: string): Promise<void> {
+  return serializeConfigFileOperation(path, async () => {
+    await mkdir(dirname(path), { recursive: true });
+    await writeFileAtomic(path, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
+  });
+}
+
+/**
+ * Publish a settings candidate, activate it synchronously, and restore the
+ * previous file if activation rejects the candidate.
+ */
+export function writeConfigSettingsTransaction(
+  path: string,
+  contents: string,
+  activate: () => undefined,
+): Promise<void> {
+  return serializeConfigFileOperation(path, async () => {
     let backup: string | undefined;
     let preserveBackup = false;
     try {
       await mkdir(dirname(path), { recursive: true });
-      await writeFile(staged, contents, { flag: 'wx', mode: 0o600 });
-      if (activate) {
-        const candidate = `${path}.${randomUUID()}.rollback`;
-        try {
-          await copyFile(path, candidate, constants.COPYFILE_EXCL);
-          backup = candidate;
-        } catch (error) {
-          await unlink(candidate).catch(() => undefined);
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        }
-      }
-      await rename(staged, path);
+      const candidate = `${path}.${randomUUID()}.rollback`;
       try {
-        activate?.();
+        await copyFile(path, candidate, constants.COPYFILE_EXCL);
+        backup = candidate;
+      } catch (error) {
+        await unlink(candidate).catch(() => undefined);
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      await writeFileAtomic(path, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
+      try {
+        activate();
       } catch (error) {
         try {
           if (backup) await rename(backup, path);
@@ -44,12 +63,7 @@ export function writeConfigFile(
         throw error;
       }
     } finally {
-      await unlink(staged).catch(() => undefined);
       if (backup && !preserveBackup) await unlink(backup).catch(() => undefined);
     }
-  });
-  saves.set(path, operation);
-  return operation.finally(() => {
-    if (saves.get(path) === operation) saves.delete(path);
   });
 }
