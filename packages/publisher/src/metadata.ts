@@ -1,5 +1,5 @@
 import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-subjects.js';
-import { encodeEntityShareOperationMetadata } from './entity-share-metadata.js';
+import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {
@@ -1084,15 +1084,17 @@ export function generateShareMetadata(
   swmMetaGraph: string,
 ): Quad[] {
   const subject = formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId);
-  return encodeEntityShareOperationMetadata(subject, swmMetaGraph, {
-    contextGraphId: lit(meta.contextGraphId),
-    shareOperationId: lit(meta.shareOperationId),
-    publisherPeerId: lit(meta.publisherPeerId),
-    wasAttributedTo: meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId),
-    publishedAt: dateLit(meta.timestamp),
-    rootEntities: meta.rootEntities,
-    ...(meta.subGraphName ? { subGraphName: lit(meta.subGraphName) } : {}),
-  });
+  const rows: Quad[] = [
+    mq(subject, ENTITY_SHARE.type, `${DKG}WorkspaceOperation`, swmMetaGraph),
+    mq(subject, ENTITY_SHARE.contextGraphId, lit(meta.contextGraphId), swmMetaGraph),
+    mq(subject, ENTITY_SHARE.shareOperationId, lit(meta.shareOperationId), swmMetaGraph),
+    mq(subject, ENTITY_SHARE.publisherPeerId, lit(meta.publisherPeerId), swmMetaGraph),
+    mq(subject, ENTITY_SHARE.wasAttributedTo, meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId), swmMetaGraph),
+    mq(subject, ENTITY_SHARE.publishedAt, dateLit(meta.timestamp), swmMetaGraph),
+  ];
+  if (meta.subGraphName) rows.push(mq(subject, ENTITY_SHARE.subGraphName, lit(meta.subGraphName), swmMetaGraph));
+  for (const rootEntity of meta.rootEntities) rows.push(mq(subject, ENTITY_SHARE.rootEntity, rootEntity, swmMetaGraph));
+  return rows;
 }
 
 /** @deprecated Use generateShareMetadata */

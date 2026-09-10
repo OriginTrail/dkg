@@ -1,7 +1,5 @@
 export {
   decodeEntityShareMetadata,
-  encodeEntityShareOperationMetadata,
-  encodeEntityShareSliceMetadata,
   ENTITY_SHARE_METADATA_PREDICATES,
   ENTITY_SHARE_METADATA_SIDECAR_PREDICATES,
   ENTITY_SHARE_SNAPSHOT_CONTENT_DIGEST_PREDICATE,

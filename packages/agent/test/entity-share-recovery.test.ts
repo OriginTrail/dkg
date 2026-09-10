@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contextGraphWorkspaceGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
+import { contextGraphWorkspaceGraphUri, createOperationContext } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   workspaceOperationPublicSliceSubject,
@@ -13,15 +13,18 @@ import {
 import { type SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import { createSelectedSwmMetaFetcher } from '../src/sync/selected-swm-meta-fetcher.js';
+import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 import { type SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
   runSharedMemorySync,
+  type SharedMemorySnapshotWalkContinuation,
   type SharedMemorySyncMode,
 } from '../src/sync/requester/shared-memory-sync.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 
 const COVERAGE_CG = 'coverage-swm';
-const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
+const ctx = createOperationContext('sync');
 const noop = () => {};
 
 function pageResult(
@@ -166,12 +169,34 @@ describe('entity-share recovery beside malformed KA heads', () => {
     snapshotEvidencePolicy: { accepts: () => accepts },
   });
   const ambiguousVersion = /ambiguous assertionVersion/;
+  const legacyMetadata = (f: EntityFixture, subGraphName?: string): Quad[] => {
+    const metadata = subGraphName ? f.namedMeta : f.entityMeta;
+    const digestRow = metadata.find(row => row.predicate === 'http://dkg.io/ontology/publicQuadsDigest')!;
+    return [...metadata, { ...digestRow, predicate: 'http://dkg.io/ontology/publicSnapshotRef' }];
+  };
   const entityScenarios: EntityRecoveryScenario[] = [
     {
       name: 'clean entity share',
       arrange: f => ({ meta: f.entityMeta, data: [] }),
       expected: f => recovered(f.entityMeta, [], coverage(1, 1, 0), 0),
     },
+    {
+      name: 'clean entity data and metadata share one write',
+      arrange: f => ({ meta: f.entityMeta, data: f.data }),
+      expected: f => recovered(f.entityMeta, f.data, coverage(1, 1, 0), 0),
+    },
+    {
+      name: 'rejected clean entity write leaves data and metadata retryable',
+      arrange: f => ({ meta: f.entityMeta, data: f.data, rejectMetadataInsert: true }),
+      expected: f => ({ ...recovered([], [], coverage(0, 1, 1), 1), attemptedRows: [...f.data, ...f.entityMeta] }),
+    },
+    ...[undefined, 'research'].map((subGraphName): EntityRecoveryScenario => ({
+      name: `valid legacy snapshot reference in ${subGraphName ?? 'root'} subgraph`,
+      parseError: ambiguousVersion,
+      arrange: f => ({ meta: [...legacyMetadata(f, subGraphName), ...f.duplicateHead], data: [] }),
+      expected: f => recovered(legacyMetadata(f, subGraphName), [], coverage(1, 2, 1)),
+      resolvedOperation: { subGraphName },
+    })),
     {
       name: 'duplicate KA version', parseError: ambiguousVersion,
       arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: f.data }),
@@ -398,6 +423,75 @@ describe('entity-share recovery beside malformed KA heads', () => {
         expect(batches[0]).toEqual(expect.arrayContaining(expected.attemptedRows));
       }
     } finally {
+      await store.close();
+    }
+  });
+
+  it('advances a selected entity ref only after storage and ownership commit, and retries a rejected write', async () => {
+    const f = await entityShareFixture();
+    const metadata = [...legacyMetadata(f), ...f.duplicateHead];
+    const store = new OxigraphStore();
+    const owned = new Map<string, string>();
+    let rejectWrite = true;
+    let writes = 0;
+    let durable = false;
+    let walk: SharedMemorySnapshotWalkContinuation | undefined;
+    const fetcher = createSelectedSwmMetaFetcher({
+      remotePeerId: 'peer-entity-retry', requesterScope: 'selected-swm-meta:retained:entity-retry',
+      retentionBudget: createSelectedSwmMetaRetentionBudget({ maxRows: 1000, maxPrefixRows: 1000,
+        maxBytesEstimate: 1024 * 1024, maxPrefixBytesEstimate: 1024 * 1024 }),
+      deleteCheckpoint: noop,
+      fetchPage: async () => pageResult(COVERAGE_CG, 'meta', { quads: metadata, nextOffset: metadata.length }),
+    });
+    const materializer = createSharedMemorySnapshotMaterializer({ store, writeLocks: new Map<string, Promise<void>>(), invalidateListContextGraphsCache: noop });
+    const run = () => runSharedMemorySync({
+      mode: { kind: 'selected-recovery', recoveryGuard: { signal: new AbortController().signal, assertCurrent: noop },
+        snapshotEvidencePolicy: { accepts: () => true },
+        metadataFetcher: { ...fetcher.strategy, snapshotWalk(contextGraphId, manifest) {
+          walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
+          const current = walk;
+          return { ...current, markResolved(ref, suppressedRows) {
+            expect(durable).toBe(true);
+            expect(owned.get(f.root)).toBe('peer-source');
+            current.markResolved(ref, suppressedRows);
+          } };
+        } },
+      },
+      ctx, remotePeerId: 'peer-entity-retry', contextGraphIds: [COVERAGE_CG],
+      createContextGraphSyncDeadline: () => Date.now() + 60_000,
+      fetchSyncPages: async (_ctx, _peer, cg, _shared, phase) => pageResult(cg, phase),
+      processSharedMemoryBatch: async () => ({ ...sharedMemoryProcessResult(), emptyResponses: 0,
+        verifiedMeta: metadata, verifiedData: f.data,
+        totalFetchedDataQuads: f.data.length, totalFetchedMetaQuads: metadata.length,
+        entityCreators: [{ dataGraph: contextGraphWorkspaceGraphUri(COVERAGE_CG), entity: f.root, creator: 'peer-source' }],
+      }),
+      ensureContextGraph: async () => {},
+      storeInsert: async rows => {
+        writes += 1;
+        expect(walk?.resolvedRefsSnapshot()).toEqual([]);
+        expect(owned.size).toBe(0);
+        if (rejectWrite) throw new Error('first entity batch rejected');
+        await store.insert(rows);
+        durable = true;
+      },
+      snapshotMaterializer: materializer,
+      publicSnapshotStore: { getSnapshot: async ref => f.cached.get(ref) ?? null, putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }) },
+      deleteCheckpoint: noop, setCheckpoint: noop, ensureOwnedMap: () => owned,
+      logInfo: noop, logWarn: noop, logDebug: noop,
+    });
+    try {
+      expect((await run()).swmCoverage?.snapshotsResolved).toBe(0);
+      expect(walk?.resolvedRefsSnapshot()).toEqual([]);
+      expect(owned.size).toBe(0);
+      rejectWrite = false;
+      expect((await run()).swmCoverage?.snapshotsResolved).toBe(1);
+      expect(writes).toBe(2);
+      expect(walk?.resolvedRefsSnapshot()).toEqual([f.digest]);
+      const operation = await resolveWorkspaceOperation({ store, graphManager: new GraphManager(store),
+        contextGraphId: COVERAGE_CG, shareOperationId: f.shareOperationId });
+      expect(operation.rootEntities).toEqual([f.root]);
+    } finally {
+      fetcher.strategy.release(COVERAGE_CG);
       await store.close();
     }
   });

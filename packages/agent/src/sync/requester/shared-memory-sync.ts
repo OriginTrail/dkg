@@ -1,4 +1,4 @@
-import { createEntitySliceRecoveryPlan } from './entity-slice-recovery.js';
+import { commitEntityRecoveryBatch, createEntitySliceRecoveryPlan, type EntityRecoveryBatch } from './entity-slice-recovery.js';
 import { stripMetadataLiteral as stripLiteral } from '../metadata-literal.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
@@ -915,13 +915,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       materializedRefsForCg = materializedRefs.size;
       /** Entity refs whose blobs are ready but whose metadata is not committed yet. */
       const readyEntityRefs = new Set<string>();
-      const commitReadyEntityRefs = (): void => {
-        for (const ref of readyEntityRefs) {
-          materializedRefs.add(ref);
-          snapshotWalk?.markResolved(ref);
-        }
-        materializedRefsForCg = materializedRefs.size;
-      };
+
       /** Refs that fetched but could not be written; named in the shortfall. */
       const unresolvedRefSample: string[] = [];
 
@@ -1405,56 +1399,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           + 'holding the phase incomplete until the caller can prove the referenced content');
       }
       if (!snapshotPhaseUsable) {
-        // The responder was reachable, but the snapshot phase did not produce
-        // a complete, verified snapshot. Preserve any verified data prefix
-        // below, while keeping the overall sync result non-successful so the
-        // lifecycle scheduler retries instead of stamping this peer as caught
-        // up with dangling/missing public snapshot state.
+        // Retain independently verified data, but keep the phase incomplete
+        // while graph-scoped assets or selected evidence remain unproven.
         summary.failedPhases += 1;
-        // A permanent descriptor parse failure cannot be repaired by retrying
-        // the same manifest. Preserve independently verified entity-share rows
-        // while withholding every head and graph-scoped operation they could
-        // otherwise certify. Only independently ready entity refs may publish
-        // their metadata; an unrelated snapshot timeout cannot suppress them.
-        const entityMeta = !descriptorsAuthoritativeForCg && snapshotEvidenceAccepted
-          ? entitySnapshotAuthority.metadataFor(readyEntityRefs)
-          : [];
-        const recoveredRows = [...validWsQuads, ...entityMeta];
-        if (recoveredRows.length > 0) {
-          await recoveryBoundary.admitAsyncMutation(async () => {
-            await ensureContextGraph(pid);
-            await storeInsert(recoveredRows);
-            // Ownership belongs to the same admitted logical write as the
-            // verified data. Revocation may be observed after this unit, but
-            // must never leave inserted entities without their arbitration
-            // state merely because it landed during the awaited insert.
-            hydrateOwnership();
-          });
-          summary.insertedTriples += validWsQuads.length + entityMeta.length;
-          summary.insertedMetaTriples += entityMeta.length;
-          summary.insertedDataTriples += validWsQuads.length;
-          if (validWsQuads.length > 0) recordPhaseOutcome(wsDataResult);
-          if (entityMeta.length > 0) commitReadyEntityRefs();
-        }
-        recordSnapshotCoverage(
-          snapshotSync,
-          wsMetaResult.completed,
-          descriptorsAuthoritativeForCg,
-          materializationFailures,
-          materializedRefs.size,
-          unresolvedRefSample,
-          pid,
-        );
-        if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) {
-          break;
-        }
-        continue;
       }
-
+      const readyEntityBatch = entitySnapshotAuthority.batchFor(readyEntityRefs);
       const storeStartedAt = Date.now();
       let metaForBulkInsert: Quad[] = [];
       let newlyCountedMeta = 0;
-      if (verifiedMetaForInsert.length > 0) {
+      if (snapshotPhaseUsable && verifiedMetaForInsert.length > 0) {
         // Rows written by the per-KA path are ordinarily harmless to replay —
         // an RDF store is a set. Rows for a twin retired after that path are
         // different: replaying them would recreate a dangling SWM head/op after
@@ -1483,31 +1436,45 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
       }
 
-      // The aggregate data, its verified metadata and the in-memory ownership
-      // projection form one admitted recovery unit. Once the first awaited
-      // mutation starts, a selection revocation is deliberately observed only
-      // after all three effects drain, preventing a stale invocation from
-      // leaving a data-only or metadata-without-ownership state.
-      await recoveryBoundary.admitAsyncMutation(async () => {
-        await ensureContextGraph(pid);
-        if (validWsQuads.length > 0) await storeInsert(validWsQuads);
-        if (metaForBulkInsert.length > 0) await storeInsert(metaForBulkInsert);
-        hydrateOwnership();
+      // Failed descriptor parsing can still admit independent entity slices.
+      // A selected evidence rejection admits no entity metadata or refs.
+      const recoveredEntityBatch: EntityRecoveryBatch = !descriptorsAuthoritativeForCg && snapshotEvidenceAccepted
+        ? readyEntityBatch
+        : { rows: [], refs: [] };
+      const metadataRows = snapshotPhaseUsable ? metaForBulkInsert : recoveredEntityBatch.rows;
+      const recoveryBatch: EntityRecoveryBatch = {
+        rows: [...validWsQuads, ...metadataRows],
+        refs: snapshotPhaseUsable ? readyEntityBatch.refs : recoveredEntityBatch.refs,
+      };
+      await commitEntityRecoveryBatch(recoveryBatch, {
+        admission: recoveryBoundary,
+        ensureContextGraph: () => ensureContextGraph(pid),
+        insert: storeInsert,
+        hydrateOwnership,
+        markResolved(ref) {
+          materializedRefs.add(ref);
+          snapshotWalk?.markResolved(ref);
+          materializedRefsForCg = materializedRefs.size;
+        },
+        recordCoverage: () => recordSnapshotCoverage(
+          snapshotSync,
+          wsMetaResult.completed,
+          descriptorsAuthoritativeForCg,
+          materializationFailures,
+          materializedRefs.size,
+          unresolvedRefSample,
+          pid,
+        ),
       });
-      if (readyEntityRefs.size > 0) commitReadyEntityRefs();
 
-      // Coverage is committed only after every ref it calls resolved has made
-      // its corresponding durable write. A failed entity metadata insert must
-      // leave the ref retryable rather than advancing the continuation.
-      recordSnapshotCoverage(
-        snapshotSync,
-        wsMetaResult.completed,
-        descriptorsAuthoritativeForCg,
-        materializationFailures,
-        materializedRefs.size,
-        unresolvedRefSample,
-        pid,
-      );
+      if (!snapshotPhaseUsable) {
+        summary.insertedTriples += recoveryBatch.rows.length;
+        summary.insertedMetaTriples += metadataRows.length;
+        summary.insertedDataTriples += validWsQuads.length;
+        if (validWsQuads.length > 0) recordPhaseOutcome(wsDataResult);
+        if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) break;
+        continue;
+      }
 
       if (validWsQuads.length > 0) {
         summary.insertedTriples += validWsQuads.length;

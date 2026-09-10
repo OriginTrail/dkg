@@ -1,6 +1,6 @@
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
-import { encodeEntityShareSliceMetadata } from './entity-share-metadata.js';
+import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
@@ -716,21 +716,19 @@ export async function storeWorkspaceOperationPublicQuads(params: {
         await params.store.insert(rootQuads.map((quad) => ({ ...quad, graph: snapshotGraph! })));
       }
     }
-    snapshotQuads.push(...encodeEntityShareSliceMetadata(subject, workspaceMetaGraph, {
-      contextGraphId: lit(params.contextGraphId),
-      shareOperationId: lit(params.shareOperationId),
-      rootEntity: root,
-      publicQuadsDigest: lit(digest),
-      publicQuadsCount: intLit(rootQuads.length),
-      // GH #748: dedicated `dkg:publisherPeerId` field for peer-ID-bound reads
-      // (resolveCompactWorkspaceOperationPublicQuads / Legacy variant + finalization);
-      // `prov:wasAttributedTo` carries the durable agent DID URI when known.
-      publisherPeerId: lit(publisherPeerId),
-      wasAttributedTo: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId),
-      publishedAt: dateLit(timestamp),
-      ...(snapshotGraph ? { publicSnapshotGraph: snapshotGraph } : {}),
-      ...(subGraphName ? { subGraphName: lit(subGraphName) } : {}),
-    }));
+    snapshotQuads.push(
+      { subject, predicate: ENTITY_SHARE.contextGraphId, object: lit(params.contextGraphId), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.shareOperationId, object: lit(params.shareOperationId), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.publicSliceRootEntity, object: root, graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.publicQuadsDigest, object: lit(digest), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.publicQuadsCount, object: intLit(rootQuads.length), graph: workspaceMetaGraph },
+      // Peer-bound readers use the dedicated field; attribution uses the durable agent DID when known.
+      { subject, predicate: ENTITY_SHARE.publisherPeerId, object: lit(publisherPeerId), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.wasAttributedTo, object: agentAddress ? agentDid(agentAddress) : lit(publisherPeerId), graph: workspaceMetaGraph },
+      { subject, predicate: ENTITY_SHARE.publishedAt, object: dateLit(timestamp), graph: workspaceMetaGraph },
+    );
+    if (snapshotGraph) snapshotQuads.push({ subject, predicate: ENTITY_SHARE.publicSnapshotGraph, object: snapshotGraph, graph: workspaceMetaGraph });
+    if (subGraphName) snapshotQuads.push({ subject, predicate: ENTITY_SHARE.subGraphName, object: lit(subGraphName), graph: workspaceMetaGraph });
     // RFC ka-metadata-trim Phase 2: `dkg:publicSnapshotRef` is no longer
     // written — `FileWorkspacePublicSnapshotStore.putSnapshot` returns
     // `ref === digest`, so the row was byte-identical to
