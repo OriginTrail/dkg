@@ -24,7 +24,7 @@ describe('DiscoveryClient curator peer pagination', () => {
       ],
     });
 
-    await expect(discovery.findAgentPeerIdsByAddress(
+    await expect(discovery.findAgentPeerPageByAddress(
       '0xabc',
       { afterPeerId: 'peer-010', limit: 2 },
     )).resolves.toEqual({ peerIds: ['peer-011', 'peer-012'], nextAfterPeerId: null });
@@ -50,9 +50,9 @@ describe('DiscoveryClient curator peer pagination', () => {
       await store.insert([...first.quads, ...second.quads]);
       const discovery = new DiscoveryClient(new DKGQueryEngine(store));
 
-      await expect(discovery.findAgentPeerIdsByAddress(curator, { limit: 1 }))
+      await expect(discovery.findAgentPeerPageByAddress(curator, { limit: 1 }))
         .resolves.toEqual({ peerIds: ['peer-001'], nextAfterPeerId: 'peer-001' });
-      await expect(discovery.findAgentPeerIdsByAddress(
+      await expect(discovery.findAgentPeerPageByAddress(
         curator,
         { afterPeerId: 'peer-001', limit: 2 },
       )).resolves.toEqual({ peerIds: ['peer-002'], nextAfterPeerId: null });
@@ -77,7 +77,7 @@ describe('DiscoveryClient curator peer pagination', () => {
       await store.insert(legacyQuads);
       const discovery = new DiscoveryClient(new DKGQueryEngine(store));
 
-      await expect(discovery.findAgentPeerIdsByAddress(lowerAddress, { limit: 1 }))
+      await expect(discovery.findAgentPeerPageByAddress(lowerAddress, { limit: 1 }))
         .resolves.toEqual({ peerIds: ['peer-checksum'], nextAfterPeerId: null });
     } finally {
       await store.close();
@@ -87,7 +87,7 @@ describe('DiscoveryClient curator peer pagination', () => {
     'rejects invalid limit %s before a store query', async limit => {
       const { engine, discovery } = fixture();
       const query = vi.spyOn(engine, 'query');
-      await expect(discovery.findAgentPeerIdsByAddress('curator', { limit })).rejects.toThrow(RangeError);
+      await expect(discovery.findAgentPeerPageByAddress('curator', { limit })).rejects.toThrow(RangeError);
       expect(query).not.toHaveBeenCalled();
     },
   );
@@ -112,7 +112,7 @@ describe('DiscoveryClient curator peer pagination', () => {
     const observed: string[] = [];
     let afterPeerId: string | undefined;
     do {
-      const page = await discovery.findAgentPeerIdsByAddress(wallet, { limit: 7, afterPeerId });
+      const page = await discovery.findAgentPeerPageByAddress(wallet, { limit: 7, afterPeerId });
       expect(page.peerIds.length).toBeLessThanOrEqual(7);
       observed.push(...page.peerIds);
       afterPeerId = page.nextAfterPeerId ?? undefined;
@@ -130,14 +130,14 @@ describe('DiscoveryClient curator peer pagination', () => {
     const controller = new AbortController();
     const query = vi.spyOn(engine, 'query');
     controller.abort();
-    await expect(discovery.findAgentPeerIdsByAddress('curator', { limit: 1, signal: controller.signal }))
+    await expect(discovery.findAgentPeerPageByAddress('curator', { limit: 1, signal: controller.signal }))
       .rejects.toMatchObject({ name: 'AbortError' });
     expect(query).not.toHaveBeenCalled();
 
     const active = new AbortController();
     let settle!: (value: { bindings: Array<Record<string, string>> }) => void;
     query.mockImplementation(() => new Promise(resolve => { settle = resolve; }));
-    const pending = discovery.findAgentPeerIdsByAddress('curator', { limit: 1, signal: active.signal });
+    const pending = discovery.findAgentPeerPageByAddress('curator', { limit: 1, signal: active.signal });
     expect(query.mock.calls[0][1]?.signal).toBe(active.signal);
     active.abort();
     settle({ bindings: [{ peerId: 'peer-001' }] });
@@ -149,7 +149,7 @@ describe('DiscoveryClient curator peer pagination', () => {
     let settle!: (value: { bindings: Array<Record<string, string>> }) => void;
     vi.spyOn(engine, 'query').mockImplementation(() => new Promise(resolve => { settle = resolve; }));
     const request = { limit: 1 };
-    const pending = discovery.findAgentPeerIdsByAddress('curator', request);
+    const pending = discovery.findAgentPeerPageByAddress('curator', request);
     request.limit = 100;
     settle({ bindings: [{ peerId: 'peer-001' }, { peerId: 'peer-002' }] });
     await expect(pending).resolves.toEqual({ peerIds: ['peer-001'], nextAfterPeerId: 'peer-001' });
@@ -160,7 +160,31 @@ describe('DiscoveryClient curator peer pagination', () => {
     vi.spyOn(engine, 'query').mockResolvedValue({ bindings: [
       { peerId: 'peer-001' }, { peerId: 'peer-002' }, { peerId: 'peer-003' },
     ] });
-    await expect(discovery.findAgentPeerIdsByAddress('curator', { limit: 1 })).rejects.toThrow('row limit');
+    await expect(discovery.findAgentPeerPageByAddress('curator', { limit: 1 })).rejects.toThrow('row limit');
+  });
+
+  it('preserves the published optional-limit array API on real registry data', async () => {
+    const { store, discovery } = fixture();
+    const wallet = '0x00000000000000000000000000000000000000ab';
+    for (const peerId of ['peer-001', 'peer-002', 'peer-003']) {
+      await store.insert(buildAgentProfile({ peerId, name: peerId, agentAddress: wallet, skills: [] }).quads);
+    }
+    await expect(discovery.findAgentPeerIdsByAddress(wallet)).resolves.toEqual(['peer-001', 'peer-002', 'peer-003']);
+    await expect(discovery.findAgentPeerIdsByAddress(wallet, { limit: 1, afterPeerId: 'peer-001' }))
+      .resolves.toEqual(['peer-002']);
+  });
+
+  it('preserves legacy limits larger than a page without issuing an oversized page request', async () => {
+    const { discovery } = fixture();
+    const ids = Array.from({ length: MAX_AGENT_PEER_PAGE_SIZE + 100 }, (_, i) => `peer-${String(i).padStart(4, '0')}`);
+    const page = vi.spyOn(discovery, 'findAgentPeerPageByAddress').mockImplementation(async (_wallet, request) => {
+      const after = request.afterPeerId ? ids.indexOf(request.afterPeerId) + 1 : 0;
+      const peerIds = ids.slice(after, after + request.limit);
+      return { peerIds, nextAfterPeerId: after + request.limit < ids.length ? peerIds[peerIds.length - 1] : null };
+    });
+    await expect(discovery.findAgentPeerIdsByAddress('wallet', { limit: MAX_AGENT_PEER_PAGE_SIZE + 50 }))
+      .resolves.toEqual(ids.slice(0, MAX_AGENT_PEER_PAGE_SIZE + 50));
+    expect(page.mock.calls.map(([, request]) => request.limit)).toEqual([MAX_AGENT_PEER_PAGE_SIZE, 50]);
   });
 
 });

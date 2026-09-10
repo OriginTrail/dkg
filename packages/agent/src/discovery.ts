@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
 import {
+  MAX_AGENT_PEER_PAGE_SIZE,
   validateAgentPeerPage,
   validateAgentPeerPageRequest,
   type AgentPeerDiscovery,
@@ -221,11 +222,39 @@ export class DiscoveryClient implements AgentPeerDiscovery {
   }
 
   /**
+   * @deprecated Use findAgentPeerPageByAddress for bounded page consumption.
+   * Preserves the existing optional-limit array API for explicit legacy callers;
+   * bounded recovery never calls this facade or accumulates this full result.
+   */
+  async findAgentPeerIdsByAddress(
+    agentAddress: string,
+    options: { afterPeerId?: string; limit?: number; signal?: AbortSignal } = {},
+  ): Promise<string[]> {
+    const requestedLimit = options.limit === undefined ? undefined : Math.max(1, Math.floor(options.limit));
+    if (requestedLimit !== undefined && !Number.isSafeInteger(requestedLimit)) {
+      throw new RangeError('Peer lookup limit must be finite');
+    }
+    const signal = options.signal;
+    let afterPeerId = options.afterPeerId || undefined;
+    const peerIds: string[] = [];
+    do {
+      const page = await this.findAgentPeerPageByAddress(agentAddress, {
+        limit: Math.min(MAX_AGENT_PEER_PAGE_SIZE, requestedLimit === undefined ? MAX_AGENT_PEER_PAGE_SIZE : requestedLimit - peerIds.length),
+        afterPeerId,
+        signal,
+      });
+      peerIds.push(...page.peerIds);
+      afterPeerId = page.nextAfterPeerId ?? undefined;
+    } while (afterPeerId !== undefined && (requestedLimit === undefined || peerIds.length < requestedLimit));
+    return peerIds;
+  }
+
+  /**
    * Deterministic, duplicate-free wallet-to-peer lookup for bounded recovery.
    * Rich profile rows are deliberately not selected here: OPTIONAL profile
    * properties can multiply rows before LIMIT and permanently hide a peer.
    */
-  async findAgentPeerIdsByAddress(
+  async findAgentPeerPageByAddress(
     agentAddress: string,
     options: AgentPeerPageRequest,
   ): Promise<AgentPeerPage> {

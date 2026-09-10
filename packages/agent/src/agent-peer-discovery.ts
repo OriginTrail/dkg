@@ -18,7 +18,7 @@ export interface AgentPeerPage {
 
 /** Required capability for bounded recovery. Unsupported providers must reject. */
 export interface AgentPeerDiscovery {
-  findAgentPeerIdsByAddress(agentAddress: string, request: AgentPeerPageRequest): Promise<AgentPeerPage>;
+  findAgentPeerPageByAddress(agentAddress: string, request: AgentPeerPageRequest): Promise<AgentPeerPage>;
 }
 
 export function validateAgentPeerPageRequest(request: AgentPeerPageRequest): void {
@@ -59,6 +59,6 @@ export async function readAgentPeerPage(
 ): Promise<AgentPeerPage> {
   const boundedRequest = Object.freeze({ ...request });
   validateAgentPeerPageRequest(boundedRequest);
-  const page = await discovery.findAgentPeerIdsByAddress(agentAddress, boundedRequest);
+  const page = await discovery.findAgentPeerPageByAddress(agentAddress, boundedRequest);
   return validateAgentPeerPage(page, boundedRequest);
 }

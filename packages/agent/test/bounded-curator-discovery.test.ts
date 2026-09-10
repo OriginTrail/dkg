@@ -29,12 +29,14 @@ describe('bounded curator discovery contract', () => {
     const findAgents = vi.fn(async () => [{ peerId: 'peer-001', agentAddress: WALLET }]);
     // Deliberately model an untyped older integration. The public type fixture
     // separately proves this provider cannot satisfy AgentPeerDiscovery.
-    Object.defineProperty(agent, 'discovery', { value: { findAgents } });
+    const findAgentPeerIdsByAddress = vi.fn(async () => ['peer-001']);
+    Object.defineProperty(agent, 'discovery', { value: { findAgents, findAgentPeerIdsByAddress } });
     const refresh = vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(false);
     await expect(agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2 })).resolves.toMatchObject({
       peerIds: [], lookupFailed: true,
     });
     expect(findAgents).not.toHaveBeenCalled();
+    expect(findAgentPeerIdsByAddress).not.toHaveBeenCalled();
     expect(refresh).not.toHaveBeenCalled();
   });
 
@@ -44,7 +46,7 @@ describe('bounded curator discovery contract', () => {
     vi.spyOn(agent, 'getCgMeta').mockResolvedValue({
       ...record, curator: `did:dkg:agent:${WALLET}`, curators: [`did:dkg:agent:${WALLET}`],
     });
-    const pages = vi.spyOn(agent.discovery, 'findAgentPeerIdsByAddress').mockResolvedValue(EMPTY);
+    const pages = vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress').mockResolvedValue(EMPTY);
     const rich = vi.spyOn(agent.discovery, 'findAgents').mockRejectedValue(new Error('unbounded registry query'));
     // Run the real refresh/resolution path. No resolved peer means no transport.
     await expect(agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2 })).resolves.toMatchObject({
@@ -56,7 +58,7 @@ describe('bounded curator discovery contract', () => {
 
   it('does not certify a short tail page as a complete roster after registry churn', async () => {
     const agent = await createAgent();
-    const pages = vi.spyOn(agent.discovery, 'findAgentPeerIdsByAddress')
+    const pages = vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress')
       .mockResolvedValueOnce({ peerIds: ['peer-001', 'peer-003'], nextAfterPeerId: 'peer-003' })
       .mockResolvedValueOnce({ peerIds: ['peer-004'], nextAfterPeerId: null });
     const first = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2 });
@@ -70,7 +72,7 @@ describe('bounded curator discovery contract', () => {
 
   it('wraps an exhausted cursor through a fresh bounded first-page query', async () => {
     const agent = await createAgent();
-    const pages = vi.spyOn(agent.discovery, 'findAgentPeerIdsByAddress')
+    const pages = vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress')
       .mockResolvedValueOnce(EMPTY)
       .mockResolvedValueOnce({ peerIds: ['peer-002'], nextAfterPeerId: null });
     const result = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2, pagePeerIds: 1, afterPeerId: 'peer-099' });
@@ -86,7 +88,7 @@ describe('bounded curator discovery contract', () => {
     vi.spyOn(agent, 'peerId', 'get').mockReturnValue('peer-self');
     vi.spyOn(agent, 'isCuratorOf').mockResolvedValue(false);
     vi.spyOn(agent, 'resolveCuratorPeerId').mockResolvedValue('peer-legacy');
-    const page = vi.spyOn(agent.discovery, 'findAgentPeerIdsByAddress');
+    const page = vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress');
     await expect(agent.resolveCuratorPeerIdsForCg('legacy-label', { maxPeerIds: 2 })).resolves.toEqual({
       peerIds: ['peer-legacy'], curatorIsLocal: false, legacyTripleResolved: true,
     });
@@ -96,7 +98,7 @@ describe('bounded curator discovery contract', () => {
   it('propagates cancellation through a provider that settles after abort', async () => {
     const agent = await createAgent();
     let settle!: (page: AgentPeerPage) => void;
-    vi.spyOn(agent.discovery, 'findAgentPeerIdsByAddress').mockImplementation(() => new Promise(resolve => { settle = resolve; }));
+    vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress').mockImplementation(() => new Promise(resolve => { settle = resolve; }));
     const refresh = vi.spyOn(agent, 'refreshMetaFromCurator');
     const controller = new AbortController();
     const pending = agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2, signal: controller.signal });
@@ -116,22 +118,22 @@ describe('bounded curator discovery contract', () => {
     { peerIds: ['peer-001', 'peer-002'] },
   ])('rejects a provider page outside the bounded monotonic contract: %j', async invalid => {
     const provider: AgentPeerDiscovery = {
-      findAgentPeerIdsByAddress: async () => invalid as AgentPeerPage,
+      findAgentPeerPageByAddress: async () => invalid as AgentPeerPage,
     };
     await expect(readAgentPeerPage(provider, WALLET, { limit: 2 })).rejects.toThrow();
   });
 
   it('rejects a page that repeats the exclusive cursor', async () => {
     const provider: AgentPeerDiscovery = {
-      findAgentPeerIdsByAddress: async () => ({ peerIds: ['peer-001'], nextAfterPeerId: null }),
+      findAgentPeerPageByAddress: async () => ({ peerIds: ['peer-001'], nextAfterPeerId: null }),
     };
     await expect(readAgentPeerPage(provider, WALLET, { limit: 2, afterPeerId: 'peer-001' })).rejects.toThrow('non-monotonic');
   });
 
   it('rejects an empty cursor instead of restarting a supposedly continued walk', async () => {
-    const findAgentPeerIdsByAddress = vi.fn(async () => EMPTY);
-    await expect(readAgentPeerPage({ findAgentPeerIdsByAddress }, WALLET, { limit: 2, afterPeerId: '' }))
+    const findAgentPeerPageByAddress = vi.fn(async () => EMPTY);
+    await expect(readAgentPeerPage({ findAgentPeerPageByAddress }, WALLET, { limit: 2, afterPeerId: '' }))
       .rejects.toThrow('cursor');
-    expect(findAgentPeerIdsByAddress).not.toHaveBeenCalled();
+    expect(findAgentPeerPageByAddress).not.toHaveBeenCalled();
   });
 });

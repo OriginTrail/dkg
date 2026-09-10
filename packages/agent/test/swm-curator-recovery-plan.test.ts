@@ -329,7 +329,7 @@ describe('private SWM curator recovery planning', () => {
     ];
     const calls: Array<{ afterPeerId?: string; limit?: number }> = [];
     const provider: AgentPeerDiscovery = {
-      findAgentPeerIdsByAddress: async (
+      findAgentPeerPageByAddress: async (
         _address: string,
         options,
       ) => {
@@ -338,7 +338,7 @@ describe('private SWM curator recovery planning', () => {
       },
     };
 
-    vi.spyOn(agent.discovery, 'findAgentPeerIdsByAddress').mockImplementation(provider.findAgentPeerIdsByAddress);
+    vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress').mockImplementation(provider.findAgentPeerPageByAddress);
     const first = await agent.resolveCuratorPeerIdsForCg(contextGraphId, {
       maxPeerIds: 2,
       pagePeerIds: 1,

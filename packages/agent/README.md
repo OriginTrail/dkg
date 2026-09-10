@@ -47,12 +47,14 @@ const skills = await agent.findSkills({ skillType: 'sentiment-analysis' });
 
 ## Bounded peer discovery
 
-`DiscoveryClient.findAgentPeerIdsByAddress(wallet, { limit, afterPeerId?, signal? })`
+`DiscoveryClient.findAgentPeerPageByAddress(wallet, { limit, afterPeerId?, signal? })`
 requires an integer limit from 1 to `MAX_AGENT_PEER_PAGE_SIZE` (1,024). It returns
 `{ peerIds, nextAfterPeerId }`: peer IDs are unique and ordered, the cursor is
 exclusive, and a null continuation means the query found no further row. The
 query retains at most `limit + 1` rows and does not select optional profile fields.
-This replaces the method's earlier optional-limit, array-only result.
+The existing `findAgentPeerIdsByAddress(wallet, options?)` remains available as a
+deprecated array-returning facade. It walks bounded pages internally, retaining
+the full result only for callers explicitly using that legacy API.
 
 Bounded recovery providers must implement the exported `AgentPeerDiscovery`
 contract. Providers that cannot paginate must reject the lookup; bounded recovery
