@@ -27,6 +27,10 @@ describe('stored SWM maintenance without context-graph declarations', () => {
         meta('urn:expired', `${DKG}publishedAt`, '"2000-01-01T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'),
         meta('urn:expired', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', `${DKG}WorkspaceOperation`),
         meta(ENTITY, `${DKG}workspaceOwner`, OWNER),
+        meta('urn:fresh-operation', `${DKG}rootEntity`, 'urn:fresh'),
+        meta('urn:fresh-operation', `${DKG}publishedAt`, `"${new Date().toISOString()}"^^<http://www.w3.org/2001/XMLSchema#dateTime>`),
+        meta('urn:fresh-operation', 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', `${DKG}WorkspaceOperation`),
+        meta('urn:fresh', `${DKG}workspaceOwner`, OWNER),
         ...(data ? [
           { subject: ENTITY, predicate: 'urn:name', object: '"old"', graph: dataGraph },
           { subject: `${ENTITY}/.well-known/genid/child`, predicate: 'urn:name', object: '"child"', graph: `${dataGraph}/0xabc/1` },
@@ -42,7 +46,7 @@ describe('stored SWM maintenance without context-graph declarations', () => {
       expect(await new GraphManager(agent.store).listContextGraphs()).toEqual(['agents', 'ontology']);
 
       expect(await agent.cleanupExpiredSharedMemory()).toBe(data ? 6 : 4);
-      expect(await agent.store.countQuads(metaGraph)).toBe(0);
+      expect(await agent.store.countQuads(metaGraph)).toBe(4);
       expect(await agent.store.countQuads(dataGraph)).toBe(1);
       expect(await agent.store.countQuads(`${dataGraph}/0xabc/1`)).toBe(0);
       expect(ownership.get(key)?.has(ENTITY)).toBe(false);

@@ -464,7 +464,9 @@ async function seedSignedSwmWorkspaceV1(
     accessPolicy: params.accessPolicy,
     ...(params.allowedPeers === undefined ? {} : { allowedPeers: params.allowedPeers }),
     agentAddress: AUTHOR,
-    timestamp: new Date(canonicalSeal.assertionFinalizedAt),
+    // The signed seal is fixed evidence; this share is admitted now and must
+    // remain within the normal retention window across the fixture's restart.
+    timestamp: new Date(),
   });
   await storeKnowledgeAssetWorkspaceHead({
     store: agent.store,
@@ -2285,6 +2287,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const seal = assertionSealFromCanonical(canonicalSeal);
     const assertionCoordinate = 'swm-only-shadow';
     const shareOperationId = 'swm-only-shadow-operation';
+    const sharedAt = new Date(Date.now() - 120_000);
     // The deployed seal writer uses the EIP-55 display spelling in RDF IRIs,
     // while the RFC-64 inventory scope and rows use the lowercase wire form.
     // Catalog projection must resolve that honest cross-boundary pair.
@@ -2324,7 +2327,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       publisherPeerId: author.peerId,
       accessPolicy: 'ownerOnly',
       agentAddress: AUTHOR,
-      timestamp: new Date('2026-07-19T12:35:00.000Z'),
+      timestamp: sharedAt,
     });
     await storeKnowledgeAssetWorkspaceHead({
       store: author.store,
@@ -2368,7 +2371,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       publisherPeerId: author.peerId,
       accessPolicy: 'public',
       agentAddress: AUTHOR,
-      timestamp: new Date('2026-07-19T12:35:00.000Z'),
+      timestamp: sharedAt,
     });
 
     const conflictingAuthorQuad: Quad = {
@@ -2413,7 +2416,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         publicTripleCount: canonicalSeal.publicTripleCount,
         privateTripleCount: canonicalSeal.privateTripleCount,
         sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal),
-        sharedAt: new Date('2026-07-19T12:35:00.000Z').getTime().toString(),
+        sharedAt: sharedAt.getTime().toString(),
         expiresAt: null,
       }],
     });
@@ -2701,7 +2704,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       publisherPeerId: restarted.peerId,
       accessPolicy: 'public',
       agentAddress: AUTHOR,
-      timestamp: new Date('2026-07-19T12:35:00.000Z'),
+      timestamp: sharedAt,
     });
     await storeKnowledgeAssetWorkspaceHead({
       store: restarted.store,
@@ -2761,7 +2764,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       publisherPeerId: restarted.peerId,
       accessPolicy: 'public',
       agentAddress: AUTHOR,
-      timestamp: new Date('2026-07-19T12:36:00.000Z'),
+      timestamp: new Date(sharedAt.getTime() + 60_000),
     });
     await storeKnowledgeAssetWorkspaceHead({
       store: restarted.store,
@@ -2875,7 +2878,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       publisherPeerId: restarted.peerId,
       accessPolicy: 'public',
       agentAddress: AUTHOR,
-      timestamp: new Date('2026-07-19T12:37:00.000Z'),
+      timestamp: new Date(sharedAt.getTime() + 120_000),
     });
     await storeKnowledgeAssetWorkspaceHead({
       store: restarted.store,
