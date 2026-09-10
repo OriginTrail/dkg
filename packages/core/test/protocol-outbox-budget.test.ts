@@ -5,6 +5,7 @@ import type { BoundedProtocolOutboxStore } from '../src/messenger-types.js';
 function automaticStore(): BoundedProtocolOutboxStore {
   const store = new InMemoryProtocolOutboxStore({ backoffs: [10] });
   return {
+    configurePolicy: store.configurePolicy.bind(store),
     enqueue: store.enqueue.bind(store), markDelivered: store.markDelivered.bind(store),
     hasEntry: store.hasEntry.bind(store), size: store.size.bind(store), hasPendingFor: store.hasPendingFor.bind(store),
     readDuePage: store.readDuePage.bind(store), listMetadata: store.listMetadata.bind(store),
@@ -15,13 +16,42 @@ function automaticStore(): BoundedProtocolOutboxStore {
 
 it('uses a bounded-only store without any legacy payload inspection methods', () => {
   const store = automaticStore();
-  const outbox = new BoundedProtocolOutbox(store);
+  const outbox = new BoundedProtocolOutbox(store, { backoffs: [10] });
   outbox.enqueueFailure('peer', '/test', 'id', new Uint8Array([7]), 'offline', 0);
   expect(outbox.readDuePage(10, { maxEntries: 1, maxPayloadBytes: 1 }).entries[0].messageId).toBe('id');
   expect(outbox.hasPendingFor('peer')).toBe(true);
   expect(outbox.payloadInspection()).toBeUndefined();
   outbox.markDelivered('peer', '/test', 'id');
   expect(outbox.size()).toBe(0);
+});
+
+it('delivers configured retry and retention policy through the required store contract', () => {
+  const backing = new InMemoryProtocolOutboxStore();
+  let configured: Parameters<BoundedProtocolOutboxStore['configurePolicy']>[0] | undefined;
+  const store: BoundedProtocolOutboxStore = {
+    configurePolicy: (policy) => {
+      configured = policy;
+      backing.configurePolicy(policy);
+    },
+    enqueue: backing.enqueue.bind(backing),
+    markDelivered: backing.markDelivered.bind(backing),
+    hasEntry: backing.hasEntry.bind(backing),
+    size: backing.size.bind(backing),
+    hasPendingFor: backing.hasPendingFor.bind(backing),
+    readDuePage: backing.readDuePage.bind(backing),
+    listMetadata: backing.listMetadata.bind(backing),
+    dropExpiredMetadata: backing.dropExpiredMetadata.bind(backing),
+    recordRetryFailure: backing.recordRetryFailure.bind(backing),
+    queueStats: backing.queueStats.bind(backing),
+  };
+
+  const outbox = new BoundedProtocolOutbox(store, { backoffs: [17], maxAgeMs: 31 });
+  expect(configured).toMatchObject({ backoffs: [17], maxAgeMs: 31 });
+  expect(configured!.backoffFor(99)).toBe(17);
+  expect(outbox.enqueueFailure('peer', '/test', 'id', new Uint8Array([7]), 'offline', 0))
+    .toMatchObject({ nextAttemptAt: 17 });
+  expect(outbox.dropExpiredMetadata(31)).toEqual([]);
+  expect(outbox.dropExpiredMetadata(32)).toHaveLength(1);
 });
 
 it('validates every required capability at the core construction boundary', () => {

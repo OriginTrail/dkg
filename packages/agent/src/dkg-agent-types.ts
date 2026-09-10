@@ -16,7 +16,9 @@
 
 import type { ethers } from 'ethers';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
-import type { OutboxDrainOptions, OutboxDrainStats } from './p2p/outbox-drain-types.js';
+import type {
+  MessengerOutboxDrainOptions,
+} from './p2p/outbox-drain-types.js';
 import type {
   Quad,
   TripleStore,
@@ -29,7 +31,6 @@ import type {
   DkgNetworkIdentity,
   BoundedProtocolOutboxStore,
   MessageIdempotencyStore,
-  ProtocolOutboxQueueStats,
   SwmSenderKeyPackageAckReasonCode,
   ContextGraphJoinPolicyMode as CoreContextGraphJoinPolicyMode,
   ContextGraphJoinPolicyRecord as CoreContextGraphJoinPolicyRecord,
@@ -1940,11 +1941,10 @@ export interface DKGAgentConfig {
   };
 }
 
-/** Public scheduler bounds for Universal Messenger durable retries. */
-export type MessengerOutboxDrainOptions = OutboxDrainOptions;
-
-/** Fixed-cardinality Universal Messenger scheduler and durable-queue statistics. */
-export interface MessengerOutboxStats extends OutboxDrainStats, ProtocolOutboxQueueStats {}
+export type {
+  MessengerOutboxDrainOptions,
+  MessengerOutboxStats,
+} from './p2p/outbox-drain-types.js';
 
 export interface DKGAgentACKTransportOptions {
   sendTimeoutMs?: number;

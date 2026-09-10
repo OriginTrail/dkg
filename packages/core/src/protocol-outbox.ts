@@ -42,6 +42,7 @@ import type {
   ProtocolOutboxStore,
   ProtocolOutboxPersistence,
   ProtocolOutboxPayloadInspection,
+  ProtocolOutboxPolicyConfiguration,
 } from './messenger-types.js';
 import { RESPONSE_CACHE_BYTES } from './messenger-types.js';
 import { compareCodePoint } from './code-point-order.js';
@@ -133,14 +134,6 @@ function normalizeDuePageLimit(limit: number): number {
   return Math.floor(limit);
 }
 
-interface ProtocolOutboxStorePolicy extends ProtocolOutboxOptions {
-  backoffFor: (attempts: number) => number;
-}
-
-type PolicyAwareProtocolOutboxStore = ProtocolOutboxPersistence & {
-  configurePolicy?: (policy: ProtocolOutboxStorePolicy) => void;
-};
-
 /**
  * Keep compatibility at the constructor boundary. Internally the outbox only
  * sees the current boolean peer-presence contract, while a legacy snapshot
@@ -163,8 +156,7 @@ function normalizeOutboxStore(store: CompatibleProtocolOutboxStore): ProtocolOut
     pendingFor: legacy.pendingFor.bind(legacy),
   };
   if (legacy.duePage) normalized.duePage = legacy.duePage.bind(legacy);
-  const policy = legacy as PolicyAwareProtocolOutboxStore;
-  if (policy.configurePolicy) (normalized as PolicyAwareProtocolOutboxStore).configurePolicy = policy.configurePolicy.bind(legacy);
+  if (legacy.configurePolicy) normalized.configurePolicy = legacy.configurePolicy.bind(legacy);
   return normalized;
 }
 
@@ -187,14 +179,18 @@ class ProtocolOutboxAttempts<Store extends ProtocolOutboxPersistence> {
    */
   private readonly inflight = new Set<string>();
 
-  constructor(store: Store, options: ProtocolOutboxOptions = {}) {
+  constructor(
+    store: Store,
+    options: ProtocolOutboxOptions = {},
+    policyConfiguration?: ProtocolOutboxPolicyConfiguration,
+  ) {
     this.store = store;
     const backoffs = options.backoffs ?? DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS;
     if (backoffs.length === 0) {
       throw new Error('ProtocolOutbox: backoffs must be non-empty');
     }
     this.backoffs = backoffs;
-    (store as PolicyAwareProtocolOutboxStore).configurePolicy?.({
+    policyConfiguration?.configurePolicy({
       backoffs,
       maxAgeMs: options.maxAgeMs ?? DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
       backoffFor: (attempts) => this.backoffFor(attempts),
@@ -279,7 +275,11 @@ class ProtocolOutboxAttempts<Store extends ProtocolOutboxPersistence> {
 /** Compatibility facade for explicit payload snapshots and legacy stores. */
 export class ProtocolOutbox extends ProtocolOutboxAttempts<ProtocolOutboxStore> {
   constructor(store: CompatibleProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
-    super(normalizeOutboxStore(store), options);
+    const normalized = normalizeOutboxStore(store);
+    const policyConfiguration = normalized.configurePolicy
+      ? { configurePolicy: normalized.configurePolicy.bind(normalized) }
+      : undefined;
+    super(normalized, options, policyConfiguration);
   }
 
   /** All due entries in deterministic retry order. */
@@ -350,6 +350,7 @@ const BOUNDED_STORE_METHODS = {
   readDuePage: true, listMetadata: true, dropExpiredMetadata: true,
   recordRetryFailure: true, queueStats: true, hasPendingFor: true,
   enqueue: true, markDelivered: true, hasEntry: true, size: true,
+  configurePolicy: true,
 } satisfies Record<keyof BoundedProtocolOutboxStore, true>;
 
 export function assertBoundedProtocolOutboxStore(store: unknown): asserts store is BoundedProtocolOutboxStore {
@@ -375,7 +376,7 @@ export class BoundedProtocolOutbox extends ProtocolOutboxAttempts<BoundedProtoco
 
   constructor(store: BoundedProtocolOutboxStore, options: ProtocolOutboxOptions = {}) {
     assertBoundedProtocolOutboxStore(store);
-    super(store, options);
+    super(store, options, store);
     this.inspection = protocolOutboxPayloadInspection(store);
   }
 

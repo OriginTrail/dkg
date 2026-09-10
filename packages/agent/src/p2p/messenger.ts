@@ -17,7 +17,10 @@ import {
 import {
   OutboxDrainer,
 } from './outbox-drainer.js';
-import type { MessengerOutboxDrainOptions, MessengerOutboxStats } from '../dkg-agent-types.js';
+import type {
+  MessengerOutboxDrainOptions,
+  MessengerOutboxStats,
+} from './outbox-drain-types.js';
 export {
   DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
   DEFAULT_OUTBOX_DRAIN_CONCURRENCY,

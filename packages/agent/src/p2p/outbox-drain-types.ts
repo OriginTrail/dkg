@@ -1,3 +1,5 @@
+import type { ProtocolOutboxQueueStats } from '@origintrail-official/dkg-core';
+
 /** Scheduler-owned bounds for one Universal Messenger outbox drain. */
 export interface OutboxDrainOptions {
   batchSize?: number;
@@ -18,3 +20,9 @@ export interface OutboxDrainStats {
   skippedOversizedEntriesTotal: number;
   byteBudgetDeferralsTotal: number;
 }
+
+/** Public scheduler bounds for Universal Messenger durable retries. */
+export type MessengerOutboxDrainOptions = OutboxDrainOptions;
+
+/** Fixed-cardinality scheduler and durable-queue statistics. */
+export interface MessengerOutboxStats extends OutboxDrainStats, ProtocolOutboxQueueStats {}

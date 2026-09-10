@@ -285,6 +285,8 @@ export {
   type ProtocolOutboxPageBudget,
   type ProtocolOutboxPage,
   type ProtocolOutboxQueueStats,
+  type ProtocolOutboxPolicyConfiguration,
+  type ProtocolOutboxStorePolicy,
   type BoundedProtocolOutboxStore,
   type ProtocolOutboxPersistence,
   type ProtocolOutboxInspection,

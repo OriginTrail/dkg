@@ -29,7 +29,7 @@ void legacyMessenger; void messengerMetadata; void legacyDue;
 
 // Automatic retries do not require legacy full-payload inspection methods.
 type AutomaticStore = Pick<BoundedProtocolOutboxStore,
-  'enqueue' | 'markDelivered' | 'hasEntry' | 'size' | 'hasPendingFor'
+  'configurePolicy' | 'enqueue' | 'markDelivered' | 'hasEntry' | 'size' | 'hasPendingFor'
   | 'readDuePage' | 'listMetadata' | 'dropExpiredMetadata' | 'recordRetryFailure' | 'queueStats'>;
 declare const automaticOnly: AutomaticStore;
 new Messenger({ router, outboxStore: automaticOnly });

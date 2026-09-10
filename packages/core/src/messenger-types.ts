@@ -193,13 +193,25 @@ export interface ProtocolOutboxQueueStats {
   oversizedDueEntries: number;
 }
 
+/** Retry/retention policy the outbox wrapper installs on its persistence owner. */
+export interface ProtocolOutboxStorePolicy {
+  readonly backoffs: readonly number[];
+  readonly maxAgeMs: number;
+  readonly backoffFor: (attempts: number) => number;
+}
+
+export interface ProtocolOutboxPolicyConfiguration {
+  configurePolicy(policy: ProtocolOutboxStorePolicy): void;
+}
+
 /**
  * Required by automatic Messenger retries. Legacy payload snapshots remain
  * available explicitly, but are never a fallback for these bounded reads.
  * One Messenger owns a store: pages are snapshots, not multi-consumer leases.
  * Rows survive crashes and are removed only after successful delivery or expiry.
  */
-export interface BoundedProtocolOutboxStore extends ProtocolOutboxPersistence {
+export interface BoundedProtocolOutboxStore
+  extends ProtocolOutboxPersistence, ProtocolOutboxPolicyConfiguration {
   /** Boolean peer-presence lookup for recovery bookkeeping. */
   hasPendingFor(peer: string): boolean;
   /**
@@ -307,6 +319,8 @@ export interface ProtocolOutboxInspection extends ProtocolOutboxPayloadInspectio
  * do not need to materialize full payload-bearing peer snapshots.
  */
 export interface ProtocolOutboxStore extends ProtocolOutboxPersistence, ProtocolOutboxInspection {
+  /** Optional only on the legacy payload-inspection facade. */
+  configurePolicy?(policy: ProtocolOutboxStorePolicy): void;
   /** Whether this peer still has any durable row (DHT recovery bookkeeping). */
   hasPendingFor(peer: string): boolean;
 
@@ -322,6 +336,8 @@ export interface ProtocolOutboxStore extends ProtocolOutboxPersistence, Protocol
  * Legacy stores exposed the full peer snapshot instead of a boolean fast path.
  */
 export interface LegacyProtocolOutboxStore extends ProtocolOutboxPersistence, ProtocolOutboxInspection {
+  /** Optional only on the pre-bounded compatibility facade. */
+  configurePolicy?(policy: ProtocolOutboxStorePolicy): void;
   /** Snapshot of one peer's rows, ordered by `firstFailureAt`. */
   pendingFor(peer: string): ProtocolOutboxEntry[];
 

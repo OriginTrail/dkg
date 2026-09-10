@@ -118,6 +118,7 @@ it('carries SDK outbox limits into the real Messenger and exposes queue gauges',
 it('reports payload inspection as unsupported for a bounded-only configured store', async () => {
   const backing = new InMemoryProtocolOutboxStore({ backoffs: [1_000_000_000] });
   const store: BoundedProtocolOutboxStore = {
+    configurePolicy: backing.configurePolicy.bind(backing),
     enqueue: backing.enqueue.bind(backing), markDelivered: backing.markDelivered.bind(backing),
     hasEntry: backing.hasEntry.bind(backing), size: backing.size.bind(backing),
     hasPendingFor: backing.hasPendingFor.bind(backing), readDuePage: backing.readDuePage.bind(backing),
@@ -204,6 +205,7 @@ it('returns empty diagnostics when Messenger has no durable substrate', () => {
 it('drains a custom store that implements only automatic retry capabilities', async () => {
   const backing = new InMemoryProtocolOutboxStore({ backoffs: [10] });
   const store: BoundedProtocolOutboxStore = {
+    configurePolicy: backing.configurePolicy.bind(backing),
     enqueue: backing.enqueue.bind(backing), markDelivered: backing.markDelivered.bind(backing),
     hasEntry: backing.hasEntry.bind(backing), size: backing.size.bind(backing), hasPendingFor: backing.hasPendingFor.bind(backing),
     readDuePage: backing.readDuePage.bind(backing), listMetadata: backing.listMetadata.bind(backing),
@@ -212,7 +214,7 @@ it('drains a custom store that implements only automatic retry capabilities', as
   };
   const send = vi.fn(async () => new Uint8Array());
   const messenger = new Messenger({ router: { send } as unknown as ProtocolRouter, outboxStore: store,
-    idempotencyStore: new InMemoryMessageIdempotencyStore(), clock: () => 10 });
+    idempotencyStore: new InMemoryMessageIdempotencyStore(), clock: () => 10, backoffs: [10] });
   store.enqueue(peer, protocol, 'bounded-only', envelope('bounded-only'), 'offline', 0);
   await messenger.processOutboxTick(10);
   expect(send).toHaveBeenCalledTimes(1);
