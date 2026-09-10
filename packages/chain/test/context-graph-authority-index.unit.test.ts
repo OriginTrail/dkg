@@ -3,10 +3,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  isTrustedContextGraphAuthorityIndexStore,
   normalizeContextGraphAuthorityIndexCheckpoint,
   reduceContextGraphAuthorityIndexPage,
-  trustContextGraphAuthorityIndexStore,
   type ContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index.js';
@@ -46,17 +44,6 @@ function creation(
 }
 
 describe('contract-wide Context Graph authority index reducer', () => {
-  it('requires explicit admission into the local authority trust boundary', () => {
-    const store = {
-      load: async () => undefined,
-      commitPage: async () => true,
-      delete: async () => undefined,
-    };
-    expect(isTrustedContextGraphAuthorityIndexStore(store)).toBe(false);
-    expect(trustContextGraphAuthorityIndexStore(store)).toBe(store);
-    expect(isTrustedContextGraphAuthorityIndexStore(store)).toBe(true);
-  });
-
   it('groups unsorted logs by graph and preserves the authority generation semantics', () => {
     const result = reduceContextGraphAuthorityIndexPage({
       deploymentBlockNumber: 10,

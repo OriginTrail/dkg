@@ -106,12 +106,6 @@ export interface EVMAdapterBaseConfig {
    */
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /**
-   * Durable contract-wide authority index. This is an additive cutover seam;
-   * the v1 per-graph history store remains active until the shared scanner is
-   * enabled by a later milestone.
-   */
-  contextGraphAuthorityIndexStore?: TrustedContextGraphAuthorityIndexStore;
-  /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish
    * signer. Default `0n` (strictly-positive: a wallet at exactly zero gas is

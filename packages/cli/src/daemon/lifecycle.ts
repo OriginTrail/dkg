@@ -98,7 +98,6 @@ import {
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
   SqliteContextGraphAuthorityHistoryStore,
-  SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
   type MetricsSource,

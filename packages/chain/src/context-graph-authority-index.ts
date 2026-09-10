@@ -37,7 +37,8 @@ export interface ContextGraphAuthorityIndexCheckpoint {
  * a stale provider completion to reload instead of regressing newer progress.
  */
 export interface ContextGraphAuthorityIndexStore {
-  load(scope: string): Promise<ContextGraphAuthorityIndexCheckpoint | undefined>;
+  /** Opaque durable input; the chain-owned decoder is the sole read boundary. */
+  load(scope: string): Promise<unknown>;
   commitPage(
     scope: string,
     expected: ContextGraphAuthorityIndexCursor | undefined,
@@ -45,36 +46,6 @@ export interface ContextGraphAuthorityIndexStore {
     changedStates: readonly ContextGraphAuthorityIndexState[],
   ): Promise<boolean>;
   delete(scope: string): Promise<void>;
-}
-
-declare const TRUSTED_AUTHORITY_INDEX_STORE: unique symbol;
-
-/**
- * Contract-wide generations are authority-bearing historical aggregates.
- * Only process-owned storage inside the node's local integrity boundary may be
- * admitted here; a remote/shared implementation must not be trusted merely
- * because it satisfies the structural store interface.
- */
-export interface TrustedContextGraphAuthorityIndexStore
-  extends ContextGraphAuthorityIndexStore {
-  readonly [TRUSTED_AUTHORITY_INDEX_STORE]: true;
-}
-
-const trustedAuthorityIndexStores = new WeakSet<object>();
-
-/** Explicitly admit a process-owned backend into the authority trust boundary. */
-export function trustContextGraphAuthorityIndexStore<T extends ContextGraphAuthorityIndexStore>(
-  store: T,
-): T & TrustedContextGraphAuthorityIndexStore {
-  trustedAuthorityIndexStores.add(store);
-  return store as T & TrustedContextGraphAuthorityIndexStore;
-}
-
-/** Runtime guard for composition points that retain the trusted store. */
-export function isTrustedContextGraphAuthorityIndexStore(
-  store: ContextGraphAuthorityIndexStore,
-): store is TrustedContextGraphAuthorityIndexStore {
-  return trustedAuthorityIndexStores.has(store);
 }
 
 interface ContextGraphAuthorityIndexEventBase {

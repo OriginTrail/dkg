@@ -25,11 +25,6 @@ describe('DKGAgent chain cursor wiring', () => {
       save: vi.fn(async () => {}),
       delete: vi.fn(async () => {}),
     };
-    const authorityIndexStore = {
-      load: vi.fn(async () => undefined),
-      commitPage: vi.fn(async () => true),
-      delete: vi.fn(async () => {}),
-    };
 
     agent = await DKGAgent.create({
       name: 'RegistryCursorWiring',
