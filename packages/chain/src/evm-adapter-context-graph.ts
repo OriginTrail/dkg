@@ -20,6 +20,12 @@ import {
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
+import {
+  resolveContextGraphAuthorityHistory,
+  type ContextGraphAuthorityHistoryCreationEvent,
+  type ContextGraphAuthorityHistoryEvent,
+  type ContextGraphAuthorityHistoryEventQuery,
+} from './context-graph-authority-history.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -923,79 +929,92 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           string,
           (...args: unknown[]) => ethers.DeferredTopicFilter
         >;
-        const contractAddress = await contract.getAddress();
-        const { fromBlock } = await this.resolveContractDeployBlock(
-          contractAddress,
-          'getContextGraphAuthoritySnapshot',
-          'ContextGraphStorage',
-        );
-        const readLogs = async (name: string, ...args: unknown[]) => {
-          const filter = filters[name]!(...args);
-          const logs: Array<ethers.EventLog | ethers.Log> = [];
-          // Production RPCs commonly cap eth_getLogs ranges. Keep every read
-          // deployment-anchored and page-bounded while all state and event
-          // results remain pinned to the single finalized anchor selected
-          // above. The exact Context Graph stays encoded in each filter.
-          for (
-            let lo = fromBlock;
-            lo <= finalized.number;
-            lo += this.cgRegistryScanPageSize
-          ) {
-            options.signal?.throwIfAborted();
-            const hi = Math.min(
-              lo + this.cgRegistryScanPageSize - 1,
-              finalized.number,
-            );
-            logs.push(...await contract.queryFilter(filter, lo, hi));
+        const contractAddress = (await contract.getAddress()).toLowerCase();
+        const cache = this.contextGraphAuthorityHistory;
+        const cacheKey = `${contractAddress}:${contextGraphId.toString(10)}`;
+        const authorityFilters = new Map<string, ethers.DeferredTopicFilter>();
+        const readAuthorityEvents = async (
+          name: 'ContextGraphCreated' | ContextGraphAuthorityHistoryEventQuery['name'],
+          targetContextGraphId: bigint,
+          fromBlock: number,
+          toBlock: number,
+        ): Promise<ethers.EventLog[]> => {
+          let filter = authorityFilters.get(name);
+          if (filter === undefined) {
+            filter = name === 'Transfer'
+              ? filters[name]!(null, null, targetContextGraphId)
+              : filters[name]!(targetContextGraphId);
+            authorityFilters.set(name, filter);
           }
-          return logs;
+          return (await contract.queryFilter(filter, fromBlock, toBlock))
+            .map((rawEvent) => rawEvent as ethers.EventLog);
         };
-        const [
-          current,
-          created,
-          transfers,
-          publishPolicyUpdates,
-          publishAuthorityUpdates,
-          participantAdds,
-          participantRemoves,
-        ] = await Promise.all([
+        const [current, historyResolution] = await Promise.all([
           (contract as any).getContextGraph.staticCall(
             contextGraphId,
             { blockTag: finalized.number },
           ),
-          readLogs('ContextGraphCreated', contextGraphId),
-          readLogs('Transfer', null, null, contextGraphId),
-          readLogs('PublishPolicyUpdated', contextGraphId),
-          readLogs('PublishAuthorityUpdated', contextGraphId),
-          readLogs('AgentParticipantAdded', contextGraphId),
-          readLogs('AgentParticipantRemoved', contextGraphId),
+          resolveContextGraphAuthorityHistory({
+            cache,
+            cacheKey,
+            readScope: provider,
+            contextGraphId,
+            finalized: { number: finalized.number, hash: finalized.hash },
+            pageSize: this.cgRegistryScanPageSize,
+            signal: options.signal,
+            loadColdFromBlock: async () => (await this.resolveContractDeployBlock(
+              contractAddress,
+              'getContextGraphAuthoritySnapshot',
+              'ContextGraphStorage',
+            )).fromBlock,
+            readBlockHash: async (blockNumber) => (
+              (await provider.getBlock(blockNumber))?.hash ?? null
+            ),
+            readCreationEvents: async (targetContextGraphId, fromBlock, toBlock) => (
+              readAuthorityEvents(
+                'ContextGraphCreated',
+                targetContextGraphId,
+                fromBlock,
+                toBlock,
+              ).then((events): ContextGraphAuthorityHistoryCreationEvent[] => events.map((event) => ({
+                blockNumber: event.blockNumber,
+                blockHash: event.blockHash,
+                index: event.index,
+                nameHash: String(event.args.nameHash ?? event.args[2]).toLowerCase(),
+              })))
+            ),
+            readEvents: async (query: ContextGraphAuthorityHistoryEventQuery, fromBlock, toBlock) => {
+              const { name } = query;
+              const rawEvents = await readAuthorityEvents(
+                name,
+                query.contextGraphId,
+                fromBlock,
+                toBlock,
+              );
+              const normalized: ContextGraphAuthorityHistoryEvent[] = [];
+              for (const rawEvent of rawEvents) {
+                const event = rawEvent;
+                if (name === 'Transfer') {
+                  const from = String(event.args.from ?? event.args[0]).toLowerCase();
+                  const to = String(event.args.to ?? event.args[1]).toLowerCase();
+                  if (!ethers.isAddress(from)
+                    || !ethers.isAddress(to)
+                    || from === ethers.ZeroAddress
+                    || to === ethers.ZeroAddress
+                    || from === to) continue;
+                }
+                normalized.push({
+                  blockNumber: event.blockNumber,
+                  blockHash: event.blockHash,
+                  index: event.index,
+                });
+              }
+              return normalized;
+            },
+          }),
         ]);
         options.signal?.throwIfAborted();
-        if (created.length !== 1) {
-          throw new Error(
-            `Context Graph ${contextGraphId.toString()} has ${created.length} finalized creation events`,
-          );
-        }
-        const creationEvent = created[0] as ethers.EventLog;
-        const post = await provider.getBlock(finalized.number);
-        if (post?.hash?.toLowerCase() !== finalized.hash.toLowerCase()) {
-          throw new Error('finalized Context Graph authority anchor changed during resolution');
-        }
-        const ownershipTransfers = transfers.filter((event) => {
-          const transfer = event as ethers.EventLog;
-          const from = String(transfer.args.from ?? transfer.args[0]).toLowerCase();
-          const to = String(transfer.args.to ?? transfer.args[1]).toLowerCase();
-          return ethers.isAddress(from)
-            && ethers.isAddress(to)
-            && from !== ethers.ZeroAddress
-            && to !== ethers.ZeroAddress
-            && from !== to;
-        });
-        const policyEvents = [...created, ...ownershipTransfers, ...publishPolicyUpdates,
-          ...publishAuthorityUpdates].sort((left, right) => (
-          left.blockNumber - right.blockNumber || left.index - right.index
-        ));
-        const source = policyEvents.at(-1)!;
+        const nextHistory = historyResolution.state;
         const participantAgents = [...(current.participantAgents ?? current[1] ?? [])]
           .map((address) => String(address).toLowerCase())
           .sort();
@@ -1003,10 +1022,10 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         const accessPolicy = Number(BigInt(current.accessPolicy ?? current[5]));
         const publishPolicy = Number(BigInt(current.publishPolicy ?? current[6]));
         const authorityRaw = String(current.publishAuthority ?? current[7]).toLowerCase();
-        const ownershipEra = ownershipTransfers.length;
-        return Object.freeze({
-          chainId: (await provider.getNetwork()).chainId.toString(10),
-          governanceContract: (await contract.getAddress()).toLowerCase(),
+        const chainId = (await provider.getNetwork()).chainId.toString(10);
+        const snapshot: ContextGraphAuthoritySnapshot = Object.freeze({
+          chainId,
+          governanceContract: contractAddress,
           contextGraphId: contextGraphId.toString(10),
           owner,
           active: Boolean(current.active ?? current[3]),
@@ -1016,17 +1035,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           publishAuthorityAccountId:
             BigInt(current.publishAuthorityAccountId ?? current[8]).toString(10),
           participantAgents: Object.freeze(participantAgents),
-          nameHash: String(creationEvent.args[2]).toLowerCase(),
-          ownershipEra: ownershipEra.toString(10),
-          policyVersion: (
-            ownershipEra + publishPolicyUpdates.length + publishAuthorityUpdates.length
-          ).toString(10),
-          rosterVersion: (
-            ownershipEra + participantAdds.length + participantRemoves.length
-          ).toString(10),
-          sourceBlockNumber: source.blockNumber.toString(10),
-          sourceBlockHash: source.blockHash.toLowerCase(),
+          nameHash: nextHistory.nameHash,
+          ownershipEra: nextHistory.ownershipEra.toString(10),
+          policyVersion: nextHistory.policyVersion.toString(10),
+          rosterVersion: nextHistory.rosterVersion.toString(10),
+          sourceBlockNumber: nextHistory.sourceBlockNumber.toString(10),
+          sourceBlockHash: nextHistory.sourceBlockHash,
         });
+        // Publish only after every returned field is decoded, and perform the
+        // final anchor check after the concurrent current-state read settles.
+        await historyResolution.publish();
+        return snapshot;
       },
       { signal: options.signal },
     );
