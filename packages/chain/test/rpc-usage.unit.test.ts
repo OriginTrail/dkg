@@ -23,6 +23,7 @@ import {
   boundedRpcEndpointSlotLabel,
   boundedRpcMethodLabel,
   mergeRpcUsageWindows,
+  normalizeRpcEndpointSlotLabel,
   normalizeRpcUsageWindow,
   normalizeRpcUsageConsumer,
   rpcUsageWindowTotal,
@@ -122,9 +123,8 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     servers.push(rpc);
     const provider = createCountingJsonRpcProvider(
       rpc.url,
-      0,
       new RpcUsageTracker(() => 'evm:31337'),
-      { batchMaxCount: 1 },
+      { maxRetries: 0, providerOptions: { batchMaxCount: 1 } },
     );
     const controller = new AbortController();
     const timeoutError = createRpcTimeoutError('authentication attempt timed out');
@@ -403,7 +403,10 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(merged).toEqual({
       byMethod: { eth_call: 8, eth_estimateGas: 2, eth_sendRawTransaction: 4 },
       ethCallByConsumer: { 'pcaNFT.getAccountInfo': 3, 'token.balanceOf': 2 },
-      ethGetLogsByConsumerAndEndpointSlot: {},
+      attributions: [
+        { method: 'eth_call', consumer: 'pcaNFT.getAccountInfo', count: 3 },
+        { method: 'eth_call', consumer: 'token.balanceOf', count: 2 },
+      ],
       lifetimeTotal: 150,
     });
   });
@@ -419,20 +422,25 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const empty = {
       byMethod: {},
       ethCallByConsumer: {},
-      ethGetLogsByConsumerAndEndpointSlot: {},
+      attributions: [],
       lifetimeTotal: 0,
     };
-    expect(mergeRpcUsageWindows(undefined, w, undefined)).toEqual(w);
+    expect(mergeRpcUsageWindows(undefined, w, undefined)).toEqual({
+      byMethod: { eth_call: 1 },
+      ethCallByConsumer: {},
+      attributions: [],
+      lifetimeTotal: 1,
+    });
     expect(mergeRpcUsageWindows(legacy)).toEqual({
       byMethod: { eth_call: 2 },
       ethCallByConsumer: {},
-      ethGetLogsByConsumerAndEndpointSlot: {},
+      attributions: [],
       lifetimeTotal: 2,
     });
     expect(normalizeRpcUsageWindow(legacy)).toEqual({
       byMethod: { eth_call: 2 },
       ethCallByConsumer: {},
-      ethGetLogsByConsumerAndEndpointSlot: {},
+      attributions: [],
       lifetimeTotal: 2,
     });
     expect(mergeRpcUsageWindows(undefined, undefined)).toEqual(empty);
@@ -450,7 +458,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(mergeRpcUsageWindows(drainable.drainRpcUsage(), adapter.drainRpcUsage?.())).toEqual({
       byMethod: { eth_call: 1, eth_getLogs: 2 },
       ethCallByConsumer: {},
-      ethGetLogsByConsumerAndEndpointSlot: {},
+      attributions: [],
       lifetimeTotal: 3,
     });
   });
@@ -556,6 +564,10 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(boundedRpcEndpointSlotLabel(-1)).toBe('other');
     expect(boundedRpcEndpointSlotLabel(undefined)).toBe('other');
     expect(boundedRpcEndpointSlotLabel(Number.NaN)).toBe('other');
+    expect(normalizeRpcEndpointSlotLabel('primary')).toBe('primary');
+    expect(normalizeRpcEndpointSlotLabel('fallback_15')).toBe('fallback_15');
+    expect(normalizeRpcEndpointSlotLabel('fallback_16')).toBe('other');
+    expect(normalizeRpcEndpointSlotLabel('https://secret.example/rpc')).toBe('other');
   });
 
   it('attributes every eth_getLogs request, including unscoped calls, without changing the aggregate', () => {
@@ -568,14 +580,14 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
 
     const w = t.drainWindow();
     expect(w.byMethod.eth_getLogs).toBe(3);
-    expect(w.ethGetLogsByConsumerAndEndpointSlot).toEqual({
-      'cg.authority.history': { primary: 1, fallback_1: 1 },
-      unattributed: { primary: 1 },
-    });
-    expect(Object.values(w.ethGetLogsByConsumerAndEndpointSlot)
-      .flatMap((bySlot) => Object.values(bySlot))
-      .reduce((sum, count) => sum + count, 0)).toBe(w.byMethod.eth_getLogs);
-    expect(t.drainWindow().ethGetLogsByConsumerAndEndpointSlot).toEqual({});
+    expect(w.attributions).toEqual([
+      { method: 'eth_getLogs', consumer: 'cg.authority.history', endpointSlot: 'primary', count: 1 },
+      { method: 'eth_getLogs', consumer: 'cg.authority.history', endpointSlot: 'fallback_1', count: 1 },
+      { method: 'eth_getLogs', consumer: 'unattributed', endpointSlot: 'primary', count: 1 },
+    ]);
+    expect(w.attributions.reduce((sum, attribution) => sum + attribution.count, 0))
+      .toBe(w.byMethod.eth_getLogs);
+    expect(t.drainWindow().attributions).toEqual([]);
   });
 
   it('caps distinct eth_getLogs consumer/slot pairs and reconciles overflow to other/other', () => {
@@ -587,12 +599,15 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     withRpcUsageConsumer('consumer.0', () => t.record('eth_getLogs', 0));
 
     const w = t.drainWindow();
-    const pairs = Object.values(w.ethGetLogsByConsumerAndEndpointSlot)
-      .flatMap((bySlot) => Object.values(bySlot));
-    expect(pairs).toHaveLength(max + 1);
-    expect(w.ethGetLogsByConsumerAndEndpointSlot['consumer.0'].primary).toBe(2);
-    expect(w.ethGetLogsByConsumerAndEndpointSlot.other.other).toBe(4);
-    expect(pairs.reduce((sum, count) => sum + count, 0)).toBe(max + 5);
+    expect(w.attributions).toHaveLength(max + 1);
+    expect(w.attributions).toContainEqual({
+      method: 'eth_getLogs', consumer: 'consumer.0', endpointSlot: 'primary', count: 2,
+    });
+    expect(w.attributions).toContainEqual({
+      method: 'eth_getLogs', consumer: 'other', endpointSlot: 'other', count: 4,
+    });
+    expect(w.attributions.reduce((sum, attribution) => sum + attribution.count, 0))
+      .toBe(max + 5);
     expect(w.byMethod.eth_getLogs).toBe(max + 5);
   });
 
@@ -616,10 +631,11 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     )).toEqual({
       byMethod: { eth_getLogs: 7 },
       ethCallByConsumer: {},
-      ethGetLogsByConsumerAndEndpointSlot: {
-        'cg.authority.history': { primary: 3, fallback_1: 1 },
-        'cg.subscription.events': { fallback_1: 3 },
-      },
+      attributions: [
+        { method: 'eth_getLogs', consumer: 'cg.authority.history', endpointSlot: 'primary', count: 3 },
+        { method: 'eth_getLogs', consumer: 'cg.authority.history', endpointSlot: 'fallback_1', count: 1 },
+        { method: 'eth_getLogs', consumer: 'cg.subscription.events', endpointSlot: 'fallback_1', count: 3 },
+      ],
       lifetimeTotal: 7,
     });
   });
@@ -648,13 +664,13 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(primaryHits).toBe(1);
     expect(backupHits).toBe(1);
     expect(usage.byMethod.eth_getLogs).toBe(primaryHits + backupHits);
-    expect(usage.ethGetLogsByConsumerAndEndpointSlot['unit.getLogs.failover']).toEqual({
-      primary: primaryHits,
-      fallback_1: backupHits,
-    });
-    expect(JSON.stringify(usage.ethGetLogsByConsumerAndEndpointSlot))
+    expect(usage.attributions).toEqual([
+      { method: 'eth_getLogs', consumer: 'unit.getLogs.failover', endpointSlot: 'primary', count: primaryHits },
+      { method: 'eth_getLogs', consumer: 'unit.getLogs.failover', endpointSlot: 'fallback_1', count: backupHits },
+    ]);
+    expect(JSON.stringify(usage.attributions))
       .not.toContain(primary.url);
-    expect(JSON.stringify(usage.ethGetLogsByConsumerAndEndpointSlot))
+    expect(JSON.stringify(usage.attributions))
       .not.toContain(backup.url);
   }, 30_000);
 
@@ -664,11 +680,8 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const tracker = new RpcUsageTracker(() => 'evm:31337');
     const provider = createCountingJsonRpcProvider(
       rpc.url,
-      1,
       tracker,
-      { batchMaxCount: 1 },
-      undefined,
-      3,
+      { maxRetries: 1, providerOptions: { batchMaxCount: 1 }, endpointSlot: 3 },
     );
 
     try {
@@ -681,8 +694,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       const hits = rpc.hits('eth_getLogs');
       expect(hits).toBe(2);
       expect(usage.byMethod.eth_getLogs).toBe(hits);
-      expect(usage.ethGetLogsByConsumerAndEndpointSlot['unit.getLogs.retry'])
-        .toEqual({ fallback_3: hits });
+      expect(usage.attributions).toEqual([
+        { method: 'eth_getLogs', consumer: 'unit.getLogs.retry', endpointSlot: 'fallback_3', count: hits },
+      ]);
     } finally {
       provider.destroy();
     }

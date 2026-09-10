@@ -16,6 +16,7 @@
  */
 
 import {
+  normalizeRpcEndpointSlotLabel,
   normalizeRpcUsageWindow,
   rpcUsageWindowTotal,
   type RpcUsageDrainable,
@@ -25,15 +26,6 @@ import {
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
 function safeToken(value: string, fallback: string): string {
   return /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : fallback;
-}
-
-/** Accept only tracker-owned slot labels. Never pass a URL/hostname through. */
-function safeEndpointSlot(value: string): string {
-  return value === 'primary'
-    || value === 'other'
-    || /^fallback_(?:[1-9]|1[0-5])$/.test(value)
-    ? value
-    : 'other';
 }
 
 /**
@@ -55,41 +47,35 @@ export function formatRpcUsageLines(
     if (!Number.isFinite(count) || count <= 0) continue;
     lines.push(`rpc_usage method=${safeToken(method, 'other')} count=${Math.floor(count)} window_s=${windowSeconds}${chain}`);
   }
-  for (const [consumer, count] of Object.entries(normalized.ethCallByConsumer)) {
-    if (!Number.isFinite(count) || count <= 0) continue;
-    lines.push(
-      `rpc_usage_by_consumer method=eth_call consumer=${safeToken(consumer, 'other')} ` +
-      `count=${Math.floor(count)} window_s=${windowSeconds}${chain}`,
-    );
-  }
-  const getLogsLines = new Map<string, {
+  const attributionLines = new Map<string, {
+    method: 'eth_call' | 'eth_getLogs';
     consumer: string;
-    endpointSlot: string;
+    endpointSlot?: string;
     count: number;
   }>();
-  for (const [consumer, byEndpointSlot] of Object.entries(
-    normalized.ethGetLogsByConsumerAndEndpointSlot,
-  )) {
-    for (const [endpointSlot, count] of Object.entries(byEndpointSlot)) {
-      if (!Number.isFinite(count) || count <= 0) continue;
-      const safeConsumer = safeToken(consumer, 'other');
-      const safeSlot = safeEndpointSlot(endpointSlot);
-      const key = `${safeConsumer}\0${safeSlot}`;
-      const existing = getLogsLines.get(key);
-      if (existing) existing.count += Math.floor(count);
-      else {
-        getLogsLines.set(key, {
-          consumer: safeConsumer,
-          endpointSlot: safeSlot,
-          count: Math.floor(count),
-        });
-      }
+  for (const attribution of normalized.attributions) {
+    if (!Number.isFinite(attribution.count) || attribution.count <= 0) continue;
+    const consumer = safeToken(attribution.consumer, 'other');
+    const endpointSlot = attribution.method === 'eth_getLogs'
+      ? normalizeRpcEndpointSlotLabel(attribution.endpointSlot)
+      : undefined;
+    const key = `${attribution.method}\0${consumer}\0${endpointSlot ?? ''}`;
+    const existing = attributionLines.get(key);
+    if (existing) existing.count += Math.floor(attribution.count);
+    else {
+      attributionLines.set(key, {
+        method: attribution.method,
+        consumer,
+        ...(endpointSlot ? { endpointSlot } : {}),
+        count: Math.floor(attribution.count),
+      });
     }
   }
-  for (const { consumer, endpointSlot, count } of getLogsLines.values()) {
+  for (const { method, consumer, endpointSlot, count } of attributionLines.values()) {
     lines.push(
-      `rpc_usage_by_consumer method=eth_getLogs consumer=${consumer} ` +
-      `endpoint_slot=${endpointSlot} count=${count} window_s=${windowSeconds}${chain}`,
+      `rpc_usage_by_consumer method=${method} consumer=${consumer} ` +
+      `${endpointSlot ? `endpoint_slot=${endpointSlot} ` : ''}` +
+      `count=${count} window_s=${windowSeconds}${chain}`,
     );
   }
   return lines;

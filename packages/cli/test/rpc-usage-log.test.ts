@@ -52,11 +52,12 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     const lines = formatRpcUsageLines(
       {
         byMethod: { eth_call: 42, eth_getLogs: 7 },
-        ethCallByConsumer: {
-          'pcaNFT.getAccountInfo': 30,
-          'Hub.getContractAddress_Token': 12,
-          unsafe_consumer: 0,
-        },
+        ethCallByConsumer: {},
+        attributions: [
+          { method: 'eth_call', consumer: 'pcaNFT.getAccountInfo', count: 30 },
+          { method: 'eth_call', consumer: 'Hub.getContractAddress_Token', count: 12 },
+          { method: 'eth_call', consumer: 'unsafe_consumer', count: 0 },
+        ],
         lifetimeTotal: 49,
       },
       60,
@@ -94,10 +95,11 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     const lines = formatRpcUsageLines(
       {
         byMethod: { eth_getLogs: 7 },
-        ethGetLogsByConsumerAndEndpointSlot: {
-          getContextGraphAuthoritySnapshot: { primary: 2, fallback_1: 3 },
-          unattributed: { fallback_2: 2 },
-        },
+        attributions: [
+          { method: 'eth_getLogs', consumer: 'getContextGraphAuthoritySnapshot', endpointSlot: 'primary', count: 2 },
+          { method: 'eth_getLogs', consumer: 'getContextGraphAuthoritySnapshot', endpointSlot: 'fallback_1', count: 3 },
+          { method: 'eth_getLogs', consumer: 'unattributed', endpointSlot: 'fallback_2', count: 2 },
+        ],
         lifetimeTotal: 7,
       },
       60,

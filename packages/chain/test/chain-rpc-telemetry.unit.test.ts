@@ -174,9 +174,12 @@ describe('chain RPC telemetry — real readContractWith emits bounded labels', (
 
     const usage = a.drainRpcUsage();
     expect(usage.byMethod.eth_getLogs).toBe(1);
-    expect(usage.ethGetLogsByConsumerAndEndpointSlot).toEqual({
-      getMaxKaNumberForAuthor_KnowledgeAssetCreated: { primary: 1 },
-    });
+    expect(usage.attributions).toEqual([{
+      method: 'eth_getLogs',
+      consumer: 'getMaxKaNumberForAuthor_KnowledgeAssetCreated',
+      endpointSlot: 'primary',
+      count: 1,
+    }]);
     a.destroy?.();
   });
 
