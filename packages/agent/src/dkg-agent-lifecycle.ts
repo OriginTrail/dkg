@@ -10,6 +10,7 @@
 
 import {
   traverseBoundedCuratorRoster,
+  curatorRosterResolution,
   type BoundedCuratorRosterTraversal,
 } from './bounded-curator-roster-traversal.js';
 import { createHash } from 'node:crypto';
@@ -7293,6 +7294,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     legacyTripleResolved: boolean;
     lookupFailed?: boolean;
     rosterTraversal?: BoundedCuratorRosterTraversal;
+    /** @deprecated Prefer rosterTraversal for bounded roster state. */
+    overflowed?: boolean;
+    /** @deprecated Prefer rosterTraversal for bounded roster state. */
+    nextPageAfterPeerId?: string;
   }> {
     const assertCurrent = (): void => {
       if (options.signal?.aborted || options.isCurrent?.() === false) {
@@ -7310,6 +7315,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         peerIds: string[];
         lookupFailed: boolean;
         rosterTraversal?: BoundedCuratorRosterTraversal;
+        overflowed?: boolean;
+        nextPageAfterPeerId?: string;
       }> => {
         assertCurrent();
         try {
@@ -7322,13 +7329,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 pagePeerIds: options.pagePeerIds,
                 afterPeerId: options.afterPeerId,
                 signal: options.signal,
+                isCurrent: options.isCurrent,
               },
             );
             assertCurrent();
             return {
-              peerIds: rosterTraversal.peerIds,
+              ...curatorRosterResolution(rosterTraversal),
               lookupFailed: false,
-              rosterTraversal,
             };
           }
 
@@ -7388,6 +7395,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         curatorIsLocal: false,
         legacyTripleResolved: false,
         ...(resolution.lookupFailed ? { lookupFailed: true } : {}),
+        ...(resolution.overflowed ? { overflowed: true } : {}),
+        ...(resolution.nextPageAfterPeerId
+          ? { nextPageAfterPeerId: resolution.nextPageAfterPeerId }
+          : {}),
         ...(resolution.rosterTraversal
           ? { rosterTraversal: resolution.rosterTraversal }
           : {}),

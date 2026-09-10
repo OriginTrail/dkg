@@ -2733,7 +2733,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect((internals as any).vmReconcileCuratorPeersByCg.get(localCgId)).toEqual(curators);
   });
 
-  it('rotates a bounded oversized-roster transport window without treating it as absence proof', async () => {
+  it.each(['legacy', 'traversal'] as const)('rotates a bounded oversized-roster transport window using %s state without treating it as absence proof', async (mode) => {
     const rosterDescriptor = Object.getOwnPropertyDescriptor(
       DKGAgentBase,
       'VM_RECONCILE_EXACT_ROSTER_MAX',
@@ -2756,11 +2756,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
       };
       let resolutions = 0;
+      const requestedCursors: Array<string | undefined> = [];
       (internals as any).resolveCuratorPeerIdsForCg = async (
         _cgId: string,
         options: { afterPeerId?: string },
       ) => {
         resolutions += 1;
+        requestedCursors.push(options.afterPeerId);
         const previousIndex = options.afterPeerId
           ? overflowPeers.indexOf(options.afterPeerId)
           : -1;
@@ -2769,11 +2771,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           peerIds: [peerId],
           curatorIsLocal: false,
           legacyTripleResolved: false,
-          rosterTraversal: {
-            status: 'continue',
-            peerIds: [peerId],
-            nextAfterPeerId: peerId,
-          },
+          overflowed: true,
+          nextPageAfterPeerId: peerId,
+          ...(mode === 'traversal' ? {
+            rosterTraversal: peerId === overflowPeers[4]
+              ? { status: 'cycle', peerIds: [peerId] }
+              : { status: 'continue', peerIds: [peerId], nextAfterPeerId: peerId },
+          } : {}),
         };
       };
       (internals as any).ensurePeerConnected = async (peerId: string) => {
@@ -2784,12 +2788,15 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       (internals as any).ensurePeerAdmittedForRecovery = async () => true;
       const fetches: string[] = [];
       const target = vmRecoveryTarget(localCgId, 0, 'roster-overflow');
-      const holderPeerId = overflowPeers[4]!;
+      // The first peer gains the asset during the walk. A complete cycle must
+      // return to it; an unconfirmed tail must neither suppress the target nor
+      // leave the owner querying a synthetic cursor after the final peer.
+      const holderPeerId = overflowPeers[0]!;
       let lastPeerId: string | undefined;
       (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
         fetches.push(peerId);
         lastPeerId = peerId;
-        const found = peerId === holderPeerId;
+        const found = peerId === holderPeerId && resolutions === 6;
         return {
           result: {
             fetchedDataTriples: found ? 1 : 0,
@@ -2801,7 +2808,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         };
       };
       (internals as any).reconcileChainOrdinal = async () => (
-        lastPeerId === holderPeerId
+        lastPeerId === holderPeerId && resolutions === 6
           ? { status: 'reconciled', blockNumber: 100 }
           : { status: 'pending', recovery: target }
       );
@@ -2815,21 +2822,27 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       );
 
       let result;
-      for (let pass = 0; pass < 5; pass += 1) {
+      for (let pass = 0; pass < 6; pass += 1) {
         result = await internals.recoverVmReconcileBatch(
           localCgId, 1n, [target], 100, () => true,
         );
-        if (pass < 4) {
+        if (pass < 5) {
           const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
           expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
             phase: 'collecting', curatorRosterConfirmed: false,
           });
           (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
+          if (mode === 'traversal' && pass === 4) {
+            expect((internals as any).vmReconcileCuratorPageCursorByCg.has(localCgId)).toBe(false);
+          }
         }
       }
 
-      expect(resolutions).toBe(5);
-      expect(fetches).toEqual(overflowPeers);
+      expect(resolutions).toBe(6);
+      expect(fetches).toEqual([...overflowPeers, overflowPeers[0]]);
+      expect(requestedCursors).toEqual([
+        undefined, ...overflowPeers.slice(0, 4), mode === 'traversal' ? undefined : overflowPeers[4],
+      ]);
       expect(result?.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
     } finally {
       Object.defineProperty(

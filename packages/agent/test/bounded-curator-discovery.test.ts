@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, type AgentPeerDiscovery, type AgentPeerPage } from '../src/index.js';
-import { readAgentPeerPage } from '../src/agent-peer-discovery.js';
-import { resolveCuratorSyncPeer } from '../src/dkg-agent-cg-resolve.js';
+import { readAgentPeerPage, validateAgentPeerPage } from '../src/agent-peer-discovery.js';
+import { traverseBoundedCuratorRoster } from '../src/bounded-curator-roster-traversal.js';
+import { authoritativeSyncPeerId, resolveCuratorSyncPeer } from '../src/dkg-agent-cg-resolve.js';
 
 const WALLET = '0x00000000000000000000000000000000000000ab';
 const CG = `${WALLET}/bounded-curator`;
@@ -64,35 +65,28 @@ describe('bounded curator discovery contract', () => {
       .mockResolvedValueOnce({ peerIds: ['peer-004'], nextAfterPeerId: null });
     const first = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2 });
     expect(first).toMatchObject({
-      rosterTraversal: { status: 'continue', nextAfterPeerId: 'peer-003' },
+      overflowed: true, nextPageAfterPeerId: 'peer-003',
+      rosterTraversal: { status: 'continue', peerIds: ['peer-001', 'peer-003'], nextAfterPeerId: 'peer-003' },
     });
     // Earlier peers may have been deleted and new peers inserted before the
     // cursor. This tail query says nothing about those unobserved entries.
-    const nextAfterPeerId = first.rosterTraversal?.status === 'continue'
-      ? first.rosterTraversal.nextAfterPeerId
-      : undefined;
-    const tail = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2, afterPeerId: nextAfterPeerId });
+    const tail = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2, afterPeerId: first.nextPageAfterPeerId });
     expect(tail).toMatchObject({
-      peerIds: ['peer-004'],
-      rosterTraversal: { status: 'cycle' },
+      peerIds: ['peer-004'], overflowed: true, nextPageAfterPeerId: 'peer-004',
+      rosterTraversal: { status: 'cycle', peerIds: ['peer-004'] },
     });
     expect(pages).toHaveBeenCalledTimes(2);
   });
 
-  it('returns cursor restart to the recovery owner after an exhausted tail', async () => {
+  it('wraps an exhausted cursor through a fresh bounded first-page query', async () => {
     const agent = await createAgent();
     const pages = vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress')
       .mockResolvedValueOnce(EMPTY)
       .mockResolvedValueOnce({ peerIds: ['peer-002'], nextAfterPeerId: null });
-    const exhausted = await agent.resolveCuratorPeerIdsForCg(CG, {
-      maxPeerIds: 2, pagePeerIds: 1, afterPeerId: 'peer-099',
-    });
-    expect(exhausted).toMatchObject({
-      peerIds: [], rosterTraversal: { status: 'cycle' },
-    });
-    const restarted = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2, pagePeerIds: 1 });
-    expect(restarted).toMatchObject({
-      peerIds: ['peer-002'], rosterTraversal: { status: 'complete' },
+    const result = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2, pagePeerIds: 1, afterPeerId: 'peer-099' });
+    expect(result).toEqual({
+      peerIds: ['peer-002'], curatorIsLocal: false, legacyTripleResolved: false,
+      rosterTraversal: { status: 'complete', peerIds: ['peer-002'] },
     });
     expect(pages.mock.calls.map(([, request]) => request)).toEqual([
       { limit: 1, afterPeerId: 'peer-099', signal: undefined },
@@ -126,6 +120,14 @@ describe('bounded curator discovery contract', () => {
   });
 
   it.each([
+    null,
+    undefined,
+    'page',
+    [],
+    {},
+    { peerIds: 'peer-001', nextAfterPeerId: null },
+    { peerIds: [1], nextAfterPeerId: null },
+    { peerIds: ['peer-001'], nextAfterPeerId: 1 },
     { peerIds: ['peer-001', 'peer-002', 'peer-003'], nextAfterPeerId: null },
     { peerIds: ['peer-002', 'peer-001'], nextAfterPeerId: null },
     { peerIds: ['peer-001', 'peer-001'], nextAfterPeerId: null },
@@ -133,33 +135,65 @@ describe('bounded curator discovery contract', () => {
     { peerIds: ['peer-001'], nextAfterPeerId: 'peer-001' },
     { peerIds: ['peer-001', 'peer-002'], nextAfterPeerId: 'peer-999' },
     { peerIds: ['peer-001', 'peer-002'] },
-  ])('rejects a provider page outside the bounded monotonic contract: %j', async invalid => {
-    const provider = {
-      findAgentPeerPageByAddress: async () => invalid,
-    };
-    await expect(readAgentPeerPage(provider, WALLET, { limit: 2 })).rejects.toThrow();
+  ])('rejects a provider page outside the bounded monotonic contract: %j', invalid => {
+    expect(() => validateAgentPeerPage(invalid, { limit: 2 })).toThrow();
   });
 
-  it('resolves a bounded wallet curator fallback without invoking rich discovery', async () => {
+  it('copies validated peer IDs without consuming a provider-supplied iterator', () => {
+    const peerIds = ['peer-001', 'peer-002'];
+    const iterator = vi.fn(() => { throw new Error('unbounded provider iterator'); });
+    Object.defineProperty(peerIds, Symbol.iterator, { value: iterator });
+    const decoded = validateAgentPeerPage({ peerIds, nextAfterPeerId: null }, { limit: 2 });
+    peerIds[0] = 'changed-after-validation';
+    expect(decoded).toEqual({ peerIds: ['peer-001', 'peer-002'], nextAfterPeerId: null });
+    expect(iterator).not.toHaveBeenCalled();
+  });
+
+  it('returns the bounded wallet registry candidate without assigning authority or using a bootstrap hint', async () => {
     const agent = await createAgent();
     const record = await agent.getCgMeta(CG);
     vi.spyOn(agent, 'getCgMeta').mockResolvedValue({
-      ...record,
-      curator: `did:dkg:agent:${WALLET}`,
-      curators: [`did:dkg:agent:${WALLET}`],
-      creator: undefined,
-      creators: [],
+      ...record, curator: `did:dkg:agent:${WALLET}`, curators: [`did:dkg:agent:${WALLET}`],
+      creator: undefined, creators: [],
     });
-    const pages = vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress')
-      .mockResolvedValue({ peerIds: ['peer-curator'], nextAfterPeerId: null });
-    const rich = vi.spyOn(agent.discovery, 'findAgents')
-      .mockRejectedValue(new Error('unbounded registry query'));
-
-    await expect(resolveCuratorSyncPeer(agent, new Map(), CG, {
-      registryLookup: 'bounded-first-page',
-    })).resolves.toMatchObject({ peerId: 'peer-curator', provenance: 'registry' });
-    expect(pages).toHaveBeenCalledWith(WALLET, { limit: 1, signal: undefined });
+    const pages = vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress').mockResolvedValue({
+      peerIds: ['peer-registry'], nextAfterPeerId: 'peer-registry',
+    });
+    const rich = vi.spyOn(agent.discovery, 'findAgents').mockRejectedValue(new Error('unbounded registry query'));
+    const hints = new Map([[CG, 'peer-bootstrap']]);
+    const controller = new AbortController();
+    const result = await resolveCuratorSyncPeer(agent, hints, CG, { signal: controller.signal, registryLookup: 'bounded-first-page' });
+    expect(result).toEqual({ peerId: 'peer-registry', provenance: 'registry' });
+    expect(authoritativeSyncPeerId(result)).toBeUndefined();
+    expect(hints.has(CG)).toBe(false);
+    expect(pages).toHaveBeenCalledExactlyOnceWith(WALLET, { limit: 1, signal: controller.signal });
     expect(rich).not.toHaveBeenCalled();
+  });
+
+  it('preserves every transport candidate when the proof probe is larger than one attempt', async () => {
+    const pages = vi.fn<AgentPeerDiscovery['findAgentPeerPageByAddress']>()
+      .mockResolvedValueOnce({ peerIds: ['peer-001', 'peer-002'], nextAfterPeerId: 'peer-002' })
+      .mockResolvedValueOnce({ peerIds: ['peer-002'], nextAfterPeerId: 'peer-002' })
+      .mockResolvedValueOnce({ peerIds: ['peer-003'], nextAfterPeerId: null });
+    const discovery = { findAgentPeerPageByAddress: pages };
+    const first = await traverseBoundedCuratorRoster(discovery, WALLET, { maxPeerIds: 2, pagePeerIds: 1 });
+    expect(first).toEqual({ status: 'continue', peerIds: ['peer-001'], nextAfterPeerId: 'peer-001' });
+    const second = await traverseBoundedCuratorRoster(discovery, WALLET, { maxPeerIds: 2, pagePeerIds: 1, afterPeerId: 'peer-001' });
+    expect(second).toEqual({ status: 'continue', peerIds: ['peer-002'], nextAfterPeerId: 'peer-002' });
+    const tail = await traverseBoundedCuratorRoster(discovery, WALLET, { maxPeerIds: 2, pagePeerIds: 1, afterPeerId: 'peer-002' });
+    expect(tail).toEqual({ status: 'cycle', peerIds: ['peer-003'] });
+    expect(pages.mock.calls.map(([, request]) => [request.limit, request.afterPeerId])).toEqual([
+      [2, undefined], [1, 'peer-001'], [1, 'peer-002'],
+    ]);
+  });
+
+  it('does not restart an exhausted cursor after the recovery owner becomes stale', async () => {
+    let current = true;
+    const pages = vi.fn(async () => { current = false; return EMPTY; });
+    await expect(traverseBoundedCuratorRoster({ findAgentPeerPageByAddress: pages }, WALLET, {
+      maxPeerIds: 2, afterPeerId: 'peer-099', isCurrent: () => current,
+    })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(pages).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a page that repeats the exclusive cursor', async () => {

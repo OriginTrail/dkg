@@ -5808,21 +5808,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
         curatorIsLocal: false,
         legacyTripleResolved: false,
         lookupFailed: true,
+        rosterTraversal: undefined,
+        overflowed: false,
+        nextPageAfterPeerId: undefined,
       }));
     if (!isRecoveryCurrent()) return staleRecovery();
     const allResolvedCuratorPeerIds = [...new Set(curatorResolution.peerIds
       .filter((peerId) => peerId && peerId !== this.peerId))]
       .sort((left, right) => left.localeCompare(right));
-    const curatorRosterTraversal = 'rosterTraversal' in curatorResolution
-      ? curatorResolution.rosterTraversal
-      : undefined;
-    const curatorRosterOverflow = (curatorRosterTraversal !== undefined
-        && curatorRosterTraversal.status !== 'complete')
+    const curatorRosterTraversal = curatorResolution.rosterTraversal;
+    const curatorRosterOverflow = (curatorRosterTraversal
+        ? curatorRosterTraversal.status !== 'complete' : curatorResolution.overflowed === true)
       || allResolvedCuratorPeerIds.length > DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX;
     if (curatorRosterOverflow) {
       this.log.warn(
         ctx,
-        `VM exact fetch curator roster for "${localCgId}" exceeds bounded proof capacity `
+        `VM exact fetch curator roster for "${localCgId}" cannot establish a complete bounded roster `
           + `(ordered transport page=${allResolvedCuratorPeerIds.length}, `
           + `proofCap=${DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX}); `
           + 'walking the registry without negative-proof suppression',
@@ -5854,8 +5855,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
         (overflowWindowStart + offset) % overflowTransportUniverse.length
       ]!,
     );
-    const resolvedCuratorPeerIds = curatorRosterOverflow && allResolvedCuratorPeerIds.length === 0
-      ? overflowTransportPeerIds
+    const resolvedCuratorPeerIds = curatorRosterOverflow
+      ? (curatorRosterTraversal?.status === 'continue' || curatorRosterTraversal?.status === 'cycle'
+          || curatorResolution.nextPageAfterPeerId)
+        ? allResolvedCuratorPeerIds
+        : overflowTransportPeerIds
       : allResolvedCuratorPeerIds;
     let legacyPreferredPeerId: string | undefined;
     if (resolutionSucceeded && !curatorResolution.curatorIsLocal
@@ -5890,6 +5894,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // The recovery owner, not the page reader, decides when to restart. A
       // cleared cursor makes the next scheduled recovery begin a fresh cycle.
       this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
+    } else if (curatorRosterTraversal === undefined && curatorResolution.nextPageAfterPeerId) {
+      // Preserve custom SDK implementations that still return the prior fields.
+      this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
+      this.vmReconcileCuratorPageCursorByCg.set(localCgId, curatorResolution.nextPageAfterPeerId);
     }
     if (!curatorResolution.curatorIsLocal && curatorPeerIds.length > 0) {
       this.vmReconcileCuratorPeersByCg.delete(localCgId);

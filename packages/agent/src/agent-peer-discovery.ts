@@ -34,29 +34,34 @@ export function validateAgentPeerPageRequest(request: AgentPeerPageRequest): voi
 /** Reject a broken provider contract before treating a page as registry evidence. */
 export function validateAgentPeerPage(page: unknown, request: AgentPeerPageRequest): AgentPeerPage {
   if (page === null || typeof page !== 'object' || Array.isArray(page)) {
-    throw new Error('Peer discovery returned an invalid page');
+    throw new TypeError('Peer discovery returned an invalid page');
   }
-  const record = page as Record<string, unknown>;
-  const peerIds = record.peerIds;
-  const nextAfterPeerId = record.nextAfterPeerId;
-  if (!Array.isArray(peerIds) || peerIds.length > request.limit) {
+  const { peerIds: rawPeerIds, nextAfterPeerId } = page as Record<string, unknown>;
+  if (!Array.isArray(rawPeerIds)) {
     throw new Error('Peer discovery exceeded its page bound');
   }
+  const peerCount = rawPeerIds.length;
+  if (!Number.isSafeInteger(peerCount) || peerCount < 0 || peerCount > request.limit) {
+    throw new Error('Peer discovery exceeded its page bound');
+  }
+  if (nextAfterPeerId !== null && typeof nextAfterPeerId !== 'string') {
+    throw new TypeError('Peer discovery returned an invalid continuation');
+  }
+  const peerIds: string[] = [];
   let previous = request.afterPeerId;
-  for (const peerId of peerIds) {
+  for (let index = 0; index < peerCount; index++) {
+    const peerId: unknown = rawPeerIds[index];
     if (typeof peerId !== 'string' || peerId.length === 0 || (previous !== undefined && peerId <= previous)) {
       throw new Error('Peer discovery returned a non-monotonic page');
     }
+    peerIds.push(peerId);
     previous = peerId;
-  }
-  if (nextAfterPeerId !== null && typeof nextAfterPeerId !== 'string') {
-    throw new Error('Peer discovery returned an invalid continuation');
   }
   if (nextAfterPeerId !== null && (peerIds.length !== request.limit || nextAfterPeerId !== previous)) {
     throw new Error('Peer discovery returned an invalid continuation');
   }
   request.signal?.throwIfAborted();
-  return { peerIds: [...peerIds], nextAfterPeerId };
+  return { peerIds, nextAfterPeerId };
 }
 
 export async function readAgentPeerPage(
