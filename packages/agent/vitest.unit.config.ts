@@ -20,6 +20,8 @@ export default defineConfig({
     include: [
       ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",
+      "test/bounded-curator-discovery.test.ts",
+      "test/discovery-peer-pagination.test.ts",
       "test/ack-candidate-pool.test.ts",
       "test/e2e-dht-dial.test.ts",
       "test/generic-sql-source.test.ts",
