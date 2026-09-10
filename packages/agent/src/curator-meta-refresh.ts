@@ -39,11 +39,6 @@ import { stripLiteral } from './dkg-agent-utils.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
-  /** Optional caller-owned resolution policy for choosing the refresh peer. */
-  curatorPeerResolver?: (
-    contextGraphId: string,
-    signal?: AbortSignal,
-  ) => Promise<string | undefined>;
   /**
    * A curator peer whose authority was already established by the caller.
    * The join-approved path uses the authenticated notification sender so
@@ -768,6 +763,52 @@ function scheduleCuratorMetaRefresh(
   });
 }
 
+function curatorMetaRefreshCoolingDown(
+  agent: CuratorMetaRefreshAgent,
+  contextGraphId: string,
+  force: boolean | undefined,
+): boolean {
+  const lastRefresh = agent.metaRefreshTimestamps.get(contextGraphId) ?? 0;
+  return !force && Date.now() - lastRefresh < META_REFRESH_COOLDOWN_MS;
+}
+
+function runResolvedCuratorMetaRefresh(
+  agent: CuratorMetaRefreshAgent,
+  contextGraphId: string,
+  curatorPeerId: string | undefined,
+  options: CuratorMetaRefreshOptions,
+): Promise<boolean> {
+  throwIfCuratorMetaRefreshAborted(options.signal);
+  if (!curatorPeerId || curatorPeerId === agent.peerId) return Promise.resolve(false);
+  return scheduleCuratorMetaRefresh(
+    agent,
+    contextGraphId,
+    curatorPeerId,
+    options,
+    createOperationContext('sync'),
+  );
+}
+
+/** Refresh through one peer selected by a dedicated caller-owned coordinator. */
+export function runCuratorMetaRefreshFromPeer(
+  agent: object,
+  contextGraphId: string,
+  curatorPeerId: string | undefined,
+  options: CuratorMetaRefreshOptions = {},
+): Promise<boolean> {
+  const refreshAgent = agent as CuratorMetaRefreshAgent;
+  throwIfCuratorMetaRefreshAborted(options.signal);
+  if (curatorMetaRefreshCoolingDown(refreshAgent, contextGraphId, options.force)) {
+    return Promise.resolve(false);
+  }
+  return runResolvedCuratorMetaRefresh(
+    refreshAgent,
+    contextGraphId,
+    curatorPeerId,
+    options,
+  );
+}
+
 /**
  * Resolve, serialize, fetch, validate, and atomically install a curator's
  * authoritative root metadata snapshot.
@@ -779,23 +820,16 @@ export async function runCuratorMetaRefresh(
 ): Promise<boolean> {
   const refreshAgent = agent as CuratorMetaRefreshAgent;
   throwIfCuratorMetaRefreshAborted(options.signal);
-  const lastRefresh = refreshAgent.metaRefreshTimestamps.get(contextGraphId) ?? 0;
-  if (!options.force && Date.now() - lastRefresh < META_REFRESH_COOLDOWN_MS) {
+  if (curatorMetaRefreshCoolingDown(refreshAgent, contextGraphId, options.force)) {
     return false;
   }
 
-  const ctx = createOperationContext('sync');
   const curatorPeerId = options.trustedCuratorPeerId
-    ?? await (options.curatorPeerResolver
-      ? options.curatorPeerResolver(contextGraphId, options.signal)
-      : refreshAgent.resolveCuratorPeerId(contextGraphId, { signal: options.signal }));
-  throwIfCuratorMetaRefreshAborted(options.signal);
-  if (!curatorPeerId || curatorPeerId === refreshAgent.peerId) return false;
-  return scheduleCuratorMetaRefresh(
+    ?? await refreshAgent.resolveCuratorPeerId(contextGraphId, { signal: options.signal });
+  return runResolvedCuratorMetaRefresh(
     refreshAgent,
     contextGraphId,
     curatorPeerId,
     options,
-    ctx,
   );
 }

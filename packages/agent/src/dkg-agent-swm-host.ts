@@ -507,6 +507,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import type { CuratorPeerIdsResolution } from './dkg-agent-lifecycle.js';
 import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
@@ -5803,22 +5804,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
       signal,
       isCurrent: isRecoveryCurrent,
     })
-      .catch(() => ({
-        peerIds: [] as string[],
+      .catch((): CuratorPeerIdsResolution => ({
+        peerIds: [] as [],
         curatorIsLocal: false,
         legacyTripleResolved: false,
         lookupFailed: true,
-        rosterTraversal: undefined,
-        overflowed: false,
-        nextPageAfterPeerId: undefined,
       }));
     if (!isRecoveryCurrent()) return staleRecovery();
     const allResolvedCuratorPeerIds = [...new Set(curatorResolution.peerIds
       .filter((peerId) => peerId && peerId !== this.peerId))]
       .sort((left, right) => left.localeCompare(right));
-    const curatorRosterTraversal = curatorResolution.rosterTraversal;
-    const curatorRosterOverflow = (curatorRosterTraversal
-        ? curatorRosterTraversal.status !== 'complete' : curatorResolution.overflowed === true)
+    // Runtime adapter for older custom hosts. The canonical return type below
+    // does not admit pagination without a rosterStatus discriminant.
+    const legacyPagination = curatorResolution as unknown as {
+      overflowed?: boolean;
+      nextPageAfterPeerId?: string;
+    };
+    const curatorRosterStatus = curatorResolution.rosterStatus;
+    const curatorRosterOverflow = (curatorRosterStatus
+        ? curatorRosterStatus !== 'complete' : legacyPagination.overflowed === true)
       || allResolvedCuratorPeerIds.length > DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX;
     if (curatorRosterOverflow) {
       this.log.warn(
@@ -5856,8 +5860,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ]!,
     );
     const resolvedCuratorPeerIds = curatorRosterOverflow
-      ? (curatorRosterTraversal?.status === 'continue' || curatorRosterTraversal?.status === 'cycle'
-          || curatorResolution.nextPageAfterPeerId)
+      ? (curatorRosterStatus === 'continue' || curatorRosterStatus === 'cycle'
+          || legacyPagination.nextPageAfterPeerId)
         ? allResolvedCuratorPeerIds
         : overflowTransportPeerIds
       : allResolvedCuratorPeerIds;
@@ -5884,20 +5888,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (resolutionSucceeded) {
       this.vmReconcileCuratorPeersByCg.delete(localCgId);
       this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
-    } else if (curatorRosterTraversal?.status === 'continue') {
+    } else if (curatorRosterStatus === 'continue') {
       this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
       this.vmReconcileCuratorPageCursorByCg.set(
         localCgId,
-        curatorRosterTraversal.nextAfterPeerId,
+        curatorResolution.nextPageAfterPeerId,
       );
-    } else if (curatorRosterTraversal?.status === 'cycle') {
+    } else if (curatorRosterStatus === 'cycle') {
       // The recovery owner, not the page reader, decides when to restart. A
       // cleared cursor makes the next scheduled recovery begin a fresh cycle.
       this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
-    } else if (curatorRosterTraversal === undefined && curatorResolution.nextPageAfterPeerId) {
+    } else if (curatorRosterStatus === undefined && legacyPagination.nextPageAfterPeerId) {
       // Preserve custom SDK implementations that still return the prior fields.
       this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
-      this.vmReconcileCuratorPageCursorByCg.set(localCgId, curatorResolution.nextPageAfterPeerId);
+      this.vmReconcileCuratorPageCursorByCg.set(localCgId, legacyPagination.nextPageAfterPeerId);
     }
     if (!curatorResolution.curatorIsLocal && curatorPeerIds.length > 0) {
       this.vmReconcileCuratorPeersByCg.delete(localCgId);

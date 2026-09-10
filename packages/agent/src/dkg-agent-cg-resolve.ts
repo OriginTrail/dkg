@@ -568,6 +568,26 @@ function curatorDidNeedsRegistryResolution(curatorIdentifier: string): boolean {
   return curatorIdentifier.startsWith('0x');
 }
 
+type CuratorWalletRegistryResolver = (
+  agent: DKGAgent,
+  wallet: string,
+  signal: AbortSignal | undefined,
+) => Promise<string | undefined>;
+
+const resolveRichCuratorWalletPeer: CuratorWalletRegistryResolver = async (
+  agent,
+  wallet,
+  signal,
+) => (await agent.discovery.findAgents({ signal })).find(
+  (candidate) => candidate.agentAddress?.toLowerCase() === wallet.toLowerCase(),
+)?.peerId;
+
+const resolveBoundedCuratorWalletPeer: CuratorWalletRegistryResolver = async (
+  agent,
+  wallet,
+  signal,
+) => (await readAgentPeerPage(agent.discovery, wallet, { limit: 1, signal })).peerIds[0];
+
 /**
  * Resolve the curator peer for a Context Graph together with WHERE it came from.
  *
@@ -597,7 +617,7 @@ function curatorDidNeedsRegistryResolution(curatorIdentifier: string): boolean {
  * was echoed back". Only the resolver knows which branch it took.
  */
 
-export async function resolveCuratorSyncPeer(
+async function resolveCuratorSyncPeerWithRegistry(
   agent: DKGAgent,
   /**
    * The agent's `preferredSyncPeers`, passed explicitly because it is both read
@@ -606,7 +626,8 @@ export async function resolveCuratorSyncPeer(
    */
   bootstrapHints: Map<string, string>,
   contextGraphId: string,
-  options: { signal?: AbortSignal; registryLookup?: 'legacy' | 'bounded-first-page' } = {},
+  options: { signal?: AbortSignal },
+  resolveWalletPeer: CuratorWalletRegistryResolver,
 ): Promise<SyncPeerResolution> {
   const approvedCuratorPeerId = bootstrapHints.get(contextGraphId);
   const fromHint = (): SyncPeerResolution => (approvedCuratorPeerId
@@ -658,14 +679,7 @@ export async function resolveCuratorSyncPeer(
     if (!resolved) {
       try {
         throwIfSyncAuthAborted(options.signal);
-        const peerId = options.registryLookup !== 'bounded-first-page'
-          ? (await agent.discovery.findAgents({ signal: options.signal })).find(
-              (candidate) => candidate.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
-            )?.peerId
-          : (await readAgentPeerPage(agent.discovery, curatorIdentifier, {
-              limit: 1,
-              signal: options.signal,
-            })).peerIds[0];
+        const peerId = await resolveWalletPeer(agent, curatorIdentifier, options.signal);
         throwIfSyncAuthAborted(options.signal);
         if (peerId) {
           curatorPeerId = peerId;
@@ -712,6 +726,37 @@ export async function resolveCuratorSyncPeer(
 
   bootstrapHints.delete(contextGraphId);
   return { peerId: curatorPeerId, provenance };
+}
+
+export function resolveCuratorSyncPeer(
+  agent: DKGAgent,
+  bootstrapHints: Map<string, string>,
+  contextGraphId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<SyncPeerResolution> {
+  return resolveCuratorSyncPeerWithRegistry(
+    agent,
+    bootstrapHints,
+    contextGraphId,
+    options,
+    resolveRichCuratorWalletPeer,
+  );
+}
+
+/** Resolve one refresh candidate without crossing the bounded page contract. */
+export function resolveBoundedCuratorSyncPeer(
+  agent: DKGAgent,
+  bootstrapHints: Map<string, string>,
+  contextGraphId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<SyncPeerResolution> {
+  return resolveCuratorSyncPeerWithRegistry(
+    agent,
+    bootstrapHints,
+    contextGraphId,
+    options,
+    resolveBoundedCuratorWalletPeer,
+  );
 }
 
 export class ContextGraphResolveMethods extends DKGAgentBase {
@@ -2227,7 +2272,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   public async resolveCuratorPeerId(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal; registryLookup?: 'legacy' | 'bounded-first-page' } = {},
+    options: { signal?: AbortSignal } = {},
   ): Promise<string | undefined> {
     return (await resolveCuratorSyncPeer(
       this,

@@ -3,12 +3,8 @@
 import {
   readAgentPeerPage,
   validateAgentPeerPageRequest,
-  type AgentPeerPageRequest,
+  type AgentPeerDiscovery,
 } from './agent-peer-discovery.js';
-
-interface BoundedCuratorRosterProvider {
-  findAgentPeerPageByAddress(agentAddress: string, request: AgentPeerPageRequest): Promise<unknown>;
-}
 
 export type CuratorRosterState =
   | { readonly status: 'complete' }
@@ -16,6 +12,27 @@ export type CuratorRosterState =
   | { readonly status: 'cycle' };
 
 export type BoundedCuratorRosterTraversal = CuratorRosterState & { readonly peerIds: string[] };
+
+/** Canonical public projection: the peer list has exactly one owner. */
+export type BoundedCuratorRosterResolution =
+  | {
+      readonly peerIds: string[];
+      readonly rosterStatus: 'complete';
+      readonly overflowed?: never;
+      readonly nextPageAfterPeerId?: never;
+    }
+  | {
+      readonly peerIds: string[];
+      readonly rosterStatus: 'continue';
+      readonly overflowed: true;
+      readonly nextPageAfterPeerId: string;
+    }
+  | {
+      readonly peerIds: string[];
+      readonly rosterStatus: 'cycle';
+      readonly overflowed: true;
+      readonly nextPageAfterPeerId?: never;
+    };
 
 export interface BoundedCuratorRosterRequest {
   readonly maxPeerIds: number;
@@ -27,7 +44,7 @@ export interface BoundedCuratorRosterRequest {
 
 /** Only a complete first page can establish a whole local roster. */
 export async function traverseBoundedCuratorRoster(
-  discovery: BoundedCuratorRosterProvider,
+  discovery: AgentPeerDiscovery,
   wallet: string,
   request: BoundedCuratorRosterRequest,
 ): Promise<BoundedCuratorRosterTraversal> {
@@ -67,19 +84,19 @@ export async function traverseBoundedCuratorRoster(
     : { status: 'continue', peerIds, nextAfterPeerId: tail.nextAfterPeerId };
 }
 
-/** Preserve the existing SDK pagination fields beside the explicit traversal. */
-export function curatorRosterResolution(rosterTraversal: BoundedCuratorRosterTraversal): {
-  peerIds: string[];
-  rosterTraversal: BoundedCuratorRosterTraversal;
-  overflowed?: boolean;
-  nextPageAfterPeerId?: string;
-} {
+/** Flatten traversal state beside the one canonical transport peer list. */
+export function curatorRosterResolution(
+  rosterTraversal: BoundedCuratorRosterTraversal,
+): BoundedCuratorRosterResolution {
   const { peerIds } = rosterTraversal;
-  const legacyCursor = rosterTraversal.status === 'continue' ? rosterTraversal.nextAfterPeerId
-    : rosterTraversal.status === 'cycle' ? peerIds[peerIds.length - 1] : undefined;
-  return {
-    peerIds, rosterTraversal,
-    ...(rosterTraversal.status === 'complete' ? {} : { overflowed: true }),
-    ...(legacyCursor === undefined ? {} : { nextPageAfterPeerId: legacyCursor }),
-  };
+  if (rosterTraversal.status === 'complete') return { peerIds, rosterStatus: 'complete' };
+  if (rosterTraversal.status === 'continue') {
+    return {
+      peerIds,
+      rosterStatus: 'continue',
+      overflowed: true,
+      nextPageAfterPeerId: rosterTraversal.nextAfterPeerId,
+    };
+  }
+  return { peerIds, rosterStatus: 'cycle', overflowed: true };
 }

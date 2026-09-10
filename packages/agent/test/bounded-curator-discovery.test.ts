@@ -3,7 +3,10 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent, type AgentPeerDiscovery, type AgentPeerPage } from '../src/index.js';
 import { readAgentPeerPage, validateAgentPeerPage } from '../src/agent-peer-discovery.js';
 import { traverseBoundedCuratorRoster } from '../src/bounded-curator-roster-traversal.js';
-import { authoritativeSyncPeerId, resolveCuratorSyncPeer } from '../src/dkg-agent-cg-resolve.js';
+import {
+  authoritativeSyncPeerId,
+  resolveBoundedCuratorSyncPeer,
+} from '../src/dkg-agent-cg-resolve.js';
 
 const WALLET = '0x00000000000000000000000000000000000000ab';
 const CG = `${WALLET}/bounded-curator`;
@@ -66,14 +69,13 @@ describe('bounded curator discovery contract', () => {
     const first = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2 });
     expect(first).toMatchObject({
       overflowed: true, nextPageAfterPeerId: 'peer-003',
-      rosterTraversal: { status: 'continue', peerIds: ['peer-001', 'peer-003'], nextAfterPeerId: 'peer-003' },
+      rosterStatus: 'continue', peerIds: ['peer-001', 'peer-003'],
     });
     // Earlier peers may have been deleted and new peers inserted before the
     // cursor. This tail query says nothing about those unobserved entries.
     const tail = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2, afterPeerId: first.nextPageAfterPeerId });
     expect(tail).toMatchObject({
-      peerIds: ['peer-004'], overflowed: true, nextPageAfterPeerId: 'peer-004',
-      rosterTraversal: { status: 'cycle', peerIds: ['peer-004'] },
+      peerIds: ['peer-004'], overflowed: true, rosterStatus: 'cycle',
     });
     expect(pages).toHaveBeenCalledTimes(2);
   });
@@ -86,7 +88,7 @@ describe('bounded curator discovery contract', () => {
     const result = await agent.resolveCuratorPeerIdsForCg(CG, { maxPeerIds: 2, pagePeerIds: 1, afterPeerId: 'peer-099' });
     expect(result).toEqual({
       peerIds: ['peer-002'], curatorIsLocal: false, legacyTripleResolved: false,
-      rosterTraversal: { status: 'complete', peerIds: ['peer-002'] },
+      rosterStatus: 'complete',
     });
     expect(pages.mock.calls.map(([, request]) => request)).toEqual([
       { limit: 1, afterPeerId: 'peer-099', signal: undefined },
@@ -162,7 +164,9 @@ describe('bounded curator discovery contract', () => {
     const rich = vi.spyOn(agent.discovery, 'findAgents').mockRejectedValue(new Error('unbounded registry query'));
     const hints = new Map([[CG, 'peer-bootstrap']]);
     const controller = new AbortController();
-    const result = await resolveCuratorSyncPeer(agent, hints, CG, { signal: controller.signal, registryLookup: 'bounded-first-page' });
+    const result = await resolveBoundedCuratorSyncPeer(agent, hints, CG, {
+      signal: controller.signal,
+    });
     expect(result).toEqual({ peerId: 'peer-registry', provenance: 'registry' });
     expect(authoritativeSyncPeerId(result)).toBeUndefined();
     expect(hints.has(CG)).toBe(false);

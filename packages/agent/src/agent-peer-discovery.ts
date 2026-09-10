@@ -65,9 +65,7 @@ export function validateAgentPeerPage(page: unknown, request: AgentPeerPageReque
 }
 
 export async function readAgentPeerPage(
-  discovery: {
-    findAgentPeerPageByAddress(agentAddress: string, request: AgentPeerPageRequest): Promise<unknown>;
-  },
+  discovery: AgentPeerDiscovery,
   agentAddress: string,
   request: AgentPeerPageRequest,
 ): Promise<AgentPeerPage> {

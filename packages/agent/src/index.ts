@@ -30,6 +30,7 @@ export {
   type AgentPeerPage,
   type AgentPeerPageRequest,
 } from './agent-peer-discovery.js';
+export type { CuratorPeerIdsResolution } from './dkg-agent-lifecycle.js';
 export {
   DiscoveryClient,
   discoveredAgentIdentityKey,
