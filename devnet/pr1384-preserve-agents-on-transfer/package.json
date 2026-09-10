@@ -5,5 +5,5 @@
   "type": "module",
   "scripts": { "test:devnet": "vitest run --config vitest.config.ts" },
   "dependencies": { "ethers": "^6.16.0" },
-  "devDependencies": { "vitest": "^4.0.18" }
+  "devDependencies": { "vitest": "^5.0.0" }
 }
