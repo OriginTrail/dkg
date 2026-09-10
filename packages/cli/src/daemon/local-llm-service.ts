@@ -55,6 +55,8 @@ export interface DaemonLocalLlmHealth {
   ok: boolean;
   /** True when the operator supplied at least one local-LLM environment override. */
   configured: boolean;
+  /** True when the endpoint matches a supported local-LLM health contract. */
+  detected: boolean;
   ready: boolean;
   reachable: boolean;
   offline: boolean;
@@ -185,6 +187,7 @@ export function createDaemonLocalLlmService(
       return Promise.resolve(Object.freeze({
         status: 'offline',
         reachable: false,
+        detected: false,
         error: `Local LLM endpoint configuration is invalid: ${settings.probeConfigurationError}`,
       }));
     }
@@ -221,6 +224,7 @@ export function createDaemonLocalLlmService(
       return {
         ok: ready,
         configured: settings.configured,
+        detected: availability.detected,
         ready,
         reachable,
         offline: !reachable,

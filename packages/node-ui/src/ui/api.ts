@@ -1962,6 +1962,7 @@ export type LocalAgentChannelTarget = 'bridge' | 'gateway';
 export interface LocalAgentHealthResponse {
   ok: boolean;
   configured?: boolean;
+  detected?: boolean;
   ready?: boolean;
   reachable?: boolean;
   offline?: boolean;
@@ -2818,9 +2819,12 @@ async function mapLocalAgentIntegrationRecord(
     : null;
   // The daemon-owned integration exists in the registry on every node. Keep it
   // out of the UI when the operator supplied no local-LLM configuration and
-  // the conventional local endpoint was not auto-detected. An explicit but
-  // temporarily offline configuration remains visible so its error is useful.
-  if (id === 'local-llm' && health?.configured === false && health.reachable !== true) {
+  // the conventional local endpoint was not recognized as a supported backend.
+  // An explicit but temporarily unavailable configuration remains visible so
+  // its error is useful. `ready` is the safe fallback for v10.0.16 daemons,
+  // which did not expose `detected` and treated any HTTP response as reachable.
+  const localLlmDetected = health?.detected ?? health?.ready === true;
+  if (id === 'local-llm' && health?.configured === false && !localLlmDetected) {
     return null;
   }
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
@@ -2926,7 +2930,7 @@ async function mapLocalAgentIntegrationRecord(
     chatAttachments,
     connectSupported,
     configured,
-    detected: configured || chatReady,
+    detected: configured || health?.detected === true || chatReady,
     persistentChat,
     chatReady,
     bridgeOnline,
