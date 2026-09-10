@@ -21,14 +21,25 @@ import {
 import type {
   FinalizationRecoveryEntry,
   FinalizationRecoveryHealth,
+  FinalizationRecoveryFailureCode,
   FinalizationRecoverySettledPublisherUpgradeResult,
   FinalizationRecoveryStore,
 } from './finalization-recovery-store.js';
+import { FinalizationPublisherAuthorityObserver } from
+  './finalization-publisher-authority-observer.js';
 
 export type FinalizationRecoveryApplyOutcome =
   | 'applied'
   | 'already-confirmed'
   | 'deferred';
+
+type FinalizationRecoveryMaterializationResult =
+  | { outcome: Exclude<FinalizationRecoveryApplyOutcome, 'deferred'> }
+  | {
+      outcome: 'deferred';
+      failureCode: FinalizationRecoveryFailureCode;
+      detail: string;
+    };
 
 export interface FinalizationRecoveryLiveInput {
   rawMessage: Uint8Array;
@@ -106,6 +117,23 @@ export type FinalizationMaterializationVerification =
       | 'context-graph-binding-pending'
       | 'verified-evidence-commit-failed';
   };
+
+function verificationFailureCode(
+  reason: Extract<FinalizationMaterializationVerification, { status: 'deferred' }>['reason'],
+): FinalizationRecoveryFailureCode {
+  switch (reason) {
+    case 'context-graph-binding-pending':
+      return 'context-graph-binding-pending';
+    case 'verified-evidence-commit-failed':
+      return 'evidence-commit-pending';
+    case 'legacy-verification-pending':
+    case 'canonical-receipt-pending':
+    case 'canonical-receipt-reorged':
+    case 'canonical-receipt-rejected':
+    case 'canonical-receipt-unsupported':
+      return 'receipt-pending';
+  }
+}
 
 interface FinalizationRecoveryLog {
   info(message: string): void;
@@ -197,6 +225,9 @@ const SETTLED_RECEIPT_RETRY_MAX_MS = 60_000;
 const SETTLED_NOT_FOUND_RETRY_LIMIT = 5;
 const DEFERRED_RETRY_BASE_MS = 1_000;
 const DEFERRED_RETRY_MAX_MS = 60_000;
+const FAILED_PUBLISHER_AUTHORITY_PROBE_MAX_ENTRIES = 4_096;
+export const FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD = 3;
+export const FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS = 6 * 60 * 60 * 1_000;
 /**
  * At the maximum retry delay this is approximately seven days of autonomous
  * worker attempts. The wall-clock window below must also elapse so duplicate
@@ -242,6 +273,10 @@ export class FinalizationRecovery<
     Promise<FinalizationRecoveryReplayOutcome>
   >();
   private readonly entryLockTails = new Map<string, Promise<void>>();
+  private readonly publisherAuthorityObserver: FinalizationPublisherAuthorityObserver<
+    FinalizationRecoveryLiveInput,
+    Prepared
+  >;
   private readonly store: FinalizationRecoveryStore | undefined;
   private readonly storeSource: FinalizationRecoveryStoreSource | undefined;
   private readonly liveRetryLimit: number;
@@ -273,6 +308,11 @@ export class FinalizationRecovery<
       ),
     );
     this.now = options.now ?? Date.now;
+    this.publisherAuthorityObserver = new FinalizationPublisherAuthorityObserver({
+      maxFailedProbes: FAILED_PUBLISHER_AUTHORITY_PROBE_MAX_ENTRIES,
+      prepare: (input) => this.materializer.prepare(input),
+      log: this.log,
+    });
   }
 
   private getStore(): FinalizationRecoveryStore | undefined {
@@ -360,7 +400,18 @@ export class FinalizationRecovery<
     return this.withEntryLock(key, async () => {
       const received = await this.receiveOutcome(input);
       if (received.status === 'pending') {
-        await this.recordPendingPublisherAuthority(store, key, input);
+        if (input.sourcePeerId) {
+          await this.publisherAuthorityObserver.observe({
+            store,
+            identity: {
+              entryKey: key,
+              generation: 'pending',
+              sourcePeerId: input.sourcePeerId,
+            },
+            ual: input.candidate.scope.ual,
+            prepareInput: input,
+          });
+        }
         return { status: 'handled' };
       }
       if (received.status === 'capacity') {
@@ -384,6 +435,23 @@ export class FinalizationRecovery<
       // the autonomous retry budget.
       if (!this.isLiveEntry(entry)) return { status: 'handled' };
 
+      // Every accepted delivery gets one authority-observation phase before
+      // retry scheduling. Its prepared workspace result is reused below when
+      // the materialization gate is open.
+      const authority = input.sourcePeerId
+        ? await this.publisherAuthorityObserver.observe({
+            store,
+            identity: {
+              entryKey: key,
+              generation: entry.generation,
+              sourcePeerId: input.sourcePeerId,
+            },
+            ual: input.candidate.scope.ual,
+            prepareInput: input,
+            entry,
+          })
+        : {};
+
       // The worker and reconciliation paths already honor this durable gate.
       // Live duplicate gossip must do the same: the per-entry lock serializes
       // equivalent deliveries, but without this check every queued duplicate
@@ -395,14 +463,19 @@ export class FinalizationRecovery<
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          const outcome = await this.materialize(input, { kind: 'recovery', entry });
-          if (outcome === 'deferred') {
+          const result = await this.materialize(
+            input,
+            { kind: 'recovery', entry },
+            authority.prepared,
+          );
+          if (result.outcome === 'deferred') {
             await this.recordDeferred(
               entry,
-              'finalization processing deferred',
+              result.failureCode,
+              result.detail,
             );
           } else {
-            await this.settleEntry(entry, outcome);
+            await this.settleEntry(entry, result.outcome);
           }
           return { status: 'handled' };
         } catch (error) {
@@ -417,6 +490,7 @@ export class FinalizationRecovery<
           );
           await this.recordDeferred(
             entry,
+            'store-scheduler-busy',
             'store scheduler remained busy',
           );
           return { status: 'handled' };
@@ -424,52 +498,6 @@ export class FinalizationRecovery<
       }
       return { status: 'handled' };
     });
-  }
-
-  private async recordPendingPublisherAuthority(
-    store: FinalizationRecoveryStore,
-    key: string,
-    input: FinalizationRecoveryLiveInput,
-  ): Promise<void> {
-    if (!input.sourcePeerId) return;
-    let prepared: Prepared | undefined;
-    try {
-      prepared = await this.materializer.prepare(input);
-    } catch (error) {
-      this.log.info(
-        `Finalization recovery deferred publisher authority check for `
-          + `${input.candidate.scope.ual}: `
-          + `${error instanceof Error ? error.message : String(error)}`,
-      );
-      return;
-    }
-    if (!prepared || input.sourcePeerId !== prepared.publisherPeerId) return;
-    try {
-      if (await store.recordPendingTrustedPublisher(key, prepared.publisherPeerId)) return;
-      // Promotion is serialized by the store but is intentionally independent
-      // of the per-entry recovery lock. If it moved this row between admission
-      // and the authority CAS, preserve the same monotonic evidence on the live row.
-      const promoted = await store.get(key);
-      if (
-        promoted
-        && this.isLiveEntry(promoted)
-        && await store.recordTrustedPublisher(
-          key,
-          promoted.generation,
-          prepared.publisherPeerId,
-        )
-      ) return;
-      this.log.warn(
-        `Finalization recovery inbox refused publisher authority for `
-          + `${input.candidate.scope.ual}`,
-      );
-    } catch (error) {
-      this.log.warn(
-        `Finalization recovery pending publisher authority commit failed for `
-          + `${input.candidate.scope.ual}: `
-          + `${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
   }
 
   /**
@@ -512,6 +540,7 @@ export class FinalizationRecovery<
           );
           await this.recordDeferred(
             entry,
+            'background-replay-failed',
             `background replay failed: ${reason}`,
             deferredRetryDelayMs(entry.attemptCount),
           );
@@ -560,8 +589,11 @@ export class FinalizationRecovery<
     const liveRetryAgeMs = Math.max(0, this.now() - entry.createdAt);
     if (
       this.isLiveEntry(entry)
-      && entry.attemptCount >= this.liveRetryLimit
       && liveRetryAgeMs >= this.liveRetryWindowMs
+      && (
+        entry.attemptCount >= this.liveRetryLimit
+        || entry.failureStreak >= FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD
+      )
     ) {
       const reason = 'autonomous retry budget exhausted after '
         + `${entry.attemptCount} attempts over ${liveRetryAgeMs}ms`;
@@ -581,6 +613,7 @@ export class FinalizationRecovery<
     ) {
       await this.recordDeferred(
         entry,
+        'background-chain-unavailable',
         'background replay lacks the matching chain binding capability',
         deferredRetryDelayMs(entry.attemptCount),
       );
@@ -598,6 +631,7 @@ export class FinalizationRecovery<
       ) {
         await this.recordDeferred(
           entry,
+          'background-binding-pending',
           'background replay chain binding is not available yet',
           deferredRetryDelayMs(entry.attemptCount),
         );
@@ -623,6 +657,7 @@ export class FinalizationRecovery<
       if (outcome !== 'none') return outcome;
       await this.recordDeferred(
         entry,
+        'background-no-match',
         'background replay found no canonical finalization match',
         deferredRetryDelayMs(entry.attemptCount),
       );
@@ -634,6 +669,7 @@ export class FinalizationRecovery<
       );
       await this.recordDeferred(
         entry,
+        'background-replay-failed',
         `background replay failed: ${reason}`,
         deferredRetryDelayMs(entry.attemptCount),
       );
@@ -669,10 +705,11 @@ export class FinalizationRecovery<
   }
 
   /** Processes the compatibility path when no durable inbox can be used. */
-  processUnjournaled(
+  async processUnjournaled(
     input: FinalizationRecoveryLiveInput,
   ): Promise<FinalizationRecoveryApplyOutcome> {
-    return this.materialize(input, { kind: 'live' });
+    const result = await this.materialize(input, { kind: 'live' });
+    return result.outcome;
   }
 
   async receive(
@@ -938,7 +975,8 @@ export class FinalizationRecovery<
   private async materialize(
     input: FinalizationRecoveryLiveInput,
     context: FinalizationVerificationContext,
-  ): Promise<FinalizationRecoveryApplyOutcome> {
+    observedPrepared?: Prepared,
+  ): Promise<FinalizationRecoveryMaterializationResult> {
     const preparationInput = context.kind === 'recovery'
       && context.entry.trustedPublisherPeerId
       ? {
@@ -946,14 +984,26 @@ export class FinalizationRecovery<
           sourcePeerId: context.entry.trustedPublisherPeerId,
         }
       : input;
-    const prepared = await this.materializer.prepare(preparationInput);
-    if (!prepared) return 'deferred';
+    const prepared = observedPrepared ?? await this.materializer.prepare(preparationInput);
+    if (!prepared) {
+      return {
+        outcome: 'deferred',
+        failureCode: 'workspace-unavailable',
+        detail: 'workspace preparation is unavailable',
+      };
+    }
     if (
       context.kind === 'recovery'
       && input.sourcePeerId !== undefined
       && input.sourcePeerId === prepared.publisherPeerId
       && !await this.recordTrustedPublisher(context.entry, prepared.publisherPeerId)
-    ) return 'deferred';
+    ) {
+      return {
+        outcome: 'deferred',
+        failureCode: 'publisher-authority-pending',
+        detail: 'trusted publisher authority is not durable yet',
+      };
+    }
     const verification = await this.verifyMaterialization(
       input.candidate,
       context,
@@ -964,9 +1014,13 @@ export class FinalizationRecovery<
         `Finalization verification deferred for ${input.candidate.scope.ual} `
           + `(${verification.reason})`,
       );
-      return 'deferred';
+      return {
+        outcome: 'deferred',
+        failureCode: verificationFailureCode(verification.reason),
+        detail: verification.reason,
+      };
     }
-    return this.materializer.apply({
+    const outcome = await this.materializer.apply({
       prepared,
       blockNumber: verification.blockNumber,
       txIndex: verification.txIndex,
@@ -974,6 +1028,13 @@ export class FinalizationRecovery<
         ? { authorAddress: verification.authorAddress }
         : {}),
     });
+    return outcome === 'deferred'
+      ? {
+          outcome,
+          failureCode: 'apply-deferred',
+          detail: 'verified materialization apply deferred',
+        }
+      : { outcome };
   }
 
   private async recordTrustedPublisher(
@@ -1071,18 +1132,34 @@ export class FinalizationRecovery<
 
   async recordDeferred(
     entry: FinalizationRecoveryEntry,
+    failureCode: FinalizationRecoveryFailureCode,
     reason: string,
     retryDelayMs?: number,
   ): Promise<void> {
     const store = this.getStore();
     if (!store) return;
+    const ordinaryDelay = retryDelayMs ?? deferredRetryDelayMs(entry.attemptCount);
     try {
-      await store.recordAttempt(
+      const result = await store.recordAttempt(
         entry.key,
         entry.generation,
         reason,
-        retryDelayMs,
+        entry.state === 'SETTLED'
+          ? { mode: 'ordinary', retryDelayMs: ordinaryDelay }
+          : {
+              mode: 'stable-failure',
+              retryDelayMs: ordinaryDelay,
+              failureCode,
+              stableFailureThreshold: FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+              stableFailureRetryMs: FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
+              retryDeadlineAt: entry.createdAt + this.liveRetryWindowMs,
+            },
       );
+      if (result.status === 'stale') {
+        this.log.info(
+          `Finalization recovery ignored stale attempt update for ${entry.ual}`,
+        );
+      }
     } catch (error) {
       this.log.warn(
         `Finalization recovery attempt update failed for ${entry.ual}: `
@@ -1394,7 +1471,7 @@ export class FinalizationRecovery<
         entry.key,
         entry.generation,
         reason,
-        delayMs,
+        { mode: 'ordinary', retryDelayMs: delayMs },
       );
     } catch (error) {
       this.log.warn(
@@ -1760,19 +1837,20 @@ export class FinalizationRecovery<
       reason,
     );
     if (!rearmed) return false;
-    const outcome = await this.materialize(
+    const result = await this.materialize(
       recoveryInput,
       { kind: 'recovery', entry: rearmed },
     );
-    if (outcome === 'deferred') {
+    if (result.outcome === 'deferred') {
       await this.recordDeferred(
         rearmed,
-        'settled publisher upgrade recovery deferred',
+        result.failureCode,
+        result.detail,
         deferredRetryDelay,
       );
       return false;
     }
-    return this.settleEntry(rearmed, outcome);
+    return this.settleEntry(rearmed, result.outcome);
   }
 
   private async settledMatchesReplayTarget(
@@ -1813,7 +1891,7 @@ export class FinalizationRecovery<
       candidate,
     });
     if (!reorged || reorged.state !== 'REORGED') return false;
-    const outcome = await this.materialize(
+    const result = await this.materialize(
       {
         rawMessage: entry.rawMessage,
         contextGraphId: entry.contextGraphId,
@@ -1822,15 +1900,16 @@ export class FinalizationRecovery<
       },
       { kind: 'recovery', entry: reorged },
     );
-    if (outcome === 'deferred') {
+    if (result.outcome === 'deferred') {
       await this.recordDeferred(
         reorged,
-        'settled reorg recovery deferred',
+        result.failureCode,
+        result.detail,
         deferredRetryDelay,
       );
       return false;
     }
-    return this.settleEntry(reorged, outcome);
+    return this.settleEntry(reorged, result.outcome);
   }
 
   private async replayEntry(
@@ -1869,7 +1948,7 @@ export class FinalizationRecovery<
       const replayEntry = ensured.entry;
       activeEntry = replayEntry;
 
-      let outcome: FinalizationRecoveryApplyOutcome;
+      let result: FinalizationRecoveryMaterializationResult;
       if (ensured.status === 'verified') {
         const { evidence, placement } = ensured;
         const receiptStatus = await this.verifyPersistedReceipt(
@@ -1893,6 +1972,7 @@ export class FinalizationRecovery<
           } else {
             await this.recordDeferred(
               replayEntry,
+              'receipt-pending',
               `persisted receipt is ${receiptStatus}`,
               deferredRetryDelay,
             );
@@ -1911,15 +1991,27 @@ export class FinalizationRecovery<
           candidate,
           evidence,
         });
-        outcome = replayOutcome === 'promoted'
-          ? 'applied'
-          : replayOutcome === 'already-confirmed' || replayOutcome === 'stale-target'
-            ? 'already-confirmed'
-            : 'deferred';
+        if (replayOutcome === 'promoted') {
+          result = { outcome: 'applied' };
+        } else if (replayOutcome === 'already-confirmed' || replayOutcome === 'stale-target') {
+          result = { outcome: 'already-confirmed' };
+        } else if (replayOutcome === 'no-swm') {
+          result = {
+            outcome: 'deferred',
+            failureCode: 'workspace-unavailable',
+            detail: 'verified replay has no SWM snapshot',
+          };
+        } else {
+          result = {
+            outcome: 'deferred',
+            failureCode: 'vm-metadata-pending',
+            detail: 'verified VM metadata is pending',
+          };
+        }
       } else {
         const recoverySourcePeerId = replayEntry.trustedPublisherPeerId
           ?? replayEntry.sourcePeerId;
-        outcome = await this.materialize(
+        result = await this.materialize(
           {
             rawMessage: replayEntry.rawMessage,
             contextGraphId: replayEntry.contextGraphId,
@@ -1930,17 +2022,18 @@ export class FinalizationRecovery<
         );
       }
 
-      if (outcome === 'deferred') {
+      if (result.outcome === 'deferred') {
         await this.recordDeferred(
           replayEntry,
-          'replay processing deferred',
+          result.failureCode,
+          result.detail,
           deferredRetryDelay,
         );
         return deferredRetryDelay === undefined
           ? 'none' as const
           : 'retry-pending' as const;
       }
-      const settled = await this.settleEntry(replayEntry, outcome);
+      const settled = await this.settleEntry(replayEntry, result.outcome);
       return settled ? 'recovered' as const : 'none' as const;
     } catch (error) {
       if (!this.materializer.isRetryableError(error)) throw error;
@@ -1950,6 +2043,7 @@ export class FinalizationRecovery<
       );
       await this.recordDeferred(
         activeEntry,
+        'store-scheduler-busy',
         'replay store scheduler remained busy',
         deferredRetryDelay,
       );

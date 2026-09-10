@@ -1,3 +1,9 @@
+import {
+  createEntitySliceRecoveryPlan,
+  planEntityRecovery,
+  type EntityRecoveryPhaseOutcome,
+} from './entity-slice-recovery.js';
+import { stripMetadataLiteral as stripLiteral } from '../metadata-literal.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -677,6 +683,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     let materializedFailuresForCg = 0;
     let materializedRefsForCg = 0;
     let descriptorsAuthoritativeForCg = true;
+    let snapshotProgressForCg: PublicSnapshotWalkProgress | undefined;
     const unresolvedRefSampleForCg: string[] = [];
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
@@ -903,7 +910,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializedGraphs = 0;
       let materializationFailures = 0;
       let materializedQuads = 0;
-      const manifestSnapshots = collectPublicSnapshotMetadata(snapshotManifestMeta);
+      const manifest = collectPublicSnapshotManifest(snapshotManifestMeta);
+      const manifestSnapshots = manifest.snapshots;
+      const entitySnapshotAuthority = createEntitySliceRecoveryPlan(
+        pid, processed.verifiedMeta, manifest.sourceSubjectsByRef,
+      );
       const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
         ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
         : manifestSnapshots;
@@ -912,6 +923,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       /** Snapshot refs whose every descriptor is locally present. */
       const materializedRefs = new Set<string>(snapshotWalk?.resolvedRefsSnapshot() ?? []);
       materializedRefsForCg = materializedRefs.size;
+      /** Entity refs whose blobs are ready but whose metadata is not committed yet. */
+      const readyEntityRefs = new Set<string>();
+
       /** Refs that fetched but could not be written; named in the shortfall. */
       const unresolvedRefSample: string[] = [];
 
@@ -1043,30 +1057,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // UNRESOLVED: a fetched-but-unwritten ref must never look like progress
         // to the continuation loop.
         if (!snapshotMaterializer || !publicSnapshotStore) return;
-        // No descriptors is a DIFFERENT case, and collapsing the two made a
-        // fully-synced peer permanently capable.
-        //
-        // The denominator (`snapshotsTotal`) counts refs in the peer's manifest;
-        // the numerator counts refs we materialized. A manifest ref that this
-        // round's verified metadata does not describe — a superseded
-        // share-operation row, say — has no descriptor, so it could never enter
-        // `materializedRefs`. `snapshotsResolved < snapshotsTotal` then held
-        // FOREVER: `capablePeersForNextPass` kept calling that peer capable, and
-        // every future catch-up job spent its whole pass budget re-walking a
-        // graph that was already complete, at O(KA size) per cached ref.
-        //
-        // When the manifest is complete, "no descriptor" means there is genuinely
-        // nothing to write for this ref, so it is resolved by vacuity. Gated on
-        // `manifestComplete` because a truncated meta phase never parsed
-        // descriptors at all — there "no descriptor" means "not known yet", and
-        // counting it would inflate coverage for a peer that advertised nothing.
+        // Entity refs are only READY here. They become resolved after the
+        // canonical metadata rows are durably inserted below. A complete,
+        // successfully parsed manifest can still resolve a genuinely
+        // undescribed non-entity ref by vacuity. If parsing failed, other
+        // sources (including a KA sharing the same digest) stay unresolved.
         if (!descriptors?.length) {
-          // `descriptorsAuthoritative` as well as `manifestComplete`: a parse
-          // failure empties this map while the meta phase reports complete, and
-          // treating that as vacuity reports full coverage on a round that wrote
-          // nothing — wrong in the flattering direction, which is the direction
-          // no downstream reader can detect.
-          if (manifestComplete && descriptorsAuthoritativeForCg) {
+          if (manifestComplete && entitySnapshotAuthority.refs.has(snapshotRef)) {
+            readyEntityRefs.add(snapshotRef);
+          } else if (manifestComplete && descriptorsAuthoritativeForCg) {
             materializedRefs.add(snapshotRef);
             materializedRefsForCg = materializedRefs.size;
           }
@@ -1343,6 +1342,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           }
         },
       });
+      snapshotProgressForCg = snapshotSync;
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
         // write lock, so they survive a snapshot-phase throw. Adding them again
@@ -1356,31 +1356,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.timedOutPhases += snapshotSync.timedOutPhases;
       summary.completedPhases += snapshotSync.completedPhases;
       summary.checkpointAdvances += snapshotSync.checkpointAdvances;
-      // Coverage is recorded HERE — above the incomplete branch below — because
-      // a partial round is exactly the round whose coverage the caller needs.
-      // The counts, the peer they are attributed to and the missing sample all
-      // come from this one round and stay together from here on.
-      //
-      // No record for a non-empty graph that declared no snapshot refs. That
-      // shape can contain graph-backed assets and is not terminal until their
-      // count/digest-bound transport is implemented. Only the clean
-      // two-phase-empty branch above emits explicit 0/0 completion.
-      //
-      // Across a MULTI-CG call the reduction keeps exactly ONE graph's record,
-      // named by its `contextGraphId`; the others are dropped. Foreground
-      // catch-up always passes a single CG (`syncPublicContextGraph` in
-      // `dkg-agent-lifecycle.ts`, the only caller of this function), so that
-      // only bites the on-connect fan-out, where this field is a diagnostic
-      // rather than a decision input.
-      recordSnapshotCoverage(
-        snapshotSync,
-        wsMetaResult.completed,
-        descriptorsAuthoritativeForCg,
-        materializationFailures,
-        materializedRefs.size,
-        unresolvedRefSample,
-        pid,
-      );
       // A voluntary yield is OUR budget decision, not the peer's fault. It is
       // recorded here and deliberately kept out of `timedOutPhases`, which
       // feeds `backoffWorthyFailure` and would back the peer off for it. It is
@@ -1434,36 +1409,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           + 'holding the phase incomplete until the caller can prove the referenced content');
       }
       if (!snapshotPhaseUsable) {
-        // The responder was reachable, but the snapshot phase did not produce
-        // a complete, verified snapshot. Preserve any verified data prefix
-        // below, while keeping the overall sync result non-successful so the
-        // lifecycle scheduler retries instead of stamping this peer as caught
-        // up with dangling/missing public snapshot state.
+        // Retain independently verified data, but keep the phase incomplete
+        // while graph-scoped assets or selected evidence remain unproven.
         summary.failedPhases += 1;
-        if (validWsQuads.length > 0) {
-          await recoveryBoundary.admitAsyncMutation(async () => {
-            await ensureContextGraph(pid);
-            await storeInsert(validWsQuads);
-            // Ownership belongs to the same admitted logical write as the
-            // verified data. Revocation may be observed after this unit, but
-            // must never leave inserted entities without their arbitration
-            // state merely because it landed during the awaited insert.
-            hydrateOwnership();
-          });
-          summary.insertedTriples += validWsQuads.length;
-          summary.insertedDataTriples += validWsQuads.length;
-          recordPhaseOutcome(wsDataResult);
-        }
-        if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) {
-          break;
-        }
-        continue;
       }
-
       const storeStartedAt = Date.now();
       let metaForBulkInsert: Quad[] = [];
       let newlyCountedMeta = 0;
-      if (verifiedMetaForInsert.length > 0) {
+      if (snapshotPhaseUsable && verifiedMetaForInsert.length > 0) {
         // Rows written by the per-KA path are ordinarily harmless to replay —
         // an RDF store is a set. Rows for a twin retired after that path are
         // different: replaying them would recreate a dangling SWM head/op after
@@ -1492,26 +1445,55 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
       }
 
-      // The aggregate data, its verified metadata and the in-memory ownership
-      // projection form one admitted recovery unit. Once the first awaited
-      // mutation starts, a selection revocation is deliberately observed only
-      // after all three effects drain, preventing a stale invocation from
-      // leaving a data-only or metadata-without-ownership state.
-      await recoveryBoundary.admitAsyncMutation(async () => {
-        await ensureContextGraph(pid);
-        if (validWsQuads.length > 0) await storeInsert(validWsQuads);
-        if (metaForBulkInsert.length > 0) await storeInsert(metaForBulkInsert);
-        hydrateOwnership();
+      const entityRecoveryPhase: EntityRecoveryPhaseOutcome = snapshotPhaseUsable
+        ? { kind: 'usable', metadataRows: metaForBulkInsert, newlyCountedMetadataRows: newlyCountedMeta }
+        : !snapshotEvidenceAccepted
+          ? { kind: 'evidence-rejected' }
+          : !descriptorsAuthoritativeForCg
+            ? { kind: 'parse-failed' }
+            : { kind: 'incomplete' };
+      const entityRecovery = planEntityRecovery({
+        phase: entityRecoveryPhase,
+        verifiedDataRows: validWsQuads,
+        entityAuthority: entitySnapshotAuthority,
+        readyRefs: readyEntityRefs,
       });
 
-      if (validWsQuads.length > 0) {
-        summary.insertedTriples += validWsQuads.length;
-        summary.insertedDataTriples += validWsQuads.length;
+      // One admitted durability boundary, followed in order by ownership,
+      // resolved refs, and coverage publication. The pure plan above owns the
+      // policy; this small sequence owns the observable transition.
+      if (entityRecovery.rows.length > 0) {
+        await recoveryBoundary.admitAsyncMutation(async () => {
+          await ensureContextGraph(pid);
+          await storeInsert(entityRecovery.rows);
+          hydrateOwnership();
+        });
+        for (const ref of entityRecovery.postCommitRefs) {
+          materializedRefs.add(ref);
+          snapshotWalk?.markResolved(ref);
+          materializedRefsForCg = materializedRefs.size;
+        }
       }
-      summary.insertedTriples += newlyCountedMeta;
-      summary.insertedMetaTriples += newlyCountedMeta;
-      recordPhaseOutcome(wsMetaResult);
-      recordPhaseOutcome(wsDataResult);
+      recordSnapshotCoverage(
+        snapshotSync,
+        wsMetaResult.completed,
+        descriptorsAuthoritativeForCg,
+        materializationFailures,
+        materializedRefs.size,
+        unresolvedRefSample,
+        pid,
+      );
+      summary.insertedTriples += entityRecovery.counters.insertedTriples;
+      summary.insertedMetaTriples += entityRecovery.counters.insertedMetaTriples;
+      summary.insertedDataTriples += entityRecovery.counters.insertedDataTriples;
+      if (entityRecovery.recordDataPhase) recordPhaseOutcome(wsDataResult);
+
+      if (entityRecovery.kind !== 'usable') {
+        if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) break;
+        continue;
+      }
+
+      if (entityRecovery.recordMetaPhase) recordPhaseOutcome(wsMetaResult);
       if (metadataFetcher) {
         recoveryBoundary.admitSyncMutation(() => metadataFetcher.release(pid));
       }
@@ -1533,7 +1515,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // threw would report NOTHING — and the continuation loop reads
       // `snapshotsResolved`, so it would see a converging peer as stalled and
       // drop it. Recover the walk's own counts and record them here.
-      const thrownProgress = readPublicSnapshotWalkProgress(err);
+      const thrownProgress = readPublicSnapshotWalkProgress(err) ?? snapshotProgressForCg;
       if (thrownProgress) {
         // Same builder as the success path — the counts arrive as one coherent
         // group attached by the walk, never reassembled here.
@@ -1726,8 +1708,8 @@ export async function syncPublicSnapshotsForMeta(params: {
     // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
     // for this one. Both halves matter:
     //
-    // - Before, not after: a cache "hit" is O(KA size) — a full `.nq` read plus
-    //   a SHA-256 — and a miss is a network round trip. Checking afterwards
+    // - Before, not after: first or changed-file validation can require a full
+    //   read and digest, and a miss is a network round trip. Checking afterwards
     //   would let one KA overrun the budget it was supposed to respect.
     // - Before the fetch specifically: no `SyncPageResult` exists yet, so
     //   `timedOutPhases` structurally CANNOT move on this path. That is what
@@ -1856,6 +1838,14 @@ export async function syncPublicSnapshotsForMeta(params: {
 }
 
 export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
+  return collectPublicSnapshotManifest(metaQuads).snapshots;
+}
+
+/** Keep source provenance internal without changing the exported metadata shape. */
+function collectPublicSnapshotManifest(metaQuads: readonly Quad[]): {
+  snapshots: PublicSnapshotMetadata[];
+  sourceSubjectsByRef: Map<string, Set<string>>;
+} {
   const bySubject = new Map<string, {
     ref?: string;
     digest?: string;
@@ -1895,6 +1885,7 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
   }
 
   const byRef = new Map<string, PublicSnapshotMetadata>();
+  const sourceSubjectsByRef = new Map<string, Set<string>>();
   for (const [subject, entry] of bySubject) {
     // Read-both (RFC ka-metadata-trim Phase 2): old-store rows carry an
     // explicit `dkg:publicSnapshotRef` (byte-identical to the digest); new
@@ -1915,6 +1906,9 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
     if (!entry.digest || !Number.isInteger(entry.count)) {
       throw new Error(`Shared-memory public snapshot metadata for ${subject} is missing digest/count`);
     }
+    const sources = sourceSubjectsByRef.get(ref) ?? new Set<string>();
+    sources.add(subject);
+    sourceSubjectsByRef.set(ref, sources);
     const existing = byRef.get(ref);
     const metadata: PublicSnapshotMetadata = {
       ref,
@@ -1937,7 +1931,7 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
       ...(newerHints.ualOrdinal !== undefined ? { ualOrdinal: newerHints.ualOrdinal } : {}),
     });
   }
-  return [...byRef.values()];
+  return { snapshots: [...byRef.values()], sourceSubjectsByRef };
 }
 
 function newerPublicSnapshotRecency(
@@ -2021,6 +2015,9 @@ async function hasValidSnapshot(
 ): Promise<boolean> {
   let quads: Quad[] | null;
   try {
+    if (publicSnapshotStore.validateSnapshot) {
+      return await publicSnapshotStore.validateSnapshot(snapshot.ref, snapshot.digest, snapshot.count);
+    }
     quads = await publicSnapshotStore.getSnapshot(snapshot.ref);
     if (!quads && snapshot.ref !== snapshot.digest) {
       quads = await publicSnapshotStore.getSnapshot(snapshot.digest);
@@ -2030,18 +2027,6 @@ async function hasValidSnapshot(
   }
   if (!quads) return false;
   return quads.length === snapshot.count && workspacePublicQuadsDigest(quads) === snapshot.digest;
-}
-
-function stripLiteral(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[-A-Za-z0-9]+|\^\^<[^>]+>)?$/);
-  if (!match) return value;
-  return match[1]
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '\r')
-    .replace(/\\t/g, '\t')
-    .replace(/\\"/g, '"')
-    .replace(/\\\\/g, '\\');
 }
 
 function parseIntegerLiteral(value: string | undefined): number | undefined {

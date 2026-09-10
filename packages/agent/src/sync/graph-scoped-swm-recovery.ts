@@ -1,3 +1,4 @@
+import { stripMetadataLiteral as stripLiteral } from './metadata-literal.js';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -579,7 +580,7 @@ function resolveEquivalentHeadOperation(params: {
 }): ResolvedHeadOperation {
   const shareOperationIds = [...new Set(
     distinctObjects(params.headRows, SHARE_OPERATION_ID)
-      .map(stripLiteral)
+      .map(value => stripLiteral(value))
       .map((value) => value.trim()),
   )];
   if (shareOperationIds.length === 0) {
@@ -757,9 +758,8 @@ function validateOperationRows(params: {
     throw new Error(`Graph-scoped SWM operation ${params.operationSubject} has an invalid accessPolicy`);
   }
   const allowedPeers = distinctObjects(rows, ALLOWED_PEER)
-    .map(stripLiteral)
-    .map((peer) => peer.trim())
-    .filter(Boolean)
+    .map((value) => stripLiteral(value)?.trim())
+    .filter((peer): peer is string => Boolean(peer))
     .sort();
   if (
     (accessPolicy === 'allowList' && allowedPeers.length === 0)
@@ -917,15 +917,4 @@ function requirePositiveInteger(rows: readonly Quad[], predicate: string, field:
   const parsed = BigInt(raw);
   if (parsed < 1n) throw new Error(`${field} must be positive`);
   return parsed.toString();
-}
-
-function stripLiteral(value: string): string {
-  const match = value.match(/^"((?:[^"\\]|\\.)*)"(?:@[-A-Za-z0-9]+|\^\^<[^>]+>)?$/);
-  if (!match) return value;
-  return match[1]!
-    .replace(/\\n/g, '\n')
-    .replace(/\\r/g, '\r')
-    .replace(/\\t/g, '\t')
-    .replace(/\\"/g, '"')
-    .replace(/\\\\/g, '\\');
 }

@@ -41,6 +41,8 @@ import {
   openSqliteFinalizationRecoveryStore,
   type SqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
+import type { FinalizationRecoveryEligibility } from
+  '../src/finalization-recovery-eligibility.js';
 import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
 import { protobufScalarToBigInt } from '../src/protobuf-scalars.js';
 import {
@@ -147,10 +149,12 @@ async function closeInbox(inbox: SqliteFinalizationRecoveryStore | undefined): P
 function recoveryOptions(
   recoveryStore: FinalizationRecoveryStore,
   localTopicOnChainContextGraphId = '42',
+  finalizationRecoveryEligibility: FinalizationRecoveryEligibility = async () => true,
 ) {
   return {
     recoveryStore,
     resolveContextGraphOnChainId: async () => localTopicOnChainContextGraphId,
+    finalizationRecoveryEligibility,
   };
 }
 
@@ -1282,7 +1286,10 @@ describe('graph-scoped finalization handler', () => {
       );
 
       const query = store.query.bind(store);
-      let busyReads = 2;
+      // Publisher-authority observation now owns the first store probe. Keep
+      // both materialization attempts busy as well so this still exercises the
+      // durable pre-verification timeout path.
+      let busyReads = 3;
       store.query = async (sparql, options) => {
         if (busyReads > 0) {
           busyReads -= 1;
@@ -1406,7 +1413,8 @@ describe('graph-scoped finalization handler', () => {
         chain,
         recoveryOptions(inbox),
       );
-      let busyReads = 2;
+      // One authority probe precedes the two bounded materialization attempts.
+      let busyReads = 3;
       store.query = async (sparql, options) => {
         if (busyReads > 0) {
           busyReads -= 1;
@@ -1448,7 +1456,7 @@ describe('graph-scoped finalization handler', () => {
 
       await vi.waitFor(async () => {
         expect(await inbox!.list()).toMatchObject([{ state: 'SETTLED' }]);
-      });
+      }, { timeout: 7_000 });
       expect(await store.countQuads(vmGraph)).toBe(2);
       const health = await inbox.health();
       expect(health.ready).toBe(true);
@@ -1647,7 +1655,7 @@ describe('graph-scoped finalization handler', () => {
         listDue: async () => [],
         listForKnowledgeAsset: async () => [],
         transition: async () => false,
-        recordAttempt: async () => {},
+        recordAttempt: async () => ({ status: 'stale' }),
         health: async () => ({
           available: true,
           closed: false,
@@ -1720,10 +1728,15 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toMatchObject([{
         state: 'RECEIVED',
         attemptCount: 1,
-        lastError: 'finalization processing deferred',
+        lastError: 'context-graph-binding-pending',
       }]);
 
       boundContextGraphId = 42n;
+      const [deferred] = await inbox.list();
+      await new Promise((resolve) => setTimeout(
+        resolve,
+        Math.max(0, (deferred?.nextAttemptAt ?? Date.now()) - Date.now()) + 10,
+      ));
       await recoveryHandler.handleFinalizationMessage(
         encodeFinalizationMessage(message),
         CG,
@@ -1772,7 +1785,7 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toMatchObject([{
         state: 'RECEIVED',
         attemptCount: 1,
-        lastError: 'finalization processing deferred',
+        lastError: 'context-graph-binding-pending',
       }]);
     } finally {
       await closeInbox(inbox);

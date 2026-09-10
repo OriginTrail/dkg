@@ -23,6 +23,34 @@ export function errorMessage(err: unknown): string {
 }
 
 /**
+ * Flatten the nested text fields used by ethers and managed JSON-RPC
+ * providers. Transport classifiers share this boundary so domain reducers do
+ * not grow their own incomplete error-envelope parsers.
+ */
+export function collectEvmErrorText(err: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  const visit = (value: unknown, depth: number): void => {
+    if (value == null || depth > 5 || seen.has(value)) return;
+    if (typeof value === 'string') {
+      parts.push(value);
+      return;
+    }
+    if (typeof value !== 'object') return;
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    for (const key of ['message', 'shortMessage', 'reason', 'body']) {
+      if (typeof record[key] === 'string') parts.push(record[key]);
+    }
+    for (const key of ['error', 'info', 'cause', 'data']) {
+      visit(record[key], depth + 1);
+    }
+  };
+  visit(err, 0);
+  return parts.join(' ').toLowerCase();
+}
+
+/**
  * Read the top-level error class name exposed by Error / DOMException shapes.
  * Unlike status and code extraction, this deliberately does not traverse
  * wrappers: a name describes the caught surface error, while nested transport
@@ -38,29 +66,90 @@ export function errorCode(err: unknown): string {
   return String((err as any)?.code ?? (err as any)?.error?.code ?? '').toUpperCase();
 }
 
+/** One cycle/depth-bounded traversal for the wrapper graph shared by selectors. */
+function* wrappedRpcErrorRecords(err: unknown): Generator<Record<string, unknown>> {
+  const seen = new Set<unknown>();
+  const pending: Array<{ value: unknown; depth: number }> = [{ value: err, depth: 0 }];
+  while (pending.length > 0) {
+    const { value, depth } = pending.pop()!;
+    if (value == null || typeof value !== 'object' || depth > 6 || seen.has(value)) continue;
+    seen.add(value);
+    const record = value as Record<string, unknown>;
+    yield record;
+    // Reverse push preserves the established cause → info → error → response walk.
+    for (const key of ['response', 'error', 'info', 'cause']) {
+      pending.push({ value: record[key], depth: depth + 1 });
+    }
+  }
+}
+
 export function errorStatus(err: unknown): number | undefined {
   // Walk the nested wrapper chains ethers v6 / managed RPCs actually populate, so
   // a provider HTTP status buried at e.g. `err.cause.info.error.status` is still
   // found (a shallow one-level read misses it and the caller would misclassify a
   // 401/403/429 as a non-status error). Depth- and cycle-bounded.
-  const seen = new Set<unknown>();
-  const visit = (e: any, depth: number): number | undefined => {
-    if (e == null || typeof e !== 'object' || depth > 5 || seen.has(e)) return undefined;
-    seen.add(e);
-    for (const raw of [e.status, e.statusCode, e.response?.status, e.error?.status, e.error?.statusCode]) {
+  for (const record of wrappedRpcErrorRecords(err)) {
+    for (const raw of [
+      record.status,
+      record.statusCode,
+    ]) {
       // Numeric, OR a digit-only string ("429"/"401") — several wrapped RPC/fetch
       // errors serialize the HTTP status as a string, so coerce those too rather
       // than missing them and falling back to message heuristics.
       if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
       if (typeof raw === 'string' && /^\d{3}$/.test(raw.trim())) return Number(raw);
     }
-    for (const k of ['cause', 'info', 'error']) {
-      const found = visit(e[k], depth + 1);
-      if (found !== undefined) return found;
+  }
+  return undefined;
+}
+
+/**
+ * Extract a standard HTTP `Retry-After` delay from the wrapper shapes used by
+ * ethers, undici, and managed JSON-RPC providers. Both delta-seconds and HTTP
+ * dates are accepted. The result is deliberately only metadata: callers own
+ * their policy cap and must never sleep an unbounded provider-supplied value.
+ */
+export function errorRetryAfterMs(
+  err: unknown,
+  nowMs: number = Date.now(),
+): number | undefined {
+  const delays: number[] = [];
+
+  const record = (raw: unknown): void => {
+    if (typeof raw !== 'string' && typeof raw !== 'number') return;
+    const value = String(raw).trim();
+    if (value.length === 0) return;
+    if (/^\d+$/u.test(value)) {
+      const seconds = Number(value);
+      if (Number.isSafeInteger(seconds) && seconds >= 0) {
+        const delay = seconds * 1_000;
+        if (Number.isSafeInteger(delay)) delays.push(delay);
+      }
+      return;
     }
-    return undefined;
+    const dateMs = Date.parse(value);
+    if (Number.isFinite(dateMs)) delays.push(Math.max(0, dateMs - nowMs));
   };
-  return visit(err, 0);
+
+  const readHeaders = (headers: unknown): void => {
+    if (headers == null || typeof headers !== 'object') return;
+    const get = (headers as { get?: unknown }).get;
+    if (typeof get === 'function') {
+      try {
+        record(get.call(headers, 'retry-after'));
+      } catch {
+        // A foreign Headers-like object must not break RPC error handling.
+      }
+    }
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (key.toLowerCase() === 'retry-after') record(value);
+    }
+  };
+
+  for (const candidate of wrappedRpcErrorRecords(err)) {
+    readHeaders(candidate.headers);
+  }
+  return delays.length === 0 ? undefined : Math.max(...delays);
 }
 
 export const ERROR_ABI_CONTRACTS = [
