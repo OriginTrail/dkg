@@ -11,7 +11,11 @@ import {
   parseGraphScopedAssertionSealCandidate,
   validateAssertionName,
 } from '@origintrail-official/dkg-core';
-import { readResidentAuthorSelection } from './publish-author-selection.js';
+import {
+  readResidentAuthorSelection,
+  type ResidentAssertionAuthorSelection,
+} from './internal/resident-assertion-author-selection.js';
+export type { ResidentAssertionAuthorSelection } from './internal/resident-assertion-author-selection.js';
 
 type SealQuad = { subject: string; predicate: string; object: string };
 
@@ -37,12 +41,7 @@ export interface AssertionAuthorQueryStore {
   }>;
 }
 
-/** A snapshotted selector; malformed public input still reports resident candidates. */
-export type ResidentAssertionAuthorSelection =
-  | { readonly kind: 'address'; readonly agentAddress: string }
-  | { readonly kind: 'malformed'; readonly displayValue: string };
-
-export interface ResolveFinalizedAssertionAuthorParams {
+interface FinalizedAssertionAuthorLookupParams {
   contextGraphId: string;
   name: string;
   subGraphName?: string;
@@ -60,6 +59,10 @@ export interface ResolveFinalizedAssertionAuthorParams {
    * changes the caller identity used for CG registration / curator stamping.
    */
   selectedAuthor?: ResidentAssertionAuthorSelection;
+}
+
+/** Released deep-entry-point input, adapted before normalized author lookup. */
+export interface ResolveFinalizedAssertionAuthorParams extends FinalizedAssertionAuthorLookupParams {
   /** @deprecated Use selectedAuthor. Supplying both forms is rejected. */
   selectedAuthorAgentAddress?: string;
 }
@@ -106,6 +109,16 @@ export async function resolveFinalizedAssertionAuthor(
   }
   const selectedAuthor = normalizedSelection !== undefined
     ? normalizedSelection : readResidentAuthorSelection(selectedAuthorAgentAddress);
+  return resolveResidentFinalizedAssertionAuthor(store, {
+    contextGraphId, name, subGraphName, callerAgentAddress, selectedAuthor,
+  });
+}
+
+/** Canonical lookup accepts only the normalized resident-selection model. */
+async function resolveResidentFinalizedAssertionAuthor(
+  store: AssertionAuthorQueryStore,
+  { contextGraphId, name, subGraphName, callerAgentAddress, selectedAuthor }: FinalizedAssertionAuthorLookupParams,
+): Promise<string | undefined> {
   if (!validateAssertionName(name).valid) return undefined;
   const metaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
   // Bound the query by the canonical assertion-coordinate grammar (the core

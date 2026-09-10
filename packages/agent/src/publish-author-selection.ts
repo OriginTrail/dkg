@@ -1,5 +1,9 @@
 import { PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE } from '@origintrail-official/dkg-core';
-import type { ResidentAssertionAuthorSelection } from './finalized-assertion-author.js';
+import {
+  readResidentAuthorSelection,
+  type ResidentAssertionAuthorSelection,
+} from './internal/resident-assertion-author-selection.js';
+export { readResidentAuthorSelection } from './internal/resident-assertion-author-selection.js';
 
 /** Identity choice for publishing an already-finalized assertion. */
 export type PublishAuthorSelection =
@@ -43,14 +47,6 @@ export interface PublishIdentityPlan {
 
 function conflict(message: string): never {
   throw Object.assign(new Error(message), { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE });
-}
-
-/** Snapshot untyped API input without forwarding arbitrary values into lookup. */
-export function readResidentAuthorSelection(value: unknown): ResidentAssertionAuthorSelection | undefined {
-  if (value === undefined) return undefined;
-  return typeof value === 'string'
-    ? Object.freeze({ kind: 'address', agentAddress: value })
-    : Object.freeze({ kind: 'malformed', displayValue: String(value) });
 }
 
 function authorPlan(agentAddress: string, enqueueCaller: string | undefined): PublishIdentityPlan {
