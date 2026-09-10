@@ -1382,6 +1382,67 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
+  it('keeps an unlisted lifecycle responsibility legacy while one canary runs Track-2', async () => {
+    const unlistedContextGraphId = `${AUTHOR}/bounded-default-unlisted` as ContextGraphIdV1;
+    const edge = await startAgent({
+      name: 'bounded-default-responsibility',
+      config: {
+        rfc64CatalogActivation: {
+          rollout: {
+            defaultMode: 'legacy',
+            contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+          },
+        },
+      },
+    });
+
+    expect((edge as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+      track2ContextGraphs: [CONTEXT_GRAPH_ID],
+    });
+    expect(edge.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Bounded RFC-64 canary',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.createContextGraph({
+      id: unlistedContextGraphId,
+      name: 'Bounded RFC-64 unlisted control',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        active: true,
+        mode: 'shadow',
+        selectionSource: 'operator-override',
+      }),
+      expect.objectContaining({
+        contextGraphId: unlistedContextGraphId,
+        active: true,
+        mode: 'legacy',
+        selectionSource: 'operator-override',
+      }),
+    ]);
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)).toMatchObject({
+      mode: 'shadow',
+      legacySyncAllowed: true,
+      track2Enabled: true,
+      reconciliationLane: 'shadow-stage',
+    });
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(unlistedContextGraphId)).toMatchObject({
+      mode: 'legacy',
+      legacySyncAllowed: true,
+      track2Enabled: false,
+      reconciliationLane: 'legacy',
+    });
+  });
+
   async function prepareAuthorityRefreshLifecycle() {
     const legacyContextGraphId = `${AUTHOR}/authority-refresh-legacy` as ContextGraphIdV1;
     const inactiveContextGraphId = `${AUTHOR}/authority-refresh-inactive` as ContextGraphIdV1;

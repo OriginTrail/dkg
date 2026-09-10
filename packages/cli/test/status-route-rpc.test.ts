@@ -194,6 +194,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         selectedPrivateContextGraphs: [privateContextGraph],
         rollout: {
           killSwitch: false,
+          defaultMode: 'catalog',
           contextGraphModes: {
             [publicContextGraph]: 'catalog',
             [privateContextGraph]: 'catalog',
@@ -232,6 +233,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       activationManifestPresent: true,
       deprecatedDisabledOverride: false,
       killSwitch: false,
+      defaultMode: 'catalog',
     });
     expect(response.body.rfc64Catalog.configuration.digest)
       .toMatch(/^sha256:[0-9a-f]{64}$/u);
@@ -274,6 +276,47 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       deprecatedDisabledOverride: false,
       legacyOverrideCount: 0,
       shadowOverrideCount: 0,
+    });
+  });
+
+  it('reports a bounded lifecycle default and its explicit canary override', async () => {
+    const canary = 'bounded-status-canary';
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        rfc64Catalog: {
+          rollout: {
+            defaultMode: 'legacy',
+            contextGraphModes: { [canary]: 'shadow' },
+          },
+        },
+      },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'legacy',
+          contextGraphModes: { [canary]: 'shadow' },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [canary]: 'shadow' },
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'operator-override',
+      defaultMode: 'legacy',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 1,
     });
   });
 
@@ -430,6 +473,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         },
         rollout: {
           killSwitch: true,
+          defaultMode: 'catalog',
           contextGraphModes: {
             [publicContextGraph]: 'shadow',
             [privateContextGraph]: 'legacy',
@@ -481,6 +525,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     });
     expect(response.body.rfc64Catalog.rollout).toEqual({
       killSwitch: true,
+      defaultMode: 'catalog',
       contextGraphModes: {
         [publicContextGraph]: 'shadow',
         [privateContextGraph]: 'legacy',
