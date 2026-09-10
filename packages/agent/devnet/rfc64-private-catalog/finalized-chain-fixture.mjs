@@ -39,12 +39,18 @@ const KNOWLEDGE_ASSET_SELECTORS = new Set([
 /** Chain adapter whose identity matches the deterministic finalized-RPC fixture. */
 export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
   #fixture;
+  #participantAgents;
+  #rosterVersion;
 
   constructor(fixture) {
     super(fixture.networkId, MOCK_DEFAULT_SIGNER, {
       initialContextGraphId: BigInt(fixture.onChainContextGraphId),
     });
     this.#fixture = fixture;
+    this.#participantAgents = new Set(
+      fixture.participantAgents.map((address) => address.toLowerCase()),
+    );
+    this.#rosterVersion = BigInt(fixture.rosterVersion);
   }
 
   async getEvmChainId() {
@@ -57,6 +63,40 @@ export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
 
   async getDKGKnowledgeAssetsAddress() {
     return this.#fixture.knowledgeAssetStorageAddress;
+  }
+
+  async getContextGraphAuthoritySnapshot(contextGraphId, options = {}) {
+    options.signal?.throwIfAborted();
+    if (contextGraphId.toString(10) !== this.#fixture.onChainContextGraphId) {
+      throw new Error(`unknown finalized Context Graph ${contextGraphId}`);
+    }
+    return Object.freeze({
+      chainId: this.#fixture.assertedAtChainId,
+      governanceContract: this.#fixture.contextGraphStorageAddress,
+      contextGraphId: this.#fixture.onChainContextGraphId,
+      owner: this.#fixture.ownerAddress,
+      active: this.#fixture.active,
+      accessPolicy: this.#fixture.accessPolicy,
+      publishPolicy: this.#fixture.publishPolicy,
+      publishAuthority: this.#fixture.publishAuthority,
+      publishAuthorityAccountId: this.#fixture.publishAuthorityAccountId,
+      participantAgents: Object.freeze([...this.#participantAgents].sort()),
+      nameHash: this.#fixture.nameHash,
+      ownershipEra: this.#fixture.ownershipEra,
+      policyVersion: this.#fixture.policyVersion,
+      rosterVersion: this.#rosterVersion.toString(10),
+      sourceBlockNumber: this.#fixture.authorityBlockNumber,
+      sourceBlockHash: this.#fixture.authorityBlockHash,
+    });
+  }
+
+  async removeContextGraphParticipantAgent(contextGraphId, agent) {
+    const result = await super.removeContextGraphParticipantAgent(contextGraphId, agent);
+    if (!this.#participantAgents.delete(agent.toLowerCase())) {
+      throw new Error(`finalized participant ${agent} was not present`);
+    }
+    this.#rosterVersion += 1n;
+    return result;
   }
 }
 
@@ -114,6 +154,9 @@ export async function startRfc64PrivateDevnetFinalizedRpc(fixture) {
   return Object.freeze({
     url: `http://127.0.0.1:${address.port}`,
     calls: (method) => calls.get(method) ?? 0,
+    snapshot: () => Object.freeze(Object.fromEntries(
+      [...calls.entries()].sort(([left], [right]) => left.localeCompare(right)),
+    )),
     close: async () => {
       server.closeAllConnections?.();
       await new Promise((resolve) => server.close(resolve));
@@ -155,7 +198,7 @@ function finalizedVmEthCallResult(params, fixture, assets) {
       assertContextGraphCall('getContextGraph', data, fixture.onChainContextGraphId);
       return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult('getContextGraph', [
         fixture.ownerAddress,
-        [],
+        fixture.participantAgents,
         0n,
         fixture.active,
         1n,
