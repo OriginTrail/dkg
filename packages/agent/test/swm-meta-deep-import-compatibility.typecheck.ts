@@ -50,3 +50,10 @@ void generalizedScope;
 void invalidSelectedScope;
 void currentFetcher;
 void continuation;
+
+coordinator.run({ mode: 'selected', remotePeerId: 'peer' }, () => currentFetcher, async () => {});
+new SelectedSwmMetaTransferCoordinator().run('peer', () => legacyFetcher, async () => {});
+// @ts-expect-error The canonical coordinator requires an explicit mode and peer.
+coordinator.run('peer', () => currentFetcher, async () => {});
+// @ts-expect-error Encoded registry keys are not part of the canonical API.
+coordinator.run('ordinary\0peer', () => currentFetcher, async () => {});

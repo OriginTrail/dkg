@@ -4,7 +4,8 @@ import {
   createSwmMetaFetcher,
   SwmMetaTransferOwner,
 } from '../src/sync/swm-meta-fetcher.js';
-import { SwmMetaTransferCoordinator } from '../src/sync/swm-meta-transfer-coordinator.js';
+import { SwmMetaTransferCoordinator, type SwmMetaTransferSession } from '../src/sync/swm-meta-transfer-coordinator.js';
+import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSwmMetaRetentionBudget } from '../src/sync/swm-meta-budget.js';
 
 const testContext = {
@@ -22,6 +23,80 @@ function retentionBudget() {
 }
 
 describe('selected SWM metadata transfer ownership', () => {
+  it('allocates one mode-bound requester session per retained peer and mode owner', async () => {
+    const coordinator = new SwmMetaTransferCoordinator();
+    const createFetcher = vi.fn((session: SwmMetaTransferSession) => createSwmMetaFetcher({
+      remotePeerId: session.remotePeerId,
+      requesterScope: session.requesterScope,
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage: async () => ({
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+        bytesReceived: 1, resumedFromOffset: 0, nextOffset: 1,
+        checkpointKey: session.requesterScope, completed: false, timedOut: true,
+      }),
+    }));
+    const start = (mode: 'ordinary' | 'selected', remotePeerId = 'peer-a') => coordinator.run(
+      { mode, remotePeerId }, createFetcher, fetcher => fetcher.strategy.fetch({
+        ctx: testContext, remotePeerId, contextGraphId: 'cg', graphUri: 'urn:meta',
+        deadline: Date.now() + 1_000,
+      }),
+    );
+
+    try {
+      await start('selected');
+      await start('ordinary');
+      await coordinator.run({ mode: 'selected', remotePeerId: 'peer-a' }, createFetcher, async () => {});
+      expect(createFetcher).toHaveBeenCalledTimes(2);
+      await start('selected', 'peer-b');
+      const sessions = createFetcher.mock.calls.map(([session]) => session);
+      expect(sessions.map(({ mode, remotePeerId }) => ({ mode, remotePeerId }))).toEqual([
+        { mode: 'selected', remotePeerId: 'peer-a' },
+        { mode: 'ordinary', remotePeerId: 'peer-a' },
+        { mode: 'selected', remotePeerId: 'peer-b' },
+      ]);
+      expect(new Set(sessions.map(session => session.requesterScope)).size).toBe(3);
+      for (const session of sessions) {
+        expect(session.requesterScope.startsWith(`${session.mode}-swm-meta:retained:`)).toBe(true);
+      }
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('maps the legacy peer-only entry point to the same selected owner while isolating ordinary mode', async () => {
+    const legacy = new SelectedSwmMetaTransferCoordinator();
+    const coordinator: SwmMetaTransferCoordinator = legacy;
+    const peerId = 'legacy-mode-owner';
+    const makeFetcher = (mode: 'ordinary' | 'selected') => createSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: `${mode}-swm-meta:retained:legacy-mode-owner`,
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage: async () => ({
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+        bytesReceived: 1, resumedFromOffset: 0, nextOffset: 1,
+        checkpointKey: `${mode}:legacy-owner`, completed: false, timedOut: true,
+      }),
+    });
+    const selected = makeFetcher('selected');
+    const ordinary = makeFetcher('ordinary');
+
+    try {
+      await legacy.run(peerId, () => selected, (fetcher) => fetcher.strategy.fetch({
+        ctx: testContext, remotePeerId: peerId, contextGraphId: 'cg',
+        graphUri: 'urn:meta', deadline: Date.now() + 1_000,
+      }));
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, () => {
+        throw new Error('Retained selected owner was recreated');
+      }, async fetcher => { expect(fetcher).toBe(selected); });
+      await coordinator.run({ mode: 'ordinary', remotePeerId: peerId }, () => ordinary,
+        async fetcher => { expect(fetcher).toBe(ordinary); });
+    } finally {
+      await legacy.close();
+    }
+  });
+
   it('keeps retained-prefix lifecycle controls private to the per-peer owner', async () => {
     const coordinator = new SwmMetaTransferCoordinator();
     const fetcher = createSwmMetaFetcher({
@@ -37,7 +112,7 @@ describe('selected SWM metadata transfer ownership', () => {
     expect(fetcher).not.toHaveProperty('settleOuterInvocation');
     expect(fetcher).not.toHaveProperty('pruneExpiredPrefixes');
     expect(fetcher).not.toHaveProperty('cleanup');
-    await coordinator.run('peer-private-owner', () => fetcher, async () => {});
+    await coordinator.run({ mode: 'selected', remotePeerId: 'peer-private-owner' }, () => fetcher, async () => {});
     await coordinator.close();
   });
 
@@ -78,7 +153,7 @@ describe('selected SWM metadata transfer ownership', () => {
     };
 
     try {
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
         walk.markResolved('ref-a', [suppressedRow]);
@@ -87,7 +162,7 @@ describe('selected SWM metadata transfer ownership', () => {
         expect(walk.resolvedCount()).toBe(1);
       });
 
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         const cached = await fetcher.strategy.fetch(request);
         expect(cached.result.bytesReceived).toBe(0);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
@@ -104,7 +179,7 @@ describe('selected SWM metadata transfer ownership', () => {
 
       // A fully resolved walk is terminal owner state. The next outer
       // invocation must start from a new fetcher rather than retaining trust.
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
       });
       expect(fetchPage).toHaveBeenCalledTimes(2);
@@ -165,7 +240,7 @@ describe('selected SWM metadata transfer ownership', () => {
     };
 
     try {
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest);
         walk.markResolved('ref-a');
@@ -173,7 +248,7 @@ describe('selected SWM metadata transfer ownership', () => {
 
       for (const retryAtMs of [4_000, 9_000]) {
         elapsedMs = retryAtMs;
-        await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
           const cached = await fetcher.strategy.fetch({ ...request, deadline: clock() + 60_000 });
           expect(cached.result.bytesReceived).toBe(0);
           const walk = fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest);
@@ -183,7 +258,7 @@ describe('selected SWM metadata transfer ownership', () => {
       }
 
       elapsedMs = 10_001;
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         const refreshed = await fetcher.strategy.fetch({ ...request, deadline: clock() + 60_000 });
         expect(refreshed.result.bytesReceived).toBe(1);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, correctedManifest);
@@ -227,8 +302,8 @@ describe('selected SWM metadata transfer ownership', () => {
     };
 
     try {
-      await coordinator.run(peerId, createFetcher, (fetcher) => fetcher.strategy.fetch(request));
-      await coordinator.run(peerId, createFetcher, (fetcher) => fetcher.strategy.fetch(request));
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, (fetcher) => fetcher.strategy.fetch(request));
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, (fetcher) => fetcher.strategy.fetch(request));
 
       // Terminal metadata without a post-metadata walk carries no resumable
       // work into the next outer invocation.
@@ -280,7 +355,7 @@ describe('selected SWM metadata transfer ownership', () => {
     ];
     const reordered = [changedCount[1]!, changedCount[0]!];
     try {
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, original);
         walk.markResolved('ref-a');
@@ -292,21 +367,21 @@ describe('selected SWM metadata transfer ownership', () => {
         expect(walk.orderedManifestSnapshot()).toEqual(original);
       });
 
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, changedDigest);
         expect(walk.resolvedRefsSnapshot()).toEqual([]);
         walk.markResolved('ref-a');
       });
 
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, changedCount);
         expect(walk.resolvedRefsSnapshot()).toEqual([]);
         walk.markResolved('ref-a');
       });
 
-      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, reordered);
         expect(walk.resolvedRefsSnapshot()).toEqual([]);
@@ -396,7 +471,7 @@ describe('selected SWM metadata transfer ownership', () => {
     };
 
     try {
-      await coordinator.run(peerId, createFetcher, (fetcher) => fetcher.strategy.fetch({
+      await coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, (fetcher) => fetcher.strategy.fetch({
         ctx: testContext,
         remotePeerId: peerId,
         contextGraphId,
@@ -449,7 +524,7 @@ describe('selected SWM metadata transfer ownership', () => {
       return ownedFetcher;
     };
     const fetch = (contextGraphId: string) => coordinator.run(
-      peerId,
+      { mode: 'selected', remotePeerId: peerId },
       createFetcher,
       (fetcher) => fetcher.strategy.fetch({
         ctx: testContext,
@@ -549,14 +624,14 @@ describe('selected SWM metadata transfer ownership', () => {
 
     try {
       await coordinator.run(
-        peerId,
+        { mode: 'selected', remotePeerId: peerId },
         createFetcher,
         (fetcher) => fetcher.strategy.fetch(request('cg-a')),
       );
       expect(ownedFetcher?.continuation('cg-a').progress).toBe(1);
 
       let secondCompleted = false;
-      const second = coordinator.run(peerId, createFetcher, async (fetcher) => {
+      const second = coordinator.run({ mode: 'selected', remotePeerId: peerId }, createFetcher, async (fetcher) => {
         signalSecondOperationStarted();
         await secondOperationGate;
         return fetcher.strategy.fetch(request('cg-b'));
@@ -649,13 +724,13 @@ describe('selected SWM metadata transfer ownership', () => {
 
     try {
       await coordinator.run(
-        'peer-a',
+        { mode: 'selected', remotePeerId: 'peer-a' },
         () => createFetcher('peer-a'),
         (fetcher) => fetcher.strategy.fetch(request('peer-a', 'cg-old')),
       );
 
       const activePeerA = coordinator.run(
-        'peer-a',
+        { mode: 'selected', remotePeerId: 'peer-a' },
         () => createFetcher('peer-a'),
         (fetcher) => fetcher.strategy.fetch(request('peer-a', 'cg-active')),
       );
@@ -674,7 +749,7 @@ describe('selected SWM metadata transfer ownership', () => {
       expect(deleteCheckpoint).not.toHaveBeenCalledWith('peer-a:cg-active:checkpoint');
 
       await coordinator.run(
-        'peer-b',
+        { mode: 'selected', remotePeerId: 'peer-b' },
         () => createFetcher('peer-b'),
         (fetcher) => fetcher.strategy.fetch(request('peer-b', 'cg-b')),
       );
@@ -708,13 +783,13 @@ describe('selected SWM metadata transfer ownership', () => {
     });
 
     try {
-      const peerA = coordinator.run('peer-a', () => createEmptyFetcher('peer-a'), async () => {
+      const peerA = coordinator.run({ mode: 'selected', remotePeerId: 'peer-a' }, () => createEmptyFetcher('peer-a'), async () => {
         signalPeerAStarted();
         await peerARelease;
       });
       await peerAStarted;
       let peerBStarted = false;
-      await coordinator.run('peer-b', () => createEmptyFetcher('peer-b'), async () => {
+      await coordinator.run({ mode: 'selected', remotePeerId: 'peer-b' }, () => createEmptyFetcher('peer-b'), async () => {
         peerBStarted = true;
       });
       expect(peerBStarted).toBe(true);
