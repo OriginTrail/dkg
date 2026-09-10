@@ -8,5 +8,5 @@
     "rootDir": ".",
     "sourceMap": false
   },
-  "include": ["test/**/*.typecheck.ts"]
+  "include": ["type-tests/**/*.ts", "test/**/*.typecheck.ts"]
 }
