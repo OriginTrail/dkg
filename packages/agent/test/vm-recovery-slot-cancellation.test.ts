@@ -54,6 +54,81 @@ const cases = (['discovery', 'legacy-meta', 'legacy-registry', 'dial', 'protocol
 );
 
 describe('exact VM recovery slot cancellation', () => {
+  it.each(['fingerprint', 'context', 'own-donation', 'own-donation-replacement'] as const)(
+    'preserves donor lifecycle ownership during discovery: %s', async invalidation => {
+      const localCgId = `0x0000000000000000000000000000000000000001/reserved-${invalidation}`;
+      const peer = '12D3KooWReservedDonor';
+      const entered = barrier();
+      const release = barrier();
+      const harness = await createVmRecoveryHostHarness({
+        name: `ReservedDonor-${invalidation}`, localCgId, peers: [peer], targetCount: 2,
+        targetForOrdinal: ordinal => targetFor(localCgId, ordinal), onFetch: () => 'clean-absent',
+      });
+      const host = harness.internals as CancellationHost;
+      const descriptor = Object.getOwnPropertyDescriptor(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES')!;
+      Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', { ...descriptor, value: 1 });
+      const donor = harness.targets[0]!;
+      const waiting = harness.targets[1]!;
+      const original = host.prepareVmReconcileRotationTarget(donor, [peer], host.vmReconcileRotationNow()).record!;
+      original.phase = 'backoff';
+      original.backoffKind = 'incomplete-cycle';
+      original.nextRetryAt = 0;
+      let discoverySignal: AbortSignal | undefined;
+      host.resolveCuratorPeerIdsForCg = async (_cg, options) => {
+        discoverySignal = options?.signal;
+        entered.release();
+        await release.promise;
+        return { peerIds: [peer], curatorIsLocal: false, legacyTripleResolved: false };
+      };
+      const replacementScope = host.vmRecoverySlots.begin();
+      const donorObserver = host.vmRecoverySlots.begin();
+      donorObserver.track([donor]);
+      if (invalidation === 'own-donation-replacement') {
+        donorObserver.signal.addEventListener('abort', () => {
+          replacementScope.track([{ ...donor, merkleRoot: 'replacement-root' }]);
+        }, { once: true });
+      }
+      const recovery = harness.run();
+      try {
+        await entered.promise;
+        expect(host.vmRecoverySlots.peekRecord(donor)).toBe(original);
+        expect(discoverySignal?.aborted).toBe(false);
+        let replacement: VmReconcileRotationRecord | undefined;
+        if (invalidation === 'fingerprint' || invalidation === 'context') {
+          if (invalidation === 'context') host.vmRecoverySlots.invalidateContextGraph(localCgId);
+          const current = { ...donor, merkleRoot: 'replacement-root' };
+          replacement = host.prepareVmReconcileRotationTarget(current, [peer], host.vmReconcileRotationNow()).record;
+          replacementScope.track([current]);
+          expect(replacement).toBeDefined();
+          expect(discoverySignal?.aborted).toBe(true);
+        }
+        release.release();
+        const result = await recovery;
+        if (invalidation === 'own-donation' || invalidation === 'own-donation-replacement') {
+          expect(discoverySignal?.aborted).toBe(false);
+          expect(result.attemptedOrdinals).toEqual([waiting.ordinal]);
+          expect(harness.fetched.map(fetch => fetch.uals)).toEqual([[waiting.ual]]);
+          expect(host.vmRecoverySlots.peekRecord(donor)).toBeUndefined();
+          expect(donorObserver.signal.aborted).toBe(true);
+          expect(replacementScope.signal.aborted).toBe(false);
+        } else {
+          expect(result).toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
+          expect(harness.fetched).toHaveLength(0);
+          expect(host.vmRecoverySlots.snapshot().get(vmRecoverySlotKey(donor))).toBe(replacement);
+          expect(replacementScope.signal.aborted).toBe(false);
+          expect(host.readVmReconcileActiveFetchCooldown(localCgId)).toBeUndefined();
+        }
+      } finally {
+        release.release();
+        await recovery;
+        replacementScope.release();
+        donorObserver.release();
+        Object.defineProperty(DKGAgentBase, 'VM_RECONCILE_CACHE_MAX_ENTRIES', descriptor);
+        await harness.agent.stop().catch(() => undefined);
+      }
+    },
+  );
+
   it('keeps the donor running when a replacement record cannot be installed', async () => {
     const localCgId = '0x0000000000000000000000000000000000000001/failed-donation';
     const peer = '12D3KooWFailedDonation';

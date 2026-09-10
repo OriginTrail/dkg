@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { VmRecoverySlotRegistry } from '../src/internal/vm-recovery-slot-registry.js';
+import { VmRecoverySlotRegistry, type VmRecoverySlotScope } from '../src/internal/vm-recovery-slot-registry.js';
 import type { VmReconcileRotationRecord } from '../src/dkg-agent-types.js';
 
 const target = { localCgId: 'cg-a', onChainCgId: '1', ordinal: 0, ual: 'ka-0', merkleRoot: '0xABC' };
@@ -18,6 +18,181 @@ function admitFor(
 }
 
 describe('active VM recovery slot ownership', () => {
+  it('preserves one live slot per graph across overlapping fair donations', () => {
+    const registry = new VmRecoverySlotRegistry();
+    admitFor(registry, target, 0, 2);
+    admitFor(registry, { ...target, ordinal: 1 }, 0, 2);
+    const scope = registry.begin();
+    const first = scope.reserveAdmission({ ...target, localCgId: 'cg-b' }, 0, 2);
+    expect(first.kind).toBe('reserved');
+    expect(scope.reserveAdmission({ ...target, localCgId: 'cg-c' }, 0, 2).kind).toBe('deferred');
+    expect(scope.reserveAdmission({ ...target, localCgId: 'cg-b', ordinal: 2 }, 0, 2).kind).toBe('deferred');
+    if (first.kind === 'reserved') first.reservation.release();
+    const next = scope.reserveAdmission({ ...target, localCgId: 'cg-c' }, 0, 2);
+    expect(next.kind).toBe('reserved');
+    if (next.kind === 'reserved') expect(next.reservation.commit({
+      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+    }).kind).toBe('admitted');
+    expect([...registry.snapshot().values()].map(record => record.localCgId)).toEqual(['cg-a', 'cg-c']);
+    scope.release();
+  });
+
+  it.each((['immediate', 'delayed'] as const).flatMap(mode =>
+    (['before-write', 'after-write'] as const).map(failure => ({ mode, failure })),
+  ))('rolls back $mode donation after $failure failure without aborting its donor', ({ mode, failure }) => {
+    class FailingRegistry extends VmRecoverySlotRegistry {
+      failing = true;
+      protected override retainRecord(key: string, record: VmReconcileRotationRecord): void {
+        if (this.failing && record.ordinal === 1 && failure === 'before-write') throw new Error('install failed');
+        super.retainRecord(key, record);
+        if (this.failing && record.ordinal === 1 && failure === 'after-write') throw new Error('install failed');
+      }
+    }
+    const registry = new FailingRegistry();
+    const donorRecord = admitFor(registry, target, 0, 1);
+    const donorScope = registry.begin();
+    donorScope.track([target]);
+    const requesterScope = registry.begin();
+    const waiting = { ...target, ordinal: 1 };
+    const params = { candidatePeerIds: ['peer-a'], curatorRosterConfirmed: true, collectionDeadlineAt: 200 };
+    if (mode === 'immediate') {
+      expect(() => registry.admit(waiting, params, 100, 1)).toThrow('install failed');
+    } else {
+      const admission = requesterScope.reserveAdmission(waiting, 100, 1);
+      expect(admission.kind).toBe('reserved');
+      if (admission.kind === 'reserved') expect(() => admission.reservation.commit(params)).toThrow('install failed');
+    }
+    expect([...registry.snapshot().values()]).toEqual([donorRecord]);
+    expect(donorScope.signal.aborted).toBe(false);
+    registry.failing = false;
+    expect(registry.admit(waiting, params, 100, 1).kind).toBe('admitted');
+    expect(donorScope.signal.aborted).toBe(true);
+    expect(registry.recordCount).toBe(1);
+    donorScope.release();
+    requesterScope.release();
+  });
+
+  it.each(['context', 'close'] as const)('preserves a replacement acquired by an abort listener during %s invalidation', kind => {
+    const registry = new VmRecoverySlotRegistry();
+    const other = { ...target, ordinal: 1 };
+    const firstScope = registry.begin();
+    const oldOtherScope = registry.begin();
+    firstScope.track([target]);
+    oldOtherScope.track([other]);
+    const replacement = { ...other, merkleRoot: 'new-root' };
+    let replacementScope: VmRecoverySlotScope | undefined;
+    firstScope.signal.addEventListener('abort', () => {
+      replacementScope = registry.begin();
+      replacementScope.track([replacement]);
+      admitFor(registry, replacement);
+    }, { once: true });
+    if (kind === 'context') registry.invalidateContextGraph(target.localCgId);
+    else registry.close();
+    expect(oldOtherScope.signal.aborted).toBe(true);
+    expect(replacementScope?.signal.aborted).toBe(false);
+    expect(registry.peekRecord(replacement)).toBeDefined();
+    firstScope.release();
+    oldOtherScope.release();
+    replacementScope?.release();
+    registry.close();
+  });
+
+  it('reserves distinct donors and makes released capacity available to the next waiter', () => {
+    const registry = new VmRecoverySlotRegistry();
+    const donorA = admitFor(registry, target, 0, 2);
+    const donorB = admitFor(registry, { ...target, ordinal: 1 }, 0, 2);
+    const scope = registry.begin();
+    const first = scope.reserveAdmission({ ...target, ordinal: 2 }, 100, 2);
+    const second = scope.reserveAdmission({ ...target, ordinal: 3 }, 100, 2);
+    expect(first.kind).toBe('reserved');
+    expect(second.kind).toBe('reserved');
+    expect(scope.reserveAdmission({ ...target, ordinal: 4 }, 100, 2).kind).toBe('deferred');
+    expect([...registry.snapshot().values()]).toEqual([donorA, donorB]);
+    if (first.kind === 'reserved') first.reservation.release();
+    const next = scope.reserveAdmission({ ...target, ordinal: 4 }, 100, 2);
+    expect(next.kind).toBe('reserved');
+    const params = { candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 200 };
+    if (second.kind === 'reserved') expect(second.reservation.commit(params).kind).toBe('admitted');
+    if (next.kind === 'reserved') expect(next.reservation.commit(params).kind).toBe('admitted');
+    expect([...registry.snapshot().values()].map(record => record.ordinal)).toEqual([3, 4]);
+    expect(registry.recordCount).toBe(2);
+    scope.release();
+  });
+
+  it.each(['before', 'after'] as const)('observes external donor replacement when tracked %s reservation', order => {
+    const registry = new VmRecoverySlotRegistry();
+    admitFor(registry, target, 0, 1);
+    const waiting = { ...target, ordinal: 1 };
+    const scope = registry.begin();
+    if (order === 'before') scope.track([target, waiting]);
+    const admission = scope.reserveAdmission(waiting, 100, 1);
+    expect(admission.kind).toBe('reserved');
+    if (order === 'after') scope.track([target, waiting]);
+    const replacement = { ...target, merkleRoot: 'new-root' };
+    const record = admitFor(registry, replacement, 100, 1);
+    expect(scope.signal.aborted).toBe(true);
+    if (admission.kind === 'reserved') expect(admission.reservation.commit({
+      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 200,
+    }).kind).toBe('deferred');
+    expect(registry.peekRecord(replacement)).toBe(record);
+    scope.release();
+  });
+
+  it.each(['before', 'after'] as const)('suppresses only its own donation when tracked %s reservation', order => {
+    const registry = new VmRecoverySlotRegistry();
+    admitFor(registry, target, 0, 1);
+    const otherScope = registry.begin();
+    otherScope.track([target]);
+    const waiting = { ...target, ordinal: 1 };
+    const scope = registry.begin();
+    if (order === 'before') scope.track([target, waiting]);
+    const admission = scope.reserveAdmission(waiting, 100, 1);
+    expect(admission.kind).toBe('reserved');
+    if (order === 'after') scope.track([target, waiting]);
+    if (admission.kind === 'reserved') expect(admission.reservation.commit({
+      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 200,
+    }).kind).toBe('admitted');
+    expect(otherScope.signal.aborted).toBe(true);
+    expect(scope.signal.aborted).toBe(false);
+    expect(registry.peekRecord(target)).toBeUndefined();
+    expect(registry.peekRecord(waiting)).toBeDefined();
+    registry.invalidate(waiting);
+    expect(scope.signal.aborted).toBe(true);
+    scope.release();
+    otherScope.release();
+  });
+
+  it('counts delayed open-capacity reservations during immediate admission', () => {
+    const registry = new VmRecoverySlotRegistry();
+    const scope = registry.begin();
+    const admission = scope.reserveAdmission(target, 0, 1);
+    expect(admission.kind).toBe('reserved');
+    expect(registry.admit({ ...target, ordinal: 1 }, {
+      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+    }, 0, 1).kind).toBe('deferred');
+    if (admission.kind === 'reserved') expect(admission.reservation.commit({
+      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+    }).kind).toBe('admitted');
+    expect(registry.recordCount).toBe(1);
+    scope.release();
+  });
+
+  it.each(['target', 'context', 'close'] as const)('retires an untracked pending admission on %s invalidation', kind => {
+    const registry = new VmRecoverySlotRegistry();
+    const scope = registry.begin();
+    const admission = scope.reserveAdmission(target, 0, 1);
+    expect(admission.kind).toBe('reserved');
+    if (kind === 'target') registry.observeTarget({ ...target, merkleRoot: 'new-root' });
+    else if (kind === 'context') registry.invalidateContextGraph(target.localCgId);
+    else registry.close();
+    if (admission.kind === 'reserved') expect(admission.reservation.commit({
+      candidatePeerIds: [], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
+    }).kind).toBe('deferred');
+    expect(registry.recordCount).toBe(0);
+    expect(admitFor(registry, target, 0, 1)).toBeDefined();
+    scope.release();
+  });
+
   it('keeps snapshot membership fixed while later reads reflect slot transitions', () => {
     const registry = new VmRecoverySlotRegistry();
     const empty = registry.snapshot();

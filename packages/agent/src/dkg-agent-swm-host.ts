@@ -5851,6 +5851,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       .sort((left, right) => Number(left.hasOwnedRecord) - Number(right.hasOwnedRecord)
         || admissionDistance(left.index) - admissionDistance(right.index))
       .map(({ index, target }) => {
+        const original = initiallyOwnedRecords.get(target);
+        if (!isRecoveryCurrent() || (original && !this.vmRecoverySlots.isCurrent(target, original))) {
+          // A committed donation or external invalidation retired this exact
+          // record. Do not observe/prepare its old fingerprint again.
+          return { index, target, prepared: { suppressed: true } };
+        }
         const reservation = admissionReservations.get(target);
         if (reservation) {
           const admission = reservation.commit({
