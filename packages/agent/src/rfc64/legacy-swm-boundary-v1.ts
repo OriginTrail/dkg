@@ -401,22 +401,30 @@ async function readRfc64LateLegacySwmBoundaryEntriesV1(
 async function captureRfc64LegacySwmBoundaryV1(
   store: TripleStore,
 ): Promise<Readonly<Rfc64LegacySwmBoundaryCaptureV1>> {
-  // Bind and reject named-subgraph metadata inside the store. URI-only parsing
-  // is ambiguous because a valid Context Graph ID may itself contain slashes;
-  // enumerating every `.../_shared_memory_meta` graph would also let unrelated
-  // named history consume the bounded root-capture budget before classification.
+  // Derive the head-side UAL from the selective operation binding before
+  // reading suffix-bearing heads. BIND is an explicit SPARQL algebra boundary,
+  // unlike textual ordering inside one basic graph pattern, so the store never
+  // needs to begin with the broad legacy-head scan that blocked startup. Keep
+  // the head subject variable so corrupt subject/UAL identities remain visible
+  // to the fail-closed validation below.
+  // DISTINCT runs after the exact head/operation share-ID correlation: repeated
+  // history collapses and the limits count only fully qualified legacy heads.
+  // Reject named-subgraph metadata inside the store: URI-only parsing is
+  // ambiguous because a valid Context Graph ID may itself contain slashes.
   const result = await store.query(
     `SELECT DISTINCT ?metaGraph ?head ?ual ?contextGraphId WHERE { ` +
     `GRAPH ?metaGraph { ` +
-    `?head <${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId . ` +
     `?operation <${RDF_TYPE}> <${WORKSPACE_OPERATION}> ; ` +
-    `<${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId ; ` +
+    `<${KA_UAL}> ?operationUal ; <${SHARE_OPERATION_ID}> ?shareId ; ` +
     `<${CONTEXT_GRAPH_ID}> ?contextGraphId . ` +
-    `FILTER(STR(?metaGraph) = CONCAT(` +
+    `} FILTER(STR(?metaGraph) = CONCAT(` +
     `${JSON.stringify(CONTEXT_GRAPH_PREFIX)}, STR(?contextGraphId), ` +
     `${JSON.stringify(SWM_META_SUFFIX)})) ` +
-    `FILTER(STRENDS(STR(?head), ${JSON.stringify(SWM_HEAD_SUFFIX)})) ` +
-    `} } LIMIT ${RFC64_LEGACY_SWM_HEAD_LIMIT_V1 + 1}`,
+    `BIND(?operationUal AS ?ual) ` +
+    `GRAPH ?metaGraph { ` +
+    `?head <${KA_UAL}> ?ual ; <${SHARE_OPERATION_ID}> ?shareId . ` +
+    `} FILTER(STRENDS(STR(?head), ${JSON.stringify(SWM_HEAD_SUFFIX)})) ` +
+    `} LIMIT ${RFC64_LEGACY_SWM_HEAD_LIMIT_V1 + 1}`,
     {
       source: 'agent.rfc64.legacySwmBoundary.readHeads',
       priority: 'background',
@@ -445,7 +453,9 @@ async function captureRfc64LegacySwmBoundaryV1(
       || rawUal === undefined
       || rawContextGraphId === undefined
     ) {
-      throw new Error('RFC-64 legacy SWM boundary returned an incomplete head');
+      throw new Error(
+        'RFC-64 legacy SWM boundary returned an incomplete head',
+      );
     }
     const contextGraphId = decodeRfc64BindingValueV1(rawContextGraphId);
     assertContextGraphIdV1(
