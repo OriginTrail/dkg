@@ -45,29 +45,6 @@ export interface ContextGraphAuthorityHistoryStore {
   delete(cacheKey: string): Promise<void>;
 }
 
-declare const TRUSTED_AUTHORITY_HISTORY_STORE: unique symbol;
-
-/**
- * Authority generations are historical aggregates and cannot be authenticated
- * from a block hash alone. A checkpoint backend therefore belongs to the
- * node's trusted local integrity domain; untrusted remote/shared stores must
- * not be promoted through this interface.
- */
-export interface TrustedContextGraphAuthorityHistoryStore
-  extends ContextGraphAuthorityHistoryStore {
-  readonly [TRUSTED_AUTHORITY_HISTORY_STORE]: true;
-}
-
-const trustedAuthorityHistoryStores = new WeakSet<object>();
-
-/** Explicitly admit a process-owned backend into the authority trust boundary. */
-export function trustContextGraphAuthorityHistoryStore<T extends ContextGraphAuthorityHistoryStore>(
-  store: T,
-): T & TrustedContextGraphAuthorityHistoryStore {
-  trustedAuthorityHistoryStores.add(store);
-  return store as T & TrustedContextGraphAuthorityHistoryStore;
-}
-
 export type ContextGraphAuthorityHistoryEventName =
   | 'Transfer'
   | 'PublishPolicyUpdated'
@@ -108,10 +85,48 @@ export interface ContextGraphAuthorityHistoryResolution {
   publish(): Promise<void>;
 }
 
+export type ContextGraphAuthorityCheckpointAdmission =
+  | { readonly kind: 'warm'; readonly state: ContextGraphAuthorityHistoryState }
+  | {
+      readonly kind: 'cold';
+      readonly reason: 'missing' | 'ahead' | 'unverifiable' | 'stale';
+      readonly invalidateMemory: boolean;
+      readonly invalidateDurable: boolean;
+    };
+
+/** Pure checkpoint policy: classify once, then apply its explicit actions. */
+export function classifyContextGraphAuthorityCheckpoint(
+  checkpoint: ContextGraphAuthorityHistoryState | undefined,
+  finalized: Readonly<{ number: number; hash: string }>,
+  anchorHash: string | null,
+): ContextGraphAuthorityCheckpointAdmission {
+  if (checkpoint === undefined) {
+    return Object.freeze({
+      kind: 'cold', reason: 'missing', invalidateMemory: false, invalidateDurable: false,
+    });
+  }
+  if (checkpoint.throughBlockNumber > finalized.number) {
+    return Object.freeze({
+      kind: 'cold', reason: 'ahead', invalidateMemory: false, invalidateDurable: false,
+    });
+  }
+  if (anchorHash?.toLowerCase() === checkpoint.throughBlockHash) {
+    return Object.freeze({ kind: 'warm', state: checkpoint });
+  }
+  if (anchorHash === null) {
+    return Object.freeze({
+      kind: 'cold', reason: 'unverifiable', invalidateMemory: true, invalidateDurable: false,
+    });
+  }
+  return Object.freeze({
+    kind: 'cold', reason: 'stale', invalidateMemory: true, invalidateDurable: true,
+  });
+}
+
 interface ColdScanWaiter {
   readonly cacheKey: string;
   readonly signal?: AbortSignal;
-  readonly resolve: () => void;
+  readonly resolve: (generation: number) => void;
 }
 
 /**
@@ -121,6 +136,7 @@ interface ColdScanWaiter {
 class ContextGraphAuthorityColdScanAdmission {
   #activeCacheKey: string | undefined;
   #activeCount = 0;
+  #activeGeneration = 0;
   readonly #waiters: ColdScanWaiter[] = [];
 
   async run<T>(
@@ -128,29 +144,37 @@ class ContextGraphAuthorityColdScanAdmission {
     signal: AbortSignal | undefined,
     read: () => Promise<T>,
   ): Promise<T> {
-    await this.#acquire(cacheKey, signal);
+    const generation = await this.#acquire(cacheKey, signal);
+    let completed = false;
     try {
       signal?.throwIfAborted();
-      return await read();
+      const result = await read();
+      // A successful provider completes the logical cold scan. Supersede every
+      // other same-graph attempt so a timed-out transport promise that ignores
+      // cancellation cannot retain the global admission slot forever.
+      this.#complete(cacheKey, generation);
+      completed = true;
+      return result;
     } finally {
-      this.#release();
+      if (!completed) this.#release(cacheKey, generation);
     }
   }
 
-  async #acquire(cacheKey: string, signal?: AbortSignal): Promise<void> {
+  async #acquire(cacheKey: string, signal?: AbortSignal): Promise<number> {
     signal?.throwIfAborted();
     if (this.#activeCacheKey === undefined || this.#activeCacheKey === cacheKey) {
+      if (this.#activeCacheKey === undefined) this.#activeGeneration += 1;
       this.#activeCacheKey = cacheKey;
       this.#activeCount += 1;
-      return;
+      return this.#activeGeneration;
     }
-    await new Promise<void>((resolve, reject) => {
+    return new Promise<number>((resolve, reject) => {
       const waiter: ColdScanWaiter = {
         cacheKey,
         signal,
-        resolve: () => {
+        resolve: (generation) => {
           if (signal) signal.removeEventListener('abort', abort);
-          resolve();
+          resolve(generation);
         },
       };
       const abort = () => {
@@ -163,14 +187,27 @@ class ContextGraphAuthorityColdScanAdmission {
     });
   }
 
-  #release(): void {
+  #release(cacheKey: string, generation: number): void {
+    if (this.#activeCacheKey !== cacheKey || this.#activeGeneration !== generation) return;
     this.#activeCount -= 1;
     if (this.#activeCount > 0) return;
     this.#activeCacheKey = undefined;
+    this.#drain();
+  }
+
+  #complete(cacheKey: string, generation: number): void {
+    if (this.#activeCacheKey !== cacheKey || this.#activeGeneration !== generation) return;
+    this.#activeCount = 0;
+    this.#activeCacheKey = undefined;
+    this.#drain();
+  }
+
+  #drain(): void {
     while (this.#waiters.length > 0) {
       const first = this.#waiters.shift()!;
       if (first.signal?.aborted) continue;
       this.#activeCacheKey = first.cacheKey;
+      this.#activeGeneration += 1;
       const admitted = [first];
       for (let index = this.#waiters.length - 1; index >= 0; index -= 1) {
         const waiter = this.#waiters[index]!;
@@ -179,7 +216,7 @@ class ContextGraphAuthorityColdScanAdmission {
         this.#waiters.splice(index, 1);
       }
       this.#activeCount = admitted.length;
-      for (const waiter of admitted) waiter.resolve();
+      for (const waiter of admitted) waiter.resolve(this.#activeGeneration);
       return;
     }
   }
@@ -201,15 +238,11 @@ export class ContextGraphAuthorityHistoryCache {
 
   constructor(
     readonly maxEntries: number = CONTEXT_GRAPH_AUTHORITY_HISTORY_MAX_ENTRIES,
-    readonly store?: TrustedContextGraphAuthorityHistoryStore,
+    /** Explicitly named local composition input; never populate from remote/shared data. */
+    readonly localStore?: ContextGraphAuthorityHistoryStore,
   ) {
     if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
       throw new Error('Context Graph authority history cache must retain at least one entry');
-    }
-    if (store !== undefined && !trustedAuthorityHistoryStores.has(store)) {
-      throw new Error(
-        'Context Graph authority history store must be explicitly admitted as trusted local storage',
-      );
     }
     this.#entries = new BoundedLruCache(maxEntries);
   }
@@ -291,53 +324,44 @@ export class ContextGraphAuthorityHistoryCache {
   async #load(
     input: ContextGraphAuthorityHistoryLoadInput,
   ): Promise<ContextGraphAuthorityHistoryState> {
-    let previous = this.#entries.get(input.cacheKey);
-    if (previous === undefined) {
-      previous = await this.#loadCheckpoint(input.cacheKey);
-      if (previous !== undefined) this.#entries.set(input.cacheKey, previous);
+    let checkpoint = this.#entries.get(input.cacheKey);
+    if (checkpoint === undefined) {
+      checkpoint = await this.#loadCheckpoint(input.cacheKey);
+      if (checkpoint !== undefined) this.#entries.set(input.cacheKey, checkpoint);
     }
-    // A lagging endpoint cannot authenticate a watermark from its future. Keep
-    // that higher checkpoint in memory and durable storage, cold-scan only for
-    // this request, and let publish monotonicity prevent the older result from
-    // replacing it. A later caught-up endpoint can validate and resume from it.
-    if (previous !== undefined && previous.throughBlockNumber > input.finalized.number) {
-      return this.#coldScans.run(input.cacheKey, input.signal, () => (
-        loadContextGraphAuthorityHistory({ ...input, previous: undefined })
-      ));
-    }
-    if (previous !== undefined) {
-      const anchorHash = previous.throughBlockNumber === input.finalized.number
+    const anchorHash = checkpoint === undefined
+      || checkpoint.throughBlockNumber > input.finalized.number
+      ? null
+      : checkpoint.throughBlockNumber === input.finalized.number
         ? input.finalized.hash
-        : await input.readBlockHash(previous.throughBlockNumber);
-      if (anchorHash?.toLowerCase() !== previous.throughBlockHash) {
-        // Do not let a slow stale-anchor check delete a newer state published
-        // while its RPC request was in flight.
-        if (this.#entries.get(input.cacheKey) === previous) {
-          this.#entries.delete(input.cacheKey);
-        }
-        // A null historical lookup can be a transient/non-archive provider
-        // limitation. Fail closed for this attempt without destroying a
-        // checkpoint that a failover provider may still validate. A concrete
-        // hash mismatch is a genuinely stale anchor.
-        if (anchorHash !== null) {
-          await this.#deleteCheckpoint(input.cacheKey);
-        }
-        previous = undefined;
+        : await input.readBlockHash(checkpoint.throughBlockNumber);
+    const admission = classifyContextGraphAuthorityCheckpoint(
+      checkpoint,
+      input.finalized,
+      anchorHash,
+    );
+    if (admission.kind === 'warm') {
+      return loadContextGraphAuthorityHistory({ ...input, previous: admission.state });
+    }
+    if (checkpoint !== undefined && admission.invalidateMemory) {
+      // Do not let a slow stale-anchor check delete a newer state published
+      // while its RPC request was in flight.
+      if (this.#entries.get(input.cacheKey) === checkpoint) {
+        this.#entries.delete(input.cacheKey);
       }
     }
-    return previous === undefined
-      ? this.#coldScans.run(input.cacheKey, input.signal, () => (
-          loadContextGraphAuthorityHistory({ ...input, previous: undefined })
-        ))
-      : loadContextGraphAuthorityHistory({ ...input, previous });
+    if (admission.invalidateDurable) await this.#deleteCheckpoint(input.cacheKey);
+    return this.#coldScans.run(input.cacheKey, input.signal, () => (
+      loadContextGraphAuthorityHistory({ ...input, previous: undefined })
+    ));
   }
 
   async #loadCheckpoint(
     cacheKey: string,
   ): Promise<ContextGraphAuthorityHistoryState | undefined> {
-    if (this.store === undefined) return undefined;
+    if (this.localStore === undefined) return undefined;
     try {
-      return decodeContextGraphAuthorityHistoryCheckpoint(await this.store.load(cacheKey));
+      return decodeContextGraphAuthorityHistoryCheckpoint(await this.localStore.load(cacheKey));
     } catch (err) {
       console.warn(
         `[chain] Context Graph authority history checkpoint load failed: ${formatError(err)}`,
@@ -350,13 +374,13 @@ export class ContextGraphAuthorityHistoryCache {
     cacheKey: string,
     state: ContextGraphAuthorityHistoryState,
   ): Promise<void> {
-    if (this.store === undefined) return;
+    if (this.localStore === undefined) return;
     await this.#persistence.run(cacheKey, async () => {
       // A newer publication can arrive while an older store write is queued.
       // Persist only the current watermark so async stores cannot regress it.
       if (this.#entries.get(cacheKey) !== state) return;
       try {
-        await this.store!.save(cacheKey, encodeContextGraphAuthorityHistoryCheckpoint(state));
+        await this.localStore!.save(cacheKey, encodeContextGraphAuthorityHistoryCheckpoint(state));
       } catch (err) {
         // Persistence is optional for availability. Once explicitly admitted,
         // its valid checkpoints are authority-bearing; a write failure still
@@ -369,14 +393,14 @@ export class ContextGraphAuthorityHistoryCache {
   }
 
   async #deleteCheckpoint(cacheKey: string): Promise<void> {
-    if (this.store === undefined) return;
+    if (this.localStore === undefined) return;
     await this.#persistence.run(cacheKey, async () => {
       // A concurrent publication may have installed a newer desired state
       // before this queued delete begins. In that case the deletion belongs to
       // an obsolete generation and must not touch durable storage.
       if (this.#entries.get(cacheKey) !== undefined) return;
       try {
-        await this.store!.delete(cacheKey);
+        await this.localStore!.delete(cacheKey);
       } catch (err) {
         console.warn(
           `[chain] Context Graph authority history checkpoint delete failed: ${formatError(err)}`,

@@ -4,11 +4,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ContextGraphAuthorityHistoryCache,
+  classifyContextGraphAuthorityCheckpoint,
   decodeContextGraphAuthorityHistoryCheckpoint,
   encodeContextGraphAuthorityHistoryCheckpoint,
   normalizeContextGraphAuthorityHistoryState,
   resolveContextGraphAuthorityHistory,
-  trustContextGraphAuthorityHistoryStore,
   type ContextGraphAuthorityHistoryCreationEvent,
   type ContextGraphAuthorityHistoryEvent,
   type ContextGraphAuthorityHistoryEventName,
@@ -22,6 +22,40 @@ const FINALIZED_HASH = `0x${'55'.repeat(32)}`;
 const NEXT_FINALIZED_HASH = `0x${'56'.repeat(32)}`;
 const NAME_HASH = `0x${'88'.repeat(32)}`;
 const DIRECT_READ_SCOPE = {};
+
+describe('Context Graph authority checkpoint admission policy', () => {
+  const checkpoint: ContextGraphAuthorityHistoryState = {
+    throughBlockNumber: 30,
+    throughBlockHash: FINALIZED_HASH,
+    nameHash: NAME_HASH,
+    ownershipEra: 1,
+    policyVersion: 2,
+    rosterVersion: 3,
+    sourceBlockNumber: 30,
+    sourceBlockHash: FINALIZED_HASH,
+  };
+
+  it('makes warm, future, unverifiable, and stale actions explicit', () => {
+    expect(classifyContextGraphAuthorityCheckpoint(
+      checkpoint, { number: 30, hash: FINALIZED_HASH }, FINALIZED_HASH,
+    )).toEqual({ kind: 'warm', state: checkpoint });
+    expect(classifyContextGraphAuthorityCheckpoint(
+      checkpoint, { number: 20, hash: NEXT_FINALIZED_HASH }, null,
+    )).toEqual({
+      kind: 'cold', reason: 'ahead', invalidateMemory: false, invalidateDurable: false,
+    });
+    expect(classifyContextGraphAuthorityCheckpoint(
+      checkpoint, { number: 35, hash: NEXT_FINALIZED_HASH }, null,
+    )).toEqual({
+      kind: 'cold', reason: 'unverifiable', invalidateMemory: true, invalidateDurable: false,
+    });
+    expect(classifyContextGraphAuthorityCheckpoint(
+      checkpoint, { number: 35, hash: NEXT_FINALIZED_HASH }, NEXT_FINALIZED_HASH,
+    )).toEqual({
+      kind: 'cold', reason: 'stale', invalidateMemory: true, invalidateDurable: true,
+    });
+  });
+});
 
 class MemoryHistoryStore implements ContextGraphAuthorityHistoryStore {
   readonly checkpoints = new Map<string, unknown>();
@@ -75,7 +109,7 @@ class DelayedHistoryStore extends MemoryHistoryStore {
 function cacheWithStore(store: ContextGraphAuthorityHistoryStore) {
   return new ContextGraphAuthorityHistoryCache(
     1_024,
-    trustContextGraphAuthorityHistoryStore(store),
+    store,
   );
 }
 
@@ -193,7 +227,7 @@ describe('ContextGraphAuthorityHistoryCache', () => {
     await Promise.all([firstResolution.publish(), secondResolution.publish()]);
   });
 
-  it('does not let a stalled provider attempt capture same-head failover', async () => {
+  it('a successful fallback retires a stalled same-graph lease for other cold graphs', async () => {
     const cache = new ContextGraphAuthorityHistoryCache();
     const stalledScope = {};
     const healthyScope = {};
@@ -209,6 +243,13 @@ describe('ContextGraphAuthorityHistoryCache', () => {
     }));
     await entered.promise;
 
+    const otherGraph = resolveContextGraphAuthorityHistory(directHistoryInput({
+      cache,
+      cacheKey: 'provider-failover-other-graph',
+      blockNumber: 30,
+      blockHash: FINALIZED_HASH,
+    }));
+
     const healthy = await resolveContextGraphAuthorityHistory(directHistoryInput({
       cache,
       cacheKey: 'provider-failover',
@@ -219,8 +260,14 @@ describe('ContextGraphAuthorityHistoryCache', () => {
     expect(healthy.state.nameHash).toBe(NAME_HASH);
     await healthy.publish();
 
+    const otherBeforeStalledRetires = await Promise.race([
+      otherGraph.then(() => 'started'),
+      new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 25)),
+    ]);
     release.resolve();
     await expect(stalled).resolves.toMatchObject({ state: healthy.state });
+    await expect(otherGraph).resolves.toMatchObject({ state: { nameHash: NAME_HASH } });
+    expect(otherBeforeStalledRetires).toBe('started');
   });
 
   it('does not let one reader abort an independent same-head reader', async () => {
@@ -342,11 +389,9 @@ describe('ContextGraphAuthorityHistoryCache', () => {
     expect(coldReads.get('c')?.count).toBe(1);
   });
 
-  it('requires an explicit trusted-local admission for authority aggregates', () => {
-    const untrusted = new MemoryHistoryStore();
-    expect(() => new ContextGraphAuthorityHistoryCache(1_024, untrusted as never))
-      .toThrow(/explicitly admitted as trusted local storage/);
-    expect(() => cacheWithStore(untrusted)).not.toThrow();
+  it('takes the process-local checkpoint store directly at its composition boundary', () => {
+    const localStore = new MemoryHistoryStore();
+    expect(cacheWithStore(localStore).localStore).toBe(localStore);
   });
 
   it('serializes cold histories across graphs without blocking same-graph failover', async () => {
