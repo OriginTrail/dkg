@@ -666,7 +666,6 @@ export interface ChatSendResult {
  */
 export type ContextGraphSyncMode = 'on-demand' | 'always-on';
 
-/** Tracks the subscription and sync state of a context graph. */
 export interface ContextGraphSub {
   name?: string;
   /** Requested synchronization lifetime, normalized before entering live state. */
