@@ -267,7 +267,9 @@ describe('daemon local LLM service', () => {
       if (url.endsWith('/health')) {
         return healthy
           ? Response.json({ status: 'ok' })
-          : new Response('loading model', { status: 503 });
+          : Response.json({
+            error: { code: 503, message: 'Loading model', type: 'unavailable_error' },
+          }, { status: 503 });
       }
       return new Response('not found', { status: 404 });
     });
@@ -280,7 +282,7 @@ describe('daemon local LLM service', () => {
     });
 
     expect(await service.health()).toEqual(expect.objectContaining({
-      ok: false, ready: false, reachable: true, offline: false,
+      ok: false, detected: true, ready: false, reachable: true, offline: false,
     }));
     await expect(service.chat({ message: 'hello' })).rejects.toMatchObject({
       code: 'LOCAL_LLM_NOT_READY', status: 503,
@@ -306,10 +308,12 @@ describe('daemon local LLM service', () => {
 
     expect(await service.health()).toEqual(expect.objectContaining({
       ok: false,
+      configured: false,
+      detected: false,
       ready: false,
       reachable: true,
       offline: false,
-      error: expect.stringContaining('reachable but not ready'),
+      error: expect.stringContaining('No compatible local LLM server was detected'),
     }));
     await expect(service.chat({ message: 'hello' })).rejects.toMatchObject({
       code: 'LOCAL_LLM_NOT_READY', status: 503,
@@ -322,7 +326,8 @@ describe('daemon local LLM service', () => {
       dkgHome: '/tmp/dkg', fetch: onlineFetch(), createSession,
     });
     expect(await online.health()).toEqual(expect.objectContaining({
-      ok: true, ready: true, reachable: true, offline: false, initialized: false, readOnly: true,
+      ok: true, detected: true, ready: true, reachable: true, offline: false,
+      initialized: false, readOnly: true,
     }));
     expect(createSession).not.toHaveBeenCalled();
 
@@ -332,7 +337,7 @@ describe('daemon local LLM service', () => {
       createSession,
     });
     expect(await offline.health()).toEqual(expect.objectContaining({
-      ok: false, configured: false, reachable: false, offline: true,
+      ok: false, configured: false, detected: false, reachable: false, offline: true,
     }));
     await expect(offline.chat({ message: 'hello' })).rejects.toMatchObject({
       code: 'LOCAL_LLM_OFFLINE', status: 503,
