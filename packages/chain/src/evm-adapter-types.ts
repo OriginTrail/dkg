@@ -8,7 +8,6 @@
 import { Contract } from 'ethers';
 import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
 import type { TrustedContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
-import type { TrustedContextGraphAuthorityIndexStore } from './context-graph-authority-index.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
@@ -107,12 +106,6 @@ export interface EVMAdapterBaseConfig {
    * within that local integrity boundary.
    */
   contextGraphAuthorityHistoryStore?: TrustedContextGraphAuthorityHistoryStore;
-  /**
-   * Durable contract-wide authority index. This is an additive cutover seam;
-   * the v1 per-graph history store remains active until the shared scanner is
-   * enabled by a later milestone.
-   */
-  contextGraphAuthorityIndexStore?: TrustedContextGraphAuthorityIndexStore;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish
