@@ -43,7 +43,7 @@ import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactionError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
-import { errorCode, errorMessage } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorRetryAfterMs } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
@@ -162,10 +162,10 @@ type ProviderSetExhaustionKind = 'all-throttled' | 'mixed';
 class ProviderSetExhaustedError extends ChainRpcTransportError {
   constructor(
     message: string,
-    readonly exhaustionKind: ProviderSetExhaustionKind,
-    opts: { cause: unknown; rpcUrls: readonly string[] },
+    exhaustionKind: ProviderSetExhaustionKind,
+    opts: { cause: unknown; rpcUrls: readonly string[]; retryAfterMs?: number },
   ) {
-    super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
+    super('RPC_ENDPOINTS_EXHAUSTED', message, { ...opts, exhaustionKind });
   }
 }
 
@@ -750,6 +750,7 @@ export class RpcFailoverClient {
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let lastRetryable: unknown;
     let allEndpointsThrottled = true;
+    let retryAfterMs: number | undefined;
     let sawEmpty = false;
     let lastEmpty: T | undefined;
     let deadlineExpiredBeforeAttempt = false;
@@ -804,7 +805,12 @@ export class RpcFailoverClient {
       } catch (err) {
         if (!options.isRetryable(err)) throw err;
         lastRetryable = err;
-        if (!isThrottleRpcError(err)) allEndpointsThrottled = false;
+        if (!isThrottleRpcError(err)) {
+          allEndpointsThrottled = false;
+        } else {
+          const hint = errorRetryAfterMs(err);
+          if (hint !== undefined) retryAfterMs = Math.max(retryAfterMs ?? 0, hint);
+        }
         attempt.recordFailure(); // de-prefer a failed backend
         const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
         if (!isLast && canTryNext) {
@@ -833,6 +839,7 @@ export class RpcFailoverClient {
       throw new ProviderSetExhaustedError(message, allEndpointsThrottled ? 'all-throttled' : 'mixed', {
         cause: lastRetryable,
         rpcUrls: canonical.map((e) => e.rpcUrl),
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       });
     }
     // Either every endpoint returned empty with no errors, or the caller's

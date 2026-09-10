@@ -50,6 +50,10 @@ export interface ChainRpcTransportErrorLike {
   message?: string;
   rpcUrls?: readonly string[];
   txHash?: string;
+  /** Shape of the final provider pass when every endpoint was exhausted. */
+  exhaustionKind?: 'all-throttled' | 'mixed';
+  /** Largest valid HTTP Retry-After hint observed during the provider pass. */
+  retryAfterMs?: number;
 }
 
 export class ChainRpcTransportError extends Error {
@@ -61,16 +65,28 @@ export class ChainRpcTransportError extends Error {
   readonly rpcUrls?: readonly string[];
 
   readonly txHash?: string;
+
+  readonly exhaustionKind?: 'all-throttled' | 'mixed';
+
+  readonly retryAfterMs?: number;
   constructor(
     code: ChainRpcTransportCode,
     message: string,
-    opts?: { cause?: unknown; rpcUrls?: readonly string[]; txHash?: string },
+    opts?: {
+      cause?: unknown;
+      rpcUrls?: readonly string[];
+      txHash?: string;
+      exhaustionKind?: 'all-throttled' | 'mixed';
+      retryAfterMs?: number;
+    },
   ) {
     super(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
     this.name = 'ChainRpcTransportError';
     this.code = code;
     if (opts?.rpcUrls) this.rpcUrls = Object.freeze([...opts.rpcUrls]);
     if (opts?.txHash) this.txHash = opts.txHash;
+    if (opts?.exhaustionKind) this.exhaustionKind = opts.exhaustionKind;
+    if (opts?.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
   }
 }
 

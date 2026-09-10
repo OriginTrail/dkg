@@ -1917,7 +1917,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         );
         const expectedOnChainId = BigInt(onChainId);
         const snapshot = parseRfc64AuthoritySnapshotV1(
-          await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
+          await this.rfc64AuthorityRpcCircuitBreakerV1.run(
+            signal,
+            () => reader.getContextGraphAuthoritySnapshot(
+              expectedOnChainId,
+              { signal },
+            ),
+          ),
           expectedOnChainId,
         );
         if (signal?.aborted) throw signal.reason;

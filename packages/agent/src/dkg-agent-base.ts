@@ -28,6 +28,8 @@ import type { Rfc64CatalogSynchronizationEvidenceV1 } from
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
 import type { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
+import { Rfc64AuthorityRpcCircuitBreakerV1 } from
+  './rfc64/authority-rpc-circuit-breaker-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
@@ -1215,6 +1217,9 @@ export class DKGAgentBase {
   protected readonly finalizationRuntime = new FinalizationRuntime();
   /** Single owner for RFC-64 public transport, authority refresh, and persistence. */
   protected rfc64PublicCatalogOwnerV1!: Rfc64PublicCatalogWorkloadOwnerV1;
+  /** Shared provider-pool backpressure for registered RFC-64 authority refreshes. */
+  protected readonly rfc64AuthorityRpcCircuitBreakerV1 =
+    new Rfc64AuthorityRpcCircuitBreakerV1();
   /** Compatibility view for catalog methods that operate on the active service. */
   protected get rfc64PublicCatalogServiceV1(): Rfc64PublicCatalogServiceV1 | undefined {
     return this.rfc64PublicCatalogOwnerV1?.service;

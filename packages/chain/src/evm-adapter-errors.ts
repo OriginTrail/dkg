@@ -75,20 +75,84 @@ export function errorStatus(err: unknown): number | undefined {
   const visit = (e: any, depth: number): number | undefined => {
     if (e == null || typeof e !== 'object' || depth > 5 || seen.has(e)) return undefined;
     seen.add(e);
-    for (const raw of [e.status, e.statusCode, e.response?.status, e.error?.status, e.error?.statusCode]) {
+    for (const raw of [
+      e.status,
+      e.statusCode,
+      e.response?.status,
+      e.response?.statusCode,
+      e.error?.status,
+      e.error?.statusCode,
+    ]) {
       // Numeric, OR a digit-only string ("429"/"401") — several wrapped RPC/fetch
       // errors serialize the HTTP status as a string, so coerce those too rather
       // than missing them and falling back to message heuristics.
       if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
       if (typeof raw === 'string' && /^\d{3}$/.test(raw.trim())) return Number(raw);
     }
-    for (const k of ['cause', 'info', 'error']) {
+    for (const k of ['cause', 'info', 'error', 'response']) {
       const found = visit(e[k], depth + 1);
       if (found !== undefined) return found;
     }
     return undefined;
   };
   return visit(err, 0);
+}
+
+/**
+ * Extract a standard HTTP `Retry-After` delay from the wrapper shapes used by
+ * ethers, undici, and managed JSON-RPC providers. Both delta-seconds and HTTP
+ * dates are accepted. The result is deliberately only metadata: callers own
+ * their policy cap and must never sleep an unbounded provider-supplied value.
+ */
+export function errorRetryAfterMs(
+  err: unknown,
+  nowMs: number = Date.now(),
+): number | undefined {
+  const delays: number[] = [];
+  const seen = new Set<unknown>();
+
+  const record = (raw: unknown): void => {
+    if (typeof raw !== 'string' && typeof raw !== 'number') return;
+    const value = String(raw).trim();
+    if (value.length === 0) return;
+    if (/^\d+$/u.test(value)) {
+      const seconds = Number(value);
+      if (Number.isSafeInteger(seconds) && seconds >= 0) {
+        const delay = seconds * 1_000;
+        if (Number.isSafeInteger(delay)) delays.push(delay);
+      }
+      return;
+    }
+    const dateMs = Date.parse(value);
+    if (Number.isFinite(dateMs)) delays.push(Math.max(0, dateMs - nowMs));
+  };
+
+  const readHeaders = (headers: unknown): void => {
+    if (headers == null || typeof headers !== 'object') return;
+    const get = (headers as { get?: unknown }).get;
+    if (typeof get === 'function') {
+      try {
+        record(get.call(headers, 'retry-after'));
+      } catch {
+        // A foreign Headers-like object must not break RPC error handling.
+      }
+    }
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (key.toLowerCase() === 'retry-after') record(value);
+    }
+  };
+
+  const visit = (value: unknown, depth: number): void => {
+    if (value == null || typeof value !== 'object' || depth > 6 || seen.has(value)) return;
+    seen.add(value);
+    const candidate = value as Record<string, unknown>;
+    readHeaders(candidate.headers);
+    for (const key of ['cause', 'info', 'error', 'response']) {
+      visit(candidate[key], depth + 1);
+    }
+  };
+  visit(err, 0);
+  return delays.length === 0 ? undefined : Math.max(...delays);
 }
 
 export const ERROR_ABI_CONTRACTS = [
