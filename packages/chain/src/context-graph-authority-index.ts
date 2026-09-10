@@ -2,7 +2,6 @@
 
 import { ethers } from 'ethers';
 import {
-  normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexState,
   type ContextGraphAuthorityIndexStore,
@@ -15,6 +14,15 @@ import {
   reduceContextGraphAuthorityIndexPage,
   type ContextGraphAuthorityIndexEvent,
 } from './context-graph-authority-index-reducer.js';
+import {
+  classifyContextGraphAuthorityIndexAdmission,
+  UNREAD_CONTEXT_GRAPH_AUTHORITY_INDEX_ANCHOR,
+  type ContextGraphAuthorityIndexAnchorObservation,
+} from './context-graph-authority-index-admission.js';
+import {
+  ContextGraphAuthorityIndexRepository,
+  type ContextGraphAuthorityIndexRepositoryRecord,
+} from './context-graph-authority-index-repository.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 
 export class ContextGraphAuthorityIndexRetryableError extends Error {
@@ -53,18 +61,8 @@ export interface ContextGraphAuthorityIndexScanInput {
   ) => Promise<readonly ContextGraphAuthorityIndexEvent[]>;
 }
 
-interface DurableAuthorityIndexState {
-  /** Store-owned non-repeating CAS identity; absent only before the first write. */
-  readonly token: number | undefined;
-  /** Absent when the durable row is missing or is an invalidation tombstone. */
-  readonly checkpoint?: ContextGraphAuthorityIndexCheckpoint;
-}
-
-function assertAuthorityIndexToken(value: unknown): asserts value is number {
-  if (!Number.isSafeInteger(value) || Number(value) < 1) {
-    throw new Error('Context Graph authority index durable token is invalid');
-  }
-}
+const MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_RECOVERY_EFFECTS = 16;
+const MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_WINNER_RELOADS = 3;
 
 /**
  * Process-local owner for the durable contract-wide authority index.
@@ -74,12 +72,13 @@ function assertAuthorityIndexToken(value: unknown): asserts value is number {
  * next block instead of repeating the already-covered contract prefix.
  */
 export class ContextGraphAuthorityIndex {
-  readonly #entries = new Map<string, DurableAuthorityIndexState>();
+  readonly #repository: ContextGraphAuthorityIndexRepository;
   readonly #singleFlight = new KeyedSingleFlight<string, object>();
-  #epoch = 0;
   #lifecycleAbort = new AbortController();
 
-  constructor(readonly localStore: ContextGraphAuthorityIndexStore) {}
+  constructor(readonly localStore: ContextGraphAuthorityIndexStore) {
+    this.#repository = new ContextGraphAuthorityIndexRepository(localStore);
+  }
 
   clear(): void {
     this.#lifecycleAbort.abort(new DOMException(
@@ -87,8 +86,7 @@ export class ContextGraphAuthorityIndex {
       'AbortError',
     ));
     this.#lifecycleAbort = new AbortController();
-    this.#epoch += 1;
-    this.#entries.clear();
+    this.#repository.clear();
     this.#singleFlight.invalidateAll();
   }
 
@@ -114,7 +112,7 @@ export class ContextGraphAuthorityIndex {
     }
     const scanKey = [scope, input.finalized.number, finalizedHash].join('\u0000');
     const pending = this.#singleFlight.run(scanKey, input.readScope, () => {
-      const epoch = this.#epoch;
+      const epoch = this.#repository.epoch;
       const lifecycleSignal = this.#lifecycleAbort.signal;
       return this.#scan({ ...input, scope, finalized: {
         number: input.finalized.number,
@@ -148,21 +146,21 @@ export class ContextGraphAuthorityIndex {
       throw new Error('Context Graph authority index scan bounds are invalid');
     }
 
-    let durable = await this.#load(scope);
-    if (durable.checkpoint !== undefined) {
-      durable = await this.#admitCheckpoint(
-        scope,
-        durable,
-        deploymentBlockNumber,
-        { number: finalizedNumber, hash: finalizedHash },
-        input.readBlockHash,
-        lifecycleSignal,
-      );
-    }
+    let durable = await this.#driveCheckpointAdmission(
+      scope,
+      await this.#repository.load(scope, { epoch }),
+      deploymentBlockNumber,
+      { number: finalizedNumber, hash: finalizedHash },
+      input.readBlockHash,
+      lifecycleSignal,
+      epoch,
+    );
 
     for (;;) {
       lifecycleSignal.throwIfAborted();
-      const checkpoint = durable.checkpoint;
+      const checkpoint = durable.kind === 'checkpoint'
+        ? durable.checkpoint
+        : undefined;
       if (checkpoint !== undefined && checkpoint.cursor.throughBlockNumber === finalizedNumber) {
         return checkpoint;
       }
@@ -198,177 +196,118 @@ export class ContextGraphAuthorityIndex {
       });
       const next = reduction.checkpoint;
 
-      const committedToken = await this.localStore.compareAndSwap(
+      const committed = await this.#repository.compareAndSwap(
         scope,
-        durable.token,
+        durable,
         next,
+        epoch,
       );
-      if (committedToken === undefined) {
+      if (committed === undefined) {
         // Another valid provider completion won the page. Reload its result
         // and continue from that cursor rather than overwriting or rescanning.
-        durable = await this.#admitCheckpoint(
+        durable = await this.#driveCheckpointAdmission(
           scope,
-          await this.#load(scope, true),
+          await this.#repository.load(scope, { forceDurable: true, epoch }),
           deploymentBlockNumber,
           { number: finalizedNumber, hash: finalizedHash },
           input.readBlockHash,
           lifecycleSignal,
+          epoch,
         );
         continue;
-      }
-      assertAuthorityIndexToken(committedToken);
-
-      const committed = Object.freeze({ token: committedToken, checkpoint: next });
-      const current = this.#entries.get(scope);
-      if (this.#epoch === epoch && (
-        current === undefined
-        || current.token === undefined
-        || current.token < committedToken
-      )) {
-        this.#entries.set(scope, committed);
       }
       // A newer cache entry can belong to a concurrently scanned provider
       // fork. Keep this attempt on the checkpoint it reduced and admitted;
       // if another token wins the next CAS, that value is reloaded through
-      // #admitCheckpoint before it can influence this attempt.
+      // the admission driver before it can influence this attempt.
       durable = committed;
     }
   }
 
-  async #load(
+  /** Apply pure admission actions through one bounded, non-recursive effect loop. */
+  async #driveCheckpointAdmission(
     scope: string,
-    forceDurable = false,
-  ): Promise<DurableAuthorityIndexState> {
-    const memory = forceDurable ? undefined : this.#entries.get(scope);
-    if (memory !== undefined) return memory;
+    initial: ContextGraphAuthorityIndexRepositoryRecord,
+    deploymentBlockNumber: number,
+    finalized: Readonly<{ number: number; hash: string }>,
+    readBlockHash: (
+      blockNumber: number,
+      lifecycleSignal: AbortSignal,
+    ) => Promise<string | null>,
+    lifecycleSignal: AbortSignal,
+    epoch: number,
+  ): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+    let record = initial;
+    let anchor: ContextGraphAuthorityIndexAnchorObservation =
+      UNREAD_CONTEXT_GRAPH_AUTHORITY_INDEX_ANCHOR;
+    let winnerReloads = 0;
 
-    // A bounded loop handles a concurrent winner without allowing malformed
-    // durable tokens to turn recovery into unbounded recursive reloads.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const record = await this.localStore.load(scope);
-      if (record === undefined) return Object.freeze({ token: undefined });
-      assertAuthorityIndexToken(record.token);
-      if (record.value === null) {
-        const tombstone = Object.freeze({ token: record.token });
-        this.#entries.set(scope, tombstone);
-        return tombstone;
-      }
-      const checkpoint = normalizeContextGraphAuthorityIndexCheckpoint(record.value);
-      if (checkpoint !== undefined) {
-        const admitted = Object.freeze({ token: record.token, checkpoint });
-        this.#entries.set(scope, admitted);
-        return admitted;
-      }
-      const invalidatedToken = await this.localStore.invalidate(scope, record.token);
-      if (invalidatedToken !== undefined) {
-        assertAuthorityIndexToken(invalidatedToken);
-        const tombstone = Object.freeze({ token: invalidatedToken });
-        this.#entries.set(scope, tombstone);
-        return tombstone;
+    for (
+      let effect = 0;
+      effect < MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_RECOVERY_EFFECTS;
+      effect += 1
+    ) {
+      lifecycleSignal.throwIfAborted();
+      const action = classifyContextGraphAuthorityIndexAdmission({
+        record,
+        deploymentBlockNumber,
+        finalized,
+        anchor,
+      });
+      switch (action.kind) {
+        case 'accept':
+        case 'rebuild':
+          return record;
+        case 'read-anchor': {
+          const hash = normalizeHash(await readBlockHash(
+            action.blockNumber,
+            lifecycleSignal,
+          ));
+          anchor = hash === undefined
+            ? Object.freeze({ kind: 'unavailable' })
+            : Object.freeze({ kind: 'available', hash });
+          break;
+        }
+        case 'retry-provider':
+          if (action.reason === 'finalized-behind') {
+            throw retryableAuthorityIndexReadError(
+              `Context Graph authority index finalized head ${action.finalizedBlockNumber} is behind `
+              + `durable cursor ${action.cursorBlockNumber}`,
+            );
+          }
+          throw retryableAuthorityIndexReadError(
+            `Context Graph authority index anchor ${action.cursorBlockNumber} is unavailable`,
+          );
+        case 'invalidate': {
+          this.#repository.discardIfCurrent(scope, record);
+          if (record.token === undefined) {
+            // The pure policy never emits invalidate for a missing row. Keep
+            // this effect boundary total if a future action variant regresses.
+            return record;
+          }
+          const invalidated = await this.#repository.invalidate(
+            scope,
+            record,
+            epoch,
+          );
+          if (invalidated !== undefined) return invalidated;
+          winnerReloads += 1;
+          if (winnerReloads >= MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_WINNER_RELOADS) {
+            throw retryableAuthorityIndexReadError(
+              'Context Graph authority index changed repeatedly during checkpoint recovery',
+            );
+          }
+          record = await this.#repository.load(scope, {
+            forceDurable: true,
+            epoch,
+          });
+          anchor = UNREAD_CONTEXT_GRAPH_AUTHORITY_INDEX_ANCHOR;
+          break;
+        }
       }
     }
     throw retryableAuthorityIndexReadError(
-      'Context Graph authority index durable value changed repeatedly during recovery',
-    );
-  }
-
-  async #admitCheckpoint(
-    scope: string,
-    durable: DurableAuthorityIndexState,
-    deploymentBlockNumber: number,
-    finalized: Readonly<{ number: number; hash: string }>,
-    readBlockHash: (
-      blockNumber: number,
-      lifecycleSignal: AbortSignal,
-    ) => Promise<string | null>,
-    lifecycleSignal: AbortSignal,
-    recoveryBudget = 3,
-  ): Promise<DurableAuthorityIndexState> {
-    const checkpoint = durable.checkpoint;
-    if (checkpoint === undefined) return durable;
-    if (
-      checkpoint.cursor.deploymentBlockNumber !== deploymentBlockNumber
-    ) {
-      return this.#discardOrReload(
-        scope,
-        durable,
-        deploymentBlockNumber,
-        finalized,
-        readBlockHash,
-        lifecycleSignal,
-        recoveryBudget,
-      );
-    }
-    if (checkpoint.cursor.throughBlockNumber > finalized.number) {
-      // A lagging provider/caller is not evidence that the durable prefix is
-      // invalid. Preserve the newer winner and let endpoint failover obtain a
-      // head that can serve it.
-      throw retryableAuthorityIndexReadError(
-        `Context Graph authority index finalized head ${finalized.number} is behind `
-        + `durable cursor ${checkpoint.cursor.throughBlockNumber}`,
-      );
-    }
-    const anchorHash = checkpoint.cursor.throughBlockNumber === finalized.number
-      ? finalized.hash
-      : normalizeHash(await readBlockHash(
-          checkpoint.cursor.throughBlockNumber,
-          lifecycleSignal,
-        ));
-    if (anchorHash === undefined) {
-      // A non-archive endpoint must not destroy a valid durable prefix. Let the
-      // adapter fail over to an endpoint that can revalidate it.
-      throw retryableAuthorityIndexReadError(
-        `Context Graph authority index anchor ${checkpoint.cursor.throughBlockNumber} is unavailable`,
-      );
-    }
-    if (anchorHash !== checkpoint.cursor.throughBlockHash) {
-      return this.#discardOrReload(
-        scope,
-        durable,
-        deploymentBlockNumber,
-        finalized,
-        readBlockHash,
-        lifecycleSignal,
-        recoveryBudget,
-      );
-    }
-    return durable;
-  }
-
-  async #discardOrReload(
-    scope: string,
-    durable: DurableAuthorityIndexState,
-    deploymentBlockNumber: number,
-    finalized: Readonly<{ number: number; hash: string }>,
-    readBlockHash: (
-      blockNumber: number,
-      lifecycleSignal: AbortSignal,
-    ) => Promise<string | null>,
-    lifecycleSignal: AbortSignal,
-    recoveryBudget: number,
-  ): Promise<DurableAuthorityIndexState> {
-    if (recoveryBudget < 1) {
-      throw retryableAuthorityIndexReadError(
-        'Context Graph authority index changed repeatedly during anchor recovery',
-      );
-    }
-    if (this.#entries.get(scope) === durable) this.#entries.delete(scope);
-    if (durable.token === undefined) return Object.freeze({ token: undefined });
-    const invalidatedToken = await this.localStore.invalidate(scope, durable.token);
-    if (invalidatedToken !== undefined) {
-      assertAuthorityIndexToken(invalidatedToken);
-      const tombstone = Object.freeze({ token: invalidatedToken });
-      this.#entries.set(scope, tombstone);
-      return tombstone;
-    }
-    return this.#admitCheckpoint(
-      scope,
-      await this.#load(scope, true),
-      deploymentBlockNumber,
-      finalized,
-      readBlockHash,
-      lifecycleSignal,
-      recoveryBudget - 1,
+      'Context Graph authority index exceeded its checkpoint recovery effect budget',
     );
   }
 
