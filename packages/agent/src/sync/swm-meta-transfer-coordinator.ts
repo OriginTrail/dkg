@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  SelectedSwmMetaTransferOwner,
-  type SelectedSwmMetaFetcher,
-} from './selected-swm-meta-fetcher.js';
+  SwmMetaTransferOwner,
+  type SwmMetaFetcher,
+} from './swm-meta-fetcher.js';
 
-/** Agent-owned registry and shutdown boundary for per-peer metadata transfer owners. */
-export class SelectedSwmMetaTransferCoordinator {
-  readonly #owners = new Map<string, SelectedSwmMetaTransferOwner>();
+/** Agent-owned registry and shutdown boundary for isolated metadata transfer owners. */
+export class SwmMetaTransferCoordinator {
+  readonly #owners = new Map<string, SwmMetaTransferOwner>();
 
   readonly #now: () => number;
 
@@ -18,27 +18,27 @@ export class SelectedSwmMetaTransferCoordinator {
   }
 
   run<T>(
-    remotePeerId: string,
-    createFetcher: () => SelectedSwmMetaFetcher,
-    operation: (fetcher: SelectedSwmMetaFetcher) => Promise<T>,
+    transferKey: string,
+    createFetcher: () => SwmMetaFetcher,
+    operation: (fetcher: SwmMetaFetcher) => Promise<T>,
   ): Promise<T> {
     if (this.#closed) return Promise.reject(this.#closedError());
-    let owner = this.#owners.get(remotePeerId);
+    let owner = this.#owners.get(transferKey);
     if (!owner) {
-      let registeredOwner: SelectedSwmMetaTransferOwner;
-      registeredOwner = new SelectedSwmMetaTransferOwner({
+      let registeredOwner: SwmMetaTransferOwner;
+      registeredOwner = new SwmMetaTransferOwner({
         now: this.#now,
         onIdle: () => {
           if (
-            this.#owners.get(remotePeerId) === registeredOwner
+            this.#owners.get(transferKey) === registeredOwner
             && registeredOwner.isIdle()
           ) {
-            this.#owners.delete(remotePeerId);
+            this.#owners.delete(transferKey);
           }
         },
       });
       owner = registeredOwner;
-      this.#owners.set(remotePeerId, owner);
+      this.#owners.set(transferKey, owner);
     }
     const execute = owner.run(createFetcher, operation);
     return execute;
@@ -52,7 +52,7 @@ export class SelectedSwmMetaTransferCoordinator {
   }
 
   #closedError(): Error {
-    const error = new Error('Selected SWM metadata transfer coordinator is closed');
+    const error = new Error('SWM metadata transfer coordinator is closed');
     error.name = 'AbortError';
     return error;
   }

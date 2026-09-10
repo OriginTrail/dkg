@@ -16,10 +16,10 @@ import {
   VmReconcileShutdownTimeoutError,
 } from '../src/vm-reconcile-service.js';
 import {
-  createSelectedSwmMetaFetcher,
-} from '../src/sync/selected-swm-meta-fetcher.js';
-import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
-import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
+  createSwmMetaFetcher,
+} from '../src/sync/swm-meta-fetcher.js';
+import { SwmMetaTransferCoordinator } from '../src/sync/swm-meta-transfer-coordinator.js';
+import { createSwmMetaRetentionBudget } from '../src/sync/swm-meta-budget.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from
   '../src/rfc64/background-work-dispatcher-v1.js';
@@ -120,7 +120,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
 
   it('drains an in-flight selected-SWM owner after network stop and before store close', async () => {
     const events: string[] = [];
-    const transfers = new SelectedSwmMetaTransferCoordinator();
+    const transfers = new SwmMetaTransferCoordinator();
     const deleteCheckpoint = vi.fn(() => events.push('prefix-cleaned'));
     const peerId = 'peer-stop-order';
     let releaseTransfer!: () => void;
@@ -131,10 +131,10 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     });
     const transfer = transfers.run(
       peerId,
-      () => createSelectedSwmMetaFetcher({
+      () => createSwmMetaFetcher({
         remotePeerId: peerId,
         requesterScope: 'selected-swm-meta:retained:1',
-        retentionBudget: createSelectedSwmMetaRetentionBudget({
+        retentionBudget: createSwmMetaRetentionBudget({
           maxRows: 10,
           maxBytesEstimate: 1024,
           maxPrefixRows: 10,
@@ -173,7 +173,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     Object.assign(agent, {
       started: true,
       chainPoller: null,
-      selectedSwmMetaTransfers: transfers,
+      swmMetaTransfers: transfers,
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
@@ -186,7 +186,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       store: {
         close: vi.fn(async () => {
           expect(deleteCheckpoint).toHaveBeenCalledWith('retained-stop-checkpoint');
-          expect(agent.selectedSwmMetaTransfers).toBeUndefined();
+          expect(agent.swmMetaTransfers).toBeUndefined();
           events.push('store-close');
         }),
       },
@@ -197,7 +197,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     await vi.waitFor(() => expect(agent.node.stop).toHaveBeenCalledOnce());
     expect(agent.store.close).not.toHaveBeenCalled();
     expect(deleteCheckpoint).not.toHaveBeenCalled();
-    expect(agent.selectedSwmMetaTransfers).toBe(transfers);
+    expect(agent.swmMetaTransfers).toBe(transfers);
 
     releaseTransfer();
     await Promise.all([transfer, stopping]);

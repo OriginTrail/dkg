@@ -303,7 +303,7 @@ import {
   getSyncCheckpointKey,
   MemorySyncCheckpointStore,
   type DurableManifestDigest,
-  type SelectedSwmMetaRetentionScope,
+  type SwmMetaRetentionScope,
   type SyncCheckpointScope,
 } from './sync/checkpoint/state.js';
 import {
@@ -337,9 +337,9 @@ import {
 } from './sync/requester/exact-durable-fetch.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
 import {
-  createSelectedSwmMetaRetentionBudget,
-  type SelectedSwmMetaRetentionLimits,
-} from './sync/selected-swm-meta-budget.js';
+  createSwmMetaRetentionBudget,
+  type SwmMetaRetentionLimits,
+} from './sync/swm-meta-budget.js';
 import {
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
@@ -350,9 +350,9 @@ import {
   recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
-  createSelectedSwmMetaFetcher,
-  type SelectedSwmMetaFetcher,
-} from './sync/selected-swm-meta-fetcher.js';
+  createSwmMetaFetcher,
+  type SwmMetaFetcher,
+} from './sync/swm-meta-fetcher.js';
 import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
@@ -1264,32 +1264,32 @@ function normalizeSyncPageFetchOptions(
   };
 }
 
-let selectedSwmMetaInvocationSequence = 0;
+let swmMetaInvocationSequence = 0;
 
-type SelectedSwmMetaRetentionBudget = ReturnType<
-  typeof createSelectedSwmMetaRetentionBudget
+type SwmMetaRetentionBudget = ReturnType<
+  typeof createSwmMetaRetentionBudget
 >;
 
-const selectedSwmMetaRetentionBudgets = new WeakMap<
+const swmMetaRetentionBudgets = new WeakMap<
   object,
-  { signature: string; budget: SelectedSwmMetaRetentionBudget }
+  { signature: string; budget: SwmMetaRetentionBudget }
 >();
 
-function selectedSwmMetaRetentionBudgetFor(
+function swmMetaRetentionBudgetFor(
   owner: object,
-  limits: SelectedSwmMetaRetentionLimits,
-): SelectedSwmMetaRetentionBudget {
+  limits: SwmMetaRetentionLimits,
+): SwmMetaRetentionBudget {
   const signature = JSON.stringify(limits);
-  const existing = selectedSwmMetaRetentionBudgets.get(owner);
+  const existing = swmMetaRetentionBudgets.get(owner);
   if (existing?.signature === signature) return existing.budget;
-  const budget = createSelectedSwmMetaRetentionBudget(limits);
-  selectedSwmMetaRetentionBudgets.set(owner, { signature, budget });
+  const budget = createSwmMetaRetentionBudget(limits);
+  swmMetaRetentionBudgets.set(owner, { signature, budget });
   return budget;
 }
 
-function nextSelectedSwmMetaRequesterScope(): SelectedSwmMetaRetentionScope {
-  selectedSwmMetaInvocationSequence += 1;
-  return `selected-swm-meta:retained:${selectedSwmMetaInvocationSequence}`;
+function nextSwmMetaRequesterScope(selected: boolean): SwmMetaRetentionScope {
+  swmMetaInvocationSequence += 1;
+  return `${selected ? 'selected' : 'ordinary'}-swm-meta:retained:${swmMetaInvocationSequence}`;
 }
 
 function asSyncFetchAbortError(reason: unknown): Error {
@@ -7412,13 +7412,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         selectedPublicTargets.map(({ contextGraphId }) => contextGraphId),
       )
       : null;
-    const selectedMetaRetentionBudget = selectedSwmEnabled
+    const metaRetentionEnabled = selectedPublicTargets.length > 0;
+    const metaRetentionBudget = metaRetentionEnabled
       ? (() => {
         const budget = resolveSyncResponderSnapshotPolicy(
           this.config.syncResponderSnapshotLimits,
           process.env,
         ).budget;
-        return selectedSwmMetaRetentionBudgetFor(this, {
+        return swmMetaRetentionBudgetFor(this, {
           maxRows: budget.maxRows,
           maxBytesEstimate: budget.maxBytesEstimate,
           maxPrefixRows: budget.maxSnapshotRows,
@@ -7426,12 +7427,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       })()
       : undefined;
-    const createSelectedMetaFetcher = (): SelectedSwmMetaFetcher => {
-      const requesterScope = nextSelectedSwmMetaRequesterScope();
-      return createSelectedSwmMetaFetcher({
+    const createMetaFetcher = (): SwmMetaFetcher => {
+      const requesterScope = nextSwmMetaRequesterScope(selectedSwmEnabled);
+      return createSwmMetaFetcher({
         remotePeerId,
         requesterScope,
-        retentionBudget: selectedMetaRetentionBudget!,
+        retentionBudget: metaRetentionBudget!,
         deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
         fetchPage: (request) => {
           const lease = recoveryLeaseFor(request.contextGraphId);
@@ -7467,7 +7468,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
 
     const runSync = async (
-      selectedMetaFetcher?: SelectedSwmMetaFetcher,
+      metaFetcher?: SwmMetaFetcher,
     ): Promise<SharedMemorySyncExecution> => {
       const syncPublicContextGraph = async (
         contextGraphId: string,
@@ -7476,7 +7477,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const mode = selectedSwmEnabled
           ? (() => {
             const recoveryGuard = recoveryLeaseFor(contextGraphId);
-            if (recoveryGuard === undefined || selectedMetaFetcher === undefined) {
+            if (recoveryGuard === undefined || metaFetcher === undefined) {
               throw new Error(
                 `Selected SWM target "${contextGraphId}" is missing its recovery capability`,
               );
@@ -7484,10 +7485,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             return {
               kind: 'selected-recovery' as const,
               recoveryGuard,
-              metadataFetcher: selectedMetaFetcher.strategy,
+              metadataFetcher: metaFetcher.strategy,
             };
           })()
-          : { kind: 'ordinary' as const };
+          : { kind: 'ordinary' as const, metadataFetcher: metaFetcher?.strategy };
         return recoveryExecutor.syncPublicTarget({
           ctx,
           remotePeerId,
@@ -7594,7 +7595,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             && item.lane === 'shared_memory'
             && recoveryLeaseFor(item.contextGraphId)?.isCurrent() !== false
           ) {
-            const metadataContinuation = selectedMetaFetcher!.continuation(
+            const metadataContinuation = metaFetcher!.continuation(
               item.contextGraphId,
             );
             selectedContinuationUnits.push({
@@ -7604,7 +7605,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   const nextResult = await item.run(remainingContextGraphs);
                   return {
                     result: nextResult,
-                    metadataContinuation: selectedMetaFetcher!.continuation(
+                    metadataContinuation: metaFetcher!.continuation(
                       item.contextGraphId,
                     ),
                   };
@@ -7744,11 +7745,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
 
     return runSyncSingleFlight(this, singleFlightKey, () => (
-      selectedSwmEnabled
-        ? this.getSelectedSwmMetaTransfers().run(
-          remotePeerId,
-          createSelectedMetaFetcher,
-          (selectedMetaFetcher) => runSync(selectedMetaFetcher),
+      metaRetentionEnabled
+        ? this.getSwmMetaTransfers().run(
+          `${selectedSwmEnabled ? 'selected' : 'ordinary'}\0${remotePeerId}`,
+          createMetaFetcher,
+          (metaFetcher) => runSync(metaFetcher),
         )
         : runSync()
     ), {

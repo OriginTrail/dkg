@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { afterEach, describe, expect, it } from 'vitest';
+import { SYSTEM_CONTEXT_GRAPHS, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   runDurableSync,
@@ -13,6 +13,10 @@ import {
   runOrderedContextGraphSyncs,
 } from '../src/sync/requester/ordered-sync.js';
 import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
+import type { SyncPhase } from '../src/sync/auth/request-build.js';
+import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
+import { SwmMetaTransferCoordinator } from '../src/sync/swm-meta-transfer-coordinator.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   noop,
@@ -24,6 +28,10 @@ import { createSwmTargetExecutorSessionFactoryForTest } from
   './_helpers/swm-target-executor-session-fixture.js';
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
+const metaTransfers: SwmMetaTransferCoordinator[] = [];
+afterEach(async () => {
+  for (const transfers of metaTransfers.splice(0)) await transfers.close();
+});
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -47,6 +55,8 @@ function durableProcessResult() {
     totalFetchedDataQuads: 0,
     totalFetchedMetaQuads: 0,
     rejectedKcs: 0,
+    consumedUnpersistedMetaTriples: 0,
+    verifiedPrivateOnlyResponses: 0,
     emptyResponses: 1,
     metaOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
@@ -217,7 +227,7 @@ describe('sync requester bailout', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
+      phase: SyncPhase,
     ) => {
       if (contextGraphId === 'pressured-swm') {
         throw transportError('sync responder queue full');
@@ -362,7 +372,7 @@ describe('lifecycle durable fanout isolation', () => {
         _peer: string,
         contextGraphId: string,
         _swm: boolean,
-        phase: 'data' | 'meta',
+        phase: SyncPhase,
       ) => {
         const error = failFor(contextGraphId);
         if (error) throw error;
@@ -481,6 +491,8 @@ describe('lifecycle shared-memory fanout isolation', () => {
     let createTargetExecutorSession:
       | ReturnType<typeof createSwmTargetExecutorSessionFactoryForTest>
       | undefined;
+    const transfers = new SwmMetaTransferCoordinator();
+    metaTransfers.push(transfers);
     const agent = {
       config: { syncContextGraphPriorities: {} },
       store: {},
@@ -533,6 +545,7 @@ describe('lifecycle shared-memory fanout isolation', () => {
           createSwmTargetExecutorSessionFactoryForTest(agent as never);
         return createTargetExecutorSession();
       },
+      getSwmMetaTransfers: () => transfers,
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
