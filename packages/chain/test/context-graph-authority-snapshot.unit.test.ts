@@ -15,6 +15,7 @@ const SECOND_MEMBER = '0x5555555555555555555555555555555555555555';
 const SECOND_AUTHORITY = '0x6666666666666666666666666666666666666666';
 const FINALIZED_HASH = `0x${'55'.repeat(32)}`;
 const NEXT_FINALIZED_HASH = `0x${'56'.repeat(32)}`;
+const REPLACEMENT_FINALIZED_HASH = `0x${'cc'.repeat(32)}`;
 const CREATION_HASH = `0x${'66'.repeat(32)}`;
 const POLICY_HASH = `0x${'77'.repeat(32)}`;
 const NEXT_POLICY_HASH = `0x${'78'.repeat(32)}`;
@@ -38,6 +39,7 @@ interface AuthorityEvidence {
   readonly indexRanges: Array<readonly [number, number]>;
   readonly indexTopicSets: string[][];
   readonly indexAddresses: string[];
+  readonly indexInvalidations: number[];
 }
 
 interface EvmAuthorityHarness {
@@ -47,6 +49,7 @@ interface EvmAuthorityHarness {
   advanceAuthorityHead(): void;
   replaceCachedAnchor(): void;
   replaceFinalizedHead(): void;
+  replaceAuthorityFork(): void;
   holdCurrentStateRead(): Readonly<{ entered: Promise<void>; release(): void }>;
   holdBlockRead(tag: string | number): Readonly<{ entered: Promise<void>; release(): void }>;
   holdIndexPageRead(): Readonly<{ entered: Promise<void>; release(): void }>;
@@ -63,6 +66,7 @@ function makeEvmAuthorityAdapter(
   } = {},
 ): EvmAuthorityHarness {
   let authorityIndexRecord: Readonly<{ token: number; value: unknown | null }> | undefined;
+  const indexInvalidations: number[] = [];
   const authorityIndexStore = {
     load: async () => authorityIndexRecord,
     compareAndSwap: async (
@@ -79,6 +83,7 @@ function makeEvmAuthorityAdapter(
       if (authorityIndexRecord?.token !== expectedToken) return undefined;
       const nextToken = expectedToken + 1;
       authorityIndexRecord = { token: nextToken, value: null };
+      indexInvalidations.push(nextToken);
       return nextToken;
     },
   };
@@ -102,11 +107,13 @@ function makeEvmAuthorityAdapter(
     indexRanges: [],
     indexTopicSets: [],
     indexAddresses: [],
+    indexInvalidations,
   };
 
   let finalizedNumber = 30;
   let finalizedHash = FINALIZED_HASH;
   let cachedAnchorReplaced = false;
+  let replacementAuthorityFork = false;
   let currentReadGate: PromiseWithResolvers<void> | undefined;
   let blockReadGate: Readonly<{
     tag: string | number;
@@ -217,7 +224,7 @@ function makeEvmAuthorityAdapter(
       }
       if (tag === 'finalized') return { number: finalizedNumber, hash: finalizedHash };
       const historicalHash = tag === 30 && cachedAnchorReplaced
-        ? `0x${'cc'.repeat(32)}`
+        ? REPLACEMENT_FINALIZED_HASH
         : tag === 30
           ? FINALIZED_HASH
           : finalizedHash;
@@ -248,6 +255,10 @@ function makeEvmAuthorityAdapter(
       const namedArgs = (values: readonly unknown[], names: Record<string, unknown>) => (
         Object.assign([...values], names)
       );
+      const forkOwner = replacementAuthorityFork ? MEMBER : SECOND_MEMBER;
+      const forkParticipants = replacementAuthorityFork
+        ? [MEMBER]
+        : [MEMBER, SECOND_MEMBER];
       return [
         {
           blockNumber: 10,
@@ -257,9 +268,9 @@ function makeEvmAuthorityAdapter(
             name: 'ContextGraphCreated',
             args: namedArgs([
               9n,
-              SECOND_MEMBER,
+              forkOwner,
               NAME_HASH,
-              [MEMBER, SECOND_MEMBER],
+              forkParticipants,
               0n,
               1n,
               0n,
@@ -267,9 +278,9 @@ function makeEvmAuthorityAdapter(
               7n,
             ], {
               contextGraphId: 9n,
-              owner: SECOND_MEMBER,
+              owner: forkOwner,
               nameHash: NAME_HASH,
-              participantAgents: [MEMBER, SECOND_MEMBER],
+              participantAgents: forkParticipants,
               accessPolicy: 1n,
               publishPolicy: 0n,
               publishAuthority: AUTHORITY,
@@ -283,8 +294,8 @@ function makeEvmAuthorityAdapter(
           index: 0,
           parsed: {
             name: 'Transfer',
-            args: namedArgs([ethers.ZeroAddress, SECOND_MEMBER, 9n], {
-              from: ethers.ZeroAddress, to: SECOND_MEMBER, tokenId: 9n,
+            args: namedArgs([ethers.ZeroAddress, forkOwner, 9n], {
+              from: ethers.ZeroAddress, to: forkOwner, tokenId: 9n,
             }),
           },
         },
@@ -361,10 +372,15 @@ function makeEvmAuthorityAdapter(
             }),
           },
         },
-      ].filter((entry) => (
-        Number(entry.blockNumber) >= filter.fromBlock
-        && Number(entry.blockNumber) <= filter.toBlock
-      ));
+      ].filter((entry) => {
+        if (
+          replacementAuthorityFork
+          && entry.parsed.name !== 'ContextGraphCreated'
+          && !(entry.parsed.name === 'Transfer' && entry.blockNumber === 10)
+        ) return false;
+        return Number(entry.blockNumber) >= filter.fromBlock
+          && Number(entry.blockNumber) <= filter.toBlock;
+      });
     },
   };
   adapter.contracts = {
@@ -407,8 +423,13 @@ function makeEvmAuthorityAdapter(
     advanceAuthorityHead,
     replaceCachedAnchor,
     replaceFinalizedHead: () => {
-      finalizedHash = `0x${'cc'.repeat(32)}`;
+      finalizedHash = REPLACEMENT_FINALIZED_HASH;
       cachedAnchorReplaced = true;
+    },
+    replaceAuthorityFork: () => {
+      finalizedHash = REPLACEMENT_FINALIZED_HASH;
+      cachedAnchorReplaced = true;
+      replacementAuthorityFork = true;
     },
     holdCurrentStateRead: () => {
       const entered = Promise.withResolvers<void>();
@@ -476,6 +497,31 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     await adapter.getContextGraphAuthoritySnapshot(9n);
     expect(evidence.indexRanges).toHaveLength(3);
     expect(evidence.staticCalls).toEqual([]);
+  });
+
+  it('rejects an indexed reorg fence then invalidates and rebuilds the replacement fork', async () => {
+    const harness = makeEvmAuthorityAdapter({ sharedIndex: true });
+    const stabilization = harness.holdBlockRead(30);
+    const stale = harness.adapter.getContextGraphAuthoritySnapshot(9n);
+
+    await stabilization.entered;
+    harness.replaceAuthorityFork();
+    stabilization.release();
+    await expect(stale).rejects.toThrow('anchor changed');
+
+    await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
+      contextGraphId: '9',
+      owner: MEMBER,
+      participantAgents: [MEMBER],
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '0',
+    });
+    expect(harness.evidence.indexInvalidations).toEqual([4]);
+    expect(harness.evidence.indexRanges).toEqual([
+      [7, 16], [17, 26], [27, 30],
+      [7, 16], [17, 26], [27, 30],
+    ]);
   });
 
   it.each([

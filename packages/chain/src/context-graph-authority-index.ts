@@ -218,17 +218,20 @@ export class ContextGraphAuthorityIndex {
       }
       assertAuthorityIndexToken(committedToken);
 
+      const committed = Object.freeze({ token: committedToken, checkpoint: next });
       const current = this.#entries.get(scope);
       if (this.#epoch === epoch && (
         current === undefined
         || current.token === undefined
         || current.token < committedToken
       )) {
-        this.#entries.set(scope, Object.freeze({ token: committedToken, checkpoint: next }));
+        this.#entries.set(scope, committed);
       }
-      durable = this.#epoch === epoch
-        ? (this.#entries.get(scope) ?? Object.freeze({ token: committedToken, checkpoint: next }))
-        : Object.freeze({ token: committedToken, checkpoint: next });
+      // A newer cache entry can belong to a concurrently scanned provider
+      // fork. Keep this attempt on the checkpoint it reduced and admitted;
+      // if another token wins the next CAS, that value is reloaded through
+      // #admitCheckpoint before it can influence this attempt.
+      durable = committed;
     }
   }
 

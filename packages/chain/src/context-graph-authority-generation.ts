@@ -58,19 +58,31 @@ export function normalizeContextGraphAuthorityGenerationState(
   });
 }
 
-/** Stable field order shared by both authority checkpoint integrity encodings. */
-export function contextGraphAuthorityGenerationIntegrityValues(
+/**
+ * Versioned generation payload embedded by the v1 history and v2 index
+ * checkpoint codecs. The fixed tuple is part of those durable formats; model
+ * property order and later model additions cannot change it accidentally.
+ */
+export type ContextGraphAuthorityGenerationV1 = readonly [
+  nameHash: string,
+  ownershipEra: number,
+  policyVersion: number,
+  rosterVersion: number,
+  sourceBlockNumber: number,
+  sourceBlockHash: string,
+];
+
+export function encodeContextGraphAuthorityGenerationV1(
   state: ContextGraphAuthorityGenerationState,
-): readonly unknown[] {
-  const fields = {
-    nameHash: state.nameHash,
-    ownershipEra: state.ownershipEra,
-    policyVersion: state.policyVersion,
-    rosterVersion: state.rosterVersion,
-    sourceBlockNumber: state.sourceBlockNumber,
-    sourceBlockHash: state.sourceBlockHash,
-  } satisfies { [K in keyof ContextGraphAuthorityGenerationState]: unknown };
-  return Object.freeze(Object.values(fields));
+): ContextGraphAuthorityGenerationV1 {
+  return Object.freeze([
+    state.nameHash,
+    state.ownershipEra,
+    state.policyVersion,
+    state.rosterVersion,
+    state.sourceBlockNumber,
+    state.sourceBlockHash,
+  ]);
 }
 
 interface ContextGraphAuthorityGenerationEventBase {

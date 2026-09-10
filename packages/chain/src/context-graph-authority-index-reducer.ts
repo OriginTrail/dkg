@@ -9,7 +9,6 @@ import {
   createContextGraphAuthorityIndexCheckpoint,
   normalizeAuthorityIndexAddress,
   normalizeAuthorityIndexParticipantAgents,
-  normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexCheckpoint,
 } from './context-graph-authority-index-checkpoint.js';
 import {
@@ -182,12 +181,9 @@ export function reduceContextGraphAuthorityIndexPage(
   ) {
     throw new Error('Context Graph authority index page has an invalid block boundary');
   }
-  const previous = input.previous === undefined
-    ? undefined
-    : normalizeContextGraphAuthorityIndexCheckpoint(input.previous);
-  if (input.previous !== undefined && previous === undefined) {
-    throw new Error('Context Graph authority index previous checkpoint is malformed');
-  }
+  // `previous` is branded by the creator/decoder. Opaque durable validation
+  // happens once in ContextGraphAuthorityIndex.#load, not once per scan page.
+  const previous = input.previous;
   if (
     previous !== undefined
     && previous.cursor.deploymentBlockNumber !== deploymentBlockNumber
@@ -231,7 +227,6 @@ export function reduceContextGraphAuthorityIndexPage(
       deploymentBlockNumber,
       throughBlockNumber,
       throughBlockHash,
-      stateCount: states.size,
     }, states.values()),
   });
 }

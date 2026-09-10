@@ -4,7 +4,7 @@ import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import {
   applyContextGraphAuthorityGenerationEvent,
-  contextGraphAuthorityGenerationIntegrityValues,
+  encodeContextGraphAuthorityGenerationV1,
   normalizeContextGraphAuthorityGenerationState,
   normalizeContextGraphAuthorityHash,
   normalizeContextGraphAuthorityNonNegativeSafeInteger,
@@ -449,7 +449,7 @@ function contextGraphAuthorityHistoryStateIntegrity(
     'dkg-context-graph-authority-history-checkpoint-v1',
     state.throughBlockNumber,
     state.throughBlockHash,
-    ...contextGraphAuthorityGenerationIntegrityValues(state),
+    ...encodeContextGraphAuthorityGenerationV1(state),
   ]);
   return ethers.keccak256(ethers.toUtf8Bytes(canonical)).toLowerCase();
 }

@@ -87,7 +87,6 @@ const validCursor = Object.freeze({
   deploymentBlockNumber: 10,
   throughBlockNumber: 20,
   throughBlockHash: blockHash(20),
-  stateCount: 1,
 });
 
 const validState = Object.freeze({
@@ -128,7 +127,6 @@ describe('contract-wide Context Graph authority index reducer', () => {
       deploymentBlockNumber: 10,
       throughBlockNumber: 20,
       throughBlockHash: blockHash(20),
-      stateCount: 2,
     });
     expect(result.checkpoint.states).toEqual([
       {
@@ -256,7 +254,7 @@ describe('contract-wide Context Graph authority index reducer', () => {
       previous: suffix.checkpoint,
       events: [],
     });
-    expect(emptySuffix.checkpoint.cursor.stateCount).toBe(2);
+    expect(emptySuffix.checkpoint.states).toHaveLength(2);
   });
 
   it('materializes every mutable authority field from ordered contract events', () => {
@@ -325,7 +323,7 @@ describe('contract-wide Context Graph authority index reducer', () => {
     })).toThrow('cannot materialize a burned token');
   });
 
-  it('fails closed on gaps, overlaps, deployment changes, and malformed prior state', () => {
+  it('fails closed on gaps, overlaps, and deployment changes', () => {
     const first = reduceContextGraphAuthorityIndexPage({
       deploymentBlockNumber: 10,
       throughBlockNumber: 20,
@@ -346,16 +344,6 @@ describe('contract-wide Context Graph authority index reducer', () => {
       previous: first.checkpoint,
       events: [],
     })).toThrow('deployment block changed');
-    expect(() => reduceContextGraphAuthorityIndexPage({
-      deploymentBlockNumber: 10,
-      throughBlockNumber: 25,
-      throughBlockHash: blockHash(25),
-      previous: {
-        ...first.checkpoint,
-        cursor: { ...first.checkpoint.cursor, stateCount: 2 },
-      },
-      events: [],
-    })).toThrow('previous checkpoint is malformed');
   });
 
   it('fails closed on duplicate positions, duplicate creation, and pre-creation changes', () => {
@@ -415,7 +403,7 @@ describe('contract-wide Context Graph authority index reducer', () => {
     })).toThrow('invalid address');
   });
 
-  it('normalizes durable checkpoints and rejects count, id, hash, and source corruption', () => {
+  it('normalizes durable checkpoints and rejects id, hash, and source corruption', () => {
     const valid = reduceContextGraphAuthorityIndexPage({
       deploymentBlockNumber: 10,
       throughBlockNumber: 20,
@@ -425,10 +413,6 @@ describe('contract-wide Context Graph authority index reducer', () => {
     expect(normalizeContextGraphAuthorityIndexCheckpoint(valid)).toEqual(valid);
     expect(normalizeContextGraphAuthorityIndexCheckpoint({ ...valid, version: 1 }))
       .toBeUndefined();
-    expect(normalizeContextGraphAuthorityIndexCheckpoint({
-      ...valid,
-      cursor: { ...valid.cursor, stateCount: 2 },
-    })).toBeUndefined();
     expect(normalizeContextGraphAuthorityIndexCheckpoint({
       ...valid,
       states: [{ ...valid.states[0], contextGraphId: '09' }],

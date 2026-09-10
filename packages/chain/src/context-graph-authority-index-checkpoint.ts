@@ -2,7 +2,7 @@
 
 import { ethers } from 'ethers';
 import {
-  contextGraphAuthorityGenerationIntegrityValues,
+  encodeContextGraphAuthorityGenerationV1,
   normalizeContextGraphAuthorityGenerationState,
   normalizeContextGraphAuthorityHash,
   normalizeContextGraphAuthorityNonNegativeSafeInteger,
@@ -25,15 +25,18 @@ export interface ContextGraphAuthorityIndexCursor {
   readonly deploymentBlockNumber: number;
   readonly throughBlockNumber: number;
   readonly throughBlockHash: string;
-  readonly stateCount: number;
 }
 
+declare const validatedContextGraphAuthorityIndexCheckpoint: unique symbol;
+
+/** Constructed only by the chain-owned creator or opaque durable decoder. */
 export interface ContextGraphAuthorityIndexCheckpoint {
   readonly version: typeof CONTEXT_GRAPH_AUTHORITY_INDEX_CHECKPOINT_VERSION;
   readonly cursor: ContextGraphAuthorityIndexCursor;
   readonly states: readonly ContextGraphAuthorityIndexState[];
   /** Detects torn, stale-schema, and accidentally edited durable payloads. */
   readonly integrity: string;
+  readonly [validatedContextGraphAuthorityIndexCheckpoint]: true;
 }
 
 /**
@@ -112,8 +115,9 @@ function stateIntegrityValues(
     keyof ContextGraphAuthorityIndexState,
     keyof ContextGraphAuthorityGenerationState
   >;
-  // Generation ordering is canonical across both durable formats. Adding a
-  // materialized field remains a compile-time failure until it is included.
+  // Both the materialized and shared-generation portions are fixed durable
+  // tuples. The named field map retains compile-time completeness without
+  // making its property enumeration order part of the persisted format.
   const fields = {
     contextGraphId: state.contextGraphId,
     owner: state.owner,
@@ -125,8 +129,15 @@ function stateIntegrityValues(
     participantAgents: state.participantAgents,
   } satisfies { [K in MaterializedField]: unknown };
   return Object.freeze([
-    ...Object.values(fields),
-    ...contextGraphAuthorityGenerationIntegrityValues(state),
+    fields.contextGraphId,
+    fields.owner,
+    fields.active,
+    fields.accessPolicy,
+    fields.publishPolicy,
+    fields.publishAuthority,
+    fields.publishAuthorityAccountId,
+    fields.participantAgents,
+    ...encodeContextGraphAuthorityGenerationV1(state),
   ]);
 }
 
@@ -139,7 +150,7 @@ function contextGraphAuthorityIndexIntegrity(
     checkpoint.cursor.deploymentBlockNumber,
     checkpoint.cursor.throughBlockNumber,
     checkpoint.cursor.throughBlockHash,
-    checkpoint.cursor.stateCount,
+    checkpoint.states.length,
     ...checkpoint.states.flatMap(stateIntegrityValues),
   ]);
   return ethers.keccak256(ethers.toUtf8Bytes(canonical)).toLowerCase();
@@ -217,22 +228,18 @@ export function normalizeContextGraphAuthorityIndexCheckpoint(
     rawCursor.throughBlockNumber,
   );
   const throughBlockHash = normalizeContextGraphAuthorityHash(rawCursor.throughBlockHash);
-  const stateCount = normalizeContextGraphAuthorityNonNegativeSafeInteger(rawCursor.stateCount);
   const integrity = normalizeContextGraphAuthorityHash(candidate.integrity);
   if (
     deploymentBlockNumber === undefined
     || throughBlockNumber === undefined
     || throughBlockHash === undefined
-    || stateCount === undefined
     || integrity === undefined
     || throughBlockNumber < deploymentBlockNumber
-    || candidate.states.length !== stateCount
   ) return undefined;
   const cursor = Object.freeze({
     deploymentBlockNumber,
     throughBlockNumber,
     throughBlockHash,
-    stateCount,
   });
   const states: ContextGraphAuthorityIndexState[] = [];
   const ids = new Set<string>();
@@ -247,7 +254,7 @@ export function normalizeContextGraphAuthorityIndexCheckpoint(
     cursor,
     states: sortAndFreezeContextGraphAuthorityIndexStates(states),
     integrity,
-  });
+  }) as ContextGraphAuthorityIndexCheckpoint;
   return integrity === contextGraphAuthorityIndexIntegrity(checkpoint)
     ? checkpoint
     : undefined;
@@ -260,11 +267,11 @@ export function createContextGraphAuthorityIndexCheckpoint(
   const frozenStates = sortAndFreezeContextGraphAuthorityIndexStates(states);
   const checkpointWithoutIntegrity = {
     version: CONTEXT_GRAPH_AUTHORITY_INDEX_CHECKPOINT_VERSION,
-    cursor: Object.freeze({ ...cursor, stateCount: frozenStates.length }),
+    cursor: Object.freeze({ ...cursor }),
     states: frozenStates,
   } as const;
   return Object.freeze({
     ...checkpointWithoutIntegrity,
     integrity: contextGraphAuthorityIndexIntegrity(checkpointWithoutIntegrity),
-  });
+  }) as ContextGraphAuthorityIndexCheckpoint;
 }

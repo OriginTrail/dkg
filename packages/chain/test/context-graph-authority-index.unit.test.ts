@@ -310,6 +310,57 @@ describe('durable contract-wide Context Graph authority scanner', () => {
       .toMatchObject({ throughBlockNumber: 25 });
   });
 
+  it('does not adopt a newer cached checkpoint from another provider fork', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    const index = new ContextGraphAuthorityIndex(store);
+    const finalCommitStored = Promise.withResolvers<void>();
+    const releaseFinalCommit = Promise.withResolvers<void>();
+    const compareAndSwap = store.compareAndSwap.bind(store);
+    let delayedAcknowledgement = false;
+    store.compareAndSwap = async (scope, expectedToken, value) => {
+      const token = await compareAndSwap(scope, expectedToken, value);
+      const throughBlockNumber = (
+        value as { cursor?: { throughBlockNumber?: unknown } }
+      ).cursor?.throughBlockNumber;
+      if (
+        token !== undefined
+        && throughBlockNumber === 25
+        && !delayedAcknowledgement
+      ) {
+        delayedAcknowledgement = true;
+        finalCommitStored.resolve();
+        await releaseFinalCommit.promise;
+      }
+      return token;
+    };
+
+    const forkAEvents = allEvents;
+    const forkBEvents = allEvents.map((entry) => (
+      entry.name === 'ContextGraphCreated' && entry.contextGraphId === 9n
+        ? creation(9n, entry.blockNumber, entry.index, NAME_10)
+        : entry
+    ));
+    const readFork = (entries: readonly ContextGraphAuthorityIndexEvent[]) => async (
+      from: number,
+      to: number,
+    ) => entries.filter((entry) => entry.blockNumber >= from && entry.blockNumber <= to);
+
+    const providerA = index.resolve(makeInput(9n, {}, readFork(forkAEvents)));
+    await finalCommitStored.promise;
+
+    const providerB = index.resolve({
+      ...makeInput(9n, {}, readFork(forkBEvents)),
+      finalized: { number: 25, hash: `0x${'bb'.repeat(32)}` },
+    });
+    await expect(providerB).resolves.toMatchObject({ nameHash: NAME_10 });
+
+    releaseFinalCommit.resolve();
+    await expect(providerA).resolves.toMatchObject({ nameHash: NAME_9 });
+    expect(store.invalidations).toEqual([5]);
+    expect((store.record!.value as { states: Array<{ nameHash: string }> }).states[0])
+      .toMatchObject({ nameHash: NAME_10 });
+  });
+
   it('prevents an ABA stale writer after invalidation and checkpoint recreation', async () => {
     const store = new MemoryAuthorityIndexStore();
     const scope = makeInput(9n, {}, async () => []).scope;
