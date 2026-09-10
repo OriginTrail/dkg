@@ -16,6 +16,7 @@ import {
   type SyncPageResult,
 } from './page-fetch.js';
 import {
+  canonicalGraphScopedSnapshotManifestQuads,
   canonicalizeGraphScopedSwmHeadRows,
   discoverSwmRecoverySubGraphNames,
   materializeGraphScopedSwmRecoveryAsset,
@@ -844,6 +845,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // "no materialization this round" — never take down the sync.
       const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
       let verifiedMetaForInsert = processed.verifiedMeta;
+      let snapshotManifestMeta = processed.verifiedMeta;
       // Whether the descriptor map is an AUTHORITATIVE statement about this
       // round's metadata, i.e. whether "this ref has no descriptor" may be read
       // as "this ref has nothing to materialize".
@@ -874,6 +876,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             metaQuads: processed.verifiedMeta,
             descriptors,
           });
+          snapshotManifestMeta = canonicalGraphScopedSnapshotManifestQuads(
+            processed.verifiedMeta,
+            descriptors,
+          );
           for (const descriptor of descriptors) {
             if (descriptor.snapshotSource.locator.kind !== 'store') continue;
             const { ref } = descriptor.snapshotSource.locator;
@@ -897,7 +903,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializedGraphs = 0;
       let materializationFailures = 0;
       let materializedQuads = 0;
-      const manifestSnapshots = collectPublicSnapshotMetadata(processed.verifiedMeta);
+      const manifestSnapshots = collectPublicSnapshotMetadata(snapshotManifestMeta);
       const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
         ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
         : manifestSnapshots;
@@ -1290,7 +1296,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         ...(snapshotWalk
           ? { snapshotWalk }
           : {
-            metaQuads: processed.verifiedMeta,
+            metaQuads: snapshotManifestMeta,
             recoveryOrder: snapshotRecoveryOrder,
           }),
         publicSnapshotStore,
@@ -2016,6 +2022,9 @@ async function hasValidSnapshot(
   let quads: Quad[] | null;
   try {
     quads = await publicSnapshotStore.getSnapshot(snapshot.ref);
+    if (!quads && snapshot.ref !== snapshot.digest) {
+      quads = await publicSnapshotStore.getSnapshot(snapshot.digest);
+    }
   } catch {
     return false;
   }

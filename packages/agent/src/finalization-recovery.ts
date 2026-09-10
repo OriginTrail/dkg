@@ -13,7 +13,7 @@ import { ethers } from 'ethers';
 import {
   VerifiedGraphScopedFinalizationEvidenceCodec,
   parseGraphScopedFinalization,
-  type GraphScopedAccessPolicy,
+  type GraphScopedAccessEnvelope,
   type ParsedGraphScopedFinalization,
   type VerifiedGraphScopedFinalizationEvidence,
   type VerifiedGraphScopedFinalizationEvidencePlacement,
@@ -84,8 +84,7 @@ export interface FinalizationRecoveryPreparedMaterialization {
   localTopicOnChainContextGraphId?: string;
   publicQuadsDigest?: string;
   publisherPeerId: string;
-  accessPolicy: GraphScopedAccessPolicy;
-  allowedPeers: string[];
+  access: GraphScopedAccessEnvelope;
   workspaceSubGraphName?: string;
 }
 
@@ -918,8 +917,8 @@ export class FinalizationRecovery<
       ...(canonical.receipt.authorAddress
         ? { authorAddress: canonical.receipt.authorAddress }
         : {}),
-      accessPolicy: prepared.accessPolicy,
-      allowedPeers: prepared.allowedPeers,
+      accessPolicy: prepared.access.accessPolicy,
+      allowedPeers: [...prepared.access.allowedPeers],
       workspaceSubGraphName: prepared.workspaceSubGraphName,
     });
     const committed = await this.recordVerified(entry, evidence);
@@ -2227,8 +2226,8 @@ function sameGraphScopedAccessSemantics(
   prepared: FinalizationRecoveryPreparedMaterialization,
   evidence: VerifiedGraphScopedFinalizationEvidence,
 ): boolean {
-  return prepared.accessPolicy === evidence.accessPolicy
-    && [...prepared.allowedPeers].sort().join('\0')
+  return prepared.access.accessPolicy === evidence.accessPolicy
+    && [...prepared.access.allowedPeers].sort().join('\0')
       === [...evidence.allowedPeers].sort().join('\0');
 }
 

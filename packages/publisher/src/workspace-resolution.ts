@@ -673,7 +673,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     });
     return operation;
   });
-  const { selected } = selectEquivalentWorkspaceOperation(
+  const orderedCandidates = selectEquivalentWorkspaceOperation(
     candidates,
     publisherWorkspaceOperationSemanticsKey,
     {
@@ -682,33 +682,23 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     ),
     },
   );
+  const selected = orderedCandidates[0];
   const decodedOperation = selected.semantics;
-  const persistedAccess = candidates.find(
+  const persistedAccess = orderedCandidates.find(
     (candidate) => candidate.semantics.access.kind === 'persisted',
   )?.semantics.access;
   const access = persistedAccess ?? decodedOperation.access;
-  const aliasesById = candidates
-    .map((candidate): KnowledgeAssetWorkspaceOperationAlias => Object.freeze({
+  const toAlias = (candidate: typeof selected): KnowledgeAssetWorkspaceOperationAlias => Object.freeze({
       shareOperationId: candidate.provenance.shareOperationId,
       ...(candidate.provenance.publishedAtMs === undefined
         ? {}
         : { publishedAt: candidate.provenance.publishedAtMs.toString() as TimestampMsV1 }),
       snapshotLocator: candidate.snapshotLocator,
-    }));
-  const selectedAlias = aliasesById.find(
-    (alias) => alias.shareOperationId === selected.provenance.shareOperationId,
-  );
-  if (selectedAlias === undefined) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${decodedHead.scope.ual}: selected alias is missing`,
-    );
-  }
-  const operationAliases = Object.freeze([
-    selectedAlias,
-    ...aliasesById
-      .filter((alias) => alias !== selectedAlias)
-      .sort((left, right) => left.shareOperationId.localeCompare(right.shareOperationId)),
-  ]) as KnowledgeAssetWorkspaceOperationAliasClass;
+    });
+  const operationAliases: KnowledgeAssetWorkspaceOperationAliasClass = Object.freeze([
+    toAlias(selected),
+    ...orderedCandidates.slice(1).map(toAlias),
+  ]);
   return createKnowledgeAssetWorkspaceHead({
     kaUal: decodedHead.scope.ual,
     assertionVersion: decodedHead.scope.assertionVersion,
@@ -1108,6 +1098,17 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
     quads = await resolveSnapshotGraphQuads(params.store, snapshotGraph);
   }
   if (!quads) {
+    throw new KnowledgeAssetOperationPublicSnapshotNotFoundError(
+      `Immutable graph-scoped public snapshot is missing for ` +
+      `share operation ${params.shareOperationId}`,
+    );
+  }
+  // A named graph that no longer exists is observed as an empty result by
+  // RDF stores. When metadata commits a non-empty snapshot, classify that as
+  // unavailable (and therefore eligible for equivalent-alias fallback), not
+  // as corruption. A present but truncated/non-matching graph still fails
+  // closed in the integrity check below.
+  if (quads.length === 0 && expectedCount !== 0) {
     throw new KnowledgeAssetOperationPublicSnapshotNotFoundError(
       `Immutable graph-scoped public snapshot is missing for ` +
       `share operation ${params.shareOperationId}`,

@@ -56,6 +56,7 @@ import {
   resolveKnowledgeAssetWorkspaceHead,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
+  type WorkspaceOperationAccessEnvelope,
   type KCMetadata, type KAMetadata, type OnChainProvenance,
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
@@ -97,7 +98,7 @@ import type {
 } from './finalization-recovery-store.js';
 import {
   type GraphScopedFinalizationAdmission,
-  type GraphScopedAccessPolicy,
+  type GraphScopedAccessEnvelope,
   type ParsedGraphScopedFinalization,
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
@@ -225,8 +226,7 @@ type GraphScopedMaterializationEnvelope = Pick<
   | 'privateTripleCount'
   | 'publisherPeerId'
 > & Readonly<{
-  accessPolicy: GraphScopedAccessPolicy;
-  allowedPeers: readonly string[];
+  access: WorkspaceOperationAccessEnvelope;
 }>;
 
 /** Immutable queued assertion envelope supplied only after receipt/seal validation. */
@@ -234,14 +234,12 @@ type TrustedGraphScopedAssertionEvidence = VerifiedGraphScopedFinalizationEviden
 
 function resolveGraphScopedAccessEnvelope(
   head: GraphScopedMaterializationEnvelope,
-  requestedAccessPolicy?: GraphScopedAccessPolicy,
-  requestedAllowedPeers: string[] = [],
-): { accessPolicy: GraphScopedAccessPolicy; allowedPeers: string[] } {
-  const accessPolicy = requestedAccessPolicy
-    ?? head.accessPolicy
-    ?? 'ownerOnly';
+  requestedAccess?: GraphScopedAccessEnvelope,
+): GraphScopedAccessEnvelope {
+  const selected = requestedAccess ?? head.access;
+  const accessPolicy = selected.accessPolicy;
   const allowedPeers = accessPolicy === 'allowList'
-    ? (requestedAccessPolicy ? requestedAllowedPeers : head.allowedPeers)
+    ? selected.allowedPeers
     : [];
   if (accessPolicy === 'allowList' && allowedPeers.length === 0) {
     return { accessPolicy: 'ownerOnly', allowedPeers: [] };
@@ -1152,16 +1150,11 @@ export class FinalizationHandler {
     // metadata omitted the row. Finalization must separately preserve that
     // omission: only an explicitly durable policy outranks an authenticated
     // publisher envelope carried by the finalization message.
-    const requestedAccessPolicy = head.access.kind === 'persisted'
-      ? head.access.accessPolicy
-      : trustedWireAccess
-        ? wireAccessPolicy
+    const requestedAccess: GraphScopedAccessEnvelope | undefined = head.access.kind === 'persisted'
+      ? head.access
+      : trustedWireAccess && wireAccessPolicy !== undefined
+        ? { accessPolicy: wireAccessPolicy, allowedPeers }
         : undefined;
-    const requestedAllowedPeers = head.access.kind === 'persisted'
-      ? [...head.access.allowedPeers]
-      : trustedWireAccess
-        ? allowedPeers
-        : [];
 
     const vmVerification = await this.verifyExactGraphScopedLayer({
       contextGraphId,
@@ -1208,13 +1201,11 @@ export class FinalizationHandler {
       privateMerkleRoot: head.privateMerkleRoot,
       privateTripleCount: head.privateTripleCount,
       publisherPeerId: head.publisherPeerId,
-      accessPolicy: head.access.accessPolicy,
-      allowedPeers: [...head.access.allowedPeers],
+      access: head.access,
     };
     const verifiedAccess = resolveGraphScopedAccessEnvelope(
       materializationHead,
-      requestedAccessPolicy,
-      requestedAllowedPeers,
+      requestedAccess,
     );
     return {
       candidate: parsed,
@@ -1230,8 +1221,7 @@ export class FinalizationHandler {
       layerVerification,
       ...(head.publicQuadsDigest ? { publicQuadsDigest: head.publicQuadsDigest } : {}),
       publisherPeerId: head.publisherPeerId,
-      accessPolicy: verifiedAccess.accessPolicy,
-      allowedPeers: verifiedAccess.allowedPeers,
+      access: verifiedAccess,
     };
   }
 
@@ -1256,8 +1246,7 @@ export class FinalizationHandler {
       head,
       vmVerification,
       layerVerification,
-      accessPolicy,
-      allowedPeers,
+      access,
     } = prepared;
     const { msg } = parsed;
     const {
@@ -1281,8 +1270,7 @@ export class FinalizationHandler {
         batchId,
         expectedTxHash: msg.txHash,
         materializedVersion,
-        accessPolicy,
-        allowedPeers,
+        access,
         authorAddress: verifiedAuthorAddress,
         subGraphName,
       });
@@ -1318,8 +1306,7 @@ export class FinalizationHandler {
         blockNumber: verifiedBlockNumber,
         materializedVersion,
       },
-      accessPolicy,
-      allowedPeers,
+      access,
       subGraphName,
       source: 'finalization',
       contentAlreadyMaterialized: vmVerification.status === 'verified',
@@ -1379,8 +1366,11 @@ export class FinalizationHandler {
         : {}),
       privateTripleCount: evidence.privateTripleCount,
       publisherPeerId: evidence.publisherPeerId,
-      accessPolicy: evidence.accessPolicy,
-      allowedPeers: [...evidence.allowedPeers],
+      access: {
+        kind: 'persisted',
+        accessPolicy: evidence.accessPolicy,
+        allowedPeers: [...evidence.allowedPeers],
+      },
     };
     const outcome = await withMaterializationLock(metaGraph, scope.ual, async () => {
       const metadataState = await this.graphScopedMetadataState({
@@ -1394,8 +1384,10 @@ export class FinalizationHandler {
           blockNumber: evidence.blockNumber,
           txIndex: evidence.txIndex,
         },
-        accessPolicy: evidence.accessPolicy,
-        allowedPeers: evidence.allowedPeers,
+        access: {
+          accessPolicy: evidence.accessPolicy,
+          allowedPeers: evidence.allowedPeers,
+        },
         authorAddress: evidence.authorAddress,
         subGraphName,
       });
@@ -1716,16 +1708,18 @@ export class FinalizationHandler {
             : {}),
           privateTripleCount: trustedAssertionEvidence.privateTripleCount,
           publisherPeerId: trustedAssertionEvidence.publisherPeerId,
-          accessPolicy: trustedAssertionEvidence.accessPolicy,
-          allowedPeers: [...trustedAssertionEvidence.allowedPeers],
+          access: {
+            kind: 'persisted',
+            accessPolicy: trustedAssertionEvidence.accessPolicy,
+            allowedPeers: [...trustedAssertionEvidence.allowedPeers],
+          },
         }
       : {
           publicTripleCount: workspaceHead!.publicTripleCount,
           privateMerkleRoot: workspaceHead!.privateMerkleRoot,
           privateTripleCount: workspaceHead!.privateTripleCount,
           publisherPeerId: workspaceHead!.publisherPeerId,
-          accessPolicy: workspaceHead!.access.accessPolicy,
-          allowedPeers: [...workspaceHead!.access.allowedPeers],
+          access: workspaceHead!.access,
         };
     const evidencePublisherAddress = trustedAssertionEvidence?.publisherAddress ?? publisherAddress;
     const evidenceAuthorAddress = trustedAssertionEvidence?.authorAddress ?? authorAddress;
@@ -1781,8 +1775,12 @@ export class FinalizationHandler {
     if (vmVerification.status === 'verified') {
       const access = resolveGraphScopedAccessEnvelope(
         head,
-        trustedAssertionEvidence?.accessPolicy,
-        trustedAssertionEvidence?.allowedPeers,
+        trustedAssertionEvidence
+          ? {
+              accessPolicy: trustedAssertionEvidence.accessPolicy,
+              allowedPeers: trustedAssertionEvidence.allowedPeers,
+            }
+          : undefined,
       );
       const metadataState = await this.graphScopedMetadataState({
         contextGraphId,
@@ -1791,8 +1789,7 @@ export class FinalizationHandler {
         merkleRoot,
         batchId: reconciliationBatchId,
         expectedTxHash: trustedAssertionEvidence?.transactionHash,
-        accessPolicy: access.accessPolicy,
-        allowedPeers: access.allowedPeers,
+        access,
         confirmationKind: 'transaction',
         authorAddress: evidenceAuthorAddress,
         subGraphName,
@@ -1822,8 +1819,7 @@ export class FinalizationHandler {
           head,
           merkleRoot,
           batchId: reconciliationBatchId,
-          accessPolicy: 'ownerOnly',
-          allowedPeers: [],
+          access: { accessPolicy: 'ownerOnly', allowedPeers: [] },
           confirmationKind: 'transaction',
           authorAddress,
           subGraphName,
@@ -2006,8 +2002,14 @@ export class FinalizationHandler {
         blockNumber: evidenceBlockNumber,
         materializedVersion,
       },
-      accessPolicy: trustedAssertionEvidence?.accessPolicy,
-      allowedPeers: trustedAssertionEvidence?.allowedPeers,
+      ...(trustedAssertionEvidence
+        ? {
+            access: {
+              accessPolicy: trustedAssertionEvidence.accessPolicy,
+              allowedPeers: trustedAssertionEvidence.allowedPeers,
+            },
+          }
+        : {}),
       subGraphName,
       source: 'chain-reconcile',
       ctx,
@@ -2104,8 +2106,7 @@ export class FinalizationHandler {
     const finalizedHead: GraphScopedMaterializationEnvelope = {
       ...head,
       publisherPeerId: CHAIN_FINALIZED_RECONCILE_PEER_ID,
-      accessPolicy: 'public',
-      allowedPeers: [],
+      access: { kind: 'persisted', accessPolicy: 'public', allowedPeers: [] },
     };
     const finalizedVersion = { blockNumber: versionBlock, txIndex: 0 };
 
@@ -2120,8 +2121,7 @@ export class FinalizationHandler {
         merkleRoot,
         batchId,
         materializedVersion: finalizedVersion,
-        accessPolicy: 'public',
-        allowedPeers: [],
+        access: { accessPolicy: 'public', allowedPeers: [] },
         confirmationKind: 'finalized-materialization',
         authorAddress: publicAuthority.authorAddress,
         subGraphName,
@@ -2162,8 +2162,7 @@ export class FinalizationHandler {
         kind: 'finalized-materialization',
         materializedVersion: finalizedVersion,
       },
-      accessPolicy: 'public',
-      allowedPeers: [],
+      access: { accessPolicy: 'public', allowedPeers: [] },
       subGraphName,
       source: 'chain-reconcile',
       contentAlreadyMaterialized,
@@ -2254,8 +2253,11 @@ export class FinalizationHandler {
         : {}),
       privateTripleCount: evidence.privateTripleCount,
       publisherPeerId: evidence.publisherPeerId,
-      accessPolicy: evidence.accessPolicy,
-      allowedPeers: [...evidence.allowedPeers],
+      access: {
+        kind: 'persisted',
+        accessPolicy: evidence.accessPolicy,
+        allowedPeers: [...evidence.allowedPeers],
+      },
     };
     const outcome = await this.applyVerifiedGraphScopedFinalization({
       contextGraphId: input.contextGraphId,
@@ -2273,8 +2275,10 @@ export class FinalizationHandler {
         blockNumber: evidence.blockNumber,
         materializedVersion: { blockNumber: evidence.blockNumber, txIndex: evidence.txIndex },
       },
-      accessPolicy: evidence.accessPolicy,
-      allowedPeers: evidence.allowedPeers,
+      access: {
+        accessPolicy: evidence.accessPolicy,
+        allowedPeers: evidence.allowedPeers,
+      },
       subGraphName: evidence.subGraphName,
       source: 'chain-reconcile',
       contentAlreadyMaterialized: true,
@@ -2314,8 +2318,7 @@ export class FinalizationHandler {
     batchId: bigint;
     authorAddress?: string;
     confirmation: VerifiedGraphScopedConfirmation;
-    accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
-    allowedPeers?: string[];
+    access?: GraphScopedAccessEnvelope;
     subGraphName?: string;
     source: 'finalization' | 'chain-reconcile';
     contentAlreadyMaterialized?: boolean;
@@ -2331,8 +2334,7 @@ export class FinalizationHandler {
       batchId,
       authorAddress,
       confirmation,
-      accessPolicy: requestedAccessPolicy,
-      allowedPeers: requestedAllowedPeers = [],
+      access: requestedAccess,
       subGraphName,
       source,
       contentAlreadyMaterialized = false,
@@ -2348,14 +2350,7 @@ export class FinalizationHandler {
       subGraphName,
     );
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    const {
-      accessPolicy: safeAccessPolicy,
-      allowedPeers: effectiveAllowedPeers,
-    } = resolveGraphScopedAccessEnvelope(
-      head,
-      requestedAccessPolicy,
-      requestedAllowedPeers,
-    );
+    const safeAccess = resolveGraphScopedAccessEnvelope(head, requestedAccess);
 
     const outcome = await withMaterializationLock(metaGraph, scope.ual, async () => {
       const currentMaterializedVersion = await readMaterializedVersion(
@@ -2386,11 +2381,11 @@ export class FinalizationHandler {
       const preserveConfirmedMetadata = confirmedAssertionVersion !== undefined
         && confirmedAssertionVersion !== scope.assertionVersion;
       const metadataAccessPolicy = source === 'chain-reconcile'
-        && requestedAccessPolicy === undefined
+        && requestedAccess === undefined
         ? 'ownerOnly'
-        : safeAccessPolicy;
+        : safeAccess.accessPolicy;
       const metadataAllowedPeers = metadataAccessPolicy === 'allowList'
-        ? effectiveAllowedPeers
+        ? safeAccess.allowedPeers
         : [];
       // A chain sweep knows the latest root, but not which assertion version or
       // access envelope produced it. Identical-content updates share a root and
@@ -2460,7 +2455,7 @@ export class FinalizationHandler {
           publisherPeerId: head.publisherPeerId,
           accessPolicy: metadataAccessPolicy,
           ...(metadataAccessPolicy === 'allowList'
-            ? { allowedPeers: metadataAllowedPeers }
+            ? { allowedPeers: [...metadataAllowedPeers] }
             : {}),
           timestamp: new Date(),
           subGraphName,
@@ -2572,8 +2567,7 @@ export class FinalizationHandler {
     batchId: bigint;
     expectedTxHash?: string;
     materializedVersion?: MaterializedVersion;
-    accessPolicy: GraphScopedAccessPolicy;
-    allowedPeers: string[];
+    access: GraphScopedAccessEnvelope;
     confirmationKind?: 'transaction' | 'finalized-materialization';
     authorAddress?: string;
     subGraphName?: string;
@@ -2586,8 +2580,7 @@ export class FinalizationHandler {
       batchId,
       expectedTxHash,
       materializedVersion,
-      accessPolicy,
-      allowedPeers,
+      access,
       confirmationKind = 'transaction',
       authorAddress,
       subGraphName,
@@ -2645,7 +2638,9 @@ export class FinalizationHandler {
       const storedAllowedPeers = storedAllowedPeerValues
         .map((value) => stripOptionalLiteral(value))
         .filter((value): value is string => value !== undefined);
-      const expectedAllowedPeers = [...new Set(allowedPeers)].sort();
+      const expectedAllowedPeers = access.accessPolicy === 'allowList'
+        ? [...new Set(access.allowedPeers)].sort()
+        : [];
       const actualAllowedPeers = [...new Set(storedAllowedPeers)].sort();
       const storedMaterializedVersion = oneLiteral(`${DKG_NS}materializedVersion`);
       const storedTransactionHash = oneLiteral(`${DKG_NS}transactionHash`);
@@ -2684,7 +2679,7 @@ export class FinalizationHandler {
         || !Number.isSafeInteger(Number(parsedMaterializedVersion[2]))
         || (expectedMaterializedVersion !== undefined
           && storedMaterializedVersion !== expectedMaterializedVersion)
-        || oneLiteral(`${DKG_NS}accessPolicy`) !== accessPolicy
+        || oneLiteral(`${DKG_NS}accessPolicy`) !== access.accessPolicy
         || oneLiteral(`${DKG_NS}publisherPeerId`) !== head.publisherPeerId
         || oneRaw(`${DKG_NS}contextGraph`) !== `did:dkg:context-graph:${contextGraphId}`
         || !oneLiteral(`${DKG_NS}publishedAt`)

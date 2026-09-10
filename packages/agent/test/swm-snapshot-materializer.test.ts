@@ -38,12 +38,16 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
+  canonicalGraphScopedSnapshotManifestQuads,
   materializeGraphScopedSwmRecoveryAsset,
   operationIdentityKey,
   parseGraphScopedSwmRecoveryDescriptors,
 } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
-import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import {
+  collectPublicSnapshotMetadata,
+  runSharedMemorySync,
+} from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 
@@ -251,27 +255,48 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
   });
 
   describe('end-to-end catch-up with the real materializer', () => {
-    function realHarness(store: TripleStore, served: typeof v1, servedMeta: Quad[] = served.meta) {
+    function realHarness(
+      store: TripleStore,
+      served: typeof v1,
+      servedMeta: Quad[] = served.meta,
+      options: Readonly<{
+        preloadSnapshot?: boolean;
+        onSnapshotRequest?: (ref: string) => void;
+      }> = {},
+    ) {
       const snapshotStore = new MemorySnapshotStore();
       const { materializer } = materializerFor(store);
       let replaceCalls = 0;
       const run = async () => {
-        await snapshotStore.putSnapshot({ digest: served.digest, quads: served.payload });
+        if (options.preloadSnapshot !== false) {
+          await snapshotStore.putSnapshot({ digest: served.digest, quads: served.payload });
+        }
         return runSharedMemorySync({
           mode: { kind: 'ordinary' },
           ctx,
           remotePeerId: 'peer-source',
           contextGraphIds: [CG],
           createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
-          fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => ({
-            quads: phase === 'meta' ? [...servedMeta] : [],
-            bytesReceived: 0,
-            resumedFromOffset: 0,
-            nextOffset: phase === 'meta' ? servedMeta.length : 0,
-            checkpointKey: 'k',
-            completed: true,
-            timedOut: false,
-          }),
+          fetchSyncPages: async (
+            _c, _p, _cg, _inc, phase, _graph, _deadline, fetchOptions,
+          ): Promise<SyncPageResult> => {
+            if (phase === 'snapshot' && fetchOptions?.snapshotRef) {
+              options.onSnapshotRequest?.(fetchOptions.snapshotRef);
+            }
+            return {
+              quads: phase === 'meta'
+                ? [...servedMeta]
+                : phase === 'snapshot' ? [...served.payload] : [],
+              bytesReceived: 0,
+              resumedFromOffset: 0,
+              nextOffset: phase === 'meta'
+                ? servedMeta.length
+                : phase === 'snapshot' ? served.payload.length : 0,
+              checkpointKey: 'k',
+              completed: true,
+              timedOut: false,
+            };
+          },
           processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
             verifiedData: wsDataQuads,
             verifiedMeta: wsMetaQuads,
@@ -536,6 +561,67 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
         descriptor: descriptor!,
         fetchedDataQuads: inGraph(v1.payload, snapshotGraph),
       })).resolves.toMatchObject({ quads: inGraph(v1.payload, v1.assertionGraph) });
+    });
+
+    it('requests and materializes the persisted ref from an older equivalent alias', async () => {
+      const selected = share(1, 'storage-ack-digest-fallback', 'version-one');
+      const persistedRef = `sha256:${'9'.repeat(64)}`;
+      const olderPersisted = v1.meta.map((row) => (
+        row.subject === v1.operationSubject && row.predicate === `${DKG}publicSnapshotRef`
+          ? { ...row, object: `"${persistedRef}"` }
+          : row
+      ));
+      const newerDigestFallback = selected.meta
+        .filter((row) => !(
+          row.subject === selected.operationSubject
+          && (row.predicate === `${DKG}publicSnapshotRef`
+            || row.predicate === `${DKG}publicSnapshotGraph`)
+        ))
+        .map((row) => row.subject === selected.operationSubject
+          && row.predicate === `${DKG}publishedAt`
+          ? { ...row, object: '"1970-01-01T00:00:01.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }
+          : row);
+      const servedMeta = [
+        ...olderPersisted,
+        ...newerDigestFallback.filter((row) => row.subject === selected.operationSubject),
+        ...newerDigestFallback.filter((row) => (
+          row.subject === selected.headSubject && row.predicate === `${DKG}shareOperationId`
+        )),
+      ];
+      const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      });
+      expect(descriptor).toMatchObject({
+        shareOperationId: selected.operationId,
+        snapshotSource: {
+          shareOperationId: v1.operationId,
+          locator: { kind: 'store', ref: persistedRef, provenance: 'persisted-ref' },
+        },
+      });
+      expect(collectPublicSnapshotMetadata(
+        canonicalGraphScopedSnapshotManifestQuads(servedMeta, [descriptor!]),
+      ).map((snapshot) => snapshot.ref)).toEqual([persistedRef]);
+
+      const requestedRefs: string[] = [];
+      const store = new OxigraphStore();
+      const h = realHarness(store, selected, servedMeta, {
+        preloadSnapshot: false,
+        onSnapshotRequest: (ref) => requestedRefs.push(ref),
+      });
+      const summary = await h.run();
+      expect(summary).toMatchObject({
+        failedPhases: 0,
+        swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 1 },
+      });
+      expect(requestedRefs).toEqual([persistedRef]);
+      expect(await store.countQuads(v1.assertionGraph)).toBe(v1.payload.length);
+      await expect(resolveKnowledgeAssetWorkspaceHead({
+        store,
+        graphManager: new GraphManager(store),
+        contextGraphId: CG,
+        kaUal: UAL,
+      })).resolves.toMatchObject({ shareOperationId: selected.operationId });
     });
 
     it('still fails closed when two head operations disagree on content', () => {

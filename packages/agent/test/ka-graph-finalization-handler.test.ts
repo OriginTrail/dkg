@@ -638,6 +638,42 @@ describe('graph-scoped finalization handler', () => {
     expect(metadata).toMatchObject({ type: 'boolean', value: true });
   });
 
+  it.each([
+    {
+      label: 'accepts an authenticated publisher envelope',
+      sourcePeerId: '12D3KooWPublisher',
+      expectedPolicy: 'allowList',
+      expectsReader: true,
+    },
+    {
+      label: 'ignores the same envelope from a relay',
+      sourcePeerId: '12D3KooWUntrustedRelay',
+      expectedPolicy: 'ownerOnly',
+      expectsReader: false,
+    },
+  ])('$label when private legacy workspace metadata omitted accessPolicy', async ({
+    sourcePeerId,
+    expectedPolicy,
+    expectsReader,
+  }) => {
+    const { message } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ...message,
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWReader'],
+    }), CG, sourcePeerId);
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + `<http://dkg.io/ontology/accessPolicy> "${expectedPolicy}" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + '<http://dkg.io/ontology/allowedPeer> "12D3KooWReader" } }',
+    )).resolves.toMatchObject({ type: 'boolean', value: expectsReader });
+  });
+
   it('ignores an access envelope supplied by a relay that is not the durable owner', async () => {
     const { message } = await stageGraph({ accessPolicy: 'ownerOnly' });
 

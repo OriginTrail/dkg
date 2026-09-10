@@ -112,8 +112,7 @@ function recoveryMaterializer() {
       onChainContextGraphId: '42',
       localTopicOnChainContextGraphId: '42',
       publisherPeerId: '12D3KooWPublisher',
-      accessPolicy: 'public' as const,
-      allowedPeers: [],
+      access: { accessPolicy: 'public' as const, allowedPeers: [] },
     }),
     apply: async () => 'applied' as const,
     recoverVerifiedEvidence: async () => undefined,
@@ -239,14 +238,16 @@ describe('graph-scoped finalization recovery admission', () => {
               onChainContextGraphId: '42',
               localTopicOnChainContextGraphId: '42',
               publisherPeerId: '12D3KooWPublisher',
-              accessPolicy: 'allowList' as const,
-              allowedPeers: ['12D3KooWReader'],
+              access: {
+                accessPolicy: 'allowList' as const,
+                allowedPeers: ['12D3KooWReader'],
+              },
             };
           },
           apply: async ({ prepared }) => {
             appliedAccess = {
-              policy: prepared.accessPolicy,
-              peers: prepared.allowedPeers,
+              policy: prepared.access.accessPolicy,
+              peers: [...prepared.access.allowedPeers],
             };
             return 'applied' as const;
           },
@@ -584,8 +585,10 @@ describe('graph-scoped finalization recovery admission', () => {
             onChainContextGraphId: '42',
             localTopicOnChainContextGraphId: '42',
             publisherPeerId: '12D3KooWPublisher',
-            accessPolicy: 'allowList' as const,
-            allowedPeers: ['12D3KooWReader'],
+            access: {
+              accessPolicy: 'allowList' as const,
+              allowedPeers: ['12D3KooWReader'],
+            },
           }),
           apply: async () => {
             upgradeApplyCalls += 1;

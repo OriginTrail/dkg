@@ -771,6 +771,64 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
       .resolves.toEqual({ action: 'execute' });
   });
 
+  it('rejects a standalone legacy-default head at admission and queued preflight', async () => {
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const graphManager = new GraphManager(store);
+    const shareOperationId = 'legacy-default-only';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId,
+      kaUal: KA_UAL,
+      assertionVersion: 1,
+      quads: [PUBLIC_QUAD],
+      privateTripleCount: 0,
+      publisherPeerId: 'publisher-peer',
+      agentAddress: MEMBER,
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId,
+      kaUal: KA_UAL,
+      assertionVersion: 1,
+    });
+    const sealRoot = `0x${Buffer.from(MERKLE).toString('hex')}`;
+    const agent = stubAgent(store, CURATOR);
+    agent.publisher = { hasSwmShareComplete: async () => true };
+    agent.getCustodialAgentPrivateKey = () => undefined;
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async () => ({
+          events: [],
+          currentShareOperationId: shareOperationId,
+          wmCurrentAssertion: sealRoot,
+          swmCurrentAssertion: sealRoot,
+        }),
+      },
+      configurable: true,
+    });
+
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
+      .rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+
+    const operationSubject = `urn:dkg:share:${CG}:${shareOperationId}`;
+    const accessPolicyRow = {
+      subject: operationSubject,
+      predicate: 'http://dkg.io/ontology/accessPolicy',
+      object: '"public"',
+      graph: graphManager.sharedMemoryMetaUri(CG),
+    };
+    await store.insert([accessPolicyRow]);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME);
+    await store.deleteByPattern(accessPolicyRow);
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
+      .rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+  });
+
   it('resolves the member author from _meta when the caller (curator) is not the author', async () => {
     const store = new OxigraphStore();
     await store.insert(sealFor(MEMBER));

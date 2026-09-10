@@ -66,6 +66,8 @@ export interface WorkspaceOperationModel<TSemantics> {
   readonly provenance: WorkspaceOperationProvenance;
 }
 
+export type EquivalentWorkspaceOperationClass<T> = readonly [T, ...T[]];
+
 /**
  * Publisher-local equality for decoded workspace operations. RDF lexical
  * normalization belongs to the recovery policy that compares wire and stored
@@ -87,7 +89,7 @@ export function selectEquivalentWorkspaceOperation<
   options: Readonly<{
     ambiguityError?: () => Error;
   }> = {},
-): Readonly<{ selected: T; shareOperationIds: readonly string[] }> {
+): EquivalentWorkspaceOperationClass<T> {
   if (candidates.length === 0) throw new Error('Workspace operation candidates are empty');
   const keys = new Set(candidates.map((candidate) => equivalenceKey(candidate.semantics)));
   if (keys.size !== 1) {
@@ -98,12 +100,7 @@ export function selectEquivalentWorkspaceOperation<
       - (left.provenance.publishedAtMs ?? Number.NEGATIVE_INFINITY)
     || right.provenance.shareOperationId.localeCompare(left.provenance.shareOperationId)
   ));
-  return Object.freeze({
-    selected: ordered[0]!,
-    shareOperationIds: Object.freeze(
-      [...new Set(candidates.map(({ provenance }) => provenance.shareOperationId))].sort(),
-    ),
-  });
+  return Object.freeze([ordered[0]!, ...ordered.slice(1)]);
 }
 
 /** Exact-intent consumers accept any alias in the resolver-validated class. */

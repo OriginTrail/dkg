@@ -123,6 +123,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
         || head.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
         || head.publisherPeerId !== input.publisherPeerId?.trim()
         || input.accessPolicy === undefined
+        || head.access.kind !== 'persisted'
         || head.access.accessPolicy !== input.accessPolicy
         || normalizePeers(head.access.allowedPeers) !== normalizePeers(input.allowedPeers)
       ) {

@@ -180,10 +180,8 @@ describe('workspace operation semantic model', () => {
     expect(selectEquivalentWorkspaceOperation([
       { semantics, provenance: { shareOperationId: 'originator', publishedAtMs: 1 } },
       { semantics, provenance: { shareOperationId: 'storage-ack', publishedAtMs: 2 } },
-    ], publisherWorkspaceOperationSemanticsKey)).toMatchObject({
-      selected: { provenance: { shareOperationId: 'storage-ack' } },
-      shareOperationIds: ['originator', 'storage-ack'],
-    });
+    ], publisherWorkspaceOperationSemanticsKey).map(({ provenance }) => provenance.shareOperationId))
+      .toEqual(['storage-ack', 'originator']);
   });
 
 });
@@ -343,6 +341,30 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     expect(snapshot.quads).toEqual(expect.arrayContaining(CONTENT));
   });
 
+  it('falls back after the preferred alias snapshot is missing from its usable locator', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    await seedOperation(h, REMOTE_OP);
+    await unionInsertSecondHeadId(h);
+    const head = await resolveHead(h);
+    if (!head) throw new Error('expected resolved workspace head');
+    expect(head.operationAliases[0]?.shareOperationId).toBe(REMOTE_OP);
+    const preferred = head.operationAliases[0]!.snapshotLocator;
+    expect(preferred.kind).toBe('graph');
+    if (preferred.kind !== 'graph') throw new Error('expected graph locator');
+    await h.store.dropGraph(preferred.graph);
+
+    await expect(resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+      store: h.store,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      head,
+    })).resolves.toMatchObject({
+      publicQuadsDigest: head.publicQuadsDigest,
+      quads: expect.arrayContaining(CONTENT),
+    });
+  });
+
   it('fails closed when an operation carries both graph and store snapshot locators', async () => {
     const h = makeHarness();
     await seedHealthyHead(h);
@@ -381,10 +403,9 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     const head = await resolveHead(h);
     if (!head) throw new Error('expected resolved workspace head');
     for (const alias of head.operationAliases) {
-      await h.store.deleteByPattern({
-        graph: h.metaGraph,
-        subject: `urn:dkg:share:${CONTEXT_GRAPH}:${alias.shareOperationId}`,
-      });
+      if (alias.snapshotLocator.kind === 'graph') {
+        await h.store.dropGraph(alias.snapshotLocator.graph);
+      }
     }
     await expect(resolveKnowledgeAssetWorkspaceHeadPublicQuads({
       store: h.store,

@@ -10,6 +10,11 @@ import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scala
 
 export type GraphScopedAccessPolicy = 'public' | 'ownerOnly' | 'allowList';
 
+export interface GraphScopedAccessEnvelope {
+  readonly accessPolicy: GraphScopedAccessPolicy;
+  readonly allowedPeers: readonly string[];
+}
+
 export interface ParsedGraphScopedFinalization {
   msg: FinalizationMessageMsg;
   scope: ReturnType<typeof createGraphKnowledgeAssetScope>;

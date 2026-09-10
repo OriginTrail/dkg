@@ -4592,6 +4592,7 @@ export class PublishMethods extends DKGAgentBase {
       !head
       || !workspaceHeadIncludesShareOperationId(head, shareOperationId)
       || head.assertionVersion !== seal.assertionVersion
+      || head.access.kind !== 'persisted'
     ) {
       throw Object.assign(
         new Error(
@@ -4849,6 +4850,7 @@ export class PublishMethods extends DKGAgentBase {
       !liveHead
       || !workspaceHeadIncludesShareOperationId(liveHead, request.shareOperationId)
       || liveHead.assertionVersion !== request.assertionVersion
+      || liveHead.access.kind !== 'persisted'
       || liveHead.access.accessPolicy !== request.accessPolicy
       || JSON.stringify(liveAllowedPeers) !== JSON.stringify(queuedAllowedPeers)
     ) {

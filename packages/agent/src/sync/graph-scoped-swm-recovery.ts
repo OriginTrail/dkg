@@ -112,6 +112,7 @@ export interface GraphScopedSwmRecoveryDescriptor {
   /** Equivalent operation and immutable locator selected for materialization. */
   readonly snapshotSource: Readonly<{
     shareOperationId: string;
+    operationSubject: string;
     locator: RecoverySnapshotLocator;
   }>;
   readonly publicQuadsDigest: string;
@@ -236,6 +237,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       shareOperationId,
       snapshotSource: {
         shareOperationId: snapshotSource.shareOperationId,
+        operationSubject: snapshotSource.operationSubject,
         locator: snapshotSource.locator,
       },
       publicQuadsDigest,
@@ -271,6 +273,31 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     assertionOwners.set(descriptor.assertionGraph, descriptor.kaUal);
   }
   return descriptors;
+}
+
+/**
+ * Keep one store-backed snapshot request per validated graph-scoped alias
+ * class. Operation metadata remains intact for head recovery, while the
+ * snapshot walk follows the locator selected by the equivalence resolver.
+ */
+export function canonicalGraphScopedSnapshotManifestQuads(
+  metaQuads: readonly Quad[],
+  descriptors: readonly GraphScopedSwmRecoveryDescriptor[],
+): Quad[] {
+  const equivalentOperationSubjects = new Set<string>();
+  const selectedSnapshotSubjects = new Set<string>();
+  for (const descriptor of descriptors) {
+    selectedSnapshotSubjects.add(descriptor.snapshotSource.operationSubject);
+    for (const row of descriptor.metadataQuads) {
+      if (row.predicate === PUBLIC_QUADS_DIGEST && row.subject !== descriptor.headSubject) {
+        equivalentOperationSubjects.add(row.subject);
+      }
+    }
+  }
+  return metaQuads.filter((row) => (
+    !equivalentOperationSubjects.has(row.subject)
+    || selectedSnapshotSubjects.has(row.subject)
+  ));
 }
 
 /**
@@ -605,23 +632,20 @@ function resolveEquivalentHeadOperation(params: {
     };
   });
 
-  const { selected } = selectEquivalentWorkspaceOperation(
+  const orderedCandidates = selectEquivalentWorkspaceOperation(
     candidates,
     samePayloadOperationEquivalenceKey,
     { ambiguityError: () => new Error('ambiguous shareOperationId') },
   );
+  const selected = orderedCandidates[0];
   // Logical display ordering and snapshot capability are intentionally
   // independent. Prefer a self-contained graph locator from any equivalent
   // alias; otherwise prefer the selected alias, then an explicitly persisted
   // store ref, before using the modern digest fallback convention.
-  const graphSource = candidates
-    .filter((candidate) => candidate.snapshotLocator.kind === 'graph')
-    .sort((left, right) => (
-      (right.provenance.publishedAtMs ?? Number.NEGATIVE_INFINITY)
-        - (left.provenance.publishedAtMs ?? Number.NEGATIVE_INFINITY)
-      || right.shareOperationId.localeCompare(left.shareOperationId)
-    ))[0];
-  const persistedRefSource = candidates.find(
+  const graphSource = orderedCandidates.find(
+    (candidate) => candidate.snapshotLocator.kind === 'graph',
+  );
+  const persistedRefSource = orderedCandidates.find(
     (candidate) => candidate.snapshotLocator.kind === 'store'
       && candidate.snapshotLocator.provenance === 'persisted-ref',
   );
@@ -662,6 +686,13 @@ export async function materializeGraphScopedSwmRecoveryAsset(params: {
       throw new Error(`Graph-scoped SWM recovery requires a public snapshot store for ${descriptor.kaUal}`);
     }
     raw = await params.publicSnapshotStore.getSnapshot(locator.ref);
+    // Legacy explicit refs can differ from the content digest. A network
+    // recovery stores verified bytes under the canonical digest, so retain
+    // read compatibility with the advertised ref while accepting that local
+    // canonical copy on subsequent materialization attempts.
+    if (!raw && locator.ref !== descriptor.publicQuadsDigest) {
+      raw = await params.publicSnapshotStore.getSnapshot(descriptor.publicQuadsDigest);
+    }
   }
   if (!raw) {
     throw new Error(`Graph-scoped SWM snapshot is missing for ${descriptor.kaUal}`);

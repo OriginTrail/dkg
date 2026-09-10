@@ -22,6 +22,7 @@ import {
 } from './shared-memory-sync.js';
 import { appendInPlace } from '../append-in-place.js';
 import {
+  canonicalGraphScopedSnapshotManifestQuads,
   discoverSwmRecoverySubGraphNames,
   materializeGraphScopedSwmRecoveryAsset,
   parseGraphScopedSwmRecoveryDescriptors,
@@ -459,9 +460,10 @@ async function recoverContextGraphSwmUnlocked(
   // progress across retries while memory remains bounded to one KA rather than
   // the complete context graph.
   if (graphScopedDescriptors.length > 0) {
-    const activeGraphMeta = graphScopedDescriptors.flatMap((descriptor) => [
-      ...descriptor.metadataQuads,
-    ]);
+    const activeGraphMeta = canonicalGraphScopedSnapshotManifestQuads(
+      graphScopedDescriptors.flatMap((descriptor) => [...descriptor.metadataQuads]),
+      graphScopedDescriptors,
+    );
     boundary.assertCurrent();
     const snapshotSync = await syncPublicSnapshotsForMeta({
       ctx: deps.ctx,
