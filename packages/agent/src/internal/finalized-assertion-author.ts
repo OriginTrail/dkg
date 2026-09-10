@@ -10,8 +10,6 @@ import {
   parseGraphScopedAssertionSealCandidate,
   validateAssertionName,
 } from '@origintrail-official/dkg-core';
-import type { ResidentAssertionAuthorSelection } from './resident-assertion-author-selection.js';
-
 type SealQuad = { subject: string; predicate: string; object: string };
 
 /**
@@ -53,7 +51,94 @@ export interface FinalizedAssertionAuthorLookupParams {
    * authorship (an address that is not resident fails closed) and it never
    * changes the caller identity used for CG registration / curator stamping.
    */
-  selectedAuthor?: ResidentAssertionAuthorSelection;
+  selectedAuthorAgentAddress?: string;
+}
+
+export type ResidentAuthorBoundarySelection =
+  | { readonly kind: 'address'; readonly agentAddress: string }
+  | { readonly kind: 'invalid'; readonly displayValue: string };
+
+/** Parse untyped public input without admitting invalid values to the domain model. */
+export function readResidentAuthorBoundarySelection(
+  value: unknown,
+): ResidentAuthorBoundarySelection | undefined {
+  if (value === undefined) return undefined;
+  return typeof value === 'string'
+    ? Object.freeze({ kind: 'address', agentAddress: value })
+    : Object.freeze({ kind: 'invalid', displayValue: String(value) });
+}
+
+type AssertionAuthorCoordinate = Pick<
+  FinalizedAssertionAuthorLookupParams,
+  'contextGraphId' | 'name' | 'subGraphName'
+>;
+
+async function findResidentFinalizedAssertionAuthors(
+  store: AssertionAuthorQueryStore,
+  { contextGraphId, name, subGraphName }: AssertionAuthorCoordinate,
+): Promise<string[] | undefined> {
+  if (!validateAssertionName(name).valid) return undefined;
+  const metaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
+  // Bound the query by the canonical assertion-coordinate grammar (the core
+  // helper owns the URI layout; `name` cannot contain `/`, so the suffix cannot
+  // cross a segment, and the prefix carries a slash-containing cg id verbatim).
+  const { scope: expectedScope, prefix, suffix } = contextGraphAssertionQueryBounds(
+    contextGraphId, name, subGraphName,
+  );
+  // Phase 1 — find the candidate seal subject(s) at this name coordinate. This
+  // is a bound-predicate lookup fenced by the exact coordinate prefix/suffix.
+  const subjectsResult = await store.query(
+    `SELECT DISTINCT ?s WHERE {
+      GRAPH <${metaGraph}> {
+        ?s <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root .
+        FILTER(STRSTARTS(STR(?s), "${escapeSparqlLiteral(prefix)}"))
+        FILTER(STRENDS(STR(?s), "${escapeSparqlLiteral(suffix)}"))
+      }
+    }`,
+  );
+  const subjects = subjectsResult.type === 'bindings'
+    ? (subjectsResult.bindings ?? []).map((b) => b.s)
+      .filter((subject): subject is string => typeof subject === 'string' && subject.length > 0)
+    : [];
+
+  // Phase 2 — admit only complete, self-consistent graph-scoped seals.
+  const candidates: string[] = [];
+  for (const subject of subjects) {
+    let safeSubject: string;
+    try {
+      safeSubject = assertSafeIri(subject);
+    } catch {
+      continue;
+    }
+    const rowsResult = await store.query(
+      `CONSTRUCT { <${safeSubject}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${safeSubject}> ?p ?o } }`,
+    );
+    const rows = rowsResult.type === 'quads' ? (rowsResult.quads ?? []) : [];
+    const candidate = parseGraphScopedAssertionSealCandidate(rows, subject);
+    if (!candidate
+      || candidate.coordinate.scope !== expectedScope
+      || candidate.coordinate.name !== name) continue;
+    candidates.push(candidate.coordinate.agentAddress);
+  }
+  return candidates;
+}
+
+function authorNotResidentError(
+  contextGraphId: string,
+  name: string,
+  displayValue: string,
+  candidates: readonly string[],
+): Error {
+  return Object.assign(
+    new Error(
+      `Cannot publish "${name}" in context graph "${contextGraphId}": selected author ` +
+        `${displayValue} has no finalized knowledge asset with this name.`,
+    ),
+    {
+      code: ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
+      candidates: distinctAuthors(candidates),
+    },
+  );
 }
 
 /**
@@ -81,58 +166,19 @@ export interface FinalizedAssertionAuthorLookupParams {
  */
 export async function resolveResidentFinalizedAssertionAuthor(
   store: AssertionAuthorQueryStore,
-  { contextGraphId, name, subGraphName, callerAgentAddress, selectedAuthor }: FinalizedAssertionAuthorLookupParams,
+  {
+    contextGraphId,
+    name,
+    subGraphName,
+    callerAgentAddress,
+    selectedAuthorAgentAddress,
+  }: FinalizedAssertionAuthorLookupParams,
 ): Promise<string | undefined> {
-  if (!validateAssertionName(name).valid) return undefined;
-  const metaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
-  // Bound the query by the canonical assertion-coordinate grammar (the core
-  // helper owns the URI layout; `name` cannot contain `/`, so the suffix cannot
-  // cross a segment, and the prefix carries a slash-containing cg id verbatim).
-  const { scope: expectedScope, prefix, suffix } = contextGraphAssertionQueryBounds(
-    contextGraphId, name, subGraphName,
+  const candidates = await findResidentFinalizedAssertionAuthors(
+    store,
+    { contextGraphId, name, subGraphName },
   );
-  // Phase 1 — find the candidate seal subject(s) at this name coordinate. This
-  // is a bound-predicate lookup fenced by the exact coordinate prefix/suffix
-  // (NOT an all-variable `?s ?p ?o` scan of the growing `_meta` graph), and the
-  // result is the ~1 subject finalized under this name.
-  const subjectsResult = await store.query(
-    `SELECT DISTINCT ?s WHERE {
-      GRAPH <${metaGraph}> {
-        ?s <${ASSERTION_SEAL_PREDICATES.ASSERTION_MERKLE_ROOT}> ?root .
-        FILTER(STRSTARTS(STR(?s), "${escapeSparqlLiteral(prefix)}"))
-        FILTER(STRENDS(STR(?s), "${escapeSparqlLiteral(suffix)}"))
-      }
-    }`,
-  );
-  const subjects = subjectsResult.type === 'bindings'
-    ? (subjectsResult.bindings ?? []).map((b) => b.s).filter((s): s is string => typeof s === 'string' && s.length > 0)
-    : [];
-
-  // Phase 2 — read each candidate's rows by EXACT subject (a bounded per-subject
-  // read, not a graph scan) and admit only a complete, self-consistent
-  // graph-scoped seal — the SAME canonical definition durable-sync uses
-  // (`parseGraphScopedAssertionSealCandidate`). `assertionMerkleRoot` alone is
-  // NOT proof of a publishable assertion: a partial/corrupt subject, or a
-  // complete seal whose `authorAddress`/`kaUal` disagree with its
-  // `/assertion/<addr>/…` coordinate, is treated as not-finalized (GH#1778 review).
-  const candidates: string[] = [];
-  for (const subject of subjects) {
-    let safeSubject: string;
-    try {
-      safeSubject = assertSafeIri(subject);
-    } catch {
-      continue; // unsafe/corrupt subject IRI — cannot be a valid candidate
-    }
-    const rowsResult = await store.query(
-      `CONSTRUCT { <${safeSubject}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${safeSubject}> ?p ?o } }`,
-    );
-    const rows = rowsResult.type === 'quads' ? (rowsResult.quads ?? []) : [];
-    const candidate = parseGraphScopedAssertionSealCandidate(rows, subject);
-    if (!candidate
-      || candidate.coordinate.scope !== expectedScope
-      || candidate.coordinate.name !== name) continue;
-    candidates.push(candidate.coordinate.agentAddress);
-  }
+  if (candidates === undefined) return undefined;
   // 0. GH#1786 — an explicit resident-candidate selection is authoritative. It is
   // evaluated BEFORE both the zero-candidate return and the caller-preference rule
   // below, for two reasons: it is what lets a curator who ALSO owns a same-named KA
@@ -145,23 +191,13 @@ export async function resolveResidentFinalizedAssertionAuthor(
   // silent-drop this option exists to prevent. Only `undefined` is absent, matching the
   // HTTP boundary, which 400s every other malformed value. Anything present that names no
   // resident candidate fails closed below.
-  if (selectedAuthor !== undefined) {
-    const selected = selectedAuthor.kind === 'address'
-      ? candidates.find((a) => knowledgeAssetAgentAddressesEqual(a, selectedAuthor.agentAddress))
-      : undefined;
-    const displayValue = selectedAuthor.kind === 'address'
-      ? selectedAuthor.agentAddress : selectedAuthor.displayValue;
+  if (selectedAuthorAgentAddress !== undefined) {
+    const selected = candidates.find((a) => knowledgeAssetAgentAddressesEqual(
+      a,
+      selectedAuthorAgentAddress,
+    ));
     if (selected) return selected;
-    throw Object.assign(
-      new Error(
-        `Cannot publish "${name}" in context graph "${contextGraphId}": selected author ` +
-          `${displayValue} has no finalized knowledge asset with this name.`,
-      ),
-      {
-        code: ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
-        candidates: distinctAuthors(candidates),
-      },
-    );
+    throw authorNotResidentError(contextGraphId, name, selectedAuthorAgentAddress, candidates);
   }
   if (candidates.length === 0) return undefined;
   // 1. Prefer the caller's own KA (preserves today's self-publish exactly).
@@ -179,4 +215,19 @@ export async function resolveResidentFinalizedAssertionAuthor(
     ),
     { code: AMBIGUOUS_ASSERTION_AUTHOR_CODE, candidates: distinct },
   );
+}
+
+/**
+ * Compatibility boundary for malformed legacy/untyped selectors. Candidate
+ * discovery deliberately remains identical to a valid resident selection, but
+ * the invalid value never becomes part of the canonical lookup parameters.
+ */
+export async function rejectInvalidResidentFinalizedAssertionAuthor(
+  store: AssertionAuthorQueryStore,
+  params: Omit<FinalizedAssertionAuthorLookupParams, 'selectedAuthorAgentAddress'>,
+  displayValue: string,
+): Promise<string | undefined> {
+  const candidates = await findResidentFinalizedAssertionAuthors(store, params);
+  if (candidates === undefined) return undefined;
+  throw authorNotResidentError(params.contextGraphId, params.name, displayValue, candidates);
 }

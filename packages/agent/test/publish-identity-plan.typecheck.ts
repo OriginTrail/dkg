@@ -1,5 +1,5 @@
 import type { ResolveFinalizedAssertionAuthorParams } from '../src/finalized-assertion-author.js';
-import { readPublishIdentityPlan } from '../src/internal/publish-identity-plan.js';
+import { readPublishIdentityBoundary } from '../src/internal/publish-identity-plan.js';
 import {
   resolveFinalizedAssertionAuthor,
   type AssertionAuthorQueryStore,
@@ -25,12 +25,16 @@ const malformed: ResolveFinalizedAssertionAuthorParams = {
   // @ts-expect-error Untyped resident selectors must be normalized at the API boundary.
   selectedAuthor: unknownSelector,
 };
-const plan = readPublishIdentityPlan(undefined, 'caller');
+const boundary = readPublishIdentityBoundary(undefined, 'caller');
+if (boundary.kind !== 'valid') throw new Error('expected valid plan');
+const plan = boundary.plan;
 // @ts-expect-error The enqueue decision is immutable after normalization.
 plan.enqueueCaller = 'other';
 if (plan.author.mode === 'residentAuthor') {
-  const requiredSelector: 'address' | 'malformed' = plan.author.residentSelection.kind;
-  void requiredSelector;
+  const requiredAddress: string = plan.author.agentAddress;
+  void requiredAddress;
+  // @ts-expect-error Invalid boundary values cannot inhabit the normalized plan.
+  void plan.author.displayValue;
   // @ts-expect-error Resident selection has no caller-hint policy or fallback.
   void plan.author.callerHint;
 } else if (plan.author.mode === 'callerHint') {
@@ -44,9 +48,9 @@ void malformed;
 // @ts-expect-error The normalized model is not re-exported by the released deep resolver.
 export type { ResidentAssertionAuthorSelection } from '@origintrail-official/dkg-agent/dist/finalized-assertion-author.js';
 // @ts-expect-error Public selection contracts do not expose internal plan construction.
-export { readPublishIdentityPlan as publicPlanReader } from '@origintrail-official/dkg-agent/dist/publish-author-selection.js';
-// @ts-expect-error Public selection contracts do not expose the malformed-selector parser.
-export { readResidentAuthorSelection as publicResidentReader } from '@origintrail-official/dkg-agent/dist/publish-author-selection.js';
+export { readPublishIdentityBoundary as publicPlanReader } from '@origintrail-official/dkg-agent/dist/publish-author-selection.js';
+// @ts-expect-error Public selection contracts do not expose the boundary parser.
+export { readResidentAuthorBoundarySelection as publicResidentReader } from '@origintrail-official/dkg-agent/dist/publish-author-selection.js';
 // @ts-expect-error The normalized plan model is internal.
 export type { PublishIdentityPlan } from '@origintrail-official/dkg-agent/dist/publish-author-selection.js';
 // @ts-expect-error Internal normalized resolution is blocked by package exports.

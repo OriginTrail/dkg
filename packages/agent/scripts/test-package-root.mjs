@@ -94,7 +94,6 @@ for (const [subpath, target] of Object.entries(packageExports)) {
 }
 for (const path of [
   'context-graph-authority/context-graph-agent-gate-authority.js',
-  'resident-assertion-author-selection.js',
   'publish-identity-plan.js',
   'finalized-assertion-author.js',
 ]) {

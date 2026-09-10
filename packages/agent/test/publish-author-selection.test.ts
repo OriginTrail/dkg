@@ -3,7 +3,7 @@ import { contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import type { PublishAuthorSelectionOptions } from '../src/publish-author-selection.js';
-import { readPublishIdentityPlan } from '../src/internal/publish-identity-plan.js';
+import { readPublishIdentityBoundary } from '../src/internal/publish-identity-plan.js';
 import { CG, MEMBER, CURATOR, OTHER, NAME, KA_UAL, RESERVED_KA_ID, PUBLIC_QUAD, MERKLE, sealFor, stubAgent } from './_helpers/finalized-author.js';
 
 it.each([
@@ -28,18 +28,15 @@ it.each([
   expect(query).not.toHaveBeenCalled();
 });
 
-it.each([null, 42, {}])('represents a malformed resident selector explicitly in the immutable plan: %j', selectedAuthorAgentAddress => {
-  const plan = readPublishIdentityPlan({ authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress } } as never, CURATOR);
-  expect(plan.author.mode).toBe('residentAuthor');
-  if (plan.author.mode === 'residentAuthor') {
-    const selection = plan.author.residentSelection;
-    expect(selection).toEqual({ kind: 'malformed', displayValue: String(selectedAuthorAgentAddress) });
-    if (selection.kind === 'malformed') expectTypeOf(selection.displayValue).toEqualTypeOf<string>();
-    expect(plan.author).not.toHaveProperty('callerHint');
-    expect(Object.isFrozen(selection)).toBe(true);
-  }
-  expect(Object.isFrozen(plan.author)).toBe(true);
-  expect(Object.isFrozen(plan)).toBe(true);
+it.each([null, 42, {}])('keeps a malformed resident selector outside the immutable plan: %j', selectedAuthorAgentAddress => {
+  const boundary = readPublishIdentityBoundary({ authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress } } as never, CURATOR);
+  expect(boundary).toEqual({
+    kind: 'invalidResidentAuthor',
+    displayValue: String(selectedAuthorAgentAddress),
+    enqueueCaller: undefined,
+  });
+  expectTypeOf(boundary).not.toMatchTypeOf<{ plan: unknown }>();
+  expect(Object.isFrozen(boundary)).toBe(true);
 });
 
 it.each<{ options: PublishAuthorSelectionOptions; enqueueCaller?: string }>([
@@ -47,8 +44,9 @@ it.each<{ options: PublishAuthorSelectionOptions; enqueueCaller?: string }>([
   { options: { agentAddress: MEMBER }, enqueueCaller: MEMBER },
   { options: { authorSelection: { mode: 'author', agentAddress: MEMBER } }, enqueueCaller: MEMBER },
 ])('captures the complete caller decision beside an authoritative author: $options', ({ options, enqueueCaller }) => {
-  expect(readPublishIdentityPlan(options, CURATOR)).toEqual({
-    author: { mode: 'author', agentAddress: MEMBER }, enqueueCaller,
+  expect(readPublishIdentityBoundary(options, CURATOR)).toEqual({
+    kind: 'valid',
+    plan: { author: { mode: 'author', agentAddress: MEMBER }, enqueueCaller },
   });
 });
 

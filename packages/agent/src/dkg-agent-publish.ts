@@ -108,8 +108,11 @@ import {
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import type { PublishAuthorSelectionOptions } from './publish-author-selection.js';
-import { readPublishIdentityPlan, type PublishIdentityPlan } from './internal/publish-identity-plan.js';
-import { readResidentAuthorSelection } from './internal/resident-assertion-author-selection.js';
+import {
+  readPublishIdentityBoundary,
+  type PublishIdentityBoundary,
+  type PublishIdentityPlan,
+} from './internal/publish-identity-plan.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -187,7 +190,11 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
-import { resolveResidentFinalizedAssertionAuthor } from './internal/finalized-assertion-author.js';
+import {
+  readResidentAuthorBoundarySelection,
+  rejectInvalidResidentFinalizedAssertionAuthor,
+  resolveResidentFinalizedAssertionAuthor,
+} from './internal/finalized-assertion-author.js';
 
 /**
  * Public options for {@link DKGAgentPublishMixin.resolveAssertionAuthor}. Declared
@@ -878,7 +885,7 @@ async function resolvePublishAuthorSelection(
       })) ?? selection.callerHint;
     case 'residentAuthor': {
       const author = await resolveResidentFinalizedAssertionAuthor(agent.store, {
-        contextGraphId, name, subGraphName, selectedAuthor: selection.residentSelection,
+        contextGraphId, name, subGraphName, selectedAuthorAgentAddress: selection.agentAddress,
       });
       // An invalid assertion name has no resident coordinate. Do not substitute
       // a caller identity when this policy requires the selected resident author.
@@ -890,6 +897,38 @@ async function resolvePublishAuthorSelection(
       return author;
     }
   }
+}
+
+async function resolvePublishIdentityBoundary(
+  agent: DKGAgent,
+  contextGraphId: string,
+  name: string,
+  identity: PublishIdentityBoundary,
+  subGraphName?: string,
+): Promise<{ readonly agentAddress: string; readonly enqueueCaller: string | undefined }> {
+  if (identity.kind === 'invalidResidentAuthor') {
+    const author = await rejectInvalidResidentFinalizedAssertionAuthor(
+      agent.store,
+      { contextGraphId, name, subGraphName },
+      identity.displayValue,
+    );
+    if (author === undefined) {
+      throw new Error(
+        `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
+      );
+    }
+    return { agentAddress: author, enqueueCaller: identity.enqueueCaller };
+  }
+  return {
+    agentAddress: await resolvePublishAuthorSelection(
+      agent,
+      contextGraphId,
+      name,
+      identity.plan.author,
+      subGraphName,
+    ),
+    enqueueCaller: identity.plan.enqueueCaller,
+  };
 }
 
 // Only finalized-assertion / durable-queue replay paths may submit payloads
@@ -4392,6 +4431,19 @@ export class PublishMethods extends DKGAgentBase {
     // than the one the caller named, on the exported DKGAgent surface. The required
     // coordinate must always win, and a future option added to the params type must be
     // forwarded deliberately rather than by accident.
+    const selectedAuthor = readResidentAuthorBoundarySelection(opts.selectedAuthorAgentAddress);
+    if (selectedAuthor?.kind === 'invalid') {
+      return rejectInvalidResidentFinalizedAssertionAuthor(
+        this.store,
+        {
+          contextGraphId,
+          name,
+          subGraphName: opts.subGraphName,
+          callerAgentAddress: opts.callerAgentAddress,
+        },
+        selectedAuthor.displayValue,
+      );
+    }
     return resolveResidentFinalizedAssertionAuthor(this.store, {
       contextGraphId,
       name,
@@ -4399,7 +4451,7 @@ export class PublishMethods extends DKGAgentBase {
       callerAgentAddress: opts.callerAgentAddress,
       // Presence, not truthiness: '' / null are SUPPLIED selectors and must fail closed
       // downstream, not silently fall back to normal resolution.
-      selectedAuthor: readResidentAuthorSelection(opts.selectedAuthorAgentAddress),
+      selectedAuthorAgentAddress: selectedAuthor?.agentAddress,
     });
   }
 
@@ -4412,10 +4464,10 @@ export class PublishMethods extends DKGAgentBase {
     name: string,
     opts?: PublishAuthorSelectionOptions & { subGraphName?: string },
   ): Promise<string> {
-    const identity = readPublishIdentityPlan(opts, this.defaultAgentAddress ?? this.peerId);
-    return resolvePublishAuthorSelection(
-      this, contextGraphId, name, identity.author, opts?.subGraphName,
-    );
+    const identity = readPublishIdentityBoundary(opts, this.defaultAgentAddress ?? this.peerId);
+    return (await resolvePublishIdentityBoundary(
+      this, contextGraphId, name, identity, opts?.subGraphName,
+    )).agentAddress;
   }
 
   /**
@@ -4450,13 +4502,14 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
-    const identity = readPublishIdentityPlan(opts, this.defaultAgentAddress ?? this.peerId);
+    const identity = readPublishIdentityBoundary(opts, this.defaultAgentAddress ?? this.peerId);
+    const resolvedIdentity = await resolvePublishIdentityBoundary(
+      this, contextGraphId, name, identity, opts?.subGraphName,
+    );
     // Persist the enqueuing caller independently from the resolved member author.
     // The normalization boundary owns legacy empty-caller and tokenless behavior.
-    const callerAgentAddress = identity.enqueueCaller;
-    const agentAddress = await resolvePublishAuthorSelection(
-      this, contextGraphId, name, identity.author, opts?.subGraphName,
-    );
+    const callerAgentAddress = resolvedIdentity.enqueueCaller;
+    const agentAddress = resolvedIdentity.agentAddress;
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,

@@ -1,9 +1,8 @@
 import { PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE } from '@origintrail-official/dkg-core';
 import type { PublishAuthorSelectionOptions } from '../publish-author-selection.js';
 import {
-  readResidentAuthorSelection,
-  type ResidentAssertionAuthorSelection,
-} from './resident-assertion-author-selection.js';
+  readResidentAuthorBoundarySelection,
+} from './finalized-assertion-author.js';
 
 /** All identity decisions consumed by author lookup and durable enqueue. */
 export interface PublishIdentityPlan {
@@ -12,10 +11,18 @@ export interface PublishIdentityPlan {
     | { readonly mode: 'callerHint'; readonly callerHint: string }
     | {
         readonly mode: 'residentAuthor';
-        readonly residentSelection: ResidentAssertionAuthorSelection;
+        readonly agentAddress: string;
       };
   readonly enqueueCaller: string | undefined;
 }
+
+export type PublishIdentityBoundary =
+  | { readonly kind: 'valid'; readonly plan: PublishIdentityPlan }
+  | {
+      readonly kind: 'invalidResidentAuthor';
+      readonly displayValue: string;
+      readonly enqueueCaller: string | undefined;
+    };
 
 function conflict(message: string): never {
   throw Object.assign(new Error(message), { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE });
@@ -31,13 +38,31 @@ function identityPlan(
   });
 }
 
+function validIdentity(
+  author: PublishIdentityPlan['author'],
+  enqueueCaller: string | undefined,
+): PublishIdentityBoundary {
+  return Object.freeze({ kind: 'valid', plan: identityPlan(author, enqueueCaller) });
+}
+
+function invalidResidentIdentity(
+  displayValue: string,
+  enqueueCaller: string | undefined,
+): PublishIdentityBoundary {
+  return Object.freeze({
+    kind: 'invalidResidentAuthor',
+    displayValue,
+    enqueueCaller: enqueueCaller || undefined,
+  });
+}
+
 /** Adapt released flat-field quirks once, before any asynchronous author lookup. */
-function readLegacyPublishIdentityPlan(
+function readLegacyPublishIdentityBoundary(
   agentAddress: unknown,
   callerAgentAddress: unknown,
   selectedAuthorAgentAddress: unknown,
   defaultCallerHint: string,
-): PublishIdentityPlan {
+): PublishIdentityBoundary {
   if ((agentAddress !== undefined && typeof agentAddress !== 'string')
     || (callerAgentAddress !== undefined && typeof callerAgentAddress !== 'string')) {
     return conflict('Invalid or conflicting VM publish author selection fields');
@@ -49,22 +74,25 @@ function readLegacyPublishIdentityPlan(
     if (callerAgentAddress || selectedAuthorAgentAddress !== undefined) {
       return conflict('Invalid or conflicting VM publish author selection fields');
     }
-    return identityPlan({ mode: 'author', agentAddress }, enqueueCaller);
+    return validIdentity({ mode: 'author', agentAddress }, enqueueCaller);
   }
-  const residentSelection = readResidentAuthorSelection(selectedAuthorAgentAddress);
-  return identityPlan(
-    residentSelection === undefined
-      ? { mode: 'callerHint', callerHint: callerAgentAddress ?? defaultCallerHint }
-      : { mode: 'residentAuthor', residentSelection },
+  const residentSelection = readResidentAuthorBoundarySelection(selectedAuthorAgentAddress);
+  if (residentSelection?.kind === 'invalid') {
+    return invalidResidentIdentity(residentSelection.displayValue, enqueueCaller);
+  }
+  return validIdentity(
+    residentSelection
+      ? { mode: 'residentAuthor', agentAddress: residentSelection.agentAddress }
+      : { mode: 'callerHint', callerHint: callerAgentAddress ?? defaultCallerHint },
     enqueueCaller,
   );
 }
 
 /** Normalize either public syntax into one immutable, behavior-complete plan. */
-export function readPublishIdentityPlan(
+export function readPublishIdentityBoundary(
   options: PublishAuthorSelectionOptions | undefined,
   defaultCallerHint: string,
-): PublishIdentityPlan {
+): PublishIdentityBoundary {
   const rawOptions = options as Record<string, unknown> | undefined;
   const selection = rawOptions?.authorSelection;
   const agentAddress = rawOptions?.agentAddress;
@@ -77,7 +105,7 @@ export function readPublishIdentityPlan(
     return conflict('VM publish identity fields must use either authorSelection or the compatible flat form');
   }
   if (selection === undefined) {
-    return readLegacyPublishIdentityPlan(
+    return readLegacyPublishIdentityBoundary(
       agentAddress, callerAgentAddress, selectedAuthorAgentAddress, defaultCallerHint,
     );
   }
@@ -92,20 +120,20 @@ export function readPublishIdentityPlan(
     case 'author':
       if (typeof nestedAgentAddress !== 'string' || nestedAgentAddress.length === 0
         || nestedCallerAgentAddress !== undefined || nestedSelectedAuthorAgentAddress !== undefined) break;
-      return identityPlan({ mode: 'author', agentAddress: nestedAgentAddress }, nestedAgentAddress);
+      return validIdentity({ mode: 'author', agentAddress: nestedAgentAddress }, nestedAgentAddress);
     case 'callerHint':
       if (typeof nestedCallerAgentAddress !== 'string'
         || nestedAgentAddress !== undefined || nestedSelectedAuthorAgentAddress !== undefined) break;
-      return identityPlan({ mode: 'callerHint', callerHint: nestedCallerAgentAddress }, nestedCallerAgentAddress);
+      return validIdentity({ mode: 'callerHint', callerHint: nestedCallerAgentAddress }, nestedCallerAgentAddress);
     case 'residentAuthor':
       if (nestedAgentAddress !== undefined || nestedSelectedAuthorAgentAddress === undefined
         || (nestedCallerAgentAddress !== undefined && typeof nestedCallerAgentAddress !== 'string')) break;
-      return identityPlan(
-        {
-          mode: 'residentAuthor',
-          // Presence was checked above; malformed values remain explicit selectors.
-          residentSelection: readResidentAuthorSelection(nestedSelectedAuthorAgentAddress)!,
-        },
+      const residentSelection = readResidentAuthorBoundarySelection(nestedSelectedAuthorAgentAddress)!;
+      if (residentSelection.kind === 'invalid') {
+        return invalidResidentIdentity(residentSelection.displayValue, nestedCallerAgentAddress);
+      }
+      return validIdentity(
+        { mode: 'residentAuthor', agentAddress: residentSelection.agentAddress },
         nestedCallerAgentAddress,
       );
   }

@@ -1,8 +1,9 @@
 import {
+  readResidentAuthorBoundarySelection,
+  rejectInvalidResidentFinalizedAssertionAuthor,
   resolveResidentFinalizedAssertionAuthor,
   type AssertionAuthorQueryStore,
 } from './internal/finalized-assertion-author.js';
-import { readResidentAuthorSelection } from './internal/resident-assertion-author-selection.js';
 
 export type { AssertionAuthorQueryStore } from './internal/finalized-assertion-author.js';
 
@@ -26,8 +27,16 @@ export async function resolveFinalizedAssertionAuthor(
   params: ResolveFinalizedAssertionAuthorParams,
 ): Promise<string | undefined> {
   const { contextGraphId, name, subGraphName, callerAgentAddress, selectedAuthorAgentAddress } = params;
+  const selectedAuthor = readResidentAuthorBoundarySelection(selectedAuthorAgentAddress);
+  if (selectedAuthor?.kind === 'invalid') {
+    return rejectInvalidResidentFinalizedAssertionAuthor(
+      store,
+      { contextGraphId, name, subGraphName, callerAgentAddress },
+      selectedAuthor.displayValue,
+    );
+  }
   return resolveResidentFinalizedAssertionAuthor(store, {
     contextGraphId, name, subGraphName, callerAgentAddress,
-    selectedAuthor: readResidentAuthorSelection(selectedAuthorAgentAddress),
+    selectedAuthorAgentAddress: selectedAuthor?.agentAddress,
   });
 }
