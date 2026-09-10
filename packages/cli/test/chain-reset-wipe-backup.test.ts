@@ -375,7 +375,10 @@ describe('chainResetWipe — store.nq backup rename (#679)', () => {
     expect(readFileSync(join(dataDir, 'store.nq'), 'utf8')).toBe('PRECIOUS');
     // Marker NOT persisted — the wipe must retry on the next boot.
     expect(readPersistedMarker(dataDir)).toBe(OLD_MARKER);
-    expect(logs.some((l) => l.includes('marker was not persisted'))).toBe(true);
+    // The low-level wipe keeps the actionable per-file diagnostic; the daemon
+    // lifecycle owns the single terminal summary for the typed outcome.
+    expect(logs.some((l) => l.includes('failed to back up store.nq'))).toBe(true);
+    expect(logs.some((l) => l.includes('marker was not persisted'))).toBe(false);
   });
 
   it('never overwrites an existing backup — appends a counter on a name collision (🔴 OXNZb)', async () => {
