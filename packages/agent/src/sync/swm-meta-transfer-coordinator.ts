@@ -5,6 +5,13 @@ import {
   type SwmMetaFetcher,
 } from './swm-meta-fetcher.js';
 
+export type SwmMetaTransferMode = 'ordinary' | 'selected';
+
+export interface SwmMetaTransferScope {
+  readonly mode: SwmMetaTransferMode;
+  readonly remotePeerId: string;
+}
+
 /** Agent-owned registry and shutdown boundary for isolated metadata transfer owners. */
 export class SwmMetaTransferCoordinator {
   readonly #owners = new Map<string, SwmMetaTransferOwner>();
@@ -18,11 +25,12 @@ export class SwmMetaTransferCoordinator {
   }
 
   run<T>(
-    transferKey: string,
+    scope: string | SwmMetaTransferScope,
     createFetcher: () => SwmMetaFetcher,
     operation: (fetcher: SwmMetaFetcher) => Promise<T>,
   ): Promise<T> {
     if (this.#closed) return Promise.reject(this.#closedError());
+    const transferKey = typeof scope === 'string' ? scope : `${scope.mode}\0${scope.remotePeerId}`;
     let owner = this.#owners.get(transferKey);
     if (!owner) {
       let registeredOwner: SwmMetaTransferOwner;
