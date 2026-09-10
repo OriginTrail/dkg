@@ -108,11 +108,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { SpanStatusCode } from '@opentelemetry/api';
 import type { PublishAuthorSelectionOptions } from './publish-author-selection.js';
-import {
-  readPublishIdentityBoundary,
-  type PublishIdentityBoundary,
-  type PublishIdentityPlan,
-} from './internal/publish-identity-plan.js';
+import { resolveFinalizedPublishIdentity } from './internal/finalized-publish-identity.js';
 import {
   deleteByPatternWithoutCount,
   GraphManager,
@@ -866,69 +862,6 @@ function recordPublishOutcome(
   const attrs = { outcome, source, ...(chainId ? { chain_id: chainId } : {}) };
   getMetrics().publishTotal.add(1, attrs);
   getMetrics().publishDuration.record(Date.now() - startedAt, attrs);
-}
-
-/** Resolve the snapshotted plan without revisiting public option syntax. */
-async function resolvePublishAuthorSelection(
-  agent: DKGAgent,
-  contextGraphId: string,
-  name: string,
-  selection: PublishIdentityPlan['author'],
-  subGraphName?: string,
-): Promise<string> {
-  switch (selection.mode) {
-    case 'author':
-      return selection.agentAddress;
-    case 'callerHint':
-      return (await resolveResidentFinalizedAssertionAuthor(agent.store, {
-        contextGraphId, name, subGraphName, callerAgentAddress: selection.callerHint,
-      })) ?? selection.callerHint;
-    case 'residentAuthor': {
-      const author = await resolveResidentFinalizedAssertionAuthor(agent.store, {
-        contextGraphId, name, subGraphName, selectedAuthorAgentAddress: selection.agentAddress,
-      });
-      // An invalid assertion name has no resident coordinate. Do not substitute
-      // a caller identity when this policy requires the selected resident author.
-      if (author === undefined) {
-        throw new Error(
-          `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
-        );
-      }
-      return author;
-    }
-  }
-}
-
-async function resolvePublishIdentityBoundary(
-  agent: DKGAgent,
-  contextGraphId: string,
-  name: string,
-  identity: PublishIdentityBoundary,
-  subGraphName?: string,
-): Promise<{ readonly agentAddress: string; readonly enqueueCaller: string | undefined }> {
-  if (identity.kind === 'invalidResidentAuthor') {
-    const author = await rejectInvalidResidentFinalizedAssertionAuthor(
-      agent.store,
-      { contextGraphId, name, subGraphName },
-      identity.displayValue,
-    );
-    if (author === undefined) {
-      throw new Error(
-        `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
-      );
-    }
-    return { agentAddress: author, enqueueCaller: identity.enqueueCaller };
-  }
-  return {
-    agentAddress: await resolvePublishAuthorSelection(
-      agent,
-      contextGraphId,
-      name,
-      identity.plan.author,
-      subGraphName,
-    ),
-    enqueueCaller: identity.plan.enqueueCaller,
-  };
 }
 
 // Only finalized-assertion / durable-queue replay paths may submit payloads
@@ -4464,9 +4397,9 @@ export class PublishMethods extends DKGAgentBase {
     name: string,
     opts?: PublishAuthorSelectionOptions & { subGraphName?: string },
   ): Promise<string> {
-    const identity = readPublishIdentityBoundary(opts, this.defaultAgentAddress ?? this.peerId);
-    return (await resolvePublishIdentityBoundary(
-      this, contextGraphId, name, identity, opts?.subGraphName,
+    return (await resolveFinalizedPublishIdentity(
+      this.store, { contextGraphId, name, subGraphName: opts?.subGraphName },
+      opts, this.defaultAgentAddress ?? this.peerId,
     )).agentAddress;
   }
 
@@ -4502,9 +4435,10 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
-    const identity = readPublishIdentityBoundary(opts, this.defaultAgentAddress ?? this.peerId);
-    const resolvedIdentity = await resolvePublishIdentityBoundary(
-      this, contextGraphId, name, identity, opts?.subGraphName,
+    const subGraphName = opts?.subGraphName;
+    const resolvedIdentity = await resolveFinalizedPublishIdentity(
+      this.store, { contextGraphId, name, subGraphName },
+      opts, this.defaultAgentAddress ?? this.peerId,
     );
     // Persist the enqueuing caller independently from the resolved member author.
     // The normalization boundary owns legacy empty-caller and tokenless behavior.
@@ -4513,7 +4447,7 @@ export class PublishMethods extends DKGAgentBase {
     const publisher = opts?.publisherOverride ?? this.publisher;
     const history = await this.assertion.history(contextGraphId, name, {
       agentAddress,
-      ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+      ...(subGraphName ? { subGraphName } : {}),
     });
     if (!history) {
       throw new Error(
@@ -4550,7 +4484,7 @@ export class PublishMethods extends DKGAgentBase {
       }
       if (refuse) throw updateAttestationNotCustodialError(agentAddress);
     }
-    if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
+    if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName))) {
       throw Object.assign(
         new Error(
           `Cannot publish "${name}" in context graph "${contextGraphId}": it is not a complete full share ` +
@@ -4561,7 +4495,7 @@ export class PublishMethods extends DKGAgentBase {
     }
 
     const metaGraph = contextGraphMetaUri(contextGraphId);
-    const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+    const assertionUri = contextGraphAssertionUri(contextGraphId, agentAddress, name, subGraphName);
     const metaResult = await this.store.query(
       `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
       { source: 'agent.asyncVmPublish.seal' },
@@ -4607,7 +4541,7 @@ export class PublishMethods extends DKGAgentBase {
       graphManager: new GraphManager(this.store),
       contextGraphId,
       kaUal: seal.kaUal,
-      subGraphName: opts?.subGraphName,
+      subGraphName,
     });
     if (
       !head
@@ -4672,7 +4606,7 @@ export class PublishMethods extends DKGAgentBase {
       // GH#1778 — caller identity is persisted for execution but deliberately
       // excluded from the canonical projection so dedup remains first-writer-wins.
       ...(callerAgentAddress ? { callerAgentAddress } : {}),
-      ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
+      ...(subGraphName ? { subGraphName } : {}),
       shareOperationId,
       roots: [],
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,

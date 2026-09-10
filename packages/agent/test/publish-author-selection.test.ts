@@ -1,9 +1,9 @@
-import { it, expect, expectTypeOf, vi } from 'vitest';
+import { it, expect, vi } from 'vitest';
 import { contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
 import { storeKnowledgeAssetOperationPublicQuads, storeKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import type { PublishAuthorSelectionOptions } from '../src/publish-author-selection.js';
-import { readPublishIdentityBoundary } from '../src/internal/publish-identity-plan.js';
+import { resolveFinalizedPublishIdentity } from '../src/internal/finalized-publish-identity.js';
 import { CG, MEMBER, CURATOR, OTHER, NAME, KA_UAL, RESERVED_KA_ID, PUBLIC_QUAD, MERKLE, sealFor, stubAgent } from './_helpers/finalized-author.js';
 
 it.each([
@@ -28,26 +28,18 @@ it.each([
   expect(query).not.toHaveBeenCalled();
 });
 
-it.each([null, 42, {}])('keeps a malformed resident selector outside the immutable plan: %j', selectedAuthorAgentAddress => {
-  const boundary = readPublishIdentityBoundary({ authorSelection: { mode: 'residentAuthor', selectedAuthorAgentAddress } } as never, CURATOR);
-  expect(boundary).toEqual({
-    kind: 'invalidResidentAuthor',
-    displayValue: String(selectedAuthorAgentAddress),
-    enqueueCaller: undefined,
-  });
-  expectTypeOf(boundary).not.toMatchTypeOf<{ plan: unknown }>();
-  expect(Object.isFrozen(boundary)).toBe(true);
-});
-
 it.each<{ options: PublishAuthorSelectionOptions; enqueueCaller?: string }>([
   { options: { agentAddress: MEMBER, callerAgentAddress: '' } },
   { options: { agentAddress: MEMBER }, enqueueCaller: MEMBER },
   { options: { authorSelection: { mode: 'author', agentAddress: MEMBER } }, enqueueCaller: MEMBER },
-])('captures the complete caller decision beside an authoritative author: $options', ({ options, enqueueCaller }) => {
-  expect(readPublishIdentityBoundary(options, CURATOR)).toEqual({
-    kind: 'valid',
-    plan: { author: { mode: 'author', agentAddress: MEMBER }, enqueueCaller },
-  });
+])('resolves the complete caller decision beside an authoritative author: $options', async ({ options, enqueueCaller }) => {
+  const store = new OxigraphStore();
+  const query = vi.spyOn(store, 'query');
+  try {
+    await expect(resolveFinalizedPublishIdentity(store, { contextGraphId: CG, name: NAME }, options, CURATOR))
+      .resolves.toEqual({ agentAddress: MEMBER, enqueueCaller });
+    expect(query).not.toHaveBeenCalled();
+  } finally { await store.close(); }
 });
 
 it('treats undefined legacy optional fields as the default selection', async () => {
@@ -143,12 +135,15 @@ it.each<{ options: PublishAuthorSelectionOptions; author: string; caller?: strin
   expect(agent.publishFromSharedMemory).toHaveBeenCalledWith(CG, expect.anything(), expect.objectContaining({ precomputedAttestation: expect.objectContaining({ authorAddress: author }) }));
 });
 
-it.each(['callerHint', 'residentAuthor', 'legacy'] as const)('snapshots %s author and caller across an awaited lookup', async mode => {
+it.each(['callerHint', 'residentAuthor', 'legacy', 'scope'] as const)('snapshots %s identity and coordinate across an awaited lookup', async mode => {
   const { agent, store } = await publishableAgent();
   const authorSelection = { mode: 'residentAuthor' as const, selectedAuthorAgentAddress: MEMBER, callerAgentAddress: CURATOR };
   const callerSelection = { mode: 'callerHint' as const, callerAgentAddress: MEMBER };
   const legacy = { callerAgentAddress: MEMBER };
-  const options = mode === 'residentAuthor' ? { authorSelection } : mode === 'callerHint' ? { authorSelection: callerSelection } : legacy;
+  const scope: { callerAgentAddress: string; subGraphName?: string } = { callerAgentAddress: MEMBER };
+  const options = mode === 'residentAuthor' ? { authorSelection }
+    : mode === 'callerHint' ? { authorSelection: callerSelection }
+      : mode === 'scope' ? scope : legacy;
   let release!: () => void;
   let entered!: () => void;
   const blocked = new Promise<void>(resolve => { release = resolve; });
@@ -165,9 +160,11 @@ it.each(['callerHint', 'residentAuthor', 'legacy'] as const)('snapshots %s autho
   authorSelection.callerAgentAddress = OTHER;
   callerSelection.callerAgentAddress = CURATOR;
   legacy.callerAgentAddress = CURATOR;
+  scope.subGraphName = 'mutated-during-lookup';
   release();
   const intent = await pending;
   expect(intent.agentAddress).toBe(MEMBER);
   expect(intent.seal.authorAddress.toLowerCase()).toBe(MEMBER.toLowerCase());
   expect(intent.callerAgentAddress).toBe(mode === 'residentAuthor' ? CURATOR : MEMBER);
+  expect(intent.subGraphName).toBeUndefined();
 });

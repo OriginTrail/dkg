@@ -94,7 +94,7 @@ for (const [subpath, target] of Object.entries(packageExports)) {
 }
 for (const path of [
   'context-graph-authority/context-graph-agent-gate-authority.js',
-  'publish-identity-plan.js',
+  'finalized-publish-identity.js',
   'finalized-assertion-author.js',
 ]) {
   const specifier = `@origintrail-official/dkg-agent/dist/internal/${path}`;
