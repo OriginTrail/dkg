@@ -35,6 +35,7 @@ import {
   withRpcUsageConsumer,
 } from '../src/rpc-usage.js';
 import { withRpcRequestAbortSignal } from '../src/rpc-request-transport.js';
+import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
 import type { ChainAdapter } from '../src/chain-adapter.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
@@ -336,7 +337,18 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     // must match exactly (this is the undercount the review flagged).
     const rpc = await startLoopbackRpc({ throttle: ['eth_chainId'] });
     servers.push(rpc);
-    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url, staticNetwork: false }));
+    const rpcRequestGovernor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 10_000,
+      foregroundReservePercent: 0,
+      burstRequests: 100_000,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: rpc.url,
+      staticNetwork: false,
+      rpcRequestGovernor,
+    }));
     adapters.push(a);
 
     await expect(a.getEvmChainId()).rejects.toBeTruthy(); // perpetual 429 → bounded failure
@@ -345,6 +357,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(rpc.hits('eth_chainId')).toBeGreaterThanOrEqual(2); // initial + ≥1 retry actually happened
     expect(usage.byMethod['eth_chainId'] ?? 0).toBe(rpc.hits('eth_chainId'));
     expect(rpcUsageWindowTotal(usage)).toBe(rpc.totalHits());
+    expect(
+      usage.requestGovernor.foregroundAdmitted + usage.requestGovernor.backgroundAdmitted,
+    ).toBe(rpc.totalHits());
   }, 30_000);
 
   it('bounds unknown methods to "other" for the metric label', () => {

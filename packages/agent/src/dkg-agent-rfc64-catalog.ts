@@ -54,6 +54,7 @@ import {
 import {
   resolveRpcUrls,
   verifyControlEnvelopeIssuerSignatureV1,
+  withRpcRequestClass,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
 } from '@origintrail-official/dkg-chain';
@@ -1245,6 +1246,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
+  /** Shared authority-RPC circuit state for local operator status. */
+  readRfc64AuthorityRpcCircuitStatusV1(this: DKGAgent) {
+    return this.rfc64AuthorityReadCoordinatorV1.snapshot();
+  }
+
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */
   async readRfc64CatalogOperationalStatusV1(
     this: DKGAgent,
@@ -1586,14 +1592,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     agentAddress: EvmAddressV1;
     authorityEra: DecimalU64V1;
   }> | null> {
-    const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+    const onChainId = await withRpcRequestClass(
+      'background',
+      () => this.getContextGraphOnChainId(contextGraphId),
+    );
     if (onChainId !== null) {
       const reader = requireRfc64ContextGraphAuthorityReaderV1(
         this.contextGraphAuthorityReaderCapability,
       );
       const expectedOnChainId = BigInt(onChainId);
       const snapshot = parseRfc64AuthoritySnapshotV1(
-        await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
+        await withRpcRequestClass(
+          'background',
+          () => reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
+        ),
         expectedOnChainId,
       );
       const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
@@ -1609,7 +1621,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         authorityEra: snapshot.ownershipEra,
       });
     }
-    const ownerDid = await this.getContextGraphOwner(contextGraphId);
+    const ownerDid = await withRpcRequestClass(
+      'background',
+      () => this.getContextGraphOwner(contextGraphId),
+    );
     const owner = ownerDid
       ?.trim()
       .replace(/^<|>$/gu, '')
@@ -1810,7 +1825,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const run = (async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
       let accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
       if (accessPolicy === null && subscription.onChainId !== undefined) {
-        const onChainPolicy = await this.getContextGraphOnChainPolicy(contextGraphId);
+        const onChainPolicy = await withRpcRequestClass(
+          'background',
+          () => this.getContextGraphOnChainPolicy(contextGraphId),
+        );
         accessPolicy = onChainPolicy.accessPolicy === 0
           ? 'public'
           : onChainPolicy.accessPolicy === 1
@@ -1911,7 +1929,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       const registeredAuthorityRead = await this.rfc64AuthorityReadCoordinatorV1.run(
         signal,
-        async (readSignal) => {
+        async (readSignal) => withRpcRequestClass('background', async () => {
           const onChainId = await this.getContextGraphOnChainId(contextGraphId);
           if (readSignal?.aborted) throw readSignal.reason;
           if (onChainId === null) return null;
@@ -1927,7 +1945,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             expectedOnChainId,
           );
           return { expectedOnChainId, snapshot } as const;
-        },
+        }),
       );
       let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;
       if (registeredAuthorityRead !== null) {
@@ -1979,7 +1997,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           snapshot: authoritativeSnapshot,
         });
       } else {
-        const ownerDid = await this.getContextGraphOwner(contextGraphId);
+        const ownerDid = await withRpcRequestClass(
+          'background',
+          () => this.getContextGraphOwner(contextGraphId),
+        );
         if (signal?.aborted) throw signal.reason;
         const normalizedOwnerDid = ownerDid
           ?.trim()
@@ -3395,12 +3416,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           },
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogReceiverReconcilerV1 = {
-          isHeadApplied: (announcement) => {
+          isHeadApplied: (announcement) => withRpcRequestClass('background', () => {
             this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
             return reconciler.isHeadApplied(announcement);
-          },
+          }),
           reconcileHead: (remotePeerId, announcement, signal) =>
-            reconciler.reconcileHead(remotePeerId, announcement, signal),
+            withRpcRequestClass(
+              'background',
+              () => reconciler.reconcileHead(remotePeerId, announcement, signal),
+            ),
         };
         return Object.freeze(deploymentAwareReconciler);
       },

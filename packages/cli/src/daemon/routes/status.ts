@@ -904,6 +904,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       typeof agent.readRfc64CatalogOperationalStatusV1 === 'function'
         ? await agent.readRfc64CatalogOperationalStatusV1()
         : [];
+    const rfc64AuthorityRpcCircuit =
+      typeof agent.readRfc64AuthorityRpcCircuitStatusV1 === 'function'
+        ? agent.readRfc64AuthorityRpcCircuitStatusV1()
+        : null;
     const selectedPublicContextGraphs = new Set(
       rfc64CatalogActivation.selectedPublicContextGraphs,
     );
@@ -1111,6 +1115,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         runtimeSelection: rfc64CatalogRuntimeSelection,
         responsibilities: rfc64CatalogResponsibilities,
         contextGraphs: rfc64CatalogContextGraphs,
+        authorityRpcCircuit: rfc64AuthorityRpcCircuit,
         configuration: rfc64CatalogConfiguration,
         autoPublishEnabled: rfc64CatalogActivation.autoPublish !== undefined,
         rollout: rfc64CatalogRollout,

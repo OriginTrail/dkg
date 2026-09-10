@@ -8,10 +8,13 @@
 import { Contract } from 'ethers';
 import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
 import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
+import type { RpcRequestGovernor } from './rpc-request-governor.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
   rpcUrls?: string[];
+  /** Process-shared transport budget injected by the daemon composition root. */
+  rpcRequestGovernor?: RpcRequestGovernor;
   /**
    * Public RPC endpoints safe to hand to browser wallets for
    * `wallet_addEthereumChain`. These are intentionally separate from

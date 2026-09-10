@@ -1111,7 +1111,7 @@ export class EVMChainAdapterBase {
     // tracker (the PROVIDER-BILLING unit — see rpc-usage.ts). With
     // `batchMaxCount: 1` below, one send() == one HTTP request, so the count is
     // exact. `this.chainId` is assigned later in this constructor → live thunk.
-    this.rpcUsage = new RpcUsageTracker(() => this.chainId);
+    this.rpcUsage = new RpcUsageTracker(() => this.chainId, config.rpcRequestGovernor);
     // One transport factory wires BOTH billing-exact accounting hooks (first
     // attempt at `_send` + every ethers-internal retry attempt) to the tracker —
     // see createCountingJsonRpcProvider for the invariant.
@@ -1129,6 +1129,7 @@ export class EVMChainAdapterBase {
         },
         network: staticNetwork,
         endpointSlot,
+        requestGovernor: config.rpcRequestGovernor,
       }),
     );
     this.primaryProvider = this.providers[0];

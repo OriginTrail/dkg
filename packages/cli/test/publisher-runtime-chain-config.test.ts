@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { RpcRequestGovernor } from '@origintrail-official/dkg-chain';
 import { projectRuntimeEvmChainConfig } from '../src/runtime-chain-config.js';
 
 describe('publisher runtime chain config projection', () => {
@@ -23,7 +24,7 @@ describe('publisher runtime chain config projection', () => {
       minPublisherTracWei: 456n,
     });
 
-    expect(projected).toEqual({
+    expect(projected).toMatchObject({
       rpcUrl: 'http://127.0.0.1:8545',
       rpcUrls: ['https://backup.example'],
       walletRpcUrls: ['https://wallet.example'],
@@ -42,6 +43,7 @@ describe('publisher runtime chain config projection', () => {
       minPublisherNativeWei: 123n,
       minPublisherTracWei: 456n,
     });
+    expect(projected?.rpcRequestGovernor).toBeInstanceOf(RpcRequestGovernor);
   });
 
   it('requires both adapter endpoint and Hub address', () => {

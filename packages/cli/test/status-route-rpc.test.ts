@@ -152,6 +152,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           authorityState: 'accepted',
           policySource: 'owner-signed-unregistered',
         }],
+        readRfc64AuthorityRpcCircuitStatusV1: () => ({
+          state: 'open',
+          consecutiveExhaustions: 2,
+          retryAtMs: 1_725_987_654_321,
+        }),
       },
       {
         rfc64PublicCatalog: {
@@ -200,6 +205,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       phase: 'bootstrapping',
       authorityState: 'accepted',
     })]);
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 2,
+      retryAtMs: 1_725_987_654_321,
+    });
     expect(response.body.rfc64Catalog.configuration).toMatchObject({
       schemaVersion: 1,
       source: 'compatibility-seed',

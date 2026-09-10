@@ -142,6 +142,18 @@ export {
   type RpcUsageDrainable,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+export {
+  DEFAULT_RPC_REQUEST_GOVERNOR_POLICY,
+  RpcRequestGovernor,
+  RpcRequestGovernorQueueFullError,
+  resolveRpcRequestGovernorPolicy,
+  withRpcRequestClass,
+  type RpcRequestClass,
+  type RpcRequestGovernorPolicy,
+  type RpcRequestGovernorPolicyInput,
+  type RpcRequestGovernorClock,
+  type RpcRequestGovernorWindow,
+} from './rpc-request-governor.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {

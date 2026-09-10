@@ -1,4 +1,7 @@
-import type { EVMAdapterConfig } from '@origintrail-official/dkg-chain';
+import {
+  RpcRequestGovernor,
+  type EVMAdapterConfig,
+} from '@origintrail-official/dkg-chain';
 import {
   resolveApprovalPolicy,
   type ResolvedChainConfig,
@@ -12,6 +15,7 @@ export type RuntimeEvmChainConfig = Pick<
   | 'finalityConfirmations'
   | 'maxFeePerGasWei'
   | 'minPublisherNativeWei' | 'minPublisherTracWei'
+  | 'rpcRequestGovernor'
 >;
 
 /** Neutral projection shared by the agent and every publisher adapter. */
@@ -33,5 +37,6 @@ export function projectRuntimeEvmChainConfig(
     cgRegistryScanPageSize: chain.cgRegistryScanPageSize,
     minPublisherNativeWei: chain.minPublisherNativeWei,
     minPublisherTracWei: chain.minPublisherTracWei,
+    rpcRequestGovernor: new RpcRequestGovernor(chain.rpcRequestBudget),
   };
 }
