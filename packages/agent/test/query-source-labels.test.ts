@@ -155,15 +155,15 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     { id: `${LOCAL_MEMBER}/private-query`, suffix: '' },
     { id: `${LOCAL_MEMBER}/private-query`, suffix: `/_shared_memory/${REMOTE_MEMBER}/1` },
     { id: `${LOCAL_MEMBER}/private-query`, suffix: '/tasks/_verifiable_memory' },
-  ])('protects undeclared stored graph $id$suffix using accepted policy authority', async ({ id, suffix }) => {
+  ])('protects undeclared stored graph $id (suffix: $suffix) using accepted policy authority', async ({ id, suffix }) => {
     const fixture = runtimePrivateQueryAgent({ subscribed: false, contextGraphId: id as ContextGraphIdV1 });
     const store = new OxigraphStore();
     try {
       await store.insert([{ subject: 'urn:private:s', predicate: 'urn:private:p', object: '"secret"',
         graph: `did:dkg:context-graph:${id}${suffix}` }]);
-      // A graph without a declaration is absent from CG listings, but privacy
-      // still follows its accepted runtime policy even after unsubscription.
-      expect(await new GraphManager(store).listContextGraphs()).toEqual([]);
+      // Absence from declared CG listings does not remove accepted runtime
+      // privacy authority, including after unsubscription.
+      expect(await new GraphManager(store).listDeclaredContextGraphs()).toEqual([]);
       const agent = { ...fixture.agent, store };
       const sparql = 'SELECT ?s WHERE { ?s ?p ?o }';
       await expect(QueryMethods.prototype.query.call(agent as never, sparql, {
