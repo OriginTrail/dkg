@@ -31,6 +31,7 @@ function entry(
     rawMessage: RAW,
     generation: 0,
     attemptCount: 0,
+    failureStreak: 0,
     createdAt: 1_000,
     updatedAt: 1_000,
     ...overrides,
@@ -45,6 +46,8 @@ describe('finalization recovery verified-evidence transition planner', () => {
         state: 'REORGED',
         generation: 2,
         attemptCount: 3,
+        failureSignature: 'receipt-pending',
+        failureStreak: 2,
         nextAttemptAt: 5_000,
         lastError: 'receipt lookup pending',
       }),
@@ -57,6 +60,8 @@ describe('finalization recovery verified-evidence transition planner', () => {
         verifiedEvidence,
         generation: 2,
         attemptCount: 3,
+        failureSignature: 'receipt-pending',
+        failureStreak: 2,
         nextAttemptAt: 5_000,
         lastError: 'receipt lookup pending',
       },
@@ -74,6 +79,8 @@ describe('finalization recovery verified-evidence transition planner', () => {
         attemptCount: 3,
         nextAttemptAt: 5_000,
         lastError: 'receipt lookup pending',
+        failureSignature: 'receipt-pending',
+        failureStreak: 2,
       }),
       0,
       {
@@ -90,6 +97,8 @@ describe('finalization recovery verified-evidence transition planner', () => {
         attemptCount: 0,
         nextAttemptAt: null,
         lastError: 'independently recovered canonical receipt moved',
+        failureSignature: null,
+        failureStreak: 0,
       },
     });
   });

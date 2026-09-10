@@ -1246,7 +1246,10 @@ describe('graph-scoped finalization handler', () => {
       );
 
       const query = store.query.bind(store);
-      let busyReads = 2;
+      // Publisher-authority observation now owns the first store probe. Keep
+      // both materialization attempts busy as well so this still exercises the
+      // durable pre-verification timeout path.
+      let busyReads = 3;
       store.query = async (sparql, options) => {
         if (busyReads > 0) {
           busyReads -= 1;
@@ -1370,7 +1373,8 @@ describe('graph-scoped finalization handler', () => {
         chain,
         recoveryOptions(inbox),
       );
-      let busyReads = 2;
+      // One authority probe precedes the two bounded materialization attempts.
+      let busyReads = 3;
       store.query = async (sparql, options) => {
         if (busyReads > 0) {
           busyReads -= 1;
