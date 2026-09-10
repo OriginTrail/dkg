@@ -47,10 +47,11 @@ export type {
 
 export type Rfc64PublicCatalogReconcileResultV1 = 'applied' | 'not-found' | 'staged-only';
 
-/** Full semantic reconciliation supplied by the wired service. */
-export interface Rfc64PublicCatalogReceiverReconcilerV1 {
-  /** True only when this exact inventory head is durably recorded as applied. */
-  isHeadApplied(announcement: Rfc64PublicCatalogHeadAnnouncementV1): Promise<boolean>;
+export type Rfc64PublicCatalogHeadSatisfactionCheckV1 = (
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+) => Promise<boolean>;
+
+interface Rfc64PublicCatalogReceiverReconcilerBaseV1 {
   /**
    * Fetch, verify, activate, exact-post-read, then durably commit applied state.
    * The operation must be idempotent so a restart can repair the semantic-store
@@ -61,6 +62,48 @@ export interface Rfc64PublicCatalogReceiverReconcilerV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     signal: AbortSignal,
   ): Promise<Rfc64PublicCatalogReconcileResultV1>;
+}
+
+/** Current full semantic reconciliation supplied by the wired service. */
+export interface Rfc64PublicCatalogCurrentReceiverReconcilerV1
+  extends Rfc64PublicCatalogReceiverReconcilerBaseV1 {
+  /**
+   * True when this exact head is durable or a newer same-scope durable head
+   * strictly supersedes it. Equal-version conflicts are never deduplicated.
+   */
+  isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+}
+
+/** Constructor compatibility for implementations compiled against the V1 name. */
+export interface Rfc64PublicCatalogLegacyReceiverReconcilerV1
+  extends Rfc64PublicCatalogReceiverReconcilerBaseV1 {
+  /** @deprecated V1 compatibility name; use isHeadSatisfied in new code. */
+  isHeadApplied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+}
+
+/** Public V1 input accepts either the established or current method name. */
+export type Rfc64PublicCatalogReceiverReconcilerV1 =
+  | Rfc64PublicCatalogCurrentReceiverReconcilerV1
+  | Rfc64PublicCatalogLegacyReceiverReconcilerV1;
+
+/** Normalize the compatibility union once at the ownership boundary. */
+export function normalizeRfc64PublicCatalogReceiverReconcilerV1(
+  reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
+): Rfc64PublicCatalogCurrentReceiverReconcilerV1 {
+  if ('isHeadSatisfied' in reconciler) return reconciler;
+  if ('isHeadApplied' in reconciler) {
+    return Object.freeze({
+      reconcileHead: (
+        remotePeerId: string,
+        announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+        signal: AbortSignal,
+      ) =>
+        reconciler.reconcileHead(remotePeerId, announcement, signal),
+      isHeadSatisfied: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
+        reconciler.isHeadApplied(announcement),
+    });
+  }
+  throw new TypeError('RFC-64 receiver reconciler requires a head satisfaction check');
 }
 
 export interface Rfc64PublicCatalogReceiverOptionsV1 {
@@ -273,7 +316,8 @@ const DEFAULTS = Object.freeze({
 const DEFAULT_DEFERRABLE_ERROR = isFinalizedChainAdmissionContention;
 
 export class Rfc64PublicCatalogReceiverV1 {
-  readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerV1;
+  readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerBaseV1;
+  readonly #isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
   readonly #maxConcurrent: number;
   readonly #maxQueue: number;
   readonly #maxAttempts: number;
@@ -329,7 +373,9 @@ export class Rfc64PublicCatalogReceiverV1 {
     reconciler: Rfc64PublicCatalogReceiverReconcilerV1,
     options: Rfc64PublicCatalogReceiverOptionsV1 = {},
   ) {
-    this.#reconciler = reconciler;
+    const normalizedReconciler = normalizeRfc64PublicCatalogReceiverReconcilerV1(reconciler);
+    this.#reconciler = normalizedReconciler;
+    this.#isHeadSatisfied = normalizedReconciler.isHeadSatisfied;
     this.#maxConcurrent = rfc64ReceiverPositiveIntV1(
       options.maxConcurrent,
       DEFAULTS.maxConcurrent,
@@ -947,7 +993,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         task.lastProviderKey = provider.key;
       };
       try {
-        if (await this.#reconciler.isHeadApplied(provider.announcement)) {
+        if (await this.#isHeadSatisfied(provider.announcement)) {
           recordProviderAttempt();
           return { kind: 'already-applied', announcement: provider.announcement };
         }

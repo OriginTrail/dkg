@@ -1,4 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import type { ClientTarget } from '../src/mcp-client-registry.js';
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readRegisteredServerKeys, type ServerKeyProbe } from '../src/mcp-client-config.js';
+import { McpPhysicalConfig } from '../src/mcp-physical-config.js';
 
 import { installService } from '../src/integrations/install-service.js';
 import { detectInstalled, parseGlobalNpmList } from '../src/integrations/detect-installed.js';
@@ -261,9 +267,9 @@ describe('detectInstalled', () => {
     ({ ...baseEntry, slug, install }) as unknown as IntegrationEntry;
 
   const clients = [
-    { name: 'Cursor', configPath: '/fake/cursor.json', displayPath: '~/cursor.json' },
-    { name: 'Windsurf', configPath: '/fake/windsurf.json', displayPath: '~/windsurf.json' },
-  ] as never;
+    { id: 'cursor', location: 'native', format: 'json', serverContainer: 'mcpServers', name: 'Cursor', configPath: '/fake/cursor.json', displayPath: '~/cursor.json' },
+    { id: 'windsurf', location: 'native', format: 'json', serverContainer: 'mcpServers', name: 'Windsurf', configPath: '/fake/windsurf.json', displayPath: '~/windsurf.json' },
+  ] satisfies ClientTarget[];
 
   it('reports cli and npm-global service entries from the global npm map', async () => {
     const rows = await detectInstalled(
@@ -385,13 +391,41 @@ describe('detectInstalled', () => {
     expect(row!.state).toBe('not installed');
   });
 
+  it.each([false, true].flatMap(aliasFirst => ['installed', 'unreadable'].map(outcome => ({ aliasFirst, outcome }))))(
+    'probes shared physical configs once and retains aliases ($outcome, alias first: $aliasFirst)', async ({ aliasFirst, outcome }) => {
+      const directory = mkdtempSync(join(tmpdir(), 'dkg-integration-alias-'));
+      try {
+        const configPath = join(directory, 'config.json');
+        const aliasPath = join(directory, 'alias.json');
+        writeFileSync(configPath, outcome === 'installed'
+          ? JSON.stringify({ mcpServers: { 'mcp-slug': { command: 'npx', args: ['-y', 'p'] } } }) : '{ broken');
+        symlinkSync(configPath, aliasPath);
+        const native: ClientTarget = { id: 'cursor', location: 'native', format: 'json', serverContainer: 'mcpServers',
+          name: 'Cursor native', configPath, displayPath: configPath };
+        const windows: ClientTarget = { ...native, location: 'windows-wsl', name: 'Cursor Windows',
+          configPath: aliasPath, displayPath: aliasPath };
+        const readServerKeys = vi.fn(readRegisteredServerKeys);
+        const [row] = await detectInstalled([entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })], {
+          clients: aliasFirst ? [windows, native] : [native, windows], readServerKeys,
+        });
+        expect(readServerKeys).toHaveBeenCalledTimes(1);
+        const [file] = readServerKeys.mock.calls[0]!;
+        expect(file).toBeInstanceOf(McpPhysicalConfig);
+        expect(file).toHaveProperty('destination', realpathSync(configPath));
+        expect(row!.state).toBe(outcome === 'installed' ? 'installed' : 'unknown');
+        expect(row!.detail).toContain(native.name);
+        expect(row!.detail).toContain(windows.name);
+      } finally { rmSync(directory, { recursive: true, force: true }); }
+    },
+  );
+
   it('detects an mcp entry across every client that registers it', async () => {
     const rows = await detectInstalled(
       [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
       {
         clients,
-        readServerKeys: (t) =>
-          t.name === 'Cursor'
+        readServerKeys: (t): ServerKeyProbe =>
+          t.displayPath === '~/cursor.json'
             ? { ok: true as const, servers: { 'mcp-slug': { command: 'npx', args: ['-y', 'p'] }, other: { command: 'npx', args: ['-y', 'p'] } } }
             : { ok: true as const, servers: { 'mcp-slug': { command: 'npx', args: ['-y', 'p'] } } },
       },
@@ -418,8 +452,8 @@ describe('detectInstalled', () => {
       [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
       {
         clients,
-        readServerKeys: (t) =>
-          t.name === 'Cursor'
+        readServerKeys: (t): ServerKeyProbe =>
+          t.displayPath === '~/cursor.json'
             ? { ok: false as const, reason: 'could not read ~/cursor.json' }
             : { ok: true as const, servers: {} },
       },
@@ -436,8 +470,8 @@ describe('detectInstalled', () => {
       [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
       {
         clients,
-        readServerKeys: (t) =>
-          t.name === 'Cursor'
+        readServerKeys: (t): ServerKeyProbe =>
+          t.displayPath === '~/cursor.json'
             ? { ok: false as const, reason: 'could not read ~/cursor.json' }
             : { ok: true as const, servers: { 'mcp-slug': { command: 'npx', args: ['-y', 'p'] } } },
       },
@@ -497,14 +531,14 @@ describe('detectInstalled', () => {
       [entry('mcp-slug', { kind: 'mcp', command: 'npx', args: ['-y', 'p'] })],
       {
         clients,
-        readServerKeys: (t) => ({
+        readServerKeys: (t): ServerKeyProbe => ({
           ok: true as const,
           servers: {
             'mcp-slug': {
               command: 'npx',
               args: ['-y', 'p'],
               env:
-                t.name === 'Cursor'
+                t.displayPath === '~/cursor.json'
                   ? { DKG_AUTH_TOKEN: 'dkg_live_abc' }
                   : { DKG_AUTH_TOKEN: '<DKG_AUTH_TOKEN>' },
             },

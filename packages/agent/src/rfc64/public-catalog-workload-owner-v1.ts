@@ -7,6 +7,8 @@ import type {
   Rfc64CatalogWorkloadOwnerV1,
   Rfc64PublicCatalogRuntimeOwnerV1,
 } from './catalog-runtime-v1.js';
+import { Rfc64AuthorityReadCoordinatorV1 } from
+  './authority-rpc-circuit-breaker-v1.js';
 
 /** Narrow transport lifecycle required by the workload owner. */
 export interface Rfc64PublicCatalogLifecyclePortV1 {
@@ -23,6 +25,7 @@ export interface Rfc64PublicCatalogWorkloadOwnerOptionsV1<
     ctx: OperationContext,
   ) => Service | null;
   readonly authorityRefresh: Rfc64CatalogWorkloadOwnerV1;
+  readonly authorityReads?: Rfc64AuthorityReadCoordinatorV1;
   readonly onServiceStarted: (ctx: OperationContext) => void;
 }
 
@@ -32,6 +35,7 @@ export class Rfc64PublicCatalogWorkloadOwnerV1<
 >
 implements Rfc64PublicCatalogRuntimeOwnerV1 {
   readonly #options: Rfc64PublicCatalogWorkloadOwnerOptionsV1<Service>;
+  readonly #authorityReads: Rfc64AuthorityReadCoordinatorV1;
   #service: Service | null = null;
   #authorityStartAttempted = false;
   #started = false;
@@ -39,10 +43,15 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
 
   constructor(options: Rfc64PublicCatalogWorkloadOwnerOptionsV1<Service>) {
     this.#options = options;
+    this.#authorityReads = options.authorityReads ?? new Rfc64AuthorityReadCoordinatorV1();
   }
 
   get service(): Service | undefined {
     return this.#service ?? undefined;
+  }
+
+  get authorityReads(): Rfc64AuthorityReadCoordinatorV1 {
+    return this.#authorityReads;
   }
 
   start(ctx: OperationContext): void {
@@ -54,6 +63,7 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
     let serviceStartAttempted = false;
     let authorityStartAttempted = false;
     try {
+      this.#authorityReads.reopen();
       service = this.#options.createService(ctx);
       if (service === null) {
         this.#started = true;
@@ -83,6 +93,7 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
     await Promise.all([
       this.#service?.whenReceiverIdle(),
       this.#options.authorityRefresh.whenIdle(),
+      this.#authorityReads.whenIdle(),
     ]);
   }
 
@@ -124,6 +135,7 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
           ? this.#options.authorityRefresh.close()
           : undefined
       )),
+      Promise.resolve().then(() => this.#authorityReads.close()),
     ]);
     for (const result of retirements) {
       if (result.status === 'rejected') failures.push(result.reason);

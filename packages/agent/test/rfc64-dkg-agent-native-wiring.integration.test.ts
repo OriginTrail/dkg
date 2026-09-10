@@ -1005,7 +1005,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     };
     const stagedTarget = catalogOperationalTarget(0, 0, 10_000);
     const stagedReceiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async () => 'staged-only',
     }, observers);
     await expect(stagedReceiver.scheduleVerifiedCurrentHeadAndWait([{
@@ -1022,7 +1022,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const closingTarget = catalogOperationalTarget(0, 1, 20_000);
     const queuedTarget = catalogOperationalTarget(1, 2, 30_000);
     const closingReceiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_remotePeerId, _announcement, signal) => {
         if (!signal.aborted) {
           await new Promise<void>((resolve) => {
@@ -1076,7 +1076,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
     const reconciled: Digest32V1[] = [];
     const receiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_peer, announcement) => {
         reconciled.push(announcement.catalogHeadObjectDigest);
         if (announcement.catalogHeadObjectDigest === activeAmbient.catalogHeadObjectDigest) {
@@ -1105,7 +1105,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
 
     const rejected: Digest32V1[] = [];
     const blockingReceiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_peer, _announcement, signal) => {
         if (!signal.aborted) {
           await new Promise<void>((resolve) => {
@@ -1148,7 +1148,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const activeAfterDeferral = catalogOperationalTarget(4, 4, 80_000);
     const verifiedAfterDeferral = catalogOperationalTarget(5, 5, 90_000);
     const deferredReceiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_peer, announcement) => {
         if (announcement.catalogHeadObjectDigest === deferredAmbient.catalogHeadObjectDigest) {
           deferredAttempted = true;
@@ -1200,7 +1200,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
     const reconciled: Digest32V1[] = [];
     const receiver = new Rfc64PublicCatalogReceiverV1({
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: async (_peer, announcement) => {
         reconciled.push(announcement.catalogHeadObjectDigest);
         if (announcement.catalogHeadObjectDigest === deferredAmbient.catalogHeadObjectDigest) {
@@ -2107,6 +2107,17 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           providerPeerAddresses.get(peerId) ?? null,
       },
     });
+    const seedProviderAdmissionBackoff = (peerId: string) => {
+      provider.networkAdmission.rememberRetryableProbeFailure(
+        peerId, 'restart fixture transient backoff', 'transient',
+      );
+    };
+    const startAuthorWithAdmissionBackoff = async (options: NativeAgentStartOptionsV1) => {
+      const agent = await startNativeAgentWithOptions({ ...options, syncContextGraphs: [] });
+      seedProviderAdmissionBackoff(agent.peerId);
+      agent.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+      return agent;
+    };
     provider.acceptRfc64CatalogAccessSnapshotV1({
       policy: authority.policy,
       policyDigest: authority.policyDigest,
@@ -2118,7 +2129,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authority,
       1_000,
     );
-    const author = await startNativeAgentWithOptions({
+    const author = await startAuthorWithAdmissionBackoff({
       name: 'selected-private-startup-author',
       existingDataDir: dataDir,
       persistentStorePath,
@@ -2129,7 +2140,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         );
       },
     });
-    providerPeerAddresses.set(author.peerId, AUTHOR);
     const assertionCoordinate = 'private-startup-repair';
     const shareOperationId = 'private-startup-repair-operation';
     await seedSignedSwmWorkspaceV1(author, {
@@ -2152,11 +2162,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const authorPeerId = author.peerId;
     await author.stop();
     agents.splice(agents.indexOf(author), 1);
-    await vi.waitFor(() => {
-      expect(provider.node.libp2p.getConnections().some(
-        ({ remotePeer }) => remotePeer.toString() === authorPeerId,
-      )).toBe(false);
-    }, { timeout: 10_000, interval: 10 });
 
     let markStartupProjectionEntered!: () => void;
     let releaseStartupProjection!: () => void;
@@ -2167,7 +2172,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       releaseStartupProjection = resolve;
     });
     let announce: ReturnType<typeof vi.spyOn<DKGAgent, 'announceRfc64PublicCatalogHeadV1'>>;
-    const restarted = await startNativeAgentWithOptions({
+    const restarted = await startAuthorWithAdmissionBackoff({
       name: 'selected-private-startup-author-restarted',
       existingDataDir: dataDir,
       persistentStorePath,
@@ -2192,8 +2197,21 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     providerPeerAddresses.set(restarted.peerId, AUTHOR);
     await startupProjectionEntered;
-    await connectBothWays(restarted, provider);
-    releaseStartupProjection();
+    try {
+      expect(restarted.peerId).toBe(authorPeerId);
+      // Raw libp2p dial only awaits transport. This controlled reconnect must
+      // await the public API's signed identity admission before publishing.
+      seedProviderAdmissionBackoff(restarted.peerId);
+      await restarted.connectTo(tcpMultiaddr(provider));
+      expect(provider.networkAdmission.getRetryableProbeBackoff(restarted.peerId))
+        .toMatchObject({ kind: 'transient', retryAfterMs: expect.any(Number) });
+      expect(provider.networkAdmission.isAcceptedPeer(restarted.peerId)).toBe(false);
+      await provider.connectTo(tcpMultiaddr(restarted));
+      expect(provider.networkAdmission.isAcceptedPeer(restarted.peerId)).toBe(true);
+      expect(provider.networkAdmission.getRetryableProbeBackoff(restarted.peerId)).toBeUndefined();
+    } finally {
+      releaseStartupProjection();
+    }
     await restarted.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
 
     expect(restarted.readRfc64AppliedCatalogHeadV1({

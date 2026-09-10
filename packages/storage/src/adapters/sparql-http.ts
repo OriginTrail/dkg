@@ -96,6 +96,8 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+import { ManagedReadRecoveryCoordinatorV1 } from
+  '../managed-read-recovery-coordinator.js';
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
@@ -227,7 +229,8 @@ export interface SparqlHttpStoreOptions {
    * closed instead of failing boot; it never grants managed guarantees.
    */
   managedOxigraph?: boolean;
-  /** Runtime-only recovery hook invoked when the HTTP client deadline fires. */
+  /** Runtime-only recovery hook for a client deadline, including a cancelled
+   * managed read reaching its retained deadline with server work unconfirmed. */
   onClientTimeout?: (operation: string) => void;
   /** Runtime-only managed-server state used to classify restart collateral. */
   getRecoveryState?: () => SparqlHttpRecoveryState;
@@ -291,6 +294,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
   private readonly workLifecycle = new AbortableStoreWorkLifecycle();
+  private readonly managedReadRecovery: ManagedReadRecoveryCoordinatorV1;
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -333,6 +337,12 @@ export class SparqlHttpStore implements TripleStore {
       DEFAULT_SLOW_QUERY_SAMPLE_RATE,
     );
     this.onSlowQuery = options.onSlowQuery;
+    this.managedReadRecovery = new ManagedReadRecoveryCoordinatorV1({
+      enabled: this.managedOxigraph,
+      now: this.now,
+      readRecoveryState: () => this.readRecoveryState(),
+      recover: (operation) => this.notifyClientTimeout(operation),
+    });
     // Content-Type is set per-request by the query/mutation transports (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
     // headers (e.g. Authorization) belong here.
@@ -513,9 +523,14 @@ export class SparqlHttpStore implements TripleStore {
     // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
     // SPARQL protocol prescribes.
     const timeoutSignal = AbortSignal.timeout(this.timeout);
+    const deadline = this.now() + this.timeout;
+    const recoveryToken = this.managedReadRecovery.begin(recoveryAtStart);
     const signalScope = composeAbortSignals(options?.signal, timeoutSignal);
     const signal = signalScope.signal ?? timeoutSignal;
+    let dispatched = false;
     try {
+      throwIfAborted(signal);
+      dispatched = true;
       const response = await fetch(this.queryEndpoint, {
         method: 'POST',
         headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
@@ -542,6 +557,12 @@ export class SparqlHttpStore implements TripleStore {
           timeoutMs: this.timeout,
           cause: error,
         });
+      }
+      if (dispatched && signal.aborted) {
+        // Closing the HTTP connection does not cancel Oxigraph 0.5
+        // evaluation. Hand the dispatched read to the lifecycle-owned
+        // retained-deadline coordinator instead of extending the caller wait.
+        this.managedReadRecovery.retain(operation, deadline, recoveryToken);
       }
       if (this.recoveryInterrupted(recoveryAtStart)) {
         throw this.recoveryError(storeOperation, 'indeterminate', error);
@@ -1238,6 +1259,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async close(): Promise<void> {
+    this.managedReadRecovery.close();
     // A managed endpoint is stopped immediately after store.close(). The
     // lifecycle owns one complete generation, aborting and draining every
     // operation admitted before close while rejecting work attempted during
