@@ -59,17 +59,16 @@ describe.each([
     })).toBe(CURATOR);
   });
 
-  it.each([
-    { selectedAuthor: { kind: 'address', agentAddress: MEMBER } },
-    { selectedAuthor: { kind: 'malformed', displayValue: '[object Object]' } },
-    { selectedAuthor: { kind: 'address', agentAddress: MEMBER }, selectedAuthorAgentAddress: MEMBER },
-    { selectedAuthor: { kind: 'address', agentAddress: MEMBER }, selectedAuthorAgentAddress: OTHER },
-  ])('rejects internal normalized selectors before querying: %j', async (options) => {
-    const store = { query: vi.fn().mockRejectedValue(new Error('unsupported selectors must not query')) };
+  it('adapts only declared legacy fields without interpreting private selector names', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
     await expect(resolveAuthor(store, {
-      contextGraphId: CG, name: NAME, ...options,
-    } as never)).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
-    expect(store.query).not.toHaveBeenCalled();
+      contextGraphId: CG,
+      name: NAME,
+      callerAgentAddress: CURATOR,
+      selectedAuthor: { kind: 'address', agentAddress: MEMBER },
+      residentSelection: { kind: 'address', agentAddress: MEMBER },
+    } as never)).resolves.toBe(CURATOR);
   });
 });
 

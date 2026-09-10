@@ -1,4 +1,3 @@
-import { PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE } from '@origintrail-official/dkg-core';
 import {
   resolveResidentFinalizedAssertionAuthor,
   type AssertionAuthorQueryStore,
@@ -26,14 +25,6 @@ export async function resolveFinalizedAssertionAuthor(
   store: AssertionAuthorQueryStore,
   params: ResolveFinalizedAssertionAuthorParams,
 ): Promise<string | undefined> {
-  // Internal normalization artifacts are not an alternative public syntax.
-  // Reject untyped callers too, so an unsupported selector cannot be ignored.
-  if ((params as unknown as Record<string, unknown>).selectedAuthor !== undefined) {
-    throw Object.assign(
-      new Error('Use selectedAuthorAgentAddress at the public author resolver boundary'),
-      { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE },
-    );
-  }
   const { contextGraphId, name, subGraphName, callerAgentAddress, selectedAuthorAgentAddress } = params;
   return resolveResidentFinalizedAssertionAuthor(store, {
     contextGraphId, name, subGraphName, callerAgentAddress,
