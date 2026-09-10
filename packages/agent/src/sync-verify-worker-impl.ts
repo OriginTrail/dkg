@@ -3,7 +3,8 @@ import { validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, DurableBatchVerificationMode, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
-import { admitSharedMemoryMetadata, type AdmittedSharedMemoryMetadata } from './sync/shared-memory-metadata-admission.js';
+import { admitSharedMemoryMetadata } from './sync/shared-memory-metadata-admission.js';
+import { projectLegacySwmHydration, projectSwmPersistence, type LegacySwmHydration } from './sync/shared-memory-metadata-projections.js';
 import {
   selectVerifiedDurableSyncQuads,
   type DurableIntegrityVerificationMode,
@@ -114,12 +115,12 @@ function processSharedMemory(
   wsDataQuads: Quad[],
   wsMetaQuads: Quad[],
 ): SharedMemoryProcessResult {
-  return processAdmittedSharedMemory(wsDataQuads, admitSharedMemoryMetadata(wsMetaQuads, { kind: 'allGraphs' }));
+  return processAdmittedSharedMemory(wsDataQuads, projectLegacySwmHydration(admitSharedMemoryMetadata(wsMetaQuads, { kind: 'allGraphs' })));
 }
 
 function processAdmittedSharedMemory(
   wsDataQuads: Quad[],
-  admitted: AdmittedSharedMemoryMetadata,
+  admitted: LegacySwmHydration,
 ): SharedMemoryProcessResult {
   const validQuads = wsDataQuads.filter((quad) => {
     const allowed = allowedRootsForSwmDataGraph(admitted.legacyRoots, quad.graph);
@@ -366,10 +367,10 @@ function processSharedMemoryBatch(
   const admitted = admitSharedMemoryMetadata(wsMetaQuads, contextGraphId === undefined
     ? { kind: 'allGraphs' }
     : { kind: 'context', contextGraphId, registeredSubGraphNames: new Set(effectiveRegisteredSubGraphNames) });
-  const processed = processAdmittedSharedMemory(wsDataQuads, admitted);
+  const processed = processAdmittedSharedMemory(wsDataQuads, projectLegacySwmHydration(admitted));
   return {
     verifiedData: processed.validQuads,
-    verifiedMeta: admitted.metadata,
+    verifiedMeta: projectSwmPersistence(admitted),
     totalFetchedDataQuads,
     totalFetchedMetaQuads,
     droppedDataTriples: processed.dropped,

@@ -12,7 +12,9 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { admitSharedMemoryMetadata, type AdmittedSwmRecord } from './shared-memory-metadata-admission.js';
+import { admitSharedMemoryMetadata } from './shared-memory-metadata-admission.js';
+import { projectStrictSwmRecovery } from './shared-memory-metadata-projections.js';
+import type { AdmittedSwmRecord } from './shared-memory-metadata-records.js';
 import {
   formatCanonicalRdfLiteralTerm,
   parseRdfLiteralTerm,
@@ -103,27 +105,14 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
   readonly registeredSubGraphNames?: readonly string[];
   readonly excludedSubGraphNames?: readonly string[];
 }): GraphScopedSwmRecoveryDescriptor[] {
-  const allowedMetaGraphs = allowedWorkspaceMetaGraphs(
-    params.contextGraphId,
-    params.registeredSubGraphNames,
-    params.excludedSubGraphNames,
-  );
-  // Broad shape admission is explicit here; descriptor scope validation below
-  // retains the existing failure for a head outside the caller's allowed lanes.
-  const admitted = admitSharedMemoryMetadata(params.metaQuads, { kind: 'allGraphs' });
-  for (const head of admitted.rejectedHeads) {
-    if (!allowedMetaGraphs.has(head.metaGraph)) {
-      throw new Error(`Graph-scoped SWM head ${head.subject} is in an unregistered metadata graph ${head.metaGraph}`);
-    }
-    throw new Error(`Graph-scoped SWM head ${head.subject} has a non-canonical or mismatched kaUal`);
-  }
+  const excluded = new Set(params.excludedSubGraphNames ?? []);
+  const admitted = projectStrictSwmRecovery(admitSharedMemoryMetadata(params.metaQuads, {
+    kind: 'context', contextGraphId: params.contextGraphId,
+    registeredSubGraphNames: new Set((params.registeredSubGraphNames ?? []).filter(name => !excluded.has(name))),
+  }));
   const descriptors: GraphScopedSwmRecoveryDescriptor[] = [];
 
   for (const { rows: headRows, metaGraph, subject: headSubject } of admitted.heads) {
-    if (!allowedMetaGraphs.has(metaGraph)) {
-      throw new Error(`Graph-scoped SWM head ${headSubject} is in an unregistered metadata graph ${metaGraph}`);
-    }
-
     const kaUalFromHead = headSubject.slice(0, -HEAD_SUFFIX.length);
     const scopeVersion = requireSafeInteger(headRows, CONTENT_SCOPE_VERSION, 'contentScopeVersion');
     if (scopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
@@ -627,21 +616,6 @@ function validateOperationRows(params: {
       throw new Error(`Graph-scoped SWM operation ${params.operationSubject} is not graph-local`);
     }
   }
-}
-
-function allowedWorkspaceMetaGraphs(
-  contextGraphId: string,
-  registeredSubGraphNames: readonly string[] | undefined,
-  excludedSubGraphNames: readonly string[] | undefined,
-): Set<string> {
-  const prefix = `did:dkg:context-graph:${contextGraphId}`;
-  const allowed = new Set<string>([`${prefix}/_shared_memory_meta`]);
-  const excluded = new Set(excludedSubGraphNames ?? []);
-  for (const name of registeredSubGraphNames ?? []) {
-    if (excluded.has(name) || !validateSubGraphName(name).valid) continue;
-    allowed.add(`${prefix}/${name}/_shared_memory_meta`);
-  }
-  return allowed;
 }
 
 function subGraphForMetaGraph(contextGraphId: string, metaGraph: string): string | undefined {

@@ -1,4 +1,4 @@
-import { emitSwmRecord, swmOperationSubject, SWM_WORKSPACE_OPERATION } from './swm-metadata-schema.js';
+import { emitLegacySwmOperation, emitGraphSwmOperationHeader, emitSwmOwnership, swmOperationSubject, SWM_WORKSPACE_OPERATION } from './swm-metadata-schema.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {
@@ -1082,7 +1082,7 @@ export function generateShareMetadata(
   meta: ShareMetadata,
   swmMetaGraph: string,
 ): Quad[] {
-  return emitSwmRecord('legacyOperationV1', swmOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
+  return emitLegacySwmOperation(swmOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
     type: SWM_WORKSPACE_OPERATION,
     contextGraphId: lit(meta.contextGraphId), shareOperationId: lit(meta.shareOperationId),
     publisherPeerId: lit(meta.publisherPeerId),
@@ -1153,7 +1153,7 @@ export function generateKnowledgeAssetShareMetadata(
   ) {
     throw new Error('Graph-scoped KA share has an invalid access-policy peer envelope');
   }
-  return emitSwmRecord('graphOperationV2', swmOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
+  return emitGraphSwmOperationHeader(swmOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
     type: SWM_WORKSPACE_OPERATION,
     contextGraphId: lit(meta.contextGraphId), shareOperationId: lit(meta.shareOperationId),
     contentScopeVersion: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), kaUal: scope.ual,
@@ -1176,7 +1176,7 @@ export function generateOwnershipQuads(
   rootEntities: { rootEntity: string; creatorPeerId: string }[],
   swmMetaGraph: string,
 ): Quad[] {
-  return rootEntities.flatMap((entry) => emitSwmRecord('ownershipV1', entry.rootEntity, swmMetaGraph, {
+  return rootEntities.flatMap((entry) => emitSwmOwnership(entry.rootEntity, swmMetaGraph, {
     workspaceOwner: lit(entry.creatorPeerId),
   }));
 }

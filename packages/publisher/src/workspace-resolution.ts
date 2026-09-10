@@ -1,5 +1,5 @@
 import {
-  emitSwmRecord, SWM_PREDICATES,
+  emitSwmHead, emitSwmPublicSlice, emitGraphSwmSnapshotFragment, SWM_PREDICATES,
   swmOperationSubject as workspaceOperationSubject,
   swmKnowledgeAssetHeadSubject as workspaceKnowledgeAssetHeadSubject,
   swmPublicSliceSubject as workspaceOperationPublicSliceSubject,
@@ -597,7 +597,7 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
     { graph: metaGraph, subject },
     workspaceHeadStoreOptions(params.queryOptions, 'deleteByPattern'),
   );
-  const rows = emitSwmRecord('headV2', subject, metaGraph, {
+  const rows = emitSwmHead(subject, metaGraph, {
     contentScopeVersion: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), kaUal: scope.ual,
     assertionVersion: intLit(BigInt(scope.assertionVersion)), assertionGraph,
     shareOperationId: lit(params.shareOperationId),
@@ -716,7 +716,7 @@ export async function storeWorkspaceOperationPublicQuads(params: {
         await params.store.insert(rootQuads.map((quad) => ({ ...quad, graph: snapshotGraph! })));
       }
     }
-    snapshotQuads.push(...emitSwmRecord('publicSliceV1', subject, workspaceMetaGraph, {
+    snapshotQuads.push(...emitSwmPublicSlice(subject, workspaceMetaGraph, {
       contextGraphId: lit(params.contextGraphId), shareOperationId: lit(params.shareOperationId),
       publicSliceRootEntity: root, publicQuadsDigest: lit(digest), publicQuadsCount: intLit(rootQuads.length),
       publisherPeerId: lit(publisherPeerId),
@@ -803,7 +803,7 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
     },
     workspaceMetaGraph,
   );
-  metadata.push(...emitSwmRecord('graphOperationV2', operationSubject, workspaceMetaGraph, {
+  metadata.push(...emitGraphSwmSnapshotFragment(operationSubject, workspaceMetaGraph, {
     publicQuadsDigest: lit(digest),
     ...(snapshotGraph ? { publicSnapshotGraph: snapshotGraph } : {}),
   }));
