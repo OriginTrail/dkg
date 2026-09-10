@@ -2,6 +2,7 @@ import {
   AMBIGUOUS_ASSERTION_AUTHOR_CODE,
   ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
   ASSERTION_SEAL_PREDICATES,
+  PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   assertSafeIri,
   contextGraphAssertionQueryBounds,
   contextGraphMetaUri,
@@ -10,6 +11,7 @@ import {
   parseGraphScopedAssertionSealCandidate,
   validateAssertionName,
 } from '@origintrail-official/dkg-core';
+import { readResidentAuthorSelection } from './publish-author-selection.js';
 
 type SealQuad = { subject: string; predicate: string; object: string };
 
@@ -58,6 +60,8 @@ export interface ResolveFinalizedAssertionAuthorParams {
    * changes the caller identity used for CG registration / curator stamping.
    */
   selectedAuthor?: ResidentAssertionAuthorSelection;
+  /** @deprecated Use selectedAuthor. Supplying both forms is rejected. */
+  selectedAuthorAgentAddress?: string;
 }
 
 /**
@@ -68,7 +72,7 @@ export interface ResolveFinalizedAssertionAuthorParams {
  * coordinate helpers it depends on.
  *
  * Resolution order:
- *   0. if `selectedAuthorAgentAddress` names a resident candidate → that candidate
+ *   0. if `selectedAuthor` (or its legacy alias) names a resident candidate → that candidate
  *      (GH#1786); if it names none → throw `ASSERTION_AUTHOR_NOT_RESIDENT`. An
  *      explicit selection is never silently ignored, and it outranks rule 1;
  *   1. if the caller authored a KA of this name → the caller's own (stored-case)
@@ -90,9 +94,18 @@ export async function resolveFinalizedAssertionAuthor(
     name,
     subGraphName,
     callerAgentAddress,
-    selectedAuthor,
+    selectedAuthor: normalizedSelection,
+    selectedAuthorAgentAddress,
   }: ResolveFinalizedAssertionAuthorParams,
 ): Promise<string | undefined> {
+  if (normalizedSelection !== undefined && selectedAuthorAgentAddress !== undefined) {
+    throw Object.assign(
+      new Error('Use either selectedAuthor or the deprecated selectedAuthorAgentAddress, not both'),
+      { code: PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE },
+    );
+  }
+  const selectedAuthor = normalizedSelection !== undefined
+    ? normalizedSelection : readResidentAuthorSelection(selectedAuthorAgentAddress);
   if (!validateAssertionName(name).valid) return undefined;
   const metaGraph = assertSafeIri(contextGraphMetaUri(contextGraphId));
   // Bound the query by the canonical assertion-coordinate grammar (the core

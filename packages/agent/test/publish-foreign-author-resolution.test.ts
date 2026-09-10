@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
+import { resolveFinalizedAssertionAuthor as publishedResolveAuthor } from '@origintrail-official/dkg-agent/dist/finalized-assertion-author.js';
+import { resolveFinalizedAssertionAuthor as sourceResolveAuthor } from '../src/finalized-assertion-author.js';
 import {
   buildAssertionSealQuads,
   contextGraphAssertionUri,
@@ -9,6 +11,54 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { CG, MEMBER, CURATOR, OTHER, NAME, KA_UAL, RESERVED_KA_ID, PUBLIC_QUAD, MERKLE, sealAt, sealFor, stubAgent } from './_helpers/finalized-author.js';
+
+describe.each([
+  ['source', sourceResolveAuthor],
+  ['published deep subpath', publishedResolveAuthor],
+] as const)('%s finalized author resolver compatibility', (_entryPoint, resolveAuthor) => {
+  it.each([undefined, 'wing-a'])('honors the legacy member selector over a resident caller in scope %s', async (subGraphName) => {
+    const store = new OxigraphStore();
+    await store.insert([
+      ...sealAt(CG, CURATOR, NAME, subGraphName),
+      ...sealAt(CG, MEMBER, NAME, subGraphName),
+    ]);
+    expect(await resolveAuthor(store, {
+      contextGraphId: CG, name: NAME, subGraphName, callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: MEMBER.toLowerCase(),
+    })).toBe(MEMBER);
+  });
+
+  it.each(['', null, false, 7, OTHER])('fails closed for a nonresident legacy selector %s', async (selector) => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
+    await expect(resolveAuthor(store, {
+      contextGraphId: CG, name: NAME, callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: selector as string,
+    })).rejects.toMatchObject({
+      code: 'ASSERTION_AUTHOR_NOT_RESIDENT',
+      candidates: expect.arrayContaining([CURATOR, MEMBER]),
+    });
+  });
+
+  it('preserves caller preference when the legacy selector is undefined', async () => {
+    const store = new OxigraphStore();
+    await store.insert([...sealFor(CURATOR), ...sealFor(MEMBER)]);
+    expect(await resolveAuthor(store, {
+      contextGraphId: CG, name: NAME, callerAgentAddress: CURATOR,
+      selectedAuthorAgentAddress: undefined,
+    })).toBe(CURATOR);
+  });
+
+  it.each([MEMBER, OTHER])('rejects both selector forms before querying, including matching addresses (%s)', async (legacyAddress) => {
+    const store = { query: vi.fn().mockRejectedValue(new Error('conflicting selectors must not query')) };
+    await expect(resolveAuthor(store, {
+      contextGraphId: CG, name: NAME,
+      selectedAuthor: { kind: 'address', agentAddress: MEMBER },
+      selectedAuthorAgentAddress: legacyAddress,
+    })).rejects.toMatchObject({ code: 'PUBLISH_AUTHOR_SELECTION_CONFLICT' });
+    expect(store.query).not.toHaveBeenCalled();
+  });
+});
 
 /**
  * GH#1778 — a curator publishes a rootless named KA authored by a MEMBER and
