@@ -5957,25 +5957,32 @@ export class SwmHostModeMethods extends DKGAgentBase {
           if (connectedPeer) connectedByPeerId.set(candidatePeerId, connectedPeer);
         }
         recoveryWorkRan = true;
-        const protocolReady = connectedPeer
-          ? await this.waitForSyncProtocol(connectedPeer, signal)
-          : false;
-        if (!isRecoveryCurrent()) return staleRecovery();
-        if (!connectedPeer || !protocolReady) {
-          providerPolicy.markUnavailable(candidatePeerId);
-        } else {
-          // Network boundary: a merely-connected peer is not necessarily
-          // admitted to this DKG network. Never send an authenticated exact
-          // request to an unverified or rejected peer.
-          const peerAdmitted = await this.ensurePeerAdmittedForRecovery(
-            candidatePeerId,
-            ctx,
-            'VM exact fetch',
-            signal,
-          );
+        try {
+          const protocolReady = connectedPeer
+            ? await this.waitForSyncProtocol(connectedPeer, signal)
+            : false;
           if (!isRecoveryCurrent()) return staleRecovery();
-          if (!peerAdmitted) providerPolicy.markUnavailable(candidatePeerId);
-          else peerId = candidatePeerId;
+          if (!connectedPeer || !protocolReady) {
+            providerPolicy.markUnavailable(candidatePeerId);
+          } else {
+            // Network boundary: a merely-connected peer is not necessarily
+            // admitted to this DKG network. Never send an authenticated exact
+            // request to an unverified or rejected peer.
+            const peerAdmitted = await this.ensurePeerAdmittedForRecovery(
+              candidatePeerId,
+              ctx,
+              'VM exact fetch',
+              signal,
+            );
+            if (!isRecoveryCurrent()) return staleRecovery();
+            if (!peerAdmitted) providerPolicy.markUnavailable(candidatePeerId);
+            else peerId = candidatePeerId;
+          }
+        } catch (error) {
+          // Protocol readiness and network admission reject on abort. A
+          // retired slot must follow the same cleanup path as a late result.
+          if (!isRecoveryCurrent()) return staleRecovery();
+          throw error;
         }
       }
       if (!peerId) {

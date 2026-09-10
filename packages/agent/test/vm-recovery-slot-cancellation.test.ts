@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { waitForPeerProtocol } from '../src/p2p/protocol-readiness.js';
 import type { ContextGraphSub, VmReconcileRotationRecord } from '../src/dkg-agent-types.js';
 import type { VmRecoverySlotRegistry } from '../src/internal/vm-recovery-slot-registry.js';
 import {
@@ -297,6 +298,26 @@ describe('exact VM recovery slot cancellation', () => {
     }
   });
 
+  it.each((['protocol', 'admission'] as const).flatMap(stage =>
+    [new Error('transport failed'), new DOMException('independent operation aborted', 'AbortError')]
+      .map(error => ({ stage, error })),
+  ))('preserves a live recovery failure from $stage: $error.name', async ({ stage, error }) => {
+    const localCgId = `0x0000000000000000000000000000000000000001/live-error-${stage}`;
+    const harness = await createVmRecoveryHostHarness({
+      name: `LiveBoundaryError-${stage}`, localCgId, peers: ['12D3KooWLiveBoundaryError'], targetCount: 1,
+      targetForOrdinal: ordinal => targetFor(localCgId, ordinal), onFetch: () => 'clean-absent',
+    });
+    const host = harness.internals as CancellationHost;
+    const reject = async () => { throw error; };
+    if (stage === 'protocol') host.waitForSyncProtocol = reject;
+    else host.ensurePeerAdmittedForRecovery = reject;
+    try {
+      await expect(harness.run()).rejects.toBe(error);
+      expect(host.vmReconcileLifecycleController.signal.aborted).toBe(false);
+      expect(harness.fetched).toHaveLength(0);
+    } finally { await harness.agent.stop().catch(() => undefined); }
+  });
+
   it.each(cases)('$invalidation cancels a pending $stage boundary and releases its capacity', async ({ stage, invalidation }) => {
     const localCgId = `0x0000000000000000000000000000000000000001/${stage}-${invalidation}`;
     const peer = '12D3KooWSlotCancellationPeer';
@@ -374,13 +395,21 @@ describe('exact VM recovery slot cancellation', () => {
         options?.signal?.throwIfAborted();
       };
     }
-    if (stage === 'protocol') host.waitForSyncProtocol = async (_peer, signal) => {
-      await wait(signal);
-      return !signal?.aborted;
+    if (stage === 'protocol') host.waitForSyncProtocol = async (remotePeer, signal) => {
+      boundarySignal = signal;
+      // Exercise the production readiness wait, including its throwing abort
+      // path while waiting for identify to advertise the required protocol.
+      return waitForPeerProtocol({
+        get: async () => {
+          markEntered();
+          return { protocols: [] };
+        },
+      }, remotePeer, '/dkg/test/exact-sync', 2, 60_000, signal);
     };
     if (stage === 'admission') host.ensurePeerAdmittedForRecovery = async (_peer, _ctx, _operation, signal) => {
       await wait(signal);
-      return !signal?.aborted;
+      signal?.throwIfAborted();
+      return true;
     };
     const reconcile = vi.spyOn(host, 'reconcileChainOrdinal');
     const protocol = vi.spyOn(host, 'waitForSyncProtocol');
@@ -410,7 +439,8 @@ describe('exact VM recovery slot cancellation', () => {
       if (stage !== 'transport') expect(harness.fetched).toHaveLength(0);
     } finally {
       releaseWait();
-      await recovery;
+      host.vmReconcileLifecycleController.abort();
+      await recovery.catch(() => undefined);
       restoreCapacity();
       await harness.agent.stop().catch(() => undefined);
     }
