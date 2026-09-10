@@ -54,6 +54,17 @@
     "command": "resolve"
   },
   {
+    "pattern": "packages/agent/devnet/rfc64-remote-canary/*.test.mjs",
+    "lane": "devnet",
+    "reason": "Remote canary contract tests are explicit operator tooling with a dedicated package command",
+    "cadence": "manual",
+    "command": "pnpm --dir packages/agent test:rfc64-remote-canary:unit",
+    "layer": "operator certification",
+    "prerequisites": [
+      "Node.js 22 or newer"
+    ]
+  },
+  {
     "pattern": "demo/**",
     "lane": "demo",
     "reason": "Demo-local smoke tests",
