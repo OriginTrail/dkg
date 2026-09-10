@@ -40,7 +40,7 @@ describe('SQLite finalization recovery store', () => {
       await store.receive(received({ key: 'entry-1' }));
       await store.receive(received({ key: 'entry-2' }));
       await store.receive(received({ key: 'entry-3' }));
-      await store.recordAttempt('entry-1', 0, 'busy', { retryDelayMs: 1_000 });
+      await store.recordAttempt('entry-1', 0, 'busy', { mode: 'ordinary', retryDelayMs: 1_000 });
       await commitOriginalEvidence(store, 'entry-3', 0, evidence());
       await store.transition('entry-3', 0, 'SETTLED');
 
@@ -73,10 +73,12 @@ describe('SQLite finalization recovery store', () => {
         0,
         'late failure',
         {
+          mode: 'stable-failure',
           retryDelayMs: 1_000,
-          failureSignature: 'late failure',
+          failureCode: 'store-scheduler-busy',
           stableFailureThreshold: 3,
           stableFailureRetryMs: 10_000,
+          retryDeadlineAt: 60_000,
         },
       )).resolves.toEqual({ status: 'stale' });
       await expect(store.get('entry-1')).resolves.toMatchObject({
@@ -101,7 +103,9 @@ describe('SQLite finalization recovery store', () => {
       await store.receive(received());
       await commitOriginalEvidence(store, 'entry-1', 0, evidence());
       await store.transition('entry-1', 0, 'SETTLED');
-      await store.recordAttempt('entry-1', 0, 'receipt pending', { retryDelayMs: 1_000 });
+      await store.recordAttempt('entry-1', 0, 'receipt pending', {
+        mode: 'ordinary', retryDelayMs: 1_000,
+      });
 
       await expect(store.listDue(16)).resolves.toEqual([]);
       now = 2_000;
@@ -127,7 +131,9 @@ describe('SQLite finalization recovery store', () => {
         oldestDueAgeMs: 0,
       });
 
-      await store.recordAttempt('entry-1', 0, 'long backoff', { retryDelayMs: 10_000 });
+      await store.recordAttempt('entry-1', 0, 'long backoff', {
+        mode: 'ordinary', retryDelayMs: 10_000,
+      });
       expect(await store.get('entry-1')).toMatchObject({
         nextAttemptAt: 11_000,
       });
@@ -135,12 +141,16 @@ describe('SQLite finalization recovery store', () => {
 
       now = 1_500;
       await store.recordAttempt('entry-1', 0, 'duplicate without delay');
-      await store.recordAttempt('entry-1', 0, 'shorter backoff', { retryDelayMs: 100 });
+      await store.recordAttempt('entry-1', 0, 'shorter backoff', {
+        mode: 'ordinary', retryDelayMs: 100,
+      });
       expect(await store.get('entry-1')).toMatchObject({
         nextAttemptAt: 11_000,
       });
 
-      await store.recordAttempt('entry-1', 0, 'longer backoff', { retryDelayMs: 20_000 });
+      await store.recordAttempt('entry-1', 0, 'longer backoff', {
+        mode: 'ordinary', retryDelayMs: 20_000,
+      });
       expect(await store.get('entry-1')).toMatchObject({
         nextAttemptAt: 21_500,
       });
@@ -298,7 +308,9 @@ describe('SQLite finalization recovery store', () => {
       expect((await store.receive(received())).status).toBe('inserted');
       expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status).toBe('verified');
       for (let attempt = 0; attempt < 4; attempt += 1) {
-        await store.recordAttempt('entry-1', 0, 'store scheduler remained busy', { retryDelayMs: 1_000 });
+        await store.recordAttempt('entry-1', 0, 'store scheduler remained busy', {
+          mode: 'ordinary', retryDelayMs: 1_000,
+        });
       }
       expect(await store.list()).toMatchObject([{
         state: 'VERIFIED',
@@ -421,7 +433,9 @@ describe('SQLite finalization recovery store', () => {
       }))).status).toBe('inserted');
       expect((await commitOriginalEvidence(store, 'entry-1', 0, evidence())).status).toBe('verified');
       expect(await store.transition('entry-1', 0, 'SETTLED')).toBe(true);
-      await store.recordAttempt('entry-1', 0, 'old settled retry', { retryDelayMs: 1_000 });
+      await store.recordAttempt('entry-1', 0, 'old settled retry', {
+        mode: 'ordinary', retryDelayMs: 1_000,
+      });
 
       await expect(store.recordSettledPublisherUpgrade(
         'entry-1',

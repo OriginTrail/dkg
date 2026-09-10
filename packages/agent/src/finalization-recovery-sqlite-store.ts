@@ -775,7 +775,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     key: string,
     generation: number,
     lastError?: string,
-    policy: FinalizationRecoveryAttemptPolicy = {},
+    policy: FinalizationRecoveryAttemptPolicy = { mode: 'ordinary' },
   ): Promise<FinalizationRecoveryAttemptResult> {
     if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
     return this.mutate(() => {

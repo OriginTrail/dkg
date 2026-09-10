@@ -30,7 +30,6 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from '../src/finalization-graph-envelope.js';
 import {
-  FINALIZATION_RECOVERY_LIVE_RETRY_WINDOW_MS,
   FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
   FinalizationRecovery,
 } from '../src/finalization-recovery.js';
@@ -435,7 +434,7 @@ describe('graph-scoped finalization recovery admission', () => {
       [entry] = await store.list();
       expect(entry).toMatchObject({
         attemptCount: 3,
-        failureSignature: 'replay processing deferred',
+        failureSignature: 'processing-deferred',
         failureStreak: 3,
         lastError: 'replay processing deferred',
       });
@@ -463,11 +462,12 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
-  it('rejects a default-policy parked poison entry at the seven-day boundary', async () => {
+  it('caps a stable retry at the live deadline and rejects it there', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-stable-expiry-'));
     try {
       let now = 1_000;
       const store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const liveRetryWindowMs = 5_000;
       const recovery = new FinalizationRecovery(
         store,
         recoveryChain(),
@@ -477,7 +477,7 @@ describe('graph-scoped finalization recovery admission', () => {
           apply: async () => 'deferred' as const,
           replayVerified: async () => 'no-swm' as const,
         },
-        { now: () => now },
+        { now: () => now, liveRetryWindowMs },
       );
       await recovery.receive({
         rawMessage: encodeFinalizationMessage(message()),
@@ -492,8 +492,9 @@ describe('graph-scoped finalization recovery admission', () => {
       }
       const [parked] = await store.list();
       expect(parked).toMatchObject({ attemptCount: 3, failureStreak: 3 });
+      expect(parked!.nextAttemptAt).toBe(parked!.createdAt + liveRetryWindowMs);
 
-      now = parked!.createdAt + FINALIZATION_RECOVERY_LIVE_RETRY_WINDOW_MS;
+      now = parked!.nextAttemptAt!;
       await expect(recovery.processDueBatch(16)).resolves.toBe(1);
       expect(await store.list()).toMatchObject([{
         state: 'REJECTED',
@@ -991,12 +992,20 @@ describe('graph-scoped finalization recovery admission', () => {
       expect(preparedSources).toEqual(['12D3KooWRelayA', '12D3KooWRelayB']);
       expect(receiptCalls).toBe(1);
 
+      // A and B plus 4,095 new relay identities exceed the production 4,096
+      // bound. The oldest failed identity (A) must then be probed again.
+      for (let relay = 0; relay < 4_095; relay += 1) {
+        await recovery.processLive({
+          ...baseInput,
+          sourcePeerId: `12D3KooWRelay-${relay}`,
+        });
+      }
+      await recovery.processLive({ ...baseInput, sourcePeerId: '12D3KooWRelayA' });
+      expect(preparedSources).toHaveLength(4_098);
+      expect(preparedSources.at(-1)).toBe('12D3KooWRelayA');
+
       await recovery.processLive({ ...baseInput, sourcePeerId: '12D3KooWPublisher' });
-      expect(preparedSources).toEqual([
-        '12D3KooWRelayA',
-        '12D3KooWRelayB',
-        '12D3KooWPublisher',
-      ]);
+      expect(preparedSources.at(-1)).toBe('12D3KooWPublisher');
       expect(await store.list()).toMatchObject([{
         trustedPublisherPeerId: '12D3KooWPublisher',
         attemptCount: 1,
@@ -1028,7 +1037,9 @@ describe('graph-scoped finalization recovery admission', () => {
         sourcePeerId: '12D3KooWPublisher',
         candidate: parsedMessage(),
       });
-      await store.recordAttempt(entry!.key, entry!.generation, 'worker busy', { retryDelayMs: 60_000 });
+      await store.recordAttempt(entry!.key, entry!.generation, 'worker busy', {
+        mode: 'ordinary', retryDelayMs: 60_000,
+      });
 
       await expect(recovery.replayMatching({
         chainId: chain.chainId,

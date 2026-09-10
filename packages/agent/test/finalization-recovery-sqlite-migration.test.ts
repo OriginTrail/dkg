@@ -122,6 +122,20 @@ async function makeDatabaseV1(databasePath: string): Promise<void> {
   legacy.close();
 }
 
+async function makeDatabaseV2(databasePath: string): Promise<void> {
+  const initial = await openSqliteFinalizationRecoveryStore(dirname(databasePath));
+  await initial.receive(received());
+  await initial.close();
+
+  const v2 = new DatabaseSync(databasePath);
+  v2.exec(`
+    ALTER TABLE finalization_inbox_v1 DROP COLUMN failure_signature;
+    ALTER TABLE finalization_inbox_v1 DROP COLUMN failure_streak;
+    PRAGMA user_version = 2;
+  `);
+  v2.close();
+}
+
 describe('SQLite finalization recovery migration and crash recovery', () => {
   it('migrates a v1 inbox in place without losing accepted entries', async () => {
     const directory = await temporaryDirectory();
@@ -167,6 +181,28 @@ describe('SQLite finalization recovery migration and crash recovery', () => {
       ).get()?.name).toBe('failure_streak');
       schema.close();
       await recovered.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('migrates a clean persisted v2 inbox and defaults its failure streak', async () => {
+    const directory = await temporaryDirectory();
+    const databasePath = join(directory, FINALIZATION_INBOX_DATABASE_FILENAME);
+    try {
+      await makeDatabaseV2(databasePath);
+      expect((await readFile(databasePath)).readUInt32BE(60)).toBe(2);
+
+      const migrated = await openSqliteFinalizationRecoveryStore(directory);
+      expect(await migrated.list()).toMatchObject([{
+        key: 'entry-1',
+        state: 'RECEIVED',
+        failureStreak: 0,
+      }]);
+      const schema = new DatabaseSync(databasePath, { readOnly: true });
+      expect(schema.prepare('PRAGMA user_version').get()?.user_version).toBe(3);
+      schema.close();
+      await migrated.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

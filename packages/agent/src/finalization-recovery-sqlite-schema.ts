@@ -237,7 +237,11 @@ function verifySchema(
   }
   database.prepare('SELECT * FROM finalization_inbox_v1')
     .all()
-    .forEach(finalizationRecoveryRowToEntry);
+    .forEach((row) => finalizationRecoveryRowToEntry(
+      userVersion < USER_VERSION
+        ? { ...row, failure_signature: null, failure_streak: 0 }
+        : row,
+    ));
 }
 
 function applyRuntimePragmas(database: DatabaseSync): void {
@@ -301,13 +305,36 @@ function initializeFresh(database: DatabaseSync, path: string): void {
   fsyncOwnedSqliteFileAndDirectoryV1(path);
 }
 
-function migrateLegacyV1(database: DatabaseSync, databasePath: string): void {
+interface FinalizationSchemaMigration {
+  readonly sourceVersion: number;
+  readonly targetVersion: number;
+  readonly ddl: string;
+}
+
+const SCHEMA_MIGRATIONS: ReadonlyMap<number, FinalizationSchemaMigration> = new Map([
+  [LEGACY_USER_VERSION, {
+    sourceVersion: LEGACY_USER_VERSION,
+    targetVersion: DEFERRED_SPOOL_USER_VERSION,
+    ddl: PENDING_DDL_V2,
+  }],
+  [DEFERRED_SPOOL_USER_VERSION, {
+    sourceVersion: DEFERRED_SPOOL_USER_VERSION,
+    targetVersion: USER_VERSION,
+    ddl: FAILURE_STREAK_MIGRATION_V3,
+  }],
+]);
+
+function runDurableMigration(
+  database: DatabaseSync,
+  databasePath: string,
+  migration: FinalizationSchemaMigration,
+): void {
   let transactionOpen = false;
   try {
     database.exec('BEGIN IMMEDIATE');
     transactionOpen = true;
-    database.exec(PENDING_DDL_V2);
-    database.exec(`PRAGMA user_version = ${DEFERRED_SPOOL_USER_VERSION}`);
+    database.exec(migration.ddl);
+    database.exec(`PRAGMA user_version = ${migration.targetVersion}`);
     database.exec('COMMIT');
     transactionOpen = false;
   } catch (error) {
@@ -320,35 +347,24 @@ function migrateLegacyV1(database: DatabaseSync, databasePath: string): void {
   if (String(journalMode?.journal_mode).toLowerCase() === 'wal') {
     const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
     if (Number(checkpoint?.busy ?? 1) !== 0) {
-      throw new Error('Finalization inbox v1 migration WAL checkpoint remained busy');
+      throw new Error(
+        `Finalization inbox v${migration.sourceVersion} migration WAL checkpoint remained busy`,
+      );
     }
   }
   fsyncOwnedSqliteFileAndDirectoryV1(databasePath);
 }
 
-function migrateDeferredSpoolV2(database: DatabaseSync, databasePath: string): void {
-  let transactionOpen = false;
-  try {
-    database.exec('BEGIN IMMEDIATE');
-    transactionOpen = true;
-    database.exec(FAILURE_STREAK_MIGRATION_V3);
-    database.exec(`PRAGMA user_version = ${USER_VERSION}`);
-    database.exec('COMMIT');
-    transactionOpen = false;
-  } catch (error) {
-    if (transactionOpen) {
-      try { database.exec('ROLLBACK'); } catch { /* retain migration failure */ }
-    }
-    throw error;
+function migrateFromVersion(
+  database: DatabaseSync,
+  databasePath: string,
+  sourceVersion: number,
+): void {
+  const migration = SCHEMA_MIGRATIONS.get(sourceVersion);
+  if (!migration) {
+    throw new Error(`Finalization inbox has no migration from version ${sourceVersion}`);
   }
-  const journalMode = database.prepare('PRAGMA journal_mode').get();
-  if (String(journalMode?.journal_mode).toLowerCase() === 'wal') {
-    const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
-    if (Number(checkpoint?.busy ?? 1) !== 0) {
-      throw new Error('Finalization inbox v2 migration WAL checkpoint remained busy');
-    }
-  }
-  fsyncOwnedSqliteFileAndDirectoryV1(databasePath);
+  runDurableMigration(database, databasePath, migration);
 }
 
 export async function openFinalizationRecoveryDatabase(
@@ -396,15 +412,15 @@ export async function openFinalizationRecoveryDatabase(
         expectedSchema(sqlite.DatabaseSync, DDL_V1),
         LEGACY_USER_VERSION,
       );
-      migrateLegacyV1(database, databasePath);
-      migrateDeferredSpoolV2(database, databasePath);
+      migrateFromVersion(database, databasePath, LEGACY_USER_VERSION);
+      migrateFromVersion(database, databasePath, DEFERRED_SPOOL_USER_VERSION);
     } else if (recoveredVersion === DEFERRED_SPOOL_USER_VERSION) {
       verifySchema(
         database,
         expectedSchema(sqlite.DatabaseSync, DDL_V2),
         DEFERRED_SPOOL_USER_VERSION,
       );
-      migrateDeferredSpoolV2(database, databasePath);
+      migrateFromVersion(database, databasePath, DEFERRED_SPOOL_USER_VERSION);
     } else if (recoveredVersion !== USER_VERSION) {
       throw new Error('Finalization inbox has a foreign or unsupported recovered version');
     }

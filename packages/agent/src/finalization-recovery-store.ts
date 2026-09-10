@@ -160,14 +160,31 @@ export type FinalizationRecoverySettledPublisherUpgradeResult =
   | { status: 'recorded' | 'existing'; entry: FinalizationRecoveryEntry }
   | { status: 'conflict' | 'missing' | 'closed' };
 
-export interface FinalizationRecoveryAttemptPolicy {
-  retryDelayMs?: number;
-  failureSignature?: string;
-  stableFailureThreshold?: number;
-  stableFailureRetryMs?: number;
-  /** Autonomous poison entries must be reconsidered no later than this time. */
-  retryDeadlineAt?: number;
-}
+export type FinalizationRecoveryFailureCode =
+  | 'processing-deferred'
+  | 'store-scheduler-busy'
+  | 'background-chain-unavailable'
+  | 'background-binding-pending'
+  | 'background-no-match'
+  | 'background-replay-failed'
+  | 'receipt-pending'
+  | 'settled-upgrade-deferred'
+  | 'settled-reorg-deferred';
+
+export type FinalizationRecoveryAttemptPolicy =
+  | {
+      mode: 'ordinary';
+      retryDelayMs?: number;
+    }
+  | {
+      mode: 'stable-failure';
+      retryDelayMs: number;
+      failureCode: FinalizationRecoveryFailureCode;
+      stableFailureThreshold: number;
+      stableFailureRetryMs: number;
+      /** A stable live failure must be reconsidered no later than this time. */
+      retryDeadlineAt: number;
+    };
 
 export type FinalizationRecoveryAttemptResult =
   | { status: 'updated'; entry: FinalizationRecoveryEntry }
@@ -188,7 +205,9 @@ export function planFinalizationRecoveryAttempt(
   policy: FinalizationRecoveryAttemptPolicy,
   now: number,
 ): FinalizationRecoveryAttemptUpdate {
-  const failureSignature = policy.failureSignature;
+  const failureSignature = policy.mode === 'stable-failure'
+    ? policy.failureCode
+    : undefined;
   const failureStreak = failureSignature === undefined
     ? 0
     : current.failureSignature === failureSignature
@@ -196,16 +215,22 @@ export function planFinalizationRecoveryAttempt(
       : 1;
   let delayMs = policy.retryDelayMs;
   if (
-    delayMs !== undefined
-    && failureSignature !== undefined
-    && failureStreak >= (policy.stableFailureThreshold ?? Number.POSITIVE_INFINITY)
+    policy.mode === 'stable-failure'
+    && failureStreak >= policy.stableFailureThreshold
   ) {
-    delayMs = Math.max(delayMs, policy.stableFailureRetryMs ?? 0);
+    delayMs = Math.max(policy.retryDelayMs, policy.stableFailureRetryMs);
   }
   let nextAttemptAt = delayMs === undefined
     ? current.nextAttemptAt ?? null
     : Math.max(current.nextAttemptAt ?? 0, now + Math.max(0, delayMs));
-  if (policy.retryDeadlineAt !== undefined && nextAttemptAt !== null) {
+  if (
+    policy.mode === 'stable-failure'
+    && failureStreak >= policy.stableFailureThreshold
+    && nextAttemptAt !== null
+  ) {
+    // Only stable failures are capped. Once the deadline has elapsed this
+    // immediate due time is safe because replay's next pass terminally rejects
+    // the live entry. Ordinary and SETTLED retries retain their future backoff.
     nextAttemptAt = Math.min(nextAttemptAt, Math.max(now, policy.retryDeadlineAt));
   }
   return {

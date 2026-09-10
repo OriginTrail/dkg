@@ -141,11 +141,7 @@ export function finalizationRecoveryRowToEntry(
     ...(optionalString(row.failure_signature)
       ? { failureSignature: String(row.failure_signature) }
       : {}),
-    // Historical v1/v2 rows are decoded once during exact-schema verification
-    // immediately before the v3 migration adds the durable streak columns.
-    failureStreak: row.failure_streak === undefined
-      ? 0
-      : asSafeInteger(row.failure_streak, 'failure_streak'),
+    failureStreak: asSafeInteger(row.failure_streak, 'failure_streak'),
     ...(row.next_attempt_at === null
       ? {}
       : { nextAttemptAt: asSafeInteger(row.next_attempt_at, 'next_attempt_at') }),

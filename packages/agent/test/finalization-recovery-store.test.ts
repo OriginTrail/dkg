@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  planFinalizationRecoveryAttempt,
   planFinalizationRecoveryVerifiedEvidenceTransition,
   type FinalizationRecoveryEntry,
   type FinalizationRecoveryVerifiedEvidenceCommit,
@@ -9,6 +10,10 @@ import {
   TX_HASH,
   evidence,
 } from './finalization-recovery-sqlite-test-helpers.js';
+import {
+  finalizationEnvelopeSha256,
+  finalizationRecoveryRowToEntry,
+} from '../src/finalization-recovery-sqlite-codec.js';
 
 function entry(
   overrides: Partial<FinalizationRecoveryEntry> = {},
@@ -184,5 +189,124 @@ describe('finalization recovery verified-evidence transition planner', () => {
         placement: 'original',
       },
     ).status).toBe('update');
+  });
+});
+
+describe('finalization recovery attempt planner', () => {
+  const stablePolicy = {
+    mode: 'stable-failure' as const,
+    retryDelayMs: 100,
+    failureCode: 'processing-deferred' as const,
+    stableFailureThreshold: 3,
+    stableFailureRetryMs: 10_000,
+    retryDeadlineAt: 20_000,
+  };
+
+  it('keys consecutive failures by code rather than diagnostic wording', () => {
+    const first = planFinalizationRecoveryAttempt(
+      entry(),
+      'first wording',
+      stablePolicy,
+      1_000,
+    );
+    const second = planFinalizationRecoveryAttempt(
+      entry({ ...first }),
+      'equivalent wording after an edit',
+      stablePolicy,
+      1_100,
+    );
+    const changed = planFinalizationRecoveryAttempt(
+      entry({ ...second }),
+      'unrelated transient failure',
+      {
+        ...stablePolicy,
+        failureCode: 'store-scheduler-busy',
+      },
+      1_200,
+    );
+
+    expect(first).toMatchObject({ failureSignature: 'processing-deferred', failureStreak: 1 });
+    expect(second).toMatchObject({
+      lastError: 'equivalent wording after an edit',
+      failureSignature: 'processing-deferred',
+      failureStreak: 2,
+    });
+    expect(changed).toMatchObject({
+      failureSignature: 'store-scheduler-busy',
+      failureStreak: 1,
+      nextAttemptAt: 1_300,
+    });
+  });
+
+  it('caps only a terminally actionable stable failure at its deadline', () => {
+    const belowThreshold = planFinalizationRecoveryAttempt(
+      entry({ createdAt: 1_000 }),
+      'old but not stable',
+      { ...stablePolicy, retryDeadlineAt: 2_000 },
+      10_000,
+    );
+    expect(belowThreshold.nextAttemptAt).toBe(10_100);
+
+    const stable = planFinalizationRecoveryAttempt(
+      entry({
+        failureSignature: 'processing-deferred',
+        failureStreak: 2,
+      }),
+      'still deferred',
+      {
+        ...stablePolicy,
+        stableFailureRetryMs: 6_000,
+        retryDeadlineAt: 2_000,
+      },
+      1_900,
+    );
+    expect(stable).toMatchObject({ failureStreak: 3, nextAttemptAt: 2_000 });
+  });
+
+  it('preserves future backoff for settled retries after the live window', () => {
+    expect(planFinalizationRecoveryAttempt(
+      entry({ state: 'SETTLED', createdAt: 1_000 }),
+      'receipt still pending',
+      { mode: 'ordinary', retryDelayMs: 1_000 },
+      10_000,
+    )).toMatchObject({
+      failureSignature: null,
+      failureStreak: 0,
+      nextAttemptAt: 11_000,
+    });
+  });
+
+  it('rejects a current-schema row with a missing failure streak', () => {
+    expect(() => finalizationRecoveryRowToEntry({
+      key: 'entry-1',
+      state: 'RECEIVED',
+      chain_id: 'base:84532',
+      context_graph_id: 'graph',
+      source_peer_id: null,
+      trusted_publisher_peer_id: null,
+      publisher_upgrade_pending: 0,
+      ual: entry().ual,
+      tx_hash: TX_HASH,
+      assertion_version: '1',
+      merkle_root: `0x${'01'.repeat(32)}`,
+      ka_id: '7',
+      batch_id: '7',
+      target_context_graph_id: null,
+      block_number: null,
+      block_hash: null,
+      tx_index: null,
+      publisher_address: null,
+      author_address: null,
+      envelope_sha256: finalizationEnvelopeSha256(RAW),
+      raw_envelope: RAW,
+      verified_evidence_json: null,
+      generation: 0,
+      attempt_count: 0,
+      failure_signature: null,
+      next_attempt_at: null,
+      last_error: null,
+      created_at: 1_000,
+      updated_at: 1_000,
+    })).toThrow('invalid failure_streak');
   });
 });

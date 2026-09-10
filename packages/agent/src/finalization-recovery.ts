@@ -5,6 +5,7 @@ import type {
   EventFilter,
 } from '@origintrail-official/dkg-chain';
 import {
+  BoundedLruCache,
   decodeFinalizationMessage,
   getMetrics,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -21,6 +22,7 @@ import {
 import type {
   FinalizationRecoveryEntry,
   FinalizationRecoveryHealth,
+  FinalizationRecoveryFailureCode,
   FinalizationRecoverySettledPublisherUpgradeResult,
   FinalizationRecoveryStore,
 } from './finalization-recovery-store.js';
@@ -246,7 +248,9 @@ export class FinalizationRecovery<
     Promise<FinalizationRecoveryReplayOutcome>
   >();
   private readonly entryLockTails = new Map<string, Promise<void>>();
-  private readonly failedPublisherAuthorityProbes = new Map<string, true>();
+  private readonly failedPublisherAuthorityProbes = new BoundedLruCache<string, true>(
+    FAILED_PUBLISHER_AUTHORITY_PROBE_MAX_ENTRIES,
+  );
   private readonly store: FinalizationRecoveryStore | undefined;
   private readonly storeSource: FinalizationRecoveryStoreSource | undefined;
   private readonly liveRetryLimit: number;
@@ -413,6 +417,7 @@ export class FinalizationRecovery<
           if (outcome === 'deferred') {
             await this.recordDeferred(
               entry,
+              'processing-deferred',
               'finalization processing deferred',
             );
           } else {
@@ -431,6 +436,7 @@ export class FinalizationRecovery<
           );
           await this.recordDeferred(
             entry,
+            'store-scheduler-busy',
             'store scheduler remained busy',
           );
           return { status: 'handled' };
@@ -461,18 +467,7 @@ export class FinalizationRecovery<
       return {};
     }
     if (!prepared || input.sourcePeerId !== prepared.publisherPeerId) {
-      this.failedPublisherAuthorityProbes.delete(probeKey);
       this.failedPublisherAuthorityProbes.set(probeKey, true);
-      while (
-        this.failedPublisherAuthorityProbes.size
-        > FAILED_PUBLISHER_AUTHORITY_PROBE_MAX_ENTRIES
-      ) {
-        const oldest = this.failedPublisherAuthorityProbes.keys().next().value as
-          | string
-          | undefined;
-        if (oldest === undefined) break;
-        this.failedPublisherAuthorityProbes.delete(oldest);
-      }
       return { prepared };
     }
     try {
@@ -552,6 +547,7 @@ export class FinalizationRecovery<
           );
           await this.recordDeferred(
             entry,
+            'background-replay-failed',
             `background replay failed: ${reason}`,
             deferredRetryDelayMs(entry.attemptCount),
           );
@@ -624,6 +620,7 @@ export class FinalizationRecovery<
     ) {
       await this.recordDeferred(
         entry,
+        'background-chain-unavailable',
         'background replay lacks the matching chain binding capability',
         deferredRetryDelayMs(entry.attemptCount),
       );
@@ -641,6 +638,7 @@ export class FinalizationRecovery<
       ) {
         await this.recordDeferred(
           entry,
+          'background-binding-pending',
           'background replay chain binding is not available yet',
           deferredRetryDelayMs(entry.attemptCount),
         );
@@ -666,6 +664,7 @@ export class FinalizationRecovery<
       if (outcome !== 'none') return outcome;
       await this.recordDeferred(
         entry,
+        'background-no-match',
         'background replay found no canonical finalization match',
         deferredRetryDelayMs(entry.attemptCount),
       );
@@ -677,6 +676,7 @@ export class FinalizationRecovery<
       );
       await this.recordDeferred(
         entry,
+        'background-replay-failed',
         `background replay failed: ${reason}`,
         deferredRetryDelayMs(entry.attemptCount),
       );
@@ -1115,6 +1115,7 @@ export class FinalizationRecovery<
 
   async recordDeferred(
     entry: FinalizationRecoveryEntry,
+    failureCode: FinalizationRecoveryFailureCode,
     reason: string,
     retryDelayMs?: number,
   ): Promise<void> {
@@ -1126,13 +1127,16 @@ export class FinalizationRecovery<
         entry.key,
         entry.generation,
         reason,
-        {
-          retryDelayMs: ordinaryDelay,
-          failureSignature: reason,
-          stableFailureThreshold: FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
-          stableFailureRetryMs: FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
-          retryDeadlineAt: entry.createdAt + this.liveRetryWindowMs,
-        },
+        entry.state === 'SETTLED'
+          ? { mode: 'ordinary', retryDelayMs: ordinaryDelay }
+          : {
+              mode: 'stable-failure',
+              retryDelayMs: ordinaryDelay,
+              failureCode,
+              stableFailureThreshold: FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+              stableFailureRetryMs: FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
+              retryDeadlineAt: entry.createdAt + this.liveRetryWindowMs,
+            },
       );
       if (result.status === 'stale') {
         this.log.info(
@@ -1450,7 +1454,7 @@ export class FinalizationRecovery<
         entry.key,
         entry.generation,
         reason,
-        { retryDelayMs: delayMs },
+        { mode: 'ordinary', retryDelayMs: delayMs },
       );
     } catch (error) {
       this.log.warn(
@@ -1823,6 +1827,7 @@ export class FinalizationRecovery<
     if (outcome === 'deferred') {
       await this.recordDeferred(
         rearmed,
+        'settled-upgrade-deferred',
         'settled publisher upgrade recovery deferred',
         deferredRetryDelay,
       );
@@ -1881,6 +1886,7 @@ export class FinalizationRecovery<
     if (outcome === 'deferred') {
       await this.recordDeferred(
         reorged,
+        'settled-reorg-deferred',
         'settled reorg recovery deferred',
         deferredRetryDelay,
       );
@@ -1949,6 +1955,7 @@ export class FinalizationRecovery<
           } else {
             await this.recordDeferred(
               replayEntry,
+              'receipt-pending',
               `persisted receipt is ${receiptStatus}`,
               deferredRetryDelay,
             );
@@ -1989,6 +1996,7 @@ export class FinalizationRecovery<
       if (outcome === 'deferred') {
         await this.recordDeferred(
           replayEntry,
+          'processing-deferred',
           'replay processing deferred',
           deferredRetryDelay,
         );
@@ -2006,6 +2014,7 @@ export class FinalizationRecovery<
       );
       await this.recordDeferred(
         activeEntry,
+        'store-scheduler-busy',
         'replay store scheduler remained busy',
         deferredRetryDelay,
       );
