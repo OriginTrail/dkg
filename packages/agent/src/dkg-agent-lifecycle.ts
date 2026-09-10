@@ -4358,9 +4358,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ctx,
           'Random Sampling exact repair peer',
           signal,
-        ))) return false;
+        ))) throw new NetworkAdmissionRejectedError(peerId);
         await this.ensurePeerConnected(peerId, { signal });
-        return this.waitForSyncProtocol({ toString: () => peerId }, signal);
+        if (!(await this.waitForSyncProtocol(peerId, signal))) {
+          throw Object.assign(
+            new Error(`Peer ${peerId} does not advertise ${PROTOCOL_SYNC}`),
+            { code: 'SYNC_PROTOCOL_UNAVAILABLE' },
+          );
+        }
+        return true;
       },
       fetchExactKnowledgeAsset: async (
         peerId,
@@ -9112,12 +9118,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   async waitForSyncProtocol(
     this: DKGAgent,
-    pid: { toString(): string },
+    pid: string | { toString(): string },
     signal?: AbortSignal,
   ): Promise<boolean> {
+    const peer = typeof pid === 'string'
+      ? (await import('@libp2p/peer-id')).peerIdFromString(pid)
+      : pid;
     return waitForPeerProtocol(
       this.node.libp2p.peerStore as any,
-      pid,
+      peer,
       PROTOCOL_SYNC,
       SYNC_PROTOCOL_CHECK_ATTEMPTS,
       SYNC_PROTOCOL_CHECK_DELAY_MS,

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer,
+  PROTOCOL_SYNC,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   tripleContentV10,
@@ -95,7 +96,7 @@ interface RepairAgentHarness {
   ) => Promise<boolean>;
   ensurePeerConnected: (peerId: string, options: { signal: AbortSignal }) => Promise<void>;
   waitForSyncProtocol: (
-    peer: { toString(): string },
+    peer: string | { toString(): string },
     signal: AbortSignal,
   ) => Promise<boolean>;
   syncExactKnowledgeAssetsFromPeerDetailed: (
@@ -152,6 +153,25 @@ function runLifecycleRepair(
 }
 
 describe('Random Sampling proof-time exact repair', () => {
+  it('canonicalizes string peer IDs before the libp2p protocol lookup', async () => {
+    const peerId = '12D3KooWLwPkoiastt27S2SRPtdx6t8KuFXwcbHovgCkAMfkJcXx';
+    const get = vi.fn(async (peer: {
+      toString(): string;
+      type: string;
+      multihash: unknown;
+    }) => {
+      expect(peer.toString()).toBe(peerId);
+      expect(peer.type).toBe('Ed25519');
+      expect(peer.multihash).toBeDefined();
+      return { protocols: [PROTOCOL_SYNC] };
+    });
+
+    await expect(LifecycleSyncMethods.prototype.waitForSyncProtocol.call({
+      node: { libp2p: { peerStore: { get } } },
+    } as never, peerId)).resolves.toBe(true);
+    expect(get).toHaveBeenCalledOnce();
+  });
+
   it('keeps every Core eligible after a distinct graph-specific provider', async () => {
     const curatorPeer = 'peer-curator';
     const corePeers = Array.from(
@@ -261,6 +281,7 @@ describe('Random Sampling proof-time exact repair', () => {
       .toEqual({ signal: expect.any(AbortSignal) });
     expect(agentLike.waitForSyncProtocol.mock.calls[0]?.[1])
       .toBeInstanceOf(AbortSignal);
+    expect(agentLike.waitForSyncProtocol.mock.calls[0]?.[0]).toBe(peers[0]);
   });
 
   it('discovers candidate sources concurrently and tries observed providers before Cores', async () => {
