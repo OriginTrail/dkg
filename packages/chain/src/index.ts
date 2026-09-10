@@ -5,6 +5,8 @@ export {
   type ContextGraphAuthorityHistoryStore,
 } from './context-graph-authority-history.js';
 export {
+  CONTEXT_GRAPH_AUTHORITY_INDEX_CHECKPOINT_VERSION,
+  ContextGraphAuthorityIndex,
   normalizeContextGraphAuthorityIndexCheckpoint,
   reduceContextGraphAuthorityIndexPage,
   type ContextGraphAuthorityIndexCheckpoint,
@@ -14,6 +16,7 @@ export {
   type ContextGraphAuthorityIndexPageReduction,
   type ContextGraphAuthorityIndexPolicyEvent,
   type ContextGraphAuthorityIndexRosterEvent,
+  type ContextGraphAuthorityIndexScanInput,
   type ContextGraphAuthorityIndexState,
   type ContextGraphAuthorityIndexStore,
   type ContextGraphAuthorityIndexTransferEvent,

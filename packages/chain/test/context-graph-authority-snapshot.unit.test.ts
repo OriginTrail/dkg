@@ -35,11 +35,14 @@ interface AuthorityEvidence {
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly deploymentReads: Array<readonly [string, string, string]>;
   readonly readOptions: Array<Readonly<{ policy?: string }>>;
+  readonly indexRanges: Array<readonly [number, number]>;
+  readonly indexTopicSets: string[][];
 }
 
 interface EvmAuthorityHarness {
   readonly adapter: EVMChainAdapter;
   readonly evidence: AuthorityEvidence;
+  readonly provider: Readonly<Record<string, unknown>>;
   advanceAuthorityHead(): void;
   replaceCachedAnchor(): void;
   replaceFinalizedHead(): void;
@@ -49,14 +52,34 @@ interface EvmAuthorityHarness {
 }
 
 function makeEvmAuthorityAdapter(
-  options: { reorg?: boolean; providerRangeLimit?: number } = {},
+  options: { reorg?: boolean; providerRangeLimit?: number; sharedIndex?: boolean } = {},
 ): EvmAuthorityHarness {
+  let authorityIndexRecord: Readonly<{ revision: number; value: unknown }> | undefined;
+  const authorityIndexStore = {
+    load: async () => authorityIndexRecord,
+    compareAndSwap: async (
+      _scope: string,
+      expectedRevision: number | undefined,
+      nextRevision: number,
+      value: unknown,
+    ) => {
+      if (authorityIndexRecord?.revision !== expectedRevision) return false;
+      authorityIndexRecord = { revision: nextRevision, value };
+      return true;
+    },
+    delete: async (_scope: string, expectedRevision: number) => {
+      if (authorityIndexRecord?.revision !== expectedRevision) return false;
+      authorityIndexRecord = undefined;
+      return true;
+    },
+  };
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
     hubAddress: GOVERNANCE,
     privateKey: `0x${'11'.repeat(32)}`,
     allowNoAdminSigner: true,
     chainId: 'evm:31337',
+    ...(options.sharedIndex ? { localContextGraphAuthorityIndexStore: authorityIndexStore } : {}),
   });
   adapter.initialized = true;
   adapter.init = async () => {};
@@ -67,6 +90,8 @@ function makeEvmAuthorityAdapter(
     staticCalls: [] as Array<readonly [bigint, { blockTag: number }]>,
     deploymentReads: [] as Array<readonly [string, string, string]>,
     readOptions: [],
+    indexRanges: [],
+    indexTopicSets: [],
   };
 
   let finalizedNumber = 30;
@@ -97,6 +122,10 @@ function makeEvmAuthorityAdapter(
     },
   );
   const contract = {
+    interface: {
+      getEvent: (name: string) => ({ topicHash: `topic:${name}` }),
+      parseLog: (log: { parsed: unknown }) => log.parsed,
+    },
     filters: Object.fromEntries(Object.keys(logs).map((name) => [
       name,
       (...args: readonly unknown[]) => {
@@ -160,6 +189,70 @@ function makeEvmAuthorityAdapter(
       };
     },
     getNetwork: async () => ({ chainId: 31337n }),
+    getLogs: async (filter: {
+      fromBlock: number;
+      toBlock: number;
+      topics: string[][];
+    }) => {
+      evidence.indexRanges.push([filter.fromBlock, filter.toBlock]);
+      evidence.indexTopicSets.push(filter.topics[0] ?? []);
+      const namedArgs = (values: readonly unknown[], names: Record<string, unknown>) => (
+        Object.assign([...values], names)
+      );
+      return [
+        {
+          blockNumber: 10,
+          blockHash: CREATION_HASH,
+          index: 1,
+          parsed: {
+            name: 'ContextGraphCreated',
+            args: namedArgs([9n, OWNER, NAME_HASH], {
+              contextGraphId: 9n, owner: OWNER, nameHash: NAME_HASH,
+            }),
+          },
+        },
+        {
+          blockNumber: 10,
+          blockHash: CREATION_HASH,
+          index: 0,
+          parsed: {
+            name: 'Transfer',
+            args: namedArgs([ethers.ZeroAddress, OWNER, 9n], {
+              from: ethers.ZeroAddress, to: OWNER, tokenId: 9n,
+            }),
+          },
+        },
+        {
+          blockNumber: 15,
+          blockHash: `0x${'99'.repeat(32)}`,
+          index: 0,
+          parsed: {
+            name: 'Transfer',
+            args: namedArgs([SECOND_MEMBER, OWNER, 9n], {
+              from: SECOND_MEMBER, to: OWNER, tokenId: 9n,
+            }),
+          },
+        },
+        ...[
+          ['PublishPolicyUpdated', 20, 0, POLICY_HASH],
+          ['PublishAuthorityUpdated', 21, 0, POLICY_HASH],
+          ['AgentParticipantAdded', 22, 0, `0x${'aa'.repeat(32)}`],
+          ['AgentParticipantRemoved', 23, 0, `0x${'bb'.repeat(32)}`],
+          ['PublishPolicyUpdated', 33, 0, NEXT_POLICY_HASH],
+        ].map(([name, blockNumber, index, hash]) => ({
+          blockNumber,
+          blockHash: hash,
+          index,
+          parsed: {
+            name,
+            args: namedArgs([9n], { contextGraphId: 9n }),
+          },
+        })),
+      ].filter((entry) => (
+        Number(entry.blockNumber) >= filter.fromBlock
+        && Number(entry.blockNumber) <= filter.toBlock
+      ));
+    },
   };
   adapter.contracts = {
     contextGraphStorage: { connect: () => contract },
@@ -193,6 +286,7 @@ function makeEvmAuthorityAdapter(
   return {
     adapter: adapter as EVMChainAdapter,
     evidence,
+    provider,
     advanceAuthorityHead,
     replaceCachedAnchor,
     replaceFinalizedHead: () => {
@@ -218,6 +312,69 @@ function makeEvmAuthorityAdapter(
 }
 
 describe('RFC-64 Context Graph authority snapshots', () => {
+  it('uses one combined contract-wide log request per page when the durable index is wired', async () => {
+    const { adapter, evidence } = makeEvmAuthorityAdapter({ sharedIndex: true });
+
+    const snapshot = await adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(snapshot).toMatchObject({
+      contextGraphId: '9',
+      ownershipEra: '1',
+      policyVersion: '3',
+      rosterVersion: '3',
+      sourceBlockNumber: '21',
+    });
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+    expect(evidence.filters).toEqual([]);
+    expect(evidence.indexTopicSets).toEqual(Array(3).fill([
+      'topic:ContextGraphCreated',
+      'topic:Transfer',
+      'topic:PublishPolicyUpdated',
+      'topic:PublishAuthorityUpdated',
+      'topic:AgentParticipantAdded',
+      'topic:AgentParticipantRemoved',
+    ]));
+
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    expect(evidence.indexRanges).toHaveLength(3);
+  });
+
+  it('fails over when a provider cannot revalidate the durable authority anchor', async () => {
+    const { adapter, provider, advanceAuthorityHead } = makeEvmAuthorityAdapter({
+      sharedIndex: true,
+    });
+    await adapter.getContextGraphAuthoritySnapshot(9n);
+    advanceAuthorityHead();
+
+    const attempts: string[] = [];
+    const lagging = {
+      ...provider,
+      getBlock: async (tag: string | number) => {
+        if (tag === 30) return null;
+        return (provider.getBlock as (block: string | number) => Promise<unknown>)(tag);
+      },
+    };
+    (adapter as any).readTipProvider = async (
+      _label: string,
+      read: (selected: typeof lagging) => Promise<unknown>,
+      options: Readonly<{ isRetryable?: (error: unknown) => boolean }>,
+    ) => {
+      try {
+        attempts.push('lagging');
+        return await read(lagging);
+      } catch (error) {
+        expect(options.isRetryable?.(error)).toBe(true);
+        attempts.push('healthy');
+        return read(provider as typeof lagging);
+      }
+    };
+
+    await expect(adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
+      policyVersion: '4',
+      sourceBlockNumber: '33',
+    });
+    expect(attempts).toEqual(['lagging', 'healthy']);
+  });
+
   it('reads one stable finalized EVM generation and derives monotonic epochs', async () => {
     const { adapter, evidence, advanceAuthorityHead } = makeEvmAuthorityAdapter();
     const snapshot = await adapter.getContextGraphAuthoritySnapshot(9n);

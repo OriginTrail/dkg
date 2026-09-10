@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphAuthorityHistoryStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
+import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphAuthorityHistoryStore, SqliteContextGraphAuthorityIndexStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -2361,6 +2361,36 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     expect(await reopened.load(key)).toEqual(checkpoint);
     await reopened.delete(key);
     expect(await reopened.load(key)).toBeUndefined();
+  });
+
+  it('atomically advances opaque contract-wide authority index checkpoints', async () => {
+    const store = new SqliteContextGraphAuthorityIndexStore(db);
+    const scope = 'evm:84532:hub=0xabc:context-graph-storage=0xdef';
+    const first = { version: 1, revision: 1, cursor: { throughBlockNumber: 20 } };
+    const second = { version: 1, revision: 2, cursor: { throughBlockNumber: 30 } };
+
+    expect(await store.compareAndSwap(scope, undefined, 1, first)).toBe(true);
+    expect(await store.compareAndSwap(scope, undefined, 1, first)).toBe(false);
+    expect(await store.load(scope)).toEqual({ revision: 1, value: first });
+    expect(await store.compareAndSwap(scope, 1, 2, second)).toBe(true);
+    expect(await store.compareAndSwap(scope, 1, 2, second)).toBe(false);
+    expect(await store.delete(scope, 1)).toBe(false);
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteContextGraphAuthorityIndexStore(db);
+    expect(await reopened.load(scope)).toEqual({ revision: 2, value: second });
+
+    db.db.prepare(`
+      UPDATE context_graph_authority_indexes SET checkpoint_json = ? WHERE scope = ?
+    `).run('{not-json', scope);
+    expect(await reopened.load(scope)).toEqual({
+      revision: 2,
+      value: { invalidCheckpointJson: '{not-json' },
+    });
+    expect(await reopened.delete(scope, 1)).toBe(false);
+    expect(await reopened.delete(scope, 2)).toBe(true);
+    expect(await reopened.load(scope)).toBeUndefined();
   });
 });
 

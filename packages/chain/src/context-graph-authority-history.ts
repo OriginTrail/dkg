@@ -596,19 +596,30 @@ async function loadContextGraphAuthorityHistory(
       );
     }
   }
-  const named = <T extends ContextGraphAuthorityHistoryEvent>(
-    name: ContextGraphAuthorityGenerationEvent['name'],
-    events: readonly T[],
-  ) => events.map((event) => ({ ...event, name } as ContextGraphAuthorityGenerationEvent & {
-    readonly index: number;
-  }));
-  const events = [
-    ...named('ContextGraphCreated', created),
-    ...named('Transfer', transfers),
-    ...named('PublishPolicyUpdated', publishPolicy),
-    ...named('PublishAuthorityUpdated', publishAuthority),
-    ...named('AgentParticipantAdded', participantAdds),
-    ...named('AgentParticipantRemoved', participantRemoves),
+  type OrderedGenerationEvent = ContextGraphAuthorityGenerationEvent & { readonly index: number };
+  const events: OrderedGenerationEvent[] = [
+    ...created.map((event): OrderedGenerationEvent => ({
+      name: 'ContextGraphCreated',
+      blockNumber: event.blockNumber,
+      blockHash: event.blockHash,
+      index: event.index,
+      nameHash: event.nameHash,
+    })),
+    ...transfers.map((event): OrderedGenerationEvent => ({
+      name: 'Transfer', ...event,
+    })),
+    ...publishPolicy.map((event): OrderedGenerationEvent => ({
+      name: 'PublishPolicyUpdated', ...event,
+    })),
+    ...publishAuthority.map((event): OrderedGenerationEvent => ({
+      name: 'PublishAuthorityUpdated', ...event,
+    })),
+    ...participantAdds.map((event): OrderedGenerationEvent => ({
+      name: 'AgentParticipantAdded', ...event,
+    })),
+    ...participantRemoves.map((event): OrderedGenerationEvent => ({
+      name: 'AgentParticipantRemoved', ...event,
+    })),
   ].sort((left, right) => (
     left.blockNumber - right.blockNumber || left.index - right.index
   ));

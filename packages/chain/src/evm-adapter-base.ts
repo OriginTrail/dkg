@@ -60,6 +60,7 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, reso
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
+import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -920,6 +921,9 @@ export class EVMChainAdapterBase {
   /** Finalized authority scan watermarks owned by this adapter lifecycle. */
   protected readonly contextGraphAuthorityHistory: ContextGraphAuthorityHistoryCache;
 
+  /** Shared contract-wide authority history, enabled by daemon-local persistence. */
+  protected readonly contextGraphAuthorityIndex: ContextGraphAuthorityIndex | undefined;
+
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
    * scan (adapter-level config `kaHighWaterScanPageSize`; non-integer / `< 1`
@@ -946,6 +950,7 @@ export class EVMChainAdapterBase {
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
     this.contextGraphAuthorityHistory.clear();
+    this.contextGraphAuthorityIndex?.clear();
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -1261,6 +1266,9 @@ export class EVMChainAdapterBase {
       undefined,
       config.localContextGraphAuthorityHistoryStore,
     );
+    this.contextGraphAuthorityIndex = config.localContextGraphAuthorityIndexStore === undefined
+      ? undefined
+      : new ContextGraphAuthorityIndex(config.localContextGraphAuthorityIndexStore);
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;
@@ -4297,6 +4305,7 @@ export class EVMChainAdapterBase {
   destroy(): void {
     this.hubRotationPoller.stop();
     this.contextGraphAuthorityHistory.clear();
+    this.contextGraphAuthorityIndex?.clear();
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }

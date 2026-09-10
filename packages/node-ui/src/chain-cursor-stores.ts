@@ -167,3 +167,81 @@ export class SqliteContextGraphAuthorityHistoryStore {
     return `${SqliteContextGraphAuthorityHistoryStore.KEY_PREFIX}${cacheKey}`;
   }
 }
+
+/**
+ * Opaque SQLite persistence for the chain-owned contract-wide authority index.
+ *
+ * The JSON payload is never interpreted here. Only the monotonic revision is
+ * stored separately so SQLite can provide one atomic compare-and-swap boundary
+ * for complete page checkpoints.
+ */
+export class SqliteContextGraphAuthorityIndexStore {
+  private readonly db: Database.Database;
+
+  constructor(dashboard: DashboardDB) {
+    this.db = dashboard.db;
+  }
+
+  async load(scope: string): Promise<Readonly<{ revision: number; value: unknown }> | undefined> {
+    const row = this.db.prepare(`
+      SELECT revision, checkpoint_json
+        FROM context_graph_authority_indexes
+       WHERE scope = ?
+    `).get(scope) as { revision: number; checkpoint_json: string } | undefined;
+    if (row === undefined) return undefined;
+    try {
+      return Object.freeze({
+        revision: row.revision,
+        value: JSON.parse(row.checkpoint_json) as unknown,
+      });
+    } catch {
+      // Preserve the durable revision even when the opaque payload is corrupt,
+      // so chain can conditionally delete this exact row without racing a
+      // newer compare-and-swap winner.
+      return Object.freeze({
+        revision: row.revision,
+        value: Object.freeze({ invalidCheckpointJson: row.checkpoint_json }),
+      });
+    }
+  }
+
+  async compareAndSwap(
+    scope: string,
+    expectedRevision: number | undefined,
+    nextRevision: number,
+    checkpoint: unknown,
+  ): Promise<boolean> {
+    if (scope.trim().length === 0) throw new Error('Authority index scope is empty');
+    if (!Number.isSafeInteger(nextRevision) || nextRevision < 1) {
+      throw new Error('Authority index revision is invalid');
+    }
+    const value = JSON.stringify(checkpoint);
+    if (expectedRevision === undefined) {
+      if (nextRevision !== 1) throw new Error('Initial authority index revision must be 1');
+      return this.db.prepare(`
+        INSERT OR IGNORE INTO context_graph_authority_indexes (
+          scope, revision, checkpoint_json, updated_at
+        ) VALUES (?, ?, ?, ?)
+      `).run(scope, nextRevision, value, Date.now()).changes === 1;
+    }
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+      throw new Error('Authority index expected revision is invalid');
+    }
+    if (nextRevision !== expectedRevision + 1) {
+      throw new Error('Authority index revision must advance exactly once');
+    }
+    return this.db.prepare(`
+      UPDATE context_graph_authority_indexes
+         SET revision = ?, checkpoint_json = ?, updated_at = ?
+       WHERE scope = ? AND revision = ?
+    `).run(nextRevision, value, Date.now(), scope, expectedRevision).changes === 1;
+  }
+
+  async delete(scope: string, expectedRevision: number): Promise<boolean> {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) return false;
+    return this.db.prepare(`
+      DELETE FROM context_graph_authority_indexes
+       WHERE scope = ? AND revision = ?
+    `).run(scope, expectedRevision).changes === 1;
+  }
+}
