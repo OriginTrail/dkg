@@ -35,7 +35,6 @@ import {
   releasesDir,
   activeSlot,
   inactiveSlot,
-  swapSlot,
   gitCommandArgs,
   gitCommandEnv,
   isStandaloneInstall,
@@ -298,6 +297,38 @@ export async function writePendingUpdateState(
   await writeFileAtomic(pendingFile, JSON.stringify(state, null, 2));
 }
 
+/** Activate a prepared slot only after runtime validation and durable intent. */
+async function activateStagedSlot(
+  state: PendingUpdateState,
+  source: 'npm' | 'git',
+  log: (message: string) => void,
+): Promise<boolean> {
+  try {
+    assertNodeRuntimeSupported();
+  } catch (error) {
+    log(`Auto-update: refusing slot activation: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+
+  await writePendingUpdateState(state);
+  try {
+    log(`Auto-update (${source}): swapping active slot to ${state.target}...`);
+    await _autoUpdateIo.swapSlot(state.target);
+    if (state.commit) {
+      await writeFileAtomic(join(_autoUpdateIo.dkgDir(), '.current-commit'), state.commit);
+    }
+    if (state.version) {
+      await writeFileAtomic(join(_autoUpdateIo.dkgDir(), '.current-version'), state.version);
+    }
+    await clearPendingUpdateState();
+    return true;
+  } catch (swapErr) {
+    await clearPendingUpdateState();
+    log(`Auto-update (${source}): symlink swap failed — ${swapErr instanceof Error ? swapErr.message : String(swapErr)}`);
+    return false;
+  }
+}
+
 // ─── NPM-based auto-update helpers ──────────────────────────────────
 
 export function getCurrentCliVersion(): string {
@@ -356,7 +387,7 @@ async function _performNpmUpdateInner(
   targetVersion: string,
   log: (msg: string) => void,
 ): Promise<UpdateStatus> {
-  const { readFile, writeFile, mkdir, rm, existsSync, exec: execAsync, dkgDir, releasesDir, activeSlot, swapSlot, readCliPackageVersion, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
+  const { readFile, writeFile, mkdir, rm, existsSync, exec: execAsync, dkgDir, releasesDir, activeSlot, readCliPackageVersion, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
   const rDir = releasesDir();
   await mkdir(rDir, { recursive: true });
 
@@ -501,34 +532,17 @@ async function _performNpmUpdateInner(
     }
   }
 
-  try {
-    assertNodeRuntimeSupported();
-  } catch (error) {
-    log(`Auto-update: refusing slot activation: ${error instanceof Error ? error.message : String(error)}`);
-    return "failed";
-  }
-
-  await writePendingUpdateState({
-    target: target as "a" | "b",
+  const activated = await activateStagedSlot({
+    target,
     commit: "",
     version: resolvedVersion,
     ref: `npm:${resolvedVersion}`,
     createdAt: new Date().toISOString(),
-  });
-
-  try {
-    log(`Auto-update (npm): swapping active slot to ${target}...`);
-    await swapSlot(target as "a" | "b");
-    await writeFileAtomic(versionFile, resolvedVersion);
-    await clearPendingUpdateState();
-    log(
-      `Auto-update (npm): slot ${target} active (${CLI_NPM_PACKAGE}@${resolvedVersion}).`,
-    );
-  } catch (swapErr: any) {
-    await clearPendingUpdateState();
-    log(`Auto-update (npm): symlink swap failed — ${swapErr.message}`);
-    return "failed";
-  }
+  }, 'npm', log);
+  if (!activated) return "failed";
+  log(
+    `Auto-update (npm): slot ${target} active (${CLI_NPM_PACKAGE}@${resolvedVersion}).`,
+  );
 
   return "updated";
 }
@@ -942,7 +956,7 @@ async function _performUpdateInner(
   log: (msg: string) => void,
   opts: PerformUpdateOptions,
 ): Promise<UpdateStatus> {
-  const { readFile, writeFile, mkdir, existsSync, exec: execAsync, execFile: execFileAsync, dkgDir, releasesDir, activeSlot, inactiveSlot, swapSlot, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
+  const { readFile, writeFile, mkdir, existsSync, exec: execAsync, execFile: execFileAsync, dkgDir, releasesDir, activeSlot, inactiveSlot, hasVerifiedBundledMarkItDownBinary, expectedBundledMarkItDownBuildMetadata } = _autoUpdateIo;
   const rDir = releasesDir();
   const activeDir = join(rDir, (await activeSlot()) ?? "a");
   const target = await inactiveSlot();
@@ -1349,36 +1363,19 @@ async function _performUpdateInner(
     return "failed";
   }
 
-  try {
-    assertNodeRuntimeSupported();
-  } catch (error) {
-    log(`Auto-update: refusing slot activation: ${error instanceof Error ? error.message : String(error)}`);
-    return "failed";
-  }
-
-  await writePendingUpdateState({
+  const swapStartedAt = Date.now();
+  const activated = await activateStagedSlot({
     target,
     commit: checkedOutCommit,
     version: nextVersion || undefined,
     ref,
     createdAt: new Date().toISOString(),
-  });
-  try {
-    const swapStartedAt = Date.now();
-    log(`Auto-update (git): swapping active slot to ${target}...`);
-    await swapSlot(target);
-    await writeFileAtomic(commitFile, checkedOutCommit);
-    if (nextVersion) await writeFileAtomic(versionFile, nextVersion);
-    await clearPendingUpdateState();
-    const swapElapsedMs = Date.now() - swapStartedAt;
-    log(
-      `Auto-update (git): swap complete; active slot is now ${target} (${checkedOutCommit.slice(0, 8)}) in ${swapElapsedMs}ms.`,
-    );
-  } catch (swapErr: any) {
-    await clearPendingUpdateState();
-    log(`Auto-update (git): symlink swap failed — ${swapErr.message}`);
-    return "failed";
-  }
+  }, 'git', log);
+  if (!activated) return "failed";
+  const swapElapsedMs = Date.now() - swapStartedAt;
+  log(
+    `Auto-update (git): swap complete; active slot is now ${target} (${checkedOutCommit.slice(0, 8)}) in ${swapElapsedMs}ms.`,
+  );
   log(
     `Auto-update (git): build succeeded in slot ${target}` +
       `${nextVersion ? ` (version ${nextVersion})` : ""}. Swapped symlink. Restarting...`,

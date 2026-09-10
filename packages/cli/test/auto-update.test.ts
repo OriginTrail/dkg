@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { AutoUpdateConfig } from '../src/config.js';
+import type { ResolvedAutoUpdateConfig } from '../src/config.js';
 import { _autoUpdateDependencies, _autoUpdateIo } from '../src/daemon.js';
 
 const MARKITDOWN_TARGETS_JSON = JSON.stringify([
@@ -211,7 +211,7 @@ import { createUpdateHoldoffGate } from '../src/daemon/auto-update-jitter.js';
 import { createNpmUpdateRunCheck, createGitUpdateRunCheck } from '../src/daemon/auto-update-runner.js';
 import type { LastUpdateCheck } from '../src/daemon/state.js';
 
-const AU: AutoUpdateConfig = {
+const AU: ResolvedAutoUpdateConfig = {
   enabled: true,
   repo: 'owner/repo',
   branch: 'main',
@@ -228,11 +228,8 @@ describe('git auto-update ref normalization', () => {
     expect(normalizeGitRefInput('refs/heads/main')).toBe('refs/heads/main');
     expect(normalizeGitRefInput('refs/tags/v10.0.5')).toBe('refs/tags/v10.0.5');
     expect(resolveAutoUpdateGitRef({
-      enabled: true,
-      repo: 'owner/repo',
-      branch: 'main',
+      ...AU,
       ref: 'refs/heads/canary',
-      checkIntervalMinutes: 30,
     })).toBe('refs/heads/canary');
   });
 
@@ -244,11 +241,8 @@ describe('git auto-update ref normalization', () => {
 
   it('plans signed tag verification and the matching force-fetch ref in one place', () => {
     const plan = resolveAutoUpdateGitRefPlan({
-      enabled: true,
-      repo: 'owner/repo',
-      branch: 'main',
+      ...AU,
       ref: 'refs/tags/v10.0.8',
-      checkIntervalMinutes: 30,
       verifyTagSignature: true,
     });
 
@@ -264,11 +258,8 @@ describe('git auto-update ref normalization', () => {
 
   it('plans unverified tag fetches with a non-forced destination refspec', () => {
     const plan = resolveAutoUpdateGitRefPlan({
-      enabled: true,
-      repo: 'owner/repo',
-      branch: 'main',
+      ...AU,
       ref: 'refs/tags/v10.0.8',
-      checkIntervalMinutes: 30,
       verifyTagSignature: false,
     });
 
@@ -283,10 +274,7 @@ describe('git auto-update ref normalization', () => {
 
   it('plans branch verification as inert and formats the daemon startup warning', () => {
     const plan = resolveAutoUpdateGitRefPlan({
-      enabled: true,
-      repo: 'owner/repo',
-      branch: 'main',
-      checkIntervalMinutes: 30,
+      ...AU,
       verifyTagSignature: true,
     });
 
@@ -414,7 +402,7 @@ describe('blue-green checkForUpdate', () => {
       return { stdout: '', stderr: '' };
     };
 
-    const sshAu: AutoUpdateConfig = {
+    const sshAu: ResolvedAutoUpdateConfig = {
       ...AU,
       repo: 'git@github.com:owner/repo.git',
       sshKeyPath: '/tmp/test key',
@@ -756,7 +744,7 @@ describe('blue-green checkForUpdate', () => {
     const logCalls: string[] = [];
     const log = (msg: string) => { logCalls.push(msg); };
 
-    const malicious: AutoUpdateConfig = {
+    const malicious: ResolvedAutoUpdateConfig = {
       ...AU,
       branch: 'main; rm -rf /',
     };
@@ -956,24 +944,37 @@ describe('blue-green checkForUpdate', () => {
     expect(gitCmds.some(c => c.file === 'git' && c.args.join(' ') === 'init' && c.cwd === targetDir)).toBe(true);
   });
 
-  it('commit file is written before swap (crash safety)', async () => {
-    readFileImpl = async () => 'old-commit';
+  it('persists git intent before swap and active metadata afterwards', async () => {
+    readFileImpl = async (path) => String(path).endsWith('/packages/cli/package.json')
+      ? JSON.stringify({ version: '10.0.1' }) : 'old-commit';
     makeFetchOk('new-commit');
 
     const callOrder: string[] = [];
-    writeFileImpl = async (path: any) => {
-      const p = String(path);
-      if (p.includes('.update-pending.json')) callOrder.push('writePending');
-      else if (p.includes('.current-commit')) callOrder.push('writeCommit');
+    _autoUpdateIo.rename = async (_from, to) => { callOrder.push(String(to).split('/').pop()!); };
+    _autoUpdateIo.unlink = async (path) => {
+      if (String(path).endsWith('.update-pending.json')) callOrder.push('clearPending');
     };
     swapSlotImpl = async () => { callOrder.push('swapSlot'); };
 
-    await performUpdate(AU, () => {});
+    expect(await performUpdate(AU, () => {})).toBe(true);
+    expect(callOrder).toEqual([
+      '.update-pending.json', 'swapSlot', '.current-commit', '.current-version', 'clearPending',
+    ]);
+    const pendingWrite = writeFileCalls.find(([file]) => String(file).includes('.update-pending.json'));
+    expect(JSON.parse(pendingWrite![1])).toMatchObject({
+      target: 'b', commit: 'new-commit', version: '10.0.1', ref: `refs/heads/${AU.branch}`,
+    });
+  });
 
-    const writeIdx = callOrder.indexOf('writePending');
-    const swapIdx = callOrder.indexOf('swapSlot');
-    expect(writeIdx).toBeGreaterThanOrEqual(0);
-    expect(swapIdx).toBeGreaterThan(writeIdx);
+  it('does not swap a git slot when durable intent cannot be written', async () => {
+    readFileImpl = async () => 'old-commit';
+    makeFetchOk('new-commit');
+    _autoUpdateIo.rename = async (_from, to) => {
+      if (String(to).endsWith('.update-pending.json')) throw new Error('intent rename failed');
+    };
+    await expect(performUpdate(AU, () => {})).rejects.toThrow('intent rename failed');
+    expect(swapSlotCalls).toEqual([]);
+    expect(writeFileCalls.some(([file]) => String(file).includes('.current-'))).toBe(false);
   });
 
   it('clears pending file if swap fails', async () => {
@@ -1264,7 +1265,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     });
     const result = await checkForNpmVersionUpdate(() => {}, false);
     expect(result.status).toBe('available');
-    expect(result.version).toBe('9.1.0');
+    expect(result).toMatchObject({ version: '9.1.0' });
   });
 
   it('skips when allowPrerelease=false and latest is a prerelease', async () => {
@@ -1286,7 +1287,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     });
     const result = await checkForNpmVersionUpdate(() => {}, true);
     expect(result.status).toBe('available');
-    expect(result.version).toBe('9.0.0-beta.4-dev.999.abc1234');
+    expect(result).toMatchObject({ version: '9.0.0-beta.4-dev.999.abc1234' });
   });
 
   it('prefers stable latest over older dev tag when allowPrerelease=true', async () => {
@@ -1297,7 +1298,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     });
     const result = await checkForNpmVersionUpdate(() => {}, true);
     expect(result.status).toBe('available');
-    expect(result.version).toBe('9.1.0');
+    expect(result).toMatchObject({ version: '9.1.0' });
   });
 
   it('returns error on registry failure', async () => {
@@ -1355,7 +1356,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     });
     const result = await checkForNpmVersionUpdate(() => {}, true, 'testnet');
     expect(result.status).toBe('available');
-    expect(result.version).toBe('9.0.0-beta.5');
+    expect(result).toMatchObject({ version: '9.0.0-beta.5' });
   });
 
   it('channel pin is up-to-date when the pinned tag does not advance', async () => {
@@ -1375,7 +1376,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     // Distinct from up-to-date: an unpublished/misconfigured channel must be
     // visible, not silently reported as current.
     expect(result.status).toBe('no-target');
-    expect(result.channel).toBe('testnet');
+    expect(result).toMatchObject({ channel: 'testnet' });
   });
 
   it.each(['constructor', '__proto__'])(
@@ -1393,7 +1394,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     fetchImpl = async () => makeRegistryResponse({ testnet: '9.6.0-rc.1' });
     const result = await checkForNpmVersionUpdate(() => {}, false, 'testnet');
     expect(result.status).toBe('no-target');
-    expect(result.channel).toBe('testnet');
+    expect(result).toMatchObject({ channel: 'testnet' });
   });
 
   it('channel pin reports no-target when the tag value is not valid semver', async () => {
@@ -1416,7 +1417,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     fetchImpl = async () => makeRegistryResponse({ mainnet: '10.0.0+mainnet-build.1' });
     const result = await checkForNpmVersionUpdate(() => {}, false, 'mainnet');
     expect(result.status).toBe('available');
-    expect(result.version).toBe('10.0.0+mainnet-build.1');
+    expect(result).toMatchObject({ version: '10.0.0+mainnet-build.1' });
   });
 
   it('channel pin follows a stable tag under allowPrerelease=false', async () => {
@@ -1427,7 +1428,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     });
     const result = await checkForNpmVersionUpdate(() => {}, false, 'mainnet');
     expect(result.status).toBe('available');
-    expect(result.version).toBe('10.0.0');
+    expect(result).toMatchObject({ version: '10.0.0' });
   });
 
   it('preserves the exported legacy resolver arguments and stable-only result shape', async () => {
@@ -1569,7 +1570,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     const result = await checkForNpmVersionUpdate(() => {}, true);
     // current is 9.0.0-beta.3 → the valid beta.4 must be selected, not dropped.
     expect(result.status).toBe('available');
-    expect(result.version).toBe('9.0.0-beta.4');
+    expect(result).toMatchObject({ version: '9.0.0-beta.4' });
   });
 
   it('channel mainnet: a STABLE +build target is "available" over the current rc (not falsely up-to-date)', async () => {
@@ -1581,7 +1582,7 @@ describe('checkForNpmVersionUpdate tag precedence', () => {
     fetchImpl = async () => makeRegistryResponse({ mainnet: '10.0.0+mainnet-build.1' });
     const result = await checkForNpmVersionUpdate(() => {}, false, 'mainnet');
     expect(result.status).toBe('available');
-    expect(result.version).toBe('10.0.0+mainnet-build.1');
+    expect(result).toMatchObject({ version: '10.0.0+mainnet-build.1' });
   });
 });
 
@@ -1641,13 +1642,35 @@ describe('performNpmUpdate', () => {
     } finally { probe.mockRestore(); }
   });
 
-  it('installs package and swaps slot on success', async () => {
-    const result = await performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', () => {});
-    expect(result).toBe('updated');
-    expect(swapSlotCalls).toContain('b');
-    expect(writeFileCalls.some(c =>
-      String(c[0]).includes('.current-version') && c[1] === '9.0.0-beta.4-dev.100.abc1234'
-    )).toBe(true);
+  it('persists npm intent before swap and active version afterwards', async () => {
+    const version = '9.0.0-beta.4-dev.100.abc1234';
+    const callOrder: string[] = [];
+    _autoUpdateIo.rename = async (_from, to) => { callOrder.push(String(to).split('/').pop()!); };
+    _autoUpdateIo.unlink = async (path) => {
+      if (String(path).endsWith('.update-pending.json')) callOrder.push('clearPending');
+    };
+    swapSlotImpl = async () => { callOrder.push('swapSlot'); };
+
+    expect(await performNpmUpdate(version, () => {})).toBe('updated');
+    expect(swapSlotCalls).toEqual(['b']);
+    expect(callOrder).toEqual([
+      '.update-pending.json', 'swapSlot', '.current-version', 'clearPending',
+    ]);
+    const pendingWrite = writeFileCalls.find(([file]) => String(file).includes('.update-pending.json'));
+    expect(JSON.parse(pendingWrite![1])).toMatchObject({
+      target: 'b', commit: '', version, ref: `npm:${version}`,
+    });
+    expect(writeFileCalls.some(([file, data]) => String(file).includes('.current-version') && data === version)).toBe(true);
+    expect(writeFileCalls.some(([file]) => String(file).includes('.current-commit'))).toBe(false);
+  });
+
+  it('does not swap an npm slot when durable intent cannot be written', async () => {
+    _autoUpdateIo.rename = async (_from, to) => {
+      if (String(to).endsWith('.update-pending.json')) throw new Error('intent rename failed');
+    };
+    await expect(performNpmUpdate('9.0.0-beta.4-dev.100.abc1234', () => {})).rejects.toThrow('intent rename failed');
+    expect(swapSlotCalls).toEqual([]);
+    expect(writeFileCalls.some(([file]) => String(file).includes('.current-'))).toBe(false);
   });
 
   it('returns failed when npm install throws', async () => {
@@ -2107,7 +2130,7 @@ describe('autoupdater hardening', () => {
       if (cmd.includes('pnpm install')) installTimeout = opts?.timeout;
       return { stdout: '', stderr: '' };
     };
-    const auWithTimeout: AutoUpdateConfig = {
+    const auWithTimeout: ResolvedAutoUpdateConfig = {
       ...AU,
       buildTimeoutMs: { install: 600_000 },
     };
