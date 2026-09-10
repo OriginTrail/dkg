@@ -1688,7 +1688,7 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toMatchObject([{
         state: 'RECEIVED',
         attemptCount: 1,
-        lastError: 'finalization processing deferred',
+        lastError: 'context-graph-binding-pending',
       }]);
 
       boundContextGraphId = 42n;
@@ -1745,7 +1745,7 @@ describe('graph-scoped finalization handler', () => {
       expect(await inbox.list()).toMatchObject([{
         state: 'RECEIVED',
         attemptCount: 1,
-        lastError: 'finalization processing deferred',
+        lastError: 'context-graph-binding-pending',
       }]);
     } finally {
       await closeInbox(inbox);

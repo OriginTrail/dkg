@@ -161,13 +161,18 @@ export type FinalizationRecoverySettledPublisherUpgradeResult =
   | { status: 'conflict' | 'missing' | 'closed' };
 
 export type FinalizationRecoveryFailureCode =
-  | 'processing-deferred'
+  | 'workspace-unavailable'
+  | 'publisher-authority-pending'
+  | 'receipt-pending'
+  | 'context-graph-binding-pending'
+  | 'evidence-commit-pending'
+  | 'apply-deferred'
+  | 'vm-metadata-pending'
   | 'store-scheduler-busy'
   | 'background-chain-unavailable'
   | 'background-binding-pending'
   | 'background-no-match'
   | 'background-replay-failed'
-  | 'receipt-pending'
   | 'settled-upgrade-deferred'
   | 'settled-reorg-deferred';
 

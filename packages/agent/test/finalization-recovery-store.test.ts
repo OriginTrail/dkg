@@ -196,7 +196,7 @@ describe('finalization recovery attempt planner', () => {
   const stablePolicy = {
     mode: 'stable-failure' as const,
     retryDelayMs: 100,
-    failureCode: 'processing-deferred' as const,
+    failureCode: 'apply-deferred' as const,
     stableFailureThreshold: 3,
     stableFailureRetryMs: 10_000,
     retryDeadlineAt: 20_000,
@@ -225,10 +225,10 @@ describe('finalization recovery attempt planner', () => {
       1_200,
     );
 
-    expect(first).toMatchObject({ failureSignature: 'processing-deferred', failureStreak: 1 });
+    expect(first).toMatchObject({ failureSignature: 'apply-deferred', failureStreak: 1 });
     expect(second).toMatchObject({
       lastError: 'equivalent wording after an edit',
-      failureSignature: 'processing-deferred',
+      failureSignature: 'apply-deferred',
       failureStreak: 2,
     });
     expect(changed).toMatchObject({
@@ -249,7 +249,7 @@ describe('finalization recovery attempt planner', () => {
 
     const stable = planFinalizationRecoveryAttempt(
       entry({
-        failureSignature: 'processing-deferred',
+        failureSignature: 'apply-deferred',
         failureStreak: 2,
       }),
       'still deferred',

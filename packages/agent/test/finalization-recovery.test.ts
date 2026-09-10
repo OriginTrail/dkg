@@ -398,7 +398,11 @@ describe('graph-scoped finalization recovery admission', () => {
       });
       const makeRecovery = () => new FinalizationRecovery(
         store,
-        recoveryChain(),
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => repairReady
+            ? { status: 'confirmed', receipt: confirmedReceipt() }
+            : { status: 'pending' },
+        }),
         { info: () => {}, warn: () => {} },
         {
           ...recoveryMaterializer(),
@@ -421,7 +425,7 @@ describe('graph-scoped finalization recovery admission', () => {
       expect(entry).toMatchObject({
         attemptCount: 1,
         failureStreak: 1,
-        lastError: 'replay processing deferred',
+        lastError: 'canonical-receipt-pending',
       });
       await store.close();
       store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
@@ -434,9 +438,9 @@ describe('graph-scoped finalization recovery admission', () => {
       [entry] = await store.list();
       expect(entry).toMatchObject({
         attemptCount: 3,
-        failureSignature: 'processing-deferred',
+        failureSignature: 'receipt-pending',
         failureStreak: 3,
-        lastError: 'replay processing deferred',
+        lastError: 'canonical-receipt-pending',
       });
       expect(entry!.nextAttemptAt).toBe(now + FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS);
 
@@ -462,6 +466,61 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('resets the stable streak when recovery advances to a different stage', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-stage-progress-'));
+    try {
+      let now = 1_000;
+      let receiptPending = true;
+      const store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => {
+            return receiptPending
+              ? { status: 'pending' as const }
+              : { status: 'confirmed' as const, receipt: confirmedReceipt() };
+          },
+        }),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => 'deferred' as const,
+        },
+        { now: () => now },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await recovery.processDueBatch(16);
+      let [entry] = await store.list();
+      expect(entry).toMatchObject({ failureSignature: 'receipt-pending', failureStreak: 1 });
+      now = entry!.nextAttemptAt!;
+      await recovery.processDueBatch(16);
+      [entry] = await store.list();
+      expect(entry).toMatchObject({ failureSignature: 'receipt-pending', failureStreak: 2 });
+
+      now = entry!.nextAttemptAt!;
+      receiptPending = false;
+      await recovery.processDueBatch(16);
+      [entry] = await store.list();
+      expect(entry).toMatchObject({
+        state: 'VERIFIED',
+        failureSignature: 'apply-deferred',
+        failureStreak: 1,
+      });
+      expect(entry!.nextAttemptAt).toBeLessThan(
+        now + FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
+      );
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('caps a stable retry at the live deadline and rejects it there', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-stable-expiry-'));
     try {
@@ -470,13 +529,11 @@ describe('graph-scoped finalization recovery admission', () => {
       const liveRetryWindowMs = 5_000;
       const recovery = new FinalizationRecovery(
         store,
-        recoveryChain(),
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => ({ status: 'pending' }),
+        }),
         { info: () => {}, warn: () => {} },
-        {
-          ...recoveryMaterializer(),
-          apply: async () => 'deferred' as const,
-          replayVerified: async () => 'no-swm' as const,
-        },
+        recoveryMaterializer(),
         { now: () => now, liveRetryWindowMs },
       );
       await recovery.receive({
