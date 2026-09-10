@@ -331,10 +331,13 @@ import {
   type SelectedSwmMetaRetentionLimits,
 } from './sync/selected-swm-meta-budget.js';
 import {
-  emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
-  mergeSharedMemorySyncDiagnostics,
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
+import {
+  emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
+  mergeFleetSharedMemoryDiagnostics,
+  mergeSamePeerSharedMemoryDiagnostics,
+} from './sync/shared-memory-diagnostics.js';
 import {
   createSelectedSwmMetaFetcher,
   type SelectedSwmMetaFetcher,
@@ -1736,9 +1739,7 @@ function mergeSharedMemorySyncResults(
   b: SharedMemorySyncResult,
 ): SharedMemorySyncResult {
   return {
-    ...mergeSharedMemorySyncDiagnostics(a, b),
-    insertedTriples: a.insertedTriples + b.insertedTriples,
-    deniedPhases: a.deniedPhases + b.deniedPhases,
+    ...mergeSamePeerSharedMemoryDiagnostics(a, b),
   };
 }
 
@@ -8484,10 +8485,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       let peerDenied = durableProgress.denied;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
-        diagnostics.sharedMemory = mergeSharedMemorySyncDiagnostics(
+        diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
           diagnostics.sharedMemory,
           r.shared,
-          { failedPeers: 'sum' },
         );
         deferredBackpressure += r.shared.deferredBackpressure ?? 0;
         peerDenied = peerDenied || Boolean(sharedProgress?.denied);
@@ -8510,10 +8510,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
 
       sharedMemorySynced += shared.insertedDataTriples;
-      diagnostics.sharedMemory = mergeSharedMemorySyncDiagnostics(
+      diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
         diagnostics.sharedMemory,
         shared,
-        { failedPeers: 'sum' },
       );
       deferredBackpressure += shared.deferredBackpressure ?? 0;
 

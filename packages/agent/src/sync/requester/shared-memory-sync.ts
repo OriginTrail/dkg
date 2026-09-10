@@ -5,11 +5,10 @@ import {
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type {
-  SharedMemorySyncDiagnostics,
-  SharedMemorySyncResult,
-  SwmSnapshotCoverage,
-} from '../../dkg-agent-types.js';
+import {
+  selectSwmSnapshotCoverage,
+  type SharedMemorySyncSummary,
+} from '../shared-memory-diagnostics.js';
 import {
   mergeSharedMemoryLocalYield,
   sharedMemoryLocalYield,
@@ -239,44 +238,6 @@ export function readPublicSnapshotWalkProgress(err: unknown): PublicSnapshotWalk
   return candidate as PublicSnapshotWalkProgress;
 }
 
-export interface SharedMemorySyncSummary {
-  /** Plane-neutral reason that this requester voluntarily stopped local work. */
-  localYield?: SharedMemoryLocalYield;
-  /** Snapshot phases left incomplete specifically by a local yield; zero on clean results. */
-  snapshotPlaneIncomplete: number;
-  insertedTriples: number;
-  fetchedMetaTriples: number;
-  fetchedDataTriples: number;
-  insertedMetaTriples: number;
-  insertedDataTriples: number;
-  bytesReceived: number;
-  resumedPhases: number;
-  timedOutPhases: number;
-  completedPhases: number;
-  checkpointAdvances: number;
-  deniedPhases: number;
-  emptyResponses: number;
-  droppedDataTriples: number;
-  failedPeers: number;
-  failedPhases: number;
-  backoffWorthyFailures: number;
-  /** Context Graph admissions deferred by local scheduler pressure. */
-  deferredBackpressure: number;
-  /** Selected-only metadata deadline yields whose exact prefixes were retained. */
-  metadataContinuationYields: number;
-  /** Coherent snapshot coverage for this round; reduced only by {@link selectSwmSnapshotCoverage}. */
-  swmCoverage?: SwmSnapshotCoverage;
-  /**
-   * The REPLAY half of `bytesReceived` — metadata AND aggregate data, the two
-   * phases a repeated pass re-fetches in full. `bytesReceived` merges these
-   * with snapshot bytes into one scalar, which leaves the accepted cost of
-   * repeating the peer walk unmeasurable in bytes.
-   */
-  replayPhaseBytesReceived: number;
-  /** The USEFUL half of `bytesReceived` — immutable snapshot content. */
-  snapshotPhaseBytesReceived: number;
-}
-
 export interface SharedMemoryMetadataFetchRequest {
   readonly ctx: OperationContext;
   readonly remotePeerId: string;
@@ -344,152 +305,6 @@ export interface SharedMemoryMetadataFetcher {
     contextGraphId: string,
     orderedManifest: readonly PublicSnapshotMetadata[],
   ): SharedMemorySnapshotWalkContinuation;
-}
-
-/**
- * Pick the coverage record a caller should report, WHOLE.
- *
- * This is the single reduction for {@link SwmSnapshotCoverage}, used both when
- * one peer's rounds are merged across Context Graphs (`mergeSharedMemorySyncResults`)
- * and when a catch-up walk merges across peers. It never builds a new pair of
- * counts — the returned record is byte-for-byte one of its inputs, so the
- * counts, the peer they are attributed to, and the missing sample always
- * describe the same round.
- *
- * Order: authority evidence, then a complete manifest (an incomplete one's
- * denominator is only a lower bound), then the LARGEST manifest, then the most
- * resolved within that manifest, then a lexicographic peer-id tiebreak.
- *
- * **Largest manifest, not best fraction.** Ranking by `resolved/total` picks
- * `200/200` over `178/250` and so reports "0 outstanding" on a job that is 72
- * Knowledge Assets short. That is worse than the synthetic `200/250` this
- * record shape exists to prevent, because it is internally self-consistent and
- * nothing downstream can detect it. The largest complete manifest is the best
- * known lower bound on what the graph actually holds, so the shortfall is
- * reported against that.
- *
- * Residual, stated: a peer that sorts first on authority still wins with a
- * stale or smaller manifest, and can report converged while a
- * non-authoritative peer knows of more. That one is accepted — the curator is
- * definitionally authoritative about its own Context Graph's inventory.
- */
-export function selectSwmSnapshotCoverage(
-  a: SwmSnapshotCoverage | undefined,
-  b: SwmSnapshotCoverage | undefined,
-): SwmSnapshotCoverage | undefined {
-  if (!a) return b;
-  if (!b) return a;
-  if ((a.fromAuthority ?? false) !== (b.fromAuthority ?? false)) {
-    return a.fromAuthority ? a : b;
-  }
-  if (a.manifestComplete !== b.manifestComplete) return a.manifestComplete ? a : b;
-  if (a.snapshotsTotal !== b.snapshotsTotal) return a.snapshotsTotal > b.snapshotsTotal ? a : b;
-  if (a.snapshotsResolved !== b.snapshotsResolved) {
-    return a.snapshotsResolved > b.snapshotsResolved ? a : b;
-  }
-  // Genuinely indistinguishable records. This settles a cross-PEER tie only:
-  // in the cross-Context-Graph merge both records come from the SAME peer, so
-  // the suffixes are equal and the choice falls through to `a` — that is,
-  // to Context Graph iteration order. Deterministic either way, but not
-  // because of this comparison.
-  return a.peerIdSuffix <= b.peerIdSuffix ? a : b;
-}
-
-/** Canonical zero value for every shared-memory orchestration path. */
-export function emptySharedMemorySyncResult(failedPeers = 0): SharedMemorySyncResult {
-  return {
-    snapshotPlaneIncomplete: 0,
-    insertedTriples: 0,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 0,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 0,
-    bytesReceived: 0,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    droppedDataTriples: 0,
-    failedPeers,
-    failedPhases: 0,
-    deniedPhases: 0,
-    backoffWorthyFailures: 0,
-    deferredBackpressure: 0,
-    metadataContinuationYields: 0,
-    replayPhaseBytesReceived: 0,
-    snapshotPhaseBytesReceived: 0,
-  };
-}
-
-/**
- * Canonical diagnostic reduction. Coverage and local-yield records remain
- * whole, counters add, and same-peer result folds can retain max failure
- * semantics while fleet-level catch-up diagnostics explicitly sum peers.
- */
-export function mergeSharedMemorySyncDiagnostics(
-  a: SharedMemorySyncDiagnostics,
-  b: SharedMemorySyncDiagnostics,
-  options: { readonly failedPeers?: 'max' | 'sum' } = {},
-): SharedMemorySyncDiagnostics {
-  type OptionalCounter =
-    | 'backoffWorthyFailures'
-    | 'deferredBackpressure'
-    | 'metadataContinuationYields'
-    | 'continuationPasses'
-    | 'resolvedSnapshotPlaneIncomplete'
-    | 'resolvedMetadataContinuationYields'
-    | 'replayPhaseBytesReceived'
-    | 'snapshotPhaseBytesReceived';
-  const optionalSum = (key: OptionalCounter): number | undefined => {
-    const left = a[key];
-    const right = b[key];
-    return left === undefined && right === undefined
-      ? undefined
-      : (left ?? 0) + (right ?? 0);
-  };
-  const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
-  const backoffWorthyFailures = optionalSum('backoffWorthyFailures');
-  const deferredBackpressure = optionalSum('deferredBackpressure');
-  const metadataContinuationYields = optionalSum('metadataContinuationYields');
-  const continuationPasses = optionalSum('continuationPasses');
-  const resolvedSnapshotPlaneIncomplete = optionalSum('resolvedSnapshotPlaneIncomplete');
-  const resolvedMetadataContinuationYields = optionalSum('resolvedMetadataContinuationYields');
-  const replayPhaseBytesReceived = optionalSum('replayPhaseBytesReceived');
-  const snapshotPhaseBytesReceived = optionalSum('snapshotPhaseBytesReceived');
-  return {
-    localYield: mergeSharedMemoryLocalYield(a.localYield, b.localYield),
-    snapshotPlaneIncomplete: a.snapshotPlaneIncomplete + b.snapshotPlaneIncomplete,
-    fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
-    fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
-    insertedMetaTriples: a.insertedMetaTriples + b.insertedMetaTriples,
-    insertedDataTriples: a.insertedDataTriples + b.insertedDataTriples,
-    bytesReceived: a.bytesReceived + b.bytesReceived,
-    resumedPhases: a.resumedPhases + b.resumedPhases,
-    timedOutPhases: a.timedOutPhases + b.timedOutPhases,
-    completedPhases: a.completedPhases + b.completedPhases,
-    checkpointAdvances: a.checkpointAdvances + b.checkpointAdvances,
-    emptyResponses: a.emptyResponses + b.emptyResponses,
-    droppedDataTriples: a.droppedDataTriples + b.droppedDataTriples,
-    failedPeers: options.failedPeers === 'sum'
-      ? a.failedPeers + b.failedPeers
-      : Math.max(a.failedPeers, b.failedPeers),
-    failedPhases: a.failedPhases + b.failedPhases,
-    ...(backoffWorthyFailures === undefined ? {} : { backoffWorthyFailures }),
-    ...(deferredBackpressure === undefined ? {} : { deferredBackpressure }),
-    ...(metadataContinuationYields === undefined ? {} : { metadataContinuationYields }),
-    ...(continuationPasses === undefined ? {} : { continuationPasses }),
-    ...(resolvedSnapshotPlaneIncomplete === undefined
-      ? {} : { resolvedSnapshotPlaneIncomplete }),
-    ...(resolvedMetadataContinuationYields === undefined
-      ? {} : { resolvedMetadataContinuationYields }),
-    ...(replayPhaseBytesReceived === undefined ? {} : { replayPhaseBytesReceived }),
-    ...(snapshotPhaseBytesReceived === undefined ? {} : { snapshotPhaseBytesReceived }),
-    ...(swmCoverage ? { swmCoverage } : {}),
-    ...(b.continuationStopReason === undefined && a.continuationStopReason === undefined
-      ? {}
-      : { continuationStopReason: b.continuationStopReason ?? a.continuationStopReason }),
-  };
 }
 
 export interface SharedMemorySyncSnapshotEvidencePolicy {
@@ -678,6 +493,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
     metadataContinuationYields: 0,
+    continuationPasses: 0,
+    resolvedSnapshotPlaneIncomplete: 0,
+    resolvedMetadataContinuationYields: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
   };

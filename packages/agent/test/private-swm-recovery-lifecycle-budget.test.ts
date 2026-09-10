@@ -61,7 +61,12 @@ function legacyMetadata(): Quad[] {
 }
 
 const stores: OxigraphStore[] = [];
-function harness(publicSnapshotStore?: WorkspacePublicSnapshotStore, detectLegacyRoots = false, roundBudgetMs = Infinity) {
+function harness(
+  publicSnapshotStore?: WorkspacePublicSnapshotStore,
+  detectLegacyRoots = false,
+  roundBudgetMs = Infinity,
+  privateSnapshotWalks?: PrivateSwmSnapshotWalkRegistry,
+) {
   const store = new OxigraphStore(); stores.push(store);
   const fetchSyncPages = vi.fn<SwmTargetExecutorPortsV1['fetchSyncPages']>();
   const host = {
@@ -86,6 +91,7 @@ function harness(publicSnapshotStore?: WorkspacePublicSnapshotStore, detectLegac
     resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
     createSwmTargetExecutorSessionV1: () => factory(),
+    privateSnapshotWalks,
     syncSharedMemoryFromPeerDetailedExecution: LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
   };
   const factory = createSwmTargetExecutorSessionFactoryForTest(host);
@@ -134,38 +140,54 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     }
   });
 
-  it('keeps retrying when each bounded round materializes a new snapshot', async () => {
-    vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '600000');
-    let elapsed = 0;
-    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
-    vi.spyOn(Date, 'now').mockImplementation(() => 10_000 + elapsed);
-    const fixtures = [10, 9, 8, 7].map(number => snapshotFixture(number));
-    const snapshots = new Map<string, Quad[]>();
-    const { executor, fetchSyncPages, store } = harness({
-      getSnapshot: async ref => snapshots.get(ref) ?? null,
-      putSnapshot: async ({ digest, quads }) => {
-        snapshots.set(digest, quads.map(quad => ({ ...quad })));
-        return { ref: digest, byteLength: 1 };
-      },
-    }, false, 10);
-    const fetchedRefs: string[] = [];
-    fetchSyncPages.mockImplementation(async (_ctx, _peer, _cg, _swm, phase, _graph, _deadline, options) => {
-      if (phase === 'meta') return page(fixtures.flatMap(({ metadata }) => metadata));
-      expect(phase).toBe('snapshot');
-      const fixture = fixtures.find(({ digest }) => digest === options?.snapshotRef);
-      if (!fixture) throw new Error('Unknown snapshot reference');
-      fetchedRefs.push(fixture.digest);
-      // One complete asset consumes this round, leaving ample overall budget.
-      elapsed += 10;
-      return page(fixture.payload);
-    });
-    const onRetry = vi.fn();
-    const result = await executor.recoverPrivateTarget({ contextGraphId: CG, remotePeerId: 'peer-source', onRetry });
-    expect(result.completed).toBe(true);
-    expect(fetchedRefs).toEqual(fixtures.map(({ digest }) => digest));
-    expect(onRetry.mock.calls.map(([progress]) => progress.readySnapshots)).toEqual([1, 2, 3, 4]);
-    for (const fixture of fixtures) expect(await store.countQuads(fixture.assertionGraph)).toBe(1);
-  });
+  it.each(['retained', 'detached'] as const)(
+    'keeps retrying with explicit %s progress when each bounded round materializes a new snapshot',
+    async expectedRetention => {
+      vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '600000');
+      let elapsed = 0;
+      vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+      vi.spyOn(Date, 'now').mockImplementation(() => 10_000 + elapsed);
+      const fixtures = [10, 9, 8, 7].map(number => snapshotFixture(number));
+      const snapshots = new Map<string, Quad[]>();
+      const privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry({ maxTargets: 1 });
+      if (expectedRetention === 'detached') {
+        privateSnapshotWalks.open(
+          { contextGraphId: 'capacity-owner', remotePeerId: 'capacity-peer' },
+          [{ ref: 'capacity', digest: 'capacity', count: 1 }],
+        );
+      }
+      const { executor, fetchSyncPages, store } = harness({
+        getSnapshot: async ref => snapshots.get(ref) ?? null,
+        putSnapshot: async ({ digest, quads }) => {
+          snapshots.set(digest, quads.map(quad => ({ ...quad })));
+          return { ref: digest, byteLength: 1 };
+        },
+      }, false, 10, privateSnapshotWalks);
+      const fetchedRefs: string[] = [];
+      fetchSyncPages.mockImplementation(async (_ctx, _peer, _cg, _swm, phase, _graph, _deadline, options) => {
+        if (phase === 'meta') return page(fixtures.flatMap(({ metadata }) => metadata));
+        expect(phase).toBe('snapshot');
+        const fixture = fixtures.find(({ digest }) => digest === options?.snapshotRef);
+        if (!fixture) throw new Error('Unknown snapshot reference');
+        fetchedRefs.push(fixture.digest);
+        // One complete asset consumes this round, leaving ample overall budget.
+        elapsed += 10;
+        return page(fixture.payload);
+      });
+      const onRetry = vi.fn();
+      const result = await executor.recoverPrivateTarget({
+        contextGraphId: CG,
+        remotePeerId: 'peer-source',
+        onRetry,
+      });
+      expect(result.completed).toBe(true);
+      expect(fetchedRefs).toEqual(fixtures.map(({ digest }) => digest));
+      expect(onRetry.mock.calls.map(([progress]) => progress.readySnapshots)).toEqual([1, 2, 3, 4]);
+      expect(onRetry.mock.calls.map(([progress]) => progress.snapshotProgressRetention))
+        .toEqual([expectedRetention, expectedRetention, expectedRetention, expectedRetention]);
+      for (const fixture of fixtures) expect(await store.countQuads(fixture.assertionGraph)).toBe(1);
+    },
+  );
 
   it('reports a local yield with no snapshot send or peer backoff after cache validation consumes the job', async () => {
     vi.stubEnv('DKG_PRIVATE_SWM_RECOVERY_BUDGET_MS', '100');
@@ -367,41 +389,47 @@ describe('private recovery job ownership and lifecycle outcome', () => {
       { ref: 'b', digest: 'b', count: 1 },
     ];
     const ownerA = { contextGraphId: 'cg-a', remotePeerId: 'peer-a' };
-    const walkA = registry.open(ownerA, manifest);
+    const leaseA = registry.open(ownerA, manifest);
+    expect(leaseA.kind).toBe('retained');
+    const walkA = leaseA.progress;
     walkA.markResolved('a');
-    expect(registry.open(ownerA, manifest).isResolved('a')).toBe(true);
+    expect(registry.open(ownerA, manifest).progress.isResolved('a')).toBe(true);
 
     const changedDigest = manifest.map((snapshot) => (
       snapshot.ref === 'a' ? { ...snapshot, digest: 'changed-digest' } : snapshot
     ));
-    expect(registry.open(ownerA, changedDigest).isResolved('a')).toBe(false);
-    registry.open(ownerA, manifest).markResolved('a');
+    expect(registry.open(ownerA, changedDigest).progress.isResolved('a')).toBe(false);
+    registry.open(ownerA, manifest).progress.markResolved('a');
 
     const changedCount = manifest.map((snapshot) => (
       snapshot.ref === 'a' ? { ...snapshot, count: 2 } : snapshot
     ));
-    expect(registry.open(ownerA, changedCount).isResolved('a')).toBe(false);
-    registry.open(ownerA, manifest).markResolved('a');
+    expect(registry.open(ownerA, changedCount).progress.isResolved('a')).toBe(false);
+    registry.open(ownerA, manifest).progress.markResolved('a');
 
-    const reversedA = registry.open(ownerA, [...manifest].reverse());
+    const reversedA = registry.open(ownerA, [...manifest].reverse()).progress;
     expect(reversedA.isResolved('a')).toBe(false);
     const ownerB = { ...ownerA, remotePeerId: 'peer-b' };
-    const walkB = registry.open(ownerB, manifest);
+    const walkB = registry.open(ownerB, manifest).progress;
     expect(walkB.isResolved('a')).toBe(false);
 
     const ownerC = { contextGraphId: 'cg-c', remotePeerId: 'peer-c' };
     const detachedC = registry.open(ownerC, [{ ref: 'only', digest: 'only', count: 1 }]);
-    detachedC.markResolved('only');
+    expect(detachedC.kind).toBe('detached');
+    detachedC.progress.markResolved('only');
     expect(registry.retainedTargetCount).toBe(2);
-    expect(registry.open(ownerB, manifest)).toBe(walkB);
+    expect(registry.open(ownerC, [{ ref: 'only', digest: 'only', count: 1 }])
+      .progress.isResolved('only')).toBe(false);
+    expect(registry.open(ownerB, manifest).progress).toBe(walkB);
 
     reversedA.markResolved('a');
     reversedA.markResolved('b');
     registry.release(ownerA);
     expect(registry.retainedTargetCount).toBe(1);
     const completing = registry.open(ownerC, [{ ref: 'only', digest: 'only', count: 1 }]);
-    completing.markResolved('only');
-    registry.release(ownerC);
+    expect(completing.kind).toBe('retained');
+    completing.progress.markResolved('only');
+    completing.release();
     expect(registry.retainedTargetCount).toBe(1);
     now = 11;
     expect(registry.retainedTargetCount).toBe(0);
@@ -422,13 +450,17 @@ describe('private recovery job ownership and lifecycle outcome', () => {
     for (let cycle = 0; cycle < 6 && completed.size < owners.length; cycle += 1) {
       for (const owner of owners) {
         if (completed.has(owner.contextGraphId)) continue;
-        const walk = registry.open(owner, manifest);
+        const lease = registry.open(owner, manifest);
+        expect(lease.kind).toBe(owner.contextGraphId === 'cg-c' && completed.size === 0
+          ? 'detached'
+          : 'retained');
+        const walk = lease.progress;
         const next = manifest.find(({ ref }) => !walk.isResolved(ref));
         if (!next) throw new Error('Incomplete owner has no remaining ref');
         walk.markResolved(next.ref);
         if (walk.resolvedCount() === manifest.length) {
           completed.add(owner.contextGraphId);
-          registry.release(owner);
+          lease.release();
         }
         expect(registry.retainedTargetCount).toBeLessThanOrEqual(2);
       }

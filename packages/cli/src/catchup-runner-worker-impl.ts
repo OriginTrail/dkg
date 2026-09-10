@@ -10,7 +10,7 @@ import {
   createFailedPeerDurableSyncResult,
   emptySharedMemorySyncResult,
   mapWithConcurrency,
-  mergeSharedMemorySyncDiagnostics,
+  mergeFleetSharedMemoryDiagnostics,
   resolveSwmCatchupPassConfig,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
@@ -614,20 +614,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
           },
         }
         : shared;
-      const mergedSharedMemoryDiagnostics = mergeSharedMemorySyncDiagnostics(
+      diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
         diagnostics.sharedMemory,
         sharedForDiagnostics,
-        { failedPeers: 'sum' },
       );
-      diagnostics.sharedMemory = {
-        ...mergedSharedMemoryDiagnostics,
-        deferredBackpressure: mergedSharedMemoryDiagnostics.deferredBackpressure ?? 0,
-        continuationPasses: mergedSharedMemoryDiagnostics.continuationPasses ?? 0,
-        replayPhaseBytesReceived:
-          mergedSharedMemoryDiagnostics.replayPhaseBytesReceived ?? 0,
-        snapshotPhaseBytesReceived:
-          mergedSharedMemoryDiagnostics.snapshotPhaseBytesReceived ?? 0,
-      };
       // The DIAGNOSTIC above counts every deferral, including continuation
       // ones — that is the honest observability number. The JOB-LEVEL scalar
       // below must not, and the reason is a behaviour change rather than a
@@ -652,8 +642,6 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       if (!isContinuationRound) {
         deferredBackpressure += shared.deferredBackpressure ?? 0;
       }
-      diagnostics.sharedMemory.deniedPhases =
-        (diagnostics.sharedMemory.deniedPhases ?? 0) + (shared.deniedPhases ?? 0);
       peerDenied = peerDenied || shared.deniedPhases > 0;
 
       // Shared memory carries no verified-private-only signal, so the shared

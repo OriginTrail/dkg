@@ -8,6 +8,8 @@ import {
 } from '../../src/sync/requester/swm-target-executor.js';
 import { createSwmRecoveryMutationRuntimeV1 } from
   '../../src/sync/requester/swm-recovery-apply.js';
+import type { PrivateSwmSnapshotWalkRegistry } from
+  '../../src/sync/requester/private-swm-snapshot-walk-registry.js';
 
 type CheckpointStore = Parameters<typeof deleteSyncPageCheckpoint>[0];
 
@@ -38,6 +40,7 @@ export function createSwmTargetExecutorSessionFactoryForTest(owner: {
     ReturnType<SwmTargetExecutorPortsV1['ensureOwnedMap']>
   >;
   retireFinalizedSwmTwinCandidate?: SwmTargetExecutorPortsV1['retireFinalizedSwmTwin'];
+  privateSnapshotWalks?: PrivateSwmSnapshotWalkRegistry;
   log?: {
     info?: SwmTargetExecutorPortsV1['logInfo'];
     warn?: SwmTargetExecutorPortsV1['logWarn'];
@@ -83,6 +86,6 @@ export function createSwmTargetExecutorSessionFactoryForTest(owner: {
     logInfo: (...args) => owner.log?.info?.(...args),
     logWarn: (...args) => owner.log?.warn?.(...args),
     logDebug: (...args) => owner.log?.debug?.(...args),
-  });
+  }, owner.privateSnapshotWalks);
   return () => factory.createSession();
 }

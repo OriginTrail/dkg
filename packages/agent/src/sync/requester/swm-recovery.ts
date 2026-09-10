@@ -204,6 +204,8 @@ export interface SwmRecoveryProgress {
   readonly completedRound: number;
   readonly readySnapshots: number;
   readonly totalSnapshots: number;
+  /** Present when an owning registry exposes cross-invocation retention. */
+  readonly snapshotProgressRetention?: 'retained' | 'detached';
 }
 
 export const DEFAULT_PRIVATE_SWM_RECOVERY_MAX_ROUNDS = 6;
@@ -235,6 +237,7 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
   readonly recover: (round: number) => Promise<RecoverContextGraphSwmResult>;
   readonly maxRounds?: number;
   readonly onRetry?: (progress: SwmRecoveryProgress) => void;
+  readonly snapshotProgressRetention?: () => 'retained' | 'detached';
 }): Promise<RecoverContextGraphSwmResult> {
   const explicitMaxRounds = params.maxRounds === undefined
     ? undefined
@@ -264,10 +267,12 @@ export async function recoverContextGraphSwmWithProgressRetries(params: {
       || !params.window.canStartRound(round + 1)) return result;
 
     previousReadySnapshots = readySnapshots;
+    const snapshotProgressRetention = params.snapshotProgressRetention?.();
     params.onRetry?.({
       completedRound: round,
       readySnapshots,
       totalSnapshots: result.totalSnapshots,
+      ...(snapshotProgressRetention === undefined ? {} : { snapshotProgressRetention }),
     });
   }
 

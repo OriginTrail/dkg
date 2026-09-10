@@ -1,5 +1,4 @@
 import type {
-  SharedMemorySyncDiagnostics,
   SharedMemorySyncResult,
 } from '../dkg-agent-types.js';
 import type {
@@ -141,28 +140,6 @@ export function classifySelectedSwmRoundFreshness(
       && coverage.materializationFailures === 0
       && coverage.snapshotsResolved === coverage.snapshotsTotal
       && progress.completedWithoutFailure,
-  };
-}
-
-/** Keep the freshness-only diagnostic additive when per-round results merge. */
-export function mergeSharedMemoryFreshnessDiagnostics(
-  a: SharedMemorySyncDiagnostics,
-  b: SharedMemorySyncDiagnostics,
-): Pick<
-  SharedMemorySyncDiagnostics,
-  | 'snapshotPlaneIncomplete'
-  | 'resolvedSnapshotPlaneIncomplete'
-  | 'resolvedMetadataContinuationYields'
-> {
-  return {
-    snapshotPlaneIncomplete:
-      (a.snapshotPlaneIncomplete ?? 0) + (b.snapshotPlaneIncomplete ?? 0),
-    resolvedSnapshotPlaneIncomplete:
-      (a.resolvedSnapshotPlaneIncomplete ?? 0)
-      + (b.resolvedSnapshotPlaneIncomplete ?? 0),
-    resolvedMetadataContinuationYields:
-      (a.resolvedMetadataContinuationYields ?? 0)
-      + (b.resolvedMetadataContinuationYields ?? 0),
   };
 }
 

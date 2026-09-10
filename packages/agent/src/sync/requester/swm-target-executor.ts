@@ -22,10 +22,9 @@ import type { RecoveryExecutionGuard } from './recovery-execution-guard.js';
 import {
   runSharedMemorySync,
   type SharedMemoryMetadataFetcher,
-  type PublicSnapshotMetadata,
   type SharedMemorySyncContext,
-  type SharedMemorySyncSummary,
 } from './shared-memory-sync.js';
+import type { SharedMemorySyncSummary } from '../shared-memory-diagnostics.js';
 import {
   createSharedMemorySnapshotMaterializer,
   type SharedMemorySnapshotMaterializer,
@@ -43,8 +42,8 @@ import {
 import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-filter.js';
 import {
   PrivateSwmSnapshotWalkRegistry,
+  type PrivateSwmSnapshotWalkLease,
 } from './private-swm-snapshot-walk-registry.js';
-import type { ManifestBoundSnapshotProgress } from './manifest-bound-snapshot-walk.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
@@ -134,19 +133,13 @@ export class SwmTargetExecutorV1 {
     this.#recoveryMutation = ports.recoveryMutation;
   }
 
-  #privateSnapshotWalk(
-    target: PrivateSwmRecoveryTargetV1,
-    orderedManifest: readonly PublicSnapshotMetadata[],
-  ): ManifestBoundSnapshotProgress {
-    return this.privateSnapshotWalks.open(target, orderedManifest);
-  }
-
   async recoverPrivateTarget(
     target: PrivateSwmRecoveryTargetV1,
   ): Promise<RecoverContextGraphSwmResult> {
     const window = createPrivateSwmRecoveryWindow(this.#ports.privateRecoveryBudgetMs);
     const ctx = createOperationContext('sync');
     const admission = () => this.#getSubGraphAdmission(target.contextGraphId);
+    let snapshotLease: PrivateSwmSnapshotWalkLease | undefined;
     const options: Omit<RecoverContextGraphSwmOptions, 'deadline' | 'workAdmission'> = {
       ctx,
       remotePeerId: target.remotePeerId,
@@ -192,7 +185,13 @@ export class SwmTargetExecutorV1 {
       includeRootScope: target.includeRootScope,
       ensureOwnedMap: this.#ports.ensureOwnedMap,
       snapshotWalkProgress: (orderedManifest) => (
-        this.#privateSnapshotWalk(target, orderedManifest)
+        snapshotLease?.progress.matches(orderedManifest)
+          ? snapshotLease.progress
+          : (() => {
+              snapshotLease?.release();
+              snapshotLease = this.privateSnapshotWalks.open(target, orderedManifest);
+              return snapshotLease.progress;
+            })()
       ),
       logInfo: this.#ports.logInfo,
       logWarn: this.#ports.logWarn,
@@ -201,6 +200,7 @@ export class SwmTargetExecutorV1 {
     const result = await recoverContextGraphSwmWithProgressRetries({
       window,
       onRetry: target.onRetry,
+      snapshotProgressRetention: () => snapshotLease?.kind ?? 'detached',
       recover: (round) => {
         const deadline = this.#ports.createContextGraphSyncDeadline(1);
         const workAdmission = window.admitRound(deadline, {
@@ -210,7 +210,7 @@ export class SwmTargetExecutorV1 {
         return recoverContextGraphSwm({ ...options, deadline, workAdmission });
       },
     });
-    if (result.completed) this.privateSnapshotWalks.release(target);
+    if (result.completed) snapshotLease?.release();
     return result;
   }
 
@@ -322,10 +322,14 @@ export class SwmTargetExecutorV1 {
 /** Stable typed composition with isolated session caches and shared manifest progress. */
 export class SwmTargetExecutorSessionFactoryV1 {
   readonly #ports: SwmTargetExecutorPortsV1;
-  readonly #privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry();
+  readonly #privateSnapshotWalks: PrivateSwmSnapshotWalkRegistry;
 
-  constructor(ports: SwmTargetExecutorPortsV1) {
+  constructor(
+    ports: SwmTargetExecutorPortsV1,
+    privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
+  ) {
     this.#ports = ports;
+    this.#privateSnapshotWalks = privateSnapshotWalks;
   }
 
   createSession(): SwmTargetExecutorV1 {

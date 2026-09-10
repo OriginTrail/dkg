@@ -65,6 +65,15 @@ interface RetainedPrivateSnapshotWalk {
   readonly progress: ManifestBoundSnapshotProgress;
 }
 
+export type PrivateSwmSnapshotWalkLease = Readonly<{
+  readonly progress: ManifestBoundSnapshotProgress;
+  /** Release is identity-safe: a stale lease cannot delete a newer owner. */
+  release(): void;
+} & (
+  | { readonly kind: 'retained' }
+  | { readonly kind: 'detached' }
+)>;
+
 const DEFAULT_MAX_RETAINED_PRIVATE_SNAPSHOT_WALKS = 256;
 
 /**
@@ -96,11 +105,13 @@ export class PrivateSwmSnapshotWalkRegistry {
   open(
     owner: PrivateSwmSnapshotWalkOwner,
     orderedManifest: readonly PublicSnapshotMetadata[],
-  ): ManifestBoundSnapshotProgress {
+  ): PrivateSwmSnapshotWalkLease {
     this.#pruneExpired();
     const ownerKey = privateSnapshotWalkOwnerKey(owner);
     const retained = this.#walks.get(ownerKey);
-    if (retained?.progress.matches(orderedManifest)) return retained.progress;
+    if (retained?.progress.matches(orderedManifest)) {
+      return this.#retainedLease(ownerKey, retained.progress);
+    }
     if (retained) this.#walks.delete(ownerKey);
 
     const progress = new ManifestBoundSnapshotProgress(orderedManifest, {
@@ -108,10 +119,10 @@ export class PrivateSwmSnapshotWalkRegistry {
       retentionTtlMs: this.#retentionTtlMs,
     });
     if (orderedManifest.length === 0 || this.#walks.size >= this.#maxTargets) {
-      return progress;
+      return Object.freeze({ kind: 'detached', progress, release: () => {} });
     }
     this.#walks.set(ownerKey, { progress });
-    return progress;
+    return this.#retainedLease(ownerKey, progress);
   }
 
   release(owner: PrivateSwmSnapshotWalkOwner): void {
@@ -128,6 +139,19 @@ export class PrivateSwmSnapshotWalkRegistry {
     for (const [ownerKey, retained] of this.#walks) {
       if (retained.progress.expiresAtMs <= now) this.#walks.delete(ownerKey);
     }
+  }
+
+  #retainedLease(
+    ownerKey: string,
+    progress: ManifestBoundSnapshotProgress,
+  ): PrivateSwmSnapshotWalkLease {
+    return Object.freeze({
+      kind: 'retained' as const,
+      progress,
+      release: () => {
+        if (this.#walks.get(ownerKey)?.progress === progress) this.#walks.delete(ownerKey);
+      },
+    });
   }
 }
 

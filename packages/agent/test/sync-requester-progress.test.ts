@@ -18,12 +18,15 @@ import { generateShareMetadata, workspacePublicQuadsDigest } from '@origintrail-
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import {
   collectPublicSnapshotMetadata,
-  emptySharedMemorySyncResult,
-  mergeSharedMemorySyncDiagnostics,
   runSharedMemorySync,
-  selectSwmSnapshotCoverage,
   syncPublicSnapshotsForMeta,
 } from '../src/sync/requester/shared-memory-sync.js';
+import {
+  emptySharedMemorySyncResult,
+  mergeFleetSharedMemoryDiagnostics,
+  mergeSamePeerSharedMemoryDiagnostics,
+  selectSwmSnapshotCoverage,
+} from '../src/sync/shared-memory-diagnostics.js';
 import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
@@ -75,14 +78,14 @@ describe('canonical shared-memory diagnostics reduction', () => {
       swmCoverage: smallerComplete,
     };
 
-    expect(mergeSharedMemorySyncDiagnostics(left, right)).toMatchObject({
+    expect(mergeSamePeerSharedMemoryDiagnostics(left, right)).toMatchObject({
       bytesReceived: 17,
       failedPeers: 2,
       backoffWorthyFailures: 2,
       metadataContinuationYields: 3,
       swmCoverage: largerPartial,
     });
-    expect(mergeSharedMemorySyncDiagnostics(left, right, { failedPeers: 'sum' }))
+    expect(mergeFleetSharedMemoryDiagnostics(left, right))
       .toMatchObject({ failedPeers: 3, swmCoverage: largerPartial });
   });
 });
