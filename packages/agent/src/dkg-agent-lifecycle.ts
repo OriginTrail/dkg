@@ -8,6 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
+import { readAgentPeerPage, validateAgentPeerPageRequest } from './agent-peer-discovery.js';
 import { createHash } from 'node:crypto';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
@@ -7311,29 +7312,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }> => {
         assertCurrent();
         try {
-          if (options.maxPeerIds !== undefined
-            && typeof this.discovery.findAgentPeerIdsByAddress === 'function') {
-            const pagePeerIds = Math.min(
-              options.maxPeerIds,
-              Math.max(1, Math.floor(options.pagePeerIds ?? options.maxPeerIds)),
-            );
+          if (options.maxPeerIds !== undefined) {
+            validateAgentPeerPageRequest({ limit: options.maxPeerIds, signal: options.signal });
+            const requestedPageSize = options.pagePeerIds ?? options.maxPeerIds;
+            validateAgentPeerPageRequest({ limit: requestedPageSize, signal: options.signal });
+            const pagePeerIds = Math.min(options.maxPeerIds, requestedPageSize);
             const queryPage = (afterPeerId?: string) =>
-              this.discovery.findAgentPeerIdsByAddress(structuralAgent, {
-                ...(afterPeerId ? { afterPeerId } : {}),
-                limit: (afterPeerId ? pagePeerIds : options.maxPeerIds!) + 1,
+              readAgentPeerPage(this.discovery, structuralAgent, {
+                ...(afterPeerId !== undefined ? { afterPeerId } : {}),
+                limit: afterPeerId !== undefined ? pagePeerIds : options.maxPeerIds!,
                 signal: options.signal,
               });
-            let pageStartedAtBeginning = !options.afterPeerId;
-            let peerIds = await queryPage(options.afterPeerId);
+            let pageStartedAtBeginning = options.afterPeerId === undefined;
+            let page = await queryPage(options.afterPeerId);
             assertCurrent();
-            if (options.afterPeerId && peerIds.length === 0) {
+            if (options.afterPeerId !== undefined && page.peerIds.length === 0) {
               pageStartedAtBeginning = true;
-              peerIds = await queryPage();
+              page = await queryPage();
             }
             assertCurrent();
-            const overflowed = !pageStartedAtBeginning
-              || peerIds.length > options.maxPeerIds;
-            const bounded = peerIds.slice(0, overflowed ? pagePeerIds : options.maxPeerIds);
+            // Only a complete first-page query can describe a whole roster.
+            // A tail page remains overflowed even if concurrent deletions made
+            // it short; it cannot authorize an absence proof for earlier peers.
+            const overflowed = !pageStartedAtBeginning || page.nextAfterPeerId !== null;
+            const bounded = page.peerIds.slice(0, overflowed ? pagePeerIds : options.maxPeerIds);
             return {
               peerIds: bounded,
               lookupFailed: false,
@@ -7361,10 +7363,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       };
       let resolution = await resolve();
       assertCurrent();
-      if (resolution.peerIds.length === 0) {
+      // A missing/broken bounded capability is a lookup failure, never an
+      // invitation to invoke the legacy rich-profile fallback via refresh.
+      if (resolution.peerIds.length === 0 && !(options.maxPeerIds !== undefined && resolution.lookupFailed)) {
         assertCurrent();
         const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
           signal: options.signal,
+          ...(options.maxPeerIds !== undefined ? { registryPageLimit: 1 } : {}),
         }).catch((error) => {
           assertCurrent();
           return false;

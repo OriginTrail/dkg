@@ -9,6 +9,7 @@
  * cross-calls resolve against the composed class.
  */
 
+import { readAgentPeerPage } from './agent-peer-discovery.js';
 import { createHash } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -605,7 +606,7 @@ export async function resolveCuratorSyncPeer(
    */
   bootstrapHints: Map<string, string>,
   contextGraphId: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; registryPageLimit?: number } = {},
 ): Promise<SyncPeerResolution> {
   const approvedCuratorPeerId = bootstrapHints.get(contextGraphId);
   const fromHint = (): SyncPeerResolution => (approvedCuratorPeerId
@@ -657,14 +658,17 @@ export async function resolveCuratorSyncPeer(
     if (!resolved) {
       try {
         throwIfSyncAuthAborted(options.signal);
-        const agents = await agent.discovery.findAgents({ signal: options.signal });
+        const peerId = options.registryPageLimit === undefined
+          ? (await agent.discovery.findAgents({ signal: options.signal })).find(
+              (candidate) => candidate.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
+            )?.peerId
+          : (await readAgentPeerPage(agent.discovery, curatorIdentifier, {
+              limit: options.registryPageLimit,
+              signal: options.signal,
+            })).peerIds[0];
         throwIfSyncAuthAborted(options.signal);
-        const matches = agents.filter(
-          (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
-        );
-        const match = matches[0];
-        if (match) {
-          curatorPeerId = match.peerId;
+        if (peerId) {
+          curatorPeerId = peerId;
           resolved = true;
           // NEVER authoritative, however many matches came back. `findAgents()`
           // queries the LOCAL Agent Registry only, so "one match" means one match
@@ -2223,7 +2227,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   public async resolveCuratorPeerId(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; registryPageLimit?: number } = {},
   ): Promise<string | undefined> {
     return (await resolveCuratorSyncPeer(
       this,

@@ -45,6 +45,28 @@ const agents = await agent.findAgents();
 const skills = await agent.findSkills({ skillType: 'sentiment-analysis' });
 ```
 
+## Bounded peer discovery
+
+`DiscoveryClient.findAgentPeerIdsByAddress(wallet, { limit, afterPeerId?, signal? })`
+requires an integer limit from 1 to `MAX_AGENT_PEER_PAGE_SIZE` (1,024). It returns
+`{ peerIds, nextAfterPeerId }`: peer IDs are unique and ordered, the cursor is
+exclusive, and a null continuation means the query found no further row. The
+query retains at most `limit + 1` rows and does not select optional profile fields.
+This replaces the method's earlier optional-limit, array-only result.
+
+Bounded recovery providers must implement the exported `AgentPeerDiscovery`
+contract. Providers that cannot paginate must reject the lookup; bounded recovery
+reports `lookupFailed` and never substitutes `findAgents()`. This also applies to
+registry discovery during its metadata-refresh fallback. Legacy single-curator
+metadata resolution and callers explicitly using the rich profile API retain
+their existing behavior.
+
+A page walk is not a snapshot of a changing registry. Recovery treats tail pages
+as incomplete roster evidence even when a tail page has no continuation. Only a
+fresh first-page query covering the entire bounded roster can support its existing
+absence-proof checks. These local peer IDs do not themselves establish curator
+authority.
+
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-core` — P2P node, crypto, event bus

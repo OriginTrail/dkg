@@ -7,6 +7,13 @@ import {
   sparqlIri,
 } from '@origintrail-official/dkg-core';
 import { AGENT_REGISTRY_CONTEXT_GRAPH } from './profile.js';
+import {
+  validateAgentPeerPage,
+  validateAgentPeerPageRequest,
+  type AgentPeerDiscovery,
+  type AgentPeerPage,
+  type AgentPeerPageRequest,
+} from './agent-peer-discovery.js';
 
 const SKILL = 'https://dkg.origintrail.io/skill#';
 const DKG = 'https://dkg.network/ontology#';
@@ -150,7 +157,7 @@ export interface SkillSearchOptions {
  * Discovers agents and skill offerings by querying the local Agent Registry
  * context graph. All queries are strictly local (Spec §1.6 Store Isolation).
  */
-export class DiscoveryClient {
+export class DiscoveryClient implements AgentPeerDiscovery {
   private readonly engine: QueryEngine;
 
   constructor(engine: QueryEngine) {
@@ -220,36 +227,43 @@ export class DiscoveryClient {
    */
   async findAgentPeerIdsByAddress(
     agentAddress: string,
-    options: { afterPeerId?: string; limit?: number; signal?: AbortSignal } = {},
-  ): Promise<string[]> {
+    options: AgentPeerPageRequest,
+  ): Promise<AgentPeerPage> {
+    options = Object.freeze({ ...options });
+    validateAgentPeerPageRequest(options);
     const isEvmAddress = /^0x[0-9a-fA-F]{40}$/.test(agentAddress);
     const addressMatch = isEvmAddress
       ? `?agent <${DKG}agentAddress> ?storedAgentAddress .
         FILTER(LCASE(STR(?storedAgentAddress)) = "${escapeSparqlLiteral(agentAddress.toLowerCase())}")`
       : `?agent <${DKG}agentAddress> "${escapeSparqlLiteral(agentAddress)}" .`;
-    const limit = options.limit === undefined
-      ? undefined
-      : Math.max(1, Math.floor(options.limit));
     const afterFilter = options.afterPeerId
-      ? `FILTER(STR(?peerId) > "${escapeSparqlLiteral(options.afterPeerId)}")`
+      ? `FILTER(STR(?storedPeerId) > "${escapeSparqlLiteral(options.afterPeerId)}")`
       : '';
     const result = await this.engine.query(`
-      SELECT DISTINCT ?peerId WHERE {
+      SELECT DISTINCT (STR(?storedPeerId) AS ?peerId) WHERE {
         ?agent a <${DKG}Agent> ;
-               <${DKG}peerId> ?peerId .
+               <${DKG}peerId> ?storedPeerId .
         ${addressMatch}
+        FILTER(STRLEN(STR(?storedPeerId)) > 0)
         ${afterFilter}
       }
       ORDER BY ASC(STR(?peerId))
-      ${limit === undefined ? '' : `LIMIT ${limit}`}
+      LIMIT ${options.limit + 1}
     `, {
       contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
       signal: options.signal,
     });
 
-    return result.bindings
-      .map((row) => stripQuotes(row['peerId'] ?? ''))
-      .filter((peerId) => peerId.length > 0);
+    options.signal?.throwIfAborted();
+    if (result.bindings.length > options.limit + 1) {
+      throw new Error('Peer registry query exceeded its row limit');
+    }
+    const peerIds = result.bindings.slice(0, options.limit)
+      .map((row) => stripQuotes(row['peerId'] ?? ''));
+    return validateAgentPeerPage({
+      peerIds,
+      nextAfterPeerId: result.bindings.length > options.limit ? peerIds[peerIds.length - 1] : null,
+    }, options);
   }
 
   async findSkillOfferings(options: SkillSearchOptions = {}): Promise<DiscoveredOffering[]> {

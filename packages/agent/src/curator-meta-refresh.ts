@@ -39,6 +39,8 @@ import { stripLiteral } from './dkg-agent-utils.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
+  /** Require bounded peer discovery if resolving a wallet curator through the registry. */
+  registryPageLimit?: number;
   /**
    * A curator peer whose authority was already established by the caller.
    * The join-approved path uses the authenticated notification sender so
