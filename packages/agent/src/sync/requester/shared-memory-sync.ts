@@ -9,6 +9,10 @@ import {
   selectSwmSnapshotCoverage,
   type SharedMemorySyncSummary,
 } from '../shared-memory-diagnostics.js';
+export {
+  selectSwmSnapshotCoverage,
+  type SharedMemorySyncSummary,
+} from '../shared-memory-diagnostics.js';
 import {
   mergeSharedMemoryLocalYield,
   sharedMemoryLocalYield,
