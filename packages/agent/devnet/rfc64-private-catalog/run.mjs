@@ -30,6 +30,16 @@ const RUNTIME_LOAD_HOOK = resolve(
 export const RFC64_PRIVATE_GATE_ARTIFACT_PATH = join(HERE, 'artifacts', 'latest.json');
 const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
 const RUN_TIMEOUT_MS = 90_000;
+export const RFC64_PRIVATE_GATE_RPC_BUDGET_V1 = Object.freeze({
+  total: 128,
+  methods: Object.freeze({
+    eth_blockNumber: 16,
+    eth_call: 96,
+    eth_chainId: 16,
+    eth_getBlockByNumber: 16,
+    eth_getCode: 8,
+  }),
+});
 export const EXPECTED_MEMORY_CONTENTS = Object.freeze({
   assetNumbers: ASSET_NUMBERS,
   projection: PROJECTION_EVIDENCE,
@@ -347,6 +357,25 @@ export async function executeRfc64PrivateReleaseGateV1({
       expectedHeadDigest: published.headObjectDigest,
     }, 'inspection');
 
+    // Advance the provider's finalized authority high-water after the receiver
+    // has proved it was previously authorized. The receiver deliberately keeps
+    // its old local snapshot so its next pull reaches the serving-side gate.
+    const receiverRevocation = await provider2.request({
+      cmd: 'revoke-receiver',
+    }, 'receiver-revoked');
+    const revokedReceiverDenial = await receiver.request({
+      cmd: 'sync-denied',
+      providerPeerIds: [peerIds.provider2],
+    }, 'sync-denial-result');
+    const provider2StateAfterRevocation = await provider2.request({
+      cmd: 'inspect',
+      expectedHeadDigest: published.headObjectDigest,
+    }, 'inspection');
+    const receiverStateAfterRevocation = await receiver.request({
+      cmd: 'inspect',
+      expectedHeadDigest: published.headObjectDigest,
+    }, 'inspection');
+
     runtimeEvidence.record('provider2', await provider2.stop());
     active.delete(provider2);
     runtimeEvidence.record('receiver', await receiver.stop());
@@ -397,12 +426,23 @@ export async function executeRfc64PrivateReleaseGateV1({
       receiverHasExactSwmAndVm: hasExactMemoryContents(receiverState),
       finalizedChainPathExecuted:
         provider2State.rpcCalls > 0 && receiverState.rpcCalls > 0,
+      finalizedChainRpcWithinBudget:
+        isWithinRpcBudgetV1(provider2StateAfterRevocation)
+        && isWithinRpcBudgetV1(receiverStateAfterRevocation)
+        && isWithinRpcBudgetV1(restartState),
       outsiderDeniedBeforeApplication:
         isExpectedPrivateCatalogDenialResultV1(outsiderDenial)
         && outsiderState.appliedHeadDigest === null,
       outsiderReceivedNoPrivateGraphs:
         outsiderState.graphCounts.every(({ swm, vm }) => swm === 0 && vm === 0),
       nonmemberQueryIsEmpty: providerAccessState.outsiderVisibleVmBindings === 0,
+      revokedReceiverDeniedAfterFinalizedRosterAdvance:
+        receiverRevocation.rosterVersion === '1'
+        && receiverRevocation.revokedAgentAddress === roleAgentAddress('receiver')
+        && isExpectedPrivateCatalogDenialResultV1(revokedReceiverDenial),
+      revocationDoesNotCorruptPreviouslyCommittedMemory:
+        receiverStateAfterRevocation.exactExpectedHead === true
+        && hasExactMemoryContents(receiverStateAfterRevocation),
       restartPreservedIdentityAndExactHead:
         restartedReceiver.ready.peerId === peerIds.receiver
         && restartState.exactExpectedHead === true
@@ -430,7 +470,7 @@ export async function executeRfc64PrivateReleaseGateV1({
         catalogVersion: published.catalogVersion,
         inventoryRowCount: published.inventoryRowCount,
       },
-      provider2: safeState(provider2State, provider2Bootstrap),
+      provider2: safeState(provider2StateAfterRevocation, provider2Bootstrap),
       failoverBarrier: {
         ownerExitCode: ownerExit.code,
         ownerExitedAt: ownerExit.exitedAt,
@@ -448,6 +488,16 @@ export async function executeRfc64PrivateReleaseGateV1({
         failureCode: outsiderDenial.failureCode,
         appliedHeadDigest: outsiderState.appliedHeadDigest,
         graphCounts: outsiderState.graphCounts,
+      },
+      revokedReceiver: {
+        denial: {
+          denied: revokedReceiverDenial.denied,
+          failureClass: revokedReceiverDenial.failureClass,
+          failureCode: revokedReceiverDenial.failureCode,
+        },
+        revokedAgentAddress: receiverRevocation.revokedAgentAddress,
+        rosterVersion: receiverRevocation.rosterVersion,
+        state: safeState(receiverStateAfterRevocation, receiverBootstrap),
       },
       restartedReceiver: safeState(restartState, null),
     };
@@ -529,12 +579,14 @@ function safeRole(ready) {
 }
 
 function safeState(state, bootstrap) {
+  const rpc = rpcEvidenceV1(state);
   return {
     appliedHeadDigest: state.appliedHeadDigest,
     catalogVersion: state.catalogVersion,
     inventoryRowCount: state.inventoryRowCount,
     graphCounts: state.graphCounts,
     rpcCalls: state.rpcCalls,
+    rpc,
     receiver: {
       applied: state.receiverStats?.applied ?? 0,
       failed: state.receiverStats?.failed ?? 0,
@@ -547,6 +599,30 @@ function safeState(state, bootstrap) {
       },
     }),
   };
+}
+
+export function rpcEvidenceV1(state) {
+  const calls = state?.rpcCallCounts;
+  const byMethod = calls !== null && typeof calls === 'object' && !Array.isArray(calls)
+    ? Object.fromEntries(Object.entries(calls).map(([method, count]) => [method, Number(count)]))
+    : {};
+  return Object.freeze({
+    byMethod: Object.freeze(byMethod),
+    total: Object.values(byMethod).reduce((sum, count) => sum + count, 0),
+  });
+}
+
+export function isWithinRpcBudgetV1(state) {
+  const evidence = rpcEvidenceV1(state);
+  if (evidence.total < 1 || evidence.total > RFC64_PRIVATE_GATE_RPC_BUDGET_V1.total) {
+    return false;
+  }
+  return Object.entries(evidence.byMethod).every(([method, count]) => (
+    Number.isSafeInteger(count)
+    && count >= 0
+    && Object.hasOwn(RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods, method)
+    && count <= RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods[method]
+  ));
 }
 
 function delay(ms) {

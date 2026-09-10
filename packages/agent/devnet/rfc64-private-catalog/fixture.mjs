@@ -50,6 +50,7 @@ export const PROJECTION_NQUADS = canonicalGraphlessProjectionNQuads(PROJECTION_Q
 export const PROJECTION = new TextEncoder().encode(`${PROJECTION_NQUADS}\n`);
 export const PROJECTION_EVIDENCE = computeGraphlessMemoryEvidence(PROJECTION_QUADS);
 export const PROJECTION_DIGEST = PROJECTION_EVIDENCE.digest;
+export const PRIVATE_MEMBER_ROLES = Object.freeze(['owner', 'provider2', 'receiver']);
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,
@@ -68,12 +69,15 @@ export function ownerWallet() {
 
 export function createPrivatePolicyAndRoster() {
   const ownerAddress = roleAgentAddress('owner');
+  const ownershipTransitionDigest = ethers.keccak256(ethers.toUtf8Bytes(
+    `dkg:rfc64:ownership:v1\n${CONTEXT_GRAPH_ID}\n${ownerAddress}\n0`,
+  )).toLowerCase();
   const policy = Object.freeze({
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_ID,
     governanceChainId: CHAIN_ID,
     governanceContractAddress: CONTEXT_GRAPH_STORAGE,
-    ownershipTransitionDigest: null,
+    ownershipTransitionDigest,
     era: '0',
     version: '0',
     previousPolicyDigest: null,
@@ -90,11 +94,11 @@ export function createPrivatePolicyAndRoster() {
       blockNumber: '120',
       blockHash: FINALIZED_POLICY_BLOCK_HASH,
     }),
-    effectiveAt: '1773900000000',
-    issuedAt: '1773900000000',
+    effectiveAt: '0',
+    issuedAt: '0',
   });
   const policyEnvelope = Object.freeze({
-    issuer: CONTEXT_GRAPH_STORAGE,
+    issuer: ownerAddress,
     objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
     payload: policy,
     signatureEvidence: Object.freeze({ kind: 'none' }),
@@ -104,27 +108,20 @@ export function createPrivatePolicyAndRoster() {
   const roster = Object.freeze({
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_ID,
-    ownershipTransitionDigest: null,
+    ownershipTransitionDigest,
     era: '0',
     version: '0',
     previousRosterDigest: null,
     policyDigest,
     administrativeDelegationDigest: null,
-    members: Object.freeze([
-      Object.freeze({ agentAddress: ownerAddress, roles: Object.freeze(['holder', 'provider']) }),
-      Object.freeze({
-        agentAddress: roleAgentAddress('provider2'),
-        roles: Object.freeze(['holder', 'provider']),
-      }),
-      Object.freeze({
-        agentAddress: roleAgentAddress('receiver'),
-        roles: Object.freeze(['holder']),
-      }),
-    ]),
-    issuedAt: '1773900000000',
+    members: Object.freeze(PRIVATE_MEMBER_ROLES.map((role) => Object.freeze({
+      agentAddress: roleAgentAddress(role),
+      roles: Object.freeze(['holder', 'provider']),
+    }))),
+    issuedAt: '0',
   });
   const rosterEnvelope = Object.freeze({
-    issuer: CONTEXT_GRAPH_STORAGE,
+    issuer: ownerAddress,
     objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
     payload: roster,
     signatureEvidence: Object.freeze({ kind: 'none' }),
@@ -133,11 +130,37 @@ export function createPrivatePolicyAndRoster() {
   return Object.freeze({ policy, policyEnvelope, policyDigest, roster, rosterEnvelope });
 }
 
+/** Finalized roster generation after the original receiver is removed. */
+export function createReceiverRevokedPolicyAndRoster() {
+  const current = createPrivatePolicyAndRoster();
+  const roster = Object.freeze({
+    ...current.roster,
+    version: '1',
+    members: Object.freeze(current.roster.members.filter(
+      ({ agentAddress }) => agentAddress !== roleAgentAddress('receiver'),
+    )),
+    issuedAt: '1',
+  });
+  const rosterEnvelope = Object.freeze({
+    ...current.rosterEnvelope,
+    payload: roster,
+  });
+  return Object.freeze({
+    policy: current.policy,
+    policyEnvelope: current.policyEnvelope,
+    policyDigest: current.policyDigest,
+    roster,
+    rosterEnvelope,
+  });
+}
+
 export function createFinalizedChainFixture() {
   const ownerAddress = roleAgentAddress('owner');
   return Object.freeze({
     accessPolicy: 1,
     active: true,
+    authorityBlockHash: FINALIZED_POLICY_BLOCK_HASH,
+    authorityBlockNumber: '120',
     assertedAtChainId: CHAIN_ID,
     assertedAtKav10Address: KAV10,
     knowledgeAssetStorageAddress: KA_STORAGE,
@@ -155,9 +178,13 @@ export function createFinalizedChainFixture() {
     networkId: NETWORK_ID,
     onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
     ownerAddress,
+    ownershipEra: '0',
+    participantAgents: Object.freeze(PRIVATE_MEMBER_ROLES.map(roleAgentAddress)),
+    policyVersion: '0',
     publishPolicy: 0,
     publishAuthority: ownerAddress,
     publishAuthorityAccountId: '0',
+    rosterVersion: '0',
   });
 }
 

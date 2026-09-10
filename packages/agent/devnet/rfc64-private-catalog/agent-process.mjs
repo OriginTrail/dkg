@@ -11,6 +11,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  composeRfc64FinalizedCatalogAuthorityV1,
+  parseRfc64AuthoritySnapshotV1,
+} from '../../dist/rfc64/release-native-catalog-authority-v1.js';
 
 import {
   Rfc64PrivateDevnetChainAdapter,
@@ -22,9 +26,12 @@ import {
   CONTEXT_GRAPH_STORAGE,
   DEPLOYMENT,
   NETWORK_ID,
+  ON_CHAIN_CONTEXT_GRAPH_ID,
+  PRIVATE_MEMBER_ROLES,
   createCatalogAssets,
   createFinalizedChainFixture,
   createPrivatePolicyAndRoster,
+  createReceiverRevokedPolicyAndRoster,
   ownerWallet,
   roleAgentAddress,
 } from './fixture.mjs';
@@ -39,6 +46,7 @@ const RUNTIME_MANIFEST_DIGEST = requiredEnv('DKG_RFC64_RUNTIME_MANIFEST_DIGEST')
 const MANIFEST_PATH = process.env.DKG_RFC64_PRIVATE_MANIFEST;
 
 let agent;
+let chainAdapter;
 let rpc;
 let stopping = false;
 
@@ -80,12 +88,13 @@ async function createAgent(manifest, finalizedRuntime) {
   let chainRuntime = {};
   if (finalizedRuntime) {
     rpc = await startRfc64PrivateDevnetFinalizedRpc(fixture);
-    const chainAdapter = new Rfc64PrivateDevnetChainAdapter(fixture);
+    chainAdapter = new Rfc64PrivateDevnetChainAdapter(fixture);
     await chainAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
       publishAuthority: fixture.ownerAddress,
       publishAuthorityAccountId: 0n,
+      participantAgents: fixture.participantAgents,
       nameHash: fixture.nameHash,
     });
     chainRuntime = {
@@ -118,7 +127,7 @@ async function createAgent(manifest, finalizedRuntime) {
   const { policyEnvelope, rosterEnvelope } =
     createPrivatePolicyAndRoster();
   const peerIds = manifest.peerIds;
-  const memberRoles = ['owner', 'provider2', 'receiver'];
+  const memberRoles = PRIVATE_MEMBER_ROLES;
   if (ROLE === 'outsider') {
     return DKGAgent.create({
       ...base,
@@ -201,6 +210,9 @@ async function handle(command) {
     case 'sync-denied':
       await proveDenied(command, requestId);
       return;
+    case 'revoke-receiver':
+      await revokeReceiver(requestId);
+      return;
     case 'stop':
       await shutdown(0, requestId);
       return;
@@ -217,7 +229,7 @@ async function publishCatalog(requestId) {
     contextGraphId: CONTEXT_GRAPH_ID,
     governanceChainId: policy.governanceChainId,
     governanceContractAddress: policy.governanceContractAddress,
-    ownershipTransitionDigest: null,
+    ownershipTransitionDigest: policy.ownershipTransitionDigest,
     subGraphName: null,
     authorAddress: roleAgentAddress('owner'),
     era: policy.era,
@@ -280,7 +292,7 @@ async function inspect(expectedHeadDigest) {
     contextGraphId: CONTEXT_GRAPH_ID,
     governanceChainId: '20430',
     governanceContractAddress: CONTEXT_GRAPH_STORAGE,
-    ownershipTransitionDigest: null,
+    ownershipTransitionDigest: createPrivatePolicyAndRoster().policy.ownershipTransitionDigest,
     subGraphName: null,
     authorAddress,
     era: '0',
@@ -319,7 +331,46 @@ async function inspect(expectedHeadDigest) {
       'eth_getBlockByNumber',
       'eth_call',
     ].reduce((sum, method) => sum + rpc.calls(method), 0),
+    rpcCallCounts: rpc?.snapshot() ?? Object.freeze({}),
   };
+}
+
+async function revokeReceiver(requestId) {
+  if (ROLE !== 'provider2') throw new Error('only provider2 can advance the gate roster');
+  if (chainAdapter === undefined) throw new Error('provider2 has no finalized chain adapter');
+  await chainAdapter.removeContextGraphParticipantAgent(
+    BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
+    roleAgentAddress('receiver'),
+  );
+  const contextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
+  const authority = composeRfc64FinalizedCatalogAuthorityV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    snapshot: parseRfc64AuthoritySnapshotV1(
+      await chainAdapter.getContextGraphAuthoritySnapshot(contextGraphId),
+      contextGraphId,
+    ),
+  });
+  const expected = createReceiverRevokedPolicyAndRoster();
+  if (
+    authority.policyDigest !== expected.policyDigest
+    || authority.roster?.version !== expected.roster.version
+    || authority.roster.members.some(
+      ({ agentAddress }) => agentAddress === roleAgentAddress('receiver'),
+    )
+  ) {
+    throw new Error('provider2 did not adopt the finalized receiver revocation');
+  }
+  agent.acceptRfc64CatalogAccessSnapshotV1({
+    policy: authority.policy,
+    policyDigest: authority.policyDigest,
+    roster: authority.roster,
+  });
+  emit('receiver-revoked', requestId, {
+    policyDigest: authority.policyDigest,
+    rosterVersion: authority.roster.version,
+    revokedAgentAddress: roleAgentAddress('receiver'),
+  });
 }
 
 async function proveDenied(command, requestId) {

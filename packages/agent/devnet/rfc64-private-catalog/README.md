@@ -21,9 +21,17 @@ The test publishes two catalog assets before receivers start. It then proves:
   receiver gets the same exact state only from that provider;
 - the node outside the roster cannot discover or pull the catalog and receives
   no private graph data;
+- after the authorized receiver has synchronized, a finalized roster advance
+  removes it and the surviving provider rejects its next catalog pull;
 - a nonmember query on an authorized node returns no VM rows;
 - both complete providers stop, the cold receiver restarts with the same peer
   identity and durable stores, and its exact head, SWM, and VM remain present.
+
+The verdict also records every loopback JSON-RPC method count for the provider,
+receiver, and restarted receiver. The run fails if an unexpected method is
+used or if a per-method or total request ceiling is exceeded. These ceilings
+are regression guards for this deterministic scenario, not production capacity
+estimates.
 
 ## Run
 
@@ -37,6 +45,10 @@ The command writes a sanitized strict verdict to
 `devnet/rfc64-private-catalog/artifacts/latest.json`. It does not write wallet
 keys, signed transactions, raw protocol messages, policy bodies, or KA bundle
 bodies to the artifact.
+
+The revocation check intentionally leaves the receiver's already committed
+local SWM and VM intact. Revocation blocks later network reads; it does not
+retroactively erase bytes the former member legitimately received.
 
 Set `DKG_RFC64_PRIVATE_KEEP_RUN=1` only when local failure investigation needs
 the temporary process data directories. The default removes them.
