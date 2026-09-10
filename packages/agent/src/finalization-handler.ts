@@ -325,7 +325,6 @@ export interface FinalizationHandlerOptions {
   lifecycleLogOptions?: FinalizationLifecycleLogOptions;
   recoveryStore?: FinalizationRecoveryStore;
   runtime?: FinalizationRuntime;
-  workspaceWriteLocks?: Map<string, Promise<void>>;
   finalizationRecoveryEligibility?: FinalizationRecoveryEligibility;
 }
 
@@ -495,7 +494,6 @@ export class FinalizationHandler {
     this.finalizationRecoveryEligibility = options.finalizationRecoveryEligibility
       ?? createDurableFinalizationRecoveryEligibility({
         store,
-        writeLocks: options.workspaceWriteLocks,
       });
     this.lifecycle = new FinalizationLifecycleLogger(
       this.log,

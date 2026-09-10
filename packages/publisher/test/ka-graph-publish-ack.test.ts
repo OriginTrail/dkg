@@ -23,7 +23,7 @@ import {
   computeFlatKCMerkleLeafCountV10,
   computeFlatKCRootV10,
 } from '../src/merkle.js';
-import { swmKaWriteLockKey, withKeyedLocks } from '../src/keyed-lock.js';
+import { workspaceWriteCoordinatorForStore } from '../src/workspace-write-coordinator.js';
 
 const CONTEXT_GRAPH_ID = '42';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -66,7 +66,7 @@ function byteSizeFloor(quads: readonly Pick<Quad, 'subject' | 'predicate' | 'obj
 describe('graph-scoped publish storage ACKs', () => {
   it('serializes workspace persistence in the shared per-KA lock domain', async () => {
     const store = new OxigraphStore();
-    const writeLocks = new Map<string, Promise<void>>();
+    const workspaceWrites = workspaceWriteCoordinatorForStore(store);
     const quads: Quad[] = [{
       subject: 'urn:asset:locked',
       predicate: 'urn:p:value',
@@ -77,7 +77,7 @@ describe('graph-scoped publish storage ACKs', () => {
     const config = handlerConfig(ethers.Wallet.createRandom(), false);
     const handler = new StorageACKHandler(
       store,
-      { ...config, workspaceWriteLocks: writeLocks },
+      config,
       new TypedEventBus(),
     );
     const merkleRoot = computeFlatKCRootV10(quads, []);
@@ -103,14 +103,13 @@ describe('graph-scoped publish storage ACKs', () => {
     let entered!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const lockEntered = new Promise<void>((resolve) => { entered = resolve; });
-    const lock = withKeyedLocks(
-      writeLocks,
-      [swmKaWriteLockKey(CONTEXT_GRAPH_ID, undefined, UAL)],
-      async () => {
+    const lock = workspaceWrites.withKnowledgeAsset({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    }, async () => {
         entered();
         await blocked;
-      },
-    );
+      });
     await lockEntered;
 
     let settled = false;

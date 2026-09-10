@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
-  swmKaWriteLockKey,
-  withKeyedLocks,
+  workspaceWriteCoordinatorForStore,
 } from '@origintrail-official/dkg-publisher';
 import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
 
@@ -41,14 +40,13 @@ describe('agent finalization admission composition', () => {
     let entered!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const lockEntered = new Promise<void>((resolve) => { entered = resolve; });
-    const lock = withKeyedLocks(
-      writeLocks,
-      [swmKaWriteLockKey(CONTEXT_GRAPH_ID, undefined, UAL)],
-      async () => {
+    const lock = workspaceWriteCoordinatorForStore(store).withKnowledgeAsset({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    }, async () => {
         entered();
         await blocked;
-      },
-    );
+      });
     await lockEntered;
 
     let settled = false;

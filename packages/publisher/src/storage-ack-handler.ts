@@ -58,7 +58,10 @@ import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storeKnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
-import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
+import {
+  workspaceWriteCoordinatorForStore,
+  type WorkspaceWriteCoordinator,
+} from './workspace-write-coordinator.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -393,8 +396,6 @@ export interface StorageACKHandlerConfig {
    * of the H5 prefix on the V10 ACK digest.
    */
   kav10Address: string;
-  /** Shared publisher/agent lock domain for graph-scoped SWM KA writes. */
-  workspaceWriteLocks?: Map<string, Promise<void>>;
   /**
    * Optional live confirmation hook. When provided, the handler calls it
    * immediately before signing so removed/unregistered operational keys stop
@@ -608,11 +609,13 @@ export class StorageACKHandler {
   private readonly graphManager: GraphManager;
   private config: StorageACKHandlerConfig;
   private eventBus: EventBus;
+  private readonly workspaceWrites: WorkspaceWriteCoordinator;
   private readonly log = new Logger('StorageACKHandler');
 
   constructor(store: TripleStore, config: StorageACKHandlerConfig, eventBus: EventBus) {
     this.store = store;
     this.graphManager = new GraphManager(store);
+    this.workspaceWrites = workspaceWriteCoordinatorForStore(store);
     this.config = config;
     this.eventBus = eventBus;
   }
@@ -946,17 +949,11 @@ export class StorageACKHandler {
         ackStoreOptions('storage-ack.persistGraphScoped.flush'),
       );
     }, signal);
-    const result = this.config.workspaceWriteLocks
-      ? await withKeyedLocks(
-        this.config.workspaceWriteLocks,
-        [swmKaWriteLockKey(
-          swmGraphId,
-          graphPublish.subGraphName,
-          graphPublish.scope.ual,
-        )],
-        persist,
-      )
-      : await persist();
+    const result = await this.workspaceWrites.withKnowledgeAsset({
+      contextGraphId: swmGraphId,
+      subGraphName: graphPublish.subGraphName,
+      kaUal: graphPublish.scope.ual,
+    }, persist);
     return result.ok ? { ok: true } : result;
   }
 

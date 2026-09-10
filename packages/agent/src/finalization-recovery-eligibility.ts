@@ -9,8 +9,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
-  swmKaWriteLockKey,
-  withKeyedLocks,
+  workspaceWriteCoordinatorForStore,
   workspaceKnowledgeAssetHeadSubject,
 } from '@origintrail-official/dkg-publisher';
 
@@ -31,8 +30,6 @@ export type FinalizationRecoveryEligibility = (
 
 export interface DurableFinalizationRecoveryEligibilityOptions {
   readonly store: TripleStore;
-  /** The publisher's canonical SWM per-KA lock domain. */
-  readonly writeLocks?: Map<string, Promise<void>>;
 }
 
 /**
@@ -45,6 +42,7 @@ export function createDurableFinalizationRecoveryEligibility(
   options: DurableFinalizationRecoveryEligibilityOptions,
 ): FinalizationRecoveryEligibility {
   const graphManager = new GraphManager(options.store);
+  const workspaceWrites = workspaceWriteCoordinatorForStore(options.store);
   return async (input) => {
     const probe = async (): Promise<boolean> => {
       try {
@@ -77,15 +75,10 @@ export function createDurableFinalizationRecoveryEligibility(
       }
     };
 
-    if (!options.writeLocks) return probe();
-    return withKeyedLocks(
-      options.writeLocks,
-      [swmKaWriteLockKey(
-        input.contextGraphId,
-        input.subGraphName,
-        input.ual,
-      )],
-      probe,
-    );
+    return workspaceWrites.withKnowledgeAsset({
+      contextGraphId: input.contextGraphId,
+      subGraphName: input.subGraphName,
+      kaUal: input.ual,
+    }, probe);
   };
 }
