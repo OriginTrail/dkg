@@ -8,10 +8,12 @@ in this directory names or connects to a deployed node by default.
 The runner fails closed. `PASS` means every configured node ran the exact
 expected commit, the sync reconciler and catalog mode were active, new SWM data
 propagated, one receiver caught up after a real stop/start, VM status reached
-exact digest/count parity, authorization denials were observed, and minutely
-RPC evidence was supplied. A missing lifecycle command, unavailable denial API,
-or missing RPC evidence produces `INCOMPLETE` with a machine-readable evidence
-requirement. It never turns an unperformed check into a pass.
+exact digest/count parity, a pre-existing catalog-owned SWM assertion remained
+queryable on both nodes, authorization denials were observed, and minutely RPC
+evidence was supplied. A missing lifecycle command, known-catalog SWM query,
+unavailable denial API, or missing RPC evidence produces `INCOMPLETE` with a
+machine-readable evidence requirement. It never turns an unperformed check
+into a pass.
 
 ## Safety and artifact boundary
 
@@ -33,6 +35,13 @@ requirement. It never turns an unperformed check into a pass.
   cursor/digest parity is always checked, but without an application-level VM
   assertion the result remains `INCOMPLETE` rather than treating status alone
   as proof that VM data is queryable.
+- Each CG also needs a read-only `catalogSwmAskSparql` for a pre-existing asset
+  represented by its catalog. The runner checks it on both source and receiver
+  after the receiver restart and parity phase. This is deliberately distinct
+  from the assertions created during the run: fresh marker delivery cannot
+  conceal missing catalog-owned SWM. A false result fails certification.
+- Catalog preflight requires `legacySyncAllowed` to be exactly `false`, so
+  marker delivery cannot be attributed to a compatibility or rollback lane.
 - A new run atomically writes `INCOMPLETE` before doing work, so an old `PASS`
   cannot survive a failed or interrupted attempt.
 
@@ -58,6 +67,8 @@ sequenceDiagram
   end
   C->>S: Read RFC-64 VM parity status
   C->>R: Read RFC-64 VM parity status
+  C->>S: ASK pre-existing catalog assertion in SWM
+  C->>R: ASK pre-existing catalog assertion in SWM
   C->>E: Read strict minutely request-count evidence
   C->>C: Atomically write redacted certificate
 ```
@@ -99,7 +110,8 @@ probes are configured.
       "expectedMode": "catalog",
       "sourceNodeId": "source-a",
       "receiverNodeId": "receiver-a",
-      "vmAskSparql": "ASK { <urn:known:vm-subject> ?p ?o }"
+      "vmAskSparql": "ASK { <urn:known:vm-subject> ?p ?o }",
+      "catalogSwmAskSparql": "ASK { <urn:known:catalog-swm-subject> ?p ?o }"
     }
   ],
   "lifecycle": {

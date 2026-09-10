@@ -64,6 +64,7 @@ export function validateRemoteCanaryConfigV1(input) {
     assertRecord(entry, `contextGraphs[${index}]`);
     exactKeys(entry, [
       'id', 'expectedMode', 'sourceNodeId', 'receiverNodeId', 'vmAskSparql',
+      'catalogSwmAskSparql',
     ], `contextGraphs[${index}]`);
     boundedString(entry.id, 1, 512, 'context-graph-id');
     if (contextGraphIds.has(entry.id)) invalid('duplicate-context-graph');
@@ -76,7 +77,10 @@ export function validateRemoteCanaryConfigV1(input) {
     const source = nodes.find(({ id }) => id === entry.sourceNodeId);
     const receiver = nodes.find(({ id }) => id === entry.receiverNodeId);
     if (source.role !== 'source' || receiver.role !== 'receiver') invalid('context-graph-node-role');
-    if (entry.vmAskSparql !== undefined) validateAskSparql(entry.vmAskSparql);
+    if (entry.vmAskSparql !== undefined) validateAskSparql(entry.vmAskSparql, 'vm');
+    if (entry.catalogSwmAskSparql !== undefined) {
+      validateAskSparql(entry.catalogSwmAskSparql, 'catalog-swm');
+    }
     return Object.freeze({ ...entry });
   });
   const receiverNodeIds = new Set(contextGraphs.map(({ receiverNodeId }) => receiverNodeId));
@@ -121,6 +125,9 @@ export function createRemoteCanaryDryRunArtifactV1(config, now = () => new Date(
       liveSwmPropagationChecks: validated.contextGraphs.length,
       offlineCatchup: validated.lifecycle === null ? 'EVIDENCE_REQUIRED' : 'PLANNED',
       vmParityChecks: validated.contextGraphs.length,
+      catalogSwmEvidence: validated.contextGraphs.every((entry) => (
+        entry.catalogSwmAskSparql !== undefined
+      )) ? 'PLANNED' : 'EVIDENCE_REQUIRED',
       authorization: authorizationPlan(validated.authorizationChecks),
       rpcUsage: validated.rpcUsage.kind === 'required' ? 'EVIDENCE_REQUIRED' : 'PLANNED',
     }),
@@ -220,6 +227,36 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
       }));
     }
 
+    phase = 'catalog-swm-evidence';
+    const catalogSwm = [];
+    for (const contextGraph of validated.contextGraphs) {
+      if (contextGraph.catalogSwmAskSparql === undefined) {
+        catalogSwm.push(Object.freeze({
+          contextGraphRef: opaqueRef('cg', contextGraph.id),
+          status: 'EVIDENCE_REQUIRED',
+          requirement: 'known-catalog-swm-ask-query',
+          queryChecked: false,
+        }));
+        continue;
+      }
+      const source = nodeById.get(contextGraph.sourceNodeId);
+      const receiver = nodeById.get(contextGraph.receiverNodeId);
+      const [sourceQueryPassed, receiverQueryPassed] = await Promise.all([
+        askConfiguredCatalogSwmQuery(source, contextGraph, request),
+        askConfiguredCatalogSwmQuery(receiver, contextGraph, request),
+      ]);
+      if (!sourceQueryPassed || !receiverQueryPassed) {
+        throw failure('catalog-swm-query-failed', phase);
+      }
+      catalogSwm.push(Object.freeze({
+        contextGraphRef: opaqueRef('cg', contextGraph.id),
+        status: 'PASS',
+        queryChecked: true,
+        sourceQueryPassed,
+        receiverQueryPassed,
+      }));
+    }
+
     phase = 'authorization';
     const authorization = Object.freeze({
       unauthorized: await runAuthorizationCheck(
@@ -242,6 +279,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
 
     const incomplete = offlineCatchup.status !== 'PASS'
       || vmParity.some((entry) => entry.status !== 'PASS')
+      || catalogSwm.some((entry) => entry.status !== 'PASS')
       || authorization.unauthorized.status !== 'PASS'
       || authorization.revoked.status !== 'PASS'
       || rpcUsage.status !== 'PASS';
@@ -258,6 +296,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
         liveSwmPropagation: Object.freeze(liveSwmPropagation),
         offlineCatchup,
         vmParity: Object.freeze(vmParity),
+        catalogSwm: Object.freeze(catalogSwm),
         authorization,
         rpcUsage,
       }),
@@ -410,6 +449,7 @@ async function preflightAllNodes({ config, request, nodeRefs }) {
       contextGraphs: Object.freeze(relevant.map((entry) => Object.freeze({
         contextGraphRef: opaqueRef('cg', entry.id),
         mode: 'catalog',
+        legacySyncAllowed: false,
       }))),
     });
   }));
@@ -448,6 +488,9 @@ function validateNodePreflight(status, node, config) {
     }
     if (operational.catalogServiceStarted !== true) {
       throw failure('rfc64-catalog-service-not-started', 'preflight');
+    }
+    if (operational.legacySyncAllowed !== false) {
+      throw failure('rfc64-legacy-sync-allowed', 'preflight');
     }
   }
 }
@@ -579,6 +622,15 @@ async function askConfiguredVmQuery(node, contextGraph, request) {
     sparql: contextGraph.vmAskSparql,
     contextGraphId: contextGraph.id,
     view: 'verifiable-memory',
+  });
+  return result.result?.type === 'boolean' && result.result.value === true;
+}
+
+async function askConfiguredCatalogSwmQuery(node, contextGraph, request) {
+  const result = await request.json(node, 'POST', '/api/query', {
+    sparql: contextGraph.catalogSwmAskSparql,
+    contextGraphId: contextGraph.id,
+    view: 'shared-working-memory',
   });
   return result.result?.type === 'boolean' && result.result.value === true;
 }
@@ -1026,11 +1078,11 @@ function validateTiming(value) {
   });
 }
 
-function validateAskSparql(value) {
-  boundedString(value, 1, 32768, 'vm-ask-sparql');
-  if (!/\bASK\b/iu.test(value)) invalid('vm-query-must-be-ask');
+function validateAskSparql(value, label) {
+  boundedString(value, 1, 32768, `${label}-ask-sparql`);
+  if (!/\bASK\b/iu.test(value)) invalid(`${label}-query-must-be-ask`);
   if (/\b(?:INSERT|DELETE|LOAD|CLEAR|CREATE|DROP|MOVE|COPY|ADD|WITH)\b/iu.test(value)) {
-    invalid('vm-query-must-be-read-only');
+    invalid(`${label}-query-must-be-read-only`);
   }
 }
 

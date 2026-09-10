@@ -20,6 +20,7 @@ const SOURCE_URL = 'https://source.internal.example';
 const RECEIVER_URL = 'https://receiver.internal.example';
 const SOURCE_SECRET = 'source-super-secret-token';
 const RECEIVER_SECRET = 'receiver-super-secret-token';
+const CATALOG_SWM_ASK = 'ASK { <urn:known:catalog-swm-subject> ?p ?o }';
 
 function baseConfig(overrides = {}) {
   return {
@@ -45,6 +46,7 @@ function baseConfig(overrides = {}) {
       sourceNodeId: 'alpha-source',
       receiverNodeId: 'beta-receiver',
       vmAskSparql: 'ASK { <urn:known:vm-subject> ?p ?o }',
+      catalogSwmAskSparql: CATALOG_SWM_ASK,
     }],
     lifecycle: {
       receiverNodeId: 'beta-receiver',
@@ -82,7 +84,7 @@ function baseConfig(overrides = {}) {
   };
 }
 
-function statusBody() {
+function statusBody({ legacySyncAllowed = false } = {}) {
   const digest = `0x${'ab'.repeat(32)}`;
   const inventory = `0x${'cd'.repeat(32)}`;
   return {
@@ -98,6 +100,7 @@ function statusBody() {
       contextGraphs: [{
         contextGraphId: CG,
         effectiveMode: 'catalog',
+        legacySyncAllowed,
         phase: 'complete',
         authorityState: 'accepted',
         authorityFreshness: 'current',
@@ -137,7 +140,11 @@ function rpcEvidence() {
   });
 }
 
-function fakeRuntime({ failOfflineShare = false } = {}) {
+function fakeRuntime({
+  failOfflineShare = false,
+  catalogSwmPresent = true,
+  legacySyncAllowed = false,
+} = {}) {
   const state = {
     receiverOnline: true,
     receiverMarkers: new Set(),
@@ -153,7 +160,9 @@ function fakeRuntime({ failOfflineShare = false } = {}) {
     state.requests.push({ origin: url.origin, path: url.pathname, method });
     if (isReceiver && !state.receiverOnline) throw new TypeError('offline endpoint details');
     if (url.pathname === '/api/status') {
-      return new Response(method === 'HEAD' ? null : JSON.stringify(statusBody()), {
+      return new Response(method === 'HEAD' ? null : JSON.stringify(statusBody({
+        legacySyncAllowed,
+      })), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       });
@@ -171,6 +180,9 @@ function fakeRuntime({ failOfflineShare = false } = {}) {
       const body = JSON.parse(options.body);
       if (body.view === 'verifiable-memory') {
         return jsonResponse({ result: { type: 'boolean', value: true } });
+      }
+      if (body.sparql === CATALOG_SWM_ASK) {
+        return jsonResponse({ result: { type: 'boolean', value: catalogSwmPresent } });
       }
       const marker = body.sparql.match(/<([^>]+)>/)?.[1];
       const present = isReceiver
@@ -217,6 +229,7 @@ test('dry-run validates without reading secrets, calling nodes, or running comma
   ));
   assert.equal(artifact.status, 'DRY_RUN');
   assert.equal(artifact.plan.offlineCatchup, 'PLANNED');
+  assert.equal(artifact.plan.catalogSwmEvidence, 'PLANNED');
   assert.equal(artifact.plan.rpcUsage, 'PLANNED');
   const serialized = JSON.stringify(artifact);
   for (const sensitive of [SOURCE_URL, RECEIVER_URL, CG, '/run/secrets', 'alpha-source', 'beta-receiver']) {
@@ -266,6 +279,13 @@ test('full run certifies propagation, one-node catch-up, VM parity, denials, and
   assert.equal(artifact.checks.offlineCatchup.status, 'PASS');
   assert.equal(artifact.checks.vmParity[0].status, 'PASS');
   assert.equal(artifact.checks.vmParity[0].statusParity, 'PASS');
+  assert.deepEqual(artifact.checks.catalogSwm[0], {
+    contextGraphRef: artifact.topology.contextGraphs[0].contextGraphRef,
+    status: 'PASS',
+    queryChecked: true,
+    sourceQueryPassed: true,
+    receiverQueryPassed: true,
+  });
   assert.equal(artifact.checks.authorization.unauthorized.status, 'PASS');
   assert.equal(artifact.checks.authorization.revoked.status, 'PASS');
   assert.deepEqual(artifact.checks.rpcUsage, {
@@ -290,6 +310,7 @@ test('full run certifies propagation, one-node catch-up, VM parity, denials, and
     'beta-receiver',
     '12D3KooWNeverPersistThisPeer',
     'urn:must-not-persist',
+    'urn:known:catalog-swm-subject',
   ]) assert.equal(serialized.includes(sensitive), false, sensitive);
 });
 
@@ -309,12 +330,57 @@ test('missing live-only surfaces remain explicit and cannot produce PASS', async
     },
     rpcUsage: { kind: 'required' },
   });
+  delete config.contextGraphs[0].catalogSwmAskSparql;
   const artifact = await executeRemoteCanaryCertificationV1(config, runtime);
   assert.equal(artifact.status, 'INCOMPLETE');
   assert.equal(artifact.checks.offlineCatchup.status, 'EVIDENCE_REQUIRED');
   assert.equal(artifact.checks.authorization.revoked.status, 'EVIDENCE_REQUIRED');
   assert.equal(artifact.checks.rpcUsage.status, 'EVIDENCE_REQUIRED');
+  assert.deepEqual(artifact.checks.catalogSwm[0], {
+    contextGraphRef: artifact.topology.contextGraphs[0].contextGraphRef,
+    status: 'EVIDENCE_REQUIRED',
+    requirement: 'known-catalog-swm-ask-query',
+    queryChecked: false,
+  });
   assert.deepEqual(runtime.state.commands, []);
+});
+
+test('fresh markers and VM parity cannot hide missing catalog-owned SWM', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-swm-test-'));
+  const artifactPath = join(directory, 'latest.json');
+  const runtime = fakeRuntime({ catalogSwmPresent: false });
+  try {
+    await assert.rejects(
+      runRemoteCanaryArtifactLifecycleV1({
+        config: baseConfig(),
+        artifactPath,
+        dependencies: runtime,
+      }),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === 'catalog-swm-query-failed',
+    );
+    assert.equal(runtime.state.sourceMarkers.size, 2);
+    assert.equal(runtime.state.receiverMarkers.size, 2);
+    assert.deepEqual(runtime.state.commands, ['stop', 'start']);
+    const artifact = JSON.parse(await readFile(artifactPath, 'utf8'));
+    assert.equal(artifact.status, 'FAIL');
+    assert.equal(artifact.phase, 'catalog-swm-evidence');
+    assert.equal(artifact.failure.code, 'catalog-swm-query-failed');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('catalog preflight rejects compatibility authority with legacy sync allowed', async () => {
+  const runtime = fakeRuntime({ legacySyncAllowed: true });
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rfc64-legacy-sync-allowed'
+      && error.phase === 'preflight',
+  );
+  assert.deepEqual(runtime.state.commands, []);
+  assert.equal(runtime.state.sourceMarkers.size, 0);
 });
 
 test('catalog status parity alone cannot certify VM queryability', async () => {
