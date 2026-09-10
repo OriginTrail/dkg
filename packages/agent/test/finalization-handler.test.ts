@@ -76,8 +76,15 @@ describe('FinalizationHandler', () => {
     });
     const author = '0x1111111111111111111111111111111111111111';
     const packedKaId = (BigInt(author) << 96n) | 7n;
+    const ual = `did:dkg:otp:20430/${author}/7`;
+    await store.insert([{
+      subject: `${ual}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/assertionVersion',
+      object: '"1"',
+      graph: new GraphManager(store).sharedMemoryMetaUri(CONTEXT_GRAPH),
+    } as Quad]);
     await configured.handleFinalizationMessage(encodeFinalizationMessage({
-      ual: `did:dkg:otp:20430/${author}/7`,
+      ual,
       contextGraphId: CONTEXT_GRAPH,
       kcMerkleRoot: new Uint8Array(32),
       txHash: `0x${'ab'.repeat(32)}`,

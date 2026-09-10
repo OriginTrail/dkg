@@ -188,7 +188,7 @@ describe('exact VM recovery lifecycle', () => {
       await agent.start();
       expect((agent as any).vmReconcileRotationClosed).toBe(false);
       expect((agent as any).vmReconcileLifecycleGeneration).toBe(initialGeneration + 1);
-      expect((agent as any).vmReconcileDispatcher.snapshot().closed).toBe(false);
+      expect((agent as any).vmReconcileScheduling.snapshot().closed).toBe(false);
       expect((agent as any).contextGraphMembershipPersistence.status().closed).toBe(false);
       const upsertsBeforeRestartProbe = membershipUpsert.mock.calls.length;
       await agent.upsertContextGraphMember({
@@ -218,7 +218,7 @@ describe('exact VM recovery lifecycle', () => {
     const heal = vi.fn(async () => undefined);
     try {
       await agent.start();
-      const oldDispatcher = (agent as any).vmReconcileDispatcher;
+      const oldDispatcher = (agent as any).vmReconcileScheduling;
       (agent as any).resolveVmReconcileTarget = async () => {
         targetEntered.resolve();
         await releaseTarget.promise;
@@ -240,7 +240,7 @@ describe('exact VM recovery lifecycle', () => {
       await agent.stop();
 
       await agent.start();
-      const newDispatcher = (agent as any).vmReconcileDispatcher;
+      const newDispatcher = (agent as any).vmReconcileScheduling;
       expect(newDispatcher).not.toBe(oldDispatcher);
       expect(newDispatcher.snapshot().closed).toBe(false);
     } finally {

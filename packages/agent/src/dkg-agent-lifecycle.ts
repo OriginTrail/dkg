@@ -8,6 +8,11 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
+import {
+  traverseBoundedCuratorRoster,
+  curatorRosterResolution,
+  type BoundedCuratorRosterResolution,
+} from './bounded-curator-roster-traversal.js';
 import { createHash } from 'node:crypto';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
@@ -82,6 +87,7 @@ import {
   type WorkspaceRecipientEncryptionKey,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
+  assertBoundedProtocolOutboxStore,
   type MessageIdempotencyStore,
   type ProtocolOutboxStore,
   type ProtocolOutboxEntry,
@@ -204,6 +210,7 @@ import {
 } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
+import { resolveOutboxDrainerOptions } from './p2p/outbox-drainer.js';
 import { createSingleUseSyncSender } from './p2p/sync-transport.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
@@ -626,9 +633,11 @@ import {
 } from './context-graph-subscription-policy.js';
 import {
   authoritativeSyncPeerId,
+  resolveBoundedCuratorSyncPeer,
   resolveCuratorSyncPeer,
   type SyncPeerResolution,
 } from './dkg-agent-cg-resolve.js';
+import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -1807,6 +1816,69 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
   };
 }
 
+type NonBoundedCuratorPeerIdsResolution =
+  | {
+      readonly peerIds: [];
+      readonly curatorIsLocal: true;
+      readonly legacyTripleResolved: boolean;
+      readonly lookupFailed?: never;
+      readonly rosterStatus?: never;
+      readonly overflowed?: never;
+      readonly nextPageAfterPeerId?: never;
+    }
+  | {
+      readonly peerIds: string[];
+      readonly curatorIsLocal: false;
+      readonly legacyTripleResolved: true;
+      readonly lookupFailed?: false;
+      readonly rosterStatus?: never;
+      readonly overflowed?: never;
+      readonly nextPageAfterPeerId?: never;
+    }
+  | {
+      readonly peerIds: string[];
+      readonly curatorIsLocal: false;
+      readonly legacyTripleResolved: false;
+      readonly lookupFailed?: false;
+      readonly rosterStatus?: never;
+      readonly overflowed?: never;
+      readonly nextPageAfterPeerId?: never;
+    }
+  | {
+      readonly peerIds: [];
+      readonly curatorIsLocal: false;
+      readonly legacyTripleResolved: false;
+      readonly lookupFailed: true;
+      readonly rosterStatus?: never;
+      readonly overflowed?: never;
+      readonly nextPageAfterPeerId?: never;
+    };
+
+export type CuratorPeerIdsResolution =
+  | NonBoundedCuratorPeerIdsResolution
+  | (BoundedCuratorRosterResolution & {
+      readonly curatorIsLocal: false;
+      readonly legacyTripleResolved: false;
+      readonly lookupFailed?: false;
+    });
+
+type StructuralCuratorPeerLookup =
+  | (BoundedCuratorRosterResolution & { readonly lookupFailed?: false })
+  | {
+      readonly peerIds: string[];
+      readonly lookupFailed?: false;
+      readonly rosterStatus?: never;
+      readonly overflowed?: never;
+      readonly nextPageAfterPeerId?: never;
+    }
+  | {
+      readonly peerIds: [];
+      readonly lookupFailed: true;
+      readonly rosterStatus?: never;
+      readonly overflowed?: never;
+      readonly nextPageAfterPeerId?: never;
+    };
+
 export class LifecycleSyncMethods extends DKGAgentBase {
   async retireFinalizedSwmTwinCandidate(
     candidate: FinalizedSwmTwinRetirement,
@@ -2002,6 +2074,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    // Validate and capture the substrate before persistence/network startup.
+    // Caller changes during awaits cannot introduce a late configuration error.
+    const outboxDrain = resolveOutboxDrainerOptions(this.config.messengerOutboxDrain);
+    // The daemon supplies durable stores. SDK embedders default to process-local
+    // stores whose reliability state lasts only for this agent lifetime.
+    const idempotencyStore =
+      this.config.messengerStores?.idempotencyStore ??
+      new InMemoryMessageIdempotencyStore();
+    const outboxStore =
+      this.config.messengerStores?.outboxStore ??
+      new InMemoryProtocolOutboxStore();
+    assertBoundedProtocolOutboxStore(outboxStore);
     this.contextGraphMembershipPersistence.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
@@ -2230,25 +2314,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...createNetworkAdmissionRouterPolicy(this.networkAdmissionCoordinator),
       admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
     });
-    // Default to in-memory substrate stores when no durable stores
-    // are supplied. The production daemon (`cli/src/daemon/
-    // lifecycle.ts`) always wires SQLite-backed stores against the
-    // shared DashboardDB; the in-memory fallback exists so that
-    // test fixtures and ad-hoc DKGAgent embedders get working
-    // reliability semantics without having to plumb a database.
-    // In-memory means: substrate works correctly within one daemon
-    // lifetime, but outbox entries don't survive restart.
-    // Production picks up the SQLite path via `messengerStores`.
-    const idempotencyStore =
-      this.config.messengerStores?.idempotencyStore ??
-      new InMemoryMessageIdempotencyStore();
-    const outboxStore =
-      this.config.messengerStores?.outboxStore ??
-      new InMemoryProtocolOutboxStore();
     this.messenger = new Messenger({
       router: this.router,
       idempotencyStore,
       outboxStore,
+      outboxDrain,
       // PR feat/chain-agents-cg-phonebook: stall-recovery now routes
       // through the full PeerResolver instead of raw DHT findPeer.
       // The dial fast-path (ProtocolRouter) already uses the canonical
@@ -2697,6 +2767,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               contextGraphSharedMemoryUri,
               chainId: chainIdForHandler,
               kav10Address: kav10AddressForHandler,
+              workspaceWriteLocks: this.writeLocks,
               ackHandlerDeadlineMs: this.config.storageAckTiming.handlerDeadlineMs,
               // Codex review (round 2) on PR #727: must NOT collapse to a
               // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`
@@ -4183,11 +4254,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // jitter instead of launching an eager sweep against the old runtime.
     this.vmReconcileRuntimeReady = true;
     if (this.vmReconcileEnabled()) {
-      this.ensureVmReconcileDispatcher();
+      this.ensureVmReconcileScheduling();
       const runSweep = (): void => {
-        this.runVmReconcileSweep().catch((err: unknown) => {
+        try { this.scheduleVmReconcileSweep(); }
+        catch (err) {
           this.log.warn(ctx, `VM reconcile sweep failed: ${err instanceof Error ? err.message : String(err)}`);
-        });
+        }
       };
       const startupDelayMs = deterministicStartupJitterMs(
         `${this.node.peerId.toString()}\0${this.chain.chainId}`,
@@ -7283,14 +7355,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
     } = {},
-  ): Promise<{
-    peerIds: string[];
-    curatorIsLocal: boolean;
-    legacyTripleResolved: boolean;
-    lookupFailed?: boolean;
-    overflowed?: boolean;
-    nextPageAfterPeerId?: string;
-  }> {
+  ): Promise<CuratorPeerIdsResolution> {
     const assertCurrent = (): void => {
       if (options.signal?.aborted || options.isCurrent?.() === false) {
         throw new DOMException('Curator discovery is no longer current', 'AbortError');
@@ -7303,45 +7368,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if ([...this.localAgents.keys()].some((addr) => addr.toLowerCase() === structuralAgent)) {
         return { peerIds: [], curatorIsLocal: true, legacyTripleResolved: false };
       }
-      const resolve = async (): Promise<{
-        peerIds: string[];
-        lookupFailed: boolean;
-        overflowed?: boolean;
-        nextPageAfterPeerId?: string;
-      }> => {
+      const resolve = async (): Promise<StructuralCuratorPeerLookup> => {
         assertCurrent();
         try {
-          if (options.maxPeerIds !== undefined
-            && typeof this.discovery.findAgentPeerIdsByAddress === 'function') {
-            const pagePeerIds = Math.min(
-              options.maxPeerIds,
-              Math.max(1, Math.floor(options.pagePeerIds ?? options.maxPeerIds)),
-            );
-            const queryPage = (afterPeerId?: string) =>
-              this.discovery.findAgentPeerIdsByAddress(structuralAgent, {
-                ...(afterPeerId ? { afterPeerId } : {}),
-                limit: (afterPeerId ? pagePeerIds : options.maxPeerIds!) + 1,
+          if (options.maxPeerIds !== undefined) {
+            const rosterTraversal = await traverseBoundedCuratorRoster(
+              this.discovery,
+              structuralAgent,
+              {
+                maxPeerIds: options.maxPeerIds,
+                pagePeerIds: options.pagePeerIds,
+                afterPeerId: options.afterPeerId,
                 signal: options.signal,
-              });
-            let pageStartedAtBeginning = !options.afterPeerId;
-            let peerIds = await queryPage(options.afterPeerId);
+                isCurrent: options.isCurrent,
+              },
+            );
             assertCurrent();
-            if (options.afterPeerId && peerIds.length === 0) {
-              pageStartedAtBeginning = true;
-              peerIds = await queryPage();
-            }
-            assertCurrent();
-            const overflowed = !pageStartedAtBeginning
-              || peerIds.length > options.maxPeerIds;
-            const bounded = peerIds.slice(0, overflowed ? pagePeerIds : options.maxPeerIds);
-            return {
-              peerIds: bounded,
-              lookupFailed: false,
-              overflowed,
-              ...(overflowed && bounded[0]
-                ? { nextPageAfterPeerId: bounded[bounded.length - 1] }
-                : {}),
-            };
+            return curatorRosterResolution(rosterTraversal);
           }
 
           const agents = await this.discovery.findAgents({
@@ -7353,7 +7396,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             .filter((a) => a.agentAddress?.toLowerCase() === structuralAgent)
             .map((a) => a.peerId))]
             .sort((left, right) => left.localeCompare(right));
-          return { peerIds, lookupFailed: false, overflowed: false };
+          return { peerIds };
         } catch {
           assertCurrent();
           return { peerIds: [], lookupFailed: true };
@@ -7361,14 +7404,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       };
       let resolution = await resolve();
       assertCurrent();
-      if (resolution.peerIds.length === 0) {
+      // A missing/broken bounded capability is a lookup failure, never an
+      // invitation to invoke the legacy rich-profile fallback via refresh.
+      if (resolution.peerIds.length === 0
+        && resolution.rosterStatus !== 'cycle'
+        && !(options.maxPeerIds !== undefined && resolution.lookupFailed)) {
         assertCurrent();
-        const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
-          signal: options.signal,
-        }).catch((error) => {
+        let refreshed = false;
+        try {
+          if (options.maxPeerIds !== undefined) {
+            const refreshPeer = await resolveBoundedCuratorSyncPeer(
+              this,
+              this.preferredSyncPeers,
+              contextGraphId,
+              { signal: options.signal },
+            );
+            assertCurrent();
+            refreshed = await runCuratorMetaRefreshFromPeer(
+              this,
+              contextGraphId,
+              refreshPeer.peerId,
+              { signal: options.signal },
+            );
+          } else {
+            refreshed = await this.refreshMetaFromCurator(contextGraphId, {
+              signal: options.signal,
+            });
+          }
+        } catch {
           assertCurrent();
-          return false;
-        });
+        }
         assertCurrent();
         resolution = await resolve();
         assertCurrent();
@@ -7376,18 +7441,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // authoritative empty registry. Preserve any caller-side last-known
         // curator roster unless another writer populated the registry.
         if (!refreshed && !resolution.lookupFailed && resolution.peerIds.length === 0) {
-          resolution = { ...resolution, lookupFailed: true };
+          resolution = { peerIds: [], lookupFailed: true };
         }
       }
+      if (resolution.lookupFailed) {
+        return {
+          peerIds: [],
+          curatorIsLocal: false,
+          legacyTripleResolved: false,
+          lookupFailed: true,
+        };
+      }
       return {
-        peerIds: resolution.peerIds,
+        ...resolution,
         curatorIsLocal: false,
         legacyTripleResolved: false,
-        ...(resolution.lookupFailed ? { lookupFailed: true } : {}),
-        ...(resolution.overflowed ? { overflowed: true } : {}),
-        ...(resolution.nextPageAfterPeerId
-          ? { nextPageAfterPeerId: resolution.nextPageAfterPeerId }
-          : {}),
       };
     }
     // Legacy non-wallet-scoped CG: fall back to triple-based curator resolution.

@@ -1274,6 +1274,9 @@ importers:
       '@origintrail-official/dkg-query':
         specifier: workspace:*
         version: link:../query
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage

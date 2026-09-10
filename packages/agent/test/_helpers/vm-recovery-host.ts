@@ -6,6 +6,7 @@ import type {
   OrdinalRecoveryTarget,
   PendingOrdinalRecoveryResult,
 } from '../../src/chain-reconciler.js';
+import type { CuratorPeerIdsResolution } from '../../src/dkg-agent-lifecycle.js';
 import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
 import type { VmRecoverySlotRegistry } from '../../src/internal/vm-recovery-slot-registry.js';
 import { DKGAgent } from '../../src/index.js';
@@ -66,14 +67,7 @@ export interface VmRecoveryHostInternals {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
     },
-  ): Promise<{
-    peerIds: string[];
-    curatorIsLocal: boolean;
-    legacyTripleResolved: boolean;
-    lookupFailed?: boolean;
-    overflowed?: boolean;
-    nextPageAfterPeerId?: string;
-  }>;
+  ): Promise<CuratorPeerIdsResolution>;
   ensurePeerConnected(peerId: string, options?: { signal?: AbortSignal }): Promise<void>;
   selectCatchupPeers(peers: TestPeerId[]): TestPeerId[];
   waitForSyncProtocol(peer: TestPeerId, signal?: AbortSignal): Promise<boolean>;

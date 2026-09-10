@@ -152,6 +152,50 @@ describe('chain RPC telemetry — real readContractWith emits bounded labels', (
     a.destroy?.();
   });
 
+  it('attributes direct page-scan eth_getLogs requests to a stable operation key', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const contract = logScanContract(async () => {
+      // Emulate CountingJsonRpcProvider's raw transport hook at the direct
+      // queryFilter seam. The page scan deliberately does not use
+      // RpcFailoverClient, so this pins its explicit consumer scope.
+      a.rpcUsage.record('eth_getLogs', 0);
+      return [];
+    });
+
+    await a.queryEventLogsPage(
+      contract,
+      {},
+      0,
+      100,
+      scanProviders,
+      new Map(),
+      'getMaxKaNumberForAuthor KnowledgeAssetCreated',
+      undefined,
+      'getMaxKaNumberForAuthor',
+    );
+    await a.queryEventLogsPage(
+      contract,
+      {},
+      101,
+      200,
+      scanProviders,
+      new Map(),
+      'wording can change without changing telemetry identity',
+      undefined,
+      'getMaxKaNumberForAuthor',
+    );
+
+    const usage = a.drainRpcUsage();
+    expect(usage.byMethod.eth_getLogs).toBe(2);
+    expect(usage.attributions).toEqual([{
+      method: 'eth_getLogs',
+      consumer: 'getMaxKaNumberForAuthor',
+      endpointSlot: 'primary',
+      count: 2,
+    }]);
+    a.destroy?.();
+  });
+
   it('eth_getLogs FAILURE (all backends error): records a non-ok outcome', async () => {
     installMeter();
     const a: any = new EVMChainAdapter(minimalConfig());

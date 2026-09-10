@@ -52,7 +52,7 @@ import type {
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
-  VmReconcileDispatcher,
+  VmReconcileSchedulingRuntime,
   type OrdinalOutcome,
   type OrdinalRecoveryTarget,
   type PendingOrdinalRecoveryResult,
@@ -100,14 +100,10 @@ interface AgentInternals {
     source: 'live' | 'periodic' | 'manual',
   ): Promise<ContextGraphReconcileResult>;
   runVmReconcileSweep(): Promise<void>;
+  scheduleVmReconcileSweep(): void;
   subscribedContextGraphs: Map<string, { subscribed: boolean; syncMode?: 'on-demand' | 'always-on'; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
   gossipRegistered: Set<string>;
-  vmReconcileDispatcher: {
-    triggerLive: (cg: string) => void;
-    triggerPeriodic: (cg: string) => void;
-    tryTriggerPeriodic: (cg: string) => boolean;
-    dispatch?: (cg: string, source: 'live' | 'periodic' | 'manual') => Promise<unknown>;
-  } | null;
+  vmReconcileScheduling: VmReconcileSchedulingRuntime<unknown>;
   store: TripleStore;
   chain: MockChainAdapter & {
     getContextGraphAccessPolicy?: (id: bigint) => Promise<number>;
@@ -2308,19 +2304,12 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     const liveTriggered: string[] = [];
     const periodicTriggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      triggerLive: (cg: string) => { liveTriggered.push(cg); },
-      triggerPeriodic: (cg: string) => { periodicTriggered.push(cg); },
-      tryTriggerPeriodic: (cg: string) => {
-        periodicTriggered.push(cg);
-        return true;
-      },
-      dispatch: async (cg: string, source: 'live' | 'periodic' | 'manual') => {
-        if (source === 'periodic') periodicTriggered.push(cg);
-        else if (source === 'live') liveTriggered.push(cg);
-        return {};
-      },
-    };
+    const scheduling = new VmReconcileSchedulingRuntime(async (cg, source) => {
+      if (source === 'periodic') periodicTriggered.push(cg);
+      else if (source === 'live') liveTriggered.push(cg);
+      return {};
+    }, () => undefined);
+    internals.vmReconcileScheduling = scheduling;
 
     await internals.runVmReconcileSweep();
 
@@ -2346,16 +2335,21 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     }
 
     const swept: string[] = [];
-    const dispatcher = new VmReconcileDispatcher(
+    const scheduling = new VmReconcileSchedulingRuntime(
       async (contextGraphId) => { swept.push(contextGraphId); },
       () => undefined,
       { concurrency: 1, maxPending: 1 },
     );
-    internals.vmReconcileDispatcher = dispatcher;
+    const dispatcher = scheduling;
+    internals.vmReconcileScheduling = scheduling;
 
-    for (let sweep = 0; sweep < 4; sweep += 1) {
-      await internals.runVmReconcileSweep();
+    for (let sweep = 0; sweep < contextGraphIds.length; sweep += 1) {
+      internals.scheduleVmReconcileSweep();
+      // maxPending=1 is reserved for foreground work: only the active slot is
+      // available to this background-only sweep, so one CG advances per tick.
+      expect(dispatcher.snapshot().queued).toBe(0);
       await dispatcher.waitForIdle();
+      expect(swept).toHaveLength(sweep + 1);
     }
 
     expect(new Set(swept)).toEqual(new Set(contextGraphIds));
@@ -2515,12 +2509,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
 
     const liveTriggered: string[] = [];
-    internals.vmReconcileDispatcher = {
-      triggerLive: (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
-      triggerPeriodic: () => undefined,
-      tryTriggerPeriodic: () => true,
-      dispatch: async () => ({}),
-    };
+    const scheduling = new VmReconcileSchedulingRuntime(async () => ({}), () => undefined);
+    vi.spyOn(scheduling, 'triggerLive').mockImplementation(
+      (contextGraphId: string) => { liveTriggered.push(contextGraphId); },
+    );
+    internals.vmReconcileScheduling = scheduling;
 
     const pendingResult = await internals.executeVmReconcileForCg(pendingCg, 'periodic');
     expect(pendingResult).toMatchObject({
@@ -2746,7 +2739,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect((internals as any).vmReconcileCuratorPeersByCg.get(localCgId)).toEqual(curators);
   });
 
-  it('rotates a bounded oversized-roster transport window without treating it as absence proof', async () => {
+  it.each(['legacy', 'traversal'] as const)('rotates a bounded oversized-roster transport window using %s state without treating it as absence proof', async (mode) => {
     const rosterDescriptor = Object.getOwnPropertyDescriptor(
       DKGAgentBase,
       'VM_RECONCILE_EXACT_ROSTER_MAX',
@@ -2769,22 +2762,31 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         },
       };
       let resolutions = 0;
+      const requestedCursors: Array<string | undefined> = [];
       (internals as any).resolveCuratorPeerIdsForCg = async (
         _cgId: string,
         options: { afterPeerId?: string },
       ) => {
         resolutions += 1;
+        requestedCursors.push(options.afterPeerId);
         const previousIndex = options.afterPeerId
           ? overflowPeers.indexOf(options.afterPeerId)
           : -1;
         const peerId = overflowPeers[(previousIndex + 1) % overflowPeers.length]!;
-        return {
+        const baseResolution = {
           peerIds: [peerId],
           curatorIsLocal: false,
           legacyTripleResolved: false,
           overflowed: true,
-          nextPageAfterPeerId: peerId,
         };
+        if (mode === 'legacy') return { ...baseResolution, nextPageAfterPeerId: peerId };
+        return peerId === overflowPeers[4]
+          ? { ...baseResolution, rosterStatus: 'cycle' as const }
+          : {
+              ...baseResolution,
+              rosterStatus: 'continue' as const,
+              nextPageAfterPeerId: peerId,
+            };
       };
       (internals as any).ensurePeerConnected = async (peerId: string) => {
         connectedById.set(peerId, { toString: () => peerId });
@@ -2794,12 +2796,15 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       (internals as any).ensurePeerAdmittedForRecovery = async () => true;
       const fetches: string[] = [];
       const target = vmRecoveryTarget(localCgId, 0, 'roster-overflow');
-      const holderPeerId = overflowPeers[4]!;
+      // The first peer gains the asset during the walk. A complete cycle must
+      // return to it; an unconfirmed tail must neither suppress the target nor
+      // leave the owner querying a synthetic cursor after the final peer.
+      const holderPeerId = overflowPeers[0]!;
       let lastPeerId: string | undefined;
       (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
         fetches.push(peerId);
         lastPeerId = peerId;
-        const found = peerId === holderPeerId;
+        const found = peerId === holderPeerId && resolutions === 6;
         return {
           result: {
             fetchedDataTriples: found ? 1 : 0,
@@ -2811,7 +2816,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         };
       };
       (internals as any).reconcileChainOrdinal = async () => (
-        lastPeerId === holderPeerId
+        lastPeerId === holderPeerId && resolutions === 6
           ? { status: 'reconciled', blockNumber: 100 }
           : { status: 'pending', recovery: target }
       );
@@ -2825,21 +2830,27 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       );
 
       let result;
-      for (let pass = 0; pass < 5; pass += 1) {
+      for (let pass = 0; pass < 6; pass += 1) {
         result = await internals.recoverVmReconcileBatch(
           localCgId, 1n, [target], 100, () => true,
         );
-        if (pass < 4) {
+        if (pass < 5) {
           const slotKey = vmRecoverySlotKey(target);
           expect(internals.vmRecoverySlots.snapshot().get(slotKey)).toMatchObject({
             phase: 'collecting', curatorRosterConfirmed: false,
           });
           (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
+          if (mode === 'traversal' && pass === 4) {
+            expect((internals as any).vmReconcileCuratorPageCursorByCg.has(localCgId)).toBe(false);
+          }
         }
       }
 
-      expect(resolutions).toBe(5);
-      expect(fetches).toEqual(overflowPeers);
+      expect(resolutions).toBe(6);
+      expect(fetches).toEqual([...overflowPeers, overflowPeers[0]]);
+      expect(requestedCursors).toEqual([
+        undefined, ...overflowPeers.slice(0, 4), mode === 'traversal' ? undefined : overflowPeers[4],
+      ]);
       expect(result?.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
     } finally {
       Object.defineProperty(
@@ -2848,6 +2859,89 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         rosterDescriptor,
       );
     }
+  });
+
+  it('clears a completed page-cycle cursor before accepting a fresh complete roster', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmRosterCycleRestart', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/roster-cycle';
+    const firstPeer = '12D3KooWRosterCycleFirst';
+    const tailPeer = '12D3KooWRosterCycleTail';
+    const connectedById = new Map<string, { toString(): string }>();
+    (internals as any).node = {
+      peerId: '12D3KooWRosterCycleLocal',
+      libp2p: {
+        getConnections: () => [...connectedById.values()].map((remotePeer) => ({ remotePeer })),
+      },
+    };
+    const requestedCursors: Array<string | undefined> = [];
+    const resolutions = [
+      {
+        peerIds: [firstPeer], curatorIsLocal: false, legacyTripleResolved: false,
+        rosterStatus: 'continue', overflowed: true, nextPageAfterPeerId: firstPeer,
+      },
+      {
+        peerIds: [tailPeer], curatorIsLocal: false, legacyTripleResolved: false,
+        rosterStatus: 'cycle', overflowed: true,
+      },
+      {
+        peerIds: [firstPeer, tailPeer], curatorIsLocal: false, legacyTripleResolved: false,
+        rosterStatus: 'complete',
+      },
+    ] as const;
+    let resolutionCalls = 0;
+    (internals as any).resolveCuratorPeerIdsForCg = async (
+      _cgId: string,
+      options: { afterPeerId?: string },
+    ) => {
+      requestedCursors.push(options.afterPeerId);
+      return resolutions[resolutionCalls++]!;
+    };
+    (internals as any).ensurePeerConnected = async (peerId: string) => {
+      connectedById.set(peerId, { toString: () => peerId });
+    };
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const target = vmRecoveryTarget(localCgId, 0, 'roster-cycle');
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => {
+      const found = resolutionCalls === 3;
+      return {
+        result: {
+          fetchedDataTriples: found ? 1 : 0,
+          fetchedMetaTriples: found ? 8 : 0,
+          insertedTriples: found ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: found ? 'found' as const : 'clean-absent' as const,
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => (
+      resolutionCalls === 3
+        ? { status: 'reconciled', blockNumber: 100 }
+        : { status: 'pending', recovery: target }
+    );
+
+    let result;
+    for (let pass = 0; pass < 3; pass += 1) {
+      result = await internals.recoverVmReconcileBatch(
+        localCgId, 1n, [target], 100, () => true,
+      );
+      if (pass < 2) {
+        expect(internals.vmRecoverySlots.snapshot().get(
+          vmRecoverySlotKey(target),
+        )).toMatchObject({ phase: 'collecting', curatorRosterConfirmed: false });
+        (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
+      }
+      if (pass === 1) {
+        expect((internals as any).vmReconcileCuratorPageCursorByCg.has(localCgId))
+          .toBe(false);
+      }
+    }
+
+    expect(requestedCursors).toEqual([undefined, firstPeer, undefined]);
+    expect(result?.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
   });
 
   it('keeps a successful-empty metadata fallback ahead of the ordinary roster cap', async () => {
@@ -5540,12 +5634,13 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     chain.getContextGraphKCCount = async () => 0n;
 
     const sources: string[] = [];
-    (internals as any).vmReconcileDispatcher = {
-      dispatch: async (_key: string, source: string) => {
+    internals.vmReconcileScheduling = new VmReconcileSchedulingRuntime(
+      async (_key: string, source: string) => {
         sources.push(source);
         return {};
       },
-    };
+      () => undefined,
+    );
 
     await internals.runVmReconcileForCg('priority-current', 'periodic');
     await internals.runVmReconcileForCg('priority-current', 'live');
