@@ -73,7 +73,7 @@ import {
   statSync,
   utimesSync,
 } from 'node:fs';
-import { join, sep } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { isExternalBackend, getSparqlEndpoint, CHANGELOG_GRAPH } from '@origintrail-official/dkg-storage';
 
 const STATE_FILE = '.network-state.json';
@@ -590,9 +590,11 @@ function performWipe(
   const walAbs = walPath && walPath.length > 0
     ? walPath
     : join(dataDir, 'random-sampling.wal');
-  const dataPrefix = dataDir.endsWith(sep) ? dataDir : dataDir + sep;
-  const walLabel = walAbs.startsWith(dataPrefix)
-    ? walAbs.slice(dataPrefix.length)
+  const relativeWalPath = relative(dataDir, walAbs);
+  const walLabel = relativeWalPath !== '..'
+    && !relativeWalPath.startsWith(`..${sep}`)
+    && !isAbsolute(relativeWalPath)
+    ? relativeWalPath
     : walAbs;
   wipeAbs(walAbs, walLabel || 'random-sampling.wal');
   for (const suffix of ['', '-journal', '-wal', '-shm']) {
