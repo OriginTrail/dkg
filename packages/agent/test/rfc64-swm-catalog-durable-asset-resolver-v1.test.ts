@@ -18,12 +18,17 @@ import {
 import {
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { resolveRfc64InventoryWorkspaceCatalogAssetV1 } from
+import {
+  resolveRfc64ConfirmedVmRepairCatalogAssetV1,
+  resolveRfc64InventoryWorkspaceCatalogAssetV1,
+} from
   '../src/rfc64/swm-catalog-durable-asset-resolver-v1.js';
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'73'.repeat(32)}`);
@@ -55,6 +60,66 @@ beforeEach(async () => {
 });
 
 describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
+  it('accepts an inventory operation id retained as an equivalent head alias', async () => {
+    const graphManager = new GraphManager(store);
+    const selectedAlias = 'newer-storage-ack-alias';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: row.shareOperationId,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+      quads: PROJECTION_QUADS,
+      privateTripleCount: 0,
+      publisherPeerId: 'rfc64-finalized-catalog-test',
+      accessPolicy: 'public',
+      agentAddress: AUTHOR,
+      timestamp: new Date('2026-09-01T00:00:00.000Z'),
+    });
+    const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH_ID);
+    const originalSubject = `urn:dkg:share:${CONTEXT_GRAPH_ID}:${row.shareOperationId}`;
+    const aliasSubject = `urn:dkg:share:${CONTEXT_GRAPH_ID}:${selectedAlias}`;
+    const originalMetadata = await store.query(
+      `CONSTRUCT { <${originalSubject}> ?p ?o } WHERE { GRAPH <${metaGraph}> { `
+        + `<${originalSubject}> ?p ?o } }`,
+    );
+    if (originalMetadata.type !== 'quads') throw new Error('expected operation metadata');
+    await store.insert(originalMetadata.quads
+      .filter((quad) => !quad.predicate.endsWith('publicSnapshotGraph')
+        && !quad.predicate.endsWith('publicSnapshotRef'))
+      .map((quad) => ({
+        ...quad,
+        graph: metaGraph,
+        subject: aliasSubject,
+        object: quad.predicate.endsWith('shareOperationId')
+          ? JSON.stringify(selectedAlias)
+          : quad.predicate.endsWith('publishedAt')
+            ? JSON.stringify('2026-09-01T00:00:01.000Z')
+            : quad.object,
+      })));
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: row.shareOperationId,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+    });
+    await store.insert([{
+      subject: `${seal.kaUal}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(selectedAlias),
+      graph: metaGraph,
+    }]);
+
+    await expect(resolve('public')).resolves.toMatchObject({
+      assertionCoordinate: ASSERTION_COORDINATE,
+      projectionBytes: PROJECTION_BYTES,
+      seal,
+    });
+  });
+
   it('uses an exact finalized VM projection for a retained private row without an SWM head', async () => {
     await seedVmProjection(store, seal, PROJECTION_QUADS);
 
@@ -134,6 +199,59 @@ describe('RFC-64 durable SWM inventory catalog asset resolver', () => {
     await seedVmProjection(store, seal, PROJECTION_QUADS);
 
     await expect(resolve('private')).resolves.toMatchObject({
+      assertionCoordinate: ASSERTION_COORDINATE,
+      projectionBytes: PROJECTION_BYTES,
+      seal,
+    });
+  });
+
+  it('uses verified VM for confirmed repair when the matching head has no usable locator', async () => {
+    seal = await createSeal({ privateMerkleRoot: `0x${'22'.repeat(32)}` as Digest32V1 });
+    store = new OxigraphStore();
+    await seedDurableSeal(store, seal);
+    await seedVmProjection(store, seal, PROJECTION_QUADS);
+    const graphManager = new GraphManager(store);
+    const operationId = 'confirmed-locatorless';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: operationId,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+      quads: PROJECTION_QUADS,
+      privateMerkleRoot: ethers.getBytes(seal.privateMerkleRoot!),
+      privateTripleCount: 1,
+      publisherPeerId: 'rfc64-finalized-catalog-test',
+      accessPolicy: 'ownerOnly',
+      agentAddress: AUTHOR,
+      timestamp: new Date('2026-09-01T00:00:00.000Z'),
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: operationId,
+      kaUal: seal.kaUal,
+      assertionVersion: seal.assertionVersion,
+    });
+    await store.deleteByPattern({
+      graph: graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH_ID),
+      subject: `urn:dkg:share:${CONTEXT_GRAPH_ID}:${operationId}`,
+      predicate: 'http://dkg.io/ontology/publicSnapshotGraph',
+    });
+
+    await expect(resolveRfc64ConfirmedVmRepairCatalogAssetV1({
+      store,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      authorAddress: AUTHOR,
+      identity: {
+        assertionCoordinate: ASSERTION_COORDINATE,
+        assertionVersion: seal.assertionVersion,
+        kaUal: seal.kaUal,
+        sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal),
+      },
+    })).resolves.toMatchObject({
       assertionCoordinate: ASSERTION_COORDINATE,
       projectionBytes: PROJECTION_BYTES,
       seal,

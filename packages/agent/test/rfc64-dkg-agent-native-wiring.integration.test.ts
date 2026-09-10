@@ -2390,6 +2390,31 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toBeNull();
     await author.store.deleteByPattern(conflictingAuthorQuad);
 
+    // A later storage ACK can leave a second equivalent operation id on the
+    // head. The committed lifecycle callback still names the originator id;
+    // membership in the validated alias class must be enough to record it.
+    const selectedAlias = 'swm-only-shadow-storage-ack-alias';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: author.store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      shareOperationId: selectedAlias,
+      kaUal: canonicalSeal.kaUal,
+      assertionVersion: canonicalSeal.assertionVersion,
+      quads: publicQuads,
+      privateTripleCount: 0,
+      publisherPeerId: author.peerId,
+      accessPolicy: 'public',
+      agentAddress: AUTHOR,
+      timestamp: new Date('2026-07-19T12:35:01.000Z'),
+    });
+    await author.store.insert([{
+      subject: `${canonicalSeal.kaUal}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(selectedAlias),
+      graph: graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH_ID),
+    }]);
+
     const first = await author.recordRfc64SwmAuthorInventoryShadowV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate,
@@ -2413,7 +2438,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         publicTripleCount: canonicalSeal.publicTripleCount,
         privateTripleCount: canonicalSeal.privateTripleCount,
         sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(canonicalSeal),
-        sharedAt: new Date('2026-07-19T12:35:00.000Z').getTime().toString(),
+        sharedAt: new Date('2026-07-19T12:35:01.000Z').getTime().toString(),
         expiresAt: null,
       }],
     });
@@ -2456,6 +2481,16 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       assertionVersion: canonicalSeal.assertionVersion,
       shareOperationId,
     });
+    // The corruption probe above replaces the complete head. Restore the
+    // equivalent storage-ACK alias as well so restart reconciliation still
+    // exercises the intended two-ID head instead of silently falling back to
+    // the originator-only case.
+    await author.store.insert([{
+      subject: `${canonicalSeal.kaUal}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(selectedAlias),
+      graph: graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH_ID),
+    }]);
 
     await author.stop();
     agents.splice(agents.indexOf(author), 1);

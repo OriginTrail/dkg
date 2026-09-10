@@ -7,8 +7,13 @@ import {
   ASSERTION_SEAL_PREDICATES,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  computeFlatKCRootV10,
+  resolveKnowledgeAssetWorkspaceHead,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 /**
@@ -697,6 +702,133 @@ describe('GH#1786 selectedAuthorAgentAddress (resident-candidate selection)', ()
 });
 
 describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves the member author', () => {
+  it('accepts an equivalent selected head alias for intent and queued preflight', async () => {
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const graphManager = new GraphManager(store);
+    const originalId = 'queued-original';
+    const selectedAlias = 'storage-ack-alias';
+    for (const [shareOperationId, accessPolicy, timestamp] of [
+      [originalId, undefined, new Date('2026-09-10T00:00:00.000Z')],
+      [selectedAlias, 'public', new Date('2026-09-10T00:00:01.000Z')],
+    ] as const) {
+      await storeKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        shareOperationId,
+        kaUal: KA_UAL,
+        assertionVersion: 1,
+        quads: [PUBLIC_QUAD],
+        privateTripleCount: 0,
+        publisherPeerId: 'publisher-peer',
+        ...(accessPolicy === undefined ? {} : { accessPolicy }),
+        agentAddress: MEMBER,
+        timestamp,
+      });
+    }
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: originalId,
+      kaUal: KA_UAL,
+      assertionVersion: 1,
+    });
+    await store.insert([{
+      subject: `${KA_UAL.toLowerCase()}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(selectedAlias),
+      graph: graphManager.sharedMemoryMetaUri(CG),
+    }]);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store, graphManager, contextGraphId: CG, kaUal: KA_UAL,
+    })).resolves.toMatchObject({
+      shareOperationId: selectedAlias,
+      shareOperationIds: [originalId, selectedAlias],
+      access: { kind: 'persisted', accessPolicy: 'public', allowedPeers: [] },
+    });
+
+    const sealRoot = `0x${Buffer.from(MERKLE).toString('hex')}`;
+    const agent = stubAgent(store, CURATOR);
+    agent.publisher = { hasSwmShareComplete: async () => true };
+    agent.getCustodialAgentPrivateKey = () => undefined;
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async () => ({
+          events: [],
+          currentShareOperationId: originalId,
+          wmCurrentAssertion: sealRoot,
+          swmCurrentAssertion: sealRoot,
+        }),
+      },
+      configurable: true,
+    });
+
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME);
+    expect(intent.shareOperationId).toBe(originalId);
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
+      .resolves.toEqual({ action: 'execute' });
+  });
+
+  it('rejects a standalone legacy-default head at admission and queued preflight', async () => {
+    const store = new OxigraphStore();
+    await store.insert(sealFor(MEMBER));
+    const graphManager = new GraphManager(store);
+    const shareOperationId = 'legacy-default-only';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId,
+      kaUal: KA_UAL,
+      assertionVersion: 1,
+      quads: [PUBLIC_QUAD],
+      privateTripleCount: 0,
+      publisherPeerId: 'publisher-peer',
+      agentAddress: MEMBER,
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId,
+      kaUal: KA_UAL,
+      assertionVersion: 1,
+    });
+    const sealRoot = `0x${Buffer.from(MERKLE).toString('hex')}`;
+    const agent = stubAgent(store, CURATOR);
+    agent.publisher = { hasSwmShareComplete: async () => true };
+    agent.getCustodialAgentPrivateKey = () => undefined;
+    Object.defineProperty(agent, 'assertion', {
+      value: {
+        history: async () => ({
+          events: [],
+          currentShareOperationId: shareOperationId,
+          wmCurrentAssertion: sealRoot,
+          swmCurrentAssertion: sealRoot,
+        }),
+      },
+      configurable: true,
+    });
+
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
+      .rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+
+    const operationSubject = `urn:dkg:share:${CG}:${shareOperationId}`;
+    const accessPolicyRow = {
+      subject: operationSubject,
+      predicate: 'http://dkg.io/ontology/accessPolicy',
+      object: '"public"',
+      graph: graphManager.sharedMemoryMetaUri(CG),
+    };
+    await store.insert([accessPolicyRow]);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME);
+    await store.deleteByPattern(accessPolicyRow);
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
+      .rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
+  });
+
   it('resolves the member author from _meta when the caller (curator) is not the author', async () => {
     const store = new OxigraphStore();
     await store.insert(sealFor(MEMBER));

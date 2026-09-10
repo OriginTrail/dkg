@@ -39,6 +39,7 @@ import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
   resolvePublishedKnowledgeAssetWorkspaceHead,
+  workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -681,7 +682,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       });
       if (
         head === undefined
-        || head.shareOperationId !== shareOperationId
+        || !workspaceHeadIncludesShareOperationId(head, shareOperationId)
         || head.assertionVersion !== canonicalSeal.assertionVersion
         || head.publicTripleCount !== Number(canonicalSeal.publicTripleCount)
         || head.privateTripleCount !== Number(canonicalSeal.privateTripleCount)
@@ -689,7 +690,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
       // Public catalogs never reveal restricted individual shares. A selected
       // private CG instead carries the same public projection only through its
       // roster-authenticated V2 catalog transport.
-      if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.accessPolicy)) {
+      if (!rfc64CatalogLaneAcceptsWorkspaceHeadV1(lane, head.access.accessPolicy)) {
         return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
           shadowResult('dormant', 'upsert', 0, null, null, 'policy-mismatch'),
           params.contextGraphId,
