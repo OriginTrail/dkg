@@ -187,8 +187,6 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
 import { sharedMemoryScopeForFinalizedLifecycle } from './finalized-lifecycle-scope.js';
 import {
-  readResidentAuthorBoundarySelection,
-  rejectInvalidResidentFinalizedAssertionAuthor,
   resolveResidentFinalizedAssertionAuthor,
 } from './internal/finalized-assertion-author.js';
 
@@ -4364,19 +4362,6 @@ export class PublishMethods extends DKGAgentBase {
     // than the one the caller named, on the exported DKGAgent surface. The required
     // coordinate must always win, and a future option added to the params type must be
     // forwarded deliberately rather than by accident.
-    const selectedAuthor = readResidentAuthorBoundarySelection(opts.selectedAuthorAgentAddress);
-    if (selectedAuthor?.kind === 'invalid') {
-      return rejectInvalidResidentFinalizedAssertionAuthor(
-        this.store,
-        {
-          contextGraphId,
-          name,
-          subGraphName: opts.subGraphName,
-          callerAgentAddress: opts.callerAgentAddress,
-        },
-        selectedAuthor.displayValue,
-      );
-    }
     return resolveResidentFinalizedAssertionAuthor(this.store, {
       contextGraphId,
       name,
@@ -4384,7 +4369,7 @@ export class PublishMethods extends DKGAgentBase {
       callerAgentAddress: opts.callerAgentAddress,
       // Presence, not truthiness: '' / null are SUPPLIED selectors and must fail closed
       // downstream, not silently fall back to normal resolution.
-      selectedAuthorAgentAddress: selectedAuthor?.agentAddress,
+      selectedAuthorAgentAddress: opts.selectedAuthorAgentAddress,
     });
   }
 

@@ -1,12 +1,9 @@
 import { PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE } from '@origintrail-official/dkg-core';
 import type { PublishAuthorSelectionOptions } from '../publish-author-selection.js';
 import {
-  readResidentAuthorBoundarySelection,
-  rejectInvalidResidentFinalizedAssertionAuthor,
   resolveResidentFinalizedAssertionAuthor,
   type AssertionAuthorQueryStore,
   type FinalizedAssertionAuthorLookupParams,
-  type ResidentAuthorBoundarySelection,
 } from './finalized-assertion-author.js';
 
 function conflict(message: string): never {
@@ -36,7 +33,8 @@ export async function resolveFinalizedPublishIdentity(
 
   let callerHint = defaultCallerHint;
   let enqueueCaller: string | undefined;
-  let residentSelection: ResidentAuthorBoundarySelection | undefined;
+  let residentSelection: unknown;
+  let hasResidentSelection = false;
   if (selection === undefined) {
     if ((agentAddress !== undefined && typeof agentAddress !== 'string')
       || (callerAgentAddress !== undefined && typeof callerAgentAddress !== 'string')) {
@@ -52,7 +50,8 @@ export async function resolveFinalizedPublishIdentity(
       return { agentAddress, enqueueCaller };
     }
     callerHint = callerAgentAddress ?? defaultCallerHint;
-    residentSelection = readResidentAuthorBoundarySelection(selectedAuthorAgentAddress);
+    residentSelection = selectedAuthorAgentAddress;
+    hasResidentSelection = selectedAuthorAgentAddress !== undefined;
   } else {
     if (selection === null || typeof selection !== 'object') {
       return conflict('Invalid VM publish authorSelection');
@@ -83,7 +82,8 @@ export async function resolveFinalizedPublishIdentity(
           || (nestedCallerAgentAddress !== undefined && typeof nestedCallerAgentAddress !== 'string')) {
           return conflict('Invalid or conflicting VM publish authorSelection fields');
         }
-        residentSelection = readResidentAuthorBoundarySelection(nestedSelectedAuthorAgentAddress);
+        residentSelection = nestedSelectedAuthorAgentAddress;
+        hasResidentSelection = true;
         enqueueCaller = nestedCallerAgentAddress || undefined;
         break;
       default:
@@ -91,20 +91,13 @@ export async function resolveFinalizedPublishIdentity(
     }
   }
 
-  let author: string | undefined;
-  if (residentSelection?.kind === 'invalid') {
-    author = await rejectInvalidResidentFinalizedAssertionAuthor(
-      store, { contextGraphId, name, subGraphName }, residentSelection.displayValue,
-    );
-  } else {
-    author = await resolveResidentFinalizedAssertionAuthor(store, {
-      contextGraphId, name, subGraphName,
-      ...(residentSelection
-        ? { selectedAuthorAgentAddress: residentSelection.agentAddress }
-        : { callerAgentAddress: callerHint }),
-    });
-  }
-  if (residentSelection && author === undefined) {
+  const author = await resolveResidentFinalizedAssertionAuthor(store, {
+    contextGraphId, name, subGraphName,
+    ...(hasResidentSelection
+      ? { selectedAuthorAgentAddress: residentSelection }
+      : { callerAgentAddress: callerHint }),
+  });
+  if (hasResidentSelection && author === undefined) {
     throw new Error(
       `publishFromFinalizedAssertion: assertion "${name}" in context graph "${contextGraphId}" is not finalized or does not exist.`,
     );

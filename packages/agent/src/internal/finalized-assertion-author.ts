@@ -51,21 +51,7 @@ export interface FinalizedAssertionAuthorLookupParams {
    * authorship (an address that is not resident fails closed) and it never
    * changes the caller identity used for CG registration / curator stamping.
    */
-  selectedAuthorAgentAddress?: string;
-}
-
-export type ResidentAuthorBoundarySelection =
-  | { readonly kind: 'address'; readonly agentAddress: string }
-  | { readonly kind: 'invalid'; readonly displayValue: string };
-
-/** Parse untyped public input without admitting invalid values to the domain model. */
-export function readResidentAuthorBoundarySelection(
-  value: unknown,
-): ResidentAuthorBoundarySelection | undefined {
-  if (value === undefined) return undefined;
-  return typeof value === 'string'
-    ? Object.freeze({ kind: 'address', agentAddress: value })
-    : Object.freeze({ kind: 'invalid', displayValue: String(value) });
+  selectedAuthorAgentAddress?: unknown;
 }
 
 type AssertionAuthorCoordinate = Pick<
@@ -192,6 +178,14 @@ export async function resolveResidentFinalizedAssertionAuthor(
   // HTTP boundary, which 400s every other malformed value. Anything present that names no
   // resident candidate fails closed below.
   if (selectedAuthorAgentAddress !== undefined) {
+    if (typeof selectedAuthorAgentAddress !== 'string') {
+      throw authorNotResidentError(
+        contextGraphId,
+        name,
+        String(selectedAuthorAgentAddress),
+        candidates,
+      );
+    }
     const selected = candidates.find((a) => knowledgeAssetAgentAddressesEqual(
       a,
       selectedAuthorAgentAddress,
@@ -215,19 +209,4 @@ export async function resolveResidentFinalizedAssertionAuthor(
     ),
     { code: AMBIGUOUS_ASSERTION_AUTHOR_CODE, candidates: distinct },
   );
-}
-
-/**
- * Compatibility boundary for malformed legacy/untyped selectors. Candidate
- * discovery deliberately remains identical to a valid resident selection, but
- * the invalid value never becomes part of the canonical lookup parameters.
- */
-export async function rejectInvalidResidentFinalizedAssertionAuthor(
-  store: AssertionAuthorQueryStore,
-  params: Omit<FinalizedAssertionAuthorLookupParams, 'selectedAuthorAgentAddress'>,
-  displayValue: string,
-): Promise<string | undefined> {
-  const candidates = await findResidentFinalizedAssertionAuthors(store, params);
-  if (candidates === undefined) return undefined;
-  throw authorNotResidentError(params.contextGraphId, params.name, displayValue, candidates);
 }
