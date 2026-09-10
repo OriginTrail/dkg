@@ -108,4 +108,42 @@ describe('query catalog parameters', () => {
       { maximum: 10 },
     )).toBe('SELECT ?score WHERE { ?s <urn:score> ?score . FILTER(?score<10) }');
   });
+
+  it('keeps scanning after a compact comparison with a literal right operand', () => {
+    const template = 'SELECT ?score WHERE { ?s <urn:score> ?score . FILTER(?score<10 && ?score<{{maximum}}) }';
+    expect(renderQueryCatalogTemplate(template, [{ name: 'maximum', type: 'number' }], { maximum: 7 }))
+      .toBe(template.replace('{{maximum}}', '7'));
+  });
+
+  it('uses canonical string, comment, and IRI masking without shifting replacement offsets', () => {
+    const template = String.raw`SELECT * WHERE {
+      BIND('😀 {{single}}' AS ?a)
+      BIND("escaped \" {{double}}" AS ?b)
+      BIND('''long ' {{longSingle}}''' AS ?c)
+      BIND("""long " {{longDouble}}""" AS ?d)
+      BIND(<urn:example:{{iri}}> AS ?e)
+      \u0023 {{encodedComment}}
+      BIND(\u0022{{encodedString}}\u0022 AS ?f)
+      BIND({{first}} AS ?first)
+      BIND({{second}} AS ?second)
+    }`;
+    expect(renderQueryCatalogTemplate(template,
+      [{ name: 'first', type: 'integer' }, { name: 'second', type: 'string' }],
+      { first: 12, second: 'done' }))
+      .toBe(template.replace('{{first}}', '12').replace('{{second}}', '"done"'));
+  });
+
+  it.each(['?{{value}}', 'prefix:{{value}}', '{{value}}suffix', '{{value}}:suffix'])(
+    'preserves complete-term rejection for %s', (term) => {
+      expect(() => renderQueryCatalogTemplate(`ASK { BIND(${term} AS ?v) }`,
+        [{ name: 'value', type: 'string' }], { value: 'safe' }))
+        .toThrow('Query parameter value must occupy a complete SPARQL term position.');
+    },
+  );
+
+  it('rejects active Unicode escapes that fail the canonical lexical safety check', () => {
+    expect(() => renderQueryCatalogTemplate(String.raw`ASK { \u005Cu0053ERVICE {{value}} }`,
+      [{ name: 'value', type: 'iri' }], { value: 'urn:test' }))
+      .toThrow('SPARQL template contains invalid lexical syntax.');
+  });
 });

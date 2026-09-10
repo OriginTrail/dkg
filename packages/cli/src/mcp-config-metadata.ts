@@ -1,8 +1,9 @@
 import { win32, posix } from 'node:path';
-import { release } from 'node:os';
-import type { McpClientLocation } from './mcp-client-registry.js';
+import { detectMcpRuntime, type McpRuntime } from './mcp-runtime.js';
 import { execFileSync } from 'node:child_process';
 import { existsSync, fchmodSync, fchownSync, fstatSync, renameSync, rmSync, type Stats } from 'node:fs';
+
+type WindowsExecution = 'native' | 'windows-wsl';
 
 interface McpConfigReplacement {
   configPath: string;
@@ -48,7 +49,7 @@ const WINDOWS_MCP_CONFIG_SCRIPTS: Record<WindowsMcpConfigOperation, string> = {
 };
 
 /** Resolve the OS runtime without searching the working directory or PATH. */
-export function windowsPowerShellExecutable(location: McpClientLocation): string {
+export function windowsPowerShellExecutable(location: WindowsExecution): string {
   // WSL does not forward SystemRoot by default. Non-default Windows installs
   // can supply the inherited Windows SystemRoot explicitly to the Linux process.
   const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT ?? 'C:\\Windows';
@@ -65,7 +66,7 @@ export function windowsPowerShellExecutable(location: McpClientLocation): string
 function runMcpConfigPowerShell(
   operation: WindowsMcpConfigOperation,
   paths: { source: string; destination: string; backup?: string },
-  location: Extract<McpClientLocation, 'native' | 'windows-wsl'>,
+  location: WindowsExecution,
 ): void {
   const executable = windowsPowerShellExecutable(location);
   const windowsPath = (path: string) => location === 'windows-wsl'
@@ -96,7 +97,7 @@ function runMcpConfigPowerShell(
 export function copyWindowsMcpConfigMetadata(
   source: string,
   destination: string,
-  location: Extract<McpClientLocation, 'native' | 'windows-wsl'>,
+  location: WindowsExecution,
 ): void {
   runMcpConfigPowerShell('copy-metadata', { source, destination }, location);
 }
@@ -106,7 +107,7 @@ export function replaceWindowsMcpConfigFile(
   source: string,
   destination: string,
   backup: string,
-  location: Extract<McpClientLocation, 'native' | 'windows-wsl'>,
+  location: WindowsExecution,
 ): void {
   runMcpConfigPowerShell('replace-file', { source, destination, backup }, location);
 }
@@ -190,13 +191,12 @@ function windowsPersistence(
   };
 }
 
-/** Resolve client placement and the physical destination into one write policy. */
+/** Select persistence solely from the runtime and resolved physical destination. */
 export function mcpConfigPersistenceStrategy(
-  location: McpClientLocation,
   destination: string,
+  runtime: McpRuntime = detectMcpRuntime(),
 ): McpConfigPersistenceStrategy {
-  if (process.platform === 'linux'
-      && (process.env.WSL_DISTRO_NAME || /microsoft/i.test(release()))) {
+  if (runtime === 'wsl') {
     // WSL resolves custom drive mounts and UNC shares too. A Linux-backed path
     // is exported through the distro share; every other Windows path uses ACLs.
     const translated = execFileSync('/usr/bin/wslpath', ['-w', destination], { encoding: 'utf8', stdio: 'pipe' }).trim();
@@ -204,7 +204,6 @@ export function mcpConfigPersistenceStrategy(
     return /^\\\\wsl(?:\$|\.localhost)\\/i.test(translated)
       ? posixPersistence('linux') : windowsPersistence('windows-wsl');
   }
-  if (location === 'windows-wsl') return windowsPersistence('windows-wsl');
-  if (process.platform === 'win32') return windowsPersistence('windows-native');
-  return posixPersistence(process.platform === 'linux' ? 'linux' : 'posix');
+  if (runtime === 'windows') return windowsPersistence('windows-native');
+  return posixPersistence(runtime === 'linux' ? 'linux' : 'posix');
 }

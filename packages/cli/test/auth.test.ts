@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
-import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { writeFile, mkdir, rm, readFile, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -9,7 +10,9 @@ import {
   extractBearerToken,
   httpAuthGuard,
   loadTokens,
+  loadApiClientToken,
 } from '../src/auth.js';
+import { DkgHomeFiles } from '../src/config.js';
 
 // ---------------------------------------------------------------------------
 // Unit tests for pure functions
@@ -108,6 +111,29 @@ describe('loadTokens', () => {
     expect(tokens.has('file-token')).toBe(true);
     expect(tokens.has('config-token')).toBe(true);
     expect(tokens.size).toBe(2);
+  });
+
+  it('selects the first file credential in the bound home without rewriting the file', async () => {
+    const files = new DkgHomeFiles();
+    const contents = '# header\n\n first-token \nsecond-token\nfirst-token\n';
+    await writeFile(files.tokenPath, contents);
+    process.env.DKG_HOME = join(tempDir, 'other-home');
+    expect(await loadApiClientToken(files)).toBe('first-token');
+    expect(await readFile(files.tokenPath, 'utf8')).toBe(contents);
+    expect(existsSync(new DkgHomeFiles().tokenPath)).toBe(false);
+  });
+
+  it('generates a private client token file and reuses that credential', async () => {
+    const files = new DkgHomeFiles();
+    const token = await loadApiClientToken(files);
+    expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(await loadApiClientToken(files)).toBe(token);
+    if (process.platform !== 'win32') expect((await stat(files.tokenPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('does not generate a daemon token file when config credentials already exist', async () => {
+    expect([...await loadTokens({ tokens: ['config-token'] })]).toEqual(['config-token']);
+    expect(existsSync(new DkgHomeFiles().tokenPath)).toBe(false);
   });
 });
 
