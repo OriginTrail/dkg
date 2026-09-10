@@ -51,6 +51,7 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, reso
 } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
+import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -981,6 +982,9 @@ export class EVMChainAdapterBase {
 
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
+  /** Finalized authority scan watermarks owned by this adapter lifecycle. */
+  protected readonly contextGraphAuthorityHistory = new ContextGraphAuthorityHistoryCache();
+
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
    * scan (adapter-level config `kaHighWaterScanPageSize`; non-integer / `< 1`
@@ -1006,6 +1010,7 @@ export class EVMChainAdapterBase {
     this.cachedContractDeployBlocks.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
+    this.contextGraphAuthorityHistory.clear();
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -4345,6 +4350,7 @@ export class EVMChainAdapterBase {
    */
   destroy(): void {
     this.hubRotationPoller.stop();
+    this.contextGraphAuthorityHistory.clear();
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }

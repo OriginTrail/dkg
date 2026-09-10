@@ -8,9 +8,9 @@
     "build": "tsc && pnpm run test:types",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:types": "tsc --project tsconfig.type-tests.json",
     "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs chain",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo",
-    "test:types": "tsc -p tsconfig.type-tests.json"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@origintrail-official/dkg-http-utils": "workspace:*",
