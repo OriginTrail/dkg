@@ -35,7 +35,7 @@ export interface ChainEventPollerLaneSpec {
   canUseLegacyAggregateCursor?(): boolean;
   liveSeedLookbackBlocks?: number;
   cadenceMs: number;
-  dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
+  dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
 }
 
@@ -91,16 +91,19 @@ export class ChainEventLaneRunner {
     this.cursorStore = createLaneCursorStore(config.cursorPersistence);
   }
 
-  async restoreCurrentlyActive(ctx: OperationContext): Promise<void> {
-    await this.restoreLaneCursors(this.activeLaneSpecs(), ctx);
+  async restoreCurrentlyActive(ctx: OperationContext, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
+    await this.restoreLaneCursors(this.activeLaneSpecs(), ctx, signal);
   }
 
-  async poll(): Promise<void> {
+  async poll(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     const ctx = createOperationContext('publish');
     const activeLanes = this.activeLaneSpecs();
     if (activeLanes.length === 0) return;
 
-    await this.restoreLaneCursors(activeLanes, ctx);
+    await this.restoreLaneCursors(activeLanes, ctx, signal);
+    signal?.throwIfAborted();
 
     const now = this.clock();
     const dueLanes = activeLanes.filter((lane) => this.laneDue(lane, now));
@@ -108,12 +111,17 @@ export class ChainEventLaneRunner {
 
     let head: number | undefined;
     if (this.chain.getBlockNumber) {
-      try { head = await this.chain.getBlockNumber(); } catch { /* unavailable */ }
+      try { head = await this.chain.getBlockNumber({ signal }); } catch {
+        signal?.throwIfAborted();
+        // An unavailable head retains the existing bounded scan fallback.
+      }
+      signal?.throwIfAborted();
     }
 
     const scanResults: ChainEventPollerLaneScanResult[] = [];
     for (const lane of dueLanes) {
-      scanResults.push(await this.scanLane(lane, head, now, ctx));
+      signal?.throwIfAborted();
+      scanResults.push(await this.scanLane(lane, head, now, ctx, signal));
     }
     await this.persistScanResults(scanResults, activeLanes);
   }
@@ -154,26 +162,30 @@ export class ChainEventLaneRunner {
   private async restoreLaneCursors(
     activeLanes: readonly ChainEventPollerLaneRuntime[],
     ctx: OperationContext,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!this.cursorStore) return;
     for (const lane of activeLanes) {
+      signal?.throwIfAborted();
       if (this.restoredLanes.has(lane.spec.name)) continue;
-      await this.restoreLaneCursor(lane, ctx);
+      await this.restoreLaneCursor(lane, ctx, signal);
     }
   }
 
-  private async restoreLaneCursor(lane: ChainEventPollerLaneRuntime, ctx: OperationContext): Promise<void> {
+  private async restoreLaneCursor(lane: ChainEventPollerLaneRuntime, ctx: OperationContext, signal?: AbortSignal): Promise<void> {
     if (!this.cursorStore) return;
     try {
       const saved = await this.loadPersistedLaneCursor(lane);
+      signal?.throwIfAborted();
       if (saved != null && saved > 0) {
         lane.state.lastBlock = saved;
         this.log.info(ctx, `Restored poller cursor from persistence: lane=${lane.spec.name} block ${saved}`);
       }
     } catch (err) {
+      signal?.throwIfAborted();
       this.log.warn(ctx, `Failed to load persisted cursor: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      this.restoredLanes.add(lane.spec.name);
+      if (!signal?.aborted) this.restoredLanes.add(lane.spec.name);
     }
   }
 
@@ -235,7 +247,9 @@ export class ChainEventLaneRunner {
     head: number | undefined,
     now: number,
     ctx: OperationContext,
+    signal?: AbortSignal,
   ): Promise<ChainEventPollerLaneScanResult> {
+    signal?.throwIfAborted();
     const state = lane.state;
 
     this.applyHistoryModeTransition(lane, head, ctx);
@@ -264,19 +278,25 @@ export class ChainEventLaneRunner {
       eventTypes: lane.eventTypes,
       fromBlock,
       toBlock: upperBound,
+      ...(signal ? { signal } : {}),
     };
     const caughtUp = head != null && upperBound >= head;
     let advanced = false;
 
     try {
       for await (const event of this.chain.listenForEvents(filter)) {
-        await lane.spec.dispatch(event, ctx);
+        signal?.throwIfAborted();
+        await lane.spec.dispatch(event, ctx, signal);
+        signal?.throwIfAborted();
       }
+      signal?.throwIfAborted();
 
       state.lastBlock = upperBound;
       advanced = true;
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
+      // Shutdown leaves this page replayable and does not start failure backoff.
+      signal?.throwIfAborted();
       this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
       this.applyLaneSchedule(lane, { kind: 'failure', now });
     }

@@ -3086,13 +3086,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
     ) | null = null;
     try {
-      resolved = await raceVmReconcileAbort(
-        this.resolveContextGraphOnChainIdBinding(localCgId, {
-          signal,
-          source: 'agent.vmReconcile.resolveOnChainId',
-        }),
+      const read = this.resolveContextGraphOnChainIdBinding(localCgId, {
         signal,
-      );
+        source: 'agent.vmReconcile.resolveOnChainId',
+      });
+      // Logical cancellation may win before a noncooperative adapter settles.
+      // Keep the physical read in the existing retirement drain so backing
+      // stores remain quarantined until it actually finishes.
+      this.vmReconcilePhysicalRuns.add(read);
+      void read.finally(() => { this.vmReconcilePhysicalRuns.delete(read); }).catch(() => {});
+      resolved = await raceVmReconcileAbort(read, signal);
     } catch {
       return null;
     }
@@ -3152,9 +3155,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainId: string,
     kaId: bigint,
     ctx: OperationContext,
+    pollSignal?: AbortSignal,
   ): Promise<string | null> {
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const signals = [this.vmReconcileLifecycleController?.signal, pollSignal]
+      .filter((signal): signal is AbortSignal => signal !== undefined);
+    const lifecycleSignal = signals.length > 0 ? AbortSignal.any(signals) : undefined;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
       && !lifecycleSignal?.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;

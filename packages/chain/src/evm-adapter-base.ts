@@ -3985,12 +3985,12 @@ export class EVMChainAdapterBase {
     return !!this.contracts.randomSampling && !!this.contracts.randomSamplingStorage;
   }
 
-  async getBlockNumber(): Promise<number> {
+  async getBlockNumber(options: ChainReadOptions = {}): Promise<number> {
     // TIP-SENSITIVE: the current head drives the event-lane cursor, proof-
     // challenge block, and finalization reads. A lagging sticky backend would
     // make the head non-monotonic across calls (poller moving backwards / re-
     // scanning), so read canonical-order + preference-transparent.
-    return this.readTipProvider('getBlockNumber', (p) => p.getBlockNumber());
+    return this.readTipProvider('getBlockNumber', (p) => p.getBlockNumber(), { signal: options.signal });
   }
 
   getProvider(): JsonRpcProvider {

@@ -572,6 +572,7 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
 
       const shutdownStarted = beginGracefulShutdown({
         state: daemonState,
+        closeChainEventAdmission: () => {},
         log: () => {},
         removeApiPort: async () => { enteredWindow(); await held; },
       });
@@ -1119,7 +1120,7 @@ describe('A24 — a failing step never strands the steps after it', () => {
   it('reports EVERY failing step and still runs all of them', async () => {
     const ran: StepName[] = [];
     const steps = Object.fromEntries(
-      TEARDOWN_ORDER.map((name) => [name, async () => {
+      TEARDOWN_ORDER.map((name) => [name, async (): Promise<void> => {
         ran.push(name);
         throw new Error(`${name} exploded`);
       }]),

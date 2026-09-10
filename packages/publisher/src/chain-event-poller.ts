@@ -1,4 +1,4 @@
-import type { ChainAdapter, ChainEvent } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, ChainEvent, ChainReadOptions } from '@origintrail-official/dkg-chain';
 import { Logger, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
@@ -67,7 +67,7 @@ export type OnKARegisteredToContextGraph = (info: {
   txHash: string;
   txIndex?: number;
   blockNumber: number;
-}) => Promise<void>;
+}, options?: ChainReadOptions) => Promise<void>;
 
 /**
  * Callback for `KnowledgeAssetCreated` events — OT-RFC-43 Option-1 allocator
@@ -133,6 +133,7 @@ export class ChainEventPoller {
   private readonly log = new Logger('ChainEventPoller');
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private pollGeneration: AbortController | null = null;
   /**
    * The currently-executing `poll()` promise (or `null` when idle).
    *
@@ -171,39 +172,49 @@ export class ChainEventPoller {
 
   async start(): Promise<void> {
     if (this.running) return;
+    const previous = this.inFlightPoll;
+    const generation = new AbortController();
+    this.pollGeneration = generation;
     this.running = true;
+    // A restart cannot overlap work still owned by the preceding generation.
+    if (previous) await previous.catch(() => {});
+    if (!this.isCurrentGeneration(generation)) return;
 
     const ctx = createOperationContext('system');
-
-    // Restore cursor from persistent storage (spec §5.1: scan from last processed block)
-    await this.laneRunner.restoreCurrentlyActive(ctx);
-    if (!this.running) return;
+    const restore = this.laneRunner.restoreCurrentlyActive(ctx, generation.signal);
+    this.inFlightPoll = restore;
+    try {
+      await restore;
+    } catch (error) {
+      if (!generation.signal.aborted) {
+        this.running = false;
+        generation.abort(error);
+        throw error;
+      }
+    } finally {
+      if (this.inFlightPoll === restore) this.inFlightPoll = null;
+    }
+    if (!this.isCurrentGeneration(generation)) return;
 
     this.log.info(ctx, `Starting chain event poller (interval=${this.intervalMs}ms)`);
+    this.timer = setInterval(() => this.runPoll(generation), this.intervalMs);
+    this.runPoll(generation);
+  }
 
-    this.timer = setInterval(() => {
-      // Serialize: if the previous poll is still in flight, skip this tick.
-      // Without this guard, overlapping polls would stack up — each tick
-      // would overwrite `inFlightPoll` and orphan the previous one along
-      // with its in-flight `eth_getLogs` HTTP request. On test teardown
-      // (or any RPC connection close) those orphaned sockets surface as
-      // `TCP.onStreamRead ECONNRESET` unhandled rejections — observed as
-      // 40k+ errors per file in `chain-event-poller-extra.test.ts`. The
-      // chain is monotonic and the poll catches up via `MAX_RANGE`, so a
-      // skipped tick is functionally identical to slightly longer cadence.
-      if (this.inFlightPoll) return;
-      this.inFlightPoll = this.poll()
-        .catch((err) => {
-          const pollCtx = createOperationContext('system');
-          this.log.error(pollCtx, `Poll failed: ${err instanceof Error ? err.message : String(err)}`);
-        })
-        .finally(() => { this.inFlightPoll = null; });
-    }, this.intervalMs);
+  private isCurrentGeneration(generation: AbortController): boolean {
+    return this.running && this.pollGeneration === generation && !generation.signal.aborted;
+  }
 
-    // Run first poll immediately, and track it so `stop()` can await it.
-    this.inFlightPoll = this.poll()
-      .catch(() => {})
-      .finally(() => { this.inFlightPoll = null; });
+  private runPoll(generation: AbortController): void {
+    if (!this.isCurrentGeneration(generation) || this.inFlightPoll) return;
+    const pending = this.poll(generation.signal)
+      .catch(error => {
+        if (!generation.signal.aborted) {
+          this.log.error(createOperationContext('system'), `Poll failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      })
+      .finally(() => { if (this.inFlightPoll === pending) this.inFlightPoll = null; });
+    this.inFlightPoll = pending;
   }
 
   /** Wait for the startup/current poll without exposing poller internals. */
@@ -212,33 +223,22 @@ export class ChainEventPoller {
     if (pending) await pending;
   }
 
-  /**
-   * Stop the interval and wait for any in-flight poll to settle.
-   *
-   * Returns a Promise so callers can `await poller.stop()` before
-   * tearing down the chain adapter / RPC connection — without this,
-   * an in-flight `eth_getLogs` would still be holding an HTTP keep-
-   * alive socket open and a downstream `killHardhat()` (in tests) or
-   * `provider.destroy()` (in prod shutdown) would surface as an
-   * `ECONNRESET` unhandled rejection from somewhere inside ethers.
-   *
-   * Idempotent: a second `stop()` after the first has resolved is a
-   * no-op. Legacy synchronous callers may still treat the return as
-   * void; they just lose the in-flight-await guarantee.
-   */
-  async stop(): Promise<void> {
+  /** Fence new events and cancel cooperative work before a shutdown await. */
+  closeAdmission(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
     this.running = false;
+    this.pollGeneration?.abort();
+  }
+
+  /** Cancel admission, then physically drain the current poll or startup restore. */
+  async stop(): Promise<void> {
+    this.closeAdmission();
     const pending = this.inFlightPoll;
     if (pending) {
-      // The `.catch(() => {})` chain at the call sites already swallows
-      // rejections, but defensively guard against an externally-rejected
-      // promise here too. We just want to wait for completion. The
-      // `.finally(() => { this.inFlightPoll = null })` in start() will
-      // null out `inFlightPoll` once the await unblocks.
+      // Ownership stays with this promise even when an adapter ignores abort.
       try { await pending; } catch { /* already logged or swallowed */ }
     }
 
@@ -292,7 +292,7 @@ export class ChainEventPoller {
         eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx) => this.handleKARegistered(event, ctx),
+        dispatch: (event, ctx, signal) => this.handleKARegistered(event, ctx, signal),
       },
       {
         name: 'collectionUpdates',
@@ -321,8 +321,8 @@ export class ChainEventPoller {
     ];
   }
 
-  private async poll(): Promise<void> {
-    await this.laneRunner.poll();
+  private async poll(signal?: AbortSignal): Promise<void> {
+    await this.laneRunner.poll(signal);
   }
 
   private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
@@ -446,7 +446,7 @@ export class ChainEventPoller {
     }
   }
 
-  private async handleKARegistered(event: ChainEvent, ctx: OperationContext): Promise<void> {
+  private async handleKARegistered(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void> {
     if (!this.onKARegisteredToContextGraph) return;
     const { data } = event;
     const contextGraphId = String(data['contextGraphId'] ?? '');
@@ -470,7 +470,7 @@ export class ChainEventPoller {
         txHash,
         txIndex,
         blockNumber: event.blockNumber,
-      });
+      }, { signal });
     } catch (err) {
       this.log.warn(ctx, `onKARegisteredToContextGraph callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }

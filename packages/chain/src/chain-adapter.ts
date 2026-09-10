@@ -450,7 +450,7 @@ export interface VerifyACKIdentityResult {
   reason?: VerifyACKIdentityReason;
 }
 
-export interface EventFilter {
+export interface EventFilter extends ChainReadOptions {
   eventTypes: string[];
   fromBlock?: number;
   /** Upper block bound (inclusive). Limits scan range to prevent expensive queries. */
@@ -1337,7 +1337,7 @@ export interface ChainAdapter {
   verifyPublisherOwnsRange?(publisherAddress: string, startKAId: bigint, endKAId: bigint): Promise<boolean>;
 
   // Block height (used by ChainEventPoller to seed the scan cursor)
-  getBlockNumber?(): Promise<number>;
+  getBlockNumber?(options?: ChainReadOptions): Promise<number>;
 
   // Events
   listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent>;

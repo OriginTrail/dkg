@@ -2229,6 +2229,11 @@ export class DKGAgent extends DKGAgentBase {
     await this.chainPoller?.waitForCurrentPoll();
   }
 
+  /** Close event admission at the daemon shutdown boundary, before other producers drain. */
+  closeChainEventAdmission(): void {
+    this.chainPoller?.closeAdmission();
+  }
+
   async stop(): Promise<void> {
     if (!this.started) return;
     // Fence membership persistence before any network callback can enqueue
