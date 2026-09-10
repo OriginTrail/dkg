@@ -11,7 +11,7 @@
 import { describe, it, expect } from 'vitest';
 import { Interface } from 'ethers';
 import { decodeConvictionCostCovered } from '../src/evm-adapter-base.js';
-import { PublishMethods } from '../src/evm-adapter-publish.js';
+import { createPublishAdapterFixture } from './publish-adapter-fixture.js';
 import { getPcaLogicInterface } from '../src/evm-adapter-errors.js';
 
 function costCoveredLog(values: bigint[]): { topics: string[]; data: string } {
@@ -64,19 +64,18 @@ describe('decodeConvictionCostCovered (B8)', () => {
   });
 
   it('attaches CostCovered when resolving a V10 publish receipt by tx hash', async () => {
-    const parser = Object.create(PublishMethods.prototype) as PublishMethods & {
-      contracts: Record<string, unknown>;
-      getBlockTimestamp: () => Promise<number>;
-    };
-    parser.contracts = {
-      knowledgeAssetStorage: {
-        target: KAS,
-        interface: new Interface([
-          'event KnowledgeAssetCreated(uint256 id, address author)',
-        ]),
+    const parser = createPublishAdapterFixture();
+    Object.assign(parser, {
+      contracts: {
+        knowledgeAssetStorage: {
+          target: KAS,
+          interface: new Interface([
+            'event KnowledgeAssetCreated(uint256 id, address author)',
+          ]),
+        },
       },
-    };
-    parser.getBlockTimestamp = async () => 1234;
+      getBlockTimestamp: async () => 1234,
+    });
 
     const out = await parser.parseV10PublishReceipt({
       hash: '0xabc',

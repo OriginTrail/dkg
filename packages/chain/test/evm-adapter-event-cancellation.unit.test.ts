@@ -3,6 +3,7 @@ import { Contract, Interface } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import type { ChainEvent, EventFilter } from '../src/chain-adapter.js';
+import { eventContractKeysFor } from '../src/evm-event-contracts.js';
 
 const PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const address = '0x0000000000000000000000000000000000000012';
@@ -30,6 +31,83 @@ async function collect(adapter: EVMChainAdapter, filter: EventFilter) {
 }
 
 describe('event scan RPC cancellation', () => {
+  it.each(['Staking', 'Token', 'RandomSampling'])('reloads event bindings when Hub rotation overlaps full initialization at %s', async pausedName => {
+    const hub = new Interface([
+      'function getContractAddress(string name) view returns (address)',
+      'function getAssetStorageAddress(string name) view returns (address)',
+    ]);
+    const replacement = '0x0000000000000000000000000000000000000034';
+    let currentStorage = address;
+    let pauseInitialization = true;
+    let enter!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>(resolve => { release = resolve; });
+    const scans: string[] = [];
+    const storageLookups: string[] = [];
+    const server = createServer(async (request, response) => {
+      let body = '';
+      for await (const part of request) body += part;
+      const payload = JSON.parse(body) as { method: string; id: number; params: [{ data: string; address: string }] };
+      let result: unknown = '0x7a69';
+      if (payload.method === 'eth_call') {
+        const call = hub.parseTransaction({ data: payload.params[0].data });
+        if (!call) throw new Error('expected Hub lookup');
+        const name = String(call.args[0]);
+        if (name === pausedName && pauseInitialization) {
+          pauseInitialization = false;
+          enter();
+          await released;
+        }
+        const resolved = name === 'ContextGraphStorage' ? currentStorage : address;
+        if (name === 'ContextGraphStorage') storageLookups.push(resolved);
+        result = hub.encodeFunctionResult(call.fragment, [resolved]);
+      } else if (payload.method === 'eth_getLogs') {
+        scans.push(payload.params[0].address.toLowerCase());
+        result = [];
+      }
+      response.setHeader('content-type', 'application/json');
+      response.end(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result }));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const bound = server.address();
+    if (!bound || typeof bound === 'string') throw new Error('missing RPC listener');
+    const adapter = new EVMChainAdapter({ rpcUrl: `http://127.0.0.1:${bound.port}`,
+      privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const internal = adapter as unknown as {
+      initialized: boolean; contracts: { contextGraphStorage?: Contract };
+      init(): Promise<void>; applyHubRotationEventName(name: string): void;
+    };
+    const filter = { eventTypes: ['ContextGraphCreated'], fromBlock: 1, toBlock: 20 };
+    let initialization: Promise<void> | undefined;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await collect(adapter, filter);
+      expect(internal.initialized).toBe(false);
+      initialization = internal.init();
+      await Promise.race([entered, new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('full initialization never reached the paused lookup')), 2000);
+      })]);
+      expect(await internal.contracts.contextGraphStorage?.getAddress()).toBe(address);
+      currentStorage = replacement;
+      internal.applyHubRotationEventName('ContextGraphStorage');
+      release();
+      await initialization;
+      scans.length = 0;
+      await collect(adapter, filter);
+      expect(scans).toEqual([replacement]);
+      expect(storageLookups).toEqual([address, replacement]);
+      expect(await internal.contracts.contextGraphStorage?.getAddress()).toBe(replacement);
+    } finally {
+      clearTimeout(timeout);
+      release();
+      await initialization?.catch(() => {});
+      adapter.destroy();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
   it.each(['head', 'scan'] as const)('physically cancels a hung %s HTTP request without trying the backup', async boundary => {
     let entered!: () => void;
     const requestEntered = new Promise<void>(resolve => { entered = resolve; });
@@ -83,7 +161,7 @@ describe('event scan RPC cancellation', () => {
     const sharedRequest = new Promise<void>(resolve => { sharedEntered = resolve; });
     const eventRequest = new Promise<void>(resolve => { eventEntered = resolve; });
     const disconnected = new Promise<void>(resolve => { eventDisconnected = resolve; });
-    let sharedResponse: ServerResponse | undefined;
+    let sharedResponse: Pick<ServerResponse, 'destroyed'> | undefined;
     let releaseShared: (() => void) | undefined;
     const requests: string[] = [];
     async function bounded<T>(work: Promise<T>, label: string): Promise<T> {
@@ -237,7 +315,12 @@ describe('event scan RPC cancellation', () => {
       expect(await collect(adapter, { eventTypes: [...eventTypes] })).toEqual([]);
       expect(requests.map(request => request.name)).toEqual([...expectedNames, ...expectedNames]);
       expect(internal.initialized).toBe(false);
-      expect(internal.contracts).toEqual(beforeBindings);
+      // Successful subset admission installs into the canonical handle store;
+      // cancelled staging above installed nothing and full initialization is pending.
+      expect(Object.keys(internal.contracts).sort()).toEqual([
+        ...Object.keys(beforeBindings), ...eventContractKeysFor(eventTypes),
+      ].sort());
+      expect(internal.contracts.identity).toBeUndefined();
       await collect(adapter, { eventTypes: [...eventTypes] });
       expect(requests.map(request => request.name)).toEqual([...expectedNames, ...expectedNames]);
       internal.applyHubRotationEventName(stalledName);

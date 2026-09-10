@@ -1,6 +1,7 @@
 import { Contract } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
-import { EvmEventContractGroup, eventContractKeysFor } from '../src/evm-event-contracts.js';
+import { eventContractKeysFor } from '../src/evm-event-contracts.js';
+import { EvmHubContractBindings } from '../src/evm-hub-contract-bindings.js';
 
 const first = new Contract('0x0000000000000000000000000000000000000001', []);
 const second = new Contract('0x0000000000000000000000000000000000000002', []);
@@ -10,7 +11,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-describe('staged EVM event contracts', () => {
+describe('generation-owned Hub bindings and event selection', () => {
   it('shares one capability across aliases and repeated requested event types', () => {
     expect(eventContractKeysFor(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated']))
       .toEqual(['knowledgeAssetStorage']);
@@ -19,7 +20,7 @@ describe('staged EVM event contracts', () => {
   });
 
   it('keeps a noncancellable caller independent of an aborted concurrent load', async () => {
-    const group = new EvmEventContractGroup();
+    const group = new EvmHubContractBindings({ hub: first });
     const pending = deferred<Contract>();
     const load = vi.fn(() => pending.promise);
     let settled = false;
@@ -38,7 +39,7 @@ describe('staged EVM event contracts', () => {
   });
 
   it('restarts a staged group when Hub rotation arrives during a lookup', async () => {
-    const group = new EvmEventContractGroup();
+    const group = new EvmHubContractBindings({ hub: first });
     const pending = deferred<Contract>();
     const load = vi.fn().mockImplementationOnce(() => pending.promise).mockResolvedValue(second);
     const resolving = group.resolve(['contextGraphStorage'], load);
@@ -51,7 +52,7 @@ describe('staged EVM event contracts', () => {
   });
 
   it('merges concurrently completed disjoint groups without losing either capability', async () => {
-    const group = new EvmEventContractGroup();
+    const group = new EvmHubContractBindings({ hub: first });
     const pending = deferred<Contract>();
     const firstGroup = group.resolve(['contextGraphStorage'], () => pending.promise);
     await group.resolve(['knowledgeAssetStorage'], async () => second);
@@ -63,8 +64,18 @@ describe('staged EVM event contracts', () => {
     expect(unused).not.toHaveBeenCalled();
   });
 
+  it('retains the first committed handle when a concurrent same-generation load completes late', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const pending = deferred<Contract>();
+    const slow = group.resolve(['contextGraphStorage'], () => pending.promise);
+    await group.resolve(['contextGraphStorage'], async () => second);
+    pending.resolve(first);
+    await expect(slow).resolves.toEqual({ contextGraphStorage: second });
+    expect(group.contracts.contextGraphStorage).toBe(second);
+  });
+
   it('preserves missing optional legacy contracts until the Hub generation changes', async () => {
-    const group = new EvmEventContractGroup();
+    const group = new EvmHubContractBindings({ hub: first });
     const load = vi.fn().mockRejectedValueOnce(new Error('legacy contract absent')).mockResolvedValue(first);
     await expect(group.resolve(['contextGraphNameRegistry'], load)).resolves.toEqual({ contextGraphNameRegistry: undefined });
     await group.resolve(['contextGraphNameRegistry'], load);
@@ -75,11 +86,13 @@ describe('staged EVM event contracts', () => {
   });
 
   it('does not retain any staged bindings when a required contract fails', async () => {
-    const group = new EvmEventContractGroup();
+    const group = new EvmHubContractBindings({ hub: first });
     const failure = new Error('KA storage unavailable');
     const load = vi.fn().mockResolvedValueOnce(first).mockRejectedValueOnce(failure).mockResolvedValue(second);
     const keys = ['contextGraphStorage', 'knowledgeAssetStorage'] as const;
     await expect(group.resolve(keys, load)).rejects.toBe(failure);
+    expect(group.contracts.contextGraphStorage).toBeUndefined();
+    expect(group.contracts.knowledgeAssetStorage).toBeUndefined();
     await expect(group.resolve(keys, load)).resolves.toEqual({ contextGraphStorage: second, knowledgeAssetStorage: second });
     expect(load).toHaveBeenCalledTimes(4);
   });

@@ -25,7 +25,8 @@ import type {
   SignedTransactionEnvelope,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { ALL_EVM_EVENT_CONTRACT_KEYS, EvmEventContractGroup, optionalEvmContract, selectEventContracts, type EvmEventContractKey, type EvmEventContracts } from './evm-event-contracts.js';
+import type { EvmEventContractKey, EvmEventContracts } from './evm-event-contracts.js';
+import { ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings, optionalEvmContract, type EvmHubContractSpec } from './evm-hub-contract-bindings.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
@@ -110,25 +111,10 @@ type HubBindingInvalidationPolicy =
   | { contractKey: HubContractCacheKey; invalidateOnRotation?: false }
   | { special: 'identityStorage'; invalidateOnRotation: true };
 
-const HUB_BINDING_INVALIDATOR_ENTRIES = [
-  ['Identity',                   { contractKey: 'identity' }],
-  ['IdentityStorage',            { special: 'identityStorage', invalidateOnRotation: true }],
-  ['Profile',                    { contractKey: 'profile' }],
-  ['ProfileStorage',             { contractKey: 'profileStorage' }],
-  ['ParametersStorage',          { contractKey: 'parametersStorage' }],
-  ['Staking',                    { contractKey: 'staking' }],
-  ['Token',                      { contractKey: 'token' }],
-  ['AskStorage',                 { contractKey: 'askStorage' }],
-  ['KnowledgeAssets',            { contractKey: 'knowledgeAssets' }],
-  ['KnowledgeAssetsStorage',     { contractKey: 'knowledgeAssetsStorage' }],
-  ['KnowledgeAssetsLifecycle',   { contractKey: 'knowledgeAssetsLifecycle' }],
-  ['DKGKnowledgeAssets',         { contractKey: 'knowledgeAssetStorage' }],
-  ['ContextGraphNameRegistry',   { contractKey: 'contextGraphNameRegistry' }],
-  ['ContextGraphs',              { contractKey: 'contextGraphs' }],
-  ['ContextGraphStorage',        { contractKey: 'contextGraphStorage' }],
-  ['DKGPublishingConvictionNFT', { contractKey: 'dkgPublishingConvictionNFT' }],
-  ['Chronos',                    { contractKey: 'chronos' }],
-] as const satisfies ReadonlyArray<readonly [string, HubBindingInvalidationPolicy]>;
+const HUB_BINDING_INVALIDATOR_ENTRIES: ReadonlyArray<readonly [string, HubBindingInvalidationPolicy]> = [
+  ...ALL_EVM_HUB_CONTRACT_KEYS.map(key => [EVM_HUB_CONTRACT_SPECS[key].name, { contractKey: key }] as const),
+  ['IdentityStorage', { special: 'identityStorage', invalidateOnRotation: true }],
+];
 
 const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
   HUB_BINDING_INVALIDATOR_ENTRIES,
@@ -691,10 +677,12 @@ export class EVMChainAdapterBase {
    */
   protected readonly approvalPolicy: ApprovalPolicy;
 
-  protected contracts: ContractCache;
+  private readonly hubContractBindings: EvmHubContractBindings;
+  protected get contracts(): ContractCache { return this.hubContractBindings.contracts; }
+  protected set contracts(value: ContractCache) { this.hubContractBindings.contracts = value; }
 
-  protected initialized = false;
-  private readonly eventContractGroup = new EvmEventContractGroup();
+  protected get initialized(): boolean { return this.hubContractBindings.initialized; }
+  protected set initialized(value: boolean) { this.hubContractBindings.initialized = value; }
 
   /**
    * Single self-refreshing cache for the `RandomSampling` /
@@ -1269,9 +1257,9 @@ export class EVMChainAdapterBase {
     this.fundedWalletSelectionDisabled = process.env.DKG_DISABLE_FUNDED_WALLET_SELECTION === '1';
     this.idleAwareSelectionDisabled = process.env.DKG_DISABLE_IDLE_AWARE_SELECTION === '1';
 
-    this.contracts = {
+    this.hubContractBindings = new EvmHubContractBindings({
       hub: new Contract(config.hubAddress, loadAbi('Hub'), this.signer),
-    };
+    });
 
     // Coerce `<=0` to the default. The "disable refresh entirely" mode
     // is intentionally unsupported (see `randomSamplingHubRefreshMs`
@@ -2814,53 +2802,37 @@ export class EVMChainAdapterBase {
     }
   }
 
-  /** Event scans request only their own bindings; full init composes the same group. */
-  protected async resolveEventContracts(
+  /** Both event subsets and full initialization use one generation-owned registry. */
+  protected resolveEventContracts(
     keys: readonly EvmEventContractKey[],
     options: ChainReadOptions = {},
   ): Promise<EvmEventContracts> {
-    options.signal?.throwIfAborted();
-    if (this.initialized) return selectEventContracts(this.contracts, keys);
-    return this.eventContractGroup.resolve(keys, spec => spec.registry === 'assetStorage'
-      ? this.resolveAssetStorage(spec.name, undefined, options)
-      : this.resolveContract(spec.name, undefined, options), options.signal);
+    return this.hubContractBindings.resolve(keys, spec => this.loadHubContractBinding(spec, options), options.signal);
+  }
+
+  private async loadHubContractBinding(spec: EvmHubContractSpec, options: ChainReadOptions = {}): Promise<Contract | undefined> {
+    if (spec.registry === 'assetStorage') return this.resolveAssetStorage(spec.name, undefined, options);
+    if (spec.registry === 'contract') return this.resolveContract(spec.name, undefined, options);
+    const tokenAddress = this.tokenAddress ?? await this.readHubAddress('getContractAddress', 'Token', options);
+    if (tokenAddress === ethers.ZeroAddress) return undefined;
+    return new Contract(tokenAddress, [
+      'function approve(address,uint256) returns (bool)',
+      'function balanceOf(address) view returns (uint256)',
+      'function allowance(address,address) view returns (uint256)',
+    ], this.signer);
   }
 
   protected async initContracts(): Promise<void> {
-    this.contracts.identity = await this.resolveContract('Identity');
-    this.contracts.profile = await this.resolveContract('Profile');
-    this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
-
-    // The event group is staged independently and installed in one synchronous
-    // commit. Optional legacy/RFC-04 bindings may be absent; V10 KA storage is required.
-    const events = await this.resolveEventContracts(ALL_EVM_EVENT_CONTRACT_KEYS);
-    this.contracts = { ...this.contracts, ...events };
-
-    // Older deployments may omit archived V8/V9 or newer feature contracts.
-    // Their public methods retain their existing capability checks/fallbacks.
-    this.contracts.staking = await optionalEvmContract(() => this.resolveContract('Staking'));
-    this.contracts.knowledgeAssets = await optionalEvmContract(() => this.resolveContract('KnowledgeAssets'));
-    this.contracts.askStorage = await optionalEvmContract(() => this.resolveContract('AskStorage'));
-    this.contracts.contextGraphs = await optionalEvmContract(() => this.resolveContract('ContextGraphs'));
-    this.contracts.knowledgeAssetsLifecycle = await optionalEvmContract(() => this.resolveContract('KnowledgeAssetsLifecycle'));
-    this.contracts.dkgPublishingConvictionNFT = await optionalEvmContract(() => this.resolveContract('DKGPublishingConvictionNFT'));
-    this.contracts.chronos = await optionalEvmContract(() => this.resolveContract('Chronos'));
-    await optionalEvmContract(() => this.resolveAndAssignRandomSamplingPair());
-
-    const tokenAddress = this.tokenAddress ?? await this.readHubAddress('getContractAddress', 'Token', {});
-    if (tokenAddress !== ethers.ZeroAddress) {
-      this.contracts.token = new Contract(
-        tokenAddress,
-        [
-          'function approve(address,uint256) returns (bool)',
-          'function balanceOf(address) view returns (uint256)',
-          'function allowance(address,address) view returns (uint256)',
-        ],
-        this.signer,
-      );
+    for (;;) {
+      const generation = this.hubContractBindings.generation;
+      await this.hubContractBindings.resolve(ALL_EVM_HUB_CONTRACT_KEYS, spec => this.loadHubContractBinding(spec));
+      // Random Sampling retains its existing pair/TTL owner and generation guard.
+      await optionalEvmContract(() => this.resolveAndAssignRandomSamplingPair());
+      await this.startHubRotationListener();
+      // A watcher started by an event-only scan can rotate any boot binding
+      // during these awaits. Never overwrite that invalidation with readiness.
+      if (this.hubContractBindings.completeInitialization(generation)) return;
     }
-    await this.startHubRotationListener();
-    this.initialized = true;
   }
 
   protected requireV9(): void {
@@ -4168,7 +4140,7 @@ export class EVMChainAdapterBase {
   }
 
   protected finalizeKnownHubRotation(): void {
-    this.eventContractGroup.invalidate();
+    this.hubContractBindings.invalidate();
     this.invalidatePublishPreflightCache();
     // #1583 — redundant-but-harmless second flush (the unconditional flush at the
     // top of `applyHubRotationEventName` already cleared the memo for this event).
@@ -4179,7 +4151,6 @@ export class EVMChainAdapterBase {
     // every binding. Do not clear boot-bound handles here: the callback can
     // fire between a public method's `await init()` and its first
     // `this.contracts.X` read.
-    this.initialized = false;
   }
 
   /**
@@ -4199,7 +4170,7 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
-    this.eventContractGroup.invalidate();
+    this.hubContractBindings.invalidate();
     for (const policy of HUB_BINDING_INVALIDATORS.values()) {
       this.invalidateHubBinding(policy);
     }
@@ -4208,7 +4179,6 @@ export class EVMChainAdapterBase {
     // the entire resolved-address memo along with every bound handle.
     this.resolvedContractAddressCache.invalidateAll();
     this.invalidateRandomSamplingPair();
-    this.initialized = false;
   }
 
   protected requireContextGraphStorage(): Contract {

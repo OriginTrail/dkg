@@ -15,14 +15,15 @@
  * of that rejection to `inconclusive`.
  */
 import { describe, expect, it, vi } from 'vitest';
-import { PublishMethods } from '../src/evm-adapter-publish.js';
+import type { PublishMethods } from '../src/evm-adapter-publish.js';
+import { createPublishAdapterFixture } from './publish-adapter-fixture.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 
 const TX_HASH = `0x${'ab'.repeat(32)}`;
 const BLOCK_HASH = `0x${'cd'.repeat(32)}`;
 
 function adapter(overrides: Record<string, unknown> = {}) {
-  return Object.assign(Object.create(PublishMethods.prototype), {
+  return Object.assign(createPublishAdapterFixture(), {
     init: vi.fn(async () => undefined),
     finalityConfirmations: 1,
     contracts: { knowledgeAssetStorage: {} },
