@@ -38,8 +38,6 @@ import type {
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
-import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission.js';
-import type { FinalizedEvmReadBindingV1 } from './chain-adapter.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -265,12 +263,6 @@ export class MockChainAdapter implements ChainAdapter {
 
   getRpcUrls(): string[] {
     return [];
-  }
-
-  async createFinalizedEvmReadBinding(
-    _owner: FinalizedChainReadOwnerV1,
-  ): Promise<Readonly<FinalizedEvmReadBindingV1> | null> {
-    return null;
   }
 
   /** RPC-usage capability: the mock has no RPC transport → always-empty window. */

@@ -1,4 +1,4 @@
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { bindFinalizedEvmReadBindingProvider, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
   createRfc64FinalizedPolicyAgentPrecommitV1,
@@ -16,10 +16,13 @@ interface Rfc64FinalizedAgentPrecommitsOptionsV1 extends Pick<
 
 /** Bind both catalog barriers to the adapter and the shared RFC-64 read owner. */
 export function createRfc64FinalizedAgentPrecommitsV1(options: Rfc64FinalizedAgentPrecommitsOptionsV1) {
+  const finalizedReads = bindFinalizedEvmReadBindingProvider(options.chain);
   const shared: Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1 = {
     acceptedPolicySnapshotForCatalogScope: options.acceptedPolicySnapshotForCatalogScope,
     getOnChainContextGraphId: options.getOnChainContextGraphId,
-    createFinalizedReadBinding: () => options.chain.createFinalizedEvmReadBinding('rfc64'),
+    createFinalizedReadBinding: () => finalizedReads.status === 'supported'
+      ? finalizedReads.provider.createFinalizedEvmReadBinding('rfc64')
+      : Promise.resolve(null),
   };
   return Object.freeze({
     finalizedPolicyPrecommit: createRfc64FinalizedPolicyAgentPrecommitV1(shared),

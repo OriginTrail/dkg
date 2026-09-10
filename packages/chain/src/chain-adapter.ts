@@ -1213,8 +1213,8 @@ export interface ChainAdapter {
    */
   drainRpcUsage?(): RpcUsageWindow;
 
-  /** Adapter-owned finalized reads; null when the adapter has no such capability. */
-  createFinalizedEvmReadBinding(
+  /** Optional adapter-owned EVM reads; bind with bindFinalizedEvmReadBindingProvider. */
+  createFinalizedEvmReadBinding?(
     owner: FinalizedChainReadOwnerV1,
   ): Promise<Readonly<FinalizedEvmReadBindingV1> | null>;
 

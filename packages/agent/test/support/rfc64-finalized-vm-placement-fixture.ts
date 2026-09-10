@@ -5,6 +5,8 @@ import {
   AUTHOR_CATALOG_HEAD_OBJECT_TYPE_V1,
   AUTHOR_CATALOG_ISSUER_DELEGATION_OBJECT_TYPE_V1,
   buildAuthorAttestationTypedData,
+  assertCanonicalDecimalU64,
+  assertCanonicalChainId,
   canonicalizeCanonicalGraphScopedAuthorSealBytesV1,
   computeAuthorCatalogScopeDigestV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -65,6 +67,10 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
   readonly assertionVersion?: string;
   readonly publicTripleCount?: number;
 } = {}): Promise<FinalizedVmPlacementEvidenceV1> {
+  const chainId = RFC64_VM_CHAIN_ID;
+  assertCanonicalChainId(chainId);
+  const bucketId = '0';
+  assertCanonicalDecimalU64(bucketId);
   const kaNumber = options.kaNumber ?? 1n;
   const kaId = rfc64VmPackKaId(kaNumber);
   const assertionRoot = options.assertionRoot ?? RFC64_VM_ASSERTION_ROOT;
@@ -159,7 +165,7 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
     era: '0',
     bucketCount: '1',
     bucketId: '0',
-    rows: [row],
+    rows: [{ ...row, transfer: { ...row.transfer } }],
   };
   const bucket = await signEnvelope({
     issuer: RFC64_VM_CATALOG_ISSUER,
@@ -220,7 +226,7 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
       catalogHeadSignature: await verifyControlEnvelopeIssuerSignatureV1(head),
       directoryPathEnvelopes: [directory],
       directoryPathSignatures: [await verifyControlEnvelopeIssuerSignatureV1(directory)],
-      directoryPathProof: verifyAuthorCatalogDirectoryPathV1(head, [directory], '0'),
+      directoryPathProof: verifyAuthorCatalogDirectoryPathV1(head, [directory], bucketId),
       catalogBucket: bucket,
       catalogBucketSignature: await verifyControlEnvelopeIssuerSignatureV1(bucket),
       targetKaId: kaId,
@@ -231,7 +237,7 @@ export async function createRfc64FinalizedVmPlacementFixture(options: {
       canonicalizeCanonicalGraphScopedAuthorSealBytesV1(seal),
       {
         networkId: RFC64_VM_NETWORK_ID,
-        assertedAtChainId: RFC64_VM_CHAIN_ID,
+        assertedAtChainId: chainId,
         assertedAtKav10Address: RFC64_VM_KAV10,
       },
     ),

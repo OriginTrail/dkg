@@ -12,8 +12,6 @@ import type {
   V10PublishParams,
 } from './chain-adapter.js';
 
-import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission.js';
-
 function noChain(): never {
   throw new Error(
     'No blockchain configured. To use on-chain operations, provide chainConfig ' +
@@ -44,7 +42,6 @@ export class NoChainAdapter implements ChainAdapter {
   async isOperationalWalletRegistered(_identityId: bigint, _address: string): Promise<boolean> { return false; }
   async getKnowledgeAssetsLifecycleAddress(): Promise<string> { noChain(); }
   async getEvmChainId(): Promise<bigint> { noChain(); }
-  async createFinalizedEvmReadBinding(_owner: FinalizedChainReadOwnerV1): Promise<null> { return null; }
   async getKnowledgeAssetOwner(_kaId: bigint): Promise<string> { noChain(); }
   async getPublishingConvictionAccountOwner(_accountId: bigint): Promise<string> { noChain(); }
   // The 7 #519 PCA write+read methods are OMITTED on purpose: they are

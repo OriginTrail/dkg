@@ -84,7 +84,7 @@ export class FinalizedChainLoopbackMockChainAdapterV1 extends MockChainAdapter {
     this.rpcEndpoint = rpcEndpoint;
   }
 
-  override async createFinalizedEvmReadBinding(
+  async createFinalizedEvmReadBinding(
     owner: FinalizedChainReadOwnerV1,
   ): Promise<Readonly<FinalizedEvmReadBindingV1>> {
     const chainId = this.fixture.assertedAtChainId;
