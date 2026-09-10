@@ -1903,11 +1903,14 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // distinct from transient authority unavailability at the HTTP boundary;
     // both fail closed and leave no subscription or catch-up-job side effect.
     const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
-    let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphReadAuthority>>;
+    let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphSubscriptionBootstrapAuthority>>;
     try {
-      readAuthority = await agent.resolveContextGraphReadAuthority(contextGraphId, {
+      readAuthority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
         callerAgentAddress: callerAddr,
         allowSubscriptionFallback: false,
+        // This explicit admission boundary may spend a bounded cold lookup to
+        // populate the chain adapter's reverse name-hash index. Ordinary
+        // queries and restart rehydration retain the short fail-closed timeout.
       });
     } catch {
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);

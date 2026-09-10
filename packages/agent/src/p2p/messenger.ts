@@ -5,20 +5,26 @@ import {
   RELIABLE_ENVELOPE_VERSION,
   RESPONSE_GONE_MARKER,
   isRecoverableSendError,
-  ProtocolOutbox,
-  type CompatibleProtocolOutboxStore,
+  BoundedProtocolOutbox,
+  type BoundedProtocolOutboxStore,
   type MessageIdempotencyStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
+  type ProtocolOutboxPayloadInspection,
   type ProtocolRouter,
   type SendOptions,
 } from '@origintrail-official/dkg-core';
 import {
   OutboxDrainer,
-  type OutboxDrainerOptions,
 } from './outbox-drainer.js';
+import type {
+  MessengerOutboxDrainOptions,
+  MessengerOutboxStats,
+} from './outbox-drain-types.js';
 export {
   DEFAULT_OUTBOX_DRAIN_BATCH_SIZE,
   DEFAULT_OUTBOX_DRAIN_CONCURRENCY,
+  DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES,
   type OutboxDrainerOptions,
 } from './outbox-drainer.js';
 
@@ -135,10 +141,10 @@ export interface MessengerDeps {
   /**
    * Substrate sender-side outbox store. Same optionality rules as
    * `idempotencyStore`. The Messenger wraps the store with a
-   * `ProtocolOutbox` internally (which owns the backoff ladder +
+   * `BoundedProtocolOutbox` internally (which owns the backoff ladder +
    * inflight guard).
    */
-  outboxStore?: CompatibleProtocolOutboxStore;
+  outboxStore?: BoundedProtocolOutboxStore;
   /**
    * Override the default backoff ladder (5s → 2h, mirrors rc.8 chat
    * outbox). Caller can pass a tighter / looser ladder per Messenger
@@ -181,7 +187,7 @@ export interface MessengerDeps {
    * Periodic retry scheduler bounds. Defaults and validation are owned by
    * `OutboxDrainer` (`batchSize: 100`, `concurrency: 4`).
    */
-  outboxDrain?: OutboxDrainerOptions;
+  outboxDrain?: MessengerOutboxDrainOptions;
 }
 
 /** Router options exposed by Messenger's legacy pass-through send. */
@@ -380,10 +386,11 @@ export const DEFAULT_SLO_WINDOW_SAMPLES = 1000;
 export class Messenger {
   private readonly router: ProtocolRouter;
   private readonly idempotencyStore?: MessageIdempotencyStore;
-  private readonly outbox?: ProtocolOutbox;
+  private readonly outbox?: BoundedProtocolOutbox;
+  private readonly outboxPayloadInspection?: ProtocolOutboxPayloadInspection;
   private readonly clock: () => number;
   private readonly resolvePeer?: (peerId: string, opts: { signal: AbortSignal }) => Promise<void>;
-  private readonly outboxDrainer?: OutboxDrainer<ProtocolOutboxEntry>;
+  private readonly outboxDrainer?: OutboxDrainer;
 
   /**
    * Application handlers registered via `register`. Stored separately
@@ -485,17 +492,18 @@ export class Messenger {
     this.router = deps.router;
     this.idempotencyStore = deps.idempotencyStore;
     if (deps.outboxStore) {
-      this.outbox = new ProtocolOutbox(deps.outboxStore, {
+      this.outbox = new BoundedProtocolOutbox(deps.outboxStore, {
         backoffs: deps.backoffs,
         maxAgeMs: deps.maxAgeMs,
       });
+      this.outboxPayloadInspection = this.outbox.payloadInspection();
     }
     this.clock = deps.clock ?? (() => Date.now());
     this.sloWindowSamples = deps.sloWindowSamples ?? DEFAULT_SLO_WINDOW_SAMPLES;
     this.resolvePeer = deps.resolvePeer;
     if (this.outbox) {
       this.outboxDrainer = new OutboxDrainer(
-        (now, limit) => this.outbox!.duePage(now, limit),
+        (now, budget) => this.outbox!.readDuePage(now, budget),
         (entry) => this.retryOutboxEntry(entry),
         deps.outboxDrain,
       );
@@ -1016,15 +1024,14 @@ export class Messenger {
       this.clearDhtWalkRateLimitIfDrained(entry.peer);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      const updated = outbox.enqueueFailure(
+      const updated = outbox.recordRetryFailure(
         entry.peer,
         entry.protocol,
         entry.messageId,
-        entry.payload,
         errMsg,
         this.clock(),
       );
-      if (isRecoverableMessengerSendError(err, errMsg)) {
+      if (updated && isRecoverableMessengerSendError(err, errMsg)) {
         this.scheduleOutboxPeerRecovery(entry.peer, updated.attempts, errMsg);
       }
       // A non-recoverable retry remains visible for operator intervention, but
@@ -1150,7 +1157,7 @@ export class Messenger {
     lastError: string;
   }> {
     if (!this.outbox) return [];
-    const dropped = this.outbox.dropExpired(now);
+    const dropped = this.outbox.dropExpiredMetadata(now);
     // rc.9 PR-12: clean firstAttemptAt for expired entries so the
     // SLO bookkeeping map doesn't grow unbounded on permanently
     // unreachable peers.
@@ -1175,14 +1182,21 @@ export class Messenger {
     return this.outbox?.size() ?? 0;
   }
 
-  /**
-   * Snapshot of every entry currently in the outbox. Used by the
-   * `/api/chat/outbox` route + the MCP `dkg_outbox_status` tool so
-   * operators can see what's pending after a long recipient outage.
-   * Empty array when no outbox is wired.
-   */
-  listOutbox(): ProtocolOutboxEntry[] {
-    return this.outbox?.list() ?? [];
+  /** Explicit legacy payload inspection; operational diagnostics use listOutboxMetadata. */
+  listOutbox(): ProtocolOutboxEntry[] | undefined {
+    return this.outboxPayloadInspection?.list();
+  }
+
+  /** Metadata-only diagnostics never load queued envelopes. */
+  listOutboxMetadata(peerId?: string): ProtocolOutboxMetadata[] {
+    return this.outbox?.listMetadata(peerId) ?? [];
+  }
+
+  /** Fixed-cardinality queue/admission gauges and skip counters for /api/slo. */
+  getOutboxStats(): MessengerOutboxStats | undefined {
+    const stats = this.outboxDrainer?.getStats();
+    if (!stats || !this.outbox) return undefined;
+    return { ...stats, ...this.outbox.queueStats(this.clock(), stats.maxPayloadBytes) };
   }
 
   /**
@@ -1192,7 +1206,7 @@ export class Messenger {
    * when no outbox is wired or no such entry exists.
    */
   getOutboxEntry(peerId: string, protocolId: string, messageId: string): ProtocolOutboxEntry | undefined {
-    return this.outbox?.getEntry(peerId, protocolId, messageId);
+    return this.outboxPayloadInspection?.getEntry(peerId, protocolId, messageId);
   }
 
   private requireSubstrate(method: string): void {

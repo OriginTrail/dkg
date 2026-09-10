@@ -1,11 +1,13 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { homedir, platform, release as osRelease } from 'node:os';
+import { homedir, platform } from 'node:os';
 import { execSync } from 'node:child_process';
 import { resolveMcpConfigDestination } from './mcp-config-file.js';
+import { McpPhysicalConfig } from './mcp-physical-config.js';
+import { detectMcpRuntime } from './mcp-runtime.js';
 
 
-import { DKG_SERVER_KEY, type McpClientConfigShape } from './mcp-config-document.js';
+import { DKG_SERVER_KEY } from './mcp-config-document.js';
 export { DKG_SERVER_KEY, type McpClientConfigShape } from './mcp-config-document.js';
 export type McpClientLocation = 'native' | 'windows-wsl';
 type WindowsPaths = { USERPROFILE: string | null; APPDATA: string | null };
@@ -77,31 +79,14 @@ export function parseMcpClientSelector(value: string): { id: McpClientId; locati
   return { id: client.target.id, location };
 }
 
-/** Physical storage owns format and persistence, independently of client identity. */
-export type McpConfigEndpoint = McpClientConfigShape & {
-  readonly configPath: string;
-  readonly displayPath: string;
-  readonly location: McpClientLocation;
-};
-
 export interface McpConfigSelection {
-  readonly endpoint: McpConfigEndpoint;
-  readonly destination: string;
+  readonly file: McpPhysicalConfig;
   /** Logical clients selected by the caller; never replaced by a storage alias. */
   readonly aliases: readonly ClientTarget[];
 }
 
 export function mcpConfigClientNames(selection: McpConfigSelection): string {
   return [...new Set(selection.aliases.map(alias => alias.name))].join(', ');
-}
-
-/** Confirmation applies to all selected aliases of the inspected destination. */
-export function assertMcpConfigSelectionCurrent(selection: McpConfigSelection): void {
-  for (const alias of selection.aliases) {
-    if (resolveMcpConfigDestination(alias.configPath) !== selection.destination) {
-      throw new Error(`MCP config path changed since inspection: ${alias.displayPath}. Re-run the command to confirm the current destination.`);
-    }
-  }
 }
 
 /** Select each physical owned leaf once while retaining the selected logical aliases. */
@@ -114,7 +99,7 @@ export function selectMcpClientTargets(
     let physicalPath: string;
     try { physicalPath = resolveMcpConfigDestination(target.configPath); }
     catch { physicalPath = resolve(target.configPath); }
-    const leaf = JSON.stringify([physicalPath, target.serverContainer, DKG_SERVER_KEY]);
+    const leaf = JSON.stringify([physicalPath, target.format, target.serverContainer, DKG_SERVER_KEY]);
     const group = groups.get(leaf) ?? { path: physicalPath, aliases: [] };
     group.aliases.push(target);
     groups.set(leaf, group);
@@ -124,16 +109,7 @@ export function selectMcpClientTargets(
     const aliases = group.aliases.filter(target => !selector || (target.id === selector.id
       && (!selector.location || target.location === selector.location)));
     if (aliases.length === 0) continue;
-    // A selected native alias can still refer to a Windows-backed file. Only
-    // storage fields come from the persistence owner; identity stays in aliases.
-    const storage = group.aliases.find(target => target.location === 'windows-wsl') ?? group.aliases[0]!;
-    const { id: _id, name: _name, ...endpoint } = storage;
-    selected.push({
-      // Keep a selected live path for the atomic transaction's revalidation.
-      endpoint: { ...endpoint, configPath: aliases[0]!.configPath, displayPath: aliases[0]!.displayPath },
-      destination: group.path,
-      aliases,
-    });
+    selected.push({ file: McpPhysicalConfig.create(aliases), aliases });
   }
   return selected;
 }
@@ -188,35 +164,6 @@ function appConfigPaths(root: string, ...suffix: string[]) {
  * `dkg mcp setup --print-only`" message.
  */
 /**
- * Codex Round-13 Fix 20: detect WSL2. Linux platform with `microsoft`
- * / `WSL` markers in env, kernel release, or `/proc/version`. WSL
- * users running `dkg mcp setup` from inside their WSL distro need
- * to register Windows-side GUI clients (Claude Desktop, Windsurf,
- * VSCode + Copilot, Cline) AS WELL AS any Linux-native clients —
- * pre-fix they got the Linux-only set and the README's WSL2
- * promise silently failed for the apps users actually run.
- *
- * Multi-signal detection (env first; cheaper than fs reads):
- *   - `WSL_DISTRO_NAME` / `WSL_INTEROP` set by the WSL launcher.
- *   - `os.release()` contains `microsoft` or `wsl` (WSL kernels
- *     identify themselves there).
- *   - `/proc/version` contains the same markers (slower fallback).
- */
-function isWSL(): boolean {
-  if (platform() !== 'linux') return false;
-  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) return true;
-  try {
-    const release = osRelease().toLowerCase();
-    if (release.includes('microsoft') || release.includes('wsl')) return true;
-  } catch { /* fall through */ }
-  try {
-    const procVersion = readFileSync('/proc/version', 'utf-8').toLowerCase();
-    if (procVersion.includes('microsoft') || procVersion.includes('wsl')) return true;
-  } catch { /* /proc/version not readable; not WSL */ }
-  return false;
-}
-
-/**
  * Resolve a Windows-side env var (e.g. `%USERPROFILE%`,
  * `%APPDATA%`) into a WSL-mounted Linux path (`/mnt/c/...`). Uses
  * `cmd.exe` to read the env var, then `wslpath` to convert. Returns
@@ -266,7 +213,7 @@ export function detectClients(
     location: 'native',
     ...client.nativePaths(home, appConfigRoot),
   }));
-  if (isWSL()) {
+  if (detectMcpRuntime() === 'wsl') {
     const windows = {
       USERPROFILE: resolveWslWindowsEnvPath('USERPROFILE'),
       APPDATA: resolveWslWindowsEnvPath('APPDATA'),

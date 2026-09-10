@@ -13,9 +13,11 @@ export default defineConfig({
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
           'test/mcp-config-document.test.ts',
+          'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
           'test/rdf-parser.test.ts',
+          'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
@@ -132,7 +134,9 @@ export default defineConfig({
           // (mocked fetch + in-memory config); cheap to keep in the
           // fast unit lane.
           'test/chain-reset-wipe.test.ts',
+          'test/chain-reset-wipe-outcome.test.ts',
           'test/chain-reset-wipe-backup.test.ts',
+          'test/daemon-chain-reset-wipe.test.ts',
           'test/store-health-check.test.ts',
           'test/validate-store-config.test.ts',
           'test/store-wizard.test.ts',
