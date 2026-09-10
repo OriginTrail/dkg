@@ -1,6 +1,6 @@
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 import { DEFAULT_MAX_READ_BYTES, type ProtocolOutboxEntry, type ProtocolOutboxPage, type ProtocolOutboxPageBudget } from '@origintrail-official/dkg-core';
-import type { MessengerOutboxDrainOptions, MessengerOutboxStats } from '../dkg-agent-types.js';
+import type { OutboxDrainOptions, OutboxDrainStats } from './outbox-drain-types.js';
 
 export const DEFAULT_OUTBOX_DRAIN_BATCH_SIZE = 100;
 export const DEFAULT_OUTBOX_DRAIN_CONCURRENCY = 4;
@@ -9,17 +9,14 @@ export const DEFAULT_OUTBOX_DRAIN_CONCURRENCY = 4;
 export const DEFAULT_OUTBOX_DRAIN_MAX_PAYLOAD_BYTES = DEFAULT_MAX_READ_BYTES;
 
 /** @deprecated Import MessengerOutboxDrainOptions from the package root. */
-export type OutboxDrainerOptions = MessengerOutboxDrainOptions;
+export type OutboxDrainerOptions = OutboxDrainOptions;
+export type { OutboxDrainStats } from './outbox-drain-types.js';
 
 interface ResolvedOutboxDrainerOptions {
   batchSize: number;
   concurrency: number;
   maxPayloadBytes: number;
 }
-
-/** Internal scheduler subset of the public aggregate statistics. */
-export type OutboxDrainStats = Omit<MessengerOutboxStats,
-  'queuedEntries' | 'queuedBytes' | 'oldestDueAgeMs' | 'oversizedDueEntries'>;
 
 function positiveInteger(value: number | undefined, fallback: number, name: string): number {
   const resolved = value ?? fallback;

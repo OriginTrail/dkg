@@ -16,6 +16,7 @@
 
 import type { ethers } from 'ethers';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
+import type { OutboxDrainOptions, OutboxDrainStats } from './p2p/outbox-drain-types.js';
 import type {
   Quad,
   TripleStore,
@@ -1940,25 +1941,10 @@ export interface DKGAgentConfig {
 }
 
 /** Public scheduler bounds for Universal Messenger durable retries. */
-export interface MessengerOutboxDrainOptions {
-  batchSize?: number;
-  concurrency?: number;
-  maxPayloadBytes?: number;
-}
+export type MessengerOutboxDrainOptions = OutboxDrainOptions;
 
-/** Fixed-cardinality Universal Messenger retry and queue statistics. */
-export interface MessengerOutboxStats extends ProtocolOutboxQueueStats {
-  batchSize: number;
-  maxPayloadBytes: number;
-  /** Bytes/entries reserved by the active in-process page, not a durable lease. */
-  claimedEntries: number;
-  claimedBytes: number;
-  lastBatchEntries: number;
-  lastBatchPayloadBytes: number;
-  /** Repeated skips of the same oversized row are counted once per observed page. */
-  skippedOversizedEntriesTotal: number;
-  byteBudgetDeferralsTotal: number;
-}
+/** Fixed-cardinality Universal Messenger scheduler and durable-queue statistics. */
+export interface MessengerOutboxStats extends OutboxDrainStats, ProtocolOutboxQueueStats {}
 
 export interface DKGAgentACKTransportOptions {
   sendTimeoutMs?: number;
