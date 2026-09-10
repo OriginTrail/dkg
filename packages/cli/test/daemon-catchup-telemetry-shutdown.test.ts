@@ -227,7 +227,7 @@ async function createHarness(opts: HarnessOptions = {}) {
   }> = [];
 
   const agent = {
-    resolveContextGraphReadAuthority: async () => {
+    resolveContextGraphSubscriptionBootstrapAuthority: async () => {
       if (opts.authorityUnavailable) return {
         outcome: 'unavailable' as const,
         source: 'registered-chain' as const,

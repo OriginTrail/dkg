@@ -185,7 +185,7 @@ export class Gate1RolloutAdapterFixture {
             currentAgent.getSyncContextGraphIds().includes(input.contextGraphId),
           manualLegacySwmTargetCount: manualSwmPlan.targets.length,
           vmChainInventorySelected:
-            currentAgent.isRfc64SelectedVmReconcileContextGraph(input.contextGraphId),
+            currentAgent.isVmReconcileTargetSelected(input.contextGraphId),
         });
       },
       vmReconcile: (currentAgent, input) => (

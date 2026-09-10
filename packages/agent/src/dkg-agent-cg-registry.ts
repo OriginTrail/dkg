@@ -621,8 +621,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveContextGraphRegistrationBinding(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: {
+      signal?: AbortSignal;
+      registrationTimeoutMs?: number;
+    } = {},
   ): Promise<ContextGraphRegistrationBinding> {
+    const registrationResolutionTimeoutMs = options.registrationTimeoutMs
+      ?? CHAIN_POLICY_READ_TIMEOUT_MS;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return { kind: 'unregistered' };
     }
@@ -637,7 +642,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           }),
           {
             label: `resolveContextGraphOnChainIdBinding(${contextGraphId})`,
-            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            timeoutMs: registrationResolutionTimeoutMs,
             signal: options.signal,
           },
         );
@@ -691,7 +696,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         (signal) => resolveByNameHash.call(this.chain, nameHash, { signal }),
         {
           label: `resolveContextGraphIdByNameHash(${nameHash})`,
-          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          timeoutMs: registrationResolutionTimeoutMs,
           signal: options.signal,
         },
       );

@@ -37,8 +37,8 @@ import type {
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
-import type { RpcUsageWindow } from './rpc-usage.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
+import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -268,7 +268,7 @@ export class MockChainAdapter implements ChainAdapter {
 
   /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
   drainRpcUsage(): RpcUsageWindow {
-    return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
+    return emptyRpcUsageWindow();
   }
 
   async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {

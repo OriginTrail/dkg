@@ -384,6 +384,8 @@ import {
   type ImportedArtifactByteStore,
   type ReplicationEvent,
   type ResolvedDKGAgentConfig,
+  type MessengerOutboxDrainOptions,
+  type MessengerOutboxStats,
 } from './dkg-agent-types.js';
 import {
   normalizePublishContextGraphId,
@@ -479,6 +481,7 @@ import {
   SEAL_CAPABILITY_GAP_CODE,
 } from './dkg-agent-publish.js';
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
+import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ImportedArtifactMethods } from './imported-artifact.js';
 // Public surface re-exported so external consumers that import directly
@@ -529,6 +532,8 @@ export type {
   Rfc64CatalogBootstrapPolicyV1,
   Rfc64PublicCatalogBootstrapConfigV1,
   DKGAgentACKTransportOptions,
+  MessengerOutboxDrainOptions,
+  MessengerOutboxStats,
   ImportedArtifactByteStore,
 };
 
@@ -749,6 +754,7 @@ function constructConfiguredChainAdapter(
       minPublisherNativeWei: config.chainConfig.minPublisherNativeWei,
       minPublisherTracWei: config.chainConfig.minPublisherTracWei,
       contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
+      localContextGraphAuthorityHistoryStore: config.localContextGraphAuthorityHistoryStore,
     };
     const chain = config.chainConfig.adminPrivateKey
       ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })
@@ -1696,6 +1702,10 @@ export class DKGAgent extends DKGAgentBase {
     return this.messenger.getSloStats();
   }
 
+  getMessengerOutboxStats(): MessengerOutboxStats | undefined {
+    return this.messenger.getOutboxStats();
+  }
+
   /**
    * Snapshot of SWM gossip publish health (rc.9 PR-A).
    *
@@ -2223,6 +2233,8 @@ export class DKGAgent extends DKGAgentBase {
     if (!this.started) return;
     // Fence delayed eligibility lookups and handle creation before any shutdown await.
     this.randomSamplingRuntime?.cancel();
+    const authorityRetryDrain =
+      this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
     // Fence membership persistence before any network callback can enqueue
     // more work; the physical drain below completes before store teardown.
     const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()
@@ -2282,12 +2294,11 @@ export class DKGAgent extends DKGAgentBase {
     // state after the cancellation signal.
     // Exact-absence rotations were cleared before stopping the chain poller,
     // so a late in-flight response cannot restore process-local suppression.
-    const vmReconcileDispatcher = this.vmReconcileDispatcher;
-    const vmReconcileSweep = this.vmReconcileSweepInFlight;
+    const vmReconcileScheduling = this.vmReconcileScheduling;
     const priorRetirement = this.vmReconcileRetirement;
     // close() fences admission synchronously before the physical-set drain is
     // sampled, so no dispatcher worker can appear behind an observed empty set.
-    const dispatcherDrain = vmReconcileDispatcher?.close();
+    const dispatcherDrain = vmReconcileScheduling?.close();
     const drainPhysicalRuns = async (): Promise<void> => {
       while (
         (this.vmReconcilePhysicalRuns?.size ?? 0) > 0
@@ -2303,18 +2314,15 @@ export class DKGAgent extends DKGAgentBase {
       }
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns()];
+    if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
     if (dispatcherDrain) drains.push(dispatcherDrain);
-    if (vmReconcileSweep) drains.push(vmReconcileSweep.catch(() => undefined));
 
     let retirement!: Promise<void>;
     retirement = Promise.allSettled(drains).then(() => {
-      if (this.vmReconcileDispatcher === vmReconcileDispatcher) {
-        this.vmReconcileDispatcher = undefined;
-      }
-      if (this.vmReconcileSweepInFlight === vmReconcileSweep) {
-        this.vmReconcileSweepInFlight = null;
+      if (this.vmReconcileScheduling === vmReconcileScheduling) {
+        this.vmReconcileScheduling = undefined;
       }
       if (this.chainPoller === chainPoller) {
         this.chainPoller = null;
@@ -3855,5 +3863,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods]);

@@ -79,20 +79,25 @@ export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpo
     req.on('end', () => {
       try {
         const contentType = String(req.headers['content-type'] ?? '');
+        // Daemon reset/ownership requests use SPARQL Protocol form encoding;
+        // the runtime store adapter sends raw SPARQL to the same endpoint.
+        const form = contentType.includes('application/x-www-form-urlencoded')
+          ? new URLSearchParams(body)
+          : undefined;
         if (contentType.includes('text/x-nquads') || contentType.includes('application/n-quads')) {
           store.load(body, { format: 'application/n-quads' });
           res.writeHead(200);
           res.end();
           return;
         }
-        if (req.url?.includes('/update') || contentType.includes('application/sparql-update')) {
-          store.update(body);
+        if (req.url?.includes('/update') || contentType.includes('application/sparql-update') || form?.has('update')) {
+          store.update(form?.get('update') ?? body);
           res.writeHead(204);
           res.end();
           return;
         }
         const accept = String(req.headers['accept'] ?? '');
-        const result = store.query(body);
+        const result = store.query(form?.get('query') ?? body);
 
         if (typeof result === 'boolean') {
           res.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
