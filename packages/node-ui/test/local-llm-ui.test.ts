@@ -140,6 +140,35 @@ describe('DKG Local LLM Node UI surface', () => {
     await expect(fetchLocalAgentIntegrations()).resolves.toEqual({ integrations: [] });
   });
 
+  it('keeps a healthy v10.0.16 auto-detected LLM visible without detected health', async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/local-agent-integrations')) {
+        return json({ integrations: [localLlmRecord()] });
+      }
+      if (url.endsWith('/api/local-llm/health')) {
+        return json({
+          ok: true,
+          configured: false,
+          ready: true,
+          reachable: true,
+          offline: false,
+          readOnly: true,
+        });
+      }
+      return json({ error: `Unexpected request: ${url}` }, 500);
+    }) as typeof globalThis.fetch;
+
+    const { integrations } = await fetchLocalAgentIntegrations();
+    expect(integrations).toHaveLength(1);
+    expect(integrations[0]).toMatchObject({
+      id: 'local-llm',
+      detected: true,
+      chatReady: true,
+      status: 'chat_ready',
+    });
+  });
+
   it('shows an auto-detected default local LLM without environment overrides', async () => {
     globalThis.fetch = vi.fn(async (input) => {
       const url = String(input);
