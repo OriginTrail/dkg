@@ -267,7 +267,12 @@ export class MockChainAdapter implements ChainAdapter {
 
   /** RPC-usage capability: the mock has no RPC transport → always-empty window. */
   drainRpcUsage(): RpcUsageWindow {
-    return { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
+    return {
+      byMethod: {},
+      ethCallByConsumer: {},
+      ethGetLogsByConsumerAndEndpointSlot: {},
+      lifetimeTotal: 0,
+    };
   }
 
   async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {

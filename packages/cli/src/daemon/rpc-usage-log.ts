@@ -10,6 +10,9 @@
  *
  * Companion diagnostic line shape for `eth_call` attribution:
  *   rpc_usage_by_consumer method=eth_call consumer=pcaNFT.getAccountInfo count=7 window_s=60 chain=base:8453
+ *
+ * `eth_getLogs` additionally identifies the non-secret configured endpoint slot:
+ *   rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=fallback_1 count=7 window_s=60 chain=base:8453
  */
 
 import {
@@ -22,6 +25,15 @@ import {
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
 function safeToken(value: string, fallback: string): string {
   return /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : fallback;
+}
+
+/** Accept only tracker-owned slot labels. Never pass a URL/hostname through. */
+function safeEndpointSlot(value: string): string {
+  return value === 'primary'
+    || value === 'other'
+    || /^fallback_(?:[1-9]|1[0-5])$/.test(value)
+    ? value
+    : 'other';
 }
 
 /**
@@ -48,6 +60,36 @@ export function formatRpcUsageLines(
     lines.push(
       `rpc_usage_by_consumer method=eth_call consumer=${safeToken(consumer, 'other')} ` +
       `count=${Math.floor(count)} window_s=${windowSeconds}${chain}`,
+    );
+  }
+  const getLogsLines = new Map<string, {
+    consumer: string;
+    endpointSlot: string;
+    count: number;
+  }>();
+  for (const [consumer, byEndpointSlot] of Object.entries(
+    normalized.ethGetLogsByConsumerAndEndpointSlot,
+  )) {
+    for (const [endpointSlot, count] of Object.entries(byEndpointSlot)) {
+      if (!Number.isFinite(count) || count <= 0) continue;
+      const safeConsumer = safeToken(consumer, 'other');
+      const safeSlot = safeEndpointSlot(endpointSlot);
+      const key = `${safeConsumer}\0${safeSlot}`;
+      const existing = getLogsLines.get(key);
+      if (existing) existing.count += Math.floor(count);
+      else {
+        getLogsLines.set(key, {
+          consumer: safeConsumer,
+          endpointSlot: safeSlot,
+          count: Math.floor(count),
+        });
+      }
+    }
+  }
+  for (const { consumer, endpointSlot, count } of getLogsLines.values()) {
+    lines.push(
+      `rpc_usage_by_consumer method=eth_getLogs consumer=${consumer} ` +
+      `endpoint_slot=${endpointSlot} count=${count} window_s=${windowSeconds}${chain}`,
     );
   }
   return lines;

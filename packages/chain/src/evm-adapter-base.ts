@@ -1185,11 +1185,11 @@ export class EVMChainAdapterBase {
       ? undefined
       : ethers.Network.from(this.configuredStaticChainId);
     this.providers = this.rpcUrls.map(
-      (url) => createCountingJsonRpcProvider(url, perEndpointRetries, this.rpcUsage, {
+      (url, endpointSlot) => createCountingJsonRpcProvider(url, perEndpointRetries, this.rpcUsage, {
         cacheTimeout: -1,
         polling: true,
         batchMaxCount: 1,
-      }, staticNetwork),
+      }, staticNetwork, endpointSlot),
     );
     this.primaryProvider = this.providers[0];
     // No `FallbackProvider`: reads route through the `RpcFailoverClient` read

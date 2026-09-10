@@ -20,6 +20,7 @@ import {
 import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import {
+  boundedRpcEndpointSlotLabel,
   boundedRpcMethodLabel,
   mergeRpcUsageWindows,
   normalizeRpcUsageWindow,
@@ -402,23 +403,36 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(merged).toEqual({
       byMethod: { eth_call: 8, eth_estimateGas: 2, eth_sendRawTransaction: 4 },
       ethCallByConsumer: { 'pcaNFT.getAccountInfo': 3, 'token.balanceOf': 2 },
+      ethGetLogsByConsumerAndEndpointSlot: {},
       lifetimeTotal: 150,
     });
   });
 
   it('mergeRpcUsageWindows skips undefined inputs; nothing to merge yields a concrete EMPTY window', () => {
-    const w = { byMethod: { eth_call: 1 }, ethCallByConsumer: {}, lifetimeTotal: 1 };
+    const w = {
+      byMethod: { eth_call: 1 },
+      ethCallByConsumer: {},
+      ethGetLogsByConsumerAndEndpointSlot: {},
+      lifetimeTotal: 1,
+    };
     const legacy = { byMethod: { eth_call: 2 }, lifetimeTotal: 2 };
-    const empty = { byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 };
+    const empty = {
+      byMethod: {},
+      ethCallByConsumer: {},
+      ethGetLogsByConsumerAndEndpointSlot: {},
+      lifetimeTotal: 0,
+    };
     expect(mergeRpcUsageWindows(undefined, w, undefined)).toEqual(w);
     expect(mergeRpcUsageWindows(legacy)).toEqual({
       byMethod: { eth_call: 2 },
       ethCallByConsumer: {},
+      ethGetLogsByConsumerAndEndpointSlot: {},
       lifetimeTotal: 2,
     });
     expect(normalizeRpcUsageWindow(legacy)).toEqual({
       byMethod: { eth_call: 2 },
       ethCallByConsumer: {},
+      ethGetLogsByConsumerAndEndpointSlot: {},
       lifetimeTotal: 2,
     });
     expect(mergeRpcUsageWindows(undefined, undefined)).toEqual(empty);
@@ -436,6 +450,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(mergeRpcUsageWindows(drainable.drainRpcUsage(), adapter.drainRpcUsage?.())).toEqual({
       byMethod: { eth_call: 1, eth_getLogs: 2 },
       ethCallByConsumer: {},
+      ethGetLogsByConsumerAndEndpointSlot: {},
       lifetimeTotal: 3,
     });
   });
@@ -532,6 +547,146 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(w.ethCallByConsumer.other).toBe(4);
     expect(w.byMethod.eth_call).toBe(max + 5);
   });
+
+  it('bounds configured endpoint slots without exposing endpoint identity', () => {
+    expect(boundedRpcEndpointSlotLabel(0)).toBe('primary');
+    expect(boundedRpcEndpointSlotLabel(1)).toBe('fallback_1');
+    expect(boundedRpcEndpointSlotLabel(15)).toBe('fallback_15');
+    expect(boundedRpcEndpointSlotLabel(16)).toBe('other');
+    expect(boundedRpcEndpointSlotLabel(-1)).toBe('other');
+    expect(boundedRpcEndpointSlotLabel(undefined)).toBe('other');
+    expect(boundedRpcEndpointSlotLabel(Number.NaN)).toBe('other');
+  });
+
+  it('attributes every eth_getLogs request, including unscoped calls, without changing the aggregate', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    withRpcUsageConsumer('cg.authority.history', () => {
+      t.record('eth_getLogs', 0);
+      t.record('eth_getLogs', 1);
+    });
+    t.record('eth_getLogs', 0);
+
+    const w = t.drainWindow();
+    expect(w.byMethod.eth_getLogs).toBe(3);
+    expect(w.ethGetLogsByConsumerAndEndpointSlot).toEqual({
+      'cg.authority.history': { primary: 1, fallback_1: 1 },
+      unattributed: { primary: 1 },
+    });
+    expect(Object.values(w.ethGetLogsByConsumerAndEndpointSlot)
+      .flatMap((bySlot) => Object.values(bySlot))
+      .reduce((sum, count) => sum + count, 0)).toBe(w.byMethod.eth_getLogs);
+    expect(t.drainWindow().ethGetLogsByConsumerAndEndpointSlot).toEqual({});
+  });
+
+  it('caps distinct eth_getLogs consumer/slot pairs and reconciles overflow to other/other', () => {
+    const t = new RpcUsageTracker(() => 'evm:31337');
+    const max = RpcUsageTracker.MAX_WINDOW_GET_LOGS_ATTRIBUTIONS;
+    for (let i = 0; i < max + 4; i += 1) {
+      withRpcUsageConsumer(`consumer.${i}`, () => t.record('eth_getLogs', i % 2));
+    }
+    withRpcUsageConsumer('consumer.0', () => t.record('eth_getLogs', 0));
+
+    const w = t.drainWindow();
+    const pairs = Object.values(w.ethGetLogsByConsumerAndEndpointSlot)
+      .flatMap((bySlot) => Object.values(bySlot));
+    expect(pairs).toHaveLength(max + 1);
+    expect(w.ethGetLogsByConsumerAndEndpointSlot['consumer.0'].primary).toBe(2);
+    expect(w.ethGetLogsByConsumerAndEndpointSlot.other.other).toBe(4);
+    expect(pairs.reduce((sum, count) => sum + count, 0)).toBe(max + 5);
+    expect(w.byMethod.eth_getLogs).toBe(max + 5);
+  });
+
+  it('merges eth_getLogs attribution by consumer and endpoint slot', () => {
+    expect(mergeRpcUsageWindows(
+      {
+        byMethod: { eth_getLogs: 3 },
+        ethGetLogsByConsumerAndEndpointSlot: {
+          'cg.authority.history': { primary: 2, fallback_1: 1 },
+        },
+        lifetimeTotal: 3,
+      },
+      {
+        byMethod: { eth_getLogs: 4 },
+        ethGetLogsByConsumerAndEndpointSlot: {
+          'cg.authority.history': { primary: 1 },
+          'cg.subscription.events': { fallback_1: 3 },
+        },
+        lifetimeTotal: 4,
+      },
+    )).toEqual({
+      byMethod: { eth_getLogs: 7 },
+      ethCallByConsumer: {},
+      ethGetLogsByConsumerAndEndpointSlot: {
+        'cg.authority.history': { primary: 3, fallback_1: 1 },
+        'cg.subscription.events': { fallback_1: 3 },
+      },
+      lifetimeTotal: 7,
+    });
+  });
+
+  it('attributes failover eth_getLogs attempts to fixed configured endpoint slots', async () => {
+    installMeter();
+    const primary = await startLoopbackRpc({ throttle: ['eth_getLogs'] });
+    const backup = await startLoopbackRpc();
+    servers.push(primary, backup);
+    const a: any = new EVMChainAdapter(minimalConfig({
+      rpcUrl: primary.url,
+      rpcUrls: [backup.url],
+      chainId: 'evm:31337',
+    }));
+    adapters.push(a);
+
+    await expect(a.readProvider(
+      'unit.getLogs.failover',
+      (provider: any) => provider.send('eth_getLogs', [{ fromBlock: '0x0', toBlock: '0x1' }]),
+      { policy: 'wideLogScan' },
+    )).resolves.toBeDefined();
+
+    const usage = a.drainRpcUsage();
+    const primaryHits = primary.hits('eth_getLogs');
+    const backupHits = backup.hits('eth_getLogs');
+    expect(primaryHits).toBe(1);
+    expect(backupHits).toBe(1);
+    expect(usage.byMethod.eth_getLogs).toBe(primaryHits + backupHits);
+    expect(usage.ethGetLogsByConsumerAndEndpointSlot['unit.getLogs.failover']).toEqual({
+      primary: primaryHits,
+      fallback_1: backupHits,
+    });
+    expect(JSON.stringify(usage.ethGetLogsByConsumerAndEndpointSlot))
+      .not.toContain(primary.url);
+    expect(JSON.stringify(usage.ethGetLogsByConsumerAndEndpointSlot))
+      .not.toContain(backup.url);
+  }, 30_000);
+
+  it('attributes ethers-internal eth_getLogs retries to the same endpoint slot', async () => {
+    const rpc = await startLoopbackRpc({ throttle: ['eth_getLogs'] });
+    servers.push(rpc);
+    const tracker = new RpcUsageTracker(() => 'evm:31337');
+    const provider = createCountingJsonRpcProvider(
+      rpc.url,
+      1,
+      tracker,
+      { batchMaxCount: 1 },
+      undefined,
+      3,
+    );
+
+    try {
+      await expect(withRpcUsageConsumer(
+        'unit.getLogs.retry',
+        () => provider.send('eth_getLogs', [{ fromBlock: '0x0', toBlock: '0x1' }]),
+      )).rejects.toBeTruthy();
+
+      const usage = tracker.drainWindow();
+      const hits = rpc.hits('eth_getLogs');
+      expect(hits).toBe(2);
+      expect(usage.byMethod.eth_getLogs).toBe(hits);
+      expect(usage.ethGetLogsByConsumerAndEndpointSlot['unit.getLogs.retry'])
+        .toEqual({ fallback_3: hits });
+    } finally {
+      provider.destroy();
+    }
+  }, 30_000);
 
   it('attributes failover eth_call attempts to the readProvider label', async () => {
     installMeter();

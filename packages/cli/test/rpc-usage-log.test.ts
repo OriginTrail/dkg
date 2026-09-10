@@ -89,6 +89,62 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
       'rpc_usage_by_consumer method=eth_call consumer=other count=2 window_s=60',
     ]);
   });
+
+  it('emits bounded eth_getLogs consumer and endpoint-slot attribution', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_getLogs: 7 },
+        ethGetLogsByConsumerAndEndpointSlot: {
+          getContextGraphAuthoritySnapshot: { primary: 2, fallback_1: 3 },
+          unattributed: { fallback_2: 2 },
+        },
+        lifetimeTotal: 7,
+      },
+      60,
+      'base:84532',
+    );
+
+    expect(lines).toContain(
+      'rpc_usage method=eth_getLogs count=7 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=primary count=2 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=fallback_1 count=3 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getLogs consumer=unattributed endpoint_slot=fallback_2 count=2 window_s=60 chain=base:84532',
+    );
+    expect(lines).toHaveLength(4);
+    for (const line of lines) {
+      expect(line).toMatch(/^rpc_usage(_by_consumer)?( [a-z_]+=[A-Za-z0-9_.:-]+)+$/);
+    }
+  });
+
+  it('never emits endpoint URLs and aggregates invalid external slots under other', () => {
+    const endpointUrl = 'https://secret-token.example/rpc';
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_getLogs: 3 },
+        ethGetLogsByConsumerAndEndpointSlot: {
+          authority: {
+            [endpointUrl]: 2,
+            'attacker.example': 1,
+          },
+        },
+        lifetimeTotal: 3,
+      },
+      60,
+    );
+
+    expect(lines).toEqual([
+      'rpc_usage method=eth_getLogs count=3 window_s=60',
+      'rpc_usage_by_consumer method=eth_getLogs consumer=authority endpoint_slot=other count=3 window_s=60',
+    ]);
+    expect(lines.join('\n')).not.toContain(endpointUrl);
+    expect(lines.join('\n')).not.toContain('attacker.example');
+  });
 });
 
 describe('composite daemon source — agent + publisher-runtime windows merged at drain time', () => {
