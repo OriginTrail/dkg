@@ -9,6 +9,7 @@
  * via applyMixins(); see evm-adapter.ts for the assembly.
  */
 
+import { decodeContextGraphScanRequest } from './context-graph-scan-request.js';
 import {
   EVMChainAdapterBase,
   CG_REGISTRY_MAX_SCAN_PAGES,
@@ -61,20 +62,11 @@ type ContextGraphRegistryScanPlan =
       pageBudget?: number;
     };
 
-function normalizePageBudget(value: number | undefined): number | undefined {
-  return Number.isFinite(value) && (value ?? 0) >= 1
-    ? Math.floor(value ?? 0)
-    : undefined;
-}
-
 function buildPublicContextGraphRegistryScanPlan(
   fromBlock: number | undefined,
   options: ContextGraphChainScanOptions | undefined,
 ): ContextGraphRegistryScanPlan {
-  const runtimeOptions = options as
-    | (ContextGraphChainScanOptions & { mode?: string })
-    | undefined;
-  const mode = runtimeOptions?.mode;
+  const scan = decodeContextGraphScanRequest(options, 'list');
 
   if (fromBlock !== undefined) {
     return {
@@ -86,47 +78,7 @@ function buildPublicContextGraphRegistryScanPlan(
     };
   }
 
-  if (runtimeOptions && 'incremental' in runtimeOptions && runtimeOptions.incremental === true) {
-    return {
-      mode: 'incremental',
-      resumeFromWatermark: true,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: false,
-      pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
-    };
-  }
-
-  if (
-    runtimeOptions &&
-    'seedIncrementalWatermark' in runtimeOptions &&
-    runtimeOptions.seedIncrementalWatermark === true
-  ) {
-    if (runtimeOptions.resumeFromCursor === true) {
-      return {
-        mode: 'seedFromCursor',
-        resumeFromWatermark: true,
-        persistProgress: true,
-        allowPartialFailure: true,
-        seedAtEnd: true,
-        pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
-      };
-    }
-    return {
-      mode: 'seedFull',
-      resumeFromWatermark: false,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: true,
-    };
-  }
-
-  if (mode !== undefined && mode !== 'listAll') {
-    throw new Error(
-      'listContextGraphsFromChain accepts only listAll or legacy boolean scan options; ' +
-      'use scanContextGraphRegistryPages for cursor-backed daemon scans.',
-    );
-  }
+  if (scan.mode !== 'listAll') return buildCursorContextGraphRegistryScanPlan(scan);
 
   return {
     mode: 'listAll',
@@ -147,7 +99,7 @@ function buildCursorContextGraphRegistryScanPlan(
       persistProgress: true,
       allowPartialFailure: true,
       seedAtEnd: false,
-      pageBudget: normalizePageBudget(options.pageBudget),
+      pageBudget: options.pageBudget,
     };
   }
 
@@ -168,7 +120,7 @@ function buildCursorContextGraphRegistryScanPlan(
       persistProgress: true,
       allowPartialFailure: true,
       seedAtEnd: true,
-      pageBudget: normalizePageBudget(options.pageBudget),
+      pageBudget: options.pageBudget,
     };
   }
 
@@ -273,22 +225,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     fromBlock?: number,
     options?: ContextGraphChainScanOptions,
   ): Promise<ContextGraphOnChain[]> {
+    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
     await this.init();
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return [];
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
     return this._collectContextGraphRegistryScan(registry, registryAddress, fromBlock, scanPlan);
   }
 
   async *scanContextGraphRegistryPages(
     options: ContextGraphRegistryScanOptions,
   ): AsyncIterable<ContextGraphRegistryScanPage> {
+    const scanPlan = buildCursorContextGraphRegistryScanPlan(decodeContextGraphScanRequest(options, 'pages'));
     await this.init();
     const registry = this.contracts.contextGraphNameRegistry;
     if (!registry) return;
     const registryAddress = (await registry.getAddress()).toLowerCase();
-    const scanPlan = buildCursorContextGraphRegistryScanPlan(options);
     yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, undefined, scanPlan);
   }
 

@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import { DKGAgent } from '../../src/index.js';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
 import { GraphManager } from '@origintrail-official/dkg-storage';
+import { DKG_ONTOLOGY, contextGraphDataUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 
 /**
  * Minimal in-memory gossip transport — mirrors the surface the agent
@@ -86,6 +87,7 @@ interface AgentInternals {
   gossip: InMemoryGossipBus;
   swmHostModeStore?: SwmHostModeStore;
   swmHostModeSubscribed: Map<string, string>;
+  subscribedContextGraphs: Map<string, { subscribed: boolean; synced: boolean; onChainId?: string; onChainHash?: string; coreHosted?: boolean }>;
   swmHostModeHandlers: Map<string, unknown>;
   wireIdToLocalCgId: Map<string, string>;
   config: { swmHostMode?: { reconcileBatchSize?: number } };
@@ -103,7 +105,7 @@ interface AgentInternals {
   ): string | null;
   setContextGraphSubscription(
     contextGraphId: string,
-    next: { subscribed: boolean; synced: boolean },
+    next: { subscribed: boolean; synced: boolean; onChainHash?: string; coreHosted?: boolean },
     options?: { persist?: boolean },
   ): void;
 }
@@ -152,9 +154,14 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     const internals = core as unknown as AgentInternals;
     internals.config.swmHostMode = { ...(internals.config.swmHostMode ?? {}), reconcileBatchSize: 2 };
     const graphManager = new GraphManager(core.store);
-    const cgIds = ['cursor-cg-d', 'cursor-cg-b', 'cursor-cg-a', 'cursor-cg-c'];
+    const cgIds = ['cursor-cg-d', 'cursor-cg-b', `0x${'ab'.repeat(20)}/cursor-cg-a`, 'cursor-cg-c'];
     for (const cgId of cgIds) {
       await core.store.insert([{
+        subject: contextGraphDataUri(cgId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      }, {
         subject: `http://example.org/${cgId}`,
         predicate: 'http://schema.org/name',
         object: `"${cgId}"`,
@@ -185,6 +192,11 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     const cgIds = ['failing-cursor-cg-a', 'failing-cursor-cg-b', 'failing-cursor-cg-c'];
     for (const cgId of cgIds) {
       await core.store.insert([{
+        subject: contextGraphDataUri(cgId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      }, {
         subject: `http://example.org/${cgId}`,
         predicate: 'http://schema.org/name',
         object: `"${cgId}"`,
@@ -204,6 +216,39 @@ describe('host-mode bookkeeping key canonicalisation', () => {
 
     await core.reconcileHostModeSubscriptions();
     expect(calls).toEqual([knownCgs[0], knownCgs[1], knownCgs[2]]);
+  });
+
+  it('reconciles an undeclared surviving SWM family', async () => {
+    const { core } = await makeCore();
+    const cg = 'undeclared-host-swm';
+    await core.store.insert([{
+      subject: 'urn:surviving-operation', predicate: 'urn:state', object: '"pending"',
+      graph: `${contextGraphDataUri(cg)}/_shared_memory_meta`,
+    }]);
+    expect(await new GraphManager(core.store).listContextGraphs()).not.toContain(cg);
+    const reconcile = vi.spyOn(core, 'reconcileSwmHostModeSubscription');
+    await core.reconcileHostModeSubscriptions();
+    expect(reconcile).toHaveBeenCalledWith(cg);
+  });
+
+  it('unwires a revoked persisted host subscription after all CG graphs disappear', async () => {
+    const { core, bus } = await makeCore();
+    const cg = 'undeclared-revoked-host';
+    const internals = core as unknown as AgentInternals;
+    await core.enableSwmHostModeFor(cg);
+    await internals.awaitHostModePersistence(cg);
+    expect(await internals.swmHostModeStore!.listHostModeSubscribedCgs()).toContain(cg);
+    expect(await new GraphManager(core.store).listContextGraphs()).not.toContain(cg);
+    expect(totalHandlers(bus)).toBe(1);
+
+    vi.spyOn(core, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(false);
+    await core.reconcileHostModeSubscriptions();
+    await internals.awaitHostModePersistence(cg);
+
+    expect(totalHandlers(bus)).toBe(0);
+    expect(internals.swmHostModeSubscribed.size).toBe(0);
+    expect(internals.swmHostModeHandlers.size).toBe(0);
+    expect(await internals.swmHostModeStore!.listHostModeSubscribedCgs()).not.toContain(cg);
   });
 
   it('cleartext subscribe followed by wire-hash subscribe for the same CG is idempotent', async () => {

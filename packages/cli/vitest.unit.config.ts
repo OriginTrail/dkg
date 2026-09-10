@@ -72,6 +72,7 @@ export default defineConfig({
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
+          'test/node-runtime-preflight.test.ts',
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/dkg-doctor.test.ts',
@@ -80,6 +81,7 @@ export default defineConfig({
           'test/init-command.test.ts',
           'test/init-chain-config.test.ts',
           'test/start-store-preflight.test.ts',
+          'test/daemon-startup-validation.test.ts',
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
           'test/random-sampling-status.test.ts',
@@ -109,6 +111,7 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          'test/async-promote-worker-diagnostics.test.ts',
           'test/async-promote-error-classification.test.ts',
           'test/async-promote-publisher-recovery.test.ts',
           'test/async-promote-bookkeeping-recovery.test.ts',

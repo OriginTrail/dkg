@@ -15,6 +15,7 @@ import {
   type TripleStore,
 } from '../src/index.js';
 import {
+  DKG_ONTOLOGY,
   contextGraphDataGraphUri,
   contextGraphSharedMemoryMetaUri,
   contextGraphSharedMemoryUri,
@@ -437,9 +438,8 @@ describe('GraphManager', () => {
 
   it('lists context graphs', async () => {
     await store.insert([
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"a"', graph: 'did:dkg:context-graph:test1' },
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"b"', graph: 'did:dkg:context-graph:test1/_meta' },
-      { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"c"', graph: 'did:dkg:context-graph:test2' },
+      { subject: 'did:dkg:context-graph:test1', predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: 'did:dkg:context-graph:test1/_meta' },
+      { subject: 'did:dkg:context-graph:test2', predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: 'did:dkg:context-graph:test2/_meta' },
     ]);
     const cgs = await gm.listContextGraphs();
     expect(cgs.sort()).toEqual(['test1', 'test2']);

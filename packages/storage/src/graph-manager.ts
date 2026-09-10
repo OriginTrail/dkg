@@ -1,3 +1,4 @@
+import { listDeclaredContextGraphIds, listStoredContextGraphIds } from './context-graph-listing.js';
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
 import {
   contextGraphDataUri,
@@ -840,27 +841,17 @@ export class ContextGraphManager {
     this.ensuredContextGraphs.add(contextGraphId);
   }
 
+  /**
+   * Locally stored CGs: declared identities plus unambiguous legacy bare roots.
+   * This storage enumeration does not establish a graph's authority or policy.
+   */
   async listContextGraphs(options?: QueryOptions): Promise<string[]> {
-    const graphs = await listGraphsByPrefix(this.store, CG_PREFIX, options);
-    const contextGraphs = new Set<string>();
-    for (const g of graphs) {
-      if (g.startsWith(CG_PREFIX)) {
-        const rest = g.slice(CG_PREFIX.length);
-        const id = rest.endsWith('/_meta')
-          ? rest.slice(0, -6)
-          : rest.endsWith('/_private')
-            ? rest.slice(0, -9)
-            : rest.endsWith('/_shared_memory_meta')
-              ? rest.slice(0, -20)
-              : rest.endsWith('/_shared_memory')
-                ? rest.slice(0, -15)
-                : rest;
-        if (!id.includes('/')) {
-          contextGraphs.add(id);
-        }
-      }
-    }
-    return [...contextGraphs];
+    return listStoredContextGraphIds(this.store, options);
+  }
+
+  /** IDs declared in Agents/Ontology, their own metadata, or private catalogs. */
+  async listDeclaredContextGraphs(options?: QueryOptions): Promise<string[]> {
+    return listDeclaredContextGraphIds(this.store, options);
   }
 
   /**

@@ -8,6 +8,7 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
+import { listStoredContextGraphUris, storedContextGraphPolicyCandidates, storedSharedMemoryFamilies } from './stored-context-graph-candidates.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
@@ -1268,11 +1269,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const inflight = (async () => {
       try {
         const graphManager = new GraphManager(this.store);
-        const knownCgs = (
-          await graphManager.listContextGraphs({
-            source: 'agent.swmHostMode.listContextGraphs',
-          })
-        ).sort();
+        const declared = await graphManager.listDeclaredContextGraphs({ source: 'agent.swmHostMode.listContextGraphs' });
+        const storedGraphs = await listStoredContextGraphUris(this.store, { source: 'agent.swmHostMode.graphFamilies' });
+        const candidates = [
+          ...declared,
+          ...this.subscribedContextGraphs.keys(),
+          ...(this.config.syncContextGraphs ?? []),
+          ...await this.swmHostModeStore!.listHostModeSubscribedCgs(),
+          ...this.swmHostModeSubscribed.keys(),
+          ...storedContextGraphPolicyCandidates(storedSharedMemoryFamilies(storedGraphs).map((family) => family.scopeUri)),
+        ];
+        // Persisted and live subscriptions can outlast all graph declarations.
+        // Prefer a known cleartext ID and reconcile each canonical topic once.
+        const byTopic = new Map<string, string>();
+        for (const candidate of candidates) {
+          const topicKey = this.canonicalSwmHostModeKey(candidate);
+          if (!byTopic.has(topicKey)) byTopic.set(topicKey, candidate);
+        }
+        const knownCgs = [...byTopic.values()].sort();
         if (knownCgs.length === 0) {
           this.hostModeReconcileCursor = 0;
           return;

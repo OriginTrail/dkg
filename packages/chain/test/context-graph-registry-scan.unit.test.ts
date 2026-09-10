@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { decodeContextGraphScanRequest } from '../src/index.js';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { ContextGraphChainScanPartialError, type ContextGraphChainScanOptions, type ContextGraphOnChain, type ContextGraphRegistryScanOptions } from '../src/chain-adapter.js';
 import {
@@ -313,7 +314,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     ]);
     expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000]);
 
-    provider.getCode = seam(async () => {
+    provider.getCode = seam<Parameters<typeof provider.getCode>, ReturnType<typeof provider.getCode>>(async () => {
       throw new Error('deploy block probing should not run with the legacy incremental cursor');
     });
     registry.queryFilter.clear();
@@ -445,7 +446,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(head + 1);
     await expect(adapter.hasContextGraphRegistryScanWatermark()).resolves.toBe(true);
 
-    provider.getCode = seam(async () => {
+    provider.getCode = seam<Parameters<typeof provider.getCode>, ReturnType<typeof provider.getCode>>(async () => {
       throw new Error('eth_getCode should not be called after watermark seeding');
     });
     registry.queryFilter.clear();
@@ -485,7 +486,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       cgRegistryScanPageSize: 1_000,
       contextGraphRegistryScanCursorStore: store,
     });
-    provider.getCode = seam(async () => {
+    provider.getCode = seam<Parameters<typeof provider.getCode>, ReturnType<typeof provider.getCode>>(async () => {
       throw new Error('deploy block probing should not run with persisted cursor');
     });
     restartedRegistry.queryFilter.setImpl(async () => []);
@@ -592,7 +593,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       });
 
       expect((adapter as any).contextGraphRegistryScanCursor.getCachedWatermark(REGISTRY)).toBe(2_101);
-      provider.getCode = seam(async () => {
+      provider.getCode = seam<Parameters<typeof provider.getCode>, ReturnType<typeof provider.getCode>>(async () => {
         throw new Error('deploy block probing should not run with process-local cursor');
       });
       registry.queryFilter.clear();
@@ -623,7 +624,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       cgRegistryScanPageSize: 1_000,
       contextGraphRegistryScanCursorStore: store,
     });
-    provider.getCode = seam(async () => {
+    provider.getCode = seam<Parameters<typeof provider.getCode>, ReturnType<typeof provider.getCode>>(async () => {
       throw new Error('deploy block probing should not run with persisted cursor');
     });
     registry.queryFilter.setImpl(async () => []);
@@ -748,7 +749,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
   it('does not require deploy-block probing when fromBlock is explicit', async () => {
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry, 2_100);
-    provider.getCode = seam(async () => {
+    provider.getCode = seam<Parameters<typeof provider.getCode>, ReturnType<typeof provider.getCode>>(async () => {
       throw new Error('eth_getCode should not be called');
     });
     registry.queryFilter.setImpl(async () => []);
@@ -764,7 +765,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
   it('resumes incremental scans from the watermark without deploy-block probing', async () => {
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry, 2_100);
-    provider.getCode = seam(async () => {
+    provider.getCode = seam<Parameters<typeof provider.getCode>, ReturnType<typeof provider.getCode>>(async () => {
       throw new Error('eth_getCode should not be called');
     });
     registry.queryFilter.setImpl(async () => []);
@@ -833,7 +834,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     const defaultPageSize = 2_000;
     const defaultBlockBudget = CG_REGISTRY_MAX_SCAN_PAGES * defaultPageSize;
     const { adapter, provider } = makeAdapter(registry, defaultBlockBudget);
-    provider.getCode = seam(async () => {
+    provider.getCode = seam<Parameters<typeof provider.getCode>, ReturnType<typeof provider.getCode>>(async () => {
       throw new Error('missing trie node (pruned node)');
     });
     registry.queryFilter.setImpl(async () => []);
@@ -849,5 +850,62 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
 
     const defaulted = new EVMChainAdapter(minimalConfig({ cgRegistryScanPageSize: 0.5 }));
     expect((defaulted as any).cgRegistryScanPageSize).toBe(2_000);
+  });
+});
+
+describe('context graph list compatibility validation (#1485)', () => {
+  it.each([
+    { mode: 'listAll', incremental: true },
+    { mode: 'listAll', seedIncrementalWatermark: true },
+    { incremental: true, seedIncrementalWatermark: true },
+    { resumeFromCursor: true },
+    null, [], false, 'incremental',
+    { incremental: 'true' }, { seedIncrementalWatermark: 1 },
+    { resumeFromCursor: 'false' }, { mode: null }, { mode: 'unknown' },
+  ])('rejects contradictory options before registry access: %j', async (options) => {
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry);
+    await expect(adapter.listContextGraphsFromChain(undefined, options as unknown as ContextGraphChainScanOptions)).rejects.toThrow();
+    expect(registry.getAddress.calls).toEqual([]);
+    expect(registry.queryFilter.calls).toEqual([]);
+    expect(provider.getBlockNumber.calls).toEqual([]);
+  });
+});
+
+
+describe('chain-owned context graph scan decoding', () => {
+  it.each([
+    [undefined, { mode: 'listAll' }],
+    [{}, { mode: 'listAll' }],
+    [{ mode: 'listAll' }, { mode: 'listAll' }],
+    [{ incremental: false, seedIncrementalWatermark: false }, { mode: 'listAll' }],
+    [{ seedIncrementalWatermark: false, resumeFromCursor: true }, { mode: 'listAll' }],
+    [{ incremental: true, pageBudget: 3.9 }, { mode: 'incremental', pageBudget: 3 }],
+    [{ seedIncrementalWatermark: true }, { mode: 'seedFull' }],
+    [{ seedIncrementalWatermark: true, resumeFromCursor: true, pageBudget: 2 }, { mode: 'seedFromCursor', pageBudget: 2 }],
+    [{ mode: 'incremental', pageBudget: 2.9 }, { mode: 'incremental', pageBudget: 2 }],
+    [{ mode: 'seedFromCursor', pageBudget: 2.9 }, { mode: 'seedFromCursor', pageBudget: 2 }],
+    [{ mode: 'seedFull', pageBudget: 5 }, { mode: 'seedFull' }],
+    [{ mode: 'incremental', pageBudget: 0.5 }, { mode: 'incremental' }],
+    [{ mode: 'incremental', pageBudget: Number.POSITIVE_INFINITY }, { mode: 'incremental' }],
+    [{ mode: 'incremental', pageBudget: '2' }, { mode: 'incremental' }],
+  ])('decodes %j to %j', (input, expected) => {
+    expect(decodeContextGraphScanRequest(input)).toEqual(expected);
+  });
+
+  it.each([
+    undefined, null, {}, { mode: 'listAll' }, { incremental: true },
+    { mode: 'incremental', incremental: false }, { mode: 'unknown' },
+  ])('rejects invalid paged requests before registry access: %j', async input => {
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry);
+    await expect((async () => {
+      for await (const page of adapter.scanContextGraphRegistryPages(input as ContextGraphRegistryScanOptions)) {
+        await page.ack();
+      }
+    })()).rejects.toThrow();
+    expect(registry.getAddress.calls).toEqual([]);
+    expect(registry.queryFilter.calls).toEqual([]);
+    expect(provider.getBlockNumber.calls).toEqual([]);
   });
 });

@@ -64,6 +64,8 @@ The read-only snapshot includes owner, committed TRAC, top-up buffer, base epoch
 
 ## Use PCA With a Curated Context Graph
 
+The `--pca-account-id` option selects the PCA that authorizes publishing to a curated Context Graph. It does not by itself guarantee a registration-deposit waiver: registration has separate eligibility and quota checks described below. If they fail, the registering wallet pays the normal liquid-TRAC deposit as well as native gas.
+
 Attach a PCA to curated Context Graph registration with `--pca-account-id`:
 
 ```bash

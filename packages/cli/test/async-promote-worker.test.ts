@@ -17,27 +17,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import {
   OxigraphStore,
-  StoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
   type PromoteRequest,
-  type PromoteTerminalJobClearer,
 } from '@origintrail-official/dkg-publisher';
-import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
 import {
   createPromoteWorkerSupervisor,
   runPromoteJob,
 } from '../src/daemon/worker/async-promote-worker.js';
 import {
   createAsyncPromoteWorkerFixture,
+  deferred,
   retryableBookkeepingFailure,
   type AsyncPromoteWorkerFixture,
 } from './_helpers/async-promote-worker-fixture.js';
 import { createClaimFailureBackoff } from '../src/daemon/worker/claim-failure-backoff.js';
-
-const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
 
 describe('claim failure backoff', () => {
   it('grows from 250ms to the 30s cap with injected time and randomness', () => {
@@ -85,28 +81,6 @@ describe('claim failure backoff', () => {
   });
 });
 
-function deferred<T = void>(): {
-  promise: Promise<T>;
-  resolve: (value?: T | PromiseLike<T>) => void;
-  reject: (reason?: unknown) => void;
-} {
-  let resolve!: (value?: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-const PROMOTE_FAILURE_LOG_PREFIX = '[async-promote-worker] ';
-
-function promoteFailureDiagnostics(logs: readonly string[]): Record<string, unknown>[] {
-  return logs
-    .filter((line) => line.startsWith(PROMOTE_FAILURE_LOG_PREFIX))
-    .map((line) => JSON.parse(line.slice(PROMOTE_FAILURE_LOG_PREFIX.length)) as Record<string, unknown>)
-    .filter((entry) => entry['event'] === 'async_promote_attempt_failed');
-}
 
 describe('runPromoteJob', () => {
   let fixture: AsyncPromoteWorkerFixture;
@@ -132,7 +106,7 @@ describe('runPromoteJob', () => {
       },
       now: fixture.clock.now,
       heartbeatIntervalMs: 0,
-      log: (m) => logs.push(m),
+      log: (m) => { logs.push(m); },
     });
 
     expect(result.outcome).toBe('succeeded');
@@ -162,16 +136,13 @@ describe('runPromoteJob', () => {
     // expires; recoverOnStartup() then routes it into the abandoned
     // partial-promote bucket on next daemon boot.
     const job = await enqueueAndClaim();
-    const failingQueue: AsyncPromoteQueue = {
-      effectiveLeaseMs: 15 * 60 * 1000,
-      ...queue,
-      recordCommitMarker: async (jobId, claimToken, step) => {
-        if (step === 'swmInserted') {
-          throw new Error('simulated non-retryable bookkeeping failure');
-        }
-        return queue.recordCommitMarker(jobId, claimToken, step);
-      },
-    } as AsyncPromoteQueue;
+    const failingQueue = Object.create(queue) as AsyncPromoteQueue;
+    failingQueue.recordCommitMarker = async (jobId, claimToken, step) => {
+      if (step === 'swmInserted') {
+        throw new Error('simulated non-retryable bookkeeping failure');
+      }
+      return queue.recordCommitMarker(jobId, claimToken, step);
+    };
 
     const result = await runPromoteJob({
       job,
@@ -183,7 +154,7 @@ describe('runPromoteJob', () => {
       },
       now: fixture.clock.now,
       heartbeatIntervalMs: 0,
-      log: (m) => logs.push(m),
+      log: (m) => { logs.push(m); },
     });
 
     expect(result.outcome).toBe('partial_promote_ambiguity');
@@ -250,357 +221,6 @@ describe('runPromoteJob', () => {
       emitMemoryGraphChanged: (e) => events.push(e),
     });
     expect(events).toHaveLength(0);
-  });
-
-  it('on transient error, transitions to failed_retrying with backoff', async () => {
-    const job = await enqueueAndClaim();
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw new Error('fetch failed');
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
-    });
-    expect(result.outcome).toBe('failed_retrying');
-    expect(result.error?.classification).toBe('transient');
-    const final = await queue.getStatus(job.jobId);
-    expect(final?.state).toBe('failed_retrying');
-    expect(final?.attempt.nextRetryAt).toBeGreaterThan(fixture.clock.now());
-    expect(promoteFailureDiagnostics(logs)).toEqual([
-      expect.objectContaining({
-        event: 'async_promote_attempt_failed',
-        jobId: job.jobId,
-        attempt: 1,
-        maxAttempts: 3,
-        promoteStartedMarkerPersisted: true,
-        swmCommitObserved: false,
-        stage: 'unknown',
-        classification: 'transient',
-        retryable: true,
-      }),
-    ]);
-  });
-
-  it('keeps a serialized cross-boundary generic failure queued for retry', async () => {
-    const job = await enqueueAndClaim();
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw { code: PROMOTE_RETRYABLE_FAILURE_CODE };
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
-    });
-
-    expect(result).toMatchObject({
-      outcome: 'failed_retrying',
-      error: { classification: 'transient', retryable: true },
-    });
-    expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
-    expect(promoteFailureDiagnostics(logs)).toEqual([
-      expect.objectContaining({
-        classification: 'transient',
-        retryable: true,
-        errorName: 'PromoteRetryableFailureError',
-        errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
-      }),
-    ]);
-  });
-
-  it('uses publisher-owned diagnostics for a certified replay-safe failure', async () => {
-    const job = await enqueueAndClaim();
-    const replaySafeFailure = classifyExactSwmGraphReplaceFailure(
-      new StoreOperationTimeoutError({
-        backend: 'oxigraph-server',
-        operation: 'replaceGraph',
-        outcome: 'indeterminate',
-      }),
-    );
-
-    await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw replaySafeFailure;
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
-    });
-
-    expect(promoteFailureDiagnostics(logs)).toEqual([
-      expect.objectContaining({
-        classification: 'transient',
-        retryable: true,
-        errorName: 'PromoteReplaySafeError',
-        errorCode: 'PROMOTE_REPLAY_SAFE_FAILURE',
-      }),
-    ]);
-  });
-
-  it('on cap_exceeded error, transitions to failed (terminal)', async () => {
-    const job = await enqueueAndClaim();
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async () => {
-        throw new Error('Promoted assertion too large for gossip (6000 KB, limit 4 MB)');
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: () => {},
-    });
-    expect(result.outcome).toBe('failed_terminal');
-    expect(result.error?.classification).toBe('cap_exceeded');
-    const final = await queue.getStatus(job.jobId);
-    expect(final?.state).toBe('failed');
-  });
-
-  it('on fatal error, transitions to failed (terminal)', async () => {
-    const job = await enqueueAndClaim();
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async () => {
-        throw new Error('assertion not found: shard-1');
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
-    });
-    expect(result.outcome).toBe('failed_terminal');
-    expect(result.error?.classification).toBe('fatal');
-    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
-    expect(promoteFailureDiagnostics(logs)).toEqual([
-      expect.objectContaining({
-        promoteStartedMarkerPersisted: false,
-        swmCommitObserved: false,
-        classification: 'fatal',
-        retryable: false,
-      }),
-    ]);
-  });
-
-  it('logs bounded tagged failure evidence that survives terminal cleanup without leaking the message', async () => {
-    const job = await enqueueAndClaim();
-    const sensitiveMessage = 'query failed for secret-sentinel and https://rpc.example/private-key';
-    const failure = Object.assign(
-      new Error(`[promote:assertionScopedQuads] ${sensitiveMessage}`),
-      { name: 'CuratorRejectedError', code: 'CURATOR_REJECTED' },
-    );
-    const order: string[] = [];
-    let diagnosticPresentWhenFailBegan = false;
-    const fail = queue.fail.bind(queue);
-    queue.fail = async (jobId, claimToken, error) => {
-      order.push('queue.fail.begin');
-      diagnosticPresentWhenFailBegan = promoteFailureDiagnostics(logs).length === 1;
-      await fail(jobId, claimToken, error);
-      order.push('queue.fail.end');
-    };
-
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw failure;
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: (message) => {
-        order.push('diagnostic');
-        logs.push(message);
-      },
-    });
-
-    expect(result.outcome).toBe('failed_terminal');
-    expect(order).toEqual(['diagnostic', 'queue.fail.begin', 'queue.fail.end']);
-    expect(diagnosticPresentWhenFailBegan).toBe(true);
-    const diagnostics = promoteFailureDiagnostics(logs);
-    expect(diagnostics).toEqual([
-      {
-        event: 'async_promote_attempt_failed',
-        schemaVersion: 1,
-        jobId: job.jobId,
-        attempt: 1,
-        maxAttempts: 3,
-        promoteStartedMarkerPersisted: true,
-        swmCommitObserved: false,
-        stage: 'assertionScopedQuads',
-        classification: 'fatal',
-        retryable: false,
-        errorName: 'CuratorRejectedError',
-        errorCode: 'CURATOR_REJECTED',
-      },
-    ]);
-    expect(diagnostics[0]).not.toHaveProperty('messageFingerprint');
-    expect(logs.join('\n')).not.toContain('secret-sentinel');
-    expect(logs.join('\n')).not.toContain('rpc.example');
-
-    const clearer = queue as AsyncPromoteQueue & PromoteTerminalJobClearer;
-    await expect(clearer.clearTerminalJob(job.jobId)).resolves.toEqual({ outcome: 'cleared' });
-    await expect(queue.getStatus(job.jobId)).resolves.toBeNull();
-    expect(promoteFailureDiagnostics(logs)).toEqual(diagnostics);
-  });
-
-  it('sanitizes caller-controlled error identity at the worker logging boundary', async () => {
-    const job = await enqueueAndClaim();
-    const secretToken = 'AKIAIOSFODNN7EXAMPLE';
-    const failure = Object.assign(new Error('[promote:callerControlled] secret-sentinel failure'), {
-      name: `Error${secretToken}`,
-      code: secretToken,
-    });
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw failure;
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: (message) => logs.push(message),
-    });
-
-    expect(result.outcome).toBe('failed_terminal');
-    expect(promoteFailureDiagnostics(logs)).toEqual([expect.objectContaining({
-      stage: 'unknown', errorName: 'unknown', errorCode: 'unknown',
-      classification: 'fatal', retryable: false,
-    })]);
-    expect(promoteFailureDiagnostics(logs)[0]).not.toHaveProperty('messageFingerprint');
-    expect(logs.join('\n')).not.toContain(secretToken);
-    expect(logs.join('\n')).not.toContain('secret-sentinel');
-    expect(logs.join('\n')).not.toContain('callerControlled');
-    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
-  });
-
-  it('keeps fail-closed queue bookkeeping intact when the diagnostic logger throws', async () => {
-    const job = await enqueueAndClaim();
-
-    const result = await runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: () => {
-        throw new Error('logger unavailable');
-      },
-    });
-
-    expect(result).toMatchObject({
-      outcome: 'failed_terminal',
-      error: { classification: 'fatal', retryable: false },
-    });
-    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
-  });
-
-  it('does not wait for an unresolved logger before queue.fail reaches terminal state', async () => {
-    const job = await enqueueAndClaim();
-    const pendingLog = deferred<void>();
-    let loggerSettled = false;
-    void pendingLog.promise.then(() => {
-      loggerSettled = true;
-    });
-
-    const fail = queue.fail.bind(queue);
-    let failCompleted = false;
-    queue.fail = async (jobId, claimToken, error) => {
-      await fail(jobId, claimToken, error);
-      failCompleted = true;
-    };
-
-    const resultPromise = runPromoteJob({
-      job,
-      queue,
-      workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
-        throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
-      },
-      now: fixture.clock.now,
-      heartbeatIntervalMs: 0,
-      log: () => pendingLog.promise,
-    });
-    let runSettled = false;
-    void resultPromise.then(
-      () => {
-        runSettled = true;
-      },
-      () => {
-        runSettled = true;
-      },
-    );
-
-    try {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(loggerSettled).toBe(false);
-      expect(failCompleted).toBe(true);
-      expect(runSettled).toBe(true);
-      expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
-    } finally {
-      pendingLog.resolve();
-    }
-
-    await expect(resultPromise).resolves.toMatchObject({
-      outcome: 'failed_terminal',
-      error: { classification: 'fatal', retryable: false },
-    });
-  });
-
-  it('does not await an async diagnostic logger and absorbs its rejection', async () => {
-    const job = await enqueueAndClaim();
-    const unhandledRejections: unknown[] = [];
-    const onUnhandledRejection = (reason: unknown): void => {
-      unhandledRejections.push(reason);
-    };
-    process.on('unhandledRejection', onUnhandledRejection);
-
-    try {
-      const result = await runPromoteJob({
-        job,
-        queue,
-        workerId: 'worker-test',
-        runPromote: async (_request, markPromoteStarted) => {
-          await markPromoteStarted();
-          throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
-        },
-        now: fixture.clock.now,
-        heartbeatIntervalMs: 0,
-        log: async () => {
-          throw new Error('async logger unavailable');
-        },
-      });
-
-      expect(result).toMatchObject({
-        outcome: 'failed_terminal',
-        error: { classification: 'fatal', retryable: false },
-      });
-      expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(unhandledRejections).toEqual([]);
-    } finally {
-      process.off('unhandledRejection', onUnhandledRejection);
-    }
   });
 
   it('after maxRetries transient failures in a row, settles in failed (terminal)', async () => {
@@ -700,7 +320,7 @@ describe('createPromoteWorkerSupervisor', () => {
       workerConcurrency: 2,
       pollIntervalMs: 1_000_000, // disable auto-tick; we drive manually
       heartbeatIntervalMs: 0,
-      log: (m) => logs.push(m),
+      log: (m) => { logs.push(m); },
       workerIdPrefix: 'test',
     });
 
@@ -735,7 +355,7 @@ describe('createPromoteWorkerSupervisor', () => {
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
       heartbeatIntervalMs: 0,
-      log: (m) => logs.push(m),
+      log: (m) => { logs.push(m); },
       workerIdPrefix: 'test',
     });
 
@@ -880,11 +500,13 @@ describe('createPromoteWorkerSupervisor', () => {
     const wrappedQueue = new Proxy(queue, {
       get(target, prop, receiver) {
         if (prop === 'workScheduling') {
+          const scheduling = target.workScheduling;
+          if (!scheduling) throw new Error('fixture requires work scheduling');
           return {
             attachScheduler(scheduler: { onWorkAvailable: () => void }) {
               attachAttempts += 1;
               if (attachAttempts === 1) throw new Error('scheduler attachment failed');
-              return target.workScheduling.attachScheduler(scheduler);
+              return scheduling.attachScheduler(scheduler);
             },
           };
         }
@@ -1010,6 +632,47 @@ describe('createPromoteWorkerSupervisor', () => {
     expect(claimCalls).toBe(1);
   });
 
+  it.each(['throwing', 'rejecting'] as const)('keeps supervisor retries and shutdown working with a %s logger', async (mode) => {
+    vi.useFakeTimers();
+    const originalClaim = queue.claimNext.bind(queue);
+    const claim = vi.spyOn(queue, 'claimNext')
+      .mockRejectedValueOnce(new Error('store unavailable'))
+      .mockImplementation(originalClaim);
+    const promote = vi.fn(async () => ({ promotedCount: 1 }));
+    const sup = createPromoteWorkerSupervisor({
+      agent: makeAgentStub(promote),
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      random: () => 0.5,
+      log: (message) => {
+        logs.push(message);
+        if (!message.startsWith('claimNext error')) return;
+        if (mode === 'throwing') throw new Error('logger failed');
+        return Promise.reject(new Error('logger failed'));
+      },
+    });
+    try {
+      await sup.start();
+      await expect(sup.tickOnce()).resolves.toBe(0);
+      const jobId = await queue.enqueue(makeRequest(`hostile-supervisor-${mode}`));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(logs.filter((message) => message.startsWith('claimNext error'))).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(claim).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.waitFor(async () => expect((await queue.getStatus(jobId))?.state).toBe('succeeded'));
+      expect(promote).toHaveBeenCalledOnce();
+      await expect(sup.tickOnce()).resolves.toBe(0);
+      await sup.stop();
+      await sup.start();
+      await expect(sup.tickOnce()).resolves.toBe(0);
+    } finally {
+      await sup.stop();
+    }
+  });
+
   it('backs off repeated claim failures instead of polling the store continuously', async () => {
     let now = 10_000;
     let claimCalls = 0;
@@ -1028,7 +691,7 @@ describe('createPromoteWorkerSupervisor', () => {
       heartbeatIntervalMs: 0,
       now: () => now,
       random: () => 0.5,
-      log: (message) => logs.push(message),
+      log: (message) => { logs.push(message); },
       workerIdPrefix: 'claim-backoff',
     });
 
@@ -1071,7 +734,7 @@ describe('createPromoteWorkerSupervisor', () => {
       pollIntervalMs: 60_000,
       heartbeatIntervalMs: 0,
       random: () => 0.5,
-      log: (message) => logs.push(message),
+      log: (message) => { logs.push(message); },
       workerIdPrefix: 'automatic-claim-retry',
     });
 
@@ -1108,7 +771,7 @@ describe('createPromoteWorkerSupervisor', () => {
       heartbeatIntervalMs: 0,
       now: () => now,
       random: () => 0.5,
-      log: (message) => logs.push(message),
+      log: (message) => { logs.push(message); },
       workerIdPrefix: 'claim-recovery',
     });
 
@@ -1201,7 +864,7 @@ describe('createPromoteWorkerSupervisor', () => {
       pollIntervalMs: 1_000_000,
       heartbeatIntervalMs: 0,
       shutdownTimeoutMs: 50,
-      log: (m) => logs.push(m),
+      log: (m) => { logs.push(m); },
       workerIdPrefix: 'test',
     });
     await sup.start();
@@ -1257,7 +920,7 @@ describe('createPromoteWorkerSupervisor', () => {
         retrySleepStarted.resolve();
         await retrySleep.promise;
       },
-      log: (m) => logs.push(m),
+      log: (m) => { logs.push(m); },
       workerIdPrefix: 'test',
     });
     await sup.start();
@@ -1306,7 +969,7 @@ describe('createPromoteWorkerSupervisor', () => {
       pollIntervalMs: 1,
       heartbeatIntervalMs: 0,
       shutdownTimeoutMs: 500,
-      log: (m) => logs.push(m),
+      log: (m) => { logs.push(m); },
       workerIdPrefix: 'test',
     });
     await sup.start();
@@ -1350,7 +1013,7 @@ describe('createPromoteWorkerSupervisor', () => {
       pollIntervalMs: 1_000_000,
       heartbeatIntervalMs: 0,
       bookkeepingRetryBudgetMs: 500,
-      log: (m) => logs.push(m),
+      log: (m) => { logs.push(m); },
       workerIdPrefix: 'test',
     });
     await sup.start();
@@ -1394,7 +1057,7 @@ describe('createPromoteWorkerSupervisor', () => {
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1,
-      log: (m) => logs.push(m),
+      log: (m) => { logs.push(m); },
       workerIdPrefix: 'test',
     });
     await expect(sup.start()).rejects.toThrow(/recoverOnStartup failed: store offline/);

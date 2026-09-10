@@ -1,3 +1,4 @@
+import { exitOnNodeRuntimeError } from '../node-runtime-preflight.js';
 // daemon/lifecycle.ts
 //
 // `runDaemon` + `runDaemonInner` extracted verbatim from the legacy
@@ -1435,6 +1436,7 @@ async function runDaemonInnerWithStartupOwnership(
     process.exit(1);
   }
 
+  exitOnNodeRuntimeError(log);
   exitOnStoreConfigErrors(config, log);
 
   // Managed local Oxigraph server (`store.backend: 'oxigraph-server'`,

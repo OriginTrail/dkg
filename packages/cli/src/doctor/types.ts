@@ -1,3 +1,4 @@
+import type { NodeRuntimeHost, NodeRuntimeStatus } from '../node-runtime-preflight.js';
 /**
  * Type surface for `dkg doctor` (OT-RFC-41 §4.7).
  *
@@ -51,6 +52,8 @@ export interface Finding {
  * may be cross-referenced by checks below.
  */
 export interface StateSummary {
+  /** Additive capability snapshot of the CLI/runtime that will launch a worker. */
+  runtime?: NodeRuntimeStatus;
   /** ~/.dkg/daemon.pid — `null` if absent. */
   daemon: {
     pid: number | null;
@@ -149,6 +152,8 @@ export interface DoctorReport {
  * subprocesses, or hitting the daemon's HTTP port.
  */
 export interface DoctorDeps {
+  /** Runtime capability source; defaults to the process executing doctor. */
+  runtimeHost?: NodeRuntimeHost;
   /** Platform used for static capability checks; defaults to the current process. */
   platform?: NodeJS.Platform;
   /** Resolved DKG home (`~/.dkg/` typically). */

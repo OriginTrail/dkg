@@ -7,6 +7,7 @@
  * so cross-calls resolve against the composed class.
  */
 
+import { listStoredContextGraphUris, storedContextGraphPolicyCandidates } from './stored-context-graph-candidates.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -94,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -843,15 +844,21 @@ export class QueryMethods extends DKGAgentBase {
       }
     }
     // Runtime authority can be accepted independently of startup bootstrap.
-    // Subscription/sync selection and the bounded local graph-name index
-    // supply CG candidates without exposing the private policy registry itself.
+    // Privacy discovery must also cover stored graphs without RDF declarations
+    // or active subscriptions. Graph names supply policy lookup candidates,
+    // never authoritative CG identities: only the accepted runtime policy below
+    // can classify one as private. Probe every ancestor so owner/name CGs and
+    // CGs with only subgraph/lifecycle data left are protected too.
     const runtimeCandidates = new Set<string>([
       ...this.subscribedContextGraphs.keys(),
       ...(this.config.syncContextGraphs ?? []),
-      ...await new GraphManager(this.store).listContextGraphs({
-        source: 'agent.query.rfc64RuntimePrivateGraphs',
-      }),
     ]);
+    const storedGraphs = await listStoredContextGraphUris(this.store, {
+      source: 'agent.query.rfc64RuntimePrivateGraphs',
+    });
+    for (const candidate of storedContextGraphPolicyCandidates(storedGraphs)) {
+      runtimeCandidates.add(candidate);
+    }
     for (const contextGraphId of runtimeCandidates) {
       if (this.resolveRfc64PrivateReadRosterV1(contextGraphId) !== undefined) {
         privateContextGraphIds.add(contextGraphId);

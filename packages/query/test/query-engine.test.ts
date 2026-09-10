@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Worker } from 'node:worker_threads';
 import {
+  GraphManager,
   GraphSetIndexStore,
   OxigraphStore,
   OxigraphWorkerStore,
@@ -1104,16 +1105,33 @@ describe('DKGQueryEngine', () => {
     });
   });
 
-  it('queries across all contextGraphs', async () => {
-    // Add data to another context graph
+  it('queries legacy data created through ensureContextGraph without a declaration', async () => {
+    const id = 'legacy-api-cg';
+    const manager = new GraphManager(store);
+    await manager.ensureContextGraph(id);
+    await store.insert([q('urn:legacy:entity', 'urn:legacy:value', '"available"', manager.dataGraphUri(id))]);
+    const result = await new DKGQueryEngine(store).queryAllContextGraphs(
+      'SELECT ?value WHERE { <urn:legacy:entity> <urn:legacy:value> ?value }',
+    );
+    expect(result.bindings).toEqual([{ value: '"available"' }]);
+  });
+
+  it.each(['text-tools', `0x${'ab'.repeat(20)}/text-tools`])('queries declared identities and unambiguous legacy roots, including %s', async (id) => {
+    const graph = `did:dkg:context-graph:${id}`;
+    // Declarations identify owner/name CGs. A bare root remains discoverable
+    // through the legacy storage API without an authoritative declaration.
     await store.insert([
-      q('did:dkg:agent:QmTextBot', 'http://schema.org/name', '"TextBot"', 'did:dkg:context-graph:text-tools'),
+      q(graph, RDF_TYPE, DKG_CONTEXT_GRAPH, ONTOLOGY_GRAPH),
+      q('did:dkg:agent:QmTextBot', 'http://schema.org/name', '"TextBot"', graph),
+      q('urn:undeclared', 'http://schema.org/name', '"Undeclared"', 'did:dkg:context-graph:raw-data'),
     ]);
 
     const result = await engine.queryAllContextGraphs(
       'SELECT ?name WHERE { ?s <http://schema.org/name> ?name }',
     );
-    expect(result.bindings.length).toBe(2);
+    expect(result.bindings.length).toBe(3);
+    expect(result.bindings.map((row) => row.name)).toContain('"TextBot"');
+    expect(result.bindings.map((row) => row.name)).toContain('"Undeclared"');
   });
 
   it('queries shared memory graph when graphSuffix is _shared_memory', async () => {

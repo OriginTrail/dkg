@@ -21,7 +21,7 @@ To better understand how DKG works, explore [here](../how-dkg-works/key-concepts
 
 ## Prerequisites&#x20;
 
-Node.js 22+, npm 10+. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
+Node.js 22.13+ (22.x), 23.4+, or newer, with `node:sqlite` support, npm 10+. macOS, Linux, and Windows (PowerShell 5.1+ or WSL2) all supported.
 
 ## Hermes&#x20;
 

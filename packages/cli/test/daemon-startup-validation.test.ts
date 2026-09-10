@@ -8,6 +8,7 @@ import {
   DEFAULT_DAEMON_LOG_MAX_BYTES,
 } from '../src/daemon/log-rotation.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
+import * as managedOxigraph from '../src/daemon/oxigraph-managed.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -88,6 +89,38 @@ describe('daemon startup network validation', () => {
     }
     if (tempHome) await rm(tempHome, { recursive: true, force: true });
     tempHome = undefined;
+  });
+
+  it('rejects a direct daemon worker without SQLite before storage or agent creation', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-worker-runtime-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+    mocks.loadNetworkConfig.mockResolvedValue({
+      networkName: 'Local EVM', genesisId: 'gnosis-mainnet', genesisVersion: 1,
+      relays: [], defaultNodeRole: 'edge',
+    });
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process, 'getBuiltinModule').mockReturnValue(undefined);
+    vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
+      throw new Error(`process.exit:${code}`);
+    }) as never);
+    const storeStart = vi.spyOn(managedOxigraph, 'startManagedOxigraph')
+      .mockRejectedValue(new Error('unexpected storage startup'));
+
+    await expect(runDaemonInner(true, {
+      name: 'worker-runtime-test', networkConfig: 'local-evm', listenPort: 0, apiPort: 0, nodeRole: 'edge',
+    }, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
+
+    expect(stdoutSpy.mock.calls.map(call => String(call[0])).join('')).toContain('DKG requires node:sqlite support');
+    expect(storeStart).not.toHaveBeenCalled();
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+    await expect(stat(join(tempHome, 'dashboard.db'))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(process.listeners('uncaughtException')).toEqual(uncaughtExceptionListeners);
+    expect(process.listeners('unhandledRejection')).toEqual(unhandledRejectionListeners);
   });
 
   it('exits before agent creation when the selected network is pre-deployment', async () => {
