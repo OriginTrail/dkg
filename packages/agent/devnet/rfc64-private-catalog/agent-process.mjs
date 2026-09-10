@@ -34,6 +34,7 @@ import {
   createReceiverRevokedPolicyAndRoster,
   ownerWallet,
   roleAgentAddress,
+  rolePrivateKey,
 } from './fixture.mjs';
 import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
 import { sealExecutedRuntimeManifestV1 } from '../../../../devnet/rfc64-runtime-load-hook.mts';
@@ -102,7 +103,7 @@ async function createAgent(manifest, finalizedRuntime) {
       chainConfig: {
         rpcUrl: rpc.url,
         hubAddress: CONTEXT_GRAPH_STORAGE,
-        operationalKeys: [`0x${'12'.repeat(32)}`],
+        operationalKeys: [rolePrivateKey(ROLE)],
       },
       contextGraphSubscriptionStore: seededSubscriptionStore(CONTEXT_GRAPH_ID),
     };

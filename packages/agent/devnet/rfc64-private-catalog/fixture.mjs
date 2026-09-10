@@ -58,9 +58,13 @@ export const DEPLOYMENT = Object.freeze({
 });
 
 export function roleAgentAddress(role) {
+  return new ethers.Wallet(rolePrivateKey(role)).address.toLowerCase();
+}
+
+export function rolePrivateKey(role) {
   const privateKey = ROLE_KEYS[role];
   if (privateKey === undefined) throw new Error(`unknown RFC-64 devnet role ${role}`);
-  return new ethers.Wallet(privateKey).address.toLowerCase();
+  return privateKey;
 }
 
 export function ownerWallet() {
