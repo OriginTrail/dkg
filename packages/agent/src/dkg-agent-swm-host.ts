@@ -1269,7 +1269,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const inflight = (async () => {
       try {
         const graphManager = new GraphManager(this.store);
-        const declared = await graphManager.listContextGraphs({ source: 'agent.swmHostMode.listContextGraphs' });
+        const declared = await graphManager.listDeclaredContextGraphs({ source: 'agent.swmHostMode.listContextGraphs' });
         const storedGraphs = await listStoredContextGraphUris(this.store, { source: 'agent.swmHostMode.graphFamilies' });
         const candidates = [
           ...declared,

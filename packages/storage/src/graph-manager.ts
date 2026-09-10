@@ -1,4 +1,4 @@
-import { listDeclaredContextGraphIds } from './context-graph-listing.js';
+import { listDeclaredContextGraphIds, listStoredContextGraphIds } from './context-graph-listing.js';
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
 import {
   contextGraphDataUri,
@@ -841,10 +841,16 @@ export class ContextGraphManager {
     this.ensuredContextGraphs.add(contextGraphId);
   }
 
-  /** IDs declared in Agents/Ontology, their own metadata, or private catalogs.
-   * Raw named graphs without a CG declaration are deliberately not identities.
+  /**
+   * Locally stored CGs: declared identities plus unambiguous legacy bare roots.
+   * This storage enumeration does not establish a graph's authority or policy.
    */
   async listContextGraphs(options?: QueryOptions): Promise<string[]> {
+    return listStoredContextGraphIds(this.store, options);
+  }
+
+  /** IDs declared in Agents/Ontology, their own metadata, or private catalogs. */
+  async listDeclaredContextGraphs(options?: QueryOptions): Promise<string[]> {
     return listDeclaredContextGraphIds(this.store, options);
   }
 

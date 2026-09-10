@@ -1,11 +1,14 @@
-import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, assertSafeIri, contextGraphDataUri } from '@origintrail-official/dkg-core';
+import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, assertSafeIri, isSafeIri, contextGraphDataUri } from '@origintrail-official/dkg-core';
 import type { QueryOptions, TripleStore } from './triple-store.js';
 
 const PREFIX = 'did:dkg:context-graph:';
 const SOURCE_BATCH_SIZE = 128;
 
-/** Enumerate declared identities, never infer CG/subgraph ownership from a URI. */
-export async function listDeclaredContextGraphIds(store: TripleStore, options?: QueryOptions): Promise<string[]> {
+/** Read declarations and physical roots from the same named-graph inventory. */
+async function readContextGraphIds(store: TripleStore, options?: QueryOptions): Promise<{
+  declared: string[];
+  legacyBareRoots: string[];
+}> {
   const ids = new Set<string>();
   async function readDeclarations(graphs: string[], type: string, ownSuffix?: string): Promise<void> {
     for (let offset = 0; offset < graphs.length; offset += SOURCE_BATCH_SIZE) {
@@ -49,5 +52,21 @@ export async function listDeclaredContextGraphIds(store: TripleStore, options?: 
     : (await store.listGraphs(options)).filter((graph) => graph.startsWith(PREFIX));
   await readDeclarations(graphs.filter((graph) => graph.endsWith('/_meta')), DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, '/_meta');
   await readDeclarations(graphs.filter((graph) => graph.endsWith('/_catalog')), DKG_ONTOLOGY.DKG_PRIVATE_CONTEXT_GRAPH, '/_catalog');
-  return [...ids].sort();
+  // A bare root has no slash that could mean either owner/name or a subgraph.
+  // Keep its historical storage identity without creating an RDF declaration.
+  const legacyBareRoots = graphs.filter((graph) => isSafeIri(graph))
+    .map((graph) => graph.slice(PREFIX.length))
+    .filter((id) => id.length > 0 && !id.includes('/'));
+  return { declared: [...ids].sort(), legacyBareRoots };
+}
+
+/** Enumerate declared identities, never infer CG/subgraph ownership from a URI. */
+export async function listDeclaredContextGraphIds(store: TripleStore, options?: QueryOptions): Promise<string[]> {
+  return (await readContextGraphIds(store, options)).declared;
+}
+
+/** Preserve legacy bare-root discovery while adding complete declared IDs. */
+export async function listStoredContextGraphIds(store: TripleStore, options?: QueryOptions): Promise<string[]> {
+  const { declared, legacyBareRoots } = await readContextGraphIds(store, options);
+  return [...new Set([...declared, ...legacyBareRoots])].sort();
 }

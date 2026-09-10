@@ -243,7 +243,7 @@ export class ContextGraphMetaProjection {
   }
 
   async listDeclaredContextGraphIds(options: QueryOptions = {}): Promise<string[]> {
-    return new GraphManager(this.store).listContextGraphs(options);
+    return new GraphManager(this.store).listDeclaredContextGraphs(options);
   }
 
   private async listGraphsByPrefix(prefix: string, options: QueryOptions): Promise<string[]> {
