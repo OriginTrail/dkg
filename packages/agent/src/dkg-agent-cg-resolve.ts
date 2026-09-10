@@ -606,7 +606,7 @@ export async function resolveCuratorSyncPeer(
    */
   bootstrapHints: Map<string, string>,
   contextGraphId: string,
-  options: { signal?: AbortSignal; registryPageLimit?: number } = {},
+  options: { signal?: AbortSignal; registryLookup?: 'legacy' | 'bounded-first-page' } = {},
 ): Promise<SyncPeerResolution> {
   const approvedCuratorPeerId = bootstrapHints.get(contextGraphId);
   const fromHint = (): SyncPeerResolution => (approvedCuratorPeerId
@@ -658,12 +658,12 @@ export async function resolveCuratorSyncPeer(
     if (!resolved) {
       try {
         throwIfSyncAuthAborted(options.signal);
-        const peerId = options.registryPageLimit === undefined
+        const peerId = options.registryLookup !== 'bounded-first-page'
           ? (await agent.discovery.findAgents({ signal: options.signal })).find(
               (candidate) => candidate.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
             )?.peerId
           : (await readAgentPeerPage(agent.discovery, curatorIdentifier, {
-              limit: options.registryPageLimit,
+              limit: 1,
               signal: options.signal,
             })).peerIds[0];
         throwIfSyncAuthAborted(options.signal);
@@ -2227,7 +2227,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   public async resolveCuratorPeerId(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal; registryPageLimit?: number } = {},
+    options: { signal?: AbortSignal; registryLookup?: 'legacy' | 'bounded-first-page' } = {},
   ): Promise<string | undefined> {
     return (await resolveCuratorSyncPeer(
       this,

@@ -39,8 +39,11 @@ import { stripLiteral } from './dkg-agent-utils.js';
 
 export interface CuratorMetaRefreshOptions {
   signal?: AbortSignal;
-  /** Require bounded peer discovery if resolving a wallet curator through the registry. */
-  registryPageLimit?: number;
+  /** Optional caller-owned resolution policy for choosing the refresh peer. */
+  curatorPeerResolver?: (
+    contextGraphId: string,
+    signal?: AbortSignal,
+  ) => Promise<string | undefined>;
   /**
    * A curator peer whose authority was already established by the caller.
    * The join-approved path uses the authenticated notification sender so
@@ -93,7 +96,7 @@ interface CuratorMetaRefreshAgent {
   invalidateListContextGraphsCache(): void;
   resolveCuratorPeerId(
     contextGraphId: string,
-    options: CuratorMetaRefreshOptions,
+    options: { signal?: AbortSignal },
   ): Promise<string | undefined>;
   fetchSyncPages(
     ctx: OperationContext,
@@ -783,7 +786,9 @@ export async function runCuratorMetaRefresh(
 
   const ctx = createOperationContext('sync');
   const curatorPeerId = options.trustedCuratorPeerId
-    ?? await refreshAgent.resolveCuratorPeerId(contextGraphId, options);
+    ?? await (options.curatorPeerResolver
+      ? options.curatorPeerResolver(contextGraphId, options.signal)
+      : refreshAgent.resolveCuratorPeerId(contextGraphId, { signal: options.signal }));
   throwIfCuratorMetaRefreshAborted(options.signal);
   if (!curatorPeerId || curatorPeerId === refreshAgent.peerId) return false;
   return scheduleCuratorMetaRefresh(

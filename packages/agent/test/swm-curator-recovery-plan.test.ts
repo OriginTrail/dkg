@@ -346,18 +346,18 @@ describe('private SWM curator recovery planning', () => {
     const second = await agent.resolveCuratorPeerIdsForCg(contextGraphId, {
       maxPeerIds: 2,
       pagePeerIds: 1,
-      afterPeerId: first.nextPageAfterPeerId,
+      afterPeerId: first.rosterTraversal?.status === 'continue'
+        ? first.rosterTraversal.nextAfterPeerId
+        : undefined,
     });
 
     expect(first).toMatchObject({
       peerIds: ['peer-001'],
-      overflowed: true,
-      nextPageAfterPeerId: 'peer-001',
+      rosterTraversal: { status: 'continue', nextAfterPeerId: 'peer-001' },
     });
     expect(second).toMatchObject({
       peerIds: ['peer-002'],
-      overflowed: true,
-      nextPageAfterPeerId: 'peer-002',
+      rosterTraversal: { status: 'continue', nextAfterPeerId: 'peer-002' },
     });
     expect(calls).toEqual([
       { limit: 2, signal: undefined },

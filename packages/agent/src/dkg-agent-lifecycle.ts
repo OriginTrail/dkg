@@ -8,7 +8,10 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-import { readAgentPeerPage, validateAgentPeerPageRequest } from './agent-peer-discovery.js';
+import {
+  traverseBoundedCuratorRoster,
+  type BoundedCuratorRosterTraversal,
+} from './bounded-curator-roster-traversal.js';
 import { createHash } from 'node:crypto';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
@@ -7289,8 +7292,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     curatorIsLocal: boolean;
     legacyTripleResolved: boolean;
     lookupFailed?: boolean;
-    overflowed?: boolean;
-    nextPageAfterPeerId?: string;
+    rosterTraversal?: BoundedCuratorRosterTraversal;
   }> {
     const assertCurrent = (): void => {
       if (options.signal?.aborted || options.isCurrent?.() === false) {
@@ -7307,42 +7309,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const resolve = async (): Promise<{
         peerIds: string[];
         lookupFailed: boolean;
-        overflowed?: boolean;
-        nextPageAfterPeerId?: string;
+        rosterTraversal?: BoundedCuratorRosterTraversal;
       }> => {
         assertCurrent();
         try {
           if (options.maxPeerIds !== undefined) {
-            validateAgentPeerPageRequest({ limit: options.maxPeerIds, signal: options.signal });
-            const requestedPageSize = options.pagePeerIds ?? options.maxPeerIds;
-            validateAgentPeerPageRequest({ limit: requestedPageSize, signal: options.signal });
-            const pagePeerIds = Math.min(options.maxPeerIds, requestedPageSize);
-            const queryPage = (afterPeerId?: string) =>
-              readAgentPeerPage(this.discovery, structuralAgent, {
-                ...(afterPeerId !== undefined ? { afterPeerId } : {}),
-                limit: afterPeerId !== undefined ? pagePeerIds : options.maxPeerIds!,
+            const rosterTraversal = await traverseBoundedCuratorRoster(
+              this.discovery,
+              structuralAgent,
+              {
+                maxPeerIds: options.maxPeerIds,
+                pagePeerIds: options.pagePeerIds,
+                afterPeerId: options.afterPeerId,
                 signal: options.signal,
-              });
-            let pageStartedAtBeginning = options.afterPeerId === undefined;
-            let page = await queryPage(options.afterPeerId);
+              },
+            );
             assertCurrent();
-            if (options.afterPeerId !== undefined && page.peerIds.length === 0) {
-              pageStartedAtBeginning = true;
-              page = await queryPage();
-            }
-            assertCurrent();
-            // Only a complete first-page query can describe a whole roster.
-            // A tail page remains overflowed even if concurrent deletions made
-            // it short; it cannot authorize an absence proof for earlier peers.
-            const overflowed = !pageStartedAtBeginning || page.nextAfterPeerId !== null;
-            const bounded = page.peerIds.slice(0, overflowed ? pagePeerIds : options.maxPeerIds);
             return {
-              peerIds: bounded,
+              peerIds: rosterTraversal.peerIds,
               lookupFailed: false,
-              overflowed,
-              ...(overflowed && bounded[0]
-                ? { nextPageAfterPeerId: bounded[bounded.length - 1] }
-                : {}),
+              rosterTraversal,
             };
           }
 
@@ -7355,7 +7341,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             .filter((a) => a.agentAddress?.toLowerCase() === structuralAgent)
             .map((a) => a.peerId))]
             .sort((left, right) => left.localeCompare(right));
-          return { peerIds, lookupFailed: false, overflowed: false };
+          return { peerIds, lookupFailed: false };
         } catch {
           assertCurrent();
           return { peerIds: [], lookupFailed: true };
@@ -7365,11 +7351,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       assertCurrent();
       // A missing/broken bounded capability is a lookup failure, never an
       // invitation to invoke the legacy rich-profile fallback via refresh.
-      if (resolution.peerIds.length === 0 && !(options.maxPeerIds !== undefined && resolution.lookupFailed)) {
+      if (resolution.peerIds.length === 0
+        && resolution.rosterTraversal?.status !== 'cycle'
+        && !(options.maxPeerIds !== undefined && resolution.lookupFailed)) {
         assertCurrent();
         const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
           signal: options.signal,
-          ...(options.maxPeerIds !== undefined ? { registryPageLimit: 1 } : {}),
+          ...(options.maxPeerIds !== undefined
+            ? {
+                curatorPeerResolver: async (cgId: string, signal?: AbortSignal) => (
+                  await resolveCuratorSyncPeer(
+                    this,
+                    this.preferredSyncPeers,
+                    cgId,
+                    { signal, registryLookup: 'bounded-first-page' },
+                  )
+                ).peerId,
+              }
+            : {}),
         }).catch((error) => {
           assertCurrent();
           return false;
@@ -7389,9 +7388,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         curatorIsLocal: false,
         legacyTripleResolved: false,
         ...(resolution.lookupFailed ? { lookupFailed: true } : {}),
-        ...(resolution.overflowed ? { overflowed: true } : {}),
-        ...(resolution.nextPageAfterPeerId
-          ? { nextPageAfterPeerId: resolution.nextPageAfterPeerId }
+        ...(resolution.rosterTraversal
+          ? { rosterTraversal: resolution.rosterTraversal }
           : {}),
       };
     }

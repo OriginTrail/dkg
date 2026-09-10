@@ -5808,14 +5808,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
         curatorIsLocal: false,
         legacyTripleResolved: false,
         lookupFailed: true,
-        overflowed: false,
-        nextPageAfterPeerId: undefined,
       }));
     if (!isRecoveryCurrent()) return staleRecovery();
     const allResolvedCuratorPeerIds = [...new Set(curatorResolution.peerIds
       .filter((peerId) => peerId && peerId !== this.peerId))]
       .sort((left, right) => left.localeCompare(right));
-    const curatorRosterOverflow = curatorResolution.overflowed === true
+    const curatorRosterTraversal = 'rosterTraversal' in curatorResolution
+      ? curatorResolution.rosterTraversal
+      : undefined;
+    const curatorRosterOverflow = (curatorRosterTraversal !== undefined
+        && curatorRosterTraversal.status !== 'complete')
       || allResolvedCuratorPeerIds.length > DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX;
     if (curatorRosterOverflow) {
       this.log.warn(
@@ -5852,10 +5854,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         (overflowWindowStart + offset) % overflowTransportUniverse.length
       ]!,
     );
-    const resolvedCuratorPeerIds = curatorRosterOverflow
-      ? curatorResolution.nextPageAfterPeerId
-        ? allResolvedCuratorPeerIds
-        : overflowTransportPeerIds
+    const resolvedCuratorPeerIds = curatorRosterOverflow && allResolvedCuratorPeerIds.length === 0
+      ? overflowTransportPeerIds
       : allResolvedCuratorPeerIds;
     let legacyPreferredPeerId: string | undefined;
     if (resolutionSucceeded && !curatorResolution.curatorIsLocal
@@ -5880,12 +5880,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (resolutionSucceeded) {
       this.vmReconcileCuratorPeersByCg.delete(localCgId);
       this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
-    } else if (curatorResolution.nextPageAfterPeerId) {
+    } else if (curatorRosterTraversal?.status === 'continue') {
       this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
       this.vmReconcileCuratorPageCursorByCg.set(
         localCgId,
-        curatorResolution.nextPageAfterPeerId,
+        curatorRosterTraversal.nextAfterPeerId,
       );
+    } else if (curatorRosterTraversal?.status === 'cycle') {
+      // The recovery owner, not the page reader, decides when to restart. A
+      // cleared cursor makes the next scheduled recovery begin a fresh cycle.
+      this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
     }
     if (!curatorResolution.curatorIsLocal && curatorPeerIds.length > 0) {
       this.vmReconcileCuratorPeersByCg.delete(localCgId);

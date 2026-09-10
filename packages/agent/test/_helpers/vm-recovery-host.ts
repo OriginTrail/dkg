@@ -7,6 +7,7 @@ import type {
   PendingOrdinalRecoveryResult,
 } from '../../src/chain-reconciler.js';
 import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
+import type { BoundedCuratorRosterTraversal } from '../../src/bounded-curator-roster-traversal.js';
 import { DKGAgent } from '../../src/index.js';
 import type { ExactAssetSelection } from '../../src/sync/exact-assets.js';
 import type {
@@ -67,8 +68,7 @@ export interface VmRecoveryHostInternals {
     curatorIsLocal: boolean;
     legacyTripleResolved: boolean;
     lookupFailed?: boolean;
-    overflowed?: boolean;
-    nextPageAfterPeerId?: string;
+    rosterTraversal?: BoundedCuratorRosterTraversal;
   }>;
   ensurePeerConnected(peerId: string, options?: { signal?: AbortSignal }): Promise<void>;
   selectCatchupPeers(peers: TestPeerId[]): TestPeerId[];

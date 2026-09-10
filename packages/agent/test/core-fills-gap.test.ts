@@ -2769,8 +2769,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           peerIds: [peerId],
           curatorIsLocal: false,
           legacyTripleResolved: false,
-          overflowed: true,
-          nextPageAfterPeerId: peerId,
+          rosterTraversal: {
+            status: 'continue',
+            peerIds: [peerId],
+            nextAfterPeerId: peerId,
+          },
         };
       };
       (internals as any).ensurePeerConnected = async (peerId: string) => {

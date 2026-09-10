@@ -32,9 +32,13 @@ export function validateAgentPeerPageRequest(request: AgentPeerPageRequest): voi
 }
 
 /** Reject a broken provider contract before treating a page as registry evidence. */
-export function validateAgentPeerPage(page: AgentPeerPage, request: AgentPeerPageRequest): AgentPeerPage {
-  const peerIds = page.peerIds;
-  const nextAfterPeerId = page.nextAfterPeerId;
+export function validateAgentPeerPage(page: unknown, request: AgentPeerPageRequest): AgentPeerPage {
+  if (page === null || typeof page !== 'object' || Array.isArray(page)) {
+    throw new Error('Peer discovery returned an invalid page');
+  }
+  const record = page as Record<string, unknown>;
+  const peerIds = record.peerIds;
+  const nextAfterPeerId = record.nextAfterPeerId;
   if (!Array.isArray(peerIds) || peerIds.length > request.limit) {
     throw new Error('Peer discovery exceeded its page bound');
   }
@@ -45,6 +49,9 @@ export function validateAgentPeerPage(page: AgentPeerPage, request: AgentPeerPag
     }
     previous = peerId;
   }
+  if (nextAfterPeerId !== null && typeof nextAfterPeerId !== 'string') {
+    throw new Error('Peer discovery returned an invalid continuation');
+  }
   if (nextAfterPeerId !== null && (peerIds.length !== request.limit || nextAfterPeerId !== previous)) {
     throw new Error('Peer discovery returned an invalid continuation');
   }
@@ -53,7 +60,9 @@ export function validateAgentPeerPage(page: AgentPeerPage, request: AgentPeerPag
 }
 
 export async function readAgentPeerPage(
-  discovery: AgentPeerDiscovery,
+  discovery: {
+    findAgentPeerPageByAddress(agentAddress: string, request: AgentPeerPageRequest): Promise<unknown>;
+  },
   agentAddress: string,
   request: AgentPeerPageRequest,
 ): Promise<AgentPeerPage> {
