@@ -1,11 +1,11 @@
-export interface SelectedSwmMetaRetentionLimits {
+export interface SwmMetaRetentionLimits {
   maxRows: number;
   maxBytesEstimate: number;
   maxPrefixRows: number;
   maxPrefixBytesEstimate: number;
 }
 
-export interface SelectedSwmMetaRetentionReservation {
+export interface SwmMetaRetentionReservation {
   maxRows: number;
   maxBytesEstimate: number;
   /** Atomically consume this reservation while replacing the lease's prefix. */
@@ -13,15 +13,15 @@ export interface SelectedSwmMetaRetentionReservation {
   release(): void;
 }
 
-export interface SelectedSwmMetaRetentionLease {
+export interface SwmMetaRetentionLease {
   /** Reserve append capacity before a page fetch starts. */
-  reserve(): SelectedSwmMetaRetentionReservation;
+  reserve(): SwmMetaRetentionReservation;
   /** Atomically replace this lease's retained size after a fetched tail. */
   replace(rows: number, bytesEstimate: number): void;
   release(): void;
 }
 
-export class SelectedSwmMetaRetentionBudgetError extends Error {
+export class SwmMetaRetentionBudgetError extends Error {
   readonly code = 'SELECTED_SWM_META_RETENTION_LIMIT' as const;
 
   constructor(
@@ -29,22 +29,22 @@ export class SelectedSwmMetaRetentionBudgetError extends Error {
     readonly actual: number,
     readonly limit: number,
   ) {
-    super(`Selected SWM metadata retention ${dimension} ${actual} exceeds limit ${limit}`);
-    this.name = 'SelectedSwmMetaRetentionBudgetError';
+    super(`SWM metadata retention ${dimension} ${actual} exceeds limit ${limit}`);
+    this.name = 'SwmMetaRetentionBudgetError';
   }
 }
 
 /**
- * Process-local retained-prefix budget shared by overlapping selected calls.
+ * Process-local retained-prefix budget shared by overlapping ordinary and selected calls.
  *
  * A lease starts empty. `reserve()` atomically removes append capacity from the
- * process-wide pool before network I/O starts, so overlapping selected calls
+ * process-wide pool before network I/O starts, so overlapping ordinary and selected calls
  * cannot each observe and allocate the same free allowance. A reservation is
  * either committed into the lease's retained prefix or released on failure.
  */
-export function createSelectedSwmMetaRetentionBudget(
-  input: SelectedSwmMetaRetentionLimits,
-): { lease(): SelectedSwmMetaRetentionLease } {
+export function createSwmMetaRetentionBudget(
+  input: SwmMetaRetentionLimits,
+): { lease(): SwmMetaRetentionLease } {
   const limits = {
     maxRows: Math.max(0, Math.floor(input.maxRows)),
     maxBytesEstimate: Math.max(0, Math.floor(input.maxBytesEstimate)),
@@ -69,35 +69,35 @@ export function createSelectedSwmMetaRetentionBudget(
 
   const validateRetainedSize = (nextRows: number, nextBytesEstimate: number) => {
     if (!Number.isSafeInteger(nextRows) || nextRows < 0) {
-      throw new Error(`Invalid selected SWM metadata retained rows: ${nextRows}`);
+      throw new Error(`Invalid SWM metadata retained rows: ${nextRows}`);
     }
     if (!Number.isSafeInteger(nextBytesEstimate) || nextBytesEstimate < 0) {
       throw new Error(
-        `Invalid selected SWM metadata retained bytes estimate: ${nextBytesEstimate}`,
+        `Invalid SWM metadata retained bytes estimate: ${nextBytesEstimate}`,
       );
     }
   };
 
   return {
     lease() {
-      const id = Symbol('selected-swm-meta-retention');
+      const id = Symbol('swm-meta-retention');
       entries.set(id, { rows: 0, bytesEstimate: 0 });
       let released = false;
       const replace = (nextRows: number, nextBytesEstimate: number) => {
         if (released) {
-          throw new Error('Selected SWM metadata retention lease is released');
+          throw new Error('SWM metadata retention lease is released');
         }
         validateRetainedSize(nextRows, nextBytesEstimate);
         const current = entries.get(id) ?? { rows: 0, bytesEstimate: 0 };
         if (nextRows > limits.maxPrefixRows) {
-          throw new SelectedSwmMetaRetentionBudgetError(
+          throw new SwmMetaRetentionBudgetError(
             'rows',
             nextRows,
             limits.maxPrefixRows,
           );
         }
         if (nextBytesEstimate > limits.maxPrefixBytesEstimate) {
-          throw new SelectedSwmMetaRetentionBudgetError(
+          throw new SwmMetaRetentionBudgetError(
             'bytes',
             nextBytesEstimate,
             limits.maxPrefixBytesEstimate,
@@ -106,14 +106,14 @@ export function createSelectedSwmMetaRetentionBudget(
         const globalRows = rows - current.rows + nextRows;
         const globalBytes = bytesEstimate - current.bytesEstimate + nextBytesEstimate;
         if (globalRows + reservedRows > limits.maxRows) {
-          throw new SelectedSwmMetaRetentionBudgetError(
+          throw new SwmMetaRetentionBudgetError(
             'rows',
             globalRows + reservedRows,
             limits.maxRows,
           );
         }
         if (globalBytes + reservedBytesEstimate > limits.maxBytesEstimate) {
-          throw new SelectedSwmMetaRetentionBudgetError(
+          throw new SwmMetaRetentionBudgetError(
             'bytes',
             globalBytes + reservedBytesEstimate,
             limits.maxBytesEstimate,
@@ -126,7 +126,7 @@ export function createSelectedSwmMetaRetentionBudget(
       return {
         reserve() {
           if (released) {
-            throw new Error('Selected SWM metadata retention lease is released');
+            throw new Error('SWM metadata retention lease is released');
           }
           const current = entries.get(id) ?? { rows: 0, bytesEstimate: 0 };
           const reservationRows = Math.max(0, Math.min(
@@ -137,7 +137,7 @@ export function createSelectedSwmMetaRetentionBudget(
             limits.maxPrefixBytesEstimate - current.bytesEstimate,
             limits.maxBytesEstimate - bytesEstimate - reservedBytesEstimate,
           ));
-          const reservationId = Symbol('selected-swm-meta-reservation');
+          const reservationId = Symbol('swm-meta-reservation');
           reservations.set(reservationId, {
             owner: id,
             rows: reservationRows,
@@ -160,7 +160,7 @@ export function createSelectedSwmMetaRetentionBudget(
             maxBytesEstimate: reservationBytesEstimate,
             commitReplace(nextRows, nextBytesEstimate) {
               if (reservationReleased) {
-                throw new Error('Selected SWM metadata retention reservation is released');
+                throw new Error('SWM metadata retention reservation is released');
               }
               validateRetainedSize(nextRows, nextBytesEstimate);
               if (
@@ -168,7 +168,7 @@ export function createSelectedSwmMetaRetentionBudget(
                 || nextBytesEstimate - current.bytesEstimate > reservationBytesEstimate
               ) {
                 releaseReservation();
-                throw new SelectedSwmMetaRetentionBudgetError(
+                throw new SwmMetaRetentionBudgetError(
                   nextRows - current.rows > reservationRows ? 'rows' : 'bytes',
                   nextRows - current.rows > reservationRows
                     ? nextRows - current.rows

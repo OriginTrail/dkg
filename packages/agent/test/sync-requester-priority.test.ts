@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { createOperationContext, PROTOCOL_SYNC_CHANGELOG, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   runDurableSync,
@@ -13,12 +13,17 @@ import {
   withGlobalSyncBackpressure,
 } from '../src/sync/backpressure.js';
 import { syncPriorityClass } from '../src/sync/policy.js';
+import { SwmMetaTransferCoordinator } from '../src/sync/swm-meta-transfer-coordinator.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from
   './_helpers/swm-target-executor-session-fixture.js';
 
 const ctx = createOperationContext('sync');
 const noop = () => {};
+const metaTransfers: SwmMetaTransferCoordinator[] = [];
+afterEach(async () => {
+  for (const transfers of metaTransfers.splice(0)) await transfers.close();
+});
 
 function page(contextGraphId: string, phase: string) {
   return {
@@ -44,6 +49,7 @@ function durableContext(contextGraphIds: string[]) {
     }: DurableSyncFetchRequest) => page(contextGraphId, phase),
     processDurableBatchInWorker: async () => ({
       verifiedData: [], verifiedMeta: [], totalFetchedDataQuads: 0, totalFetchedMetaQuads: 0,
+      consumedUnpersistedMetaTriples: 0, verifiedPrivateOnlyResponses: 0,
       rejectedKcs: 0, emptyResponses: 1, metaOnlyResponses: 0, dataRejectedMissingMeta: 0,
     }),
     storeInsert: async () => {},
@@ -241,6 +247,8 @@ describe('requester per-CG priority admission', () => {
     let createTargetExecutorSession:
       | ReturnType<typeof createSwmTargetExecutorSessionFactoryForTest>
       | undefined;
+    const transfers = new SwmMetaTransferCoordinator();
+    metaTransfers.push(transfers);
     const agent = {
       config: { syncContextGraphPriorities: {} },
       store: {},
@@ -294,6 +302,7 @@ describe('requester per-CG priority admission', () => {
           createSwmTargetExecutorSessionFactoryForTest(agent as never);
         return createTargetExecutorSession();
       },
+      getSwmMetaTransfers: () => transfers,
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };

@@ -4,7 +4,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   getSyncCheckpointKey,
-  type SelectedSwmMetaRetentionScope,
+  type SwmMetaRetentionScope,
 } from './checkpoint/state.js';
 import { estimateQuadHeapBytes } from './memory-telemetry.js';
 import {
@@ -16,74 +16,74 @@ import type {
   SharedMemoryMetadataFetchRequest,
   SharedMemoryMetadataFetcher,
 } from './requester/shared-memory-sync.js';
-import type { SelectedSwmMetaRetentionLease } from './selected-swm-meta-budget.js';
+import type { SwmMetaRetentionLease } from './swm-meta-budget.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from './durable-session.js';
 
 /** Post-metadata continuation bound to one exact ordered manifest. */
-interface SelectedSwmSnapshotWalkState {
+interface SwmSnapshotWalkState {
   readonly orderedManifest: readonly PublicSnapshotMetadata[];
   readonly resolvedRefs: Set<string>;
   readonly suppressedMetadataRowsByRef: Map<string, readonly Quad[]>;
   expiresAtMs: number;
 }
 
-/** Exact metadata prefix retained only by one selected-provider transfer owner. */
-interface SelectedSwmMetaContinuationState {
+/** Exact metadata prefix retained only by one provider/mode transfer owner. */
+interface SwmMetaContinuationState {
   quads: Quad[];
   bytesEstimate: number;
   nextOffset: number;
   checkpointKey: string;
-  requesterScope: SelectedSwmMetaRetentionScope;
+  requesterScope: SwmMetaRetentionScope;
   /** Incremented whenever the responder restarts this prefix from offset zero. */
   generation: number;
   completed: boolean;
   /** Prefix expiry; terminal metadata has no prefix retention clock. */
   metadataExpiresAtMs: number;
   /** Independent continuation created only after metadata is complete. */
-  snapshotWalk?: SelectedSwmSnapshotWalkState;
-  retentionLease: SelectedSwmMetaRetentionLease;
+  snapshotWalk?: SwmSnapshotWalkState;
+  retentionLease: SwmMetaRetentionLease;
 }
 
-export interface SelectedSwmMetaFetcher {
+export interface SwmMetaFetcher {
   readonly strategy: SharedMemoryMetadataFetcher;
-  continuation(contextGraphId: string): SelectedSwmMetaContinuation;
+  continuation(contextGraphId: string): SwmMetaContinuation;
 }
 
-interface SelectedSwmMetaRetentionState {
+interface SwmMetaRetentionState {
   readonly retained: boolean;
   /** Earliest independent Context Graph prefix expiry. */
   readonly nextExpiryAtMs: number | undefined;
 }
 
-interface SelectedSwmMetaFetcherLifecycle {
+interface SwmMetaFetcherLifecycle {
   /** Release expired inactive prefixes while an outer peer operation is live. */
-  pruneExpiredPrefixes(): SelectedSwmMetaRetentionState;
+  pruneExpiredPrefixes(): SwmMetaRetentionState;
   /**
    * Drop terminal/empty state at an outer reconciler boundary and describe the
    * useful incomplete prefix that remains eligible for a later invocation.
    */
-  settleOuterInvocation(): SelectedSwmMetaRetentionState;
+  settleOuterInvocation(): SwmMetaRetentionState;
   cleanup(): void;
 }
 
-const selectedSwmMetaFetcherLifecycles = new WeakMap<
-SelectedSwmMetaFetcher,
-SelectedSwmMetaFetcherLifecycle
+const swmMetaFetcherLifecycles = new WeakMap<
+SwmMetaFetcher,
+SwmMetaFetcherLifecycle
 >();
 
 /**
- * One peer's complete retained-prefix lifecycle.
+ * One provider/mode transfer's complete retained-prefix lifecycle.
  *
- * The coordinator only registers these owners by peer. Serialization, outer
+ * The coordinator only registers these owners by provider/mode key. Serialization, outer
  * invocation boundaries, independent prefix expiry, failure cleanup, and
  * shutdown drain all remain behind this single API.
  */
-export class SelectedSwmMetaTransferOwner {
+export class SwmMetaTransferOwner {
   readonly #now: () => number;
 
   readonly #onIdle: (() => void) | undefined;
 
-  #fetcher: SelectedSwmMetaFetcher | undefined;
+  #fetcher: SwmMetaFetcher | undefined;
 
   #tail: Promise<void> = Promise.resolve();
 
@@ -104,8 +104,8 @@ export class SelectedSwmMetaTransferOwner {
   }
 
   run<T>(
-    createFetcher: () => SelectedSwmMetaFetcher,
-    operation: (fetcher: SelectedSwmMetaFetcher) => Promise<T>,
+    createFetcher: () => SwmMetaFetcher,
+    operation: (fetcher: SwmMetaFetcher) => Promise<T>,
   ): Promise<T> {
     if (this.#closed) return Promise.reject(this.#closedError());
     this.#pendingRuns += 1;
@@ -165,10 +165,10 @@ export class SelectedSwmMetaTransferOwner {
     this.#releaseFetcher();
   }
 
-  #lifecycle(fetcher: SelectedSwmMetaFetcher): SelectedSwmMetaFetcherLifecycle {
-    const lifecycle = selectedSwmMetaFetcherLifecycles.get(fetcher);
+  #lifecycle(fetcher: SwmMetaFetcher): SwmMetaFetcherLifecycle {
+    const lifecycle = swmMetaFetcherLifecycles.get(fetcher);
     if (!lifecycle) {
-      throw new Error('Selected SWM metadata owner received an unowned fetcher');
+      throw new Error('SWM metadata owner received an unowned fetcher');
     }
     return lifecycle;
   }
@@ -207,7 +207,7 @@ export class SelectedSwmMetaTransferOwner {
   }
 
   #closedError(): Error {
-    const error = new Error('Selected SWM metadata transfer owner is closed');
+    const error = new Error('SWM metadata transfer owner is closed');
     error.name = 'AbortError';
     return error;
   }
@@ -218,47 +218,47 @@ export class SelectedSwmMetaTransferOwner {
 }
 
 /** Immutable continuation evidence captured immediately after one SWM round. */
-export interface SelectedSwmMetaContinuation {
+export interface SwmMetaContinuation {
   readonly progress: number | undefined;
   readonly generation: number;
   readonly completed: boolean;
 }
 
-interface SelectedMetaPageFetchRequest {
+interface SwmMetaPageFetchRequest {
   readonly ctx: OperationContext;
   readonly remotePeerId: string;
   readonly contextGraphId: string;
   readonly graphUri: string;
   readonly deadline: number;
   readonly returnAcceptedPrefixOnRetryableTransportFailure: true;
-  readonly requesterScope: SelectedSwmMetaRetentionScope;
+  readonly requesterScope: SwmMetaRetentionScope;
   readonly maxAcceptedQuads: number;
   readonly maxAcceptedHeapBytesEstimate: number;
 }
 
 /**
- * Build the selected-only metadata strategy outside the generic SWM pipeline.
+ * Build a bounded metadata strategy shared by ordinary and selected SWM.
  *
  * It owns responder-session scoping, exact prefix retention, process-wide
  * reservations and the one bounded fresh-generation retry. The generic
  * requester sees only a normal metadata page plus a voluntary-yield bit.
  */
-export function createSelectedSwmMetaFetcher(options: {
+export function createSwmMetaFetcher(options: {
   readonly remotePeerId: string;
-  readonly requesterScope: SelectedSwmMetaRetentionScope;
-  readonly retentionBudget: { lease(): SelectedSwmMetaRetentionLease };
-  readonly fetchPage: (request: SelectedMetaPageFetchRequest) => Promise<SyncPageResult>;
+  readonly requesterScope: SwmMetaRetentionScope;
+  readonly retentionBudget: { lease(): SwmMetaRetentionLease };
+  readonly fetchPage: (request: SwmMetaPageFetchRequest) => Promise<SyncPageResult>;
   readonly deleteCheckpoint: (checkpointKey: string) => void;
   readonly now?: () => number;
   readonly retentionTtlMs?: number;
-}): SelectedSwmMetaFetcher {
-  const states = new Map<string, SelectedSwmMetaContinuationState>();
+}): SwmMetaFetcher {
+  const states = new Map<string, SwmMetaContinuationState>();
   const completedContextGraphs = new Set<string>();
   const activeContextGraphs = new Set<string>();
   const now = options.now ?? (() => Date.now());
   const retentionTtlMs = options.retentionTtlMs ?? DURABLE_DATA_SYNC_SESSION_TTL_MS;
   if (!Number.isSafeInteger(retentionTtlMs) || retentionTtlMs <= 0) {
-    throw new Error(`Invalid selected SWM metadata retention TTL: ${retentionTtlMs}`);
+    throw new Error(`Invalid SWM metadata retention TTL: ${retentionTtlMs}`);
   }
 
   const release = (
@@ -271,7 +271,7 @@ export function createSelectedSwmMetaFetcher(options: {
     state.retentionLease.release();
   };
 
-  const ensureState = (contextGraphId: string): SelectedSwmMetaContinuationState => {
+  const ensureState = (contextGraphId: string): SwmMetaContinuationState => {
     const existing = states.get(contextGraphId);
     if (existing) return existing;
     completedContextGraphs.delete(contextGraphId);
@@ -289,7 +289,7 @@ export function createSelectedSwmMetaFetcher(options: {
     // A prefix is coordinator-local. A checkpoint without that byte-identical
     // prefix cannot be resumed, even if a previous process left it behind.
     options.deleteCheckpoint(checkpointKey);
-    const state: SelectedSwmMetaContinuationState = {
+    const state: SwmMetaContinuationState = {
       quads: [],
       bytesEstimate: 0,
       nextOffset: 0,
@@ -304,13 +304,13 @@ export function createSelectedSwmMetaFetcher(options: {
     return state;
   };
 
-  const hasRetainedMetadataPrefix = (state: SelectedSwmMetaContinuationState): boolean => (
+  const hasRetainedMetadataPrefix = (state: SwmMetaContinuationState): boolean => (
     !state.completed
     && state.nextOffset > 0
     && state.quads.length > 0
   );
 
-  const hasIncompleteSnapshotWalk = (state: SelectedSwmMetaContinuationState): boolean => {
+  const hasIncompleteSnapshotWalk = (state: SwmMetaContinuationState): boolean => {
     const walk = state.snapshotWalk;
     return state.completed
       && walk !== undefined
@@ -318,12 +318,12 @@ export function createSelectedSwmMetaFetcher(options: {
       && walk.resolvedRefs.size < walk.orderedManifest.length;
   };
 
-  const hasRetainedContinuation = (state: SelectedSwmMetaContinuationState): boolean => (
+  const hasRetainedContinuation = (state: SwmMetaContinuationState): boolean => (
     hasRetainedMetadataPrefix(state) || hasIncompleteSnapshotWalk(state)
   );
 
   const retainedContinuationExpiry = (
-    state: SelectedSwmMetaContinuationState,
+    state: SwmMetaContinuationState,
   ): number | undefined => {
     if (hasRetainedMetadataPrefix(state)) return state.metadataExpiresAtMs;
     if (hasIncompleteSnapshotWalk(state)) return state.snapshotWalk?.expiresAtMs;
@@ -348,7 +348,7 @@ export function createSelectedSwmMetaFetcher(options: {
     }
   };
 
-  const retentionState = (): SelectedSwmMetaRetentionState => {
+  const retentionState = (): SwmMetaRetentionState => {
     const expiringInactiveStates = [...states.entries()]
       .filter(([contextGraphId, state]) => (
         !activeContextGraphs.has(contextGraphId)
@@ -367,10 +367,10 @@ export function createSelectedSwmMetaFetcher(options: {
 
   const fetchRetained = async (
     request: SharedMemoryMetadataFetchRequest,
-    state: SelectedSwmMetaContinuationState,
+    state: SwmMetaContinuationState,
     allowFreshRestartRetry: boolean,
   ): Promise<SyncPageResult> => {
-    // Reserve before yielding to transport. Overlapping selected invocations
+    // Reserve before yielding to transport. Overlapping invocations
     // therefore cannot both spend the same process-wide free allowance.
     const reservation = state.retentionLease.reserve();
     try {
@@ -560,7 +560,7 @@ export function createSelectedSwmMetaFetcher(options: {
     },
   };
 
-  const fetcher: SelectedSwmMetaFetcher = {
+  const fetcher: SwmMetaFetcher = {
     strategy,
     continuation: (contextGraphId) => {
       const state = states.get(contextGraphId);
@@ -571,7 +571,7 @@ export function createSelectedSwmMetaFetcher(options: {
       };
     },
   };
-  selectedSwmMetaFetcherLifecycles.set(fetcher, {
+  swmMetaFetcherLifecycles.set(fetcher, {
     pruneExpiredPrefixes() {
       pruneExpiredStates();
       return retentionState();

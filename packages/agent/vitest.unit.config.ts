@@ -115,8 +115,8 @@ export default defineConfig({
       "test/selected-swm-lifecycle-core.test.ts",
       "test/selected-swm-lifecycle-session.test.ts",
       "test/selected-swm-lifecycle-queue.test.ts",
-      "test/selected-swm-meta-transfer-coordinator.test.ts",
-      "test/selected-swm-meta-budget.test.ts",
+      "test/swm-meta-transfer-coordinator.test.ts",
+      "test/swm-meta-budget.test.ts",
       "test/legacy-sync-graph-candidate.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
       "test/sync-checkpoint-key.test.ts",
@@ -203,6 +203,7 @@ export default defineConfig({
       "test/swm-sender-key-stale-target.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/shared-memory-metadata-admission.test.ts",
+      "test/shared-memory-metadata-continuation.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count
       // gate that keeps it self-healing, and the digest binding that makes an

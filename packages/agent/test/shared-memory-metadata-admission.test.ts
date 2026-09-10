@@ -216,14 +216,32 @@ describe('shared-memory metadata protocol admission', () => {
     for (const row of extra) expect(descriptor.metadataQuads).not.toContainEqual(row);
   });
 
-  it('preserves legacy members named like actual protocol records without admitting misplaced ownership controls', () => {
+  it.each(['head', 'public-slice'])('hydrates a legacy root that is also an actual %s record without trusting injected ownership', async role => {
     const share = swmFixtures(CG).share({ ual: UAL, version: 1, operationId: 'modern-op', marker: 'modern' });
-    const extra = [
-      q(OP, `${DKG}rootEntity`, share.headSubject),
-      q(share.headSubject, `${DKG}workspaceOwner`, '"attacker"'),
+    const sliceSubject = `urn:dkg:public-stage:${CG}:_:legacy-op:urn%3Adata%3Aallowed`;
+    const slice = [
+      q(sliceSubject, `${DKG}contextGraphId`, `"${CG}"`),
+      q(sliceSubject, `${DKG}shareOperationId`, '"legacy-op"'),
+      q(sliceSubject, `${DKG}publicSliceRootEntity`, ROOT),
+      q(sliceSubject, `${DKG}publicQuadsDigest`, '"sha256:legacy"'),
+      q(sliceSubject, `${DKG}publicQuadsCount`, '"1"'),
     ];
-    const valid = [...legacy(), ...share.meta];
-    expect(projectMetadata([...valid, ...extra], contextScope(CG)).metadata).toEqual([...valid, extra[0]]);
+    const root = role === 'head' ? share.headSubject : sliceSubject;
+    const member = q(OP, `${DKG}rootEntity`, root);
+    const attacker = q(root, `${DKG}workspaceOwner`, '"attacker"');
+    const valid = [...legacy(), ...(role === 'head' ? share.meta : slice), member];
+    const input = [...valid, attacker];
+    const model = projectMetadata(input, contextScope(CG));
+    expect(model.metadata).toEqual(valid);
+    expect(model.legacyRoots.get(contextGraphSharedMemoryUri(CG))?.has(root)).toBe(true);
+    const data = [q(root, 'urn:data:name', '"record subject is user data too"', contextGraphSharedMemoryUri(CG))];
+    const worker = new SyncVerifyWorker(); workers.push(worker);
+    const result = await worker.processSharedMemoryBatch(data, input, CG);
+    expect(result.verifiedData).toEqual(data);
+    expect(result.verifiedMeta).toEqual(valid);
+    expect(result.entityCreators).toEqual([ROOT, root].map(entity => ({
+      dataGraph: data[0].graph, entity, creator: 'peer-source',
+    })));
   });
 
   it('retains a rejected-head diagnostic so descriptor parsing fails closed', () => {

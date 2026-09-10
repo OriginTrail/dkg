@@ -251,7 +251,7 @@ export interface SharedMemorySyncSummary {
    * note on `SharedMemorySyncDiagnostics.snapshotPlaneIncomplete`.
    */
   snapshotPlaneIncomplete: number;
-  /** Selected-only metadata deadline yields whose exact prefixes were retained. */
+  /** Metadata deadline yields whose exact prefixes were retained. */
   metadataContinuationYields: number;
   /** Coherent snapshot coverage for this round; reduced only by {@link selectSwmSnapshotCoverage}. */
   swmCoverage?: SwmSnapshotCoverage;
@@ -322,8 +322,8 @@ type PublicSnapshotWalkSource =
 /**
  * Strategy boundary for metadata retrieval.
  *
- * The default requester performs one ordinary page fetch. Selected RFC-64 SWM
- * injects a strategy that owns its exceptional retained-prefix/session state;
+ * The agent injects a strategy that owns bounded retained-prefix/session state
+ * for both ordinary and selected RFC-64 SWM;
  * the canonical SWM pipeline only consumes the resulting page and yield bit.
  */
 export interface SharedMemoryMetadataFetcher {
@@ -394,7 +394,7 @@ export interface SharedMemorySyncSnapshotEvidencePolicy {
 
 /** The only two valid requester algorithm modes. */
 export type SharedMemorySyncMode = Readonly<
-  | { kind: 'ordinary' }
+  | { kind: 'ordinary'; metadataFetcher?: SharedMemoryMetadataFetcher }
   | {
     kind: 'selected-recovery';
     recoveryGuard: RecoveryExecutionGuard;
@@ -517,9 +517,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   const snapshotEvidencePolicy = context.mode.kind === 'selected-recovery'
     ? context.mode.snapshotEvidencePolicy
     : undefined;
-  const metadataFetcher = context.mode.kind === 'selected-recovery'
-    ? context.mode.metadataFetcher
-    : undefined;
+  const metadataFetcher = context.mode.metadataFetcher;
   const snapshotRecoveryOrder = context.mode.kind === 'selected-recovery'
     ? context.mode.snapshotRecoveryOrder ?? 'manifest'
     : 'manifest';

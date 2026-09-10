@@ -2503,10 +2503,10 @@ export class DKGAgent extends DKGAgentBase {
     } finally {
       this.finalizationRuntime.markStopped();
       // Node stop aborts active transport first; now drain the peer-serial
-      // owners and release every retained selected-SWM prefix/checkpoint before
+      // owners and release every retained SWM prefix/checkpoint before
       // the backing store closes.
       try {
-        await this.closeSelectedSwmMetaTransfers();
+        await this.closeSwmMetaTransfers();
       } finally {
         this.selectedSwmBootstrapAdmission.clearAll();
       }

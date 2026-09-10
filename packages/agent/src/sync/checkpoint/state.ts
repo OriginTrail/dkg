@@ -19,20 +19,23 @@ export {
 };
 
 /**
- * Requester-only namespace for one selected-SWM transfer owner.
+ * Requester-only namespace for one transfer owner.
  *
  * The suffix is deliberately owner-unique. One agent-local peer coordinator
- * serializes overlapping selected calls and may retain that owner's exact
+ * serializes overlapping calls in each mode and may retain that owner's exact
  * prefix across bounded outer reconciler invocations; unrelated owners can
  * never share its cursor/session.
  */
 export type SyncCheckpointScope =
   | `selected-swm-meta:${string}`
+  | `ordinary-swm-meta:${string}`
   | `durable-recovery-meta:${string}`
   | `challenge-exact:${string}`;
 
-/** Runtime-distinct namespace owned only by retained selected-SWM metadata. */
-export type SelectedSwmMetaRetentionScope = `selected-swm-meta:retained:${string}`;
+/** Runtime-distinct namespaces for retained SWM metadata owners. */
+export type SwmMetaRetentionScope =
+  | `selected-swm-meta:retained:${string}`
+  | `ordinary-swm-meta:retained:${string}`;
 
 export interface SyncCheckpointStore {
   /**

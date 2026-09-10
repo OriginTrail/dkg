@@ -46,7 +46,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
         selectedSwmPriority: true,
         recoveryTargets: plan.targets,
       });
-      await harness.agent.closeSelectedSwmMetaTransfers();
+      await harness.agent.closeSwmMetaTransfers();
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         recoveryTargets: plan.targets,
@@ -468,7 +468,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       const selectedSummary = selectedResult.shared;
       expect(ordinarySummary).not.toBe(selectedSummary);
       expect(harness.probes.metaFetches()).toBe(3);
-      expect(harness.probes.metaRequesterScopes[0]).toBeUndefined();
+      expect(harness.probes.metaRequesterScopes[0]).toMatch(/^ordinary-swm-meta:retained:\d+$/);
       expect(harness.probes.metaRequesterScopes[1]).toMatch(/^selected-swm-meta:retained:\d+$/);
       expect(harness.probes.metaRequesterScopes[2]).toBe(
         harness.probes.metaRequesterScopes[1],
