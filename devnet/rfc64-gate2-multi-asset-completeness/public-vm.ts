@@ -3,7 +3,6 @@ import { join, resolve } from 'node:path';
 import process from 'node:process';
 
 import {
-  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
   MemoryLayer,
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
@@ -38,7 +37,7 @@ import {
 } from './two-agent-harness.ts';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../..');
-const DEFAULT_ARTIFACT = join(import.meta.dirname, 'artifacts/m2-public-vm-result.json');
+const DEFAULT_ARTIFACT = join(import.meta.dirname, 'artifacts/public-finalized-catalog-result.json');
 const NETWORK_ID = 'otp:20430';
 const CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/m2-public-vm-process';
@@ -55,7 +54,6 @@ const KA_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR_ADDRESS}/${KA_NUMBER}`;
 const ASSERTION_VERSION = '1';
 const ASSERTION_ROOT =
   '0x8d7a7be6029c98db1a7300bf47008c90084d5de4a3b97a68c043c0ea4773609f';
-const POLICY_DIGEST = `0x${'cd'.repeat(32)}`;
 const PROJECTION_NQUADS =
   '<https://example.org/alice> <https://schema.org/age> '
     + '"42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
@@ -65,31 +63,7 @@ const DEPLOYMENT = Object.freeze({
   assertedAtChainId: '20430',
   assertedAtKav10Address: KAV10,
 });
-const POLICY = Object.freeze({
-  networkId: NETWORK_ID,
-  contextGraphId: CONTEXT_GRAPH_ID,
-  governanceChainId: '20430',
-  governanceContractAddress: CG_STORAGE,
-  ownershipTransitionDigest: null,
-  era: '0',
-  version: '0',
-  previousPolicyDigest: null,
-  accessPolicy: 0,
-  publishPolicy: 1,
-  publishAuthority: null,
-  publishAuthorityAccountId: '0',
-  projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
-  administrativeDelegationDigest: null,
-  source: {
-    kind: 'finalized-chain',
-    chainId: '20430',
-    contractAddress: CG_STORAGE,
-    blockNumber: '120',
-    blockHash: `0x${'76'.repeat(32)}`,
-  },
-  effectiveAt: '1773900000000',
-  issuedAt: '1773900000000',
-});
+
 
 await execute();
 
@@ -150,37 +124,42 @@ async function execute(): Promise<void> {
     );
     await connectGate2HarnessAgentsV1(author, receiver, authorReady, receiverReady, 'm2-public-vm');
 
-    const acceptedSnapshot = { policy: POLICY, policyDigest: POLICY_DIGEST, roster: null };
-    const [authorPolicy, receiverPolicy] = await Promise.all([
-      author.request(
-        'acceptPolicySnapshot',
-        'author-finalized-policy-v1',
-        'operation-completed',
-        acceptedSnapshot,
-      ),
-      receiver.request(
-        'acceptPolicySnapshot',
-        'receiver-finalized-policy-v1',
-        'operation-completed',
-        acceptedSnapshot,
-      ),
-    ]);
-    exact(outputRecord(authorPolicy, 'author policy').policyDigest, POLICY_DIGEST, 'author policy');
-    exact(
-      outputRecord(receiverPolicy, 'receiver policy').policyDigest,
-      POLICY_DIGEST,
-      'receiver policy',
-    );
+    // Startup has already installed release-native authority from the chain
+    // event. Reuse that exact policy instead of overwriting its lineage with a
+    // hardcoded genesis policy and an unrelated digest.
+    const receiverPolicy = outputRecord(await receiver.request(
+      'reconcileCatalogAccessAuthority',
+      'receiver-finalized-policy-v1',
+      'operation-completed',
+      { contextGraphId: CONTEXT_GRAPH_ID },
+    ), 'receiver policy');
+    const policy = record(receiverPolicy.policy, 'receiver policy payload');
+    const policyDigest = digest(receiverPolicy.policyDigest, 'receiver policy digest');
+    exact(record(policy.source, 'policy source').kind, 'finalized-chain', 'policy source');
+    exact(policy.networkId, NETWORK_ID, 'policy network');
+    exact(policy.contextGraphId, CONTEXT_GRAPH_ID, 'policy context graph');
+    exact(policy.governanceChainId, '20430', 'policy chain');
+    exact(policy.governanceContractAddress, CG_STORAGE, 'policy governance contract');
+    exact(policy.accessPolicy, 0, 'public access policy');
+    exact(receiverPolicy.roster, null, 'public policy roster');
+    const authorPolicy = outputRecord(await author.request(
+      'acceptPolicySnapshot',
+      'author-finalized-policy-v1',
+      'operation-completed',
+      { policy, policyDigest, roster: null },
+    ), 'author policy');
+    exact(authorPolicy.policyDigest, policyDigest, 'author policy');
 
     const scope = Object.freeze({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
       governanceChainId: '20430',
       governanceContractAddress: CG_STORAGE,
-      ownershipTransitionDigest: null,
+      ownershipTransitionDigest: policy.ownershipTransitionDigest === null
+        ? null : digest(policy.ownershipTransitionDigest, 'policy ownership transition'),
       subGraphName: null,
       authorAddress: AUTHOR_ADDRESS,
-      era: '0',
+      era: string(policy.era, 'policy era'),
       bucketCount: '1',
     });
     const genesis = outputRecord(await author.request(
@@ -273,6 +252,18 @@ async function execute(): Promise<void> {
     );
     exact(numericId.output, ON_CHAIN_CONTEXT_GRAPH_ID, 'event-derived numeric context graph id');
 
+    const swmGraph = contextGraphLayerUri(
+      CONTEXT_GRAPH_ID, MemoryLayer.SharedWorkingMemory, AUTHOR_ADDRESS, Number(KA_NUMBER),
+    );
+    const swm = outputRecord(await receiver.request(
+      'semanticGraphReadback',
+      'public-finalized-catalog-swm-v1',
+      'operation-completed',
+      { swmGraph },
+    ), 'SWM readback');
+    exact(swm.activatedQuadCount, 2, 'SWM triple count');
+    exact(swm.projectionNQuads, PROJECTION_NQUADS, 'exact SWM projection');
+
     const vmGraph = contextGraphLayerUri(
       CONTEXT_GRAPH_ID,
       MemoryLayer.VerifiableMemory,
@@ -286,21 +277,11 @@ async function execute(): Promise<void> {
       'operation-completed',
       { vmGraph, metaGraph, ual: KA_UAL },
     ), 'VM readback');
-    exact(vm.tripleCount, 2, 'VM triple count');
-    exact(vm.projectionNQuads, PROJECTION_NQUADS, 'exact VM projection');
-    const metadata = array(vm.metadataBindings, 'VM metadata').map((row, index) =>
-      record(row, `VM metadata row ${index}`));
-    metadataObject(metadata, 'status', '"confirmed"');
-    metadataObject(
-      metadata,
-      'batchId',
-      `"${KA_ID}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
-    );
-    metadataObject(metadata, 'materializedVersion', '"123:0"');
-    requireCondition(
-      metadata.every((row) => !string(row.p, 'metadata predicate').endsWith('transactionHash')),
-      'finalized VM metadata contains no synthetic transaction hash',
-    );
+    // Public catalog synchronization verifies finalized policy while retaining
+    // SWM. VM materialization belongs to the separate chain recovery path.
+    exact(vm.tripleCount, 0, 'public catalog must not manufacture VM rows');
+    const metadata = array(vm.metadataBindings, 'VM metadata');
+    exact(metadata.length, 0, 'public catalog must not manufacture confirmed VM metadata');
 
     exact(terminalFailure.output, null, 'receiver terminal failure');
 
@@ -319,7 +300,7 @@ async function execute(): Promise<void> {
     );
 
     const artifact = Object.freeze({
-      gate: 'OT-RFC-64 M2 public finalized VM separate-process proof',
+      gate: 'OT-RFC-64 public catalog finalized-policy separate-process proof',
       status: 'PASS',
       repository: { testedHeadCommit: headAfter, cleanBeforeAndAfter: true },
       processes: {
@@ -329,7 +310,7 @@ async function execute(): Promise<void> {
         authorPeerId: authorReady.peerId,
         receiverPeerId: receiverReady.peerId,
       },
-      policy: { digest: POLICY_DIGEST, source: 'finalized-chain' },
+      policy: { digest: policyDigest, source: 'finalized-chain' },
       chain: {
         numericContextGraphId: numericId.output,
         finalizedBlockNumber: '123',
@@ -340,6 +321,11 @@ async function execute(): Promise<void> {
         appliedInventoryDigest: applied.appliedInventoryDigest,
         inventoryRowCount: applied.inventoryRowCount,
       },
+      sharedWorkingMemory: {
+        graph: swmGraph,
+        tripleCount: swm.activatedQuadCount,
+        exactProjection: swm.projectionNQuads,
+      },
       verifiableMemory: {
         graph: vmGraph,
         tripleCount: vm.tripleCount,
@@ -348,13 +334,14 @@ async function execute(): Promise<void> {
       },
       runtimeBuildManifestDigest: launchReceipt.manifest.manifestDigest,
     });
-    const artifactPath = process.env.DKG_RFC64_M2_PUBLIC_VM_ARTIFACT ?? DEFAULT_ARTIFACT;
+    const artifactPath = process.env.DKG_RFC64_PUBLIC_FINALIZED_CATALOG_ARTIFACT
+      ?? process.env.DKG_RFC64_M2_PUBLIC_VM_ARTIFACT ?? DEFAULT_ARTIFACT;
     const publication = atomicWriteExactBytes(
       artifactPath,
       new TextEncoder().encode(canonicalDocument(artifact as unknown as CanonicalValue)),
     );
     process.stdout.write(
-      `[rfc64-m2-public-vm] PASS artifact=${artifactPath} sha256=${publication.sha256}\n`,
+      `[rfc64-public-finalized-catalog] PASS artifact=${artifactPath} sha256=${publication.sha256}\n`,
     );
     operationFailed = false;
   } catch (error) {
@@ -369,7 +356,7 @@ async function execute(): Promise<void> {
       }),
       reportSecondaryFailure: (primary, secondary) => {
         process.stderr.write(
-          `[rfc64-m2-public-vm] cleanup failure after ${String(primary)}: ${String(secondary)}\n`,
+          `[rfc64-public-finalized-catalog] cleanup failure after ${String(primary)}: ${String(secondary)}\n`,
         );
       },
     });
@@ -445,17 +432,6 @@ function stagedHead(output: Record<string, unknown>, label: string): Record<stri
       `${label} signature variant digest`,
     ),
   };
-}
-
-function metadataObject(
-  rows: readonly Record<string, unknown>[],
-  predicateSuffix: string,
-  expectedObject: string,
-): void {
-  const matching = rows.filter((row) =>
-    string(row.p, `metadata ${predicateSuffix} predicate`).endsWith(predicateSuffix));
-  exact(matching.length, 1, `metadata ${predicateSuffix} row count`);
-  exact(matching[0]!.o, expectedObject, `metadata ${predicateSuffix} object`);
 }
 
 function executedManifest(event: Gate2AgentEvent, label: string): Gate2ExecutedRuntimeManifestV1 {

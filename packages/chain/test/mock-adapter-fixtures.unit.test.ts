@@ -11,8 +11,8 @@ describe('MockChainAdapter explicit fixture seams', () => {
   ] as const)('provides no finalized EVM evidence for the %s adapter', async (_name, adapter: ChainAdapter) => {
     // The optional capability must fail closed for local state: callers cannot
     // mistake a fixture or chain-disabled node for a finalized read source.
-    const snapshot = await adapter.createFinalizedEvmSnapshotScope?.('rfc64') ?? null;
-    expect(snapshot).toBeNull();
+    const binding = await adapter.createFinalizedEvmReadBinding('rfc64');
+    expect(binding).toBeNull();
   });
 
   it('seeds the first numeric context graph id through immutable fixture setup', async () => {

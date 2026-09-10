@@ -137,16 +137,6 @@ export async function startFinalizedVmHarnessRuntimeV1(
     publishPolicy: 1,
   } satisfies FinalizedVmLoopbackFixtureConfigV1);
   const rpcFixture = createFinalizedVmLoopbackRpcV1(fixture);
-  const chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
-  const created = await chainAdapter.createOnChainContextGraph({
-    accessPolicy: config.accessPolicy,
-    publishPolicy: 1,
-    nameHash: config.nameHash,
-  });
-  if (created.contextGraphId.toString() !== config.onChainContextGraphId) {
-    throw new Error('mock chain created a different numeric context graph id');
-  }
-
   let activeServer: Server | undefined;
   const server = createServer(async (request, response) => {
     try {
@@ -190,9 +180,25 @@ export async function startFinalizedVmHarnessRuntimeV1(
     await closeServer(server);
     throw new Error('finalized VM JSON-RPC server has no address');
   }
+  const rpcUrl = `http://127.0.0.1:${address.port}`;
+  let chainAdapter: FinalizedVmLoopbackMockChainAdapterV1;
+  try {
+    chainAdapter = new FinalizedVmLoopbackMockChainAdapterV1(fixture, rpcUrl);
+    const created = await chainAdapter.createOnChainContextGraph({
+      accessPolicy: config.accessPolicy,
+      publishPolicy: 1,
+      nameHash: config.nameHash,
+    });
+    if (created.contextGraphId.toString() !== config.onChainContextGraphId) {
+      throw new Error('mock chain created a different numeric context graph id');
+    }
+  } catch (error) {
+    await closeServer(server);
+    throw error;
+  }
   return Object.freeze({
     chainAdapter,
-    rpcUrl: `http://127.0.0.1:${address.port}`,
+    rpcUrl,
     close: async () => {
       const current = activeServer;
       activeServer = undefined;

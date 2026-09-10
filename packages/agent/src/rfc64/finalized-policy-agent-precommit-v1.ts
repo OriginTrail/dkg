@@ -12,7 +12,7 @@ import {
   type EvmAddressV1,
   type MemberRosterV1,
 } from '@origintrail-official/dkg-core';
-import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
+import type { FinalizedEvmReadBindingV1, StrictCurrentFinalizedEvmSnapshotScopeV1 } from '@origintrail-official/dkg-chain';
 
 import {
   assertAcceptedRfc64CatalogAuthorMembershipV1,
@@ -30,13 +30,10 @@ import type {
 export interface Rfc64FinalizedPolicyAgentPrecommitResolutionOptionsV1 {
   readonly acceptedPolicySnapshotForCatalogScope:
     (scope: Readonly<AuthorCatalogScopeV1>) => AcceptedRfc64CatalogAccessSnapshotV1;
-  readonly createFinalizedSnapshotScope:
-    (() => StrictCurrentFinalizedEvmSnapshotScopeV1
-      | Promise<StrictCurrentFinalizedEvmSnapshotScopeV1 | null>
-      | null) | null;
+  readonly createFinalizedReadBinding:
+    () => Promise<Readonly<FinalizedEvmReadBindingV1> | null>;
   readonly getOnChainContextGraphId:
     (contextGraphId: ContextGraphIdV1, signal: AbortSignal) => Promise<string | null>;
-  readonly getEvmChainId: () => Promise<bigint>;
 }
 
 export interface Rfc64FinalizedPolicyAgentPrecommitOptionsV1
@@ -125,20 +122,18 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
   ) {
     throw new Error('RFC-64 finalized precommit source differs from its governance binding');
   }
-  const snapshot = await options.createFinalizedSnapshotScope?.() ?? null;
-  if (snapshot === null) {
-    throw new Error('RFC-64 finalized precommit requires trusted RPC configuration');
-  }
-
-  const [untrustedContextGraphId, liveChainId] = await Promise.all([
+  const [binding, untrustedContextGraphId] = await Promise.all([
+    options.createFinalizedReadBinding(),
     options.getOnChainContextGraphId(plan.catalogScope.contextGraphId, signal),
-    options.getEvmChainId(),
   ]);
   signal.throwIfAborted();
+  if (binding === null) {
+    throw new Error('RFC-64 finalized precommit requires trusted RPC configuration');
+  }
   if (untrustedContextGraphId === null) {
     throw new Error('RFC-64 finalized precommit could not resolve the numeric context graph id');
   }
-  if (liveChainId.toString() !== chainId) {
+  if (binding.chainId !== chainId) {
     throw new Error('RFC-64 finalized precommit policy differs from the configured chain id');
   }
   assertCanonicalDecimalU256(
@@ -153,7 +148,7 @@ export async function resolveRfc64FinalizedPolicyAgentPrecommitV1(
     chainId,
     contextGraphStorageAddress,
     onChainContextGraphId: untrustedContextGraphId,
-    snapshot,
+    snapshot: binding.snapshot,
   });
 }
 

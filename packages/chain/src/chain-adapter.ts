@@ -1,7 +1,14 @@
 import type { ethers } from 'ethers';
+import type { ChainIdV1 } from '@origintrail-official/dkg-core';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission.js';
 import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from './current-finalized-evm-snapshot.js';
+
+/** Chain identity and strict snapshot access resolved together by one adapter. */
+export interface FinalizedEvmReadBindingV1 {
+  readonly chainId: ChainIdV1;
+  readonly snapshot: StrictCurrentFinalizedEvmSnapshotScopeV1;
+}
 
 /**
  * The Publishing-Conviction-Account read methods the funded-wallet selector
@@ -1206,10 +1213,10 @@ export interface ChainAdapter {
    */
   drainRpcUsage?(): RpcUsageWindow;
 
-  /** Adapter-owned strict finalized-read scope; absent on non-EVM adapters. */
-  createFinalizedEvmSnapshotScope?(
+  /** Adapter-owned finalized reads; null when the adapter has no such capability. */
+  createFinalizedEvmReadBinding(
     owner: FinalizedChainReadOwnerV1,
-  ): Promise<StrictCurrentFinalizedEvmSnapshotScopeV1 | null>;
+  ): Promise<Readonly<FinalizedEvmReadBindingV1> | null>;
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;

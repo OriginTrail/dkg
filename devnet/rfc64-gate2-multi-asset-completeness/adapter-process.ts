@@ -410,6 +410,16 @@ async function handle(command: Command): Promise<void> {
       emitOperationResult(command, accepted);
       return;
     }
+    case 'reconcileCatalogAccessAuthority': {
+      const input = plainRecord(command.input, 'reconcileCatalogAccessAuthority input');
+      const contextGraphId = requiredString(input.contextGraphId, 'contextGraphId');
+      assertContextGraphIdV1(contextGraphId);
+      await currentAgent.whenRfc64CatalogResponsibilitiesIdleV1();
+      const accepted = await currentAgent.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+      if (accepted === null) throw new Error('Harness could not resolve current catalog authority');
+      emitOperationResult(command, accepted);
+      return;
+    }
     case 'publishGenesis': {
       requireRole('author');
       const output = await currentAgent.publishOpenAuthorCatalogGenesisV1(

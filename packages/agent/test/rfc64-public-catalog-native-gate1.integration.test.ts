@@ -2334,7 +2334,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       ),
     );
     const getOnChainContextGraphId = vi.fn(async () => '14');
-    const getEvmChainId = vi.fn(async () => 20_430n);
+    const createFinalizedReadBinding = vi.fn(async () => null);
     const getKnowledgeAssetStorageAddress = vi.fn(async () => KAV10);
     const policy = Object.freeze({
       networkId: NETWORK_ID,
@@ -2367,9 +2367,8 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
         policyDigest: POLICY_DIGEST,
         roster: null,
       }),
-      createFinalizedSnapshotScope: null,
       getOnChainContextGraphId,
-      getEvmChainId,
+      createFinalizedReadBinding,
       getKnowledgeAssetStorageAddress,
       getKnowledgeAssetsLifecycleAddress: async () => KAV10,
       store: fixture.receiverStore,
@@ -2387,8 +2386,8 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       message: expect.stringContaining('catalog applied-head precommit rejected'),
     });
 
-    expect(getOnChainContextGraphId).not.toHaveBeenCalled();
-    expect(getEvmChainId).not.toHaveBeenCalled();
+    expect(getOnChainContextGraphId).toHaveBeenCalledOnce();
+    expect(createFinalizedReadBinding).toHaveBeenCalledOnce();
     expect(getKnowledgeAssetStorageAddress).not.toHaveBeenCalled();
     expect(compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(

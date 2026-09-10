@@ -39,7 +39,7 @@ import type {
 } from './chain-adapter.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission.js';
-import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from './current-finalized-evm-snapshot.js';
+import type { FinalizedEvmReadBindingV1 } from './chain-adapter.js';
 import {
   NoEligibleContextGraphError,
   NoEligibleKnowledgeCollectionError,
@@ -267,9 +267,9 @@ export class MockChainAdapter implements ChainAdapter {
     return [];
   }
 
-  async createFinalizedEvmSnapshotScope(
+  async createFinalizedEvmReadBinding(
     _owner: FinalizedChainReadOwnerV1,
-  ): Promise<StrictCurrentFinalizedEvmSnapshotScopeV1 | null> {
+  ): Promise<Readonly<FinalizedEvmReadBindingV1> | null> {
     return null;
   }
 

@@ -77,8 +77,8 @@ describe('RFC-64 finalized VM precommit on a shipped RPC pool', () => {
     // exercised through the production adapter boundary.
     const precommit = createRfc64FinalizedVmAgentPrecommitV1(
       rfc64FinalizedVmPrecommitOptions({
-        createFinalizedSnapshotScope: () =>
-          adapter.createFinalizedEvmSnapshotScope('rfc64'),
+        createFinalizedReadBinding: () =>
+          adapter.createFinalizedEvmReadBinding('rfc64'),
       }),
     );
 

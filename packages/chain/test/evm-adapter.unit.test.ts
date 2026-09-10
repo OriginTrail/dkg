@@ -1261,9 +1261,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }));
     const getEvmChainId = vi.spyOn(a, 'getEvmChainId').mockResolvedValue(31337n);
 
-    const scope = await a.createFinalizedEvmSnapshotScope('rfc64');
+    const binding = await a.createFinalizedEvmReadBinding('rfc64');
 
-    expect(scope).toEqual(expect.any(Function));
+    expect(binding).toEqual({ chainId: '31337', snapshot: expect.any(Function) });
+    expect(Object.isFrozen(binding)).toBe(true);
     expect(getEvmChainId).toHaveBeenCalledOnce();
   });
 

@@ -41,7 +41,7 @@ import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './r
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import { RpcUsageTracker, createCountingJsonRpcProvider, type RpcUsageWindow } from './rpc-usage.js';
 import { createStrictCurrentFinalizedEvmSnapshotScopeV1 } from './strict-current-finalized-evm-snapshot-factory.js';
-import type { StrictCurrentFinalizedEvmSnapshotScopeV1 } from './current-finalized-evm-snapshot.js';
+import type { FinalizedEvmReadBindingV1 } from './chain-adapter.js';
 import type { FinalizedChainReadOwnerV1 } from './finalized-chain-read-admission.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
@@ -4017,15 +4017,16 @@ export class EVMChainAdapterBase {
     return [...this.rpcUrls];
   }
 
-  async createFinalizedEvmSnapshotScope(
+  async createFinalizedEvmReadBinding(
     owner: FinalizedChainReadOwnerV1,
-  ): Promise<StrictCurrentFinalizedEvmSnapshotScopeV1> {
+  ): Promise<Readonly<FinalizedEvmReadBindingV1>> {
     const chainId = (await this.getEvmChainId()).toString(10);
     assertCanonicalChainId(chainId, 'finalized snapshot chainId');
-    return createStrictCurrentFinalizedEvmSnapshotScopeV1({
+    return Object.freeze({
       chainId,
-      endpoints: this.rpcUrls,
-      owner,
+      snapshot: createStrictCurrentFinalizedEvmSnapshotScopeV1({
+        chainId, endpoints: this.rpcUrls, owner,
+      }),
     });
   }
 
