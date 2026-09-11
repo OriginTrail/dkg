@@ -105,6 +105,28 @@ function abortError(reason: unknown): Error {
   return error;
 }
 
+function pressureCapacityIdentity(capacity: SchedulerPressureCapacity): string {
+  const finiteLimit = (value: number | null | undefined): number | null => (
+    Number.isFinite(value) && (value as number) >= 0 ? value as number : null
+  );
+  const capacityModel = capacity.capacityModel === 'shared' ? 'shared' : 'partitioned';
+  const lanes = capacityModel === 'partitioned'
+    ? Object.entries(capacity.lanes ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([lane, limits]) => [
+        lane,
+        finiteLimit(limits.queueLimit),
+        finiteLimit(limits.inflightLimit),
+      ])
+    : [];
+  return JSON.stringify([
+    capacityModel,
+    finiteLimit(capacity.queueLimit),
+    finiteLimit(capacity.inflightLimit),
+    lanes,
+  ]);
+}
+
 /**
  * Shared priority/FIFO admission queue. Scheduler decision metrics are events:
  * an aged start emits both `started` and `aged` intentionally.
@@ -542,7 +564,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     this.pressureTickets.set(entry, this.pressureEnqueue(this.pressureWork(entry)));
     const capacity = this.hooks.observability.capacityFor?.(entry);
     if (capacity) {
-      const key = JSON.stringify(capacity);
+      const key = pressureCapacityIdentity(capacity);
       const current = this.pressureCapacityCounts.get(key);
       if (current) current.count += 1;
       else this.pressureCapacityCounts.set(key, { capacity, count: 1 });

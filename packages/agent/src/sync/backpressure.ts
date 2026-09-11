@@ -464,7 +464,7 @@ function acquire(
         ? policy.partitions.slow.foregroundQueueLimit
         : policy.partitions.slow.backgroundQueueLimit;
   const queueTimeoutMs = isPartitionedPolicy(policy) && admissionClass === 'fast'
-    ? policy.partitions.fast.queueTimeoutMs || undefined
+    ? policy.partitions.fast.queueTimeoutMs
     : undefined;
   lastLimit = limit;
   lastQueueLimit = queueLimit;

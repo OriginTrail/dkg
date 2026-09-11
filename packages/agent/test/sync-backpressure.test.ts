@@ -1642,6 +1642,73 @@ describe('sync global backpressure', () => {
     });
   });
 
+  it('coalesces equivalent dynamic capacities across object and lane property order', async () => {
+    let running = 0;
+    const queue = new PriorityAdmissionQueue<'first' | 'second'>({
+      canRun: () => running < 2,
+      onStart: () => {
+        running += 1;
+        return () => { running -= 1; };
+      },
+      observability: {
+        scheduler: 'test-equivalent-capacity',
+        operation: (entry) => entry.payload,
+        capacityFor: (entry) => entry.payload === 'first'
+          ? {
+            capacityModel: 'partitioned',
+            queueLimit: 4,
+            inflightLimit: 2,
+            lanes: {
+              fast: { queueLimit: 2, inflightLimit: 1 },
+              slow: { queueLimit: 2, inflightLimit: 1 },
+            },
+          }
+          : {
+            lanes: {
+              slow: { inflightLimit: 1, queueLimit: 2 },
+              fast: { inflightLimit: 1, queueLimit: 2 },
+            },
+            inflightLimit: 2,
+            queueLimit: 4,
+          },
+      },
+    });
+    const options = (
+      payload: 'first' | 'second',
+    ): PriorityAdmissionAcquireOptions<'first' | 'second'> => ({
+      payload,
+      lane: payload === 'first' ? 'fast' : 'slow',
+      priority: 0,
+      priorityClass: 'default',
+      queueLimit: 4,
+      agingThresholdMs: 30_000,
+      createBusyError: () => new Error('full'),
+      createDisplacedError: () => new Error('displaced'),
+    });
+
+    const releaseFirst = await queue.acquire(options('first')).release;
+    const releaseSecond = await queue.acquire(options('second')).release;
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      capacityModel: 'partitioned',
+      totals: { inflight: 2, inflightLimit: 2, queueLimit: 4 },
+      lanes: [
+        { lane: 'fast', inflight: 1, inflightLimit: 1, queueLimit: 2 },
+        { lane: 'slow', inflight: 1, inflightLimit: 1, queueLimit: 2 },
+      ],
+    });
+
+    releaseFirst();
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      capacityModel: 'partitioned',
+      totals: { inflight: 1, inflightLimit: 2, queueLimit: 4 },
+    });
+    releaseSecond();
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      capacityModel: 'shared',
+      totals: { inflight: 0, inflightLimit: null, queueLimit: null },
+    });
+  });
+
   it('keeps an explicitly disabled partitioned scheduler healthy while idle', () => {
     const queue = new PriorityAdmissionQueue<string>({
       canRun: () => false,
@@ -2327,7 +2394,7 @@ describe('sync global backpressure', () => {
     }
   });
 
-  it('treats a zero fast queue timeout as unbounded waiting', async () => {
+  it('treats a zero fast queue timeout as fail-fast', async () => {
     const ctx = createOperationContext('sync');
     const policy = resolveSyncGlobalBackpressure({
       syncAdmission: {
@@ -2344,8 +2411,6 @@ describe('sync global backpressure', () => {
     });
     const events: string[] = [];
     let releaseFirst!: () => void;
-    let releaseSecond!: () => void;
-    let secondSettled = false;
     const first = withGlobalSyncBackpressure({
       policy, ctx, label: 'changelog:first', lane: 'changelog', source: 'reconcile',
     }, async () => new Promise<void>((resolve) => {
@@ -2353,28 +2418,17 @@ describe('sync global backpressure', () => {
       releaseFirst = resolve;
     }));
     await tick();
-    const second = withGlobalSyncBackpressure({
-      policy, ctx, label: 'changelog:second', lane: 'changelog', source: 'reconcile',
-    }, async () => new Promise<void>((resolve) => {
-      events.push('second-start');
-      releaseSecond = resolve;
-    }));
-    void second.then(
-      () => { secondSettled = true; },
-      () => { secondSettled = true; },
-    );
-    await tick();
-    await tick();
-    expect(events).toEqual(['first-start']);
-    expect(secondSettled).toBe(false);
-    expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 1 });
-
-    releaseFirst();
-    await first;
-    await tick();
-    expect(events).toEqual(['first-start', 'second-start']);
-    releaseSecond();
-    await second;
+    try {
+      await expect(withGlobalSyncBackpressure({
+        policy, ctx, label: 'changelog:second', lane: 'changelog', source: 'reconcile',
+      }, async () => { events.push('second-start'); }))
+        .rejects.toMatchObject({ reason: 'queue_timeout' });
+      expect(events).toEqual(['first-start']);
+      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+    } finally {
+      releaseFirst();
+      await first;
+    }
   });
 
   it('applies changing Edge recovery scopes to the immutable partitioned startup policy', async () => {
