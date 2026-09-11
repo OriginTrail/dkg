@@ -387,6 +387,23 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     });
     expect(JSON.stringify(evidence)).not.toContain(privateContextGraph);
 
+    const catalogDefault = buildRfc64CatalogConfigurationEvidenceV1({
+      rfc64Catalog: { rollout: { defaultMode: 'catalog' } },
+    }, {
+      killSwitch: false,
+      defaultMode: 'catalog',
+      contextGraphModes: {},
+    });
+    const legacyDefault = buildRfc64CatalogConfigurationEvidenceV1({
+      rfc64Catalog: { rollout: { defaultMode: 'legacy' } },
+    }, {
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: {},
+    });
+    expect(catalogDefault.digest).not.toBe(legacyDefault.digest);
+    expect(JSON.stringify([catalogDefault, legacyDefault])).not.toContain(privateContextGraph);
+
     expect(buildRfc64CatalogConfigurationEvidenceV1({}, {
       killSwitch: false,
       contextGraphModes: {},
@@ -439,6 +456,39 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       defaultMode: 'legacy',
       legacyOverrideCount: 0,
       shadowOverrideCount: 1,
+    });
+  });
+
+  it('does not report a selected inherited mode as a per-CG override', async () => {
+    const selected = 'selected-inherited-shadow';
+    const response = await requestStatusWithAgent(
+      {},
+      { rfc64Catalog: { rollout: { defaultMode: 'shadow' } } },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [selected],
+        selectedPublicContextGraphs: [selected],
+        selectedPrivateContextGraphs: [],
+        selectedContextGraphModes: { [selected]: 'shadow' },
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'shadow',
+          contextGraphModes: {},
+        },
+      } as never,
+    );
+
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'shadow',
+      contextGraphModes: {},
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      defaultMode: 'shadow',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
     });
   });
 

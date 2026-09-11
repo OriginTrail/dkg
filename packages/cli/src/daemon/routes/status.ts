@@ -60,6 +60,7 @@ import {
   DKGAgent,
   loadOpWallets,
   resolveSyncReconcilerEnabled,
+  sanitizeRfc64CatalogShadowExecutionStatusV1,
 } from '@origintrail-official/dkg-agent';
 import {
   rfc64CatalogKillSwitchActiveV1,
@@ -681,59 +682,6 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
   });
 }
 
-/**
- * Keep the daemon boundary fail-closed even if an older/newer agent adds fields
- * to its internal status object. Only fixed-cardinality counters and invariant
- * flags are copied; identifiers and diagnostic strings cannot cross the route.
- */
-function buildPublicRfc64CatalogShadowExecutionStatusV1(
-  status: ReturnType<DKGAgent['readRfc64CatalogShadowExecutionStatusV1']>,
-) {
-  if (status === null) return null;
-  return {
-    schemaVersion: status.schemaVersion,
-    contextGraphCount: status.contextGraphCount,
-    legacyAuthorityRetained: status.legacyAuthorityRetained,
-    authoritativeApplyAllowed: status.authoritativeApplyAllowed,
-    inventoryObserver: {
-      scope: status.inventoryObserver.scope,
-      inFlight: status.inventoryObserver.inFlight,
-      attemptedUpserts: status.inventoryObserver.attemptedUpserts,
-      attemptedRemovals: status.inventoryObserver.attemptedRemovals,
-      committedMutations: status.inventoryObserver.committedMutations,
-      noOpMutations: status.inventoryObserver.noOpMutations,
-      failedMutations: status.inventoryObserver.failedMutations,
-      casRetries: status.inventoryObserver.casRetries,
-    },
-    projectionSupervisor: {
-      running: status.projectionSupervisor.running,
-      passes: status.projectionSupervisor.passes,
-      trackedAuthorScopes: status.projectionSupervisor.trackedAuthorScopes,
-      pending: status.projectionSupervisor.pending,
-      reconciled: status.projectionSupervisor.reconciled,
-      noInventory: status.projectionSupervisor.noInventory,
-      failed: status.projectionSupervisor.failed,
-      lastPassStartedAtMs: status.projectionSupervisor.lastPassStartedAtMs,
-      lastPassCompletedAtMs: status.projectionSupervisor.lastPassCompletedAtMs,
-    },
-    receiverStaging: {
-      running: status.receiverStaging.running,
-      passes: status.receiverStaging.passes,
-      trackedTargets: status.receiverStaging.trackedTargets,
-      pending: status.receiverStaging.pending,
-      staged: status.receiverStaging.staged,
-      notFound: status.receiverStaging.notFound,
-      knownIncomplete: status.receiverStaging.knownIncomplete,
-      failed: status.receiverStaging.failed,
-      authoritativeApplyCount: status.receiverStaging.authoritativeApplyCount,
-      stagingObserved: status.receiverStaging.stagingObserved,
-      stageOnlyInvariantSatisfied: status.receiverStaging.stageOnlyInvariantSatisfied,
-      lastPassStartedAtMs: status.receiverStaging.lastPassStartedAtMs,
-      lastPassCompletedAtMs: status.receiverStaging.lastPassCompletedAtMs,
-    },
-  };
-}
-
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -972,7 +920,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     const rfc64CatalogShadowExecution =
       rfc64CatalogActivation.enabled
       && typeof agent.readRfc64CatalogShadowExecutionStatusV1 === 'function'
-        ? buildPublicRfc64CatalogShadowExecutionStatusV1(
+        ? sanitizeRfc64CatalogShadowExecutionStatusV1(
             agent.readRfc64CatalogShadowExecutionStatusV1(),
           )
         : null;
@@ -1164,7 +1112,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
           contextGraphModes: Object.fromEntries(
             rfc64PublicCatalogActivation.selectedContextGraphs.map((contextGraphId) => [
               contextGraphId,
-              rfc64CatalogRollout.contextGraphModes[contextGraphId],
+              rfc64CatalogRolloutModeForContextGraphV1(
+                rfc64CatalogActivation,
+                contextGraphId,
+              ),
             ]),
           ),
         },

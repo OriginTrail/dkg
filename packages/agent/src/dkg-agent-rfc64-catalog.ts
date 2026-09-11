@@ -167,6 +167,8 @@ import type { Rfc64CatalogMutationCoordinatorV1 } from
 import {
   Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
+import { observeRfc64CatalogShadowReceiverCompletionV1 } from
+  './rfc64/catalog-shadow-observability-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -1042,6 +1044,9 @@ function rfc64CatalogResponsibilityRegistryForV1(
   registry = new Rfc64CatalogResponsibilityRegistryV1({
     defaultMode,
     contextGraphModes: executionPlan.contextGraphModes,
+    selectedShadowContextGraphIds: Object.entries(executionPlan.selectedAuthority)
+      .filter(([, authority]) => authority.mode === 'shadow')
+      .map(([contextGraphId]) => contextGraphId),
     killSwitchActive: executionPlan.killSwitchActive,
   });
   rfc64CatalogResponsibilityRegistriesV1.set(agent, registry);
@@ -1305,6 +1310,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return authority.active && authority.mode !== 'legacy';
     });
     return Object.freeze([...new Set([...responsibilityIds, ...configuredIds])].sort());
+  }
+
+  /** Canonical configured-and-live scope for privacy-safe shadow evidence. */
+  readRfc64CatalogShadowContextGraphIdsV1(this: DKGAgent): readonly string[] {
+    return rfc64CatalogResponsibilityRegistryForV1(
+      this,
+      this.config.rfc64CatalogExecutionPlan,
+    ).shadowContextGraphIds();
   }
 
   /**
@@ -2357,6 +2370,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
+        onCompletion: (announcement, outcome) => {
+          observeRfc64CatalogShadowReceiverCompletionV1(
+            this,
+            announcement.contextGraphId,
+            this.resolveRfc64CatalogReceiverAuthorityV1(
+              announcement.contextGraphId,
+            ).mode,
+            outcome,
+          );
+        },
         onReconciliationAttemptStart: (announcement) => {
           const token = ++nextReconciliationAttemptToken;
           reconciliationAttempts.set(token, Object.freeze({

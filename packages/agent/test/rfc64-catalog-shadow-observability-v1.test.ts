@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { projectRfc64CatalogShadowExecutionStatusV1 } from
-  '../src/rfc64/catalog-shadow-observability-v1.js';
+import {
+  observeRfc64CatalogShadowReceiverCompletionV1,
+  projectRfc64CatalogShadowExecutionStatusV1,
+  readRfc64CatalogShadowReceiverCompletionCountersV1,
+} from '../src/rfc64/catalog-shadow-observability-v1.js';
+import { Rfc64PublicCatalogReceiverV1 } from
+  '../src/rfc64/public-catalog-receiver-v1.js';
 import {
   bindRfc64SwmCatalogProjectionOwnerV1,
   Rfc64SwmCatalogProjectionOwnerV1,
@@ -25,7 +30,7 @@ describe('RFC-64 catalog shadow observability projection', () => {
           selectedAuthority: { [SHADOW_CG]: { mode: 'shadow' } },
         },
       },
-      readRfc64CatalogResponsibilitiesV1: () => [],
+      readRfc64CatalogShadowContextGraphIdsV1: () => [SHADOW_CG],
       readRfc64PublicCatalogBootstrapStatusV1: () => ({
         running: false,
         pass: 1,
@@ -52,6 +57,12 @@ describe('RFC-64 catalog shadow observability projection', () => {
         reconcile: async () => null,
         warn: () => undefined,
       }),
+    );
+    observeRfc64CatalogShadowReceiverCompletionV1(
+      agent,
+      SHADOW_CG,
+      'shadow',
+      'staged-only',
     );
 
     const status = Rfc64SwmCatalogProjectionSupervisorMethods.prototype
@@ -168,6 +179,13 @@ describe('RFC-64 catalog shadow observability projection', () => {
           updatedAtMs: 40,
         }],
       } as never,
+      receiverCompletions: {
+        trackedTargets: 1,
+        staged: 1,
+        notFound: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+      },
     });
 
     expect(status).toEqual({
@@ -257,6 +275,13 @@ describe('RFC-64 catalog shadow observability projection', () => {
           appliedHeadDigest: HEAD_DIGEST,
         }],
       } as never,
+      receiverCompletions: {
+        trackedTargets: 1,
+        staged: 0,
+        notFound: 0,
+        failed: 0,
+        authoritativeApplyCount: 1,
+      },
     });
 
     expect(status?.receiverStaging).toMatchObject({
@@ -268,6 +293,78 @@ describe('RFC-64 catalog shadow observability projection', () => {
     });
   });
 
+  it('records ordinary receiver completions cumulatively before later classification', async () => {
+    const owner = {};
+    let outcome: 'applied' | 'staged-only' = 'applied';
+    const receiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadSatisfied: async () => false,
+      reconcileHead: async () => outcome,
+    }, {
+      onCompletion: (announcement, completionOutcome) => {
+        observeRfc64CatalogShadowReceiverCompletionV1(
+          owner,
+          announcement.contextGraphId,
+          'shadow',
+          completionOutcome,
+        );
+      },
+    });
+    const announcement = (version: string) => ({
+      kind: 'dkg/rfc64/public-catalog/head-announcement/v1',
+      networkId: 'otp:20430',
+      contextGraphId: SHADOW_CG,
+      subGraphName: null,
+      authorAddress: PRIVATE_AUTHOR,
+      catalogEra: '0',
+      catalogVersion: version,
+      policyDigest: `0x${'11'.repeat(32)}`,
+      catalogHeadObjectDigest: `0x${version.padStart(64, '0')}`,
+      signatureVariantDigest: `0x${'22'.repeat(32)}`,
+    }) as never;
+
+    receiver.schedule(announcement('1'), PRIVATE_PROVIDER);
+    await receiver.whenIdle();
+    outcome = 'staged-only';
+    receiver.schedule(announcement('2'), PRIVATE_PROVIDER);
+    await receiver.whenIdle();
+
+    expect(readRfc64CatalogShadowReceiverCompletionCountersV1(owner, [SHADOW_CG]))
+      .toEqual({
+        trackedTargets: 2,
+        staged: 1,
+        notFound: 0,
+        failed: 0,
+        authoritativeApplyCount: 1,
+      });
+    await receiver.close();
+  });
+
+  it('retains conservative apply evidence after the bounded CG tracker fills', () => {
+    const owner = {};
+    for (let index = 0; index < 1_024; index += 1) {
+      observeRfc64CatalogShadowReceiverCompletionV1(
+        owner,
+        `bounded-shadow-${index}`,
+        'shadow',
+        'staged-only',
+      );
+    }
+    observeRfc64CatalogShadowReceiverCompletionV1(
+      owner,
+      'overflow-shadow',
+      'shadow',
+      'applied',
+    );
+
+    expect(readRfc64CatalogShadowReceiverCompletionCountersV1(
+      owner,
+      ['overflow-shadow'],
+    )).toMatchObject({
+      trackedTargets: 1,
+      authoritativeApplyCount: 1,
+    });
+  });
+
   it('omits the block when no Context Graph is in shadow mode', () => {
     expect(projectRfc64CatalogShadowExecutionStatusV1({
       shadowContextGraphIds: [],
@@ -275,6 +372,13 @@ describe('RFC-64 catalog shadow observability projection', () => {
       inventoryObserver: {} as never,
       projectionSupervisor: null,
       bootstrap: null,
+      receiverCompletions: {
+        trackedTargets: 0,
+        staged: 0,
+        notFound: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+      },
     })).toBeNull();
   });
 });

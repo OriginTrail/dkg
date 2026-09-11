@@ -556,6 +556,7 @@ describe('RFC-64 private catalog activation', () => {
     expect(resolveRfc64PublicCatalogActivationInputV1({
       enabled: false,
       selectedContextGraphs: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
     } as never, chainIdentity)).toMatchObject({
       enabled: false,
       selectedContextGraphs: [],
@@ -566,6 +567,7 @@ describe('RFC-64 private catalog activation', () => {
       selectedContextGraphs: [],
       selectedPublicContextGraphs: [],
       selectedPrivateContextGraphs: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
     } as never, chainIdentity)).toMatchObject({
       enabled: false,
       selectedContextGraphs: [],
@@ -667,6 +669,13 @@ describe('RFC-64 private catalog activation', () => {
       defaultMode: 'legacy',
       contextGraphModes: { [PUBLIC_CG]: 'shadow' },
     });
+
+    const inherited = resolveRfc64CatalogActivationConfigV1({
+      ...privateActivation(),
+      rollout: { defaultMode: 'legacy' },
+    }, chainIdentity);
+    expect(inherited.rollout.contextGraphModes).toEqual({});
+    expect(rfc64CatalogRolloutModeForContextGraphV1(inherited, PRIVATE_CG)).toBe('legacy');
   });
 
   it('treats omitted unified activation as enabled with an optional seed', () => {
@@ -900,6 +909,26 @@ describe('RFC-64 private catalog activation', () => {
     expect(rfc64CatalogRolloutModeForContextGraphV1(union.catalog, PUBLIC_CG))
       .toBe('shadow');
     expect(rfc64CatalogKillSwitchActiveV1(union.catalog)).toBe(true);
+  });
+
+  it('keeps a deprecated public manifest on its catalog default without fabricating overrides', () => {
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const resolved = resolveRfc64CatalogActivationsV1({
+      catalog: { rollout: { defaultMode: 'legacy' } },
+      publicCatalog: {
+        bootstrap: {
+          acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
+        },
+      },
+    }, chainIdentity).catalog;
+
+    expect(resolved.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: {},
+    });
+    expect(resolved.selectedContextGraphModes).toEqual({ [PUBLIC_CG]: 'catalog' });
+    expect(rfc64CatalogRolloutModeForContextGraphV1(resolved, PUBLIC_CG)).toBe('catalog');
   });
 
   it('enforces the global policy limit after additive and compatibility blocks are merged', () => {
