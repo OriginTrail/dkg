@@ -2,7 +2,9 @@
 
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { once } from 'node:events';
 import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -19,6 +21,7 @@ import {
   RECEIVER_URL,
   SOURCE_URL,
   baseConfig,
+  statusBody,
 } from './test-support.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -31,6 +34,7 @@ test('dry-run validates without reading secrets, calling nodes, or running comma
   ));
   assert.equal(artifact.status, 'DRY_RUN');
   assert.equal(artifact.plan.offlineCatchup, 'PLANNED');
+  assert.equal(artifact.plan.vmParityEvidence, 'PLANNED');
   assert.equal(artifact.plan.catalogSwmEvidence, 'PLANNED');
   assert.equal(artifact.plan.rpcUsage, 'PLANNED');
   const serialized = JSON.stringify(artifact);
@@ -120,6 +124,7 @@ test('operator CLI rejects config/artifact aliases before changing configuration
           '--artifact', artifactPath,
         ], { cwd: AGENT_DIRECTORY }),
         (error) => {
+          assert.equal(error.code, 1);
           assert.match(error.stderr, /FAIL config-artifact-path-alias/u);
           return true;
         },
@@ -129,6 +134,79 @@ test('operator CLI rejects config/artifact aliases before changing configuration
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  }
+});
+
+test('operator CLI persists INCOMPLETE and exits 2 when required evidence is absent', async () => {
+  const server = createServer((request, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    if (request.url === '/api/status' && ['GET', 'HEAD'].includes(request.method)) {
+      response.writeHead(200);
+      response.end(JSON.stringify(statusBody()));
+      return;
+    }
+    if (request.url === '/api/knowledge-assets' && request.method === 'POST') {
+      response.writeHead(200);
+      response.end(JSON.stringify({ swmShared: true }));
+      return;
+    }
+    if (request.url === '/api/query' && request.method === 'POST') {
+      response.writeHead(200);
+      response.end(JSON.stringify({ result: { type: 'boolean', value: true } }));
+      return;
+    }
+    response.writeHead(404);
+    response.end('{}');
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.equal(typeof address, 'object');
+
+  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-cli-incomplete-'));
+  const artifactPath = join(directory, 'result.json');
+  const configPath = join(directory, 'config.json');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const config = baseConfig({
+    nodes: [
+      { id: 'alpha-source', role: 'source', baseUrl, auth: { kind: 'none' } },
+      { id: 'beta-receiver', role: 'receiver', baseUrl, auth: { kind: 'none' } },
+    ],
+    lifecycle: null,
+    authorizationChecks: {
+      unauthorized: {
+        kind: 'not-exposed',
+        reasonCode: 'catalog-protocol-api-not-exposed',
+      },
+      revoked: { kind: 'not-exposed', reasonCode: 'revocation-api-not-exposed' },
+    },
+    rpcUsage: { kind: 'required' },
+  });
+  try {
+    await writeFile(configPath, JSON.stringify(config));
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        '--import', 'tsx',
+        RUNNER_PATH,
+        '--config', configPath,
+        '--artifact', artifactPath,
+      ], { cwd: AGENT_DIRECTORY }),
+      (error) => {
+        assert.equal(error.code, 2);
+        assert.equal(error.stdout, `INCOMPLETE ${artifactPath}\n`);
+        assert.equal(error.stderr, '');
+        return true;
+      },
+    );
+    const artifact = JSON.parse(await readFile(artifactPath, 'utf8'));
+    assert.equal(artifact.status, 'INCOMPLETE');
+    assert.equal(artifact.phase, 'evidence-required');
+  } finally {
+    const closed = once(server, 'close');
+    server.close();
+    server.closeAllConnections?.();
+    await closed;
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

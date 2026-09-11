@@ -15,8 +15,9 @@ import {
 import { operationalStatusV1 } from './preflight.mjs';
 import { askConfiguredQueryV1 } from './query.mjs';
 
-export function verifyVmParityV1({ config, request, sleep }) {
-  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
+export function verifyVmParityV1({ config, plan, request, sleep }) {
+  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph, index) => {
+    const check = plan[index];
     const parity = await pollUntilV1(
       async () => readVmParityV1(
         contextGraph.source,
@@ -30,7 +31,7 @@ export function verifyVmParityV1({ config, request, sleep }) {
       () => failure('vm-parity-timeout', 'vm-parity'),
       { retryError: isRetryableNodeRequestErrorV1 },
     );
-    if (contextGraph.vmAskSparql !== undefined) {
+    if (check.state === 'PLANNED') {
       const queryPassed = await Promise.all([
         contextGraph.source,
         contextGraph.receiver,
@@ -41,13 +42,13 @@ export function verifyVmParityV1({ config, request, sleep }) {
     }
     return Object.freeze({
       contextGraphRef: contextGraph.contextGraphRef,
-      status: contextGraph.vmAskSparql === undefined ? 'EVIDENCE_REQUIRED' : 'PASS',
+      status: check.state === 'EVIDENCE_REQUIRED' ? 'EVIDENCE_REQUIRED' : 'PASS',
       statusParity: 'PASS',
       cursorPresent: parity.cursorPresent,
       digestParity: parity.digestParity,
       rowCountParity: parity.rowCountParity,
-      vmQueryChecked: contextGraph.vmAskSparql !== undefined,
-      ...(contextGraph.vmAskSparql === undefined ? { requirement: 'vm-ask-query' } : {}),
+      vmQueryChecked: check.state === 'PLANNED',
+      ...(check.state === 'EVIDENCE_REQUIRED' ? { requirement: 'vm-ask-query' } : {}),
     });
   });
 }

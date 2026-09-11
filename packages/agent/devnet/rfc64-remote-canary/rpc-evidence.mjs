@@ -20,8 +20,8 @@ const rpcSchemaValidator = new Ajv2020({ allErrors: false, strict: true });
 addFormats(rpcSchemaValidator);
 const matchesRpcEvidenceV1 = rpcSchemaValidator.compile(rpcEvidenceSchema);
 
-export async function collectRpcUsageEvidenceV1(config, context) {
-  if (config.kind === 'required') {
+export async function collectRpcUsageEvidenceV1(config, context, plannedCheck) {
+  if (plannedCheck.state === 'EVIDENCE_REQUIRED') {
     return Object.freeze({
       status: 'EVIDENCE_REQUIRED',
       requirement: RPC_EVIDENCE_SCHEMA,

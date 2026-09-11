@@ -11,16 +11,16 @@ function jsonPointer(value, pointer) {
   }, value);
 }
 
-export async function verifyAuthorizationV1(checks, request) {
+export async function verifyAuthorizationV1(checks, request, plan) {
   const [unauthorized, revoked] = await Promise.all([
-    runAuthorizationCheckV1(checks.unauthorized, request),
-    runAuthorizationCheckV1(checks.revoked, request),
+    runAuthorizationCheckV1(checks.unauthorized, plan.unauthorized, request),
+    runAuthorizationCheckV1(checks.revoked, plan.revoked, request),
   ]);
   return Object.freeze({ unauthorized, revoked });
 }
 
-async function runAuthorizationCheckV1(check, request) {
-  if (check.kind === 'not-exposed') {
+async function runAuthorizationCheckV1(check, plannedCheck, request) {
+  if (plannedCheck.state === 'EVIDENCE_REQUIRED') {
     return Object.freeze({ status: 'EVIDENCE_REQUIRED', reasonCode: check.reasonCode });
   }
   const response = await request.raw(

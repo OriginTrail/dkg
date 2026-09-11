@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 
 import { verifyAuthorizationV1 } from './authorization.mjs';
+import { createCertificationPlanV1 } from './certification-plan.mjs';
 import {
   RemoteCanaryError,
   validateRemoteCanaryConfigV1,
@@ -51,7 +52,11 @@ test('generic 404 cannot certify authorization even with a plausible denial body
     timing: validated.timing,
   });
   await assert.rejects(
-    verifyAuthorizationV1(validated.authorizationChecks, request),
+    verifyAuthorizationV1(
+      validated.authorizationChecks,
+      request,
+      createCertificationPlanV1(validated).authorization,
+    ),
     (error) => error instanceof RemoteCanaryError
       && error.code === 'authorization-not-found-control-failed',
   );
@@ -95,7 +100,11 @@ test('real HTTP daemon authentication 401 cannot certify a nonexistent RFC-64 ro
   });
   try {
     await assert.rejects(
-      verifyAuthorizationV1(validated.authorizationChecks, request),
+      verifyAuthorizationV1(
+        validated.authorizationChecks,
+        request,
+        createCertificationPlanV1(validated).authorization,
+      ),
       (error) => error instanceof RemoteCanaryError
         && error.code === 'authorization-denial-code-mismatch',
     );
