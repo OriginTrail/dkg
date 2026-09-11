@@ -37,7 +37,8 @@ describe('ContextGraphAuthorityIndexRepository cache lifecycle', () => {
     };
 
     const repository = new ContextGraphAuthorityIndexRepository(store);
-    const staleLoad = repository.load('scope');
+    const scoped = repository.forScope('scope');
+    const staleLoad = scoped.load();
     await firstLoadEntered.promise;
     repository.clear();
     store.record = { token: 2, value: currentCheckpoint };
@@ -47,9 +48,9 @@ describe('ContextGraphAuthorityIndexRepository cache lifecycle', () => {
       kind: 'checkpoint',
       token: 1,
     });
-    const current = await repository.load('scope');
+    const current = await scoped.load();
     expect(current).toMatchObject({ kind: 'checkpoint', token: 2 });
-    await expect(repository.load('scope')).resolves.toBe(current);
+    await expect(scoped.load()).resolves.toBe(current);
     expect(loadCount).toBe(2);
   });
 
@@ -63,7 +64,8 @@ describe('ContextGraphAuthorityIndexRepository cache lifecycle', () => {
       return load();
     };
     const repository = new ContextGraphAuthorityIndexRepository(store);
-    const rejected = await repository.load('scope');
+    const scoped = repository.forScope('scope');
+    const rejected = await scoped.load();
     const winner = checkpoint(25);
     store.invalidate = async (_scope, expectedToken) => {
       expect(expectedToken).toBe(1);
@@ -71,12 +73,12 @@ describe('ContextGraphAuthorityIndexRepository cache lifecycle', () => {
       return undefined;
     };
 
-    const recovery = await repository.invalidateOrReloadWinner('scope', rejected);
+    const recovery = await scoped.invalidateOrReloadWinner(rejected);
     expect(recovery).toMatchObject({
       kind: 'winner',
       record: { kind: 'checkpoint', token: 2, checkpoint: winner },
     });
-    await expect(repository.load('scope')).resolves.toBe(recovery.record);
+    await expect(scoped.load()).resolves.toBe(recovery.record);
     expect(loadCount).toBe(2);
   });
 
@@ -90,7 +92,8 @@ describe('ContextGraphAuthorityIndexRepository cache lifecycle', () => {
       return load();
     };
     const repository = new ContextGraphAuthorityIndexRepository(store);
-    const previous = await repository.load('scope');
+    const scoped = repository.forScope('scope');
+    const previous = await scoped.load();
     const winner = checkpoint(25);
     store.compareAndSwap = async (_scope, expectedToken) => {
       expect(expectedToken).toBe(1);
@@ -98,16 +101,25 @@ describe('ContextGraphAuthorityIndexRepository cache lifecycle', () => {
       return undefined;
     };
 
-    const recovery = await repository.commitOrReloadWinner(
-      'scope',
-      previous,
-      checkpoint(21),
-    );
+    const recovery = await scoped.commitOrReloadWinner(previous, checkpoint(21));
     expect(recovery).toMatchObject({
       kind: 'winner',
       record: { kind: 'checkpoint', token: 2, checkpoint: winner },
     });
-    await expect(repository.load('scope')).resolves.toBe(recovery.record);
+    await expect(scoped.load()).resolves.toBe(recovery.record);
     expect(loadCount).toBe(2);
+  });
+
+  it('rejects observations produced by another repository scope', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    store.record = { token: 1, value: checkpoint(20) };
+    const repository = new ContextGraphAuthorityIndexRepository(store);
+    const first = repository.forScope('first');
+    const second = repository.forScope('second');
+    const observation = await first.load();
+
+    await expect(second.commitOrReloadWinner(observation, checkpoint(21)))
+      .rejects.toThrow('observation belongs to another scope');
+    expect(store.commits).toEqual([]);
   });
 });

@@ -3,29 +3,16 @@
 import { normalizeContextGraphAuthorityHash as normalizeHash } from
   './context-graph-authority-generation.js';
 import {
-  ContextGraphAuthorityIndexRepository,
+  type ContextGraphAuthorityIndexScopedRepository,
   type ContextGraphAuthorityIndexRepositoryRecord,
 } from './context-graph-authority-index-repository.js';
+import { ContextGraphAuthorityIndexRetryableError } from
+  './context-graph-authority-index-errors.js';
 
 const MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS = 3;
 
-export class ContextGraphAuthorityIndexRetryableError extends Error {
-  override readonly name = 'ContextGraphAuthorityIndexRetryableError';
-}
-
-export function isContextGraphAuthorityIndexRetryableError(
-  error: unknown,
-): error is ContextGraphAuthorityIndexRetryableError {
-  return error instanceof ContextGraphAuthorityIndexRetryableError;
-}
-
-function retryableAuthorityIndexReadError(message: string): Error {
-  return new ContextGraphAuthorityIndexRetryableError(message);
-}
-
 export interface ContextGraphAuthorityIndexAdmissionInput {
-  readonly repository: ContextGraphAuthorityIndexRepository;
-  readonly scope: string;
+  readonly repository: ContextGraphAuthorityIndexScopedRepository;
   readonly initial: ContextGraphAuthorityIndexRepositoryRecord;
   readonly deploymentBlockNumber: number;
   readonly finalized: Readonly<{ number: number; hash: string }>;
@@ -58,7 +45,7 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
       const checkpoint = record.checkpoint;
       if (checkpoint.cursor.deploymentBlockNumber === input.deploymentBlockNumber) {
         if (checkpoint.cursor.throughBlockNumber > input.finalized.number) {
-          throw retryableAuthorityIndexReadError(
+          throw new ContextGraphAuthorityIndexRetryableError(
             `Context Graph authority index finalized head ${input.finalized.number} is behind `
             + `durable cursor ${checkpoint.cursor.throughBlockNumber}`,
           );
@@ -70,7 +57,7 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
               input.lifecycleSignal,
             ));
         if (anchorHash === undefined) {
-          throw retryableAuthorityIndexReadError(
+          throw new ContextGraphAuthorityIndexRetryableError(
             `Context Graph authority index anchor ${checkpoint.cursor.throughBlockNumber} `
             + 'is unavailable',
           );
@@ -80,11 +67,11 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
     }
 
     if (lostInvalidations >= MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS) {
-      throw retryableAuthorityIndexReadError(
+      throw new ContextGraphAuthorityIndexRetryableError(
         'Context Graph authority index changed repeatedly during checkpoint recovery',
       );
     }
-    const recovery = await input.repository.invalidateOrReloadWinner(input.scope, record);
+    const recovery = await input.repository.invalidateOrReloadWinner(record);
     if (recovery.kind === 'invalidated') return recovery.record;
     lostInvalidations += 1;
     record = recovery.record;

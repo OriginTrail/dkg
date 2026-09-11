@@ -9,7 +9,6 @@ import { createContextGraphAuthorityIndexCheckpoint } from
   '../src/context-graph-authority-index-checkpoint.js';
 import {
   ContextGraphAuthorityIndexRepository,
-  type ContextGraphAuthorityIndexRepositoryRecord,
 } from '../src/context-graph-authority-index-repository.js';
 import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
 
@@ -24,25 +23,18 @@ const checkpoint = createContextGraphAuthorityIndexCheckpoint({
   throughBlockHash: HASH_20,
 }, []);
 
-const checkpointRecord = Object.freeze({
-  kind: 'checkpoint' as const,
-  token: 7,
-  checkpoint,
-});
-
-function admit(
+async function admit(
   repository: ContextGraphAuthorityIndexRepository,
-  initial: ContextGraphAuthorityIndexRepositoryRecord,
   overrides: Readonly<{
     deploymentBlockNumber?: number;
     finalized?: Readonly<{ number: number; hash: string }>;
     readBlockHash?: () => Promise<string | null>;
   }> = {},
 ) {
+  const scoped = repository.forScope(SCOPE);
   return admitContextGraphAuthorityIndexCheckpoint({
-    repository,
-    scope: SCOPE,
-    initial,
+    repository: scoped,
+    initial: await scoped.load(),
     deploymentBlockNumber: overrides.deploymentBlockNumber ?? 10,
     finalized: overrides.finalized ?? { number: 25, hash: HASH_25 },
     lifecycleSignal: new AbortController().signal,
@@ -54,30 +46,29 @@ describe('Context Graph authority index checkpoint admission and recovery', () =
   it('rebuilds missing and tombstoned rows without durable effects', async () => {
     const store = new MemoryAuthorityIndexStore();
     const repository = new ContextGraphAuthorityIndexRepository(store);
-    await expect(admit(repository, { kind: 'missing', token: undefined }))
+    await expect(admit(repository))
       .resolves.toEqual({ kind: 'missing', token: undefined });
-    await expect(admit(repository, { kind: 'tombstone', token: 8 }))
+    store.record = { token: 8, value: null };
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store)))
       .resolves.toEqual({ kind: 'tombstone', token: 8 });
     expect(store.invalidations).toEqual([]);
   });
 
   it('accepts a matching warm anchor and the requested finalized head', async () => {
-    const repository = new ContextGraphAuthorityIndexRepository(
-      new MemoryAuthorityIndexStore(),
-    );
-    await expect(admit(repository, checkpointRecord)).resolves.toBe(checkpointRecord);
+    const store = new MemoryAuthorityIndexStore();
+    store.record = { token: 7, value: checkpoint };
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store)))
+      .resolves.toMatchObject({ kind: 'checkpoint', token: 7 });
 
     const finalizedCheckpoint = createContextGraphAuthorityIndexCheckpoint({
       deploymentBlockNumber: 10,
       throughBlockNumber: 25,
       throughBlockHash: HASH_25,
     }, []);
+    const finalizedStore = new MemoryAuthorityIndexStore();
+    finalizedStore.record = { token: 8, value: finalizedCheckpoint };
     let anchorReads = 0;
-    await expect(admit(repository, {
-      kind: 'checkpoint',
-      token: 8,
-      checkpoint: finalizedCheckpoint,
-    }, {
+    await expect(admit(new ContextGraphAuthorityIndexRepository(finalizedStore), {
       readBlockHash: async () => {
         anchorReads += 1;
         return HASH_25;
@@ -88,11 +79,11 @@ describe('Context Graph authority index checkpoint admission and recovery', () =
 
   it('keeps lagging and non-archive observations retryable without invalidation', async () => {
     const store = new MemoryAuthorityIndexStore();
-    const repository = new ContextGraphAuthorityIndexRepository(store);
-    await expect(admit(repository, checkpointRecord, {
+    store.record = { token: 7, value: checkpoint };
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
       finalized: { number: 19, hash: HASH_25 },
     })).rejects.toThrow('finalized head 19 is behind durable cursor 20');
-    await expect(admit(repository, checkpointRecord, {
+    await expect(admit(new ContextGraphAuthorityIndexRepository(store), {
       readBlockHash: async () => null,
     })).rejects.toThrow('anchor 20 is unavailable');
     expect(store.invalidations).toEqual([]);
@@ -100,22 +91,18 @@ describe('Context Graph authority index checkpoint admission and recovery', () =
 
   it('tombstones corrupt rows, deployment changes, and proven fork replacements', async () => {
     const scenarios: Array<Readonly<{
-      initial: ContextGraphAuthorityIndexRepositoryRecord;
       durableValue: unknown;
       deploymentBlockNumber?: number;
       readBlockHash?: () => Promise<string | null>;
     }>> = [
       {
-        initial: { kind: 'invalid', token: 7 },
         durableValue: { corrupt: true },
       },
       {
-        initial: checkpointRecord,
         durableValue: checkpoint,
         deploymentBlockNumber: 11,
       },
       {
-        initial: checkpointRecord,
         durableValue: checkpoint,
         readBlockHash: async () => REPLACEMENT_HASH,
       },
@@ -126,7 +113,6 @@ describe('Context Graph authority index checkpoint admission and recovery', () =
       store.record = { token: 7, value: scenario.durableValue };
       const result = await admit(
         new ContextGraphAuthorityIndexRepository(store),
-        scenario.initial,
         {
           deploymentBlockNumber: scenario.deploymentBlockNumber,
           readBlockHash: scenario.readBlockHash,

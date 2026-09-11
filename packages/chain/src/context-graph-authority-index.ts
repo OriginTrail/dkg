@@ -16,8 +16,9 @@ import {
 } from './context-graph-authority-index-reducer.js';
 import {
   admitContextGraphAuthorityIndexCheckpoint,
-  ContextGraphAuthorityIndexRetryableError,
 } from './context-graph-authority-index-admission.js';
+import { ContextGraphAuthorityIndexRetryableError } from
+  './context-graph-authority-index-errors.js';
 import { ContextGraphAuthorityIndexRepository } from
   './context-graph-authority-index-repository.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
@@ -25,11 +26,7 @@ import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 export {
   ContextGraphAuthorityIndexRetryableError,
   isContextGraphAuthorityIndexRetryableError,
-} from './context-graph-authority-index-admission.js';
-
-function retryableAuthorityIndexReadError(message: string): Error {
-  return new ContextGraphAuthorityIndexRetryableError(message);
-}
+} from './context-graph-authority-index-errors.js';
 
 export interface ContextGraphAuthorityIndexScanInput {
   /** Deployment + physical ContextGraphStorage address; contains no secret. */
@@ -118,6 +115,7 @@ export class ContextGraphAuthorityIndex {
     lifecycleSignal: AbortSignal,
   ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     const scope = input.scope;
+    const repository = this.#repository.forScope(scope);
     const deploymentBlockNumber = normalizeNonNegativeSafeInteger(input.deploymentBlockNumber);
     const finalizedNumber = normalizeNonNegativeSafeInteger(input.finalized.number);
     const finalizedHash = normalizeHash(input.finalized.hash);
@@ -134,9 +132,8 @@ export class ContextGraphAuthorityIndex {
     }
 
     let durable = await admitContextGraphAuthorityIndexCheckpoint({
-      repository: this.#repository,
-      scope,
-      initial: await this.#repository.load(scope),
+      repository,
+      initial: await repository.load(),
       deploymentBlockNumber,
       finalized: { number: finalizedNumber, hash: finalizedHash },
       readBlockHash: input.readBlockHash,
@@ -163,7 +160,7 @@ export class ContextGraphAuthorityIndex {
         ? finalizedHash
         : normalizeHash(await input.readBlockHash(throughBlockNumber, lifecycleSignal));
       if (throughBlockHash === undefined) {
-        throw retryableAuthorityIndexReadError(
+        throw new ContextGraphAuthorityIndexRetryableError(
           `Context Graph authority index block ${throughBlockNumber} is unavailable`,
         );
       }
@@ -183,8 +180,7 @@ export class ContextGraphAuthorityIndex {
       });
       const next = reduction.checkpoint;
 
-      const commit = await this.#repository.commitOrReloadWinner(
-        scope,
+      const commit = await repository.commitOrReloadWinner(
         durable,
         next,
       );
@@ -192,8 +188,7 @@ export class ContextGraphAuthorityIndex {
         // Another valid provider completion won the page. Reload its result
         // and continue from that cursor rather than overwriting or rescanning.
         durable = await admitContextGraphAuthorityIndexCheckpoint({
-          repository: this.#repository,
-          scope,
+          repository,
           initial: commit.record,
           deploymentBlockNumber,
           finalized: { number: finalizedNumber, hash: finalizedHash },

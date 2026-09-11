@@ -1,34 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest';
-import { ethers } from 'ethers';
 
 import type { ContextGraphAuthoritySnapshot } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
-
-const OWNER = '0x1111111111111111111111111111111111111111';
-const MEMBER = '0x2222222222222222222222222222222222222222';
-const AUTHORITY = '0x3333333333333333333333333333333333333333';
-const GOVERNANCE = '0x4444444444444444444444444444444444444444';
-const SECOND_MEMBER = '0x5555555555555555555555555555555555555555';
-const SECOND_AUTHORITY = '0x6666666666666666666666666666666666666666';
-const FINALIZED_HASH = `0x${'55'.repeat(32)}`;
-const NEXT_FINALIZED_HASH = `0x${'56'.repeat(32)}`;
-const REPLACEMENT_FINALIZED_HASH = `0x${'cc'.repeat(32)}`;
-const CREATION_HASH = `0x${'66'.repeat(32)}`;
-const POLICY_HASH = `0x${'77'.repeat(32)}`;
-const NEXT_POLICY_HASH = `0x${'78'.repeat(32)}`;
-const NAME_HASH = `0x${'88'.repeat(32)}`;
-
-function event(
-  blockNumber: number,
-  index: number,
-  blockHash: string,
-  args: readonly unknown[] = [],
-) {
-  return { blockNumber, index, blockHash, args };
-}
+import {
+  AUTHORITY,
+  createAuthorityScenario,
+  FINALIZED_HASH,
+  GOVERNANCE,
+  MEMBER,
+  NAME_HASH,
+  NEXT_POLICY_HASH,
+  OWNER,
+  POLICY_HASH,
+  SECOND_AUTHORITY,
+  SECOND_MEMBER,
+} from './helpers/context-graph-authority-scenario.js';
 
 interface AuthorityEvidence {
   readonly filters: Array<readonly [string, ...unknown[]]>;
@@ -57,6 +46,7 @@ function makeEvmAuthorityAdapter(
     providerRangeLimit?: number;
   } = {},
 ): EvmAuthorityHarness {
+  const scenario = createAuthorityScenario({ reorg: options.reorg });
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
     hubAddress: GOVERNANCE,
@@ -75,56 +65,19 @@ function makeEvmAuthorityAdapter(
     readOptions: [],
   };
 
-  let finalizedNumber = 30;
-  let finalizedHash = FINALIZED_HASH;
-  let cachedAnchorReplaced = false;
-  let currentReadGate: PromiseWithResolvers<void> | undefined;
-  let blockReadGate: Readonly<{
-    tag: string | number;
-    entered: PromiseWithResolvers<void>;
-    release: PromiseWithResolvers<void>;
-  }> | undefined;
-  const logs: Record<string, ReturnType<typeof event>[]> = {
-    ContextGraphCreated: [event(10, 1, CREATION_HASH, [
-      9n,
-      SECOND_MEMBER,
-      NAME_HASH,
-      [MEMBER, SECOND_MEMBER],
-      0n,
-      1n,
-      0n,
-      AUTHORITY,
-      7n,
-    ])],
-    Transfer: [
-      event(10, 0, CREATION_HASH, [ethers.ZeroAddress, SECOND_MEMBER, 9n]),
-      event(15, 0, `0x${'99'.repeat(32)}`, [SECOND_MEMBER, OWNER, 9n]),
-    ],
-    PublishPolicyUpdated: [event(20, 0, POLICY_HASH, [
-      9n, 0n, SECOND_AUTHORITY, 9n,
-    ])],
-    PublishAuthorityUpdated: [event(21, 0, POLICY_HASH, [9n, AUTHORITY, 7n])],
-    AgentParticipantAdded: [event(22, 0, `0x${'aa'.repeat(32)}`, [9n, OWNER])],
-    AgentParticipantRemoved: [event(23, 0, `0x${'bb'.repeat(32)}`, [9n, SECOND_MEMBER])],
-  };
-  const current = Object.assign(
-    [OWNER, [MEMBER, OWNER], 0n, true, 0n, 1n, 0n, AUTHORITY, 7n],
-    {
-      owner: OWNER,
-      participantAgents: [MEMBER, OWNER],
-      active: true,
-      accessPolicy: 1n,
-      publishPolicy: 0n,
-      publishAuthority: AUTHORITY,
-      publishAuthorityAccountId: 7n,
-    },
-  );
   const contract = {
     interface: {
       getEvent: (name: string) => ({ topicHash: `topic:${name}` }),
       parseLog: (log: { parsed: unknown }) => log.parsed,
     },
-    filters: Object.fromEntries(Object.keys(logs).map((name) => [
+    filters: Object.fromEntries([
+      'ContextGraphCreated',
+      'Transfer',
+      'PublishPolicyUpdated',
+      'PublishAuthorityUpdated',
+      'AgentParticipantAdded',
+      'AgentParticipantRemoved',
+    ].map((name) => [
       name,
       (...args: readonly unknown[]) => {
         evidence.filters.push([name, ...args]);
@@ -151,47 +104,20 @@ function makeEvmAuthorityAdapter(
           },
         };
       }
-      return (logs[filter.name] ?? []).filter(
-        (entry) => entry.blockNumber >= fromBlock && entry.blockNumber <= toBlock,
-      );
+      return scenario.renderQueryFilter(filter.name, fromBlock, toBlock);
     },
     getContextGraph: {
       staticCall: async (contextGraphId: bigint, readOptions: { blockTag: number }) => {
         evidence.staticCalls.push([contextGraphId, readOptions]);
         expect(contextGraphId).toBe(9n);
-        expect(readOptions).toEqual({ blockTag: finalizedNumber });
-        const gate = currentReadGate;
-        if (gate !== undefined) {
-          currentReadGate = undefined;
-          gate.resolve();
-          await gate.promise;
-        }
-        return current;
+        expect(readOptions).toEqual({ blockTag: scenario.finalizedNumber });
+        return scenario.readCurrentState();
       },
     },
     getAddress: async () => GOVERNANCE,
   };
   const provider = {
-    getBlock: async (tag: string | number) => {
-      const gate = blockReadGate;
-      if (gate?.tag === tag) {
-        blockReadGate = undefined;
-        gate.entered.resolve();
-        await gate.release.promise;
-      }
-      if (tag === 'finalized') return { number: finalizedNumber, hash: finalizedHash };
-      const historicalHash = tag === 30 && cachedAnchorReplaced
-        ? REPLACEMENT_FINALIZED_HASH
-        : tag === 30
-          ? FINALIZED_HASH
-          : finalizedHash;
-      return {
-        number: Number(tag),
-        hash: options.reorg && tag === finalizedNumber
-          ? `0x${'cc'.repeat(32)}`
-          : historicalHash,
-      };
-    },
+    getBlock: (tag: string | number) => scenario.getBlock(tag),
     getNetwork: async () => ({ chainId: 31337n }),
   };
   adapter.contracts = {
@@ -213,50 +139,16 @@ function makeEvmAuthorityAdapter(
     evidence.deploymentReads.push([address, operation, label]);
     return { fromBlock: 7, head: 30, scanProviders: [] };
   };
-  const advanceAuthorityHead = () => {
-    finalizedNumber = 35;
-    finalizedHash = NEXT_FINALIZED_HASH;
-    logs.PublishPolicyUpdated.push(event(33, 0, NEXT_POLICY_HASH));
-    current.publishPolicy = 1n;
-    current[6] = 1n;
-    current.publishAuthority = ethers.ZeroAddress;
-    current[7] = ethers.ZeroAddress;
-    current.publishAuthorityAccountId = 0n;
-    current[8] = 0n;
-  };
-  const replaceCachedAnchor = () => {
-    cachedAnchorReplaced = true;
-  };
   return {
     adapter: adapter as EVMChainAdapter,
     evidence,
     provider,
-    advanceAuthorityHead,
-    replaceCachedAnchor,
-    replaceFinalizedHead: () => {
-      finalizedHash = REPLACEMENT_FINALIZED_HASH;
-      cachedAnchorReplaced = true;
-    },
-    holdCurrentStateRead: () => {
-      const entered = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
-      currentReadGate = {
-        promise: release.promise,
-        resolve: entered.resolve,
-        reject: release.reject,
-      };
-      return { entered: entered.promise, release: release.resolve };
-    },
-    holdBlockRead: (tag) => {
-      const entered = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
-      blockReadGate = { tag, entered, release };
-      return { entered: entered.promise, release: release.resolve };
-    },
-    setPublishAuthorityAccountId: (value) => {
-      current.publishAuthorityAccountId = value;
-      current[8] = value;
-    },
+    advanceAuthorityHead: scenario.advanceAuthorityHead,
+    replaceCachedAnchor: scenario.replaceCachedAnchor,
+    replaceFinalizedHead: scenario.replaceFinalizedHead,
+    holdCurrentStateRead: scenario.holdCurrentStateRead,
+    holdBlockRead: scenario.holdBlockRead,
+    setPublishAuthorityAccountId: scenario.setPublishAuthorityAccountId,
     rotateContextGraphStorage: () => adapter.applyHubRotationEventName('ContextGraphStorage'),
   };
 }

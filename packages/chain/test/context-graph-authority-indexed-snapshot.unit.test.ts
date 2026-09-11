@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { ethers } from 'ethers';
 import { describe, expect, it } from 'vitest';
 
 import { EVMChainAdapter } from '../src/evm-adapter.js';
@@ -8,20 +7,13 @@ import {
   createAbortableTipReader,
   MemoryAuthorityIndexStore,
 } from './helpers/context-graph-authority-index.js';
-
-const OWNER = '0x1111111111111111111111111111111111111111';
-const MEMBER = '0x2222222222222222222222222222222222222222';
-const AUTHORITY = '0x3333333333333333333333333333333333333333';
-const GOVERNANCE = '0x4444444444444444444444444444444444444444';
-const SECOND_MEMBER = '0x5555555555555555555555555555555555555555';
-const SECOND_AUTHORITY = '0x6666666666666666666666666666666666666666';
-const FINALIZED_HASH = `0x${'55'.repeat(32)}`;
-const NEXT_FINALIZED_HASH = `0x${'56'.repeat(32)}`;
-const REPLACEMENT_FINALIZED_HASH = `0x${'cc'.repeat(32)}`;
-const CREATION_HASH = `0x${'66'.repeat(32)}`;
-const POLICY_HASH = `0x${'77'.repeat(32)}`;
-const NEXT_POLICY_HASH = `0x${'78'.repeat(32)}`;
-const NAME_HASH = `0x${'88'.repeat(32)}`;
+import {
+  AUTHORITY,
+  createAuthorityScenario,
+  GOVERNANCE,
+  MEMBER,
+  OWNER,
+} from './helpers/context-graph-authority-scenario.js';
 
 interface IndexedAuthorityEvidence {
   readonly filters: Array<readonly [string, ...unknown[]]>;
@@ -64,6 +56,7 @@ interface IndexedAuthorityHarness {
 function makeIndexedAuthorityAdapter(
   options: Readonly<{ deactivated?: boolean }> = {},
 ): IndexedAuthorityHarness {
+  const scenario = createAuthorityScenario(options);
   const authorityIndexStore = new MemoryAuthorityIndexStore();
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
@@ -86,23 +79,11 @@ function makeIndexedAuthorityAdapter(
     indexAddresses: [],
     indexInvalidations: authorityIndexStore.invalidations,
   };
-  let finalizedNumber = 30;
-  let finalizedHash = FINALIZED_HASH;
-  let cachedAnchorReplaced = false;
-  let replacementAuthorityFork = false;
-  let blockReadGate: Readonly<{
-    tag: string | number;
-    entered: PromiseWithResolvers<void>;
-    release: PromiseWithResolvers<void>;
-  }> | undefined;
   let indexPageReadGate: Readonly<{
     entered: PromiseWithResolvers<void>;
     release: PromiseWithResolvers<void>;
   }> | undefined;
 
-  const namedArgs = (values: readonly unknown[], names: Record<string, unknown>) => (
-    Object.assign([...values], names)
-  );
   const contract = {
     interface: {
       getEvent: (name: string) => ({ topicHash: `topic:${name}` }),
@@ -129,39 +110,14 @@ function makeIndexedAuthorityAdapter(
     getContextGraph: {
       staticCall: async (contextGraphId: bigint, readOptions: { blockTag: number }) => {
         evidence.staticCalls.push([contextGraphId, readOptions]);
-        return Object.assign(
-          [OWNER, [MEMBER, OWNER], 0n, !options.deactivated, 0n, 1n, 0n, AUTHORITY, 7n],
-          {
-            owner: OWNER,
-            participantAgents: [MEMBER, OWNER],
-            active: !options.deactivated,
-            accessPolicy: 1n,
-            publishPolicy: 0n,
-            publishAuthority: AUTHORITY,
-            publishAuthorityAccountId: 7n,
-          },
-        );
+        return scenario.readCurrentState();
       },
     },
     getAddress: async () => GOVERNANCE,
   };
 
   const provider: IndexedAuthorityProvider = {
-    getBlock: async (tag) => {
-      const gate = blockReadGate;
-      if (gate?.tag === tag) {
-        blockReadGate = undefined;
-        gate.entered.resolve();
-        await gate.release.promise;
-      }
-      if (tag === 'finalized') return { number: finalizedNumber, hash: finalizedHash };
-      const historicalHash = tag === 30 && cachedAnchorReplaced
-        ? REPLACEMENT_FINALIZED_HASH
-        : tag === 30
-          ? FINALIZED_HASH
-          : finalizedHash;
-      return { number: Number(tag), hash: historicalHash };
-    },
+    getBlock: (tag) => scenario.getBlock(tag),
     getNetwork: async () => ({ chainId: 31337n }),
     getLogs: async (filter) => {
       expect(filter.address).toBe(GOVERNANCE);
@@ -174,136 +130,7 @@ function makeIndexedAuthorityAdapter(
         gate.entered.resolve();
         await gate.release.promise;
       }
-      const forkOwner = replacementAuthorityFork ? MEMBER : SECOND_MEMBER;
-      const forkParticipants = replacementAuthorityFork
-        ? [MEMBER]
-        : [MEMBER, SECOND_MEMBER];
-      return [
-        {
-          blockNumber: 10,
-          blockHash: CREATION_HASH,
-          index: 1,
-          parsed: {
-            name: 'ContextGraphCreated',
-            args: namedArgs([
-              9n,
-              forkOwner,
-              NAME_HASH,
-              forkParticipants,
-              0n,
-              1n,
-              0n,
-              AUTHORITY,
-              7n,
-            ], {
-              contextGraphId: 9n,
-              owner: forkOwner,
-              nameHash: NAME_HASH,
-              participantAgents: forkParticipants,
-              accessPolicy: 1n,
-              publishPolicy: 0n,
-              publishAuthority: AUTHORITY,
-              publishAuthorityAccountId: 7n,
-            }),
-          },
-        },
-        {
-          blockNumber: 10,
-          blockHash: CREATION_HASH,
-          index: 0,
-          parsed: {
-            name: 'Transfer',
-            args: namedArgs([ethers.ZeroAddress, forkOwner, 9n], {
-              from: ethers.ZeroAddress,
-              to: forkOwner,
-              tokenId: 9n,
-            }),
-          },
-        },
-        {
-          blockNumber: 15,
-          blockHash: `0x${'99'.repeat(32)}`,
-          index: 0,
-          parsed: {
-            name: 'Transfer',
-            args: namedArgs([SECOND_MEMBER, OWNER, 9n], {
-              from: SECOND_MEMBER,
-              to: OWNER,
-              tokenId: 9n,
-            }),
-          },
-        },
-        {
-          blockNumber: 20,
-          blockHash: POLICY_HASH,
-          index: 0,
-          parsed: {
-            name: 'PublishPolicyUpdated',
-            args: namedArgs([9n, 0n, SECOND_AUTHORITY, 9n], {
-              contextGraphId: 9n,
-              publishPolicy: 0n,
-              publishAuthority: SECOND_AUTHORITY,
-              publishAuthorityAccountId: 9n,
-            }),
-          },
-        },
-        {
-          blockNumber: 21,
-          blockHash: POLICY_HASH,
-          index: 0,
-          parsed: {
-            name: 'PublishAuthorityUpdated',
-            args: namedArgs([9n, AUTHORITY, 7n], {
-              contextGraphId: 9n,
-              newAuthority: AUTHORITY,
-              newAuthorityAccountId: 7n,
-            }),
-          },
-        },
-        ...[
-          ['AgentParticipantAdded', 22, `0x${'aa'.repeat(32)}`, OWNER],
-          ['AgentParticipantRemoved', 23, `0x${'bb'.repeat(32)}`, SECOND_MEMBER],
-        ].map(([name, blockNumber, hash, agent]) => ({
-          blockNumber,
-          blockHash: hash,
-          index: 0,
-          parsed: {
-            name,
-            args: namedArgs([9n, agent], { contextGraphId: 9n, agent }),
-          },
-        })),
-        ...(options.deactivated ? [{
-          blockNumber: 24,
-          blockHash: `0x${'bc'.repeat(32)}`,
-          index: 0,
-          parsed: {
-            name: 'ContextGraphDeactivated',
-            args: namedArgs([9n], { contextGraphId: 9n }),
-          },
-        }] : []),
-        {
-          blockNumber: 33,
-          blockHash: NEXT_POLICY_HASH,
-          index: 0,
-          parsed: {
-            name: 'PublishPolicyUpdated',
-            args: namedArgs([9n, 1n, ethers.ZeroAddress, 0n], {
-              contextGraphId: 9n,
-              publishPolicy: 1n,
-              publishAuthority: ethers.ZeroAddress,
-              publishAuthorityAccountId: 0n,
-            }),
-          },
-        },
-      ].filter((entry) => {
-        if (
-          replacementAuthorityFork
-          && entry.parsed.name !== 'ContextGraphCreated'
-          && !(entry.parsed.name === 'Transfer' && entry.blockNumber === 10)
-        ) return false;
-        return Number(entry.blockNumber) >= filter.fromBlock
-          && Number(entry.blockNumber) <= filter.toBlock;
-      });
+      return scenario.renderParsedLogs(filter.fromBlock, filter.toBlock);
     },
   };
 
@@ -328,21 +155,9 @@ function makeIndexedAuthorityAdapter(
     adapter: adapter as EVMChainAdapter,
     evidence,
     provider,
-    advanceAuthorityHead: () => {
-      finalizedNumber = 35;
-      finalizedHash = NEXT_FINALIZED_HASH;
-    },
-    replaceAuthorityFork: () => {
-      finalizedHash = REPLACEMENT_FINALIZED_HASH;
-      cachedAnchorReplaced = true;
-      replacementAuthorityFork = true;
-    },
-    holdBlockRead: (tag) => {
-      const entered = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
-      blockReadGate = { tag, entered, release };
-      return { entered: entered.promise, release: release.resolve };
-    },
+    advanceAuthorityHead: scenario.advanceAuthorityHead,
+    replaceAuthorityFork: scenario.replaceAuthorityFork,
+    holdBlockRead: scenario.holdBlockRead,
     holdIndexPageRead: () => {
       const entered = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
