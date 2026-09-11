@@ -622,6 +622,9 @@ importers:
       '@opentelemetry/sdk-metrics':
         specifier: ^2.8.0
         version: 2.8.0(@opentelemetry/api@1.9.1)
+      '@traqula/parser-sparql-1-1':
+        specifier: 1.3.0
+        version: 1.3.0
       '@types/js-yaml':
         specifier: ^4.0.9
         version: 4.0.9
@@ -3607,6 +3610,22 @@ packages:
 
   '@toml-tools/parser@1.0.0':
     resolution: {integrity: sha512-j8cd3A3ccLHppGoWI69urbiVJslrpwI6sZ61ySDUPxM/FTkQWRx/JkkF8aipnl0Ds0feWXyjyvmWzn70mIohYg==}
+
+  '@traqula/chevrotain@1.1.0':
+    resolution: {integrity: sha512-VpcoQKb2ZnsOQPlPO2mE9hfR0Aidp7drwTCtaXfpdRHGkXeQ5Nv4rnxmxwUoEDRzu6b/3z4n8oTd+sYhe4fAaA==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+
+  '@traqula/core@1.3.0':
+    resolution: {integrity: sha512-xVp6sblElVsZeeXIQQ8KNRiUFqobNT/IfgWNymlUlICi69aLJWydSWsKcH+TnS5Sz7LW2BoFpoQiIcErXaXPfQ==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+
+  '@traqula/parser-sparql-1-1@1.3.0':
+    resolution: {integrity: sha512-0OH8H1e3C77W6O4kzpL8NheegjjetMerZJvxSWJFTpjs4X/9IhstA1GOJzDe4YtxyQe0MhqRuzLSWyQA435l6w==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+
+  '@traqula/rules-sparql-1-1@1.3.0':
+    resolution: {integrity: sha512-gH33RiH7enfowRVGG95IalM+icTQxVZ/bD0WeTK/235PpjzSiUK0jTd/N3CpNc1BJOUZf6I/VHrqnMPjNf51Mg==}
+    engines: {node: ^20.19.0 || >=22.12.0}
 
   '@tsconfig/node10@1.0.12':
     resolution: {integrity: sha512-UCYBaeFvM11aU2y3YPZ//O5Rhj+xKyzy7mvcIoAjASbigy8mHMryP5cK7dgjlz2hWxh1g5pLw084E0a/wlUSFQ==}
@@ -10299,6 +10318,22 @@ snapshots:
     dependencies:
       '@toml-tools/lexer': 1.0.0
       chevrotain: 11.2.0
+
+  '@traqula/chevrotain@1.1.0': {}
+
+  '@traqula/core@1.3.0':
+    dependencies:
+      '@traqula/chevrotain': 1.1.0
+
+  '@traqula/parser-sparql-1-1@1.3.0':
+    dependencies:
+      '@traqula/core': 1.3.0
+      '@traqula/rules-sparql-1-1': 1.3.0
+
+  '@traqula/rules-sparql-1-1@1.3.0':
+    dependencies:
+      '@traqula/chevrotain': 1.1.0
+      '@traqula/core': 1.3.0
 
   '@tsconfig/node10@1.0.12': {}
 

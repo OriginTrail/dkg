@@ -18,9 +18,17 @@ import {
   runRemoteCanaryArtifactLifecycleV1,
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
+import { isRetryableNodeRequestErrorV1, pollUntilV1 } from './phase-helpers.mjs';
+import { preflightAllNodesV1, validateNodePreflightV1 } from './preflight.mjs';
+import {
+  collectRpcUsageEvidenceV1,
+  validateRpcEvidenceV1,
+} from './rpc-evidence.mjs';
+import { completeOperationalParityV1 } from './vm.mjs';
 
 const execFileAsync = promisify(execFile);
 const RUNNER_PATH = fileURLToPath(new URL('./run.mjs', import.meta.url));
+const AGENT_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url));
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const CG = '0x1111111111111111111111111111111111111111/testnet-canary';
@@ -261,6 +269,61 @@ test('dry-run validates without reading secrets, calling nodes, or running comma
   }
 });
 
+test('operator CLI dry-run performs no network, secret, evidence, or command I/O', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-cli-dry-run-'));
+  const artifactPath = join(directory, 'result.json');
+  const configPath = join(directory, 'config.json');
+  const sensitive = [
+    'https://unreachable-source.invalid',
+    'https://unreachable-receiver.invalid',
+    '/definitely/missing/source-secret',
+    '/definitely/missing/receiver-secret',
+    '/definitely/missing/rpc-evidence.json',
+    'must-never-run-lifecycle-command',
+  ];
+  const config = baseConfig({
+    nodes: [
+      {
+        id: 'alpha-source',
+        role: 'source',
+        baseUrl: sensitive[0],
+        auth: { kind: 'bearer-file', secretFile: sensitive[2] },
+      },
+      {
+        id: 'beta-receiver',
+        role: 'receiver',
+        baseUrl: sensitive[1],
+        auth: { kind: 'bearer-file', secretFile: sensitive[3] },
+      },
+    ],
+    lifecycle: {
+      receiverNodeId: 'beta-receiver',
+      stop: { argv: [sensitive[5], 'stop'] },
+      start: { argv: [sensitive[5], 'start'] },
+    },
+    rpcUsage: { kind: 'evidence-file', path: sensitive[4], minimumSamples: 2 },
+  });
+  try {
+    await writeFile(configPath, JSON.stringify(config));
+    const { stdout, stderr } = await execFileAsync(process.execPath, [
+      '--import', 'tsx',
+      RUNNER_PATH,
+      '--config', configPath,
+      '--artifact', artifactPath,
+      '--dry-run',
+    ], { cwd: AGENT_DIRECTORY });
+    assert.match(stdout, /^DRY_RUN /u);
+    assert.equal(stderr, '');
+    const artifactText = await readFile(artifactPath, 'utf8');
+    assert.equal(JSON.parse(artifactText).status, 'DRY_RUN');
+    for (const value of [...sensitive, CG, 'alpha-source', 'beta-receiver']) {
+      assert.equal(artifactText.includes(value), false, value);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('strict config rejects inline credentials and multiple receivers', () => {
   assert.throws(
     () => validateRemoteCanaryConfigV1(baseConfig({
@@ -306,6 +369,33 @@ test('the standards-based config validator enforces authorization body shape', (
   );
 });
 
+test('normalization resolves the canonical execution topology once', () => {
+  const config = validateRemoteCanaryConfigV1(baseConfig());
+  const contextGraph = config.contextGraphs[0];
+  assert.equal(contextGraph.source, config.nodes[0]);
+  assert.equal(contextGraph.receiver, config.nodes[1]);
+  assert.equal(config.lifecycle.receiver, contextGraph.receiver);
+  assert.equal(config.authorizationChecks.unauthorized.node, contextGraph.receiver);
+  assert.match(contextGraph.contextGraphRef, /^cg:[0-9a-f]{20}$/u);
+  assert.match(contextGraph.source.nodeRef, /^node:[0-9a-f]{20}$/u);
+});
+
+test('schema owns numeric bounds while normalization applies canonical defaults', () => {
+  const normalized = validateRemoteCanaryConfigV1(baseConfig({ timing: {} }));
+  assert.deepEqual(normalized.timing, {
+    requestTimeoutMs: 10_000,
+    pollIntervalMs: 2_000,
+    propagationTimeoutMs: 120_000,
+    catchupTimeoutMs: 240_000,
+    parityTimeoutMs: 120_000,
+  });
+  const config = baseConfig({ timing: { requestTimeoutMs: 999 } });
+  assert.throws(
+    () => validateRemoteCanaryConfigV1(config),
+    (error) => error instanceof RemoteCanaryError && error.code === 'config-shape',
+  );
+});
+
 test('config requires mandatory basic graph patterns for both ASK evidence fields', () => {
   for (const field of ['vmAskSparql', 'catalogSwmAskSparql']) {
     for (const sparql of [
@@ -324,6 +414,32 @@ test('config requires mandatory basic graph patterns for both ASK evidence field
         `${field}: ${sparql}`,
       );
     }
+  }
+});
+
+test('standards ASK parsing preserves ordinary prefixed and literal syntax', () => {
+  for (const sparql of [
+    'ASK WHERE { <urn:known> a "value"@en . }',
+    'PREFIX ex: <urn:example:> ASK { ex:subject ex:count 42 . }',
+    'ASK { <urn:known> <urn:value> "1"^^<http://www.w3.org/2001/XMLSchema#integer> }',
+  ]) {
+    const config = baseConfig();
+    config.contextGraphs[0].vmAskSparql = sparql;
+    assert.doesNotThrow(() => validateRemoteCanaryConfigV1(config), sparql);
+  }
+});
+
+test('standards ASK parsing rejects updates and non-ASK queries', () => {
+  for (const [sparql, expectedCode] of [
+    ['INSERT DATA { <urn:x> <urn:y> <urn:z> }', 'vm-query-must-be-read-only'],
+    ['SELECT * WHERE { <urn:x> ?p ?o }', 'vm-query-must-be-ask'],
+  ]) {
+    const config = baseConfig();
+    config.contextGraphs[0].vmAskSparql = sparql;
+    assert.throws(
+      () => validateRemoteCanaryConfigV1(config),
+      (error) => error instanceof RemoteCanaryError && error.code === expectedCode,
+    );
   }
 });
 
@@ -521,6 +637,125 @@ test('catalog preflight rejects compatibility authority with legacy sync allowed
   assert.equal(runtime.state.sourceMarkers.size, 0);
 });
 
+test('preflight fails closed for every release-defining status condition', () => {
+  const config = validateRemoteCanaryConfigV1(baseConfig());
+  const node = config.contextGraphs[0].source;
+  const cases = [
+    ['build', (status) => { status.commit = 'f'.repeat(40); }, 'node-build-mismatch'],
+    ['reconciler', (status) => {
+      status.syncLifecycle.syncReconcilerEnabled = false;
+    }, 'sync-reconciler-disabled'],
+    ['kill switch', (status) => {
+      status.rfc64Catalog.rollout.killSwitch = true;
+    }, 'rfc64-kill-switch-active'],
+    ['catalog enabled', (status) => {
+      status.rfc64Catalog.enabled = false;
+    }, 'rfc64-catalog-disabled'],
+    ['catalog service', (status) => {
+      status.rfc64Catalog.contextGraphs[0].catalogServiceStarted = false;
+    }, 'rfc64-catalog-service-not-started'],
+    ['configured mode', (status) => {
+      status.rfc64Catalog.rollout.contextGraphModes[CG] = 'shadow';
+    }, 'rfc64-mode-mismatch'],
+    ['operational mode', (status) => {
+      status.rfc64Catalog.contextGraphs[0].effectiveMode = 'shadow';
+    }, 'rfc64-operational-mode-missing'],
+    ['chain', (status) => {
+      status.chain.configured = false;
+    }, 'chain-rpc-not-configured'],
+    ['network', (status) => {
+      status.networkId = '';
+    }, 'node-network-missing'],
+  ];
+  for (const [label, mutate, expectedCode] of cases) {
+    const status = structuredClone(statusBody());
+    mutate(status);
+    assert.throws(
+      () => validateNodePreflightV1(status, node, config),
+      (error) => error instanceof RemoteCanaryError && error.code === expectedCode,
+      label,
+    );
+  }
+});
+
+test('preflight rejects a cross-node network identity mismatch', async () => {
+  const config = validateRemoteCanaryConfigV1(baseConfig());
+  await assert.rejects(
+    preflightAllNodesV1({
+      config,
+      request: {
+        json: async (node) => ({
+          ...statusBody(),
+          networkId: node.role === 'source' ? 'otp-testnet-2160' : 'otp-other',
+        }),
+      },
+    }),
+    (error) => error instanceof RemoteCanaryError && error.code === 'node-network-mismatch',
+  );
+});
+
+test('complete VM parity requires every canonical cursor field', () => {
+  const required = [
+    'expectedCatalogHeadDigest',
+    'appliedCatalogHeadDigest',
+    'expectedInventoryDigest',
+    'appliedInventoryDigest',
+    'expectedRowCount',
+    'appliedRowCount',
+    'missingRowCount',
+    'catalogVersion',
+    'lastSuccessfulAdvanceAt',
+  ];
+  assert.notEqual(completeOperationalParityV1(statusBody(), CG), null);
+  for (const field of required) {
+    const status = structuredClone(statusBody());
+    delete status.rfc64Catalog.contextGraphs[0][field];
+    assert.equal(completeOperationalParityV1(status, CG), null, field);
+  }
+  for (const [field, value] of [
+    ['appliedCatalogHeadDigest', `0x${'AB'.repeat(32)}`],
+    ['appliedRowCount', '01'],
+    ['catalogVersion', '-1'],
+    ['lastSuccessfulAdvanceAt', 1893456000],
+  ]) {
+    const status = structuredClone(statusBody());
+    status.rfc64Catalog.contextGraphs[0][field] = value;
+    assert.equal(completeOperationalParityV1(status, CG), null, field);
+  }
+});
+
+test('polling retries only explicitly classified failures', async () => {
+  const transient = new RemoteCanaryError('node-request-failed', 'http');
+  let attempts = 0;
+  const result = await pollUntilV1(
+    async () => {
+      attempts += 1;
+      if (attempts === 1) return false;
+      if (attempts === 2) throw transient;
+      return 'ready';
+    },
+    1_000,
+    1,
+    async () => undefined,
+    () => new Error('timeout'),
+    { retryError: isRetryableNodeRequestErrorV1 },
+  );
+  assert.equal(result, 'ready');
+  assert.equal(attempts, 3);
+
+  const invariant = new RemoteCanaryError('node-build-mismatch', 'preflight');
+  await assert.rejects(
+    pollUntilV1(
+      async () => { throw invariant; },
+      1_000,
+      1,
+      async () => undefined,
+      () => new Error('timeout'),
+    ),
+    (error) => error === invariant,
+  );
+});
+
 test('catalog status parity alone cannot certify VM queryability', async () => {
   const runtime = fakeRuntime();
   const config = baseConfig();
@@ -681,6 +916,79 @@ test('RPC evidence rejects a minutely sample whose method counts do not match to
     }), runtime),
     (error) => error instanceof RemoteCanaryError
       && error.code === 'rpc-evidence-total-mismatch',
+  );
+});
+
+test('RPC evidence rejects unsafe counts and checked aggregate overflow', async () => {
+  const config = validateRemoteCanaryConfigV1(baseConfig());
+  const cohortRef = createRemoteCanaryCohortRefV1(config);
+  const evidence = {
+    schema: 'dkg-rpc-usage-minutes-v1',
+    scope: 'certified-cohort',
+    expectedCommit: COMMIT,
+    cohortRef,
+    samples: [
+      {
+        windowStartedAt: '2026-09-11T00:00:00.000Z',
+        windowEndedAt: '2026-09-11T00:01:00.000Z',
+        total: Number.MAX_SAFE_INTEGER,
+        byMethod: { eth_call: Number.MAX_SAFE_INTEGER },
+      },
+      {
+        windowStartedAt: '2026-09-11T00:01:00.000Z',
+        windowEndedAt: '2026-09-11T00:02:00.000Z',
+        total: 1,
+        byMethod: { eth_call: 1 },
+      },
+    ],
+  };
+  const validationContext = {
+    startedAt: '2026-09-11T00:02:30.000Z',
+    observedAt: '2026-09-11T00:02:30.000Z',
+    expectedCommit: COMMIT,
+    cohortRef,
+  };
+  await assert.rejects(
+    collectRpcUsageEvidenceV1(config.rpcUsage, {
+      readFileFn: async () => JSON.stringify(evidence),
+      ...validationContext,
+    }),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rpc-evidence-count-overflow',
+  );
+
+  const unsafeEvidence = structuredClone(evidence);
+  unsafeEvidence.samples = [{
+    windowStartedAt: '2026-09-11T00:01:00.000Z',
+    windowEndedAt: '2026-09-11T00:02:00.000Z',
+    total: Number.MAX_SAFE_INTEGER + 1,
+    byMethod: { eth_call: Number.MAX_SAFE_INTEGER + 1 },
+  }];
+  assert.throws(
+    () => validateRpcEvidenceV1(unsafeEvidence, 1, validationContext),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rpc-evidence-count-out-of-range',
+  );
+  await assert.rejects(
+    collectRpcUsageEvidenceV1(config.rpcUsage, {
+      readFileFn: async () => JSON.stringify(unsafeEvidence),
+      ...validationContext,
+    }),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rpc-evidence-malformed',
+  );
+
+  const sampleOverflow = structuredClone(evidence);
+  sampleOverflow.samples = [{
+    windowStartedAt: '2026-09-11T00:01:00.000Z',
+    windowEndedAt: '2026-09-11T00:02:00.000Z',
+    total: Number.MAX_SAFE_INTEGER,
+    byMethod: { eth_call: Number.MAX_SAFE_INTEGER, eth_blockNumber: 1 },
+  }];
+  assert.throws(
+    () => validateRpcEvidenceV1(sampleOverflow, 1, validationContext),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rpc-evidence-count-overflow',
   );
 });
 

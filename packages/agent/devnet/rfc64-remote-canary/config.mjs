@@ -5,11 +5,11 @@ import { isAbsolute } from 'node:path';
 
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
+import { Parser as SparqlParser } from '@traqula/parser-sparql-1-1';
 
 import {
   CONFIG_SCHEMA,
   assertJsonData,
-  boundedInteger,
   invalid,
   opaqueRef,
 } from './common.mjs';
@@ -20,6 +20,15 @@ const DEFAULT_TIMING = Object.freeze({
   propagationTimeoutMs: 120_000,
   catchupTimeoutMs: 240_000,
   parityTimeoutMs: 120_000,
+});
+const DEFAULT_LIFECYCLE = Object.freeze({
+  commandTimeoutMs: 60_000,
+  stopTimeoutMs: 60_000,
+  readyTimeoutMs: 180_000,
+});
+const DEFAULT_RPC_USAGE = Object.freeze({
+  minimumSamples: 1,
+  commandTimeoutMs: 60_000,
 });
 const configSchema = JSON.parse(readFileSync(
   new URL('./config.schema.json', import.meta.url),
@@ -33,6 +42,7 @@ const schemaValidator = new Ajv2020({ allErrors: false, strict: true });
 addFormats(schemaValidator);
 const matchesRemoteCanaryConfigV1 = schemaValidator.compile(configSchema);
 const matchesRpcEvidenceV1 = schemaValidator.compile(rpcEvidenceSchema);
+const sparqlParser = new SparqlParser();
 
 /**
  * The JSON Schema is the canonical shape contract. Handwritten checks below
@@ -49,11 +59,12 @@ export function validateRemoteCanaryConfigV1(input) {
     const auth = node.auth.kind === 'none'
       ? Object.freeze({ kind: 'none' })
       : Object.freeze({ kind: 'bearer-file', secretFile: validateSecretFile(node.auth.secretFile) });
-    return Object.freeze({ ...node, baseUrl, auth });
+    return Object.freeze({ ...node, baseUrl, auth, nodeRef: opaqueRef('node', node.id) });
   });
   if (!nodes.some(({ role }) => role === 'source')) invalid('source-node-required');
   if (!nodes.some(({ role }) => role === 'receiver')) invalid('receiver-node-required');
 
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const contextGraphIds = new Set();
   const contextGraphs = input.contextGraphs.map((entry) => {
     if (contextGraphIds.has(entry.id)) invalid('duplicate-context-graph');
@@ -62,14 +73,19 @@ export function validateRemoteCanaryConfigV1(input) {
       invalid('context-graph-node-reference');
     }
     if (entry.sourceNodeId === entry.receiverNodeId) invalid('source-receiver-must-differ');
-    const source = nodes.find(({ id }) => id === entry.sourceNodeId);
-    const receiver = nodes.find(({ id }) => id === entry.receiverNodeId);
+    const source = nodeById.get(entry.sourceNodeId);
+    const receiver = nodeById.get(entry.receiverNodeId);
     if (source.role !== 'source' || receiver.role !== 'receiver') invalid('context-graph-node-role');
     if (entry.vmAskSparql !== undefined) validateAskSparql(entry.vmAskSparql, 'vm');
     if (entry.catalogSwmAskSparql !== undefined) {
       validateAskSparql(entry.catalogSwmAskSparql, 'catalog-swm');
     }
-    return Object.freeze({ ...entry });
+    return Object.freeze({
+      ...entry,
+      source,
+      receiver,
+      contextGraphRef: opaqueRef('cg', entry.id),
+    });
   });
 
   const receiverNodeIds = new Set(contextGraphs.map(({ receiverNodeId }) => receiverNodeId));
@@ -77,10 +93,18 @@ export function validateRemoteCanaryConfigV1(input) {
   const receiverNodeId = [...receiverNodeIds][0];
   const lifecycle = input.lifecycle === undefined || input.lifecycle === null
     ? null
-    : normalizeLifecycle(input.lifecycle, nodeIds, receiverNodeId);
+    : normalizeLifecycle(input.lifecycle, nodeById, receiverNodeId);
   const authorizationChecks = Object.freeze({
-    unauthorized: normalizeAuthorizationCheck(input.authorizationChecks.unauthorized, 'unauthorized', nodes),
-    revoked: normalizeAuthorizationCheck(input.authorizationChecks.revoked, 'revoked', nodes),
+    unauthorized: normalizeAuthorizationCheck(
+      input.authorizationChecks.unauthorized,
+      'unauthorized',
+      nodeById,
+    ),
+    revoked: normalizeAuthorizationCheck(
+      input.authorizationChecks.revoked,
+      'revoked',
+      nodeById,
+    ),
   });
   const rpcUsage = normalizeRpcUsage(input.rpcUsage);
   const timing = normalizeTiming(input.timing);
@@ -146,21 +170,22 @@ function validateBaseUrl(value, allowTailscaleHttp) {
   return url.origin;
 }
 
-function normalizeLifecycle(value, nodeIds, receiverNodeId) {
-  if (!nodeIds.has(value.receiverNodeId) || value.receiverNodeId !== receiverNodeId) {
+function normalizeLifecycle(value, nodeById, receiverNodeId) {
+  if (!nodeById.has(value.receiverNodeId) || value.receiverNodeId !== receiverNodeId) {
     invalid('lifecycle-receiver-mismatch');
   }
   return Object.freeze({
     receiverNodeId: value.receiverNodeId,
+    receiver: nodeById.get(value.receiverNodeId),
     stop: validateCommandV1(value.stop),
     start: validateCommandV1(value.start),
-    commandTimeoutMs: boundedInteger(value.commandTimeoutMs ?? 60_000, 1_000, 120_000),
-    stopTimeoutMs: boundedInteger(value.stopTimeoutMs ?? 60_000, 1_000, 120_000),
-    readyTimeoutMs: boundedInteger(value.readyTimeoutMs ?? 180_000, 1_000, 300_000),
+    commandTimeoutMs: value.commandTimeoutMs ?? DEFAULT_LIFECYCLE.commandTimeoutMs,
+    stopTimeoutMs: value.stopTimeoutMs ?? DEFAULT_LIFECYCLE.stopTimeoutMs,
+    readyTimeoutMs: value.readyTimeoutMs ?? DEFAULT_LIFECYCLE.readyTimeoutMs,
   });
 }
 
-function normalizeAuthorizationCheck(value, label, nodes) {
+function normalizeAuthorizationCheck(value, label, nodeById) {
   if (value.kind === 'not-exposed') {
     const expected = label === 'unauthorized'
       ? 'catalog-protocol-api-not-exposed'
@@ -172,8 +197,7 @@ function normalizeAuthorizationCheck(value, label, nodes) {
   if (value.authentication !== requiredAuthentication) {
     invalid(`${label}-authentication-mode`);
   }
-  const nodeIds = new Set(nodes.map(({ id }) => id));
-  if (!nodeIds.has(value.nodeId)) invalid('authorization-node-reference');
+  if (!nodeById.has(value.nodeId)) invalid('authorization-node-reference');
   if (value.path.includes('#') || value.path.startsWith('//')) invalid('authorization-path');
   if (value.method === 'POST' && value.path.split('?')[0] !== '/api/query') {
     invalid('authorization-post-must-be-read-only-query');
@@ -189,15 +213,21 @@ function normalizeAuthorizationCheck(value, label, nodes) {
     if (value.bodyCodePointer === undefined || value.notFoundControlNodeId === undefined) {
       invalid('authorization-404-requires-code-and-control');
     }
-    const controlNode = nodes.find(({ id }) => id === value.notFoundControlNodeId);
+    const controlNode = nodeById.get(value.notFoundControlNodeId);
     if (controlNode === undefined || controlNode.auth.kind === 'none') {
       invalid('authorization-404-control-node');
     }
   } else if (value.notFoundControlNodeId !== undefined) {
     invalid('authorization-404-control-without-404');
   }
+  const node = nodeById.get(value.nodeId);
+  const notFoundControlNode = value.notFoundControlNodeId === undefined
+    ? undefined
+    : nodeById.get(value.notFoundControlNodeId);
   return Object.freeze({
     ...value,
+    node,
+    ...(notFoundControlNode === undefined ? {} : { notFoundControlNode }),
     expectedStatuses: Object.freeze([...new Set(value.expectedStatuses)]),
     ...(value.expectedCodes === undefined
       ? {}
@@ -212,123 +242,43 @@ function normalizeRpcUsage(value) {
     return Object.freeze({
       kind: value.kind,
       path: value.path,
-      minimumSamples: boundedInteger(value.minimumSamples ?? 1, 1, 1440),
+      minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
     });
   }
   return Object.freeze({
     kind: value.kind,
     command: validateCommandV1(value.command),
-    minimumSamples: boundedInteger(value.minimumSamples ?? 1, 1, 1440),
-    commandTimeoutMs: boundedInteger(value.commandTimeoutMs ?? 60_000, 1_000, 120_000),
+    minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
+    commandTimeoutMs: value.commandTimeoutMs ?? DEFAULT_RPC_USAGE.commandTimeoutMs,
   });
 }
 
 function normalizeTiming(value) {
   if (value === undefined) return DEFAULT_TIMING;
-  return Object.freeze({
-    requestTimeoutMs: boundedInteger(value.requestTimeoutMs ?? 10_000, 1_000, 60_000),
-    pollIntervalMs: boundedInteger(value.pollIntervalMs ?? 2_000, 250, 30_000),
-    propagationTimeoutMs: boundedInteger(value.propagationTimeoutMs ?? 120_000, 1_000, 300_000),
-    catchupTimeoutMs: boundedInteger(value.catchupTimeoutMs ?? 240_000, 1_000, 600_000),
-    parityTimeoutMs: boundedInteger(value.parityTimeoutMs ?? 120_000, 1_000, 300_000),
-  });
+  return Object.freeze({ ...DEFAULT_TIMING, ...value });
 }
 
 function validateAskSparql(value, label) {
-  if (/\b(?:INSERT|DELETE|LOAD|CLEAR|CREATE|DROP|MOVE|COPY|ADD|WITH)\b/iu.test(value)) {
-    invalid(`${label}-query-must-be-read-only`);
+  let parsed;
+  try {
+    parsed = sparqlParser.parse(value);
+  } catch {
+    invalid(`${label}-query-must-be-ask`);
   }
-  const match = /^\s*ASK(?:\s+WHERE)?\s*\{([\s\S]*)\}\s*$/iu.exec(value);
-  if (match === null) invalid(`${label}-query-must-be-ask`);
-  const body = match[1].trim();
-  if (body.length === 0) invalid(`${label}-query-must-depend-on-data`);
-  const invalidPattern = `${label}-query-must-depend-on-data`;
-  const tokens = tokenizeBasicGraphPattern(body, invalidPattern);
-  let offset = 0;
-  let tripleCount = 0;
-  let concreteTermCount = 0;
-  while (offset < tokens.length) {
-    const triple = tokens.slice(offset, offset + 3);
-    if (triple.length !== 3 || triple.some(({ kind }) => kind === 'dot')) {
-      invalid(`${label}-query-must-depend-on-data`);
-    }
-    concreteTermCount += triple.filter(({ kind }) => kind === 'concrete').length;
-    tripleCount += 1;
-    offset += 3;
-    if (offset < tokens.length) {
-      if (tokens[offset].kind !== 'dot') invalid(`${label}-query-must-depend-on-data`);
-      offset += 1;
-    }
+  if (parsed.type === 'update') invalid(`${label}-query-must-be-read-only`);
+  if (parsed.type !== 'query' || parsed.subType !== 'ask') {
+    invalid(`${label}-query-must-be-ask`);
   }
-  if (tripleCount === 0 || concreteTermCount === 0) {
-    invalid(`${label}-query-must-depend-on-data`);
-  }
-}
-
-/** Accept only mandatory basic graph patterns; optional/control expressions are intentionally unsupported. */
-function tokenizeBasicGraphPattern(body, invalidPattern) {
-  const tokens = [];
-  let cursor = 0;
-  while (cursor < body.length) {
-    if (/\s/u.test(body[cursor])) {
-      cursor += 1;
-      continue;
-    }
-    if (body[cursor] === '.') {
-      tokens.push({ kind: 'dot' });
-      cursor += 1;
-      continue;
-    }
-    if (body[cursor] === '<') {
-      const end = body.indexOf('>', cursor + 1);
-      if (end <= cursor + 1 || /[\r\n]/u.test(body.slice(cursor, end + 1))) {
-        invalid(invalidPattern);
-      }
-      tokens.push({ kind: 'concrete' });
-      cursor = end + 1;
-      continue;
-    }
-    if (body[cursor] === '?' || body[cursor] === '$') {
-      const variable = /^[?$][A-Za-z_][A-Za-z0-9_]*/u.exec(body.slice(cursor));
-      if (variable === null) invalid(invalidPattern);
-      tokens.push({ kind: 'variable' });
-      cursor += variable[0].length;
-      continue;
-    }
-    if (body[cursor] === '"') {
-      cursor = consumeQuotedLiteral(body, cursor, invalidPattern);
-      tokens.push({ kind: 'concrete' });
-      continue;
-    }
-    if (body[cursor] === 'a' && /(?:\s|\.|$)/u.test(body[cursor + 1] ?? '')) {
-      tokens.push({ kind: 'keyword' });
-      cursor += 1;
-      continue;
-    }
-    invalid(invalidPattern);
-  }
-  return tokens;
-}
-
-function consumeQuotedLiteral(body, start, invalidPattern) {
-  let cursor = start + 1;
-  let closed = false;
-  while (cursor < body.length) {
-    if (body[cursor] === '\\') {
-      cursor += 2;
-      continue;
-    }
-    if (body[cursor] === '"') {
-      cursor += 1;
-      closed = true;
-      break;
-    }
-    if (body[cursor] === '\r' || body[cursor] === '\n') invalid(invalidPattern);
-    cursor += 1;
-  }
-  if (!closed) invalid(invalidPattern);
-  const suffix = /^(?:@[A-Za-z]+(?:-[A-Za-z0-9]+)*|\^\^<[^>\r\n]+>)/u.exec(
-    body.slice(cursor),
-  );
-  return cursor + (suffix?.[0].length ?? 0);
+  const patterns = parsed.where?.subType === 'group' ? parsed.where.patterns : [];
+  const triples = patterns.flatMap((pattern) => (
+    pattern.subType === 'bgp' && Array.isArray(pattern.triples) ? pattern.triples : []
+  ));
+  if (
+    patterns.length === 0
+    || patterns.some((pattern) => pattern.subType !== 'bgp' || pattern.triples.length === 0)
+    || triples.length === 0
+    || !triples.some((triple) => [triple.subject, triple.predicate, triple.object].some(
+      (term) => term?.subType !== 'variable',
+    ))
+  ) invalid(`${label}-query-must-depend-on-data`);
 }

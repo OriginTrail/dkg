@@ -1,24 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createMarker, failure, opaqueRef } from './common.mjs';
-import { mapCanaryPhaseV1, pollUntilV1 } from './phase-helpers.mjs';
+import {
+  isRetryableNodeRequestErrorV1,
+  mapCanaryPhaseV1,
+  pollUntilV1,
+} from './phase-helpers.mjs';
 import { validateNodePreflightV1 } from './preflight.mjs';
 
-export function verifyLiveSwmPropagationV1({ config, nodeById, request, sleep }) {
+export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
     const marker = createMarker();
-    const source = nodeById.get(contextGraph.sourceNodeId);
-    const receiver = nodeById.get(contextGraph.receiverNodeId);
-    await shareMarkerV1(source, contextGraph.id, marker, request, 'live-swm-propagation');
+    await shareMarkerV1(
+      contextGraph.source,
+      contextGraph.id,
+      marker,
+      request,
+      'live-swm-propagation',
+    );
     await pollUntilV1(
-      async () => askMarkerV1(receiver, contextGraph.id, marker, 'shared-working-memory', request),
+      async () => askMarkerV1(
+        contextGraph.receiver,
+        contextGraph.id,
+        marker,
+        'shared-working-memory',
+        request,
+      ),
       config.timing.propagationTimeoutMs,
       config.timing.pollIntervalMs,
       sleep,
       () => failure('swm-propagation-timeout', 'live-swm-propagation'),
+      { retryError: isRetryableNodeRequestErrorV1 },
     );
     return Object.freeze({
-      contextGraphRef: opaqueRef('cg', contextGraph.id),
+      contextGraphRef: contextGraph.contextGraphRef,
       markerRef: opaqueRef('marker', marker.subject),
       status: 'PASS',
     });
@@ -28,12 +43,11 @@ export function verifyLiveSwmPropagationV1({ config, nodeById, request, sleep })
 export async function verifyOfflineCatchupV1({
   config,
   lifecycle,
-  nodeById,
   request,
   runCommand,
   sleep,
 }) {
-  const receiver = nodeById.get(lifecycle.receiverNodeId);
+  const receiver = lifecycle.receiver;
   let stopInvoked = false;
   let primaryFailure = null;
   let startFailure = null;
@@ -52,7 +66,7 @@ export async function verifyOfflineCatchupV1({
     markers = await mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
       const marker = createMarker();
       await shareMarkerV1(
-        nodeById.get(contextGraph.sourceNodeId),
+        contextGraph.source,
         contextGraph.id,
         marker,
         request,
@@ -83,18 +97,15 @@ export async function verifyOfflineCatchupV1({
 
   await pollUntilV1(
     async () => {
-      try {
-        const status = await request.json(receiver, 'GET', '/api/status');
-        validateNodePreflightV1(status, receiver, config);
-        return true;
-      } catch {
-        return false;
-      }
+      const status = await request.json(receiver, 'GET', '/api/status');
+      validateNodePreflightV1(status, receiver, config);
+      return true;
     },
     lifecycle.readyTimeoutMs,
     config.timing.pollIntervalMs,
     sleep,
     () => failure('receiver-did-not-recover', 'offline-catchup'),
+    { retryError: isRetryableNodeRequestErrorV1 },
   );
 
   const evidence = await mapCanaryPhaseV1(markers, async ([contextGraph, marker]) => {
@@ -104,9 +115,10 @@ export async function verifyOfflineCatchupV1({
       config.timing.pollIntervalMs,
       sleep,
       () => failure('offline-catchup-timeout', 'offline-catchup'),
+      { retryError: isRetryableNodeRequestErrorV1 },
     );
     return Object.freeze({
-      contextGraphRef: opaqueRef('cg', contextGraph.id),
+      contextGraphRef: contextGraph.contextGraphRef,
       markerRef: opaqueRef('marker', marker.subject),
       status: 'PASS',
     });
@@ -114,28 +126,26 @@ export async function verifyOfflineCatchupV1({
   return Object.freeze({ status: 'PASS', receiverCount: 1, contextGraphs: evidence });
 }
 
-export function verifyCatalogSwmV1({ config, nodeById, request }) {
+export function verifyCatalogSwmV1({ config, request }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
     if (contextGraph.catalogSwmAskSparql === undefined) {
       return Object.freeze({
-        contextGraphRef: opaqueRef('cg', contextGraph.id),
+        contextGraphRef: contextGraph.contextGraphRef,
         status: 'EVIDENCE_REQUIRED',
         requirement: 'known-catalog-swm-ask-query',
         queryChecked: false,
       });
     }
-    const source = nodeById.get(contextGraph.sourceNodeId);
-    const receiver = nodeById.get(contextGraph.receiverNodeId);
     const [sourceQueryPassed, receiverQueryPassed] = await Promise.all([
       askConfiguredQueryV1(
-        source,
+        contextGraph.source,
         contextGraph,
         contextGraph.catalogSwmAskSparql,
         'shared-working-memory',
         request,
       ),
       askConfiguredQueryV1(
-        receiver,
+        contextGraph.receiver,
         contextGraph,
         contextGraph.catalogSwmAskSparql,
         'shared-working-memory',
@@ -146,7 +156,7 @@ export function verifyCatalogSwmV1({ config, nodeById, request }) {
       throw failure('catalog-swm-query-failed', 'catalog-swm-evidence');
     }
     return Object.freeze({
-      contextGraphRef: opaqueRef('cg', contextGraph.id),
+      contextGraphRef: contextGraph.contextGraphRef,
       status: 'PASS',
       queryChecked: true,
       sourceQueryPassed,

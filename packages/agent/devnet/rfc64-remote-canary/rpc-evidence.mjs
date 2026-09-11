@@ -44,10 +44,10 @@ export async function collectRpcUsageEvidenceV1(config, context) {
   let total = 0;
   let durationSeconds = 0;
   for (const sample of samples) {
-    total += sample.total;
+    total = checkedRpcCountAddV1(total, sample.total);
     durationSeconds += (Date.parse(sample.windowEndedAt) - Date.parse(sample.windowStartedAt)) / 1000;
     for (const [method, count] of Object.entries(sample.byMethod)) {
-      byMethod[method] = (byMethod[method] ?? 0) + count;
+      byMethod[method] = checkedRpcCountAddV1(byMethod[method] ?? 0, count);
     }
   }
   return Object.freeze({
@@ -83,7 +83,12 @@ export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
       throw failure('rpc-evidence-window-not-minutely', 'rpc-usage');
     }
     precedingEnd = end;
-    const methodTotal = Object.values(sample.byMethod).reduce((sum, count) => sum + count, 0);
+    assertRpcCountV1(sample.total);
+    let methodTotal = 0;
+    for (const count of Object.values(sample.byMethod)) {
+      assertRpcCountV1(count);
+      methodTotal = checkedRpcCountAddV1(methodTotal, count);
+    }
     if (methodTotal !== sample.total) throw failure('rpc-evidence-total-mismatch', 'rpc-usage');
     return sample;
   });
@@ -98,4 +103,19 @@ export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
     throw failure('rpc-evidence-future', 'rpc-usage');
   }
   return samples;
+}
+
+function assertRpcCountV1(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw failure('rpc-evidence-count-out-of-range', 'rpc-usage');
+  }
+}
+
+function checkedRpcCountAddV1(left, right) {
+  assertRpcCountV1(left);
+  assertRpcCountV1(right);
+  if (left > Number.MAX_SAFE_INTEGER - right) {
+    throw failure('rpc-evidence-count-overflow', 'rpc-usage');
+  }
+  return left + right;
 }

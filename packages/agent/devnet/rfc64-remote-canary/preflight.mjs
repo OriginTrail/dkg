@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { canonicalChainId, failure, opaqueRef } from './common.mjs';
+import { canonicalChainId, failure } from './common.mjs';
 import { mapCanaryPhaseV1 } from './phase-helpers.mjs';
 
-export async function preflightAllNodesV1({ config, request, nodeRefs }) {
+export async function preflightAllNodesV1({ config, request }) {
   const statuses = await mapCanaryPhaseV1(config.nodes, async (node) => {
     const status = await request.json(node, 'GET', '/api/status');
     validateNodePreflightV1(status, node, config);
@@ -17,17 +17,17 @@ export async function preflightAllNodesV1({ config, request, nodeRefs }) {
   return Object.freeze(config.nodes.map((node) => {
     const status = raw.get(node.id);
     const relevant = config.contextGraphs.filter((entry) => (
-      entry.sourceNodeId === node.id || entry.receiverNodeId === node.id
+      entry.source === node || entry.receiver === node
     ));
     return Object.freeze({
-      nodeRef: nodeRefs.get(node.id),
+      nodeRef: node.nodeRef,
       role: node.role,
       commit: status.commit,
       chainId: canonicalChainId(status.chain?.chainId),
       syncReconcilerEnabled: true,
       catalogServiceEnabled: status.rfc64Catalog.enabled === true,
       contextGraphs: Object.freeze(relevant.map((entry) => Object.freeze({
-        contextGraphRef: opaqueRef('cg', entry.id),
+        contextGraphRef: entry.contextGraphRef,
         mode: 'catalog',
         legacySyncAllowed: false,
       }))),
@@ -57,7 +57,7 @@ export function validateNodePreflightV1(status, node, config) {
   ) throw failure('chain-rpc-not-configured', 'preflight');
   canonicalChainId(status.chain.chainId);
   for (const entry of config.contextGraphs.filter((candidate) => (
-    candidate.sourceNodeId === node.id || candidate.receiverNodeId === node.id
+    candidate.source === node || candidate.receiver === node
   ))) {
     if (status.rfc64Catalog?.rollout?.contextGraphModes?.[entry.id] !== entry.expectedMode) {
       throw failure('rfc64-mode-mismatch', 'preflight');
