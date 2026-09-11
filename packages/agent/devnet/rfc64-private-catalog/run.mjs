@@ -29,6 +29,10 @@ import {
   isWithinRpcCeilingV1,
   rpcEvidenceV1,
 } from './rpc-evidence.mjs';
+import {
+  RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1,
+  childCommandDescriptorV1,
+} from './child-protocol.mjs';
 
 export {
   RFC64_PRIVATE_GATE_RPC_BUDGET_V1,
@@ -175,6 +179,12 @@ export class AgentChild {
   }
 
   async request(cmd, expectedEvent, timeoutMs = RUN_TIMEOUT_MS) {
+    const descriptor = childCommandDescriptorV1(cmd);
+    if (descriptor.responseEvent !== expectedEvent) {
+      throw new TypeError(
+        `RFC-64 private child command ${descriptor.command} expects ${descriptor.responseEvent}`,
+      );
+    }
     const requestId = `${this.role}-${++requestSequence}`;
     this.proc.stdin.write(`${JSON.stringify({ ...cmd, requestId })}\n`);
     return this.waitFor(expectedEvent, { requestId, timeoutMs });
@@ -278,7 +288,10 @@ export async function executeRfc64PrivateReleaseGateV1({
       active.add(child);
       let shutdownRecorded = false;
       try {
-        const ready = await child.waitFor('ready', { timeoutMs: probeReadyTimeoutMs });
+        const ready = await child.waitFor(
+          RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready,
+          { timeoutMs: probeReadyTimeoutMs },
+        );
         assertReadyRuntimeManifest(ready, runtimeManifest.manifestDigest);
         const shutdown = await child.stop();
         runtimeEvidence.record(`probe-${role}`, shutdown);
@@ -570,7 +583,7 @@ async function startRole(
     runtimeProvenance,
   });
   active.add(child);
-  child.ready = await child.waitFor('ready');
+  child.ready = await child.waitFor(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready);
   assertReadyRuntimeManifest(
     child.ready,
     runtimeProvenance.runtimeManifestDigest,
