@@ -17,7 +17,7 @@ import {
 } from '../fixture.mjs';
 import {
   bindGraphlessProjectionToGraph,
-  readPrivateCatalogGraphCountEvidence,
+  readPrivateCatalogWorkspaceMemoryEvidenceV1,
 } from '../memory-evidence.mjs';
 
 /** Seed the one canonical SWM-v2/VM-v1 state used by private-gate tests. */
@@ -76,11 +76,10 @@ export async function seedExpectedPrivateMemoryV1(store) {
 }
 
 export function readExpectedPrivateMemoryV1(store) {
-  return readPrivateCatalogGraphCountEvidence(store, {
+  return readPrivateCatalogWorkspaceMemoryEvidenceV1(store, {
     assetNumbers: ASSET_NUMBERS,
     authorAddress: roleAgentAddress('owner'),
     contextGraphId: CONTEXT_GRAPH_ID,
     networkId: NETWORK_ID,
-    swmProofMode: 'workspace-head',
   });
 }

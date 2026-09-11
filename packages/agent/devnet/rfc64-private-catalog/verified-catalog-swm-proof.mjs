@@ -13,13 +13,31 @@ import { loadExactAppliedCatalogRowsV1 } from
   '../../src/rfc64/applied-catalog-authority-transition-v1.ts';
 import { computeRfc64AppliedInventoryDigestV1 } from
   '../../src/rfc64/public-catalog-inventory-completeness-v1.ts';
+import { unpackKnowledgeAssetId } from '../../src/ka-identity.ts';
+import { readPrivateCatalogAppliedProjectionEvidenceV1 } from './memory-evidence.mjs';
 
-const VERIFIED_CLOSURES = new WeakMap();
-const KA_NUMBER_MASK = (1n << 96n) - 1n;
+/** Verify the durable closure and join its proofs to the exact stored projections. */
+export async function readVerifiedAppliedCatalogMemoryEvidenceV1(input) {
+  const proofs = await verifyAppliedCatalogSwmClosureV1(input);
+  const byKaNumber = new Map(proofs.map(({ kaNumber, proof }) => [kaNumber, proof]));
+  const projections = await readPrivateCatalogAppliedProjectionEvidenceV1(input.store, {
+    assetNumbers: input.expectedAssetNumbers,
+    authorAddress: input.trustedCatalogScope.authorAddress,
+    contextGraphId: input.trustedCatalogScope.contextGraphId,
+    networkId: input.trustedCatalogScope.networkId,
+  });
+  return Object.freeze(projections.map((entry) => {
+    const swmProof = byKaNumber.get(entry.kaNumber);
+    if (swmProof === undefined) {
+      throw new Error('verified catalog closure has no proof for stored SWM projection');
+    }
+    return Object.freeze({ ...entry, swmProof });
+  }));
+}
 
 /**
- * Mint a harness-local capability only after the durable applied-head record
- * and its complete signed catalog closure agree exactly.
+ * Verify the durable applied-head record and its complete signed catalog
+ * closure, then return the exact per-asset proof set.
  */
 export async function verifyAppliedCatalogSwmClosureV1({
   appliedHead,
@@ -85,9 +103,9 @@ export async function verifyAppliedCatalogSwmClosureV1({
       bundle.sealBytes,
       deployment,
     ));
-    const packedKaId = BigInt(row.kaId);
-    const authorAddress = `0x${(packedKaId >> 96n).toString(16).padStart(40, '0')}`;
-    const kaNumber = Number(packedKaId & KA_NUMBER_MASK);
+    const identity = unpackKnowledgeAssetId(BigInt(row.kaId));
+    const authorAddress = identity.agentAddress;
+    const kaNumber = Number(identity.kaNumber);
     if (
       authorAddress !== trustedCatalogScope.authorAddress
       || !Number.isSafeInteger(kaNumber)
@@ -126,21 +144,8 @@ export async function verifyAppliedCatalogSwmClosureV1({
   }) !== appliedHead.appliedInventoryDigest) {
     throw new Error('signed catalog closure differs from the durable applied inventory digest');
   }
-  const capability = Object.freeze({});
-  VERIFIED_CLOSURES.set(capability, Object.freeze({ byKaNumber }));
-  return capability;
-}
-
-/** Read one per-asset proof from a capability minted by the verifier above. */
-export function readVerifiedCatalogRowSwmProofV1(capability, kaNumber) {
-  const closure = capability !== null && typeof capability === 'object'
-    ? VERIFIED_CLOSURES.get(capability)
-    : undefined;
-  if (closure === undefined) {
-    throw new TypeError('catalog-row SWM proof closure is not verifier-minted');
-  }
-  const row = closure.byKaNumber.get(kaNumber);
-  return row === undefined
-    ? Object.freeze({ kind: 'absent' })
-    : Object.freeze({ kind: 'catalog-row', ...row });
+  return Object.freeze([...byKaNumber.entries()].map(([kaNumber, proof]) => Object.freeze({
+    kaNumber,
+    proof: Object.freeze({ kind: 'catalog-row', ...proof }),
+  })));
 }

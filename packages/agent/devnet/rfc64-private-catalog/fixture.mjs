@@ -11,6 +11,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+import { packKnowledgeAssetIdFromIdentity } from '../../src/ka-identity.ts';
 import {
   canonicalGraphlessProjectionNQuads,
   computeGraphlessMemoryEvidence,
@@ -200,7 +201,7 @@ export function createReceiverRevokedPolicyAndRoster() {
     members: Object.freeze(current.roster.members.filter(
       ({ agentAddress }) => agentAddress !== roleAgentAddress('receiver'),
     )),
-    issuedAt: '1',
+    issuedAt: '0',
   });
   const rosterEnvelope = Object.freeze({
     ...current.rosterEnvelope,
@@ -229,7 +230,10 @@ export function createFinalizedChainFixture() {
       assertionRoot: ASSERTION_ROOT,
       assertionVersion: '1',
       authorAddress: ownerAddress,
-      kaId: ((BigInt(ownerAddress) << 96n) | BigInt(kaNumber)).toString(),
+      kaId: packKnowledgeAssetIdFromIdentity({
+        agentAddress: ownerAddress,
+        kaNumber,
+      }).toString(),
       publisherAddress: ownerAddress,
     }))),
     blockHash: FINALIZED_BLOCK_HASH,
@@ -257,7 +261,10 @@ export async function createCatalogAssets({
   const wallet = ownerWallet();
   const ownerAddress = wallet.address.toLowerCase();
   return Promise.all(ASSET_NUMBERS.map(async (kaNumber) => {
-    const kaId = ((BigInt(ownerAddress) << 96n) | BigInt(kaNumber)).toString();
+    const kaId = packKnowledgeAssetIdFromIdentity({
+      agentAddress: ownerAddress,
+      kaNumber,
+    }).toString();
     const typedData = buildAuthorAttestationTypedData({
       chainId: BigInt(CHAIN_ID),
       kav10Address: KAV10,

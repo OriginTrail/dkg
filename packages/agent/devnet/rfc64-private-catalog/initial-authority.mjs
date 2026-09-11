@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  canonicalizeContextGraphPolicyPayloadV1,
+  canonicalizeMemberRosterPayloadV1,
+} from '@origintrail-official/dkg-core';
+
 /**
  * Fail closed unless the authority accepted by the agent is exactly the
  * release-native finalized-chain generation and agrees with both the raw
@@ -45,19 +50,11 @@ export function assertInitialFinalizedAuthorityV1({
 function assertSameAuthorityEvidenceV1(left, right, message) {
   if (
     left.policyDigest !== right.policyDigest
-    || canonicalJsonV1(left.policy.source) !== canonicalJsonV1(right.policy.source)
-    || canonicalJsonV1(left.roster) !== canonicalJsonV1(right.roster)
+    || canonicalizeContextGraphPolicyPayloadV1(left.policy)
+      !== canonicalizeContextGraphPolicyPayloadV1(right.policy)
+    || canonicalizeMemberRosterPayloadV1(left.roster)
+      !== canonicalizeMemberRosterPayloadV1(right.roster)
   ) {
     throw new Error(`RFC-64 private gate ${message}`);
   }
-}
-
-function canonicalJsonV1(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJsonV1).join(',')}]`;
-  if (value !== null && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map((key) => (
-      `${JSON.stringify(key)}:${canonicalJsonV1(value[key])}`
-    )).join(',')}}`;
-  }
-  return JSON.stringify(value);
 }
