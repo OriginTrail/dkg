@@ -86,6 +86,12 @@ test('RPC evidence is method-attributed and rejects unknown or over-budget work'
   }), false);
   assert.equal(isWithinRpcCeilingV1({ rpcCallCounts: { eth_unexpected: 1 } }), false);
   assert.equal(isWithinRpcCeilingV1({ rpcCallCounts: { eth_call: '1' } }), false);
+  assert.equal(isWithinRpcCeilingV1({
+    rpcCallCounts: {
+      eth_call: Number.MAX_SAFE_INTEGER,
+      eth_chainId: Number.MAX_SAFE_INTEGER,
+    },
+  }), false);
   assert.equal(hasFinalizedRpcReadEvidenceV1({ rpcCallCounts: { eth_chainId: 1 } }), false);
   assert.equal(hasFinalizedRpcReadEvidenceV1({
     rpcCallCounts: { eth_call: 1, eth_getBlockByNumber: 1 },
@@ -98,6 +104,7 @@ test('RPC evidence is method-attributed and rejects unknown or over-budget work'
     provider2: finalized,
     'receiver-seed': finalized,
     receiver: finalized,
+    'owner-revoker': quiet,
     outsider: quiet,
     'receiver-restart': quiet,
   };

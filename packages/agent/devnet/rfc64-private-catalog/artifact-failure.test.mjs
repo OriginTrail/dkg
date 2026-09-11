@@ -3,6 +3,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { computeAuthorCatalogScopeDigestV1 } from '@origintrail-official/dkg-core';
+
 import {
   RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1,
   RFC64_PRIVATE_CHILD_PROTOCOL_V1,
@@ -15,8 +17,22 @@ import {
   createGateCommandFailureV1,
   sanitizeGateFailureV1,
 } from './gate-artifact.mjs';
-import { assertInitialFinalizedAuthorityV1 } from './initial-authority.mjs';
-import { createPrivatePolicyAndRoster, roleAgentAddress } from './fixture.mjs';
+import {
+  assertAuthorityEvidenceParityV1,
+  assertInitialFinalizedAuthorityV1,
+} from './initial-authority.mjs';
+import {
+  createPrivateCatalogScope,
+  createPrivateCatalogSyncScope,
+  createPrivatePolicyAndRoster,
+  roleAgentAddress,
+} from './fixture.mjs';
+import {
+  assertFinalizedRuntimeV1,
+  createFinalizedRuntimeV1,
+  createOwnerPublicationStateV1,
+  createProbeRuntimeV1,
+} from './agent-runtime.mjs';
 
 const PROTOCOL_TEST_DIGEST = `0x${'ab'.repeat(32)}`;
 const VALID_CHILD_COMMANDS = Object.freeze({
@@ -36,6 +52,7 @@ const VALID_CHILD_COMMANDS = Object.freeze({
   'inspect-persisted': Object.freeze({ cmd: 'inspect-persisted' }),
   'sync-denied': Object.freeze({ cmd: 'sync-denied', providerPeerIds: ['test-peer'] }),
   'revoke-receiver': Object.freeze({ cmd: 'revoke-receiver' }),
+  'observe-receiver-revocation': Object.freeze({ cmd: 'observe-receiver-revocation' }),
   stop: Object.freeze({ cmd: 'stop' }),
 });
 
@@ -106,6 +123,50 @@ test('child command failures retain only a bounded command phase', () => {
   ), { failureClass: 'gate-execution-failed' });
 });
 
+test('runtime variants make owner publication ordering explicit', () => {
+  const created = { agent: {}, chainAdapter: undefined, rpc: undefined };
+  const probe = createProbeRuntimeV1(created);
+  assert.equal(probe.kind, 'probe');
+  assert.throws(() => assertFinalizedRuntimeV1(probe), /requires a finalized runtime/u);
+
+  const publication = createOwnerPublicationStateV1();
+  assert.throws(() => publication.requireBaseline(), /requires a published/u);
+  publication.beginBaseline();
+  assert.throws(() => publication.beginBaseline(), /already published/u);
+  const scope = Object.freeze({ scope: 'test' });
+  publication.commitBaseline(scope, [Object.freeze({ asset: 1 })]);
+  assert.deepEqual(publication.requireBaseline(), {
+    kind: 'baseline',
+    scope,
+    assets: [{ asset: 1 }],
+  });
+
+  const finalized = createFinalizedRuntimeV1(created, {
+    initialFinalizedAuthority: {},
+    peerIds: { owner: 'owner-peer' },
+    role: 'provider2',
+  });
+  assert.equal(finalized.kind, 'run');
+  assert.equal(finalized.publication, null);
+  assert.doesNotThrow(() => assertFinalizedRuntimeV1(finalized));
+});
+
+test('publication and synchronization derive the exact canonical catalog scope', () => {
+  const scope = createPrivateCatalogScope();
+  const syncScope = createPrivateCatalogSyncScope();
+  assert.equal(
+    computeAuthorCatalogScopeDigestV1(scope),
+    '0x7dbdfe9c09c959661b0d26d5353d14e55336429a26d75da593f9ca680d127f52',
+  );
+  assert.deepEqual(syncScope, {
+    networkId: scope.networkId,
+    contextGraphId: scope.contextGraphId,
+    subGraphName: scope.subGraphName,
+    authorAddress: scope.authorAddress,
+    catalogEra: scope.era,
+  });
+});
+
 test('initial authority rejects a finalized-chain roster fault before readiness', () => {
   const expected = createPrivatePolicyAndRoster();
   const expectedAuthority = {
@@ -154,4 +215,22 @@ test('initial authority rejects a finalized-chain roster fault before readiness'
     }),
     /differs from the finalized chain snapshot/u,
   );
+  const laterGeneration = {
+    ...expectedAuthority,
+    roster: { ...expectedAuthority.roster, version: '10000000000000' },
+  };
+  assert.throws(
+    () => assertAuthorityEvidenceParityV1({
+      actual: laterGeneration,
+      expected: expectedAuthority,
+      message: 'test authority mismatch',
+    }),
+    /test authority mismatch/u,
+  );
+  assert.doesNotThrow(() => assertAuthorityEvidenceParityV1({
+    actual: laterGeneration,
+    expected: expectedAuthority,
+    expectedRosterVersion: laterGeneration.roster.version,
+    message: 'test authority mismatch',
+  }));
 });

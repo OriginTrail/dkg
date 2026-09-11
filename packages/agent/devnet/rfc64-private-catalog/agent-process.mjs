@@ -7,18 +7,15 @@ import { createInterface } from 'node:readline';
 import { multiaddr } from '@multiformats/multiaddr';
 import {
   DKG_ONTOLOGY,
-  canonicalizeContextGraphPolicyPayloadV1,
-  canonicalizeMemberRosterPayloadV1,
   computeAuthorCatalogScopeDigestV1,
   computeNetworkId,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
-  decodeOpaqueKaBundleV1,
-  encodeOpaqueKaBundleV1,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  composeRfc64RegisteredRosterVersionV1,
   composeRfc64FinalizedCatalogAuthorityV1,
   parseRfc64AuthoritySnapshotV1,
 } from '../../src/rfc64/release-native-catalog-authority-v1.ts';
@@ -34,13 +31,14 @@ import {
   NETWORK_ID,
   ON_CHAIN_CONTEXT_GRAPH_ID,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
-  PRIVATE_MEMBER_ROLES,
   RUNTIME_ROLES,
   UPDATED_ASSERTION_ROOT,
   UPDATED_PROJECTION,
   UPDATED_PROJECTION_QUADS,
   createCatalogAssets,
   createFinalizedChainFixture,
+  createPrivateCatalogScope,
+  createPrivateCatalogSyncScope,
   createPrivatePolicyAndRoster,
   createReceiverRevokedPolicyAndRoster,
   ownerWallet,
@@ -60,26 +58,28 @@ import {
   defineChildCommandHandlersV1,
   dispatchChildCommandV1,
 } from './child-protocol.mjs';
-import { assertInitialFinalizedAuthorityV1 } from './initial-authority.mjs';
+import {
+  assertAuthorityEvidenceParityV1,
+  assertFinalizedAuthorityMatchesExpectedV1,
+  assertInitialFinalizedAuthorityV1,
+} from './initial-authority.mjs';
 import { readVerifiedAppliedCatalogMemoryEvidenceV1 } from './verified-catalog-swm-proof.mjs';
 import { emitAuthoritativeRuntimeShutdownReceiptV1 } from './runtime-shutdown.mjs';
+import { createRfc64PrivateFaultProfileV1 } from './fault-injection.mjs';
+import {
+  assertFinalizedRuntimeV1,
+  createFinalizedRuntimeV1,
+  createProbeRuntimeV1,
+} from './agent-runtime.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
 const DATA_DIR = requiredEnv('DKG_RFC64_PRIVATE_DATA_DIR');
 const RUNTIME_MANIFEST_DIGEST = requiredEnv('DKG_RFC64_RUNTIME_MANIFEST_DIGEST');
 const MANIFEST_PATH = process.env.DKG_RFC64_PRIVATE_MANIFEST;
-const AUTHORITY_FAULT = process.env.DKG_RFC64_PRIVATE_AUTHORITY_FAULT;
-const CATALOG_PROOF_FAULT = process.env.DKG_RFC64_PRIVATE_CATALOG_PROOF_FAULT;
-
-let agent;
-let chainAdapter;
-let rpc;
+let runtime;
+let childCommandHandlers;
 let stopping = false;
-let runtimePeerIds;
-let initialFinalizedAuthority;
-let publishedCatalogScope;
-let baselineCatalogAssets;
 
 function emit(event, requestId, fields = {}) {
   process.stdout.write(`RFC64_PRIVATE_EVENT ${JSON.stringify({
@@ -91,95 +91,121 @@ function emit(event, requestId, fields = {}) {
 }
 
 async function boot() {
-  if (
-    CATALOG_PROOF_FAULT !== undefined
-    && CATALOG_PROOF_FAULT !== 'inventory-digest'
-    && CATALOG_PROOF_FAULT !== 'expected-assets'
-    && CATALOG_PROOF_FAULT !== 'duplicate-expected-assets'
-    && CATALOG_PROOF_FAULT !== 'missing-bundle'
-    && CATALOG_PROOF_FAULT !== 'mismatched-bundle'
-  ) {
-    throw new Error('unsupported RFC-64 private catalog proof fault injection');
-  }
+  const faultProfile = createRfc64PrivateFaultProfileV1(process.env);
   if (MODE === 'probe') {
-    agent = await createAgent(undefined, false);
-    await agent.start();
-    emit(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready, undefined, readyFields());
+    const created = await createAgent(undefined, false, faultProfile);
+    await created.agent.start();
+    runtime = createProbeRuntimeV1(created);
+    childCommandHandlers = createChildCommandHandlersV1(runtime);
+    emit(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready, undefined, readyFields(runtime));
     return;
   }
   if (MODE !== 'run' || MANIFEST_PATH === undefined) {
     throw new Error('runtime mode requires a manifest');
   }
   const manifest = JSON.parse(await readFile(MANIFEST_PATH, 'utf8'));
-  runtimePeerIds = manifest.peerIds;
-  agent = await createAgent(manifest, true);
-  await agent.start();
-  const responsibility = await agent.reconcileRfc64CatalogResponsibilityV1(
-    CONTEXT_GRAPH_ID,
-  );
-  if (
-    ROLE !== 'outsider'
-    && (!responsibility.active || responsibility.mode === 'legacy')
-  ) {
-    throw new Error('real graph did not enter release-native RFC-64 responsibility');
-  }
-  if (ROLE === 'outsider' && responsibility.active) {
-    throw new Error('nonmember unexpectedly entered RFC-64 catalog responsibility');
-  }
-  const acceptedAuthority = await agent.reconcileRfc64CatalogAccessAuthorityV1(
-    CONTEXT_GRAPH_ID,
-  );
-  if (acceptedAuthority === null || chainAdapter === undefined) {
-    throw new Error('real graph produced no release-native finalized authority');
+  const created = await createAgent(manifest, true, faultProfile);
+  await created.agent.start();
+  if (created.chainAdapter === undefined) {
+    throw new Error('finalized runtime produced no chain adapter');
   }
   const onChainContextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
   const finalizedAuthority = composeRfc64FinalizedCatalogAuthorityV1({
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_ID,
     snapshot: parseRfc64AuthoritySnapshotV1(
-      await chainAdapter.getContextGraphAuthoritySnapshot(onChainContextGraphId),
+      await created.chainAdapter.getContextGraphAuthoritySnapshot(onChainContextGraphId),
       onChainContextGraphId,
     ),
   });
-  const expected = createPrivatePolicyAndRoster();
-  initialFinalizedAuthority = assertInitialFinalizedAuthorityV1({
-    acceptedAuthority,
-    finalizedAuthority,
-    expectedAuthority: {
-      policy: expected.policy,
-      policyDigest: expected.policyDigest,
-      roster: expected.roster,
-      source: 'finalized-chain',
-    },
+  const runtimeIsMember = finalizedAuthority.roster?.members.some(
+    ({ agentAddress }) => agentAddress === roleAgentAddress(ROLE),
+  ) === true;
+  const responsibility = await created.agent.reconcileRfc64CatalogResponsibilityV1(
+    CONTEXT_GRAPH_ID,
+  );
+  if (
+    runtimeIsMember
+    && (!responsibility.active || responsibility.mode === 'legacy')
+  ) {
+    throw new Error('real graph did not enter release-native RFC-64 responsibility');
+  }
+  if (!runtimeIsMember && responsibility.active) {
+    throw new Error('nonmember unexpectedly entered RFC-64 catalog responsibility');
+  }
+  const expected = finalizedAuthority.roster?.version === '0'
+    ? createPrivatePolicyAndRoster()
+    : createReceiverRevokedPolicyAndRoster();
+  const registeredRosterVersion = finalizedAuthority.roster === null
+    ? null
+    : composeRfc64RegisteredRosterVersionV1(
+      finalizedAuthority.roster.version,
+      await created.agent.readRfc64PrivateRosterVersionV1(CONTEXT_GRAPH_ID),
+    );
+  const registeredFinalizedAuthority = finalizedAuthority.roster === null
+    ? finalizedAuthority
+    : Object.freeze({
+      ...finalizedAuthority,
+      roster: Object.freeze({
+        ...finalizedAuthority.roster,
+        version: registeredRosterVersion,
+      }),
+    });
+  const expectedAuthority = {
+    policy: expected.policy,
+    policyDigest: expected.policyDigest,
+    roster: Object.freeze({ ...expected.roster, version: registeredRosterVersion }),
+    source: 'finalized-chain',
+  };
+  let acceptedAuthority = null;
+  try {
+    acceptedAuthority = await created.agent.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+    );
+  } catch (error) {
+    if (
+      runtimeIsMember
+      || error?.code !== 'catalog-service-unavailable'
+    ) throw error;
+  }
+  if (runtimeIsMember && acceptedAuthority === null) {
+    throw new Error('real graph produced no release-native finalized authority');
+  }
+  const initialFinalizedAuthority = acceptedAuthority === null
+    ? assertFinalizedAuthorityMatchesExpectedV1({
+      finalizedAuthority: registeredFinalizedAuthority,
+      expectedAuthority,
+    })
+    : assertInitialFinalizedAuthorityV1({
+      acceptedAuthority,
+      finalizedAuthority: registeredFinalizedAuthority,
+      expectedAuthority,
+    });
+  runtime = createFinalizedRuntimeV1(created, {
+    initialFinalizedAuthority,
+    peerIds: manifest.peerIds,
+    role: ROLE,
   });
-  emit(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready, undefined, readyFields());
+  childCommandHandlers = createChildCommandHandlersV1(runtime);
+  emit(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready, undefined, readyFields(runtime));
 }
 
-async function createAgent(manifest, finalizedRuntime) {
+async function createAgent(manifest, finalizedRuntime, faultProfile) {
   const canonicalFixture = createFinalizedChainFixture();
-  const fixture = AUTHORITY_FAULT === 'omit-receiver'
-    ? Object.freeze({
-      ...canonicalFixture,
-      participantAgents: Object.freeze(canonicalFixture.participantAgents.filter(
-        (address) => address !== roleAgentAddress('receiver'),
-      )),
-    })
-    : canonicalFixture;
-  if (
-    AUTHORITY_FAULT !== undefined
-    && AUTHORITY_FAULT !== 'omit-receiver'
-    && AUTHORITY_FAULT !== 'revocation-chain-noop'
-    && AUTHORITY_FAULT !== 'revocation-over-removal'
-  ) {
-    throw new Error('unsupported RFC-64 private authority fault injection');
-  }
+  const fixture = faultProfile.authority.fixture(
+    canonicalFixture,
+    roleAgentAddress('receiver'),
+  );
+  let chainAdapter;
+  let rpc;
   let chainRuntime = {};
   if (finalizedRuntime) {
     chainAdapter = new Rfc64PrivateDevnetChainAdapter(fixture, {
-      participantRemovalAlsoRemoves: AUTHORITY_FAULT === 'revocation-over-removal'
-        ? roleAgentAddress('owner')
-        : undefined,
-      participantRemovalNoop: AUTHORITY_FAULT === 'revocation-chain-noop',
+      ...faultProfile.authority.adapterOptions({
+        authorityStatePath: manifest.authorityStatePath,
+        ownerAddress: roleAgentAddress('owner'),
+      }),
+      signerAddress: roleAgentAddress(ROLE),
     });
     await chainAdapter.createOnChainContextGraph({
       accessPolicy: 1,
@@ -222,7 +248,14 @@ async function createAgent(manifest, finalizedRuntime) {
     agentProfileHeartbeatMs: 0,
     ...chainRuntime,
   };
-  if (manifest === undefined) return DKGAgent.create(base);
+  if (manifest === undefined) {
+    return Object.freeze({
+      agent: await DKGAgent.create(base),
+      chainAdapter: undefined,
+      faultProfile,
+      rpc: undefined,
+    });
+  }
 
   const peerIds = manifest.peerIds;
   const agentAddressByPeerId = new Map(RUNTIME_ROLES.map((role) => [
@@ -233,6 +266,10 @@ async function createAgent(manifest, finalizedRuntime) {
     localAgentAddress: roleAgentAddress(ROLE),
     resolveRemoteAgentAddress: async (peerId) => agentAddressByPeerId.get(peerId) ?? null,
   };
+  const finalizedSnapshot = await chainAdapter.getContextGraphAuthoritySnapshot(
+    BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
+  );
+  await seedPrivateCatalogDefinition(base.store, peerIds, finalizedSnapshot.participantAgents);
   const created = await DKGAgent.create({
     ...base,
     networkIdentity: {
@@ -251,24 +288,23 @@ async function createAgent(manifest, finalizedRuntime) {
       },
     },
   });
-  await seedPrivateCatalogDefinition(created, peerIds);
-  return created;
+  return Object.freeze({ agent: created, chainAdapter, faultProfile, rpc });
 }
 
-function readyFields() {
-  const address = agent.multiaddrs.find((candidate) => candidate.includes('/tcp/'));
+function readyFields(context) {
+  const address = context.agent.multiaddrs.find((candidate) => candidate.includes('/tcp/'));
   if (address === undefined) throw new Error('agent has no TCP multiaddr');
   return {
-    agentClass: agent.constructor.name,
-    peerId: agent.peerId,
+    agentClass: context.agent.constructor.name,
+    peerId: context.agent.peerId,
     multiaddr: address,
-    catalogServiceStarted: agent.rfc64PublicCatalogStatsV1()?.started === true,
+    catalogServiceStarted: context.agent.rfc64PublicCatalogStatsV1()?.started === true,
     runtimeBuildManifestDigest: RUNTIME_MANIFEST_DIGEST,
-    ...(initialFinalizedAuthority === undefined ? {} : {
-      authoritySource: initialFinalizedAuthority.source,
-      authorityPolicyDigest: initialFinalizedAuthority.policyDigest,
-      authorityRosterVersion: initialFinalizedAuthority.roster.version,
-      authorityMembers: initialFinalizedAuthority.roster.members.map(
+    ...(context.kind !== 'run' ? {} : {
+      authoritySource: context.initialFinalizedAuthority.source,
+      authorityPolicyDigest: context.initialFinalizedAuthority.policyDigest,
+      authorityRosterVersion: context.initialFinalizedAuthority.roster.version,
+      authorityMembers: context.initialFinalizedAuthority.roster.members.map(
         ({ agentAddress }) => agentAddress,
       ),
     }),
@@ -276,55 +312,51 @@ function readyFields() {
 }
 
 async function handle(command) {
+  if (childCommandHandlers === undefined) throw new Error('child runtime is not ready');
   const { descriptor } = await dispatchChildCommandV1(
-  CHILD_COMMAND_HANDLERS,
-  command,
-  emit,
+    childCommandHandlers,
+    command,
+    emit,
   );
   if (descriptor.command === 'stop') {
     await shutdown(0, command.requestId, descriptor.responseEvent);
   }
 }
 
-const CHILD_COMMAND_HANDLERS = defineChildCommandHandlersV1({
-  dial: async (command) => {
-    await agent.node.libp2p.dial(multiaddr(command.multiaddr));
-    return { peerId: command.peerId };
-  },
-  publish: () => publishCatalogBaseline(),
-  'publish-update': () => publishCatalogUpdate(),
-  'wait-bootstrap': (command) => waitForBootstrap(command),
-  inspect: (command) => inspect(command.expectedHeadDigest),
-  'inspect-persisted': (command) => inspect(
-    command.expectedHeadDigest,
-    { includeNonmemberQuery: false },
-  ),
-  'sync-denied': (command) => proveDenied(command),
-  'revoke-receiver': () => revokeReceiver(),
-  stop: async () => Object.freeze({}),
-});
+function createChildCommandHandlersV1(context) {
+  return defineChildCommandHandlersV1({
+    dial: async (command) => {
+      await context.agent.node.libp2p.dial(multiaddr(command.multiaddr));
+      return { peerId: command.peerId };
+    },
+    publish: () => publishCatalogBaseline(context),
+    'publish-update': () => publishCatalogUpdate(context),
+    'wait-bootstrap': (command) => waitForBootstrap(context, command),
+    inspect: (command) => inspect(context, command.expectedHeadDigest),
+    'inspect-persisted': (command) => inspect(
+      context,
+      command.expectedHeadDigest,
+      { includeNonmemberQuery: false },
+    ),
+    'sync-denied': (command) => proveDenied(context, command),
+    'revoke-receiver': () => revokeReceiver(context),
+    'observe-receiver-revocation': () => observeReceiverRevocation(context),
+    stop: async () => Object.freeze({}),
+  });
+}
 
-async function publishCatalogBaseline() {
-  if (ROLE !== 'owner') throw new Error('only the owner role can publish');
-  if (publishedCatalogScope !== undefined) throw new Error('catalog baseline already published');
-  const { policy, policyDigest } = createPrivatePolicyAndRoster();
-  const scope = {
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
-    governanceChainId: policy.governanceChainId,
-    governanceContractAddress: policy.governanceContractAddress,
-    ownershipTransitionDigest: policy.ownershipTransitionDigest,
-    subGraphName: null,
-    authorAddress: roleAgentAddress('owner'),
-    era: policy.era,
-    bucketCount: '1',
-  };
+async function publishCatalogBaseline(context) {
+  assertFinalizedRuntimeV1(context);
+  if (ROLE !== 'owner' || context.publication === null) {
+    throw new Error('only the owner role can publish');
+  }
+  context.publication.beginBaseline();
+  const { policyDigest } = createPrivatePolicyAndRoster();
+  const scope = createPrivateCatalogScope();
   const assets = await createCatalogAssets();
-  baselineCatalogAssets = assets;
-  publishedCatalogScope = scope;
   let applied;
   for (const asset of assets) {
-    applied = await agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+    applied = await context.agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({
       scope,
       author: ownerWallet(),
       asset,
@@ -334,29 +366,31 @@ async function publishCatalogBaseline() {
       catalogIssuerDelegationExpiresAt: '1893456000000',
     });
   }
+  context.publication.commitBaseline(scope, assets);
   return publishedFields(applied, policyDigest, scope);
 }
 
-async function publishCatalogUpdate() {
-  if (ROLE !== 'owner') throw new Error('only the owner role can publish');
-  if (publishedCatalogScope === undefined || baselineCatalogAssets === undefined) {
-    throw new Error('catalog update requires a published finalized-VM baseline');
+async function publishCatalogUpdate(context) {
+  assertFinalizedRuntimeV1(context);
+  if (ROLE !== 'owner' || context.publication === null) {
+    throw new Error('only the owner role can publish');
   }
+  const baseline = context.publication.requireBaseline();
   const { policyDigest } = createPrivatePolicyAndRoster();
   // The catalog establishes the finalized VM baseline first. These staged
   // version-2 snapshots represent a later, not-yet-finalized SWM generation,
   // so finalized version-1 twin retirement must preserve them.
-  for (const [index, asset] of baselineCatalogAssets.entries()) {
+  for (const [index, asset] of baseline.assets.entries()) {
     const kaNumber = ASSET_NUMBERS[index];
     if (kaNumber === undefined) throw new Error('catalog fixture asset number is missing');
-    await agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+    await context.agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       shareOperationId: privateCatalogSwmShareOperationId(kaNumber),
       kaUal: asset.seal.kaUal,
       assertionVersion: '2',
       quads: UPDATED_PROJECTION_QUADS,
       privateTripleCount: 0,
-      publisherPeerId: agent.peerId,
+      publisherPeerId: context.agent.peerId,
       accessPolicy: 'ownerOnly',
       agentAddress: roleAgentAddress('owner'),
       timestamp: new Date(),
@@ -369,8 +403,8 @@ async function publishCatalogUpdate() {
   });
   let applied;
   for (const asset of updatedAssets) {
-    applied = await agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({
-      scope: publishedCatalogScope,
+    applied = await context.agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+      scope: baseline.scope,
       author: ownerWallet(),
       asset,
       deployment: DEPLOYMENT,
@@ -379,7 +413,7 @@ async function publishCatalogUpdate() {
       catalogIssuerDelegationExpiresAt: '1893456000000',
     });
   }
-  return publishedFields(applied, policyDigest, publishedCatalogScope);
+  return publishedFields(applied, policyDigest, baseline.scope);
 }
 
 function publishedFields(applied, policyDigest, scope) {
@@ -393,28 +427,23 @@ function publishedFields(applied, policyDigest, scope) {
   };
 }
 
-async function waitForBootstrap(command) {
+async function waitForBootstrap(context, command) {
+  assertFinalizedRuntimeV1(context);
   const timeoutMs = boundedTimeout(command.timeoutMs);
   const deadline = Date.now() + timeoutMs;
   let last;
   let attempts = 0;
   const providerRole = ROLE === 'provider2' ? 'owner' : 'provider2';
-  const providerPeerId = runtimePeerIds?.[providerRole];
+  const providerPeerId = context.peerIds[providerRole];
   if (providerPeerId === undefined) {
     throw new Error(`${ROLE} has no configured catalog provider`);
   }
   while (Date.now() < deadline) {
     attempts += 1;
     try {
-      last = await agent.synchronizeRfc64CatalogFromProvidersV1({
+      last = await context.agent.synchronizeRfc64CatalogFromProvidersV1({
         remotePeerIds: [providerPeerId],
-        scope: {
-          networkId: NETWORK_ID,
-          contextGraphId: CONTEXT_GRAPH_ID,
-          subGraphName: null,
-          authorAddress: roleAgentAddress('owner'),
-          catalogEra: '0',
-        },
+        scope: createPrivateCatalogSyncScope(),
       });
     } catch (error) {
       last = { error: boundedErrorChain(error) };
@@ -426,8 +455,8 @@ async function waitForBootstrap(command) {
         || last.currentCatalogHeadDigest === command.expectedHeadDigest
       );
     const exactMemory = command.expectedMemory === 'finalized-vm-v1'
-      ? await hasExactLocalFinalizedVmBaseline()
-      : await hasExactLocalMemoryContents({
+      ? await hasExactLocalFinalizedVmBaseline(context)
+      : await hasExactLocalMemoryContents(context, {
         catalogVersion: last?.catalogVersion,
         exactExpectedHead: bootstrapApplied,
       });
@@ -443,16 +472,16 @@ async function waitForBootstrap(command) {
     }
     await delay(100);
   }
-  const graphCounts = await readPrivateCatalogWorkspaceMemoryEvidenceV1(agent.store, {
+  const graphCounts = await readPrivateCatalogWorkspaceMemoryEvidenceV1(context.agent.store, {
     assetNumbers: ASSET_NUMBERS,
     contextGraphId: CONTEXT_GRAPH_ID,
     authorAddress: roleAgentAddress('owner'),
     networkId: NETWORK_ID,
   });
-  const registeredAuthority = await agent.resolveRegisteredContextGraphAuthority(
+  const registeredAuthority = await context.agent.resolveRegisteredContextGraphAuthority(
     CONTEXT_GRAPH_ID,
   ).catch((error) => ({ error: boundedErrorChain(error) }));
-  const memberRecoveryGate = await agent.getMemberRecoveryGate(
+  const memberRecoveryGate = await context.agent.getMemberRecoveryGate(
     CONTEXT_GRAPH_ID,
   ).catch((error) => ({ error: boundedErrorChain(error) }));
   throw new Error(
@@ -463,8 +492,8 @@ async function waitForBootstrap(command) {
   );
 }
 
-async function hasExactLocalFinalizedVmBaseline() {
-  const graphCounts = await readPrivateCatalogWorkspaceMemoryEvidenceV1(agent.store, {
+async function hasExactLocalFinalizedVmBaseline(context) {
+  const graphCounts = await readPrivateCatalogWorkspaceMemoryEvidenceV1(context.agent.store, {
     assetNumbers: ASSET_NUMBERS,
     contextGraphId: CONTEXT_GRAPH_ID,
     authorAddress: roleAgentAddress('owner'),
@@ -483,14 +512,14 @@ async function hasExactLocalFinalizedVmBaseline() {
     ));
 }
 
-async function hasExactLocalMemoryContents(catalogEvidence = {}) {
+async function hasExactLocalMemoryContents(context, catalogEvidence = {}) {
   const authorAddress = roleAgentAddress('owner');
-  const scope = privateCatalogScope(authorAddress);
-  const applied = agent.readRfc64AppliedCatalogHeadV1({
+  const scope = createPrivateCatalogScope({ authorAddress });
+  const applied = context.agent.readRfc64AppliedCatalogHeadV1({
     catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
     authorAddress,
   });
-  const graphCounts = await readVerifiedAppliedCatalogMemoryV1(applied, scope);
+  const graphCounts = await readVerifiedAppliedCatalogMemoryV1(context, applied, scope);
   return hasExactPrivateCatalogMemoryContents(
     {
       appliedHeadDigest: applied?.currentCatalogHeadDigest,
@@ -501,25 +530,25 @@ async function hasExactLocalMemoryContents(catalogEvidence = {}) {
   );
 }
 
-async function inspect(expectedHeadDigest, { includeNonmemberQuery = true } = {}) {
+async function inspect(context, expectedHeadDigest, { includeNonmemberQuery = true } = {}) {
   const authorAddress = roleAgentAddress('owner');
-  const scope = privateCatalogScope(authorAddress);
+  const scope = createPrivateCatalogScope({ authorAddress });
   const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
-  const applied = agent.readRfc64AppliedCatalogHeadV1({
+  const applied = context.agent.readRfc64AppliedCatalogHeadV1({
     catalogScopeDigest: scopeDigest,
     authorAddress,
   });
   const graphCounts = ROLE === 'owner' || applied === null
-    ? await readPrivateCatalogWorkspaceMemoryEvidenceV1(agent.store, {
+    ? await readPrivateCatalogWorkspaceMemoryEvidenceV1(context.agent.store, {
         assetNumbers: ASSET_NUMBERS,
         contextGraphId: CONTEXT_GRAPH_ID,
         authorAddress,
         networkId: NETWORK_ID,
       })
-    : await readVerifiedAppliedCatalogMemoryV1(applied, scope);
+    : await readVerifiedAppliedCatalogMemoryV1(context, applied, scope);
   const outsiderResult = ROLE === 'outsider' || !includeNonmemberQuery
     ? null
-    : await agent.query(
+    : await context.agent.query(
       'SELECT ?name WHERE { <https://example.org/alice> <https://schema.org/name> ?name }',
       {
         contextGraphId: CONTEXT_GRAPH_ID,
@@ -529,6 +558,7 @@ async function inspect(expectedHeadDigest, { includeNonmemberQuery = true } = {}
     );
   return {
     appliedHeadDigest: applied?.currentCatalogHeadDigest ?? null,
+    catalogScopeDigest: scopeDigest,
     catalogVersion: applied?.catalogVersion ?? null,
     inventoryRowCount: applied?.inventoryRowCount ?? null,
     exactExpectedHead: expectedHeadDigest === undefined
@@ -538,85 +568,123 @@ async function inspect(expectedHeadDigest, { includeNonmemberQuery = true } = {}
     outsiderVisibleVmBindings: includeNonmemberQuery
       ? outsiderResult?.bindings?.length ?? 0
       : null,
-    receiverStats: agent.rfc64PublicCatalogStatsV1()?.receiver ?? null,
-    rpcCalls: rpc === undefined ? 0 : [
+    receiverStats: context.agent.rfc64PublicCatalogStatsV1()?.receiver ?? null,
+    rpcCalls: context.rpc === undefined ? 0 : [
       'eth_getBlockByNumber',
       'eth_call',
-    ].reduce((sum, method) => sum + rpc.calls(method), 0),
-    rpcCallCounts: rpc?.snapshot() ?? Object.freeze({}),
+    ].reduce((sum, method) => sum + context.rpc.calls(method), 0),
+    rpcCallCounts: context.rpc?.snapshot() ?? Object.freeze({}),
   };
 }
 
-function privateCatalogScope(authorAddress) {
-  return Object.freeze({
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
-    governanceChainId: '20430',
-    governanceContractAddress: CONTEXT_GRAPH_STORAGE,
-    ownershipTransitionDigest: createPrivatePolicyAndRoster().policy.ownershipTransitionDigest,
-    subGraphName: null,
-    authorAddress,
-    era: '0',
-    bucketCount: '1',
-  });
-}
-
-async function readVerifiedAppliedCatalogMemoryV1(applied, scope) {
-  const persistence = agent.rfc64PersistenceV1;
+async function readVerifiedAppliedCatalogMemoryV1(context, applied, scope) {
+  const persistence = context.agent.rfc64PersistenceV1;
   if (applied === null || persistence === undefined) {
     throw new Error('catalog-row SWM evidence has no durable applied catalog');
   }
+  const proofInputs = context.faultProfile.proof.inputs({
+    appliedHead: applied,
+    expectedAssetNumbers: ASSET_NUMBERS,
+    kaBundles: persistence.kaBundles,
+    trustedCatalogScope: scope,
+    untrustedCatalogScope: Object.freeze({
+      ...scope,
+      authorAddress: roleAgentAddress('outsider'),
+    }),
+  });
   return readVerifiedAppliedCatalogMemoryEvidenceV1({
-    appliedHead: CATALOG_PROOF_FAULT === 'inventory-digest'
-      ? Object.freeze({ ...applied, appliedInventoryDigest: `0x${'00'.repeat(32)}` })
-      : applied,
+    ...proofInputs,
     controlObjects: persistence.controlObjects,
     deployment: DEPLOYMENT,
-    expectedAssetNumbers: CATALOG_PROOF_FAULT === 'expected-assets'
-      ? Object.freeze([ASSET_NUMBERS[0], 43])
-      : CATALOG_PROOF_FAULT === 'duplicate-expected-assets'
-        ? Object.freeze([ASSET_NUMBERS[0], ASSET_NUMBERS[0]])
-        : ASSET_NUMBERS,
-    kaBundles: catalogProofKaBundlesV1(persistence.kaBundles),
-    store: agent.store,
-    trustedCatalogScope: scope,
+    store: context.agent.store,
   });
 }
 
-function catalogProofKaBundlesV1(kaBundles) {
-  if (CATALOG_PROOF_FAULT === 'missing-bundle') {
-    return Object.freeze({ readKaBundleByDigest: async () => null });
-  }
-  if (CATALOG_PROOF_FAULT !== 'mismatched-bundle') return kaBundles;
-  return Object.freeze({
-    readKaBundleByDigest: async (blobDigest) => {
-      const bundleBytes = await kaBundles.readKaBundleByDigest(blobDigest);
-      if (bundleBytes === null) return null;
-      const decoded = decodeOpaqueKaBundleV1(bundleBytes);
-      const projectionBytes = decoded.projectionBytes.slice();
-      if (projectionBytes.length === 0) {
-        throw new Error('cannot inject a mismatched empty catalog projection');
-      }
-      projectionBytes[0] ^= 1;
-      return encodeOpaqueKaBundleV1(projectionBytes, decoded.sealBytes).bundleBytes;
-    },
-  });
-}
-
-async function revokeReceiver() {
-  if (ROLE !== 'provider2') throw new Error('only provider2 can advance the gate roster');
-  if (chainAdapter === undefined) throw new Error('provider2 has no finalized chain adapter');
-  await agent.removeAgentFromContextGraph(
+async function revokeReceiver(context) {
+  assertFinalizedRuntimeV1(context);
+  if (ROLE !== 'owner') throw new Error('only the owner can advance the gate roster');
+  if (context.chainAdapter === undefined) throw new Error('owner has no finalized chain adapter');
+  await context.agent.removeAgentFromContextGraph(
     CONTEXT_GRAPH_ID,
     roleAgentAddress('receiver'),
     roleAgentAddress('owner'),
   );
+  const finalizedAuthority = await readExactReceiverRevokedFinalizedAuthorityV1(context);
+  return {
+    policyDigest: finalizedAuthority.policyDigest,
+    rosterVersion: finalizedAuthority.roster.version,
+    revokedAgentAddress: roleAgentAddress('receiver'),
+  };
+}
+
+async function observeReceiverRevocation(context) {
+  assertFinalizedRuntimeV1(context);
+  if (ROLE !== 'provider2') throw new Error('only provider2 can observe the gate revocation');
+  let providerMutationDenied = false;
+  try {
+    await context.agent.removeAgentFromContextGraph(
+      CONTEXT_GRAPH_ID,
+      roleAgentAddress('receiver'),
+      roleAgentAddress('provider2'),
+    );
+  } catch (error) {
+    providerMutationDenied = /Only the context graph creator can manage participants/u.test(
+      error instanceof Error ? error.message : '',
+    );
+  }
+  if (!providerMutationDenied) {
+    throw new Error('provider2 identity was not denied the owner-only receiver revocation');
+  }
+  const finalizedAuthority = await readExactReceiverRevokedFinalizedAuthorityV1(context);
+  const curatorMetadataRefreshed = await context.agent.refreshMetaFromCurator(
+    CONTEXT_GRAPH_ID,
+    {
+      force: true,
+      trustedCuratorPeerId: context.peerIds.owner,
+    },
+  );
+  if (!curatorMetadataRefreshed) {
+    throw new Error('provider2 did not refresh the owner-authenticated revocation metadata');
+  }
+  const authority = await context.agent.reconcileRfc64CatalogAccessAuthorityV1(
+    CONTEXT_GRAPH_ID,
+  );
+  if (authority === null) {
+    throw new Error('provider2 canonical authority reconciliation produced no snapshot');
+  }
+  if (
+    authority.roster === null
+    || authority.source !== 'finalized-chain'
+    || BigInt(authority.roster.version)
+      <= BigInt(context.initialFinalizedAuthority.roster.version)
+  ) {
+    throw new Error('provider2 reconciliation differs from the finalized receiver revocation');
+  }
+  assertAuthorityEvidenceParityV1({
+    actual: authority,
+    expected: finalizedAuthority,
+    expectedRosterVersion: authority.roster.version,
+    message: 'provider2 reconciliation differs from the finalized receiver revocation',
+  });
+  return {
+    policyDigest: authority.policyDigest,
+    curatorMetadataRefreshed,
+    providerMutationDenied,
+    rosterVersion: authority.roster.version,
+    revokedAgentAddress: roleAgentAddress('receiver'),
+  };
+}
+
+async function readExactReceiverRevokedFinalizedAuthorityV1(context) {
+  if (context.chainAdapter === undefined) {
+    throw new Error(`${ROLE} has no finalized chain adapter`);
+  }
   const onChainContextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
   const finalizedAuthority = composeRfc64FinalizedCatalogAuthorityV1({
     networkId: NETWORK_ID,
     contextGraphId: CONTEXT_GRAPH_ID,
     snapshot: parseRfc64AuthoritySnapshotV1(
-      await chainAdapter.getContextGraphAuthoritySnapshot(onChainContextGraphId),
+      await context.chainAdapter.getContextGraphAuthoritySnapshot(onChainContextGraphId),
       onChainContextGraphId,
     ),
   });
@@ -624,56 +692,31 @@ async function revokeReceiver() {
   const expected = createReceiverRevokedPolicyAndRoster();
   if (
     finalizedAuthority.roster === null
-    || initialFinalizedAuthority?.roster === null
-    || initialFinalizedAuthority?.roster === undefined
+    || context.initialFinalizedAuthority.roster === null
     || BigInt(finalizedAuthority.roster.version)
-      <= BigInt(initialFinalizedAuthority.roster.version)
+      <= BigInt(context.initialFinalizedAuthority.roster.version)
     || finalizedAuthority.roster.members.some(
       ({ agentAddress }) => agentAddress === receiverAddress,
     )
-    || finalizedAuthority.policyDigest !== expected.policyDigest
-    || canonicalizeContextGraphPolicyPayloadV1(finalizedAuthority.policy)
-      !== canonicalizeContextGraphPolicyPayloadV1(expected.policy)
-    || canonicalizeMemberRosterPayloadV1(finalizedAuthority.roster)
-      !== canonicalizeMemberRosterPayloadV1(expected.roster)
   ) {
     throw new Error('finalized chain authority did not exactly apply the receiver revocation');
   }
-  const authority = await agent.reconcileRfc64CatalogAccessAuthorityV1(
-    CONTEXT_GRAPH_ID,
-  );
-  if (authority === null) {
-    throw new Error('provider2 canonical authority reconciliation produced no snapshot');
-  }
-  const expectedReconciledRoster = authority.roster === null
-    ? null
-    : Object.freeze({
-        ...finalizedAuthority.roster,
-        version: authority.roster.version,
-      });
-  if (
-    authority.roster === null
-    || authority.source !== 'finalized-chain'
-    || BigInt(authority.roster.version) <= BigInt(initialFinalizedAuthority.roster.version)
-    || authority.policyDigest !== finalizedAuthority.policyDigest
-    || canonicalizeContextGraphPolicyPayloadV1(authority.policy)
-      !== canonicalizeContextGraphPolicyPayloadV1(finalizedAuthority.policy)
-    || canonicalizeMemberRosterPayloadV1(authority.roster)
-      !== canonicalizeMemberRosterPayloadV1(expectedReconciledRoster)
-  ) {
-    throw new Error('provider2 reconciliation differs from the finalized receiver revocation');
-  }
-  return {
-    policyDigest: authority.policyDigest,
-    rosterVersion: authority.roster.version,
-    revokedAgentAddress: receiverAddress,
-  };
+  assertAuthorityEvidenceParityV1({
+    actual: finalizedAuthority,
+    expected,
+    message: 'finalized chain authority did not exactly apply the receiver revocation',
+  });
+  return finalizedAuthority;
 }
 
-async function seedPrivateCatalogDefinition(created, peerIds) {
+async function seedPrivateCatalogDefinition(store, peerIds, participantAgents) {
   const graph = contextGraphMetaGraphUri(CONTEXT_GRAPH_ID);
   const subject = contextGraphDataGraphUri(CONTEXT_GRAPH_ID);
-  await created.store.insert([
+  await Promise.all([
+    DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+    DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT,
+  ].map((predicate) => store.deleteByPattern({ subject, predicate, graph })));
+  await store.insert([
     {
       subject,
       predicate: DKG_ONTOLOGY.RDF_TYPE,
@@ -698,26 +741,21 @@ async function seedPrivateCatalogDefinition(created, peerIds) {
       object: `did:dkg:agent:${roleAgentAddress('owner')}`,
       graph,
     },
-    ...PRIVATE_MEMBER_ROLES.map((role) => ({
+    ...participantAgents.map((agentAddress) => ({
       subject,
       predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
-      object: `"${roleAgentAddress(role)}"`,
+      object: `"${agentAddress.toLowerCase()}"`,
       graph,
     })),
   ]);
 }
 
-async function proveDenied(command) {
+async function proveDenied(context, command) {
+  assertFinalizedRuntimeV1(context);
   try {
-    const result = await agent.synchronizeRfc64CatalogFromProvidersV1({
+    const result = await context.agent.synchronizeRfc64CatalogFromProvidersV1({
       remotePeerIds: command.providerPeerIds,
-      scope: {
-        networkId: NETWORK_ID,
-        contextGraphId: CONTEXT_GRAPH_ID,
-        subGraphName: null,
-        authorAddress: roleAgentAddress('owner'),
-        catalogEra: '0',
-      },
+      scope: createPrivateCatalogSyncScope(),
     });
     return {
       denied: false,
@@ -758,9 +796,13 @@ async function shutdown(
 ) {
   if (stopping) return;
   stopping = true;
+  if (runtime === undefined) {
+    process.exit(code);
+    return;
+  }
   await emitAuthoritativeRuntimeShutdownReceiptV1({
-    agent,
-    rpc,
+    agent: runtime.agent,
+    rpc: runtime.rpc,
     executedRuntimeManifest: sealExecutedRuntimeManifestV1(),
     emitReceipt: (fields) => emitAndFlush(responseEvent, requestId, fields),
   });

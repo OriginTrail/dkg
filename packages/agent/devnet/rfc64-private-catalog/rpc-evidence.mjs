@@ -8,7 +8,10 @@ export const RFC64_PRIVATE_GATE_RPC_BUDGET_V1 = Object.freeze({
     eth_call: 96,
     eth_chainId: 16,
     eth_getBlockByNumber: 16,
-    eth_getCode: 8,
+    // The owner mutation actor performs six independently finalized authority
+    // reads (boot, responsibility, acceptance, mutation, raw parity, and
+    // shutdown), each of which proves the three fixture contracts are live.
+    eth_getCode: 24,
   }),
 });
 
@@ -23,6 +26,7 @@ export const RFC64_PRIVATE_FINALIZED_READ_PROCESS_IDS_V1 = Object.freeze([
 export const RFC64_PRIVATE_RUNTIME_RPC_PROCESS_IDS_V1 = Object.freeze([
   'owner',
   ...RFC64_PRIVATE_FINALIZED_READ_PROCESS_IDS_V1,
+  'owner-revoker',
   'outsider',
   'receiver-restart',
 ]);
@@ -33,11 +37,14 @@ export function rpcEvidenceV1(state) {
     ? Object.fromEntries(Object.entries(calls))
     : {};
   const counts = Object.values(byMethod);
+  const total = counts.every((count) => Number.isSafeInteger(count) && count >= 0)
+    ? counts.reduce((sum, count) => (
+      Number.isSafeInteger(sum + count) ? sum + count : Number.NaN
+    ), 0)
+    : Number.NaN;
   return Object.freeze({
     byMethod: Object.freeze(byMethod),
-    total: counts.every((count) => Number.isSafeInteger(count) && count >= 0)
-      ? counts.reduce((sum, count) => sum + count, 0)
-      : Number.NaN,
+    total,
   });
 }
 
@@ -86,6 +93,7 @@ function hasRpcAccountingV1(state) {
 /** Persisted-state inspection may be RPC-free but must never exceed known ceilings. */
 export function isWithinRpcCeilingV1(state) {
   const evidence = rpcEvidenceV1(state);
+  if (!Number.isSafeInteger(evidence.total) || evidence.total < 0) return false;
   if (evidence.total > RFC64_PRIVATE_GATE_RPC_BUDGET_V1.total) return false;
   return Object.entries(evidence.byMethod).every(([method, count]) => (
     Number.isSafeInteger(count)

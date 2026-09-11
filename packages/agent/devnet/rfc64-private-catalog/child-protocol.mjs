@@ -9,6 +9,11 @@ const COMMAND_DESCRIPTORS = Object.freeze([
   descriptor('inspect-persisted', 'persisted-inspection', validateInspectCommandV1),
   descriptor('sync-denied', 'sync-denial-result', validateSyncDeniedCommandV1),
   descriptor('revoke-receiver', 'receiver-revoked', validateNoPayloadCommandV1),
+  descriptor(
+    'observe-receiver-revocation',
+    'revocation-observed',
+    validateNoPayloadCommandV1,
+  ),
   descriptor('stop', 'stopping', validateNoPayloadCommandV1),
 ]);
 
