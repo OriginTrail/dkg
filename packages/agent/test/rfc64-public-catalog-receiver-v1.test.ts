@@ -263,6 +263,73 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     ]);
   });
 
+  it('preserves deprecated verified-target callbacks beside the typed lifecycle', async () => {
+    const typedEvents = vi.fn();
+    const onAccepted = vi.fn();
+    const onRejected = vi.fn();
+    const onSettled = vi.fn();
+    const appliedHead = announcement({
+      catalogHeadObjectDigest: `0x${'c1'.repeat(32)}`,
+    });
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => 'applied'),
+      {
+        onVerifiedCurrentHeadTargetLifecycleEvent: typedEvents,
+        onVerifiedCurrentHeadTargetAccepted: onAccepted,
+        onVerifiedCurrentHeadTargetRejected: onRejected,
+        onVerifiedCurrentHeadTargetSettled: onSettled,
+      },
+    );
+
+    await expect(receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: appliedHead,
+      remotePeerId: 'verified-applied',
+    }])).resolves.toMatchObject({ outcome: 'applied' });
+
+    expect(typedEvents).toHaveBeenCalledTimes(2);
+    expect(typedEvents.mock.calls.map(([event]) => (
+      event.kind === 'settled' ? event.kind : event.result
+    ))).toEqual(['accepted', 'settled']);
+    expect(onAccepted).toHaveBeenCalledExactlyOnceWith(appliedHead, 1);
+    expect(onRejected).not.toHaveBeenCalled();
+    expect(onSettled).toHaveBeenCalledExactlyOnceWith(appliedHead, 1, null, 'applied');
+
+    await receiver.close();
+  });
+
+  it('invokes the deprecated verified-target rejection hook exactly once', async () => {
+    const onRejected = vi.fn();
+    const blocker = deferred<Rfc64PublicCatalogReconcileResultV1>();
+    const receiver = new Rfc64PublicCatalogReceiverV1(
+      reconciler(async () => blocker.promise),
+      {
+        maxConcurrent: 1,
+        maxQueue: 1,
+        onVerifiedCurrentHeadTargetRejected: onRejected,
+      },
+    );
+    const active = receiver.scheduleManyAndWait([{
+      announcement: headWith(`0x${'c2'.repeat(32)}`),
+      remotePeerId: 'explicit-active',
+    }]);
+    const queued = receiver.scheduleManyAndWait([{
+      announcement: headWith(`0x${'c3'.repeat(32)}`),
+      remotePeerId: 'explicit-queued',
+    }]);
+    const rejectedHead = headWith(`0x${'c4'.repeat(32)}`);
+
+    await expect(receiver.scheduleVerifiedCurrentHeadAndWait([{
+      announcement: rejectedHead,
+      remotePeerId: 'verified-rejected',
+    }])).resolves.toMatchObject({ outcome: 'dropped' });
+    expect(onRejected).toHaveBeenCalledExactlyOnceWith(rejectedHead, 'dropped');
+
+    blocker.resolve('not-found');
+    await expect(active).resolves.toMatchObject({ outcome: 'not-found' });
+    await expect(queued).resolves.toMatchObject({ outcome: 'not-found' });
+    await receiver.close();
+  });
+
   it('preserves older ambient history when a verified current-head jump fails', async () => {
     const firstStarted = deferred<void>();
     const releaseFirst = deferred<void>();

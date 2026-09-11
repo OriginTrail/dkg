@@ -857,6 +857,43 @@ describe('RFC-64 private catalog activation', () => {
     }, chainIdentity)).toThrow(/conflict for selected graph/u);
   });
 
+  it('rejects rollout-mode conflicts for identical overlapping manifests', () => {
+    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
+    const accepted = { policyEnvelope: publicEnvelope, targets: [] } as const;
+    const publicCatalog = {
+      bootstrap: {
+        acceptedPublicPolicies: [accepted],
+        retryIntervalMs: 1_000,
+      },
+    } as const;
+
+    expect(() => resolveRfc64CatalogActivationsV1({
+      catalog: {
+        rollout: { contextGraphModes: { [PUBLIC_CG]: 'shadow' } },
+        bootstrap: {
+          acceptedPolicies: [accepted],
+          retryIntervalMs: 1_000,
+        },
+      },
+      publicCatalog,
+    }, chainIdentity)).toThrow(
+      /rfc64Catalog and rfc64PublicCatalog rollout modes conflict for selected graph/u,
+    );
+
+    const matching = resolveRfc64CatalogActivationsV1({
+      catalog: {
+        rollout: { contextGraphModes: { [PUBLIC_CG]: 'catalog' } },
+        bootstrap: {
+          acceptedPolicies: [accepted],
+          retryIntervalMs: 1_000,
+        },
+      },
+      publicCatalog,
+    }, chainIdentity);
+    expect(rfc64CatalogRolloutModeForContextGraphV1(matching.catalog, PUBLIC_CG))
+      .toBe('catalog');
+  });
+
   it('lets the unified rollback suppress every deprecated public selection', () => {
     const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
     const rollback = resolveRfc64CatalogActivationsV1({
