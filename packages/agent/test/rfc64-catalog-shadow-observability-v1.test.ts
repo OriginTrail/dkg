@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   Rfc64CatalogShadowObservabilityRuntimeV1,
@@ -29,6 +29,9 @@ function createShadowRuntimeV1(input: Readonly<{
   selectedContextGraphIds?: readonly string[];
   contextGraphModes?: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
   responsibilityDefaultMode?: 'legacy' | 'shadow' | 'catalog';
+  readResponsibility?: (
+    contextGraphId: string,
+  ) => Rfc64CatalogResponsibilitySelectionV1;
   readResponsibilities?: () => readonly Rfc64CatalogResponsibilitySelectionV1[];
 }> = {}): Rfc64CatalogShadowObservabilityRuntimeV1 {
   const selectedAuthority = Object.fromEntries(
@@ -47,9 +50,23 @@ function createShadowRuntimeV1(input: Readonly<{
     selectedAuthorityByWireId: {},
     standaloneTrack2Enabled: false,
   } as unknown as Rfc64CatalogExecutionPlanV1;
+  const readResponsibilities = input.readResponsibilities ?? (() => []);
   return new Rfc64CatalogShadowObservabilityRuntimeV1({
     executionPlan,
-    readResponsibilities: input.readResponsibilities ?? (() => []),
+    readResponsibility: input.readResponsibility ?? ((contextGraphId) => (
+      readResponsibilities().find((entry) => entry.contextGraphId === contextGraphId)
+      ?? {
+        contextGraphId,
+        responsible: false,
+        responsibilityReason: null,
+        active: false,
+        mode: input.contextGraphModes?.[contextGraphId]
+          ?? input.responsibilityDefaultMode
+          ?? 'legacy',
+        selectionSource: 'default',
+      }
+    )),
+    readResponsibilities,
   });
 }
 
@@ -110,6 +127,33 @@ describe('RFC-64 catalog shadow observability projection', () => {
       trackedTargets: 0,
       authoritativeApplyCount: 0,
     });
+  });
+
+  it('classifies terminal events with point lookup and enumerates only for snapshots', () => {
+    const readResponsibility = vi.fn((contextGraphId: string) => (
+      shadowResponsibilityV1(contextGraphId)
+    ));
+    const readResponsibilities = vi.fn(() => [shadowResponsibilityV1(SHADOW_CG)]);
+    const runtime = createShadowRuntimeV1({
+      readResponsibility,
+      readResponsibilities,
+    });
+
+    runtime.recordTerminalEvent({
+      kind: 'receiver-completed',
+      contextGraphId: SHADOW_CG,
+      outcome: 'staged-only',
+    });
+
+    expect(readResponsibility).toHaveBeenCalledOnce();
+    expect(readResponsibility).toHaveBeenCalledWith(SHADOW_CG);
+    expect(readResponsibilities).not.toHaveBeenCalled();
+
+    expect(receiverStagingV1(runtime)).toMatchObject({
+      trackedTargets: 1,
+      staged: 1,
+    });
+    expect(readResponsibilities).toHaveBeenCalledOnce();
   });
 
   it('degrades malformed and version-skewed public status input to null', () => {

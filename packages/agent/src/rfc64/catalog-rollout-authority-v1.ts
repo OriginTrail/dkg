@@ -5,6 +5,13 @@ import { ethers } from 'ethers';
 /** Restart-stable authority selection for one explicitly selected CG. */
 export type Rfc64CatalogRolloutModeV1 = 'legacy' | 'shadow' | 'catalog';
 
+/** Construction-time provenance for the effective RFC-64 activation choice. */
+export type Rfc64CatalogActivationSourceV1 =
+  | 'default-omitted'
+  | 'operator-override'
+  | 'compatibility-seed'
+  | 'explicit-disabled';
+
 export interface Rfc64CatalogRolloutConfigV1 {
   /** Emergency stop for every Track-2 protocol and worker on this node. */
   readonly killSwitch?: boolean;
@@ -101,6 +108,8 @@ export type Rfc64CatalogReconciliationLaneV1 =
 /** Canonical lane ownership resolved once during agent construction. */
 export interface Rfc64CatalogExecutionPlanV1 {
   readonly killSwitchActive: boolean;
+  /** Canonical activation provenance resolved before raw controls are discarded. */
+  readonly activationSource: Rfc64CatalogActivationSourceV1;
   /** Desired mode for lifecycle-responsible CGs that have no explicit override. */
   readonly responsibilityDefaultMode: Rfc64CatalogRolloutModeV1;
   /** Restart-stable per-CG overrides, including graphs discovered after startup. */
@@ -250,6 +259,12 @@ const RFC64_CATALOG_ROLLOUT_MODES_V1 = new Set<Rfc64CatalogRolloutModeV1>([
   'legacy',
   'shadow',
   'catalog',
+]);
+const RFC64_CATALOG_ACTIVATION_SOURCES_V1 = new Set<Rfc64CatalogActivationSourceV1>([
+  'default-omitted',
+  'operator-override',
+  'compatibility-seed',
+  'explicit-disabled',
 ]);
 
 export function resolveRfc64CatalogRolloutConfigV1(
@@ -500,6 +515,8 @@ export function resolveRfc64LegacySyncContextGraphsV1(input: Readonly<{
 /** Resolve legacy and Track-2 owner scopes once, before either lane starts. */
 export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   configuredContextGraphs: readonly string[];
+  /** Canonical provenance supplied by the construction-time config resolver. */
+  activationSource?: Rfc64CatalogActivationSourceV1;
   /** DKG 10.0.16 supplies catalog; legacy preserves explicit enabled=false. */
   responsibilityDefaultMode?: Rfc64CatalogRolloutModeV1;
   /** Legacy public bootstrap remains active beside additive catalog selection. */
@@ -515,6 +532,10 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   const responsibilityDefaultMode = input.responsibilityDefaultMode ?? 'legacy';
   if (!RFC64_CATALOG_ROLLOUT_MODES_V1.has(responsibilityDefaultMode)) {
     throw new TypeError('RFC-64 responsibility default mode must be legacy, shadow, or catalog');
+  }
+  const activationSource = input.activationSource ?? 'operator-override';
+  if (!RFC64_CATALOG_ACTIVATION_SOURCES_V1.has(activationSource)) {
+    throw new TypeError('RFC-64 activation source is invalid');
   }
   const selectedAuthority: Record<string, Rfc64CatalogAuthorityPolicyV1> =
     Object.create(null);
@@ -578,6 +599,7 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   }));
   return Object.freeze({
     killSwitchActive: input.activation.rollout.killSwitch,
+    activationSource,
     responsibilityDefaultMode,
     contextGraphModes,
     legacyContextGraphs,

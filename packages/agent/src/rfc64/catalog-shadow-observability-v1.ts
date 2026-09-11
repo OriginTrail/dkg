@@ -85,6 +85,9 @@ export type Rfc64CatalogShadowTerminalEventV1 = Readonly<{
 
 export interface Rfc64CatalogShadowObservabilityRuntimeOptionsV1 {
   readonly executionPlan: Rfc64CatalogExecutionPlanV1;
+  readonly readResponsibility: (
+    contextGraphId: string,
+  ) => Rfc64CatalogResponsibilitySelectionV1;
   readonly readResponsibilities: () => readonly Rfc64CatalogResponsibilitySelectionV1[];
 }
 
@@ -99,17 +102,27 @@ export type Rfc64CatalogShadowObservabilitySnapshotInputV1 = Omit<
  * responsibility code never need to coordinate observability state.
  */
 export class Rfc64CatalogShadowObservabilityRuntimeV1 {
-  readonly #executionPlan: Rfc64CatalogExecutionPlanV1;
   readonly #readResponsibilities:
     Rfc64CatalogShadowObservabilityRuntimeOptionsV1['readResponsibilities'];
+  readonly #readResponsibility:
+    Rfc64CatalogShadowObservabilityRuntimeOptionsV1['readResponsibility'];
+  readonly #configuredShadowContextGraphIds: ReadonlySet<string>;
   readonly #receiverCompletions: Rfc64CatalogShadowReceiverCompletionStateV1 = {
     byContextGraph: new Map(),
     overflow: emptyReceiverCompletionCountersV1(),
   };
 
   constructor(options: Rfc64CatalogShadowObservabilityRuntimeOptionsV1) {
-    this.#executionPlan = options.executionPlan;
+    this.#readResponsibility = options.readResponsibility;
     this.#readResponsibilities = options.readResponsibilities;
+    this.#configuredShadowContextGraphIds = new Set([
+      ...Object.entries(options.executionPlan.selectedAuthority)
+        .filter(([, authority]) => authority.mode === 'shadow')
+        .map(([contextGraphId]) => contextGraphId),
+      ...Object.entries(options.executionPlan.contextGraphModes)
+        .filter(([, mode]) => mode === 'shadow')
+        .map(([contextGraphId]) => contextGraphId),
+    ]);
   }
 
   /**
@@ -118,7 +131,7 @@ export class Rfc64CatalogShadowObservabilityRuntimeV1 {
    * or independently-derived rollout mode.
    */
   recordTerminalEvent(event: Rfc64CatalogShadowTerminalEventV1): void {
-    if (!this.#shadowContextGraphIds().includes(event.contextGraphId)) return;
+    if (!this.isShadowContextGraph(event.contextGraphId)) return;
     let counters = this.#receiverCompletions.byContextGraph.get(event.contextGraphId);
     if (counters === undefined) {
       if (
@@ -149,21 +162,18 @@ export class Rfc64CatalogShadowObservabilityRuntimeV1 {
     }
   }
 
-  /** Canonical configured-and-live scope, owned independently of responsibility. */
-  #shadowContextGraphIds(): readonly string[] {
-    const contextGraphIds = new Set<string>();
-    for (const [contextGraphId, authority] of Object.entries(
-      this.#executionPlan.selectedAuthority,
-    )) {
-      if (authority.mode === 'shadow') contextGraphIds.add(contextGraphId);
-    }
-    for (const [contextGraphId, mode] of Object.entries(
-      this.#executionPlan.contextGraphModes,
-    )) {
-      if (mode === 'shadow') contextGraphIds.add(contextGraphId);
-    }
+  /** Constant-time point classification for receiver terminal-event hot paths. */
+  isShadowContextGraph(contextGraphId: string): boolean {
+    if (this.#configuredShadowContextGraphIds.has(contextGraphId)) return true;
+    const responsibility = this.#readResponsibility(contextGraphId);
+    return responsibility.responsible && responsibility.mode === 'shadow';
+  }
+
+  /** Enumerate and sort the full scope only when producing an operator snapshot. */
+  listShadowContextGraphIds(): readonly string[] {
+    const contextGraphIds = new Set(this.#configuredShadowContextGraphIds);
     for (const responsibility of this.#readResponsibilities()) {
-      if (responsibility.mode === 'shadow') {
+      if (responsibility.responsible && responsibility.mode === 'shadow') {
         contextGraphIds.add(responsibility.contextGraphId);
       }
     }
@@ -174,7 +184,7 @@ export class Rfc64CatalogShadowObservabilityRuntimeV1 {
   snapshot(
     input: Readonly<Rfc64CatalogShadowObservabilitySnapshotInputV1>,
   ): Readonly<Rfc64CatalogShadowExecutionStatusV1> | null {
-    const shadowContextGraphIds = this.#shadowContextGraphIds();
+    const shadowContextGraphIds = this.listShadowContextGraphIds();
     const totals = emptyReceiverCompletionCountersV1();
     for (const contextGraphId of new Set(shadowContextGraphIds)) {
       const counters = this.#receiverCompletions.byContextGraph.get(contextGraphId);
