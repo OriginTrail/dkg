@@ -26,6 +26,18 @@ const rfc64CatalogAuthorityRefreshSchedulerV1:
   },
 };
 
+export type Rfc64CatalogAuthorityRevisionReadV1 =
+  | Readonly<{
+      kind: 'complete';
+      revisions: ReadonlyMap<string, string>;
+      fallbackContextGraphIds: ReadonlySet<string>;
+    }>
+  | Readonly<{
+      kind: 'failed';
+      fallbackContextGraphIds: ReadonlySet<string>;
+      error: unknown;
+    }>;
+
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
   readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
@@ -36,26 +48,74 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readAuthorityRevisions?: (
     contextGraphIds: readonly string[],
     signal: AbortSignal,
-  ) => Promise<ReadonlyMap<string, string> | null>;
+  ) => Promise<Rfc64CatalogAuthorityRevisionReadV1 | null>;
   readonly onAuthorityRevisionsReadFailure?: (error: unknown) => void;
   readonly refreshContextGraph: (
     contextGraphId: string,
     signal: AbortSignal,
-  ) => Promise<unknown>;
+  ) => Promise<boolean | void>;
   readonly onRefreshFailure: (contextGraphId: string, error: unknown) => void;
   readonly scheduler?: Rfc64CatalogAuthorityRefreshSchedulerV1;
+}
+
+/** One graph's physical worker and all revision state it owns. */
+class Rfc64CatalogAuthorityRefreshLaneV1 {
+  readonly #task: CoalescingRecurringTask;
+  #acceptedRevision: string | undefined;
+  #target: Readonly<{ revision: string | null }> | undefined;
+
+  constructor(
+    readonly contextGraphId: string,
+    refresh: (contextGraphId: string, signal: AbortSignal) => Promise<boolean | void>,
+    onFailure: (contextGraphId: string, error: unknown) => void,
+  ) {
+    this.#task = new CoalescingRecurringTask({
+      requestWhileRunning: 'coalesce',
+      runPass: async (signal) => {
+        const target = this.#target;
+        if (target === undefined) return;
+        try {
+          // `false` is an explicit fulfilled-but-not-committed result. `void`
+          // remains successful for existing callers and focused test fixtures.
+          const committed = await refresh(this.contextGraphId, signal);
+          if (signal.aborted || committed === false) return;
+          if (target.revision !== null) this.#acceptedRevision = target.revision;
+        } catch (error) {
+          if (signal.aborted) return;
+          onFailure(this.contextGraphId, error);
+        }
+      },
+      // Per-context-graph failures are reported by the lane body.
+      onError: () => undefined,
+      closingMessage: 'RFC-64 authority refresh stopped during agent shutdown',
+    });
+  }
+
+  get closed(): boolean {
+    return this.#task.closed;
+  }
+
+  request(revision: string | null, force: boolean): boolean {
+    if (!force && revision !== null && this.#acceptedRevision === revision) return false;
+    if (this.#task.running && this.#target?.revision === revision) return false;
+    this.#target = Object.freeze({ revision });
+    return this.#task.request();
+  }
+
+  whenIdle(): Promise<void> {
+    return this.#task.whenIdle();
+  }
+
+  close(): Promise<void> {
+    return this.#task.close();
+  }
 }
 
 /** Bounded independent authority lanes with explicit scheduling and shutdown ownership. */
 export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadOwnerV1 {
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
-  readonly #lanes = new Map<string, CoalescingRecurringTask>();
+  readonly #lanes = new Map<string, Rfc64CatalogAuthorityRefreshLaneV1>();
   readonly #retirements = new Set<Promise<void>>();
-  readonly #acceptedRevisions = new Map<string, string>();
-  readonly #targetRevisions = new Map<
-    string,
-    Readonly<{ revision: string | null }>
-  >();
   #passOwner: CoalescingRecurringTask | null = null;
   #pass = 0;
   #timer: ReturnType<typeof setInterval> | null = null;
@@ -80,36 +140,20 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     });
   }
 
-  #createLane(contextGraphId: string): CoalescingRecurringTask {
-    return new CoalescingRecurringTask({
-      requestWhileRunning: 'coalesce',
-      runPass: async (signal) => {
-        const target = this.#targetRevisions.get(contextGraphId);
-        try {
-          await this.options.refreshContextGraph(contextGraphId, signal);
-          if (signal.aborted) return;
-          if (target?.revision !== null && target?.revision !== undefined) {
-            this.#acceptedRevisions.set(contextGraphId, target.revision);
-          }
-        } catch (error) {
-          if (signal.aborted) return;
-          this.options.onRefreshFailure(contextGraphId, error);
-        }
-      },
-      // Per-context-graph failures are reported by the lane body.
-      onError: () => undefined,
-      closingMessage: 'RFC-64 authority refresh stopped during agent shutdown',
-    });
+  #createLane(contextGraphId: string): Rfc64CatalogAuthorityRefreshLaneV1 {
+    return new Rfc64CatalogAuthorityRefreshLaneV1(
+      contextGraphId,
+      this.options.refreshContextGraph,
+      this.options.onRefreshFailure,
+    );
   }
 
   #retireLane(
     contextGraphId: string,
-    lane: CoalescingRecurringTask,
+    lane: Rfc64CatalogAuthorityRefreshLaneV1,
   ): void {
     if (this.#lanes.get(contextGraphId) !== lane) return;
     this.#lanes.delete(contextGraphId);
-    this.#acceptedRevisions.delete(contextGraphId);
-    this.#targetRevisions.delete(contextGraphId);
     const retirement = lane.close();
     this.#retirements.add(retirement);
     void retirement.then(
@@ -159,10 +203,10 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     const initial = pass === 1;
     const safety = !initial && (pass - 1)
       % RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.safetyRevalidationIntervalCount === 0;
-    let revisions: ReadonlyMap<string, string> | null = null;
+    let revisionRead: Rfc64CatalogAuthorityRevisionReadV1 | null = null;
     if (this.options.readAuthorityRevisions !== undefined) {
       try {
-        revisions = await this.options.readAuthorityRevisions(
+        revisionRead = await this.options.readAuthorityRevisions(
           Object.freeze([...desiredContextGraphIds]),
           signal,
         );
@@ -177,25 +221,26 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     }
     signal.throwIfAborted();
 
+    if (revisionRead?.kind === 'failed') {
+      this.options.onAuthorityRevisionsReadFailure?.(revisionRead.error);
+    }
+
     for (const contextGraphId of desiredContextGraphIds) {
+      if (
+        revisionRead?.kind === 'failed'
+        && !initial
+        && !safety
+        && !revisionRead.fallbackContextGraphIds.has(contextGraphId)
+      ) continue;
       let lane = this.#lanes.get(contextGraphId);
       if (lane === undefined || lane.closed) {
         lane = this.#createLane(contextGraphId);
         this.#lanes.set(contextGraphId, lane);
       }
-      const revision = revisions?.get(contextGraphId) ?? null;
-      const changed = revision === null
-        || this.#acceptedRevisions.get(contextGraphId) !== revision;
-      if (!initial && !safety && !changed) continue;
-
-      const previousTarget = this.#targetRevisions.get(contextGraphId);
-      if (lane.running && previousTarget?.revision === revision) {
-        // The active pass already validates this exact revision. Repeated
-        // cadence and safety ticks must not manufacture duplicate work.
-        continue;
-      }
-      this.#targetRevisions.set(contextGraphId, Object.freeze({ revision }));
-      lane.request();
+      const revision = revisionRead?.kind === 'complete'
+        ? revisionRead.revisions.get(contextGraphId) ?? null
+        : null;
+      lane.request(revision, initial || safety);
     }
   }
 
@@ -244,8 +289,6 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       if (this.#close !== closing) return;
       this.#lanes.clear();
       this.#retirements.clear();
-      this.#acceptedRevisions.clear();
-      this.#targetRevisions.clear();
       if (this.#passOwner === passOwner) this.#passOwner = null;
       this.#close = null;
     });

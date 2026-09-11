@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import { Rfc64CatalogAuthorityRefreshLoopV1 } from
   '../src/rfc64/catalog-authority-refresh-loop-v1.js';
+import type { Rfc64CatalogAuthorityRevisionReadV1 } from
+  '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
 
@@ -27,6 +29,28 @@ function createSchedulerHarness() {
       },
     },
   };
+}
+
+function completeRevisionRead(
+  revisions: ReadonlyMap<string, string>,
+  fallbackContextGraphIds: ReadonlySet<string> = new Set(),
+): Rfc64CatalogAuthorityRevisionReadV1 {
+  return Object.freeze({
+    kind: 'complete',
+    revisions,
+    fallbackContextGraphIds,
+  });
+}
+
+function failedRevisionRead(
+  error: unknown,
+  fallbackContextGraphIds: ReadonlySet<string> = new Set(),
+): Rfc64CatalogAuthorityRevisionReadV1 {
+  return Object.freeze({
+    kind: 'failed',
+    error,
+    fallbackContextGraphIds,
+  });
 }
 
 describe('RFC-64 catalog authority refresh loop', () => {
@@ -334,7 +358,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => revisions,
+      readAuthorityRevisions: async () => completeRevisionRead(revisions),
       refreshContextGraph: async (contextGraphId) => { attempts.push(contextGraphId); },
       onRefreshFailure: () => undefined,
       scheduler,
@@ -370,7 +394,10 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['registered', 'unregistered'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => new Map([['registered', 'revision-1']]),
+      readAuthorityRevisions: async () => completeRevisionRead(
+        new Map([['registered', 'revision-1']]),
+        new Set(['unregistered']),
+      ),
       refreshContextGraph: async (contextGraphId) => { attempts.push(contextGraphId); },
       onRefreshFailure: () => undefined,
       scheduler,
@@ -395,7 +422,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
       onActiveContextGraphIdsReadFailure: () => undefined,
       readAuthorityRevisions: async () => {
         reads += 1;
-        if (reads === 1) return new Map([['cg-a', 'a-1'], ['cg-b', 'b-1']]);
+        if (reads === 1) {
+          return completeRevisionRead(new Map([['cg-a', 'a-1'], ['cg-b', 'b-1']]));
+        }
         throw failure;
       },
       onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
@@ -417,6 +446,144 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await loop.whenIdle();
     expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-a', 'cg-b']);
     expect(readFailures).toEqual([failure, failure, failure]);
+    await loop.close();
+  });
+
+  it('retries an unchanged revision until the selected refresh commits', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const failure = new Error('authority refresh failed');
+    const reported: unknown[] = [];
+    let calls = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      readAuthorityRevisions: async () => completeRevisionRead(
+        new Map([['cg-a', 'revision-1']]),
+      ),
+      refreshContextGraph: async () => {
+        calls += 1;
+        if (calls === 1) throw failure;
+        return true;
+      },
+      onRefreshFailure: (_contextGraphId, error) => { reported.push(error); },
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(calls).toBe(1);
+    expect(reported).toEqual([failure]);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+    await loop.close();
+  });
+
+  it('does not accept a fulfilled refresh that reports no authority commit', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const outcomes = [false, true];
+    let calls = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      readAuthorityRevisions: async () => completeRevisionRead(
+        new Map([['cg-a', 'revision-1']]),
+      ),
+      refreshContextGraph: async () => outcomes[calls++]!,
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+    await loop.close();
+  });
+
+  it('coalesces a newer revision observed during an in-flight refresh', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    let revision = 'revision-1';
+    let markFirstStarted!: () => void;
+    let releaseFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let calls = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      readAuthorityRevisions: async () => completeRevisionRead(
+        new Map([['cg-a', revision]]),
+      ),
+      refreshContextGraph: async () => {
+        calls += 1;
+        if (calls === 1) {
+          markFirstStarted();
+          await firstGate;
+        }
+        return true;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await firstStarted;
+    revision = 'revision-2';
+    scheduled[0]!.callback();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    releaseFirst();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(calls).toBe(2);
+    await loop.close();
+  });
+
+  it('keeps fallback graphs refreshing when the shared index read fails', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const failure = new Error('shared index unavailable');
+    const readFailures: unknown[] = [];
+    const attempts: string[] = [];
+    let reads = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['registered', 'unregistered'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      readAuthorityRevisions: async () => {
+        reads += 1;
+        return reads === 1
+          ? completeRevisionRead(
+            new Map([['registered', 'revision-1']]),
+            new Set(['unregistered']),
+          )
+          : failedRevisionRead(failure, new Set(['unregistered']));
+      },
+      onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
+      refreshContextGraph: async (contextGraphId) => { attempts.push(contextGraphId); },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+
+    expect(attempts).toEqual(['registered', 'unregistered', 'unregistered']);
+    expect(readFailures).toEqual([failure]);
     await loop.close();
   });
 });

@@ -163,6 +163,12 @@ import type { Rfc64CatalogMutationCoordinatorV1 } from
 import {
   Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
+import {
+  mapRfc64CatalogAuthorityRevisionsToLocalV1,
+  projectRfc64CatalogAuthorityRevisionTargetsV1,
+} from './rfc64/catalog-authority-revision-projection-v1.js';
+import type { Rfc64CatalogAuthorityRevisionReadV1 } from
+  './rfc64/catalog-authority-refresh-loop-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -1307,39 +1313,52 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphIds: readonly string[],
     signal: AbortSignal,
-  ): Promise<ReadonlyMap<string, string> | null> {
+  ): Promise<Rfc64CatalogAuthorityRevisionReadV1 | null> {
     const readRevisions = this.chain.getContextGraphAuthorityIndexRevisions;
     if (typeof readRevisions !== 'function') return null;
 
-    const localIdsByOnChainId = new Map<string, string[]>();
-    for (const contextGraphId of contextGraphIds) {
-      const knownOnChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-        ?? (/^[1-9][0-9]*$/u.test(contextGraphId) ? contextGraphId : undefined);
-      if (knownOnChainId === undefined || !/^[1-9][0-9]*$/u.test(knownOnChainId)) continue;
-      const numericId = BigInt(knownOnChainId);
-      if (numericId > ethers.MaxUint256) continue;
-      const locals = localIdsByOnChainId.get(knownOnChainId) ?? [];
-      locals.push(contextGraphId);
-      localIdsByOnChainId.set(knownOnChainId, locals);
-    }
-    if (localIdsByOnChainId.size === 0) return new Map();
-
-    const revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
-      signal,
-      (readSignal) => readRevisions.call(
-        this.chain,
-        [...localIdsByOnChainId.keys()].map((id) => BigInt(id)),
-        { signal: readSignal },
+    const targets = projectRfc64CatalogAuthorityRevisionTargetsV1(
+      contextGraphIds,
+      (contextGraphId) => this.contextGraphBindingState.authorityIndexSchedulingBindingFor(
+        contextGraphId,
+        this.subscribedContextGraphs.get(contextGraphId),
       ),
     );
-    if (revisions === null) return null;
-    const byLocalContextGraph = new Map<string, string>();
-    for (const { contextGraphId, revision } of revisions) {
-      for (const localContextGraphId of localIdsByOnChainId.get(contextGraphId) ?? []) {
-        byLocalContextGraph.set(localContextGraphId, revision);
-      }
+    if (targets.onChainContextGraphIds.length === 0) {
+      return Object.freeze({
+        kind: 'complete',
+        revisions: new Map(),
+        fallbackContextGraphIds: targets.fallbackContextGraphIds,
+      });
     }
-    return byLocalContextGraph;
+
+    let revisions: Awaited<ReturnType<typeof readRevisions>>;
+    try {
+      revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
+        signal,
+        (readSignal) => readRevisions.call(
+          this.chain,
+          targets.onChainContextGraphIds,
+          { signal: readSignal },
+        ),
+      );
+    } catch (error) {
+      if (signal.aborted) throw signal.reason;
+      return Object.freeze({
+        kind: 'failed',
+        fallbackContextGraphIds: targets.fallbackContextGraphIds,
+        error,
+      });
+    }
+    if (revisions === null) return null;
+    return Object.freeze({
+      kind: 'complete',
+      revisions: mapRfc64CatalogAuthorityRevisionsToLocalV1(
+        revisions,
+        targets.localContextGraphIdsByOnChainId,
+      ),
+      fallbackContextGraphIds: targets.fallbackContextGraphIds,
+    });
   }
 
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */

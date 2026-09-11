@@ -1233,10 +1233,11 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('maps locally bound responsibilities onto one shared authority revision read', async () => {
     const revision = `0x${'ab'.repeat(32)}`;
-    const readRevisions = vi.fn(async () => Object.freeze([Object.freeze({
-      contextGraphId: '9',
-      revision,
-    })]));
+    const numericRevision = `0x${'cd'.repeat(32)}`;
+    const readRevisions = vi.fn(async () => Object.freeze([
+      Object.freeze({ contextGraphId: '9', revision }),
+      Object.freeze({ contextGraphId: '11', revision: numericRevision }),
+    ]));
     const chainAdapter = Object.assign(new NoChainAdapter(), {
       getContextGraphAuthoritySnapshot: vi.fn(async () => (
         finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0')
@@ -1255,15 +1256,64 @@ describe('RFC-64 rollout authority integration', () => {
     const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
     expect(subscription).toBeDefined();
     (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
+    const duplicateLocalId = `${AUTHOR}/same-authority-slot`;
+    (edge as any).subscribedContextGraphs.set(duplicateLocalId, {
+      subscribed: true,
+      onChainId: '9',
+    });
     readRevisions.mockClear();
 
     const revisions = await edge.readRfc64CatalogAuthorityIndexRevisionsV1(
-      [CONTEXT_GRAPH_ID, `${AUTHOR}/unbound`],
+      [CONTEXT_GRAPH_ID, duplicateLocalId, '11', `${AUTHOR}/unbound`],
       new AbortController().signal,
     );
 
-    expect(revisions).toEqual(new Map([[CONTEXT_GRAPH_ID, revision]]));
+    expect(revisions).toEqual({
+      kind: 'complete',
+      revisions: new Map([
+        [CONTEXT_GRAPH_ID, revision],
+        [duplicateLocalId, revision],
+        ['11', numericRevision],
+      ]),
+      fallbackContextGraphIds: new Set([`${AUTHOR}/unbound`]),
+    });
     expect(readRevisions).toHaveBeenCalledOnce();
+    expect(readRevisions).toHaveBeenCalledWith([9n, 11n], {
+      signal: expect.any(AbortSignal),
+    });
+  });
+
+  it('returns the known fallback subset when a shared authority revision read fails', async () => {
+    const failure = new Error('authority index unavailable');
+    const readRevisions = vi.fn(async () => { throw failure; });
+    const edge = await startAgent({
+      name: 'registered-authority-revision-fallback',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: vi.fn(async () => (
+            finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0')
+          )),
+          getContextGraphAuthorityIndexRevisions: readRevisions,
+        }),
+      },
+    });
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Authority revision fallback',
+      callerAgentAddress: AUTHOR,
+    });
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
+
+    await expect(edge.readRfc64CatalogAuthorityIndexRevisionsV1(
+      [CONTEXT_GRAPH_ID, `${AUTHOR}/unbound`],
+      new AbortController().signal,
+    )).resolves.toEqual({
+      kind: 'failed',
+      fallbackContextGraphIds: new Set([`${AUTHOR}/unbound`]),
+      error: failure,
+    });
     expect(readRevisions).toHaveBeenCalledWith([9n], {
       signal: expect.any(AbortSignal),
     });

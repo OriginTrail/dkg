@@ -239,6 +239,28 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     expect(evidence.indexRanges.slice(3)).toEqual([[31, 35]]);
   });
 
+  it('rejects a stale revision projection and rebuilds from the replacement finalized fork', async () => {
+    const harness = makeEvmAuthorityAdapter({ sharedIndex: true });
+    const stabilization = harness.holdBlockRead(30);
+    const stale = harness.adapter.getContextGraphAuthorityIndexRevisions([9n]);
+
+    await stabilization.entered;
+    harness.replaceAuthorityFork();
+    stabilization.release();
+    await expect(stale).rejects.toThrow('anchor changed');
+
+    await expect(harness.adapter.getContextGraphAuthorityIndexRevisions([9n]))
+      .resolves.toEqual([{
+        contextGraphId: '9',
+        revision: expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      }]);
+    expect(harness.evidence.indexInvalidations).toEqual([4]);
+    expect(harness.evidence.indexRanges).toEqual([
+      [7, 16], [17, 26], [27, 30],
+      [7, 16], [17, 26], [27, 30],
+    ]);
+  });
+
   it('declines authority revision scheduling when no durable index is wired', async () => {
     const { adapter, evidence } = makeEvmAuthorityAdapter();
     await expect(adapter.getContextGraphAuthorityIndexRevisions([9n])).resolves.toBeNull();

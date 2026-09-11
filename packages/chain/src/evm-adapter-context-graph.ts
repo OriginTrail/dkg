@@ -27,17 +27,16 @@ import {
   type ContextGraphAuthorityHistoryEventQuery,
 } from './context-graph-authority-history.js';
 import {
-  contextGraphAuthorityEventTopics,
-  normalizeContextGraphAuthorityIndexLog,
   resolveEvmContextGraphAuthoritySource,
   type EvmContextGraphAuthoritySource,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
-import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 import { contextGraphAuthorityIndexStateRevision } from
   './context-graph-authority-index-checkpoint.js';
+import { readEvmContextGraphAuthorityIndexV1 } from
+  './evm-context-graph-authority-index-reader.js';
 
 const CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS = 4_096;
 
@@ -957,52 +956,30 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             'getContextGraphAuthoritySnapshot',
             'ContextGraphStorage',
           )).fromBlock;
-          const authorityTopics = contextGraphAuthorityEventTopics(contract.interface);
+          const indexed = await readEvmContextGraphAuthorityIndexV1({
+            index: this.contextGraphAuthorityIndex!,
+            deploymentId: this.deploymentId,
+            contract,
+            contractAddress,
+            provider,
+            deploymentBlockNumber,
+            finalized: { number: finalized.number, hash: finalizedHash },
+            pageSize: this.cgRegistryScanPageSize,
+            stabilizationOperation: 'resolution',
+            signal: options.signal,
+          });
+          const state = indexed.checkpoint.states.find(
+            (candidate) => candidate.contextGraphId === contextGraphId.toString(10),
+          );
+          if (state === undefined) {
+            throw new Error(
+              `Context Graph ${contextGraphId.toString(10)} has no finalized creation event`,
+            );
+          }
           return Object.freeze({
             kind: 'indexed' as const,
-            readSnapshot: () => this.contextGraphAuthorityIndex!.resolve({
-              scope: [this.deploymentId, contractAddress].join(':'),
-              contextGraphId,
-              readScope: provider,
-              deploymentBlockNumber,
-              finalized: { number: finalized.number, hash: finalizedHash },
-              pageSize: this.cgRegistryScanPageSize,
-              signal: options.signal,
-              readBlockHash: async (blockNumber, lifecycleSignal) => (
-                (await withRpcRequestAbortSignal(
-                  lifecycleSignal,
-                  () => provider.getBlock(blockNumber),
-                ))?.hash ?? null
-              ),
-              readPage: async (fromBlock, toBlock, lifecycleSignal) => {
-                const logs = await readAdaptiveEvmLogRange({
-                  read: (rangeFrom, rangeTo) => withRpcRequestAbortSignal(
-                    lifecycleSignal,
-                    () => provider.getLogs({
-                      address: contractAddress,
-                      topics: [[...authorityTopics]],
-                      fromBlock: rangeFrom,
-                      toBlock: rangeTo,
-                    }),
-                  ),
-                  fromBlock,
-                  toBlock,
-                  signal: lifecycleSignal,
-                });
-                return logs.map((log) => normalizeContextGraphAuthorityIndexLog(
-                  contract.interface,
-                  log,
-                ));
-              },
-            }),
-            stabilize: async () => {
-              const stable = await provider.getBlock(finalized.number);
-              if (stable?.hash?.toLowerCase() !== finalizedHash.toLowerCase()) {
-                throw new Error(
-                  'finalized Context Graph authority anchor changed during resolution',
-                );
-              }
-            },
+            readSnapshot: async () => state,
+            stabilize: indexed.stabilize,
           });
         })() : (() => {
           const cache = this.contextGraphAuthorityHistory;
@@ -1189,54 +1166,25 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           'getContextGraphAuthorityIndexRevisions',
           'ContextGraphStorage',
         )).fromBlock;
-        const authorityTopics = contextGraphAuthorityEventTopics(contract.interface);
-        const checkpoint = await index.snapshot({
-          scope: [this.deploymentId, contractAddress].join(':'),
-          readScope: provider,
+        const indexed = await readEvmContextGraphAuthorityIndexV1({
+          index,
+          deploymentId: this.deploymentId,
+          contract,
+          contractAddress,
+          provider,
           deploymentBlockNumber,
           finalized: { number: finalized.number, hash: finalizedHash },
           pageSize: this.cgRegistryScanPageSize,
+          stabilizationOperation: 'revision scan',
           signal: options.signal,
-          readBlockHash: async (blockNumber, lifecycleSignal) => (
-            (await withRpcRequestAbortSignal(
-              lifecycleSignal,
-              () => provider.getBlock(blockNumber),
-            ))?.hash ?? null
-          ),
-          readPage: async (fromBlock, toBlock, lifecycleSignal) => {
-            const logs = await readAdaptiveEvmLogRange({
-              read: (rangeFrom, rangeTo) => withRpcRequestAbortSignal(
-                lifecycleSignal,
-                () => provider.getLogs({
-                  address: contractAddress,
-                  topics: [[...authorityTopics]],
-                  fromBlock: rangeFrom,
-                  toBlock: rangeTo,
-                }),
-              ),
-              fromBlock,
-              toBlock,
-              signal: lifecycleSignal,
-            });
-            return logs.map((log) => normalizeContextGraphAuthorityIndexLog(
-              contract.interface,
-              log,
-            ));
-          },
         });
-        options.signal?.throwIfAborted();
-        const revisions = checkpoint.states
+        const revisions = indexed.checkpoint.states
           .filter(({ contextGraphId }) => targetIds.has(contextGraphId))
           .map((state) => Object.freeze({
             contextGraphId: state.contextGraphId,
             revision: contextGraphAuthorityIndexStateRevision(state),
           }));
-        const stable = await provider.getBlock(finalized.number);
-        if (stable?.hash?.toLowerCase() !== finalizedHash.toLowerCase()) {
-          throw new Error(
-            'finalized Context Graph authority anchor changed during revision scan',
-          );
-        }
+        await indexed.stabilize();
         return Object.freeze(revisions);
       },
       {
