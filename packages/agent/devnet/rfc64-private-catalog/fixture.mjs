@@ -102,8 +102,6 @@ export const RUNTIME_ROLES = Object.freeze([
   ...PRIVATE_MEMBER_ROLES,
   'outsider',
 ]);
-export const AUTHORITY_SENTINEL_CONTEXT_GRAPH_ID =
-  '0x1111111111111111111111111111111111111111/rfc64-private-release-gate-authority-sentinel';
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,
