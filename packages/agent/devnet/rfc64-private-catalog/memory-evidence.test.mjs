@@ -7,6 +7,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   ASSET_NUMBERS,
   CONTEXT_GRAPH_ID,
+  NETWORK_ID,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   PROJECTION_EVIDENCE,
   UPDATED_PROJECTION_EVIDENCE,
@@ -28,12 +29,13 @@ import {
 } from './fixtures/private-memory-fixture.mjs';
 
 test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async () => {
-  const graphCounts = ASSET_NUMBERS.map((kaNumber) => ({
+  const workspaceGraphCounts = ASSET_NUMBERS.map((kaNumber) => ({
     kaNumber,
     swm: UPDATED_PROJECTION_EVIDENCE.count,
     swmDigest: UPDATED_PROJECTION_EVIDENCE.digest,
     swmGraph: `swm:${kaNumber}`,
-    swmHead: {
+    swmProof: {
+      kind: 'workspace-head',
       assertionVersion: '2',
       assertionGraph: `swm:${kaNumber}`,
       shareOperationId: privateCatalogSwmShareOperationId(kaNumber),
@@ -49,12 +51,16 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
   assert.equal(EXPECTED_MEMORY_CONTENTS.swm.assertionVersion, '2');
   assert.equal(EXPECTED_MEMORY_CONTENTS.vm.assertionVersion, '1');
   assert.equal(EXPECTED_MEMORY_CONTENTS, PRIVATE_CATALOG_MEMORY_EXPECTATION);
-  assert.equal(hasExactSourceSwmContents({ graphCounts }), true);
-  assert.equal(hasExactMemoryContents({ graphCounts }), true);
+  assert.equal(hasExactSourceSwmContents({ graphCounts: workspaceGraphCounts }), true);
+  assert.equal(hasExactMemoryContents(
+    { graphCounts: workspaceGraphCounts },
+    { swmProofKind: 'workspace-head' },
+  ), true);
+  assert.equal(hasExactMemoryContents({ graphCounts: workspaceGraphCounts }), false);
   const corruptions = [
     (evidence) => ({
       ...evidence,
-      swmHead: { ...evidence.swmHead, assertionVersion: '1' },
+      swmProof: { ...evidence.swmProof, assertionVersion: '1' },
     }),
     (evidence) => ({
       ...evidence,
@@ -62,7 +68,7 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
     }),
     (evidence) => ({
       ...evidence,
-      swmHead: { ...evidence.swmHead, assertionGraph: 'urn:wrong:swm' },
+      swmProof: { ...evidence.swmProof, assertionGraph: 'urn:wrong:swm' },
     }),
     (evidence) => ({
       ...evidence,
@@ -70,16 +76,64 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
     }),
     (evidence) => ({
       ...evidence,
-      swmHead: { ...evidence.swmHead, shareOperationId: 'wrong-operation' },
+      swmProof: { ...evidence.swmProof, shareOperationId: 'wrong-operation' },
     }),
     (evidence) => ({ ...evidence, swmDigest: PROJECTION_EVIDENCE.digest }),
   ];
   for (const corrupt of corruptions) {
     assert.equal(hasExactMemoryContents({
-      graphCounts: graphCounts.map((evidence, index) => (
+      graphCounts: workspaceGraphCounts.map((evidence, index) => (
         index === 0 ? corrupt(evidence) : evidence
       )),
+    }, { swmProofKind: 'workspace-head' }), false);
+  }
+
+  const appliedHeadDigest = `0x${'ab'.repeat(32)}`;
+  const catalogGraphCounts = workspaceGraphCounts.map((evidence) => ({
+    ...evidence,
+    swmProof: {
+      kind: 'catalog-row',
+      assertionVersion: '2',
+      catalogHeadDigest: appliedHeadDigest,
+      kaId: ((BigInt(roleAgentAddress('owner')) << 96n) | BigInt(evidence.kaNumber))
+        .toString(),
+      projectionDigest: PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.catalogProjectionDigest,
+    },
+  }));
+  const productionState = {
+    appliedHeadDigest,
+    catalogVersion: '4',
+    exactExpectedHead: true,
+    graphCounts: catalogGraphCounts,
+  };
+  assert.equal(hasExactMemoryContents(productionState), true);
+  const {
+    projectionDigest: _missingProjectionDigest,
+    ...missingProjectionDigest
+  } = catalogGraphCounts[0].swmProof;
+  for (const swmProof of [
+    { kind: 'absent' },
+    { ...catalogGraphCounts[0].swmProof, assertionVersion: '1' },
+    { ...catalogGraphCounts[0].swmProof, catalogHeadDigest: `0x${'cd'.repeat(32)}` },
+    { ...catalogGraphCounts[0].swmProof, kaId: '1' },
+    { ...catalogGraphCounts[0].swmProof, kind: 'workspace-head' },
+    { ...catalogGraphCounts[0].swmProof, projectionDigest: `0x${'00'.repeat(32)}` },
+    missingProjectionDigest,
+    { ...catalogGraphCounts[0].swmProof, assertionGraph: 'urn:mixed-proof' },
+  ]) {
+    assert.equal(hasExactMemoryContents({
+      ...productionState,
+      graphCounts: catalogGraphCounts.map((evidence, index) => (
+        index === 0 ? { ...evidence, swmProof } : evidence
+      )),
     }), false);
+  }
+  for (const graphCounts of [
+    catalogGraphCounts.slice(0, 1),
+    [catalogGraphCounts[0], catalogGraphCounts[0]],
+    [...catalogGraphCounts, { ...catalogGraphCounts[0], kaNumber: 43 }],
+  ]) {
+    assert.equal(hasExactMemoryContents({ ...productionState, graphCounts }), false);
   }
 
   assert.equal(parsePrivateCatalogLiteralEvidenceV1('"line\\nvalue"'), 'line\nvalue');
@@ -91,7 +145,10 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
   try {
     await seedExpectedPrivateMemoryV1(store);
     const storeEvidence = await readExpectedPrivateMemoryV1(store);
-    assert.equal(hasExactMemoryContents({ graphCounts: storeEvidence }), true);
+    assert.equal(hasExactMemoryContents(
+      { graphCounts: storeEvidence },
+      { swmProofKind: 'workspace-head' },
+    ), true);
     await assert.rejects(
       readPrivateCatalogGraphCountEvidence(store, {
         assetNumbers: ASSET_NUMBERS,
@@ -99,6 +156,17 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
         contextGraphId: CONTEXT_GRAPH_ID,
       }),
       /networkId is required/u,
+    );
+    await assert.rejects(
+      readPrivateCatalogGraphCountEvidence(store, {
+        assetNumbers: ASSET_NUMBERS,
+        authorAddress,
+        catalogClosure: {},
+        contextGraphId: CONTEXT_GRAPH_ID,
+        networkId: NETWORK_ID,
+        swmProofMode: 'catalog-row',
+      }),
+      /not verifier-minted/u,
     );
   } finally {
     await store.close();

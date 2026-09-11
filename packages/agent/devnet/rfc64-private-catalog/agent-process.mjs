@@ -55,6 +55,7 @@ import {
   childCommandDescriptorV1,
 } from './child-protocol.mjs';
 import { assertInitialFinalizedAuthorityV1 } from './initial-authority.mjs';
+import { verifyAppliedCatalogSwmClosureV1 } from './verified-catalog-swm-proof.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
@@ -62,6 +63,7 @@ const DATA_DIR = requiredEnv('DKG_RFC64_PRIVATE_DATA_DIR');
 const RUNTIME_MANIFEST_DIGEST = requiredEnv('DKG_RFC64_RUNTIME_MANIFEST_DIGEST');
 const MANIFEST_PATH = process.env.DKG_RFC64_PRIVATE_MANIFEST;
 const AUTHORITY_FAULT = process.env.DKG_RFC64_PRIVATE_AUTHORITY_FAULT;
+const CATALOG_PROOF_FAULT = process.env.DKG_RFC64_PRIVATE_CATALOG_PROOF_FAULT;
 
 let agent;
 let chainAdapter;
@@ -82,6 +84,15 @@ function emit(event, requestId, fields = {}) {
 }
 
 async function boot() {
+  if (
+    CATALOG_PROOF_FAULT !== undefined
+    && CATALOG_PROOF_FAULT !== 'inventory-digest'
+    && CATALOG_PROOF_FAULT !== 'expected-assets'
+    && CATALOG_PROOF_FAULT !== 'duplicate-expected-assets'
+    && CATALOG_PROOF_FAULT !== 'missing-bundle'
+  ) {
+    throw new Error('unsupported RFC-64 private catalog proof fault injection');
+  }
   if (MODE === 'probe') {
     agent = await createAgent(undefined, false);
     await agent.start();
@@ -446,6 +457,7 @@ async function waitForBootstrap(command, requestId) {
     contextGraphId: CONTEXT_GRAPH_ID,
     authorAddress: roleAgentAddress('owner'),
     networkId: NETWORK_ID,
+    swmProofMode: 'workspace-head',
   });
   const registeredAuthority = await agent.resolveRegisteredContextGraphAuthority(
     CONTEXT_GRAPH_ID,
@@ -467,12 +479,13 @@ async function hasExactLocalFinalizedVmBaseline() {
     contextGraphId: CONTEXT_GRAPH_ID,
     authorAddress: roleAgentAddress('owner'),
     networkId: NETWORK_ID,
+    swmProofMode: 'workspace-head',
   });
   return graphCounts.length === ASSET_NUMBERS.length
     && graphCounts.every((entry, index) => (
       entry.kaNumber === ASSET_NUMBERS[index]
       && entry.swm === 0
-      && entry.swmHead === null
+      && entry.swmProof?.kind === 'absent'
       && entry.vm === PRIVATE_CATALOG_MEMORY_EXPECTATION.vm.projection.count
       && entry.vmDigest === PRIVATE_CATALOG_MEMORY_EXPECTATION.vm.projection.digest
       && entry.vmHead?.assertionVersion
@@ -482,40 +495,52 @@ async function hasExactLocalFinalizedVmBaseline() {
 }
 
 async function hasExactLocalMemoryContents(catalogEvidence = {}) {
+  const authorAddress = roleAgentAddress('owner');
+  const scope = privateCatalogScope(authorAddress);
+  const applied = agent.readRfc64AppliedCatalogHeadV1({
+    catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
+    authorAddress,
+  });
+  const catalogClosure = await readVerifiedAppliedCatalogClosureV1(applied, scope);
   const graphCounts = await readPrivateCatalogGraphCountEvidence(agent.store, {
     assetNumbers: ASSET_NUMBERS,
     contextGraphId: CONTEXT_GRAPH_ID,
-    authorAddress: roleAgentAddress('owner'),
+    authorAddress,
+    catalogClosure,
     networkId: NETWORK_ID,
+    swmProofMode: 'catalog-row',
   });
   return hasExactPrivateCatalogMemoryContents(
-    { graphCounts, ...catalogEvidence },
+    {
+      appliedHeadDigest: applied?.currentCatalogHeadDigest,
+      graphCounts,
+      ...catalogEvidence,
+    },
     PRIVATE_CATALOG_MEMORY_EXPECTATION,
   );
 }
 
 async function inspect(expectedHeadDigest, { includeNonmemberQuery = true } = {}) {
   const authorAddress = roleAgentAddress('owner');
-  const scopeDigest = computeAuthorCatalogScopeDigestV1({
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
-    governanceChainId: '20430',
-    governanceContractAddress: CONTEXT_GRAPH_STORAGE,
-    ownershipTransitionDigest: createPrivatePolicyAndRoster().policy.ownershipTransitionDigest,
-    subGraphName: null,
-    authorAddress,
-    era: '0',
-    bucketCount: '1',
-  });
+  const scope = privateCatalogScope(authorAddress);
+  const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
   const applied = agent.readRfc64AppliedCatalogHeadV1({
     catalogScopeDigest: scopeDigest,
     authorAddress,
   });
+  const swmProofMode = ROLE === 'owner' || applied === null
+    ? 'workspace-head'
+    : 'catalog-row';
+  const catalogClosure = swmProofMode === 'catalog-row'
+    ? await readVerifiedAppliedCatalogClosureV1(applied, scope)
+    : undefined;
   const graphCounts = await readPrivateCatalogGraphCountEvidence(agent.store, {
     assetNumbers: ASSET_NUMBERS,
     contextGraphId: CONTEXT_GRAPH_ID,
     authorAddress,
+    ...(catalogClosure === undefined ? {} : { catalogClosure }),
     networkId: NETWORK_ID,
+    swmProofMode,
   });
   const outsiderResult = ROLE === 'outsider' || !includeNonmemberQuery
     ? null
@@ -545,6 +570,43 @@ async function inspect(expectedHeadDigest, { includeNonmemberQuery = true } = {}
     ].reduce((sum, method) => sum + rpc.calls(method), 0),
     rpcCallCounts: rpc?.snapshot() ?? Object.freeze({}),
   };
+}
+
+function privateCatalogScope(authorAddress) {
+  return Object.freeze({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    governanceChainId: '20430',
+    governanceContractAddress: CONTEXT_GRAPH_STORAGE,
+    ownershipTransitionDigest: createPrivatePolicyAndRoster().policy.ownershipTransitionDigest,
+    subGraphName: null,
+    authorAddress,
+    era: '0',
+    bucketCount: '1',
+  });
+}
+
+async function readVerifiedAppliedCatalogClosureV1(applied, scope) {
+  const persistence = agent.rfc64PersistenceV1;
+  if (applied === null || persistence === undefined) {
+    throw new Error('catalog-row SWM evidence has no durable applied catalog');
+  }
+  return verifyAppliedCatalogSwmClosureV1({
+    appliedHead: CATALOG_PROOF_FAULT === 'inventory-digest'
+      ? Object.freeze({ ...applied, appliedInventoryDigest: `0x${'00'.repeat(32)}` })
+      : applied,
+    controlObjects: persistence.controlObjects,
+    deployment: DEPLOYMENT,
+    expectedAssetNumbers: CATALOG_PROOF_FAULT === 'expected-assets'
+      ? Object.freeze([ASSET_NUMBERS[0], 43])
+      : CATALOG_PROOF_FAULT === 'duplicate-expected-assets'
+        ? Object.freeze([ASSET_NUMBERS[0], ASSET_NUMBERS[0]])
+        : ASSET_NUMBERS,
+    kaBundles: CATALOG_PROOF_FAULT === 'missing-bundle'
+      ? Object.freeze({ readKaBundleByDigest: async () => null })
+      : persistence.kaBundles,
+    trustedCatalogScope: scope,
+  });
 }
 
 async function revokeReceiver(requestId) {

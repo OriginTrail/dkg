@@ -7,6 +7,7 @@ import {
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
   computeContextGraphPolicyObjectDigestV1,
+  computeKaProjectionDigestV1,
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -85,7 +86,10 @@ export const PRIVATE_CATALOG_MEMORY_EXPECTATION = Object.freeze({
   swm: Object.freeze({
     projection: UPDATED_PROJECTION_EVIDENCE,
     assertionVersion: '2',
+    authorAddress: roleAgentAddress('owner'),
+    catalogProjectionDigest: computeKaProjectionDigestV1(UPDATED_PROJECTION),
     catalogVersion: '4',
+    proofKind: 'catalog-row',
     shareOperationIdPrefix: PRIVATE_CATALOG_SWM_SHARE_OPERATION_PREFIX,
   }),
   vm: Object.freeze({

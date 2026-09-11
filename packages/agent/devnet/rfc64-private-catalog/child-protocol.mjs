@@ -24,7 +24,7 @@ export const RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1 = Object.freeze({
 
 const SAFE_DIAGNOSTIC_PHASES = new Set([
   RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready,
-  ...COMMAND_DESCRIPTORS.map(({ safeDiagnosticPhase }) => safeDiagnosticPhase),
+  ...COMMAND_DESCRIPTORS.map(({ responseEvent }) => responseEvent),
 ]);
 
 /** Validate a parent-to-child request against the single canonical command table. */
@@ -54,9 +54,5 @@ export function isSafeChildDiagnosticPhaseV1(value) {
 }
 
 function descriptor(command, responseEvent) {
-  return Object.freeze({
-    command,
-    responseEvent,
-    safeDiagnosticPhase: responseEvent,
-  });
+  return Object.freeze({ command, responseEvent });
 }

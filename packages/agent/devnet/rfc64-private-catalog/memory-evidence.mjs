@@ -3,7 +3,6 @@
 import { createHash } from 'node:crypto';
 
 import {
-  ASSERTION_SEAL_PREDICATES,
   MemoryLayer,
   contextGraphLayerUri,
   contextGraphMetaUri,
@@ -14,6 +13,7 @@ import {
   quadsToNQuads,
   readExactGraphPagedWithDiscoveredCount,
 } from '@origintrail-official/dkg-storage';
+import { readVerifiedCatalogRowSwmProofV1 } from './verified-catalog-swm-proof.mjs';
 
 const DEFAULT_MAX_QUAD_COUNT = 16;
 const DEFAULT_MAX_NQUADS_BYTES = 64 * 1024;
@@ -81,7 +81,7 @@ export async function readPrivateCatalogGraphCountEvidence(store, input) {
       input.authorAddress,
       kaNumber,
     );
-    const [swm, vm, swmHead, vmHead, catalogSwmSeal] = await Promise.all([
+    const [swm, vm, swmHead, vmHead] = await Promise.all([
       readExactGraphMemoryEvidence(store, swmGraph),
       readExactGraphMemoryEvidence(store, vmGraph),
       readLayerHeadEvidence(store, {
@@ -94,19 +94,17 @@ export async function readPrivateCatalogGraphCountEvidence(store, input) {
         subject: kaUal,
         includeShareOperationId: false,
       }),
-      readCatalogSwmSealEvidence(store, {
-        graph: contextGraphMetaUri(input.contextGraphId),
-        kaUal,
-      }),
     ]);
+    const swmProof = input.swmProofMode === 'workspace-head'
+      ? workspaceHeadProofV1(swmHead)
+      : catalogRowProofV1(input, kaNumber);
     return Object.freeze({
       kaNumber,
       kaUal,
       swmGraph,
       swm: swm.count,
       swmDigest: swm.digest,
-      swmHead,
-      catalogSwmSeal,
+      swmProof,
       vmGraph,
       vm: vm.count,
       vmDigest: vm.digest,
@@ -115,32 +113,14 @@ export async function readPrivateCatalogGraphCountEvidence(store, input) {
   }));
 }
 
-async function readCatalogSwmSealEvidence(store, input) {
-  const result = await store.query(`
-    SELECT ?sealSubject ?assertionVersion WHERE {
-      GRAPH <${input.graph}> {
-        ?sealSubject <${ASSERTION_SEAL_PREDICATES.KA_UAL}> <${input.kaUal}> ;
-          <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?assertionVersion .
-      }
-    }
-    LIMIT 16
-  `, { source: 'rfc64-private-release-gate.catalogSwmSealEvidence' });
-  if (result.type !== 'bindings' || result.bindings.length === 0) return null;
-  const candidates = result.bindings.map((row) => ({
-    sealSubject: namedNodeValue(row?.['sealSubject']),
-    assertionVersion: parsePrivateCatalogLiteralEvidenceV1(row?.['assertionVersion']),
-  })).filter(({ sealSubject, assertionVersion }) => (
-    sealSubject !== null && /^(?:0|[1-9][0-9]*)$/u.test(assertionVersion ?? '')
-  )).sort((left, right) => (
-    BigInt(left.assertionVersion) < BigInt(right.assertionVersion) ? 1 : -1
-  ));
-  const latest = candidates[0];
-  if (latest === undefined) return null;
-  if (
-    candidates[1] !== undefined
-    && candidates[1].assertionVersion === latest.assertionVersion
-  ) return null;
-  return Object.freeze({ ...latest, kaUal: input.kaUal });
+function workspaceHeadProofV1(head) {
+  return head === null
+    ? Object.freeze({ kind: 'absent' })
+    : Object.freeze({ kind: 'workspace-head', ...head });
+}
+
+function catalogRowProofV1(input, kaNumber) {
+  return readVerifiedCatalogRowSwmProofV1(input.catalogClosure, kaNumber);
 }
 
 async function readLayerHeadEvidence(store, input) {
@@ -217,6 +197,12 @@ function assertPrivateCatalogEvidenceInput(input) {
   ) {
     throw new TypeError('private catalog evidence assetNumbers must be safe integers');
   }
+  if (input.swmProofMode !== 'workspace-head' && input.swmProofMode !== 'catalog-row') {
+    throw new TypeError('private catalog evidence swmProofMode is required');
+  }
+  if (input.swmProofMode === 'catalog-row') {
+    readVerifiedCatalogRowSwmProofV1(input.catalogClosure, input.assetNumbers[0] ?? 0);
+  }
 }
 
 /**
@@ -258,29 +244,50 @@ function hasExactPrivateCatalogLayerContents(state, expected, layer) {
     const count = evidence[layer];
     const digest = evidence[`${layer}Digest`];
     const graph = evidence[`${layer}Graph`];
-    const head = evidence[`${layer}Head`];
-    const catalogSwmSeal = evidence.catalogSwmSeal;
-    const appliedCatalogProvesSwmVersion =
-      state.exactExpectedHead === true
-      && state.catalogVersion === expected.catalogVersion;
     const exactLayerIdentity = layer === 'swm'
-      ? (
-        (
-          head?.assertionVersion === expected.assertionVersion
-          && head?.assertionGraph === graph
-          && head?.shareOperationId
-            === `${expected.shareOperationIdPrefix ?? ''}${evidence.kaNumber}`
-        )
-        || (
-          catalogSwmSeal?.assertionVersion === expected.assertionVersion
-          && catalogSwmSeal?.kaUal === evidence.kaUal
-        )
-        || appliedCatalogProvesSwmVersion
-      )
-      : head?.assertionVersion === expected.assertionVersion
-        && head?.assertionGraph === graph;
+      ? hasExactSwmProofV1(state, evidence, expected)
+      : evidence.vmHead?.assertionVersion === expected.assertionVersion
+        && evidence.vmHead?.assertionGraph === graph;
     return count === projection?.count
       && digest === projection?.digest
       && exactLayerIdentity;
   });
+}
+
+function hasExactSwmProofV1(state, evidence, expected) {
+  const proof = evidence.swmProof;
+  if (expected.proofKind === 'workspace-head') {
+    return hasExactKeysV1(
+      proof,
+      ['assertionGraph', 'assertionVersion', 'kind', 'shareOperationId'],
+    )
+      && proof.kind === 'workspace-head'
+      && proof.assertionVersion === expected.assertionVersion
+      && proof.assertionGraph === evidence.swmGraph
+      && proof.shareOperationId
+        === `${expected.shareOperationIdPrefix ?? ''}${evidence.kaNumber}`;
+  }
+  if (expected.proofKind === 'catalog-row') {
+    const expectedKaId = ((BigInt(expected.authorAddress) << 96n)
+      | BigInt(evidence.kaNumber)).toString();
+    return hasExactKeysV1(
+      proof,
+      ['assertionVersion', 'catalogHeadDigest', 'kaId', 'kind', 'projectionDigest'],
+    )
+      && proof.kind === 'catalog-row'
+      && proof.assertionVersion === expected.assertionVersion
+      && proof.catalogHeadDigest === state.appliedHeadDigest
+      && proof.kaId === expectedKaId
+      && proof.projectionDigest === expected.catalogProjectionDigest
+      && state.exactExpectedHead === true
+      && state.catalogVersion === expected.catalogVersion;
+  }
+  return false;
+}
+
+function hasExactKeysV1(value, expected) {
+  return value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).sort().join('\n') === [...expected].sort().join('\n');
 }

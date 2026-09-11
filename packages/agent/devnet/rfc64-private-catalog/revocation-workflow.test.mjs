@@ -45,3 +45,26 @@ test('a finalized roster mismatch aborts before publish or synchronization', {
     /finalized chain authority differs from the declared gate topology/u,
   );
 });
+
+for (const [fault, expected] of [
+  ['inventory-digest', /differs from the durable applied inventory digest/u],
+  ['expected-assets', /differs from the expected asset identities/u],
+  ['duplicate-expected-assets', /asset identities are duplicated/u],
+  ['missing-bundle', /has no durable KA bundle/u],
+]) {
+  test(`a ${fault} catalog closure fault fails before exact SWM certification`, {
+    timeout: 90_000,
+  }, async () => {
+    const runtimeManifest = buildRuntimeManifestV1(REPO_ROOT, SOURCE_REVISION);
+    await assert.rejects(
+      executeRfc64PrivateReleaseGateV1({
+        childEnvironment: {
+          DKG_RFC64_PRIVATE_CATALOG_PROOF_FAULT: fault,
+        },
+        runtimeManifest,
+        sourceRevision: SOURCE_REVISION,
+      }),
+      (error) => expected.test(error?.cause?.message ?? ''),
+    );
+  });
+}

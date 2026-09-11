@@ -134,7 +134,10 @@ test('native transport enforces an authoritative roster rotation before object r
     assert.equal(catalogReads, 1);
     const memoryAfterRevocation = await readExpectedPrivateMemoryV1(store);
     assert.deepEqual(memoryAfterRevocation, memoryBeforeRevocation);
-    assert.equal(hasExactMemoryContents({ graphCounts: memoryAfterRevocation }), true);
+    assert.equal(hasExactMemoryContents(
+      { graphCounts: memoryAfterRevocation },
+      { swmProofKind: 'workspace-head' },
+    ), true);
   } finally {
     receiver.stop();
     provider.stop();

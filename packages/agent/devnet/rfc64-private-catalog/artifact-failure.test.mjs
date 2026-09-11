@@ -20,7 +20,7 @@ test('child protocol table classifies every request, response, and safe phase', 
   for (const descriptor of Object.values(RFC64_PRIVATE_CHILD_PROTOCOL_V1)) {
     assert.equal(childCommandDescriptorV1({ cmd: descriptor.command }), descriptor);
     assert.equal(isSafeChildDiagnosticPhaseV1(descriptor.responseEvent), true);
-    assert.equal(descriptor.safeDiagnosticPhase, descriptor.responseEvent);
+    assert.deepEqual(Object.keys(descriptor), ['command', 'responseEvent']);
   }
   assert.equal(
     isSafeChildDiagnosticPhaseV1(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready),
