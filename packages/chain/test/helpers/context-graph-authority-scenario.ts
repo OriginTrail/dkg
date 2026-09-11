@@ -16,13 +16,154 @@ export const POLICY_HASH = `0x${'77'.repeat(32)}`;
 export const NEXT_POLICY_HASH = `0x${'78'.repeat(32)}`;
 export const NAME_HASH = `0x${'88'.repeat(32)}`;
 
-interface AuthorityScenarioEvent {
-  readonly name: string;
+interface AuthorityScenarioCurrentState {
+  owner: string;
+  participantAgents: readonly string[];
+  metadataBatchId: bigint;
+  active: boolean;
+  createdAt: bigint;
+  accessPolicy: bigint;
+  publishPolicy: bigint;
+  publishAuthority: string;
+  publishAuthorityAccountId: bigint;
+}
+
+interface AuthorityScenarioEventBase {
   readonly blockNumber: number;
   readonly blockHash: string;
   readonly index: number;
-  readonly positionalArgs: readonly unknown[];
-  readonly namedArgs: Readonly<Record<string, unknown>>;
+}
+
+type AuthorityScenarioEvent =
+  | (AuthorityScenarioEventBase & Readonly<{
+      name: 'ContextGraphCreated';
+      contextGraphId: bigint;
+      owner: string;
+      nameHash: string;
+      participantAgents: readonly string[];
+      accessPolicy: bigint;
+      publishPolicy: bigint;
+      publishAuthority: string;
+      publishAuthorityAccountId: bigint;
+    }>)
+  | (AuthorityScenarioEventBase & Readonly<{
+      name: 'ContextGraphDeactivated';
+      contextGraphId: bigint;
+    }>)
+  | (AuthorityScenarioEventBase & Readonly<{
+      name: 'Transfer';
+      from: string;
+      to: string;
+      tokenId: bigint;
+    }>)
+  | (AuthorityScenarioEventBase & Readonly<{
+      name: 'PublishPolicyUpdated';
+      contextGraphId: bigint;
+      publishPolicy: bigint;
+      publishAuthority: string;
+      publishAuthorityAccountId: bigint;
+    }>)
+  | (AuthorityScenarioEventBase & Readonly<{
+      name: 'PublishAuthorityUpdated';
+      contextGraphId: bigint;
+      newAuthority: string;
+      newAuthorityAccountId: bigint;
+    }>)
+  | (AuthorityScenarioEventBase & Readonly<{
+      name: 'AgentParticipantAdded' | 'AgentParticipantRemoved';
+      contextGraphId: bigint;
+      agent: string;
+    }>);
+
+function renderCurrentState(
+  state: AuthorityScenarioCurrentState,
+  publishAuthorityAccountId: unknown = state.publishAuthorityAccountId,
+) {
+  return Object.assign([
+    state.owner,
+    [...state.participantAgents],
+    state.metadataBatchId,
+    state.active,
+    state.createdAt,
+    state.accessPolicy,
+    state.publishPolicy,
+    state.publishAuthority,
+    publishAuthorityAccountId,
+  ], {
+    owner: state.owner,
+    participantAgents: [...state.participantAgents],
+    metadataBatchId: state.metadataBatchId,
+    active: state.active,
+    createdAt: state.createdAt,
+    accessPolicy: state.accessPolicy,
+    publishPolicy: state.publishPolicy,
+    publishAuthority: state.publishAuthority,
+    publishAuthorityAccountId,
+  });
+}
+
+function renderEventArgs(event: AuthorityScenarioEvent) {
+  switch (event.name) {
+    case 'ContextGraphCreated':
+      return Object.assign([
+        event.contextGraphId,
+        event.owner,
+        event.nameHash,
+        [...event.participantAgents],
+        0n,
+        event.accessPolicy,
+        event.publishPolicy,
+        event.publishAuthority,
+        event.publishAuthorityAccountId,
+      ], {
+        contextGraphId: event.contextGraphId,
+        owner: event.owner,
+        nameHash: event.nameHash,
+        participantAgents: [...event.participantAgents],
+        accessPolicy: event.accessPolicy,
+        publishPolicy: event.publishPolicy,
+        publishAuthority: event.publishAuthority,
+        publishAuthorityAccountId: event.publishAuthorityAccountId,
+      });
+    case 'ContextGraphDeactivated':
+      return Object.assign([event.contextGraphId], {
+        contextGraphId: event.contextGraphId,
+      });
+    case 'Transfer':
+      return Object.assign([event.from, event.to, event.tokenId], {
+        from: event.from,
+        to: event.to,
+        tokenId: event.tokenId,
+      });
+    case 'PublishPolicyUpdated':
+      return Object.assign([
+        event.contextGraphId,
+        event.publishPolicy,
+        event.publishAuthority,
+        event.publishAuthorityAccountId,
+      ], {
+        contextGraphId: event.contextGraphId,
+        publishPolicy: event.publishPolicy,
+        publishAuthority: event.publishAuthority,
+        publishAuthorityAccountId: event.publishAuthorityAccountId,
+      });
+    case 'PublishAuthorityUpdated':
+      return Object.assign([
+        event.contextGraphId,
+        event.newAuthority,
+        event.newAuthorityAccountId,
+      ], {
+        contextGraphId: event.contextGraphId,
+        newAuthority: event.newAuthority,
+        newAuthorityAccountId: event.newAuthorityAccountId,
+      });
+    case 'AgentParticipantAdded':
+    case 'AgentParticipantRemoved':
+      return Object.assign([event.contextGraphId, event.agent], {
+        contextGraphId: event.contextGraphId,
+        agent: event.agent,
+      });
+  }
 }
 
 export interface AuthorityScenarioOptions {
@@ -54,18 +195,18 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
     release: PromiseWithResolvers<void>;
   }> | undefined;
 
-  const current = Object.assign(
-    [OWNER, [MEMBER, OWNER], 0n, !options.deactivated, 0n, 1n, 0n, AUTHORITY, 7n],
-    {
-      owner: OWNER,
-      participantAgents: [MEMBER, OWNER],
-      active: !options.deactivated,
-      accessPolicy: 1n,
-      publishPolicy: 0n,
-      publishAuthority: AUTHORITY,
-      publishAuthorityAccountId: 7n as unknown,
-    },
-  );
+  const current: AuthorityScenarioCurrentState = {
+    owner: OWNER,
+    participantAgents: [MEMBER, OWNER],
+    metadataBatchId: 0n,
+    active: !options.deactivated,
+    createdAt: 0n,
+    accessPolicy: 1n,
+    publishPolicy: 0n,
+    publishAuthority: AUTHORITY,
+    publishAuthorityAccountId: 7n,
+  };
+  let malformedPublishAuthorityAccountId: unknown | undefined;
 
   const events = (): AuthorityScenarioEvent[] => {
     const forkOwner = replacementAuthorityFork ? MEMBER : SECOND_MEMBER;
@@ -78,105 +219,84 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
         blockNumber: 10,
         blockHash: CREATION_HASH,
         index: 1,
-        positionalArgs: [
-          9n,
-          forkOwner,
-          NAME_HASH,
-          forkParticipants,
-          0n,
-          1n,
-          0n,
-          AUTHORITY,
-          7n,
-        ],
-        namedArgs: {
-          contextGraphId: 9n,
-          owner: forkOwner,
-          nameHash: NAME_HASH,
-          participantAgents: forkParticipants,
-          accessPolicy: 1n,
-          publishPolicy: 0n,
-          publishAuthority: AUTHORITY,
-          publishAuthorityAccountId: 7n,
-        },
+        contextGraphId: 9n,
+        owner: forkOwner,
+        nameHash: NAME_HASH,
+        participantAgents: forkParticipants,
+        accessPolicy: 1n,
+        publishPolicy: 0n,
+        publishAuthority: AUTHORITY,
+        publishAuthorityAccountId: 7n,
       },
       {
         name: 'Transfer',
         blockNumber: 10,
         blockHash: CREATION_HASH,
         index: 0,
-        positionalArgs: [ethers.ZeroAddress, forkOwner, 9n],
-        namedArgs: { from: ethers.ZeroAddress, to: forkOwner, tokenId: 9n },
+        from: ethers.ZeroAddress,
+        to: forkOwner,
+        tokenId: 9n,
       },
       {
         name: 'Transfer',
         blockNumber: 15,
         blockHash: `0x${'99'.repeat(32)}`,
         index: 0,
-        positionalArgs: [SECOND_MEMBER, OWNER, 9n],
-        namedArgs: { from: SECOND_MEMBER, to: OWNER, tokenId: 9n },
+        from: SECOND_MEMBER,
+        to: OWNER,
+        tokenId: 9n,
       },
       {
         name: 'PublishPolicyUpdated',
         blockNumber: 20,
         blockHash: POLICY_HASH,
         index: 0,
-        positionalArgs: [9n, 0n, SECOND_AUTHORITY, 9n],
-        namedArgs: {
-          contextGraphId: 9n,
-          publishPolicy: 0n,
-          publishAuthority: SECOND_AUTHORITY,
-          publishAuthorityAccountId: 9n,
-        },
+        contextGraphId: 9n,
+        publishPolicy: 0n,
+        publishAuthority: SECOND_AUTHORITY,
+        publishAuthorityAccountId: 9n,
       },
       {
         name: 'PublishAuthorityUpdated',
         blockNumber: 21,
         blockHash: POLICY_HASH,
         index: 0,
-        positionalArgs: [9n, AUTHORITY, 7n],
-        namedArgs: {
-          contextGraphId: 9n,
-          newAuthority: AUTHORITY,
-          newAuthorityAccountId: 7n,
-        },
+        contextGraphId: 9n,
+        newAuthority: AUTHORITY,
+        newAuthorityAccountId: 7n,
       },
       {
         name: 'AgentParticipantAdded',
         blockNumber: 22,
         blockHash: `0x${'aa'.repeat(32)}`,
         index: 0,
-        positionalArgs: [9n, OWNER],
-        namedArgs: { contextGraphId: 9n, agent: OWNER },
+        contextGraphId: 9n,
+        agent: OWNER,
       },
       {
         name: 'AgentParticipantRemoved',
         blockNumber: 23,
         blockHash: `0x${'bb'.repeat(32)}`,
         index: 0,
-        positionalArgs: [9n, SECOND_MEMBER],
-        namedArgs: { contextGraphId: 9n, agent: SECOND_MEMBER },
+        contextGraphId: 9n,
+        agent: SECOND_MEMBER,
       },
       ...(options.deactivated ? [{
         name: 'ContextGraphDeactivated',
         blockNumber: 24,
         blockHash: `0x${'bc'.repeat(32)}`,
         index: 0,
-        positionalArgs: [9n],
-        namedArgs: { contextGraphId: 9n },
+        contextGraphId: 9n,
       }] : []),
       {
         name: 'PublishPolicyUpdated',
         blockNumber: 33,
         blockHash: NEXT_POLICY_HASH,
         index: 0,
-        positionalArgs: [9n, 1n, ethers.ZeroAddress, 0n],
-        namedArgs: {
-          contextGraphId: 9n,
-          publishPolicy: 1n,
-          publishAuthority: ethers.ZeroAddress,
-          publishAuthorityAccountId: 0n,
-        },
+        contextGraphId: 9n,
+        publishPolicy: 1n,
+        publishAuthority: ethers.ZeroAddress,
+        publishAuthorityAccountId: 0n,
       },
     ];
     if (!replacementAuthorityFork) return rows;
@@ -199,7 +319,7 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
           blockNumber: row.blockNumber,
           blockHash: row.blockHash,
           index: row.index,
-          args: [...row.positionalArgs],
+          args: renderEventArgs(row),
         }));
     },
     renderParsedLogs(fromBlock: number, toBlock: number) {
@@ -211,7 +331,7 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
           index: row.index,
           parsed: {
             name: row.name,
-            args: Object.assign([...row.positionalArgs], row.namedArgs),
+            args: renderEventArgs(row),
           },
         }));
     },
@@ -222,7 +342,7 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
         gate.entered.resolve();
         await gate.release.promise;
       }
-      return current;
+      return renderCurrentState(current, malformedPublishAuthorityAccountId);
     },
     async getBlock(tag: string | number) {
       const gate = blockReadGate;
@@ -248,11 +368,8 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
       finalizedNumber = 35;
       finalizedHash = NEXT_FINALIZED_HASH;
       current.publishPolicy = 1n;
-      current[6] = 1n;
       current.publishAuthority = ethers.ZeroAddress;
-      current[7] = ethers.ZeroAddress;
       current.publishAuthorityAccountId = 0n;
-      current[8] = 0n;
     },
     replaceCachedAnchor(): void {
       cachedAnchorReplaced = true;
@@ -279,8 +396,7 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
       return { entered: entered.promise, release: release.resolve };
     },
     setPublishAuthorityAccountId(value: unknown): void {
-      current.publishAuthorityAccountId = value;
-      current[8] = value;
+      malformedPublishAuthorityAccountId = value;
     },
   };
 }
