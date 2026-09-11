@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphAuthorityHistoryStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
+import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphAuthorityHistoryStore, SqliteContextGraphAuthorityIndexStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -2361,6 +2361,63 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     expect(await reopened.load(key)).toEqual(checkpoint);
     await reopened.delete(key);
     expect(await reopened.load(key)).toBeUndefined();
+  });
+
+  it('atomically advances opaque contract-wide authority index checkpoints', async () => {
+    const store = new SqliteContextGraphAuthorityIndexStore(db);
+    const scope = 'evm:84532:hub=0xabc:context-graph-storage=0xdef';
+    const first = { version: 1, cursor: { throughBlockNumber: 20 } };
+    const second = { version: 1, cursor: { throughBlockNumber: 30 } };
+
+    expect(await store.compareAndSwap(scope, undefined, first)).toBe(1);
+    expect(await store.compareAndSwap(scope, undefined, first)).toBeUndefined();
+    expect(await store.load(scope)).toEqual({ token: 1, value: first });
+    expect(await store.compareAndSwap(scope, 1, second)).toBe(2);
+    expect(await store.compareAndSwap(scope, 1, second)).toBeUndefined();
+    expect(await store.invalidate(scope, 1)).toBeUndefined();
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteContextGraphAuthorityIndexStore(db);
+    expect(await reopened.load(scope)).toEqual({ token: 2, value: second });
+
+    db.db.prepare(`
+      UPDATE context_graph_authority_indexes SET checkpoint_json = ? WHERE scope = ?
+    `).run('{not-json', scope);
+    expect(await reopened.load(scope)).toEqual({
+      token: 2,
+      value: { invalidCheckpointJson: '{not-json' },
+    });
+    expect(await reopened.invalidate(scope, 1)).toBeUndefined();
+    expect(await reopened.invalidate(scope, 2)).toBe(3);
+    expect(await reopened.load(scope)).toEqual({ token: 3, value: null });
+    expect(await reopened.compareAndSwap(scope, 3, first)).toBe(4);
+    expect(await reopened.load(scope)).toEqual({ token: 4, value: first });
+  });
+
+  it('migrates V35 to the authority index schema without disturbing existing data', async () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.db.prepare(`INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`)
+      .run('v35-representative-setting', 'preserved');
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE context_graph_authority_indexes');
+    raw.pragma('user_version = 35');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(db.db.prepare(`SELECT value FROM settings WHERE key = ?`)
+      .get('v35-representative-setting')).toEqual({ value: 'preserved' });
+
+    const store = new SqliteContextGraphAuthorityIndexStore(db);
+    const scope = 'evm:84532:v35-migration';
+    const checkpoint = { version: 1, cursor: { throughBlockNumber: 42 } };
+    expect(await store.compareAndSwap(scope, undefined, checkpoint)).toBe(1);
+    expect(await store.load(scope)).toEqual({ token: 1, value: checkpoint });
+    expect(await store.invalidate(scope, 1)).toBe(2);
+    expect(await store.compareAndSwap(scope, 2, checkpoint)).toBe(3);
   });
 });
 
