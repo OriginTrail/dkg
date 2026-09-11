@@ -105,28 +105,6 @@ function abortError(reason: unknown): Error {
   return error;
 }
 
-function pressureCapacityIdentity(capacity: SchedulerPressureCapacity): string {
-  const finiteLimit = (value: number | null | undefined): number | null => (
-    Number.isFinite(value) && (value as number) >= 0 ? value as number : null
-  );
-  const capacityModel = capacity.capacityModel === 'shared' ? 'shared' : 'partitioned';
-  const lanes = capacityModel === 'partitioned'
-    ? Object.entries(capacity.lanes ?? {})
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([lane, limits]) => [
-        lane,
-        finiteLimit(limits.queueLimit),
-        finiteLimit(limits.inflightLimit),
-      ])
-    : [];
-  return JSON.stringify([
-    capacityModel,
-    finiteLimit(capacity.queueLimit),
-    finiteLimit(capacity.inflightLimit),
-    lanes,
-  ]);
-}
-
 /**
  * Shared priority/FIFO admission queue. Scheduler decision metrics are events:
  * an aged start emits both `started` and `aged` intentionally.
@@ -135,11 +113,6 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
   private readonly queue: InternalEntry<Payload>[] = [];
   private readonly handoffReservations = new Map<number, HandoffReservation>();
   private readonly pressureTickets = new WeakMap<PriorityAdmissionEntry<Payload>, SchedulerPressureTicket>();
-  private readonly pressureCapacityKeys = new WeakMap<PriorityAdmissionEntry<Payload>, string>();
-  private readonly pressureCapacityCounts = new Map<string, {
-    capacity: SchedulerPressureCapacity;
-    count: number;
-  }>();
   private readonly hooks: PriorityAdmissionQueueHooks<Payload>;
   private readonly now: () => number;
   private hasInstalledObservabilityCapacity: boolean;
@@ -561,16 +534,11 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
 
   private observePressureEnqueue(entry: PriorityAdmissionEntry<Payload>): void {
     if (!this.hooks.observability) return;
-    this.pressureTickets.set(entry, this.pressureEnqueue(this.pressureWork(entry)));
     const capacity = this.hooks.observability.capacityFor?.(entry);
-    if (capacity) {
-      const key = pressureCapacityIdentity(capacity);
-      const current = this.pressureCapacityCounts.get(key);
-      if (current) current.count += 1;
-      else this.pressureCapacityCounts.set(key, { capacity, count: 1 });
-      this.pressureCapacityKeys.set(entry, key);
-      this.refreshDynamicPressureCapacity();
-    }
+    this.pressureTickets.set(
+      entry,
+      this.pressureEnqueue(this.pressureWork(entry), capacity),
+    );
   }
 
   private observePressureStart(entry: PriorityAdmissionEntry<Payload>): void {
@@ -605,19 +573,5 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
 
   private forgetPressureEntry(entry: PriorityAdmissionEntry<Payload>): void {
     this.pressureTickets.delete(entry);
-    const key = this.pressureCapacityKeys.get(entry);
-    if (key === undefined) return;
-    this.pressureCapacityKeys.delete(entry);
-    const current = this.pressureCapacityCounts.get(key);
-    if (current && --current.count === 0) this.pressureCapacityCounts.delete(key);
-    this.refreshDynamicPressureCapacity();
-  }
-
-  private refreshDynamicPressureCapacity(): void {
-    if (!this.hooks.observability?.capacityFor) return;
-    const capacities = [...this.pressureCapacityCounts.values()];
-    this.updatePressureCapacity(
-      capacities.length === 1 ? capacities[0].capacity : { capacityModel: 'shared' },
-    );
   }
 }

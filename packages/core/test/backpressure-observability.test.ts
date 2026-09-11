@@ -828,6 +828,70 @@ describe('BackpressureMonitor', () => {
     });
   });
 
+  it('owns dynamic capacity through ticket lifecycle and semantic equality', () => {
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'dynamic-capacity',
+      capacity: { capacityModel: 'shared', queueLimit: 9, inflightLimit: 3 },
+    });
+    const firstCapacity = {
+      capacityModel: 'partitioned' as const,
+      queueLimit: 4,
+      inflightLimit: 2,
+      lanes: {
+        fast: { queueLimit: 2, inflightLimit: 1 },
+        slow: { queueLimit: 2, inflightLimit: 1 },
+      },
+    };
+    const equivalentCapacity = {
+      lanes: {
+        slow: { inflightLimit: 1, queueLimit: 2 },
+        fast: { inflightLimit: 1, queueLimit: 2 },
+      },
+      inflightLimit: 2,
+      queueLimit: 4,
+    };
+
+    const active = tracker.enqueue(
+      { lane: 'fast', operation: 'active' },
+      firstCapacity,
+    );
+    const rejected = tracker.enqueue(
+      { lane: 'slow', operation: 'rejected' },
+      equivalentCapacity,
+    );
+    expect(tracker.snapshot()).toMatchObject({
+      capacityModel: 'partitioned',
+      totals: { queued: 2, queueLimit: 4, inflightLimit: 2 },
+    });
+
+    tracker.start(active);
+    tracker.rejectQueued(rejected, 'owner_queue_full');
+    expect(tracker.snapshot()).toMatchObject({
+      capacityModel: 'partitioned',
+      totals: { queued: 0, inflight: 1, queueLimit: 4, inflightLimit: 2 },
+    });
+
+    const cancelled = tracker.enqueue(
+      { lane: 'slow', operation: 'cancelled' },
+      { capacityModel: 'shared', queueLimit: 8, inflightLimit: 4 },
+    );
+    expect(tracker.snapshot()).toMatchObject({
+      capacityModel: 'shared',
+      totals: { queued: 1, inflight: 1, queueLimit: null, inflightLimit: null },
+    });
+    tracker.cancelQueued(cancelled, 'aborted');
+    expect(tracker.snapshot()).toMatchObject({
+      capacityModel: 'partitioned',
+      totals: { queued: 0, inflight: 1, queueLimit: 4, inflightLimit: 2 },
+    });
+
+    tracker.finish(active, 'released');
+    expect(tracker.snapshot()).toMatchObject({
+      capacityModel: 'shared',
+      totals: { queued: 0, inflight: 0, queueLimit: 9, inflightLimit: 3 },
+    });
+  });
+
   it('contains logger failures', () => {
     const registry = new BackpressureRegistry();
     registry.register({

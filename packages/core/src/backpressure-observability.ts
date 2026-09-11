@@ -177,6 +177,7 @@ interface PressureWorkRecord {
   operation: string;
   queuedAt: number;
   startedAt?: number;
+  capacity?: SchedulerPressureCapacity;
 }
 
 interface LaneRuntime {
@@ -204,6 +205,28 @@ function maxState(a: BackpressureState, b: BackpressureState): BackpressureState
 
 function normalizeLimit(value: number | null | undefined): number | null {
   return Number.isFinite(value) && (value as number) >= 0 ? value as number : null;
+}
+
+/** Stable identity for the capacity semantics the tracker exposes. */
+export function schedulerPressureCapacityIdentity(
+  capacity: SchedulerPressureCapacity,
+): string {
+  const capacityModel = capacity.capacityModel === 'shared' ? 'shared' : 'partitioned';
+  const lanes = capacityModel === 'partitioned'
+    ? Object.entries(capacity.lanes ?? {})
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([lane, limits]) => [
+        lane,
+        normalizeLimit(limits.queueLimit),
+        normalizeLimit(limits.inflightLimit),
+      ])
+    : [];
+  return JSON.stringify([
+    capacityModel,
+    normalizeLimit(capacity.queueLimit),
+    normalizeLimit(capacity.inflightLimit),
+    lanes,
+  ]);
 }
 
 /**
@@ -294,12 +317,16 @@ export class SchedulerPressureTracker {
     this.capacity = capacity;
   }
 
-  enqueue(work: SchedulerPressureWork): SchedulerPressureTicket {
+  enqueue(
+    work: SchedulerPressureWork,
+    capacity?: SchedulerPressureCapacity,
+  ): SchedulerPressureTicket {
     const record: PressureWorkRecord = {
       id: this.nextTicketId++,
       lane: normalizeBackpressureLabel(work.lane, 'default'),
       operation: normalizeBackpressureLabel(work.operation),
       queuedAt: this.now(),
+      capacity,
     };
     this.queued.set(record.id, record);
     this.recordEvent(record.lane, 'enqueued');
@@ -356,21 +383,22 @@ export class SchedulerPressureTracker {
 
   snapshot(): BackpressureSnapshot {
     const now = this.now();
+    const capacity = this.liveCapacity();
     const laneNames = new Set<string>([
       ...this.lanes.keys(),
-      ...Object.keys(this.capacity.lanes ?? {}),
+      ...Object.keys(capacity.lanes ?? {}),
       ...[...this.queued.values()].map((entry) => entry.lane),
       ...[...this.active.values()].map((entry) => entry.lane),
     ]);
     const snapshots = [...laneNames]
       .sort()
-      .map((lane) => this.laneSnapshot(lane, now));
+      .map((lane) => this.laneSnapshot(lane, now, capacity));
     const totals = {
       queued: snapshots.reduce((sum, lane) => sum + lane.queued, 0),
-      queueLimit: normalizeLimit(this.capacity.queueLimit)
+      queueLimit: normalizeLimit(capacity.queueLimit)
         ?? this.sumLaneLimits('queueLimit', snapshots),
       inflight: snapshots.reduce((sum, lane) => sum + lane.inflight, 0),
-      inflightLimit: normalizeLimit(this.capacity.inflightLimit)
+      inflightLimit: normalizeLimit(capacity.inflightLimit)
         ?? this.sumLaneLimits('inflightLimit', snapshots),
       oldestQueuedAgeMs: Math.max(0, ...snapshots.map((lane) => lane.oldestQueuedAgeMs)),
       oldestActiveAgeMs: Math.max(0, ...snapshots.map((lane) => lane.oldestActiveAgeMs)),
@@ -402,10 +430,25 @@ export class SchedulerPressureTracker {
     return {
       scheduler: this.scheduler,
       state,
-      capacityModel: this.capacity.capacityModel === 'shared' ? 'shared' : 'partitioned',
+      capacityModel: capacity.capacityModel === 'shared' ? 'shared' : 'partitioned',
       totals,
       lanes: snapshots,
     };
+  }
+
+  private liveCapacity(): SchedulerPressureCapacity {
+    let liveIdentity: string | undefined;
+    let liveCapacity: SchedulerPressureCapacity | undefined;
+    for (const record of [...this.queued.values(), ...this.active.values()]) {
+      if (record.capacity === undefined) continue;
+      const identity = schedulerPressureCapacityIdentity(record.capacity);
+      if (liveIdentity !== undefined && identity !== liveIdentity) {
+        return { capacityModel: 'shared' };
+      }
+      liveIdentity = identity;
+      liveCapacity = record.capacity;
+    }
+    return liveCapacity ?? this.capacity;
   }
 
   private runtimeFor(lane: string): LaneRuntime {
@@ -450,7 +493,11 @@ export class SchedulerPressureTracker {
    * so adding a model means extending this descriptor rather than editing the
    * classifier's branches.
    */
-  private laneCapacityFor(lane: string, laneQueued: number): {
+  private laneCapacityFor(
+    lane: string,
+    laneQueued: number,
+    capacity: SchedulerPressureCapacity,
+  ): {
     /** Reported ceilings, whether or not depth classification applies. */
     capacityModel: SchedulerLaneCapacityModel;
     queueLimit: number | null;
@@ -463,10 +510,10 @@ export class SchedulerPressureTracker {
      */
     depthPressure: { queued: number; limit: number } | null;
   } {
-    const shared = this.capacity.capacityModel === 'shared';
+    const shared = capacity.capacityModel === 'shared';
     const queueLimit = shared
-      ? normalizeLimit(this.capacity.queueLimit)
-      : normalizeLimit(this.capacity.lanes?.[lane]?.queueLimit);
+      ? normalizeLimit(capacity.queueLimit)
+      : normalizeLimit(capacity.lanes?.[lane]?.queueLimit);
     // A lane with nothing waiting is not held back by a full queue, whoever
     // filled it. Scoped to `shared` deliberately: under `partitioned` the
     // comparisons imply it only for a positive utilization threshold, and
@@ -479,8 +526,8 @@ export class SchedulerPressureTracker {
       capacityModel: shared ? 'shared' : 'partitioned',
       queueLimit,
       inflightLimit: shared
-        ? normalizeLimit(this.capacity.inflightLimit)
-        : normalizeLimit(this.capacity.lanes?.[lane]?.inflightLimit),
+        ? normalizeLimit(capacity.inflightLimit)
+        : normalizeLimit(capacity.lanes?.[lane]?.inflightLimit),
       // Depth is measured against whatever the lane's ceiling bounds: its own
       // backlog when the allocation is private, the whole pool when the ceiling
       // is shared.
@@ -490,7 +537,11 @@ export class SchedulerPressureTracker {
     };
   }
 
-  private laneSnapshot(lane: string, now: number): BackpressureLaneSnapshot {
+  private laneSnapshot(
+    lane: string,
+    now: number,
+    capacity: SchedulerPressureCapacity,
+  ): BackpressureLaneSnapshot {
     const runtime = this.runtimeFor(lane);
     const queued = [...this.queued.values()].filter((entry) => entry.lane === lane);
     const active = [...this.active.values()].filter((entry) => entry.lane === lane);
@@ -499,7 +550,7 @@ export class SchedulerPressureTracker {
       queueLimit,
       inflightLimit,
       depthPressure,
-    } = this.laneCapacityFor(lane, queued.length);
+    } = this.laneCapacityFor(lane, queued.length, capacity);
     // Exactly the depth the classifier used, so `pressureQueued / queueLimit`
     // is always the utilization behind this lane's own state. A lane no depth
     // applies to reports its own backlog rather than a pool it is not being
@@ -617,8 +668,11 @@ export abstract class ObservableScheduler implements BackpressureSource {
     this.pressure.updateCapacity(capacity);
   }
 
-  protected pressureEnqueue(work: SchedulerPressureWork): SchedulerPressureTicket {
-    return this.pressure.enqueue(work);
+  protected pressureEnqueue(
+    work: SchedulerPressureWork,
+    capacity?: SchedulerPressureCapacity,
+  ): SchedulerPressureTicket {
+    return this.pressure.enqueue(work, capacity);
   }
 
   protected pressureStart(ticket: SchedulerPressureTicket): void {
