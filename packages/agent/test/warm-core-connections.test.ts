@@ -1,10 +1,27 @@
 import { describe, it, expect } from 'vitest';
 import {
+  findCorePeerIds,
   selectWarmCoreCandidates,
   reconcileWarmCoreConnections,
   type WarmCoreAgent,
   type WarmCoreDeps,
 } from '../src/p2p/warm-core-connections.js';
+
+describe('findCorePeerIds', () => {
+  it('returns a deterministic recovery order for an unordered registry result', async () => {
+    const signal = new AbortController().signal;
+    const findAgents = async () => [
+      { peerId: 'core-z', nodeRole: 'core' },
+      { peerId: 'core-a', nodeRole: 'core' },
+      { peerId: 'self', nodeRole: 'core' },
+      { peerId: 'edge-a', nodeRole: 'edge' },
+      { peerId: 'core-z', nodeRole: 'core' },
+    ];
+
+    await expect(findCorePeerIds({ findAgents, selfPeerId: 'self', signal }))
+      .resolves.toEqual(['core-a', 'core-z']);
+  });
+});
 
 describe('selectWarmCoreCandidates', () => {
   it('keeps only nodeRole=core, drops self, dedupes, preserves order', () => {

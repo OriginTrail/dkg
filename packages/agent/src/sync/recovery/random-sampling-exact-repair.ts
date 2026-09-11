@@ -5,7 +5,11 @@ import {
 } from '@origintrail-official/dkg-random-sampling';
 import { buildReconciledKnowledgeAssetUal } from '../../ka-identity.js';
 import type { ExactAssetCommitment } from '../exact-assets.js';
-import { runBoundedPreparedPeerTraversal } from '../prepared-peer-traversal.js';
+import {
+  describePreparedPeerAttempt,
+  runBoundedPreparedPeerTraversal,
+  type PreparedPeerPreparation,
+} from '../prepared-peer-traversal.js';
 
 export interface RandomSamplingExactRepairInput {
   readonly kaId: bigint;
@@ -43,7 +47,7 @@ export interface RandomSamplingExactRepairDependencies {
     peerIds: string[],
     options: { readonly maxPeers: number; readonly peerRotationKey: string },
   ): string[];
-  preparePeer(peerId: string, signal: AbortSignal): Promise<boolean>;
+  preparePeer(peerId: string, signal: AbortSignal): Promise<PreparedPeerPreparation>;
   fetchExactKnowledgeAsset(
     peerId: string,
     localContextGraphId: string,
@@ -103,6 +107,8 @@ async function executeRandomSamplingExactRepair(
   }
   const traversal = await runBoundedPreparedPeerTraversal<RandomSamplingExactRepairResult>({
     candidatePeerIds,
+    // Keep each proof repair bounded while the keyed peer window advances
+    // through the complete discovered roster across subsequent repairs.
     maxPeers: deps.maxPeers,
     operationLabel: `RS exact repair for ${assetUal} from`,
     assertCurrent: () => {
@@ -134,7 +140,7 @@ async function executeRandomSamplingExactRepair(
       );
       return result.kind === 'found'
         ? { kind: 'done', result }
-        : { kind: 'continue' };
+        : { kind: 'continue', reason: result.disposition };
     },
     log: deps.logInfo,
   });
@@ -142,11 +148,11 @@ async function executeRandomSamplingExactRepair(
     return traversal.result.material;
   }
 
+  // The traversal owns the per-peer outcomes; render the leading ones compactly.
   throw new Error(
-    `Random Sampling exact repair did not recover ${assetUal} from `
-      + `${traversal.attemptedPeerIds.length > 0
-        ? traversal.attemptedPeerIds.map((peerId) => peerId.slice(-8)).join(',')
-        : 'the bounded provider window'}`,
+    `Random Sampling exact repair did not recover: ${traversal.attempts.length > 0
+      ? traversal.attempts.slice(0, 8).map(describePreparedPeerAttempt).join(',')
+      : 'no peer attempts'}; asset=${assetUal}`,
   );
 }
 

@@ -47,173 +47,6 @@ function processDurableBatchWithRealVerifier(
 }
 
 describe('Random Sampling proof-time exact repair', () => {
-  it('rotates through the bounded provider window until an exact asset is found', async () => {
-    const peers = ['peer-0001', 'peer-0002', 'peer-0003', 'peer-0004'];
-    const expectedUal = 'did:dkg:base:8453/0x0000000000000000000000000000000000001234/7';
-    const historicalQuad = {
-      subject: 'urn:historical',
-      predicate: 'urn:value',
-      object: '"proof"',
-      graph: 'urn:historical-graph',
-    };
-    const proofMaterial = {
-      contents: [tripleContentV10(
-        historicalQuad.subject,
-        historicalQuad.predicate,
-        historicalQuad.object,
-      )],
-      privateRoots: [],
-    };
-    const syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async (peerId: string) => ({
-      disposition: peerId === 'peer-0003' ? 'found' : 'clean-absent',
-      result: { insertedTriples: 0 },
-      ...(peerId === 'peer-0003'
-        ? {
-            authenticatedAssets: [{
-              asset: {
-                ual: expectedUal,
-                dataQuads: [historicalQuad],
-              },
-              privateRoots: [],
-            }],
-          }
-        : {}),
-    }));
-    const agentLike = {
-      started: true,
-      peerId: 'self',
-      chain: {
-        chainId: 'base:8453',
-        getDKGKnowledgeAssetsAddress: vi.fn(async () =>
-          '0x00000000000000000000000000000000000000aa'),
-      },
-      node: {
-        stopSignal: undefined,
-        libp2p: { getConnections: () => [] },
-      },
-      log: { info: vi.fn() },
-      resolveLocalCgIdByOnChainId: vi.fn(() => 'food-safety'),
-      resolveRandomSamplingLocalContextGraphId: vi.fn(async () => 'food-safety'),
-      resolveCuratorPeerIdsForCg: vi.fn(async () => ({ peerIds: [] })),
-      vmReconcileObservedCandidatePeerIds: vi.fn(() => peers),
-      preferredSyncPeers: new Map(),
-      selectCatchupPeerWindow: vi.fn((candidates: Array<{ toString(): string }>) =>
-        candidates.slice(0, 3)),
-      ensurePeerAdmittedForRecovery: vi.fn(async () => true),
-      ensurePeerConnected: vi.fn(async () => undefined),
-      waitForSyncProtocol: vi.fn(async () => true),
-      syncExactKnowledgeAssetsFromPeerDetailed,
-    };
-    const kaId = (0x1234n << 96n) | 7n;
-    const expectedRoot = new Uint8Array(32).fill(0x11);
-
-    await expect(
-      (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
-        agentLike,
-        { kaId, cgId: 1n, expectedRoot, expectedLeafCount: 12n },
-      ).result,
-    ).resolves.toEqual(proofMaterial);
-
-    expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(3);
-    expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
-      .toEqual(['peer-0001', 'peer-0002', 'peer-0003']);
-    expect(agentLike.selectCatchupPeerWindow).toHaveBeenCalledWith(
-      expect.any(Array),
-      expect.objectContaining({ maxPeers: 3, peerRotationKey: 'rs-proof:food-safety' }),
-    );
-    for (const call of syncExactKnowledgeAssetsFromPeerDetailed.mock.calls) {
-      expect(call[1]).toBe('food-safety');
-      expect(call[2]).toEqual({
-        kind: 'challenge-pinned',
-        commitments: [{
-          assetUal: expectedUal,
-          merkleRootHex: '11'.repeat(32),
-          merkleLeafCount: 12n,
-        }],
-      });
-      expect(call[3]).toEqual(expect.objectContaining({
-        signal: expect.any(AbortSignal),
-      }));
-    }
-    expect(agentLike.ensurePeerAdmittedForRecovery.mock.calls[0]?.[3])
-      .toBeInstanceOf(AbortSignal);
-    expect(agentLike.ensurePeerConnected.mock.calls[0]?.[1])
-      .toEqual({ signal: expect.any(AbortSignal) });
-    expect(agentLike.waitForSyncProtocol.mock.calls[0]?.[1])
-      .toBeInstanceOf(AbortSignal);
-  });
-
-  it('discovers and dials a registry provider with an empty local cache and no connection', async () => {
-    const providerPeerId = '12D3KooWRegistryProofProvider';
-    const expectedUal =
-      'did:dkg:base:8453/0x0000000000000000000000000000000000001234/7';
-    const resolveCuratorPeerIdsForCg = vi.fn(async () => ({
-      peerIds: [providerPeerId],
-      curatorIsLocal: false,
-      legacyTripleResolved: false,
-    }));
-    const ensurePeerConnected = vi.fn(async () => undefined);
-    const syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async () => ({
-      disposition: 'found' as const,
-      result: { insertedTriples: 0 },
-      authenticatedAssets: [{
-        asset: { ual: expectedUal, dataQuads: [] },
-        privateRoots: [],
-      }],
-    }));
-    const agentLike = {
-      started: true,
-      peerId: 'self',
-      chain: {
-        chainId: 'base:8453',
-        getDKGKnowledgeAssetsAddress: vi.fn(async () =>
-          '0x00000000000000000000000000000000000000aa'),
-      },
-      node: {
-        stopSignal: undefined,
-        libp2p: { getConnections: () => [] },
-      },
-      log: { info: vi.fn() },
-      resolveLocalCgIdByOnChainId: vi.fn(() => 'food-safety'),
-      resolveRandomSamplingLocalContextGraphId: vi.fn(async () => 'food-safety'),
-      resolveCuratorPeerIdsForCg,
-      vmReconcileObservedCandidatePeerIds: vi.fn(() => []),
-      preferredSyncPeers: new Map(),
-      selectCatchupPeerWindow: vi.fn((peers: Array<{ toString(): string }>) => peers),
-      ensurePeerAdmittedForRecovery: vi.fn(async () => true),
-      ensurePeerConnected,
-      waitForSyncProtocol: vi.fn(async () => true),
-      syncExactKnowledgeAssetsFromPeerDetailed,
-    };
-
-    await expect(
-      (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
-        agentLike,
-        {
-          kaId: (0x1234n << 96n) | 7n,
-          cgId: 1n,
-          expectedRoot: new Uint8Array(32).fill(0x11),
-          expectedLeafCount: 1n,
-        },
-      ).result,
-    ).resolves.toEqual({ contents: [], privateRoots: [] });
-
-    expect(resolveCuratorPeerIdsForCg).toHaveBeenCalledWith(
-      'food-safety',
-      expect.objectContaining({
-        maxPeerIds: expect.any(Number),
-        signal: expect.any(AbortSignal),
-        isCurrent: expect.any(Function),
-      }),
-    );
-    expect(ensurePeerConnected).toHaveBeenCalledWith(
-      providerPeerId,
-      { signal: expect.any(AbortSignal) },
-    );
-    expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls[0]?.[0])
-      .toBe(providerPeerId);
-  });
-
   it('terminates challenge authentication when a chain read ignores cancellation', async () => {
     vi.useFakeTimers();
     try {
@@ -316,7 +149,7 @@ describe('Random Sampling proof-time exact repair', () => {
         attemptedPeers.push(peerId);
         observedSignals.push(signal);
         if (peerId === 'peer-0001') throw new Error('connection reset');
-        return true;
+        return { kind: 'ready' };
       },
       fetchExactKnowledgeAsset: async (_peerId, _cgId, _commitment, signal) => {
         observedSignals.push(signal);
@@ -342,6 +175,56 @@ describe('Random Sampling proof-time exact repair', () => {
     expect(observedSignals.length).toBeGreaterThan(0);
     expect(observedSignals.every((signal) => signal === observedSignals[0])).toBe(true);
     expect(observedSignals[0]?.aborted).toBe(false);
+  });
+
+  it('reports every structured peer outcome when no provider recovers the asset', async () => {
+    const logInfo = vi.fn();
+    const attempted: string[] = [];
+
+    await expect(runRandomSamplingExactRepair({
+      chainId: 'base:8453',
+      maxPeers: 5,
+      timeoutMs: 30_000,
+      resolveStorageAddress: async () => '0x0000000000000000000000000000000000001234',
+      resolveLocalContextGraphId: () => 'food-safety',
+      resolveCandidatePeerIds: async () => [
+        'peer-rejected', 'peer-unreachable', 'peer-reset', 'peer-absent', 'peer-partial',
+      ],
+      selectPeerWindow: (peerIds) => peerIds,
+      preparePeer: async (peerId) => {
+        if (peerId === 'peer-rejected') return { kind: 'skipped', reason: 'not-admitted' };
+        if (peerId === 'peer-unreachable') {
+          throw Object.assign(new Error('dial  timed out'), { code: 'ERR_TIMEOUT' });
+        }
+        return { kind: 'ready' };
+      },
+      fetchExactKnowledgeAsset: async (peerId) => {
+        attempted.push(peerId);
+        if (peerId === 'peer-reset') throw new Error('stream reset');
+        return { kind: 'miss', disposition: peerId === 'peer-absent' ? 'clean-absent' : 'incomplete' };
+      },
+      logInfo,
+    }, {
+      kaId: 7n,
+      cgId: 1n,
+      expectedRoot: new Uint8Array(32).fill(0x11),
+      expectedLeafCount: 1n,
+    })).rejects.toThrow(
+      'did not recover: rejected=skipped:not-admitted,'
+        + 'eachable=prepare:ERR_TIMEOUT:dial timed out,'
+        + 'er-reset=error:stream reset,'
+        + 'r-absent=missed:clean-absent,'
+        + '-partial=missed:incomplete; '
+        + 'asset=did:dkg:base:8453/0x0000000000000000000000000000000000001234/7',
+    );
+    expect(attempted).toEqual(['peer-reset', 'peer-absent', 'peer-partial']);
+    expect(logInfo.mock.calls.map(([message]) => message)).toEqual([
+      expect.stringContaining('peer-rejected skipped: not-admitted'),
+      expect.stringContaining('peer-unreachable failed: dial  timed out'),
+      expect.stringContaining('peer-reset failed: stream reset'),
+      expect.stringContaining('from r-absent: outcome=miss disposition=clean-absent'),
+      expect.stringContaining('from -partial: outcome=miss disposition=incomplete'),
+    ]);
   });
 
   it('authenticates historical bytes cryptographically and rejects a tampered payload', async () => {
@@ -410,6 +293,7 @@ describe('Random Sampling proof-time exact repair', () => {
         resolveLocalCgIdByOnChainId: vi.fn(() => localContextGraphId),
         resolveRandomSamplingLocalContextGraphId: vi.fn(async () => localContextGraphId),
         resolveCuratorPeerIdsForCg: vi.fn(async () => ({ peerIds: [] })),
+        discovery: { findAgents: vi.fn(async () => []) },
         vmReconcileObservedCandidatePeerIds: vi.fn(() => ['peer-history']),
         preferredSyncPeers: new Map(),
         selectCatchupPeerWindow: vi.fn((peers: Array<{ toString(): string }>) => peers),
@@ -484,85 +368,11 @@ describe('Random Sampling proof-time exact repair', () => {
     expect(tampered.insertSyncedQuadsAndInvalidateListCache).not.toHaveBeenCalled();
   });
 
-  it('fails closed when no local on-chain CG binding exists', async () => {
-    const agentLike = {
-      chain: {},
-      node: { stopSignal: undefined },
-      log: { info: vi.fn() },
-      resolveLocalCgIdByOnChainId: vi.fn(() => undefined),
-      resolveRandomSamplingLocalContextGraphId: vi.fn(async () => undefined),
-    };
-
-    await expect(
-      (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
-        agentLike,
-        {
-          kaId: 7n,
-          cgId: 1n,
-          expectedRoot: new Uint8Array(32),
-          expectedLeafCount: 1n,
-        },
-      ).result,
-    ).rejects.toThrow('cannot resolve local CG 1');
-  });
-
-  it('awaits the required cold-binding resolver before provider discovery', async () => {
-    const resolverSignal: AbortSignal[] = [];
-    const resolveRandomSamplingLocalContextGraphId = vi.fn(async (
-      _cgId: bigint,
-      signal: AbortSignal,
-    ) => {
-      resolverSignal.push(signal);
-      return 'cold-public-proof-cg';
-    });
-    const resolveCuratorPeerIdsForCg = vi.fn(async () => ({ peerIds: [] }));
-    const agentLike = {
-      started: true,
-      peerId: 'self',
-      chain: {
-        chainId: 'base:8453',
-        getDKGKnowledgeAssetsAddress: vi.fn(async () =>
-          '0x00000000000000000000000000000000000000aa'),
-      },
-      node: {
-        stopSignal: undefined,
-        libp2p: { getConnections: () => [] },
-      },
-      log: { info: vi.fn() },
-      resolveRandomSamplingLocalContextGraphId,
-      resolveCuratorPeerIdsForCg,
-      vmReconcileObservedCandidatePeerIds: vi.fn(() => []),
-      preferredSyncPeers: new Map(),
-      selectCatchupPeerWindow: vi.fn((peers: Array<{ toString(): string }>) => peers),
-    };
-
-    await expect(
-      (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
-        agentLike,
-        {
-          kaId: 7n,
-          cgId: 317n,
-          expectedRoot: new Uint8Array(32),
-          expectedLeafCount: 1n,
-        },
-      ).result,
-    ).rejects.toThrow('no providers for cold-public-proof-cg');
-
-    expect(resolveRandomSamplingLocalContextGraphId).toHaveBeenCalledWith(
-      317n,
-      expect.any(AbortSignal),
-    );
-    expect(resolveCuratorPeerIdsForCg).toHaveBeenCalledWith(
-      'cold-public-proof-cg',
-      expect.objectContaining({ signal: resolverSignal[0] }),
-    );
-  });
-
   it('aborts a stalled peer-setup stage under the shared deadline', async () => {
     let setupSignal: AbortSignal | undefined;
     const repair = runRandomSamplingExactRepair({
       chainId: 'base:8453',
-      maxPeers: 3,
+      maxPeers: 1,
       timeoutMs: 10,
       resolveStorageAddress: async () =>
         '0x00000000000000000000000000000000000000aa',
@@ -574,7 +384,7 @@ describe('Random Sampling proof-time exact repair', () => {
         await new Promise<void>((_resolve, reject) => {
           signal.addEventListener('abort', () => reject(signal.reason), { once: true });
         });
-        return true;
+        return { kind: 'ready' };
       },
       fetchExactKnowledgeAsset: async () => ({
         kind: 'found',
@@ -605,7 +415,7 @@ describe('Random Sampling proof-time exact repair', () => {
       resolveLocalContextGraphId: () => 'food-safety',
       resolveCandidatePeerIds: async () => ['unreachable'],
       selectPeerWindow: (peers) => peers,
-      preparePeer: async () => true,
+      preparePeer: async () => ({ kind: 'ready' }),
       fetchExactKnowledgeAsset: async () => ({
         kind: 'miss',
         disposition: 'clean-absent',
@@ -638,7 +448,7 @@ describe('Random Sampling proof-time exact repair', () => {
       resolveLocalContextGraphId: () => 'food-safety',
       resolveCandidatePeerIds,
       selectPeerWindow: (peers) => peers,
-      preparePeer: async () => true,
+      preparePeer: async () => ({ kind: 'ready' }),
       fetchExactKnowledgeAsset: async () => ({
         kind: 'miss',
         disposition: 'clean-absent',

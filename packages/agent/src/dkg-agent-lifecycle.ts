@@ -269,7 +269,11 @@ import {
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
-import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
+import {
+  findCorePeerIds,
+  reconcileWarmCoreConnections,
+  type WarmCoreAgent,
+} from './p2p/warm-core-connections.js';
 import {
   deleteSyncPageCheckpoint,
   fetchSyncPages,
@@ -4296,17 +4300,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.resolveRandomSamplingLocalContextGraphId(cgId, signal),
       resolveCandidatePeerIds: async (localContextGraphId, signal) => {
         const isCurrent = () => this.started && !signal.aborted;
-        const curatorResolution = await this.resolveCuratorPeerIdsForCg(
-          localContextGraphId,
-          {
-            maxPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+        const [curatorResolution, corePeerIds] = await Promise.all([
+          this.resolveCuratorPeerIdsForCg(
+            localContextGraphId,
+            {
+              maxPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+              signal,
+              isCurrent,
+            },
+          ).catch((error) => {
+            if (signal.aborted) throw signal.reason ?? error;
+            return { peerIds: [] as string[] };
+          }),
+          // Registry Core discovery and graph-specific curator discovery are
+          // independent. Resolve them together, then preserve graph-specific
+          // providers ahead of this broad fallback roster.
+          findCorePeerIds({
+            findAgents: (options) => this.discovery.findAgents(options),
+            selfPeerId: this.peerId,
             signal,
-            isCurrent,
-          },
-        ).catch((error) => {
-          if (signal.aborted) throw signal.reason ?? error;
-          return { peerIds: [] as string[] };
-        });
+          }).catch((error) => {
+            if (signal.aborted) throw signal.reason ?? error;
+            this.log.info(
+              ctx,
+              `Random Sampling Core-roster discovery failed for ${localContextGraphId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return [] as string[];
+          }),
+        ]);
         if (!isCurrent()) {
           throw signal.reason ?? asSyncFetchAbortError(new Error(
             `Random Sampling provider discovery for ${localContextGraphId} is no longer current`,
@@ -4322,6 +4343,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ...observedPeerIds,
           this.preferredSyncPeers.get(localContextGraphId),
           ...connectedPeerIds,
+          ...corePeerIds,
         ].filter((peerId): peerId is string => Boolean(
           peerId && peerId !== this.peerId,
         )))];
@@ -4331,14 +4353,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         options,
       ).map((peer) => peer.toString()),
       preparePeer: async (peerId, signal) => {
+        // Declined admission and a missing sync protocol are expected peer
+        // outcomes; the traversal records them as skips, not failures.
         if (!(await this.ensurePeerAdmittedForRecovery(
           peerId,
           ctx,
           'Random Sampling exact repair peer',
           signal,
-        ))) return false;
+        ))) return { kind: 'skipped', reason: 'not-admitted' };
         await this.ensurePeerConnected(peerId, { signal });
-        return this.waitForSyncProtocol({ toString: () => peerId }, signal);
+        if (!(await this.waitForSyncProtocol(peerId, signal))) {
+          return { kind: 'skipped', reason: 'sync-protocol-unavailable' };
+        }
+        return { kind: 'ready' };
       },
       fetchExactKnowledgeAsset: async (
         peerId,
@@ -9090,12 +9117,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   async waitForSyncProtocol(
     this: DKGAgent,
-    pid: { toString(): string },
+    pid: string | { toString(): string },
     signal?: AbortSignal,
   ): Promise<boolean> {
+    const peer = typeof pid === 'string'
+      ? (await import('@libp2p/peer-id')).peerIdFromString(pid)
+      : pid;
     return waitForPeerProtocol(
       this.node.libp2p.peerStore as any,
-      pid,
+      peer,
       PROTOCOL_SYNC,
       SYNC_PROTOCOL_CHECK_ATTEMPTS,
       SYNC_PROTOCOL_CHECK_DELAY_MS,

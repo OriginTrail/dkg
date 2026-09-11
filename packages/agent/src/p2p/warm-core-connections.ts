@@ -51,6 +51,35 @@ function lastSeenMs(iso?: string): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
+/** Select every de-duplicated Core except this node, preserving input order. */
+export function selectCoreAgents(
+  agents: readonly WarmCoreAgent[],
+  selfPeerId: string,
+): WarmCoreAgent[] {
+  const seen = new Set<string>();
+  const out: WarmCoreAgent[] = [];
+  for (const agent of agents) {
+    if (agent.nodeRole !== 'core') continue;
+    if (!agent.peerId || agent.peerId === selfPeerId) continue;
+    if (seen.has(agent.peerId)) continue;
+    seen.add(agent.peerId);
+    out.push(agent);
+  }
+  return out;
+}
+
+/** Discover a stable, complete, de-duplicated Core peer roster for recovery work. */
+export async function findCorePeerIds(options: {
+  findAgents: (options?: { signal?: AbortSignal }) => Promise<readonly WarmCoreAgent[]>;
+  selfPeerId: string;
+  signal?: AbortSignal;
+}): Promise<string[]> {
+  const agents = await options.findAgents({ signal: options.signal });
+  return selectCoreAgents(agents, options.selfPeerId)
+    .map(({ peerId }) => peerId)
+    .sort();
+}
+
 /**
  * From the phonebook agent list, the Cores worth warm-pinning: role
  * `core`, not ourselves, de-duplicated by peerId.
@@ -69,15 +98,7 @@ export function selectWarmCoreCandidates(
   selfPeerId: string,
   opts?: { nowMs?: number; staleThresholdMs?: number },
 ): WarmCoreAgent[] {
-  const seen = new Set<string>();
-  const out: WarmCoreAgent[] = [];
-  for (const agent of agents) {
-    if (agent.nodeRole !== 'core') continue;
-    if (!agent.peerId || agent.peerId === selfPeerId) continue;
-    if (seen.has(agent.peerId)) continue;
-    seen.add(agent.peerId);
-    out.push(agent);
-  }
+  const out = selectCoreAgents(agents, selfPeerId);
   const nowMs = opts?.nowMs;
   const staleThresholdMs = opts?.staleThresholdMs;
   const filtered =
