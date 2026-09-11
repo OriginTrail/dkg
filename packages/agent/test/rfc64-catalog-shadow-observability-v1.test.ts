@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   Rfc64CatalogShadowObservabilityRuntimeV1,
+  sanitizeRfc64CatalogShadowExecutionStatusV1,
 } from '../src/rfc64/catalog-shadow-observability-v1.js';
 import type { Rfc64CatalogExecutionPlanV1 } from
   '../src/rfc64/catalog-rollout-authority-v1.js';
@@ -109,6 +110,35 @@ describe('RFC-64 catalog shadow observability projection', () => {
       trackedTargets: 0,
       authoritativeApplyCount: 0,
     });
+  });
+
+  it('degrades malformed and version-skewed public status input to null', () => {
+    const valid = shadowStatusV1(createShadowRuntimeV1({
+      selectedContextGraphIds: [SHADOW_CG],
+    }))!;
+    const cases: ReadonlyArray<readonly [string, unknown]> = [
+      ['empty object', {}],
+      ['unsupported schema', { ...valid, schemaVersion: 0 }],
+      ['missing inventory block', { ...valid, inventoryObserver: undefined }],
+      ['wrong projection block type', { ...valid, projectionSupervisor: [] }],
+      ['missing receiver block', { ...valid, receiverStaging: undefined }],
+      ['object-valued inventory leaf', {
+        ...valid,
+        inventoryObserver: { ...valid.inventoryObserver, failedMutations: {} },
+      }],
+      ['object-valued receiver leaf', {
+        ...valid,
+        receiverStaging: { ...valid.receiverStaging, stagingObserved: {} },
+      }],
+    ];
+
+    for (const [label, input] of cases) {
+      expect(
+        sanitizeRfc64CatalogShadowExecutionStatusV1(input),
+        label,
+      ).toBeNull();
+    }
+    expect(sanitizeRfc64CatalogShadowExecutionStatusV1(valid)).toEqual(valid);
   });
 
   it('reads the safe projection from the agent-owned supervisor and inventory runtime', () => {

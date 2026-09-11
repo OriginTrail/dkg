@@ -270,6 +270,35 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('providers');
   });
 
+  it('keeps status available when a shadow provider is structurally version-skewed', async () => {
+    const response = await requestStatusWithAgent(
+      {
+        readRfc64CatalogShadowExecutionStatusV1: () => ({
+          schemaVersion: 0,
+          unknownPrivateField: 'must-not-leak',
+        }),
+      },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: ['shadow-version-skew'],
+        selectedPublicContextGraphs: ['shadow-version-skew'],
+        selectedPrivateContextGraphs: [],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'shadow',
+          contextGraphModes: {},
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.shadowExecution).toBeNull();
+    expect(JSON.stringify(response.body)).not.toContain('must-not-leak');
+  });
+
   it('projects live mixed edge selection without leaking private ids into public status', async () => {
     const publicContextGraph = 'runtime-selected-public';
     const privateContextGraph =
@@ -413,6 +442,42 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       deprecatedPublicControlPresent: false,
       activationManifestPresent: false,
       deprecatedDisabledOverride: false,
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
+    });
+  });
+
+  it.each([
+    ['unified', { rfc64Catalog: { enabled: false } }],
+    ['deprecated', { rfc64PublicCatalog: { enabled: false } }],
+  ])('reports the effective legacy lane for an explicitly disabled %s activation', async (
+    _label,
+    configOverrides,
+  ) => {
+    const response = await requestStatusWithAgent(
+      {},
+      configOverrides,
+      '/api/status',
+      null,
+      {
+        enabled: false,
+        selectedContextGraphs: [],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [],
+        selectedCatalogAuthoringControls: [],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {},
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'explicit-disabled',
+      deprecatedDisabledOverride: true,
+      defaultMode: 'legacy',
       legacyOverrideCount: 0,
       shadowOverrideCount: 0,
     });
