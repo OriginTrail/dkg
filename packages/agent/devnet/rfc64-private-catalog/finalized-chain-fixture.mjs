@@ -3,7 +3,6 @@
 import { createServer } from 'node:http';
 
 import {
-  MOCK_DEFAULT_SIGNER,
   MockChainAdapter,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
@@ -39,18 +38,12 @@ const KNOWLEDGE_ASSET_SELECTORS = new Set([
 /** Chain adapter whose identity matches the deterministic finalized-RPC fixture. */
 export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
   #fixture;
-  #participantAgents;
-  #rosterVersion;
 
   constructor(fixture) {
-    super(fixture.networkId, MOCK_DEFAULT_SIGNER, {
+    super(fixture.networkId, fixture.ownerAddress, {
       initialContextGraphId: BigInt(fixture.onChainContextGraphId),
     });
     this.#fixture = fixture;
-    this.#participantAgents = new Set(
-      fixture.participantAgents.map((address) => address.toLowerCase()),
-    );
-    this.#rosterVersion = BigInt(fixture.rosterVersion);
   }
 
   async getEvmChainId() {
@@ -66,37 +59,13 @@ export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
   }
 
   async getContextGraphAuthoritySnapshot(contextGraphId, options = {}) {
-    options.signal?.throwIfAborted();
-    if (contextGraphId.toString(10) !== this.#fixture.onChainContextGraphId) {
-      throw new Error(`unknown finalized Context Graph ${contextGraphId}`);
-    }
+    const snapshot = await super.getContextGraphAuthoritySnapshot(contextGraphId, options);
     return Object.freeze({
-      chainId: this.#fixture.assertedAtChainId,
+      ...snapshot,
       governanceContract: this.#fixture.contextGraphStorageAddress,
-      contextGraphId: this.#fixture.onChainContextGraphId,
-      owner: this.#fixture.ownerAddress,
-      active: this.#fixture.active,
-      accessPolicy: this.#fixture.accessPolicy,
-      publishPolicy: this.#fixture.publishPolicy,
-      publishAuthority: this.#fixture.publishAuthority,
-      publishAuthorityAccountId: this.#fixture.publishAuthorityAccountId,
-      participantAgents: Object.freeze([...this.#participantAgents].sort()),
-      nameHash: this.#fixture.nameHash,
-      ownershipEra: this.#fixture.ownershipEra,
-      policyVersion: this.#fixture.policyVersion,
-      rosterVersion: this.#rosterVersion.toString(10),
       sourceBlockNumber: this.#fixture.authorityBlockNumber,
       sourceBlockHash: this.#fixture.authorityBlockHash,
     });
-  }
-
-  async removeContextGraphParticipantAgent(contextGraphId, agent) {
-    const result = await super.removeContextGraphParticipantAgent(contextGraphId, agent);
-    if (!this.#participantAgents.delete(agent.toLowerCase())) {
-      throw new Error(`finalized participant ${agent} was not present`);
-    }
-    this.#rosterVersion += 1n;
-    return result;
   }
 }
 
@@ -105,7 +74,7 @@ export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
  * but every finalized-policy and VM read still travels through ethers and the
  * production strict-current-finalized snapshot path.
  */
-export async function startRfc64PrivateDevnetFinalizedRpc(fixture) {
+export async function startRfc64PrivateDevnetFinalizedRpc(fixture, options = {}) {
   const calls = new Map();
   const server = createServer(async (request, response) => {
     try {
@@ -113,13 +82,18 @@ export async function startRfc64PrivateDevnetFinalizedRpc(fixture) {
       for await (const chunk of request) raw += chunk.toString();
       const body = JSON.parse(raw);
       const batch = Array.isArray(body) ? body : [body];
-      const results = batch.map((call) => {
+      const results = await Promise.all(batch.map(async (call) => {
         calls.set(call.method, (calls.get(call.method) ?? 0) + 1);
         try {
           return {
             jsonrpc: '2.0',
             id: call.id,
-            result: finalizedRpcResult(call.method, call.params ?? [], fixture),
+            result: await finalizedRpcResult(
+              call.method,
+              call.params ?? [],
+              fixture,
+              options.readAuthoritySnapshot,
+            ),
           };
         } catch (error) {
           return {
@@ -131,7 +105,7 @@ export async function startRfc64PrivateDevnetFinalizedRpc(fixture) {
             },
           };
         }
-      });
+      }));
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify(Array.isArray(body) ? results : results[0]));
     } catch {
@@ -164,7 +138,7 @@ export async function startRfc64PrivateDevnetFinalizedRpc(fixture) {
   });
 }
 
-function finalizedRpcResult(method, params, fixture) {
+async function finalizedRpcResult(method, params, fixture, readAuthoritySnapshot) {
   const assets = new Map(fixture.assets.map((asset) => [asset.kaId, asset]));
   switch (method) {
     case 'eth_chainId':
@@ -176,13 +150,23 @@ function finalizedRpcResult(method, params, fixture) {
     case 'eth_getCode':
       return '0x6000';
     case 'eth_call':
-      return finalizedVmEthCallResult(params, fixture, assets);
+      return finalizedVmEthCallResult(
+        params,
+        fixture,
+        assets,
+        readAuthoritySnapshot,
+      );
     default:
       throw new Error(`unexpected finalized RPC method ${method}`);
   }
 }
 
-function finalizedVmEthCallResult(params, fixture, assets) {
+async function finalizedVmEthCallResult(
+  params,
+  fixture,
+  assets,
+  readAuthoritySnapshot,
+) {
   const call = plainRecord(params[0], 'eth_call object');
   const target = requiredString(call.to, 'eth_call target').toLowerCase();
   const data = requiredString(call.data, 'eth_call data');
@@ -194,19 +178,23 @@ function finalizedVmEthCallResult(params, fixture, assets) {
     assertCallTarget(target, fixture.knowledgeAssetStorageAddress, 'knowledge asset');
   }
   switch (selector) {
-    case CONTEXT_GRAPH_INTERFACE.getFunction('getContextGraph').selector:
+    case CONTEXT_GRAPH_INTERFACE.getFunction('getContextGraph').selector: {
       assertContextGraphCall('getContextGraph', data, fixture.onChainContextGraphId);
+      const authority = readAuthoritySnapshot === undefined
+        ? fixture
+        : await readAuthoritySnapshot();
       return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult('getContextGraph', [
-        fixture.ownerAddress,
-        fixture.participantAgents,
+        authority.owner ?? fixture.ownerAddress,
+        authority.participantAgents,
         0n,
-        fixture.active,
+        authority.active,
         1n,
-        fixture.accessPolicy,
-        fixture.publishPolicy,
-        fixture.publishAuthority,
-        BigInt(fixture.publishAuthorityAccountId),
+        authority.accessPolicy,
+        authority.publishPolicy,
+        authority.publishAuthority ?? ethers.ZeroAddress,
+        BigInt(authority.publishAuthorityAccountId),
       ]);
+    }
     case CONTEXT_GRAPH_INTERFACE.getFunction('getNameHash').selector:
       assertContextGraphCall('getNameHash', data, fixture.onChainContextGraphId);
       return CONTEXT_GRAPH_INTERFACE.encodeFunctionResult('getNameHash', [fixture.nameHash]);

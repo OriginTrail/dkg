@@ -9,9 +9,7 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import {
-  ASSET_NUMBERS,
-  PROJECTION_EVIDENCE,
-  UPDATED_PROJECTION_EVIDENCE,
+  PRIVATE_CATALOG_MEMORY_EXPECTATION,
   roleAgentAddress,
 } from './fixture.mjs';
 import {
@@ -47,18 +45,7 @@ export const RFC64_PRIVATE_GATE_RPC_BUDGET_V1 = Object.freeze({
     eth_getCode: 8,
   }),
 });
-export const EXPECTED_MEMORY_CONTENTS = Object.freeze({
-  assetNumbers: ASSET_NUMBERS,
-  swm: Object.freeze({
-    projection: UPDATED_PROJECTION_EVIDENCE,
-    assertionVersion: '2',
-    shareOperationIdPrefix: 'rfc64-private-release-gate-v2-',
-  }),
-  vm: Object.freeze({
-    projection: PROJECTION_EVIDENCE,
-    assertionVersion: '1',
-  }),
-});
+export const EXPECTED_MEMORY_CONTENTS = PRIVATE_CATALOG_MEMORY_EXPECTATION;
 
 let requestSequence = 0;
 let lifecycleSequence = 0;
@@ -200,13 +187,14 @@ export class AgentChild {
     }
     let handshakeFailure = null;
     let executedRuntimeManifest;
+    let stoppedEvent;
     try {
-      const stopped = await this.request(
+      stoppedEvent = await this.request(
         { cmd: 'stop' },
         'stopping',
         this.stopTimeouts.handshake,
       );
-      executedRuntimeManifest = requiredExecutedRuntimeManifest(stopped, this.role);
+      executedRuntimeManifest = requiredExecutedRuntimeManifest(stoppedEvent, this.role);
     } catch (error) {
       handshakeFailure = error;
     }
@@ -238,6 +226,7 @@ export class AgentChild {
     this.shutdownReceipt = Object.freeze({
       exit: Object.freeze(result),
       executedRuntimeManifest,
+      rpcCallCounts: requiredRpcCallCounts(stoppedEvent, this.role),
     });
     return this.shutdownReceipt;
   }
@@ -408,9 +397,11 @@ export async function executeRfc64PrivateReleaseGateV1({
       expectedHeadDigest: published.headObjectDigest,
     }, 'inspection');
 
-    runtimeEvidence.record('provider2', await provider2.stop());
+    const provider2Shutdown = await provider2.stop();
+    runtimeEvidence.record('provider2', provider2Shutdown);
     active.delete(provider2);
-    runtimeEvidence.record('receiver', await receiver.stop());
+    const receiverShutdown = await receiver.stop();
+    runtimeEvidence.record('receiver', receiverShutdown);
     active.delete(receiver);
     const restartedReceiver = await startRole(
       'receiver',
@@ -425,9 +416,11 @@ export async function executeRfc64PrivateReleaseGateV1({
       expectedHeadDigest: published.headObjectDigest,
     }, 'persisted-inspection');
 
-    runtimeEvidence.record('outsider', await outsider.stop());
+    const outsiderShutdown = await outsider.stop();
+    runtimeEvidence.record('outsider', outsiderShutdown);
     active.delete(outsider);
-    runtimeEvidence.record('receiver-restart', await restartedReceiver.stop());
+    const restartedReceiverShutdown = await restartedReceiver.stop();
+    runtimeEvidence.record('receiver-restart', restartedReceiverShutdown);
     active.delete(restartedReceiver);
 
     const sealedRuntimeProvenance = runtimeEvidence.seal();
@@ -457,11 +450,14 @@ export async function executeRfc64PrivateReleaseGateV1({
         && owner.exitSequence < receiver.spawnSequence,
       receiverCaughtUpSwmV2AndVmV1: hasExactMemoryContents(receiverState),
       finalizedChainPathExecuted:
-        provider2State.rpcCalls > 0 && receiverState.rpcCalls > 0,
+        rpcEvidenceV1(provider2Shutdown).total > 0
+        && rpcEvidenceV1(receiverShutdown).total > 0,
       finalizedChainRpcWithinBudget:
-        isWithinRpcBudgetV1(provider2StateAfterRevocation)
-        && isWithinRpcBudgetV1(receiverStateAfterRevocation)
-        && isWithinRpcCeilingV1(restartState),
+        isWithinRpcCeilingV1(ownerShutdown)
+        && isWithinRpcBudgetV1(provider2Shutdown)
+        && isWithinRpcBudgetV1(receiverShutdown)
+        && isWithinRpcCeilingV1(outsiderShutdown)
+        && isWithinRpcCeilingV1(restartedReceiverShutdown),
       outsiderDeniedBeforeApplication:
         isExpectedPrivateCatalogDenialResultV1(outsiderDenial)
         && outsiderState.appliedHeadDigest === null,
@@ -469,7 +465,7 @@ export async function executeRfc64PrivateReleaseGateV1({
         outsiderState.graphCounts.every(({ swm, vm }) => swm === 0 && vm === 0),
       nonmemberQueryIsEmpty: providerAccessState.outsiderVisibleVmBindings === 0,
       revokedReceiverDeniedAfterFinalizedRosterAdvance:
-        receiverRevocation.rosterVersion === '1'
+        BigInt(receiverRevocation.rosterVersion) > 0n
         && receiverRevocation.revokedAgentAddress === roleAgentAddress('receiver')
         && isExpectedPrivateCatalogDenialResultV1(revokedReceiverDenial),
       revocationDoesNotCorruptPreviouslyCommittedMemory:
@@ -502,7 +498,12 @@ export async function executeRfc64PrivateReleaseGateV1({
         catalogVersion: published.catalogVersion,
         inventoryRowCount: published.inventoryRowCount,
       },
-      provider2: safeState(provider2StateAfterRevocation, provider2Bootstrap),
+      sourceProvider: safeState(ownerSourceState, null, ownerShutdown),
+      provider2: safeState(
+        provider2StateAfterRevocation,
+        provider2Bootstrap,
+        provider2Shutdown,
+      ),
       failoverBarrier: {
         ownerExitCode: ownerExit.code,
         ownerExitedAt: ownerExit.exitedAt,
@@ -513,13 +514,14 @@ export async function executeRfc64PrivateReleaseGateV1({
         provider2ListenerDialable,
         receiverSpawnedAt: receiver.spawnedAt,
       },
-      failoverReceiver: safeState(receiverState, receiverBootstrap),
+      failoverReceiver: safeState(receiverState, receiverBootstrap, receiverShutdown),
       outsider: {
         denied: outsiderDenial.denied,
         failureClass: outsiderDenial.failureClass,
         failureCode: outsiderDenial.failureCode,
         appliedHeadDigest: outsiderState.appliedHeadDigest,
         graphCounts: outsiderState.graphCounts,
+        rpc: rpcEvidenceV1(outsiderShutdown),
       },
       revokedReceiver: {
         denial: {
@@ -529,9 +531,13 @@ export async function executeRfc64PrivateReleaseGateV1({
         },
         revokedAgentAddress: receiverRevocation.revokedAgentAddress,
         rosterVersion: receiverRevocation.rosterVersion,
-        state: safeState(receiverStateAfterRevocation, receiverBootstrap),
+        state: safeState(
+          receiverStateAfterRevocation,
+          receiverBootstrap,
+          receiverShutdown,
+        ),
       },
-      restartedReceiver: safeState(restartState, null),
+      restartedReceiver: safeState(restartState, null, restartedReceiverShutdown),
     };
     if (status !== 'PASS') process.exitCode = 1;
   } finally {
@@ -587,6 +593,23 @@ function requiredExecutedRuntimeManifest(event, label) {
   return manifest;
 }
 
+function requiredRpcCallCounts(event, label) {
+  const counts = event?.rpcCallCounts;
+  if (counts === null || typeof counts !== 'object' || Array.isArray(counts)) {
+    throw new Error(`${label}: child did not report final RPC accounting`);
+  }
+  const entries = Object.entries(counts);
+  if (entries.some(([method, count]) => (
+    method.length === 0
+    || method.length > 128
+    || !Number.isSafeInteger(count)
+    || count < 0
+  ))) {
+    throw new Error(`${label}: child reported invalid final RPC accounting`);
+  }
+  return Object.freeze(Object.fromEntries(entries));
+}
+
 async function connectBothWays(left, right) {
   await Promise.all([dial(left, right), dial(right, left)]);
 }
@@ -626,14 +649,14 @@ function safeRole(ready) {
   };
 }
 
-function safeState(state, bootstrap) {
-  const rpc = rpcEvidenceV1(state);
+function safeState(state, bootstrap, shutdownReceipt) {
+  const rpc = rpcEvidenceV1(shutdownReceipt);
   return {
     appliedHeadDigest: state.appliedHeadDigest,
     catalogVersion: state.catalogVersion,
     inventoryRowCount: state.inventoryRowCount,
     graphCounts: state.graphCounts,
-    rpcCalls: state.rpcCalls,
+    rpcCalls: rpc.total,
     rpc,
     receiver: {
       applied: state.receiverStats?.applied ?? 0,
