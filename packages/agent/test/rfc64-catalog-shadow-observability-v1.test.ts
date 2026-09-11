@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  observeRfc64CatalogShadowReceiverCompletionV1,
-  projectRfc64CatalogShadowExecutionStatusV1,
-  readRfc64CatalogShadowReceiverCompletionCountersV1,
+  Rfc64CatalogShadowObservabilityRuntimeV1,
 } from '../src/rfc64/catalog-shadow-observability-v1.js';
+import type { Rfc64CatalogExecutionPlanV1 } from
+  '../src/rfc64/catalog-rollout-authority-v1.js';
+import type { Rfc64CatalogResponsibilitySelectionV1 } from
+  '../src/rfc64/catalog-responsibility-registry-v1.js';
 import { Rfc64PublicCatalogReceiverV1 } from
   '../src/rfc64/public-catalog-receiver-v1.js';
 import {
@@ -22,15 +24,104 @@ const PRIVATE_UAL = 'did:dkg:otp:20430/secret-ual';
 const PRIVATE_ERROR = `provider ${PRIVATE_PROVIDER} failed for ${PRIVATE_UAL}`;
 const HEAD_DIGEST = `0x${'44'.repeat(32)}`;
 
+function createShadowRuntimeV1(input: Readonly<{
+  selectedContextGraphIds?: readonly string[];
+  contextGraphModes?: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
+  responsibilityDefaultMode?: 'legacy' | 'shadow' | 'catalog';
+  readResponsibilities?: () => readonly Rfc64CatalogResponsibilitySelectionV1[];
+}> = {}): Rfc64CatalogShadowObservabilityRuntimeV1 {
+  const selectedAuthority = Object.fromEntries(
+    (input.selectedContextGraphIds ?? []).map((contextGraphId) => [
+      contextGraphId,
+      { contextGraphId, mode: 'shadow' },
+    ]),
+  );
+  const executionPlan = {
+    killSwitchActive: false,
+    responsibilityDefaultMode: input.responsibilityDefaultMode ?? 'legacy',
+    contextGraphModes: input.contextGraphModes ?? {},
+    legacyContextGraphs: [],
+    track2ContextGraphs: [],
+    selectedAuthority,
+    selectedAuthorityByWireId: {},
+    standaloneTrack2Enabled: false,
+  } as unknown as Rfc64CatalogExecutionPlanV1;
+  return new Rfc64CatalogShadowObservabilityRuntimeV1({
+    executionPlan,
+    readResponsibilities: input.readResponsibilities ?? (() => []),
+  });
+}
+
+function shadowStatusV1(runtime: Rfc64CatalogShadowObservabilityRuntimeV1) {
+  return runtime.snapshot({
+    inFlightInventoryObservers: 0,
+    inventoryObserver: {
+      attemptedUpserts: 0,
+      appliedUpserts: 0,
+      existingUpserts: 0,
+      attemptedRemovals: 0,
+      appliedRemovals: 0,
+      absentRemovals: 0,
+      failed: 0,
+      casRetries: 0,
+    },
+    projectionSupervisor: null,
+    bootstrap: null,
+  });
+}
+
+function receiverStagingV1(runtime: Rfc64CatalogShadowObservabilityRuntimeV1) {
+  return shadowStatusV1(runtime)?.receiverStaging;
+}
+
+function shadowResponsibilityV1(
+  contextGraphId: string,
+): Rfc64CatalogResponsibilitySelectionV1 {
+  return {
+    contextGraphId,
+    responsible: true,
+    responsibilityReason: 'edge-subscription',
+    active: true,
+    mode: 'shadow',
+    selectionSource: 'default',
+  };
+}
+
 describe('RFC-64 catalog shadow observability projection', () => {
+  it('owns configured and live shadow scope independently of responsibility storage', () => {
+    let responsibilities: Rfc64CatalogResponsibilitySelectionV1[] = [];
+    const runtime = createShadowRuntimeV1({
+      selectedContextGraphIds: [SHADOW_CG],
+      responsibilityDefaultMode: 'shadow',
+      readResponsibilities: () => responsibilities,
+    });
+
+    expect(shadowStatusV1(runtime)?.contextGraphCount).toBe(1);
+    responsibilities = [shadowResponsibilityV1('later-discovered')];
+    expect(shadowStatusV1(runtime)?.contextGraphCount).toBe(2);
+
+    runtime.recordTerminalEvent({
+      kind: 'receiver-completed',
+      contextGraphId: OTHER_CG,
+      outcome: 'applied',
+    });
+    expect(receiverStagingV1(runtime)).toMatchObject({
+      trackedTargets: 0,
+      authoritativeApplyCount: 0,
+    });
+  });
+
   it('reads the safe projection from the agent-owned supervisor and inventory runtime', () => {
+    const shadowObservability = createShadowRuntimeV1({
+      selectedContextGraphIds: [SHADOW_CG],
+    });
     const agent = {
       config: {
         rfc64CatalogExecutionPlan: {
           selectedAuthority: { [SHADOW_CG]: { mode: 'shadow' } },
         },
       },
-      readRfc64CatalogShadowContextGraphIdsV1: () => [SHADOW_CG],
+      rfc64CatalogShadowObservabilityV1: shadowObservability,
       readRfc64PublicCatalogBootstrapStatusV1: () => ({
         running: false,
         pass: 1,
@@ -58,12 +149,11 @@ describe('RFC-64 catalog shadow observability projection', () => {
         warn: () => undefined,
       }),
     );
-    observeRfc64CatalogShadowReceiverCompletionV1(
-      agent,
-      SHADOW_CG,
-      'shadow',
-      'staged-only',
-    );
+    shadowObservability.recordTerminalEvent({
+      kind: 'receiver-completed',
+      contextGraphId: SHADOW_CG,
+      outcome: 'staged-only',
+    });
 
     const status = Rfc64SwmCatalogProjectionSupervisorMethods.prototype
       .readRfc64CatalogShadowExecutionStatusV1.call(agent);
@@ -85,8 +175,13 @@ describe('RFC-64 catalog shadow observability projection', () => {
   });
 
   it('proves staged-only progress with fixed aggregate counters and no identifiers', () => {
-    const status = projectRfc64CatalogShadowExecutionStatusV1({
-      shadowContextGraphIds: [SHADOW_CG, SHADOW_CG],
+    const runtime = createShadowRuntimeV1({ selectedContextGraphIds: [SHADOW_CG] });
+    runtime.recordTerminalEvent({
+      kind: 'receiver-completed',
+      contextGraphId: SHADOW_CG,
+      outcome: 'staged-only',
+    });
+    const status = runtime.snapshot({
       inFlightInventoryObservers: 2,
       inventoryObserver: {
         attemptedUpserts: 7,
@@ -179,13 +274,6 @@ describe('RFC-64 catalog shadow observability projection', () => {
           updatedAtMs: 40,
         }],
       } as never,
-      receiverCompletions: {
-        trackedTargets: 1,
-        staged: 1,
-        notFound: 0,
-        failed: 0,
-        authoritativeApplyCount: 0,
-      },
     });
 
     expect(status).toEqual({
@@ -243,8 +331,13 @@ describe('RFC-64 catalog shadow observability projection', () => {
   });
 
   it('makes any authoritative shadow completion visible as an invariant failure', () => {
-    const status = projectRfc64CatalogShadowExecutionStatusV1({
-      shadowContextGraphIds: [SHADOW_CG],
+    const runtime = createShadowRuntimeV1({ selectedContextGraphIds: [SHADOW_CG] });
+    runtime.recordTerminalEvent({
+      kind: 'receiver-completed',
+      contextGraphId: SHADOW_CG,
+      outcome: 'applied',
+    });
+    const status = runtime.snapshot({
       inFlightInventoryObservers: 0,
       inventoryObserver: {
         attemptedUpserts: 0,
@@ -275,13 +368,6 @@ describe('RFC-64 catalog shadow observability projection', () => {
           appliedHeadDigest: HEAD_DIGEST,
         }],
       } as never,
-      receiverCompletions: {
-        trackedTargets: 1,
-        staged: 0,
-        notFound: 0,
-        failed: 0,
-        authoritativeApplyCount: 1,
-      },
     });
 
     expect(status?.receiverStaging).toMatchObject({
@@ -294,19 +380,18 @@ describe('RFC-64 catalog shadow observability projection', () => {
   });
 
   it('records ordinary receiver completions cumulatively before later classification', async () => {
-    const owner = {};
+    const runtime = createShadowRuntimeV1({ selectedContextGraphIds: [SHADOW_CG] });
     let outcome: 'applied' | 'staged-only' = 'applied';
     const receiver = new Rfc64PublicCatalogReceiverV1({
       isHeadSatisfied: async () => false,
       reconcileHead: async () => outcome,
     }, {
-      onCompletion: (announcement, completionOutcome) => {
-        observeRfc64CatalogShadowReceiverCompletionV1(
-          owner,
-          announcement.contextGraphId,
-          'shadow',
-          completionOutcome,
-        );
+      onTerminalEvent: ({ announcement, outcome: completionOutcome }) => {
+        runtime.recordTerminalEvent({
+          kind: 'receiver-completed',
+          contextGraphId: announcement.contextGraphId,
+          outcome: completionOutcome,
+        });
       },
     });
     const announcement = (version: string) => ({
@@ -328,19 +413,18 @@ describe('RFC-64 catalog shadow observability projection', () => {
     receiver.schedule(announcement('2'), PRIVATE_PROVIDER);
     await receiver.whenIdle();
 
-    expect(readRfc64CatalogShadowReceiverCompletionCountersV1(owner, [SHADOW_CG]))
-      .toEqual({
+    expect(receiverStagingV1(runtime)).toMatchObject({
         trackedTargets: 2,
         staged: 1,
         notFound: 0,
         failed: 0,
         authoritativeApplyCount: 1,
-      });
+    });
     await receiver.close();
   });
 
   it('records a distinct ambient head dropped before task creation', async () => {
-    const owner = {};
+    const runtime = createShadowRuntimeV1({ selectedContextGraphIds: [SHADOW_CG] });
     let release!: (outcome: 'not-found') => void;
     const gate = new Promise<'not-found'>((resolve) => { release = resolve; });
     const head = (version: string) => ({
@@ -361,13 +445,12 @@ describe('RFC-64 catalog shadow observability projection', () => {
     }, {
       maxConcurrent: 1,
       maxQueue: 1,
-      onCompletion: (announcement, outcome) => {
-        observeRfc64CatalogShadowReceiverCompletionV1(
-          owner,
-          announcement.contextGraphId,
-          'shadow',
+      onTerminalEvent: ({ announcement, outcome }) => {
+        runtime.recordTerminalEvent({
+          kind: 'receiver-completed',
+          contextGraphId: announcement.contextGraphId,
           outcome,
-        );
+        });
       },
     });
 
@@ -375,68 +458,57 @@ describe('RFC-64 catalog shadow observability projection', () => {
     receiver.schedule(head('2'), PRIVATE_PROVIDER);
     receiver.schedule(head('3'), PRIVATE_PROVIDER);
 
-    expect(readRfc64CatalogShadowReceiverCompletionCountersV1(owner, [SHADOW_CG]))
-      .toEqual({
+    expect(receiverStagingV1(runtime)).toMatchObject({
         trackedTargets: 1,
         staged: 0,
         notFound: 0,
         failed: 1,
         authoritativeApplyCount: 0,
-      });
+    });
 
     release('not-found');
     await receiver.whenIdle();
-    expect(readRfc64CatalogShadowReceiverCompletionCountersV1(owner, [SHADOW_CG]))
-      .toEqual({
+    expect(receiverStagingV1(runtime)).toMatchObject({
         trackedTargets: 3,
         staged: 0,
         notFound: 2,
         failed: 1,
         authoritativeApplyCount: 0,
-      });
+    });
     await receiver.close();
   });
 
   it('retains conservative apply evidence after the bounded CG tracker fills', () => {
-    const owner = {};
-    for (let index = 0; index < 1_024; index += 1) {
-      observeRfc64CatalogShadowReceiverCompletionV1(
-        owner,
-        `bounded-shadow-${index}`,
-        'shadow',
-        'staged-only',
-      );
-    }
-    observeRfc64CatalogShadowReceiverCompletionV1(
-      owner,
-      'overflow-shadow',
-      'shadow',
-      'applied',
+    let responsibilities = Array.from(
+      { length: 1_024 },
+      (_, index) => shadowResponsibilityV1(`bounded-shadow-${index}`),
     );
+    responsibilities.push(shadowResponsibilityV1('overflow-shadow'));
+    const runtime = createShadowRuntimeV1({
+      responsibilityDefaultMode: 'shadow',
+      readResponsibilities: () => responsibilities,
+    });
+    for (let index = 0; index < 1_024; index += 1) {
+      runtime.recordTerminalEvent({
+        kind: 'receiver-completed',
+        contextGraphId: `bounded-shadow-${index}`,
+        outcome: 'staged-only',
+      });
+    }
+    runtime.recordTerminalEvent({
+      kind: 'receiver-completed',
+      contextGraphId: 'overflow-shadow',
+      outcome: 'applied',
+    });
+    responsibilities = [shadowResponsibilityV1('overflow-shadow')];
 
-    expect(readRfc64CatalogShadowReceiverCompletionCountersV1(
-      owner,
-      ['overflow-shadow'],
-    )).toMatchObject({
+    expect(receiverStagingV1(runtime)).toMatchObject({
       trackedTargets: 1,
       authoritativeApplyCount: 1,
     });
   });
 
   it('omits the block when no Context Graph is in shadow mode', () => {
-    expect(projectRfc64CatalogShadowExecutionStatusV1({
-      shadowContextGraphIds: [],
-      inFlightInventoryObservers: 0,
-      inventoryObserver: {} as never,
-      projectionSupervisor: null,
-      bootstrap: null,
-      receiverCompletions: {
-        trackedTargets: 0,
-        staged: 0,
-        notFound: 0,
-        failed: 0,
-        authoritativeApplyCount: 0,
-      },
-    })).toBeNull();
+    expect(receiverStagingV1(createShadowRuntimeV1())).toBeUndefined();
   });
 });

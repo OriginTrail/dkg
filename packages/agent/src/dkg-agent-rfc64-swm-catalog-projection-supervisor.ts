@@ -28,8 +28,6 @@ import {
   rfc64SupervisorErrorMessageV1,
 } from './rfc64/supervisor-status-v1.js';
 import {
-  projectRfc64CatalogShadowExecutionStatusV1,
-  readRfc64CatalogShadowReceiverCompletionCountersV1,
   type Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';
 
@@ -544,18 +542,11 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
   readRfc64CatalogShadowExecutionStatusV1(
     this: DKGAgent,
   ): Readonly<Rfc64CatalogShadowExecutionStatusV1> | null {
-    const shadowContextGraphIds = this.readRfc64CatalogShadowContextGraphIdsV1();
-    if (shadowContextGraphIds.length === 0) return null;
     const inventoryRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
-    return projectRfc64CatalogShadowExecutionStatusV1({
-      shadowContextGraphIds,
+    return this.rfc64CatalogShadowObservabilityV1.snapshot({
       inventoryObserver: inventoryRuntime.status(),
       projectionSupervisor: projectionOwnerV1(this).status(),
       bootstrap: this.readRfc64PublicCatalogBootstrapStatusV1(),
-      receiverCompletions: readRfc64CatalogShadowReceiverCompletionCountersV1(
-        this,
-        shadowContextGraphIds,
-      ),
       inFlightInventoryObservers: inventoryRuntime.inFlightCount,
     });
   }

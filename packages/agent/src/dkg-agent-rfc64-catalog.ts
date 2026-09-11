@@ -167,8 +167,6 @@ import type { Rfc64CatalogMutationCoordinatorV1 } from
 import {
   Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
-import { observeRfc64CatalogShadowReceiverCompletionV1 } from
-  './rfc64/catalog-shadow-observability-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -1044,9 +1042,6 @@ function rfc64CatalogResponsibilityRegistryForV1(
   registry = new Rfc64CatalogResponsibilityRegistryV1({
     defaultMode,
     contextGraphModes: executionPlan.contextGraphModes,
-    selectedShadowContextGraphIds: Object.entries(executionPlan.selectedAuthority)
-      .filter(([, authority]) => authority.mode === 'shadow')
-      .map(([contextGraphId]) => contextGraphId),
     killSwitchActive: executionPlan.killSwitchActive,
   });
   rfc64CatalogResponsibilityRegistriesV1.set(agent, registry);
@@ -2370,15 +2365,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
-        onCompletion: (announcement, outcome) => {
-          observeRfc64CatalogShadowReceiverCompletionV1(
-            this,
-            announcement.contextGraphId,
-            this.resolveRfc64CatalogReceiverAuthorityV1(
-              announcement.contextGraphId,
-            ).mode,
+        onTerminalEvent: ({ announcement, outcome }) => {
+          this.rfc64CatalogShadowObservabilityV1.recordTerminalEvent({
+            kind: 'receiver-completed',
+            contextGraphId: announcement.contextGraphId,
             outcome,
-          );
+          });
         },
         onReconciliationAttemptStart: (announcement) => {
           const token = ++nextReconciliationAttemptToken;
@@ -2398,39 +2390,36 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           if (attempt === undefined) return;
           attempt.succeeded.value = true;
         },
-        onVerifiedCurrentHeadTargetAccepted: (announcement, targetToken) => {
-          verifiedTargetLeases.set(
-            targetToken,
-            recordRfc64CatalogTargetAnnouncementV1(this, announcement),
-          );
-        },
-        onVerifiedCurrentHeadTargetRejected: (announcement) => {
-          rejectRfc64CatalogTargetAnnouncementV1(this, announcement);
-          this.rfc64PublicCatalogReconciliationFailuresV1.record(
-            announcement.catalogHeadObjectDigest,
-            Object.assign(
-              new Error('RFC-64 verified current-head admission queue is full'),
-              {
-                name: 'Rfc64VerifiedCurrentHeadAdmissionErrorV1',
-                code: 'catalog-receiver-queue-full',
-              },
-            ),
-          );
-        },
-        onVerifiedCurrentHeadTargetSettled: (
-          announcement,
-          targetToken,
-          token,
-          outcome,
-        ) => {
-          if (token !== null) {
-            const attempt = reconciliationAttempts.get(token);
-            if (attempt !== undefined) attempt.terminalOutcome.value = outcome;
+        onVerifiedCurrentHeadTargetLifecycleEvent: (event) => {
+          if (event.kind === 'admission-result') {
+            if (event.result === 'accepted') {
+              verifiedTargetLeases.set(
+                event.targetToken,
+                recordRfc64CatalogTargetAnnouncementV1(this, event.announcement),
+              );
+              return;
+            }
+            rejectRfc64CatalogTargetAnnouncementV1(this, event.announcement);
+            this.rfc64PublicCatalogReconciliationFailuresV1.record(
+              event.announcement.catalogHeadObjectDigest,
+              Object.assign(
+                new Error('RFC-64 verified current-head admission queue is full'),
+                {
+                  name: 'Rfc64VerifiedCurrentHeadAdmissionErrorV1',
+                  code: 'catalog-receiver-queue-full',
+                },
+              ),
+            );
+            return;
           }
-          const lease = verifiedTargetLeases.get(targetToken);
-          verifiedTargetLeases.delete(targetToken);
+          if (event.attemptToken !== null) {
+            const attempt = reconciliationAttempts.get(event.attemptToken);
+            if (attempt !== undefined) attempt.terminalOutcome.value = event.outcome;
+          }
+          const lease = verifiedTargetLeases.get(event.targetToken);
+          verifiedTargetLeases.delete(event.targetToken);
           if (lease !== undefined) {
-            rfc64CatalogTargetAnnouncementsV1.get(this)?.settle(lease, outcome);
+            rfc64CatalogTargetAnnouncementsV1.get(this)?.settle(lease, event.outcome);
           }
         },
         onReconciliationAttemptEnd: (_announcement, token) => {

@@ -137,10 +137,9 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
-  /** Actual terminal receiver boundary for ambient and explicit work alike. */
-  readonly onCompletion?: (
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-    outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'],
+  /** Single typed terminal boundary for ambient and explicit work alike. */
+  readonly onTerminalEvent?: (
+    event: Rfc64PublicCatalogReceiverTerminalEventV1,
   ) => void;
   /**
    * Scheduling-time observer called once for a distinct exact-head request.
@@ -163,22 +162,9 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     attemptToken: number,
   ) => void;
-  /** Authenticated verified-current-head work was accepted into the receiver queue. */
-  readonly onVerifiedCurrentHeadTargetAccepted?: (
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-    targetToken: number,
-  ) => void;
-  /** Authenticated work could not enter bounded pending capacity full of explicit work. */
-  readonly onVerifiedCurrentHeadTargetRejected?: (
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-    outcome: 'dropped',
-  ) => void;
-  /** Balanced terminal observer for accepted verified-current-head work. */
-  readonly onVerifiedCurrentHeadTargetSettled?: (
-    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-    targetToken: number,
-    attemptToken: number | null,
-    outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'],
+  /** Single admission/settlement boundary for authenticated current-head work. */
+  readonly onVerifiedCurrentHeadTargetLifecycleEvent?: (
+    event: Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
   ) => void;
   readonly onError?: (
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
@@ -187,6 +173,33 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     attemptToken: number | null,
   ) => void;
 }
+
+export type Rfc64PublicCatalogReceiverTerminalEventV1 = Readonly<{
+  readonly kind: 'receiver-completed';
+  readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  readonly outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'];
+}>;
+
+export type Rfc64VerifiedCurrentHeadTargetLifecycleEventV1 =
+  | Readonly<{
+    readonly kind: 'admission-result';
+    readonly result: 'accepted';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly targetToken: number;
+  }>
+  | Readonly<{
+    readonly kind: 'admission-result';
+    readonly result: 'rejected';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly outcome: 'dropped';
+  }>
+  | Readonly<{
+    readonly kind: 'settled';
+    readonly announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+    readonly targetToken: number;
+    readonly attemptToken: number | null;
+    readonly outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'];
+  }>;
 
 export interface Rfc64PublicCatalogReceiverStatsV1 {
   readonly scheduled: number;
@@ -329,7 +342,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #maxProvidersPerHead: number;
   readonly #retryBackoffMs: number;
   readonly #onHeadApplied?: Rfc64PublicCatalogReceiverOptionsV1['onHeadApplied'];
-  readonly #onCompletion?: Rfc64PublicCatalogReceiverOptionsV1['onCompletion'];
+  readonly #onTerminalEvent?: Rfc64PublicCatalogReceiverOptionsV1['onTerminalEvent'];
   readonly #onAttemptStart?: Rfc64PublicCatalogReceiverOptionsV1['onAttemptStart'];
   readonly #onReconciliationAttemptStart?:
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptStart'];
@@ -337,12 +350,8 @@ export class Rfc64PublicCatalogReceiverV1 {
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptSuccess'];
   readonly #onReconciliationAttemptEnd?:
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptEnd'];
-  readonly #onVerifiedCurrentHeadTargetAccepted?:
-    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetAccepted'];
-  readonly #onVerifiedCurrentHeadTargetRejected?:
-    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetRejected'];
-  readonly #onVerifiedCurrentHeadTargetSettled?:
-    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetSettled'];
+  readonly #onVerifiedCurrentHeadTargetLifecycleEvent?:
+    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetLifecycleEvent'];
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
   /** Every exact head and its queued/deferred/terminal task lifecycle. */
@@ -411,14 +420,13 @@ export class Rfc64PublicCatalogReceiverV1 {
     );
     this.#isDeferrableError = options.isDeferrableError ?? DEFAULT_DEFERRABLE_ERROR;
     this.#onHeadApplied = options.onHeadApplied;
-    this.#onCompletion = options.onCompletion;
+    this.#onTerminalEvent = options.onTerminalEvent;
     this.#onAttemptStart = options.onAttemptStart;
     this.#onReconciliationAttemptStart = options.onReconciliationAttemptStart;
     this.#onReconciliationAttemptSuccess = options.onReconciliationAttemptSuccess;
     this.#onReconciliationAttemptEnd = options.onReconciliationAttemptEnd;
-    this.#onVerifiedCurrentHeadTargetAccepted = options.onVerifiedCurrentHeadTargetAccepted;
-    this.#onVerifiedCurrentHeadTargetRejected = options.onVerifiedCurrentHeadTargetRejected;
-    this.#onVerifiedCurrentHeadTargetSettled = options.onVerifiedCurrentHeadTargetSettled;
+    this.#onVerifiedCurrentHeadTargetLifecycleEvent =
+      options.onVerifiedCurrentHeadTargetLifecycleEvent;
     this.#onError = options.onError;
   }
 
@@ -675,10 +683,12 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (!this.#hasAdmissionCapacity()) {
       this.#droppedQueueFull += 1;
       if (schedulingClass === 'verified-current-head') {
-        this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetRejected?.(
-          first.announcement,
-          'dropped',
-        ));
+        this.#observeVerifiedCurrentHeadTargetLifecycle({
+          kind: 'admission-result',
+          result: 'rejected',
+          announcement: first.announcement,
+          outcome: 'dropped',
+        });
       }
       this.#observeCompletion(first.announcement, 'dropped');
       completion(createRfc64PublicCatalogReceiverCompletionV1({
@@ -700,10 +710,12 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (schedulingClass === 'verified-current-head') {
       task.verifiedCurrentHeadTargetAccepted = true;
       task.verifiedCurrentHeadTargetToken = ++this.#verifiedCurrentHeadTargetSequence;
-      this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetAccepted?.(
-        first.announcement,
-        task.verifiedCurrentHeadTargetToken!,
-      ));
+      this.#observeVerifiedCurrentHeadTargetLifecycle({
+        kind: 'admission-result',
+        result: 'accepted',
+        announcement: first.announcement,
+        targetToken: task.verifiedCurrentHeadTargetToken,
+      });
     }
     this.#pump();
   }
@@ -1136,7 +1148,11 @@ export class Rfc64PublicCatalogReceiverV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'],
   ): void {
-    this.#safeNotify(() => this.#onCompletion?.(announcement, outcome));
+    this.#safeNotify(() => this.#onTerminalEvent?.({
+      kind: 'receiver-completed',
+      announcement,
+      outcome,
+    }));
   }
 
   /** Single terminal hook for every accepted task lifecycle. */
@@ -1166,12 +1182,19 @@ export class Rfc64PublicCatalogReceiverV1 {
     if (targetToken === undefined) return;
     const firstProvider = task.providers.values().next().value;
     if (firstProvider === undefined) return;
-    this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetSettled?.(
-      firstProvider.announcement,
+    this.#observeVerifiedCurrentHeadTargetLifecycle({
+      kind: 'settled',
+      announcement: firstProvider.announcement,
       targetToken,
-      task.reconciliationAttemptToken ?? null,
+      attemptToken: task.reconciliationAttemptToken ?? null,
       outcome,
-    ));
+    });
+  }
+
+  #observeVerifiedCurrentHeadTargetLifecycle(
+    event: Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
+  ): void {
+    this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetLifecycleEvent?.(event));
   }
 
   #finishReconciliationAttempt(task: ReceiverTaskV1): void {

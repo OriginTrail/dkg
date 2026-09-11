@@ -94,7 +94,10 @@ import {
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
   '../src/rfc64/public-catalog-native-reconciler-v1.js';
-import { Rfc64PublicCatalogReceiverV1 } from
+import {
+  Rfc64PublicCatalogReceiverV1,
+  type Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
+} from
   '../src/rfc64/public-catalog-receiver-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
@@ -993,15 +996,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       string | null,
     ]> = [];
     const observers = {
-      onVerifiedCurrentHeadTargetAccepted: (
-        announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-      ) => events.push(['start', announcement.catalogHeadObjectDigest, null]),
-      onVerifiedCurrentHeadTargetSettled: (
-        announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-        _targetToken: number,
-        _attemptToken: number | null,
-        outcome: string,
-      ) => events.push(['end', announcement.catalogHeadObjectDigest, outcome]),
+      onVerifiedCurrentHeadTargetLifecycleEvent: (
+        event: Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
+      ) => {
+        if (event.kind === 'settled') {
+          events.push(['end', event.announcement.catalogHeadObjectDigest, event.outcome]);
+        } else if (event.result === 'accepted') {
+          events.push(['start', event.announcement.catalogHeadObjectDigest, null]);
+        }
+      },
     };
     const stagedTarget = catalogOperationalTarget(0, 0, 10_000);
     const stagedReceiver = new Rfc64PublicCatalogReceiverV1({
@@ -1117,8 +1120,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     }, {
       maxConcurrent: 1,
       maxQueue: 1,
-      onVerifiedCurrentHeadTargetRejected: (announcement) => {
-        rejected.push(announcement.catalogHeadObjectDigest);
+      onVerifiedCurrentHeadTargetLifecycleEvent: (event) => {
+        if (event.kind === 'admission-result' && event.result === 'rejected') {
+          rejected.push(event.announcement.catalogHeadObjectDigest);
+        }
       },
     });
     const active = blockingReceiver.scheduleVerifiedCurrentHeadAndWait([{
