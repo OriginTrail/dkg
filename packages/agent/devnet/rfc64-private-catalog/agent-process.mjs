@@ -20,6 +20,7 @@ import {
 } from './finalized-chain-fixture.mjs';
 import {
   ASSET_NUMBERS,
+  AUTHORITY_SENTINEL_CONTEXT_GRAPH_ID,
   CONTEXT_GRAPH_ID,
   CONTEXT_GRAPH_STORAGE,
   DEPLOYMENT,
@@ -27,6 +28,7 @@ import {
   ON_CHAIN_CONTEXT_GRAPH_ID,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   PRIVATE_MEMBER_ROLES,
+  RUNTIME_ROLES,
   UPDATED_PROJECTION_QUADS,
   createCatalogAssets,
   createFinalizedChainFixture,
@@ -131,22 +133,22 @@ async function createAgent(manifest, finalizedRuntime) {
   if (manifest === undefined) return DKGAgent.create(base);
 
   const peerIds = manifest.peerIds;
-  const memberRoles = PRIVATE_MEMBER_ROLES;
-  const accessPolicyAuthority = ROLE === 'outsider'
-    ? {
-        localAgentAddress: roleAgentAddress(ROLE),
-        resolveRemoteAgentAddress: async (peerId) => {
-          const role = Object.entries(peerIds).find(([, value]) => value === peerId)?.[0];
-          return role === undefined ? null : roleAgentAddress(role);
-        },
-      }
-    : {
-        localAgentAddress: roleAgentAddress(ROLE),
-        peerAgentBindings: memberRoles.map((role) => ({
-          peerId: peerIds[role],
-          agentAddress: roleAgentAddress(role),
-        })),
-      };
+  const accessPolicyAuthority = {
+    localAgentAddress: roleAgentAddress(ROLE),
+    peerAgentBindings: RUNTIME_ROLES.map((role) => ({
+      peerId: peerIds[role],
+      agentAddress: roleAgentAddress(role),
+    })),
+  };
+  // The activation boundary intentionally requires at least one selected
+  // private policy whenever manual peer-to-agent authority is supplied. Keep
+  // that validation policy inert (no targets or subscription), while the real
+  // graph below remains chain-discovered so this gate exercises canonical
+  // create/add/remove reconciliation rather than a configured authority copy.
+  const authoritySentinel = createPrivatePolicyAndRoster({
+    contextGraphId: AUTHORITY_SENTINEL_CONTEXT_GRAPH_ID,
+    memberRoles: RUNTIME_ROLES,
+  });
   const created = await DKGAgent.create({
     ...base,
     networkIdentity: {
@@ -157,6 +159,15 @@ async function createAgent(manifest, finalizedRuntime) {
       enabled: true,
       deploymentProfile: DEPLOYMENT,
       accessPolicyAuthority,
+      bootstrap: {
+        acceptedPolicies: [{
+          policyEnvelope: authoritySentinel.policyEnvelope,
+          rosterEnvelope: authoritySentinel.rosterEnvelope,
+          targets: [],
+          completeSwmProviders: [peerIds.owner],
+        }],
+        retryIntervalMs: 1_000,
+      },
       rollout: {
         contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' },
       },
