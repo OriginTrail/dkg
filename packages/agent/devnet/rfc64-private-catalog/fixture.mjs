@@ -8,6 +8,7 @@ import {
   buildAuthorAttestationTypedData,
   computeContextGraphPolicyObjectDigestV1,
 } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
   canonicalGraphlessProjectionNQuads,
@@ -65,6 +66,12 @@ export const UPDATED_PROJECTION_QUADS = Object.freeze([
 export const UPDATED_PROJECTION_EVIDENCE = computeGraphlessMemoryEvidence(
   UPDATED_PROJECTION_QUADS,
 );
+export const UPDATED_ASSERTION_ROOT = ethers.hexlify(
+  computeFlatKCRootV10([...UPDATED_PROJECTION_QUADS], []),
+).toLowerCase();
+export const UPDATED_PROJECTION = new TextEncoder().encode(
+  `${canonicalGraphlessProjectionNQuads(UPDATED_PROJECTION_QUADS)}\n`,
+);
 export const PRIVATE_CATALOG_SWM_SHARE_OPERATION_PREFIX =
   'rfc64-private-release-gate-v2-';
 export function privateCatalogSwmShareOperationId(kaNumber) {
@@ -78,6 +85,7 @@ export const PRIVATE_CATALOG_MEMORY_EXPECTATION = Object.freeze({
   swm: Object.freeze({
     projection: UPDATED_PROJECTION_EVIDENCE,
     assertionVersion: '2',
+    catalogVersion: '4',
     shareOperationIdPrefix: PRIVATE_CATALOG_SWM_SHARE_OPERATION_PREFIX,
   }),
   vm: Object.freeze({
@@ -162,10 +170,13 @@ export function createPrivatePolicyAndRoster({
     previousRosterDigest: null,
     policyDigest,
     administrativeDelegationDigest: null,
-    members: Object.freeze(memberRoles.map((role) => Object.freeze({
-      agentAddress: roleAgentAddress(role),
-      roles: Object.freeze(['holder', 'provider']),
-    }))),
+    members: Object.freeze(memberRoles
+      .map(roleAgentAddress)
+      .sort()
+      .map((agentAddress) => Object.freeze({
+        agentAddress,
+        roles: Object.freeze(['holder', 'provider']),
+      }))),
     issuedAt: '0',
   });
   const rosterEnvelope = Object.freeze({
@@ -236,7 +247,11 @@ export function createFinalizedChainFixture() {
   });
 }
 
-export async function createCatalogAssets() {
+export async function createCatalogAssets({
+  assertionRoot = ASSERTION_ROOT,
+  assertionVersion = '1',
+  projectionBytes = PROJECTION,
+} = {}) {
   const wallet = ownerWallet();
   const ownerAddress = wallet.address.toLowerCase();
   return Promise.all(ASSET_NUMBERS.map(async (kaNumber) => {
@@ -244,7 +259,7 @@ export async function createCatalogAssets() {
     const typedData = buildAuthorAttestationTypedData({
       chainId: BigInt(CHAIN_ID),
       kav10Address: KAV10,
-      merkleRoot: ethers.getBytes(ASSERTION_ROOT),
+      merkleRoot: ethers.getBytes(assertionRoot),
       authorAddress: ownerAddress,
       reservedKaId: BigInt(kaId),
     });
@@ -254,7 +269,7 @@ export async function createCatalogAssets() {
       typedData.message,
     ));
     const seal = {
-      assertionMerkleRoot: ASSERTION_ROOT,
+      assertionMerkleRoot: assertionRoot,
       authorAddress: ownerAddress,
       authorAttestationR: signature.r,
       authorAttestationVS: signature.yParityAndS,
@@ -265,7 +280,7 @@ export async function createCatalogAssets() {
       assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
       contentScopeVersion: '2',
       kaUal: `did:dkg:${NETWORK_ID}/${ownerAddress}/${kaNumber}`,
-      assertionVersion: '1',
+      assertionVersion,
       publicTripleCount: '2',
       privateTripleCount: '0',
       privateMerkleRoot: null,
@@ -273,7 +288,7 @@ export async function createCatalogAssets() {
     assertCanonicalGraphScopedAuthorSealV1(seal);
     return Object.freeze({
       assertionCoordinate: `private-release-gate-${kaNumber}`,
-      projectionBytes: PROJECTION,
+      projectionBytes,
       seal: Object.freeze(seal),
     });
   }));

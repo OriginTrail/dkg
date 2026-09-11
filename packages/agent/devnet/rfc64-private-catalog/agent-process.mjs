@@ -15,6 +15,10 @@ import {
 import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  composeRfc64FinalizedCatalogAuthorityV1,
+  parseRfc64AuthoritySnapshotV1,
+} from '../../src/rfc64/release-native-catalog-authority-v1.ts';
+import {
   Rfc64PrivateDevnetChainAdapter,
   startRfc64PrivateDevnetFinalizedRpc,
 } from './finalized-chain-fixture.mjs';
@@ -29,6 +33,8 @@ import {
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   PRIVATE_MEMBER_ROLES,
   RUNTIME_ROLES,
+  UPDATED_ASSERTION_ROOT,
+  UPDATED_PROJECTION,
   UPDATED_PROJECTION_QUADS,
   createCatalogAssets,
   createFinalizedChainFixture,
@@ -48,18 +54,23 @@ import {
   RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1,
   childCommandDescriptorV1,
 } from './child-protocol.mjs';
+import { assertInitialFinalizedAuthorityV1 } from './initial-authority.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
 const DATA_DIR = requiredEnv('DKG_RFC64_PRIVATE_DATA_DIR');
 const RUNTIME_MANIFEST_DIGEST = requiredEnv('DKG_RFC64_RUNTIME_MANIFEST_DIGEST');
 const MANIFEST_PATH = process.env.DKG_RFC64_PRIVATE_MANIFEST;
+const AUTHORITY_FAULT = process.env.DKG_RFC64_PRIVATE_AUTHORITY_FAULT;
 
 let agent;
 let chainAdapter;
 let rpc;
 let stopping = false;
 let runtimePeerIds;
+let initialFinalizedAuthority;
+let publishedCatalogScope;
+let baselineCatalogAssets;
 
 function emit(event, requestId, fields = {}) {
   process.stdout.write(`RFC64_PRIVATE_EVENT ${JSON.stringify({
@@ -84,12 +95,60 @@ async function boot() {
   runtimePeerIds = manifest.peerIds;
   agent = await createAgent(manifest, true);
   await agent.start();
-  await agent.reconcileRfc64CatalogResponsibilityV1(CONTEXT_GRAPH_ID);
+  const responsibility = await agent.reconcileRfc64CatalogResponsibilityV1(
+    CONTEXT_GRAPH_ID,
+  );
+  if (
+    ROLE !== 'outsider'
+    && (!responsibility.active || responsibility.mode === 'legacy')
+  ) {
+    throw new Error('real graph did not enter release-native RFC-64 responsibility');
+  }
+  if (ROLE === 'outsider' && responsibility.active) {
+    throw new Error('nonmember unexpectedly entered RFC-64 catalog responsibility');
+  }
+  const acceptedAuthority = await agent.reconcileRfc64CatalogAccessAuthorityV1(
+    CONTEXT_GRAPH_ID,
+  );
+  if (acceptedAuthority === null || chainAdapter === undefined) {
+    throw new Error('real graph produced no release-native finalized authority');
+  }
+  const onChainContextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
+  const finalizedAuthority = composeRfc64FinalizedCatalogAuthorityV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    snapshot: parseRfc64AuthoritySnapshotV1(
+      await chainAdapter.getContextGraphAuthoritySnapshot(onChainContextGraphId),
+      onChainContextGraphId,
+    ),
+  });
+  const expected = createPrivatePolicyAndRoster();
+  initialFinalizedAuthority = assertInitialFinalizedAuthorityV1({
+    acceptedAuthority,
+    finalizedAuthority,
+    expectedAuthority: {
+      policy: expected.policy,
+      policyDigest: expected.policyDigest,
+      roster: expected.roster,
+      source: 'finalized-chain',
+    },
+  });
   emit(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready, undefined, readyFields());
 }
 
 async function createAgent(manifest, finalizedRuntime) {
-  const fixture = createFinalizedChainFixture();
+  const canonicalFixture = createFinalizedChainFixture();
+  const fixture = AUTHORITY_FAULT === 'omit-receiver'
+    ? Object.freeze({
+      ...canonicalFixture,
+      participantAgents: Object.freeze(canonicalFixture.participantAgents.filter(
+        (address) => address !== roleAgentAddress('receiver'),
+      )),
+    })
+    : canonicalFixture;
+  if (AUTHORITY_FAULT !== undefined && AUTHORITY_FAULT !== 'omit-receiver') {
+    throw new Error('unsupported RFC-64 private authority fault injection');
+  }
   let chainRuntime = {};
   if (finalizedRuntime) {
     chainAdapter = new Rfc64PrivateDevnetChainAdapter(fixture);
@@ -178,8 +237,6 @@ async function createAgent(manifest, finalizedRuntime) {
     },
   });
   await seedPrivateCatalogDefinition(created, peerIds);
-  const { policy, policyDigest, roster } = createPrivatePolicyAndRoster();
-  created.acceptRfc64CatalogAccessSnapshotV1({ policy, policyDigest, roster });
   return created;
 }
 
@@ -192,6 +249,14 @@ function readyFields() {
     multiaddr: address,
     catalogServiceStarted: agent.rfc64PublicCatalogStatsV1()?.started === true,
     runtimeBuildManifestDigest: RUNTIME_MANIFEST_DIGEST,
+    ...(initialFinalizedAuthority === undefined ? {} : {
+      authoritySource: initialFinalizedAuthority.source,
+      authorityPolicyDigest: initialFinalizedAuthority.policyDigest,
+      authorityRosterVersion: initialFinalizedAuthority.roster.version,
+      authorityMembers: initialFinalizedAuthority.roster.members.map(
+        ({ agentAddress }) => agentAddress,
+      ),
+    }),
   };
 }
 
@@ -204,7 +269,10 @@ async function handle(command) {
       emit('dialed', requestId, { peerId: command.peerId });
       return;
     case 'publish':
-      await publishCatalog(requestId);
+      await publishCatalogBaseline(requestId);
+      return;
+    case 'publish-update':
+      await publishCatalogUpdate(requestId);
       return;
     case 'wait-bootstrap':
       await waitForBootstrap(command, requestId);
@@ -233,8 +301,9 @@ async function handle(command) {
   }
 }
 
-async function publishCatalog(requestId) {
+async function publishCatalogBaseline(requestId) {
   if (ROLE !== 'owner') throw new Error('only the owner role can publish');
+  if (publishedCatalogScope !== undefined) throw new Error('catalog baseline already published');
   const { policy, policyDigest } = createPrivatePolicyAndRoster();
   const scope = {
     networkId: NETWORK_ID,
@@ -248,6 +317,8 @@ async function publishCatalog(requestId) {
     bucketCount: '1',
   };
   const assets = await createCatalogAssets();
+  baselineCatalogAssets = assets;
+  publishedCatalogScope = scope;
   let applied;
   for (const asset of assets) {
     applied = await agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({
@@ -260,10 +331,19 @@ async function publishCatalog(requestId) {
       catalogIssuerDelegationExpiresAt: '1893456000000',
     });
   }
+  emitPublished(requestId, applied, policyDigest, scope);
+}
+
+async function publishCatalogUpdate(requestId) {
+  if (ROLE !== 'owner') throw new Error('only the owner role can publish');
+  if (publishedCatalogScope === undefined || baselineCatalogAssets === undefined) {
+    throw new Error('catalog update requires a published finalized-VM baseline');
+  }
+  const { policyDigest } = createPrivatePolicyAndRoster();
   // The catalog establishes the finalized VM baseline first. These staged
   // version-2 snapshots represent a later, not-yet-finalized SWM generation,
   // so finalized version-1 twin retirement must preserve them.
-  for (const [index, asset] of assets.entries()) {
+  for (const [index, asset] of baselineCatalogAssets.entries()) {
     const kaNumber = ASSET_NUMBERS[index];
     if (kaNumber === undefined) throw new Error('catalog fixture asset number is missing');
     await agent.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
@@ -279,6 +359,27 @@ async function publishCatalog(requestId) {
       timestamp: new Date(),
     });
   }
+  const updatedAssets = await createCatalogAssets({
+    assertionRoot: UPDATED_ASSERTION_ROOT,
+    assertionVersion: '2',
+    projectionBytes: UPDATED_PROJECTION,
+  });
+  let applied;
+  for (const asset of updatedAssets) {
+    applied = await agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+      scope: publishedCatalogScope,
+      author: ownerWallet(),
+      asset,
+      deployment: DEPLOYMENT,
+      peers: [],
+      catalogIssuerDelegationEffectiveAt: '0',
+      catalogIssuerDelegationExpiresAt: '1893456000000',
+    });
+  }
+  emitPublished(requestId, applied, policyDigest, publishedCatalogScope);
+}
+
+function emitPublished(requestId, applied, policyDigest, scope) {
   if (applied === undefined) throw new Error('catalog upsert produced no applied head');
   emit('published', requestId, {
     headObjectDigest: applied.currentCatalogHeadDigest,
@@ -321,10 +422,16 @@ async function waitForBootstrap(command, requestId) {
         command.expectedHeadDigest === undefined
         || last.currentCatalogHeadDigest === command.expectedHeadDigest
       );
-    if (bootstrapApplied && await hasExactLocalMemoryContents()) {
+    const exactMemory = command.expectedMemory === 'finalized-vm-v1'
+      ? await hasExactLocalFinalizedVmBaseline()
+      : await hasExactLocalMemoryContents({
+        catalogVersion: last?.catalogVersion,
+        exactExpectedHead: bootstrapApplied,
+      });
+    if (bootstrapApplied && exactMemory) {
       emit('bootstrap-applied', requestId, {
         outcome: 'applied',
-        providerPeerId: last.appliedProviderPeerId,
+        providerPeerId: last.appliedProviderPeerId ?? providerPeerId,
         appliedHeadDigest: last.currentCatalogHeadDigest,
         catalogVersion: last.catalogVersion,
         inventoryRowCount: last.inventoryRowCount,
@@ -354,7 +461,27 @@ async function waitForBootstrap(command, requestId) {
   );
 }
 
-async function hasExactLocalMemoryContents() {
+async function hasExactLocalFinalizedVmBaseline() {
+  const graphCounts = await readPrivateCatalogGraphCountEvidence(agent.store, {
+    assetNumbers: ASSET_NUMBERS,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    authorAddress: roleAgentAddress('owner'),
+    networkId: NETWORK_ID,
+  });
+  return graphCounts.length === ASSET_NUMBERS.length
+    && graphCounts.every((entry, index) => (
+      entry.kaNumber === ASSET_NUMBERS[index]
+      && entry.swm === 0
+      && entry.swmHead === null
+      && entry.vm === PRIVATE_CATALOG_MEMORY_EXPECTATION.vm.projection.count
+      && entry.vmDigest === PRIVATE_CATALOG_MEMORY_EXPECTATION.vm.projection.digest
+      && entry.vmHead?.assertionVersion
+        === PRIVATE_CATALOG_MEMORY_EXPECTATION.vm.assertionVersion
+      && entry.vmHead.assertionGraph === entry.vmGraph
+    ));
+}
+
+async function hasExactLocalMemoryContents(catalogEvidence = {}) {
   const graphCounts = await readPrivateCatalogGraphCountEvidence(agent.store, {
     assetNumbers: ASSET_NUMBERS,
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -362,7 +489,7 @@ async function hasExactLocalMemoryContents() {
     networkId: NETWORK_ID,
   });
   return hasExactPrivateCatalogMemoryContents(
-    { graphCounts },
+    { graphCounts, ...catalogEvidence },
     PRIVATE_CATALOG_MEMORY_EXPECTATION,
   );
 }
