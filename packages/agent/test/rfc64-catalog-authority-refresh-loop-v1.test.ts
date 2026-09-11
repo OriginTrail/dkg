@@ -298,6 +298,36 @@ describe('RFC-64 catalog authority refresh loop', () => {
     expect(cleared).toEqual([scheduled[0]!.handle]);
   });
 
+  it('drains detached physical revision work before close settles', async () => {
+    let markReadStarted!: () => void;
+    let releasePhysicalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve; });
+    const physicalRead = new Promise<void>((resolve) => { releasePhysicalRead = resolve; });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      readAuthorityRevisions: async (_contextGraphIds, signal) => {
+        markReadStarted();
+        return new Promise<Rfc64CatalogAuthorityRevisionReadV1>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+      whenAuthorityRevisionsIdle: () => physicalRead,
+      refreshContextGraph: async () => COMMITTED,
+      onRefreshFailure: () => undefined,
+    });
+
+    loop.start();
+    await readStarted;
+    let closeSettled = false;
+    const closing = loop.close().then(() => { closeSettled = true; });
+    await Promise.resolve();
+    expect(closeSettled).toBe(false);
+    releasePhysicalRead();
+    await closing;
+    expect(closeSettled).toBe(true);
+  });
+
   it('retires lanes that leave the active responsibility set and recreates them on return', async () => {
     const { scheduled, scheduler } = createSchedulerHarness();
     let activeContextGraphIds = ['cg-a'];

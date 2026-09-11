@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
+import { ContextGraphAuthorityIndexRetryableError } from
+  '../src/context-graph-authority-index.js';
 import {
   createAbortableTipReader,
   MemoryAuthorityIndexStore,
@@ -323,6 +325,102 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       [7, 16], [17, 26], [27, 30],
       [7, 16], [17, 26], [27, 30],
     ]);
+  });
+
+  it.each([
+    ['finalized head', (harness: IndexedAuthorityHarness) => harness.holdBlockRead('finalized')],
+    ['stabilization fence', (harness: IndexedAuthorityHarness) => harness.holdBlockRead(30)],
+  ] as const)('keeps revision-reader cancellation bound during the indexed %s read', async (
+    _stage,
+    hold,
+  ) => {
+    const harness = makeIndexedAuthorityAdapter();
+    bindAbortableTipReader(harness);
+    const gate = hold(harness);
+    const abort = new AbortController();
+    const pending = harness.adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')], {
+        signal: abort.signal,
+      });
+    await gate.entered;
+    expect(harness.evidence.readOptions[0]).toMatchObject({
+      policy: 'wideLogScan',
+      signal: abort.signal,
+    });
+    expect(harness.evidence.readOptions[0]?.isRetryable?.(
+      new ContextGraphAuthorityIndexRetryableError('retryable index read'),
+    )).toBe(true);
+    expect(harness.evidence.readOptions[0]?.isRetryable?.(
+      new Error('programming failure'),
+    )).toBe(false);
+    abort.abort(new Error('revision caller left'));
+    await expect(pending).rejects.toThrow('revision caller left');
+    gate.release();
+  });
+
+  it('drains a detached physical revision scan before the capability becomes idle', async () => {
+    const harness = makeIndexedAuthorityAdapter();
+    bindAbortableTipReader(harness);
+    const gate = harness.holdIndexPageRead();
+    const abort = new AbortController();
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    const cancelled = reader.readContextGraphAuthorityIndexRevisions([
+      authorityIndexId('9'),
+    ], { signal: abort.signal });
+    await gate.entered;
+    abort.abort(new Error('revision owner closed'));
+    await expect(cancelled).rejects.toThrow('revision owner closed');
+
+    let idle = false;
+    const drain = reader.whenIdle().then(() => { idle = true; });
+    await Promise.resolve();
+    expect(idle).toBe(false);
+    gate.release();
+    await drain;
+    expect(idle).toBe(true);
+  });
+
+  it('fails a revision scan over after a retryable index error', async () => {
+    const harness = makeIndexedAuthorityAdapter();
+    const attempts: string[] = [];
+    const nonArchive: IndexedAuthorityProvider = {
+      ...harness.provider,
+      getBlock: async (tag) => {
+        if (tag === 16) return null;
+        return harness.provider.getBlock(tag);
+      },
+    };
+    (harness.adapter as any).readTipProvider = async (
+      label: string,
+      read: (selected: IndexedAuthorityProvider) => Promise<unknown>,
+      options: IndexedAuthorityEvidence['readOptions'][number],
+    ) => {
+      expect(label).toBe('readContextGraphAuthorityIndexRevisions');
+      harness.evidence.readOptions.push(options);
+      try {
+        attempts.push('non-archive');
+        return await read(nonArchive);
+      } catch (error) {
+        expect(error).toBeInstanceOf(ContextGraphAuthorityIndexRetryableError);
+        expect(options.isRetryable?.(error)).toBe(true);
+        attempts.push('healthy');
+        return read(harness.provider);
+      }
+    };
+    const abort = new AbortController();
+
+    await expect(harness.adapter.contextGraphAuthorityIndexRevisionReader!
+      .readContextGraphAuthorityIndexRevisions([authorityIndexId('9')], {
+        signal: abort.signal,
+      })).resolves.toEqual(new Map([[
+      '9',
+      expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+    ]]));
+    expect(attempts).toEqual(['non-archive', 'healthy']);
+    expect(harness.evidence.readOptions[0]).toMatchObject({
+      policy: 'wideLogScan',
+      signal: abort.signal,
+    });
   });
 
   it('rejects an indexed reorg fence then invalidates and rebuilds the replacement fork', async () => {

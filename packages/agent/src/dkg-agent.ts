@@ -1075,6 +1075,10 @@ export class DKGAgent extends DKGAgentBase {
       readAuthorityRevisions: (contextGraphIds, signal) => (
         this.readRfc64CatalogAuthorityIndexRevisionsV1(contextGraphIds, signal)
       ),
+      whenAuthorityRevisionsIdle: () => (
+        this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle()
+        ?? Promise.resolve()
+      ),
       onActiveContextGraphIdsReadFailure: (error) => {
         this.log.warn(
           createOperationContext('system'),

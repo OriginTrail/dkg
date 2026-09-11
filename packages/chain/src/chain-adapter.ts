@@ -526,6 +526,8 @@ export interface ContextGraphAuthorityIndexRevisionReader {
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
     options?: ChainReadOptions,
   ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
+  /** Await the physical shared-index scans underlying detached/cancelled waiters. */
+  whenIdle(): Promise<void>;
 }
 
 export class ContextGraphChainScanPartialError extends Error {

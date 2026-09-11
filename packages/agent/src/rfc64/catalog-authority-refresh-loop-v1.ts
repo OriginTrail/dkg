@@ -44,6 +44,8 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
     contextGraphIds: readonly string[],
     signal: AbortSignal,
   ) => Promise<Rfc64CatalogAuthorityRevisionReadV1>;
+  /** Drain physical revision scans after the cancellable selector retires. */
+  readonly whenAuthorityRevisionsIdle?: () => Promise<void>;
   readonly onAuthorityRevisionsReadFailure?: (error: unknown) => void;
   readonly refreshContextGraph: (
     contextGraphId: string,
@@ -288,6 +290,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       const lanes = [...this.#lanes.values()];
       const retirements = [...this.#retirements];
       await Promise.all([
+        this.options.whenAuthorityRevisionsIdle?.(),
         ...lanes.map((lane) => lane.close()),
         ...retirements,
       ]);

@@ -1235,6 +1235,7 @@ describe('RFC-64 rollout authority integration', () => {
     const revision = `0x${'ab'.repeat(32)}`;
     const reader = {
       label: 'direct-authority-index-reader',
+      whenIdle: vi.fn(async () => undefined),
       readContextGraphAuthorityIndexRevisions: vi.fn(async function (
         this: { label: string },
       ) {
@@ -1305,6 +1306,7 @@ describe('RFC-64 rollout authority integration', () => {
             finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0')
           )),
           contextGraphAuthorityIndexRevisionReader: {
+            whenIdle: vi.fn(async () => undefined),
             readContextGraphAuthorityIndexRevisions: readRevisions,
           },
         }),
@@ -1484,6 +1486,7 @@ describe('RFC-64 rollout authority integration', () => {
       contextGraphIds: readonly string[],
       options?: { signal?: AbortSignal },
     ) => Promise<ReadonlyMap<string, string>>,
+    whenRevisionReadsIdle: () => Promise<void> = async () => undefined,
   ) {
     const legacyContextGraphId = `${AUTHOR}/authority-refresh-legacy` as ContextGraphIdV1;
     const inactiveContextGraphId = `${AUTHOR}/authority-refresh-inactive` as ContextGraphIdV1;
@@ -1492,6 +1495,7 @@ describe('RFC-64 rollout authority integration', () => {
     if (readRevisions !== undefined) {
       Object.assign(chainAdapter, {
         contextGraphAuthorityIndexRevisionReader: {
+          whenIdle: vi.fn(whenRevisionReadsIdle),
           readContextGraphAuthorityIndexRevisions: readRevisions,
         },
       });
@@ -1667,6 +1671,59 @@ describe('RFC-64 rollout authority integration', () => {
       expect(idleSettled).toBe(true);
     } finally {
       releaseAuthorityRead();
+      await stopping?.catch(() => undefined);
+    }
+  });
+
+  it('drains a detached authority-index revision scan during public agent shutdown', async () => {
+    let blockRevisionRead = false;
+    let markRevisionReadStarted!: () => void;
+    let releasePhysicalRead = () => undefined;
+    const revisionReadStarted = new Promise<void>((resolve) => {
+      markRevisionReadStarted = resolve;
+    });
+    const physicalRead = new Promise<void>((resolve) => {
+      releasePhysicalRead = resolve;
+    });
+    const readRevisions = vi.fn(async (
+      _contextGraphIds: readonly string[],
+      options?: { signal?: AbortSignal },
+    ): Promise<ReadonlyMap<string, string>> => {
+      if (!blockRevisionRead) return new Map();
+      markRevisionReadStarted();
+      return new Promise((_, reject) => {
+        const signal = options?.signal;
+        if (signal === undefined) throw new Error('revision read signal is missing');
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const whenRevisionReadsIdle = vi.fn(async () => {
+      if (blockRevisionRead) await physicalRead;
+    });
+    const { edge, runtime } = await prepareAuthorityRefreshLifecycle(
+      readRevisions,
+      whenRevisionReadsIdle,
+    );
+
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
+    blockRevisionRead = true;
+    let stopping: Promise<void> | undefined;
+    try {
+      runtime.start(createOperationContext('system'));
+      await revisionReadStarted;
+      let stopSettled = false;
+      stopping = edge.stop().then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(whenRevisionReadsIdle).toHaveBeenCalled();
+
+      releasePhysicalRead();
+      await stopping;
+      expect(stopSettled).toBe(true);
+    } finally {
+      releasePhysicalRead();
       await stopping?.catch(() => undefined);
     }
   });

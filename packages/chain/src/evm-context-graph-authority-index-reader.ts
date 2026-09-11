@@ -161,6 +161,30 @@ function snapshotAuthorityRevisionTargetsV1(
   return Object.freeze([...targets]);
 }
 
+/** Physical provider attempts outlive a cancelled caller and must be drained. */
+class EvmContextGraphAuthorityIndexRevisionReadLifecycleV1 {
+  readonly #active = new Set<Promise<unknown>>();
+  #activityRevision = 0;
+
+  run<T>(read: () => Promise<T>): Promise<T> {
+    const pending = read();
+    this.#activityRevision += 1;
+    this.#active.add(pending);
+    void pending.finally(() => {
+      this.#active.delete(pending);
+    }).catch(() => undefined);
+    return pending;
+  }
+
+  async whenIdle(): Promise<void> {
+    for (;;) {
+      const activityRevision = this.#activityRevision;
+      await Promise.allSettled(this.#active);
+      if (activityRevision === this.#activityRevision && this.#active.size === 0) return;
+    }
+  }
+}
+
 /**
  * Build the sole adapter capability for complete finalized revision reads.
  * Transport, index advancement, projection, and the final anchor fence remain
@@ -169,7 +193,11 @@ function snapshotAuthorityRevisionTargetsV1(
 export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   dependencies: EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1,
 ): ContextGraphAuthorityIndexRevisionReader {
+  const lifecycle = new EvmContextGraphAuthorityIndexRevisionReadLifecycleV1();
   return Object.freeze({
+    whenIdle(): Promise<void> {
+      return lifecycle.whenIdle();
+    },
     async readContextGraphAuthorityIndexRevisions(
       contextGraphIds: readonly ContextGraphAuthorityIndexId[],
       options: ChainReadOptions = {},
@@ -181,8 +209,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       const base = dependencies.requireContextGraphStorage();
       return dependencies.readTipProvider(
         'readContextGraphAuthorityIndexRevisions',
-        async (provider) => {
-          options.signal?.throwIfAborted();
+        (provider) => lifecycle.run(async () => {
           const finalized = await provider.getBlock('finalized');
           if (finalized === null || finalized.hash === null) {
             throw new Error('finalized Context Graph authority block is unavailable');
@@ -205,7 +232,6 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
               finalized: { number: finalized.number, hash: finalized.hash },
               pageSize: dependencies.pageSize(),
               stabilizationOperation: 'revision scan',
-              signal: options.signal,
             },
             (scan) => dependencies.index.revisions({
               ...scan,
@@ -214,7 +240,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           );
           await indexed.stabilize();
           return indexed.value;
-        },
+        }),
         {
           signal: options.signal,
           isRetryable: (error: unknown) => (
