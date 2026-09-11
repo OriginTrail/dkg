@@ -88,6 +88,7 @@ for (const [fault, expected] of [
   ['duplicate-expected-assets', /asset identities are duplicated/u],
   ['missing-bundle', /has no durable KA bundle/u],
   ['mismatched-bundle', /durable KA bundle differs from its signed catalog row/u],
+  ['trusted-scope', /differs from its signed SWM proof closure/u],
 ]) {
   test(`a ${fault} catalog closure fault fails before exact SWM certification`, {
     timeout: 90_000,

@@ -123,6 +123,36 @@ export function ownerWallet() {
   return new ethers.Wallet(ROLE_KEYS.owner);
 }
 
+/** Canonical private-catalog identity derived from the declared gate policy. */
+export function createPrivateCatalogScope({
+  authorAddress = roleAgentAddress('owner'),
+} = {}) {
+  const { policy } = createPrivatePolicyAndRoster();
+  return Object.freeze({
+    networkId: policy.networkId,
+    contextGraphId: policy.contextGraphId,
+    governanceChainId: policy.governanceChainId,
+    governanceContractAddress: policy.governanceContractAddress,
+    ownershipTransitionDigest: policy.ownershipTransitionDigest,
+    subGraphName: null,
+    authorAddress,
+    era: policy.era,
+    bucketCount: '1',
+  });
+}
+
+/** Derive the receiver API's catalog-era spelling from the canonical scope. */
+export function createPrivateCatalogSyncScope() {
+  const scope = createPrivateCatalogScope();
+  return Object.freeze({
+    networkId: scope.networkId,
+    contextGraphId: scope.contextGraphId,
+    subGraphName: scope.subGraphName,
+    authorAddress: scope.authorAddress,
+    catalogEra: scope.era,
+  });
+}
+
 export function createPrivatePolicyAndRoster({
   contextGraphId = CONTEXT_GRAPH_ID,
   memberRoles = PRIVATE_MEMBER_ROLES,

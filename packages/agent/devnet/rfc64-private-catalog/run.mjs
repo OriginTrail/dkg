@@ -9,25 +9,21 @@ import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 import {
-  PRIVATE_CATALOG_MEMORY_EXPECTATION,
-  roleAgentAddress,
+  createFinalizedChainFixture,
 } from './fixture.mjs';
+import { initializeRfc64PrivateAuthorityStateV1 } from './finalized-chain-fixture.mjs';
 import {
   createGateCommandFailureV1,
   sanitizeGateFailureV1,
 } from './gate-artifact.mjs';
-import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
-import {
-  hasExactPrivateCatalogMemoryContents,
-  hasExactPrivateCatalogSwmContents,
-} from './memory-evidence.mjs';
 import {
   createRfc64PrivateRuntimeEvidenceCollectorV1,
 } from './runtime-provenance.mjs';
+import { buildRfc64PrivateReleaseArtifactV1 } from './scenario-artifact.mjs';
 import {
-  finalizedRuntimeRpcVerdictV1,
-  rpcEvidenceV1,
-} from './rpc-evidence.mjs';
+  hasExactMemoryContents,
+  hasExactSourceSwmContents,
+} from './scenario-artifact.mjs';
 import {
   RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1,
   childCommandDescriptorV1,
@@ -39,6 +35,11 @@ export {
   isWithinRpcCeilingV1,
   rpcEvidenceV1,
 } from './rpc-evidence.mjs';
+export {
+  EXPECTED_MEMORY_CONTENTS,
+  hasExactMemoryContents,
+  hasExactSourceSwmContents,
+} from './scenario-artifact.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_ROOT = join(HERE, '..', '..');
@@ -50,8 +51,6 @@ const RUNTIME_LOAD_HOOK = resolve(
 export const RFC64_PRIVATE_GATE_ARTIFACT_PATH = join(HERE, 'artifacts', 'latest.json');
 const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
 const RUN_TIMEOUT_MS = 90_000;
-export const EXPECTED_MEMORY_CONTENTS = PRIVATE_CATALOG_MEMORY_EXPECTATION;
-
 let requestSequence = 0;
 let lifecycleSequence = 0;
 
@@ -270,6 +269,7 @@ export async function executeRfc64PrivateReleaseGateV1({
   });
   const runtimeEvidence = createRfc64PrivateRuntimeEvidenceCollectorV1(runtimeManifest);
   const runRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-release-gate-'));
+  const authorityStatePath = join(runRoot, 'authority.json');
   const manifestPath = join(runRoot, 'manifest.json');
   const dataDirs = Object.fromEntries(ROLES.map((role) => [role, join(runRoot, role)]));
   const scenario = new PrivateReleaseScenarioContext({
@@ -284,23 +284,27 @@ export async function executeRfc64PrivateReleaseGateV1({
   let artifact;
   try {
     await Promise.all(Object.values(dataDirs).map((path) => mkdir(path, { recursive: true })));
+    await initializeRfc64PrivateAuthorityStateV1(
+      authorityStatePath,
+      createFinalizedChainFixture(),
+    );
     const probed = await scenario.probeRoles();
     const peerIds = Object.fromEntries(ROLES.map((role) => [role, probed[role].ready.peerId]));
     scenario.bindPeerIds(peerIds);
-    await writeFile(manifestPath, `${JSON.stringify({ peerIds }, null, 2)}\n`, { mode: 0o600 });
+    await writeFile(
+      manifestPath,
+      `${JSON.stringify({ authorityStatePath, peerIds }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
     const baseline = await establishBaselineV1(scenario);
     const failover = await exerciseFailoverV1(scenario, baseline);
     const revocation = await exerciseRevocationV1(scenario, baseline, failover);
-    const restart = await inspectRestartV1(scenario, baseline, failover, revocation);
-    const evidence = Object.freeze({ baseline, failover, peerIds, probed, restart, revocation });
-    const checks = buildRfc64PrivateReleaseChecksV1(evidence);
-    const status = Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL';
+    await inspectRestartV1(scenario, baseline, failover, revocation);
     artifact = buildRfc64PrivateReleaseArtifactV1(
-      evidence,
-      checks,
-      status,
+      scenario.sealEvidence(),
       runtimeManifest.manifestDigest,
     );
+    const { status } = artifact;
     if (status !== 'PASS') process.exitCode = 1;
   } finally {
     // Any child still owned here is on a failure path and cannot contribute a
@@ -321,6 +325,8 @@ class PrivateReleaseScenarioContext {
     Object.assign(this, options);
     this.active = new Set();
     this.peerIds = null;
+    this.processes = new Map();
+    this.sealed = false;
   }
 
   bindPeerIds(peerIds) {
@@ -345,7 +351,9 @@ class PrivateReleaseScenarioContext {
           { timeoutMs: this.probeReadyTimeoutMs },
         );
         assertReadyRuntimeManifest(ready, this.runtimeProvenance.runtimeManifestDigest);
-        await this.stop(child, `probe-${role}`);
+        const processId = `probe-${role}`;
+        this.recordReady(processId, role, child, ready);
+        await this.stop(child, processId);
         shutdownRecorded = true;
         return [role, { ready }];
       } finally {
@@ -358,7 +366,7 @@ class PrivateReleaseScenarioContext {
     return Object.freeze(Object.fromEntries(entries));
   }
 
-  async start(role) {
+  async start(role, processId = role) {
     if (this.peerIds === null) throw new Error('private release peer identities are not bound');
     const child = new AgentChild(role, this.dataDirs[role], this.manifestPath, 'run', {
       runtimeProvenance: this.runtimeProvenance,
@@ -370,11 +378,17 @@ class PrivateReleaseScenarioContext {
     if (child.ready.peerId !== this.peerIds[role]) {
       throw new Error(`${role}: persisted peer identity changed after probe`);
     }
+    this.recordReady(processId, role, child, child.ready);
     return child;
   }
 
   async stop(child, processId) {
     const shutdown = await child.stop();
+    const process = this.requireProcess(processId);
+    if (process.shutdown !== undefined) {
+      throw new Error(`private release process already stopped: ${processId}`);
+    }
+    process.shutdown = shutdown;
     this.runtimeEvidence.record(processId, shutdown);
     this.active.delete(child);
     return shutdown;
@@ -386,15 +400,60 @@ class PrivateReleaseScenarioContext {
     )));
   }
 
-  sealRuntimeEvidence() {
-    return this.runtimeEvidence.seal();
+  observe(processId, key, value) {
+    const process = this.requireProcess(processId);
+    if (Object.hasOwn(process.observations, key)) {
+      throw new Error(`private release observation already recorded: ${processId}.${key}`);
+    }
+    process.observations[key] = value;
+  }
+
+  recordReady(processId, role, child, ready) {
+    if (this.processes.has(processId)) {
+      throw new Error(`private release process already recorded: ${processId}`);
+    }
+    this.processes.set(processId, {
+      observations: {},
+      processId,
+      ready,
+      role,
+      spawnedAt: child.spawnedAt,
+      spawnSequence: child.spawnSequence,
+    });
+  }
+
+  requireProcess(processId) {
+    const process = this.processes.get(processId);
+    if (process === undefined) {
+      throw new Error(`private release process is not recorded: ${processId}`);
+    }
+    return process;
+  }
+
+  sealEvidence() {
+    if (this.sealed) throw new Error('private release scenario evidence already sealed');
+    if (this.peerIds === null) throw new Error('private release peer identities are not bound');
+    this.sealed = true;
+    const processes = Object.fromEntries([...this.processes.entries()].map(([id, process]) => [
+      id,
+      Object.freeze({
+        ...process,
+        observations: Object.freeze({ ...process.observations }),
+      }),
+    ]));
+    return Object.freeze({
+      peerIds: this.peerIds,
+      processes: Object.freeze(processes),
+      runtimeProvenance: this.runtimeEvidence.seal(),
+    });
   }
 }
 
 async function establishBaselineV1(scenario) {
-  const owner = await scenario.start('owner');
+  const owner = await scenario.start('owner', 'owner');
   const baseline = await owner.request({ cmd: 'publish' });
-  const provider2 = await scenario.start('provider2');
+  scenario.observe('owner', 'baseline', baseline);
+  const provider2 = await scenario.start('provider2', 'provider2');
   await connectBothWays(owner, provider2);
   await provider2.request({
     cmd: 'wait-bootstrap',
@@ -406,7 +465,7 @@ async function establishBaselineV1(scenario) {
   // Populate the receiver through a real authorized catalog sync while the
   // finalized VM and catalog both name v1. Its durable store then supplies
   // the positive older-VM proof required when the later SWM-v2 head arrives.
-  const receiverSeed = await scenario.start('receiver');
+  const receiverSeed = await scenario.start('receiver', 'receiver-seed');
   await connectBothWays(provider2, receiverSeed);
   const receiverSeedBootstrap = await receiverSeed.request({
     cmd: 'wait-bootstrap',
@@ -418,9 +477,12 @@ async function establishBaselineV1(scenario) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.headObjectDigest,
   });
+  scenario.observe('receiver-seed', 'bootstrap', receiverSeedBootstrap);
+  scenario.observe('receiver-seed', 'state', receiverSeedState);
   const receiverSeedShutdown = await scenario.stop(receiverSeed, 'receiver-seed');
 
   const published = await owner.request({ cmd: 'publish-update' });
+  scenario.observe('owner', 'published', published);
   const provider2Bootstrap = await provider2.request({
     cmd: 'wait-bootstrap',
     expectedHeadDigest: published.headObjectDigest,
@@ -434,6 +496,9 @@ async function establishBaselineV1(scenario) {
     cmd: 'inspect',
     expectedHeadDigest: published.headObjectDigest,
   });
+  scenario.observe('provider2', 'bootstrap', provider2Bootstrap);
+  scenario.observe('provider2', 'state', provider2State);
+  scenario.observe('owner', 'sourceState', ownerSourceState);
   if (!hasExactSourceSwmContents(ownerSourceState)) {
     throw new Error(
       `owner: fixture source is missing the exact version-2 SWM head; `
@@ -468,6 +533,9 @@ async function exerciseFailoverV1(scenario, baseline) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
+  scenario.observe('owner', 'listenerClosed', ownerListenerClosed);
+  scenario.observe('provider2', 'listenerDialableAfterOwnerExit', provider2ListenerDialable);
+  scenario.observe('provider2', 'stateAfterOwnerExit', provider2StateAfterOwnerExit);
   if (
     provider2StateAfterOwnerExit.exactExpectedHead !== true
     || !hasExactMemoryContents(provider2StateAfterOwnerExit)
@@ -479,7 +547,7 @@ async function exerciseFailoverV1(scenario, baseline) {
     );
   }
 
-  const receiver = await scenario.start('receiver');
+  const receiver = await scenario.start('receiver', 'receiver');
   await connectBothWays(baseline.provider2, receiver);
   const receiverBootstrap = await receiver.request({
     cmd: 'wait-bootstrap',
@@ -490,6 +558,8 @@ async function exerciseFailoverV1(scenario, baseline) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
+  scenario.observe('receiver', 'bootstrap', receiverBootstrap);
+  scenario.observe('receiver', 'state', receiverState);
   return Object.freeze({
     ownerExit,
     ownerListenerClosed,
@@ -503,7 +573,7 @@ async function exerciseFailoverV1(scenario, baseline) {
 }
 
 async function exerciseRevocationV1(scenario, baseline, failover) {
-  const outsider = await scenario.start('outsider');
+  const outsider = await scenario.start('outsider', 'outsider');
   await dial(outsider, baseline.provider2);
   const outsiderDenial = await outsider.request({
     cmd: 'sync-denied',
@@ -517,11 +587,19 @@ async function exerciseRevocationV1(scenario, baseline, failover) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
+  scenario.observe('outsider', 'denial', outsiderDenial);
+  scenario.observe('outsider', 'state', outsiderState);
+  scenario.observe('provider2', 'accessState', providerAccessState);
 
   // Advance the provider's finalized authority high-water after the receiver
   // has proved it was previously authorized. The receiver deliberately keeps
   // its old local snapshot so its next pull reaches the serving-side gate.
-  const receiverRevocation = await baseline.provider2.request({ cmd: 'revoke-receiver' });
+  const ownerRevoker = await scenario.start('owner', 'owner-revoker');
+  await connectBothWays(ownerRevoker, baseline.provider2);
+  const ownerRevocation = await ownerRevoker.request({ cmd: 'revoke-receiver' });
+  const receiverRevocation = await baseline.provider2.request({
+    cmd: 'observe-receiver-revocation',
+  });
   const revokedReceiverDenial = await failover.receiver.request({
     cmd: 'sync-denied',
     providerPeerIds: [scenario.peerIds.provider2],
@@ -534,10 +612,19 @@ async function exerciseRevocationV1(scenario, baseline, failover) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
+  scenario.observe('owner-revoker', 'revocation', ownerRevocation);
+  scenario.observe('provider2', 'revocationObservation', receiverRevocation);
+  scenario.observe('provider2', 'stateAfterRevocation', provider2StateAfterRevocation);
+  scenario.observe('receiver', 'revokedDenial', revokedReceiverDenial);
+  scenario.observe('receiver', 'stateAfterRevocation', receiverStateAfterRevocation);
+  const ownerRevokerShutdown = await scenario.stop(ownerRevoker, 'owner-revoker');
   return Object.freeze({
     outsider,
     outsiderDenial,
     outsiderState,
+    ownerRevocation,
+    ownerRevokerReady: ownerRevoker.ready,
+    ownerRevokerShutdown,
     provider2StateAfterRevocation,
     providerAccessState,
     receiverRevocation,
@@ -549,11 +636,12 @@ async function exerciseRevocationV1(scenario, baseline, failover) {
 async function inspectRestartV1(scenario, baseline, failover, revocation) {
   const provider2Shutdown = await scenario.stop(baseline.provider2, 'provider2');
   const receiverShutdown = await scenario.stop(failover.receiver, 'receiver');
-  const restartedReceiver = await scenario.start('receiver');
+  const restartedReceiver = await scenario.start('receiver', 'receiver-restart');
   const restartState = await restartedReceiver.request({
     cmd: 'inspect-persisted',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
+  scenario.observe('receiver-restart', 'state', restartState);
   const outsiderShutdown = await scenario.stop(revocation.outsider, 'outsider');
   const restartedReceiverShutdown = await scenario.stop(
     restartedReceiver,
@@ -566,161 +654,7 @@ async function inspectRestartV1(scenario, baseline, failover, revocation) {
     restartState,
     restartedReceiverReady: restartedReceiver.ready,
     restartedReceiverShutdown,
-    sealedRuntimeProvenance: scenario.sealRuntimeEvidence(),
   });
-}
-
-export function buildRfc64PrivateReleaseChecksV1(evidence) {
-  const { baseline, failover, peerIds, probed, restart, revocation } = evidence;
-  const rpcVerdict = finalizedRuntimeRpcVerdictV1({
-    owner: failover.ownerShutdown,
-    provider2: restart.provider2Shutdown,
-    'receiver-seed': baseline.receiverSeedShutdown,
-    receiver: restart.receiverShutdown,
-    outsider: restart.outsiderShutdown,
-    'receiver-restart': restart.restartedReceiverShutdown,
-  });
-  return Object.freeze({
-    fourStableUniqueDaemonIdentities:
-      new Set(Object.values(peerIds)).size === 4
-      && ROLES.every((role) => probed[role].ready.agentClass === 'DKGAgent'),
-    productionCatalogServiceOnAllRoles:
-      [
-        baseline.owner.ready,
-        baseline.provider2.ready,
-        baseline.receiverSeedReady,
-        failover.receiver.ready,
-        revocation.outsider.ready,
-        restart.restartedReceiverReady,
-      ].every((ready) => ready.catalogServiceStarted === true),
-    exactTwoAssetPrivateCatalog:
-      baseline.published.inventoryRowCount === '2'
-      && baseline.published.catalogVersion === '4',
-    provider2ReceivedExactHead:
-      baseline.provider2Bootstrap.appliedHeadDigest === baseline.published.headObjectDigest
-      && baseline.provider2State.exactExpectedHead === true
-      && baseline.provider2State.inventoryRowCount === '2',
-    provider2HasSwmV2AndVmV1: hasExactMemoryContents(baseline.provider2State),
-    receiverBaselineSeededThroughProvider2:
-      baseline.receiverSeedBootstrap.providerPeerId === peerIds.provider2
-      && baseline.receiverSeedState.exactExpectedHead === true,
-    receiverUsedProvider2AfterOwnerStopped:
-      failover.receiverBootstrap.appliedHeadDigest === baseline.published.headObjectDigest
-      && failover.receiverBootstrap.providerPeerId === peerIds.provider2,
-    ownerExitedBeforeReceiverRuntimeStarted:
-      failover.ownerExit.error === null
-      && failover.ownerListenerClosed
-      && failover.provider2ListenerDialable
-      && baseline.owner.exitSequence < failover.receiver.spawnSequence,
-    receiverCaughtUpSwmV2AndVmV1: hasExactMemoryContents(failover.receiverState),
-    ...rpcVerdict,
-    outsiderDeniedBeforeApplication:
-      isExpectedPrivateCatalogDenialResultV1(revocation.outsiderDenial)
-      && revocation.outsiderState.appliedHeadDigest === null,
-    outsiderReceivedNoPrivateGraphs:
-      revocation.outsiderState.graphCounts.every(({ swm, vm }) => swm === 0 && vm === 0),
-    nonmemberQueryIsEmpty: revocation.providerAccessState.outsiderVisibleVmBindings === 0,
-    revokedReceiverDeniedAfterFinalizedRosterAdvance:
-      BigInt(revocation.receiverRevocation.rosterVersion) > 0n
-      && revocation.receiverRevocation.revokedAgentAddress === roleAgentAddress('receiver')
-      && isExpectedPrivateCatalogDenialResultV1(revocation.revokedReceiverDenial),
-    revocationDoesNotCorruptPreviouslyCommittedMemory:
-      revocation.receiverStateAfterRevocation.exactExpectedHead === true
-      && hasExactMemoryContents(revocation.receiverStateAfterRevocation),
-    restartPreservedIdentityAndExactHead:
-      restart.restartedReceiverReady.peerId === peerIds.receiver
-      && restart.restartState.exactExpectedHead === true
-      && restart.restartState.inventoryRowCount === '2',
-    restartPreservedSwmV2AndVmV1: hasExactMemoryContents(restart.restartState),
-  });
-}
-
-function buildRfc64PrivateReleaseArtifactV1(
-  evidence,
-  checks,
-  status,
-  runtimeManifestDigest,
-) {
-  const { baseline, failover, probed, restart, revocation } = evidence;
-  return {
-    schema: 'dkg-rfc64-private-release-gate-v1',
-    status,
-    limitation:
-      'Uses a deterministic finalized-chain adapter and loopback RPC, not scripts/devnet.sh Hardhat or the CLI daemon.',
-    topology: {
-      ownerProvider: safeRole(probed.owner.ready),
-      authorizedProviderReceiver: safeRole(probed.provider2.ready),
-      authorizedReceiver: safeRole(probed.receiver.ready),
-      unauthorizedNode: safeRole(probed.outsider.ready),
-    },
-    runtimeManifestDigest,
-    runtimeProvenance: restart.sealedRuntimeProvenance,
-    checks,
-    catalog: {
-      headObjectDigest: baseline.published.headObjectDigest,
-      policyDigest: baseline.published.policyDigest,
-      catalogVersion: baseline.published.catalogVersion,
-      inventoryRowCount: baseline.published.inventoryRowCount,
-    },
-    sourceProvider: safeState(
-      baseline.ownerSourceState,
-      null,
-      failover.ownerShutdown,
-    ),
-    provider2: safeState(
-      revocation.provider2StateAfterRevocation,
-      baseline.provider2Bootstrap,
-      restart.provider2Shutdown,
-    ),
-    failoverBarrier: {
-      ownerExitCode: failover.ownerExit.code,
-      ownerExitedAt: failover.ownerExit.exitedAt,
-      ownerExitedBeforeReceiverSpawn:
-        baseline.owner.exitSequence < failover.receiver.spawnSequence,
-      ownerListenerClosed: failover.ownerListenerClosed,
-      provider2ExactHeadAfterOwnerExit:
-        failover.provider2StateAfterOwnerExit.exactExpectedHead === true,
-      provider2ListenerDialable: failover.provider2ListenerDialable,
-      receiverSpawnedAt: failover.receiver.spawnedAt,
-    },
-    failoverReceiver: safeState(
-      failover.receiverState,
-      failover.receiverBootstrap,
-      restart.receiverShutdown,
-    ),
-    receiverBaseline: safeState(
-      baseline.receiverSeedState,
-      baseline.receiverSeedBootstrap,
-      baseline.receiverSeedShutdown,
-    ),
-    outsider: {
-      denied: revocation.outsiderDenial.denied,
-      failureClass: revocation.outsiderDenial.failureClass,
-      failureCode: revocation.outsiderDenial.failureCode,
-      appliedHeadDigest: revocation.outsiderState.appliedHeadDigest,
-      graphCounts: revocation.outsiderState.graphCounts,
-      rpc: rpcEvidenceV1(restart.outsiderShutdown),
-    },
-    revokedReceiver: {
-      denial: {
-        denied: revocation.revokedReceiverDenial.denied,
-        failureClass: revocation.revokedReceiverDenial.failureClass,
-        failureCode: revocation.revokedReceiverDenial.failureCode,
-      },
-      revokedAgentAddress: revocation.receiverRevocation.revokedAgentAddress,
-      rosterVersion: revocation.receiverRevocation.rosterVersion,
-      state: safeState(
-        revocation.receiverStateAfterRevocation,
-        failover.receiverBootstrap,
-        restart.receiverShutdown,
-      ),
-    },
-    restartedReceiver: safeState(
-      restart.restartState,
-      null,
-      restart.restartedReceiverShutdown,
-    ),
-  };
 }
 
 function boundedChildEnvironmentV1(value) {
@@ -787,22 +721,6 @@ async function dial(from, to) {
   }, { timeoutMs: 30_000 });
 }
 
-export const hasExactMemoryContents = (state, { swmProofKind = 'catalog-row' } = {}) =>
-  hasExactPrivateCatalogMemoryContents(state, {
-    ...EXPECTED_MEMORY_CONTENTS,
-    swm: {
-      ...EXPECTED_MEMORY_CONTENTS.swm,
-      proofKind: swmProofKind,
-    },
-  });
-
-export const hasExactSourceSwmContents = (state) =>
-  hasExactPrivateCatalogSwmContents(state, {
-    assetNumbers: EXPECTED_MEMORY_CONTENTS.assetNumbers,
-    ...EXPECTED_MEMORY_CONTENTS.swm,
-    proofKind: 'workspace-head',
-  });
-
 function safeMemorySummary(state) {
   return Object.freeze({
     appliedHeadDigest: state.appliedHeadDigest,
@@ -811,37 +729,6 @@ function safeMemorySummary(state) {
     graphCounts: state.graphCounts,
     inventoryRowCount: state.inventoryRowCount,
   });
-}
-
-function safeRole(ready) {
-  return {
-    agentClass: ready.agentClass,
-    peerId: ready.peerId,
-    agentAddress: roleAgentAddress(ready.role),
-  };
-}
-
-function safeState(state, bootstrap, shutdownReceipt) {
-  const rpc = rpcEvidenceV1(shutdownReceipt);
-  return {
-    appliedHeadDigest: state.appliedHeadDigest,
-    catalogVersion: state.catalogVersion,
-    inventoryRowCount: state.inventoryRowCount,
-    graphCounts: state.graphCounts,
-    rpcCalls: rpc.total,
-    rpc,
-    receiver: {
-      applied: state.receiverStats?.applied ?? 0,
-      failed: state.receiverStats?.failed ?? 0,
-    },
-    ...(bootstrap === null ? {} : {
-      bootstrap: {
-        outcome: bootstrap.outcome,
-        providerPeerId: bootstrap.providerPeerId,
-        attempts: bootstrap.attempts,
-      },
-    }),
-  };
 }
 
 function delay(ms) {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 
 import {
@@ -37,14 +38,16 @@ const KNOWLEDGE_ASSET_SELECTORS = new Set([
 
 /** Chain adapter whose identity matches the deterministic finalized-RPC fixture. */
 export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
+  #authorityStatePath;
   #fixture;
   #participantRemovalAlsoRemoves;
   #participantRemovalNoop;
 
   constructor(fixture, options = {}) {
-    super(fixture.networkId, fixture.ownerAddress, {
+    super(fixture.networkId, options.signerAddress ?? fixture.ownerAddress, {
       initialContextGraphId: BigInt(fixture.onChainContextGraphId),
     });
+    this.#authorityStatePath = options.authorityStatePath;
     this.#fixture = fixture;
     this.#participantRemovalAlsoRemoves = options.participantRemovalAlsoRemoves;
     this.#participantRemovalNoop = options.participantRemovalNoop === true;
@@ -64,15 +67,29 @@ export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
 
   async getContextGraphAuthoritySnapshot(contextGraphId, options = {}) {
     const snapshot = await super.getContextGraphAuthoritySnapshot(contextGraphId, options);
+    const shared = this.#authorityStatePath === undefined
+      ? null
+      : await readRfc64PrivateAuthorityStateV1(this.#authorityStatePath);
     return Object.freeze({
       ...snapshot,
+      ...(shared === null ? {} : shared),
       governanceContract: this.#fixture.contextGraphStorageAddress,
+      owner: this.#fixture.ownerAddress,
       sourceBlockNumber: this.#fixture.authorityBlockNumber,
       sourceBlockHash: this.#fixture.authorityBlockHash,
     });
   }
 
+  /** Every production membership reader observes the same finalized roster. */
+  async getContextGraphParticipantAgents(contextGraphId) {
+    const snapshot = await this.getContextGraphAuthoritySnapshot(contextGraphId);
+    return [...snapshot.participantAgents];
+  }
+
   async removeContextGraphParticipantAgent(contextGraphId, agent) {
+    if (this.signerAddress.toLowerCase() !== this.#fixture.ownerAddress.toLowerCase()) {
+      throw new Error('RFC-64 private authority mutation requires the owner signer');
+    }
     if (this.#participantRemovalNoop) return this.txResult(true);
     const result = await super.removeContextGraphParticipantAgent(contextGraphId, agent);
     if (this.#participantRemovalAlsoRemoves !== undefined) {
@@ -81,8 +98,57 @@ export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
         this.#participantRemovalAlsoRemoves,
       );
     }
+    if (this.#authorityStatePath !== undefined) {
+      const snapshot = await super.getContextGraphAuthoritySnapshot(contextGraphId);
+      await writeRfc64PrivateAuthorityStateV1(this.#authorityStatePath, {
+        participantAgents: snapshot.participantAgents,
+        rosterVersion: snapshot.rosterVersion,
+      });
+    }
     return result;
   }
+}
+
+/** Seed the one finalized-authority snapshot observed by every runtime child. */
+export function initializeRfc64PrivateAuthorityStateV1(path, fixture) {
+  return writeRfc64PrivateAuthorityStateV1(path, {
+    participantAgents: fixture.participantAgents,
+    rosterVersion: fixture.rosterVersion,
+  });
+}
+
+async function readRfc64PrivateAuthorityStateV1(path) {
+  const parsed = JSON.parse(await readFile(path, 'utf8'));
+  if (
+    parsed === null
+    || typeof parsed !== 'object'
+    || Array.isArray(parsed)
+    || Object.keys(parsed).sort().join('\n') !== 'participantAgents\nrosterVersion'
+    || !Array.isArray(parsed.participantAgents)
+    || parsed.participantAgents.some((address) => !ethers.isAddress(address))
+    || typeof parsed.rosterVersion !== 'string'
+    || !/^(0|[1-9][0-9]*)$/u.test(parsed.rosterVersion)
+  ) {
+    throw new Error('RFC-64 private shared authority state is invalid');
+  }
+  return Object.freeze({
+    participantAgents: Object.freeze(parsed.participantAgents
+      .map((address) => address.toLowerCase())
+      .sort()),
+    rosterVersion: parsed.rosterVersion,
+  });
+}
+
+async function writeRfc64PrivateAuthorityStateV1(path, state) {
+  const snapshot = Object.freeze({
+    participantAgents: Object.freeze([...state.participantAgents]
+      .map((address) => address.toLowerCase())
+      .sort()),
+    rosterVersion: state.rosterVersion,
+  });
+  const temporaryPath = `${path}.${process.pid}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporaryPath, path);
 }
 
 /**
