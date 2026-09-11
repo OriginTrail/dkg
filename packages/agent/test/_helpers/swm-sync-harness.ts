@@ -1,15 +1,24 @@
 /**
- * ONE runSharedMemorySync fixture for every real-store catch-up suite
- * (`swm-snapshot-materializer.test.ts` end-to-end block and
- * `swm-head-identity-preservation.test.ts`). Serves a fixed meta payload,
- * pre-seeds the snapshot store with the served share's payload, and exposes
- * the knobs those suites need (meta override, replaceGraph interception).
+ * ONE runSharedMemorySync fixture for every real-store catch-up suite. It owns
+ * the canonical store/materializer boundary, serves configurable phase data,
+ * pre-seeds the snapshot store, and exposes only the interception points the
+ * SWM materialization and coverage scenarios need.
  */
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  workspaceOperationPublicSliceSubject,
+  workspacePublicQuadsDigest,
+  type WorkspacePublicSnapshotStore,
+} from '@origintrail-official/dkg-publisher';
+import { storeWorkspaceOperationPublicQuads } from
+  '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
+import { GraphManager, OxigraphStore, type Quad, type TripleStore } from
+  '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../../src/sync/requester/page-fetch.js';
-import { runSharedMemorySync } from '../../src/sync/requester/shared-memory-sync.js';
+import {
+  runSharedMemorySync,
+  type SharedMemorySyncSummary,
+} from '../../src/sync/requester/shared-memory-sync.js';
 import {
   createSharedMemorySnapshotMaterializer,
   type SharedMemorySnapshotMaterializer,
@@ -32,52 +41,93 @@ export interface SwmSyncHarnessShare {
   readonly meta: readonly Quad[];
 }
 
-export function makeSwmSyncHarness(options: {
+export interface SwmSyncHarnessFetchInput {
+  readonly contextGraphId: string;
+  readonly phase: 'data' | 'meta' | 'snapshot';
+  readonly snapshotRef: string | undefined;
+}
+
+export interface SwmSyncHarnessOptions {
   readonly ctx: OperationContext;
   readonly contextGraphId: string;
   readonly store: TripleStore;
-  readonly served: SwmSyncHarnessShare;
+  readonly served?: SwmSyncHarnessShare;
   /** Meta payload override (defaults to the served share's meta). */
   readonly servedMeta?: readonly Quad[];
+  readonly cachedSnapshots?: ReadonlyMap<string, readonly Quad[]>;
+  readonly remotePeerId?: string;
+  readonly fetchPage?: (
+    input: SwmSyncHarnessFetchInput,
+    fallback: SyncPageResult,
+  ) => Promise<SyncPageResult>;
+  /** Omit the real materializer, or intercept it while retaining its behavior. */
+  readonly materializer?: false | ((real: SharedMemorySnapshotMaterializer) => SharedMemorySnapshotMaterializer);
   /** Intercept graph replacement while delegating to the real materializer. */
   readonly onReplaceGraph?: () => void;
-}) {
+}
+
+export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
   const snapshotStore = new MemorySnapshotStore();
-  const materializer = createSharedMemorySnapshotMaterializer({
+  const realMaterializer = createSharedMemorySnapshotMaterializer({
     store: options.store,
     writeLocks: new Map<string, Promise<void>>(),
     invalidateListContextGraphsCache: () => {},
   });
-  const servedMeta = options.servedMeta ?? options.served.meta;
-  const wired: SharedMemorySnapshotMaterializer = options.onReplaceGraph
+  const servedMeta = options.servedMeta ?? options.served?.meta ?? [];
+  const intercepted: SharedMemorySnapshotMaterializer = options.onReplaceGraph
     ? {
-      ...materializer,
+      ...realMaterializer,
       replaceGraph: async (graphUri, quads) => {
         options.onReplaceGraph!();
-        return materializer.replaceGraph(graphUri, quads);
+        return realMaterializer.replaceGraph(graphUri, quads);
       },
     }
-    : materializer;
+    : realMaterializer;
+  const materializer = options.materializer === false
+    ? undefined
+    : options.materializer?.(intercepted) ?? intercepted;
+  const snapshotFetches: string[] = [];
   const run = async () => {
-    await snapshotStore.putSnapshot({
-      digest: options.served.digest,
-      quads: [...options.served.payload],
-    });
+    const cachedSnapshots = options.cachedSnapshots
+      ?? (options.served
+        ? new Map([[options.served.digest, options.served.payload]])
+        : new Map<string, readonly Quad[]>());
+    for (const [digest, quads] of cachedSnapshots) {
+      await snapshotStore.putSnapshot({ digest, quads });
+    }
     return runSharedMemorySync({
       mode: { kind: 'ordinary' },
       ctx: options.ctx,
-      remotePeerId: 'peer-source',
+      remotePeerId: options.remotePeerId ?? 'peer-source',
       contextGraphIds: [options.contextGraphId],
       createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
-      fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => ({
-        quads: phase === 'meta' ? [...servedMeta] : [],
-        bytesReceived: 0,
-        resumedFromOffset: 0,
-        nextOffset: phase === 'meta' ? servedMeta.length : 0,
-        checkpointKey: 'k',
-        completed: true,
-        timedOut: false,
-      }),
+      fetchSyncPages: async (
+        _ctx,
+        _peer,
+        contextGraphId,
+        _includeSharedMemory,
+        phase,
+        _graphUri,
+        _deadline,
+        fetchOptions,
+      ): Promise<SyncPageResult> => {
+        if (phase === 'snapshot') snapshotFetches.push(String(fetchOptions?.snapshotRef));
+        const fallback: SyncPageResult = {
+          quads: phase === 'meta' ? [...servedMeta] : [],
+          bytesReceived: 0,
+          resumedFromOffset: 0,
+          responderSessionStartedFresh: true,
+          nextOffset: phase === 'meta' ? servedMeta.length : 0,
+          checkpointKey: `${contextGraphId}:${phase}`,
+          completed: true,
+          timedOut: false,
+        };
+        return options.fetchPage?.({
+          contextGraphId,
+          phase,
+          snapshotRef: fetchOptions?.snapshotRef,
+        }, fallback) ?? fallback;
+      },
       processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
         verifiedData: wsDataQuads,
         verifiedMeta: wsMetaQuads,
@@ -89,7 +139,7 @@ export function makeSwmSyncHarness(options: {
       }),
       ensureContextGraph: async () => {},
       storeInsert: async (quads) => { await options.store.insert(quads); },
-      snapshotMaterializer: wired,
+      snapshotMaterializer: materializer,
       publicSnapshotStore: snapshotStore,
       deleteCheckpoint: () => {},
       setCheckpoint: () => {},
@@ -99,5 +149,63 @@ export function makeSwmSyncHarness(options: {
       logDebug: () => {},
     });
   };
-  return { run, snapshotStore };
+  return { run, snapshotStore, snapshotFetches };
+}
+
+/** Real-store scenario runner with one canonical store lifecycle boundary. */
+export async function runManagedSwmSyncHarness(
+  options: Omit<SwmSyncHarnessOptions, 'store'>,
+): Promise<{ summary: SharedMemorySyncSummary; snapshotFetches: string[] }> {
+  const store = new OxigraphStore();
+  try {
+    const harness = makeSwmSyncHarness({ ...options, store });
+    const summary = await harness.run();
+    return { summary, snapshotFetches: harness.snapshotFetches };
+  } finally {
+    await store.close().catch(() => {});
+  }
+}
+
+/** Entity-share manifest generated exclusively through the publisher boundary. */
+export async function makeEntityShareSwmHarnessFixture(options: {
+  readonly contextGraphId: string;
+  readonly shareOperationId: string;
+  readonly rootEntity: string;
+  readonly payload: readonly Quad[];
+  readonly publisherPeerId: string;
+}): Promise<SwmSyncHarnessShare & { readonly sliceSubject: string }> {
+  const store = new OxigraphStore();
+  const graphManager = new GraphManager(store);
+  const snapshots = new MemorySnapshotStore();
+  try {
+    await storeWorkspaceOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: options.contextGraphId,
+      shareOperationId: options.shareOperationId,
+      rootEntities: [options.rootEntity],
+      quads: options.payload,
+      publisherPeerId: options.publisherPeerId,
+      timestamp: new Date(0),
+      publicSnapshotStore: snapshots,
+    });
+    const metaGraph = graphManager.sharedMemoryMetaUri(options.contextGraphId);
+    const result = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
+    );
+    if (result.type !== 'quads') throw new Error('Entity-share fixture metadata query did not return quads');
+    const digest = workspacePublicQuadsDigest(options.payload);
+    return {
+      digest,
+      payload: options.payload.map((quad) => ({ ...quad, graph: '' })),
+      meta: result.quads.map((quad) => ({ ...quad, graph: metaGraph })),
+      sliceSubject: workspaceOperationPublicSliceSubject(
+        options.contextGraphId,
+        options.shareOperationId,
+        options.rootEntity,
+      ),
+    };
+  } finally {
+    await store.close().catch(() => {});
+  }
 }

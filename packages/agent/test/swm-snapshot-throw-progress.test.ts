@@ -1,11 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
-import { type OperationContext } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import { describe, expect, it } from 'vitest';
+import { type Quad } from '@origintrail-official/dkg-storage';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
-import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
-import { ctx, noop, pageResult, transportError, sharedMemoryProcessResult } from './sync-requester-fixtures.js';
-
+import { ctx, transportError } from './sync-requester-fixtures.js';
+import { runManagedSwmSyncHarness } from './_helpers/swm-sync-harness.js';
 
 /**
  * T14 (#2050) — a throw must not erase the progress the round actually made.
@@ -24,11 +21,6 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
   const T14_UAL = 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
   const { share } = swmFixtures(T14_CG);
 
-  const stores: OxigraphStore[] = [];
-  afterEach(async () => {
-    await Promise.all(stores.splice(0).map((store) => store.close().catch(() => {})));
-  });
-
   it('carries the resolved count out through the throw instead of reporting zero', async () => {
     // Two Knowledge Assets whose snapshots are already cached — and therefore
     // materializable without a fetch — then a third whose fetch blows up.
@@ -44,7 +36,7 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
     // Two opposite properties live on this field and a no-materializer fixture
     // collapses them to the same number:
     //   - do not OVER-report: a round that fetches N and materializes 0 must
-    //     not claim `N/N` (covered by the coverage rows in this file);
+    //     not claim `N/N` (covered by swm-snapshot-coverage.test.ts);
     //   - do not UNDER-report: a round that materializes some and then THROWS
     //     must report what it wrote, not zero — which is what this row pins,
     //     and the reason the carry-through-the-throw change exists at all.
@@ -53,59 +45,23 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
     const unreachable = share({ version: 1, operationId: 'op-boom', marker: 't14-boom', ual: `${T14_UAL}/3`, payloadCount: 4 });
     const meta = [...resolvedA.meta, ...resolvedB.meta, ...unreachable.meta];
 
-    // A real store and the real materializer: a hand-rolled stub that silently
-    // fails to materialize would reproduce `resolved: 0` for a NEW reason and
-    // look identical to a pass.
-    const store = new OxigraphStore();
-    stores.push(store);
-    const materializer = createSharedMemorySnapshotMaterializer({
-      store,
-      writeLocks: new Map<string, Promise<void>>(),
-      invalidateListContextGraphsCache: () => {},
-    });
-
     const cached = new Map<string, Quad[]>([
       [resolvedA.digest, resolvedA.payload],
       [resolvedB.digest, resolvedB.payload],
     ]);
 
-    const summary = await runSharedMemorySync({
-      mode: { kind: 'ordinary' },
+    const { summary } = await runManagedSwmSyncHarness({
       ctx,
       remotePeerId: 'peer-throwing-99887766',
-      contextGraphIds: [T14_CG],
-      createContextGraphSyncDeadline: () => Date.now() + 60_000,
-      fetchSyncPages: async (
-        _ctx: OperationContext,
-        _peer: string,
-        contextGraphId: string,
-        _includeSharedMemory: boolean,
-        phase: string,
-      ) => {
+      contextGraphId: T14_CG,
+      servedMeta: meta,
+      cachedSnapshots: cached,
+      fetchPage: async ({ phase }, fallback) => {
         // Only the uncached third ref reaches a fetch; the other two are served
         // from cache and never touch the transport.
         if (phase === 'snapshot') throw transportError('snapshot stream reset');
-        return pageResult(contextGraphId, phase);
+        return fallback;
       },
-      processSharedMemoryBatch: async () => ({
-        ...sharedMemoryProcessResult(),
-        emptyResponses: 0,
-        verifiedMeta: meta,
-        totalFetchedMetaQuads: meta.length,
-      }),
-      ensureContextGraph: async () => {},
-      storeInsert: async (quads: Quad[]) => { await store.insert(quads); },
-      snapshotMaterializer: materializer,
-      publicSnapshotStore: {
-        getSnapshot: async (ref: string) => cached.get(ref) ?? null,
-        putSnapshot: async () => ({ ref: 'unused', byteLength: 0 }),
-      },
-      deleteCheckpoint: () => {},
-      setCheckpoint: () => {},
-      ensureOwnedMap: () => new Map(),
-      logInfo: noop,
-      logWarn: noop,
-      logDebug: noop,
     });
 
     // Pre-fix the whole record was `undefined` — the throw unwound past it, so
@@ -128,7 +84,8 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
   // The `resolved + missing === total` invariant is deliberately NOT asserted
   // here. `recordSnapshotCoverage` derives `missingCount` as
   // `totalSnapshots - snapshotsResolved`, so the invariant holds by
-  // construction and any test of it restates numbers the deep-equal above
-  // already pinned. An assertion that cannot fail is worse than none: it reads
-  // as coverage of a property nothing is checking.
+  // construction and any test of it restates numbers already pinned by the
+  // `carries the resolved count out through the throw` deep equality. An
+  // assertion that cannot fail is worse than none: it reads as coverage of a
+  // property nothing is checking.
 });
