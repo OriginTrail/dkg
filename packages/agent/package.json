@@ -122,11 +122,11 @@
     "benchmark:sync-worker": "node scripts/sync-worker-benchmark.cjs",
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
     "devnet:rfc64-private-release-gate": "node --import tsx devnet/rfc64-private-catalog/launch-live.ts",
-    "devnet:rfc64-remote-canary": "node devnet/rfc64-remote-canary/run.mjs",
+    "devnet:rfc64-remote-canary": "node --import tsx devnet/rfc64-remote-canary/run.mjs",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:rfc64-m0-recovery:unit": "node --test scripts/run-rfc64-m0-recovery-scenario.test.mjs",
-    "test:rfc64-remote-canary:unit": "node --test devnet/rfc64-remote-canary/certify.test.mjs",
+    "test:rfc64-remote-canary:unit": "node --import tsx --test devnet/rfc64-remote-canary/*.test.mjs",
     "test:types": "tsc --project tsconfig.type-tests.json",
     "test:package-root": "node scripts/test-package-root.mjs",
     "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs agent",
@@ -154,6 +154,8 @@
     "@opentelemetry/sdk-metrics": "^2.8.0",
     "@types/js-yaml": "^4.0.9",
     "@vitest/coverage-v8": "^4.0.18",
+    "ajv": "8.18.0",
+    "ajv-formats": "3.0.1",
     "vitest": "^4.0.18"
   },
   "publishConfig": {

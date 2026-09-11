@@ -36,9 +36,13 @@ into a pass.
   cursor/digest parity is always checked, but without an application-level VM
   assertion the result remains `INCOMPLETE` rather than treating status alone
   as proof that VM data is queryable.
-- Configured ASK evidence must contain a non-empty, data-dependent triple
-  pattern with at least one concrete IRI or literal. Tautologies such as
-  `ASK {}` are rejected before any node is contacted.
+- Configured ASK evidence is restricted to a non-empty mandatory basic graph
+  pattern with at least one concrete IRI or literal. Control constructs such
+  as `BIND`, `OPTIONAL`, `UNION`, and tautologies such as `ASK {}` are rejected
+  before any node is contacted.
+- The unauthorized probe always runs without credentials; the revoked probe
+  always runs as the configured node. These authentication modes are bound to
+  their semantic roles during configuration validation.
 - Each CG also needs a read-only `catalogSwmAskSparql` for a pre-existing asset
   represented by its catalog. The runner checks it on both source and receiver
   after the receiver restart and parity phase. This is deliberately distinct
@@ -203,7 +207,7 @@ redacted plan without reading secrets, opening a network connection, or
 executing a command.
 
 ```sh
-node packages/agent/devnet/rfc64-remote-canary/run.mjs \
+node --import tsx packages/agent/devnet/rfc64-remote-canary/run.mjs \
   --config /absolute/path/to/canary.json \
   --artifact /absolute/path/to/certificate.json \
   --dry-run

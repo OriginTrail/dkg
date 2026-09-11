@@ -14,7 +14,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ARTIFACT = join(HERE, 'artifacts', 'latest.json');
 
 function usage() {
-  return 'Usage: node run.mjs --config /absolute/config.json [--artifact /absolute/result.json] [--dry-run]';
+  return 'Usage: node --import tsx run.mjs --config /absolute/config.json [--artifact /absolute/result.json] [--dry-run]';
 }
 
 function parseArgs(argv) {
