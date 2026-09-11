@@ -154,10 +154,11 @@ The lifecycle wrapper is operator supplied. It must target only the configured
 receiver and use an SSH agent or credential file outside the JSON; the runner
 does not accept an environment block or inline credential. An HTTP denial
 probe, when a read-only daemon surface exists, accepts only `GET` or
-`POST /api/query` and only 401/403/404 as denial outcomes. A 404 additionally
-requires an RFC-64-specific response code and `notFoundControlNodeId`; the same
-request must succeed with that control node's bearer credential, preventing a
-misspelled route from certifying a denial. Previously committed
+`POST /api/query` and only 401/403/404 as denial outcomes. Every accepted denial
+must include a configured RFC-64-specific response code. A 404 additionally
+requires `notFoundControlNodeId`; the same request must succeed with that
+control node's bearer credential, preventing a misspelled route from certifying
+a denial. Previously committed
 local data remaining queryable after revocation is not itself a denial failure:
 revocation is expected to block subsequent network reads, not erase history.
 

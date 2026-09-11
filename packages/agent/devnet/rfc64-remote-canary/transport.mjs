@@ -5,9 +5,10 @@ import { spawn } from 'node:child_process';
 import {
   MAX_COMMAND_OUTPUT_BYTES,
   MAX_HTTP_BODY_BYTES,
+  RemoteCanaryError,
   failure,
 } from './common.mjs';
-import { validateCommandV1 } from './config.mjs';
+import { validateCommandV1 } from './command-policy.mjs';
 
 export async function runBoundedCommandV1(command, timeoutMs = 60_000) {
   validateCommandV1(command);
@@ -97,7 +98,7 @@ export function createRequesterV1({ fetchFn, readFileFn, secrets, timing }) {
       const text = await readBodyBoundedV1(response, controller.signal);
       return Object.freeze({ status: response.status, text });
     } catch (error) {
-      if (error?.code === 'node-response-too-large') throw error;
+      if (error instanceof RemoteCanaryError) throw error;
       throw failure('node-request-failed', 'http', error);
     } finally {
       clearTimeout(timer);
@@ -117,8 +118,9 @@ export function createRequesterV1({ fetchFn, readFileFn, secrets, timing }) {
       try {
         await raw(node, 'HEAD', '/api/status');
         return true;
-      } catch {
-        return false;
+      } catch (error) {
+        if (error instanceof RemoteCanaryError && error.code === 'node-request-failed') return false;
+        throw error;
       }
     },
   });

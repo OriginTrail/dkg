@@ -13,7 +13,7 @@ import {
   pollUntilV1,
 } from './phase-helpers.mjs';
 import { operationalStatusV1 } from './preflight.mjs';
-import { askConfiguredQueryV1 } from './swm.mjs';
+import { askConfiguredQueryV1 } from './query.mjs';
 
 export function verifyVmParityV1({ config, request, sleep }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {

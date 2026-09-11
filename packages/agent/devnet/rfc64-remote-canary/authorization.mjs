@@ -25,12 +25,10 @@ async function runAuthorizationCheckV1(check, request) {
   if (!check.expectedStatuses.includes(response.status)) {
     throw failure('authorization-denial-status-mismatch', 'authorization');
   }
-  if (check.bodyCodePointer !== undefined) {
-    const body = parseResponseJsonV1(response, 'authorization-response-malformed');
-    const code = jsonPointer(body, check.bodyCodePointer);
-    if (!check.expectedCodes.includes(code)) {
-      throw failure('authorization-denial-code-mismatch', 'authorization');
-    }
+  const body = parseResponseJsonV1(response, 'authorization-response-malformed');
+  const code = jsonPointer(body, check.bodyCodePointer);
+  if (!check.expectedCodes.includes(code)) {
+    throw failure('authorization-denial-code-mismatch', 'authorization');
   }
   if (response.status === 404) {
     const control = await request.raw(

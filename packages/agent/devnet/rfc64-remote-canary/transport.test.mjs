@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { MAX_COMMAND_OUTPUT_BYTES, RemoteCanaryError } from './common.mjs';
-import { runBoundedCommandV1 } from './transport.mjs';
+import { createRequesterV1, runBoundedCommandV1 } from './transport.mjs';
 
 test('bounded commands succeed and pass argv literally without a shell', async () => {
   const literal = 'literal;$(printf never-executed)';
@@ -51,5 +51,22 @@ test('bounded commands reject spawn failures', async () => {
   await assert.rejects(
     runBoundedCommandV1({ argv: ['/definitely/missing-rfc64-command'] }),
     (error) => error instanceof RemoteCanaryError && error.code === 'command-start-failed',
+  );
+});
+
+test('reachability does not misclassify credential failures as an offline node', async () => {
+  const request = createRequesterV1({
+    fetchFn: async () => new Response(null, { status: 200 }),
+    readFileFn: async () => { throw new Error('missing'); },
+    secrets: new Map(),
+    timing: { requestTimeoutMs: 1_000 },
+  });
+  await assert.rejects(
+    request.reachable({
+      id: 'receiver',
+      baseUrl: 'https://receiver.invalid',
+      auth: { kind: 'bearer-file', secretFile: '/missing' },
+    }),
+    (error) => error instanceof RemoteCanaryError && error.code === 'auth-secret-read-failed',
   );
 });

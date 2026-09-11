@@ -13,6 +13,7 @@ import {
   invalid,
   opaqueRef,
 } from './common.mjs';
+import { validateCommandV1 } from './command-policy.mjs';
 
 const DEFAULT_TIMING = Object.freeze({
   requestTimeoutMs: 10_000,
@@ -34,14 +35,9 @@ const configSchema = JSON.parse(readFileSync(
   new URL('./config.schema.json', import.meta.url),
   'utf8',
 ));
-const rpcEvidenceSchema = JSON.parse(readFileSync(
-  new URL('./rpc-usage-evidence.schema.json', import.meta.url),
-  'utf8',
-));
 const schemaValidator = new Ajv2020({ allErrors: false, strict: true });
 addFormats(schemaValidator);
 const matchesRemoteCanaryConfigV1 = schemaValidator.compile(configSchema);
-const matchesRpcEvidenceV1 = schemaValidator.compile(rpcEvidenceSchema);
 const sparqlParser = new SparqlParser();
 
 /**
@@ -133,25 +129,6 @@ export function createRemoteCanaryCohortRefV1(config) {
   }));
 }
 
-export function assertRpcEvidenceShapeV1(evidence) {
-  if (!matchesRpcEvidenceV1(evidence)) {
-    throw new Error('rpc-evidence-malformed');
-  }
-}
-
-export function validateCommandV1(value) {
-  for (const arg of value.argv) {
-    if (
-      /(?:^|[=\s])authorization\s*:\s*(?:bearer|basic)\s+\S+/iu.test(arg)
-      || /:\/\/[^/@:]+:[^/@]+@/u.test(arg)
-      || /^--?(?:user|password|passwd|token|api[-_]?key|secret|authorization)(?:=|$)/iu.test(arg)
-      || /^-(?:u|U)(?:.+)?$/u.test(arg)
-      || /^(?:[A-Z0-9_]*_)?(?:PASSWORD|PASSWD|TOKEN|SECRET|API_KEY|AUTHORIZATION)=.+$/iu.test(arg)
-    ) invalid('inline-command-secret-rejected');
-  }
-  return Object.freeze({ argv: Object.freeze([...value.argv]) });
-}
-
 function validateSecretFile(value) {
   if (!isAbsolute(value)) invalid('auth-secret-file-must-be-absolute');
   return value;
@@ -203,14 +180,11 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
     invalid('authorization-post-must-be-read-only-query');
   }
   if (value.body !== undefined) assertJsonData(value.body, 'authorization-body');
-  if ((value.bodyCodePointer === undefined) !== (value.expectedCodes === undefined)) {
-    invalid('authorization-code-pair');
-  }
-  if (value.expectedCodes?.some((code) => !/^RFC64_[A-Z0-9_]+$/u.test(code))) {
+  if (value.expectedCodes.some((code) => !/^RFC64_[A-Z0-9_]+$/u.test(code))) {
     invalid('authorization-code-not-rfc64-specific');
   }
   if (value.expectedStatuses.includes(404)) {
-    if (value.bodyCodePointer === undefined || value.notFoundControlNodeId === undefined) {
+    if (value.notFoundControlNodeId === undefined) {
       invalid('authorization-404-requires-code-and-control');
     }
     const controlNode = nodeById.get(value.notFoundControlNodeId);
@@ -229,9 +203,7 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
     node,
     ...(notFoundControlNode === undefined ? {} : { notFoundControlNode }),
     expectedStatuses: Object.freeze([...new Set(value.expectedStatuses)]),
-    ...(value.expectedCodes === undefined
-      ? {}
-      : { expectedCodes: Object.freeze([...new Set(value.expectedCodes)]) }),
+    expectedCodes: Object.freeze([...new Set(value.expectedCodes)]),
   });
 }
 
@@ -278,7 +250,7 @@ function validateAskSparql(value, label) {
     || patterns.some((pattern) => pattern.subType !== 'bgp' || pattern.triples.length === 0)
     || triples.length === 0
     || !triples.some((triple) => [triple.subject, triple.predicate, triple.object].some(
-      (term) => term?.subType !== 'variable',
+      (term) => term?.type === 'term' && ['namedNode', 'literal'].includes(term.subType),
     ))
   ) invalid(`${label}-query-must-depend-on-data`);
 }
