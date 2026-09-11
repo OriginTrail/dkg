@@ -175,8 +175,6 @@ describe('Rfc64CatalogResponsibilityRegistryV1', () => {
       contextGraphModes: { canary: 'shadow' },
     });
 
-    expect(registry.shadowContextGraphIds()).toEqual(['canary']);
-
     registry.setResponsibility('canary', 'edge-subscription');
     registry.setResponsibility('existing-unlisted', 'edge-subscription');
     registry.setResponsibility('later-discovered', 'core-public');
@@ -193,27 +191,18 @@ describe('Rfc64CatalogResponsibilityRegistryV1', () => {
         selectionSource: 'operator-override',
       });
     }
-    expect(registry.shadowContextGraphIds()).toEqual(['canary']);
   });
 
-  it('projects live responsibilities inherited from a shadow default', () => {
+  it('projects live responsibility modes inherited from a shadow default', () => {
     const registry = new Rfc64CatalogResponsibilityRegistryV1({ defaultMode: 'shadow' });
 
-    expect(registry.shadowContextGraphIds()).toEqual([]);
     registry.setResponsibility('discovered', 'edge-subscription');
-    expect(registry.shadowContextGraphIds()).toEqual(['discovered']);
-    registry.setResponsibility('discovered', null);
-    expect(registry.shadowContextGraphIds()).toEqual([]);
-  });
-
-  it('retains manifest-selected shadow scope before lifecycle discovery', () => {
-    const registry = new Rfc64CatalogResponsibilityRegistryV1({
-      defaultMode: 'shadow',
-      selectedShadowContextGraphIds: ['selected'],
+    expect(registry.read('discovered')).toMatchObject({
+      responsible: true,
+      mode: 'shadow',
     });
-
+    registry.setResponsibility('discovered', null);
     expect(registry.snapshot()).toEqual([]);
-    expect(registry.shadowContextGraphIds()).toEqual(['selected']);
   });
 
   it('makes the kill switch visible without silently changing the desired mode', () => {

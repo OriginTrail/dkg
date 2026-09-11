@@ -2,7 +2,12 @@
 
 /** Fixed-cardinality, privacy-safe evidence for an RFC-64 shadow rollout. */
 
-import type { Rfc64CatalogRolloutModeV1 } from './catalog-rollout-authority-v1.js';
+import type {
+  Rfc64CatalogExecutionPlanV1,
+  Rfc64CatalogRolloutModeV1,
+} from './catalog-rollout-authority-v1.js';
+import type { Rfc64CatalogResponsibilitySelectionV1 } from
+  './catalog-responsibility-registry-v1.js';
 import type { Rfc64PublicCatalogReceiverCompletionOutcomeV1 } from
   './public-catalog-reconciliation-outcome-v1.js';
 
@@ -68,77 +73,123 @@ interface Rfc64CatalogShadowReceiverCompletionStateV1 {
   readonly overflow: MutableRfc64CatalogShadowReceiverCompletionCountersV1;
 }
 
-const shadowReceiverCompletionsByOwnerV1 = new WeakMap<
-  object,
-  Rfc64CatalogShadowReceiverCompletionStateV1
->();
-
 function incrementBoundedCounterV1(value: number): number {
   return Math.min(MAX_SAFE_COUNTER_V1, value + 1);
 }
 
-/**
- * Record one actual receiver terminal event. The tracker is process-local,
- * bounded by CG count, and never exposes the identifiers it uses to scope
- * counters. Recording at this boundary preserves an apply violation even if a
- * higher-level bootstrap classifier subsequently reports the target as failed.
- */
-export function observeRfc64CatalogShadowReceiverCompletionV1(
-  owner: object,
-  contextGraphId: string,
-  mode: Rfc64CatalogRolloutModeV1,
-  outcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1,
-): void {
-  if (mode !== 'shadow') return;
-  let state = shadowReceiverCompletionsByOwnerV1.get(owner);
-  if (state === undefined) {
-    state = {
-      byContextGraph: new Map(),
-      overflow: emptyReceiverCompletionCountersV1(),
-    };
-    shadowReceiverCompletionsByOwnerV1.set(owner, state);
-  }
-  let counters = state.byContextGraph.get(contextGraphId);
-  if (counters === undefined) {
-    if (state.byContextGraph.size >= MAX_TRACKED_SHADOW_CONTEXT_GRAPHS_V1) {
-      counters = state.overflow;
-    } else {
-      counters = emptyReceiverCompletionCountersV1();
-      state.byContextGraph.set(contextGraphId, counters);
-    }
-  }
-  counters.trackedTargets = incrementBoundedCounterV1(counters.trackedTargets);
-  if (outcome === 'staged-only') {
-    counters.staged = incrementBoundedCounterV1(counters.staged);
-  } else if (outcome === 'not-found') {
-    counters.notFound = incrementBoundedCounterV1(counters.notFound);
-  } else if (outcome === 'applied') {
-    counters.authoritativeApplyCount = incrementBoundedCounterV1(
-      counters.authoritativeApplyCount,
-    );
-  } else if (outcome === 'failed' || outcome === 'dropped' || outcome === 'closed') {
-    counters.failed = incrementBoundedCounterV1(counters.failed);
-  }
+export type Rfc64CatalogShadowTerminalEventV1 = Readonly<{
+  readonly kind: 'receiver-completed';
+  readonly contextGraphId: string;
+  readonly outcome: Rfc64PublicCatalogReceiverCompletionOutcomeV1;
+}>;
+
+export interface Rfc64CatalogShadowObservabilityRuntimeOptionsV1 {
+  readonly executionPlan: Rfc64CatalogExecutionPlanV1;
+  readonly readResponsibilities: () => readonly Rfc64CatalogResponsibilitySelectionV1[];
 }
 
-/** Aggregate cumulative receiver evidence for the current canonical shadow scope. */
-export function readRfc64CatalogShadowReceiverCompletionCountersV1(
-  owner: object,
-  shadowContextGraphIds: readonly string[],
-): Readonly<Rfc64CatalogShadowReceiverCompletionCountersV1> {
-  const totals = emptyReceiverCompletionCountersV1();
-  const state = shadowReceiverCompletionsByOwnerV1.get(owner);
-  if (state !== undefined) {
+export type Rfc64CatalogShadowObservabilitySnapshotInputV1 = Omit<
+  ProjectRfc64CatalogShadowExecutionStatusInputV1,
+  'shadowContextGraphIds' | 'receiverCompletions'
+>;
+
+/**
+ * Agent-owned shadow lifecycle evidence. This runtime owns both the canonical
+ * live shadow scope and all receiver terminal accounting, so transport and
+ * responsibility code never need to coordinate observability state.
+ */
+export class Rfc64CatalogShadowObservabilityRuntimeV1 {
+  readonly #executionPlan: Rfc64CatalogExecutionPlanV1;
+  readonly #readResponsibilities:
+    Rfc64CatalogShadowObservabilityRuntimeOptionsV1['readResponsibilities'];
+  readonly #receiverCompletions: Rfc64CatalogShadowReceiverCompletionStateV1 = {
+    byContextGraph: new Map(),
+    overflow: emptyReceiverCompletionCountersV1(),
+  };
+
+  constructor(options: Rfc64CatalogShadowObservabilityRuntimeOptionsV1) {
+    this.#executionPlan = options.executionPlan;
+    this.#readResponsibilities = options.readResponsibilities;
+  }
+
+  /**
+   * Record one actual terminal event. Filtering happens here against the
+   * current runtime-owned scope; callers cannot accidentally provide a stale
+   * or independently-derived rollout mode.
+   */
+  recordTerminalEvent(event: Rfc64CatalogShadowTerminalEventV1): void {
+    if (!this.#shadowContextGraphIds().includes(event.contextGraphId)) return;
+    let counters = this.#receiverCompletions.byContextGraph.get(event.contextGraphId);
+    if (counters === undefined) {
+      if (
+        this.#receiverCompletions.byContextGraph.size
+        >= MAX_TRACKED_SHADOW_CONTEXT_GRAPHS_V1
+      ) {
+        counters = this.#receiverCompletions.overflow;
+      } else {
+        counters = emptyReceiverCompletionCountersV1();
+        this.#receiverCompletions.byContextGraph.set(event.contextGraphId, counters);
+      }
+    }
+    counters.trackedTargets = incrementBoundedCounterV1(counters.trackedTargets);
+    if (event.outcome === 'staged-only') {
+      counters.staged = incrementBoundedCounterV1(counters.staged);
+    } else if (event.outcome === 'not-found') {
+      counters.notFound = incrementBoundedCounterV1(counters.notFound);
+    } else if (event.outcome === 'applied') {
+      counters.authoritativeApplyCount = incrementBoundedCounterV1(
+        counters.authoritativeApplyCount,
+      );
+    } else if (
+      event.outcome === 'failed'
+      || event.outcome === 'dropped'
+      || event.outcome === 'closed'
+    ) {
+      counters.failed = incrementBoundedCounterV1(counters.failed);
+    }
+  }
+
+  /** Canonical configured-and-live scope, owned independently of responsibility. */
+  #shadowContextGraphIds(): readonly string[] {
+    const contextGraphIds = new Set<string>();
+    for (const [contextGraphId, authority] of Object.entries(
+      this.#executionPlan.selectedAuthority,
+    )) {
+      if (authority.mode === 'shadow') contextGraphIds.add(contextGraphId);
+    }
+    for (const [contextGraphId, mode] of Object.entries(
+      this.#executionPlan.contextGraphModes,
+    )) {
+      if (mode === 'shadow') contextGraphIds.add(contextGraphId);
+    }
+    for (const responsibility of this.#readResponsibilities()) {
+      if (responsibility.mode === 'shadow') {
+        contextGraphIds.add(responsibility.contextGraphId);
+      }
+    }
+    return Object.freeze([...contextGraphIds].sort());
+  }
+
+  /** One fixed-cardinality, privacy-safe snapshot for the whole shadow lifecycle. */
+  snapshot(
+    input: Readonly<Rfc64CatalogShadowObservabilitySnapshotInputV1>,
+  ): Readonly<Rfc64CatalogShadowExecutionStatusV1> | null {
+    const shadowContextGraphIds = this.#shadowContextGraphIds();
+    const totals = emptyReceiverCompletionCountersV1();
     for (const contextGraphId of new Set(shadowContextGraphIds)) {
-      const counters = state.byContextGraph.get(contextGraphId);
+      const counters = this.#receiverCompletions.byContextGraph.get(contextGraphId);
       if (counters === undefined) continue;
       addReceiverCompletionCountersV1(totals, counters);
     }
     if (shadowContextGraphIds.length > 0) {
-      addReceiverCompletionCountersV1(totals, state.overflow);
+      addReceiverCompletionCountersV1(totals, this.#receiverCompletions.overflow);
     }
+    return projectRfc64CatalogShadowExecutionStatusV1({
+      ...input,
+      shadowContextGraphIds,
+      receiverCompletions: Object.freeze(totals),
+    });
   }
-  return Object.freeze(totals);
 }
 
 function emptyReceiverCompletionCountersV1(
@@ -279,7 +330,7 @@ export function sanitizeRfc64CatalogShadowExecutionStatusV1(
  * object digests, UALs, or error strings. The output has a fixed schema and is
  * therefore safe for the public, frequently-polled daemon status route.
  */
-export function projectRfc64CatalogShadowExecutionStatusV1(
+function projectRfc64CatalogShadowExecutionStatusV1(
   input: Readonly<ProjectRfc64CatalogShadowExecutionStatusInputV1>,
 ): Readonly<Rfc64CatalogShadowExecutionStatusV1> | null {
   const shadowContextGraphIds = new Set(input.shadowContextGraphIds);

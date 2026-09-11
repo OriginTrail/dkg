@@ -19,8 +19,6 @@ export interface Rfc64CatalogResponsibilityRegistryControlsV1 {
   readonly defaultMode?: Rfc64CatalogRolloutModeV1;
   /** Explicit, restart-stable per-CG emergency rollout overrides. */
   readonly contextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
-  /** Manifest-selected shadow authorities, including inherited defaults. */
-  readonly selectedShadowContextGraphIds?: readonly string[];
   /** Emergency stop. It suspends Track-2 without silently selecting legacy. */
   readonly killSwitchActive?: boolean;
 }
@@ -94,19 +92,12 @@ export class Rfc64CatalogResponsibilityRegistryV1 {
   readonly #defaultMode: Rfc64CatalogRolloutModeV1;
   readonly #contextGraphModes: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
   readonly #killSwitchActive: boolean;
-  readonly #selectedShadowContextGraphIds: readonly string[];
   readonly #responsibilities = new Map<string, Rfc64CatalogResponsibilityReasonV1>();
 
   constructor(controls: Rfc64CatalogResponsibilityRegistryControlsV1 = {}) {
     this.#defaultMode = controls.defaultMode ?? 'catalog';
     assertRfc64CatalogRolloutModeV1(this.#defaultMode, 'defaultMode');
     this.#contextGraphModes = snapshotContextGraphModesV1(controls.contextGraphModes);
-    this.#selectedShadowContextGraphIds = Object.freeze([
-      ...new Set(controls.selectedShadowContextGraphIds ?? []),
-    ].sort());
-    for (const contextGraphId of this.#selectedShadowContextGraphIds) {
-      assertContextGraphIdV1(contextGraphId);
-    }
     if (
       controls.killSwitchActive !== undefined
       && typeof controls.killSwitchActive !== 'boolean'
@@ -174,23 +165,6 @@ export class Rfc64CatalogResponsibilityRegistryV1 {
     );
   }
 
-  /**
-   * Canonical shadow scope for operator evidence. Explicit canaries remain
-   * visible before lifecycle discovery, while an inherited shadow default
-   * contributes only responsibilities the node has actually discovered.
-   */
-  shadowContextGraphIds(): readonly string[] {
-    const contextGraphIds = new Set([
-      ...this.#selectedShadowContextGraphIds,
-      ...Object.entries(this.#contextGraphModes)
-        .filter(([, mode]) => mode === 'shadow')
-        .map(([contextGraphId]) => contextGraphId),
-    ]);
-    for (const contextGraphId of this.#responsibilities.keys()) {
-      if (this.read(contextGraphId).mode === 'shadow') contextGraphIds.add(contextGraphId);
-    }
-    return Object.freeze([...contextGraphIds].sort());
-  }
 }
 
 function snapshotContextGraphModesV1(

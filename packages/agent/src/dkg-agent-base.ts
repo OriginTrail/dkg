@@ -28,6 +28,8 @@ import type { Rfc64CatalogSynchronizationEvidenceV1 } from
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runtime-v1.js';
 import type { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
+import type { Rfc64CatalogShadowObservabilityRuntimeV1 } from
+  './rfc64/catalog-shadow-observability-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
@@ -1227,6 +1229,9 @@ export class DKGAgentBase {
     new Rfc64CatalogMutationCoordinatorV1();
   /** One explicit owner for observer, receiver, supervisor, and mutation lifetimes. */
   protected rfc64CatalogRuntimeV1!: Rfc64CatalogRuntimeV1;
+  /** One agent-owned scope and terminal-evidence boundary for shadow rollout. */
+  protected rfc64CatalogShadowObservabilityV1!:
+    Rfc64CatalogShadowObservabilityRuntimeV1;
   /** Exact process-local post-verification evidence, keyed by applied head. */
   protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
     new Map<string, Rfc64CatalogSynchronizationEvidenceV1>();

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   Rfc64PublicCatalogReceiverV1,
   type Rfc64PublicCatalogLegacyReceiverReconcilerV1,
+  type Rfc64PublicCatalogReceiverTerminalEventV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogHeadSatisfactionCheckV1,
   type Rfc64PublicCatalogReconcileResultV1,
@@ -32,6 +33,17 @@ function announcement(
 
 function headWith(objectDigest: string): Rfc64PublicCatalogHeadAnnouncementV1 {
   return announcement({ catalogHeadObjectDigest: objectDigest as `0x${string}` & string });
+}
+
+function adaptReceiverTerminalEventV1(
+  observer: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    outcome: Rfc64PublicCatalogReceiverTerminalEventV1['outcome'],
+  ) => void,
+): (event: Rfc64PublicCatalogReceiverTerminalEventV1) => void {
+  return ({ announcement: terminalAnnouncement, outcome }) => {
+    observer(terminalAnnouncement, outcome);
+  };
 }
 
 function deferred<T>(): {
@@ -117,7 +129,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     const onCompletion = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
       reconciler(async (peerId) => { appliedPeers.push(peerId); return 'applied'; }),
-      { onHeadApplied, onCompletion },
+      { onHeadApplied, onTerminalEvent: adaptReceiverTerminalEventV1(onCompletion) },
     );
     const head = announcement();
     receiver.schedule(head, 'peerA');
@@ -204,7 +216,12 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
         throw new Error('stale provider');
       }
       return 'applied';
-    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0, onCompletion });
+    }), {
+      maxConcurrent: 1,
+      maxAttempts: 1,
+      retryBackoffMs: 0,
+      onTerminalEvent: adaptReceiverTerminalEventV1(onCompletion),
+    });
 
     receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
     await firstStarted.promise;
@@ -790,7 +807,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       admissionDeferralMs: 60_000,
       isDeferrableError: (error) =>
         error instanceof Error && error.message === 'finalized chain lane busy',
-      onCompletion,
+      onTerminalEvent: adaptReceiverTerminalEventV1(onCompletion),
     });
 
     const activeCompletion = receiver.scheduleManyAndWait([{
@@ -944,7 +961,12 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     const onCompletion = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
       reconciler(async () => gate.promise),
-      { maxConcurrent: 1, maxQueue: 1, onAttemptStart, onCompletion },
+      {
+        maxConcurrent: 1,
+        maxQueue: 1,
+        onAttemptStart,
+        onTerminalEvent: adaptReceiverTerminalEventV1(onCompletion),
+      },
     );
     const running = headWith(`0x${'a1'.repeat(32)}`);
     const queued = headWith(`0x${'a2'.repeat(32)}`);
@@ -987,7 +1009,12 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     const onCompletion = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
       reconciler(async () => { throw new Error('down'); }),
-      { maxAttempts: 2, retryBackoffMs: 1, onError, onCompletion },
+      {
+        maxAttempts: 2,
+        retryBackoffMs: 1,
+        onError,
+        onTerminalEvent: adaptReceiverTerminalEventV1(onCompletion),
+      },
     );
     const head = announcement();
     receiver.schedule(head, 'peerA');
@@ -1186,7 +1213,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peer, _head, signal) => {
       observedSignal = signal;
       return reconcileGate.promise;
-    }), { onCompletion });
+    }), { onTerminalEvent: adaptReceiverTerminalEventV1(onCompletion) });
     const activeHead = announcement();
     receiver.schedule(activeHead, 'peerA');
     await Promise.resolve();
