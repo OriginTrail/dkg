@@ -158,12 +158,18 @@ async function createAgent(manifest, finalizedRuntime) {
       )),
     })
     : canonicalFixture;
-  if (AUTHORITY_FAULT !== undefined && AUTHORITY_FAULT !== 'omit-receiver') {
+  if (
+    AUTHORITY_FAULT !== undefined
+    && AUTHORITY_FAULT !== 'omit-receiver'
+    && AUTHORITY_FAULT !== 'revocation-chain-noop'
+  ) {
     throw new Error('unsupported RFC-64 private authority fault injection');
   }
   let chainRuntime = {};
   if (finalizedRuntime) {
-    chainAdapter = new Rfc64PrivateDevnetChainAdapter(fixture);
+    chainAdapter = new Rfc64PrivateDevnetChainAdapter(fixture, {
+      participantRemovalNoop: AUTHORITY_FAULT === 'revocation-chain-noop',
+    });
     await chainAdapter.createOnChainContextGraph({
       accessPolicy: 1,
       publishPolicy: 0,
@@ -618,6 +624,28 @@ async function revokeReceiver(requestId) {
     roleAgentAddress('receiver'),
     roleAgentAddress('owner'),
   );
+  const onChainContextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
+  const finalizedAuthority = composeRfc64FinalizedCatalogAuthorityV1({
+    networkId: NETWORK_ID,
+    contextGraphId: CONTEXT_GRAPH_ID,
+    snapshot: parseRfc64AuthoritySnapshotV1(
+      await chainAdapter.getContextGraphAuthoritySnapshot(onChainContextGraphId),
+      onChainContextGraphId,
+    ),
+  });
+  const receiverAddress = roleAgentAddress('receiver');
+  if (
+    finalizedAuthority.roster === null
+    || initialFinalizedAuthority?.roster === null
+    || initialFinalizedAuthority?.roster === undefined
+    || BigInt(finalizedAuthority.roster.version)
+      <= BigInt(initialFinalizedAuthority.roster.version)
+    || finalizedAuthority.roster.members.some(
+      ({ agentAddress }) => agentAddress === receiverAddress,
+    )
+  ) {
+    throw new Error('finalized chain roster did not advance the receiver revocation');
+  }
   const authority = await agent.reconcileRfc64CatalogAccessAuthorityV1(
     CONTEXT_GRAPH_ID,
   );
@@ -626,18 +654,27 @@ async function revokeReceiver(requestId) {
   }
   if (
     authority.roster === null
-    || authority.roster.version === '0'
+    || authority.source !== 'finalized-chain'
+    || authority.policyDigest !== finalizedAuthority.policyDigest
+    || canonicalRosterMembersV1(authority.roster)
+      !== canonicalRosterMembersV1(finalizedAuthority.roster)
     || authority.roster.members.some(
-      ({ agentAddress }) => agentAddress === roleAgentAddress('receiver'),
+      ({ agentAddress }) => agentAddress === receiverAddress,
     )
   ) {
-    throw new Error('provider2 did not adopt the finalized receiver revocation');
+    throw new Error('provider2 reconciliation differs from the finalized receiver revocation');
   }
   emit('receiver-revoked', requestId, {
     policyDigest: authority.policyDigest,
     rosterVersion: authority.roster.version,
-    revokedAgentAddress: roleAgentAddress('receiver'),
+    revokedAgentAddress: receiverAddress,
   });
+}
+
+function canonicalRosterMembersV1(roster) {
+  return roster.members.map(({ agentAddress, roles }) => (
+    `${agentAddress}:${[...roles].sort().join(',')}`
+  )).sort().join('\n');
 }
 
 async function seedPrivateCatalogDefinition(created, peerIds) {
