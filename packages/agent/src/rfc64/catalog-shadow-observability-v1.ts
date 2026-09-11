@@ -223,14 +223,13 @@ export interface ProjectRfc64CatalogShadowExecutionStatusInputV1 {
   readonly inFlightInventoryObservers: number;
 }
 
-/**
- * Runtime allow-list for the public DTO. Both agent and CLI use this one owner,
- * so newly added internal fields cannot cross the public status boundary.
- */
+/** CLI-boundary allow-list for unknown or version-skewed status providers. */
 export function sanitizeRfc64CatalogShadowExecutionStatusV1(
-  status: Readonly<Rfc64CatalogShadowExecutionStatusV1> | null,
+  input: unknown,
 ): Readonly<Rfc64CatalogShadowExecutionStatusV1> | null {
-  if (status === null) return null;
+  if (input === null) return null;
+  if (typeof input !== 'object' || Array.isArray(input)) return null;
+  const status = input as Readonly<Rfc64CatalogShadowExecutionStatusV1>;
   return Object.freeze({
     schemaVersion: status.schemaVersion,
     contextGraphCount: status.contextGraphCount,
@@ -296,12 +295,12 @@ export function projectRfc64CatalogShadowExecutionStatusV1(
   const receiver = input.receiverCompletions;
   const inventory = input.inventoryObserver;
 
-  return sanitizeRfc64CatalogShadowExecutionStatusV1({
+  return Object.freeze({
     schemaVersion: 1,
     contextGraphCount: shadowContextGraphIds.size,
     legacyAuthorityRetained: true,
     authoritativeApplyAllowed: false,
-    inventoryObserver: {
+    inventoryObserver: Object.freeze({
       scope: 'process' as const,
       inFlight: input.inFlightInventoryObservers,
       attemptedUpserts: inventory.attemptedUpserts,
@@ -310,8 +309,8 @@ export function projectRfc64CatalogShadowExecutionStatusV1(
       noOpMutations: inventory.existingUpserts + inventory.absentRemovals,
       failedMutations: inventory.failed,
       casRetries: inventory.casRetries,
-    },
-    projectionSupervisor: {
+    }),
+    projectionSupervisor: Object.freeze({
       running: input.projectionSupervisor?.running ?? false,
       passes: input.projectionSupervisor?.pass ?? 0,
       trackedAuthorScopes: repairs.length,
@@ -321,8 +320,8 @@ export function projectRfc64CatalogShadowExecutionStatusV1(
       failed: repairs.filter(({ outcome }) => outcome === 'failed').length,
       lastPassStartedAtMs: input.projectionSupervisor?.lastPassStartedAtMs ?? null,
       lastPassCompletedAtMs: input.projectionSupervisor?.lastPassCompletedAtMs ?? null,
-    },
-    receiverStaging: {
+    }),
+    receiverStaging: Object.freeze({
       running: input.bootstrap?.running ?? false,
       passes: input.bootstrap?.pass ?? 0,
       trackedTargets: receiver.trackedTargets,
@@ -336,6 +335,6 @@ export function projectRfc64CatalogShadowExecutionStatusV1(
       stageOnlyInvariantSatisfied: receiver.authoritativeApplyCount === 0,
       lastPassStartedAtMs: input.bootstrap?.lastPassStartedAtMs ?? null,
       lastPassCompletedAtMs: input.bootstrap?.lastPassCompletedAtMs ?? null,
-    },
+    }),
   });
 }

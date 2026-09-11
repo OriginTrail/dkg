@@ -255,7 +255,6 @@ interface ReceiverTaskV1 extends Rfc64ReceiverLifecycleTaskV1 {
   verifiedCurrentHeadTargetAccepted?: boolean;
   verifiedCurrentHeadTargetToken?: number;
   verifiedCurrentHeadTargetSettled?: boolean;
-  completionObserved?: boolean;
   running?: boolean;
   settled?: boolean;
 }
@@ -347,7 +346,9 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
   /** Every exact head and its queued/deferred/terminal task lifecycle. */
-  readonly #tasks = new Rfc64ReceiverTaskLifecycleV1<ReceiverTaskV1>();
+  readonly #tasks = new Rfc64ReceiverTaskLifecycleV1<ReceiverTaskV1>(
+    (task, result) => this.#observeTaskSettlement(task, result),
+  );
   /** Execution promises only; task state and scope ownership live in #tasks. */
   readonly #active = new Set<Promise<void>>();
   readonly #closing = new AbortController();
@@ -516,7 +517,16 @@ export class Rfc64PublicCatalogReceiverV1 {
       remotePeerId: string;
     }>[],
   ): void {
-    if (this.#closed) return;
+    if (this.#closed) {
+      const observedHeadKeys = new Set<string>();
+      for (const { announcement } of inputs) {
+        const headKey = rfc64ReceiverHeadKeyV1(announcement);
+        if (observedHeadKeys.has(headKey)) continue;
+        observedHeadKeys.add(headKey);
+        this.#observeCompletion(announcement, 'closed');
+      }
+      return;
+    }
     for (const { announcement, remotePeerId } of inputs) {
       this.#scheduled += 1;
       const key = rfc64ReceiverHeadKeyV1(announcement);
@@ -547,6 +557,7 @@ export class Rfc64PublicCatalogReceiverV1 {
       }
       if (!this.#hasAdmissionCapacity()) {
         this.#droppedQueueFull += 1;
+        this.#observeCompletion(announcement, 'dropped');
         continue;
       }
       this.#safeNotify(() => this.#onAttemptStart?.(announcement));
@@ -629,7 +640,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     // queue, so resolve at the scheduling boundary instead of enqueuing a
     // completion that can never settle.
     if (this.#closed) {
-      this.#safeNotify(() => this.#onCompletion?.(inputs[0]!.announcement, 'closed'));
+      this.#observeCompletion(inputs[0]!.announcement, 'closed');
       completion(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
         providerAttempts: 0,
@@ -657,10 +668,6 @@ export class Rfc64PublicCatalogReceiverV1 {
           outcome: 'dropped',
           providerAttempts: task.providerAttempts ?? 0,
         }),
-        (task) => {
-          this.#observeCompletion(task, 'dropped');
-          this.#finishReconciliationAttempt(task);
-        },
         (waiter) => this.#safeNotify(waiter),
       );
       if (evicted) this.#droppedQueueFull += 1;
@@ -673,7 +680,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           'dropped',
         ));
       }
-      this.#safeNotify(() => this.#onCompletion?.(first.announcement, 'dropped'));
+      this.#observeCompletion(first.announcement, 'dropped');
       completion(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'dropped',
         providerAttempts: 0,
@@ -716,11 +723,6 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
       }),
-      (task) => {
-        this.#observeCompletion(task, 'closed');
-        this.#settleVerifiedCurrentHeadTarget(task, 'closed');
-        this.#finishReconciliationAttempt(task);
-      },
       (waiter) => this.#safeNotify(waiter),
     );
     if (this.#isIdle()) this.#resolveIdle();
@@ -743,11 +745,6 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: task.providerAttempts ?? 0,
       }),
-      (task) => {
-        this.#observeCompletion(task, 'closed');
-        this.#settleVerifiedCurrentHeadTarget(task, 'closed');
-        this.#finishReconciliationAttempt(task);
-      },
       (waiter) => this.#safeNotify(waiter),
     );
     this.#closing.abort(new Error('RFC-64 public catalog receiver closing'));
@@ -1120,10 +1117,6 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: candidate.providerAttempts ?? 0,
       }),
-      (candidate) => {
-        this.#observeCompletion(candidate, 'closed');
-        this.#finishReconciliationAttempt(candidate);
-      },
       (waiter) => this.#safeNotify(waiter),
     );
   }
@@ -1132,25 +1125,31 @@ export class Rfc64PublicCatalogReceiverV1 {
     task: ReceiverTaskV1,
     result: Rfc64PublicCatalogReceiverCompletionV1,
   ): void {
-    this.#observeCompletion(task, result.outcome);
-    this.#settleVerifiedCurrentHeadTarget(task, result.outcome);
     this.#tasks.finalize(
       task,
       result,
-      (settledTask) => this.#finishReconciliationAttempt(settledTask),
       (waiter) => this.#safeNotify(waiter),
     );
   }
 
   #observeCompletion(
-    task: ReceiverTaskV1,
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'],
   ): void {
-    if (task.completionObserved === true) return;
-    task.completionObserved = true;
+    this.#safeNotify(() => this.#onCompletion?.(announcement, outcome));
+  }
+
+  /** Single terminal hook for every accepted task lifecycle. */
+  #observeTaskSettlement(
+    task: ReceiverTaskV1,
+    result: Rfc64PublicCatalogReceiverCompletionV1,
+  ): void {
     const firstProvider = task.providers.values().next().value;
-    if (firstProvider === undefined) return;
-    this.#safeNotify(() => this.#onCompletion?.(firstProvider.announcement, outcome));
+    if (firstProvider !== undefined) {
+      this.#observeCompletion(firstProvider.announcement, result.outcome);
+    }
+    this.#settleVerifiedCurrentHeadTarget(task, result.outcome);
+    this.#finishReconciliationAttempt(task);
   }
 
   #settleVerifiedCurrentHeadTarget(

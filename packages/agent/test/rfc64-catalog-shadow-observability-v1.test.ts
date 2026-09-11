@@ -339,6 +339,64 @@ describe('RFC-64 catalog shadow observability projection', () => {
     await receiver.close();
   });
 
+  it('records a distinct ambient head dropped before task creation', async () => {
+    const owner = {};
+    let release!: (outcome: 'not-found') => void;
+    const gate = new Promise<'not-found'>((resolve) => { release = resolve; });
+    const head = (version: string) => ({
+      kind: 'dkg/rfc64/public-catalog/head-announcement/v1',
+      networkId: 'otp:20430',
+      contextGraphId: SHADOW_CG,
+      subGraphName: null,
+      authorAddress: PRIVATE_AUTHOR,
+      catalogEra: '0',
+      catalogVersion: version,
+      policyDigest: `0x${'11'.repeat(32)}`,
+      catalogHeadObjectDigest: `0x${version.padStart(64, '0')}`,
+      signatureVariantDigest: `0x${'22'.repeat(32)}`,
+    }) as never;
+    const receiver = new Rfc64PublicCatalogReceiverV1({
+      isHeadSatisfied: async () => false,
+      reconcileHead: async () => gate,
+    }, {
+      maxConcurrent: 1,
+      maxQueue: 1,
+      onCompletion: (announcement, outcome) => {
+        observeRfc64CatalogShadowReceiverCompletionV1(
+          owner,
+          announcement.contextGraphId,
+          'shadow',
+          outcome,
+        );
+      },
+    });
+
+    receiver.schedule(head('1'), PRIVATE_PROVIDER);
+    receiver.schedule(head('2'), PRIVATE_PROVIDER);
+    receiver.schedule(head('3'), PRIVATE_PROVIDER);
+
+    expect(readRfc64CatalogShadowReceiverCompletionCountersV1(owner, [SHADOW_CG]))
+      .toEqual({
+        trackedTargets: 1,
+        staged: 0,
+        notFound: 0,
+        failed: 1,
+        authoritativeApplyCount: 0,
+      });
+
+    release('not-found');
+    await receiver.whenIdle();
+    expect(readRfc64CatalogShadowReceiverCompletionCountersV1(owner, [SHADOW_CG]))
+      .toEqual({
+        trackedTargets: 3,
+        staged: 0,
+        notFound: 2,
+        failed: 1,
+        authoritativeApplyCount: 0,
+      });
+    await receiver.close();
+  });
+
   it('retains conservative apply evidence after the bounded CG tracker fills', () => {
     const owner = {};
     for (let index = 0; index < 1_024; index += 1) {

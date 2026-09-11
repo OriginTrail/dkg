@@ -4136,7 +4136,60 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await expect(DKGAgent.create({
       name: 'ephemeral-explicit-catalog-is-invalid',
       rfc64CatalogActivation: { enabled: true },
-    })).rejects.toThrow(/RFC-64 catalog mode requires dataDir/u);
+    })).rejects.toThrow(/RFC-64 Track-2 mode requires dataDir/u);
+  });
+
+  it.each([
+    {
+      name: 'ephemeral-shadow-default-is-invalid',
+      activation: { rollout: { defaultMode: 'shadow' as const } },
+    },
+    {
+      name: 'ephemeral-shadow-canary-is-invalid',
+      activation: {
+        rollout: {
+          defaultMode: 'legacy' as const,
+          contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' as const },
+        },
+      },
+    },
+    {
+      name: 'ephemeral-catalog-canary-is-invalid',
+      activation: {
+        rollout: {
+          defaultMode: 'legacy' as const,
+          contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' as const },
+        },
+      },
+    },
+  ])('rejects $name before constructing an ephemeral Track-2 runtime', async ({
+    name,
+    activation,
+  }) => {
+    await expect(DKGAgent.create({
+      name,
+      rfc64CatalogActivation: activation,
+    })).rejects.toThrow(/RFC-64 Track-2 mode requires dataDir/u);
+  });
+
+  it('preserves explicit all-legacy operation without persistence', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ephemeral-explicit-legacy-is-valid',
+      rfc64CatalogActivation: {
+        enabled: true,
+        rollout: {
+          defaultMode: 'legacy',
+          contextGraphModes: { [CONTEXT_GRAPH_ID]: 'legacy' },
+        },
+      },
+    });
+    agents.push(agent);
+
+    expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      track2ContextGraphs: [],
+      standaloneTrack2Enabled: false,
+    });
   });
 
   it('rejects selected activation bootstrap without persistence before node startup', async () => {
