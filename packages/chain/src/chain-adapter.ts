@@ -1210,8 +1210,8 @@ export interface ChainAdapter {
 
   /**
    * Optional explicit capability for daemon-local authority-index revisions.
-   * Unlike the broad adapter method, presence means a local index is bound and
-   * every read either returns revisions or rejects.
+   * Presence means a local index is bound; every read either returns revisions
+   * or rejects, while absence selects the caller's unsupported path.
    */
   readonly contextGraphAuthorityIndexRevisionReader?:
     ContextGraphAuthorityIndexRevisionReader;
