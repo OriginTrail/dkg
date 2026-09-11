@@ -4353,20 +4353,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         options,
       ).map((peer) => peer.toString()),
       preparePeer: async (peerId, signal) => {
+        // Declined admission and a missing sync protocol are expected peer
+        // outcomes; the traversal records them as skips, not failures.
         if (!(await this.ensurePeerAdmittedForRecovery(
           peerId,
           ctx,
           'Random Sampling exact repair peer',
           signal,
-        ))) throw new NetworkAdmissionRejectedError(peerId);
+        ))) return { kind: 'skipped', reason: 'not-admitted' };
         await this.ensurePeerConnected(peerId, { signal });
         if (!(await this.waitForSyncProtocol(peerId, signal))) {
-          throw Object.assign(
-            new Error(`Peer ${peerId} does not advertise ${PROTOCOL_SYNC}`),
-            { code: 'SYNC_PROTOCOL_UNAVAILABLE' },
-          );
+          return { kind: 'skipped', reason: 'sync-protocol-unavailable' };
         }
-        return true;
+        return { kind: 'ready' };
       },
       fetchExactKnowledgeAsset: async (
         peerId,

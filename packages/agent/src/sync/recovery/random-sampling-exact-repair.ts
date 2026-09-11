@@ -5,7 +5,11 @@ import {
 } from '@origintrail-official/dkg-random-sampling';
 import { buildReconciledKnowledgeAssetUal } from '../../ka-identity.js';
 import type { ExactAssetCommitment } from '../exact-assets.js';
-import { runBoundedPreparedPeerTraversal } from '../prepared-peer-traversal.js';
+import {
+  describePreparedPeerAttempt,
+  runBoundedPreparedPeerTraversal,
+  type PreparedPeerPreparation,
+} from '../prepared-peer-traversal.js';
 
 export interface RandomSamplingExactRepairInput {
   readonly kaId: bigint;
@@ -43,7 +47,7 @@ export interface RandomSamplingExactRepairDependencies {
     peerIds: string[],
     options: { readonly maxPeers: number; readonly peerRotationKey: string },
   ): string[];
-  preparePeer(peerId: string, signal: AbortSignal): Promise<boolean>;
+  preparePeer(peerId: string, signal: AbortSignal): Promise<PreparedPeerPreparation>;
   fetchExactKnowledgeAsset(
     peerId: string,
     localContextGraphId: string,
@@ -66,15 +70,6 @@ function abortReason(signal: AbortSignal): Error {
 
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortReason(signal);
-}
-
-function compactPeerError(error: unknown): string {
-  const code = typeof error === 'object' && error !== null && 'code' in error
-    ? String((error as { code?: unknown }).code ?? '')
-    : '';
-  const message = error instanceof Error ? error.message : String(error);
-  const detail = code ? `${code}:${message}` : message;
-  return detail.replace(/\s+/g, ' ').slice(0, 72);
 }
 
 /**
@@ -110,7 +105,6 @@ async function executeRandomSamplingExactRepair(
   if (candidatePeerIds.length === 0) {
     throw new Error(`Random Sampling repair found no providers for ${localContextGraphId}`);
   }
-  const peerDiagnostics: string[] = [];
   const traversal = await runBoundedPreparedPeerTraversal<RandomSamplingExactRepairResult>({
     candidatePeerIds,
     // Keep each proof repair bounded while the keyed peer window advances
@@ -124,19 +118,8 @@ async function executeRandomSamplingExactRepair(
       maxPeers,
       peerRotationKey: `rs-proof:${localContextGraphId}`,
     }),
-    preparePeer: async (peerId) => {
-      const shortPeerId = peerId.slice(-8);
-      try {
-        const prepared = await deps.preparePeer(peerId, signal);
-        if (!prepared) peerDiagnostics.push(`${shortPeerId}=unprepared`);
-        return prepared;
-      } catch (error) {
-        peerDiagnostics.push(`${shortPeerId}=prepare:${compactPeerError(error)}`);
-        throw error;
-      }
-    },
+    preparePeer: (peerId) => deps.preparePeer(peerId, signal),
     attemptPeer: async (peerId) => {
-      const shortPeerId = peerId.slice(-8);
       let result: RandomSamplingExactRepairResult;
       try {
         result = await deps.fetchExactKnowledgeAsset(
@@ -147,12 +130,8 @@ async function executeRandomSamplingExactRepair(
         );
       } catch (error) {
         if (signal.aborted) throw abortReason(signal);
-        peerDiagnostics.push(`${shortPeerId}=error:${compactPeerError(error)}`);
         return { kind: 'continue', error };
       }
-      peerDiagnostics.push(
-        `${shortPeerId}=${result.kind === 'found' ? 'found' : result.disposition}`,
-      );
       deps.logInfo(
         `RS exact repair for ${assetUal} from ${peerId.slice(-8)}: `
           + (result.kind === 'found'
@@ -161,7 +140,7 @@ async function executeRandomSamplingExactRepair(
       );
       return result.kind === 'found'
         ? { kind: 'done', result }
-        : { kind: 'continue' };
+        : { kind: 'continue', reason: result.disposition };
     },
     log: deps.logInfo,
   });
@@ -169,10 +148,11 @@ async function executeRandomSamplingExactRepair(
     return traversal.result.material;
   }
 
+  // The traversal owns the per-peer outcomes; render the leading ones compactly.
   throw new Error(
-    `Random Sampling exact repair did not recover: ${peerDiagnostics.length > 0
-      ? peerDiagnostics.slice(0, 8).join(',')
-      : 'no prepared peer attempts'}; asset=${assetUal}`,
+    `Random Sampling exact repair did not recover: ${traversal.attempts.length > 0
+      ? traversal.attempts.slice(0, 8).map(describePreparedPeerAttempt).join(',')
+      : 'no peer attempts'}; asset=${assetUal}`,
   );
 }
 
