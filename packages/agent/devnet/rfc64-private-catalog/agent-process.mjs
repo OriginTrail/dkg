@@ -44,6 +44,10 @@ import {
   hasExactPrivateCatalogMemoryContents,
   readPrivateCatalogGraphCountEvidence,
 } from './memory-evidence.mjs';
+import {
+  RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1,
+  childCommandDescriptorV1,
+} from './child-protocol.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
@@ -70,7 +74,7 @@ async function boot() {
   if (MODE === 'probe') {
     agent = await createAgent(undefined, false);
     await agent.start();
-    emit('ready', undefined, readyFields());
+    emit(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready, undefined, readyFields());
     return;
   }
   if (MODE !== 'run' || MANIFEST_PATH === undefined) {
@@ -81,7 +85,7 @@ async function boot() {
   agent = await createAgent(manifest, true);
   await agent.start();
   await agent.reconcileRfc64CatalogResponsibilityV1(CONTEXT_GRAPH_ID);
-  emit('ready', undefined, readyFields());
+  emit(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready, undefined, readyFields());
 }
 
 async function createAgent(manifest, finalizedRuntime) {
@@ -192,8 +196,9 @@ function readyFields() {
 }
 
 async function handle(command) {
+  const descriptor = childCommandDescriptorV1(command);
   const requestId = command.requestId;
-  switch (command.cmd) {
+  switch (descriptor.command) {
     case 'dial':
       await agent.node.libp2p.dial(multiaddr(command.multiaddr));
       emit('dialed', requestId, { peerId: command.peerId });

@@ -5,19 +5,9 @@ import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 import { assertRfc64PrivateRuntimeProvenanceV1 } from './runtime-provenance.mjs';
+import { isSafeChildDiagnosticPhaseV1 } from './child-protocol.mjs';
 
 const SCHEMA = 'dkg-rfc64-private-release-gate-v1';
-const COMMAND_FAILURE_PHASES = new Set([
-  'bootstrap-applied',
-  'dialed',
-  'inspection',
-  'persisted-inspection',
-  'published',
-  'ready',
-  'receiver-revoked',
-  'stopping',
-  'sync-denial-result',
-]);
 
 /** Tag a child-command failure with fixed diagnostics safe for gate artifacts. */
 export function createGateCommandFailureV1(commandPhase, cause) {
@@ -158,7 +148,7 @@ export function sanitizeGateFailureV1(error) {
   if (
     error instanceof Error
     && error.name === 'Rfc64PrivateGateCommandFailureV1'
-    && COMMAND_FAILURE_PHASES.has(error.commandPhase)
+    && isSafeChildDiagnosticPhaseV1(error.commandPhase)
   ) {
     return Object.freeze({
       failureClass: 'gate-command-failed',
