@@ -56,6 +56,7 @@ import {
 } from './child-protocol.mjs';
 import { assertInitialFinalizedAuthorityV1 } from './initial-authority.mjs';
 import { verifyAppliedCatalogSwmClosureV1 } from './verified-catalog-swm-proof.mjs';
+import { emitAuthoritativeRuntimeShutdownReceiptV1 } from './runtime-shutdown.mjs';
 
 const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
@@ -723,12 +724,11 @@ function seededSubscriptionStore(contextGraphId, onChainId) {
 async function shutdown(code, requestId) {
   if (stopping) return;
   stopping = true;
-  try { await agent?.stop(); } catch { /* best effort */ }
-  const rpcCallCounts = rpc?.snapshot() ?? Object.freeze({});
-  try { await rpc?.close(); } catch { /* best effort */ }
-  await emitAndFlush('stopping', requestId, {
+  await emitAuthoritativeRuntimeShutdownReceiptV1({
+    agent,
+    rpc,
     executedRuntimeManifest: sealExecutedRuntimeManifestV1(),
-    rpcCallCounts,
+    emitReceipt: (fields) => emitAndFlush('stopping', requestId, fields),
   });
   process.exit(code);
 }

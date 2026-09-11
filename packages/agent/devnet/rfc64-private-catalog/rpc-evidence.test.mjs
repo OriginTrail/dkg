@@ -16,6 +16,49 @@ import {
   isWithinRpcCeilingV1,
   rpcEvidenceV1,
 } from './rpc-evidence.mjs';
+import { emitAuthoritativeRuntimeShutdownReceiptV1 } from './runtime-shutdown.mjs';
+
+test('shutdown receipt is emitted only after a successful agent drain', async () => {
+  const failedOrder = [];
+  await assert.rejects(
+    emitAuthoritativeRuntimeShutdownReceiptV1({
+      agent: {
+        stop: async () => {
+          failedOrder.push('stop');
+          throw new Error('agent drain failed');
+        },
+      },
+      rpc: {
+        snapshot: () => { failedOrder.push('snapshot'); return { eth_call: 1 }; },
+        close: async () => { failedOrder.push('close'); },
+      },
+      executedRuntimeManifest: {},
+      emitReceipt: async () => { failedOrder.push('receipt'); },
+    }),
+    /agent drain failed/,
+  );
+  assert.deepEqual(failedOrder, ['stop']);
+
+  const successfulOrder = [];
+  let receipt;
+  await emitAuthoritativeRuntimeShutdownReceiptV1({
+    agent: { stop: async () => { successfulOrder.push('stop'); } },
+    rpc: {
+      snapshot: () => { successfulOrder.push('snapshot'); return { eth_call: 1 }; },
+      close: async () => { successfulOrder.push('close'); },
+    },
+    executedRuntimeManifest: { manifestDigest: 'sha256:fixture' },
+    emitReceipt: async (value) => {
+      successfulOrder.push('receipt');
+      receipt = value;
+    },
+  });
+  assert.deepEqual(successfulOrder, ['stop', 'snapshot', 'close', 'receipt']);
+  assert.deepEqual(receipt, {
+    executedRuntimeManifest: { manifestDigest: 'sha256:fixture' },
+    rpcCallCounts: { eth_call: 1 },
+  });
+});
 
 test('RPC evidence is method-attributed and rejects unknown or over-budget work', async () => {
   const withinBudget = {
