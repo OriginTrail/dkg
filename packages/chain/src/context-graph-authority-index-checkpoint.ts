@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
+import { normalizeContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
 import {
   encodeContextGraphAuthorityGenerationV1,
   normalizeContextGraphAuthorityGenerationState,
@@ -62,12 +64,6 @@ export interface ContextGraphAuthorityIndexStore {
 
 const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/i;
 const ZERO_ADDRESS = `0x${'0'.repeat(40)}`;
-
-function normalizePositiveDecimal(value: unknown): string | undefined {
-  if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return undefined;
-  const parsed = BigInt(value);
-  return parsed <= ethers.MaxUint256 ? value : undefined;
-}
 
 export function normalizeAuthorityIndexAddress(value: unknown): string | undefined {
   return typeof value === 'string' && ADDRESS_PATTERN.test(value)
@@ -179,7 +175,7 @@ function normalizeIndexState(
 ): ContextGraphAuthorityIndexState | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const candidate = value as Partial<Record<keyof ContextGraphAuthorityIndexState, unknown>>;
-  const contextGraphId = normalizePositiveDecimal(candidate.contextGraphId);
+  const contextGraphId = normalizeContextGraphAuthorityIndexId(candidate.contextGraphId);
   const owner = normalizeAuthorityIndexAddress(candidate.owner);
   const active = typeof candidate.active === 'boolean' ? candidate.active : undefined;
   const accessPolicy = normalizeContextGraphAuthorityAccessPolicy(candidate.accessPolicy);

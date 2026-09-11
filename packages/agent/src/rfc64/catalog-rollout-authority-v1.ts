@@ -110,6 +110,30 @@ export interface Rfc64CatalogExecutionPlanV1 {
   readonly standaloneTrack2Enabled: boolean;
 }
 
+export interface Rfc64CatalogAuthorityRefreshCandidateV1 {
+  readonly contextGraphId: string;
+  readonly active: boolean;
+  readonly mode: Rfc64CatalogRolloutModeV1;
+}
+
+/**
+ * Select lifecycle-owned authority refresh work at the one execution-plan
+ * arbitration boundary. Explicit manifest authority retains precedence, while
+ * the responsibility registry continues to report the underlying lifecycle
+ * fact truthfully.
+ */
+export function selectRfc64CatalogAuthorityRefreshWorkloadV1<T extends
+  Rfc64CatalogAuthorityRefreshCandidateV1>(
+  plan: Rfc64CatalogExecutionPlanV1,
+  candidates: readonly T[],
+): readonly T[] {
+  return Object.freeze(candidates.filter(({ contextGraphId, active, mode }) => (
+    active
+    && mode !== 'legacy'
+    && plan.selectedAuthority[contextGraphId] === undefined
+  )));
+}
+
 /**
  * Read one authority answer from the construction-time execution plan.
  * Runtime services never reinterpret the raw rollout configuration.

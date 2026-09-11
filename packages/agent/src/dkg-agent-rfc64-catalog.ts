@@ -149,6 +149,8 @@ import {
   resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
+import { selectRfc64CatalogAuthorityRefreshWorkloadV1 } from
+  './rfc64/catalog-rollout-authority-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -1047,7 +1049,6 @@ function rfc64CatalogResponsibilityRegistryForV1(
     defaultMode,
     contextGraphModes: executionPlan.contextGraphModes,
     killSwitchActive: executionPlan.killSwitchActive,
-    manifestOwnedContextGraphIds: Object.keys(executionPlan.selectedAuthority),
   });
   rfc64CatalogResponsibilityRegistriesV1.set(agent, registry);
   return registry;
@@ -1307,6 +1308,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
+  /** Lifecycle responsibilities after the execution plan assigns one owner. */
+  readRfc64CatalogAuthorityRefreshResponsibilitiesV1(
+    this: DKGAgent,
+  ): readonly Rfc64CatalogResponsibilitySelectionV1[] {
+    return selectRfc64CatalogAuthorityRefreshWorkloadV1(
+      this.config.rfc64CatalogExecutionPlan,
+      this.readRfc64CatalogResponsibilitiesV1(),
+    );
+  }
+
   /**
    * Project local RFC-64 responsibilities onto opaque revisions from the
    * daemon-owned contract-wide authority index. Missing local bindings remain
@@ -1317,8 +1328,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphIds: readonly string[],
     signal: AbortSignal,
   ): Promise<Rfc64CatalogAuthorityRevisionReadV1> {
-    const capability = this.contextGraphAuthorityIndexRevisionReaderCapability;
-    if (capability.status === 'unsupported') return new Map();
+    const reader = this.contextGraphAuthorityIndexRevisionReader;
+    if (reader === undefined) return new Map();
 
     const targets = projectRfc64CatalogAuthorityRevisionTargetsV1(
       contextGraphIds,
@@ -1333,7 +1344,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
 
     const revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
       signal,
-      (readSignal) => capability.reader.readContextGraphAuthorityIndexRevisions(
+      (readSignal) => reader.readContextGraphAuthorityIndexRevisions(
           targets.onChainContextGraphIds,
           { signal: readSignal },
       ),

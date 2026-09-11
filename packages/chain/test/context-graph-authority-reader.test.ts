@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { ChainAdapter, ContextGraphAuthoritySnapshot } from '../src/chain-adapter.js';
 import {
-  bindContextGraphAuthorityIndexRevisionReader,
   bindContextGraphAuthorityReader,
 } from '../src/context-graph-authority-reader.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
@@ -60,55 +59,5 @@ describe('ContextGraphAuthorityReader capability', () => {
       status: 'unsupported',
       reason: 'get-context-graph-authority-snapshot-unavailable',
     });
-  });
-});
-
-describe('ContextGraphAuthorityIndexRevisionReader capability', () => {
-  it('binds an explicit reader once and preserves its receiver', async () => {
-    const revision = `0x${'ab'.repeat(32)}`;
-    const reader = {
-      label: 'bound-reader',
-      readContextGraphAuthorityIndexRevisions: vi.fn(function (
-        this: { label: string },
-        contextGraphIds: readonly bigint[],
-      ) {
-        expect(this.label).toBe('bound-reader');
-        expect(contextGraphIds).toEqual([9n]);
-        return Promise.resolve(Object.freeze([
-          Object.freeze({ contextGraphId: '9', revision }),
-        ]));
-      }),
-    };
-    const adapter = Object.assign(new NoChainAdapter(), {
-      contextGraphAuthorityIndexRevisionReader: reader,
-    }) as ChainAdapter;
-
-    const capability = bindContextGraphAuthorityIndexRevisionReader(adapter);
-
-    expect(capability.status).toBe('supported');
-    if (capability.status !== 'supported') throw new Error('unreachable');
-    await expect(capability.reader.readContextGraphAuthorityIndexRevisions([9n]))
-      .resolves.toEqual([{ contextGraphId: '9', revision }]);
-    expect(Object.isFrozen(capability)).toBe(true);
-    expect(Object.isFrozen(capability.reader)).toBe(true);
-  });
-
-  it('classifies absent support once and propagates supported-reader failures', async () => {
-    expect(bindContextGraphAuthorityIndexRevisionReader(new NoChainAdapter())).toEqual({
-      status: 'unsupported',
-      reason: 'context-graph-authority-index-unavailable',
-    });
-
-    const failure = new Error('authority index read failed');
-    const adapter = Object.assign(new NoChainAdapter(), {
-      contextGraphAuthorityIndexRevisionReader: {
-        readContextGraphAuthorityIndexRevisions: async () => { throw failure; },
-      },
-    }) as ChainAdapter;
-    const capability = bindContextGraphAuthorityIndexRevisionReader(adapter);
-    if (capability.status !== 'supported') throw new Error('unreachable');
-
-    await expect(capability.reader.readContextGraphAuthorityIndexRevisions([9n]))
-      .rejects.toBe(failure);
   });
 });

@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
+import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import type { ContextGraphAuthorityIndexStore } from '../src/context-graph-authority-index-checkpoint.js';
 import {
   reduceContextGraphAuthorityIndexPage,
@@ -86,13 +87,21 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     finalizedNumber = 25,
   ) => ({
     scope: 'evm:84532:hub:context-graph-storage',
-    contextGraphId,
+    contextGraphId: contextGraphId.toString(10) as ContextGraphAuthorityIndexId,
     readScope,
     deploymentBlockNumber: 10,
     finalized: { number: finalizedNumber, hash: blockHash(finalizedNumber) },
     pageSize: 5,
     readBlockHash: async (blockNumber: number) => blockHash(blockNumber),
     readPage,
+  });
+
+  it('keeps raw persisted checkpoints private behind purpose-specific views', () => {
+    const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
+
+    expect((index as any).snapshot).toBeUndefined();
+    expect(typeof index.resolve).toBe('function');
+    expect(typeof index.revisions).toBe('function');
   });
 
   it('shares one page walk across concurrent graph lookups and resumes after restart', async () => {

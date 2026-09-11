@@ -18,7 +18,7 @@ import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityIndexRevision, type ContextGraphAuthorityIndexRevisionReader, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveContextGraphAuthorityHistory,
@@ -33,12 +33,10 @@ import {
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
-import { contextGraphAuthorityIndexStateRevision } from
-  './context-graph-authority-index-checkpoint.js';
-import { readEvmContextGraphAuthorityIndexV1 } from
+import { contextGraphAuthorityIndexIdFromBigInt } from
+  './context-graph-authority-index-id.js';
+import { readEvmContextGraphAuthorityStateV1 } from
   './evm-context-graph-authority-index-reader.js';
-
-const CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS = 4_096;
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -951,12 +949,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         );
         const authoritySource: EvmContextGraphAuthoritySource =
           this.contextGraphAuthorityIndex !== undefined ? await (async () => {
+          // Reject invalid indexed ids before deployment discovery or any log scan.
+          const authorityIndexId = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
           const deploymentBlockNumber = (await this.resolveContractDeployBlock(
             contractAddress,
             'getContextGraphAuthoritySnapshot',
             'ContextGraphStorage',
           )).fromBlock;
-          const indexed = await readEvmContextGraphAuthorityIndexV1({
+          const indexed = await readEvmContextGraphAuthorityStateV1({
             index: this.contextGraphAuthorityIndex!,
             deploymentId: this.deploymentId,
             contract,
@@ -966,19 +966,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             finalized: { number: finalized.number, hash: finalizedHash },
             pageSize: this.cgRegistryScanPageSize,
             stabilizationOperation: 'resolution',
+            contextGraphId: authorityIndexId,
             signal: options.signal,
           });
-          const state = indexed.checkpoint.states.find(
-            (candidate) => candidate.contextGraphId === contextGraphId.toString(10),
-          );
-          if (state === undefined) {
-            throw new Error(
-              `Context Graph ${contextGraphId.toString(10)} has no finalized creation event`,
-            );
-          }
           return Object.freeze({
             kind: 'indexed' as const,
-            readSnapshot: async () => state,
+            readSnapshot: async () => indexed.value,
             stabilize: indexed.stabilize,
           });
         })() : (() => {
@@ -1112,107 +1105,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         // A cold authority resolution performs a bounded historical log scan;
         // the default 4s point-read cap aborts healthy fallback providers before
         // they can finish. Warm checkpoint suffixes remain fast under this cap.
-        policy: 'wideLogScan',
-      },
-    );
-  }
-
-  /**
-   * Advance the daemon-owned materialized authority index once and return only
-   * opaque per-CG revisions. This implementation remains private to the
-   * explicit capability so broad adapter consumers cannot probe two surfaces.
-   */
-  get contextGraphAuthorityIndexRevisionReader():
-    ContextGraphAuthorityIndexRevisionReader | undefined {
-    if (this.contextGraphAuthorityIndex === undefined) return undefined;
-    return Object.freeze({
-      readContextGraphAuthorityIndexRevisions: async (
-        contextGraphIds: readonly bigint[],
-        options?: ChainReadOptions,
-      ) => {
-        return this.readContextGraphAuthorityIndexRevisions(
-          contextGraphIds,
-          options,
-        );
-      },
-    });
-  }
-
-  private async readContextGraphAuthorityIndexRevisions(
-    contextGraphIds: readonly bigint[],
-    options: ChainReadOptions = {},
-  ): Promise<readonly ContextGraphAuthorityIndexRevision[]> {
-    await this.init();
-    options.signal?.throwIfAborted();
-    const index = this.contextGraphAuthorityIndex;
-    if (index === undefined) {
-      throw new Error('Context Graph authority index capability lost its bound index');
-    }
-    if (
-      !Array.isArray(contextGraphIds)
-      || contextGraphIds.length > CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS
-    ) {
-      throw new Error('Context Graph authority revision target set is invalid');
-    }
-    const targetIds = new Set<string>();
-    for (const contextGraphId of contextGraphIds) {
-      if (
-        typeof contextGraphId !== 'bigint'
-        || contextGraphId <= 0n
-        || contextGraphId > ethers.MaxUint256
-      ) {
-        throw new Error('Context Graph authority revision target id is invalid');
-      }
-      targetIds.add(contextGraphId.toString(10));
-    }
-    if (targetIds.size === 0) return Object.freeze([]);
-
-    const base = this.requireContextGraphStorage();
-    return this.readTipProvider(
-      'readContextGraphAuthorityIndexRevisions',
-      async (provider) => {
-        options.signal?.throwIfAborted();
-        const finalized = await provider.getBlock('finalized');
-        if (finalized === null || finalized.hash === null) {
-          throw new Error('finalized Context Graph authority block is unavailable');
-        }
-        const finalizedHash = finalized.hash;
-        const contract = base.connect(provider) as Contract;
-        const contractAddress = (await contract.getAddress()).toLowerCase();
-        const deploymentBlockNumber = (await this.resolveContractDeployBlock(
-          contractAddress,
-          'readContextGraphAuthorityIndexRevisions',
-          'ContextGraphStorage',
-        )).fromBlock;
-        const indexed = await readEvmContextGraphAuthorityIndexV1({
-          index,
-          deploymentId: this.deploymentId,
-          contract,
-          contractAddress,
-          provider,
-          deploymentBlockNumber,
-          finalized: { number: finalized.number, hash: finalizedHash },
-          pageSize: this.cgRegistryScanPageSize,
-          stabilizationOperation: 'revision scan',
-          signal: options.signal,
-        });
-        const revisions = indexed.checkpoint.states
-          .filter(({ contextGraphId }) => targetIds.has(contextGraphId))
-          .map((state) => Object.freeze({
-            contextGraphId: state.contextGraphId,
-            revision: contextGraphAuthorityIndexStateRevision(state),
-          }));
-        await indexed.stabilize();
-        return Object.freeze(revisions);
-      },
-      {
-        signal: options.signal,
-        isRetryable: (error: unknown) => (
-          !options.signal?.aborted && (
-            isContextGraphAuthorityIndexRetryableError(error)
-            || isRetryableRpcError(error)
-          )
-        ),
         policy: 'wideLogScan',
       },
     );

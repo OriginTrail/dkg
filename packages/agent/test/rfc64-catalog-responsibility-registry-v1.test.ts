@@ -62,20 +62,22 @@ describe('Rfc64CatalogResponsibilityRegistryV1', () => {
     expect(registry.snapshot()).toEqual([]);
   });
 
-  it('keeps manifest-owned graphs outside lifecycle responsibility', () => {
-    const registry = new Rfc64CatalogResponsibilityRegistryV1({
-      manifestOwnedContextGraphIds: ['manifest-cg'],
-    });
+  it('reports lifecycle responsibility without execution-plan arbitration', () => {
+    const registry = new Rfc64CatalogResponsibilityRegistryV1();
 
     const transition = registry.setResponsibility('manifest-cg', 'core-public');
     registry.setResponsibility('ordinary-cg', 'core-public');
 
     expect(transition).toMatchObject({
-      changed: false,
+      changed: true,
       previous: { responsible: false },
-      next: { responsible: false, active: false },
+      next: { responsible: true, active: true },
     });
     expect(registry.snapshot()).toEqual([
+      expect.objectContaining({
+        contextGraphId: 'manifest-cg',
+        responsible: true,
+      }),
       expect.objectContaining({
         contextGraphId: 'ordinary-cg',
         responsible: true,

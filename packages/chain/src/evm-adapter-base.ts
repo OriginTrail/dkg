@@ -18,6 +18,7 @@ import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.j
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  ContextGraphAuthorityIndexRevisionReader,
   KnowledgeAssetUpdateContext,
   V10PublishParams,
   OnChainPublishResult,
@@ -61,6 +62,8 @@ import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
 import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
+import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
+  './evm-context-graph-authority-index-reader.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -924,6 +927,10 @@ export class EVMChainAdapterBase {
   /** Shared contract-wide authority history, enabled by daemon-local persistence. */
   protected readonly contextGraphAuthorityIndex: ContextGraphAuthorityIndex | undefined;
 
+  /** Sole public scheduling capability backed by the private materialized index. */
+  readonly contextGraphAuthorityIndexRevisionReader:
+    ContextGraphAuthorityIndexRevisionReader | undefined;
+
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
    * scan (adapter-level config `kaHighWaterScanPageSize`; non-integer / `< 1`
@@ -1269,6 +1276,23 @@ export class EVMChainAdapterBase {
     this.contextGraphAuthorityIndex = config.localContextGraphAuthorityIndexStore === undefined
       ? undefined
       : new ContextGraphAuthorityIndex(config.localContextGraphAuthorityIndexStore);
+    this.contextGraphAuthorityIndexRevisionReader = this.contextGraphAuthorityIndex === undefined
+      ? undefined
+      : createEvmContextGraphAuthorityIndexRevisionReaderV1({
+          index: this.contextGraphAuthorityIndex,
+          deploymentId: this.deploymentId,
+          initialize: () => this.init(),
+          requireContextGraphStorage: () => this.requireContextGraphStorage(),
+          readTipProvider: (label, read, options) => this.readTipProvider(
+            label,
+            read,
+            options,
+          ),
+          resolveContractDeployBlock: (address, operationLabel, contractLabel) => (
+            this.resolveContractDeployBlock(address, operationLabel, contractLabel)
+          ),
+          pageSize: () => this.cgRegistryScanPageSize,
+        });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;

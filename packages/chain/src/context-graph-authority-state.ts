@@ -16,6 +16,10 @@ import {
   applyContextGraphAuthorityGenerationEvent,
   type ContextGraphAuthorityGenerationState,
 } from './context-graph-authority-generation.js';
+import {
+  contextGraphAuthorityIndexIdFromBigInt,
+  type ContextGraphAuthorityIndexId,
+} from './context-graph-authority-index-id.js';
 
 export const MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS = 256;
 
@@ -37,7 +41,7 @@ export type ContextGraphAuthorityState = ContextGraphAuthorityGenerationState & 
 
 /** One graph's state inside the contract-wide materialized index. */
 export type ContextGraphAuthorityIndexState = ContextGraphAuthorityState & Readonly<{
-  contextGraphId: string;
+  contextGraphId: ContextGraphAuthorityIndexId;
 }>;
 
 interface ContextGraphAuthorityIndexEventBase {
@@ -181,7 +185,7 @@ export function applyContextGraphAuthorityStateEvent(
   previous: ContextGraphAuthorityIndexState | undefined,
   event: ContextGraphAuthorityIndexEvent,
 ): ContextGraphAuthorityIndexState | undefined {
-  const contextGraphId = event.contextGraphId.toString(10);
+  const contextGraphId = contextGraphAuthorityIndexIdFromBigInt(event.contextGraphId);
   const subject = `Context Graph ${contextGraphId}`;
 
   if (event.name === 'Transfer' && event.from === ZERO_ADDRESS) return previous;

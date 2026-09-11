@@ -3,7 +3,6 @@
 import type {
   ChainAdapter,
   ChainReadOptions,
-  ContextGraphAuthorityIndexRevisionReader,
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
 
@@ -25,24 +24,9 @@ export type ContextGraphAuthorityReaderCapability =
       reason: 'get-context-graph-authority-snapshot-unavailable';
     }>;
 
-export type ContextGraphAuthorityIndexRevisionReaderCapability =
-  | Readonly<{
-      status: 'supported';
-      reader: ContextGraphAuthorityIndexRevisionReader;
-    }>
-  | Readonly<{
-      status: 'unsupported';
-      reason: 'context-graph-authority-index-unavailable';
-    }>;
-
 const UNSUPPORTED_CONTEXT_GRAPH_AUTHORITY_READER = Object.freeze({
   status: 'unsupported' as const,
   reason: 'get-context-graph-authority-snapshot-unavailable' as const,
-});
-
-const UNSUPPORTED_CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_READER = Object.freeze({
-  status: 'unsupported' as const,
-  reason: 'context-graph-authority-index-unavailable' as const,
 });
 
 /**
@@ -64,25 +48,6 @@ export function bindContextGraphAuthorityReader(
         contextGraphId: bigint,
         options?: ChainReadOptions,
       ) => readSnapshot.call(adapter, contextGraphId, options),
-    }),
-  });
-}
-
-/** Bind daemon-local authority-index support once, outside RFC-64 workflows. */
-export function bindContextGraphAuthorityIndexRevisionReader(
-  adapter: ChainAdapter,
-): ContextGraphAuthorityIndexRevisionReaderCapability {
-  const reader = adapter.contextGraphAuthorityIndexRevisionReader;
-  if (reader === undefined) {
-    return UNSUPPORTED_CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_READER;
-  }
-  return Object.freeze({
-    status: 'supported' as const,
-    reader: Object.freeze({
-      readContextGraphAuthorityIndexRevisions: (
-        contextGraphIds: readonly bigint[],
-        options?: ChainReadOptions,
-      ) => reader.readContextGraphAuthorityIndexRevisions(contextGraphIds, options),
     }),
   });
 }

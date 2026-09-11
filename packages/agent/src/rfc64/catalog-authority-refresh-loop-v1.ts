@@ -128,6 +128,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
   readonly #lanes = new Map<string, Rfc64CatalogAuthorityRefreshLaneV1>();
   readonly #retirements = new Set<Promise<void>>();
   #passOwner: CoalescingRecurringTask | null = null;
+  #passActivityRevision = 0;
   #pass = 0;
   #timer: ReturnType<typeof setInterval> | null = null;
   #started = false;
@@ -192,6 +193,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
 
   readonly trigger = (): void => {
     if (!this.#started) return;
+    this.#passActivityRevision += 1;
     this.#passOwner?.request();
   };
 
@@ -247,22 +249,29 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     for (;;) {
       const passOwner = this.#passOwner;
       await passOwner?.whenIdle();
+      const settledPassActivityRevision = this.#passActivityRevision;
       const lanes = [...this.#lanes.values()];
       const retirements = [...this.#retirements];
       await Promise.all([
         ...lanes.map((lane) => lane.whenIdle()),
         ...retirements,
       ]);
+      // A pass may begin while pre-existing lanes are draining. Re-fence the
+      // pass owner, then loop if it scheduled or retired any lane after the
+      // snapshot above so its resulting work is included in the idle proof.
+      await passOwner?.whenIdle();
       const currentLanes = [...this.#lanes.values()];
       const currentRetirements = [...this.#retirements];
       const samePassOwner = passOwner === this.#passOwner;
+      const samePassActivity = settledPassActivityRevision
+        === this.#passActivityRevision;
       const sameLanes = lanes.length === currentLanes.length
         && lanes.every((lane, index) => lane === currentLanes[index]);
       const sameRetirements = retirements.length === currentRetirements.length
         && retirements.every((retirement, index) => (
           retirement === currentRetirements[index]
         ));
-      if (samePassOwner && sameLanes && sameRetirements) return;
+      if (samePassOwner && samePassActivity && sameLanes && sameRetirements) return;
     }
   }
 

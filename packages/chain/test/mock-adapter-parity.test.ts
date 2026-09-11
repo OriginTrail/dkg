@@ -73,7 +73,6 @@ const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 // shape from being chosen merely to evade the runtime parity audit.
 const EVM_INTERNAL_METHODS = new Set<string>([
   'getContextGraphNameHashResolver',
-  'readContextGraphAuthorityIndexRevisions',
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
@@ -388,6 +387,11 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(MOCK_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
     expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(false);
     expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
+  });
+
+  it('does not leak the authority revision operation onto the adapter prototype', () => {
+    expect(EVM_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);
+    expect(EVM_INTERNAL_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);
   });
 
   it('method arity (declared parameter count) is within 1 of EVMChainAdapter for each shared method', () => {

@@ -1,29 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { type Contract, type JsonRpcProvider } from 'ethers';
+import type {
+  ChainReadOptions,
+  ContextGraphAuthorityIndexRevisionReader,
+} from './chain-adapter.js';
 import {
   ContextGraphAuthorityIndex,
+  isContextGraphAuthorityIndexRetryableError,
+  type ContextGraphAuthorityIndexScanInput,
 } from './context-graph-authority-index.js';
-import type { ContextGraphAuthorityIndexCheckpoint } from
+import type { ContextGraphAuthorityIndexState } from
   './context-graph-authority-index-checkpoint.js';
+import {
+  assertContextGraphAuthorityIndexId,
+  type ContextGraphAuthorityIndexId,
+} from './context-graph-authority-index-id.js';
+import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import {
   contextGraphAuthorityEventTopics,
   normalizeContextGraphAuthorityIndexLog,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
+import type { ReadOpts } from './rpc-failover-client.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 
-export interface EvmContextGraphAuthorityIndexReadV1 {
-  readonly checkpoint: ContextGraphAuthorityIndexCheckpoint;
-  /** Final fence shared by snapshot and revision projections. */
+export const CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS = 4_096;
+
+interface EvmContextGraphAuthorityIndexReadV1<T> {
+  readonly value: T;
+  /** Final fence shared by state and revision projections. */
   stabilize(): Promise<void>;
 }
 
-/**
- * One shared finalized-anchor/index-scan boundary for every authority
- * projection. Callers supply only the projection-specific operation label.
- */
-export async function readEvmContextGraphAuthorityIndexV1(input: Readonly<{
+type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   index: ContextGraphAuthorityIndex;
   deploymentId: string;
   contract: Contract;
@@ -34,9 +44,13 @@ export async function readEvmContextGraphAuthorityIndexV1(input: Readonly<{
   pageSize: number;
   stabilizationOperation: 'resolution' | 'revision scan';
   signal?: AbortSignal;
-}>): Promise<EvmContextGraphAuthorityIndexReadV1> {
+}>;
+
+function authorityIndexScanInputV1(
+  input: EvmContextGraphAuthorityIndexReadInputV1,
+): ContextGraphAuthorityIndexScanInput {
   const authorityTopics = contextGraphAuthorityEventTopics(input.contract.interface);
-  const checkpoint = await input.index.snapshot({
+  return {
     scope: [input.deploymentId, input.contractAddress].join(':'),
     readScope: input.provider,
     deploymentBlockNumber: input.deploymentBlockNumber,
@@ -69,10 +83,17 @@ export async function readEvmContextGraphAuthorityIndexV1(input: Readonly<{
         log,
       ));
     },
-  });
+  };
+}
+
+async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
+  input: EvmContextGraphAuthorityIndexReadInputV1,
+  project: (scan: ContextGraphAuthorityIndexScanInput) => Promise<T>,
+): Promise<EvmContextGraphAuthorityIndexReadV1<T>> {
+  const value = await project(authorityIndexScanInputV1(input));
   input.signal?.throwIfAborted();
   return Object.freeze({
-    checkpoint,
+    value,
     stabilize: async () => {
       input.signal?.throwIfAborted();
       const stable = input.signal === undefined
@@ -86,6 +107,126 @@ export async function readEvmContextGraphAuthorityIndexV1(input: Readonly<{
           `finalized Context Graph authority anchor changed during ${input.stabilizationOperation}`,
         );
       }
+    },
+  });
+}
+
+/** Resolve one state while keeping the persisted checkpoint private to the index. */
+export function readEvmContextGraphAuthorityStateV1(
+  input: EvmContextGraphAuthorityIndexReadInputV1 & Readonly<{
+    contextGraphId: ContextGraphAuthorityIndexId;
+  }>,
+): Promise<EvmContextGraphAuthorityIndexReadV1<ContextGraphAuthorityIndexState>> {
+  assertContextGraphAuthorityIndexId(input.contextGraphId);
+  return readEvmContextGraphAuthorityIndexProjectionV1(
+    input,
+    (scan) => input.index.resolve({ ...scan, contextGraphId: input.contextGraphId }),
+  );
+}
+
+interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
+  readonly index: ContextGraphAuthorityIndex;
+  readonly deploymentId: string;
+  readonly initialize: () => Promise<void>;
+  readonly requireContextGraphStorage: () => Contract;
+  readonly readTipProvider: <T>(
+    label: string,
+    read: (provider: JsonRpcProvider) => Promise<T>,
+    options?: ReadOpts,
+  ) => Promise<T>;
+  readonly resolveContractDeployBlock: (
+    address: string,
+    operationLabel: string,
+    contractLabel: string,
+  ) => Promise<Readonly<{ fromBlock: number }>>;
+  readonly pageSize: () => number;
+}
+
+function snapshotAuthorityRevisionTargetsV1(
+  contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+): readonly ContextGraphAuthorityIndexId[] {
+  if (
+    !Array.isArray(contextGraphIds)
+    || contextGraphIds.length > CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS
+  ) {
+    throw new Error('Context Graph authority revision target set is invalid');
+  }
+  const targets = new Set<ContextGraphAuthorityIndexId>();
+  for (const contextGraphId of contextGraphIds) {
+    assertContextGraphAuthorityIndexId(
+      contextGraphId,
+      'Context Graph authority revision target id',
+    );
+    targets.add(contextGraphId);
+  }
+  return Object.freeze([...targets]);
+}
+
+/**
+ * Build the sole adapter capability for complete finalized revision reads.
+ * Transport, index advancement, projection, and the final anchor fence remain
+ * internal to this collaborator rather than leaking as mixin prototype APIs.
+ */
+export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
+  dependencies: EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1,
+): ContextGraphAuthorityIndexRevisionReader {
+  return Object.freeze({
+    async readContextGraphAuthorityIndexRevisions(
+      contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+      options: ChainReadOptions = {},
+    ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>> {
+      const targets = snapshotAuthorityRevisionTargetsV1(contextGraphIds);
+      options.signal?.throwIfAborted();
+      if (targets.length === 0) return new Map();
+      await dependencies.initialize();
+      const base = dependencies.requireContextGraphStorage();
+      return dependencies.readTipProvider(
+        'readContextGraphAuthorityIndexRevisions',
+        async (provider) => {
+          options.signal?.throwIfAborted();
+          const finalized = await provider.getBlock('finalized');
+          if (finalized === null || finalized.hash === null) {
+            throw new Error('finalized Context Graph authority block is unavailable');
+          }
+          const contract = base.connect(provider) as Contract;
+          const contractAddress = (await contract.getAddress()).toLowerCase();
+          const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
+            contractAddress,
+            'readContextGraphAuthorityIndexRevisions',
+            'ContextGraphStorage',
+          )).fromBlock;
+          const indexed = await readEvmContextGraphAuthorityIndexProjectionV1(
+            {
+              index: dependencies.index,
+              deploymentId: dependencies.deploymentId,
+              contract,
+              contractAddress,
+              provider,
+              deploymentBlockNumber,
+              finalized: { number: finalized.number, hash: finalized.hash },
+              pageSize: dependencies.pageSize(),
+              stabilizationOperation: 'revision scan',
+              signal: options.signal,
+            },
+            (scan) => dependencies.index.revisions({
+              ...scan,
+              contextGraphIds: targets,
+            }),
+          );
+          await indexed.stabilize();
+          return indexed.value;
+        },
+        {
+          signal: options.signal,
+          isRetryable: (error: unknown) => (
+            !options.signal?.aborted && (
+              isContextGraphAuthorityIndexRetryableError(error)
+              || isRetryableRpcError(error)
+            )
+          ),
+          policy: 'wideLogScan',
+        },
+      );
     },
   });
 }

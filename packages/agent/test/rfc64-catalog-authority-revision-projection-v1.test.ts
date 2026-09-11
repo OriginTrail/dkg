@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
+import type { ContextGraphAuthorityIndexId } from '@origintrail-official/dkg-chain';
 import {
   mapRfc64CatalogAuthorityRevisionsToLocalV1,
   projectRfc64CatalogAuthorityRevisionTargetsV1,
@@ -40,15 +41,24 @@ describe('RFC-64 authority revision scheduling projection', () => {
       (contextGraphId) => bindings.get(contextGraphId),
     );
 
-    expect(targets.onChainContextGraphIds).toEqual([9n]);
+    expect(targets.onChainContextGraphIds).toEqual(['9']);
     expect(targets.localContextGraphIdsByOnChainId).toEqual(new Map([
       ['9', ['local-a', 'local-b']],
     ]));
-    expect(mapRfc64CatalogAuthorityRevisionsToLocalV1([
-      { contextGraphId: '9', revision: 'revision-9' },
-    ], targets.localContextGraphIdsByOnChainId)).toEqual(new Map([
+    expect(mapRfc64CatalogAuthorityRevisionsToLocalV1(new Map([
+      ['9' as ContextGraphAuthorityIndexId, 'revision-9'],
+    ]), targets.localContextGraphIdsByOnChainId)).toEqual(new Map([
       ['local-a', 'revision-9'],
       ['local-b', 'revision-9'],
     ]));
+  });
+
+  it('rejects noncanonical and zero authority bindings before scheduling a read', () => {
+    for (const invalid of ['0', '09', '-1']) {
+      expect(() => projectRfc64CatalogAuthorityRevisionTargetsV1(
+        ['local'],
+        () => invalid,
+      )).toThrow('target id is invalid');
+    }
   });
 });

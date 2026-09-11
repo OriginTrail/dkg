@@ -1,4 +1,6 @@
 export * from './chain-adapter.js';
+export { assertContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
 export {
   type ContextGraphAuthorityHistoryCheckpointV1,
   type ContextGraphAuthorityHistoryState,
@@ -8,9 +10,7 @@ export {
   type ContextGraphAuthorityIndexStore,
 } from './context-graph-authority-index-checkpoint.js';
 export {
-  bindContextGraphAuthorityIndexRevisionReader,
   bindContextGraphAuthorityReader,
-  type ContextGraphAuthorityIndexRevisionReaderCapability,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
 } from './context-graph-authority-reader.js';

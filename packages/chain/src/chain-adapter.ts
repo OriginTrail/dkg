@@ -1,5 +1,9 @@
 import type { ethers } from 'ethers';
 import type { RpcUsageWindow } from './rpc-usage.js';
+import type { ContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
+export type { ContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
 
 /**
  * The Publishing-Conviction-Account read methods the funded-wallet selector
@@ -516,18 +520,12 @@ export interface ContextGraphAuthoritySnapshot {
   readonly sourceBlockHash: string;
 }
 
-/** Opaque per-CG revision projected from the durable materialized authority index. */
-export interface ContextGraphAuthorityIndexRevision {
-  readonly contextGraphId: string;
-  readonly revision: string;
-}
-
 /** Explicit daemon-local authority-index scheduling surface. */
 export interface ContextGraphAuthorityIndexRevisionReader {
   readContextGraphAuthorityIndexRevisions(
-    contextGraphIds: readonly bigint[],
+    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
     options?: ChainReadOptions,
-  ): Promise<readonly ContextGraphAuthorityIndexRevision[]>;
+  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
 }
 
 export class ContextGraphChainScanPartialError extends Error {
