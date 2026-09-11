@@ -122,4 +122,25 @@ describe('ContextGraphAuthorityIndexRepository cache lifecycle', () => {
       .rejects.toThrow('observation belongs to another scope');
     expect(store.commits).toEqual([]);
   });
+
+  it('rejects cross-scope invalidation before touching the durable row', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    const durable = checkpoint(20);
+    store.record = { token: 1, value: durable };
+    const repository = new ContextGraphAuthorityIndexRepository(store);
+    const first = repository.forScope('first');
+    const second = repository.forScope('second');
+    const foreignObservation = await first.load();
+    const secondScopeRow = await second.load();
+
+    await expect(second.invalidateOrReloadWinner(foreignObservation))
+      .rejects.toThrow('observation belongs to another scope');
+    expect(store.invalidations).toEqual([]);
+    await expect(second.load()).resolves.toBe(secondScopeRow);
+    expect(secondScopeRow).toMatchObject({
+      kind: 'checkpoint',
+      token: 1,
+      checkpoint: durable,
+    });
+  });
 });
