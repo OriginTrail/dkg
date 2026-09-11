@@ -26,10 +26,11 @@ const rfc64CatalogAuthorityRefreshSchedulerV1:
   },
 };
 
-export type Rfc64CatalogAuthorityRevisionReadV1 = Readonly<{
-  revisions: ReadonlyMap<string, string>;
-  fallbackContextGraphIds: ReadonlySet<string>;
-}>;
+/**
+ * Opaque revisions for responsibilities backed by the shared authority index.
+ * An omitted responsibility intentionally selects the legacy every-pass path.
+ */
+export type Rfc64CatalogAuthorityRevisionReadV1 = ReadonlyMap<string, string>;
 
 export type Rfc64CatalogAuthorityRefreshResultV1 =
   | Readonly<{ kind: 'committed' }>
@@ -38,14 +39,11 @@ export type Rfc64CatalogAuthorityRefreshResultV1 =
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
   readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
-  /**
-   * Optional shared-index projection. A `null` result retains legacy all-CG
-   * refreshes; omitted CGs are also refreshed so incomplete bindings fail safe.
-   */
+  /** Optional shared-index projection; omitted CGs retain legacy refreshes. */
   readonly readAuthorityRevisions?: (
     contextGraphIds: readonly string[],
     signal: AbortSignal,
-  ) => Promise<Rfc64CatalogAuthorityRevisionReadV1 | null>;
+  ) => Promise<Rfc64CatalogAuthorityRevisionReadV1>;
   readonly onAuthorityRevisionsReadFailure?: (error: unknown) => void;
   readonly refreshContextGraph: (
     contextGraphId: string,
@@ -54,6 +52,9 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly onRefreshFailure: (contextGraphId: string, error: unknown) => void;
   readonly scheduler?: Rfc64CatalogAuthorityRefreshSchedulerV1;
 }
+
+const EMPTY_RFC64_CATALOG_AUTHORITY_REVISIONS_V1 = async ():
+Promise<Rfc64CatalogAuthorityRevisionReadV1> => new Map();
 
 /** One graph's physical worker and all revision state it owns. */
 class Rfc64CatalogAuthorityRefreshLaneV1 {
@@ -121,6 +122,9 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
 /** Bounded independent authority lanes with explicit scheduling and shutdown ownership. */
 export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadOwnerV1 {
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
+  readonly #readAuthorityRevisions: NonNullable<
+    Rfc64CatalogAuthorityRefreshLoopOptionsV1['readAuthorityRevisions']
+  >;
   readonly #lanes = new Map<string, Rfc64CatalogAuthorityRefreshLaneV1>();
   readonly #retirements = new Set<Promise<void>>();
   #passOwner: CoalescingRecurringTask | null = null;
@@ -131,6 +135,8 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
 
   constructor(private readonly options: Rfc64CatalogAuthorityRefreshLoopOptionsV1) {
     this.#scheduler = options.scheduler ?? rfc64CatalogAuthorityRefreshSchedulerV1;
+    this.#readAuthorityRevisions = options.readAuthorityRevisions
+      ?? EMPTY_RFC64_CATALOG_AUTHORITY_REVISIONS_V1;
   }
 
   #createPassOwner(): CoalescingRecurringTask {
@@ -210,21 +216,19 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     const initial = pass === 1;
     const safety = !initial && (pass - 1)
       % RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.safetyRevalidationIntervalCount === 0;
-    let revisionRead: Rfc64CatalogAuthorityRevisionReadV1 | null = null;
-    if (this.options.readAuthorityRevisions !== undefined) {
-      try {
-        revisionRead = await this.options.readAuthorityRevisions(
-          Object.freeze([...desiredContextGraphIds]),
-          signal,
-        );
-      } catch (error) {
-        if (signal.aborted) return;
-        this.options.onAuthorityRevisionsReadFailure?.(error);
-        // A failed delta read cannot identify a safe subset. The initial and
-        // safety passes still revalidate everything; ordinary passes retry the
-        // one shared scan at the next cadence without fanning out per-CG reads.
-        if (!initial && !safety) return;
-      }
+    let revisions: Rfc64CatalogAuthorityRevisionReadV1 = new Map();
+    try {
+      revisions = await this.#readAuthorityRevisions(
+        Object.freeze([...desiredContextGraphIds]),
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted) return;
+      this.options.onAuthorityRevisionsReadFailure?.(error);
+      // A failed delta read cannot identify a safe subset. The initial and
+      // safety passes still revalidate everything; ordinary passes retry the
+      // one shared scan at the next cadence without fanning out per-CG reads.
+      if (!initial && !safety) return;
     }
     signal.throwIfAborted();
 
@@ -234,9 +238,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
         lane = this.#createLane(contextGraphId);
         this.#lanes.set(contextGraphId, lane);
       }
-      const revision = revisionRead !== null
-        ? revisionRead.revisions.get(contextGraphId) ?? null
-        : null;
+      const revision = revisions.get(contextGraphId) ?? null;
       lane.request(revision, initial || safety);
     }
   }

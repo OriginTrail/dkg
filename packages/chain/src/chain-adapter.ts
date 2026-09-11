@@ -1389,16 +1389,6 @@ export interface ChainAdapter {
       contextGraphId: bigint,
       options?: ChainReadOptions,
     ): Promise<ContextGraphAuthoritySnapshot>;
-    /**
-     * Advance the shared authority index once and project revisions for the
-     * requested registered CGs. Returns `null` when no local index is bound so
-     * callers can retain their legacy full-refresh behavior.
-     */
-    getContextGraphAuthorityIndexRevisions?(
-      contextGraphIds: readonly bigint[],
-      options?: ChainReadOptions,
-    ): Promise<readonly ContextGraphAuthorityIndexRevision[] | null>;
-
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
    * Used by the daemon's curated-CG registration preflight to populate the

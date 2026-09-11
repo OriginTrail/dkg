@@ -21,6 +21,8 @@ export interface Rfc64CatalogResponsibilityRegistryControlsV1 {
   readonly contextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
   /** Emergency stop. It suspends Track-2 without silently selecting legacy. */
   readonly killSwitchActive?: boolean;
+  /** CGs whose lifecycle is owned by an explicit activation/compatibility manifest. */
+  readonly manifestOwnedContextGraphIds?: readonly string[];
 }
 
 export interface Rfc64CatalogResponsibilitySelectionV1 {
@@ -92,6 +94,7 @@ export class Rfc64CatalogResponsibilityRegistryV1 {
   readonly #defaultMode: Rfc64CatalogRolloutModeV1;
   readonly #contextGraphModes: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
   readonly #killSwitchActive: boolean;
+  readonly #manifestOwnedContextGraphIds: ReadonlySet<string>;
   readonly #responsibilities = new Map<string, Rfc64CatalogResponsibilityReasonV1>();
 
   constructor(controls: Rfc64CatalogResponsibilityRegistryControlsV1 = {}) {
@@ -105,6 +108,12 @@ export class Rfc64CatalogResponsibilityRegistryV1 {
       throw new TypeError('RFC-64 responsibility killSwitchActive must be a boolean');
     }
     this.#killSwitchActive = controls.killSwitchActive ?? false;
+    this.#manifestOwnedContextGraphIds = new Set(
+      controls.manifestOwnedContextGraphIds ?? [],
+    );
+    for (const contextGraphId of this.#manifestOwnedContextGraphIds) {
+      assertContextGraphIdV1(contextGraphId);
+    }
   }
 
   /** Replace one CG's lifecycle-derived responsibility atomically. */
@@ -120,7 +129,9 @@ export class Rfc64CatalogResponsibilityRegistryV1 {
       throw new TypeError(`Unknown RFC-64 responsibility reason: ${String(reason)}`);
     }
     const previous = this.read(contextGraphId);
-    if (reason === null) this.#responsibilities.delete(contextGraphId);
+    if (reason === null || this.#manifestOwnedContextGraphIds.has(contextGraphId)) {
+      this.#responsibilities.delete(contextGraphId);
+    }
     else this.#responsibilities.set(contextGraphId, reason);
     const next = this.read(contextGraphId);
     return Object.freeze({

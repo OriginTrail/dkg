@@ -1745,19 +1745,6 @@ export class MockChainAdapter implements ChainAdapter {
     });
   }
 
-  /**
-   * The offline mock has no RPC-backed shared authority index. Returning
-   * `null` explicitly selects the caller's legacy full-snapshot refresh path,
-   * matching an EVM adapter instantiated without a bound local index.
-   */
-  async getContextGraphAuthorityIndexRevisions(
-    _contextGraphIds: readonly bigint[],
-    options: ChainReadOptions = {},
-  ): Promise<null> {
-    options.signal?.throwIfAborted();
-    return null;
-  }
-
   async addContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
     const cg = this.contextGraphs.get(contextGraphId);
     if (!cg) throw new Error(`Mock: context graph ${contextGraphId} does not exist`);

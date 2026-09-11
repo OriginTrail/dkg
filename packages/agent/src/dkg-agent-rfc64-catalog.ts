@@ -1047,6 +1047,7 @@ function rfc64CatalogResponsibilityRegistryForV1(
     defaultMode,
     contextGraphModes: executionPlan.contextGraphModes,
     killSwitchActive: executionPlan.killSwitchActive,
+    manifestOwnedContextGraphIds: Object.keys(executionPlan.selectedAuthority),
   });
   rfc64CatalogResponsibilityRegistriesV1.set(agent, registry);
   return registry;
@@ -1315,9 +1316,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphIds: readonly string[],
     signal: AbortSignal,
-  ): Promise<Rfc64CatalogAuthorityRevisionReadV1 | null> {
+  ): Promise<Rfc64CatalogAuthorityRevisionReadV1> {
     const capability = this.contextGraphAuthorityIndexRevisionReaderCapability;
-    if (capability.status === 'unsupported') return null;
+    if (capability.status === 'unsupported') return new Map();
 
     const targets = projectRfc64CatalogAuthorityRevisionTargetsV1(
       contextGraphIds,
@@ -1327,10 +1328,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       ),
     );
     if (targets.onChainContextGraphIds.length === 0) {
-      return Object.freeze({
-        revisions: new Map(),
-        fallbackContextGraphIds: targets.fallbackContextGraphIds,
-      });
+      return new Map();
     }
 
     const revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
@@ -1340,13 +1338,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           { signal: readSignal },
       ),
     );
-    return Object.freeze({
-      revisions: mapRfc64CatalogAuthorityRevisionsToLocalV1(
-        revisions,
-        targets.localContextGraphIdsByOnChainId,
-      ),
-      fallbackContextGraphIds: targets.fallbackContextGraphIds,
-    });
+    return mapRfc64CatalogAuthorityRevisionsToLocalV1(
+      revisions,
+      targets.localContextGraphIdsByOnChainId,
+    );
   }
 
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */
@@ -1869,17 +1864,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this,
       this.config.rfc64CatalogExecutionPlan,
     );
-    // Explicit activation/compatibility manifests already own this CG's
-    // authority and receiver lifecycle. The release-native responsibility
-    // registry is only for CGs discovered from ordinary daemon state; letting
-    // it also claim a configured CG creates duplicate bootstrap invalidations
-    // and can silently replace a shadow/legacy override with the default mode.
-    if (
-      this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId]
-      !== undefined
-    ) {
-      return Promise.resolve(registry.read(contextGraphId));
-    }
     const commit = (
       reason: Parameters<Rfc64CatalogResponsibilityRegistryV1['setResponsibility']>[1],
     ): Rfc64CatalogResponsibilitySelectionV1 => {

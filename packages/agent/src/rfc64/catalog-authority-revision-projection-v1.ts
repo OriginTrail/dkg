@@ -3,7 +3,6 @@
 export interface Rfc64CatalogAuthorityRevisionTargetsV1 {
   readonly onChainContextGraphIds: readonly bigint[];
   readonly localContextGraphIdsByOnChainId: ReadonlyMap<string, readonly string[]>;
-  readonly fallbackContextGraphIds: ReadonlySet<string>;
 }
 
 /** Pure grouping boundary between local binding provenance and one index read. */
@@ -14,13 +13,9 @@ export function projectRfc64CatalogAuthorityRevisionTargetsV1(
   ) => string | undefined,
 ): Rfc64CatalogAuthorityRevisionTargetsV1 {
   const localContextGraphIdsByOnChainId = new Map<string, string[]>();
-  const fallbackContextGraphIds = new Set<string>();
   for (const contextGraphId of new Set(contextGraphIds)) {
     const onChainId = resolveBinding(contextGraphId);
-    if (onChainId === undefined) {
-      fallbackContextGraphIds.add(contextGraphId);
-      continue;
-    }
+    if (onChainId === undefined) continue;
     const localIds = localContextGraphIdsByOnChainId.get(onChainId) ?? [];
     localIds.push(contextGraphId);
     localContextGraphIdsByOnChainId.set(onChainId, localIds);
@@ -35,7 +30,6 @@ export function projectRfc64CatalogAuthorityRevisionTargetsV1(
         Object.freeze([...localIds]),
       ]),
     ),
-    fallbackContextGraphIds,
   });
 }
 

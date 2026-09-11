@@ -1069,10 +1069,9 @@ export class DKGAgent extends DKGAgentBase {
     );
     const authorityRefreshOwner = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => this.readRfc64CatalogResponsibilitiesV1()
-        .filter(({ contextGraphId, active, mode }) => (
+        .filter(({ active, mode }) => (
           active
           && mode !== 'legacy'
-          && this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] === undefined
         ))
         .map(({ contextGraphId }) => contextGraphId),
       readAuthorityRevisions: (contextGraphIds, signal) => (

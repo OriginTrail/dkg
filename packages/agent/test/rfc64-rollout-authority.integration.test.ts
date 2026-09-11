@@ -1268,13 +1268,10 @@ describe('RFC-64 rollout authority integration', () => {
       new AbortController().signal,
     );
 
-    expect(revisions).toEqual({
-      revisions: new Map([
-        [CONTEXT_GRAPH_ID, revision],
-        [duplicateLocalId, revision],
-      ]),
-      fallbackContextGraphIds: new Set(['11', `${AUTHOR}/unbound`]),
-    });
+    expect(revisions).toEqual(new Map([
+      [CONTEXT_GRAPH_ID, revision],
+      [duplicateLocalId, revision],
+    ]));
     expect(readRevisions).toHaveBeenCalledOnce();
     expect(readRevisions).toHaveBeenCalledWith([9n], {
       signal: expect.any(AbortSignal),
@@ -1590,11 +1587,15 @@ describe('RFC-64 rollout authority integration', () => {
     expect((edge as any).config.rfc64CatalogExecutionPlan
       .selectedAuthority[CONTEXT_GRAPH_ID]).toBeDefined();
     await runtime.close();
-    vi.spyOn(edge, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue(Object.freeze([{
-      contextGraphId: CONTEXT_GRAPH_ID,
-      active: true,
-      mode: 'catalog',
-    }]) as never);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    (edge as any).setContextGraphSubscription(CONTEXT_GRAPH_ID, {
+      syncMode: 'always-on',
+      subscribed: false,
+      synced: false,
+      coreHosted: true,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
     const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1');
     vi.useFakeTimers();
     try {

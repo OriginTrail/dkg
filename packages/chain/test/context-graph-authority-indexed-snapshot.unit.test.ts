@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { ethers } from 'ethers';
 import { describe, expect, it } from 'vitest';
 
 import { EVMChainAdapter } from '../src/evm-adapter.js';
@@ -210,6 +211,90 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     await adapter.getContextGraphAuthoritySnapshot(9n);
     expect(evidence.indexRanges).toHaveLength(3);
     expect(evidence.staticCalls).toEqual([]);
+  });
+
+  it('projects stable per-CG revisions from one shared index advance', async () => {
+    const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter();
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    const initial = await reader.readContextGraphAuthorityIndexRevisions([9n, 10n]);
+    expect(initial).toEqual([{
+      contextGraphId: '9',
+      revision: expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+    }]);
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+
+    const unchanged = await reader.readContextGraphAuthorityIndexRevisions([9n]);
+    expect(unchanged).toEqual(initial);
+    expect(evidence.indexRanges).toHaveLength(3);
+
+    advanceAuthorityHead();
+    const advanced = await reader.readContextGraphAuthorityIndexRevisions([9n]);
+    expect(advanced).toHaveLength(1);
+    expect(advanced[0]!.revision).not.toBe(initial[0]!.revision);
+    expect(evidence.indexRanges.slice(3)).toEqual([[31, 35]]);
+  });
+
+  it('binds a total revision capability only while the local index exists', async () => {
+    const withoutIndex = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      hubAddress: GOVERNANCE,
+      privateKey: `0x${'11'.repeat(32)}`,
+      allowNoAdminSigner: true,
+      chainId: 'evm:31337',
+    });
+    expect(withoutIndex.contextGraphAuthorityIndexRevisionReader).toBeUndefined();
+
+    const { adapter } = makeIndexedAuthorityAdapter();
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader;
+    expect(reader).toBeDefined();
+    await expect(reader!.readContextGraphAuthorityIndexRevisions([9n]))
+      .resolves.toEqual([{
+        contextGraphId: '9',
+        revision: expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      }]);
+
+    (adapter as any).contextGraphAuthorityIndex = undefined;
+    await expect(reader!.readContextGraphAuthorityIndexRevisions([9n]))
+      .rejects.toThrow('lost its bound index');
+  });
+
+  it('rejects invalid revision target sets before reading the shared index', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.readContextGraphAuthorityIndexRevisions([])).resolves.toEqual([]);
+    for (const invalidId of [0n, ethers.MaxUint256 + 1n]) {
+      await expect(reader.readContextGraphAuthorityIndexRevisions([invalidId]))
+        .rejects.toThrow('target id is invalid');
+    }
+    await expect(reader.readContextGraphAuthorityIndexRevisions(
+      Array.from({ length: 4_097 }, (_, index) => BigInt(index + 1)),
+    )).rejects.toThrow('target set is invalid');
+    expect(evidence.indexRanges).toEqual([]);
+  });
+
+  it('rejects a stale revision projection and rebuilds the replacement fork', async () => {
+    const harness = makeIndexedAuthorityAdapter();
+    const stabilization = harness.holdBlockRead(30);
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    const stale = reader.readContextGraphAuthorityIndexRevisions([9n]);
+
+    await stabilization.entered;
+    harness.replaceAuthorityFork();
+    stabilization.release();
+    await expect(stale).rejects.toThrow('anchor changed');
+
+    await expect(reader.readContextGraphAuthorityIndexRevisions([9n]))
+      .resolves.toEqual([{
+        contextGraphId: '9',
+        revision: expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      }]);
+    expect(harness.evidence.indexInvalidations).toEqual([4]);
+    expect(harness.evidence.indexRanges).toEqual([
+      [7, 16], [17, 26], [27, 30],
+      [7, 16], [17, 26], [27, 30],
+    ]);
   });
 
   it('rejects an indexed reorg fence then invalidates and rebuilds the replacement fork', async () => {

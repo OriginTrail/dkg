@@ -30,7 +30,7 @@ describe('RFC-64 authority revision scheduling projection', () => {
     expect(state.authorityIndexOnChainIdFor('11', numericLocal)).toBeUndefined();
   });
 
-  it('groups duplicate slots, retains fallback ids, and maps revisions back to locals', () => {
+  it('groups bound slots and leaves unbound locals absent from the revision map', () => {
     const bindings = new Map([
       ['local-a', '9'],
       ['local-b', '9'],
@@ -44,7 +44,6 @@ describe('RFC-64 authority revision scheduling projection', () => {
     expect(targets.localContextGraphIdsByOnChainId).toEqual(new Map([
       ['9', ['local-a', 'local-b']],
     ]));
-    expect(targets.fallbackContextGraphIds).toEqual(new Set(['11', 'fallback']));
     expect(mapRfc64CatalogAuthorityRevisionsToLocalV1([
       { contextGraphId: '9', revision: 'revision-9' },
     ], targets.localContextGraphIdsByOnChainId)).toEqual(new Map([

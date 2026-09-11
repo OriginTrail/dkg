@@ -1119,8 +1119,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   /**
    * Advance the daemon-owned materialized authority index once and return only
-   * opaque per-CG revisions. This is an opportunistic scheduling capability:
-   * SDK adapters without a local index return `null` and keep legacy refreshes.
+   * opaque per-CG revisions. This implementation remains private to the
+   * explicit capability so broad adapter consumers cannot probe two surfaces.
    */
   get contextGraphAuthorityIndexRevisionReader():
     ContextGraphAuthorityIndexRevisionReader | undefined {
@@ -1130,26 +1130,24 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         contextGraphIds: readonly bigint[],
         options?: ChainReadOptions,
       ) => {
-        const revisions = await this.getContextGraphAuthorityIndexRevisions(
+        return this.readContextGraphAuthorityIndexRevisions(
           contextGraphIds,
           options,
         );
-        if (revisions === null) {
-          throw new Error('Context Graph authority index capability lost its bound index');
-        }
-        return revisions;
       },
     });
   }
 
-  async getContextGraphAuthorityIndexRevisions(
+  private async readContextGraphAuthorityIndexRevisions(
     contextGraphIds: readonly bigint[],
     options: ChainReadOptions = {},
-  ): Promise<readonly ContextGraphAuthorityIndexRevision[] | null> {
+  ): Promise<readonly ContextGraphAuthorityIndexRevision[]> {
     await this.init();
     options.signal?.throwIfAborted();
     const index = this.contextGraphAuthorityIndex;
-    if (index === undefined) return null;
+    if (index === undefined) {
+      throw new Error('Context Graph authority index capability lost its bound index');
+    }
     if (
       !Array.isArray(contextGraphIds)
       || contextGraphIds.length > CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS
@@ -1171,7 +1169,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
     const base = this.requireContextGraphStorage();
     return this.readTipProvider(
-      'getContextGraphAuthorityIndexRevisions',
+      'readContextGraphAuthorityIndexRevisions',
       async (provider) => {
         options.signal?.throwIfAborted();
         const finalized = await provider.getBlock('finalized');
@@ -1183,7 +1181,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         const contractAddress = (await contract.getAddress()).toLowerCase();
         const deploymentBlockNumber = (await this.resolveContractDeployBlock(
           contractAddress,
-          'getContextGraphAuthorityIndexRevisions',
+          'readContextGraphAuthorityIndexRevisions',
           'ContextGraphStorage',
         )).fromBlock;
         const indexed = await readEvmContextGraphAuthorityIndexV1({

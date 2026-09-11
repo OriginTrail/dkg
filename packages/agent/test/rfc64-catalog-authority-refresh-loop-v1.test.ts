@@ -36,12 +36,8 @@ function createSchedulerHarness() {
 
 function completeRevisionRead(
   revisions: ReadonlyMap<string, string>,
-  fallbackContextGraphIds: ReadonlySet<string> = new Set(),
 ): Rfc64CatalogAuthorityRevisionReadV1 {
-  return Object.freeze({
-    revisions,
-    fallbackContextGraphIds,
-  });
+  return revisions;
 }
 
 describe('RFC-64 catalog authority refresh loop', () => {
@@ -399,7 +395,6 @@ describe('RFC-64 catalog authority refresh loop', () => {
       onActiveContextGraphIdsReadFailure: () => undefined,
       readAuthorityRevisions: async () => completeRevisionRead(
         new Map([['registered', 'revision-1']]),
-        new Set(['unregistered']),
       ),
       refreshContextGraph: async (contextGraphId) => {
         attempts.push(contextGraphId);
@@ -610,7 +605,6 @@ describe('RFC-64 catalog authority refresh loop', () => {
         if (reads > 1) throw failure;
         return completeRevisionRead(
           new Map([['registered', 'revision-1']]),
-          new Set(['unregistered']),
         );
       },
       onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
