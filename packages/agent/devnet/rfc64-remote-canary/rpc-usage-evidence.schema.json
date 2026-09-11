@@ -21,11 +21,19 @@
         "properties": {
           "windowStartedAt": { "type": "string", "format": "date-time" },
           "windowEndedAt": { "type": "string", "format": "date-time" },
-          "total": { "type": "integer", "minimum": 0 },
+          "total": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
           "byMethod": {
             "type": "object",
             "propertyNames": { "pattern": "^[a-zA-Z][a-zA-Z0-9_]{0,127}$" },
-            "additionalProperties": { "type": "integer", "minimum": 0 }
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
           }
         }
       }

@@ -27,13 +27,6 @@ export function invalid(code) {
   throw failure(code, 'config');
 }
 
-export function boundedInteger(value, minimum, maximum) {
-  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
-    invalid('integer-out-of-range');
-  }
-  return value;
-}
-
 export function boundedString(value, minimum, maximum, field) {
   if (typeof value !== 'string' || value.length < minimum || value.length > maximum) {
     invalid(field);
