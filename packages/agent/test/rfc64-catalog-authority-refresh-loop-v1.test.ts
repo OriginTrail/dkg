@@ -39,19 +39,7 @@ function completeRevisionRead(
   fallbackContextGraphIds: ReadonlySet<string> = new Set(),
 ): Rfc64CatalogAuthorityRevisionReadV1 {
   return Object.freeze({
-    kind: 'complete',
     revisions,
-    fallbackContextGraphIds,
-  });
-}
-
-function failedRevisionRead(
-  error: unknown,
-  fallbackContextGraphIds: ReadonlySet<string> = new Set(),
-): Rfc64CatalogAuthorityRevisionReadV1 {
-  return Object.freeze({
-    kind: 'failed',
-    error,
     fallbackContextGraphIds,
   });
 }
@@ -608,7 +596,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await loop.close();
   });
 
-  it('keeps fallback graphs refreshing when the shared index read fails', async () => {
+  it('uses rejection as the sole shared-index read failure channel', async () => {
     const { scheduled, scheduler } = createSchedulerHarness();
     const failure = new Error('shared index unavailable');
     const readFailures: unknown[] = [];
@@ -619,12 +607,11 @@ describe('RFC-64 catalog authority refresh loop', () => {
       onActiveContextGraphIdsReadFailure: () => undefined,
       readAuthorityRevisions: async () => {
         reads += 1;
-        return reads === 1
-          ? completeRevisionRead(
-            new Map([['registered', 'revision-1']]),
-            new Set(['unregistered']),
-          )
-          : failedRevisionRead(failure, new Set(['unregistered']));
+        if (reads > 1) throw failure;
+        return completeRevisionRead(
+          new Map([['registered', 'revision-1']]),
+          new Set(['unregistered']),
+        );
       },
       onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
       refreshContextGraph: async (contextGraphId) => {
@@ -640,7 +627,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     scheduled[0]!.callback();
     await loop.whenIdle();
 
-    expect(attempts).toEqual(['registered', 'unregistered', 'unregistered']);
+    expect(attempts).toEqual(['registered', 'unregistered']);
     expect(readFailures).toEqual([failure]);
     await loop.close();
   });

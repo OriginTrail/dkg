@@ -18,7 +18,7 @@ import {
   isTooLowAllowanceError,
 } from './evm-adapter-errors.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
-import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityIndexRevision, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
+import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityIndexRevision, type ContextGraphAuthorityIndexRevisionReader, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
   resolveContextGraphAuthorityHistory,
@@ -1122,6 +1122,26 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    * opaque per-CG revisions. This is an opportunistic scheduling capability:
    * SDK adapters without a local index return `null` and keep legacy refreshes.
    */
+  get contextGraphAuthorityIndexRevisionReader():
+    ContextGraphAuthorityIndexRevisionReader | undefined {
+    if (this.contextGraphAuthorityIndex === undefined) return undefined;
+    return Object.freeze({
+      readContextGraphAuthorityIndexRevisions: async (
+        contextGraphIds: readonly bigint[],
+        options?: ChainReadOptions,
+      ) => {
+        const revisions = await this.getContextGraphAuthorityIndexRevisions(
+          contextGraphIds,
+          options,
+        );
+        if (revisions === null) {
+          throw new Error('Context Graph authority index capability lost its bound index');
+        }
+        return revisions;
+      },
+    });
+  }
+
   async getContextGraphAuthorityIndexRevisions(
     contextGraphIds: readonly bigint[],
     options: ChainReadOptions = {},

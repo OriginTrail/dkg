@@ -522,6 +522,14 @@ export interface ContextGraphAuthorityIndexRevision {
   readonly revision: string;
 }
 
+/** Explicit daemon-local authority-index scheduling surface. */
+export interface ContextGraphAuthorityIndexRevisionReader {
+  readContextGraphAuthorityIndexRevisions(
+    contextGraphIds: readonly bigint[],
+    options?: ChainReadOptions,
+  ): Promise<readonly ContextGraphAuthorityIndexRevision[]>;
+}
+
 export class ContextGraphChainScanPartialError extends Error {
   readonly partialResults: ContextGraphOnChain[];
   readonly scannedToBlock: number;
@@ -1199,6 +1207,14 @@ export interface ChainAdapter {
    * `chainId` (single in-memory deployment per process).
    */
   deploymentId: string;
+
+  /**
+   * Optional explicit capability for daemon-local authority-index revisions.
+   * Unlike the broad adapter method, presence means a local index is bound and
+   * every read either returns revisions or rejects.
+   */
+  readonly contextGraphAuthorityIndexRevisionReader?:
+    ContextGraphAuthorityIndexRevisionReader;
 
   /**
    * OPTIONAL RPC-usage capability: drain the raw JSON-RPC request counts

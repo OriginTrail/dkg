@@ -168,7 +168,6 @@ import {
   projectRfc64CatalogAuthorityRevisionTargetsV1,
 } from './rfc64/catalog-authority-revision-projection-v1.js';
 import type {
-  Rfc64CatalogAuthorityRefreshResultV1,
   Rfc64CatalogAuthorityRevisionReadV1,
 } from
   './rfc64/catalog-authority-refresh-loop-v1.js';
@@ -1317,8 +1316,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphIds: readonly string[],
     signal: AbortSignal,
   ): Promise<Rfc64CatalogAuthorityRevisionReadV1 | null> {
-    const readRevisions = this.chain.getContextGraphAuthorityIndexRevisions;
-    if (typeof readRevisions !== 'function') return null;
+    const capability = this.contextGraphAuthorityIndexRevisionReaderCapability;
+    if (capability.status === 'unsupported') return null;
 
     const targets = projectRfc64CatalogAuthorityRevisionTargetsV1(
       contextGraphIds,
@@ -1329,33 +1328,19 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     );
     if (targets.onChainContextGraphIds.length === 0) {
       return Object.freeze({
-        kind: 'complete',
         revisions: new Map(),
         fallbackContextGraphIds: targets.fallbackContextGraphIds,
       });
     }
 
-    let revisions: Awaited<ReturnType<typeof readRevisions>>;
-    try {
-      revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
-        signal,
-        (readSignal) => readRevisions.call(
-          this.chain,
+    const revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
+      signal,
+      (readSignal) => capability.reader.readContextGraphAuthorityIndexRevisions(
           targets.onChainContextGraphIds,
           { signal: readSignal },
-        ),
-      );
-    } catch (error) {
-      if (signal.aborted) throw signal.reason;
-      return Object.freeze({
-        kind: 'failed',
-        fallbackContextGraphIds: targets.fallbackContextGraphIds,
-        error,
-      });
-    }
-    if (revisions === null) return null;
+      ),
+    );
     return Object.freeze({
-      kind: 'complete',
       revisions: mapRfc64CatalogAuthorityRevisionsToLocalV1(
         revisions,
         targets.localContextGraphIdsByOnChainId,
@@ -1985,21 +1970,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     while (pending !== undefined && pending.size > 0) {
       await Promise.allSettled(pending.values());
     }
-  }
-
-  /** Translate reconciliation ownership into the scheduler's explicit commit protocol. */
-  async refreshRfc64CatalogAccessAuthorityV1(
-    this: DKGAgent,
-    contextGraphId: string,
-    signal: AbortSignal,
-  ): Promise<Rfc64CatalogAuthorityRefreshResultV1> {
-    if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
-      return Object.freeze({ kind: 'not-applicable' });
-    }
-    const accepted = await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal);
-    return accepted === null
-      ? Object.freeze({ kind: 'superseded' })
-      : Object.freeze({ kind: 'committed' });
   }
 
   /**

@@ -1069,7 +1069,11 @@ export class DKGAgent extends DKGAgentBase {
     );
     const authorityRefreshOwner = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => this.readRfc64CatalogResponsibilitiesV1()
-        .filter(({ active, mode }) => active && mode !== 'legacy')
+        .filter(({ contextGraphId, active, mode }) => (
+          active
+          && mode !== 'legacy'
+          && this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] === undefined
+        ))
         .map(({ contextGraphId }) => contextGraphId),
       readAuthorityRevisions: (contextGraphIds, signal) => (
         this.readRfc64CatalogAuthorityIndexRevisionsV1(contextGraphIds, signal)
@@ -1086,8 +1090,10 @@ export class DKGAgent extends DKGAgentBase {
           `RFC-64 authority revision scan incomplete: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
-      refreshContextGraph: (contextGraphId, signal) => (
-        this.refreshRfc64CatalogAccessAuthorityV1(contextGraphId, signal)
+      refreshContextGraph: async (contextGraphId, signal) => (
+        await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal) === null
+          ? Object.freeze({ kind: 'superseded' as const })
+          : Object.freeze({ kind: 'committed' as const })
       ),
       onRefreshFailure: (contextGraphId, error) => {
         this.log.warn(

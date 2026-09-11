@@ -26,22 +26,14 @@ const rfc64CatalogAuthorityRefreshSchedulerV1:
   },
 };
 
-export type Rfc64CatalogAuthorityRevisionReadV1 =
-  | Readonly<{
-      kind: 'complete';
-      revisions: ReadonlyMap<string, string>;
-      fallbackContextGraphIds: ReadonlySet<string>;
-    }>
-  | Readonly<{
-      kind: 'failed';
-      fallbackContextGraphIds: ReadonlySet<string>;
-      error: unknown;
-    }>;
+export type Rfc64CatalogAuthorityRevisionReadV1 = Readonly<{
+  revisions: ReadonlyMap<string, string>;
+  fallbackContextGraphIds: ReadonlySet<string>;
+}>;
 
 export type Rfc64CatalogAuthorityRefreshResultV1 =
   | Readonly<{ kind: 'committed' }>
-  | Readonly<{ kind: 'superseded' }>
-  | Readonly<{ kind: 'not-applicable' }>;
+  | Readonly<{ kind: 'superseded' }>;
 
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
@@ -236,23 +228,13 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     }
     signal.throwIfAborted();
 
-    if (revisionRead?.kind === 'failed') {
-      this.options.onAuthorityRevisionsReadFailure?.(revisionRead.error);
-    }
-
     for (const contextGraphId of desiredContextGraphIds) {
-      if (
-        revisionRead?.kind === 'failed'
-        && !initial
-        && !safety
-        && !revisionRead.fallbackContextGraphIds.has(contextGraphId)
-      ) continue;
       let lane = this.#lanes.get(contextGraphId);
       if (lane === undefined || lane.closed) {
         lane = this.#createLane(contextGraphId);
         this.#lanes.set(contextGraphId, lane);
       }
-      const revision = revisionRead?.kind === 'complete'
+      const revision = revisionRead !== null
         ? revisionRead.revisions.get(contextGraphId) ?? null
         : null;
       lane.request(revision, initial || safety);
