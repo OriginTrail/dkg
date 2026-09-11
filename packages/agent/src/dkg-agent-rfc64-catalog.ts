@@ -149,8 +149,10 @@ import {
   resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
-import { selectRfc64CatalogAuthorityRefreshWorkloadV1 } from
-  './rfc64/catalog-rollout-authority-v1.js';
+import {
+  rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
+  selectRfc64CatalogAuthorityRefreshWorkloadV1,
+} from './rfc64/catalog-rollout-authority-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -1328,7 +1330,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphIds: readonly string[],
     signal: AbortSignal,
   ): Promise<Rfc64CatalogAuthorityRevisionReadV1> {
-    const reader = this.contextGraphAuthorityIndexRevisionReader;
+    const reader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (reader === undefined) return new Map();
 
     const targets = projectRfc64CatalogAuthorityRevisionTargetsV1(
@@ -1875,11 +1877,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this,
       this.config.rfc64CatalogExecutionPlan,
     );
+    const responsibilityOwnsAuthorityWorkload =
+      rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1(
+        this.config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      );
     const commit = (
       reason: Parameters<Rfc64CatalogResponsibilityRegistryV1['setResponsibility']>[1],
     ): Rfc64CatalogResponsibilitySelectionV1 => {
       const transition = registry.setResponsibility(contextGraphId, reason);
-      if (transition.changed) {
+      if (transition.changed && responsibilityOwnsAuthorityWorkload) {
         this.handleRfc64CatalogReceiverSelectionTransitionV1(
           contextGraphId,
           {
@@ -1927,7 +1934,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       const next = commit(reason);
       if (
-        next.active
+        responsibilityOwnsAuthorityWorkload
+        && next.active
         && next.mode !== 'legacy'
         && this.resolveRfc64AcceptedCompatibilityAuthorityV1(contextGraphId) === null
       ) {

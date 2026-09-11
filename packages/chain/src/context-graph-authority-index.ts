@@ -6,10 +6,8 @@ import {
   type ContextGraphAuthorityIndexState,
   type ContextGraphAuthorityIndexStore,
 } from './context-graph-authority-index-checkpoint.js';
-import {
-  assertContextGraphAuthorityIndexId,
-  type ContextGraphAuthorityIndexId,
-} from './context-graph-authority-index-id.js';
+import type { ContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
 import {
   normalizeContextGraphAuthorityHash as normalizeHash,
   normalizeContextGraphAuthorityNonNegativeSafeInteger as normalizeNonNegativeSafeInteger,
@@ -91,7 +89,6 @@ export class ContextGraphAuthorityIndex {
   async resolve(
     input: ContextGraphAuthorityIndexResolveInput,
   ): Promise<ContextGraphAuthorityIndexState> {
-    assertContextGraphAuthorityIndexId(input.contextGraphId);
     const checkpoint = await this.#snapshot(input);
     // Target lookup intentionally happens after the shared contract scan, so
     // every waiter resolves its own graph from the same complete checkpoint.
@@ -102,14 +99,7 @@ export class ContextGraphAuthorityIndex {
   async revisions(
     input: ContextGraphAuthorityIndexRevisionInput,
   ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>> {
-    const targetIds = new Set<ContextGraphAuthorityIndexId>();
-    for (const contextGraphId of input.contextGraphIds) {
-      assertContextGraphAuthorityIndexId(
-        contextGraphId,
-        'Context Graph authority revision target id',
-      );
-      targetIds.add(contextGraphId);
-    }
+    const targetIds = new Set<ContextGraphAuthorityIndexId>(input.contextGraphIds);
     const checkpoint = await this.#snapshot(input);
     const revisions = new Map<ContextGraphAuthorityIndexId, string>();
     for (const state of checkpoint.states) {

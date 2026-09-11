@@ -117,6 +117,18 @@ export interface Rfc64CatalogAuthorityRefreshCandidateV1 {
 }
 
 /**
+ * Resolve whether lifecycle-derived responsibility owns operational work for
+ * one graph. An explicit manifest remains the sole owner of its receiver and
+ * refresh lifecycle even while the factual responsibility registry changes.
+ */
+export function rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1(
+  plan: Rfc64CatalogExecutionPlanV1,
+  contextGraphId: string,
+): boolean {
+  return plan.selectedAuthority[contextGraphId] === undefined;
+}
+
+/**
  * Select lifecycle-owned authority refresh work at the one execution-plan
  * arbitration boundary. Explicit manifest authority retains precedence, while
  * the responsibility registry continues to report the underlying lifecycle
@@ -130,7 +142,7 @@ export function selectRfc64CatalogAuthorityRefreshWorkloadV1<T extends
   return Object.freeze(candidates.filter(({ contextGraphId, active, mode }) => (
     active
     && mode !== 'legacy'
-    && plan.selectedAuthority[contextGraphId] === undefined
+    && rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1(plan, contextGraphId)
   )));
 }
 

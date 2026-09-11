@@ -5,8 +5,12 @@ import {
   type DecimalU256V1,
 } from '@origintrail-official/dkg-core';
 
+declare const CONTEXT_GRAPH_AUTHORITY_INDEX_ID: unique symbol;
+
 /** Canonical positive ContextGraphStorage identifier used by index views. */
-export type ContextGraphAuthorityIndexId = DecimalU256V1;
+export type ContextGraphAuthorityIndexId = DecimalU256V1 & Readonly<{
+  [CONTEXT_GRAPH_AUTHORITY_INDEX_ID]: true;
+}>;
 
 export function assertContextGraphAuthorityIndexId(
   value: unknown,

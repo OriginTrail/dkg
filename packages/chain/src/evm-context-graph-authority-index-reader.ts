@@ -117,7 +117,6 @@ export function readEvmContextGraphAuthorityStateV1(
     contextGraphId: ContextGraphAuthorityIndexId;
   }>,
 ): Promise<EvmContextGraphAuthorityIndexReadV1<ContextGraphAuthorityIndexState>> {
-  assertContextGraphAuthorityIndexId(input.contextGraphId);
   return readEvmContextGraphAuthorityIndexProjectionV1(
     input,
     (scan) => input.index.resolve({ ...scan, contextGraphId: input.contextGraphId }),
@@ -143,7 +142,7 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
 }
 
 function snapshotAuthorityRevisionTargetsV1(
-  contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+  contextGraphIds: unknown,
 ): readonly ContextGraphAuthorityIndexId[] {
   if (
     !Array.isArray(contextGraphIds)
@@ -152,7 +151,7 @@ function snapshotAuthorityRevisionTargetsV1(
     throw new Error('Context Graph authority revision target set is invalid');
   }
   const targets = new Set<ContextGraphAuthorityIndexId>();
-  for (const contextGraphId of contextGraphIds) {
+  for (const contextGraphId of contextGraphIds as readonly unknown[]) {
     assertContextGraphAuthorityIndexId(
       contextGraphId,
       'Context Graph authority revision target id',

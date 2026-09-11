@@ -2598,8 +2598,26 @@ describe('RFC-64 rollout authority integration', () => {
         contextGraphId: CONTEXT_GRAPH_ID,
       }),
     }));
+    vi.spyOn(core, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    core.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await core.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(core.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        responsibilityReason: 'core-public',
+        active: true,
+      }),
+    ]);
+
     const queuedRecoveryPasses = queueRecovery.mock.calls.length;
     expect(queuedRecoveryPasses).toBeGreaterThan(0);
+    const configuredTargets = core.readRfc64PublicCatalogBootstrapStatusV1()?.targets;
+    expect(configuredTargets).toEqual([
+      expect.objectContaining({
+        mode: 'catalog',
+        scope: expect.objectContaining({ contextGraphId: CONTEXT_GRAPH_ID }),
+      }),
+    ]);
     const lease = core.acquireRfc64SwmRecoveryTargetLeaseV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       lane: 'selected-public',
@@ -2612,10 +2630,17 @@ describe('RFC-64 rollout authority integration', () => {
       (core as any).rfc64PublicCatalogServiceV1,
       'deactivateReceiverContextGraph',
     );
-    core.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    const clearTargets = vi.spyOn(core, 'clearRfc64CatalogOperationalTargetsV1');
     core.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    await core.whenRfc64CatalogResponsibilitiesIdleV1();
     await core.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(core.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
+    expect(core.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID))
+      .toMatchObject({ active: true, mode: 'catalog' });
+    expect(core.readRfc64PublicCatalogBootstrapStatusV1()?.targets)
+      .toEqual(configuredTargets);
     expect(deactivate).not.toHaveBeenCalled();
+    expect(clearTargets).not.toHaveBeenCalled();
     expect(synchronize).toHaveBeenCalledTimes(1);
     expect(queueRecovery).toHaveBeenCalledTimes(queuedRecoveryPasses);
     expect(lease.isCurrent()).toBe(true);
