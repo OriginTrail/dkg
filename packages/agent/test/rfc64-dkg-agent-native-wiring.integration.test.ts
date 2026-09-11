@@ -3280,6 +3280,39 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect((agent as any).config.rfc64CatalogAuthoringPolicy).toBeUndefined();
   });
 
+  it('accepts pre-defaultMode disabled snapshots at the DKGAgent.create boundary', async () => {
+    const unified = await startNativeAgentWithOptions({
+      name: 'legacy-disabled-rollout-snapshot',
+      omitLegacyDeployment: true,
+      catalogActivation: {
+        enabled: false,
+        selectedContextGraphs: [],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [],
+        rollout: { killSwitch: false, contextGraphModes: {} },
+      } as never,
+    });
+
+    const deprecatedPublic = await startNativeAgentWithOptions({
+      name: 'legacy-disabled-public-rollout-snapshot',
+      omitLegacyDeployment: true,
+      activation: {
+        enabled: false,
+        selectedContextGraphs: [],
+        rollout: { killSwitch: false, contextGraphModes: {} },
+      } as never,
+    });
+
+    for (const agent of [unified, deprecatedPublic]) {
+      expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+        killSwitchActive: false,
+        responsibilityDefaultMode: 'legacy',
+        contextGraphModes: {},
+        track2ContextGraphs: [],
+      });
+    }
+  });
+
   it('snapshots a bounded public-root bootstrap manifest', () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,

@@ -137,6 +137,11 @@ export interface Rfc64PublicCatalogReceiverOptionsV1 {
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
     remotePeerId: string,
   ) => void;
+  /** Actual terminal receiver boundary for ambient and explicit work alike. */
+  readonly onCompletion?: (
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+    outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'],
+  ) => void;
   /**
    * Scheduling-time observer called once for a distinct exact-head request.
    * It is not an execution boundary and must not own attempt-scoped state.
@@ -250,6 +255,7 @@ interface ReceiverTaskV1 extends Rfc64ReceiverLifecycleTaskV1 {
   verifiedCurrentHeadTargetAccepted?: boolean;
   verifiedCurrentHeadTargetToken?: number;
   verifiedCurrentHeadTargetSettled?: boolean;
+  completionObserved?: boolean;
   running?: boolean;
   settled?: boolean;
 }
@@ -324,6 +330,7 @@ export class Rfc64PublicCatalogReceiverV1 {
   readonly #maxProvidersPerHead: number;
   readonly #retryBackoffMs: number;
   readonly #onHeadApplied?: Rfc64PublicCatalogReceiverOptionsV1['onHeadApplied'];
+  readonly #onCompletion?: Rfc64PublicCatalogReceiverOptionsV1['onCompletion'];
   readonly #onAttemptStart?: Rfc64PublicCatalogReceiverOptionsV1['onAttemptStart'];
   readonly #onReconciliationAttemptStart?:
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptStart'];
@@ -403,6 +410,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     );
     this.#isDeferrableError = options.isDeferrableError ?? DEFAULT_DEFERRABLE_ERROR;
     this.#onHeadApplied = options.onHeadApplied;
+    this.#onCompletion = options.onCompletion;
     this.#onAttemptStart = options.onAttemptStart;
     this.#onReconciliationAttemptStart = options.onReconciliationAttemptStart;
     this.#onReconciliationAttemptSuccess = options.onReconciliationAttemptSuccess;
@@ -621,6 +629,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     // queue, so resolve at the scheduling boundary instead of enqueuing a
     // completion that can never settle.
     if (this.#closed) {
+      this.#safeNotify(() => this.#onCompletion?.(inputs[0]!.announcement, 'closed'));
       completion(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'closed',
         providerAttempts: 0,
@@ -648,7 +657,10 @@ export class Rfc64PublicCatalogReceiverV1 {
           outcome: 'dropped',
           providerAttempts: task.providerAttempts ?? 0,
         }),
-        (task) => this.#finishReconciliationAttempt(task),
+        (task) => {
+          this.#observeCompletion(task, 'dropped');
+          this.#finishReconciliationAttempt(task);
+        },
         (waiter) => this.#safeNotify(waiter),
       );
       if (evicted) this.#droppedQueueFull += 1;
@@ -661,6 +673,7 @@ export class Rfc64PublicCatalogReceiverV1 {
           'dropped',
         ));
       }
+      this.#safeNotify(() => this.#onCompletion?.(first.announcement, 'dropped'));
       completion(createRfc64PublicCatalogReceiverCompletionV1({
         outcome: 'dropped',
         providerAttempts: 0,
@@ -704,6 +717,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         providerAttempts: task.providerAttempts ?? 0,
       }),
       (task) => {
+        this.#observeCompletion(task, 'closed');
         this.#settleVerifiedCurrentHeadTarget(task, 'closed');
         this.#finishReconciliationAttempt(task);
       },
@@ -730,6 +744,7 @@ export class Rfc64PublicCatalogReceiverV1 {
         providerAttempts: task.providerAttempts ?? 0,
       }),
       (task) => {
+        this.#observeCompletion(task, 'closed');
         this.#settleVerifiedCurrentHeadTarget(task, 'closed');
         this.#finishReconciliationAttempt(task);
       },
@@ -1105,7 +1120,10 @@ export class Rfc64PublicCatalogReceiverV1 {
         outcome: 'closed',
         providerAttempts: candidate.providerAttempts ?? 0,
       }),
-      (candidate) => this.#finishReconciliationAttempt(candidate),
+      (candidate) => {
+        this.#observeCompletion(candidate, 'closed');
+        this.#finishReconciliationAttempt(candidate);
+      },
       (waiter) => this.#safeNotify(waiter),
     );
   }
@@ -1114,6 +1132,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     task: ReceiverTaskV1,
     result: Rfc64PublicCatalogReceiverCompletionV1,
   ): void {
+    this.#observeCompletion(task, result.outcome);
     this.#settleVerifiedCurrentHeadTarget(task, result.outcome);
     this.#tasks.finalize(
       task,
@@ -1121,6 +1140,17 @@ export class Rfc64PublicCatalogReceiverV1 {
       (settledTask) => this.#finishReconciliationAttempt(settledTask),
       (waiter) => this.#safeNotify(waiter),
     );
+  }
+
+  #observeCompletion(
+    task: ReceiverTaskV1,
+    outcome: Rfc64PublicCatalogReceiverCompletionV1['outcome'],
+  ): void {
+    if (task.completionObserved === true) return;
+    task.completionObserved = true;
+    const firstProvider = task.providers.values().next().value;
+    if (firstProvider === undefined) return;
+    this.#safeNotify(() => this.#onCompletion?.(firstProvider.announcement, outcome));
   }
 
   #settleVerifiedCurrentHeadTarget(

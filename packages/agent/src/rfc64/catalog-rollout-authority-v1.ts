@@ -14,7 +14,7 @@ export interface Rfc64CatalogRolloutConfigV1 {
   readonly contextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
 }
 
-/** Total immutable runtime plan: every selected graph has one explicit mode. */
+/** Immutable rollout controls; selected effective modes live on the activation plan. */
 export interface ResolvedRfc64CatalogRolloutConfigV1 {
   readonly killSwitch: boolean;
   readonly defaultMode: Rfc64CatalogRolloutModeV1;
@@ -24,6 +24,8 @@ export interface ResolvedRfc64CatalogRolloutConfigV1 {
 type Rfc64CatalogAuthorityActivationV1 = Readonly<{
   enabled?: boolean;
   selectedContextGraphs: readonly string[];
+  /** Effective selected-manifest modes, kept separate from operator overrides. */
+  selectedContextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
   rollout: ResolvedRfc64CatalogRolloutConfigV1;
 }>;
 
@@ -270,9 +272,6 @@ export function resolveRfc64CatalogRolloutConfigV1(
   for (const [contextGraphId, mode] of Object.entries(suppliedModes)) {
     contextGraphModes[contextGraphId] = mode;
   }
-  for (const contextGraphId of selectedContextGraphs) {
-    contextGraphModes[contextGraphId] = suppliedModes[contextGraphId] ?? defaultMode;
-  }
   return Object.freeze({
     killSwitch: input?.killSwitch ?? false,
     defaultMode,
@@ -319,7 +318,8 @@ export function rfc64CatalogRolloutModeForContextGraphV1(
   // Resolved activations produced by this release always carry a total plan.
   // Retain the pre-D18 catalog default for older direct JS callers that pass a
   // previously resolved activation shape across the package boundary.
-  const mode = activation.rollout?.contextGraphModes[contextGraphId]
+  const mode = activation.selectedContextGraphModes?.[contextGraphId]
+    ?? activation.rollout?.contextGraphModes[contextGraphId]
     ?? activation.rollout?.defaultMode
     ?? 'catalog';
   if (mode === undefined) {
@@ -336,9 +336,7 @@ export function rfc64CatalogConfiguredRolloutModeForContextGraphV1(
   if (activation === undefined || !activation.selectedContextGraphs.includes(contextGraphId)) {
     return 'legacy';
   }
-  return activation.rollout?.contextGraphModes[contextGraphId]
-    ?? activation.rollout?.defaultMode
-    ?? 'catalog';
+  return rfc64CatalogRolloutModeForContextGraphV1(activation, contextGraphId);
 }
 
 /**
@@ -510,6 +508,7 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     enabled?: boolean;
     selectedContextGraphs: readonly string[];
     selectedPublicContextGraphs: readonly string[];
+    selectedContextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
     rollout: ResolvedRfc64CatalogRolloutConfigV1;
   }>;
 }>): Rfc64CatalogExecutionPlanV1 {

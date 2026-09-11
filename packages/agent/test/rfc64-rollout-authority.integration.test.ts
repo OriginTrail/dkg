@@ -1441,6 +1441,35 @@ describe('RFC-64 rollout authority integration', () => {
       track2Enabled: false,
       reconciliationLane: 'legacy',
     });
+    const shadowStatus = edge.readRfc64CatalogShadowExecutionStatusV1();
+    expect(shadowStatus).toMatchObject({ contextGraphCount: 1 });
+    expect(JSON.stringify(shadowStatus)).not.toContain(CONTEXT_GRAPH_ID);
+    expect(JSON.stringify(shadowStatus)).not.toContain(unlistedContextGraphId);
+  });
+
+  it('reports a lifecycle responsibility inherited from a shadow default', async () => {
+    const contextGraphId = `${AUTHOR}/default-shadow-responsibility` as ContextGraphIdV1;
+    const edge = await startAgent({
+      name: 'default-shadow-responsibility',
+      config: {
+        rfc64CatalogActivation: { rollout: { defaultMode: 'shadow' } },
+      },
+    });
+    expect((edge as any).config.rfc64CatalogExecutionPlan.selectedAuthority).toEqual({});
+
+    await edge.createContextGraph({
+      id: contextGraphId,
+      name: 'Default shadow responsibility',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({ contextGraphId, mode: 'shadow' }),
+    );
+    const status = edge.readRfc64CatalogShadowExecutionStatusV1();
+    expect(status).toMatchObject({ contextGraphCount: 1 });
+    expect(JSON.stringify(status)).not.toContain(contextGraphId);
   });
 
   async function prepareAuthorityRefreshLifecycle() {
@@ -3097,6 +3126,75 @@ describe('RFC-64 rollout authority integration', () => {
         stagedHeadDigest: published?.currentCatalogHeadDigest,
         appliedHeadDigest: null,
       });
+    }, { timeout: 20_000, interval: 100 });
+    const shadowExecution = shadow.readRfc64CatalogShadowExecutionStatusV1();
+    expect(shadowExecution).toMatchObject({
+      receiverStaging: {
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+      },
+    });
+    expect(shadowExecution!.receiverStaging.trackedTargets).toBeGreaterThanOrEqual(1);
+    expect(shadowExecution!.receiverStaging.staged).toBeGreaterThanOrEqual(1);
+    expect(shadow.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  }, 30_000);
+
+  it('records staging from normal announcements for a rollout-only lifecycle canary', async () => {
+    const shadow = await startAgent({
+      name: 'lifecycle-shadow-receiver',
+      config: {
+        rfc64CatalogActivation: {
+          deploymentProfile: DEPLOYMENT,
+          rollout: {
+            defaultMode: 'legacy',
+            contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+          },
+        },
+      },
+    });
+    await shadow.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Lifecycle shadow receiver',
+      callerAgentAddress: AUTHOR,
+    });
+    await shadow.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    const author = await startAgent({
+      name: 'lifecycle-shadow-author',
+      activation: {
+        ...activation('catalog'),
+        autoPublish: {
+          peers: [shadow.peerId],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      },
+    });
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    await connectBothWays(author, shadow);
+    const published = await author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'rollout-lifecycle-shadow-announcement' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal: assertionSealFromCanonical(await authorSeal(85n)),
+    });
+    expect(published).not.toBeNull();
+
+    await vi.waitFor(() => {
+      const shadowExecution = shadow.readRfc64CatalogShadowExecutionStatusV1();
+      expect(shadowExecution).toMatchObject({
+        contextGraphCount: 1,
+        receiverStaging: {
+          authoritativeApplyCount: 0,
+          stagingObserved: true,
+          stageOnlyInvariantSatisfied: true,
+        },
+      });
+      expect(shadowExecution!.receiverStaging.trackedTargets).toBeGreaterThanOrEqual(1);
+      expect(shadowExecution!.receiverStaging.staged).toBeGreaterThanOrEqual(1);
     }, { timeout: 20_000, interval: 100 });
     expect(shadow.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
