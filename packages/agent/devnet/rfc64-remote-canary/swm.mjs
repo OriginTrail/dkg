@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { createMarker, failure, opaqueRef } from './common.mjs';
+import { randomUUID } from 'node:crypto';
+
+import { failure } from './errors.mjs';
 import {
   isRetryableNodeRequestErrorV1,
   mapCanaryPhaseV1,
@@ -8,8 +10,19 @@ import {
 } from './phase-helpers.mjs';
 import { validateNodePreflightV1 } from './preflight.mjs';
 import { askConfiguredQueryV1 } from './query.mjs';
+import { opaqueRef } from './references.mjs';
 
 const REQUIRED_OFFLINE_PROBES = 3;
+
+function createMarker() {
+  const nonce = randomUUID();
+  return Object.freeze({
+    assetName: `rfc64-canary-${nonce}`,
+    subject: `urn:dkg:rfc64-canary:${nonce}`,
+    predicate: 'https://schema.origintrail.io/rfc64/canaryValue',
+    value: nonce,
+  });
+}
 
 export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {

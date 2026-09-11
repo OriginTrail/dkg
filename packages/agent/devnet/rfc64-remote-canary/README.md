@@ -28,8 +28,9 @@ into a pass.
   Inline authorization headers, user/password flags, secret environment
   assignments, API keys, tokens, and URL credentials are rejected.
 - At most one receiver may appear in all CG scenarios. The runner stops it
-  once, confirms its API is unreachable, shares all offline markers, and always
-  invokes its start command in a `finally` path.
+  once, requires three consecutive unreachable probes, rechecks unreachability
+  around every offline marker share, and always invokes its start command in a
+  `finally` path.
 - Artifacts contain role aliases and opaque hashes instead of URLs, command
   arguments, secret paths, CG ids, peer ids, query text, or HTTP bodies.
 - Each CG needs a read-only `vmAskSparql` assertion for a full `PASS`. Catalog
@@ -52,7 +53,9 @@ into a pass.
   marker delivery cannot be attributed to a compatibility or rollback lane.
 - A new run atomically writes `INCOMPLETE` before doing work, so an old `PASS`
   cannot survive a failed or interrupted attempt—including a missing or
-  malformed configuration file.
+  malformed configuration file. The config and artifact paths must be distinct;
+  normalized paths, symlinks, and hard links to the same file are rejected
+  before the first artifact write.
 - Independent node and Context Graph checks run with a four-operation cap;
   phase ordering and the receiver stop/start critical section remain serial.
 

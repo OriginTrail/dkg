@@ -7,13 +7,11 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { Parser as SparqlParser } from '@traqula/parser-sparql-1-1';
 
-import {
-  CONFIG_SCHEMA,
-  assertJsonData,
-  invalid,
-  opaqueRef,
-} from './common.mjs';
 import { validateCommandV1 } from './command-policy.mjs';
+import { invalid } from './errors.mjs';
+import { opaqueRef } from './references.mjs';
+
+const CONFIG_SCHEMA = 'dkg-rfc64-remote-canary-config-v1';
 
 const DEFAULT_TIMING = Object.freeze({
   requestTimeoutMs: 10_000,
@@ -132,6 +130,29 @@ export function createRemoteCanaryCohortRefV1(config) {
 function validateSecretFile(value) {
   if (!isAbsolute(value)) invalid('auth-secret-file-must-be-absolute');
   return value;
+}
+
+function assertJsonData(value, field, seen = new Set()) {
+  if (value === null || ['string', 'boolean'].includes(typeof value)) return;
+  if (typeof value === 'number' && Number.isFinite(value)) return;
+  if (Array.isArray(value)) {
+    if (seen.has(value)) invalid(`${field}-circular`);
+    seen.add(value);
+    for (const entry of value) assertJsonData(entry, field, seen);
+    seen.delete(value);
+    return;
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) invalid(`${field}-circular`);
+    seen.add(value);
+    for (const [key, entry] of Object.entries(value)) {
+      if (key.length > 256) invalid(`${field}-key-too-long`);
+      assertJsonData(entry, field, seen);
+    }
+    seen.delete(value);
+    return;
+  }
+  invalid(`${field}-not-json`);
 }
 
 function validateBaseUrl(value, allowTailscaleHttp) {

@@ -5,15 +5,12 @@ import { readFileSync } from 'node:fs';
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 
-import {
-  MAX_COMMAND_OUTPUT_BYTES,
-  RPC_EVIDENCE_CLOCK_SKEW_MS,
-  RPC_EVIDENCE_MAX_PRECEDING_MS,
-  RPC_EVIDENCE_SCHEMA,
-  canonicalInstant,
-  failure,
-  round,
-} from './common.mjs';
+import { failure } from './errors.mjs';
+
+const MAX_RPC_EVIDENCE_BYTES = 1_048_576;
+const RPC_EVIDENCE_CLOCK_SKEW_MS = 60_000;
+const RPC_EVIDENCE_MAX_PRECEDING_MS = 5 * 60_000;
+const RPC_EVIDENCE_SCHEMA = 'dkg-rpc-usage-minutes-v1';
 
 const rpcEvidenceSchema = JSON.parse(readFileSync(
   new URL('./rpc-usage-evidence.schema.json', import.meta.url),
@@ -41,7 +38,7 @@ export async function collectRpcUsageEvidenceV1(config, context) {
     if (result.code !== 0) throw failure('rpc-evidence-command-failed', 'rpc-usage');
     text = result.stdout;
   }
-  if (Buffer.byteLength(text) > MAX_COMMAND_OUTPUT_BYTES) {
+  if (Buffer.byteLength(text) > MAX_RPC_EVIDENCE_BYTES) {
     throw failure('rpc-evidence-too-large', 'rpc-usage');
   }
   let evidence;
@@ -121,6 +118,19 @@ function assertRpcCountV1(value) {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw failure('rpc-evidence-count-out-of-range', 'rpc-usage');
   }
+}
+
+function canonicalInstant(value) {
+  if (typeof value !== 'string') throw failure('rpc-evidence-time-invalid', 'rpc-usage');
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
+    throw failure('rpc-evidence-time-invalid', 'rpc-usage');
+  }
+  return timestamp;
+}
+
+function round(value) {
+  return Math.round(value * 1_000) / 1_000;
 }
 
 function checkedRpcCountAddV1(left, right) {

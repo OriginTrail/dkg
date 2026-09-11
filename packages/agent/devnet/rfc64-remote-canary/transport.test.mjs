@@ -3,8 +3,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { MAX_COMMAND_OUTPUT_BYTES, RemoteCanaryError } from './common.mjs';
-import { createRequesterV1, runBoundedCommandV1 } from './transport.mjs';
+import { RemoteCanaryError } from './errors.mjs';
+import {
+  MAX_COMMAND_OUTPUT_BYTES,
+  createRequesterV1,
+  runBoundedCommandV1,
+} from './transport.mjs';
 
 test('bounded commands succeed and pass argv literally without a shell', async () => {
   const literal = 'literal;$(printf never-executed)';

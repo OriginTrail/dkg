@@ -6,7 +6,7 @@ import {
   assertCanonicalTimestampMs,
 } from '@origintrail-official/dkg-core';
 
-import { failure } from './common.mjs';
+import { failure } from './errors.mjs';
 import {
   isRetryableNodeRequestErrorV1,
   mapCanaryPhaseV1,

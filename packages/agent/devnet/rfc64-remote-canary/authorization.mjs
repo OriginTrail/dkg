@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { failure, jsonPointer } from './common.mjs';
+import { failure } from './errors.mjs';
 import { parseResponseJsonV1 } from './transport.mjs';
+
+function jsonPointer(value, pointer) {
+  return pointer.split('/').slice(1).reduce((current, token) => {
+    if (current === null || typeof current !== 'object') return undefined;
+    const decoded = token.replaceAll('~1', '/').replaceAll('~0', '~');
+    return current[decoded];
+  }, value);
+}
 
 export async function verifyAuthorizationV1(checks, request) {
   const [unauthorized, revoked] = await Promise.all([
