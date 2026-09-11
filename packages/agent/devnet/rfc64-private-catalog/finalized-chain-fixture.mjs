@@ -38,6 +38,7 @@ const KNOWLEDGE_ASSET_SELECTORS = new Set([
 /** Chain adapter whose identity matches the deterministic finalized-RPC fixture. */
 export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
   #fixture;
+  #participantRemovalAlsoRemoves;
   #participantRemovalNoop;
 
   constructor(fixture, options = {}) {
@@ -45,6 +46,7 @@ export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
       initialContextGraphId: BigInt(fixture.onChainContextGraphId),
     });
     this.#fixture = fixture;
+    this.#participantRemovalAlsoRemoves = options.participantRemovalAlsoRemoves;
     this.#participantRemovalNoop = options.participantRemovalNoop === true;
   }
 
@@ -72,7 +74,14 @@ export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
 
   async removeContextGraphParticipantAgent(contextGraphId, agent) {
     if (this.#participantRemovalNoop) return this.txResult(true);
-    return super.removeContextGraphParticipantAgent(contextGraphId, agent);
+    const result = await super.removeContextGraphParticipantAgent(contextGraphId, agent);
+    if (this.#participantRemovalAlsoRemoves !== undefined) {
+      await super.removeContextGraphParticipantAgent(
+        contextGraphId,
+        this.#participantRemovalAlsoRemoves,
+      );
+    }
+    return result;
   }
 }
 

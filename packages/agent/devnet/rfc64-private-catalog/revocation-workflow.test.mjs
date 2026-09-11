@@ -58,7 +58,27 @@ test('a successful no-op chain mutation cannot certify receiver revocation', {
       runtimeManifest,
       sourceRevision: SOURCE_REVISION,
     }),
-    (error) => /finalized chain roster did not advance/u.test(error?.cause?.message ?? ''),
+    (error) => /did not exactly apply the receiver revocation/u.test(
+      error?.cause?.message ?? '',
+    ),
+  );
+});
+
+test('over-removing another member cannot certify receiver revocation', {
+  timeout: 90_000,
+}, async () => {
+  const runtimeManifest = buildRuntimeManifestV1(REPO_ROOT, SOURCE_REVISION);
+  await assert.rejects(
+    executeRfc64PrivateReleaseGateV1({
+      childEnvironment: {
+        DKG_RFC64_PRIVATE_AUTHORITY_FAULT: 'revocation-over-removal',
+      },
+      runtimeManifest,
+      sourceRevision: SOURCE_REVISION,
+    }),
+    (error) => /did not exactly apply the receiver revocation/u.test(
+      error?.cause?.message ?? '',
+    ),
   );
 });
 
@@ -67,6 +87,7 @@ for (const [fault, expected] of [
   ['expected-assets', /differs from the expected asset identities/u],
   ['duplicate-expected-assets', /asset identities are duplicated/u],
   ['missing-bundle', /has no durable KA bundle/u],
+  ['mismatched-bundle', /durable KA bundle differs from its signed catalog row/u],
 ]) {
   test(`a ${fault} catalog closure fault fails before exact SWM certification`, {
     timeout: 90_000,

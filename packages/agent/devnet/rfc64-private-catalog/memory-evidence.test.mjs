@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { packKnowledgeAssetIdFromIdentity } from '../../src/ka-identity.ts';
 import {
   ASSET_NUMBERS,
   CONTEXT_GRAPH_ID,
-  NETWORK_ID,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   PROJECTION_EVIDENCE,
   UPDATED_PROJECTION_EVIDENCE,
@@ -21,7 +21,7 @@ import {
 } from './run.mjs';
 import {
   parsePrivateCatalogLiteralEvidenceV1,
-  readPrivateCatalogGraphCountEvidence,
+  readPrivateCatalogWorkspaceMemoryEvidenceV1,
 } from './memory-evidence.mjs';
 import {
   readExpectedPrivateMemoryV1,
@@ -95,8 +95,10 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
       kind: 'catalog-row',
       assertionVersion: '2',
       catalogHeadDigest: appliedHeadDigest,
-      kaId: ((BigInt(roleAgentAddress('owner')) << 96n) | BigInt(evidence.kaNumber))
-        .toString(),
+      kaId: packKnowledgeAssetIdFromIdentity({
+        agentAddress: roleAgentAddress('owner'),
+        kaNumber: evidence.kaNumber,
+      }).toString(),
       projectionDigest: PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.catalogProjectionDigest,
     },
   }));
@@ -150,23 +152,12 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
       { swmProofKind: 'workspace-head' },
     ), true);
     await assert.rejects(
-      readPrivateCatalogGraphCountEvidence(store, {
+      readPrivateCatalogWorkspaceMemoryEvidenceV1(store, {
         assetNumbers: ASSET_NUMBERS,
         authorAddress,
         contextGraphId: CONTEXT_GRAPH_ID,
       }),
       /networkId is required/u,
-    );
-    await assert.rejects(
-      readPrivateCatalogGraphCountEvidence(store, {
-        assetNumbers: ASSET_NUMBERS,
-        authorAddress,
-        catalogClosure: {},
-        contextGraphId: CONTEXT_GRAPH_ID,
-        networkId: NETWORK_ID,
-        swmProofMode: 'catalog-row',
-      }),
-      /not verifier-minted/u,
     );
   } finally {
     await store.close();

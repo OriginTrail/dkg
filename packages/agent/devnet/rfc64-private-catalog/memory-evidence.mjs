@@ -13,7 +13,7 @@ import {
   quadsToNQuads,
   readExactGraphPagedWithDiscoveredCount,
 } from '@origintrail-official/dkg-storage';
-import { readVerifiedCatalogRowSwmProofV1 } from './verified-catalog-swm-proof.mjs';
+import { packKnowledgeAssetIdFromIdentity } from '../../src/ka-identity.ts';
 
 const DEFAULT_MAX_QUAD_COUNT = 16;
 const DEFAULT_MAX_NQUADS_BYTES = 64 * 1024;
@@ -65,9 +65,27 @@ export async function readExactGraphMemoryEvidence(store, graph, options = {}) {
  * child. Each asset and both of its memory projections are independent, so all
  * bounded graph reads begin together while the returned order stays stable.
  */
-export async function readPrivateCatalogGraphCountEvidence(store, input) {
+export async function readPrivateCatalogWorkspaceMemoryEvidenceV1(store, input) {
   assertPrivateCatalogEvidenceInput(input);
-  return Promise.all(input.assetNumbers.map(async (kaNumber) => {
+  const evidence = await readPrivateCatalogProjectionEvidenceV1(store, input, {
+    includeWorkspaceHead: true,
+  });
+  return Object.freeze(evidence.map(({ swmHead, ...entry }) => Object.freeze({
+    ...entry,
+    swmProof: workspaceHeadProofV1(swmHead),
+  })));
+}
+
+/** Shared graph-read primitive used by the verified applied-catalog path. */
+export async function readPrivateCatalogAppliedProjectionEvidenceV1(store, input) {
+  assertPrivateCatalogEvidenceInput(input);
+  return readPrivateCatalogProjectionEvidenceV1(store, input, {
+    includeWorkspaceHead: false,
+  });
+}
+
+async function readPrivateCatalogProjectionEvidenceV1(store, input, options) {
+  return Object.freeze(await Promise.all(input.assetNumbers.map(async (kaNumber) => {
     const kaUal = `did:dkg:${input.networkId}/${input.authorAddress}/${kaNumber}`;
     const swmGraph = contextGraphLayerUri(
       input.contextGraphId,
@@ -84,43 +102,38 @@ export async function readPrivateCatalogGraphCountEvidence(store, input) {
     const [swm, vm, swmHead, vmHead] = await Promise.all([
       readExactGraphMemoryEvidence(store, swmGraph),
       readExactGraphMemoryEvidence(store, vmGraph),
-      readLayerHeadEvidence(store, {
-        graph: contextGraphWorkspaceMetaGraphUri(input.contextGraphId),
-        subject: `${kaUal}#dkg-swm-head`,
-        includeShareOperationId: true,
-      }),
+      options.includeWorkspaceHead
+        ? readLayerHeadEvidence(store, {
+            graph: contextGraphWorkspaceMetaGraphUri(input.contextGraphId),
+            subject: `${kaUal}#dkg-swm-head`,
+            includeShareOperationId: true,
+          })
+        : undefined,
       readLayerHeadEvidence(store, {
         graph: contextGraphMetaUri(input.contextGraphId),
         subject: kaUal,
         includeShareOperationId: false,
       }),
     ]);
-    const swmProof = input.swmProofMode === 'workspace-head'
-      ? workspaceHeadProofV1(swmHead)
-      : catalogRowProofV1(input, kaNumber);
     return Object.freeze({
       kaNumber,
       kaUal,
       swmGraph,
       swm: swm.count,
       swmDigest: swm.digest,
-      swmProof,
+      ...(options.includeWorkspaceHead ? { swmHead } : {}),
       vmGraph,
       vm: vm.count,
       vmDigest: vm.digest,
       vmHead,
     });
-  }));
+  })));
 }
 
 function workspaceHeadProofV1(head) {
   return head === null
     ? Object.freeze({ kind: 'absent' })
     : Object.freeze({ kind: 'workspace-head', ...head });
-}
-
-function catalogRowProofV1(input, kaNumber) {
-  return readVerifiedCatalogRowSwmProofV1(input.catalogClosure, kaNumber);
 }
 
 async function readLayerHeadEvidence(store, input) {
@@ -197,12 +210,6 @@ function assertPrivateCatalogEvidenceInput(input) {
   ) {
     throw new TypeError('private catalog evidence assetNumbers must be safe integers');
   }
-  if (input.swmProofMode !== 'workspace-head' && input.swmProofMode !== 'catalog-row') {
-    throw new TypeError('private catalog evidence swmProofMode is required');
-  }
-  if (input.swmProofMode === 'catalog-row') {
-    readVerifiedCatalogRowSwmProofV1(input.catalogClosure, input.assetNumbers[0] ?? 0);
-  }
 }
 
 /**
@@ -268,8 +275,10 @@ function hasExactSwmProofV1(state, evidence, expected) {
         === `${expected.shareOperationIdPrefix ?? ''}${evidence.kaNumber}`;
   }
   if (expected.proofKind === 'catalog-row') {
-    const expectedKaId = ((BigInt(expected.authorAddress) << 96n)
-      | BigInt(evidence.kaNumber)).toString();
+    const expectedKaId = packKnowledgeAssetIdFromIdentity({
+      agentAddress: expected.authorAddress,
+      kaNumber: evidence.kaNumber,
+    }).toString();
     return hasExactKeysV1(
       proof,
       ['assertionVersion', 'catalogHeadDigest', 'kaId', 'kind', 'projectionDigest'],
