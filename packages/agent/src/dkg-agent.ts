@@ -1086,19 +1086,9 @@ export class DKGAgent extends DKGAgentBase {
           `RFC-64 authority revision scan incomplete: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
-      refreshContextGraph: async (contextGraphId, signal) => {
-        // Manifest-backed authorities are already committed outside this loop.
-        // For release-native authorities, null means this exact reconciliation
-        // lost its revision fence and must remain eligible for the next scan.
-        if (
-          this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId]
-          !== undefined
-        ) return true;
-        return (await this.reconcileRfc64CatalogAccessAuthorityV1(
-          contextGraphId,
-          signal,
-        )) !== null;
-      },
+      refreshContextGraph: (contextGraphId, signal) => (
+        this.refreshRfc64CatalogAccessAuthorityV1(contextGraphId, signal)
+      ),
       onRefreshFailure: (contextGraphId, error) => {
         this.log.warn(
           createOperationContext('system'),

@@ -1233,10 +1233,8 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('maps locally bound responsibilities onto one shared authority revision read', async () => {
     const revision = `0x${'ab'.repeat(32)}`;
-    const numericRevision = `0x${'cd'.repeat(32)}`;
     const readRevisions = vi.fn(async () => Object.freeze([
       Object.freeze({ contextGraphId: '9', revision }),
-      Object.freeze({ contextGraphId: '11', revision: numericRevision }),
     ]));
     const chainAdapter = Object.assign(new NoChainAdapter(), {
       getContextGraphAuthoritySnapshot: vi.fn(async () => (
@@ -1273,12 +1271,11 @@ describe('RFC-64 rollout authority integration', () => {
       revisions: new Map([
         [CONTEXT_GRAPH_ID, revision],
         [duplicateLocalId, revision],
-        ['11', numericRevision],
       ]),
-      fallbackContextGraphIds: new Set([`${AUTHOR}/unbound`]),
+      fallbackContextGraphIds: new Set(['11', `${AUTHOR}/unbound`]),
     });
     expect(readRevisions).toHaveBeenCalledOnce();
-    expect(readRevisions).toHaveBeenCalledWith([9n, 11n], {
+    expect(readRevisions).toHaveBeenCalledWith([9n], {
       signal: expect.any(AbortSignal),
     });
   });
@@ -1523,29 +1520,76 @@ describe('RFC-64 rollout authority integration', () => {
     return { authoritySnapshot, chainAdapter, edge, runtime };
   }
 
-  it('wires refresh cadence only for active catalog responsibilities', async () => {
-    const { edge, runtime } = await prepareAuthorityRefreshLifecycle();
+  it('retries superseded runtime refreshes and suppresses committed unchanged revisions', async () => {
+    const { authoritySnapshot, chainAdapter, edge, runtime } =
+      await prepareAuthorityRefreshLifecycle();
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
+    const revision = `0x${'ab'.repeat(32)}`;
+    const readRevisions = vi.fn(async () => Object.freeze([
+      Object.freeze({ contextGraphId: '9', revision }),
+    ]));
+    Object.assign(chainAdapter, { getContextGraphAuthorityIndexRevisions: readRevisions });
     const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
-      .mockResolvedValue(null);
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(authoritySnapshot as never);
     vi.useFakeTimers();
     try {
       runtime.start(createOperationContext('system'));
       await runtime.whenIdle();
-      expect(reconcile).toHaveBeenCalledTimes(1);
+      // Runtime startup coalesces one responsibility update behind its initial
+      // pass. The first result is superseded; the follow-up must therefore run
+      // and commit instead of accepting the unchanged revision prematurely.
+      expect(reconcile).toHaveBeenCalledTimes(2);
       expect(reconcile).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(AbortSignal));
-      reconcile.mockClear();
 
       await vi.advanceTimersByTimeAsync(
         RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
       );
       await runtime.whenIdle();
-      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(reconcile).toHaveBeenCalledTimes(2);
       expect(reconcile).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(AbortSignal));
+      await vi.advanceTimersByTimeAsync(
+        RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
+      );
+      await runtime.whenIdle();
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      expect(readRevisions).toHaveBeenCalledTimes(3);
       await runtime.close();
       reconcile.mockClear();
       await vi.advanceTimersByTimeAsync(
         RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
       );
+      expect(reconcile).not.toHaveBeenCalled();
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps manifest-backed authority out of release-native runtime reconciliation', async () => {
+    const edge = await startAgent({
+      name: 'authority-refresh-manifest-bypass',
+      activation: activation('catalog'),
+      config: { nodeRole: 'core', syncContextGraphs: [] },
+    });
+    const runtime = (edge as unknown as {
+      rfc64CatalogRuntimeV1: Rfc64CatalogRuntimeV1;
+    }).rfc64CatalogRuntimeV1;
+    expect((edge as any).config.rfc64CatalogExecutionPlan
+      .selectedAuthority[CONTEXT_GRAPH_ID]).toBeDefined();
+    await runtime.close();
+    vi.spyOn(edge, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue(Object.freeze([{
+      contextGraphId: CONTEXT_GRAPH_ID,
+      active: true,
+      mode: 'catalog',
+    }]) as never);
+    const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1');
+    vi.useFakeTimers();
+    try {
+      runtime.start(createOperationContext('system'));
+      await runtime.whenIdle();
       expect(reconcile).not.toHaveBeenCalled();
     } finally {
       await runtime.close();

@@ -41,12 +41,6 @@ export type ContextGraphBindingTarget = ContextGraphBinding & {
   bindingGeneration: number;
 };
 
-export type ContextGraphAuthorityIndexSchedulingBinding = Readonly<{
-  localContextGraphId: string;
-  onChainId: string;
-  provenance: 'authoritative' | 'legacy-numeric-id';
-}>;
-
 export type ContextGraphBindingTransition = {
   previous: ContextGraphBinding | undefined;
   current: ContextGraphBinding;
@@ -159,35 +153,19 @@ export class ContextGraphBindingState {
   }
 
   /**
-   * Project the binding kinds that may safely participate in the shared
-   * authority-index scheduler. Durable authoritative bindings are preferred;
-   * an otherwise-unbound canonical numeric local id retains the historical
-   * direct-slot behavior. Reverse-name-hash candidates and malformed durable
-   * ids remain on the full-refresh path until they become authoritative.
+   * Return the durable on-chain id that may safely suppress authority work.
+   * Numeric local names and reverse candidates remain on the full-refresh
+   * path: only the authoritative binding used by reconciliation can prove
+   * that the scheduler is observing the same chain slot.
    */
-  authorityIndexSchedulingBindingFor(
+  authorityIndexOnChainIdFor(
     localCgId: string,
     subscription: ContextGraphBindingSubscription | undefined,
-  ): ContextGraphAuthorityIndexSchedulingBinding | undefined {
+  ): string | undefined {
     const current = this.currentBindingFor(localCgId, subscription);
-    if (current?.bindingKind === 'authoritative') {
-      const onChainId = BigInt(current.onChainId);
-      return onChainId <= ethers.MaxUint256
-        ? Object.freeze({
-          localContextGraphId: localCgId,
-          onChainId: current.onChainId,
-          provenance: 'authoritative' as const,
-        })
-        : undefined;
-    }
-    if (current !== undefined || subscription?.onChainId !== undefined) return undefined;
-    if (!isCanonicalPositiveContextGraphId(localCgId)) return undefined;
-    return BigInt(localCgId) <= ethers.MaxUint256
-      ? Object.freeze({
-        localContextGraphId: localCgId,
-        onChainId: localCgId,
-        provenance: 'legacy-numeric-id' as const,
-      })
+    return current?.bindingKind === 'authoritative'
+      && BigInt(current.onChainId) <= ethers.MaxUint256
+      ? current.onChainId
       : undefined;
   }
 

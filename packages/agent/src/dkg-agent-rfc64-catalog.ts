@@ -167,7 +167,10 @@ import {
   mapRfc64CatalogAuthorityRevisionsToLocalV1,
   projectRfc64CatalogAuthorityRevisionTargetsV1,
 } from './rfc64/catalog-authority-revision-projection-v1.js';
-import type { Rfc64CatalogAuthorityRevisionReadV1 } from
+import type {
+  Rfc64CatalogAuthorityRefreshResultV1,
+  Rfc64CatalogAuthorityRevisionReadV1,
+} from
   './rfc64/catalog-authority-refresh-loop-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -1319,7 +1322,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
 
     const targets = projectRfc64CatalogAuthorityRevisionTargetsV1(
       contextGraphIds,
-      (contextGraphId) => this.contextGraphBindingState.authorityIndexSchedulingBindingFor(
+      (contextGraphId) => this.contextGraphBindingState.authorityIndexOnChainIdFor(
         contextGraphId,
         this.subscribedContextGraphs.get(contextGraphId),
       ),
@@ -1982,6 +1985,21 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     while (pending !== undefined && pending.size > 0) {
       await Promise.allSettled(pending.values());
     }
+  }
+
+  /** Translate reconciliation ownership into the scheduler's explicit commit protocol. */
+  async refreshRfc64CatalogAccessAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    signal: AbortSignal,
+  ): Promise<Rfc64CatalogAuthorityRefreshResultV1> {
+    if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
+      return Object.freeze({ kind: 'not-applicable' });
+    }
+    const accepted = await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal);
+    return accepted === null
+      ? Object.freeze({ kind: 'superseded' })
+      : Object.freeze({ kind: 'committed' });
   }
 
   /**

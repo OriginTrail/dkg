@@ -1,9 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type {
-  ContextGraphAuthorityIndexSchedulingBinding,
-} from '../context-graph-binding-state.js';
-
 export interface Rfc64CatalogAuthorityRevisionTargetsV1 {
   readonly onChainContextGraphIds: readonly bigint[];
   readonly localContextGraphIdsByOnChainId: ReadonlyMap<string, readonly string[]>;
@@ -15,19 +11,19 @@ export function projectRfc64CatalogAuthorityRevisionTargetsV1(
   contextGraphIds: readonly string[],
   resolveBinding: (
     contextGraphId: string,
-  ) => ContextGraphAuthorityIndexSchedulingBinding | undefined,
+  ) => string | undefined,
 ): Rfc64CatalogAuthorityRevisionTargetsV1 {
   const localContextGraphIdsByOnChainId = new Map<string, string[]>();
   const fallbackContextGraphIds = new Set<string>();
   for (const contextGraphId of new Set(contextGraphIds)) {
-    const binding = resolveBinding(contextGraphId);
-    if (binding === undefined) {
+    const onChainId = resolveBinding(contextGraphId);
+    if (onChainId === undefined) {
       fallbackContextGraphIds.add(contextGraphId);
       continue;
     }
-    const localIds = localContextGraphIdsByOnChainId.get(binding.onChainId) ?? [];
-    localIds.push(binding.localContextGraphId);
-    localContextGraphIdsByOnChainId.set(binding.onChainId, localIds);
+    const localIds = localContextGraphIdsByOnChainId.get(onChainId) ?? [];
+    localIds.push(contextGraphId);
+    localContextGraphIdsByOnChainId.set(onChainId, localIds);
   }
   return Object.freeze({
     onChainContextGraphIds: Object.freeze(

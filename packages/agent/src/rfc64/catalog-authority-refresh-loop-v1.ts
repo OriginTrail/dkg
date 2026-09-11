@@ -38,6 +38,11 @@ export type Rfc64CatalogAuthorityRevisionReadV1 =
       error: unknown;
     }>;
 
+export type Rfc64CatalogAuthorityRefreshResultV1 =
+  | Readonly<{ kind: 'committed' }>
+  | Readonly<{ kind: 'superseded' }>
+  | Readonly<{ kind: 'not-applicable' }>;
+
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
   readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
@@ -53,7 +58,7 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly refreshContextGraph: (
     contextGraphId: string,
     signal: AbortSignal,
-  ) => Promise<boolean | void>;
+  ) => Promise<Rfc64CatalogAuthorityRefreshResultV1>;
   readonly onRefreshFailure: (contextGraphId: string, error: unknown) => void;
   readonly scheduler?: Rfc64CatalogAuthorityRefreshSchedulerV1;
 }
@@ -62,11 +67,14 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
 class Rfc64CatalogAuthorityRefreshLaneV1 {
   readonly #task: CoalescingRecurringTask;
   #acceptedRevision: string | undefined;
-  #target: Readonly<{ revision: string | null }> | undefined;
+  #target: Readonly<{ revision: string | null; force: boolean }> | undefined;
 
   constructor(
     readonly contextGraphId: string,
-    refresh: (contextGraphId: string, signal: AbortSignal) => Promise<boolean | void>,
+    refresh: (
+      contextGraphId: string,
+      signal: AbortSignal,
+    ) => Promise<Rfc64CatalogAuthorityRefreshResultV1>,
     onFailure: (contextGraphId: string, error: unknown) => void,
   ) {
     this.#task = new CoalescingRecurringTask({
@@ -75,13 +83,16 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
         const target = this.#target;
         if (target === undefined) return;
         try {
-          // `false` is an explicit fulfilled-but-not-committed result. `void`
-          // remains successful for existing callers and focused test fixtures.
-          const committed = await refresh(this.contextGraphId, signal);
-          if (signal.aborted || committed === false) return;
+          const result = await refresh(this.contextGraphId, signal);
+          if (signal.aborted) return;
+          if (result.kind === 'superseded') {
+            if (target.force) this.#acceptedRevision = undefined;
+            return;
+          }
           if (target.revision !== null) this.#acceptedRevision = target.revision;
         } catch (error) {
           if (signal.aborted) return;
+          if (target.force) this.#acceptedRevision = undefined;
           onFailure(this.contextGraphId, error);
         }
       },
@@ -97,8 +108,12 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
 
   request(revision: string | null, force: boolean): boolean {
     if (!force && revision !== null && this.#acceptedRevision === revision) return false;
-    if (this.#task.running && this.#target?.revision === revision) return false;
-    this.#target = Object.freeze({ revision });
+    if (
+      this.#task.running
+      && this.#target?.revision === revision
+      && (!force || this.#target.force)
+    ) return false;
+    this.#target = Object.freeze({ revision, force });
     return this.#task.request();
   }
 
