@@ -194,11 +194,16 @@
               "items": { "enum": [401, 403, 404] }
             },
             "bodyCodePointer": { "type": "string", "pattern": "^/" },
+            "notFoundControlNodeId": { "type": "string" },
             "expectedCodes": {
               "type": "array",
               "minItems": 1,
               "uniqueItems": true,
-              "items": { "type": "string", "minLength": 1, "maxLength": 128 }
+              "items": {
+                "type": "string",
+                "pattern": "^RFC64_[A-Z0-9_]+$",
+                "maxLength": 128
+              }
             }
           }
         }

@@ -1,21 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 import {
   RemoteCanaryError,
+  createRemoteCanaryCohortRefV1,
   createRemoteCanaryDryRunArtifactV1,
   executeRemoteCanaryCertificationV1,
   runRemoteCanaryArtifactLifecycleV1,
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
+import { matchesJsonSchemaV1 } from './json-schema-v1.mjs';
+
+const execFileAsync = promisify(execFile);
+const RUNNER_PATH = fileURLToPath(new URL('./run.mjs', import.meta.url));
 
 const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const CG = '0x1111111111111111111111111111111111111111/testnet-canary';
+const SECOND_CG = '0x2222222222222222222222222222222222222222/testnet-canary';
 const SOURCE_URL = 'https://source.internal.example';
 const RECEIVER_URL = 'https://receiver.internal.example';
 const SOURCE_SECRET = 'source-super-secret-token';
@@ -84,7 +93,7 @@ function baseConfig(overrides = {}) {
   };
 }
 
-function statusBody({ legacySyncAllowed = false } = {}) {
+function statusBody({ legacySyncAllowed = false, contextGraphIds = [CG] } = {}) {
   const digest = `0x${'ab'.repeat(32)}`;
   const inventory = `0x${'cd'.repeat(32)}`;
   return {
@@ -96,9 +105,12 @@ function statusBody({ legacySyncAllowed = false } = {}) {
     chain: { configured: true, rpcEndpointCount: 3, chainId: 2160 },
     rfc64Catalog: {
       enabled: true,
-      rollout: { killSwitch: false, contextGraphModes: { [CG]: 'catalog' } },
-      contextGraphs: [{
-        contextGraphId: CG,
+      rollout: {
+        killSwitch: false,
+        contextGraphModes: Object.fromEntries(contextGraphIds.map((id) => [id, 'catalog'])),
+      },
+      contextGraphs: contextGraphIds.map((contextGraphId) => ({
+        contextGraphId,
         effectiveMode: 'catalog',
         legacySyncAllowed,
         phase: 'complete',
@@ -114,15 +126,18 @@ function statusBody({ legacySyncAllowed = false } = {}) {
         missingRowCount: '0',
         catalogVersion: '7',
         lastSuccessfulAdvanceAt: '1893456000',
-      }],
+      })),
     },
   };
 }
 
-function rpcEvidence() {
+function rpcEvidence(config = baseConfig()) {
+  const cohortRef = createRemoteCanaryCohortRefV1(validateRemoteCanaryConfigV1(config));
   return JSON.stringify({
     schema: 'dkg-rpc-usage-minutes-v1',
     scope: 'certified-cohort',
+    expectedCommit: COMMIT,
+    cohortRef,
     samples: [
       {
         windowStartedAt: '2026-09-11T00:00:00.000Z',
@@ -144,6 +159,8 @@ function fakeRuntime({
   failOfflineShare = false,
   catalogSwmPresent = true,
   legacySyncAllowed = false,
+  contextGraphIds = [CG],
+  rpcEvidenceConfig = baseConfig(),
 } = {}) {
   const state = {
     receiverOnline: true,
@@ -157,11 +174,13 @@ function fakeRuntime({
     const url = new URL(input);
     const isReceiver = url.origin === RECEIVER_URL;
     const method = options.method ?? 'GET';
-    state.requests.push({ origin: url.origin, path: url.pathname, method });
+    const authorization = new Headers(options.headers).get('authorization');
+    state.requests.push({ origin: url.origin, path: url.pathname, method, authorization });
     if (isReceiver && !state.receiverOnline) throw new TypeError('offline endpoint details');
     if (url.pathname === '/api/status') {
       return new Response(method === 'HEAD' ? null : JSON.stringify(statusBody({
         legacySyncAllowed,
+        contextGraphIds,
       })), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -181,7 +200,7 @@ function fakeRuntime({
       if (body.view === 'verifiable-memory') {
         return jsonResponse({ result: { type: 'boolean', value: true } });
       }
-      if (body.sparql === CATALOG_SWM_ASK) {
+      if (body.sparql === CATALOG_SWM_ASK || body.sparql.includes('known:second-swm-subject')) {
         return jsonResponse({ result: { type: 'boolean', value: catalogSwmPresent } });
       }
       const marker = body.sparql.match(/<([^>]+)>/)?.[1];
@@ -191,9 +210,13 @@ function fakeRuntime({
       return jsonResponse({ result: { type: 'boolean', value: present } });
     }
     if (url.pathname === '/api/rfc64/unauthorized-probe') {
+      if (authorization !== null) return jsonResponse({ code: 'WRONG_AUTH_MODE' }, 500);
       return jsonResponse({ code: 'RFC64_DENIED', detail: SOURCE_SECRET }, 403);
     }
     if (url.pathname === '/api/rfc64/revoked-probe') {
+      if (authorization !== `Bearer ${RECEIVER_SECRET}`) {
+        return jsonResponse({ code: 'WRONG_AUTH_MODE' }, 500);
+      }
       return jsonResponse({ code: 'RFC64_REVOKED', detail: RECEIVER_SECRET }, 403);
     }
     return jsonResponse({ error: 'not found' }, 404);
@@ -210,10 +233,11 @@ function fakeRuntime({
   const readFileFn = async (path) => {
     if (path === '/run/secrets/source') return SOURCE_SECRET;
     if (path === '/run/secrets/receiver') return RECEIVER_SECRET;
-    if (path === '/tmp/redacted-rpc-evidence.json') return rpcEvidence();
+    if (path === '/tmp/redacted-rpc-evidence.json') return rpcEvidence(rpcEvidenceConfig);
     throw new Error('unexpected read');
   };
-  return { state, fetchFn, runCommand, readFileFn };
+  const now = () => new Date('2026-09-11T00:02:30.000Z');
+  return { state, fetchFn, runCommand, readFileFn, now };
 }
 
 function jsonResponse(body, status = 200) {
@@ -270,6 +294,50 @@ test('strict config rejects inline credentials and multiple receivers', () => {
   );
 });
 
+test('schema and runtime enforce the same authorization body shape', async () => {
+  const schema = JSON.parse(await readFile(
+    fileURLToPath(new URL('./config.schema.json', import.meta.url)),
+    'utf8',
+  ));
+  const valid = baseConfig();
+  assert.equal(matchesJsonSchemaV1(schema, valid), true);
+  assert.doesNotThrow(() => validateRemoteCanaryConfigV1(valid));
+
+  const invalid = baseConfig();
+  invalid.authorizationChecks.unauthorized.body = 'probe';
+  assert.equal(matchesJsonSchemaV1(schema, invalid), false);
+  assert.throws(
+    () => validateRemoteCanaryConfigV1(invalid),
+    (error) => error instanceof RemoteCanaryError && error.code === 'config-shape',
+  );
+});
+
+test('config rejects tautological ASK queries and common inline secret forms', () => {
+  for (const field of ['vmAskSparql', 'catalogSwmAskSparql']) {
+    const config = baseConfig();
+    config.contextGraphs[0][field] = 'ASK {}';
+    assert.throws(
+      () => validateRemoteCanaryConfigV1(config),
+      (error) => error instanceof RemoteCanaryError
+        && error.code.endsWith('query-must-depend-on-data'),
+    );
+  }
+
+  for (const secretArgv of [
+    ['curl', '-H', 'Authorization: Bearer top-secret'],
+    ['curl', '--user', 'operator:password'],
+    ['env', 'QUICKNODE_API_KEY=top-secret', 'collector'],
+  ]) {
+    const config = baseConfig();
+    config.lifecycle.stop = { argv: secretArgv };
+    assert.throws(
+      () => validateRemoteCanaryConfigV1(config),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === 'inline-command-secret-rejected',
+    );
+  }
+});
+
 test('full run certifies propagation, one-node catch-up, VM parity, denials, and RPC usage', async () => {
   const runtime = fakeRuntime();
   const artifact = await executeRemoteCanaryCertificationV1(baseConfig(), runtime);
@@ -291,12 +359,23 @@ test('full run certifies propagation, one-node catch-up, VM parity, denials, and
   assert.deepEqual(artifact.checks.rpcUsage, {
     status: 'PASS',
     source: 'evidence-file',
+    cohortRef: artifact.cohortRef,
+    windowStartedAt: '2026-09-11T00:00:00.000Z',
+    windowEndedAt: '2026-09-11T00:02:00.000Z',
     sampleCount: 2,
     measuredSeconds: 120,
     total: 20,
     requestsPerMinute: 10,
     byMethod: { eth_blockNumber: 4, eth_call: 16 },
   });
+  const unauthorizedRequest = runtime.state.requests.find(({ path }) => (
+    path === '/api/rfc64/unauthorized-probe'
+  ));
+  const revokedRequest = runtime.state.requests.find(({ path }) => (
+    path === '/api/rfc64/revoked-probe'
+  ));
+  assert.equal(unauthorizedRequest.authorization, null);
+  assert.equal(revokedRequest.authorization, `Bearer ${RECEIVER_SECRET}`);
   const serialized = JSON.stringify(artifact);
   for (const sensitive of [
     SOURCE_URL,
@@ -312,6 +391,49 @@ test('full run certifies propagation, one-node catch-up, VM parity, denials, and
     'urn:must-not-persist',
     'urn:known:catalog-swm-subject',
   ]) assert.equal(serialized.includes(sensitive), false, sensitive);
+});
+
+test('parallel graph checks preserve configuration order in certificate evidence', async () => {
+  const config = baseConfig({
+    contextGraphs: [
+      ...baseConfig().contextGraphs,
+      {
+        id: SECOND_CG,
+        expectedMode: 'catalog',
+        sourceNodeId: 'alpha-source',
+        receiverNodeId: 'beta-receiver',
+        vmAskSparql: 'ASK { <urn:known:second-vm-subject> ?p ?o }',
+        catalogSwmAskSparql: 'ASK { <urn:known:second-swm-subject> ?p ?o }',
+      },
+    ],
+  });
+  const runtime = fakeRuntime({
+    contextGraphIds: [CG, SECOND_CG],
+    rpcEvidenceConfig: config,
+  });
+  const delegateFetch = runtime.fetchFn;
+  runtime.fetchFn = async (input, options) => {
+    const url = new URL(input);
+    if (
+      url.pathname === '/api/knowledge-assets'
+      && JSON.parse(options.body).contextGraphId === CG
+    ) await new Promise((resolve) => setTimeout(resolve, 10));
+    return delegateFetch(input, options);
+  };
+  const artifact = await executeRemoteCanaryCertificationV1(config, runtime);
+  const expectedOrder = artifact.topology.contextGraphs.map(({ contextGraphRef }) => contextGraphRef);
+  assert.deepEqual(
+    artifact.checks.liveSwmPropagation.map(({ contextGraphRef }) => contextGraphRef),
+    expectedOrder,
+  );
+  assert.deepEqual(
+    artifact.checks.vmParity.map(({ contextGraphRef }) => contextGraphRef),
+    expectedOrder,
+  );
+  assert.deepEqual(
+    artifact.checks.catalogSwm.map(({ contextGraphRef }) => contextGraphRef),
+    expectedOrder,
+  );
 });
 
 test('missing live-only surfaces remain explicit and cannot produce PASS', async () => {
@@ -412,14 +534,76 @@ test('receiver start runs from finally when an offline share fails', async () =>
   assert.equal(runtime.state.receiverOnline, true);
 });
 
-test('RPC evidence rejects non-minutely windows and mismatched totals', async () => {
+test('HTTP timeout covers a stalled response body and still restarts the receiver', async () => {
   const runtime = fakeRuntime();
+  const delegateFetch = runtime.fetchFn;
+  runtime.fetchFn = async (input, options) => {
+    const url = new URL(input);
+    if (!runtime.state.receiverOnline && url.pathname === '/api/knowledge-assets') {
+      return new Response(new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"swmShared":'));
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    return delegateFetch(input, options);
+  };
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(baseConfig({
+      timing: { requestTimeoutMs: 1_000 },
+    }), runtime),
+    (error) => error instanceof RemoteCanaryError && error.code === 'node-request-failed',
+  );
+  assert.deepEqual(runtime.state.commands, ['stop', 'start']);
+  assert.equal(runtime.state.receiverOnline, true);
+});
+
+test('generic 404 cannot certify authorization even with a plausible denial body', async () => {
+  const runtime = fakeRuntime();
+  const delegateFetch = runtime.fetchFn;
+  runtime.fetchFn = async (input, options) => {
+    const url = new URL(input);
+    if (url.pathname === '/api/typo') {
+      runtime.state.requests.push({
+        origin: url.origin,
+        path: url.pathname,
+        method: options.method,
+        authorization: new Headers(options.headers).get('authorization'),
+      });
+      return jsonResponse({ code: 'RFC64_DENIED' }, 404);
+    }
+    return delegateFetch(input, options);
+  };
+  const config = baseConfig();
+  config.authorizationChecks.unauthorized = {
+    kind: 'http',
+    nodeId: 'beta-receiver',
+    method: 'GET',
+    path: '/api/typo',
+    authentication: 'none',
+    expectedStatuses: [404],
+    bodyCodePointer: '/code',
+    expectedCodes: ['RFC64_DENIED'],
+    notFoundControlNodeId: 'alpha-source',
+  };
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(config, runtime),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'authorization-not-found-control-failed',
+  );
+  const probes = runtime.state.requests.filter(({ path }) => path === '/api/typo');
+  assert.equal(probes[0].authorization, null);
+  assert.equal(probes[1].authorization, `Bearer ${SOURCE_SECRET}`);
+});
+
+test('RPC evidence rejects non-minutely windows', async () => {
+  const runtime = fakeRuntime();
+  const valid = JSON.parse(rpcEvidence());
   runtime.readFileFn = async (path) => {
     if (path === '/run/secrets/source') return SOURCE_SECRET;
     if (path === '/run/secrets/receiver') return RECEIVER_SECRET;
     return JSON.stringify({
-      schema: 'dkg-rpc-usage-minutes-v1',
-      scope: 'certified-cohort',
+      ...valid,
       samples: [{
         windowStartedAt: '2026-09-11T00:00:00.000Z',
         windowEndedAt: '2026-09-11T00:00:10.000Z',
@@ -442,6 +626,84 @@ test('RPC evidence rejects non-minutely windows and mismatched totals', async ()
   );
 });
 
+test('RPC evidence rejects a minutely sample whose method counts do not match total', async () => {
+  const runtime = fakeRuntime();
+  const evidence = JSON.parse(rpcEvidence());
+  evidence.samples = [{
+    windowStartedAt: '2026-09-11T00:01:00.000Z',
+    windowEndedAt: '2026-09-11T00:02:00.000Z',
+    total: 99,
+    byMethod: { eth_call: 1 },
+  }];
+  runtime.readFileFn = async (path) => {
+    if (path === '/run/secrets/source') return SOURCE_SECRET;
+    if (path === '/run/secrets/receiver') return RECEIVER_SECRET;
+    return JSON.stringify(evidence);
+  };
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(baseConfig({
+      rpcUsage: {
+        kind: 'evidence-file',
+        path: '/tmp/redacted-rpc-evidence.json',
+        minimumSamples: 1,
+      },
+    }), runtime),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rpc-evidence-total-mismatch',
+  );
+});
+
+test('RPC evidence rejects stale and future windows bound to the right release cohort', async () => {
+  for (const [windowStartedAt, windowEndedAt, expectedCode] of [
+    ['2026-09-10T23:00:00.000Z', '2026-09-10T23:01:00.000Z', 'rpc-evidence-stale'],
+    ['2026-09-11T00:10:00.000Z', '2026-09-11T00:11:00.000Z', 'rpc-evidence-future'],
+  ]) {
+    const runtime = fakeRuntime();
+    const evidence = JSON.parse(rpcEvidence());
+    evidence.samples = [{
+      windowStartedAt,
+      windowEndedAt,
+      total: 1,
+      byMethod: { eth_call: 1 },
+    }];
+    runtime.readFileFn = async (path) => {
+      if (path === '/run/secrets/source') return SOURCE_SECRET;
+      if (path === '/run/secrets/receiver') return RECEIVER_SECRET;
+      return JSON.stringify(evidence);
+    };
+    await assert.rejects(
+      executeRemoteCanaryCertificationV1(baseConfig({
+        rpcUsage: {
+          kind: 'evidence-file',
+          path: '/tmp/redacted-rpc-evidence.json',
+          minimumSamples: 1,
+        },
+      }), runtime),
+      (error) => error instanceof RemoteCanaryError && error.code === expectedCode,
+    );
+  }
+});
+
+test('RPC evidence must identify the certified commit and cohort', async () => {
+  for (const [mutate, expectedCode] of [
+    [(evidence) => { evidence.expectedCommit = 'f'.repeat(40); }, 'rpc-evidence-commit-mismatch'],
+    [(evidence) => { evidence.cohortRef = `cohort:${'f'.repeat(20)}`; }, 'rpc-evidence-cohort-mismatch'],
+  ]) {
+    const runtime = fakeRuntime();
+    const evidence = JSON.parse(rpcEvidence());
+    mutate(evidence);
+    runtime.readFileFn = async (path) => {
+      if (path === '/run/secrets/source') return SOURCE_SECRET;
+      if (path === '/run/secrets/receiver') return RECEIVER_SECRET;
+      return JSON.stringify(evidence);
+    };
+    await assert.rejects(
+      executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+      (error) => error instanceof RemoteCanaryError && error.code === expectedCode,
+    );
+  }
+});
+
 test('artifact lifecycle replaces a stale PASS with sanitized FAIL', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-test-'));
   const artifactPath = join(directory, 'latest.json');
@@ -462,6 +724,28 @@ test('artifact lifecycle replaces a stale PASS with sanitized FAIL', async () =>
     assert.equal(artifact.failure.code, 'node-request-failed');
     assert.equal(artifactText.includes(SOURCE_SECRET), false);
     assert.equal(artifactText.includes(SOURCE_URL), false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('runner invalidates a stale PASS before reading malformed configuration JSON', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-runner-test-'));
+  const artifactPath = join(directory, 'latest.json');
+  const configPath = join(directory, 'config.json');
+  try {
+    await writeFile(artifactPath, JSON.stringify({ status: 'PASS', secret: SOURCE_SECRET }));
+    await writeFile(configPath, '{"schema":');
+    await assert.rejects(execFileAsync(process.execPath, [
+      RUNNER_PATH,
+      '--config', configPath,
+      '--artifact', artifactPath,
+    ]));
+    const artifactText = await readFile(artifactPath, 'utf8');
+    const artifact = JSON.parse(artifactText);
+    assert.equal(artifact.status, 'FAIL');
+    assert.equal(artifact.failure.code, 'unexpected-execution-failure');
+    assert.equal(artifactText.includes(SOURCE_SECRET), false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

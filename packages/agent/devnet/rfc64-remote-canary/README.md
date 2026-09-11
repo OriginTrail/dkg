@@ -25,7 +25,8 @@ into a pass.
   node with `"allowTailscaleHttp": true` and is intended only for an encrypted
   tailnet path.
 - Lifecycle and RPC collector commands use argument arrays and `shell: false`.
-  Inline password, token, API-key, and URL-credential forms are rejected.
+  Inline authorization headers, user/password flags, secret environment
+  assignments, API keys, tokens, and URL credentials are rejected.
 - At most one receiver may appear in all CG scenarios. The runner stops it
   once, confirms its API is unreachable, shares all offline markers, and always
   invokes its start command in a `finally` path.
@@ -35,6 +36,9 @@ into a pass.
   cursor/digest parity is always checked, but without an application-level VM
   assertion the result remains `INCOMPLETE` rather than treating status alone
   as proof that VM data is queryable.
+- Configured ASK evidence must contain a non-empty, data-dependent triple
+  pattern with at least one concrete IRI or literal. Tautologies such as
+  `ASK {}` are rejected before any node is contacted.
 - Each CG also needs a read-only `catalogSwmAskSparql` for a pre-existing asset
   represented by its catalog. The runner checks it on both source and receiver
   after the receiver restart and parity phase. This is deliberately distinct
@@ -43,7 +47,10 @@ into a pass.
 - Catalog preflight requires `legacySyncAllowed` to be exactly `false`, so
   marker delivery cannot be attributed to a compatibility or rollback lane.
 - A new run atomically writes `INCOMPLETE` before doing work, so an old `PASS`
-  cannot survive a failed or interrupted attempt.
+  cannot survive a failed or interrupted attempt—including a missing or
+  malformed configuration file.
+- Independent node and Context Graph checks run with a four-operation cap;
+  phase ordering and the receiver stop/start critical section remain serial.
 
 ```mermaid
 sequenceDiagram
@@ -75,7 +82,9 @@ sequenceDiagram
 
 ## Configuration
 
-Validate against [`config.schema.json`](./config.schema.json). This minimal
+[`config.schema.json`](./config.schema.json) is executed by the runner as its
+canonical shape contract; handwritten checks only enforce cross-reference,
+normalization, and safety semantics. This minimal
 shape deliberately declares the current catalog wire-denial APIs unavailable;
 the resulting certificate is `INCOMPLETE` until executable read-only denial
 probes are configured.
@@ -141,7 +150,10 @@ The lifecycle wrapper is operator supplied. It must target only the configured
 receiver and use an SSH agent or credential file outside the JSON; the runner
 does not accept an environment block or inline credential. An HTTP denial
 probe, when a read-only daemon surface exists, accepts only `GET` or
-`POST /api/query` and only 401/403/404 as denial outcomes. Previously committed
+`POST /api/query` and only 401/403/404 as denial outcomes. A 404 additionally
+requires an RFC-64-specific response code and `notFoundControlNodeId`; the same
+request must succeed with that control node's bearer credential, preventing a
+misspelled route from certifying a denial. Previously committed
 local data remaining queryable after revocation is not itself a denial failure:
 revocation is expected to block subsequent network reads, not erase history.
 
@@ -155,6 +167,8 @@ telemetry. Export only the count fields into the schema in
 {
   "schema": "dkg-rpc-usage-minutes-v1",
   "scope": "certified-cohort",
+  "expectedCommit": "0123456789abcdef0123456789abcdef01234567",
+  "cohortRef": "cohort:0123456789abcdef0123",
   "samples": [
     {
       "windowStartedAt": "2026-09-11T00:00:00.000Z",
@@ -174,9 +188,13 @@ telemetry. Export only the count fields into the schema in
   that must be supplied.
 
 Each sample must span 45–75 seconds, windows may not overlap, every count must
-be a non-negative safe integer, and `total` must equal `byMethod` exactly.
-Counts must be aggregated across the complete certified cohort. Provider URLs
-and account metadata are not accepted by the evidence schema.
+be a non-negative safe integer, and `total` must equal `byMethod` exactly. The
+commit and derived cohort reference must match the run. The latest sample must
+overlap or end no more than five minutes before the run starts, and samples may
+not extend more than one minute beyond the observation time. The certificate
+retains only the cohort reference and window bounds for auditability. Counts
+must be aggregated across the complete certified cohort. Provider URLs and
+account metadata are not accepted by the evidence schema.
 
 ## Run
 
