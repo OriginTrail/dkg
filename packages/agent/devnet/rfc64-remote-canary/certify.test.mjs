@@ -14,10 +14,10 @@ import {
   createRemoteCanaryCohortRefV1,
   createRemoteCanaryDryRunArtifactV1,
   executeRemoteCanaryCertificationV1,
+  runBoundedCommandV1,
   runRemoteCanaryArtifactLifecycleV1,
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
-import { matchesJsonSchemaV1 } from './json-schema-v1.mjs';
 
 const execFileAsync = promisify(execFile);
 const RUNNER_PATH = fileURLToPath(new URL('./run.mjs', import.meta.url));
@@ -294,35 +294,51 @@ test('strict config rejects inline credentials and multiple receivers', () => {
   );
 });
 
-test('schema and runtime enforce the same authorization body shape', async () => {
-  const schema = JSON.parse(await readFile(
-    fileURLToPath(new URL('./config.schema.json', import.meta.url)),
-    'utf8',
-  ));
+test('the standards-based config validator enforces authorization body shape', () => {
   const valid = baseConfig();
-  assert.equal(matchesJsonSchemaV1(schema, valid), true);
   assert.doesNotThrow(() => validateRemoteCanaryConfigV1(valid));
 
   const invalid = baseConfig();
   invalid.authorizationChecks.unauthorized.body = 'probe';
-  assert.equal(matchesJsonSchemaV1(schema, invalid), false);
   assert.throws(
     () => validateRemoteCanaryConfigV1(invalid),
     (error) => error instanceof RemoteCanaryError && error.code === 'config-shape',
   );
 });
 
-test('config rejects tautological ASK queries and common inline secret forms', () => {
+test('config requires mandatory basic graph patterns for both ASK evidence fields', () => {
   for (const field of ['vmAskSparql', 'catalogSwmAskSparql']) {
+    for (const sparql of [
+      'ASK {}',
+      'ASK { BIND("constant" AS ?x) }',
+      'ASK { OPTIONAL { <urn:known> ?p ?o } }',
+      'ASK { { <urn:known> ?p ?o } UNION {} }',
+      'ASK { ?s ?p ?o }',
+    ]) {
+      const config = baseConfig();
+      config.contextGraphs[0][field] = sparql;
+      assert.throws(
+        () => validateRemoteCanaryConfigV1(config),
+        (error) => error instanceof RemoteCanaryError
+          && error.code.endsWith('query-must-depend-on-data'),
+        `${field}: ${sparql}`,
+      );
+    }
+  }
+});
+
+test('config rejects swapped authorization modes and common inline secret forms', () => {
+  for (const [field, authentication, code] of [
+    ['unauthorized', 'node', 'unauthorized-authentication-mode'],
+    ['revoked', 'none', 'revoked-authentication-mode'],
+  ]) {
     const config = baseConfig();
-    config.contextGraphs[0][field] = 'ASK {}';
+    config.authorizationChecks[field].authentication = authentication;
     assert.throws(
       () => validateRemoteCanaryConfigV1(config),
-      (error) => error instanceof RemoteCanaryError
-        && error.code.endsWith('query-must-depend-on-data'),
+      (error) => error instanceof RemoteCanaryError && error.code === code,
     );
   }
-
   for (const secretArgv of [
     ['curl', '-H', 'Authorization: Bearer top-secret'],
     ['curl', '--user', 'operator:password'],
@@ -596,6 +612,21 @@ test('generic 404 cannot certify authorization even with a plausible denial body
   assert.equal(probes[1].authorization, `Bearer ${SOURCE_SECRET}`);
 });
 
+test('the shared standards validator enforces RPC evidence date-time formats', async () => {
+  const runtime = fakeRuntime();
+  const evidence = JSON.parse(rpcEvidence());
+  evidence.samples[0].windowStartedAt = 'not-a-date';
+  runtime.readFileFn = async (path) => {
+    if (path === '/run/secrets/source') return SOURCE_SECRET;
+    if (path === '/run/secrets/receiver') return RECEIVER_SECRET;
+    return JSON.stringify(evidence);
+  };
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+    (error) => error instanceof RemoteCanaryError && error.code === 'rpc-evidence-malformed',
+  );
+});
+
 test('RPC evidence rejects non-minutely windows', async () => {
   const runtime = fakeRuntime();
   const valid = JSON.parse(rpcEvidence());
@@ -682,6 +713,47 @@ test('RPC evidence rejects stale and future windows bound to the right release c
       (error) => error instanceof RemoteCanaryError && error.code === expectedCode,
     );
   }
+});
+
+test('RPC evidence accepts old history when its final sample is fresh for this run', async () => {
+  const runtime = fakeRuntime();
+  const evidence = JSON.parse(rpcEvidence());
+  evidence.samples.unshift({
+    windowStartedAt: '2026-09-10T23:00:00.000Z',
+    windowEndedAt: '2026-09-10T23:01:00.000Z',
+    total: 3,
+    byMethod: { eth_call: 3 },
+  });
+  runtime.readFileFn = async (path) => {
+    if (path === '/run/secrets/source') return SOURCE_SECRET;
+    if (path === '/run/secrets/receiver') return RECEIVER_SECRET;
+    return JSON.stringify(evidence);
+  };
+  const artifact = await executeRemoteCanaryCertificationV1(baseConfig(), runtime);
+  assert.equal(artifact.checks.rpcUsage.status, 'PASS');
+  assert.equal(artifact.checks.rpcUsage.sampleCount, 3);
+});
+
+test('command-backed RPC evidence crosses the real subprocess boundary', async () => {
+  const config = baseConfig({
+    rpcUsage: {
+      kind: 'command',
+      command: { argv: [process.execPath, '-e', 'process.stdout.write(process.argv[1])', '{}'] },
+      minimumSamples: 2,
+      commandTimeoutMs: 5_000,
+    },
+  });
+  config.rpcUsage.command.argv[3] = rpcEvidence(config);
+  const runtime = fakeRuntime();
+  const lifecycleCommand = runtime.runCommand;
+  runtime.runCommand = (command, timeoutMs) => (
+    command.argv[0] === process.execPath
+      ? runBoundedCommandV1(command, timeoutMs)
+      : lifecycleCommand(command, timeoutMs)
+  );
+  const artifact = await executeRemoteCanaryCertificationV1(config, runtime);
+  assert.equal(artifact.checks.rpcUsage.status, 'PASS');
+  assert.equal(artifact.checks.rpcUsage.source, 'command');
 });
 
 test('RPC evidence must identify the certified commit and cohort', async () => {

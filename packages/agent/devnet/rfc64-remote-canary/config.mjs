@@ -3,6 +3,9 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 
+import Ajv2020 from 'ajv/dist/2020.js';
+import addFormats from 'ajv-formats';
+
 import {
   CONFIG_SCHEMA,
   assertJsonData,
@@ -10,7 +13,6 @@ import {
   invalid,
   opaqueRef,
 } from './common.mjs';
-import { matchesJsonSchemaV1 } from './json-schema-v1.mjs';
 
 const DEFAULT_TIMING = Object.freeze({
   requestTimeoutMs: 10_000,
@@ -27,13 +29,17 @@ const rpcEvidenceSchema = JSON.parse(readFileSync(
   new URL('./rpc-usage-evidence.schema.json', import.meta.url),
   'utf8',
 ));
+const schemaValidator = new Ajv2020({ allErrors: false, strict: true });
+addFormats(schemaValidator);
+const matchesRemoteCanaryConfigV1 = schemaValidator.compile(configSchema);
+const matchesRpcEvidenceV1 = schemaValidator.compile(rpcEvidenceSchema);
 
 /**
  * The JSON Schema is the canonical shape contract. Handwritten checks below
  * are limited to cross-references, normalization, and safety semantics.
  */
 export function validateRemoteCanaryConfigV1(input) {
-  if (!matchesJsonSchemaV1(configSchema, input)) invalid('config-shape');
+  if (!matchesRemoteCanaryConfigV1(input)) invalid('config-shape');
 
   const nodeIds = new Set();
   const nodes = input.nodes.map((node) => {
@@ -104,7 +110,7 @@ export function createRemoteCanaryCohortRefV1(config) {
 }
 
 export function assertRpcEvidenceShapeV1(evidence) {
-  if (!matchesJsonSchemaV1(rpcEvidenceSchema, evidence)) {
+  if (!matchesRpcEvidenceV1(evidence)) {
     throw new Error('rpc-evidence-malformed');
   }
 }
@@ -161,6 +167,10 @@ function normalizeAuthorizationCheck(value, label, nodes) {
       : 'revocation-api-not-exposed';
     if (value.reasonCode !== expected) invalid('authorization-gap-reason');
     return Object.freeze({ ...value });
+  }
+  const requiredAuthentication = label === 'unauthorized' ? 'none' : 'node';
+  if (value.authentication !== requiredAuthentication) {
+    invalid(`${label}-authentication-mode`);
   }
   const nodeIds = new Set(nodes.map(({ id }) => id));
   if (!nodeIds.has(value.nodeId)) invalid('authorization-node-reference');
@@ -232,9 +242,93 @@ function validateAskSparql(value, label) {
   if (match === null) invalid(`${label}-query-must-be-ask`);
   const body = match[1].trim();
   if (body.length === 0) invalid(`${label}-query-must-depend-on-data`);
-  const term = '(?:<[^>\\r\\n]+>|[?$][A-Za-z_][A-Za-z0-9_]*|"(?:[^"\\\\]|\\\\.)*"|[^\\s{}]+)';
-  const triple = new RegExp(`${term}\\s+${term}\\s+${term}(?:\\s*\\.|\\s*$)`, 'u');
-  if (!triple.test(body) || !/(?:<[^>]+>|"(?:[^"\\]|\\.)*")/u.test(body)) {
+  const invalidPattern = `${label}-query-must-depend-on-data`;
+  const tokens = tokenizeBasicGraphPattern(body, invalidPattern);
+  let offset = 0;
+  let tripleCount = 0;
+  let concreteTermCount = 0;
+  while (offset < tokens.length) {
+    const triple = tokens.slice(offset, offset + 3);
+    if (triple.length !== 3 || triple.some(({ kind }) => kind === 'dot')) {
+      invalid(`${label}-query-must-depend-on-data`);
+    }
+    concreteTermCount += triple.filter(({ kind }) => kind === 'concrete').length;
+    tripleCount += 1;
+    offset += 3;
+    if (offset < tokens.length) {
+      if (tokens[offset].kind !== 'dot') invalid(`${label}-query-must-depend-on-data`);
+      offset += 1;
+    }
+  }
+  if (tripleCount === 0 || concreteTermCount === 0) {
     invalid(`${label}-query-must-depend-on-data`);
   }
+}
+
+/** Accept only mandatory basic graph patterns; optional/control expressions are intentionally unsupported. */
+function tokenizeBasicGraphPattern(body, invalidPattern) {
+  const tokens = [];
+  let cursor = 0;
+  while (cursor < body.length) {
+    if (/\s/u.test(body[cursor])) {
+      cursor += 1;
+      continue;
+    }
+    if (body[cursor] === '.') {
+      tokens.push({ kind: 'dot' });
+      cursor += 1;
+      continue;
+    }
+    if (body[cursor] === '<') {
+      const end = body.indexOf('>', cursor + 1);
+      if (end <= cursor + 1 || /[\r\n]/u.test(body.slice(cursor, end + 1))) {
+        invalid(invalidPattern);
+      }
+      tokens.push({ kind: 'concrete' });
+      cursor = end + 1;
+      continue;
+    }
+    if (body[cursor] === '?' || body[cursor] === '$') {
+      const variable = /^[?$][A-Za-z_][A-Za-z0-9_]*/u.exec(body.slice(cursor));
+      if (variable === null) invalid(invalidPattern);
+      tokens.push({ kind: 'variable' });
+      cursor += variable[0].length;
+      continue;
+    }
+    if (body[cursor] === '"') {
+      cursor = consumeQuotedLiteral(body, cursor, invalidPattern);
+      tokens.push({ kind: 'concrete' });
+      continue;
+    }
+    if (body[cursor] === 'a' && /(?:\s|\.|$)/u.test(body[cursor + 1] ?? '')) {
+      tokens.push({ kind: 'keyword' });
+      cursor += 1;
+      continue;
+    }
+    invalid(invalidPattern);
+  }
+  return tokens;
+}
+
+function consumeQuotedLiteral(body, start, invalidPattern) {
+  let cursor = start + 1;
+  let closed = false;
+  while (cursor < body.length) {
+    if (body[cursor] === '\\') {
+      cursor += 2;
+      continue;
+    }
+    if (body[cursor] === '"') {
+      cursor += 1;
+      closed = true;
+      break;
+    }
+    if (body[cursor] === '\r' || body[cursor] === '\n') invalid(invalidPattern);
+    cursor += 1;
+  }
+  if (!closed) invalid(invalidPattern);
+  const suffix = /^(?:@[A-Za-z]+(?:-[A-Za-z0-9]+)*|\^\^<[^>\r\n]+>)/u.exec(
+    body.slice(cursor),
+  );
+  return cursor + (suffix?.[0].length ?? 0);
 }
