@@ -24,6 +24,18 @@ import {
 import {
   createRfc64PrivateRuntimeEvidenceCollectorV1,
 } from './runtime-provenance.mjs';
+import {
+  isWithinRpcBudgetV1,
+  isWithinRpcCeilingV1,
+  rpcEvidenceV1,
+} from './rpc-evidence.mjs';
+
+export {
+  RFC64_PRIVATE_GATE_RPC_BUDGET_V1,
+  isWithinRpcBudgetV1,
+  isWithinRpcCeilingV1,
+  rpcEvidenceV1,
+} from './rpc-evidence.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_ROOT = join(HERE, '..', '..');
@@ -35,16 +47,6 @@ const RUNTIME_LOAD_HOOK = resolve(
 export const RFC64_PRIVATE_GATE_ARTIFACT_PATH = join(HERE, 'artifacts', 'latest.json');
 const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
 const RUN_TIMEOUT_MS = 90_000;
-export const RFC64_PRIVATE_GATE_RPC_BUDGET_V1 = Object.freeze({
-  total: 128,
-  methods: Object.freeze({
-    eth_blockNumber: 16,
-    eth_call: 96,
-    eth_chainId: 16,
-    eth_getBlockByNumber: 16,
-    eth_getCode: 8,
-  }),
-});
 export const EXPECTED_MEMORY_CONTENTS = PRIVATE_CATALOG_MEMORY_EXPECTATION;
 
 let requestSequence = 0;
@@ -670,34 +672,6 @@ function safeState(state, bootstrap, shutdownReceipt) {
       },
     }),
   };
-}
-
-export function rpcEvidenceV1(state) {
-  const calls = state?.rpcCallCounts;
-  const byMethod = calls !== null && typeof calls === 'object' && !Array.isArray(calls)
-    ? Object.fromEntries(Object.entries(calls).map(([method, count]) => [method, Number(count)]))
-    : {};
-  return Object.freeze({
-    byMethod: Object.freeze(byMethod),
-    total: Object.values(byMethod).reduce((sum, count) => sum + count, 0),
-  });
-}
-
-export function isWithinRpcBudgetV1(state) {
-  const evidence = rpcEvidenceV1(state);
-  return evidence.total >= 1 && isWithinRpcCeilingV1(state);
-}
-
-/** Persisted-state inspection may be RPC-free but must never exceed known ceilings. */
-export function isWithinRpcCeilingV1(state) {
-  const evidence = rpcEvidenceV1(state);
-  if (evidence.total > RFC64_PRIVATE_GATE_RPC_BUDGET_V1.total) return false;
-  return Object.entries(evidence.byMethod).every(([method, count]) => (
-    Number.isSafeInteger(count)
-    && count >= 0
-    && Object.hasOwn(RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods, method)
-    && count <= RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods[method]
-  ));
 }
 
 function delay(ms) {
