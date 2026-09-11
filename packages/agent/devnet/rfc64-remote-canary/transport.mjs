@@ -2,13 +2,11 @@
 
 import { spawn } from 'node:child_process';
 
-import {
-  MAX_COMMAND_OUTPUT_BYTES,
-  MAX_HTTP_BODY_BYTES,
-  RemoteCanaryError,
-  failure,
-} from './common.mjs';
 import { validateCommandV1 } from './command-policy.mjs';
+import { RemoteCanaryError, failure } from './errors.mjs';
+
+export const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
+const MAX_HTTP_BODY_BYTES = 1_048_576;
 
 export async function runBoundedCommandV1(command, timeoutMs = 60_000) {
   validateCommandV1(command);

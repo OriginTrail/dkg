@@ -2,12 +2,13 @@
 
 import { readFile } from 'node:fs/promises';
 
-import { ARTIFACT_SCHEMA, RemoteCanaryError, failure } from './common.mjs';
+import { ARTIFACT_SCHEMA } from './artifact-contract.mjs';
 import { verifyAuthorizationV1 } from './authorization.mjs';
 import {
   createRemoteCanaryCohortRefV1,
   validateRemoteCanaryConfigV1,
 } from './config.mjs';
+import { RemoteCanaryError, failure } from './errors.mjs';
 import { preflightAllNodesV1 } from './preflight.mjs';
 import { collectRpcUsageEvidenceV1 } from './rpc-evidence.mjs';
 import {

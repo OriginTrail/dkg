@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 
-import { readFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -38,8 +38,57 @@ function parseArgs(argv) {
   return parsed;
 }
 
+async function canonicalizePotentialPath(path) {
+  let cursor = resolve(path);
+  const missingSegments = [];
+  while (true) {
+    try {
+      return join(await realpath(cursor), ...missingSegments);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      const parent = dirname(cursor);
+      if (parent === cursor) return resolve(path);
+      missingSegments.unshift(basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+async function statIfPresent(path) {
+  try {
+    return await stat(path);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function assertDistinctConfigAndArtifactPaths(configPath, artifactPath) {
+  const resolvedConfig = resolve(configPath);
+  const resolvedArtifact = resolve(artifactPath);
+  if (resolvedConfig === resolvedArtifact) {
+    throw new RemoteCanaryError('config-artifact-path-alias', 'config');
+  }
+  const [canonicalConfig, canonicalArtifact, configStat, artifactStat] = await Promise.all([
+    canonicalizePotentialPath(resolvedConfig),
+    canonicalizePotentialPath(resolvedArtifact),
+    statIfPresent(resolvedConfig),
+    statIfPresent(resolvedArtifact),
+  ]);
+  if (
+    canonicalConfig === canonicalArtifact
+    || (
+      configStat !== null
+      && artifactStat !== null
+      && configStat.dev === artifactStat.dev
+      && configStat.ino === artifactStat.ino
+    )
+  ) throw new RemoteCanaryError('config-artifact-path-alias', 'config');
+}
+
 try {
   const args = parseArgs(process.argv.slice(2));
+  await assertDistinctConfigAndArtifactPaths(args.config, args.artifact);
   const artifact = await runRemoteCanaryArtifactLifecycleV1({
     loadConfig: async () => JSON.parse(await readFile(args.config, 'utf8')),
     artifactPath: args.artifact,

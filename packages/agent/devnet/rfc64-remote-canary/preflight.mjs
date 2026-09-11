@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { canonicalChainId, failure } from './common.mjs';
+import { failure } from './errors.mjs';
 import { mapCanaryPhaseV1 } from './phase-helpers.mjs';
+
+function canonicalChainId(value) {
+  const canonical = String(value);
+  if (!/^(0|[1-9][0-9]*)$/u.test(canonical)) {
+    throw failure('node-chain-id-invalid', 'preflight');
+  }
+  return canonical;
+}
 
 export async function preflightAllNodesV1({ config, request }) {
   const statuses = await mapCanaryPhaseV1(config.nodes, async (node) => {

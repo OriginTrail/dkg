@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { mapWithConcurrency } from '../../src/map-with-concurrency.ts';
-import { RemoteCanaryError } from './common.mjs';
+import { RemoteCanaryError } from './errors.mjs';
 
 export const PHASE_CONCURRENCY = 4;
 
