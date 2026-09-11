@@ -10,8 +10,14 @@ import {
 import {
   verifyLiveSwmPropagationV1,
   verifyOfflineCatchupV1,
+  withReceiverOfflineV1,
 } from './swm.mjs';
-import { baseConfig, CG, statusBody } from './test-support.mjs';
+import {
+  SECOND_CG,
+  baseConfig,
+  CG,
+  statusBody,
+} from './test-support.mjs';
 
 test('one transient failed probe cannot certify a no-op receiver stop', async () => {
   const commands = [];
@@ -135,5 +141,133 @@ test('offline catch-up fails when a restarted receiver never receives the marker
     (error) => error instanceof RemoteCanaryError && error.code === 'offline-catchup-timeout',
   );
   assert.deepEqual(commands, ['stop', 'start']);
+  assert.equal(receiverOnline, true);
+});
+
+test('receiver lifecycle bracket attempts exactly one recovery across failure paths', async () => {
+  for (const scenario of [
+    { label: 'stop', stopCode: 1, operationFails: false, startCode: 0, expected: 'receiver-stop-command-failed' },
+    { label: 'callback', stopCode: 0, operationFails: true, startCode: 0, expected: 'offline-operation-failed' },
+    { label: 'start', stopCode: 0, operationFails: false, startCode: 1, expected: 'receiver-start-command-failed' },
+    { label: 'callback-and-start', stopCode: 0, operationFails: true, startCode: 1, expected: 'receiver-start-command-failed', combined: true },
+  ]) {
+    const commands = [];
+    await assert.rejects(
+      withReceiverOfflineV1({
+        config: { timing: { pollIntervalMs: 1 } },
+        lifecycle: {
+          receiver: { id: 'receiver' },
+          stop: { argv: ['control', 'stop'] },
+          start: { argv: ['control', 'start'] },
+          commandTimeoutMs: 1_000,
+          stopTimeoutMs: 100,
+        },
+        request: { reachable: async () => false },
+        runCommand: async (command) => {
+          const action = command.argv[1];
+          commands.push(action);
+          return {
+            code: action === 'stop' ? scenario.stopCode : scenario.startCode,
+            signal: null,
+            stdout: '',
+          };
+        },
+        sleep: async () => undefined,
+      }, async () => {
+        if (scenario.operationFails) {
+          throw new RemoteCanaryError('offline-operation-failed', 'offline-catchup');
+        }
+      }),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === scenario.expected
+        && (!scenario.combined || error.cause instanceof AggregateError),
+      scenario.label,
+    );
+    assert.deepEqual(commands, ['stop', 'start'], scenario.label);
+  }
+});
+
+test('receiver lifecycle bracket confirms readiness before returning operation results', async () => {
+  const config = validateRemoteCanaryConfigV1(baseConfig());
+  const events = [];
+  let receiverOnline = true;
+  const result = await withReceiverOfflineV1({
+    config,
+    lifecycle: config.lifecycle,
+    request: {
+      reachable: async () => receiverOnline,
+      json: async () => {
+        events.push('ready');
+        return statusBody();
+      },
+    },
+    runCommand: async (command) => {
+      const action = command.argv[1];
+      events.push(action);
+      receiverOnline = action !== 'stop';
+      return { code: 0, signal: null, stdout: '' };
+    },
+    sleep: async () => undefined,
+  }, async () => {
+    events.push('operation');
+    return 'markers';
+  });
+  assert.equal(result, 'markers');
+  assert.deepEqual(events, ['stop', 'operation', 'start', 'ready']);
+});
+
+test('offline marker failure drains in-flight shares before receiver restart', async () => {
+  const rawConfig = baseConfig();
+  rawConfig.contextGraphs.push({
+    ...rawConfig.contextGraphs[0],
+    id: SECOND_CG,
+  });
+  const validated = validateRemoteCanaryConfigV1(rawConfig);
+  const events = [];
+  let receiverOnline = true;
+  let releaseDeferred;
+  let announceDeferred;
+  const deferredStarted = new Promise((resolve) => { announceDeferred = resolve; });
+  const deferredShare = new Promise((resolve) => { releaseDeferred = resolve; });
+  const run = verifyOfflineCatchupV1({
+    config: validated,
+    lifecycle: validated.lifecycle,
+    request: {
+      reachable: async () => receiverOnline,
+      json: async (node, method, path, body) => {
+        if (path !== '/api/knowledge-assets') throw new Error('unexpected request after failure');
+        if (body.contextGraphId === CG) {
+          events.push('share-one:failed');
+          throw new RemoteCanaryError('offline-share-failed', 'offline-catchup');
+        }
+        events.push('share-two:started');
+        announceDeferred();
+        const result = await deferredShare;
+        events.push('share-two:settled');
+        return result;
+      },
+    },
+    runCommand: async (command) => {
+      const action = command.argv[1];
+      events.push(action);
+      receiverOnline = action !== 'stop';
+      return { code: 0, signal: null, stdout: '' };
+    },
+    sleep: async () => undefined,
+  });
+
+  await deferredStarted;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.includes('stop'), true);
+  assert.equal(events.includes('share-one:failed'), true);
+  assert.equal(events.includes('share-two:started'), true);
+  assert.equal(events.includes('start'), false);
+  releaseDeferred({ swmShared: true });
+  await assert.rejects(
+    run,
+    (error) => error instanceof RemoteCanaryError && error.code === 'offline-share-failed',
+  );
+  assert.ok(events.indexOf('share-two:settled') < events.indexOf('start'));
+  assert.equal(events.filter((entry) => entry === 'start').length, 1);
   assert.equal(receiverOnline, true);
 });

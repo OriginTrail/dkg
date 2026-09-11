@@ -13,6 +13,7 @@ import {
   collectRpcUsageEvidenceV1,
   validateRpcEvidenceV1,
 } from './rpc-evidence.mjs';
+import { createCertificationPlanV1 } from './certification-plan.mjs';
 import { COMMIT, baseConfig, rpcEvidence } from './test-support.mjs';
 
 const OBSERVED_AT = '2026-09-11T00:02:30.000Z';
@@ -37,12 +38,20 @@ function fileConfig(minimumSamples = 1) {
   }));
 }
 
+function collect(config, context) {
+  return collectRpcUsageEvidenceV1(
+    config.rpcUsage,
+    context,
+    createCertificationPlanV1(config).rpcUsage,
+  );
+}
+
 test('the shared standards validator enforces RPC evidence date-time formats', async () => {
   const config = fileConfig();
   const evidence = JSON.parse(rpcEvidence(config));
   evidence.samples[0].windowStartedAt = 'not-a-date';
   await assert.rejects(
-    collectRpcUsageEvidenceV1(config.rpcUsage, evidenceContext(config, {
+    collect(config, evidenceContext(config, {
       readFileFn: async () => JSON.stringify(evidence),
     })),
     (error) => error instanceof RemoteCanaryError && error.code === 'rpc-evidence-malformed',
@@ -59,12 +68,54 @@ test('RPC evidence rejects non-minutely windows', async () => {
     byMethod: { eth_call: 1 },
   }];
   await assert.rejects(
-    collectRpcUsageEvidenceV1(config.rpcUsage, evidenceContext(config, {
+    collect(config, evidenceContext(config, {
       readFileFn: async () => JSON.stringify(evidence),
     })),
     (error) => error instanceof RemoteCanaryError
       && error.code === 'rpc-evidence-window-not-minutely',
   );
+});
+
+test('RPC evidence rejects overlapping and out-of-order windows but accepts adjacency', async () => {
+  const config = fileConfig(2);
+  const sample = (windowStartedAt, windowEndedAt) => ({
+    windowStartedAt,
+    windowEndedAt,
+    total: 1,
+    byMethod: { eth_call: 1 },
+  });
+  for (const [label, samples] of [
+    ['overlapping', [
+      sample('2026-09-11T00:00:00.000Z', '2026-09-11T00:01:00.000Z'),
+      sample('2026-09-11T00:00:30.000Z', '2026-09-11T00:01:30.000Z'),
+    ]],
+    ['out-of-order', [
+      sample('2026-09-11T00:01:00.000Z', '2026-09-11T00:02:00.000Z'),
+      sample('2026-09-11T00:00:00.000Z', '2026-09-11T00:01:00.000Z'),
+    ]],
+  ]) {
+    const evidence = JSON.parse(rpcEvidence(config));
+    evidence.samples = samples;
+    await assert.rejects(
+      collect(config, evidenceContext(config, {
+        readFileFn: async () => JSON.stringify(evidence),
+      })),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === 'rpc-evidence-window-not-minutely',
+      label,
+    );
+  }
+
+  const adjacent = JSON.parse(rpcEvidence(config));
+  adjacent.samples = [
+    sample('2026-09-11T00:00:00.000Z', '2026-09-11T00:01:00.000Z'),
+    sample('2026-09-11T00:01:00.000Z', '2026-09-11T00:02:00.000Z'),
+  ];
+  const result = await collect(config, evidenceContext(config, {
+    readFileFn: async () => JSON.stringify(adjacent),
+  }));
+  assert.equal(result.status, 'PASS');
+  assert.equal(result.sampleCount, 2);
 });
 
 test('RPC evidence rejects a minutely sample whose method counts do not match total', async () => {
@@ -77,7 +128,7 @@ test('RPC evidence rejects a minutely sample whose method counts do not match to
     byMethod: { eth_call: 1 },
   }];
   await assert.rejects(
-    collectRpcUsageEvidenceV1(config.rpcUsage, evidenceContext(config, {
+    collect(config, evidenceContext(config, {
       readFileFn: async () => JSON.stringify(evidence),
     })),
     (error) => error instanceof RemoteCanaryError
@@ -110,7 +161,7 @@ test('RPC evidence rejects unsafe counts and checked aggregate overflow', async 
   };
   const validationContext = evidenceContext(config);
   await assert.rejects(
-    collectRpcUsageEvidenceV1(config.rpcUsage, {
+    collect(config, {
       readFileFn: async () => JSON.stringify(evidence),
       ...validationContext,
     }),
@@ -131,7 +182,7 @@ test('RPC evidence rejects unsafe counts and checked aggregate overflow', async 
       && error.code === 'rpc-evidence-count-out-of-range',
   );
   await assert.rejects(
-    collectRpcUsageEvidenceV1(config.rpcUsage, {
+    collect(config, {
       readFileFn: async () => JSON.stringify(unsafeEvidence),
       ...validationContext,
     }),
@@ -167,7 +218,7 @@ test('RPC evidence rejects stale and future windows bound to the right release c
       byMethod: { eth_call: 1 },
     }];
     await assert.rejects(
-      collectRpcUsageEvidenceV1(config.rpcUsage, evidenceContext(config, {
+      collect(config, evidenceContext(config, {
         readFileFn: async () => JSON.stringify(evidence),
       })),
       (error) => error instanceof RemoteCanaryError && error.code === expectedCode,
@@ -184,7 +235,7 @@ test('RPC evidence accepts old history when its final sample is fresh for this r
     total: 3,
     byMethod: { eth_call: 3 },
   });
-  const result = await collectRpcUsageEvidenceV1(config.rpcUsage, evidenceContext(config, {
+  const result = await collect(config, evidenceContext(config, {
     readFileFn: async () => JSON.stringify(evidence),
   }));
   assert.equal(result.status, 'PASS');
@@ -202,7 +253,7 @@ test('command-backed RPC evidence crosses the real subprocess boundary', async (
   });
   rawConfig.rpcUsage.command.argv[3] = rpcEvidence(rawConfig);
   const config = validateRemoteCanaryConfigV1(rawConfig);
-  const result = await collectRpcUsageEvidenceV1(config.rpcUsage, evidenceContext(config, {
+  const result = await collect(config, evidenceContext(config, {
     runCommand: runBoundedCommandV1,
   }));
   assert.equal(result.status, 'PASS');
@@ -218,7 +269,7 @@ test('RPC evidence must identify the certified commit and cohort', async () => {
     const evidence = JSON.parse(rpcEvidence(config));
     mutate(evidence);
     await assert.rejects(
-      collectRpcUsageEvidenceV1(config.rpcUsage, evidenceContext(config, {
+      collect(config, evidenceContext(config, {
         readFileFn: async () => JSON.stringify(evidence),
       })),
       (error) => error instanceof RemoteCanaryError && error.code === expectedCode,

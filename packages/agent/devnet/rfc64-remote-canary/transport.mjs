@@ -91,8 +91,12 @@ export function createRequesterV1({ fetchFn, readFileFn, secrets, timing }) {
           ...await authorization(node, authOverride),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        redirect: 'manual',
         signal: controller.signal,
       });
+      if (response.status >= 300 && response.status < 400) {
+        throw failure('node-redirect-rejected', 'http');
+      }
       const text = await readBodyBoundedV1(response, controller.signal);
       return Object.freeze({ status: response.status, text });
     } catch (error) {

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
 import test from 'node:test';
 
 import { RemoteCanaryError } from './errors.mjs';
@@ -73,4 +75,84 @@ test('reachability does not misclassify credential failures as an offline node',
     }),
     (error) => error instanceof RemoteCanaryError && error.code === 'auth-secret-read-failed',
   );
+});
+
+test('certification requests reject cross-origin and path-changing redirects', async () => {
+  let redirectLocation = '/substitute';
+  let substitutedRequests = 0;
+  const target = createServer((request, response) => {
+    substitutedRequests += 1;
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end('{}');
+  });
+  target.listen(0, '127.0.0.1');
+  await once(target, 'listening');
+  const targetAddress = target.address();
+  assert.equal(typeof targetAddress, 'object');
+
+  const redirector = createServer((request, response) => {
+    if (request.url === '/substitute') {
+      substitutedRequests += 1;
+      response.writeHead(200, { 'Content-Type': 'application/json' });
+      response.end('{}');
+      return;
+    }
+    response.writeHead(307, { Location: redirectLocation });
+    response.end();
+  });
+  redirector.listen(0, '127.0.0.1');
+  await once(redirector, 'listening');
+  const redirectorAddress = redirector.address();
+  assert.equal(typeof redirectorAddress, 'object');
+
+  const request = createRequesterV1({
+    fetchFn: globalThis.fetch,
+    readFileFn: async () => '',
+    secrets: new Map(),
+    timing: { requestTimeoutMs: 1_000 },
+  });
+  const node = {
+    id: 'redirector',
+    baseUrl: `http://127.0.0.1:${redirectorAddress.port}`,
+    auth: { kind: 'none' },
+  };
+  const probes = [
+    ['status', () => request.json(node, 'GET', '/api/status')],
+    ['reachability', () => request.reachable(node)],
+    ['query', () => request.json(node, 'POST', '/api/query', {
+      contextGraphId: 'opaque',
+      sparql: 'ASK { ?s ?p ?o }',
+      view: 'shared-working-memory',
+    })],
+    ['authorization', () => request.raw(
+      node,
+      'GET',
+      '/api/rfc64/unauthorized-probe',
+      undefined,
+      'none',
+    )],
+  ];
+  try {
+    for (const [redirectKind, location] of [
+      ['cross-origin', `http://127.0.0.1:${targetAddress.port}/substitute`],
+      ['path-changing', '/substitute'],
+    ]) {
+      redirectLocation = location;
+      for (const [probeKind, probe] of probes) {
+        await assert.rejects(
+          probe(),
+          (error) => error instanceof RemoteCanaryError && error.code === 'node-redirect-rejected',
+          `${redirectKind} ${probeKind}`,
+        );
+      }
+    }
+    assert.equal(substitutedRequests, 0);
+  } finally {
+    const closed = Promise.all([once(redirector, 'close'), once(target, 'close')]);
+    redirector.close();
+    target.close();
+    redirector.closeAllConnections?.();
+    target.closeAllConnections?.();
+    await closed;
+  }
 });

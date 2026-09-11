@@ -23,14 +23,15 @@ into a pass.
   They are loaded in memory, never printed, and never written to an artifact.
 - HTTPS is required by default. Plain HTTP must be explicitly acknowledged per
   node with `"allowTailscaleHttp": true` and is intended only for an encrypted
-  tailnet path.
+  tailnet path. HTTP redirects are rejected; evidence must come directly from
+  the configured node origin and route.
 - Lifecycle and RPC collector commands use argument arrays and `shell: false`.
   Inline authorization headers, user/password flags, secret environment
   assignments, API keys, tokens, and URL credentials are rejected.
 - At most one receiver may appear in all CG scenarios. The runner stops it
   once, requires three consecutive unreachable probes, rechecks unreachability
-  around every offline marker share, and always invokes its start command in a
-  `finally` path.
+  around every offline marker share, drains all bounded marker work, and always
+  invokes exactly one recovery command through the receiver lifecycle bracket.
 - Artifacts contain role aliases and opaque hashes instead of URLs, command
   arguments, secret paths, CG ids, peer ids, query text, or HTTP bodies.
 - Each CG needs a read-only `vmAskSparql` assertion for a full `PASS`. Catalog
@@ -75,7 +76,8 @@ sequenceDiagram
   C->>R: Injected stop command
   C->>C: Confirm receiver API is unreachable
   C->>S: Share second marker while receiver is offline
-  C->>R: Injected start command (finally-protected)
+  C->>C: Drain all started offline marker work
+  C->>R: Injected start command (lifecycle-bracket protected)
   loop bounded catch-up poll
     C->>R: Exact preflight, then ASK offline marker
   end

@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { failure } from './errors.mjs';
 import {
   isRetryableNodeRequestErrorV1,
+  mapCanaryPhaseDrainedV1,
   mapCanaryPhaseV1,
   pollUntilV1,
 } from './phase-helpers.mjs';
@@ -63,11 +64,62 @@ export async function verifyOfflineCatchupV1({
   runCommand,
   sleep,
 }) {
+  const markers = await withReceiverOfflineV1({
+    config,
+    lifecycle,
+    request,
+    runCommand,
+    sleep,
+  }, () => mapCanaryPhaseDrainedV1(config.contextGraphs, async (contextGraph) => {
+    await assertReceiverOfflineV1(lifecycle.receiver, request);
+    const marker = createMarker();
+    await shareMarkerV1(
+      contextGraph.source,
+      contextGraph.id,
+      marker,
+      request,
+      'offline-catchup',
+    );
+    await assertReceiverOfflineV1(lifecycle.receiver, request);
+    return [contextGraph, marker];
+  }));
+
+  const evidence = await mapCanaryPhaseV1(markers, async ([contextGraph, marker]) => {
+    await pollUntilV1(
+      async () => askMarkerV1(
+        lifecycle.receiver,
+        contextGraph.id,
+        marker,
+        'shared-working-memory',
+        request,
+      ),
+      config.timing.catchupTimeoutMs,
+      config.timing.pollIntervalMs,
+      sleep,
+      () => failure('offline-catchup-timeout', 'offline-catchup'),
+      { retryError: isRetryableNodeRequestErrorV1 },
+    );
+    return Object.freeze({
+      contextGraphRef: contextGraph.contextGraphRef,
+      markerRef: opaqueRef('marker', marker.subject),
+      status: 'PASS',
+    });
+  });
+  return Object.freeze({ status: 'PASS', receiverCount: 1, contextGraphs: evidence });
+}
+
+/** Own the receiver lifecycle boundary independently of catch-up evidence. */
+export async function withReceiverOfflineV1({
+  config,
+  lifecycle,
+  request,
+  runCommand,
+  sleep,
+}, operation) {
   const receiver = lifecycle.receiver;
   let stopInvoked = false;
-  let primaryFailure = null;
-  let startFailure = null;
-  let markers = [];
+  let operationResult;
+  let operationFailure = null;
   try {
     stopInvoked = true;
     const stopped = await runCommand(lifecycle.stop, lifecycle.commandTimeoutMs);
@@ -91,39 +143,26 @@ export async function verifyOfflineCatchupV1({
       sleep,
       () => failure('receiver-did-not-stop', 'offline-catchup'),
     );
-    markers = await mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
-      await assertReceiverOfflineV1(receiver, request);
-      const marker = createMarker();
-      await shareMarkerV1(
-        contextGraph.source,
-        contextGraph.id,
-        marker,
-        request,
-        'offline-catchup',
-      );
-      await assertReceiverOfflineV1(receiver, request);
-      return [contextGraph, marker];
-    });
+    operationResult = await operation();
   } catch (error) {
-    primaryFailure = error;
-  } finally {
-    if (stopInvoked) {
-      const started = await runCommand(lifecycle.start, lifecycle.commandTimeoutMs).catch(() => null);
-      if (started === null || started.code !== 0) {
-        startFailure = failure('receiver-start-command-failed', 'offline-catchup');
-      }
+    operationFailure = error;
+  }
+  let startFailure = null;
+  if (stopInvoked) {
+    const started = await runCommand(lifecycle.start, lifecycle.commandTimeoutMs).catch(() => null);
+    if (started === null || started.code !== 0) {
+      startFailure = failure('receiver-start-command-failed', 'offline-catchup');
     }
   }
   if (startFailure !== null) {
-    throw primaryFailure === null
-      ? startFailure
-      : failure(
-          'receiver-start-command-failed',
-          'offline-catchup',
-          new AggregateError([primaryFailure, startFailure], 'receiver-recovery-failed'),
-        );
+    if (operationFailure === null) throw startFailure;
+    throw failure(
+      'receiver-start-command-failed',
+      'offline-catchup',
+      new AggregateError([operationFailure, startFailure], 'receiver-recovery-failed'),
+    );
   }
-  if (primaryFailure !== null) throw primaryFailure;
+  if (operationFailure !== null) throw operationFailure;
 
   await pollUntilV1(
     async () => {
@@ -137,28 +176,12 @@ export async function verifyOfflineCatchupV1({
     () => failure('receiver-did-not-recover', 'offline-catchup'),
     { retryError: isRetryableNodeRequestErrorV1 },
   );
-
-  const evidence = await mapCanaryPhaseV1(markers, async ([contextGraph, marker]) => {
-    await pollUntilV1(
-      async () => askMarkerV1(receiver, contextGraph.id, marker, 'shared-working-memory', request),
-      config.timing.catchupTimeoutMs,
-      config.timing.pollIntervalMs,
-      sleep,
-      () => failure('offline-catchup-timeout', 'offline-catchup'),
-      { retryError: isRetryableNodeRequestErrorV1 },
-    );
-    return Object.freeze({
-      contextGraphRef: contextGraph.contextGraphRef,
-      markerRef: opaqueRef('marker', marker.subject),
-      status: 'PASS',
-    });
-  });
-  return Object.freeze({ status: 'PASS', receiverCount: 1, contextGraphs: evidence });
+  return operationResult;
 }
 
-export function verifyCatalogSwmV1({ config, request }) {
-  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
-    if (contextGraph.catalogSwmAskSparql === undefined) {
+export function verifyCatalogSwmV1({ config, plan, request }) {
+  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph, index) => {
+    if (plan[index].state === 'EVIDENCE_REQUIRED') {
       return Object.freeze({
         contextGraphRef: contextGraph.contextGraphRef,
         status: 'EVIDENCE_REQUIRED',

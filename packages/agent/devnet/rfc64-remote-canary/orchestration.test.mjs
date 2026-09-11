@@ -8,6 +8,7 @@ import test from 'node:test';
 
 import {
   RemoteCanaryError,
+  createRemoteCanaryDryRunArtifactV1,
   executeRemoteCanaryCertificationV1,
   runRemoteCanaryArtifactLifecycleV1,
 } from './certify.mjs';
@@ -137,11 +138,20 @@ test('missing live-only surfaces remain explicit and cannot produce PASS', async
     rpcUsage: { kind: 'required' },
   });
   delete config.contextGraphs[0].catalogSwmAskSparql;
+  delete config.contextGraphs[0].vmAskSparql;
+  const dryRun = createRemoteCanaryDryRunArtifactV1(config);
+  assert.equal(dryRun.plan.offlineCatchup, 'EVIDENCE_REQUIRED');
+  assert.equal(dryRun.plan.vmParityEvidence, 'EVIDENCE_REQUIRED');
+  assert.equal(dryRun.plan.catalogSwmEvidence, 'EVIDENCE_REQUIRED');
+  assert.equal(dryRun.plan.authorization.unauthorized, 'EVIDENCE_REQUIRED');
+  assert.equal(dryRun.plan.authorization.revoked, 'EVIDENCE_REQUIRED');
+  assert.equal(dryRun.plan.rpcUsage, 'EVIDENCE_REQUIRED');
   const artifact = await executeRemoteCanaryCertificationV1(config, runtime);
   assert.equal(artifact.status, 'INCOMPLETE');
   assert.equal(artifact.checks.offlineCatchup.status, 'EVIDENCE_REQUIRED');
   assert.equal(artifact.checks.authorization.revoked.status, 'EVIDENCE_REQUIRED');
   assert.equal(artifact.checks.rpcUsage.status, 'EVIDENCE_REQUIRED');
+  assert.equal(artifact.checks.vmParity[0].status, 'EVIDENCE_REQUIRED');
   assert.deepEqual(artifact.checks.catalogSwm[0], {
     contextGraphRef: artifact.topology.contextGraphs[0].contextGraphRef,
     status: 'EVIDENCE_REQUIRED',
@@ -207,7 +217,7 @@ test('catalog status parity alone cannot certify VM queryability', async () => {
   });
 });
 
-test('receiver start runs from finally when an offline share fails', async () => {
+test('receiver recovery runs when an offline share fails', async () => {
   const runtime = createCertificationRuntime({ failOfflineShare: true });
   await assert.rejects(
     executeRemoteCanaryCertificationV1(baseConfig(), runtime),
