@@ -3,12 +3,17 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  classifyContextGraphAuthorityIndexAdmission,
-  UNREAD_CONTEXT_GRAPH_AUTHORITY_INDEX_ANCHOR,
+  admitContextGraphAuthorityIndexCheckpoint,
 } from '../src/context-graph-authority-index-admission.js';
 import { createContextGraphAuthorityIndexCheckpoint } from
   '../src/context-graph-authority-index-checkpoint.js';
+import {
+  ContextGraphAuthorityIndexRepository,
+  type ContextGraphAuthorityIndexRepositoryRecord,
+} from '../src/context-graph-authority-index-repository.js';
+import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
 
+const SCOPE = 'evm:84532:hub:context-graph-storage';
 const HASH_20 = `0x${'20'.repeat(32)}`;
 const HASH_25 = `0x${'25'.repeat(32)}`;
 const REPLACEMENT_HASH = `0x${'ff'.repeat(32)}`;
@@ -19,78 +24,116 @@ const checkpoint = createContextGraphAuthorityIndexCheckpoint({
   throughBlockHash: HASH_20,
 }, []);
 
-const record = Object.freeze({
+const checkpointRecord = Object.freeze({
   kind: 'checkpoint' as const,
   token: 7,
   checkpoint,
 });
 
-const input = (overrides: Record<string, unknown> = {}) => ({
-  record,
-  deploymentBlockNumber: 10,
-  finalized: { number: 25, hash: HASH_25 },
-  anchor: UNREAD_CONTEXT_GRAPH_AUTHORITY_INDEX_ANCHOR,
-  ...overrides,
-} as Parameters<typeof classifyContextGraphAuthorityIndexAdmission>[0]);
+function admit(
+  repository: ContextGraphAuthorityIndexRepository,
+  initial: ContextGraphAuthorityIndexRepositoryRecord,
+  overrides: Readonly<{
+    deploymentBlockNumber?: number;
+    finalized?: Readonly<{ number: number; hash: string }>;
+    readBlockHash?: () => Promise<string | null>;
+  }> = {},
+) {
+  return admitContextGraphAuthorityIndexCheckpoint({
+    repository,
+    scope: SCOPE,
+    initial,
+    deploymentBlockNumber: overrides.deploymentBlockNumber ?? 10,
+    finalized: overrides.finalized ?? { number: 25, hash: HASH_25 },
+    lifecycleSignal: new AbortController().signal,
+    readBlockHash: overrides.readBlockHash ?? (async () => HASH_20),
+  });
+}
 
-describe('Context Graph authority index checkpoint admission policy', () => {
-  it('classifies missing, tombstone, and invalid durable rows without effects', () => {
-    expect(classifyContextGraphAuthorityIndexAdmission(input({
-      record: { kind: 'missing', token: undefined },
-    }))).toEqual({ kind: 'rebuild', reason: 'missing' });
-    expect(classifyContextGraphAuthorityIndexAdmission(input({
-      record: { kind: 'tombstone', token: 8 },
-    }))).toEqual({ kind: 'rebuild', reason: 'tombstone' });
-    expect(classifyContextGraphAuthorityIndexAdmission(input({
-      record: { kind: 'invalid', token: 8 },
-    }))).toEqual({ kind: 'invalidate', reason: 'invalid-checkpoint' });
+describe('Context Graph authority index checkpoint admission and recovery', () => {
+  it('rebuilds missing and tombstoned rows without durable effects', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    const repository = new ContextGraphAuthorityIndexRepository(store);
+    await expect(admit(repository, { kind: 'missing', token: undefined }))
+      .resolves.toEqual({ kind: 'missing', token: undefined });
+    await expect(admit(repository, { kind: 'tombstone', token: 8 }))
+      .resolves.toEqual({ kind: 'tombstone', token: 8 });
+    expect(store.invalidations).toEqual([]);
   });
 
-  it('requests only the anchor observation needed to accept a warm checkpoint', () => {
-    expect(classifyContextGraphAuthorityIndexAdmission(input())).toEqual({
-      kind: 'read-anchor',
-      blockNumber: 20,
-    });
-    expect(classifyContextGraphAuthorityIndexAdmission(input({
-      anchor: { kind: 'available', hash: HASH_20 },
-    }))).toEqual({ kind: 'accept', checkpoint });
-  });
+  it('accepts a matching warm anchor and the requested finalized head', async () => {
+    const repository = new ContextGraphAuthorityIndexRepository(
+      new MemoryAuthorityIndexStore(),
+    );
+    await expect(admit(repository, checkpointRecord)).resolves.toBe(checkpointRecord);
 
-  it('keeps lagging and non-archive observations retryable without invalidation', () => {
-    expect(classifyContextGraphAuthorityIndexAdmission(input({
-      finalized: { number: 19, hash: HASH_25 },
-    }))).toEqual({
-      kind: 'retry-provider',
-      reason: 'finalized-behind',
-      cursorBlockNumber: 20,
-      finalizedBlockNumber: 19,
-    });
-    expect(classifyContextGraphAuthorityIndexAdmission(input({
-      anchor: { kind: 'unavailable' },
-    }))).toEqual({
-      kind: 'retry-provider',
-      reason: 'anchor-unavailable',
-      cursorBlockNumber: 20,
-      finalizedBlockNumber: 25,
-    });
-  });
-
-  it('invalidates only deployment changes and proven fork replacements', () => {
-    expect(classifyContextGraphAuthorityIndexAdmission(input({
-      deploymentBlockNumber: 11,
-    }))).toEqual({ kind: 'invalidate', reason: 'deployment-changed' });
-    expect(classifyContextGraphAuthorityIndexAdmission(input({
-      anchor: { kind: 'available', hash: REPLACEMENT_HASH },
-    }))).toEqual({ kind: 'invalidate', reason: 'anchor-replaced' });
-    expect(classifyContextGraphAuthorityIndexAdmission(input({
-      record: {
-        ...record,
-        checkpoint: createContextGraphAuthorityIndexCheckpoint({
-          deploymentBlockNumber: 10,
-          throughBlockNumber: 25,
-          throughBlockHash: HASH_20,
-        }, []),
+    const finalizedCheckpoint = createContextGraphAuthorityIndexCheckpoint({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 25,
+      throughBlockHash: HASH_25,
+    }, []);
+    let anchorReads = 0;
+    await expect(admit(repository, {
+      kind: 'checkpoint',
+      token: 8,
+      checkpoint: finalizedCheckpoint,
+    }, {
+      readBlockHash: async () => {
+        anchorReads += 1;
+        return HASH_25;
       },
-    }))).toEqual({ kind: 'invalidate', reason: 'anchor-replaced' });
+    })).resolves.toMatchObject({ kind: 'checkpoint', token: 8 });
+    expect(anchorReads).toBe(0);
+  });
+
+  it('keeps lagging and non-archive observations retryable without invalidation', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    const repository = new ContextGraphAuthorityIndexRepository(store);
+    await expect(admit(repository, checkpointRecord, {
+      finalized: { number: 19, hash: HASH_25 },
+    })).rejects.toThrow('finalized head 19 is behind durable cursor 20');
+    await expect(admit(repository, checkpointRecord, {
+      readBlockHash: async () => null,
+    })).rejects.toThrow('anchor 20 is unavailable');
+    expect(store.invalidations).toEqual([]);
+  });
+
+  it('tombstones corrupt rows, deployment changes, and proven fork replacements', async () => {
+    const scenarios: Array<Readonly<{
+      initial: ContextGraphAuthorityIndexRepositoryRecord;
+      durableValue: unknown;
+      deploymentBlockNumber?: number;
+      readBlockHash?: () => Promise<string | null>;
+    }>> = [
+      {
+        initial: { kind: 'invalid', token: 7 },
+        durableValue: { corrupt: true },
+      },
+      {
+        initial: checkpointRecord,
+        durableValue: checkpoint,
+        deploymentBlockNumber: 11,
+      },
+      {
+        initial: checkpointRecord,
+        durableValue: checkpoint,
+        readBlockHash: async () => REPLACEMENT_HASH,
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      const store = new MemoryAuthorityIndexStore();
+      store.record = { token: 7, value: scenario.durableValue };
+      const result = await admit(
+        new ContextGraphAuthorityIndexRepository(store),
+        scenario.initial,
+        {
+          deploymentBlockNumber: scenario.deploymentBlockNumber,
+          readBlockHash: scenario.readBlockHash,
+        },
+      );
+      expect(result).toEqual({ kind: 'tombstone', token: 8 });
+      expect(store.invalidations).toEqual([8]);
+    }
   });
 });

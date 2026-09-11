@@ -1,99 +1,92 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ContextGraphAuthorityIndexCheckpoint } from
-  './context-graph-authority-index-checkpoint.js';
-import type { ContextGraphAuthorityIndexRepositoryRecord } from
-  './context-graph-authority-index-repository.js';
+import { normalizeContextGraphAuthorityHash as normalizeHash } from
+  './context-graph-authority-generation.js';
+import {
+  ContextGraphAuthorityIndexRepository,
+  type ContextGraphAuthorityIndexRepositoryRecord,
+} from './context-graph-authority-index-repository.js';
 
-export type ContextGraphAuthorityIndexAnchorObservation =
-  | Readonly<{ kind: 'unread' }>
-  | Readonly<{ kind: 'unavailable' }>
-  | Readonly<{ kind: 'available'; hash: string }>;
+const MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS = 3;
 
-export const UNREAD_CONTEXT_GRAPH_AUTHORITY_INDEX_ANCHOR:
-Readonly<ContextGraphAuthorityIndexAnchorObservation> = Object.freeze({ kind: 'unread' });
+export class ContextGraphAuthorityIndexRetryableError extends Error {
+  override readonly name = 'ContextGraphAuthorityIndexRetryableError';
+}
 
-export type ContextGraphAuthorityIndexAdmissionAction =
-  | Readonly<{
-      kind: 'accept';
-      checkpoint: ContextGraphAuthorityIndexCheckpoint;
-    }>
-  | Readonly<{
-      kind: 'rebuild';
-      reason: 'missing' | 'tombstone';
-    }>
-  | Readonly<{
-      kind: 'read-anchor';
-      blockNumber: number;
-    }>
-  | Readonly<{
-      kind: 'retry-provider';
-      reason: 'finalized-behind' | 'anchor-unavailable';
-      cursorBlockNumber: number;
-      finalizedBlockNumber: number;
-    }>
-  | Readonly<{
-      kind: 'invalidate';
-      reason: 'invalid-checkpoint' | 'deployment-changed' | 'anchor-replaced';
-    }>;
+export function isContextGraphAuthorityIndexRetryableError(
+  error: unknown,
+): error is ContextGraphAuthorityIndexRetryableError {
+  return error instanceof ContextGraphAuthorityIndexRetryableError;
+}
+
+function retryableAuthorityIndexReadError(message: string): Error {
+  return new ContextGraphAuthorityIndexRetryableError(message);
+}
 
 export interface ContextGraphAuthorityIndexAdmissionInput {
-  readonly record: ContextGraphAuthorityIndexRepositoryRecord;
+  readonly repository: ContextGraphAuthorityIndexRepository;
+  readonly scope: string;
+  readonly initial: ContextGraphAuthorityIndexRepositoryRecord;
   readonly deploymentBlockNumber: number;
   readonly finalized: Readonly<{ number: number; hash: string }>;
-  readonly anchor: ContextGraphAuthorityIndexAnchorObservation;
+  readonly lifecycleSignal: AbortSignal;
+  readonly readBlockHash: (
+    blockNumber: number,
+    lifecycleSignal: AbortSignal,
+  ) => Promise<string | null>;
 }
 
 /**
- * Pure admission policy for one durable authority-index observation.
+ * Admit one durable observation through a direct, bounded recovery loop.
  *
- * The result names exactly one effect for the bounded driver to perform. It
- * never reads RPC, decodes persistence, mutates cache state, or performs CAS.
+ * Missing rows and tombstones rebuild immediately. Every rejected token gets
+ * one conditional invalidation; when another writer wins, its row is reloaded
+ * by the repository and classified here. Three lost invalidations therefore
+ * permit three winner reloads, but a fourth invalidation is never attempted.
  */
-export function classifyContextGraphAuthorityIndexAdmission(
+export async function admitContextGraphAuthorityIndexCheckpoint(
   input: Readonly<ContextGraphAuthorityIndexAdmissionInput>,
-): ContextGraphAuthorityIndexAdmissionAction {
-  const { record, deploymentBlockNumber, finalized, anchor } = input;
-  if (record.kind === 'missing' || record.kind === 'tombstone') {
-    return Object.freeze({ kind: 'rebuild', reason: record.kind });
-  }
-  if (record.kind === 'invalid') {
-    return Object.freeze({ kind: 'invalidate', reason: 'invalid-checkpoint' });
-  }
+): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+  let record = input.initial;
+  let lostInvalidations = 0;
 
-  const checkpoint = record.checkpoint;
-  if (checkpoint.cursor.deploymentBlockNumber !== deploymentBlockNumber) {
-    return Object.freeze({ kind: 'invalidate', reason: 'deployment-changed' });
-  }
-  if (checkpoint.cursor.throughBlockNumber > finalized.number) {
-    return Object.freeze({
-      kind: 'retry-provider',
-      reason: 'finalized-behind',
-      cursorBlockNumber: checkpoint.cursor.throughBlockNumber,
-      finalizedBlockNumber: finalized.number,
-    });
-  }
+  for (;;) {
+    input.lifecycleSignal.throwIfAborted();
+    if (record.kind === 'missing' || record.kind === 'tombstone') return record;
 
-  if (checkpoint.cursor.throughBlockNumber === finalized.number) {
-    return checkpoint.cursor.throughBlockHash === finalized.hash
-      ? Object.freeze({ kind: 'accept', checkpoint })
-      : Object.freeze({ kind: 'invalidate', reason: 'anchor-replaced' });
+    if (record.kind === 'checkpoint') {
+      const checkpoint = record.checkpoint;
+      if (checkpoint.cursor.deploymentBlockNumber === input.deploymentBlockNumber) {
+        if (checkpoint.cursor.throughBlockNumber > input.finalized.number) {
+          throw retryableAuthorityIndexReadError(
+            `Context Graph authority index finalized head ${input.finalized.number} is behind `
+            + `durable cursor ${checkpoint.cursor.throughBlockNumber}`,
+          );
+        }
+        const anchorHash = checkpoint.cursor.throughBlockNumber === input.finalized.number
+          ? input.finalized.hash
+          : normalizeHash(await input.readBlockHash(
+              checkpoint.cursor.throughBlockNumber,
+              input.lifecycleSignal,
+            ));
+        if (anchorHash === undefined) {
+          throw retryableAuthorityIndexReadError(
+            `Context Graph authority index anchor ${checkpoint.cursor.throughBlockNumber} `
+            + 'is unavailable',
+          );
+        }
+        if (anchorHash === checkpoint.cursor.throughBlockHash) return record;
+      }
+    }
+
+    if (lostInvalidations >= MAX_CONTEXT_GRAPH_AUTHORITY_INDEX_LOST_INVALIDATIONS) {
+      throw retryableAuthorityIndexReadError(
+        'Context Graph authority index changed repeatedly during checkpoint recovery',
+      );
+    }
+    const recovery = await input.repository.invalidateOrReloadWinner(input.scope, record);
+    if (recovery.kind === 'invalidated') return recovery.record;
+    lostInvalidations += 1;
+    record = recovery.record;
   }
-  if (anchor.kind === 'unread') {
-    return Object.freeze({
-      kind: 'read-anchor',
-      blockNumber: checkpoint.cursor.throughBlockNumber,
-    });
-  }
-  if (anchor.kind === 'unavailable') {
-    return Object.freeze({
-      kind: 'retry-provider',
-      reason: 'anchor-unavailable',
-      cursorBlockNumber: checkpoint.cursor.throughBlockNumber,
-      finalizedBlockNumber: finalized.number,
-    });
-  }
-  return anchor.hash === checkpoint.cursor.throughBlockHash
-    ? Object.freeze({ kind: 'accept', checkpoint })
-    : Object.freeze({ kind: 'invalidate', reason: 'anchor-replaced' });
 }

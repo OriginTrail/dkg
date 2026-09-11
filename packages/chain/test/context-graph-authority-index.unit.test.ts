@@ -263,6 +263,50 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     expect(pageReads).toBe(0);
   });
 
+  it('accepts a valid checkpoint installed by the third invalidation winner', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    const winner = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 25,
+      throughBlockHash: blockHash(25),
+      events: allEvents.filter((entry) => entry.blockNumber <= 25),
+    }).checkpoint;
+    const replacedAnchor = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 25,
+      throughBlockHash: blockHash(24),
+      events: allEvents.filter((entry) => entry.blockNumber <= 25),
+    }).checkpoint;
+    store.record = { token: 1, value: replacedAnchor };
+    let invalidationAttempts = 0;
+    store.invalidate = async (_scope, expectedToken) => {
+      invalidationAttempts += 1;
+      store.record = {
+        token: expectedToken + 1,
+        value: invalidationAttempts === 3 ? winner : replacedAnchor,
+      };
+      return undefined;
+    };
+    let blockReads = 0;
+    let pageReads = 0;
+    const input = makeInput(9n, {}, async () => {
+      pageReads += 1;
+      return [];
+    });
+
+    await expect(new ContextGraphAuthorityIndex(store).resolve({
+      ...input,
+      readBlockHash: async () => {
+        blockReads += 1;
+        return blockHash(25);
+      },
+    })).resolves.toMatchObject({ contextGraphId: '9' });
+    expect(invalidationAttempts).toBe(3);
+    expect(store.record).toEqual({ token: 4, value: winner });
+    expect(blockReads).toBe(0);
+    expect(pageReads).toBe(0);
+  });
+
   it('reloads the CAS winner and resumes from its suffix with concurrent providers', async () => {
     const store = new MemoryAuthorityIndexStore();
     const index = new ContextGraphAuthorityIndex(store);

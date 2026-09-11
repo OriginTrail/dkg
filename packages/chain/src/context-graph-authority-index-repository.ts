@@ -21,6 +21,31 @@ type CacheableAuthorityIndexRecord = Exclude<
   Readonly<{ kind: 'missing'; token: undefined }> | Readonly<{ kind: 'invalid'; token: number }>
 >;
 
+type TokenedAuthorityIndexRecord = Exclude<
+  ContextGraphAuthorityIndexRepositoryRecord,
+  Readonly<{ kind: 'missing'; token: undefined }>
+>;
+
+export type ContextGraphAuthorityIndexInvalidationResult =
+  | Readonly<{
+      kind: 'invalidated';
+      record: Extract<ContextGraphAuthorityIndexRepositoryRecord, { kind: 'tombstone' }>;
+    }>
+  | Readonly<{
+      kind: 'winner';
+      record: ContextGraphAuthorityIndexRepositoryRecord;
+    }>;
+
+export type ContextGraphAuthorityIndexCommitResult =
+  | Readonly<{
+      kind: 'committed';
+      record: Extract<ContextGraphAuthorityIndexRepositoryRecord, { kind: 'checkpoint' }>;
+    }>
+  | Readonly<{
+      kind: 'winner';
+      record: ContextGraphAuthorityIndexRepositoryRecord;
+    }>;
+
 function assertAuthorityIndexToken(value: unknown): asserts value is number {
   if (!Number.isSafeInteger(value) || Number(value) < 1) {
     throw new Error('Context Graph authority index durable token is invalid');
@@ -30,12 +55,11 @@ function assertAuthorityIndexToken(value: unknown): asserts value is number {
 /** Decode, cache and mutate opaque durable rows behind one CAS repository boundary. */
 export class ContextGraphAuthorityIndexRepository {
   readonly #entries = new Map<string, CacheableAuthorityIndexRecord>();
+  readonly #store: ContextGraphAuthorityIndexStore;
   #epoch = 0;
 
-  constructor(readonly store: ContextGraphAuthorityIndexStore) {}
-
-  get epoch(): number {
-    return this.#epoch;
+  constructor(store: ContextGraphAuthorityIndexStore) {
+    this.#store = store;
   }
 
   clear(): void {
@@ -43,19 +67,77 @@ export class ContextGraphAuthorityIndexRepository {
     this.#entries.clear();
   }
 
-  async load(
-    scope: string,
-    options: Readonly<{ forceDurable?: boolean; epoch: number }>,
-  ): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
-    const memory = options.forceDurable ? undefined : this.#entries.get(scope);
+  async load(scope: string): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+    const memory = this.#entries.get(scope);
     if (memory !== undefined) return memory;
 
-    const record = await this.store.load(scope);
+    return this.#readDurable(scope, this.#epoch);
+  }
+
+  async reload(scope: string): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+    const epoch = this.#epoch;
+    return this.#reloadDurable(scope, epoch);
+  }
+
+  /**
+   * Conditionally tombstone one rejected observation. If another writer wins,
+   * return its freshly decoded row so admission can continue without callers
+   * sequencing cache eviction and a forced durable reload themselves.
+   */
+  async invalidateOrReloadWinner(
+    scope: string,
+    record: TokenedAuthorityIndexRecord,
+  ): Promise<ContextGraphAuthorityIndexInvalidationResult> {
+    const epoch = this.#epoch;
+    this.#discardIfCurrent(scope, record);
+    const token = await this.#store.invalidate(scope, record.token);
+    if (token === undefined) {
+      return Object.freeze({
+        kind: 'winner',
+        record: await this.#reloadDurable(scope, epoch),
+      });
+    }
+    assertAuthorityIndexToken(token);
+    const tombstone = Object.freeze({ kind: 'tombstone' as const, token });
+    this.#publish(scope, tombstone, epoch);
+    return Object.freeze({ kind: 'invalidated', record: tombstone });
+  }
+
+  /** Persist one reduced page, or atomically surface the durable CAS winner. */
+  async commitOrReloadWinner(
+    scope: string,
+    previous: ContextGraphAuthorityIndexRepositoryRecord,
+    checkpoint: ContextGraphAuthorityIndexCheckpoint,
+  ): Promise<ContextGraphAuthorityIndexCommitResult> {
+    const epoch = this.#epoch;
+    const token = await this.#store.compareAndSwap(scope, previous.token, checkpoint);
+    if (token === undefined) {
+      return Object.freeze({
+        kind: 'winner',
+        record: await this.#reloadDurable(scope, epoch),
+      });
+    }
+    assertAuthorityIndexToken(token);
+    const committed = Object.freeze({
+      kind: 'checkpoint' as const,
+      token,
+      checkpoint,
+    });
+    this.#publish(scope, committed, epoch);
+    return Object.freeze({ kind: 'committed', record: committed });
+  }
+
+  async #readDurable(
+    scope: string,
+    epoch: number,
+  ): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+    const record = await this.#store.load(scope);
+
     if (record === undefined) return Object.freeze({ kind: 'missing', token: undefined });
     assertAuthorityIndexToken(record.token);
     if (record.value === null) {
       const tombstone = Object.freeze({ kind: 'tombstone' as const, token: record.token });
-      this.#publish(scope, tombstone, options.epoch);
+      this.#publish(scope, tombstone, epoch);
       return tombstone;
     }
     const checkpoint = normalizeContextGraphAuthorityIndexCheckpoint(record.value);
@@ -67,43 +149,22 @@ export class ContextGraphAuthorityIndexRepository {
       token: record.token,
       checkpoint,
     });
-    this.#publish(scope, admitted, options.epoch);
+    this.#publish(scope, admitted, epoch);
     return admitted;
   }
 
-  discardIfCurrent(scope: string, record: ContextGraphAuthorityIndexRepositoryRecord): void {
+  #reloadDurable(
+    scope: string,
+    epoch: number,
+  ): Promise<ContextGraphAuthorityIndexRepositoryRecord> {
+    // A completion from before clear() must not evict a newer lifecycle's
+    // cache entry. The epoch guard also prevents its durable read publishing.
+    if (this.#epoch === epoch) this.#entries.delete(scope);
+    return this.#readDurable(scope, epoch);
+  }
+
+  #discardIfCurrent(scope: string, record: ContextGraphAuthorityIndexRepositoryRecord): void {
     if (this.#entries.get(scope) === record) this.#entries.delete(scope);
-  }
-
-  async invalidate(
-    scope: string,
-    record: Exclude<ContextGraphAuthorityIndexRepositoryRecord, { token: undefined }>,
-    epoch: number,
-  ): Promise<ContextGraphAuthorityIndexRepositoryRecord | undefined> {
-    const token = await this.store.invalidate(scope, record.token);
-    if (token === undefined) return undefined;
-    assertAuthorityIndexToken(token);
-    const tombstone = Object.freeze({ kind: 'tombstone' as const, token });
-    this.#publish(scope, tombstone, epoch);
-    return tombstone;
-  }
-
-  async compareAndSwap(
-    scope: string,
-    previous: ContextGraphAuthorityIndexRepositoryRecord,
-    checkpoint: ContextGraphAuthorityIndexCheckpoint,
-    epoch: number,
-  ): Promise<ContextGraphAuthorityIndexRepositoryRecord | undefined> {
-    const token = await this.store.compareAndSwap(scope, previous.token, checkpoint);
-    if (token === undefined) return undefined;
-    assertAuthorityIndexToken(token);
-    const committed = Object.freeze({
-      kind: 'checkpoint' as const,
-      token,
-      checkpoint,
-    });
-    this.#publish(scope, committed, epoch);
-    return committed;
   }
 
   #publish(scope: string, record: CacheableAuthorityIndexRecord, epoch: number): void {
