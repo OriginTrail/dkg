@@ -24,7 +24,6 @@ import {
 } from './finalized-chain-fixture.mjs';
 import {
   ASSET_NUMBERS,
-  AUTHORITY_SENTINEL_CONTEXT_GRAPH_ID,
   CONTEXT_GRAPH_ID,
   CONTEXT_GRAPH_STORAGE,
   DEPLOYMENT,
@@ -214,41 +213,27 @@ async function createAgent(manifest, finalizedRuntime) {
   if (manifest === undefined) return DKGAgent.create(base);
 
   const peerIds = manifest.peerIds;
+  const agentAddressByPeerId = new Map(RUNTIME_ROLES.map((role) => [
+    peerIds[role],
+    roleAgentAddress(role),
+  ]));
   const accessPolicyAuthority = {
     localAgentAddress: roleAgentAddress(ROLE),
-    peerAgentBindings: RUNTIME_ROLES.map((role) => ({
-      peerId: peerIds[role],
-      agentAddress: roleAgentAddress(role),
-    })),
+    resolveRemoteAgentAddress: async (peerId) => agentAddressByPeerId.get(peerId) ?? null,
   };
-  // The activation boundary intentionally requires at least one selected
-  // private policy whenever manual peer-to-agent authority is supplied. Keep
-  // that validation policy inert (no targets or subscription), while the real
-  // graph below remains chain-discovered so this gate exercises canonical
-  // create/add/remove reconciliation rather than a configured authority copy.
-  const authoritySentinel = createPrivatePolicyAndRoster({
-    contextGraphId: AUTHORITY_SENTINEL_CONTEXT_GRAPH_ID,
-    memberRoles: RUNTIME_ROLES,
-  });
   const created = await DKGAgent.create({
     ...base,
     networkIdentity: {
       networkId: await computeNetworkId(),
       chainId: NETWORK_ID,
     },
+    // This fixture-only resolver binds authenticated process identities. It
+    // supplies no policy or roster; the real graph remains exclusively
+    // chain-discovered through release-native authority reconciliation.
+    rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
     rfc64CatalogActivation: {
       enabled: true,
       deploymentProfile: DEPLOYMENT,
-      accessPolicyAuthority,
-      bootstrap: {
-        acceptedPolicies: [{
-          policyEnvelope: authoritySentinel.policyEnvelope,
-          rosterEnvelope: authoritySentinel.rosterEnvelope,
-          targets: [],
-          completeSwmProviders: [peerIds.owner],
-        }],
-        retryIntervalMs: 1_000,
-      },
       rollout: {
         contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' },
       },
