@@ -86,6 +86,12 @@ export const PRIVATE_CATALOG_MEMORY_EXPECTATION = Object.freeze({
   }),
 });
 export const PRIVATE_MEMBER_ROLES = Object.freeze(['owner', 'provider2', 'receiver']);
+export const RUNTIME_ROLES = Object.freeze([
+  ...PRIVATE_MEMBER_ROLES,
+  'outsider',
+]);
+export const AUTHORITY_SENTINEL_CONTEXT_GRAPH_ID =
+  '0x1111111111111111111111111111111111111111/rfc64-private-release-gate-authority-sentinel';
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,
@@ -106,14 +112,17 @@ export function ownerWallet() {
   return new ethers.Wallet(ROLE_KEYS.owner);
 }
 
-export function createPrivatePolicyAndRoster() {
+export function createPrivatePolicyAndRoster({
+  contextGraphId = CONTEXT_GRAPH_ID,
+  memberRoles = PRIVATE_MEMBER_ROLES,
+} = {}) {
   const ownerAddress = roleAgentAddress('owner');
   const ownershipTransitionDigest = ethers.keccak256(ethers.toUtf8Bytes(
-    `dkg:rfc64:ownership:v1\n${CONTEXT_GRAPH_ID}\n${ownerAddress}\n0`,
+    `dkg:rfc64:ownership:v1\n${contextGraphId}\n${ownerAddress}\n0`,
   )).toLowerCase();
   const policy = Object.freeze({
     networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
+    contextGraphId,
     governanceChainId: CHAIN_ID,
     governanceContractAddress: CONTEXT_GRAPH_STORAGE,
     ownershipTransitionDigest,
@@ -146,14 +155,14 @@ export function createPrivatePolicyAndRoster() {
   const policyDigest = computeContextGraphPolicyObjectDigestV1(policyEnvelope);
   const roster = Object.freeze({
     networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
+    contextGraphId,
     ownershipTransitionDigest,
     era: '0',
     version: '0',
     previousRosterDigest: null,
     policyDigest,
     administrativeDelegationDigest: null,
-    members: Object.freeze(PRIVATE_MEMBER_ROLES.map((role) => Object.freeze({
+    members: Object.freeze(memberRoles.map((role) => Object.freeze({
       agentAddress: roleAgentAddress(role),
       roles: Object.freeze(['holder', 'provider']),
     }))),
