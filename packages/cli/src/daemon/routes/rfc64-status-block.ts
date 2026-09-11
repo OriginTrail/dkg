@@ -25,6 +25,8 @@ export interface Rfc64StatusReaderV1 {
     OmitThisParameter<DKGAgent['readRfc64PublicCatalogBootstrapStatusV1']>;
   readonly readRfc64CatalogRuntimeSelectionV1?:
     OmitThisParameter<DKGAgent['readRfc64CatalogRuntimeSelectionV1']>;
+  readonly readRfc64CatalogExecutionSelectionV1:
+    OmitThisParameter<DKGAgent['readRfc64CatalogExecutionSelectionV1']>;
   readonly readRfc64CatalogResponsibilitiesV1?:
     OmitThisParameter<DKGAgent['readRfc64CatalogResponsibilitiesV1']>;
   readonly readRfc64AuthorityRpcCircuitSnapshotV1?:
@@ -65,6 +67,10 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
     defaultMode?: 'legacy' | 'shadow' | 'catalog';
     contextGraphModes: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
   }>,
+  executionSelection: Readonly<{
+    activationSource: Rfc64CatalogConfigurationEvidenceV1['source'];
+    responsibilityDefaultMode: 'legacy' | 'shadow' | 'catalog';
+  }>,
 ): Rfc64CatalogConfigurationEvidenceV1 {
   const catalogControlPresent = config.rfc64Catalog !== undefined;
   const deprecatedPublicControlPresent = config.rfc64PublicCatalog !== undefined;
@@ -76,19 +82,8 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
     || publicCatalog?.bootstrap !== undefined;
   const modes = Object.entries(effectiveRollout.contextGraphModes)
     .sort(([left], [right]) => left.localeCompare(right));
-  // `enabled: false` is a compatibility rollback: the agent deliberately
-  // selects the legacy responsibility default even though the normalized,
-  // disabled activation retains the catalog rollout schema default.
-  const defaultMode = deprecatedDisabledOverride
-    ? 'legacy' as const
-    : effectiveRollout.defaultMode ?? 'catalog';
-  const source = !catalogControlPresent && !deprecatedPublicControlPresent
-    ? 'default-omitted' as const
-    : deprecatedDisabledOverride
-      ? 'explicit-disabled' as const
-      : activationManifestPresent
-        ? 'compatibility-seed' as const
-        : 'operator-override' as const;
+  const defaultMode = executionSelection.responsibilityDefaultMode;
+  const source = executionSelection.activationSource;
   const digestPayload = {
     schemaVersion: 1,
     catalogControlPresent,
@@ -157,7 +152,11 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
       ]),
     ),
   };
-  const configuration = buildRfc64CatalogConfigurationEvidenceV1(config, rollout);
+  const configuration = buildRfc64CatalogConfigurationEvidenceV1(
+    config,
+    rollout,
+    agent.readRfc64CatalogExecutionSelectionV1(),
+  );
   const service = catalogActivation.enabled
     && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
     ? agent.rfc64PublicCatalogStatsV1()
@@ -178,7 +177,9 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
     : [];
   const authorityRpcCircuit =
     typeof agent.readRfc64AuthorityRpcCircuitSnapshotV1 === 'function'
-      ? agent.readRfc64AuthorityRpcCircuitSnapshotV1()
+      ? sanitizeRfc64AuthorityRpcCircuitSnapshotV1(
+          agent.readRfc64AuthorityRpcCircuitSnapshotV1(),
+        )
       : null;
   const contextGraphs = typeof agent.readRfc64CatalogOperationalStatusV1 === 'function'
     ? await agent.readRfc64CatalogOperationalStatusV1()
@@ -307,5 +308,40 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
               kaBundleNetworkBytes: service.nativeReceiver?.kaBundleNetworkBytes ?? 0,
             },
     }),
+  });
+}
+
+const RFC64_AUTHORITY_RPC_CIRCUIT_STATES_V1 = new Set([
+  'closed',
+  'open',
+  'half-open',
+]);
+
+/** Allow-list the public circuit DTO so version-skew cannot leak provider data. */
+export function sanitizeRfc64AuthorityRpcCircuitSnapshotV1(
+  input: unknown,
+): Readonly<{
+  state: 'closed' | 'open' | 'half-open';
+  consecutiveExhaustions: number;
+  retryAtMs: number | null;
+}> | null {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return null;
+  const value = input as Record<string, unknown>;
+  if (!RFC64_AUTHORITY_RPC_CIRCUIT_STATES_V1.has(value.state as string)) return null;
+  if (
+    !Number.isSafeInteger(value.consecutiveExhaustions)
+    || (value.consecutiveExhaustions as number) < 0
+  ) return null;
+  if (
+    value.retryAtMs !== null
+    && (
+      !Number.isSafeInteger(value.retryAtMs)
+      || (value.retryAtMs as number) < 0
+    )
+  ) return null;
+  return Object.freeze({
+    state: value.state as 'closed' | 'open' | 'half-open',
+    consecutiveExhaustions: value.consecutiveExhaustions as number,
+    retryAtMs: value.retryAtMs as number | null,
   });
 }

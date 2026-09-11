@@ -1105,6 +1105,8 @@ export class DKGAgent extends DKGAgentBase {
     this.rfc64CatalogShadowObservabilityV1 =
       new Rfc64CatalogShadowObservabilityRuntimeV1({
         executionPlan: this.config.rfc64CatalogExecutionPlan,
+        readResponsibility: (contextGraphId) =>
+          this.readRfc64CatalogResponsibilityV1(contextGraphId),
         readResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
       });
     this.rfc64PublicCatalogOwnerV1 = new Rfc64PublicCatalogWorkloadOwnerV1({
@@ -1248,8 +1250,20 @@ export class DKGAgent extends DKGAgentBase {
     // silently suppressing both catalog and legacy delivery.
     const rfc64CatalogEphemeralLegacyFallback =
       !normalizedConfig.dataDir && rfc64CatalogConfigurationOmitted;
+    const rfc64CatalogActivationSource = rfc64CatalogConfigurationOmitted
+      ? 'default-omitted' as const
+      : rfc64CatalogExplicitlyDisabled
+        ? 'explicit-disabled' as const
+        : (
+            normalizedConfig.rfc64CatalogActivation?.bootstrap !== undefined
+            || normalizedConfig.rfc64PublicCatalogActivation?.bootstrap !== undefined
+            || normalizedConfig.rfc64PublicCatalogBootstrap !== undefined
+          )
+          ? 'compatibility-seed' as const
+          : 'operator-override' as const;
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
+      activationSource: rfc64CatalogActivationSource,
       responsibilityDefaultMode:
         rfc64CatalogExplicitlyDisabled || rfc64CatalogEphemeralLegacyFallback
           ? 'legacy'

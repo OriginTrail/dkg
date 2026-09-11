@@ -103,6 +103,24 @@ async function requestStatusWithAgent(
         },
         publisher: { getIdentityId: () => 0n },
         getSyncContextGraphIds: () => [],
+        readRfc64CatalogExecutionSelectionV1: () => {
+          const catalog = (config as any).rfc64Catalog;
+          const deprecated = (config as any).rfc64PublicCatalog;
+          const explicitlyDisabled = catalog?.enabled === false
+            || (catalog === undefined && deprecated?.enabled === false);
+          return {
+            activationSource: explicitlyDisabled
+              ? 'explicit-disabled'
+              : catalog === undefined && deprecated === undefined
+                ? 'default-omitted'
+                : catalog?.bootstrap !== undefined || deprecated?.bootstrap !== undefined
+                  ? 'compatibility-seed'
+                  : 'operator-override',
+            responsibilityDefaultMode: explicitlyDisabled
+              ? 'legacy'
+              : catalog?.rollout?.defaultMode ?? 'catalog',
+          };
+        },
         ...agentOverrides,
       },
       nodeVersion: '0.0.0-test',
@@ -129,6 +147,9 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       state: 'open' as const,
       consecutiveExhaustions: 3,
       retryAtMs: 1_893_456_000_000,
+      endpointUrl: 'https://user:pass@rpc.example',
+      requestPayload: { method: 'eth_call', params: ['private'] },
+      contextGraphId: 'private-context-graph',
     }));
     const response = await requestStatusWithAgent({
       readRfc64AuthorityRpcCircuitSnapshotV1: readCircuit,
@@ -146,6 +167,29 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       'retryAtMs',
       'state',
     ]);
+    expect(JSON.stringify(response.body.rfc64Catalog.authorityRpcCircuit))
+      .not.toContain('rpc.example');
+    expect(JSON.stringify(response.body.rfc64Catalog.authorityRpcCircuit))
+      .not.toContain('private-context-graph');
+  });
+
+  it.each([
+    ['unknown state', { state: 'tripped', consecutiveExhaustions: 1, retryAtMs: null }],
+    ['negative count', { state: 'open', consecutiveExhaustions: -1, retryAtMs: null }],
+    ['unsafe retry', {
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: Number.MAX_SAFE_INTEGER + 1,
+    }],
+  ])('degrades malformed authority RPC circuit input to null: %s', async (
+    _label,
+    circuit,
+  ) => {
+    const response = await requestStatusWithAgent({
+      readRfc64AuthorityRpcCircuitSnapshotV1: () => circuit,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toBeNull();
   });
 
   it('exposes bounded shadow execution evidence without raw supervisor identities', async () => {
@@ -405,6 +449,9 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     }, {
       killSwitch: false,
       contextGraphModes: { [privateContextGraph]: 'legacy' },
+    }, {
+      activationSource: 'operator-override',
+      responsibilityDefaultMode: 'catalog',
     });
 
     expect(evidence).toMatchObject({
@@ -422,6 +469,9 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       killSwitch: false,
       defaultMode: 'catalog',
       contextGraphModes: {},
+    }, {
+      activationSource: 'operator-override',
+      responsibilityDefaultMode: 'catalog',
     });
     const legacyDefault = buildRfc64CatalogConfigurationEvidenceV1({
       rfc64Catalog: { rollout: { defaultMode: 'legacy' } },
@@ -429,6 +479,9 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       killSwitch: false,
       defaultMode: 'legacy',
       contextGraphModes: {},
+    }, {
+      activationSource: 'operator-override',
+      responsibilityDefaultMode: 'legacy',
     });
     expect(catalogDefault.digest).not.toBe(legacyDefault.digest);
     expect(JSON.stringify([catalogDefault, legacyDefault])).not.toContain(privateContextGraph);
@@ -436,6 +489,9 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     expect(buildRfc64CatalogConfigurationEvidenceV1({}, {
       killSwitch: false,
       contextGraphModes: {},
+    }, {
+      activationSource: 'default-omitted',
+      responsibilityDefaultMode: 'catalog',
     })).toMatchObject({
       source: 'default-omitted',
       catalogControlPresent: false,
@@ -454,8 +510,12 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     _label,
     configOverrides,
   ) => {
+    const readExecutionSelection = vi.fn(() => ({
+      activationSource: 'explicit-disabled' as const,
+      responsibilityDefaultMode: 'legacy' as const,
+    }));
     const response = await requestStatusWithAgent(
-      {},
+      { readRfc64CatalogExecutionSelectionV1: readExecutionSelection },
       configOverrides,
       '/api/status',
       null,
@@ -481,6 +541,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       legacyOverrideCount: 0,
       shadowOverrideCount: 0,
     });
+    expect(readExecutionSelection).toHaveBeenCalledOnce();
   });
 
   it('reports a bounded lifecycle default and its explicit canary override', async () => {
@@ -1258,6 +1319,10 @@ describe('/api/status selected overlay details', () => {
           peerId: 'peer-status-test',
           multiaddrs: [],
           getSyncContextGraphIds: () => [],
+          readRfc64CatalogExecutionSelectionV1: () => ({
+            activationSource: 'default-omitted',
+            responsibilityDefaultMode: 'catalog',
+          }),
           node: {
             libp2p: { getConnections: () => [] },
             getRelayStats: () => null,
@@ -1331,6 +1396,10 @@ describe('/api/status selected overlay details', () => {
             peerId: 'peer-status-test',
             multiaddrs: [],
             getSyncContextGraphIds: () => [],
+            readRfc64CatalogExecutionSelectionV1: () => ({
+              activationSource: 'default-omitted',
+              responsibilityDefaultMode: 'catalog',
+            }),
             node: { libp2p: { getConnections: () => [] }, getRelayStats: () => null },
             publisher: { getIdentityId: () => 0n },
           },

@@ -3311,6 +3311,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     for (const agent of [unified, deprecatedPublic]) {
       expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
         killSwitchActive: false,
+        activationSource: 'explicit-disabled',
         responsibilityDefaultMode: 'legacy',
         contextGraphModes: {},
         track2ContextGraphs: [],
@@ -4175,6 +4176,33 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       name,
       rfc64CatalogActivation: activation,
     })).rejects.toThrow(/RFC-64 Track-2 mode requires dataDir/u);
+  });
+
+  it('keeps predeclared Track-2 overrides dormant under the kill switch', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ephemeral-kill-switch-predeclared-canary',
+      rfc64CatalogActivation: {
+        enabled: true,
+        rollout: {
+          killSwitch: true,
+          defaultMode: 'legacy',
+          contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+        },
+      },
+    });
+    agents.push(agent);
+    await agent.start();
+
+    expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      killSwitchActive: true,
+      activationSource: 'operator-override',
+      responsibilityDefaultMode: 'legacy',
+      contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+      track2ContextGraphs: [],
+      standaloneTrack2Enabled: false,
+    });
+    expect((agent as any).rfc64PublicCatalogServiceV1).toBeUndefined();
+    expect(agent.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
   });
 
   it('preserves explicit all-legacy operation without persistence', async () => {
