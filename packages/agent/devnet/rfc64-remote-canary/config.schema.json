@@ -178,7 +178,9 @@
             "method",
             "path",
             "authentication",
-            "expectedStatuses"
+            "expectedStatuses",
+            "bodyCodePointer",
+            "expectedCodes"
           ],
           "properties": {
             "kind": { "const": "http" },

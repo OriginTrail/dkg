@@ -2,7 +2,9 @@
 
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -18,12 +20,15 @@ import {
   runRemoteCanaryArtifactLifecycleV1,
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
+import { verifyAuthorizationV1 } from './authorization.mjs';
 import { isRetryableNodeRequestErrorV1, pollUntilV1 } from './phase-helpers.mjs';
 import { preflightAllNodesV1, validateNodePreflightV1 } from './preflight.mjs';
 import {
   collectRpcUsageEvidenceV1,
   validateRpcEvidenceV1,
 } from './rpc-evidence.mjs';
+import { verifyOfflineCatchupV1 } from './swm.mjs';
+import { createRequesterV1 } from './transport.mjs';
 import { completeOperationalParityV1 } from './vm.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -245,7 +250,8 @@ function fakeRuntime({
     throw new Error('unexpected read');
   };
   const now = () => new Date('2026-09-11T00:02:30.000Z');
-  return { state, fetchFn, runCommand, readFileFn, now };
+  const sleep = async () => undefined;
+  return { state, fetchFn, runCommand, readFileFn, now, sleep };
 }
 
 function jsonResponse(body, status = 200) {
@@ -404,6 +410,8 @@ test('config requires mandatory basic graph patterns for both ASK evidence field
       'ASK { OPTIONAL { <urn:known> ?p ?o } }',
       'ASK { { <urn:known> ?p ?o } UNION {} }',
       'ASK { ?s ?p ?o }',
+      'ASK { _:asset ?p ?o }',
+      'ASK { [] ?p ?o }',
     ]) {
       const config = baseConfig();
       config.contextGraphs[0][field] = sparql;
@@ -467,6 +475,18 @@ test('config rejects swapped authorization modes and common inline secret forms'
       (error) => error instanceof RemoteCanaryError
         && error.code === 'inline-command-secret-rejected',
     );
+  }
+
+  for (const field of ['unauthorized', 'revoked']) {
+    for (const required of ['bodyCodePointer', 'expectedCodes']) {
+      const config = baseConfig();
+      delete config.authorizationChecks[field][required];
+      assert.throws(
+        () => validateRemoteCanaryConfigV1(config),
+        (error) => error instanceof RemoteCanaryError && error.code === 'config-shape',
+        `${field}.${required}`,
+      );
+    }
   }
 });
 
@@ -785,6 +805,76 @@ test('receiver start runs from finally when an offline share fails', async () =>
   assert.equal(runtime.state.receiverOnline, true);
 });
 
+test('one transient failed probe cannot certify a no-op receiver stop', async () => {
+  const commands = [];
+  let probes = 0;
+  await assert.rejects(
+    verifyOfflineCatchupV1({
+      config: {
+        contextGraphs: [],
+        timing: { pollIntervalMs: 1 },
+      },
+      lifecycle: {
+        receiver: { id: 'receiver' },
+        stop: { argv: ['control', 'stop'] },
+        start: { argv: ['control', 'start'] },
+        commandTimeoutMs: 1_000,
+        stopTimeoutMs: 25,
+      },
+      request: {
+        reachable: async () => {
+          probes += 1;
+          return probes !== 1;
+        },
+      },
+      runCommand: async (command) => {
+        commands.push(command.argv[1]);
+        return { code: 0, signal: null, stdout: '' };
+      },
+      sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    }),
+    (error) => error instanceof RemoteCanaryError && error.code === 'receiver-did-not-stop',
+  );
+  assert.ok(probes >= 2);
+  assert.deepEqual(commands, ['stop', 'start']);
+});
+
+test('receiver must remain unreachable throughout offline marker sharing', async () => {
+  const commands = [];
+  const source = { id: 'source' };
+  const receiver = { id: 'receiver' };
+  let probes = 0;
+  await assert.rejects(
+    verifyOfflineCatchupV1({
+      config: {
+        contextGraphs: [{ id: CG, source, receiver }],
+        timing: { pollIntervalMs: 1 },
+      },
+      lifecycle: {
+        receiver,
+        stop: { argv: ['control', 'stop'] },
+        start: { argv: ['control', 'start'] },
+        commandTimeoutMs: 1_000,
+        stopTimeoutMs: 100,
+      },
+      request: {
+        reachable: async () => {
+          probes += 1;
+          return probes > 3;
+        },
+      },
+      runCommand: async (command) => {
+        commands.push(command.argv[1]);
+        return { code: 0, signal: null, stdout: '' };
+      },
+      sleep: async () => undefined,
+    }),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'receiver-became-reachable-during-offline-window',
+  );
+  assert.deepEqual(commands, ['stop', 'start']);
+});
+
 test('HTTP timeout covers a stalled response body and still restarts the receiver', async () => {
   const runtime = fakeRuntime();
   const delegateFetch = runtime.fetchFn;
@@ -845,6 +935,52 @@ test('generic 404 cannot certify authorization even with a plausible denial body
   const probes = runtime.state.requests.filter(({ path }) => path === '/api/typo');
   assert.equal(probes[0].authorization, null);
   assert.equal(probes[1].authorization, `Bearer ${SOURCE_SECRET}`);
+});
+
+test('real HTTP daemon authentication 401 cannot certify a nonexistent RFC-64 route', async () => {
+  const server = createServer((request, response) => {
+    response.writeHead(401, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ code: 'AUTHENTICATION_REQUIRED' }));
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.notEqual(address, null);
+  assert.equal(typeof address, 'object');
+  const config = baseConfig();
+  config.nodes[1].baseUrl = `http://127.0.0.1:${address.port}`;
+  config.nodes[1].allowTailscaleHttp = true;
+  config.authorizationChecks.unauthorized = {
+    kind: 'http',
+    nodeId: 'beta-receiver',
+    method: 'GET',
+    path: '/api/rfc64/typo',
+    authentication: 'none',
+    expectedStatuses: [401],
+    bodyCodePointer: '/code',
+    expectedCodes: ['RFC64_DENIED'],
+  };
+  config.authorizationChecks.revoked = {
+    kind: 'not-exposed',
+    reasonCode: 'revocation-api-not-exposed',
+  };
+  const validated = validateRemoteCanaryConfigV1(config);
+  const request = createRequesterV1({
+    fetchFn: globalThis.fetch,
+    readFileFn: async () => RECEIVER_SECRET,
+    secrets: new Map(),
+    timing: validated.timing,
+  });
+  try {
+    await assert.rejects(
+      verifyAuthorizationV1(validated.authorizationChecks, request),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === 'authorization-denial-code-mismatch',
+    );
+  } finally {
+    server.close();
+    await once(server, 'close');
+  }
 });
 
 test('the shared standards validator enforces RPC evidence date-time formats', async () => {

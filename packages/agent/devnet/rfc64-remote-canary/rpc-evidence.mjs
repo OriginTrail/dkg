@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { readFileSync } from 'node:fs';
+
+import Ajv2020 from 'ajv/dist/2020.js';
+import addFormats from 'ajv-formats';
+
 import {
   MAX_COMMAND_OUTPUT_BYTES,
   RPC_EVIDENCE_CLOCK_SKEW_MS,
@@ -9,7 +14,14 @@ import {
   failure,
   round,
 } from './common.mjs';
-import { assertRpcEvidenceShapeV1 } from './config.mjs';
+
+const rpcEvidenceSchema = JSON.parse(readFileSync(
+  new URL('./rpc-usage-evidence.schema.json', import.meta.url),
+  'utf8',
+));
+const rpcSchemaValidator = new Ajv2020({ allErrors: false, strict: true });
+addFormats(rpcSchemaValidator);
+const matchesRpcEvidenceV1 = rpcSchemaValidator.compile(rpcEvidenceSchema);
 
 export async function collectRpcUsageEvidenceV1(config, context) {
   if (config.kind === 'required') {
@@ -35,7 +47,7 @@ export async function collectRpcUsageEvidenceV1(config, context) {
   let evidence;
   try {
     evidence = JSON.parse(text);
-    assertRpcEvidenceShapeV1(evidence);
+    if (!matchesRpcEvidenceV1(evidence)) throw new Error('rpc-evidence-malformed');
   } catch {
     throw failure('rpc-evidence-malformed', 'rpc-usage');
   }

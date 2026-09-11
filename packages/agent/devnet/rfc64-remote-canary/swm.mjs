@@ -7,6 +7,9 @@ import {
   pollUntilV1,
 } from './phase-helpers.mjs';
 import { validateNodePreflightV1 } from './preflight.mjs';
+import { askConfiguredQueryV1 } from './query.mjs';
+
+const REQUIRED_OFFLINE_PROBES = 3;
 
 export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
@@ -56,14 +59,27 @@ export async function verifyOfflineCatchupV1({
     stopInvoked = true;
     const stopped = await runCommand(lifecycle.stop, lifecycle.commandTimeoutMs);
     if (stopped.code !== 0) throw failure('receiver-stop-command-failed', 'offline-catchup');
-    await pollUntilV1(
-      async () => !(await request.reachable(receiver)),
-      lifecycle.stopTimeoutMs,
+    let consecutiveOfflineProbes = 0;
+    const offlineProbeIntervalMs = Math.min(
       config.timing.pollIntervalMs,
+      Math.max(1, Math.floor(lifecycle.stopTimeoutMs / REQUIRED_OFFLINE_PROBES)),
+    );
+    await pollUntilV1(
+      async () => {
+        if (await request.reachable(receiver)) {
+          consecutiveOfflineProbes = 0;
+          return false;
+        }
+        consecutiveOfflineProbes += 1;
+        return consecutiveOfflineProbes >= REQUIRED_OFFLINE_PROBES;
+      },
+      lifecycle.stopTimeoutMs,
+      offlineProbeIntervalMs,
       sleep,
       () => failure('receiver-did-not-stop', 'offline-catchup'),
     );
     markers = await mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
+      await assertReceiverOfflineV1(receiver, request);
       const marker = createMarker();
       await shareMarkerV1(
         contextGraph.source,
@@ -72,6 +88,7 @@ export async function verifyOfflineCatchupV1({
         request,
         'offline-catchup',
       );
+      await assertReceiverOfflineV1(receiver, request);
       return [contextGraph, marker];
     });
   } catch (error) {
@@ -165,15 +182,6 @@ export function verifyCatalogSwmV1({ config, request }) {
   });
 }
 
-export async function askConfiguredQueryV1(node, contextGraph, sparql, view, request) {
-  const result = await request.json(node, 'POST', '/api/query', {
-    sparql,
-    contextGraphId: contextGraph.id,
-    view,
-  });
-  return result.result?.type === 'boolean' && result.result.value === true;
-}
-
 async function shareMarkerV1(node, contextGraphId, marker, request, phase) {
   const result = await request.json(node, 'POST', '/api/knowledge-assets', {
     contextGraphId,
@@ -186,6 +194,12 @@ async function shareMarkerV1(node, contextGraphId, marker, request, phase) {
     alsoShareSwm: true,
   });
   if (result.swmShared !== true) throw failure('swm-share-not-confirmed', phase);
+}
+
+async function assertReceiverOfflineV1(receiver, request) {
+  if (await request.reachable(receiver)) {
+    throw failure('receiver-became-reachable-during-offline-window', 'offline-catchup');
+  }
 }
 
 async function askMarkerV1(node, contextGraphId, marker, view, request) {
