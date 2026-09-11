@@ -1237,24 +1237,12 @@ export class DKGAgent extends DKGAgentBase {
     // silently suppressing both catalog and legacy delivery.
     const rfc64CatalogEphemeralLegacyFallback =
       !normalizedConfig.dataDir && rfc64CatalogConfigurationOmitted;
-    const rfc64CatalogActivationSource = rfc64CatalogConfigurationOmitted
-      ? 'default-omitted' as const
-      : rfc64CatalogExplicitlyDisabled
-        ? 'explicit-disabled' as const
-        : (
-            normalizedConfig.rfc64CatalogActivation?.bootstrap !== undefined
-            || normalizedConfig.rfc64PublicCatalogActivation?.bootstrap !== undefined
-            || normalizedConfig.rfc64PublicCatalogBootstrap !== undefined
-          )
-          ? 'compatibility-seed' as const
-          : 'operator-override' as const;
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
-      activationSource: rfc64CatalogActivationSource,
       responsibilityDefaultMode:
         rfc64CatalogExplicitlyDisabled || rfc64CatalogEphemeralLegacyFallback
           ? 'legacy'
-          : catalogActivation.rollout.defaultMode,
+          : catalogActivation.rollout.defaultMode ?? 'catalog',
       standaloneTrack2ContextGraphs:
         normalizedConfig.rfc64PublicCatalogActivation === undefined
           ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(

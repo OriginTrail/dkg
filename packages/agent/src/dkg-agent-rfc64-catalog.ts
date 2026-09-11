@@ -1300,20 +1300,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
-  /** Canonical construction-time facts used by operator status projections. */
-  readRfc64CatalogExecutionSelectionV1(
-    this: DKGAgent,
-  ): Readonly<Pick<
-    Rfc64CatalogExecutionPlanV1,
-    'activationSource' | 'responsibilityDefaultMode'
-  >> {
-    const plan = this.config.rfc64CatalogExecutionPlan;
-    return Object.freeze({
-      activationSource: plan.activationSource,
-      responsibilityDefaultMode: plan.responsibilityDefaultMode,
-    });
-  }
-
   /** Constant-time point lookup for rollout-owned hot-path classification. */
   readRfc64CatalogResponsibilityV1(
     this: DKGAgent,
