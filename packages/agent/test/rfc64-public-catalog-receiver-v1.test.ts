@@ -114,15 +114,18 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
   it('reconciles and reports one durably applied inventory head', async () => {
     const appliedPeers: string[] = [];
     const onHeadApplied = vi.fn();
+    const onCompletion = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
       reconciler(async (peerId) => { appliedPeers.push(peerId); return 'applied'; }),
-      { onHeadApplied },
+      { onHeadApplied, onCompletion },
     );
-    receiver.schedule(announcement(), 'peerA');
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
     await receiver.whenIdle();
 
     expect(appliedPeers).toEqual(['peerA']);
     expect(onHeadApplied).toHaveBeenCalledTimes(1);
+    expect(onCompletion).toHaveBeenCalledExactlyOnceWith(head, 'applied');
     expect(receiver.stats()).toMatchObject({ scheduled: 1, applied: 1, notFound: 0, failed: 0 });
   });
 
@@ -192,6 +195,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
     const firstStarted = deferred<void>();
     const releaseFirst = deferred<void>();
     const versions: string[] = [];
+    const onCompletion = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peerId, head) => {
       versions.push(head.catalogVersion);
       if (head.catalogVersion === '1') {
@@ -200,7 +204,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
         throw new Error('stale provider');
       }
       return 'applied';
-    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0 });
+    }), { maxConcurrent: 1, maxAttempts: 1, retryBackoffMs: 0, onCompletion });
 
     receiver.schedule(announcement({ catalogVersion: '1' }), 'peer-ambient');
     await firstStarted.promise;
@@ -231,6 +235,15 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       queued: 0,
       inFlight: 0,
     });
+    expect(onCompletion.mock.calls.map(([head, outcome]) => [
+      head.catalogVersion,
+      outcome,
+    ]).sort()).toEqual([
+      ['1', 'failed'],
+      ['100', 'applied'],
+      ['2', 'closed'],
+      ['3', 'closed'],
+    ]);
   });
 
   it('preserves older ambient history when a verified current-head jump fails', async () => {
@@ -756,6 +769,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       contextGraphId: '0x1111111111111111111111111111111111111111/deferred',
       catalogHeadObjectDigest: `0x${'c3'.repeat(32)}`,
     });
+    const onCompletion = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(
       async (_peerId, head, signal) => {
         attemptedContextGraphs.push(head.contextGraphId);
@@ -776,6 +790,7 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       admissionDeferralMs: 60_000,
       isDeferrableError: (error) =>
         error instanceof Error && error.message === 'finalized chain lane busy',
+      onCompletion,
     });
 
     const activeCompletion = receiver.scheduleManyAndWait([{
@@ -808,6 +823,14 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       deferredHead.contextGraphId,
     ]);
     expect(receiver.stats()).toMatchObject({ deferred: 0, inFlight: 0, queued: 0 });
+    expect(onCompletion.mock.calls.map(([head, outcome]) => [
+      head.contextGraphId,
+      outcome,
+    ]).sort()).toEqual([
+      [active.contextGraphId, 'closed'],
+      [deferredHead.contextGraphId, 'closed'],
+      [queued.contextGraphId, 'closed'],
+    ].sort());
     await receiver.close();
   });
 
@@ -918,17 +941,32 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
   it('drops distinct heads when the bounded queue is full', async () => {
     const gate = deferred<Rfc64PublicCatalogReconcileResultV1>();
     const onAttemptStart = vi.fn();
+    const onCompletion = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
       reconciler(async () => gate.promise),
-      { maxConcurrent: 1, maxQueue: 1, onAttemptStart },
+      { maxConcurrent: 1, maxQueue: 1, onAttemptStart, onCompletion },
     );
-    receiver.schedule(headWith(`0x${'a1'.repeat(32)}`), 'peer');
-    receiver.schedule(headWith(`0x${'a2'.repeat(32)}`), 'peer');
-    receiver.schedule(headWith(`0x${'a3'.repeat(32)}`), 'peer');
+    const running = headWith(`0x${'a1'.repeat(32)}`);
+    const queued = headWith(`0x${'a2'.repeat(32)}`);
+    const dropped = headWith(`0x${'a3'.repeat(32)}`);
+    receiver.schedule(running, 'peer');
+    receiver.schedule(queued, 'peer');
+    receiver.schedule(dropped, 'peer');
     expect(receiver.stats().droppedQueueFull).toBe(1);
     expect(onAttemptStart).toHaveBeenCalledTimes(2);
+    expect(onCompletion).toHaveBeenCalledExactlyOnceWith(dropped, 'dropped');
     gate.resolve('not-found');
     await receiver.whenIdle();
+    expect(onCompletion).toHaveBeenCalledTimes(3);
+    expect(onCompletion.mock.calls.filter(([head]) => head === running)).toEqual([
+      [running, 'not-found'],
+    ]);
+    expect(onCompletion.mock.calls.filter(([head]) => head === queued)).toEqual([
+      [queued, 'not-found'],
+    ]);
+    expect(onCompletion.mock.calls.filter(([head]) => head === dropped)).toEqual([
+      [dropped, 'dropped'],
+    ]);
   });
 
   it('retries transient failures with bounded backoff', async () => {
@@ -946,13 +984,16 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
 
   it('reports failure after maxAttempts', async () => {
     const onError = vi.fn();
+    const onCompletion = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(
       reconciler(async () => { throw new Error('down'); }),
-      { maxAttempts: 2, retryBackoffMs: 1, onError },
+      { maxAttempts: 2, retryBackoffMs: 1, onError, onCompletion },
     );
-    receiver.schedule(announcement(), 'peerA');
+    const head = announcement();
+    receiver.schedule(head, 'peerA');
     await receiver.whenIdle();
     expect(onError).toHaveBeenCalledTimes(1);
+    expect(onCompletion).toHaveBeenCalledExactlyOnceWith(head, 'failed');
     expect(receiver.stats()).toMatchObject({ failed: 1, applied: 0 });
   });
 
@@ -1141,22 +1182,26 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
   it('close awaits in-flight reconciliation, passes an abort signal, and rejects new work', async () => {
     const reconcileGate = deferred<Rfc64PublicCatalogReconcileResultV1>();
     let observedSignal: AbortSignal | undefined;
+    const onCompletion = vi.fn();
     const receiver = new Rfc64PublicCatalogReceiverV1(reconciler(async (_peer, _head, signal) => {
       observedSignal = signal;
       return reconcileGate.promise;
-    }));
-    receiver.schedule(announcement(), 'peerA');
+    }), { onCompletion });
+    const activeHead = announcement();
+    receiver.schedule(activeHead, 'peerA');
     await Promise.resolve();
     const closing = receiver.close();
     expect(observedSignal?.aborted).toBe(true);
     reconcileGate.resolve('applied');
     await closing;
-    receiver.schedule(headWith(`0x${'cc'.repeat(32)}`), 'peerA');
+    const postCloseAmbientHead = headWith(`0x${'cc'.repeat(32)}`);
+    receiver.schedule(postCloseAmbientHead, 'peerA');
     expect(receiver.stats().scheduled).toBe(1);
 
+    const postCloseAwaitedHead = headWith(`0x${'dd'.repeat(32)}`);
     const postClose = await Promise.race([
       receiver.scheduleManyAndWait([{
-        announcement: headWith(`0x${'dd'.repeat(32)}`),
+        announcement: postCloseAwaitedHead,
         remotePeerId: 'peerB',
       }]),
       new Promise<never>((_resolve, reject) => {
@@ -1174,5 +1219,10 @@ describe('RFC-64 public catalog receiver scheduler v1', () => {
       error: null,
     });
     expect(receiver.stats().scheduled).toBe(1);
+    expect(onCompletion.mock.calls).toEqual([
+      [activeHead, 'closed'],
+      [postCloseAmbientHead, 'closed'],
+      [postCloseAwaitedHead, 'closed'],
+    ]);
   });
 });

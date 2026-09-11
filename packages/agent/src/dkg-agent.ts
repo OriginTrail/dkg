@@ -1257,13 +1257,16 @@ export class DKGAgent extends DKGAgentBase {
     if (catalogActivation.bootstrap !== undefined && !config.dataDir) {
       throw new TypeError('rfc64Catalog bootstrap requires dataDir');
     }
-    if (
-      !config.dataDir
-      && !rfc64CatalogExecutionPlan.killSwitchActive
-      && rfc64CatalogExecutionPlan.responsibilityDefaultMode === 'catalog'
-    ) {
+    const rfc64Track2RequiresPersistence =
+      !rfc64CatalogExecutionPlan.killSwitchActive
+      && (
+        rfc64CatalogExecutionPlan.responsibilityDefaultMode !== 'legacy'
+        || rfc64CatalogExecutionPlan.track2ContextGraphs.length > 0
+        || rfc64CatalogExecutionPlan.standaloneTrack2Enabled
+      );
+    if (!config.dataDir && rfc64Track2RequiresPersistence) {
       throw new TypeError(
-        'RFC-64 catalog mode requires dataDir; omit RFC-64 catalog configuration '
+        'RFC-64 Track-2 mode requires dataDir; omit RFC-64 catalog configuration '
         + 'for ephemeral legacy mode or set rfc64CatalogActivation.enabled=false',
       );
     }
