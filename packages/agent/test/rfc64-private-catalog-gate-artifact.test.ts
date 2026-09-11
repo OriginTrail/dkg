@@ -9,12 +9,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  MemoryLayer,
-  contextGraphLayerUri,
-  contextGraphMetaUri,
-  contextGraphWorkspaceMetaGraphUri,
-} from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 import {
@@ -54,22 +48,21 @@ import {
 } from '../devnet/rfc64-private-catalog/run.mjs';
 import {
   ASSET_NUMBERS,
-  CONTEXT_GRAPH_ID,
-  NETWORK_ID,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   PROJECTION_EVIDENCE,
   PROJECTION_NQUADS,
   PROJECTION_QUADS,
-  UPDATED_PROJECTION_QUADS,
   privateCatalogSwmShareOperationId,
-  roleAgentAddress,
 } from '../devnet/rfc64-private-catalog/fixture.mjs';
 import {
   bindGraphlessProjectionToGraph,
   hasExactPrivateCatalogMemoryContents,
   readExactGraphMemoryEvidence,
-  readPrivateCatalogGraphCountEvidence,
 } from '../devnet/rfc64-private-catalog/memory-evidence.mjs';
+import {
+  readExpectedPrivateMemoryV1,
+  seedExpectedPrivateMemoryV1,
+} from '../devnet/rfc64-private-catalog/fixtures/private-memory-fixture.mjs';
 
 const temporaryRoots: string[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -665,76 +658,22 @@ describe('RFC-64 private release gate process and denial evidence', () => {
 
   it('feeds process-built SWM/VM evidence through the executable gate predicate', async () => {
     const store = new OxigraphStore();
-    const authorAddress = roleAgentAddress('owner');
     try {
-      const graphs = ASSET_NUMBERS.flatMap((kaNumber) => {
-        const kaUal = `did:dkg:${NETWORK_ID}/${authorAddress}/${kaNumber}`;
-        const swmGraph = contextGraphLayerUri(
-          CONTEXT_GRAPH_ID,
-          MemoryLayer.SharedWorkingMemory,
-          authorAddress,
-          kaNumber,
-        );
-        const vmGraph = contextGraphLayerUri(
-          CONTEXT_GRAPH_ID,
-          MemoryLayer.VerifiableMemory,
-          authorAddress,
-          kaNumber,
-        );
-        return [
-          ...bindGraphlessProjectionToGraph(UPDATED_PROJECTION_QUADS, swmGraph),
-          ...bindGraphlessProjectionToGraph(PROJECTION_QUADS, vmGraph),
-          {
-            subject: `${kaUal}#dkg-swm-head`,
-            predicate: 'http://dkg.io/ontology/assertionVersion',
-            object: '"2"',
-            graph: contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID),
-          },
-          {
-            subject: `${kaUal}#dkg-swm-head`,
-            predicate: 'http://dkg.io/ontology/assertionGraph',
-            object: swmGraph,
-            graph: contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID),
-          },
-          {
-            subject: `${kaUal}#dkg-swm-head`,
-            predicate: 'http://dkg.io/ontology/shareOperationId',
-            object: `"${privateCatalogSwmShareOperationId(kaNumber)}"`,
-            graph: contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID),
-          },
-          {
-            subject: kaUal,
-            predicate: 'http://dkg.io/ontology/assertionVersion',
-            object: '"1"',
-            graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
-          },
-          {
-            subject: kaUal,
-            predicate: 'http://dkg.io/ontology/assertionGraph',
-            object: vmGraph,
-            graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
-          },
-        ];
-      });
-      await store.insert(graphs);
-
-      const graphCounts = await readPrivateCatalogGraphCountEvidence(store, {
-        assetNumbers: ASSET_NUMBERS,
-        contextGraphId: CONTEXT_GRAPH_ID,
-        authorAddress,
-        networkId: NETWORK_ID,
-      });
-      expect(hasExactMemoryContents({ graphCounts })).toBe(true);
+      await seedExpectedPrivateMemoryV1(store);
+      const graphCounts = await readExpectedPrivateMemoryV1(store);
+      expect(hasExactMemoryContents({ graphCounts }, {
+        swmProofKind: 'workspace-head',
+      })).toBe(true);
       expect(hasExactMemoryContents({
         graphCounts: graphCounts.map((entry, index) => index === 0
           ? { ...entry, swmDigest: entry.vmDigest, vmDigest: '0'.repeat(64) }
           : entry),
-      })).toBe(false);
+      }, { swmProofKind: 'workspace-head' })).toBe(false);
       expect(hasExactMemoryContents({
         graphCounts: graphCounts.map((entry, index) => index === 1
           ? { ...entry, kaNumber: 43 }
           : entry),
-      })).toBe(false);
+      }, { swmProofKind: 'workspace-head' })).toBe(false);
     } finally {
       await store.close();
     }
@@ -764,7 +703,8 @@ describe('RFC-64 private release gate process and denial evidence', () => {
         swmGraph: `urn:rfc64:test:swm:${kaNumber}`,
         swm: exact.count,
         swmDigest: exact.digest,
-        swmHead: {
+        swmProof: {
+          kind: 'workspace-head',
           assertionVersion: '2',
           assertionGraph: `urn:rfc64:test:swm:${kaNumber}`,
           shareOperationId: privateCatalogSwmShareOperationId(kaNumber),
@@ -782,6 +722,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
         swm: {
           projection: PROJECTION_EVIDENCE,
           assertionVersion: '2',
+          proofKind: 'workspace-head',
           shareOperationIdPrefix:
             PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.shareOperationIdPrefix,
         },

@@ -81,5 +81,6 @@ export function readExpectedPrivateMemoryV1(store) {
     authorAddress: roleAgentAddress('owner'),
     contextGraphId: CONTEXT_GRAPH_ID,
     networkId: NETWORK_ID,
+    swmProofMode: 'workspace-head',
   });
 }

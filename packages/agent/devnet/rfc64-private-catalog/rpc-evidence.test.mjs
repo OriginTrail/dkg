@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { AgentChild } from './run.mjs';
 import {
   RFC64_PRIVATE_GATE_RPC_BUDGET_V1,
+  finalizedRuntimeRpcVerdictV1,
+  hasFinalizedRpcReadEvidenceV1,
   isWithinRpcBudgetV1,
   isWithinRpcCeilingV1,
   rpcEvidenceV1,
@@ -40,6 +42,39 @@ test('RPC evidence is method-attributed and rejects unknown or over-budget work'
     rpcCallCounts: { eth_call: RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods.eth_call + 1 },
   }), false);
   assert.equal(isWithinRpcCeilingV1({ rpcCallCounts: { eth_unexpected: 1 } }), false);
+  assert.equal(isWithinRpcCeilingV1({ rpcCallCounts: { eth_call: '1' } }), false);
+  assert.equal(hasFinalizedRpcReadEvidenceV1({ rpcCallCounts: { eth_chainId: 1 } }), false);
+  assert.equal(hasFinalizedRpcReadEvidenceV1({
+    rpcCallCounts: { eth_call: 1, eth_getBlockByNumber: 1 },
+  }), true);
+
+  const finalized = { rpcCallCounts: { eth_call: 1, eth_getBlockByNumber: 1 } };
+  const quiet = { rpcCallCounts: {} };
+  const receipts = {
+    owner: quiet,
+    provider2: finalized,
+    'receiver-seed': finalized,
+    receiver: finalized,
+    outsider: quiet,
+    'receiver-restart': quiet,
+  };
+  assert.deepEqual(finalizedRuntimeRpcVerdictV1(receipts), {
+    finalizedChainPathExecuted: true,
+    finalizedChainRpcWithinBudget: true,
+  });
+  assert.equal(finalizedRuntimeRpcVerdictV1({
+    ...receipts,
+    provider2: { rpcCallCounts: { eth_chainId: 1 } },
+  }).finalizedChainPathExecuted, false);
+  assert.equal(finalizedRuntimeRpcVerdictV1({
+    ...receipts,
+    'receiver-seed': { rpcCallCounts: { eth_call: 97, eth_getBlockByNumber: 1 } },
+  }).finalizedChainRpcWithinBudget, false);
+  const { owner: _missingOwner, ...missingOwner } = receipts;
+  assert.equal(
+    finalizedRuntimeRpcVerdictV1(missingOwner).finalizedChainRpcWithinBudget,
+    false,
+  );
 
   const root = await mkdtemp(join(tmpdir(), 'rfc64-private-late-rpc-'));
   const child = new AgentChild('late-rpc', root, undefined, 'late-rpc', {
@@ -47,7 +82,7 @@ test('RPC evidence is method-attributed and rejects unknown or over-budget work'
   });
   try {
     await child.waitFor('ready');
-    const inspection = await child.request({ cmd: 'inspect' }, 'inspection');
+    const inspection = await child.request({ cmd: 'inspect' });
     assert.equal(isWithinRpcCeilingV1(inspection), true);
     const shutdown = await child.stop();
     assert.deepEqual(shutdown.rpcCallCounts, { eth_call: 97 });
