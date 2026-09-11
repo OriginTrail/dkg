@@ -158,6 +158,44 @@ describe('peer connection lifecycle', () => {
     },
   );
 
+  it.each(['enrichment', 'sender-key'] as const)(
+    'admits catalog replay before a stalled best-effort %s step',
+    async (stage) => {
+      const session = activeSessionWithoutJobs();
+      const replay = replayReservation();
+      const bestEffortGate = deferred<void>();
+      const remotePeer = '12D3KooWcatalogReplayBeforeBestEffort';
+      const ports = {
+        localPeerId: '12D3KooWlocal',
+        prepareCatalogReplay: vi.fn(() => replay.value),
+        ensureAdmitted: vi.fn(async () => true),
+        enrichPeerStore: vi.fn(async () => {
+          if (stage === 'enrichment') await bestEffortGate.promise;
+        }),
+        drainPendingSenderKey: vi.fn(async () => {
+          if (stage === 'sender-key') await bestEffortGate.promise;
+          return 0;
+        }),
+        queueSync: vi.fn(() => true),
+      };
+      const running = syncOpenedPeerConnection({
+        ports,
+        session,
+        ctx: createOperationContext('sync'),
+        log: { info: vi.fn(), warn: vi.fn() },
+      }, { direction: 'inbound', remotePeer: { toString: () => remotePeer } });
+      try {
+        await vi.waitFor(() => expect(replay.admit).toHaveBeenCalledOnce());
+        expect(replay.reject).not.toHaveBeenCalled();
+        expect(ports.queueSync).not.toHaveBeenCalled();
+      } finally {
+        bestEffortGate.resolve();
+        await running;
+        session.close();
+      }
+    },
+  );
+
   it.each(['enrichment', 'sender-key', 'reannouncement', 'replay incomplete'] as const)(
     'continues catch-up after a best-effort %s failure',
     async (stage) => {
@@ -267,7 +305,13 @@ describe('peer connection lifecycle', () => {
         expect(prepareReplay).not.toHaveBeenCalled();
       } else {
         expect(prepareReplay).toHaveBeenCalledExactlyOnceWith(f.peerId);
-        expect(replay.reject).toHaveBeenCalledOnce();
+        if (scenario.gate === 'admission') {
+          expect(replay.reject).toHaveBeenCalledOnce();
+          expect(replay.admit).not.toHaveBeenCalled();
+        } else {
+          expect(replay.admit).toHaveBeenCalledOnce();
+          expect(replay.reject).not.toHaveBeenCalled();
+        }
       }
       admissionGate.resolve();
       enrichmentGate.resolve();
@@ -278,7 +322,9 @@ describe('peer connection lifecycle', () => {
         expect(enrich).not.toHaveBeenCalled();
       }
       if (scenario.gate !== 'sender-key') expect(drain).not.toHaveBeenCalled();
-      expect(replay.admit).not.toHaveBeenCalled();
+      if (scenario.gate === 'event' || scenario.gate === 'admission') {
+        expect(replay.admit).not.toHaveBeenCalled();
+      }
       expect(queue).not.toHaveBeenCalled();
     } finally {
       admissionGate.resolve();

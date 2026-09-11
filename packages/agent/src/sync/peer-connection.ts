@@ -55,6 +55,14 @@ export async function syncOpenedPeerConnection(
       rejectCatalogReplay();
       return;
     }
+    signal.throwIfAborted();
+    // Network admission is the only prerequisite for catalog replay. Settle
+    // the reservation before unrelated best-effort connection maintenance so
+    // a stalled enrichment or sender-key drain cannot suppress completeness.
+    if (catalogReplay !== null) {
+      catalogReplay.admit();
+      catalogReplaySettled = true;
+    }
     try {
       await session.step(() => ports.enrichPeerStore(connection));
     } catch (err: unknown) {
@@ -76,14 +84,6 @@ export async function syncOpenedPeerConnection(
       signal.throwIfAborted();
       const message = err instanceof Error ? err.message : String(err);
       log.warn(ctx, `Pending SWM sender-key drain on connect failed for ${remotePeer}: ${message}`);
-    }
-    signal.throwIfAborted();
-    // The catalog runtime owns replay debounce, completion and physical drain.
-    // Admission stays inside this peer lifetime so shutdown cannot start a new
-    // replay after the session has been fenced.
-    if (catalogReplay !== null) {
-      catalogReplay.admit();
-      catalogReplaySettled = true;
     }
     session.commit(() => ports.queueSync(remotePeer, (peer, error) => session.commit(() => {
       log.warn(ctx, `Sync-on-connect failed for ${peer.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`);

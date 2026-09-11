@@ -1221,16 +1221,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     let runtime = rfc64CatalogReplayConnectionRuntimesV1.get(this);
     if (runtime === undefined) {
       runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
-        selectContextGraphIds: () => [
-          ...this.readRfc64CatalogResponsibilitiesV1()
-            .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
-            .map((responsibility) => responsibility.contextGraphId),
-          ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
-            .filter((contextGraphId) => {
-              const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-              return authority.active && authority.mode !== 'legacy';
-            }),
-        ],
+        selectContextGraphIds: () => this.listActiveRfc64CatalogReplayContextGraphIdsV1(),
         acquireFence: (contextGraphId, replayPeerId) =>
           this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, replayPeerId),
         reannounce: (replayPeerId) =>
