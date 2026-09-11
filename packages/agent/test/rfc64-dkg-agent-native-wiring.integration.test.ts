@@ -3295,7 +3295,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         selectedPublicContextGraphs: [],
         selectedPrivateContextGraphs: [],
         rollout: { killSwitch: false, contextGraphModes: {} },
-      } as never,
+      },
     });
 
     const deprecatedPublic = await startNativeAgentWithOptions({
@@ -3305,13 +3305,12 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         enabled: false,
         selectedContextGraphs: [],
         rollout: { killSwitch: false, contextGraphModes: {} },
-      } as never,
+      },
     });
 
     for (const agent of [unified, deprecatedPublic]) {
       expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
         killSwitchActive: false,
-        activationSource: 'explicit-disabled',
         responsibilityDefaultMode: 'legacy',
         contextGraphModes: {},
         track2ContextGraphs: [],
@@ -4195,7 +4194,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
 
     expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
       killSwitchActive: true,
-      activationSource: 'operator-override',
       responsibilityDefaultMode: 'legacy',
       contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
       track2ContextGraphs: [],

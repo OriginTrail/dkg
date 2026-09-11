@@ -4,9 +4,6 @@ import { createHash } from 'node:crypto';
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
-  sanitizeRfc64CatalogShadowExecutionStatusV1,
-} from '@origintrail-official/dkg-agent';
-import {
   rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
 } from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
@@ -16,6 +13,7 @@ import type {
   ResolvedRfc64CatalogActivationConfig,
   ResolvedRfc64PublicCatalogActivationConfig,
 } from '../../config.js';
+import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from './rfc64-status-contract.js';
 
 /** Narrow read-only agent capability used by the public RFC-64 status facade. */
 export interface Rfc64StatusReaderV1 {
@@ -25,8 +23,6 @@ export interface Rfc64StatusReaderV1 {
     OmitThisParameter<DKGAgent['readRfc64PublicCatalogBootstrapStatusV1']>;
   readonly readRfc64CatalogRuntimeSelectionV1?:
     OmitThisParameter<DKGAgent['readRfc64CatalogRuntimeSelectionV1']>;
-  readonly readRfc64CatalogExecutionSelectionV1:
-    OmitThisParameter<DKGAgent['readRfc64CatalogExecutionSelectionV1']>;
   readonly readRfc64CatalogResponsibilitiesV1?:
     OmitThisParameter<DKGAgent['readRfc64CatalogResponsibilitiesV1']>;
   readonly readRfc64AuthorityRpcCircuitSnapshotV1?:
@@ -67,10 +63,6 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
     defaultMode?: 'legacy' | 'shadow' | 'catalog';
     contextGraphModes: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
   }>,
-  executionSelection: Readonly<{
-    activationSource: Rfc64CatalogConfigurationEvidenceV1['source'];
-    responsibilityDefaultMode: 'legacy' | 'shadow' | 'catalog';
-  }>,
 ): Rfc64CatalogConfigurationEvidenceV1 {
   const catalogControlPresent = config.rfc64Catalog !== undefined;
   const deprecatedPublicControlPresent = config.rfc64PublicCatalog !== undefined;
@@ -82,8 +74,17 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
     || publicCatalog?.bootstrap !== undefined;
   const modes = Object.entries(effectiveRollout.contextGraphModes)
     .sort(([left], [right]) => left.localeCompare(right));
-  const defaultMode = executionSelection.responsibilityDefaultMode;
-  const source = executionSelection.activationSource;
+  const defaultMode = deprecatedDisabledOverride
+    ? 'legacy'
+    : effectiveRollout.defaultMode ?? 'catalog';
+  const source: Rfc64CatalogConfigurationEvidenceV1['source'] =
+    deprecatedDisabledOverride
+      ? 'explicit-disabled'
+      : !catalogControlPresent && !deprecatedPublicControlPresent
+        ? 'default-omitted'
+        : activationManifestPresent
+          ? 'compatibility-seed'
+          : 'operator-override';
   const digestPayload = {
     schemaVersion: 1,
     catalogControlPresent,
@@ -155,7 +156,6 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
   const configuration = buildRfc64CatalogConfigurationEvidenceV1(
     config,
     rollout,
-    agent.readRfc64CatalogExecutionSelectionV1(),
   );
   const service = catalogActivation.enabled
     && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
