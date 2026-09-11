@@ -46,6 +46,22 @@ test('a finalized roster mismatch aborts before publish or synchronization', {
   );
 });
 
+test('a successful no-op chain mutation cannot certify receiver revocation', {
+  timeout: 90_000,
+}, async () => {
+  const runtimeManifest = buildRuntimeManifestV1(REPO_ROOT, SOURCE_REVISION);
+  await assert.rejects(
+    executeRfc64PrivateReleaseGateV1({
+      childEnvironment: {
+        DKG_RFC64_PRIVATE_AUTHORITY_FAULT: 'revocation-chain-noop',
+      },
+      runtimeManifest,
+      sourceRevision: SOURCE_REVISION,
+    }),
+    (error) => /finalized chain roster did not advance/u.test(error?.cause?.message ?? ''),
+  );
+});
+
 for (const [fault, expected] of [
   ['inventory-digest', /differs from the durable applied inventory digest/u],
   ['expected-assets', /differs from the expected asset identities/u],

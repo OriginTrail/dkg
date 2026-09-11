@@ -38,12 +38,14 @@ const KNOWLEDGE_ASSET_SELECTORS = new Set([
 /** Chain adapter whose identity matches the deterministic finalized-RPC fixture. */
 export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
   #fixture;
+  #participantRemovalNoop;
 
-  constructor(fixture) {
+  constructor(fixture, options = {}) {
     super(fixture.networkId, fixture.ownerAddress, {
       initialContextGraphId: BigInt(fixture.onChainContextGraphId),
     });
     this.#fixture = fixture;
+    this.#participantRemovalNoop = options.participantRemovalNoop === true;
   }
 
   async getEvmChainId() {
@@ -66,6 +68,11 @@ export class Rfc64PrivateDevnetChainAdapter extends MockChainAdapter {
       sourceBlockNumber: this.#fixture.authorityBlockNumber,
       sourceBlockHash: this.#fixture.authorityBlockHash,
     });
+  }
+
+  async removeContextGraphParticipantAgent(contextGraphId, agent) {
+    if (this.#participantRemovalNoop) return this.txResult(true);
+    return super.removeContextGraphParticipantAgent(contextGraphId, agent);
   }
 }
 
