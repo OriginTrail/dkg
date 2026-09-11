@@ -239,6 +239,38 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     expect(evidence.indexRanges.slice(3)).toEqual([[31, 35]]);
   });
 
+  it('binds a total revision-reader capability only while the local index exists', async () => {
+    const withoutIndex = makeEvmAuthorityAdapter();
+    expect(withoutIndex.adapter.contextGraphAuthorityIndexRevisionReader).toBeUndefined();
+
+    const { adapter } = makeEvmAuthorityAdapter({ sharedIndex: true });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader;
+    expect(reader).toBeDefined();
+    await expect(reader!.readContextGraphAuthorityIndexRevisions([9n]))
+      .resolves.toEqual([{
+        contextGraphId: '9',
+        revision: expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+      }]);
+
+    (adapter as any).contextGraphAuthorityIndex = undefined;
+    await expect(reader!.readContextGraphAuthorityIndexRevisions([9n]))
+      .rejects.toThrow('lost its bound index');
+  });
+
+  it('rejects invalid revision target sets before reading the shared index', async () => {
+    const { adapter, evidence } = makeEvmAuthorityAdapter({ sharedIndex: true });
+
+    await expect(adapter.getContextGraphAuthorityIndexRevisions([])).resolves.toEqual([]);
+    for (const invalidId of [0n, ethers.MaxUint256 + 1n]) {
+      await expect(adapter.getContextGraphAuthorityIndexRevisions([invalidId]))
+        .rejects.toThrow('target id is invalid');
+    }
+    await expect(adapter.getContextGraphAuthorityIndexRevisions(
+      Array.from({ length: 4_097 }, (_, index) => BigInt(index + 1)),
+    )).rejects.toThrow('target set is invalid');
+    expect(evidence.indexRanges).toEqual([]);
+  });
+
   it('rejects a stale revision projection and rebuilds from the replacement finalized fork', async () => {
     const harness = makeEvmAuthorityAdapter({ sharedIndex: true });
     const stabilization = harness.holdBlockRead(30);
