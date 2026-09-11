@@ -298,6 +298,8 @@ jobs:
 
       - name: Test repository scripts
         run: pnpm run test:scripts
+      - name: Test RFC-64 remote canary certification contracts
+        run: pnpm --dir packages/agent test:rfc64-remote-canary:unit
       - name: Verify every test has an execution route
         run: pnpm test:inventory
       - name: Upload test execution inventory

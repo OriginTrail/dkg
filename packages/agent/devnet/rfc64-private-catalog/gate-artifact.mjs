@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { randomUUID } from 'node:crypto';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
-
+import { writeRfc64ArtifactAtomicV1 } from '../rfc64-artifact-v1.mjs';
 import { isSafeChildDiagnosticPhaseV1 } from './child-protocol.mjs';
 import {
   RFC64_PRIVATE_GATE_SCHEMA_V2 as SCHEMA,
@@ -14,7 +11,6 @@ import {
   assertRfc64PrivateGatePassProvenanceV2,
   decodeRfc64PrivateGatePassArtifactV2,
 } from './gate-artifact-pass-codec.mjs';
-import { stableJsonV1 } from './gate-artifact-codec-primitives.mjs';
 
 export {
   RFC64_PRIVATE_RELEASE_CHECK_KEYS_V1,
@@ -98,23 +94,7 @@ export async function runRfc64PrivateGateArtifactLifecycleV1({
 
 /** Replace the artifact with one same-directory atomic rename. */
 export async function writeGateArtifactAtomicV1(artifactPath, artifact) {
-  const artifactDirectory = dirname(artifactPath);
-  await mkdir(artifactDirectory, { recursive: true });
-  const temporaryPath = join(
-    artifactDirectory,
-    `.${basename(artifactPath)}.${process.pid}.${randomUUID()}.tmp`,
-  );
-  try {
-    await writeFile(temporaryPath, `${stableJsonV1(artifact)}\n`, {
-      encoding: 'utf8',
-      mode: 0o644,
-      flag: 'wx',
-    });
-    await rename(temporaryPath, artifactPath);
-  } catch (error) {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
+  return writeRfc64ArtifactAtomicV1(artifactPath, artifact);
 }
 
 /** Return only fixed classifications. Never retain caller-controlled error data. */

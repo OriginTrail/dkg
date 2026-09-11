@@ -40,9 +40,8 @@ function parseArgs(argv) {
 
 try {
   const args = parseArgs(process.argv.slice(2));
-  const config = JSON.parse(await readFile(args.config, 'utf8'));
   const artifact = await runRemoteCanaryArtifactLifecycleV1({
-    config,
+    loadConfig: async () => JSON.parse(await readFile(args.config, 'utf8')),
     artifactPath: args.artifact,
     dryRun: args.dryRun,
   });
