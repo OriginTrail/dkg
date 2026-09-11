@@ -88,6 +88,7 @@ export class AgentChild {
       cwd: options.agentRoot ?? AGENT_ROOT,
       env: {
         ...childEnv,
+        ...boundedChildEnvironmentV1(options.childEnvironment),
         NODE_ENV: 'production',
         DKG_RFC64_PRIVATE_ROLE: role,
         DKG_RFC64_PRIVATE_MODE: mode,
@@ -260,6 +261,7 @@ export class AgentChild {
 }
 
 export async function executeRfc64PrivateReleaseGateV1({
+  childEnvironment,
   createProbeChild = (...args) => new AgentChild(...args),
   probeReadyTimeoutMs = RUN_TIMEOUT_MS,
   runtimeManifest,
@@ -307,9 +309,52 @@ export async function executeRfc64PrivateReleaseGateV1({
     await writeFile(manifestPath, `${JSON.stringify({ peerIds }, null, 2)}\n`, { mode: 0o600 });
 
     const owner = await startRole(
-      'owner', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
+      'owner', dataDirs, manifestPath, peerIds, active, runtimeProvenance, childEnvironment,
     );
-    const published = await owner.request({ cmd: 'publish' }, 'published');
+    const baseline = await owner.request({ cmd: 'publish' }, 'published');
+
+    const provider2 = await startRole(
+      'provider2', dataDirs, manifestPath, peerIds, active, runtimeProvenance, childEnvironment,
+    );
+    await connectBothWays(owner, provider2);
+    await provider2.request({
+      cmd: 'wait-bootstrap',
+      expectedHeadDigest: baseline.headObjectDigest,
+      expectedMemory: 'finalized-vm-v1',
+      timeoutMs: RUN_TIMEOUT_MS,
+    }, 'bootstrap-applied', RUN_TIMEOUT_MS + 10_000);
+
+    // Populate the receiver through a real authorized catalog sync while the
+    // finalized VM and catalog both name v1. Its durable store then supplies
+    // the positive older-VM proof required when the later SWM-v2 head arrives.
+    const receiverSeed = await startRole(
+      'receiver', dataDirs, manifestPath, peerIds, active, runtimeProvenance, childEnvironment,
+    );
+    await connectBothWays(provider2, receiverSeed);
+    const receiverSeedBootstrap = await receiverSeed.request({
+      cmd: 'wait-bootstrap',
+      expectedHeadDigest: baseline.headObjectDigest,
+      expectedMemory: 'finalized-vm-v1',
+      timeoutMs: RUN_TIMEOUT_MS,
+    }, 'bootstrap-applied', RUN_TIMEOUT_MS + 10_000);
+    const receiverSeedState = await receiverSeed.request({
+      cmd: 'inspect',
+      expectedHeadDigest: baseline.headObjectDigest,
+    }, 'inspection');
+    const receiverSeedShutdown = await receiverSeed.stop();
+    runtimeEvidence.record('receiver-seed', receiverSeedShutdown);
+    active.delete(receiverSeed);
+
+    const published = await owner.request({ cmd: 'publish-update' }, 'published');
+    const provider2Bootstrap = await provider2.request({
+      cmd: 'wait-bootstrap',
+      expectedHeadDigest: published.headObjectDigest,
+      timeoutMs: RUN_TIMEOUT_MS,
+    }, 'bootstrap-applied', RUN_TIMEOUT_MS + 10_000);
+    const provider2State = await provider2.request({
+      cmd: 'inspect',
+      expectedHeadDigest: published.headObjectDigest,
+    }, 'inspection');
     const ownerSourceState = await owner.request({
       cmd: 'inspect',
       expectedHeadDigest: published.headObjectDigest,
@@ -320,20 +365,6 @@ export async function executeRfc64PrivateReleaseGateV1({
         + `state=${JSON.stringify(safeMemorySummary(ownerSourceState))}`,
       );
     }
-
-    const provider2 = await startRole(
-      'provider2', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
-    );
-    await connectBothWays(owner, provider2);
-    const provider2Bootstrap = await provider2.request({
-      cmd: 'wait-bootstrap',
-      expectedHeadDigest: published.headObjectDigest,
-      timeoutMs: RUN_TIMEOUT_MS,
-    }, 'bootstrap-applied', RUN_TIMEOUT_MS + 10_000);
-    const provider2State = await provider2.request({
-      cmd: 'inspect',
-      expectedHeadDigest: published.headObjectDigest,
-    }, 'inspection');
 
     const ownerShutdown = await owner.stop();
     runtimeEvidence.record('owner', ownerShutdown);
@@ -363,7 +394,7 @@ export async function executeRfc64PrivateReleaseGateV1({
     }
 
     const receiver = await startRole(
-      'receiver', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
+      'receiver', dataDirs, manifestPath, peerIds, active, runtimeProvenance, childEnvironment,
     );
     await connectBothWays(provider2, receiver);
     const receiverBootstrap = await receiver.request({
@@ -377,7 +408,7 @@ export async function executeRfc64PrivateReleaseGateV1({
     }, 'inspection');
 
     const outsider = await startRole(
-      'outsider', dataDirs, manifestPath, peerIds, active, runtimeProvenance,
+      'outsider', dataDirs, manifestPath, peerIds, active, runtimeProvenance, childEnvironment,
     );
     await dial(outsider, provider2);
     const outsiderDenial = await outsider.request({
@@ -425,6 +456,7 @@ export async function executeRfc64PrivateReleaseGateV1({
       peerIds,
       active,
       runtimeProvenance,
+      childEnvironment,
     );
     const restartState = await restartedReceiver.request({
       cmd: 'inspect-persisted',
@@ -445,16 +477,26 @@ export async function executeRfc64PrivateReleaseGateV1({
         new Set(Object.values(peerIds)).size === 4
         && ROLES.every((role) => probed[role].ready.agentClass === 'DKGAgent'),
       productionCatalogServiceOnAllRoles:
-        [owner.ready, provider2.ready, receiver.ready, outsider.ready, restartedReceiver.ready]
+        [
+          owner.ready,
+          provider2.ready,
+          receiverSeed.ready,
+          receiver.ready,
+          outsider.ready,
+          restartedReceiver.ready,
+        ]
           .every((ready) => ready.catalogServiceStarted === true),
       exactTwoAssetPrivateCatalog:
         published.inventoryRowCount === '2'
-        && published.catalogVersion === '2',
+        && published.catalogVersion === '4',
       provider2ReceivedExactHead:
         provider2Bootstrap.appliedHeadDigest === published.headObjectDigest
         && provider2State.exactExpectedHead === true
         && provider2State.inventoryRowCount === '2',
       provider2HasSwmV2AndVmV1: hasExactMemoryContents(provider2State),
+      receiverBaselineSeededThroughProvider2:
+        receiverSeedBootstrap.providerPeerId === peerIds.provider2
+        && receiverSeedState.exactExpectedHead === true,
       receiverUsedProvider2AfterOwnerStopped:
         receiverBootstrap.appliedHeadDigest === published.headObjectDigest
         && receiverBootstrap.providerPeerId === peerIds.provider2,
@@ -530,6 +572,11 @@ export async function executeRfc64PrivateReleaseGateV1({
         receiverSpawnedAt: receiver.spawnedAt,
       },
       failoverReceiver: safeState(receiverState, receiverBootstrap, receiverShutdown),
+      receiverBaseline: safeState(
+        receiverSeedState,
+        receiverSeedBootstrap,
+        receiverSeedShutdown,
+      ),
       outsider: {
         denied: outsiderDenial.denied,
         failureClass: outsiderDenial.failureClass,
@@ -578,9 +625,11 @@ async function startRole(
   expectedPeerIds,
   active,
   runtimeProvenance,
+  childEnvironment,
 ) {
   const child = new AgentChild(role, dataDirs[role], manifestPath, 'run', {
     runtimeProvenance,
+    childEnvironment,
   });
   active.add(child);
   child.ready = await child.waitFor(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready);
@@ -592,6 +641,23 @@ async function startRole(
     throw new Error(`${role}: persisted peer identity changed after probe`);
   }
   return child;
+}
+
+function boundedChildEnvironmentV1(value) {
+  if (value === undefined) return {};
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('RFC-64 private child environment must be an object');
+  }
+  const entries = Object.entries(value);
+  if (entries.some(([key, entry]) => (
+    key !== 'DKG_RFC64_PRIVATE_AUTHORITY_FAULT'
+    || typeof entry !== 'string'
+    || entry.length === 0
+    || entry.length > 128
+  ))) {
+    throw new TypeError('RFC-64 private child environment contains an unsupported entry');
+  }
+  return Object.fromEntries(entries);
 }
 
 function assertReadyRuntimeManifest(ready, expectedDigest) {

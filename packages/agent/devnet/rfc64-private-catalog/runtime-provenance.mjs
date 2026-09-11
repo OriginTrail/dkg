@@ -15,6 +15,7 @@ export const RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1 = Object.freeze([
   'probe-outsider',
   'owner',
   'provider2',
+  'receiver-seed',
   'receiver',
   'outsider',
   'receiver-restart',

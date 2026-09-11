@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto';
 
 import {
+  ASSERTION_SEAL_PREDICATES,
   MemoryLayer,
   contextGraphLayerUri,
   contextGraphMetaUri,
@@ -80,7 +81,7 @@ export async function readPrivateCatalogGraphCountEvidence(store, input) {
       input.authorAddress,
       kaNumber,
     );
-    const [swm, vm, swmHead, vmHead] = await Promise.all([
+    const [swm, vm, swmHead, vmHead, catalogSwmSeal] = await Promise.all([
       readExactGraphMemoryEvidence(store, swmGraph),
       readExactGraphMemoryEvidence(store, vmGraph),
       readLayerHeadEvidence(store, {
@@ -93,6 +94,10 @@ export async function readPrivateCatalogGraphCountEvidence(store, input) {
         subject: kaUal,
         includeShareOperationId: false,
       }),
+      readCatalogSwmSealEvidence(store, {
+        graph: contextGraphMetaUri(input.contextGraphId),
+        kaUal,
+      }),
     ]);
     return Object.freeze({
       kaNumber,
@@ -101,12 +106,41 @@ export async function readPrivateCatalogGraphCountEvidence(store, input) {
       swm: swm.count,
       swmDigest: swm.digest,
       swmHead,
+      catalogSwmSeal,
       vmGraph,
       vm: vm.count,
       vmDigest: vm.digest,
       vmHead,
     });
   }));
+}
+
+async function readCatalogSwmSealEvidence(store, input) {
+  const result = await store.query(`
+    SELECT ?sealSubject ?assertionVersion WHERE {
+      GRAPH <${input.graph}> {
+        ?sealSubject <${ASSERTION_SEAL_PREDICATES.KA_UAL}> <${input.kaUal}> ;
+          <${ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION}> ?assertionVersion .
+      }
+    }
+    LIMIT 16
+  `, { source: 'rfc64-private-release-gate.catalogSwmSealEvidence' });
+  if (result.type !== 'bindings' || result.bindings.length === 0) return null;
+  const candidates = result.bindings.map((row) => ({
+    sealSubject: namedNodeValue(row?.['sealSubject']),
+    assertionVersion: parsePrivateCatalogLiteralEvidenceV1(row?.['assertionVersion']),
+  })).filter(({ sealSubject, assertionVersion }) => (
+    sealSubject !== null && /^(?:0|[1-9][0-9]*)$/u.test(assertionVersion ?? '')
+  )).sort((left, right) => (
+    BigInt(left.assertionVersion) < BigInt(right.assertionVersion) ? 1 : -1
+  ));
+  const latest = candidates[0];
+  if (latest === undefined) return null;
+  if (
+    candidates[1] !== undefined
+    && candidates[1].assertionVersion === latest.assertionVersion
+  ) return null;
+  return Object.freeze({ ...latest, kaUal: input.kaUal });
 }
 
 async function readLayerHeadEvidence(store, input) {
@@ -225,14 +259,28 @@ function hasExactPrivateCatalogLayerContents(state, expected, layer) {
     const digest = evidence[`${layer}Digest`];
     const graph = evidence[`${layer}Graph`];
     const head = evidence[`${layer}Head`];
+    const catalogSwmSeal = evidence.catalogSwmSeal;
+    const appliedCatalogProvesSwmVersion =
+      state.exactExpectedHead === true
+      && state.catalogVersion === expected.catalogVersion;
+    const exactLayerIdentity = layer === 'swm'
+      ? (
+        (
+          head?.assertionVersion === expected.assertionVersion
+          && head?.assertionGraph === graph
+          && head?.shareOperationId
+            === `${expected.shareOperationIdPrefix ?? ''}${evidence.kaNumber}`
+        )
+        || (
+          catalogSwmSeal?.assertionVersion === expected.assertionVersion
+          && catalogSwmSeal?.kaUal === evidence.kaUal
+        )
+        || appliedCatalogProvesSwmVersion
+      )
+      : head?.assertionVersion === expected.assertionVersion
+        && head?.assertionGraph === graph;
     return count === projection?.count
       && digest === projection?.digest
-      && head?.assertionVersion === expected.assertionVersion
-      && head?.assertionGraph === graph
-      && (
-        layer !== 'swm'
-        || head.shareOperationId
-          === `${expected.shareOperationIdPrefix ?? ''}${evidence.kaNumber}`
-      );
+      && exactLayerIdentity;
   });
 }

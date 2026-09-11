@@ -3,6 +3,7 @@
 const COMMAND_DESCRIPTORS = Object.freeze([
   descriptor('dial', 'dialed'),
   descriptor('publish', 'published'),
+  descriptor('publish-update', 'published'),
   descriptor('wait-bootstrap', 'bootstrap-applied'),
   descriptor('inspect', 'inspection'),
   descriptor('inspect-persisted', 'persisted-inspection'),

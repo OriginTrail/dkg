@@ -75,7 +75,7 @@
     "command": "node --test packages/agent/scripts/*.test.mjs"
   },
   {
-    "pattern": "packages/agent/devnet/rfc64-private-catalog/verification.test.mjs",
+    "pattern": "packages/agent/devnet/rfc64-private-catalog/*.test.mjs",
     "lane": "scripts",
     "reason": "Deterministic private RFC-64 release-gate contract checks run in the build gate",
     "cadence": "required",
