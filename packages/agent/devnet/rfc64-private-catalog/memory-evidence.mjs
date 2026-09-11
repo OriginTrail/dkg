@@ -7,6 +7,7 @@ import {
   contextGraphLayerUri,
   contextGraphMetaUri,
   contextGraphWorkspaceMetaGraphUri,
+  parseRenderedRdfStoreObjectV1,
 } from '@origintrail-official/dkg-core';
 import {
   quadsToNQuads,
@@ -64,6 +65,7 @@ export async function readExactGraphMemoryEvidence(store, graph, options = {}) {
  * bounded graph reads begin together while the returned order stays stable.
  */
 export async function readPrivateCatalogGraphCountEvidence(store, input) {
+  assertPrivateCatalogEvidenceInput(input);
   return Promise.all(input.assetNumbers.map(async (kaNumber) => {
     const kaUal = `did:dkg:${input.networkId}/${input.authorAddress}/${kaNumber}`;
     const swmGraph = contextGraphLayerUri(
@@ -126,10 +128,12 @@ async function readLayerHeadEvidence(store, input) {
   `, { source: 'rfc64-private-release-gate.memoryHeadEvidence' });
   if (result.type !== 'bindings' || result.bindings.length !== 1) return null;
   const row = result.bindings[0];
-  const assertionVersion = literalValue(row?.['assertionVersion']);
-  const assertionGraph = row?.['assertionGraph'];
+  const assertionVersion = parsePrivateCatalogLiteralEvidenceV1(
+    row?.['assertionVersion'],
+  );
+  const assertionGraph = namedNodeValue(row?.['assertionGraph']);
   const shareOperationId = input.includeShareOperationId
-    ? literalValue(row?.['shareOperationId'])
+    ? parsePrivateCatalogLiteralEvidenceV1(row?.['shareOperationId'])
     : undefined;
   if (
     assertionVersion === null
@@ -145,11 +149,40 @@ async function readLayerHeadEvidence(store, input) {
   });
 }
 
-function literalValue(term) {
-  if (typeof term !== 'string') return null;
-  if (!term.startsWith('"')) return term;
-  const match = /^"((?:[^"\\]|\\.)*)"/.exec(term);
-  return match?.[1] ?? null;
+/** Parse one rendered binding and accept only a canonical RDF literal. */
+export function parsePrivateCatalogLiteralEvidenceV1(term) {
+  try {
+    const parsed = parseRenderedRdfStoreObjectV1(term);
+    return parsed.kind === 'literal' ? parsed.value : null;
+  } catch {
+    return null;
+  }
+}
+
+function namedNodeValue(term) {
+  try {
+    const parsed = parseRenderedRdfStoreObjectV1(term);
+    return parsed.kind === 'named-node' ? parsed.value : null;
+  } catch {
+    return null;
+  }
+}
+
+function assertPrivateCatalogEvidenceInput(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new TypeError('private catalog evidence input must be an object');
+  }
+  for (const field of ['networkId', 'contextGraphId', 'authorAddress']) {
+    if (typeof input[field] !== 'string' || input[field].length === 0) {
+      throw new TypeError(`private catalog evidence ${field} is required`);
+    }
+  }
+  if (
+    !Array.isArray(input.assetNumbers)
+    || input.assetNumbers.some((value) => !Number.isSafeInteger(value) || value < 0)
+  ) {
+    throw new TypeError('private catalog evidence assetNumbers must be safe integers');
+  }
 }
 
 /**

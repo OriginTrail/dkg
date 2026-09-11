@@ -65,6 +65,26 @@ export const UPDATED_PROJECTION_QUADS = Object.freeze([
 export const UPDATED_PROJECTION_EVIDENCE = computeGraphlessMemoryEvidence(
   UPDATED_PROJECTION_QUADS,
 );
+export const PRIVATE_CATALOG_SWM_SHARE_OPERATION_PREFIX =
+  'rfc64-private-release-gate-v2-';
+export function privateCatalogSwmShareOperationId(kaNumber) {
+  if (!ASSET_NUMBERS.includes(kaNumber)) {
+    throw new Error(`unknown RFC-64 private release-gate asset ${String(kaNumber)}`);
+  }
+  return `${PRIVATE_CATALOG_SWM_SHARE_OPERATION_PREFIX}${kaNumber}`;
+}
+export const PRIVATE_CATALOG_MEMORY_EXPECTATION = Object.freeze({
+  assetNumbers: ASSET_NUMBERS,
+  swm: Object.freeze({
+    projection: UPDATED_PROJECTION_EVIDENCE,
+    assertionVersion: '2',
+    shareOperationIdPrefix: PRIVATE_CATALOG_SWM_SHARE_OPERATION_PREFIX,
+  }),
+  vm: Object.freeze({
+    projection: PROJECTION_EVIDENCE,
+    assertionVersion: '1',
+  }),
+});
 export const PRIVATE_MEMBER_ROLES = Object.freeze(['owner', 'provider2', 'receiver']);
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,

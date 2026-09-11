@@ -21,17 +21,20 @@ The test publishes two catalog assets before receivers start. It then proves:
   receiver gets the same exact state only from that provider;
 - the node outside the roster cannot discover or pull the catalog and receives
   no private graph data;
-- after the authorized receiver has synchronized, a finalized roster advance
-  removes it and the surviving provider rejects its next catalog pull;
+- after the authorized receiver has synchronized, the ordinary membership
+  removal workflow advances finalized state, canonical authority
+  reconciliation adopts it, and the surviving provider rejects the former
+  member's next catalog pull;
 - a nonmember query on an authorized node returns no VM rows;
 - both complete providers stop, the cold receiver restarts with the same peer
   identity and durable stores, and its exact head, SWM, and VM remain present.
 
-The verdict also records every loopback JSON-RPC method count for the provider,
-receiver, and restarted receiver. The run fails if an unexpected method is
-used or if a per-method or total request ceiling is exceeded. These ceilings
-are regression guards for this deterministic scenario, not production capacity
-estimates.
+Every child reports its authoritative loopback JSON-RPC method counts only
+after the agent has drained recurring and background work. The verdict uses
+those shutdown receipts for its source, provider, receiver, outsider, and
+restart evidence. The run fails if an unexpected method is used or if a
+per-method or total request ceiling is exceeded. These ceilings are regression
+guards for this deterministic scenario, not production capacity estimates.
 
 ## Run
 
@@ -39,6 +42,13 @@ Build the workspace packages first, then use Node 22:
 
 ```sh
 pnpm --filter @origintrail-official/dkg-agent devnet:rfc64-private-release-gate
+```
+
+The deterministic contract checks are also part of the required repository
+tooling lane and can be run directly:
+
+```sh
+pnpm --dir packages/agent test:rfc64-private-release-gate:unit
 ```
 
 The command writes a sanitized strict verdict to

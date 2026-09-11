@@ -12,6 +12,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer,
   contextGraphLayerUri,
+  contextGraphMetaUri,
+  contextGraphWorkspaceMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
@@ -53,9 +55,13 @@ import {
 import {
   ASSET_NUMBERS,
   CONTEXT_GRAPH_ID,
+  NETWORK_ID,
+  PRIVATE_CATALOG_MEMORY_EXPECTATION,
   PROJECTION_EVIDENCE,
   PROJECTION_NQUADS,
   PROJECTION_QUADS,
+  UPDATED_PROJECTION_QUADS,
+  privateCatalogSwmShareOperationId,
   roleAgentAddress,
 } from '../devnet/rfc64-private-catalog/fixture.mjs';
 import {
@@ -661,23 +667,62 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     const store = new OxigraphStore();
     const authorAddress = roleAgentAddress('owner');
     try {
-      const graphs = ASSET_NUMBERS.flatMap((kaNumber) => (
-        [MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory].flatMap((layer) => {
-          const graph = contextGraphLayerUri(
-            CONTEXT_GRAPH_ID,
-            layer,
-            authorAddress,
-            kaNumber,
-          );
-          return bindGraphlessProjectionToGraph(PROJECTION_QUADS, graph);
-        })
-      ));
+      const graphs = ASSET_NUMBERS.flatMap((kaNumber) => {
+        const kaUal = `did:dkg:${NETWORK_ID}/${authorAddress}/${kaNumber}`;
+        const swmGraph = contextGraphLayerUri(
+          CONTEXT_GRAPH_ID,
+          MemoryLayer.SharedWorkingMemory,
+          authorAddress,
+          kaNumber,
+        );
+        const vmGraph = contextGraphLayerUri(
+          CONTEXT_GRAPH_ID,
+          MemoryLayer.VerifiableMemory,
+          authorAddress,
+          kaNumber,
+        );
+        return [
+          ...bindGraphlessProjectionToGraph(UPDATED_PROJECTION_QUADS, swmGraph),
+          ...bindGraphlessProjectionToGraph(PROJECTION_QUADS, vmGraph),
+          {
+            subject: `${kaUal}#dkg-swm-head`,
+            predicate: 'http://dkg.io/ontology/assertionVersion',
+            object: '"2"',
+            graph: contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID),
+          },
+          {
+            subject: `${kaUal}#dkg-swm-head`,
+            predicate: 'http://dkg.io/ontology/assertionGraph',
+            object: swmGraph,
+            graph: contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID),
+          },
+          {
+            subject: `${kaUal}#dkg-swm-head`,
+            predicate: 'http://dkg.io/ontology/shareOperationId',
+            object: `"${privateCatalogSwmShareOperationId(kaNumber)}"`,
+            graph: contextGraphWorkspaceMetaGraphUri(CONTEXT_GRAPH_ID),
+          },
+          {
+            subject: kaUal,
+            predicate: 'http://dkg.io/ontology/assertionVersion',
+            object: '"1"',
+            graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+          },
+          {
+            subject: kaUal,
+            predicate: 'http://dkg.io/ontology/assertionGraph',
+            object: vmGraph,
+            graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+          },
+        ];
+      });
       await store.insert(graphs);
 
       const graphCounts = await readPrivateCatalogGraphCountEvidence(store, {
         assetNumbers: ASSET_NUMBERS,
         contextGraphId: CONTEXT_GRAPH_ID,
         authorAddress,
+        networkId: NETWORK_ID,
       });
       expect(hasExactMemoryContents({ graphCounts })).toBe(true);
       expect(hasExactMemoryContents({
@@ -716,14 +761,34 @@ describe('RFC-64 private release gate process and denial evidence', () => {
 
       const exactGraphCounts = ASSET_NUMBERS.map((kaNumber) => ({
         kaNumber,
+        swmGraph: `urn:rfc64:test:swm:${kaNumber}`,
         swm: exact.count,
         swmDigest: exact.digest,
+        swmHead: {
+          assertionVersion: '2',
+          assertionGraph: `urn:rfc64:test:swm:${kaNumber}`,
+          shareOperationId: privateCatalogSwmShareOperationId(kaNumber),
+        },
+        vmGraph: `urn:rfc64:test:vm:${kaNumber}`,
         vm: exact.count,
         vmDigest: exact.digest,
+        vmHead: {
+          assertionVersion: '1',
+          assertionGraph: `urn:rfc64:test:vm:${kaNumber}`,
+        },
       }));
       const expected = {
         assetNumbers: ASSET_NUMBERS,
-        projection: PROJECTION_EVIDENCE,
+        swm: {
+          projection: PROJECTION_EVIDENCE,
+          assertionVersion: '2',
+          shareOperationIdPrefix:
+            PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.shareOperationIdPrefix,
+        },
+        vm: {
+          projection: PROJECTION_EVIDENCE,
+          assertionVersion: '1',
+        },
       };
       expect(hasExactPrivateCatalogMemoryContents(
         { graphCounts: exactGraphCounts },
