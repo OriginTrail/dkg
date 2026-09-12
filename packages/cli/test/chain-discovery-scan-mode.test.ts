@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { RpcRequestGovernor } from '@origintrail-official/dkg-chain';
 import {
   CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
@@ -59,10 +60,18 @@ describe('chainDiscoveryScanOptions', () => {
 describe('createChainDiscoveryScanRunner', () => {
   it('always finishes live discovery before starting bounded repair', async () => {
     const order: string[] = [];
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 10,
+      foregroundReservePercent: 50,
+      burstRequests: 2,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
     const agent = {
       hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
       discoverContextGraphsFromChain: vi.fn(async (options: ScanOptions) => {
         order.push(`live:${options.mode}`);
+        await governor.acquireActiveRequest();
         return 0;
       }),
       repairContextGraphRegistry: vi.fn(async (options: {
@@ -70,6 +79,7 @@ describe('createChainDiscoveryScanRunner', () => {
         minimumIntervalMs: number;
       }) => {
         order.push(`repair:${options.pageBudget}`);
+        await governor.acquireActiveRequest();
         return 0;
       }),
     };
@@ -78,6 +88,10 @@ describe('createChainDiscoveryScanRunner', () => {
     await runner();
 
     expect(order).toEqual(['live:incremental', `repair:${CHAIN_DISCOVERY_SCAN_PAGE_BUDGET}`]);
+    expect(governor.snapshot()).toMatchObject({
+      foregroundAdmitted: 1,
+      backgroundAdmitted: 1,
+    });
     expect(agent.repairContextGraphRegistry).toHaveBeenCalledWith({
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
       minimumIntervalMs: CHAIN_FULL_SCAN_EVERY * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
