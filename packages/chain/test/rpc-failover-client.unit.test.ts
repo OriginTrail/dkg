@@ -42,6 +42,12 @@ import {
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
 } from '../src/evm-adapter-constants.js';
 import { _resetRpcFailoverStatsForTest, getRpcFailoverStats } from '../src/rpc-failover-log.js';
+import {
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
+  isRetryableRpcError,
+} from '../src/evm-adapter-rpc.js';
+import { RpcRequestGovernorQueueFullError } from '../src/rpc-request-governor.js';
 import { recorder, retryable429, NEVER_SIGN, makeClient } from './rpc-failover-test-helpers.js';
 
 const callExceptionErr = (msg = 'execution reverted: TooLowAllowance') => {
@@ -66,6 +72,17 @@ const abortedRpcCodeError = () => Object.assign(
 const URLS = ['https://primary.example', 'https://backup.example'];
 
 afterEach(() => { _resetRpcFailoverStatsForTest(); });
+
+describe('RPC retry disposition', () => {
+  it('keeps local saturation caller-retryable but excludes it from endpoint failover', () => {
+    const queueFull = new RpcRequestGovernorQueueFullError(1);
+    expect(classifyRpcRetryDisposition(queueFull)).toBe('retry-later');
+    expect(isRetryableRpcError(queueFull)).toBe(true);
+    expect(isRpcEndpointFailoverEligible(queueFull)).toBe(false);
+    expect(classifyRpcRetryDisposition(retryable429())).toBe('failover');
+    expect(classifyRpcRetryDisposition(callExceptionErr())).toBe('fail');
+  });
+});
 
 // ── resolveCapMs — the named timeout-policy matrix (exhaustive 3×2) ──────────
 describe('resolveCapMs — the named timeout-policy matrix (PLAN §3.2)', () => {
@@ -233,6 +250,17 @@ describe('RpcFailoverClient.read / readContract — policy matrix applied + view
 
 // ── broadcast (write transport) ──────────────────────────────────────────────
 describe('RpcFailoverClient.broadcast — idempotent short-circuit + typed exhaustion', () => {
+  it('propagates local queue saturation without touching a backup endpoint', async () => {
+    const queueFull = new RpcRequestGovernorQueueFullError(1);
+    const primary = { broadcastTransaction: recorder(async () => { throw queueFull; }) };
+    const backup = { broadcastTransaction: recorder(async () => undefined) };
+    const client = makeClient([primary, backup], URLS);
+
+    await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).rejects.toBe(queueFull);
+    expect(primary.broadcastTransaction.calls).toHaveLength(1);
+    expect(backup.broadcastTransaction.calls).toEqual([]);
+  });
+
   it('successful broadcast records the broadcast endpoint host', async () => {
     const primary = { broadcastTransaction: recorder(async () => undefined) };
     const client = makeClient([primary], ['https://broadcast.example/key']);
@@ -378,6 +406,31 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
     address: SIGNER_ADDR,
     connect: recorder((p: unknown) => ({ address: SIGNER_ADDR, boundTo: p })),
   }) as any;
+
+  it('propagates local queue saturation during preparation without touching a backup', async () => {
+    const queueFull = new RpcRequestGovernorQueueFullError(1);
+    const primary = {};
+    const backup = {};
+    const primaryPopulate = recorder(async () => { throw queueFull; });
+    const backupPopulate = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const contract = {
+      connect: (rpcSigner: unknown) => ({
+        doWrite: {
+          populateTransaction: (rpcSigner as { boundTo?: unknown }).boundTo === primary
+            ? primaryPopulate
+            : backupPopulate,
+        },
+      }),
+    } as any;
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient([primary, backup], URLS, signPopulated as SignPopulatedFn);
+
+    await expect(client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'V10 publish'))
+      .rejects.toBe(queueFull);
+    expect(primaryPopulate.calls).toHaveLength(1);
+    expect(backupPopulate.calls).toEqual([]);
+    expect(signPopulated.calls).toEqual([]);
+  });
 
   it('#870: the per-provider-reconnected signer (same address, bound to the active provider) is what signs', async () => {
     const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));

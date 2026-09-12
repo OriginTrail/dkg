@@ -7,7 +7,7 @@
  * classification (`isRetryableRpcError`), and receipt / known-tx
  * assertions. Bodies are a 1:1 move from the original module.
  */
-import { ethers, FetchRequest } from 'ethers';
+import { ethers } from 'ethers';
 import {
   enrichEvmError,
   errorCode,
@@ -16,7 +16,7 @@ import {
   errorStatus,
 } from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
-import { cancellableRpcGetUrl } from './rpc-request-transport.js';
+export { boundedRetryFetchRequest } from './rpc-request-transport.js';
 
 /**
  * Per-request retry bound for ethers' built-in `FetchRequest`. ethers v6
@@ -43,9 +43,6 @@ import { cancellableRpcGetUrl } from './rpc-request-transport.js';
  * `RPC_REQUEST_MAX_RETRIES * backoffCap` ≈ 7.5s of wall time under a fast-
  * failing endpoint — bounded, and well under the daemon route / test ceilings.
  */
-const RPC_REQUEST_MAX_RETRIES = 5;
-const RPC_REQUEST_RETRY_BACKOFF_CAP_MS = 1_500;
-
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -97,23 +94,6 @@ export function resolveRpcUrls(rpcUrl: string, rpcUrls?: string[]): string[] {
  * `maxRetries = 0` makes `retryFunc` return `false` on attempt 0 with NO sleep,
  * so the failure surfaces synchronously to the failover loop.
  */
-export function boundedRetryFetchRequest(
-  url: string,
-  maxRetries: number = RPC_REQUEST_MAX_RETRIES,
-): FetchRequest {
-  const req = new FetchRequest(url);
-  // ethers 6.16's Node getUrl cancellation rejects the FetchRequest but does
-  // not close its underlying socket. Use the platform fetch transport so the
-  // same FetchCancelSignal also aborts the active HTTP request.
-  req.getUrlFunc = cancellableRpcGetUrl;
-  req.retryFunc = async (_attemptReq, _response, attempt) => {
-    if (attempt >= maxRetries) return false;
-    await sleep(Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS));
-    return true;
-  };
-  return req;
-}
-
 /**
  * Is `err` a transient RPC failure worth retrying / failing over (vs a
  * deterministic chain revert / argument error)? Inspects ethers/fetch error
@@ -124,7 +104,14 @@ export function boundedRetryFetchRequest(
  * the SAME extraction instead of duplicating a narrower top-level-only subset
  * (Codex PR #901 round-4 :459).
  */
-export function isRetryableRpcError(err: unknown): boolean {
+export type RpcRetryDisposition = 'fail' | 'retry-later' | 'failover';
+
+/**
+ * Distinguish caller-level retry from endpoint failover. Local governor
+ * saturation and an already-exhausted provider set are retryable later, but
+ * another endpoint attempt in the same process cannot help them.
+ */
+export function classifyRpcRetryDisposition(err: unknown): RpcRetryDisposition {
   if (err instanceof Error) enrichEvmError(err);
   const code = errorCode(err);
   const status = errorStatus(err);
@@ -135,13 +122,17 @@ export function isRetryableRpcError(err: unknown): boolean {
     || code === 'RPC_RECEIPT_LOOKUP_FAILED'
     || code === 'REPLACEMENT_UNDERPRICED' || code === 'TRANSACTION_REPLACED'
     || code === 'ACTION_REJECTED' || code === 'INVALID_ARGUMENT' || code === 'UNPREDICTABLE_GAS_LIMIT') {
-    return false;
+    return 'fail';
   }
   if (msg.includes('execution reverted') || msg.includes('call exception')
     || msg.includes('insufficient funds') || msg.includes('invalid argument')
     || msg.includes('nonce too low') || msg.includes('replacement transaction underpriced')
     || msg.includes('intrinsic gas too low') || msg.includes('exceeds block gas limit')) {
-    return false;
+    return 'fail';
+  }
+
+  if (code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' || code === 'RPC_ENDPOINTS_EXHAUSTED') {
+    return 'retry-later';
   }
 
   // Node/undici/ethers surface an aborted fetch as DOMException
@@ -152,20 +143,15 @@ export function isRetryableRpcError(err: unknown): boolean {
   // This is especially important after `eth_sendRawTransaction`: an RPC can
   // accept the tx and then abort the client response, so fail-fast would report
   // publish failure even though the mint is already on chain.
-  if (name === 'AbortError' || code === 'ABORT_ERR') return true;
+  if (name === 'AbortError' || code === 'ABORT_ERR') return 'failover';
 
-  if (status === 429 || (typeof status === 'number' && status >= 500)) return true;
+  if (status === 429 || (typeof status === 'number' && status >= 500)) return 'failover';
   if (code === 'TIMEOUT' || code === 'RPC_TIMEOUT' || code === 'TIMEOUT_ERROR' || code === 'SERVER_ERROR'
     || code === 'NETWORK_ERROR' || code === 'ECONNRESET' || code === 'ECONNREFUSED'
     || code === 'ETIMEDOUT' || code === 'ENOTFOUND' || code === 'EAI_AGAIN'
     || code === 'UNKNOWN_ERROR' || code === 'BAD_DATA'
-    // Local capacity exhaustion is transient, but failover loops special-case
-    // it because every endpoint in the process shares the same governor.
-    || code === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL'
-    // Our own synthetic "all configured RPC endpoints exhausted" code — by
-    // definition retryable, regardless of the aggregated message text.
-    || code === 'RPC_ENDPOINTS_EXHAUSTED') {
-    return true;
+    ) {
+    return 'failover';
   }
   // `no runners?!` is ethers' FallbackProvider error (provider-fallback.js)
   // when EVERY configured sub-provider is unavailable — i.e. all RPC endpoints
@@ -175,7 +161,19 @@ export function isRetryableRpcError(err: unknown): boolean {
   // would propagate it un-coded and `/api/context-graph/register` would 500
   // instead of the bounded 503 (#894 follow-up).
   return /timeout|timed out|network|socket|reset|econnreset|econnrefused|etimedout|enotfound|eai_again|rate limit|too many requests|429|503|502|500|gateway|temporarily unavailable|fetch failed|connection|no runners/i
-    .test(msg);
+    .test(msg)
+    ? 'failover'
+    : 'fail';
+}
+
+/** Caller-level retryability (including local capacity retry-later). */
+export function isRetryableRpcError(err: unknown): boolean {
+  return classifyRpcRetryDisposition(err) !== 'fail';
+}
+
+/** True only when another configured endpoint may improve this attempt. */
+export function isRpcEndpointFailoverEligible(err: unknown): boolean {
+  return classifyRpcRetryDisposition(err) === 'failover';
 }
 
 /** Canonical classifier for provider throttling, shared by failover policy. */

@@ -24,6 +24,7 @@ import {
   rpcUsageWindowTotal,
   type RpcUsageDrainable,
   type RpcUsageWindow,
+  type RpcRequestGovernorWindow,
 } from '@origintrail-official/dkg-chain';
 
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
@@ -40,10 +41,11 @@ export function formatRpcUsageLines(
   usage: RpcUsageWindow,
   windowSeconds: number,
   chainId?: string,
+  requestGovernor?: RpcRequestGovernorWindow,
 ): string[] {
   if (!usage) return [];
   const normalized = normalizeRpcUsageWindow(usage);
-  if (rpcUsageWindowTotal(normalized) <= 0 && normalized.requestGovernor === undefined) return [];
+  if (rpcUsageWindowTotal(normalized) <= 0 && requestGovernor === undefined) return [];
   const chain = chainId ? ` chain=${safeToken(chainId, 'unknown')}` : '';
   const lines: string[] = [];
   for (const [method, count] of Object.entries(normalized.byMethod)) {
@@ -81,7 +83,7 @@ export function formatRpcUsageLines(
       `count=${count} window_s=${windowSeconds}${chain}`,
     );
   }
-  const governor = normalized.requestGovernor;
+  const governor = requestGovernor;
   if (governor !== undefined) {
     const decimal = (value: number) => Number.isFinite(value)
       ? Math.max(0, value).toFixed(3).replace(/\.?0+$/u, '')
@@ -110,6 +112,11 @@ export function formatRpcUsageLines(
 /** What the daemon drains: anything (partially) implementing the shared contract. */
 export type RpcUsageSource = Partial<RpcUsageDrainable>;
 
+/** Process-wide governor state has one drain owner, separate from usage sums. */
+export interface RpcTelemetrySource extends RpcUsageSource {
+  drainRpcRequestGovernor?: () => RpcRequestGovernorWindow;
+}
+
 /**
  * Drain the source's RPC-usage window and emit one `rpc_usage` line per method
  * through `emit`. The COMPLETE daemon emission step (drain → format → emit),
@@ -118,15 +125,25 @@ export type RpcUsageSource = Partial<RpcUsageDrainable>;
  * missing capability or an empty window). Never throws.
  */
 export function emitRpcUsage(
-  source: RpcUsageSource | undefined,
+  source: RpcTelemetrySource | undefined,
   emit: (line: string) => void,
   windowSeconds: number,
   chainId?: string,
 ): number {
+  let usage: RpcUsageWindow = { byMethod: {}, lifetimeTotal: 0 };
+  let governor: RpcRequestGovernorWindow | undefined;
   try {
-    const usage = source?.drainRpcUsage?.();
-    if (!usage) return 0;
-    const lines = formatRpcUsageLines(usage, windowSeconds, chainId);
+    usage = source?.drainRpcUsage?.() ?? usage;
+  } catch {
+    // One broken source must not suppress the independently owned governor.
+  }
+  try {
+    governor = source?.drainRpcRequestGovernor?.();
+  } catch {
+    // Usage accounting remains useful when the governor snapshot is unavailable.
+  }
+  try {
+    const lines = formatRpcUsageLines(usage, windowSeconds, chainId, governor);
     for (const line of lines) emit(line);
     return lines.length;
   } catch {
@@ -152,7 +169,7 @@ export interface RpcUsageTelemetryHandle {
  * `stop()` at teardown — no feature scheduling embedded in the daemon monolith.
  */
 export function startRpcUsageTelemetry(opts: {
-  source: RpcUsageSource;
+  source: RpcTelemetrySource;
   emit: (line: string) => void;
   chainId?: string;
   /** Window length in seconds (default 60). */

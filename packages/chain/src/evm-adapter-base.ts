@@ -30,8 +30,20 @@ import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializ
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
-import { resolveRpcUrls, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
-import { withRpcRequestTimeout } from './rpc-request-transport.js';
+import {
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
+  isRetryableRpcError,
+  resolveRpcUrls,
+  assertSuccessfulReceipt,
+  sleep,
+} from './evm-adapter-rpc.js';
+import {
+  createRpcRequestProvider,
+  waitForActiveRpcRequest,
+  withRpcRequestContext,
+  withRpcRequestTimeout,
+} from './rpc-request-transport.js';
 import { rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
@@ -40,7 +52,6 @@ import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './r
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import {
   RpcUsageTracker,
-  createCountingJsonRpcProvider,
   withRpcUsageConsumer,
   type RpcUsageWindow,
 } from './rpc-usage.js';
@@ -849,7 +860,12 @@ export class EVMChainAdapterBase {
 
   protected readonly configuredStaticChainIdValidationsByProvider = new Map<
     JsonRpcProvider,
-    Promise<bigint>
+    {
+      readonly controller: AbortController;
+      promise: Promise<bigint>;
+      waiters: number;
+      settled: boolean;
+    }
   >();
 
   protected cachedKav10Address: { value: string; cachedAt: number } | undefined;
@@ -953,6 +969,11 @@ export class EVMChainAdapterBase {
   invalidatePublishPreflightCache(): void {
     this.cachedChainId = undefined;
     this.configuredStaticChainIdsByProvider.clear();
+    for (const validation of this.configuredStaticChainIdValidationsByProvider.values()) {
+      const invalidated = new Error('Configured chainId validation was invalidated');
+      invalidated.name = 'AbortError';
+      validation.controller.abort(invalidated);
+    }
     this.configuredStaticChainIdValidationsByProvider.clear();
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
@@ -1129,13 +1150,13 @@ export class EVMChainAdapterBase {
     this.rpcUsage = new RpcUsageTracker(() => this.chainId);
     // One transport factory wires BOTH billing-exact accounting hooks (first
     // attempt at `_send` + every ethers-internal retry attempt) to the tracker —
-    // see createCountingJsonRpcProvider for the invariant.
+    // see createRpcRequestProvider for the invariant.
     this.configuredStaticChainId = configuredStaticChainId(config);
     const staticNetwork = this.configuredStaticChainId == null
       ? undefined
       : ethers.Network.from(this.configuredStaticChainId);
     this.providers = this.rpcUrls.map(
-      (url, endpointSlot) => createCountingJsonRpcProvider(url, this.rpcUsage, {
+      (url, endpointSlot) => createRpcRequestProvider(url, {
         maxRetries: perEndpointRetries,
         providerOptions: {
           cacheTimeout: -1,
@@ -1144,7 +1165,8 @@ export class EVMChainAdapterBase {
         },
         network: staticNetwork,
         endpointSlot,
-        requestGovernor: config.rpcRequestGovernor,
+        admission: config.rpcRequestGovernor,
+        onRequest: (method, slot) => this.rpcUsage.record(method, slot),
       }),
     );
     this.primaryProvider = this.providers[0];
@@ -1671,7 +1693,9 @@ export class EVMChainAdapterBase {
             );
           } catch (err) {
             enrichEvmError(err);
-            if (!isRetryableRpcError(err)
+            const retryDisposition = classifyRpcRetryDisposition(err);
+            if ((errorCode(err) !== 'RPC_ENDPOINTS_EXHAUSTED'
+                && retryDisposition !== 'failover')
               || preparationPass >= RPC_PREPARATION_ENDPOINT_SET_RETRIES) {
               throw err;
             }
@@ -1736,7 +1760,7 @@ export class EVMChainAdapterBase {
         await this.broadcastSignedTransactionWithFailover(signedTx, txHash, label);
         return;
       } catch (err) {
-        if (isRetryableRpcError(err) && pass < RPC_ENDPOINT_SET_RETRIES) {
+        if (errorCode(err) === 'RPC_ENDPOINTS_EXHAUSTED' && pass < RPC_ENDPOINT_SET_RETRIES) {
           await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
           continue;
         }
@@ -2834,7 +2858,7 @@ export class EVMChainAdapterBase {
       // of a generic 500 — and never hang waiting on it (#894 follow-up). A
       // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
       // its original shape.
-      if (isRetryableRpcError(err)) {
+      if (classifyRpcRetryDisposition(err) === 'failover') {
         throw new RpcEndpointsExhaustedError(
           `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
           { cause: err, rpcUrls: this.rpcUrls },
@@ -3091,7 +3115,7 @@ export class EVMChainAdapterBase {
           (p) => this.rebindContract(storage, p).getMaxKaNumberForAuthor.staticCall(normalized),
           {
             isRetryable: (err) =>
-              isRetryableRpcError(err)
+              isRpcEndpointFailoverEligible(err)
               && !isKaHighWaterViewUnavailable(err)
               && !isKaHighWaterBareRevert(err),
           },
@@ -3585,28 +3609,59 @@ export class EVMChainAdapterBase {
 
     let validation = this.configuredStaticChainIdValidationsByProvider.get(provider);
     if (!validation) {
-      validation = withRpcRequestTimeout(
-        RPC_READ_STALL_TIMEOUT_MS,
-        'configured chainId validation',
-        async () => {
-          const raw = await provider.send('eth_chainId', []);
-          const live = BigInt(raw);
-          if (live !== this.configuredStaticChainId) {
-            throw new Error(
-              `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
-            );
-          }
-          this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
-          this.cachedChainId = { value: live, cachedAt: Date.now() };
-          return live;
-        },
-      ).finally(() => {
-        this.configuredStaticChainIdValidationsByProvider.delete(provider);
+      const controller = new AbortController();
+      validation = {
+        controller,
+        promise: Promise.resolve(0n),
+        waiters: 0,
+        settled: false,
+      };
+      const shared = validation;
+      // Defer invocation by one microtask so the initiating caller is enrolled
+      // before shared physical work can settle. The work has its own signal: a
+      // single cancelled waiter cannot poison peers, while the last departed
+      // waiter cancels admission/HTTP instead of leaving orphan RPC load.
+      shared.promise = Promise.resolve().then(() => withRpcRequestContext(
+        { signal: controller.signal, inheritSignal: false },
+        () => withRpcRequestTimeout(
+          RPC_READ_STALL_TIMEOUT_MS,
+          'configured chainId validation',
+          async () => {
+            const raw = await provider.send('eth_chainId', []);
+            const live = BigInt(raw);
+            if (live !== this.configuredStaticChainId) {
+              throw new Error(
+                `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
+              );
+            }
+            this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
+            this.cachedChainId = { value: live, cachedAt: Date.now() };
+            return live;
+          },
+        ),
+      )).finally(() => {
+        shared.settled = true;
+        if (this.configuredStaticChainIdValidationsByProvider.get(provider) === shared) {
+          this.configuredStaticChainIdValidationsByProvider.delete(provider);
+        }
       });
-      this.configuredStaticChainIdValidationsByProvider.set(provider, validation);
+      this.configuredStaticChainIdValidationsByProvider.set(provider, shared);
     }
 
-    return validation;
+    validation.waiters += 1;
+    try {
+      return await waitForActiveRpcRequest(validation.promise);
+    } finally {
+      validation.waiters -= 1;
+      if (validation.waiters === 0 && !validation.settled) {
+        if (this.configuredStaticChainIdValidationsByProvider.get(provider) === validation) {
+          this.configuredStaticChainIdValidationsByProvider.delete(provider);
+        }
+        const abandoned = new Error('Configured chainId validation has no active waiters');
+        abandoned.name = 'AbortError';
+        validation.controller.abort(abandoned);
+      }
+    }
   }
 
   /**

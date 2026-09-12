@@ -26,7 +26,7 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
   NoChainAdapter,
-  createGovernedJsonRpcProvider,
+  createRpcRequestProvider,
   RpcRequestGovernor,
   RpcEndpointsExhaustedError,
   type ChainAdapter,
@@ -239,12 +239,12 @@ describe('RFC-64 rollout authority integration', () => {
       maxQueueSize: 8,
       startupJitterMs: 0,
     });
-    const provider = createGovernedJsonRpcProvider(
+    const provider = createRpcRequestProvider(
       `http://127.0.0.1:${address.port}`,
       {
         maxRetries: 1,
         providerOptions: { batchMaxCount: 1 },
-        requestGovernor: governor,
+        admission: governor,
       },
     );
     const edge = await startAgent({ name: 'authority-transport-background-lane' });

@@ -136,7 +136,6 @@ export {
 // downstream formatters so producer and consumer use one bounded vocabulary.
 export {
   emptyRpcUsageWindow,
-  createGovernedJsonRpcProvider,
   mergeRpcUsageWindows,
   RPC_ENDPOINT_SLOT_LABELS,
   normalizeRpcUsageWindow,
@@ -147,11 +146,16 @@ export {
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
   type RpcUsageWindow,
-  type GovernedJsonRpcProviderConfig,
 } from './rpc-usage.js';
 export {
-  withRpcRequestAbortSignal,
+  boundedRetryFetchRequest,
+  createRpcRequestProvider,
+  withRpcRequestContext,
   withRpcRequestTimeout,
+  type RpcRequestClass,
+  type RpcRequestContext,
+  type RpcRequestContextInput,
+  type RpcRequestProviderConfig,
 } from './rpc-request-transport.js';
 export {
   DEFAULT_RPC_REQUEST_GOVERNOR_POLICY,
@@ -159,8 +163,6 @@ export {
   RpcRequestGovernorQueueFullError,
   isRpcRequestGovernorQueueFullError,
   resolveRpcRequestGovernorPolicy,
-  withRpcRequestClass,
-  type RpcRequestClass,
   type RpcRequestGovernorPolicy,
   type RpcRequestGovernorPolicyInput,
   type RpcRequestGovernorClock,
@@ -173,6 +175,8 @@ export {
   type EVMAdapterConfig,
   decodeEvmError,
   enrichEvmError,
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   isKnownTransactionError,
   resolveRpcUrls,
@@ -183,6 +187,7 @@ export {
   isNoFundedPublisherWalletError,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   type PublisherWalletBalance,
+  type RpcRetryDisposition,
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {

@@ -1,27 +1,63 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import {
+  FetchRequest,
+  JsonRpcProvider,
+} from 'ethers';
 import type {
   FetchCancelSignal,
   FetchGetUrlFunc,
-  FetchRequest,
+  JsonRpcApiProviderOptions,
+  JsonRpcPayload,
+  JsonRpcResult,
+  Networkish,
 } from 'ethers';
 import { errorMessage } from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
 
-const rpcRequestAbortContext = new AsyncLocalStorage<AbortSignal>();
+export type RpcRequestClass = 'foreground' | 'background';
 
-/** Bind one caller-owned cancellation signal to the raw ethers HTTP request. */
-export function withRpcRequestAbortSignal<T>(signal: AbortSignal, fn: () => T): T {
-  const parentSignal = rpcRequestAbortContext.getStore();
-  return rpcRequestAbortContext.run(
-    parentSignal === undefined ? signal : AbortSignal.any([parentSignal, signal]),
-    fn,
-  );
+/** One raw-RPC policy context: priority and cancellation cannot drift apart. */
+export interface RpcRequestContext {
+  readonly requestClass: RpcRequestClass;
+  readonly signal?: AbortSignal;
+}
+
+export interface RpcRequestContextInput {
+  readonly requestClass?: RpcRequestClass;
+  readonly signal?: AbortSignal;
+  /** Internal shared work may deliberately outlive the initiating caller. */
+  readonly inheritSignal?: boolean;
+}
+
+const rpcRequestContext = new AsyncLocalStorage<RpcRequestContext>();
+
+export function activeRpcRequestContext(): RpcRequestContext {
+  return rpcRequestContext.getStore() ?? { requestClass: 'foreground' };
+}
+
+/**
+ * Establish one request policy boundary. Nested scopes inherit priority and
+ * compose cancellation exactly once. `inheritSignal:false` is reserved for
+ * shared physical work whose lifetime must not be owned by its first waiter.
+ */
+export function withRpcRequestContext<T>(input: RpcRequestContextInput, fn: () => T): T {
+  const parent = activeRpcRequestContext();
+  const inheritedSignal = input.inheritSignal === false ? undefined : parent.signal;
+  const signal = inheritedSignal === undefined
+    ? input.signal
+    : input.signal === undefined || input.signal === inheritedSignal
+      ? inheritedSignal
+      : AbortSignal.any([inheritedSignal, input.signal]);
+  return rpcRequestContext.run({
+    requestClass: input.requestClass ?? parent.requestClass,
+    ...(signal === undefined ? {} : { signal }),
+  }, fn);
 }
 
 export function activeRpcRequestAbortSignal(): AbortSignal | undefined {
-  return rpcRequestAbortContext.getStore();
+  return activeRpcRequestContext().signal;
 }
 
 /** Normalize caller/deadline cancellation consistently at every transport gate. */
@@ -42,9 +78,12 @@ export async function withRpcRequestTimeout<T>(
   timeoutMs: number,
   label: string,
   fn: () => Promise<T>,
+  options: { inheritSignal?: boolean } = {},
 ): Promise<T> {
   const timeoutController = new AbortController();
-  const parentSignal = activeRpcRequestAbortSignal();
+  const parentSignal = options.inheritSignal === false
+    ? undefined
+    : activeRpcRequestAbortSignal();
   const signal = parentSignal === undefined
     ? timeoutController.signal
     : AbortSignal.any([parentSignal, timeoutController.signal]);
@@ -64,7 +103,10 @@ export async function withRpcRequestTimeout<T>(
     if (signal.aborted) onAbort();
   });
   try {
-    const attempt = Promise.resolve(withRpcRequestAbortSignal(signal, fn));
+    const attempt = Promise.resolve(withRpcRequestContext({
+      signal,
+      inheritSignal: false,
+    }, fn));
     return await Promise.race([attempt, aborted]);
   } finally {
     clearTimeout(timer);
@@ -72,9 +114,33 @@ export async function withRpcRequestTimeout<T>(
   }
 }
 
+/** Wait for shared physical work without allowing this waiter to cancel it. */
+export async function waitForActiveRpcRequest<T>(shared: Promise<T>): Promise<T> {
+  const signal = activeRpcRequestAbortSignal();
+  if (signal === undefined) return shared;
+  if (signal.aborted) throwRpcRequestAbortReason(signal);
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => {
+      try {
+        throwRpcRequestAbortReason(signal);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    return await Promise.race([shared, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /**
  * FetchRequest transport that combines ethers' cancellation signal with the
- * caller-owned signal bound by {@link withRpcRequestAbortSignal}. Keeping the
+ * caller-owned signal bound by {@link withRpcRequestContext}. Keeping the
  * bridge here lets JsonRpcProvider retain its native `_send` implementation;
  * this function owns only the HTTP request that can actually close the socket.
  */
@@ -152,3 +218,108 @@ export const cancellableRpcGetUrl: FetchGetUrlFunc = async (
     callerSignal?.removeEventListener('abort', onCallerAbort);
   }
 };
+
+const RPC_REQUEST_MAX_RETRIES = 5;
+const RPC_REQUEST_RETRY_BACKOFF_CAP_MS = 1_500;
+
+/** Bounded ethers retry transport shared by every provider construction path. */
+export function boundedRetryFetchRequest(
+  url: string,
+  maxRetries: number = RPC_REQUEST_MAX_RETRIES,
+): FetchRequest {
+  const request = new FetchRequest(url);
+  request.getUrlFunc = cancellableRpcGetUrl;
+  request.retryFunc = async (_attemptRequest, _response, attempt) => {
+    if (attempt >= maxRetries) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve,
+      Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS)));
+    return true;
+  };
+  return request;
+}
+
+export interface RpcRequestAdmission {
+  acquireActiveRequest(signal?: AbortSignal): Promise<void>;
+}
+
+export interface RpcRequestProviderConfig {
+  readonly maxRetries?: number;
+  readonly providerOptions?: JsonRpcApiProviderOptions;
+  readonly network?: Networkish;
+  readonly endpointSlot?: number;
+  readonly admission?: RpcRequestAdmission;
+  readonly onRequest?: (method: string, endpointSlot?: number) => void;
+}
+
+function methodsFromRequestBody(body: Uint8Array | null | undefined): string[] {
+  try {
+    if (!body || body.length === 0) return ['other'];
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(body));
+    const entries = Array.isArray(parsed) ? parsed : [parsed];
+    const methods = entries.map((entry) => String(
+      entry && typeof entry === 'object' && 'method' in entry
+        ? (entry as { method?: unknown }).method ?? 'other'
+        : 'other',
+    ));
+    return methods.length > 0 ? methods : ['other'];
+  } catch {
+    return ['other'];
+  }
+}
+
+/** JsonRpcProvider whose initial dispatch and every retry share one policy path. */
+export class RpcRequestJsonRpcProvider extends JsonRpcProvider {
+  constructor(
+    url: string | FetchRequest,
+    network: Networkish | undefined,
+    options: JsonRpcApiProviderOptions | undefined,
+    private readonly transport: Pick<RpcRequestProviderConfig, 'admission' | 'onRequest' | 'endpointSlot'>,
+  ) {
+    super(url, network, options);
+  }
+
+  override async _send(
+    payload: JsonRpcPayload | Array<JsonRpcPayload>,
+  ): Promise<Array<JsonRpcResult>> {
+    const entries = Array.isArray(payload) ? payload : [payload];
+    for (const _entry of entries) await this.transport.admission?.acquireActiveRequest();
+    try {
+      for (const entry of entries) {
+        this.transport.onRequest?.(String(entry?.method ?? 'other'), this.transport.endpointSlot);
+      }
+    } catch {
+      /* optional instrumentation must never break transport */
+    }
+    return super._send(payload);
+  }
+}
+
+/** The canonical provider factory for tracked adapters and untracked probes. */
+export function createRpcRequestProvider(
+  url: string,
+  config: RpcRequestProviderConfig,
+): RpcRequestJsonRpcProvider {
+  const request = boundedRetryFetchRequest(url, config.maxRetries);
+  const retry = request.retryFunc!;
+  request.retryFunc = async (attemptRequest, response, attempt) => {
+    const shouldRetry = await retry(attemptRequest, response, attempt);
+    if (shouldRetry) {
+      await config.admission?.acquireActiveRequest();
+      try {
+        for (const method of methodsFromRequestBody(attemptRequest?.body)) {
+          config.onRequest?.(method, config.endpointSlot);
+        }
+      } catch {
+        /* optional instrumentation must never break transport */
+      }
+    }
+    return shouldRetry;
+  };
+  const providerOptions = config.network == null
+    ? config.providerOptions
+    : {
+        ...config.providerOptions,
+        staticNetwork: config.network as JsonRpcApiProviderOptions['staticNetwork'],
+      };
+  return new RpcRequestJsonRpcProvider(request, config.network, providerOptions, config);
+}

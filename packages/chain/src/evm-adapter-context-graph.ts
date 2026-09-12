@@ -31,7 +31,7 @@ import {
   type EvmContextGraphAuthoritySource,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
-import { isRetryableRpcError } from './evm-adapter-rpc.js';
+import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 import { contextGraphAuthorityIndexIdFromBigInt } from
   './context-graph-authority-index-id.js';
@@ -1098,7 +1098,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           isRetryable: (error: unknown) => (
             !options.signal?.aborted && (
               isContextGraphAuthorityIndexRetryableError(error)
-              || isRetryableRpcError(error)
+              || isRpcEndpointFailoverEligible(error)
             )
           ),
         }),

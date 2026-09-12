@@ -12,7 +12,7 @@ import {
   CG_REGISTRY_MAX_SCAN_PAGES,
   RPC_READ_STALL_TIMEOUT_MS,
 } from './evm-adapter-constants.js';
-import { withRpcRequestAbortSignal, withRpcRequestTimeout } from './rpc-request-transport.js';
+import { withRpcRequestContext, withRpcRequestTimeout } from './rpc-request-transport.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
 
 /**
@@ -919,7 +919,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
       `resolveContextGraphIdByNameHash current-slot getNameHash(${contextGraphId.toString()})`,
       () => {
         const physicalRead = signal
-          ? withRpcRequestAbortSignal(signal, startRead)
+          ? withRpcRequestContext({ signal }, startRead)
           : startRead();
         return waitForContextGraphSlotRead(physicalRead, signal);
       },

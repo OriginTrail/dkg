@@ -8,7 +8,7 @@
  * at the provider. Also asserts the OTel counter's bounded {rpc_method,
  * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Contract } from 'ethers';
 import { metrics } from '@opentelemetry/api';
 import {
@@ -30,11 +30,13 @@ import {
   RPC_ENDPOINT_SLOT_LABELS,
   rpcUsageWindowTotal,
   RpcUsageTracker,
-  createCountingJsonRpcProvider,
   type RpcUsageDrainable,
   withRpcUsageConsumer,
 } from '../src/rpc-usage.js';
-import { withRpcRequestAbortSignal } from '../src/rpc-request-transport.js';
+import {
+  createRpcRequestProvider,
+  withRpcRequestContext,
+} from '../src/rpc-request-transport.js';
 import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
 import type { ChainAdapter } from '../src/chain-adapter.js';
@@ -124,16 +126,15 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   it('cancels the active ethers HTTP request when the caller aborts a chain read', async () => {
     const rpc = await startLoopbackRpc({ hang: ['eth_blockNumber'] });
     servers.push(rpc);
-    const provider = createCountingJsonRpcProvider(
-      rpc.url,
-      new RpcUsageTracker(() => 'evm:31337'),
-      { maxRetries: 0, providerOptions: { batchMaxCount: 1 } },
-    );
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+    });
     const controller = new AbortController();
     const timeoutError = createRpcTimeoutError('authentication attempt timed out');
 
-    const pending = withRpcRequestAbortSignal(
-      controller.signal,
+    const pending = withRpcRequestContext(
+      { signal: controller.signal },
       () => provider.send('eth_blockNumber', []),
     );
     try {
@@ -165,19 +166,15 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       startupJitterMs: 0,
     });
     await governor.acquire('foreground');
-    const provider = createCountingJsonRpcProvider(
-      rpc.url,
-      new RpcUsageTracker(() => 'evm:31337'),
-      {
-        maxRetries: 0,
-        providerOptions: { batchMaxCount: 1 },
-        requestGovernor: governor,
-      },
-    );
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+      admission: governor,
+    });
     const controller = new AbortController();
     const timeoutError = createRpcTimeoutError('caller deadline expired');
-    const pending = withRpcRequestAbortSignal(
-      controller.signal,
+    const pending = withRpcRequestContext(
+      { signal: controller.signal },
       () => provider._send({
         id: 1,
         jsonrpc: '2.0',
@@ -277,6 +274,30 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(rpc.hits('eth_chainId')).toBe(1);
     expect(usage.byMethod['eth_chainId']).toBe(1);
     expect(rpcUsageWindowTotal(usage)).toBe(1);
+  });
+
+  it('STATIC NETWORK: one cancelled waiter cannot poison shared chain-id validation', async () => {
+    let resolveChainId!: (value: string) => void;
+    const physical = new Promise<string>((resolve) => { resolveChainId = resolve; });
+    const provider = { send: vi.fn(() => physical) };
+    const adapter: any = new EVMChainAdapter(minimalConfig());
+    adapters.push(adapter);
+    const firstController = new AbortController();
+    const firstAbort = createRpcTimeoutError('first caller stopped waiting');
+
+    const first = withRpcRequestContext(
+      { signal: firstController.signal },
+      () => adapter.ensureConfiguredStaticChainIdValidated(provider),
+    );
+    const second = adapter.ensureConfiguredStaticChainIdValidated(provider);
+    firstController.abort(firstAbort);
+
+    await expect(first).rejects.toBe(firstAbort);
+    expect(provider.send).toHaveBeenCalledTimes(1);
+    resolveChainId('0x7a69');
+    await expect(second).resolves.toBe(31337n);
+    await expect(adapter.ensureConfiguredStaticChainIdValidated(provider)).resolves.toBe(31337n);
+    expect(provider.send).toHaveBeenCalledTimes(1);
   });
 
   it('STATIC NETWORK: ordinary reads validate configured chain id once, then avoid steady eth_chainId calls', async () => {
@@ -860,11 +881,12 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     const rpc = await startLoopbackRpc({ throttle: ['eth_getLogs'] });
     servers.push(rpc);
     const tracker = new RpcUsageTracker(() => 'evm:31337');
-    const provider = createCountingJsonRpcProvider(
-      rpc.url,
-      tracker,
-      { maxRetries: 1, providerOptions: { batchMaxCount: 1 }, endpointSlot: 3 },
-    );
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 1,
+      providerOptions: { batchMaxCount: 1 },
+      endpointSlot: 3,
+      onRequest: (method, slot) => tracker.record(method, slot),
+    });
 
     try {
       await expect(withRpcUsageConsumer(

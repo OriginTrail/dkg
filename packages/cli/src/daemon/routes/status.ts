@@ -56,7 +56,7 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
-  createGovernedJsonRpcProvider,
+  createRpcRequestProvider,
   enrichEvmError,
   MockChainAdapter,
   resolveRpcUrls,
@@ -372,10 +372,10 @@ export async function probeRpcEndpoint(
 }> {
   const provider = requestGovernor === undefined
     ? new ethers.JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 })
-    : createGovernedJsonRpcProvider(rpcUrl, {
+    : createRpcRequestProvider(rpcUrl, {
         maxRetries: 0,
         providerOptions: { cacheTimeout: -1, batchMaxCount: 1 },
-        requestGovernor,
+        admission: requestGovernor,
       });
   const start = Date.now();
   try {
@@ -473,10 +473,10 @@ function createRouteEvmProvider(
   const urls = resolveRpcUrls(rpcUrl, rpcUrls);
   const providers = urls.map((url) => requestGovernor === undefined
     ? new ethers.JsonRpcProvider(url, undefined, { cacheTimeout: -1 })
-    : createGovernedJsonRpcProvider(url, {
+    : createRpcRequestProvider(url, {
         maxRetries: urls.length > 1 ? 0 : undefined,
         providerOptions: { cacheTimeout: -1, batchMaxCount: 1 },
-        requestGovernor,
+        admission: requestGovernor,
       }));
   if (providers.length === 1) return providers[0];
   return new ethers.FallbackProvider(

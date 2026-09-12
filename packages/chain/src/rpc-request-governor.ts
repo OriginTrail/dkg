@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { AsyncLocalStorage } from 'node:async_hooks';
 import { ChainRpcTransportError } from './chain-rpc-transport-error.js';
 import {
-  activeRpcRequestAbortSignal,
+  activeRpcRequestContext,
   throwRpcRequestAbortReason,
 } from './rpc-request-transport.js';
-
-export type RpcRequestClass = 'foreground' | 'background';
+import type { RpcRequestClass } from './rpc-request-transport.js';
 
 export interface RpcRequestGovernorPolicyInput {
   /** Total node-process RPC request rate. Defaults to 10 requests/second. */
@@ -97,17 +95,6 @@ export function resolveRpcRequestGovernorPolicy(
       3_600_000,
     ),
   });
-}
-
-const rpcRequestClassContext = new AsyncLocalStorage<RpcRequestClass>();
-
-/** Classify every raw request and retry started by fn without changing call signatures. */
-export function withRpcRequestClass<T>(requestClass: RpcRequestClass, fn: () => T): T {
-  return rpcRequestClassContext.run(requestClass, fn);
-}
-
-function activeRpcRequestClass(): RpcRequestClass {
-  return rpcRequestClassContext.getStore() ?? 'foreground';
 }
 
 export class RpcRequestGovernorQueueFullError extends ChainRpcTransportError {
@@ -234,8 +221,8 @@ export class RpcRequestGovernor {
       + Math.floor(this.#clock.random() * this.#policy.startupJitterMs);
   }
 
-  async acquireActiveRequest(signal = activeRpcRequestAbortSignal()): Promise<void> {
-    return this.acquire(activeRpcRequestClass(), signal);
+  async acquireActiveRequest(signal = activeRpcRequestContext().signal): Promise<void> {
+    return this.acquire(activeRpcRequestContext().requestClass, signal);
   }
 
   async acquire(
@@ -248,7 +235,12 @@ export class RpcRequestGovernor {
       this.#admit(requestClass);
       return;
     }
-    if (this.#foregroundQueue.length + this.#backgroundQueue.length >= this.#policy.maxQueueSize) {
+    const queueSize = this.#foregroundQueue.length + this.#backgroundQueue.length;
+    const backgroundQueueLimit = Math.max(0, this.#policy.maxQueueSize - 1);
+    if (
+      queueSize >= this.#policy.maxQueueSize
+      || (requestClass === 'background' && queueSize >= backgroundQueueLimit)
+    ) {
       this.#window.rejected += 1;
       throw new RpcRequestGovernorQueueFullError(this.#policy.maxQueueSize);
     }

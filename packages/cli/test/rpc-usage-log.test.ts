@@ -26,10 +26,11 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
   });
 
   it('emits transport-governor state even when the raw-request window is idle', () => {
-    const lines = formatRpcUsageLines({
-      byMethod: {},
-      lifetimeTotal: 12,
-      requestGovernor: {
+    const lines = formatRpcUsageLines(
+      { byMethod: {}, lifetimeTotal: 12 },
+      60,
+      'base:84532',
+      {
         maxRequestsPerSecond: 10,
         backgroundMaxRequestsPerSecond: 2,
         availableTokens: 8.5,
@@ -44,7 +45,7 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
         cancelled: 2,
         startupDelayRemainingMs: 900,
       },
-    }, 60, 'base:84532');
+    );
     expect(lines).toEqual([
       'rpc_request_governor max_rps=10 background_max_rps=2 available=8.5 ' +
       'background_available=0.25 foreground_queued=0 background_queued=4 ' +
@@ -229,6 +230,35 @@ describe('composite daemon source — agent + publisher-runtime windows merged a
 });
 
 describe('emitRpcUsage — the complete daemon emission step (drain → format → emit)', () => {
+  it('drains the process governor exactly once through its separate owner', () => {
+    const emitted: string[] = [];
+    const drainRpcUsage = vi.fn(() => ({ byMethod: { eth_call: 1 }, lifetimeTotal: 1 }));
+    const drainRpcRequestGovernor = vi.fn(() => ({
+      maxRequestsPerSecond: 10,
+      backgroundMaxRequestsPerSecond: 2,
+      availableTokens: 9,
+      backgroundAvailableTokens: 1,
+      foregroundQueued: 0,
+      backgroundQueued: 0,
+      foregroundAdmitted: 1,
+      backgroundAdmitted: 0,
+      foregroundDeferred: 0,
+      backgroundDeferred: 0,
+      rejected: 0,
+      cancelled: 0,
+      startupDelayRemainingMs: 0,
+    }));
+    expect(emitRpcUsage(
+      { drainRpcUsage, drainRpcRequestGovernor },
+      (line) => emitted.push(line),
+      60,
+      'base:8453',
+    )).toBe(2);
+    expect(drainRpcUsage).toHaveBeenCalledTimes(1);
+    expect(drainRpcRequestGovernor).toHaveBeenCalledTimes(1);
+    expect(emitted.some((line) => line.startsWith('rpc_request_governor '))).toBe(true);
+  });
+
   it('drains the agent source and emits one line per method', () => {
     const emitted: string[] = [];
     const agentLike = {
@@ -258,6 +288,37 @@ describe('emitRpcUsage — the complete daemon emission step (drain → format �
         60,
       ),
     ).toBe(0);
+  });
+
+  it('drains and emits usage/governor independently when either source fails', () => {
+    const governorWindow = {
+      maxRequestsPerSecond: 10,
+      backgroundMaxRequestsPerSecond: 2,
+      availableTokens: 9,
+      backgroundAvailableTokens: 1,
+      foregroundQueued: 0,
+      backgroundQueued: 0,
+      foregroundAdmitted: 1,
+      backgroundAdmitted: 0,
+      foregroundDeferred: 0,
+      backgroundDeferred: 0,
+      rejected: 0,
+      cancelled: 0,
+      startupDelayRemainingMs: 0,
+    };
+    const governorOnly: string[] = [];
+    expect(emitRpcUsage({
+      drainRpcUsage: () => { throw new Error('usage down'); },
+      drainRpcRequestGovernor: () => governorWindow,
+    }, (line) => governorOnly.push(line), 60)).toBe(1);
+    expect(governorOnly[0]).toMatch(/^rpc_request_governor /);
+
+    const usageOnly: string[] = [];
+    expect(emitRpcUsage({
+      drainRpcUsage: () => ({ byMethod: { eth_call: 2 }, lifetimeTotal: 2 }),
+      drainRpcRequestGovernor: () => { throw new Error('governor down'); },
+    }, (line) => usageOnly.push(line), 60)).toBe(1);
+    expect(usageOnly).toEqual(['rpc_usage method=eth_call count=2 window_s=60']);
   });
 });
 

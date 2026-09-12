@@ -5383,6 +5383,24 @@ describe('populateAndSignV10WithAllowanceRecovery — shared publish/update reco
     }
   });
 
+  it('does not retry the provider set when local RPC capacity is saturated', async () => {
+    const { a, ensureSpy, signer } = makeRecoveryAdapter();
+    const queueFull = Object.assign(new Error('RPC request queue is full'), {
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+    });
+    const populateAndSign = recorder(async () => { throw queueFull; });
+    (a as any).populateAndSignAcrossProviders = populateAndSign;
+
+    await expect(
+      (a as any).populateAndSignV10WithAllowanceRecovery(
+        signer, {}, 'publish', {}, V10_KA_ADDRESS, 1n, 'label',
+      ),
+    ).rejects.toBe(queueFull);
+
+    expect(populateAndSign.calls).toHaveLength(1);
+    expect(ensureSpy.calls).toEqual([]);
+  });
+
   it('enriches the SECOND raw TooLowAllowance before throwing the one-shot failure', async () => {
     const { a, ensureSpy, signSpy, signer } = makeRecoveryAdapter();
     const populate = recorder(async () => { throw rawTooLowAllowanceRevert(); });

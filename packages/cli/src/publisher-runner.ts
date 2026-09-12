@@ -392,8 +392,6 @@ interface PublisherRuntimeBaseArgs {
   journalWrites?: boolean;
   /** Explicit startup mode resolved by the CLI or daemon boundary. */
   startPaused?: boolean;
-  /** Daemon drains its shared governor directly; standalone runtime owns it here. */
-  includeRequestGovernorTelemetry?: boolean;
 }
 
 export async function createPublisherRuntime(args: {
@@ -580,7 +578,6 @@ export async function createPublisherRuntimeFromAgent(args: {
     // journals. Standalone `dkg publisher run` (createPublisherRuntime) does not set this.
     journalWrites: true,
     startPaused: args.startPaused,
-    includeRequestGovernorTelemetry: false,
   });
 }
 
@@ -739,14 +736,6 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
     drainRpcUsage: () => mergeRpcUsageWindows(
       ...wallets.map((w) => w.chain.drainRpcUsage?.()),
-      args.includeRequestGovernorTelemetry === false
-        || args.chainBase?.rpcRequestGovernor === undefined
-        ? undefined
-        : {
-            byMethod: {},
-            lifetimeTotal: 0,
-            requestGovernor: args.chainBase.rpcRequestGovernor.drainWindow(),
-          },
     ),
     // The SAME question the runtime's own publisher answers, from the same adapter map, so the
     // daemon's admission instance and the lane that would do the work cannot disagree.

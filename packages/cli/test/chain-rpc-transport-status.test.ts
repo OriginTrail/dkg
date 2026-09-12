@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ServerResponse } from 'node:http';
 import { describe, it, expect, vi } from 'vitest';
-import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import {
+  ChainRpcTransportError,
+  EVMChainAdapter,
+  RpcRequestGovernor,
+} from '@origintrail-official/dkg-chain';
 import {
   classifyChainRpcTransportStatus,
   respondIfChainRpcTransportError,
@@ -61,6 +65,43 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
       503,
       expect.objectContaining({ 'Content-Type': 'application/json' }),
     );
+  });
+
+  it('preserves queue-full/not-started through an uninitialized real adapter operation', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 0.1,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 1,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+    const queuedController = new AbortController();
+    const queued = governor.acquire('foreground', queuedController.signal);
+    const adapter = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      chainId: 'evm:31337',
+      allowNoAdminSigner: true,
+      rpcRequestGovernor: governor,
+    });
+    try {
+      const error = await adapter.getIdentityId().catch((cause) => cause);
+      expect(error).toMatchObject({ code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' });
+      expect(classifyChainRpcTransportStatus(error)).toMatchObject({
+        status: 503,
+        body: {
+          code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+          retryable: true,
+          outcome: 'not_started',
+        },
+      });
+    } finally {
+      queuedController.abort(new Error('test cleanup'));
+      await queued.catch(() => {});
+      adapter.destroy();
+    }
   });
 
   it('maps an RPC_TIMEOUT -> 504 with the public/legacy `code: TIMEOUT` body', () => {

@@ -54,7 +54,7 @@ import {
 import {
   resolveRpcUrls,
   verifyControlEnvelopeIssuerSignatureV1,
-  withRpcRequestClass,
+  withRpcRequestContext,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
 } from '@origintrail-official/dkg-chain';
@@ -1681,7 +1681,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     agentAddress: EvmAddressV1;
     authorityEra: DecimalU64V1;
   }> | null> {
-    return withRpcRequestClass('background', async () => {
+    return withRpcRequestContext({ requestClass: 'background' }, async () => {
       const onChainId = await this.getContextGraphOnChainId(contextGraphId);
       if (onChainId !== null) {
         const reader = requireRfc64ContextGraphAuthorityReaderV1(
@@ -1898,7 +1898,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return Promise.resolve(inactive);
     }
 
-    const run = withRpcRequestClass('background', async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
+    const run = withRpcRequestContext({ requestClass: 'background' }, async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
       let accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
       if (accessPolicy === null && subscription.onChainId !== undefined) {
         const onChainPolicy = await this.getContextGraphOnChainPolicy(contextGraphId);
@@ -1973,7 +1973,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphId: string,
     signal?: AbortSignal,
   ): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | null> {
-    return withRpcRequestClass('background', async () => {
+    return withRpcRequestContext({ requestClass: 'background' }, async () => {
       const service = this.rfc64PublicCatalogServiceV1;
       if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
         return null;
@@ -3448,13 +3448,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           },
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogCurrentReceiverReconcilerV1 = {
-          isHeadSatisfied: (announcement) => withRpcRequestClass('background', () => {
+          isHeadSatisfied: (announcement) => withRpcRequestContext({ requestClass: 'background' }, () => {
             this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
             return reconciler.isHeadSatisfied(announcement);
           }),
           reconcileHead: (remotePeerId, announcement, signal) =>
-            withRpcRequestClass(
-              'background',
+            withRpcRequestContext(
+              { requestClass: 'background', signal },
               () => reconciler.reconcileHead(remotePeerId, announcement, signal),
             ),
         };

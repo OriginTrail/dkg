@@ -2991,14 +2991,10 @@ async function runDaemonInnerWithStartupOwnership(
       drainRpcUsage: () => mergeRpcUsageWindows(
         agent.drainRpcUsage(),
         publisherState.runtime?.drainRpcUsage(),
-        rpcRequestGovernor === undefined
-          ? undefined
-          : {
-              byMethod: {},
-              lifetimeTotal: 0,
-              requestGovernor: rpcRequestGovernor.drainWindow(),
-            },
       ),
+      ...(rpcRequestGovernor === undefined
+        ? {}
+        : { drainRpcRequestGovernor: () => rpcRequestGovernor.drainWindow() }),
     },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
     chainId: chainBase?.chainId ?? config.chain?.chainId,
