@@ -2,7 +2,7 @@
 
 import {
   assertNever,
-  type CanaryRequesterV1,
+  type CanaryNodeClientV1,
   type NormalizedRemoteCanaryConfigV1,
   type NormalizedCanaryRpcUsageV1,
   type RawCanaryRpcUsageV1,
@@ -29,15 +29,15 @@ const dependencies = {
 
 declare const rawFileEvidence: Extract<RawCanaryRpcUsageV1, { kind: 'evidence-file' }>;
 declare const normalizedConfig: NormalizedRemoteCanaryConfigV1;
-declare const requester: CanaryRequesterV1;
+declare const client: CanaryNodeClientV1;
 
-void preflightAllNodesV1({ mode: 'initial', config: normalizedConfig, request: requester });
+void preflightAllNodesV1({ mode: 'initial', config: normalizedConfig, client });
 // @ts-expect-error Final preflight requires the complete baseline as one state.
-void preflightAllNodesV1({ mode: 'final', config: normalizedConfig, request: requester });
+void preflightAllNodesV1({ mode: 'final', config: normalizedConfig, client });
 void preflightAllNodesV1({
   mode: 'initial',
   config: normalizedConfig,
-  request: requester,
+  client,
   // @ts-expect-error Initial preflight cannot admit a hybrid final baseline.
   baseline: {
     networkKey: 'otp-testnet-2160:2160',

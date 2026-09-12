@@ -260,7 +260,7 @@ async function startIncompleteDaemon(daemonIdentity) {
   };
 }
 
-test('runner invalidates a stale PASS before reading malformed configuration JSON', async () => {
+test('runner rejects malformed configuration without changing a prior artifact', async () => {
   const directory = await createTemporaryDirectoryV1('rfc64-remote-canary-runner-test-');
   const artifactPath = join(directory, 'latest.json');
   const configPath = join(directory, 'config.json');
@@ -272,13 +272,64 @@ test('runner invalidates a stale PASS before reading malformed configuration JSO
       '--config', configPath,
       '--artifact', artifactPath,
     ]));
-    const artifactText = await readFile(artifactPath, 'utf8');
-    const artifact = JSON.parse(artifactText);
-    assert.equal(artifact.status, 'FAIL');
-    assert.equal(artifact.failure.code, 'unexpected-execution-failure');
-    assert.equal(artifactText.includes(SOURCE_SECRET), false);
+    assert.equal(await readFile(artifactPath, 'utf8'), JSON.stringify({
+      status: 'PASS',
+      secret: SOURCE_SECRET,
+    }));
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('runner never replaces configured credential or RPC evidence inputs', async () => {
+  for (const scenario of [
+    { label: 'credential-direct-dry', input: 'credential', alias: 'direct', dryRun: true },
+    { label: 'credential-normalized-live', input: 'credential', alias: 'normalized', dryRun: false },
+    { label: 'evidence-symlink-dry', input: 'evidence', alias: 'symlink', dryRun: true },
+    { label: 'evidence-hard-link-live', input: 'evidence', alias: 'hard-link', dryRun: false },
+  ]) {
+    const directory = await createTemporaryDirectoryV1(`rfc64-input-alias-${scenario.label}-`);
+    const inputPath = join(directory, 'configured-input');
+    const configPath = join(directory, 'config.json');
+    const original = `sensitive-${scenario.label}`;
+    let artifactPath = inputPath;
+    try {
+      await writeFile(inputPath, original);
+      if (scenario.alias === 'normalized') {
+        await mkdir(join(directory, 'nested'));
+        artifactPath = join(directory, 'nested', '..', 'configured-input');
+      } else if (scenario.alias === 'symlink') {
+        artifactPath = join(directory, 'artifact.json');
+        await symlink(inputPath, artifactPath);
+      } else if (scenario.alias === 'hard-link') {
+        artifactPath = join(directory, 'artifact.json');
+        await link(inputPath, artifactPath);
+      }
+      const config = baseConfig();
+      if (scenario.input === 'credential') {
+        config.nodes[0].auth.secretFile = inputPath;
+      } else {
+        config.rpcUsage.path = inputPath;
+      }
+      await writeFile(configPath, JSON.stringify(config));
+      await assert.rejects(
+        execFileAsync(process.execPath, [
+          RUNNER_PATH,
+          '--config', configPath,
+          '--artifact', artifactPath,
+          ...(scenario.dryRun ? ['--dry-run'] : []),
+        ], { cwd: AGENT_DIRECTORY }),
+        (error) => {
+          assert.equal(error.code, 1);
+          assert.match(error.stderr, /FAIL artifact-input-path-alias/u);
+          return true;
+        },
+        scenario.label,
+      );
+      assert.equal(await readFile(inputPath, 'utf8'), original, scenario.label);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   }
 });
 
@@ -306,17 +357,15 @@ test('artifact lifecycle replaces a stale PASS with sanitized FAIL', async () =>
     const dependencies = {
       readFileFn: async () => SOURCE_SECRET,
       fetchFn: async () => {
+        const starting = JSON.parse(await readFile(artifactPath, 'utf8'));
+        assert.equal(starting.status, 'INCOMPLETE');
+        assert.equal(starting.phase, 'starting');
         throw new Error(`sensitive ${SOURCE_URL} ${SOURCE_SECRET}`);
       },
       now: () => new Date('2026-09-11T00:02:30.000Z'),
     };
     await assert.rejects(runRemoteCanaryArtifactLifecycleV1({
-      loadConfig: async () => {
-        const starting = JSON.parse(await readFile(artifactPath, 'utf8'));
-        assert.equal(starting.status, 'INCOMPLETE');
-        assert.equal(starting.phase, 'starting');
-        return baseConfig();
-      },
+      loadConfig: async () => baseConfig(),
       artifactPath,
       dependencies,
     }));

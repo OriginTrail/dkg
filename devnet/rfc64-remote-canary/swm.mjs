@@ -18,15 +18,15 @@ import { askQueryV1 } from './query.mjs';
 import { opaqueRef } from './references.mjs';
 
 /** @typedef {import('./domain-contract.js').CanaryCommandResultV1} CanaryCommandResultV1 */
-/** @typedef {import('./domain-contract.js').CanaryRequesterV1} CanaryRequesterV1 */
+/** @typedef {import('./domain-contract.js').CanaryNodeClientV1} CanaryNodeClientV1 */
 /** @typedef {import('./domain-contract.js').NormalizedCanaryLifecycleV1} NormalizedCanaryLifecycleV1 */
 /** @typedef {import('./domain-contract.js').NormalizedCanaryNodeV1} NormalizedCanaryNodeV1 */
 /** @typedef {import('./domain-contract.js').NormalizedRemoteCanaryConfigV1} NormalizedRemoteCanaryConfigV1 */
 /** @typedef {Readonly<{ assetName: string, subject: string, predicate: string, value: string }>} CanaryMarkerV1 */
 /** @typedef {(command: import('./domain-contract.js').CanaryCommandV1, timeoutMs?: number) => Promise<CanaryCommandResultV1>} RunCommandV1 */
 /** @typedef {(milliseconds: number) => Promise<void>} SleepV1 */
-/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, request: CanaryRequesterV1, sleep: SleepV1 }>} SwmInputV1 */
-/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, lifecycle: NormalizedCanaryLifecycleV1, request: CanaryRequesterV1, runCommand: RunCommandV1, sleep: SleepV1 }>} OfflineInputV1 */
+/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, client: CanaryNodeClientV1, sleep: SleepV1 }>} SwmInputV1 */
+/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, lifecycle: NormalizedCanaryLifecycleV1, client: CanaryNodeClientV1, runCommand: RunCommandV1, sleep: SleepV1 }>} OfflineInputV1 */
 
 const REQUIRED_OFFLINE_PROBES = 3;
 
@@ -42,14 +42,14 @@ function createMarker() {
 }
 
 /** @param {SwmInputV1} input */
-export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
+export function verifyLiveSwmPropagationV1({ config, client, sleep }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
     const marker = createMarker();
     await shareMarkerV1(
       contextGraph.source,
       contextGraph.id,
       marker,
-      request,
+      client,
     );
     await pollUntilV1(
       async () => askMarkerV1(
@@ -57,7 +57,7 @@ export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
         contextGraph.id,
         marker,
         'shared-working-memory',
-        request,
+        client,
       ),
       config.timing.propagationTimeoutMs,
       config.timing.pollIntervalMs,
@@ -77,26 +77,26 @@ export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
 export async function verifyOfflineCatchupV1({
   config,
   lifecycle,
-  request,
+  client,
   runCommand,
   sleep,
 }) {
   const markers = await withReceiverOfflineV1({
     config,
     lifecycle,
-    request,
+    client,
     runCommand,
     sleep,
   }, () => mapCanaryPhaseDrainedV1(config.contextGraphs, async (contextGraph) => {
-    await assertReceiverOfflineV1(lifecycle.receiver, request);
+    await assertReceiverOfflineV1(lifecycle.receiver, client);
     const marker = createMarker();
     await shareMarkerV1(
       contextGraph.source,
       contextGraph.id,
       marker,
-      request,
+      client,
     );
-    await assertReceiverOfflineV1(lifecycle.receiver, request);
+    await assertReceiverOfflineV1(lifecycle.receiver, client);
     return /** @type {const} */ ([contextGraph, marker]);
   }));
 
@@ -107,7 +107,7 @@ export async function verifyOfflineCatchupV1({
         contextGraph.id,
         marker,
         'shared-working-memory',
-        request,
+        client,
       ),
       config.timing.catchupTimeoutMs,
       config.timing.pollIntervalMs,
@@ -134,7 +134,7 @@ export async function verifyOfflineCatchupV1({
 export async function withReceiverOfflineV1({
   config,
   lifecycle,
-  request,
+  client,
   runCommand,
   sleep,
 }, operation) {
@@ -153,7 +153,7 @@ export async function withReceiverOfflineV1({
     );
     await pollUntilV1(
       async () => {
-        if (await request.reachable(receiver)) {
+        if (await client.reachable(receiver)) {
           consecutiveOfflineProbes = 0;
           return false;
         }
@@ -192,8 +192,11 @@ export async function withReceiverOfflineV1({
 
   await pollUntilV1(
     async () => {
-      const status = await request.json(receiver, 'GET', '/api/status');
-      validateNodePreflightV1(status, receiver, config);
+      validateNodePreflightV1(
+        await client.readCertificationStatus(receiver),
+        receiver,
+        config,
+      );
       return true;
     },
     lifecycle.readyTimeoutMs,
@@ -215,8 +218,8 @@ function isRetryableRecoveryReadinessErrorV1(error) {
     ].includes(error.code));
 }
 
-/** @param {Pick<SwmInputV1, 'config' | 'request'>} input */
-export function verifyCatalogSwmV1({ config, request }) {
+/** @param {Pick<SwmInputV1, 'config' | 'client'>} input */
+export function verifyCatalogSwmV1({ config, client }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
     if (contextGraph.catalogSwmAskSparql === undefined) {
       return Object.freeze({
@@ -232,14 +235,14 @@ export function verifyCatalogSwmV1({ config, request }) {
         contextGraph.id,
         contextGraph.catalogSwmAskSparql,
         'shared-working-memory',
-        request,
+        client,
       ),
       askQueryV1(
         contextGraph.receiver,
         contextGraph.id,
         contextGraph.catalogSwmAskSparql,
         'shared-working-memory',
-        request,
+        client,
       ),
     ]);
     if (!sourceQueryPassed || !receiverQueryPassed) {
@@ -259,10 +262,10 @@ export function verifyCatalogSwmV1({ config, request }) {
  * @param {NormalizedCanaryNodeV1} node
  * @param {string} contextGraphId
  * @param {CanaryMarkerV1} marker
- * @param {CanaryRequesterV1} request
+ * @param {CanaryNodeClientV1} client
  */
-async function shareMarkerV1(node, contextGraphId, marker, request) {
-  const result = await request.json(node, 'POST', '/api/knowledge-assets', {
+async function shareMarkerV1(node, contextGraphId, marker, client) {
+  const shared = await client.shareSwmMarker(node, {
     contextGraphId,
     name: marker.assetName,
     quads: [{
@@ -272,17 +275,12 @@ async function shareMarkerV1(node, contextGraphId, marker, request) {
     }],
     alsoShareSwm: true,
   });
-  if (
-    result === null
-    || typeof result !== 'object'
-    || Array.isArray(result)
-    || /** @type {Record<string, unknown>} */ (result).swmShared !== true
-  ) throw failure('swm-share-not-confirmed', 'swm');
+  if (!shared) throw failure('swm-share-not-confirmed', 'swm');
 }
 
-/** @param {NormalizedCanaryNodeV1} receiver @param {CanaryRequesterV1} request */
-async function assertReceiverOfflineV1(receiver, request) {
-  if (await request.reachable(receiver)) {
+/** @param {NormalizedCanaryNodeV1} receiver @param {CanaryNodeClientV1} client */
+async function assertReceiverOfflineV1(receiver, client) {
+  if (await client.reachable(receiver)) {
     throw failure('receiver-became-reachable-during-offline-window', 'lifecycle');
   }
 }
@@ -292,14 +290,14 @@ async function assertReceiverOfflineV1(receiver, request) {
  * @param {string} contextGraphId
  * @param {CanaryMarkerV1} marker
  * @param {'shared-working-memory'} view
- * @param {CanaryRequesterV1} request
+ * @param {CanaryNodeClientV1} client
  */
-async function askMarkerV1(node, contextGraphId, marker, view, request) {
+async function askMarkerV1(node, contextGraphId, marker, view, client) {
   return askQueryV1(
     node,
     contextGraphId,
     `ASK { <${marker.subject}> <${marker.predicate}> ${JSON.stringify(marker.value)} . }`,
     view,
-    request,
+    client,
   );
 }

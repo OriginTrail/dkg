@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { failure } from './errors.mjs';
+import { RemoteCanaryError, failure } from './errors.mjs';
 import {
   isRetryableNodeRequestErrorV1,
   mapCanaryPhaseV1,
@@ -9,21 +9,20 @@ import {
 import { askQueryV1 } from './query.mjs';
 import {
   equalCompleteOperationalParityV1,
-  tryDecodeNodeCertificationStatusV1,
 } from './status-contract.mjs';
 
 /** @typedef {import('@origintrail-official/dkg-agent').Rfc64DaemonCertificationStatusV1} CertificationStatusV1 */
-/** @typedef {import('./domain-contract.js').CanaryRequesterV1} CanaryRequesterV1 */
+/** @typedef {import('./domain-contract.js').CanaryNodeClientV1} CanaryNodeClientV1 */
 /** @typedef {import('./domain-contract.js').NormalizedCanaryContextGraphV1} NormalizedCanaryContextGraphV1 */
 /** @typedef {import('./domain-contract.js').NormalizedRemoteCanaryConfigV1} NormalizedRemoteCanaryConfigV1 */
 /** @typedef {Readonly<{ cursorPresent: true, digestParity: true, rowCountParity: true }>} VmParitySnapshotV1 */
-/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, request: CanaryRequesterV1, sleep: (milliseconds: number) => Promise<void> }>} VmParityInputV1 */
+/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, client: CanaryNodeClientV1, sleep: (milliseconds: number) => Promise<void> }>} VmParityInputV1 */
 
 export { completeOperationalParityV1 } from './status-contract.mjs';
 
 /** @param {VmParityInputV1} input */
-export async function verifyVmParityV1({ config, request, sleep }) {
-  return (await verifyVmParityEvidenceV1({ config, request, sleep })).checks;
+export async function verifyVmParityV1({ config, client, sleep }) {
+  return (await verifyVmParityEvidenceV1({ config, client, sleep })).checks;
 }
 
 /**
@@ -32,7 +31,7 @@ export async function verifyVmParityV1({ config, request, sleep }) {
  * between application evidence and certificate issuance.
  */
 /** @param {VmParityInputV1} input */
-export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
+export async function verifyVmParityEvidenceV1({ config, client, sleep }) {
   const participatingNodes = [...new Set(config.contextGraphs.flatMap(
     ({ source, receiver }) => [source, receiver],
   ))];
@@ -41,9 +40,7 @@ export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
       const statusEntries = await mapCanaryPhaseV1(participatingNodes, async (node) => (
         /** @type {const} */ ([
           node.id,
-          tryDecodeNodeCertificationStatusV1(
-            await request.json(node, 'GET', '/api/status'),
-          ),
+          await readCertificationStatusOrNullV1(client, node),
         ])
       ));
       const statusByNodeId = new Map(statusEntries);
@@ -73,7 +70,7 @@ export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
         contextGraph.source,
         contextGraph.receiver,
       ].map((node) => (
-        askQueryV1(node, contextGraph.id, vmAskSparql, 'verifiable-memory', request)
+        askQueryV1(node, contextGraph.id, vmAskSparql, 'verifiable-memory', client)
       )));
       if (!queryPassed.every(Boolean)) throw failure('vm-query-parity-failed', 'vm');
     }
@@ -96,6 +93,23 @@ export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
     checks,
     certificationByNodeId: evidenceSnapshot.certificationByNodeId,
   });
+}
+
+/**
+ * A malformed status is an incomplete polling observation; transport failures
+ * retain their retry classification in pollUntilV1.
+ * @param {CanaryNodeClientV1} client
+ * @param {import('./domain-contract.js').NormalizedCanaryNodeV1} node
+ */
+async function readCertificationStatusOrNullV1(client, node) {
+  try {
+    return await client.readCertificationStatus(node);
+  } catch (error) {
+    if (error instanceof RemoteCanaryError && error.code === 'preflight-status-malformed') {
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**

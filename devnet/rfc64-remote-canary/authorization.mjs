@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { failure } from './errors.mjs';
-import { parseResponseJsonV1 } from './transport.mjs';
-
-/** @typedef {import('./domain-contract.js').CanaryRequesterV1} CanaryRequesterV1 */
+/** @typedef {import('./domain-contract.js').CanaryNodeClientV1} CanaryNodeClientV1 */
 /** @typedef {import('./domain-contract.js').JsonValue} JsonValue */
 /** @typedef {import('./domain-contract.js').NormalizedCanaryAuthorizationCheckV1} NormalizedCanaryAuthorizationCheckV1 */
 
@@ -19,43 +17,46 @@ function jsonPointer(value, pointer) {
 
 /**
  * @param {Readonly<{ unauthorized: NormalizedCanaryAuthorizationCheckV1, revoked: NormalizedCanaryAuthorizationCheckV1 }>} checks
- * @param {CanaryRequesterV1} request
+ * @param {CanaryNodeClientV1} client
  */
-export async function verifyAuthorizationV1(checks, request) {
+export async function verifyAuthorizationV1(checks, client) {
   const [unauthorized, revoked] = await Promise.all([
-    runAuthorizationCheckV1(checks.unauthorized, request),
-    runAuthorizationCheckV1(checks.revoked, request),
+    runAuthorizationCheckV1(checks.unauthorized, client),
+    runAuthorizationCheckV1(checks.revoked, client),
   ]);
   return Object.freeze({ unauthorized, revoked });
 }
 
-/** @param {NormalizedCanaryAuthorizationCheckV1} check @param {CanaryRequesterV1} request */
-async function runAuthorizationCheckV1(check, request) {
+/** @param {NormalizedCanaryAuthorizationCheckV1} check @param {CanaryNodeClientV1} client */
+async function runAuthorizationCheckV1(check, client) {
   if (check.kind === 'not-exposed') {
     return Object.freeze({ status: 'EVIDENCE_REQUIRED', reasonCode: check.reasonCode });
   }
-  const response = await request.raw(
+  const response = await client.probeAuthorization(
     check.node,
-    check.method,
-    check.path,
-    check.body,
-    check.authentication,
+    {
+      method: check.method,
+      path: check.path,
+      body: check.body,
+      authentication: check.authentication,
+    },
   );
   if (!check.expectedStatuses.some((status) => status === response.status)) {
     throw failure('authorization-denial-status-mismatch', 'policy');
   }
-  const body = parseResponseJsonV1(response, 'authorization-response-malformed');
-  const code = jsonPointer(body, check.bodyCodePointer);
+  const code = jsonPointer(response.body, check.bodyCodePointer);
   if (typeof code !== 'string' || !check.expectedCodes.includes(code)) {
     throw failure('authorization-denial-code-mismatch', 'policy');
   }
   if (response.status === 404) {
-    const control = await request.raw(
+    const control = await client.probeAuthorization(
       requiredControlNode(check.notFoundControlNode),
-      check.method,
-      check.path,
-      check.body,
-      'node',
+      {
+        method: check.method,
+        path: check.path,
+        body: check.body,
+        authentication: 'node',
+      },
     );
     if (control.status < 200 || control.status >= 300) {
       throw failure('authorization-not-found-control-failed', 'policy');

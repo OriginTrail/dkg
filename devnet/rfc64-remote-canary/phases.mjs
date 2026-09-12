@@ -15,6 +15,7 @@ import {
   validateRemoteCanaryConfigV1,
 } from './config.mjs';
 import { failure, runPhaseV1 } from './errors.mjs';
+import { createCanaryNodeClientV1 } from './node-client.mjs';
 import { preflightAllNodesV1 } from './preflight.mjs';
 import { collectRpcUsageEvidenceV1 } from './rpc-evidence.mjs';
 import {
@@ -53,9 +54,11 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
   const sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const now = dependencies.now ?? (() => new Date());
   const secrets = new Map();
-  const request = runPhaseV1('config', () => {
+  const client = runPhaseV1('config', () => {
     if (typeof fetchFn !== 'function') throw failure('fetch-unavailable', 'configuration');
-    return createRequesterV1({ fetchFn, readFileFn, secrets, timing: validated.timing });
+    return createCanaryNodeClientV1(
+      createRequesterV1({ fetchFn, readFileFn, secrets, timing: validated.timing }),
+    );
   });
   const startedAt = runPhaseV1('config', () => now().toISOString());
   const cohortRef = createRemoteCanaryCohortRefV1(validated);
@@ -64,20 +67,20 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
     const initialPreflight = await runPhaseV1('preflight', () => preflightAllNodesV1({
       mode: 'initial',
       config: validated,
-      request,
+      client,
     }));
 
     // Establish catalog-owned evidence before this run can write any marker vocabulary.
     await runPhaseV1('catalog-swm-evidence', () => verifyCatalogSwmV1({
       config: validated,
-      request,
+      client,
     }));
 
     const liveSwmPropagation = await runPhaseV1(
       'live-swm-propagation',
       () => verifyLiveSwmPropagationV1({
         config: validated,
-        request,
+        client,
         sleep,
       }),
     );
@@ -91,7 +94,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
         : verifyOfflineCatchupV1({
             config: validated,
             lifecycle: validated.lifecycle,
-            request,
+            client,
             runCommand,
             sleep,
           })
@@ -99,18 +102,18 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
 
     const vmParityEvidence = await runPhaseV1('vm-parity', () => verifyVmParityEvidenceV1({
       config: validated,
-      request,
+      client,
       sleep,
     }));
 
     const catalogSwm = await runPhaseV1('catalog-swm-evidence', () => verifyCatalogSwmV1({
       config: validated,
-      request,
+      client,
     }));
 
     const authorization = await runPhaseV1('authorization', () => verifyAuthorizationV1(
       validated.authorizationChecks,
-      request,
+      client,
     ));
 
     const rpcUsage = await runPhaseV1('rpc-usage', () => collectRpcUsageEvidenceV1(
@@ -131,7 +134,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
     const finalPreflight = await runPhaseV1('final-preflight', () => preflightAllNodesV1({
       mode: 'final',
       config: validated,
-      request,
+      client,
       baseline: {
         networkKey: initialPreflight.networkKey,
         nodeIdentities: initialPreflight.nodeIdentities,

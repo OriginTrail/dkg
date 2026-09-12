@@ -7,6 +7,7 @@ import {
   RemoteCanaryError,
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
+import { createCanaryNodeClientV1 } from './node-client.mjs';
 import { preflightAllNodesV1, validateNodePreflightV1 } from './preflight.mjs';
 import { baseConfig, CG, statusBody } from './test-support.mjs';
 import { completeOperationalParityV1, verifyVmParityV1 } from './vm.mjs';
@@ -47,7 +48,7 @@ test('preflight fails closed for every release-defining status condition', () =>
     const status = structuredClone(statusBody());
     mutate(status);
     assert.throws(
-      () => validateNodePreflightV1(status, node, config),
+      () => validateNodePreflightV1(status.rfc64Certification, node, config),
       (error) => error instanceof RemoteCanaryError && error.code === expectedCode,
       label,
     );
@@ -60,7 +61,7 @@ test('preflight rejects a cross-node network identity mismatch', async () => {
     preflightAllNodesV1({
       mode: 'initial',
       config,
-      request: {
+      client: createCanaryNodeClientV1({
         json: async (node) => ({
           ...statusBody(),
           rfc64Certification: {
@@ -68,7 +69,7 @@ test('preflight rejects a cross-node network identity mismatch', async () => {
             networkId: node.role === 'source' ? 'otp-testnet-2160' : 'otp-other',
           },
         }),
-      },
+      }),
     }),
     (error) => error instanceof RemoteCanaryError && error.code === 'node-network-mismatch',
   );
@@ -77,18 +78,18 @@ test('preflight rejects a cross-node network identity mismatch', async () => {
 test('preflight uses explicit initial and complete final baseline states', async () => {
   const config = validateRemoteCanaryConfigV1(baseConfig());
   const certificationByNodeId = new Map();
-  const request = {
+  const client = createCanaryNodeClientV1({
     json: async (node) => {
       const status = statusBody({ daemonIdentity: `peer-${node.id}` });
       certificationByNodeId.set(node.id, status.rfc64Certification);
       return status;
     },
-  };
-  const initial = await preflightAllNodesV1({ mode: 'initial', config, request });
+  });
+  const initial = await preflightAllNodesV1({ mode: 'initial', config, client });
   const final = await preflightAllNodesV1({
     mode: 'final',
     config,
-    request,
+    client,
     baseline: {
       networkKey: initial.networkKey,
       nodeIdentities: initial.nodeIdentities,
@@ -100,9 +101,7 @@ test('preflight uses explicit initial and complete final baseline states', async
   assert.equal(final.nodes.length, config.nodes.length);
 });
 
-test('preflight fails closed when the versioned daemon certification contract is malformed', () => {
-  const config = validateRemoteCanaryConfigV1(baseConfig());
-  const node = config.contextGraphs[0].source;
+test('node client fails closed when the versioned daemon certification contract is malformed', async () => {
   for (const mutate of [
     (status) => { delete status.rfc64Certification.schema; },
     (status) => { status.rfc64Certification.chain.chainId = 2160; },
@@ -117,8 +116,9 @@ test('preflight fails closed when the versioned daemon certification contract is
   ]) {
     const status = structuredClone(statusBody());
     mutate(status);
-    assert.throws(
-      () => validateNodePreflightV1(status, node, config),
+    const client = createCanaryNodeClientV1({ json: async () => status });
+    await assert.rejects(
+      client.readCertificationStatus({ id: 'source' }),
       (error) => error instanceof RemoteCanaryError
         && error.code === 'preflight-status-malformed',
     );
@@ -167,7 +167,7 @@ test('VM parity rejects every internally valid cross-node cursor divergence', as
   };
   const matching = await verifyVmParityV1({
     config,
-    request: vmParityRequester(statusBody(), statusBody()),
+    client: createCanaryNodeClientV1(vmParityRequester(statusBody(), statusBody())),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   });
   assert.equal(matching[0].status, 'PASS');
@@ -199,7 +199,7 @@ test('VM parity rejects every internally valid cross-node cursor divergence', as
     await assert.rejects(
       verifyVmParityV1({
         config,
-        request: vmParityRequester(statusBody(), receiverStatus),
+        client: createCanaryNodeClientV1(vmParityRequester(statusBody(), receiverStatus)),
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
       }),
       (error) => error instanceof RemoteCanaryError && error.code === 'vm-parity-timeout',
@@ -230,14 +230,14 @@ test('VM parity reads each participating node once per shared polling round', as
   const statusReads = new Map(config.nodes.map((node) => [node.id, 0]));
   const result = await verifyVmParityV1({
     config,
-    request: {
+    client: createCanaryNodeClientV1({
       json: async (node, method, path) => {
         if (path !== '/api/status') return { result: { type: 'boolean', value: true } };
         const read = statusReads.get(node.id) + 1;
         statusReads.set(node.id, read);
         return node.role === 'receiver' && read === 1 ? firstReceiverStatus : matchingStatus;
       },
-    },
+    }),
     sleep: async () => undefined,
   });
 

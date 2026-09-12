@@ -6,19 +6,12 @@
  * @param {string} contextGraphId
  * @param {string} sparql
  * @param {'shared-working-memory' | 'verifiable-memory'} view
- * @param {import('./domain-contract.js').CanaryRequesterV1} request
+ * @param {import('./domain-contract.js').CanaryNodeClientV1} client
  */
-export async function askQueryV1(node, contextGraphId, sparql, view, request) {
-  const result = await request.json(node, 'POST', '/api/query', {
+export function askQueryV1(node, contextGraphId, sparql, view, client) {
+  return client.askQuery(node, {
     sparql,
     contextGraphId,
     view,
   });
-  if (result === null || typeof result !== 'object' || Array.isArray(result)) return false;
-  const queryResult = /** @type {Record<string, unknown>} */ (result).result;
-  return queryResult !== null
-    && typeof queryResult === 'object'
-    && !Array.isArray(queryResult)
-    && /** @type {Record<string, unknown>} */ (queryResult).type === 'boolean'
-    && /** @type {Record<string, unknown>} */ (queryResult).value === true;
 }

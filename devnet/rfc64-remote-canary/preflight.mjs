@@ -4,18 +4,17 @@ import { failure } from './errors.mjs';
 import { mapCanaryPhaseV1 } from './phase-helpers.mjs';
 import {
   completeOperationalParityV1,
-  decodeNodeCertificationStatusV1,
   equalCompleteOperationalParityV1,
   equalExactOperationalSnapshotV1,
   operationalStatusV1,
 } from './status-contract.mjs';
 
 /** @typedef {import('@origintrail-official/dkg-agent').Rfc64DaemonCertificationStatusV1} CertificationStatusV1 */
-/** @typedef {import('./domain-contract.js').CanaryRequesterV1} CanaryRequesterV1 */
+/** @typedef {import('./domain-contract.js').CanaryNodeClientV1} CanaryNodeClientV1 */
 /** @typedef {import('./domain-contract.js').NormalizedCanaryNodeV1} NormalizedCanaryNodeV1 */
 /** @typedef {import('./domain-contract.js').NormalizedRemoteCanaryConfigV1} NormalizedRemoteCanaryConfigV1 */
 
-/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, request: CanaryRequesterV1 }>} PreflightBaseInputV1 */
+/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, client: CanaryNodeClientV1 }>} PreflightBaseInputV1 */
 /** @typedef {PreflightBaseInputV1 & Readonly<{ mode: 'initial' }>} InitialPreflightInputV1 */
 /** @typedef {PreflightBaseInputV1 & Readonly<{
  *   mode: 'final',
@@ -40,13 +39,17 @@ function canonicalChainId(value) {
  * @param {PreflightInputV1} input
  */
 export async function preflightAllNodesV1(input) {
-  const { config, request } = input;
+  const { config, client } = input;
   const baseline = input.mode === 'final' ? input.baseline : null;
   const statuses = await mapCanaryPhaseV1(config.nodes, async (node) => {
-    const status = await request.json(node, 'GET', '/api/status');
-    const certification = validateNodePreflightV1(status, node, config, {
-      requireCompleteOperationalStatus: baseline !== null,
-    });
+    const certification = validateNodePreflightV1(
+      await client.readCertificationStatus(node),
+      node,
+      config,
+      {
+        requireCompleteOperationalStatus: baseline !== null,
+      },
+    );
     return /** @type {const} */ ([node, certification]);
   });
   const raw = new Map(statuses.map(([node, status]) => [node.id, status]));
@@ -117,19 +120,18 @@ export async function preflightAllNodesV1(input) {
 }
 
 /**
- * @param {unknown} status
+ * @param {Readonly<CertificationStatusV1>} certification
  * @param {NormalizedCanaryNodeV1} node
  * @param {NormalizedRemoteCanaryConfigV1} config
  * @param {{ requireCompleteOperationalStatus?: boolean }} [options]
  * @returns {Readonly<CertificationStatusV1>}
  */
 export function validateNodePreflightV1(
-  status,
+  certification,
   node,
   config,
   { requireCompleteOperationalStatus = false } = {},
 ) {
-  const certification = decodeNodeCertificationStatusV1(status);
   if (certification.commit !== config.expectedCommit) throw failure('node-build-mismatch', 'invariant');
   if (certification.networkId.length < 1) {
     throw failure('node-network-missing', 'invariant');

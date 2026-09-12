@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 
 import { verifyAuthorizationV1 } from './authorization.mjs';
+import { createCanaryNodeClientV1 } from './node-client.mjs';
 import {
   RemoteCanaryError,
   validateRemoteCanaryConfigV1,
@@ -44,7 +45,10 @@ test('executable revocation evidence requires and sends a node credential', asyn
     secrets: new Map(),
     timing: validated.timing,
   });
-  const result = await verifyAuthorizationV1(validated.authorizationChecks, request);
+  const result = await verifyAuthorizationV1(
+    validated.authorizationChecks,
+    createCanaryNodeClientV1(request),
+  );
 
   assert.equal(result.unauthorized.status, 'PASS');
   assert.equal(result.revoked.status, 'PASS');
@@ -87,7 +91,7 @@ test('generic 404 cannot certify authorization even with a plausible denial body
     timing: validated.timing,
   });
   await assert.rejects(
-    verifyAuthorizationV1(validated.authorizationChecks, request),
+    verifyAuthorizationV1(validated.authorizationChecks, createCanaryNodeClientV1(request)),
     (error) => error instanceof RemoteCanaryError
       && error.code === 'authorization-not-found-control-failed',
   );
@@ -131,7 +135,7 @@ test('real HTTP daemon authentication 401 cannot certify a nonexistent RFC-64 ro
   });
   try {
     await assert.rejects(
-      verifyAuthorizationV1(validated.authorizationChecks, request),
+      verifyAuthorizationV1(validated.authorizationChecks, createCanaryNodeClientV1(request)),
       (error) => error instanceof RemoteCanaryError
         && error.code === 'authorization-denial-code-mismatch',
     );

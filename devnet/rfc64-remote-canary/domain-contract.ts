@@ -179,6 +179,51 @@ export interface CanaryRequesterV1 {
   reachable(node: NormalizedCanaryNodeV1): Promise<boolean>;
 }
 
+export interface CanaryAskQueryV1 {
+  readonly contextGraphId: string;
+  readonly sparql: string;
+  readonly view: 'shared-working-memory' | 'verifiable-memory';
+}
+
+export interface CanarySwmMarkerShareV1 {
+  readonly contextGraphId: string;
+  readonly name: string;
+  readonly quads: readonly Readonly<{
+    subject: string;
+    predicate: string;
+    object: string;
+  }>[];
+  readonly alsoShareSwm: true;
+}
+
+export interface CanaryAuthorizationProbeV1 {
+  readonly method: 'GET' | 'POST';
+  readonly path: string;
+  readonly body?: Readonly<{ [key: string]: JsonValue }>;
+  readonly authentication: 'node' | 'none';
+}
+
+export interface CanaryAuthorizationProbeResponseV1 {
+  readonly status: number;
+  readonly body: unknown;
+}
+
+export interface CanaryNodeClientV1 {
+  readCertificationStatus(
+    node: NormalizedCanaryNodeV1,
+  ): Promise<Readonly<import('@origintrail-official/dkg-agent').Rfc64DaemonCertificationStatusV1>>;
+  askQuery(node: NormalizedCanaryNodeV1, query: CanaryAskQueryV1): Promise<boolean>;
+  shareSwmMarker(
+    node: NormalizedCanaryNodeV1,
+    marker: CanarySwmMarkerShareV1,
+  ): Promise<boolean>;
+  reachable(node: NormalizedCanaryNodeV1): Promise<boolean>;
+  probeAuthorization(
+    node: NormalizedCanaryNodeV1,
+    probe: CanaryAuthorizationProbeV1,
+  ): Promise<Readonly<CanaryAuthorizationProbeResponseV1>>;
+}
+
 export interface RemoteCanaryDependenciesV1 {
   readonly fetchFn?: typeof fetch;
   readonly readFileFn?: (path: string, encoding: BufferEncoding) => Promise<string>;

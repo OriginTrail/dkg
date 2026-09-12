@@ -52,11 +52,13 @@ into a pass.
   conceal missing catalog-owned SWM. A false result fails certification.
 - Catalog preflight requires `legacySyncAllowed` to be exactly `false`, so
   marker delivery cannot be attributed to a compatibility or rollback lane.
-- A new run atomically writes `INCOMPLETE` before doing work, so an old `PASS`
-  cannot survive a failed or interrupted attempt—including a missing or
-  malformed configuration file. The config and artifact paths must be distinct;
-  normalized paths, symlinks, and hard links to the same file are rejected
-  before the first artifact write.
+- After configuration is parsed and validated, a new run atomically writes
+  `INCOMPLETE` before any network or command work, so an old `PASS` cannot
+  survive a failed or interrupted certification attempt. Configuration is
+  deliberately read first: output paths that normalize, resolve, or hard-link
+  to any bearer-secret or RPC-evidence input are rejected before the first
+  artifact write, so the runner cannot erase an input while invalidating a
+  previous result.
 - Independent node and Context Graph checks run with a four-operation cap;
   phase ordering and the receiver stop/start critical section remain serial.
 
@@ -95,7 +97,10 @@ sequenceDiagram
 canonical shape contract; handwritten checks only enforce cross-reference,
 normalization, and safety semantics. `domain-contract.ts` separately defines
 the raw input, normalized topology, closed authentication/RPC evidence unions,
-and injected dependency boundary. Every production module in this runner,
+and injected dependency boundary. A typed node client is the sole owner of
+daemon routes, payloads, authentication selection, and response decoding; the
+certification phases consume only those semantic operations. Every production
+module in this runner,
 including the CLI and public facade, is checked directly from its JavaScript
 source on every required test run; there are no parallel declaration stubs that
 can drift from runtime behavior. A new union member or a drifted normalized

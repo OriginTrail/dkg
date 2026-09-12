@@ -7,6 +7,7 @@ import {
   RemoteCanaryError,
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
+import { createCanaryNodeClientV1 } from './node-client.mjs';
 import {
   verifyLiveSwmPropagationV1,
   verifyOfflineCatchupV1,
@@ -35,12 +36,12 @@ test('one transient failed probe cannot certify a no-op receiver stop', async ()
         commandTimeoutMs: 1_000,
         stopTimeoutMs: 25,
       },
-      request: {
+      client: createCanaryNodeClientV1({
         reachable: async () => {
           probes += 1;
           return probes !== 1;
         },
-      },
+      }),
       runCommand: async (command) => {
         commands.push(command.argv[1]);
         return { code: 0, signal: null, stdout: '' };
@@ -72,7 +73,7 @@ test('receiver must remain unreachable throughout offline marker sharing', async
         commandTimeoutMs: 1_000,
         stopTimeoutMs: 100,
       },
-      request: {
+      client: createCanaryNodeClientV1({
         reachable: async () => receiverOnline,
         json: async (_node, _method, path) => {
           assert.equal(path, '/api/knowledge-assets');
@@ -80,7 +81,7 @@ test('receiver must remain unreachable throughout offline marker sharing', async
           receiverOnline = true;
           return { swmShared: true };
         },
-      },
+      }),
       runCommand: async (command) => {
         commands.push(command.argv[1]);
         receiverOnline = command.argv[1] !== 'stop';
@@ -115,7 +116,7 @@ test('receiver reachability before marker sharing prevents any offline publish',
         commandTimeoutMs: 1_000,
         stopTimeoutMs: 100,
       },
-      request: {
+      client: createCanaryNodeClientV1({
         reachable: async () => {
           if (!receiverOnline) {
             offlineChecks += 1;
@@ -127,7 +128,7 @@ test('receiver reachability before marker sharing prevents any offline publish',
           shares += 1;
           return { swmShared: true };
         },
-      },
+      }),
       runCommand: async (command) => {
         commands.push(command.argv[1]);
         receiverOnline = command.argv[1] !== 'stop';
@@ -151,13 +152,13 @@ test('live SWM propagation fails when sharing succeeds but delivery never arrive
         ...config,
         timing: { ...config.timing, propagationTimeoutMs: 20, pollIntervalMs: 1 },
       },
-      request: {
+      client: createCanaryNodeClientV1({
         json: async (node, method, path) => {
           if (path === '/api/knowledge-assets') return { swmShared: true };
           markerQueryNodes.push(node.role);
           return { result: { type: 'boolean', value: node.role === 'source' } };
         },
-      },
+      }),
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     }),
     (error) => error instanceof RemoteCanaryError && error.code === 'swm-propagation-timeout',
@@ -180,7 +181,7 @@ test('offline catch-up fails when a restarted receiver never receives the marker
     verifyOfflineCatchupV1({
       config,
       lifecycle,
-      request: {
+      client: createCanaryNodeClientV1({
         reachable: async () => receiverOnline,
         json: async (node, method, path) => {
           if (path === '/api/knowledge-assets') return { swmShared: true };
@@ -188,7 +189,7 @@ test('offline catch-up fails when a restarted receiver never receives the marker
           markerQueryNodes.push(node.role);
           return { result: { type: 'boolean', value: node.role === 'source' } };
         },
-      },
+      }),
       runCommand: async (command) => {
         commands.push(command.argv[1]);
         receiverOnline = command.argv[1] !== 'stop';
@@ -225,7 +226,7 @@ test('receiver lifecycle bracket attempts exactly one recovery across failure pa
           commandTimeoutMs: 1_000,
           stopTimeoutMs: 100,
         },
-        request: { reachable: async () => false },
+        client: createCanaryNodeClientV1({ reachable: async () => false }),
         runCommand: async (command) => {
           const action = command.argv[1];
           commands.push(action);
@@ -270,13 +271,13 @@ test('receiver lifecycle bracket confirms readiness before returning operation r
   const result = await withReceiverOfflineV1({
     config,
     lifecycle: config.lifecycle,
-    request: {
+    client: createCanaryNodeClientV1({
       reachable: async () => receiverOnline,
       json: async () => {
         events.push('ready');
         return statusBody();
       },
-    },
+    }),
     runCommand: async (command) => {
       const action = command.argv[1];
       events.push(action);
@@ -299,7 +300,7 @@ test('receiver recovery retries transient startup status until the daemon become
   const result = await withReceiverOfflineV1({
     config,
     lifecycle: { ...config.lifecycle, readyTimeoutMs: 100 },
-    request: {
+    client: createCanaryNodeClientV1({
       reachable: async () => receiverOnline,
       json: async () => {
         statusReads += 1;
@@ -310,7 +311,7 @@ test('receiver recovery retries transient startup status until the daemon become
         }
         return status;
       },
-    },
+    }),
     runCommand: async (command) => {
       receiverOnline = command.argv[1] !== 'stop';
       return { code: 0, signal: null, stdout: '' };
@@ -330,7 +331,7 @@ test('receiver recovery fails immediately for a permanent build mismatch', async
     withReceiverOfflineV1({
       config,
       lifecycle: { ...config.lifecycle, readyTimeoutMs: 100 },
-      request: {
+      client: createCanaryNodeClientV1({
         reachable: async () => receiverOnline,
         json: async () => {
           statusReads += 1;
@@ -338,7 +339,7 @@ test('receiver recovery fails immediately for a permanent build mismatch', async
           status.rfc64Certification.commit = 'f'.repeat(40);
           return status;
         },
-      },
+      }),
       runCommand: async (command) => {
         receiverOnline = command.argv[1] !== 'stop';
         return { code: 0, signal: null, stdout: '' };
@@ -366,7 +367,7 @@ test('offline marker failure drains in-flight shares before receiver restart', a
   const run = verifyOfflineCatchupV1({
     config: validated,
     lifecycle: validated.lifecycle,
-    request: {
+    client: createCanaryNodeClientV1({
       reachable: async () => receiverOnline,
       json: async (node, method, path, body) => {
         if (path !== '/api/knowledge-assets') throw new Error('unexpected request after failure');
@@ -380,7 +381,7 @@ test('offline marker failure drains in-flight shares before receiver restart', a
         events.push('share-two:settled');
         return result;
       },
-    },
+    }),
     runCommand: async (command) => {
       const action = command.argv[1];
       events.push(action);

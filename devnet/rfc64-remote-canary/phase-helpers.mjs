@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  mapWithConcurrency,
-  mapWithConcurrencySettled,
-} from '@origintrail-official/dkg-agent';
+import { mapWithConcurrency } from '@origintrail-official/dkg-agent';
 import { RemoteCanaryError } from './errors.mjs';
 
 export const PHASE_CONCURRENCY = 4;
@@ -28,7 +25,20 @@ export function mapCanaryPhaseV1(items, mapper) {
  * @returns {Promise<readonly Output[]>}
  */
 export async function mapCanaryPhaseDrainedV1(items, mapper) {
-  const settled = await mapWithConcurrencySettled(items, PHASE_CONCURRENCY, mapper);
+  const settled = await mapWithConcurrency(
+    items,
+    PHASE_CONCURRENCY,
+    async (item, index) => {
+      try {
+        return Object.freeze({
+          status: /** @type {const} */ ('fulfilled'),
+          value: await mapper(item, index),
+        });
+      } catch (reason) {
+        return Object.freeze({ status: /** @type {const} */ ('rejected'), reason });
+      }
+    },
+  );
   const rejected = settled.find((result) => result.status === 'rejected');
   if (rejected !== undefined && rejected.status === 'rejected') throw rejected.reason;
   return settled.map((result) => {
