@@ -122,6 +122,11 @@ import {
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
+  readVerifiedAppliedCatalogClosureV1,
+  type ReadVerifiedAppliedCatalogClosureInputV1,
+  type VerifiedAppliedCatalogClosureV1,
+} from './rfc64/verified-applied-catalog-closure-v1.js';
+import {
   type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import type { Rfc64PublicCatalogReceiverCompletionOutcomeV1 } from
@@ -292,6 +297,18 @@ export interface Rfc64AppliedCatalogHeadRefV1 {
   readonly catalogScopeDigest: Digest32V1;
   readonly authorAddress: EvmAddressV1;
 }
+
+/**
+ * Public, semantic input for re-establishing a durable applied-catalog
+ * closure. Storage capabilities remain owned by the agent.
+ */
+export type ReadRfc64VerifiedAppliedCatalogClosureInputV1 = Pick<
+  ReadVerifiedAppliedCatalogClosureInputV1,
+  'appliedHead' | 'deployment' | 'trustedCatalogScope'
+>;
+
+export type { VerifiedAppliedCatalogClosureV1 } from
+  './rfc64/verified-applied-catalog-closure-v1.js';
 
 export type {
   SynchronizeRfc64PublicCatalogFromProviderParamsV1,
@@ -3142,6 +3159,26 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
+   * Re-establish a verified closure through the agent-owned durable stores.
+   * Callers provide semantic catalog coordinates, never storage internals.
+   */
+  async readRfc64VerifiedAppliedCatalogClosureV1(
+    this: DKGAgent,
+    input: ReadRfc64VerifiedAppliedCatalogClosureInputV1,
+  ): Promise<Readonly<VerifiedAppliedCatalogClosureV1>> {
+    const persistence = this.rfc64PersistenceV1;
+    if (persistence === undefined) {
+      throw new Error('verified applied catalog closure has no RFC-64 persistence');
+    }
+    return readVerifiedAppliedCatalogClosureV1({
+      ...input,
+      controlObjects: persistence.controlObjects,
+      kaBundles: persistence.kaBundles,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+  }
+
+  /**
    * Read the receiver's exact post-verification synchronization evidence for
    * one head in this process. Durable restart truth remains the applied-head
    * API above; this process-local record proves the semantic post-read that
@@ -3335,7 +3372,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               deployment,
               signal,
             );
-            const current = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
+            const current = snapshotRfc64CatalogSynchronizationEvidenceV1(
+              evidence,
+              remotePeerId,
+            );
             const previous = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
               evidence.catalogHeadDigest,
             );

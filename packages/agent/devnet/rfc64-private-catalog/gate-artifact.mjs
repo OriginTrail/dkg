@@ -5,8 +5,19 @@ import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 
 import { assertRfc64PrivateRuntimeProvenanceV1 } from './runtime-provenance.mjs';
+import { isSafeChildDiagnosticPhaseV1 } from './child-protocol.mjs';
 
 const SCHEMA = 'dkg-rfc64-private-release-gate-v1';
+
+/** Tag a child-command failure with fixed diagnostics safe for gate artifacts. */
+export function createGateCommandFailureV1(commandPhase, cause) {
+  const error = new Error(`RFC-64 private gate child command failed during ${commandPhase}`, {
+    cause,
+  });
+  error.name = 'Rfc64PrivateGateCommandFailureV1';
+  error.commandPhase = commandPhase;
+  return error;
+}
 
 /**
  * Run one gate invocation with an artifact that can never retain an earlier
@@ -134,6 +145,16 @@ export async function writeGateArtifactAtomicV1(artifactPath, artifact) {
 
 /** Return only fixed classifications. Never retain caller-controlled error data. */
 export function sanitizeGateFailureV1(error) {
+  if (
+    error instanceof Error
+    && error.name === 'Rfc64PrivateGateCommandFailureV1'
+    && isSafeChildDiagnosticPhaseV1(error.commandPhase)
+  ) {
+    return Object.freeze({
+      failureClass: 'gate-command-failed',
+      commandPhase: error.commandPhase,
+    });
+  }
   const failureClass = error instanceof AggregateError
     ? 'gate-and-artifact-failed'
     : error instanceof Error && error.name === 'AbortError'

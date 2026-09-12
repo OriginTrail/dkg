@@ -4,21 +4,13 @@ import {
   assertPersistedRuntimeProcessProvenanceV1,
   buildRuntimeProcessProvenanceV1,
 } from '../../../../devnet/rfc64-runtime-provenance.mts';
+import { RFC64_PRIVATE_SCENARIO_PROCESS_IDS_V1 } from './scenario-actors.ts';
 
 export const RFC64_PRIVATE_RUNTIME_PROVENANCE_SCHEMA_V1 =
   'dkg-rfc64-private-runtime-provenance-v1';
 
-export const RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1 = Object.freeze([
-  'probe-owner',
-  'probe-provider2',
-  'probe-receiver',
-  'probe-outsider',
-  'owner',
-  'provider2',
-  'receiver',
-  'outsider',
-  'receiver-restart',
-]);
+export const RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1 =
+  RFC64_PRIVATE_SCENARIO_PROCESS_IDS_V1;
 
 export function buildRfc64PrivateRuntimeProvenanceV1(sourceBuild, processes) {
   return buildRuntimeProcessProvenanceV1({

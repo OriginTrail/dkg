@@ -125,7 +125,7 @@ export async function readRfc64AppliedCatalogContextGraphIdV1(
     'controlObjects' | 'appliedHead' | 'verifyIssuerSignature'
   >,
 ): Promise<ContextGraphIdV1> {
-  const storedHead = await readValidatedAppliedHeadV1(input);
+  const storedHead = await readValidatedRfc64AppliedCatalogHeadV1(input);
   return deriveAuthorCatalogScopeFromHeadV1(storedHead.envelope.payload).contextGraphId;
 }
 
@@ -155,7 +155,7 @@ export async function prepareRfc64AppliedCatalogAuthorityDeactivationV1(
 ): Promise<PreparedRfc64AppliedCatalogAuthorityDeactivationV1> {
   const verifyIssuerSignature = input.verifyIssuerSignature
     ?? verifyControlEnvelopeIssuerSignatureV1;
-  const storedHead = await readValidatedAppliedHeadV1({
+  const storedHead = await readValidatedRfc64AppliedCatalogHeadV1({
     ...input,
     verifyIssuerSignature,
   });
@@ -311,7 +311,7 @@ export async function loadExactAppliedCatalogRowsV1(
   return Object.freeze(bucket.payload.rows.map((row) => Object.freeze({ ...row })));
 }
 
-async function readValidatedAppliedHeadV1(input: Pick<
+export async function readValidatedRfc64AppliedCatalogHeadV1(input: Pick<
   DeactivateRfc64AppliedCatalogAuthorityInputV1,
   'controlObjects' | 'appliedHead' | 'verifyIssuerSignature'
 >): Promise<StoredVerifiedControlObjectV1 & {

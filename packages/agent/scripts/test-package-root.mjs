@@ -137,6 +137,7 @@ const requiredCatalogMethods = [
   'acceptRfc64CatalogAccessSnapshotV1',
   'publishAuthorCatalogGenesisV1',
   'publishAuthorCatalogExactSetSuccessorV1',
+  'readRfc64VerifiedAppliedCatalogClosureV1',
   'recordRfc64PublicCatalogAssetV1',
   'recordConfirmedRfc64PublicCatalogAssetV1',
   'synchronizeRfc64PublicCatalogFromProviderV1',
@@ -150,6 +151,9 @@ for (const method of requiredCatalogMethods) {
   ) {
     throw new Error(`published DKGAgent entry points did not expose ${method}`);
   }
+}
+if ('readVerifiedAppliedCatalogClosureV1' in root) {
+  throw new Error('storage-level verified closure reader leaked from the package root');
 }
 if (
   !Array.isArray(root.RFC64_POLICY_CELLS_V1)
@@ -258,6 +262,7 @@ const blockedRfc64Modules = [
   'catalog-rollout-authority-v1.js',
   'catalog-rollout-authority-reconciliation-v1.js',
   'applied-catalog-authority-transition-v1.js',
+  'verified-applied-catalog-closure-v1.js',
   'catalog-semantic-authority-transition-v1.js',
   'public-catalog-native-errors-v1.js',
   'catalog-applied-head-coordinator-v1.js',
