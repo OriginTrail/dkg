@@ -15,6 +15,10 @@ import {
   finalizedRuntimeRpcVerdictV1,
   rpcEvidenceV1,
 } from './rpc-evidence.mjs';
+import {
+  RFC64_PRIVATE_RUNTIME_ACTORS_V1,
+  RFC64_PRIVATE_RUNTIME_ROLES_V1,
+} from './scenario-actors.ts';
 
 export const EXPECTED_MEMORY_CONTENTS = PRIVATE_CATALOG_MEMORY_EXPECTATION;
 
@@ -162,12 +166,12 @@ function buildRfc64PrivateReleaseChecksV1(evidence) {
   return Object.freeze({
     fourStableUniqueDaemonIdentities:
       new Set(Object.values(peerIds)).size === 4
-      && ['owner', 'provider2', 'receiver', 'outsider'].every(
+      && RFC64_PRIVATE_RUNTIME_ROLES_V1.every(
         (role) => actor(evidence, `probe-${role}`).ready.agentClass === 'DKGAgent',
       ),
     productionCatalogServiceOnAllRoles:
-      [owner, provider2, receiverSeed, receiver, ownerRevoker, outsider, receiverRestart]
-        .every(({ ready }) => ready.catalogServiceStarted === true),
+      RFC64_PRIVATE_RUNTIME_ACTORS_V1.every(({ processId }) =>
+        actor(evidence, processId).ready.catalogServiceStarted === true),
     exactTwoAssetPrivateCatalog:
       published.inventoryRowCount === '2'
       && published.catalogVersion === '4'

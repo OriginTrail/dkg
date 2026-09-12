@@ -44,6 +44,14 @@ import {
   runRfc64PrivateBootstrapRetryLoopV1,
 } from './catalog-evidence-handlers.mjs';
 import { buildRfc64PrivateReleaseArtifactV1 } from './scenario-artifact.mjs';
+import {
+  RFC64_PRIVATE_FINALIZED_READ_PROCESS_IDS_V1,
+  RFC64_PRIVATE_PROBE_ACTORS_V1,
+  RFC64_PRIVATE_RUNTIME_ACTORS_V1,
+  RFC64_PRIVATE_RUNTIME_ROLES_V1,
+  RFC64_PRIVATE_RUNTIME_RPC_PROCESS_IDS_V1,
+  RFC64_PRIVATE_SCENARIO_PROCESS_IDS_V1,
+} from './scenario-actors.ts';
 
 const PROTOCOL_TEST_DIGEST = `0x${'ab'.repeat(32)}`;
 const VALID_CHILD_COMMANDS = Object.freeze({
@@ -65,6 +73,57 @@ const VALID_CHILD_COMMANDS = Object.freeze({
   'revoke-receiver': Object.freeze({ cmd: 'revoke-receiver' }),
   'observe-receiver-revocation': Object.freeze({ cmd: 'observe-receiver-revocation' }),
   stop: Object.freeze({ cmd: 'stop' }),
+});
+
+test('one actor table derives every scenario role and evidence domain', () => {
+  assert.deepEqual(RFC64_PRIVATE_RUNTIME_ROLES_V1, [
+    'owner',
+    'provider2',
+    'receiver',
+    'outsider',
+  ]);
+  assert.deepEqual(RFC64_PRIVATE_PROBE_ACTORS_V1.map(({ processId }) => processId), [
+    'probe-owner',
+    'probe-provider2',
+    'probe-receiver',
+    'probe-outsider',
+  ]);
+  assert.deepEqual(RFC64_PRIVATE_RUNTIME_ACTORS_V1.map(({ processId }) => processId), [
+    'owner',
+    'provider2',
+    'receiver-seed',
+    'receiver',
+    'owner-revoker',
+    'outsider',
+    'receiver-restart',
+  ]);
+  assert.deepEqual(RFC64_PRIVATE_RUNTIME_RPC_PROCESS_IDS_V1, [
+    'owner',
+    'provider2',
+    'receiver-seed',
+    'receiver',
+    'owner-revoker',
+    'outsider',
+    'receiver-restart',
+  ]);
+  assert.deepEqual(RFC64_PRIVATE_FINALIZED_READ_PROCESS_IDS_V1, [
+    'provider2',
+    'receiver-seed',
+    'receiver',
+  ]);
+  assert.deepEqual(RFC64_PRIVATE_SCENARIO_PROCESS_IDS_V1, [
+    'probe-owner',
+    'probe-provider2',
+    'probe-receiver',
+    'probe-outsider',
+    'owner',
+    'provider2',
+    'receiver-seed',
+    'receiver',
+    'owner-revoker',
+    'outsider',
+    'receiver-restart',
+  ]);
 });
 
 test('child protocol table classifies every request, response, and safe phase', async () => {
@@ -134,22 +193,47 @@ test('child command failures retain only a bounded command phase', () => {
   ), { failureClass: 'gate-execution-failed' });
 });
 
-test('runtime discriminant and owner publication enforce behavioral transitions', () => {
+test('runtime discriminant and owner publication enforce behavioral transitions', async () => {
   const probe = { kind: 'probe', role: 'owner' };
   assert.throws(() => assertFinalizedRuntimeV1(probe), /requires a finalized runtime/u);
   assert.doesNotThrow(() => assertFinalizedRuntimeV1({ kind: 'run', role: 'provider2' }));
 
   const publication = createOwnerPublicationStateV1();
   assert.throws(() => publication.requireBaseline(), /requires a published/u);
-  publication.beginBaseline();
-  assert.throws(() => publication.beginBaseline(), /already published/u);
   const scope = Object.freeze({ scope: 'test' });
-  publication.commitBaseline(scope, [Object.freeze({ asset: 1 })]);
+  let releasePublication;
+  const publicationGate = new Promise((resolve) => { releasePublication = resolve; });
+  const inFlight = publication.publishBaseline(async () => {
+    await publicationGate;
+    return { scope, assets: [Object.freeze({ asset: 1 })], result: 'published' };
+  });
+  await assert.rejects(
+    publication.publishBaseline(async () => ({ scope, assets: [], result: 'duplicate' })),
+    /already published/u,
+  );
+  releasePublication();
+  assert.equal(await inFlight, 'published');
   assert.deepEqual(publication.requireBaseline(), {
     kind: 'baseline',
     scope,
     assets: [{ asset: 1 }],
   });
+  await assert.rejects(
+    publication.publishBaseline(async () => ({ scope, assets: [], result: 'late duplicate' })),
+    /already published/u,
+  );
+
+  const retrying = createOwnerPublicationStateV1();
+  await assert.rejects(
+    retrying.publishBaseline(async () => { throw new Error('injected publish failure'); }),
+    /injected publish failure/u,
+  );
+  assert.throws(() => retrying.requireBaseline(), /requires a published/u);
+  assert.equal(await retrying.publishBaseline(async () => ({
+    scope,
+    assets: [],
+    result: 'retried',
+  })), 'retried');
 });
 
 test('runtime external boundaries accept only canonical roles and complete manifests', () => {

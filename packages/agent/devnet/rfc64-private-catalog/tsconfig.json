@@ -19,6 +19,7 @@
     "catalog-publication-handlers.mjs",
     "fault-injection.mjs",
     "runtime-contract.typecheck.ts",
+    "scenario-actors.ts",
     "../../src/jsonld.d.ts"
   ]
 }

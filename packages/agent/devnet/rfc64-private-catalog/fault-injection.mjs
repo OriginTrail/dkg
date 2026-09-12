@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // @ts-check
 
-import {
-  decodeOpaqueKaBundleV1,
-  encodeOpaqueKaBundleV1,
-} from '@origintrail-official/dkg-core';
-
 /** @typedef {'omit-receiver' | 'revocation-chain-noop' | 'revocation-over-removal'} Rfc64PrivateAuthorityFaultV1 */
 /** @typedef {'inventory-digest' | 'expected-assets' | 'duplicate-expected-assets' | 'missing-bundle' | 'mismatched-bundle' | 'trusted-scope'} Rfc64PrivateCatalogProofFaultV1 */
 /** @typedef {import('./agent-runtime.ts').Rfc64PrivateFaultProfileV1} Rfc64PrivateFaultProfileV1 */
@@ -86,7 +81,7 @@ function catalogProofStrategyV1(fault) {
     inputs({
       appliedHead,
       expectedAssetNumbers,
-      kaBundles,
+      readVerifiedAppliedCatalogClosure,
       trustedCatalogScope,
       untrustedCatalogScope,
     }) {
@@ -105,7 +100,10 @@ function catalogProofStrategyV1(fault) {
           : fault === 'duplicate-expected-assets'
             ? Object.freeze([expectedAssetNumbers[0], expectedAssetNumbers[0]])
             : expectedAssetNumbers,
-        kaBundles: wrapKaBundlesV1(kaBundles, fault),
+        readVerifiedAppliedCatalogClosure: wrapClosureReaderV1(
+          readVerifiedAppliedCatalogClosure,
+          fault,
+        ),
         trustedCatalogScope: fault === 'trusted-scope'
           ? untrustedCatalogScope
           : trustedCatalogScope,
@@ -115,28 +113,23 @@ function catalogProofStrategyV1(fault) {
 }
 
 /**
- * @param {Rfc64PrivateCatalogProofInputsV1['kaBundles']} kaBundles
+ * Keep storage corruption behind the semantic reader boundary. Production
+ * integration tests exercise real missing/mismatched durable bundles; these
+ * fixture-only strategies preserve the same fail-closed evidence outcomes.
+ * @param {Rfc64PrivateCatalogProofInputsV1['readVerifiedAppliedCatalogClosure']} reader
  * @param {Rfc64PrivateCatalogProofFaultV1 | null} fault
- * @returns {Rfc64PrivateCatalogProofInputsV1['kaBundles']}
+ * @returns {Rfc64PrivateCatalogProofInputsV1['readVerifiedAppliedCatalogClosure']}
  */
-function wrapKaBundlesV1(kaBundles, fault) {
+function wrapClosureReaderV1(reader, fault) {
   if (fault === 'missing-bundle') {
-    return Object.freeze({ readKaBundleByDigest: async () => null });
+    return async () => {
+      throw new Error('signed catalog row has no durable KA bundle');
+    };
   }
-  if (fault !== 'mismatched-bundle') return kaBundles;
-  return Object.freeze({
-    readKaBundleByDigest: async (blobDigest) => {
-      const bundleBytes = await kaBundles.readKaBundleByDigest(blobDigest);
-      if (bundleBytes === null) return null;
-      const decoded = decodeOpaqueKaBundleV1(bundleBytes);
-      const projectionBytes = decoded.projectionBytes.slice();
-      if (projectionBytes.length === 0) {
-        throw new Error('cannot inject a mismatched empty catalog projection');
-      }
-      projectionBytes[0] ^= 1;
-      return encodeOpaqueKaBundleV1(projectionBytes, decoded.sealBytes).bundleBytes;
-    },
-  });
+  if (fault !== 'mismatched-bundle') return reader;
+  return async () => {
+    throw new Error('durable KA bundle differs from its signed catalog row');
+  };
 }
 
 /**

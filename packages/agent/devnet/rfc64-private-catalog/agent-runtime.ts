@@ -8,26 +8,25 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 
 import type { Rfc64CatalogSuccessorAssetInputV1 } from
   '../../src/dkg-agent-rfc64-catalog.js';
+import type { VerifiedAppliedCatalogClosureV1 } from
+  '../../src/dkg-agent-rfc64-catalog.js';
 import type { AppliedCatalogHeadSnapshotV1 } from
   '../../src/rfc64/inventory-v1/index.js';
-import type { Rfc64KaBundleOperationsV1 } from
-  '../../src/rfc64/ka-bundle-store-v1.js';
 import type { Rfc64ReleaseNativeAuthoritySnapshotV1 } from
   '../../src/rfc64/release-native-catalog-authority-v1.js';
 import type { Rfc64PrivateDevnetChainAdapter } from './finalized-chain-fixture.mjs';
 import type {
   createFinalizedChainFixture,
 } from './fixture.mjs';
+import {
+  RFC64_PRIVATE_RUNTIME_ROLES_V1,
+  type Rfc64PrivateRuntimeRoleV1,
+} from './scenario-actors.ts';
 
-export const RFC64_PRIVATE_RUNTIME_ROLES_V1 = Object.freeze([
-  'owner',
-  'provider2',
-  'receiver',
-  'outsider',
-] as const);
-
-export type Rfc64PrivateRuntimeRoleV1 =
-  typeof RFC64_PRIVATE_RUNTIME_ROLES_V1[number];
+export {
+  RFC64_PRIVATE_RUNTIME_ROLES_V1,
+  type Rfc64PrivateRuntimeRoleV1,
+} from './scenario-actors.ts';
 
 export type Rfc64PrivateRuntimeManifestV1 = Readonly<{
   authorityStatePath: string;
@@ -38,6 +37,13 @@ export type Rfc64PrivateFinalizedChainFixtureV1 =
   ReturnType<typeof createFinalizedChainFixture>;
 export type Rfc64PrivateCatalogAssetV1 = Rfc64CatalogSuccessorAssetInputV1;
 
+export type Rfc64PrivateCatalogClosureReaderV1 = (
+  input: Readonly<{
+    appliedHead: AppliedCatalogHeadSnapshotV1;
+    trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
+  }>,
+) => Promise<Readonly<VerifiedAppliedCatalogClosureV1>>;
+
 export type Rfc64PrivateAuthorityAdapterOptionsV1 = Readonly<{
   authorityStatePath: string | undefined;
   participantRemovalAlsoRemoves: EvmAddressV1 | undefined;
@@ -47,7 +53,7 @@ export type Rfc64PrivateAuthorityAdapterOptionsV1 = Readonly<{
 export type Rfc64PrivateCatalogProofInputsV1 = Readonly<{
   appliedHead: AppliedCatalogHeadSnapshotV1;
   expectedAssetNumbers: readonly number[];
-  kaBundles: Pick<Rfc64KaBundleOperationsV1, 'readKaBundleByDigest'>;
+  readVerifiedAppliedCatalogClosure: Rfc64PrivateCatalogClosureReaderV1;
   trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
   untrustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
 }>;
@@ -55,7 +61,7 @@ export type Rfc64PrivateCatalogProofInputsV1 = Readonly<{
 export type Rfc64PrivateCatalogProofStrategyInputsV1 = Readonly<{
   appliedHead: AppliedCatalogHeadSnapshotV1;
   expectedAssetNumbers: readonly number[];
-  kaBundles: Pick<Rfc64KaBundleOperationsV1, 'readKaBundleByDigest'>;
+  readVerifiedAppliedCatalogClosure: Rfc64PrivateCatalogClosureReaderV1;
   trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
 }>;
 
@@ -94,11 +100,11 @@ export type OwnerPublicationBaselineV1 = Readonly<{
 }>;
 
 export type OwnerPublicationStateV1 = Readonly<{
-  beginBaseline: () => void;
-  commitBaseline: (
-    scope: Readonly<AuthorCatalogScopeV1>,
-    assets: readonly Rfc64PrivateCatalogAssetV1[],
-  ) => void;
+  publishBaseline: <T>(publish: () => Promise<Readonly<{
+    scope: Readonly<AuthorCatalogScopeV1>;
+    assets: readonly Rfc64PrivateCatalogAssetV1[];
+    result: T;
+  }>>) => Promise<T>;
   requireBaseline: () => OwnerPublicationBaselineV1;
 }>;
 
@@ -117,6 +123,7 @@ type FinalizedRuntimeCommonV1 = Readonly<{
   rpc: Rfc64PrivateFinalizedRpcV1;
   initialFinalizedAuthority: Rfc64PrivateInitialFinalizedAuthorityV1;
   peerIds: Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>>;
+  readVerifiedAppliedCatalogClosure: Rfc64PrivateCatalogClosureReaderV1;
 }>;
 
 export type FinalizedRuntimeV1 = FinalizedRuntimeCommonV1 & Readonly<
@@ -193,18 +200,21 @@ export function createOwnerPublicationStateV1(): OwnerPublicationStateV1 {
     | OwnerPublicationBaselineV1
   > = Object.freeze({ kind: 'empty' });
   return Object.freeze({
-    beginBaseline() {
+    async publishBaseline<T>(publish: () => Promise<Readonly<{
+      scope: Readonly<AuthorCatalogScopeV1>;
+      assets: readonly Rfc64PrivateCatalogAssetV1[];
+      result: T;
+    }>>): Promise<T> {
       if (state.kind !== 'empty') throw new Error('catalog baseline already published');
       state = Object.freeze({ kind: 'publishing-baseline' });
-    },
-    commitBaseline(
-      scope: Readonly<AuthorCatalogScopeV1>,
-      assets: readonly Rfc64PrivateCatalogAssetV1[],
-    ) {
-      if (state.kind !== 'publishing-baseline') {
-        throw new Error('catalog baseline publication was not started');
+      try {
+        const { scope, assets, result } = await publish();
+        state = Object.freeze({ kind: 'baseline', scope, assets: Object.freeze([...assets]) });
+        return result;
+      } catch (error) {
+        state = Object.freeze({ kind: 'empty' });
+        throw error;
       }
-      state = Object.freeze({ kind: 'baseline', scope, assets: Object.freeze([...assets]) });
     },
     requireBaseline() {
       if (state.kind !== 'baseline') {

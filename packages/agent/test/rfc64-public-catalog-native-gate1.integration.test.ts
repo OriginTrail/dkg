@@ -144,6 +144,7 @@ const SECOND_KA_NUMBER = 8n;
 const SECOND_KA_ID = ((BigInt(AUTHOR) << 96n) | SECOND_KA_NUMBER).toString();
 const SECOND_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${SECOND_KA_NUMBER}`;
 const THIRD_KA_NUMBER = 9n;
+const LARGE_KA_NUMBER = (2n ** 53n) + 123n;
 const PROJECTION =
   '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
   + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
@@ -415,7 +416,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     });
     expect(closure.rows).toHaveLength(1);
     expect(closure.rows[0]).toMatchObject({
-      kaNumber: Number(KA_NUMBER),
+      kaNumber: KA_NUMBER,
       row: fixture.rowBundle.row,
       bundleBinding: {
         catalogScopeDigest: fixture.scopeDigest,
@@ -443,6 +444,68 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       ...closureInput,
       trustedCatalogScope: { ...fixture.scope, authorAddress: GOVERNANCE_CONTRACT },
     })).rejects.toThrow(/differs from its signed SWM proof closure/u);
+  }, 30_000);
+
+  it('preserves uint96 asset numbers and ordered closure rows across concurrent reads', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronizeAny(fixture.largeNumberAnnouncement);
+    const largeApplied = fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    if (largeApplied === null) throw new Error('large-number successor was not applied');
+    const largeClosure = await readVerifiedAppliedCatalogClosureV1({
+      appliedHead: largeApplied,
+      controlObjects: fixture.receiverPersistence.controlObjects,
+      deployment: DEPLOYMENT,
+      kaBundles: fixture.receiverPersistence.kaBundles,
+      trustedCatalogScope: fixture.scope,
+    });
+    expect(largeClosure.rows).toHaveLength(1);
+    expect(largeClosure.rows[0]).toMatchObject({
+      kaNumber: LARGE_KA_NUMBER,
+      row: { kaId: fixture.largeRowBundle.row.kaId },
+      bundleBinding: { kaId: fixture.largeRowBundle.row.kaId },
+      inventoryEvidence: { kaUal: fixture.largeRowBundle.kaUal },
+    });
+
+    const orderedFixture = await setupLiveReceiver();
+    await orderedFixture.bootstrap();
+    await orderedFixture.synchronize();
+    await orderedFixture.synchronizeAny(orderedFixture.multiAssetAnnouncement);
+    const multiApplied = orderedFixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      orderedFixture.scopeDigest,
+      AUTHOR,
+    );
+    if (multiApplied === null) throw new Error('multi-asset successor was not applied');
+    const completionOrder: Digest32V1[] = [];
+    const firstDigest = orderedFixture.rowBundle.row.transfer.blobDigest;
+    const delayedBundles = {
+      readKaBundleByDigest: async (digest: Digest32V1) => {
+        await new Promise((resolve) => setTimeout(
+          resolve,
+          digest === firstDigest ? 30 : 0,
+        ));
+        completionOrder.push(digest);
+        return orderedFixture.receiverPersistence.kaBundles.readKaBundleByDigest(digest);
+      },
+    };
+    const orderedClosure = await readVerifiedAppliedCatalogClosureV1({
+      appliedHead: multiApplied,
+      controlObjects: orderedFixture.receiverPersistence.controlObjects,
+      deployment: DEPLOYMENT,
+      kaBundles: delayedBundles,
+      trustedCatalogScope: orderedFixture.scope,
+    });
+    expect(completionOrder).toEqual([
+      orderedFixture.secondRowBundle.row.transfer.blobDigest,
+      firstDigest,
+    ]);
+    expect(orderedClosure.rows.map(({ kaNumber }) => kaNumber)).toEqual([
+      KA_NUMBER,
+      SECOND_KA_NUMBER,
+    ]);
   }, 30_000);
 
   it('accepts an exact projection when the store post-read returns a different row order', async () => {
@@ -2513,6 +2576,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     kaNumber: THIRD_KA_NUMBER,
     assertionCoordinate: 'gate-2-replacement-object',
   });
+  const largeRowBundle = await buildRowBundle(signingWallet, {
+    kaNumber: LARGE_KA_NUMBER,
+    assertionCoordinate: 'gate-large-number-object',
+  });
   const genesis = await produceEmptyAuthorCatalogGenesisV1({
     scope,
     catalogIssuerDelegationDigest: catalogIssuerDelegation.objectDigest,
@@ -2542,6 +2609,15 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     selectedBucketId: '0' as never,
     nextRows: [rowBundle.row, secondRowBundle.row],
     issuedAt: '1773900001002' as never,
+    signer,
+  });
+  const largeNumberSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: genesis.head,
+    previousDirectoryPath: genesis.directoryPath,
+    previousBucket: null,
+    selectedBucketId: '0' as never,
+    nextRows: [largeRowBundle.row],
+    issuedAt: '1773900001010' as never,
     signer,
   });
   const emptySuccessor = await produceSparseAuthorCatalogSuccessorV1({
@@ -2660,6 +2736,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     ...emptySuccessor.stagedObjects,
     ...malformedEmptySuccessors.flatMap(({ stagedObjects }) => stagedObjects),
     ...multiAssetSuccessor.stagedObjects,
+    ...largeNumberSuccessor.stagedObjects,
     ...removalSuccessor.stagedObjects,
     ...threeAssetSuccessor.stagedObjects,
     ...replacementSuccessor.stagedObjects,
@@ -2681,6 +2758,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     [rowBundle.row.transfer.blobDigest, rowBundle.bundleBytes],
     [secondRowBundle.row.transfer.blobDigest, secondRowBundle.bundleBytes],
     [thirdRowBundle.row.transfer.blobDigest, thirdRowBundle.bundleBytes],
+    [largeRowBundle.row.transfer.blobDigest, largeRowBundle.bundleBytes],
   ]);
   const authorBundleRead = vi.fn(async (digest: Digest32V1) =>
     bundleBytesByDigest.get(digest) ?? null);
@@ -2830,6 +2908,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const announcement = announcementFor(successor.head);
   const genesisAnnouncement = announcementFor(genesis.head);
   const multiAssetAnnouncement = announcementFor(multiAssetSuccessor.head);
+  const largeNumberAnnouncement = announcementFor(largeNumberSuccessor.head);
   const emptySuccessorAnnouncement = announcementFor(emptySuccessor.head);
   const malformedEmptySuccessorAnnouncements = malformedEmptySuccessors.map(({ head }) => (
     announcementFor(head)
@@ -2963,6 +3042,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     governedSuccessor,
     governedSuccessorAnnouncement,
     invalidGenesisAnnouncement,
+    largeNumberAnnouncement,
+    largeRowBundle,
     receiver,
     receiverBundleFetch,
     missingDelegationAnnouncement,

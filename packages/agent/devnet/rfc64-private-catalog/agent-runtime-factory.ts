@@ -14,6 +14,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DKGAgent,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
+  type DKGAgentConfig,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
 } from '@origintrail-official/dkg-agent';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -45,6 +48,7 @@ import {
   type FinalizedRuntimeV1,
   type ProbeRuntimeV1,
   type Rfc64PrivateFaultProfileV1,
+  type Rfc64PrivateCatalogClosureReaderV1,
   type Rfc64PrivateFinalizedRpcV1,
   type Rfc64PrivateRuntimeManifestV1,
   type Rfc64PrivateRuntimeRoleV1,
@@ -63,6 +67,18 @@ type ProbeRuntimeFactoryInputV1 = Readonly<{
 type FinalizedRuntimeFactoryInputV1 = ProbeRuntimeFactoryInputV1 & Readonly<{
   manifest: Rfc64PrivateRuntimeManifestV1;
 }>;
+
+type Rfc64PrivateFinalizedAgentConfigKeyV1 =
+  | 'chainAdapter'
+  | 'chainConfig'
+  | 'contextGraphSubscriptionStore'
+  | 'networkIdentity'
+  | 'rfc64CatalogAccessPolicyAuthority'
+  | 'rfc64CatalogActivation';
+
+export type Rfc64PrivateFinalizedAgentConfigV1 = DKGAgentConfig & Readonly<
+  Required<Pick<DKGAgentConfig, Rfc64PrivateFinalizedAgentConfigKeyV1>>
+>;
 
 class Rfc64PrivateFinalizedRuntimeAcquisitionV1 {
   #store: Pick<OxigraphStore, 'close'> | undefined;
@@ -126,7 +142,7 @@ export async function createRfc64PrivateProbeRuntimeV1(
   const { dataDir, faultProfile, role } = input;
   rolePrivateKey(role);
   const created = Object.freeze({
-    agent: await DKGAgent.create(createBaseAgentOptionsV1({ dataDir, role })),
+    agent: await DKGAgent.create(createBaseAgentConfigV1({ dataDir, role })),
     faultProfile,
   });
   await created.agent.start();
@@ -180,22 +196,10 @@ async function createRfc64PrivateFinalizedAgentV1(
       BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
     ),
   }));
-  const base = createBaseAgentOptionsV1({
+  const base = createBaseAgentConfigV1({
     dataDir,
     role,
     store,
-    chainRuntime: {
-      chainAdapter,
-      chainConfig: {
-        rpcUrl: rpc.url,
-        hubAddress: CONTEXT_GRAPH_STORAGE,
-        operationalKeys: [rolePrivateKey(role)],
-      },
-      contextGraphSubscriptionStore: seededSubscriptionStoreV1(
-        CONTEXT_GRAPH_ID,
-        ON_CHAIN_CONTEXT_GRAPH_ID,
-      ),
-    },
   });
 
   const peerIds = manifest.peerIds;
@@ -212,12 +216,22 @@ async function createRfc64PrivateFinalizedAgentV1(
     BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
   );
   await seedPrivateCatalogDefinitionV1(
-    base.store,
+    store,
     peerIds,
     finalizedSnapshot.participantAgents,
   );
-  const created = owner.ownAgent(await DKGAgent.create({
+  const finalizedConfig: Rfc64PrivateFinalizedAgentConfigV1 = {
     ...base,
+    chainAdapter,
+    chainConfig: {
+      rpcUrl: rpc.url,
+      hubAddress: CONTEXT_GRAPH_STORAGE,
+      operationalKeys: [rolePrivateKey(role)],
+    },
+    contextGraphSubscriptionStore: seededSubscriptionStoreV1(
+      CONTEXT_GRAPH_ID,
+      ON_CHAIN_CONTEXT_GRAPH_ID,
+    ),
     networkIdentity: {
       networkId: await computeNetworkId(),
       chainId: NETWORK_ID,
@@ -233,7 +247,8 @@ async function createRfc64PrivateFinalizedAgentV1(
         contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' },
       },
     },
-  }));
+  };
+  const created = owner.ownAgent(await DKGAgent.create(finalizedConfig));
   return Object.freeze({ agent: created, chainAdapter, faultProfile, rpc });
 }
 
@@ -320,23 +335,26 @@ async function bindRfc64PrivateFinalizedRuntimeV1({
     kind: 'run',
     initialFinalizedAuthority,
     peerIds: Object.freeze({ ...manifest.peerIds }),
+    readVerifiedAppliedCatalogClosure: ((input) =>
+      created.agent.readRfc64VerifiedAppliedCatalogClosureV1({
+        ...input,
+        deployment: DEPLOYMENT as CatalogSealDeploymentProfileV1,
+      })) satisfies Rfc64PrivateCatalogClosureReaderV1,
   });
   return role === 'owner'
     ? Object.freeze({ ...common, role, publication: createOwnerPublicationStateV1() })
     : Object.freeze({ ...common, role, publication: null });
 }
 
-function createBaseAgentOptionsV1({
+function createBaseAgentConfigV1({
   dataDir,
   role,
-  chainRuntime = {},
   store,
 }: Readonly<{
   dataDir: string;
   role: Rfc64PrivateRuntimeRoleV1;
-  chainRuntime?: Readonly<Record<string, unknown>>;
   store?: OxigraphStore;
-}>) {
+}>): DKGAgentConfig {
   return {
     name: `RFC64PrivateReleaseGate-${role}`,
     dataDir,
@@ -350,7 +368,6 @@ function createBaseAgentOptionsV1({
     syncOnConnectEnabled: false,
     durableSyncEnabled: true,
     agentProfileHeartbeatMs: 0,
-    ...chainRuntime,
   };
 }
 
@@ -399,8 +416,11 @@ async function seedPrivateCatalogDefinitionV1(
   ]);
 }
 
-function seededSubscriptionStoreV1(contextGraphId: string, onChainId: string) {
-  const records = new Map([[contextGraphId, {
+function seededSubscriptionStoreV1(
+  contextGraphId: string,
+  onChainId: string,
+): ContextGraphSubscriptionStore {
+  const records = new Map<string, ContextGraphSubscriptionRecord>([[contextGraphId, {
     id: contextGraphId,
     subscribed: true,
     synced: false,
@@ -409,14 +429,13 @@ function seededSubscriptionStoreV1(contextGraphId: string, onChainId: string) {
   }]]);
   return {
     loadAll: async () => [...records.values()].map((record) => ({ ...record })),
-    load: async (id: string) => records.has(id) ? { ...records.get(id) } : null,
-    save: async (record: Readonly<{
-      id: string;
-      subscribed: boolean;
-      synced: boolean;
-      syncScoped: boolean;
-      onChainId: string;
-    }>) => { records.set(record.id, { ...record }); },
+    load: async (id: string) => {
+      const record = records.get(id);
+      return record === undefined ? null : { ...record };
+    },
+    save: async (record: ContextGraphSubscriptionRecord) => {
+      records.set(record.id, { ...record });
+    },
     delete: async (id: string) => { records.delete(id); },
   };
 }

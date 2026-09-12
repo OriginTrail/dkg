@@ -144,6 +144,7 @@ const requiredCatalogMethods = [
   'acceptRfc64CatalogAccessSnapshotV1',
   'publishAuthorCatalogGenesisV1',
   'publishAuthorCatalogExactSetSuccessorV1',
+  'readRfc64VerifiedAppliedCatalogClosureV1',
   'recordRfc64PublicCatalogAssetV1',
   'recordConfirmedRfc64PublicCatalogAssetV1',
   'synchronizeRfc64PublicCatalogFromProviderV1',
@@ -157,6 +158,9 @@ for (const method of requiredCatalogMethods) {
   ) {
     throw new Error(`published DKGAgent entry points did not expose ${method}`);
   }
+}
+if ('readVerifiedAppliedCatalogClosureV1' in root) {
+  throw new Error('storage-level verified closure reader leaked from the package root');
 }
 if (
   !Array.isArray(root.RFC64_POLICY_CELLS_V1)

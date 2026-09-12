@@ -4,6 +4,7 @@ import {
   type Rfc64PrivateFaultProfileV1,
   type Rfc64PrivateRuntimeV1,
 } from './agent-runtime.ts';
+import type { Rfc64PrivateFinalizedAgentConfigV1 } from './agent-runtime-factory.ts';
 import { waitForBootstrapV1 } from './catalog-evidence-handlers.mjs';
 import { publishCatalogBaselineV1 } from './catalog-publication-handlers.mjs';
 
@@ -20,6 +21,24 @@ void malformedAuthorityStrategy;
 // @ts-expect-error A proof strategy cannot omit its canonical inputs transformer.
 const malformedProofStrategy: Rfc64PrivateFaultProfileV1['proof'] = {};
 void malformedProofStrategy;
+
+declare const finalizedAgentConfig: Rfc64PrivateFinalizedAgentConfigV1;
+const exactFinalizedChainConfig: Rfc64PrivateFinalizedAgentConfigV1 = finalizedAgentConfig;
+void exactFinalizedChainConfig;
+
+const missingFinalizedChainConfig: Rfc64PrivateFinalizedAgentConfigV1 = {
+  ...finalizedAgentConfig,
+  // @ts-expect-error The finalized agent boundary requires canonical chainConfig.
+  chainConfig: undefined,
+};
+void missingFinalizedChainConfig;
+
+const misspelledFinalizedChainConfig: Rfc64PrivateFinalizedAgentConfigV1 = {
+  ...finalizedAgentConfig,
+  // @ts-expect-error A misspelled chain field is not part of the finalized config.
+  chainConfg: finalizedAgentConfig.chainConfig,
+};
+void misspelledFinalizedChainConfig;
 
 declare const runtime: Rfc64PrivateRuntimeV1;
 void waitForBootstrapV1(runtime, { timeoutMs: 1_000 });

@@ -28,6 +28,10 @@ import {
   RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1,
   childCommandDescriptorV1,
 } from './child-protocol.mjs';
+import {
+  RFC64_PRIVATE_PROBE_ACTORS_V1,
+  RFC64_PRIVATE_RUNTIME_ROLES_V1,
+} from './scenario-actors.ts';
 
 export {
   RFC64_PRIVATE_GATE_RPC_BUDGET_V1,
@@ -49,7 +53,6 @@ const RUNTIME_LOAD_HOOK = resolve(
   '../../../../devnet/rfc64-runtime-load-hook.mts',
 );
 export const RFC64_PRIVATE_GATE_ARTIFACT_PATH = join(HERE, 'artifacts', 'latest.json');
-const ROLES = Object.freeze(['owner', 'provider2', 'receiver', 'outsider']);
 const RUN_TIMEOUT_MS = 90_000;
 let requestSequence = 0;
 let lifecycleSequence = 0;
@@ -271,7 +274,9 @@ export async function executeRfc64PrivateReleaseGateV1({
   const runRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-release-gate-'));
   const authorityStatePath = join(runRoot, 'authority.json');
   const manifestPath = join(runRoot, 'manifest.json');
-  const dataDirs = Object.fromEntries(ROLES.map((role) => [role, join(runRoot, role)]));
+  const dataDirs = Object.fromEntries(
+    RFC64_PRIVATE_RUNTIME_ROLES_V1.map((role) => [role, join(runRoot, role)]),
+  );
   const scenario = new PrivateReleaseScenarioContext({
     childEnvironment,
     createProbeChild,
@@ -289,7 +294,9 @@ export async function executeRfc64PrivateReleaseGateV1({
       createFinalizedChainFixture(),
     );
     const probed = await scenario.probeRoles();
-    const peerIds = Object.fromEntries(ROLES.map((role) => [role, probed[role].ready.peerId]));
+    const peerIds = Object.fromEntries(RFC64_PRIVATE_RUNTIME_ROLES_V1.map(
+      (role) => [role, probed[role].ready.peerId],
+    ));
     scenario.bindPeerIds(peerIds);
     await writeFile(
       manifestPath,
@@ -335,7 +342,10 @@ class PrivateReleaseScenarioContext {
   }
 
   async probeRoles() {
-    const entries = await Promise.all(ROLES.map(async (role) => {
+    const entries = await Promise.all(RFC64_PRIVATE_PROBE_ACTORS_V1.map(async ({
+      processId,
+      role,
+    }) => {
       const child = this.createProbeChild(
         role,
         this.dataDirs[role],
@@ -351,7 +361,6 @@ class PrivateReleaseScenarioContext {
           { timeoutMs: this.probeReadyTimeoutMs },
         );
         assertReadyRuntimeManifest(ready, this.runtimeProvenance.runtimeManifestDigest);
-        const processId = `probe-${role}`;
         this.recordReady(processId, role, child, ready);
         await this.stop(child, processId);
         shutdownRecorded = true;
