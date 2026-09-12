@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { writeRfc64ArtifactAtomicV1 } from '../rfc64-artifact-v1.mjs';
+import { ARTIFACT_SCHEMA } from './artifact-contract.mjs';
+import { RemoteCanaryError } from './errors.mjs';
+import {
+  createRemoteCanaryDryRunArtifactV1,
+  executeRemoteCanaryCertificationV1,
+} from './phases.mjs';
+
+/** @typedef {import('./domain-contract.js').RemoteCanaryDependenciesV1} RemoteCanaryDependenciesV1 */
+
+/**
+ * @typedef {Readonly<{
+ *   loadConfig: () => unknown | Promise<unknown>,
+ *   artifactPath: string,
+ *   dryRun?: boolean,
+ *   dependencies?: RemoteCanaryDependenciesV1,
+ * }>} ArtifactLifecycleInputV1
+ */
+
+/** Atomically replace prior results; a stale PASS cannot survive any attempted run. */
+/** @param {ArtifactLifecycleInputV1} input */
+export async function runRemoteCanaryArtifactLifecycleV1({
+  loadConfig,
+  artifactPath,
+  dryRun = false,
+  dependencies = {},
+}) {
+  if (typeof loadConfig !== 'function') throw new TypeError('config-loader-required');
+  const now = dependencies.now ?? (() => new Date());
+  const startedAt = now().toISOString();
+  await writeArtifactAtomicV1(artifactPath, {
+    schema: ARTIFACT_SCHEMA,
+    status: 'INCOMPLETE',
+    phase: 'starting',
+    startedAt,
+  });
+  try {
+    const loadedConfig = await loadConfig();
+    const artifact = dryRun
+      ? createRemoteCanaryDryRunArtifactV1(loadedConfig, now)
+      : await executeRemoteCanaryCertificationV1(loadedConfig, { ...dependencies, now });
+    await writeArtifactAtomicV1(artifactPath, artifact);
+    return artifact;
+  } catch (error) {
+    const failed = Object.freeze({
+      schema: ARTIFACT_SCHEMA,
+      status: 'FAIL',
+      phase: error instanceof RemoteCanaryError ? error.phase : 'failed',
+      startedAt,
+      finishedAt: now().toISOString(),
+      failure: Object.freeze({
+        code: error instanceof RemoteCanaryError
+          ? error.code
+          : 'unexpected-execution-failure',
+      }),
+    });
+    try {
+      await writeArtifactAtomicV1(artifactPath, failed);
+    } catch (artifactError) {
+      throw new AggregateError([error, artifactError], 'certificate-and-artifact-write-failed');
+    }
+    throw error;
+  }
+}
+
+/** @param {string} artifactPath @param {unknown} artifact */
+export function writeArtifactAtomicV1(artifactPath, artifact) {
+  return writeRfc64ArtifactAtomicV1(artifactPath, artifact);
+}

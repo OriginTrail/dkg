@@ -41,6 +41,8 @@
     "devnet:stop": "./scripts/devnet.sh stop",
     "devnet:status": "./scripts/devnet.sh status",
     "devnet:clean": "./scripts/devnet.sh clean",
+    "devnet:rfc64-remote-canary": "pnpm --dir devnet/rfc64-remote-canary run certify",
+    "test:rfc64-remote-canary:unit": "pnpm --dir devnet/rfc64-remote-canary test",
     "sim": "pnpm --filter @origintrail-official/dkg-network-sim dev",
     "sim:testnet": "SIM_TARGET=testnet pnpm --filter @origintrail-official/dkg-network-sim dev",
     "sim:build": "pnpm --filter @origintrail-official/dkg-network-sim build",

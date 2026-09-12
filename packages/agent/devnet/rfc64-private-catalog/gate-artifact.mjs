@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { randomUUID } from 'node:crypto';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
-
+import { writeRfc64ArtifactAtomicV1 } from '../../../../devnet/rfc64-artifact-v1.mjs';
 import { assertRfc64PrivateRuntimeProvenanceV1 } from './runtime-provenance.mjs';
 
 const SCHEMA = 'dkg-rfc64-private-release-gate-v1';
@@ -113,23 +110,7 @@ export function assertRfc64PrivateGatePassProvenanceV1(artifact) {
 
 /** Replace the artifact with one same-directory atomic rename. */
 export async function writeGateArtifactAtomicV1(artifactPath, artifact) {
-  const artifactDirectory = dirname(artifactPath);
-  await mkdir(artifactDirectory, { recursive: true });
-  const temporaryPath = join(
-    artifactDirectory,
-    `.${basename(artifactPath)}.${process.pid}.${randomUUID()}.tmp`,
-  );
-  try {
-    await writeFile(temporaryPath, `${stableJsonV1(artifact)}\n`, {
-      encoding: 'utf8',
-      mode: 0o644,
-      flag: 'wx',
-    });
-    await rename(temporaryPath, artifactPath);
-  } catch (error) {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
+  return writeRfc64ArtifactAtomicV1(artifactPath, artifact);
 }
 
 /** Return only fixed classifications. Never retain caller-controlled error data. */
@@ -156,18 +137,4 @@ function canonicalIsoInstantV1(value, field) {
     throw new TypeError(`RFC-64 private gate PASS ${field} must be a canonical ISO instant`);
   }
   return timestamp;
-}
-
-function stableJsonV1(value) {
-  return JSON.stringify(sortKeysV1(value), null, 2);
-}
-
-function sortKeysV1(value) {
-  if (Array.isArray(value)) return value.map(sortKeysV1);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.keys(value).sort().map((key) => [key, sortKeysV1(value[key])]),
-    );
-  }
-  return value;
 }

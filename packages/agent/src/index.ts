@@ -76,6 +76,7 @@ export * from './rfc64/public-catalog-successor-producer-v1.js';
 export * from './rfc64/public-open-catalog-scope-v1.js';
 export * from './rfc64/public-catalog-native-reconciler-v1.js';
 export * from './rfc64/public-catalog-activation-config-v1.js';
+export * from './rfc64/daemon-certification-status-v1.js';
 export * from './rfc64/catalog-responsibility-registry-v1.js';
 export * from './rfc64/policy-cell-v1.js';
 export { encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret } from './encryption.js';
@@ -440,7 +441,7 @@ export {
 // (`/api/context-graph/subscribe` → `catchup-runner-worker-impl`) runs the same
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
-export { mapWithConcurrency } from './map-with-concurrency.js';
+export { mapWithConcurrency, mapWithConcurrencySettled } from './map-with-concurrency.js';
 export {
   createVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,

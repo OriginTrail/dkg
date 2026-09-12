@@ -52,6 +52,8 @@ if (
   || typeof root.Rfc64CatalogReconciliationTerminalErrorV1 !== 'function'
   || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
   || typeof root.Rfc64CatalogResponsibilityRegistryV1 !== 'function'
+  || typeof root.createRfc64DaemonCertificationStatusV1 !== 'function'
+  || typeof root.decodeRfc64DaemonCertificationStatusV1 !== 'function'
   || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
@@ -247,6 +249,7 @@ const publicRfc64Modules = [
 ];
 const blockedRfc64Modules = [
   'catalog-synchronization-error-v1.js',
+  'daemon-certification-status-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
   'catalog-authority-refresh-loop-v1.js',

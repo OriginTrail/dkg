@@ -1,0 +1,22 @@
+{
+  "name": "@devnet/rfc64-remote-canary",
+  "version": "10.0.16",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0 <23.0.0 || >=23.4.0"
+  },
+  "scripts": {
+    "certify": "node run.mjs",
+    "test": "pnpm run typecheck && node --test *.test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@origintrail-official/dkg-agent": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-http-utils": "workspace:*",
+    "@traqula/parser-sparql-1-1": "1.3.0",
+    "ajv": "8.18.0",
+    "ajv-formats": "3.0.1"
+  }
+}

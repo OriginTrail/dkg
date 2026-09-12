@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../..",
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": ["*.mjs", "*.ts"],
+  "exclude": ["*.test.mjs", "orchestration-fixture.mjs", "test-support.mjs"]
+}

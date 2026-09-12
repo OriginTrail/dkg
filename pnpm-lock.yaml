@@ -438,6 +438,27 @@ importers:
         specifier: ^6.16.0
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
 
+  devnet/rfc64-remote-canary:
+    dependencies:
+      '@origintrail-official/dkg-agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@origintrail-official/dkg-http-utils':
+        specifier: workspace:*
+        version: link:../../packages/http-utils
+      '@traqula/parser-sparql-1-1':
+        specifier: 1.3.0
+        version: 1.3.0
+      ajv:
+        specifier: 8.18.0
+        version: 8.18.0
+      ajv-formats:
+        specifier: 3.0.1
+        version: 3.0.1(ajv@8.18.0)
+
   devnet/rich-scenario:
     dependencies:
       '@origintrail-official/dkg-chain':
@@ -3601,6 +3622,22 @@ packages:
 
   '@toml-tools/parser@1.0.0':
     resolution: {integrity: sha512-j8cd3A3ccLHppGoWI69urbiVJslrpwI6sZ61ySDUPxM/FTkQWRx/JkkF8aipnl0Ds0feWXyjyvmWzn70mIohYg==}
+
+  '@traqula/chevrotain@1.1.0':
+    resolution: {integrity: sha512-VpcoQKb2ZnsOQPlPO2mE9hfR0Aidp7drwTCtaXfpdRHGkXeQ5Nv4rnxmxwUoEDRzu6b/3z4n8oTd+sYhe4fAaA==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+
+  '@traqula/core@1.3.0':
+    resolution: {integrity: sha512-xVp6sblElVsZeeXIQQ8KNRiUFqobNT/IfgWNymlUlICi69aLJWydSWsKcH+TnS5Sz7LW2BoFpoQiIcErXaXPfQ==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+
+  '@traqula/parser-sparql-1-1@1.3.0':
+    resolution: {integrity: sha512-0OH8H1e3C77W6O4kzpL8NheegjjetMerZJvxSWJFTpjs4X/9IhstA1GOJzDe4YtxyQe0MhqRuzLSWyQA435l6w==}
+    engines: {node: ^20.19.0 || >=22.12.0}
+
+  '@traqula/rules-sparql-1-1@1.3.0':
+    resolution: {integrity: sha512-gH33RiH7enfowRVGG95IalM+icTQxVZ/bD0WeTK/235PpjzSiUK0jTd/N3CpNc1BJOUZf6I/VHrqnMPjNf51Mg==}
+    engines: {node: ^20.19.0 || >=22.12.0}
 
   '@tsconfig/node10@1.0.12':
     resolution: {integrity: sha512-UCYBaeFvM11aU2y3YPZ//O5Rhj+xKyzy7mvcIoAjASbigy8mHMryP5cK7dgjlz2hWxh1g5pLw084E0a/wlUSFQ==}
@@ -10293,6 +10330,22 @@ snapshots:
     dependencies:
       '@toml-tools/lexer': 1.0.0
       chevrotain: 11.2.0
+
+  '@traqula/chevrotain@1.1.0': {}
+
+  '@traqula/core@1.3.0':
+    dependencies:
+      '@traqula/chevrotain': 1.1.0
+
+  '@traqula/parser-sparql-1-1@1.3.0':
+    dependencies:
+      '@traqula/core': 1.3.0
+      '@traqula/rules-sparql-1-1': 1.3.0
+
+  '@traqula/rules-sparql-1-1@1.3.0':
+    dependencies:
+      '@traqula/chevrotain': 1.1.0
+      '@traqula/core': 1.3.0
 
   '@tsconfig/node10@1.0.12': {}
 

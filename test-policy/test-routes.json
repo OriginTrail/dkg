@@ -47,6 +47,17 @@
     ]
   },
   {
+    "pattern": "devnet/rfc64-remote-canary/*.test.mjs",
+    "lane": "devnet",
+    "reason": "Remote canary security and certification contracts run in the required build gate",
+    "cadence": "required",
+    "command": "pnpm test:rfc64-remote-canary:unit",
+    "layer": "operator certification",
+    "prerequisites": [
+      "Node.js 22 or newer"
+    ]
+  },
+  {
     "pattern": "devnet/**",
     "lane": "devnet",
     "reason": "Developer and certification suites; suite manifest and root scripts document prerequisites",
