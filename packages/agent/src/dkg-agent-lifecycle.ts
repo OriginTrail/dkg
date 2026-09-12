@@ -1,3 +1,4 @@
+import { projectStartupResourceDiagnostics } from './resource-policy.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -3345,11 +3346,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const resourcePolicy = this.config.resourcePolicy;
     if (resourcePolicy.diagnostics.warning) this.log.warn(ctx, resourcePolicy.diagnostics.warning);
     const snapshotPolicy = resourcePolicy.snapshot;
-    const { diagnostics: _diagnostics, ...resolvedResourcePolicy } = resourcePolicy;
-    this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
-      ...resolvedResourcePolicy,
-      configuredPriorities: countSyncPriorityClasses(this.config.syncContextGraphPriorities),
-    })}`);
+    this.log.info(ctx, `Resolved sync policy ${JSON.stringify(projectStartupResourceDiagnostics(
+      resourcePolicy, countSyncPriorityClasses(this.config.syncContextGraphPriorities),
+    ))}`);
     // Keep one framed sync stream (and therefore its circuit-relay connection)
     // alive across page requests. Old peers do not advertise this wire id and
     // transparently fall back to PROTOCOL_SYNC. Set DKG_POOLED_SYNC=0 only as

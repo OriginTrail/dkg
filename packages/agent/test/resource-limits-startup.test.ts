@@ -59,6 +59,12 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     // make execution disagree with the policy that startup will report.
     vi.stubEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT', '7');
     vi.stubEnv('DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT', '9999');
+    // Future internal policy objects must not become a serialization requirement
+    // of the real startup log. Keep the same admission/snapshot objects in use.
+    const internalState: { self?: unknown } = {};
+    internalState.self = internalState;
+    (agent as unknown as { config: { resourcePolicy: StartupResourcePolicy } }).config.resourcePolicy =
+      Object.freeze({ ...effective, internalState });
     await agent.start();
     expect(resolveSnapshot).toHaveBeenCalledOnce();
     const warnings = records.filter((record) => record.level === 'warn' && record.message.includes('resource setting'));
@@ -76,9 +82,14 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
       snapshot: { budget: { maxRows: 1234 } },
       vm: { values: { DKG_VM_RECONCILE_BATCH_SIZE: DKGAgent.VM_RECONCILE_BATCH_SIZE } },
     });
-    const { diagnostics: _diagnostics, ...canonicalPolicy } = effective;
-    expect(JSON.parse(resolved!.message.slice('Resolved sync policy '.length)))
-      .toMatchObject(JSON.parse(JSON.stringify(canonicalPolicy)));
+    const diagnostic = JSON.parse(resolved!.message.slice('Resolved sync policy '.length));
+    expect(Object.keys(diagnostic)).toEqual([
+      'vm', 'reconcilerTiming', 'admission', 'snapshot', 'initialSwmPass', 'configuredPriorities',
+    ]);
+    expect(diagnostic).not.toHaveProperty('diagnostics');
+    expect(diagnostic).not.toHaveProperty('vm.rejected');
+    expect(diagnostic).not.toHaveProperty('snapshot.diagnostics');
+    expect(diagnostic).not.toHaveProperty('internalState');
     expect(Object.isFrozen(effective.diagnostics.rejected)).toBe(true);
     const { getSyncBackpressureSnapshot } = await import('../src/sync/backpressure.js');
     // Enter the real agent admission path, including its evolving selected-CG
