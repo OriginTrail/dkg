@@ -618,9 +618,20 @@ export type ContextGraphRegistryScanOptions =
     }
   | {
       /**
+       * Establish the daemon's live cursor at the current reorg-protected tail.
+       * Historical discovery is deliberately left to the independent repair
+       * lane so a missing/corrupt live watermark cannot delay new registrations.
+       */
+      mode: 'seedLiveTail';
+      pageBudget?: number;
+    }
+  | {
+      /**
        * Low-priority historical integrity pass. Repair scans use a cursor and
        * captured target that are independent from the live discovery cursor,
-       * never enter its reorg window, and resume within a hard page budget.
+       * never enter its reorg window, and resume within a logical page budget.
+       * Provider retry/failover attempts are governed independently by RPC
+       * request-class policy and may exceed the number of logical pages.
        */
       mode: 'repair';
       pageBudget: number;

@@ -21,6 +21,8 @@ export interface ContextGraphRegistryRepairAuditCheckpoint {
   readonly completedAt?: number;
 }
 
+const REPAIR_COMPLETION_MAX_CLOCK_SKEW_MS = 5 * 60 * 1_000;
+
 export class ContextGraphRegistryScanCursor {
   private readonly watermarks: Map<string, number> = new Map();
   private readonly repairAudits: Map<string, ContextGraphRegistryRepairAuditCheckpoint> = new Map();
@@ -40,6 +42,11 @@ export class ContextGraphRegistryScanCursor {
 
   getCachedWatermark(registryAddress: string): number | undefined {
     return this.normalize(this.watermarks.get(this.cacheKey(registryAddress)));
+  }
+
+  hasDurableRepairAuditStore(): boolean {
+    return typeof this.input.store?.loadRepairAudit === 'function'
+      && typeof this.input.store?.saveRepairAudit === 'function';
   }
 
   async loadWatermark(registryAddress: string): Promise<number | undefined> {
@@ -80,11 +87,15 @@ export class ContextGraphRegistryScanCursor {
   async loadRepairAudit(
     registryAddress: string,
   ): Promise<ContextGraphRegistryRepairAuditCheckpoint | undefined> {
+    if (!this.hasDurableRepairAuditStore()) {
+      throw new Error(
+        'ContextGraphNameRegistry repair requires paired durable loadRepairAudit/saveRepairAudit storage',
+      );
+    }
     const cacheKey = this.cacheKey(registryAddress);
     const cached = this.repairAudits.get(cacheKey);
     if (cached) return cached;
-    const load = this.input.store?.loadRepairAudit;
-    if (!load) return undefined;
+    const load = this.input.store!.loadRepairAudit!;
     const checkpoint = this.normalizeRepairAudit(await load.call(this.input.store, this.cursorKey(cacheKey)));
     if (checkpoint) this.repairAudits.set(cacheKey, checkpoint);
     return checkpoint;
@@ -94,13 +105,16 @@ export class ContextGraphRegistryScanCursor {
     registryAddress: string,
     checkpoint: ContextGraphRegistryRepairAuditCheckpoint,
   ): Promise<void> {
+    if (!this.hasDurableRepairAuditStore()) {
+      throw new Error(
+        'ContextGraphNameRegistry repair requires paired durable loadRepairAudit/saveRepairAudit storage',
+      );
+    }
     const normalized = this.normalizeRepairAudit(checkpoint);
     if (!normalized) throw new Error('ContextGraphNameRegistry repair checkpoint is invalid');
     const cacheKey = this.cacheKey(registryAddress);
-    const save = this.input.store?.saveRepairAudit;
-    if (save) {
-      await save.call(this.input.store, this.cursorKey(cacheKey), normalized);
-    }
+    const save = this.input.store!.saveRepairAudit!;
+    await save.call(this.input.store, this.cursorKey(cacheKey), normalized);
     this.repairAudits.set(cacheKey, normalized);
   }
 
@@ -131,6 +145,7 @@ export class ContextGraphRegistryScanCursor {
     const completedAt = candidate.completedAt === undefined
       ? undefined
       : this.normalize(candidate.completedAt);
+    const now = Date.now();
     if (
       candidate.version !== 1
       || nextBlock === undefined
@@ -138,6 +153,16 @@ export class ContextGraphRegistryScanCursor {
       || startedAt === undefined
       || (candidate.completedAt !== undefined && completedAt === undefined)
     ) return undefined;
+    const completedNextBlock = targetBlock + 1;
+    if (!Number.isSafeInteger(completedNextBlock)) return undefined;
+    if (completedAt === undefined) {
+      if (nextBlock > targetBlock) return undefined;
+    } else {
+      if (nextBlock !== completedNextBlock || completedAt < startedAt) return undefined;
+      // A corrupt/far-future completion must not suppress repair forever. Small
+      // wall-clock skew is accepted, adding at most this bounded allowance.
+      if (completedAt > now + REPAIR_COMPLETION_MAX_CLOCK_SKEW_MS) return undefined;
+    }
     return Object.freeze({
       version: 1,
       nextBlock,
