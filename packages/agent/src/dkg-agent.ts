@@ -1886,7 +1886,7 @@ export class DKGAgent extends DKGAgentBase {
   recordDiscoveredContextGraph(
     contextGraphId: string,
     metadata: ContextGraphDiscoveryMetadata,
-    options: ContextGraphDiscoveryOptions = {},
+    options: ContextGraphDiscoveryOptions & { persist?: boolean } = {},
   ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const next: ContextGraphSub = {
@@ -1912,17 +1912,35 @@ export class DKGAgent extends DKGAgentBase {
     // Discovery-only rows stay in-memory. Metadata learned for an already
     // active member/host row is part of that durable state and must survive a
     // restart (notably a later-discovered onChainId).
-    const persistEnrichment = existing?.subscribed === true || existing?.coreHosted === true;
+    const persistEnrichment = options.persist !== false
+      && (existing?.subscribed === true || existing?.coreHosted === true);
     this.setContextGraphSubscription(contextGraphId, next, { persist: persistEnrichment });
 
     if (!existing && (this.config.nodeRole ?? 'edge') === 'core') {
       this.subscribeToContextGraph(contextGraphId, {
         trackSyncScope: options.trackSyncScope,
+        persist: options.persist,
         syncMode: 'always-on',
       });
     }
 
     return this.subscribedContextGraphs.get(contextGraphId) ?? next;
+  }
+
+  private async recordDiscoveredContextGraphStrict(
+    contextGraphId: string,
+    metadata: ContextGraphDiscoveryMetadata,
+    options: ContextGraphDiscoveryOptions = {},
+  ): Promise<ContextGraphSub> {
+    const recorded = this.recordDiscoveredContextGraph(
+      contextGraphId,
+      metadata,
+      { ...options, persist: false },
+    );
+    if (recorded.subscribed || recorded.coreHosted) {
+      await this.persistDiscoveredContextGraphSubscriptionStrict(contextGraphId, recorded);
+    }
+    return recorded;
   }
 
   async discoverContextGraphsFromStore(): Promise<number> {
@@ -2223,14 +2241,11 @@ export class DKGAgent extends DKGAgentBase {
           // binding but failed the active/core subscription write before page
           // acknowledgement. Rebuild/flush the active row on replay instead of
           // letting the durable binding fast-path skip that write forever.
-          const recorded = this.recordDiscoveredContextGraph(binding.name, {
+          await this.recordDiscoveredContextGraphStrict(binding.name, {
             name: binding.name,
             onChainId: binding.onChainId,
             ...(registryNameHash ? { onChainHash: registryNameHash } : {}),
           }, { trackSyncScope: false });
-          if (recorded.subscribed || recorded.coreHosted) {
-            await this.persistContextGraphSubscriptionStrict(binding.name, recorded);
-          }
           if (registryNameHash) knownNameHashes.add(registryNameHash);
           continue;
         }
@@ -2258,19 +2273,11 @@ export class DKGAgent extends DKGAgentBase {
           graph: ontoGraph,
         }]);
 
-        const recorded = this.recordDiscoveredContextGraph(binding.name, {
+        await this.recordDiscoveredContextGraphStrict(binding.name, {
           name: binding.name,
           onChainId: binding.onChainId,
           ...(registryNameHash ? { onChainHash: registryNameHash } : {}),
         }, { trackSyncScope: false });
-        // `recordDiscoveredContextGraph` deliberately uses the ordinary queued
-        // persistence path. Drain that queue with a final strict snapshot before
-        // the scanner may acknowledge this page. Edge catalogue-only rows need
-        // no subscription row; their awaited ontology binding is sufficient to
-        // reconstruct them after restart.
-        if (recorded.subscribed || recorded.coreHosted) {
-          await this.persistContextGraphSubscriptionStrict(binding.name, recorded);
-        }
         this.contextGraphMetaProjection.markDirty(binding.name);
         const roleOutcome = (this.config.nodeRole ?? 'edge') === 'core'
           ? 'auto-subscribed for core ACK hosting'

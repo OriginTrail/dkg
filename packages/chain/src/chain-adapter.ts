@@ -663,13 +663,16 @@ export interface ContextGraphRegistryScanCursorKey {
   registryAddress: string;
 }
 
+export interface ContextGraphRegistryRepairAuditStore {
+  load(key: ContextGraphRegistryScanCursorKey): Promise<unknown>;
+  save(key: ContextGraphRegistryScanCursorKey, checkpoint: unknown): Promise<void>;
+}
+
 export interface ContextGraphRegistryScanCursorStore {
   load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
-  /** Opaque, atomically replaced repair state. Older custom stores may omit it. */
-  loadRepairAudit?(key: ContextGraphRegistryScanCursorKey): Promise<unknown>;
-  /** Opaque, atomically replaced repair state. Older custom stores may omit it. */
-  saveRepairAudit?(key: ContextGraphRegistryScanCursorKey, checkpoint: unknown): Promise<void>;
+  /** Optional grouped capability for opaque, atomically replaced repair state. */
+  repairAudit?: ContextGraphRegistryRepairAuditStore;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----

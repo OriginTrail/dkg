@@ -9503,6 +9503,50 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
+   * Scanner-owned durability boundary for metadata enrichment. Unlike join
+   * approval, discovery must preserve the canonical projection: on-demand
+   * member intent stays process-local, while an independent Core hosting row
+   * is still flushed before the registry page can be acknowledged.
+   */
+  async persistDiscoveredContextGraphSubscriptionStrict(this: DKGAgent,
+    contextGraphId: string,
+    subscription: ContextGraphSub,
+  ): Promise<void> {
+    const store = this.config.contextGraphSubscriptionStore;
+    if (!store) return;
+    const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
+    const expectedBindingGeneration = this.contextGraphBindingState.capture(contextGraphId);
+    const persistence = projectContextGraphSubscriptionPersistence({
+      contextGraphId,
+      subscription,
+      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+    });
+    if (persistence.action === 'skip') return;
+    if (persistence.action !== 'save') {
+      throw new Error(
+        `Cannot persist discovered context graph "${contextGraphId}": active subscription or host state is missing`,
+      );
+    }
+    const record = persistence.record;
+    await this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
+      const current = this.subscribedContextGraphs.get(contextGraphId);
+      if (
+        current !== expectedLiveSub
+        || (!current?.subscribed && !current?.coreHosted)
+        || !this.contextGraphBindingState.isGenerationCurrent(
+          contextGraphId,
+          expectedBindingGeneration,
+        )
+      ) {
+        throw asSyncFetchAbortError(new Error(
+          `Context graph "${contextGraphId}" changed before its discovery snapshot was persisted`,
+        ));
+      }
+      await store.save(record);
+    });
+  }
+
+  /**
    * Persist the two durable halves of a requester-side join approval.
    *
    * Membership and subscription stores are deliberately separate extension

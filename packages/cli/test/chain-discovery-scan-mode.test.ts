@@ -3,7 +3,7 @@ import { RpcRequestGovernor } from '@origintrail-official/dkg-chain';
 import {
   CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
-  CHAIN_FULL_SCAN_EVERY,
+  CHAIN_REPAIR_AUDIT_EVERY_TICKS,
   INITIAL_SCAN_SCHEDULER_STATE,
   MAX_CONSECUTIVE_SAME_SCAN_RETRIES,
   chainDiscoveryScanOptions,
@@ -26,17 +26,8 @@ describe('chainDiscoveryScanOptions', () => {
     });
   });
 
-  it('trusts a durable watermark on startup and on the former daily full-scan slot', () => {
-    expect(chainDiscoveryScanOptions({ watermarkSeeded: true, run: 0 })).toEqual({
-      mode: 'incremental',
-      throwOnChainScanFailure: true,
-      pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
-    });
-    expect(chainDiscoveryScanOptions({
-      watermarkSeeded: true,
-      run: CHAIN_FULL_SCAN_EVERY,
-      fullScanEvery: CHAIN_FULL_SCAN_EVERY,
-    })).toEqual({
+  it('trusts a durable watermark without coupling live mode to repair cadence', () => {
+    expect(chainDiscoveryScanOptions({ watermarkSeeded: true })).toEqual({
       mode: 'incremental',
       throwOnChainScanFailure: true,
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
@@ -83,7 +74,11 @@ describe('createChainDiscoveryScanRunner', () => {
         return 0;
       }),
     };
-    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+    const runner = createChainDiscoveryScanRunner({
+      agent,
+      log: vi.fn(),
+      repairEveryTicks: CHAIN_REPAIR_AUDIT_EVERY_TICKS,
+    });
 
     await runner();
 
@@ -94,7 +89,7 @@ describe('createChainDiscoveryScanRunner', () => {
     });
     expect(agent.repairContextGraphRegistry).toHaveBeenCalledWith({
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
-      minimumIntervalMs: CHAIN_FULL_SCAN_EVERY * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
+      minimumIntervalMs: CHAIN_REPAIR_AUDIT_EVERY_TICKS * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
     });
   });
 

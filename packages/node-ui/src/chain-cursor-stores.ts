@@ -94,6 +94,29 @@ export class SqliteContextGraphRegistryScanCursorStore {
   private readonly cursors: RuntimePositiveIntegerCursorStore;
   private readonly legacyCursors: SettingsPositiveIntegerCursorStore;
   private readonly db: Database.Database;
+  readonly repairAudit = {
+    load: async (key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<unknown> => {
+      const row = this.db.prepare(
+        `SELECT value FROM settings WHERE key = ?`,
+      ).get(this.repairKey(key)) as { value: string } | undefined;
+      if (!row) return undefined;
+      try {
+        return JSON.parse(row.value) as unknown;
+      } catch {
+        return undefined;
+      }
+    },
+    save: async (
+      key: { chainId: string; deploymentId: string; registryAddress: string },
+      checkpoint: unknown,
+    ): Promise<void> => {
+      const encoded = JSON.stringify(checkpoint);
+      if (encoded === undefined) throw new Error('Registry repair checkpoint is not serializable');
+      this.db.prepare(
+        `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+      ).run(this.repairKey(key), encoded);
+    },
+  };
 
   constructor(dashboard: DashboardDB) {
     this.db = dashboard.db;
@@ -108,31 +131,6 @@ export class SqliteContextGraphRegistryScanCursorStore {
 
   async save(key: { chainId: string; deploymentId: string; registryAddress: string }, nextBlock: number): Promise<void> {
     this.cursors.save(this.scope(key), this.registryKey(key), nextBlock);
-  }
-
-  async loadRepairAudit(
-    key: { chainId: string; deploymentId: string; registryAddress: string },
-  ): Promise<unknown> {
-    const row = this.db.prepare(
-      `SELECT value FROM settings WHERE key = ?`,
-    ).get(this.repairKey(key)) as { value: string } | undefined;
-    if (!row) return undefined;
-    try {
-      return JSON.parse(row.value) as unknown;
-    } catch {
-      return undefined;
-    }
-  }
-
-  async saveRepairAudit(
-    key: { chainId: string; deploymentId: string; registryAddress: string },
-    checkpoint: unknown,
-  ): Promise<void> {
-    const encoded = JSON.stringify(checkpoint);
-    if (encoded === undefined) throw new Error('Registry repair checkpoint is not serializable');
-    this.db.prepare(
-      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
-    ).run(this.repairKey(key), encoded);
   }
 
   private scope(key: { chainId: string; deploymentId: string }): string {

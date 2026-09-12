@@ -45,8 +45,9 @@ export class ContextGraphRegistryScanCursor {
   }
 
   hasDurableRepairAuditStore(): boolean {
-    return typeof this.input.store?.loadRepairAudit === 'function'
-      && typeof this.input.store?.saveRepairAudit === 'function';
+    const repairAudit = this.input.store?.repairAudit;
+    return typeof repairAudit?.load === 'function'
+      && typeof repairAudit?.save === 'function';
   }
 
   async loadWatermark(registryAddress: string): Promise<number | undefined> {
@@ -89,14 +90,14 @@ export class ContextGraphRegistryScanCursor {
   ): Promise<ContextGraphRegistryRepairAuditCheckpoint | undefined> {
     if (!this.hasDurableRepairAuditStore()) {
       throw new Error(
-        'ContextGraphNameRegistry repair requires paired durable loadRepairAudit/saveRepairAudit storage',
+        'ContextGraphNameRegistry repair requires a durable repairAudit load/save capability',
       );
     }
     const cacheKey = this.cacheKey(registryAddress);
     const cached = this.repairAudits.get(cacheKey);
     if (cached) return cached;
-    const load = this.input.store!.loadRepairAudit!;
-    const checkpoint = this.normalizeRepairAudit(await load.call(this.input.store, this.cursorKey(cacheKey)));
+    const repairAudit = this.input.store!.repairAudit!;
+    const checkpoint = this.normalizeRepairAudit(await repairAudit.load(this.cursorKey(cacheKey)));
     if (checkpoint) this.repairAudits.set(cacheKey, checkpoint);
     return checkpoint;
   }
@@ -107,14 +108,13 @@ export class ContextGraphRegistryScanCursor {
   ): Promise<void> {
     if (!this.hasDurableRepairAuditStore()) {
       throw new Error(
-        'ContextGraphNameRegistry repair requires paired durable loadRepairAudit/saveRepairAudit storage',
+        'ContextGraphNameRegistry repair requires a durable repairAudit load/save capability',
       );
     }
     const normalized = this.normalizeRepairAudit(checkpoint);
     if (!normalized) throw new Error('ContextGraphNameRegistry repair checkpoint is invalid');
     const cacheKey = this.cacheKey(registryAddress);
-    const save = this.input.store!.saveRepairAudit!;
-    await save.call(this.input.store, this.cursorKey(cacheKey), normalized);
+    await this.input.store!.repairAudit!.save(this.cursorKey(cacheKey), normalized);
     this.repairAudits.set(cacheKey, normalized);
   }
 

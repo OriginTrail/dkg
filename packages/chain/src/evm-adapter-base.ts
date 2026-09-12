@@ -65,6 +65,8 @@ import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_T
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
+import { ContextGraphRegistryRepairCoordinator } from
+  './context-graph-registry-repair-coordinator.js';
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
@@ -277,7 +279,7 @@ const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
  */
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
 
-type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
+export type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
 
 /**
  * B8 — decode the `CostCovered` event from a publish receipt's logs via the
@@ -935,9 +937,7 @@ export class EVMChainAdapterBase {
   }
 
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
-
-  /** Guards the independently checkpointed historical repair pass. */
-  protected contextGraphRegistryRepairScanActive = false;
+  protected readonly contextGraphRegistryRepairCoordinator: ContextGraphRegistryRepairCoordinator;
 
   /** Finalized authority scan watermarks owned by this adapter lifecycle. */
   protected readonly contextGraphAuthorityHistory: ContextGraphAuthorityHistoryCache;
@@ -1291,6 +1291,10 @@ export class EVMChainAdapterBase {
       deploymentId: this.deploymentId,
       store: config.contextGraphRegistryScanCursorStore,
     });
+    this.contextGraphRegistryRepairCoordinator = new ContextGraphRegistryRepairCoordinator(
+      this.contextGraphRegistryScanCursor,
+      CG_REGISTRY_REORG_BUFFER_BLOCKS,
+    );
     this.contextGraphAuthorityHistory = new ContextGraphAuthorityHistoryCache(
       undefined,
       config.localContextGraphAuthorityHistoryStore,
