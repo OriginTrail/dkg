@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { type Quad } from '@origintrail-official/dkg-storage';
-import { type SharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
@@ -47,7 +46,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
       contextGraphId: COVERAGE_CG,
       servedMeta: meta,
       cachedSnapshots: new Map([[cachedDigest, cachedQuads]]),
-      materializer: false,
+      materialization: 'disabled',
       fetchPage: async ({ phase }, fallback) => phase === 'snapshot'
         ? { ...fallback, completed: false, timedOut: true }
         : fallback,
@@ -379,12 +378,8 @@ describe('public SWM snapshot coverage (#2050)', () => {
       [validKa.digest, validKa.payload],
       [residueKa.digest, residueKa.payload],
     ]);
-    // The real materializer over a real store, as the complete-manifest
-    // scenarios use it — a hand-rolled stub that silently writes nothing would reproduce
-    // `resolved: 0` for a NEW reason and look identical to a pass. Wrapped in
-    // an explicitly delegating counter rather than a spread: `withKaWriteLock`
-    // is the gate everything else runs behind, and a wrapper that broke it
-    // would make "nothing was written" true for the wrong reason.
+    // Observe the real store-backed materializer without replacing its write
+    // behavior or requiring this scenario to implement the whole interface.
     const replacedGraphs: string[] = [];
     const { summary, snapshotFetches } = await runManagedSwmSyncHarness({
       ctx,
@@ -392,30 +387,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
       contextGraphId: COVERAGE_CG,
       servedMeta: meta,
       cachedSnapshots: cached,
-      materializer: (real): SharedMemorySnapshotMaterializer => ({
-        withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) => (
-          real.withKaWriteLock(contextGraphId, subGraphName, kaUal, fn)
-        ),
-        readStoredHead: (descriptor) => real.readStoredHead(descriptor),
-        isGraphAssetMaterialized: (descriptor) => real.isGraphAssetMaterialized(descriptor),
-        replaceGraph: async (graphUri, quads) => {
-          replacedGraphs.push(graphUri);
-          await real.replaceGraph(graphUri, quads);
-        },
-        replaceHeadMetadata: (contextGraphId, descriptor) => (
-          real.replaceHeadMetadata(contextGraphId, descriptor)
-        ),
-        selectRepairIdentity: (contextGraphId, descriptor) => (
-          real.selectRepairIdentity(contextGraphId, descriptor)
-        ),
-        repairHeadPreservingIdentity: (contextGraphId, descriptor, winnerShareOperationId) => (
-          real.repairHeadPreservingIdentity(contextGraphId, descriptor, winnerShareOperationId)
-        ),
-        preserveStoredIdentityForSkippedAsset: (contextGraphId, descriptor) => (
-          real.preserveStoredIdentityForSkippedAsset(contextGraphId, descriptor)
-        ),
-        replaceMetaForGraphAssets: (assets) => real.replaceMetaForGraphAssets(assets),
-      }),
+      onReplaceGraph: (graphUri) => { replacedGraphs.push(graphUri); },
     });
 
     // Both refs were served from cache, so the snapshot plane completed and

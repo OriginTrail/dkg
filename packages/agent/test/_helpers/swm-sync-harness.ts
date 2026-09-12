@@ -14,15 +14,13 @@ import { storeWorkspaceOperationPublicQuads } from
   '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from
   '@origintrail-official/dkg-storage';
+import type { SyncPhase } from '../../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../../src/sync/requester/page-fetch.js';
 import {
   runSharedMemorySync,
   type SharedMemorySyncSummary,
 } from '../../src/sync/requester/shared-memory-sync.js';
-import {
-  createSharedMemorySnapshotMaterializer,
-  type SharedMemorySnapshotMaterializer,
-} from '../../src/sync/requester/swm-snapshot-materializer.js';
+import { createSharedMemorySnapshotMaterializer } from '../../src/sync/requester/swm-snapshot-materializer.js';
 
 export class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
   readonly snapshots = new Map<string, Quad[]>();
@@ -43,7 +41,7 @@ export interface SwmSyncHarnessShare {
 
 export interface SwmSyncHarnessFetchInput {
   readonly contextGraphId: string;
-  readonly phase: 'data' | 'meta' | 'snapshot';
+  readonly phase: SyncPhase;
   readonly snapshotRef: string | undefined;
 }
 
@@ -60,32 +58,29 @@ export interface SwmSyncHarnessOptions {
     input: SwmSyncHarnessFetchInput,
     fallback: SyncPageResult,
   ) => Promise<SyncPageResult>;
-  /** Omit the real materializer, or intercept it while retaining its behavior. */
-  readonly materializer?: false | ((real: SharedMemorySnapshotMaterializer) => SharedMemorySnapshotMaterializer);
-  /** Intercept graph replacement while delegating to the real materializer. */
-  readonly onReplaceGraph?: () => void;
+  /** Use real store-backed materialization by default, or explicitly disable it. */
+  readonly materialization?: 'real' | 'disabled';
+  /** Runs before real graph replacement; throwing models a write failure. */
+  readonly onReplaceGraph?: (graphUri: string, quads: readonly Quad[]) => void;
 }
 
 export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
   const snapshotStore = new MemorySnapshotStore();
-  const realMaterializer = createSharedMemorySnapshotMaterializer({
-    store: options.store,
-    writeLocks: new Map<string, Promise<void>>(),
-    invalidateListContextGraphsCache: () => {},
-  });
+  const materializer = options.materialization === 'disabled' ? undefined
+    : createSharedMemorySnapshotMaterializer({
+      store: options.store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+  const onReplaceGraph = options.onReplaceGraph;
+  if (materializer && onReplaceGraph) {
+    const replaceGraph = materializer.replaceGraph.bind(materializer);
+    materializer.replaceGraph = async (graphUri, quads) => {
+      onReplaceGraph(graphUri, quads);
+      await replaceGraph(graphUri, quads);
+    };
+  }
   const servedMeta = options.servedMeta ?? options.served?.meta ?? [];
-  const intercepted: SharedMemorySnapshotMaterializer = options.onReplaceGraph
-    ? {
-      ...realMaterializer,
-      replaceGraph: async (graphUri, quads) => {
-        options.onReplaceGraph!();
-        return realMaterializer.replaceGraph(graphUri, quads);
-      },
-    }
-    : realMaterializer;
-  const materializer = options.materializer === false
-    ? undefined
-    : options.materializer?.(intercepted) ?? intercepted;
   const snapshotFetches: string[] = [];
   const run = async () => {
     const cachedSnapshots = options.cachedSnapshots
