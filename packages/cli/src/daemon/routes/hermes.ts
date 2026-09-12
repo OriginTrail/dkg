@@ -141,7 +141,7 @@ function isHermesApiKeyRejection(target: { protocol?: string }, status: number):
 }
 
 function hermesApiKeyRejectedDetails(
-  config: RequestContext['config'],
+  config: RequestContext['configStore']['current'],
   apiServerKey: string | undefined,
 ): string {
   // A 401/403 with a key forwarded means the key is wrong (realign/rotate); with
@@ -161,7 +161,7 @@ function hermesUnreachableDetails(
   details: string | undefined,
   targets: Array<{ protocol?: string }>,
   apiServerKey: string | undefined,
-  config: RequestContext['config'],
+  config: RequestContext['configStore']['current'],
 ): string | undefined {
   const needsKey = !apiServerKey && targets.some((t) => t.protocol === 'hermes-openai');
   if (!needsKey) return details;
@@ -174,7 +174,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
     req,
     res,
     agent,
-    config,
+    configStore: { current: config },
     memoryManager,
     bridgeAuthToken,
     extractionStatus,
@@ -549,7 +549,7 @@ export async function handleHermesRoutes(ctx: RequestContext): Promise<void> {
   }
 }
 
-function ensureHermesIntegrationEnabled(config: RequestContext['config'], res: RequestContext['res']): boolean {
+function ensureHermesIntegrationEnabled(config: RequestContext['configStore']['current'], res: RequestContext['res']): boolean {
   if (hasConfiguredLocalAgentChat(config, 'hermes')) return true;
   jsonResponse(res, 409, {
     error: 'Hermes local-agent integration is not enabled',

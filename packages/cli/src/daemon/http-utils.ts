@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../config-snapshot.js';
 // HTTP request/response utilities extracted from the legacy monolithic
 // `daemon.ts`. Body parsing, JSON validators, CORS resolution, the
 // loopback rate-limiter, plus small helpers used across route handlers.
@@ -27,7 +28,6 @@ import {
   StoreSchedulerBusyError,
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
-import type { DkgConfig } from '../config.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
 import type { CorsAllowlist } from './state.js';
@@ -1624,7 +1624,7 @@ export function readBodyBuffer(
 // ─── CORS / rate-limit / validation helpers ───────────────────────────
 
 export function buildCorsAllowlist(
-  config: DkgConfig,
+  config: Pick<ImmutableDkgConfig, 'corsOrigins' | 'apiHost'>,
   boundPort: number,
 ): CorsAllowlist {
   const raw = config.corsOrigins;
@@ -1672,7 +1672,7 @@ export class HttpRateLimiter {
   private _hits = new Map<string, { count: number; resetAt: number }>();
   private _timer: ReturnType<typeof setInterval>;
 
-  constructor(requestsPerMinute: number, exemptPaths: string[] = []) {
+  constructor(requestsPerMinute: number, exemptPaths: readonly string[] = []) {
     this._max = requestsPerMinute;
     this._exempt = new Set(exemptPaths);
     // Sweep expired buckets every 60s

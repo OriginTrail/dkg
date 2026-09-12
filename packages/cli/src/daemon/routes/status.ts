@@ -336,7 +336,6 @@ import {
 } from '../local-agents.js';
 
 import {
-  currentDaemonConfig,
   updateDaemonConfig,
   type RequestContext,
 } from './context.js';
@@ -708,7 +707,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     path,
     requestAgentAddress,
   } = ctx;
-  const config = currentDaemonConfig(ctx);
+  const config = ctx.configStore.current;
 
   if ((req.method === "GET" || req.method === "HEAD") && path === "/.well-known/skill.md") {
     // HEAD must return the same ETag/Cache-Control/Vary headers as GET so HTTP-cache-aware clients

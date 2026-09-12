@@ -396,7 +396,7 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
-    config,
+    configStore: { current: config },
     startedAt,
     dashDb,
     opWallets,

@@ -177,7 +177,7 @@ function unavailablePublisherAvailability(
  * shape is classified consistently for direct route tests and embedded users.
  */
 export function resolveAsyncPublisherAvailability(args: {
-  config: DkgConfig;
+  config: Pick<DkgConfig, 'publisher'>;
   runtime: PublisherRuntime | null;
   lifecycleReason?: AsyncPublisherUnavailableReason;
 }): AsyncPublisherAvailability {
@@ -324,7 +324,7 @@ export type PublisherState =
  * receive this whole discriminated value, so runtime and readiness cannot
  * disagree in a request context.
  */
-export function createInitialPublisherState(config: DkgConfig): PublisherState {
+export function createInitialPublisherState(config: Pick<DkgConfig, 'publisher'>): PublisherState {
   if (!isPublisherRuntimeEnabled(config.publisher)) {
     return {
       runtime: null,

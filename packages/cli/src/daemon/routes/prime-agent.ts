@@ -52,7 +52,7 @@ type PrimeAgentPersistRouteResult = {
 };
 
 function ensurePrimeAgentIntegrationEnabled(
-  config: RequestContext['config'],
+  config: RequestContext['configStore']['current'],
   res: RequestContext['res'],
 ): boolean {
   if (hasConfiguredLocalAgentChat(config, 'prime-agent')) return true;
@@ -260,7 +260,7 @@ async function readPayload(
 }
 
 export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void> {
-  const { req, res, config, bridgeAuthToken, path, requestAgentAddress } = ctx;
+  const { req, res, configStore: { current: config }, bridgeAuthToken, path, requestAgentAddress } = ctx;
 
   if (req.method === 'POST' && path === '/api/prime-agent-channel/send') {
     if (!ensurePrimeAgentIntegrationEnabled(config, res)) return;

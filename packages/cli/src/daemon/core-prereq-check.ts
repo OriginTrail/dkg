@@ -140,7 +140,7 @@ export interface CheckCoreRelayPrereqsOpts {
    * hostnames (`localhost`, `*.local`, `*.test`, `*.example`, `*.invalid`,
    * single-label) are excluded from indeterminate rescue.
    */
-  announceAddresses?: string[];
+  announceAddresses?: readonly string[];
   /**
    * Only `'core'` nodes get a degraded verdict — `'edge'` nodes are clients
    * and don't need to serve traffic, so the check is informational at most.

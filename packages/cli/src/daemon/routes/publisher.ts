@@ -486,7 +486,6 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     res,
     agent,
     publisherControl,
-    config,
     startedAt,
     dashDb,
     opWallets,

@@ -53,7 +53,6 @@ describe('#1890 publisher admin POST body boundary', () => {
       agent: {} as RequestContext['agent'],
       publisherControl,
       publisherState: { runtime: null, availability: { available: false, reason: 'publisher_disabled', retryable: false, operatorActionRequired: true } },
-      config: {} as RequestContext['config'],
       startedAt: 0,
       dashDb: {} as RequestContext['dashDb'],
       opWallets: { adminWallet: { address: '0x0', privateKey: '0x0' }, wallets: [] } as RequestContext['opWallets'],

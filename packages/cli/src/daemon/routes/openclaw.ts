@@ -426,7 +426,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
-    config,
+    configStore: { current: config },
     startedAt,
     dashDb,
     opWallets,

@@ -46,7 +46,7 @@ describe('configuration file publication', () => {
     });
     await writeConfigSettingsTransaction(path, 'new configuration\n', activate);
     expect(activate).toHaveBeenCalledOnce();
-    expect(await fs.readdir(directory)).toEqual(['config.json']);
+    expect(await fs.readdir(directory)).toEqual(['config.json', 'config.json.write-lock.sqlite']);
   });
 
   it('preserves the old file after a partial staging write fails', async () => {
@@ -58,7 +58,7 @@ describe('configuration file publication', () => {
     await expect(writeConfigSettingsTransaction(path, 'new configuration\n', activate)).rejects.toThrow('disk full');
     expect(activate).not.toHaveBeenCalled();
     expect(await fs.readFile(path, 'utf8')).toBe('old configuration\n');
-    expect(await fs.readdir(directory)).toEqual(['config.json']);
+    expect(await fs.readdir(directory)).toEqual(['config.json', 'config.json.write-lock.sqlite']);
   });
 
   it('preserves the old file if backup creation fails partway', async () => {
@@ -70,7 +70,7 @@ describe('configuration file publication', () => {
     await expect(writeConfigSettingsTransaction(path, 'new configuration\n', activate)).rejects.toThrow('backup full');
     expect(activate).not.toHaveBeenCalled();
     expect(await fs.readFile(path, 'utf8')).toBe('old configuration\n');
-    expect(await fs.readdir(directory)).toEqual(['config.json']);
+    expect(await fs.readdir(directory)).toEqual(['config.json', 'config.json.write-lock.sqlite']);
   });
 
   it('does not activate if atomic publication fails', async () => {
@@ -79,7 +79,7 @@ describe('configuration file publication', () => {
     await expect(writeConfigSettingsTransaction(path, 'new configuration\n', activate)).rejects.toThrow('rename denied');
     expect(activate).not.toHaveBeenCalled();
     expect(await fs.readFile(path, 'utf8')).toBe('old configuration\n');
-    expect(await fs.readdir(directory)).toEqual(['config.json']);
+    expect(await fs.readdir(directory)).toEqual(['config.json', 'config.json.write-lock.sqlite']);
   });
 
   it('restores the exact previous file if synchronous activation fails', async () => {
@@ -90,7 +90,7 @@ describe('configuration file publication', () => {
     })).rejects.toThrow('activation failed');
     if (process.platform !== 'win32') expect((await fs.stat(path)).mode & 0o777).toBe(0o640);
     expect(await fs.readFile(path, 'utf8')).toBe('old configuration\n');
-    expect(await fs.readdir(directory)).toEqual(['config.json']);
+    expect(await fs.readdir(directory)).toEqual(['config.json', 'config.json.write-lock.sqlite']);
   });
 
   it('restores an absent JSON file after activation fails', async () => {
@@ -98,7 +98,7 @@ describe('configuration file publication', () => {
     await expect(writeConfigSettingsTransaction(path, 'new configuration\n', () => {
       throw new Error('activation failed');
     })).rejects.toThrow('activation failed');
-    expect(await fs.readdir(directory)).toEqual([]);
+    expect(await fs.readdir(directory)).toEqual(['config.json.write-lock.sqlite']);
   });
 
   it('retains the recovery copy and reports both errors if rollback fails', async () => {
@@ -138,7 +138,7 @@ describe('configuration file publication', () => {
     expect(activationOrder).toEqual(['first']);
     expect(ordinaryCompleted).toBe(true);
     expect(await fs.readFile(path, 'utf8')).toBe('ordinary');
-    expect(await fs.readdir(directory)).toEqual(['config.json']);
+    expect(await fs.readdir(directory)).toEqual(['config.json', 'config.json.write-lock.sqlite']);
   });
 
   it.each(['same path', 'file symlink', 'directory symlink'] as const)(
@@ -292,7 +292,7 @@ describe('configuration file publication', () => {
     await writeConfigFile(path, 'persisted only\n');
     expect(await fs.readFile(path, 'utf8')).toBe('persisted only\n');
     expect(copyFile).not.toHaveBeenCalled();
-    expect(await fs.readdir(directory)).toEqual(['config.json']);
+    expect(await fs.readdir(directory)).toEqual(['config.json', 'config.json.write-lock.sqlite']);
   });
 
   it.each(['ordinary', 'transactional'] as const)(
@@ -362,7 +362,7 @@ describe('configuration file publication', () => {
       expect((await fs.lstat(path)).isSymbolicLink()).toBe(true);
       expect(await fs.readlink(path)).toBe(join('state', 'active-config.json'));
       expect(await fs.readFile(target, 'utf8')).toBe('old through symlink\n');
-      expect(await fs.readdir(targetDirectory)).toEqual(['active-config.json']);
+      expect(await fs.readdir(targetDirectory)).toEqual(['active-config.json', 'active-config.json.write-lock.sqlite']);
     },
   );
 

@@ -117,10 +117,10 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
     } as unknown as RequestContext['agent'],
     publisherControl: {} as RequestContext['publisherControl'],
     publisherState: unavailablePublisherState('publisher_startup_failed'),
-    config: {
+    configStore: { current: {
       epcis: { contextGraphId: 'epcis-test' },
       publisher: { enabled: true },
-    } as RequestContext['config'],
+    } } as RequestContext['configStore'],
     startedAt: 0,
     dashDb: {} as RequestContext['dashDb'],
     opWallets: { adminWallet: { address: '0x0', privateKey: '0x0' }, wallets: [] } as RequestContext['opWallets'],
@@ -147,7 +147,7 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
     ...overrides,
   };
   if (overrides.publisherState === undefined) {
-    context.publisherState = context.config.publisher?.enabled
+    context.publisherState = context.configStore.current.publisher?.enabled
       ? unavailablePublisherState('publisher_startup_failed')
       : unavailablePublisherState('publisher_disabled');
   }
@@ -202,10 +202,10 @@ describe('EPCIS async capture publisher readiness', () => {
 
   it('keeps disabled publisher config mapped to PublisherDisabled', async () => {
     const ctx = createContext({
-      config: {
+      configStore: { current: {
         epcis: { contextGraphId: 'epcis-test' },
         publisher: { enabled: false },
-      } as RequestContext['config'],
+      } } as RequestContext['configStore'],
     });
 
     await handleEpcisRoutes(ctx);
@@ -352,10 +352,10 @@ describe('EPCIS async capture publisher readiness', () => {
   it('returns 400 InvalidContent when neither body nor config supplies a contextGraphId', async () => {
     const ctx = createContext({
       req: createRequest({ epcisDocument: VALID_OBJECT_EVENT_DOC }),
-      config: {
+      configStore: { current: {
         epcis: {},
         publisher: { enabled: true },
-      } as RequestContext['config'],
+      } } as RequestContext['configStore'],
       publisherState: readyPublisherState(),
     });
 
@@ -506,10 +506,10 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
 
   it('returns 400 InvalidContent when neither query nor config supplies a contextGraphId', async () => {
     const ctx = createGetContext('/api/epcis/events', {
-      config: {
+      configStore: { current: {
         epcis: {},
         publisher: { enabled: true },
-      } as RequestContext['config'],
+      } } as RequestContext['configStore'],
     });
 
     await handleEpcisRoutes(ctx);

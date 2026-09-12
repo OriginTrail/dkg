@@ -2340,7 +2340,7 @@ export function validateStoreConfig(config: StoreConfigValidationInput, platform
  * re-prompt instead of exiting.
  */
 export function exitOnStoreConfigErrors(
-  config: DkgConfig,
+  config: StoreConfigValidationInput,
   log: (msg: string) => void,
 ): void {
   const errors = validateStoreConfig(config);

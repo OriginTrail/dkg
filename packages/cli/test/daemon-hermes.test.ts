@@ -152,7 +152,7 @@ function makeHermesRouteContext(
       req,
       res,
       agent: { store: { query: vi.fn(async () => ({ bindings: [] })) } },
-      config: makeConfig({
+      configStore: { current: makeConfig({
         localAgentIntegrations: {
           hermes: {
             enabled: true,
@@ -161,7 +161,7 @@ function makeHermesRouteContext(
           },
         },
         ...configOverrides,
-      }),
+      }) },
       memoryManager,
       bridgeAuthToken: 'bridge-token',
       extractionStatus: new Map(),
@@ -1448,7 +1448,6 @@ describe('Hermes local-agent registry lifecycle', () => {
       await handleLocalAgentsRoutes({
         req,
         res,
-        config,
         configStore,
         path: '/api/local-agent-integrations/hermes',
       } as any);
@@ -1500,7 +1499,6 @@ describe('Hermes local-agent registry lifecycle', () => {
       await handleLocalAgentsRoutes({
         req,
         res,
-        config,
         configStore,
         path: '/api/local-agent-integrations/hermes',
       } as any);
@@ -1547,7 +1545,6 @@ describe('Hermes local-agent registry lifecycle', () => {
       await handleLocalAgentsRoutes({
         req,
         res,
-        config,
         configStore,
         path: '/api/local-agent-integrations/hermes',
       } as any);
@@ -1967,7 +1964,7 @@ describe('Hermes daemon routes', () => {
       req,
       res,
       agent: { store: { query: vi.fn(async () => ({ bindings: [] })) } },
-      config,
+      configStore: { current: config },
       memoryManager: {
         hasChatTurn: vi.fn(async () => false),
         storeChatExchange: vi.fn(async () => {}),

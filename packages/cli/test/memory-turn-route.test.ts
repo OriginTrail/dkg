@@ -35,7 +35,7 @@ function buildTurnCtx(body: unknown, agent: Record<string, any>, requestAgentAdd
     res,
     agent,
     publisherControl: {},
-    config: {},
+    configStore: { current: {} },
     startedAt: Date.now(),
     dashDb: {},
     opWallets: {},

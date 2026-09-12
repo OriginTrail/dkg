@@ -923,16 +923,21 @@ export async function validateStartupGenesis(
 export async function runDaemon(foreground: boolean): Promise<void> {
   await ensureDkgDir();
   const shutdownPolicy = resolveShutdownPolicy(process.env.DKG_SHUTDOWN_HARD_TIMEOUT_MS);
+  let configStore: DkgConfigStore | undefined;
   try {
-    const config = await loadConfig();
-    configureKaPublishLifecycleDebugLogging(config);
+    const files = new DkgHomeFiles();
+    // Loading under the ownership lock includes completed writes from another
+    // process and prevents a raw writer crossing daemon startup.
+    configStore = await DkgConfigStore.open(files, () => files.loadConfig());
+    configureKaPublishLifecycleDebugLogging(configStore.current);
     const startedAt = Date.now();
 
     // Claim PID + shutdown policy together so lifecycle commands never have
     // to coordinate independent ownership files.
     await daemonRuntimeState.claim(process.pid, shutdownPolicy);
-    await runDaemonInner(foreground, config, startedAt, shutdownPolicy);
+    await runDaemonInner(foreground, configStore, startedAt, shutdownPolicy);
   } catch (err) {
+    await configStore?.close().catch(() => {});
     await removeOwnedDaemonRuntimeState().catch(() => {});
     throw err;
   }
@@ -1094,43 +1099,44 @@ export async function bootstrapConfiguredContextGraphs(input: {
 
 export async function runDaemonInner(
   foreground: boolean,
-  config: Awaited<ReturnType<typeof loadConfig>>,
+  config: Awaited<ReturnType<typeof loadConfig>> | DkgConfigStore,
   startedAt: number,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
+  const configStore = config instanceof DkgConfigStore ? config : await DkgConfigStore.open(new DkgHomeFiles(), config);
   try {
     await runDaemonInnerWithStartupOwnership(
       foreground,
-      config,
+      configStore,
       startedAt,
       (cleanup) => { cleanupOwnedStartupResources = cleanup; },
       shutdownPolicy,
     );
   } catch (error) {
-    await cleanupOwnedStartupResources?.();
+    try { await cleanupOwnedStartupResources?.(); }
+    finally { await configStore.close(); }
     throw error;
   }
 }
 
 async function runDaemonInnerWithStartupOwnership(
   foreground: boolean,
-  config: Awaited<ReturnType<typeof loadConfig>>,
+  configStore: DkgConfigStore,
   startedAt: number,
   registerStartupFailureCleanup: (cleanup: () => Promise<void>) => void,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
-  configureKaPublishLifecycleDebugLogging(config);
-  const configStore = await DkgConfigStore.open(new DkgHomeFiles(), config);
-  config = mutableConfigSnapshot(configStore.current);
+  const startupConfig = configStore.current;
+  configureKaPublishLifecycleDebugLogging(startupConfig);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
-      config.contextGraphSubscriptionRehydrationEnabled,
+      startupConfig.contextGraphSubscriptionRehydrationEnabled,
       process.env.DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED,
     );
   // Resolve the local collector toggle before constructing daemon resources.
   // This is independent from OTLP metrics export configuration.
-  const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
+  const metricsCollectorConfig = resolveMetricsCollectorConfig(startupConfig);
   const logFile = logPath();
   // Rotate before installing the in-process stdout/stderr tee so startup does
   // not race the truncation with fresh log appends. Existing logs survive
@@ -1251,7 +1257,7 @@ async function runDaemonInnerWithStartupOwnership(
   };
   process.on("unhandledRejection", startupUnhandledRejectionHandler);
 
-  const role = config.nodeRole ?? "edge";
+  const role = startupConfig.nodeRole ?? "edge";
 
   const banner = `
 ██████╗ ███████╗ ██████╗███████╗███╗   ██╗████████╗██████╗  █████╗ ██╗     ██╗███████╗███████╗██████╗
@@ -1283,7 +1289,7 @@ async function runDaemonInnerWithStartupOwnership(
   const versionTag = nodeCommit
     ? `v${nodeVersion}, ${nodeCommit}`
     : `v${nodeVersion}`;
-  log(`Starting DKG ${role} node "${config.name}" (${versionTag})...`);
+  log(`Starting DKG ${role} node "${startupConfig.name}" (${versionTag})...`);
 
   // RFC-41 §4.9 / §4.3: structured startup log lines for telemetry.
   // The doctor's state summary correlates these with /api/status —
@@ -1315,7 +1321,7 @@ async function runDaemonInnerWithStartupOwnership(
     log(`[dkg-build-info] WARNING: failed to emit startup telemetry: ${String(err)}`);
   }
 
-  const storageAckTiming = resolveStorageAckTiming(config.storageAck);
+  const storageAckTiming = resolveStorageAckTiming(startupConfig.storageAck);
   // GH#2270 — fail the boot here, at the same boundary as StorageACK timing, on
   // a bad publisher retry knob — but ONLY when the publisher will actually run:
   // with `publisher.enabled` false no retry scheduler is constructed, and a
@@ -1327,11 +1333,11 @@ async function runDaemonInnerWithStartupOwnership(
   // announced only by one deferred-startup log line.
   // Validate exactly the configs that will construct a publisher — the
   // shared predicate is the same one the runner's start gates consult.
-  if (isPublisherRuntimeEnabled(config.publisher)) {
-    resolvePublisherRetryTuning(config.publisher);
+  if (isPublisherRuntimeEnabled(startupConfig.publisher)) {
+    resolvePublisherRetryTuning(startupConfig.publisher);
   }
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
-    config,
+    startupConfig,
     loadNetworkConfig,
   );
   if (!network) {
@@ -1347,25 +1353,23 @@ async function runDaemonInnerWithStartupOwnership(
   // Resolve the effective chain before activating RFC-64 so a stale/cross-
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
-  const chainBase = resolveChainConfig(config, network);
-  const unifiedRfc64Disabled = config.rfc64Catalog?.enabled === false;
+  const chainBase = resolveChainConfig(startupConfig, network);
+  const unifiedRfc64Disabled = startupConfig.rfc64Catalog?.enabled === false;
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
-    unifiedRfc64Disabled
-      ? {
-          rfc64Catalog: config.rfc64Catalog,
-          // The unified rollback is authoritative at the daemon boundary too.
-          // Do not let stale deprecated controls extend sync scope, fail
-          // validation, or reach the agent while the replacement is disabled.
-          rfc64PublicCatalog: undefined,
-        }
-      : config,
+    {
+      // The protocol resolver accepts mutable input; give this boot-only
+      // consumer a detached copy, preserving the immutable startup snapshot.
+      ...mutableConfigSnapshot(startupConfig),
+      // The unified rollback overrides stale deprecated controls too.
+      ...(unifiedRfc64Disabled ? { rfc64PublicCatalog: undefined } : {}),
+    },
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
   );
   const rfc64Catalog = rfc64CatalogActivations.catalog;
   const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
   const rfc64RollbackTimestamp = new Date().toISOString();
   const explicitDisabled = unifiedRfc64Disabled
-    || (config.rfc64Catalog === undefined && config.rfc64PublicCatalog?.enabled === false);
+    || (startupConfig.rfc64Catalog === undefined && startupConfig.rfc64PublicCatalog?.enabled === false);
   if (explicitDisabled) {
     log(
       `[rfc64-catalog-rollback] WARNING source=operator-override reason=deprecated-enabled-false `
@@ -1390,7 +1394,7 @@ async function runDaemonInnerWithStartupOwnership(
   }
   const syncContextGraphs = [
     ...new Set([
-      ...resolveContextGraphs(config),
+      ...resolveContextGraphs(startupConfig),
       ...resolveNetworkDefaultContextGraphs(network),
       // Cores host the public corpus and therefore activate the complete
       // accepted manifest. Edges activate RFC-64 only through explicit
@@ -1415,7 +1419,7 @@ async function runDaemonInnerWithStartupOwnership(
   // silently would look like data loss to the operator.
   const backendSwitch = detectBackendSwitch({
     dataDir: dkgDir(),
-    currentBackend: config.store?.backend ?? 'oxigraph-worker',
+    currentBackend: startupConfig.store?.backend ?? 'oxigraph-worker',
     acceptStoreReset: process.env.DKG_ACCEPT_STORE_RESET === '1',
     log,
   });
@@ -1440,7 +1444,7 @@ async function runDaemonInnerWithStartupOwnership(
     process.exit(1);
   }
 
-  exitOnStoreConfigErrors(config, log);
+  exitOnStoreConfigErrors(startupConfig, log);
 
   // Managed local Oxigraph server (`store.backend: 'oxigraph-server'`,
   // Release 2 opt-in). Fetch/verify the pinned binary, spawn a loopback
@@ -1454,7 +1458,7 @@ async function runDaemonInnerWithStartupOwnership(
   let managedOxigraph: OxigraphServerHandle | null = null;
   let managed: Awaited<ReturnType<typeof startManagedOxigraph>> = null;
   try {
-    managed = await startManagedOxigraph({ config, dataDir: dkgDir(), log });
+    managed = await startManagedOxigraph({ config: startupConfig, dataDir: dkgDir(), log });
     if (managed) {
       managedOxigraph = managed.handle;
       // Every remaining fatal boot path (config validation, store health
@@ -1485,17 +1489,17 @@ async function runDaemonInnerWithStartupOwnership(
   // For the directory-backed blob/snapshot stores we use the managed
   // defaults (the rewritten sparql-http backend has no `options.path` to
   // infer a directory from, unlike the local Oxigraph backend).
-  const runtimeStore = managed?.storeConfig ?? config.store;
+  const runtimeStore = managed?.storeConfig ?? startupConfig.store;
   const runtimeLargeLiteralStorage =
-    managed?.largeLiteralStorage ?? config.largeLiteralStorage;
+    managed?.largeLiteralStorage ?? startupConfig.largeLiteralStorage;
   const runtimeSnapshotStorage =
-    managed?.sharedMemoryPublicSnapshotStorage ?? config.sharedMemoryPublicSnapshotStorage;
+    managed?.sharedMemoryPublicSnapshotStorage ?? startupConfig.sharedMemoryPublicSnapshotStorage;
   // Config view used only for the boot-time store validation/health steps
   // below: same as `config` but with the runtime store/blob/snapshot values
   // swapped in, so a managed config validates against what actually runs.
-  const runtimeStoreConfig: DkgConfig = managed
+  const runtimeStoreConfig = managed
     ? {
-        ...config,
+        ...startupConfig,
         store: runtimeStore
           ? {
               backend: runtimeStore.backend,
@@ -1506,7 +1510,7 @@ async function runDaemonInnerWithStartupOwnership(
         largeLiteralStorage: runtimeLargeLiteralStorage,
         sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
       }
-    : config;
+    : startupConfig;
 
   // Refuse to start on invalid external-backend config (missing URL,
   // missing blob/snapshot directory). This fires before the health
@@ -1542,7 +1546,7 @@ async function runDaemonInnerWithStartupOwnership(
     // namespace silently corrupt each other. Fires BEFORE
     // chainResetWipe so a mismatched tag never triggers a wipe of
     // someone else's data.
-    await ensureStoreIdentityOrExit(runtimeStore, config.name, log, 'startup');
+    await ensureStoreIdentityOrExit(runtimeStore, startupConfig.name, log, 'startup');
   }
 
   const wipeResult = await chainResetWipe({
@@ -1555,7 +1559,7 @@ async function runDaemonInnerWithStartupOwnership(
     // Honour operator's `randomSampling.walPath` override; the prover
     // writes its WAL there, so a fresh chain reset must wipe that file
     // (not the default ~/.dkg/random-sampling.wal which would be empty).
-    randomSamplingWalPath: config.randomSampling?.walPath,
+    randomSamplingWalPath: startupConfig.randomSampling?.walPath,
     // For external triple-store backends, the wipe extends from local
     // files to a SPARQL DROP/DELETE on the remote endpoint; otherwise
     // operators with a chain-reset marker bump would keep stale V10 data
@@ -1571,7 +1575,7 @@ async function runDaemonInnerWithStartupOwnership(
     // Re-tag even when cleanup or marker persistence failed: the remote
     // request can take effect independently of those local outcomes.
     if (isExternalBackend(runtimeStore?.backend)) {
-      await ensureStoreIdentityOrExit(runtimeStore, config.name, log, 'post-wipe');
+      await ensureStoreIdentityOrExit(runtimeStore, startupConfig.name, log, 'post-wipe');
     }
   }
 
@@ -1611,7 +1615,7 @@ async function runDaemonInnerWithStartupOwnership(
   // intent: the operator knows about the rpcUrl iff they set it
   // themselves.
   if (chainBase?.type !== 'mock' && chainBase?.rpcUrl) {
-    const operatorSetRpc = config.chain?.rpcUrl !== undefined;
+    const operatorSetRpc = startupConfig.chain?.rpcUrl !== undefined;
     if (!operatorSetRpc && isLikelyPublicRpc(chainBase.rpcUrl)) {
       log(
         `[warn] chain.rpcUrl is using the network-default public endpoint (${chainBase.rpcUrl}). ` +
@@ -1628,13 +1632,13 @@ async function runDaemonInnerWithStartupOwnership(
   // cross-network leakage into testnet).
   let relayPeers: string[] | undefined;
   let usingNetworkRelays = false;
-  if (config.relay === "none") {
+  if (startupConfig.relay === "none") {
     relayPeers = undefined;
     log(
       'Relay disabled (config.relay = "none") — this node will not connect to any relay',
     );
-  } else if (config.relay) {
-    relayPeers = [config.relay];
+  } else if (startupConfig.relay) {
+    relayPeers = [startupConfig.relay];
   } else if (network?.relays?.length) {
     relayPeers = network.relays;
     usingNetworkRelays = true;
@@ -1653,10 +1657,10 @@ async function runDaemonInnerWithStartupOwnership(
   // rc.9 PR-7 — operator-preferred relays. See `mergePreferredRelays`
   // JSDoc for the merge semantics; this block is just the lifecycle
   // call site + the operator-visible log line.
-  if (config.relay !== "none") {
+  if (startupConfig.relay !== "none") {
     const result = mergePreferredRelays({
       envValue: process.env.DKG_RELAY_PREFERRED,
-      configPreferred: config.preferredRelays,
+      configPreferred: startupConfig.preferredRelays,
       networkAndConfigRelays: relayPeers,
     });
     if (result.preferredCount > 0) {
@@ -1669,8 +1673,8 @@ async function runDaemonInnerWithStartupOwnership(
 
   if (
     !relayPeers?.length &&
-    !config.bootstrapPeers?.length &&
-    config.relay !== "none"
+    !startupConfig.bootstrapPeers?.length &&
+    startupConfig.relay !== "none"
   ) {
     log(
       'No relay or bootstrap peers configured. Set "relay" or "bootstrapPeers" in ~/.dkg/config.json or run from repo so network/testnet.json is found.',
@@ -1710,14 +1714,14 @@ async function runDaemonInnerWithStartupOwnership(
         ? `${chainBase.chainId}:hub=none`
         : 'none:hub=none';
 
-  if (role === 'core' && config.core?.allowDegradedRelay === false) {
+  if (role === 'core' && startupConfig.core?.allowDegradedRelay === false) {
     const hostInterfaces = Object.values(osModule.networkInterfaces())
       .flat()
       .filter((i): i is NetworkInterfaceInfo => i !== undefined);
     const prereq = checkCoreRelayPrereqs({
-      listenAddresses: [`/ip4/0.0.0.0/tcp/${config.listenPort ?? 0}`],
+      listenAddresses: [`/ip4/0.0.0.0/tcp/${startupConfig.listenPort ?? 0}`],
       hostInterfaces,
-      announceAddresses: config.announceAddresses ?? [],
+      announceAddresses: startupConfig.announceAddresses ?? [],
       nodeRole: 'core',
     });
     if (prereq.looksDegraded) {
@@ -1762,7 +1766,7 @@ async function runDaemonInnerWithStartupOwnership(
   // OT-RFC-59 §6 P0: the durable era guard MUST back the changelog when enabled —
   // it lives in node-ui.db (survives a `store.nq` RDF restore) so a restore/rollback
   // rotates the era and forces peers to full-resync instead of silently skipping.
-  const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
+  const changelogEraGuard = startupConfig.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
   // DashboardDB is process-owned local state under the same integrity boundary
@@ -1795,13 +1799,13 @@ async function runDaemonInnerWithStartupOwnership(
   const agentStoreConfig = buildAgentRuntimeStoreConfig({
     runtimeStore,
     managedStore: managed?.storeConfig,
-    changelogEnabled: Boolean(config.store?.changelog),
+    changelogEnabled: Boolean(startupConfig.store?.changelog),
     changelogEraGuard,
   });
 
   const agent = await DKGAgent.create({
     kaNumberAllocator,
-    name: config.name,
+    name: startupConfig.name,
     genesisId: network?.genesisId,
     networkIdentity: {
       genesisId: network?.genesisId,
@@ -1810,46 +1814,46 @@ async function runDaemonInnerWithStartupOwnership(
       networkConfigName: selectedNetworkConfig,
     },
     framework: "DKG",
-    listenPort: config.listenPort,
+    listenPort: startupConfig.listenPort,
     dataDir: dkgDir(),
-    bootstrapPeers: config.bootstrapPeers,
+    bootstrapPeers: startupConfig.bootstrapPeers?.slice(),
     relayPeers,
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
-    announceAddresses: config.announceAddresses,
+    announceAddresses: startupConfig.announceAddresses?.slice(),
     nodeRole: role,
-    relayServerCapacity: config.relayServerCapacity,
-    relayReservationCount: config.relayReservationCount,
-    logging: config.logging,
+    relayServerCapacity: startupConfig.relayServerCapacity,
+    relayReservationCount: startupConfig.relayReservationCount,
+    logging: startupConfig.logging,
     // `dkg/<semver>` convention: broadcast our release on every libp2p
     // identify exchange so remote operators can answer "which DKG
     // release is each peer running?" via /api/peer-info instead of
     // having to guess from contract registrations. Travels the wire
     // as libp2p's `AgentVersion` PB field (their naming, not ours).
     nodeVersion: `dkg/${nodeVersion}`,
-    ...pickNetworkTunables(config.network ?? {}),
-    agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
+    ...pickNetworkTunables(startupConfig.network ?? {}),
+    agentProfileHeartbeatMs: startupConfig.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
     // The agent owns authoritative activation against the chain adapter it
     // actually constructed. This daemon-side resolved value is only a
     // fail-fast/status preview and must not become a second runtime contract.
-    rfc64PublicCatalogActivation: config.rfc64PublicCatalog === undefined
+    rfc64PublicCatalogActivation: startupConfig.rfc64PublicCatalog === undefined
       ? undefined
       : rfc64PublicCatalog.enabled
-        ? config.rfc64PublicCatalog
+        ? mutableConfigSnapshot(startupConfig).rfc64PublicCatalog
         : { enabled: false },
-    rfc64CatalogActivation: config.rfc64Catalog === undefined
+    rfc64CatalogActivation: startupConfig.rfc64Catalog === undefined
       ? undefined
       : rfc64Catalog.enabled
-        ? config.rfc64Catalog
+        ? mutableConfigSnapshot(startupConfig).rfc64Catalog
         : { enabled: false },
-    maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
+    maxRehydratedContextGraphSubscriptions: startupConfig.maxRehydratedContextGraphSubscriptions,
     contextGraphSubscriptionRehydrationEnabled,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
     // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext
     // strip kill-switch) from config.json. Without this forward the whole
     // `swmHostMode` config is inert and only in-agent defaults apply, so an
     // operator could not toggle the strip via config (the rung-1 inert-flag bug).
-    swmHostMode: config.swmHostMode,
+    swmHostMode: startupConfig.swmHostMode,
     // OT-RFC-59 changelog intent and its durable era guard are already folded
     // into this final store config. Managed Oxigraph retains its opaque runtime
     // authority through the agent's actual createTripleStore boundary.
@@ -1857,29 +1861,29 @@ async function runDaemonInnerWithStartupOwnership(
     largeLiteralStorage: runtimeLargeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage,
     publicSnapshotStore,
-    syncSharedMemoryOnConnect: config.syncSharedMemoryOnConnect,
-    syncReconcilerEnabled: config.syncReconcilerEnabled,
-    syncReconcilerIntervalMs: config.syncReconcilerIntervalMs,
-    syncStalenessThresholdMs: config.syncStalenessThresholdMs,
-    syncBackoffBaseMs: config.syncBackoffBaseMs,
-    syncBackoffMaxMs: config.syncBackoffMaxMs,
-    syncBackoffJitter: config.syncBackoffJitter,
-    syncOnConnectEnabled: config.syncOnConnectEnabled,
-    syncSystemContextGraphsOnConnect: config.syncSystemContextGraphsOnConnect,
-    durableSyncEnabled: config.durableSyncEnabled,
-    syncGlobalMaxInflight: config.syncGlobalMaxInflight,
-    syncGlobalLimit: config.syncGlobalLimit,
-    syncGlobalQueueLimit: config.syncGlobalQueueLimit,
-    syncAdmission: config.syncAdmission,
-    syncResponderSnapshotLimits: config.syncResponderSnapshotLimits,
-    syncContextGraphPriorities: config.syncContextGraphPriorities,
-    storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
-    swmAwaitCuratorAck: config.swmAwaitCuratorAck,
+    syncSharedMemoryOnConnect: startupConfig.syncSharedMemoryOnConnect,
+    syncReconcilerEnabled: startupConfig.syncReconcilerEnabled,
+    syncReconcilerIntervalMs: startupConfig.syncReconcilerIntervalMs,
+    syncStalenessThresholdMs: startupConfig.syncStalenessThresholdMs,
+    syncBackoffBaseMs: startupConfig.syncBackoffBaseMs,
+    syncBackoffMaxMs: startupConfig.syncBackoffMaxMs,
+    syncBackoffJitter: startupConfig.syncBackoffJitter,
+    syncOnConnectEnabled: startupConfig.syncOnConnectEnabled,
+    syncSystemContextGraphsOnConnect: startupConfig.syncSystemContextGraphsOnConnect,
+    durableSyncEnabled: startupConfig.durableSyncEnabled,
+    syncGlobalMaxInflight: startupConfig.syncGlobalMaxInflight,
+    syncGlobalLimit: startupConfig.syncGlobalLimit,
+    syncGlobalQueueLimit: startupConfig.syncGlobalQueueLimit,
+    syncAdmission: startupConfig.syncAdmission,
+    syncResponderSnapshotLimits: startupConfig.syncResponderSnapshotLimits,
+    syncContextGraphPriorities: startupConfig.syncContextGraphPriorities,
+    storageAckHandlerDeadlineMs: startupConfig.storageAckHandlerDeadlineMs,
+    swmAwaitCuratorAck: startupConfig.swmAwaitCuratorAck,
     // #1836 — forward the operator retry budget to the agent so its own
     // publishAsync enqueue (EPCIS / Kafka) stamps publisher.maxRetries too.
-    publisherMaxRetries: config.publisher?.maxRetries,
-    syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
-    queryAccess: config.queryAccess,
+    publisherMaxRetries: startupConfig.publisher?.maxRetries,
+    syncAgentsMeta: resolveSyncAgentsMeta(startupConfig.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
+    queryAccess: mutableConfigSnapshot(startupConfig).queryAccess,
     chainAdapter: mockChainAdapter,
     // Only forward chain to the agent when both required fields resolved.
     // resolveChainConfig() may return a partial block if neither config nor
@@ -1891,12 +1895,12 @@ async function runDaemonInnerWithStartupOwnership(
         : {}),
       operationalKeys: opWallets.wallets.map((w) => w.privateKey),
     } : undefined,
-    sharedMemoryTtlMs: resolveSharedMemoryTtlMs(config),
+    sharedMemoryTtlMs: resolveSharedMemoryTtlMs(startupConfig),
     // RFC ka-metadata-trim P3.3 — lifecycle PROV event writes (default true).
-    metadataProvenanceEvents: config.metadata?.provenanceEvents,
-    randomSamplingWalPath: config.randomSampling?.walPath,
-    randomSamplingTickIntervalMs: config.randomSampling?.tickIntervalMs,
-    randomSamplingUseWorkerThread: config.randomSampling?.useWorkerThread,
+    metadataProvenanceEvents: startupConfig.metadata?.provenanceEvents,
+    randomSamplingWalPath: startupConfig.randomSampling?.walPath,
+    randomSamplingTickIntervalMs: startupConfig.randomSampling?.tickIntervalMs,
+    randomSamplingUseWorkerThread: startupConfig.randomSampling?.useWorkerThread,
     storageAckTiming,
     syncCheckpointStore,
     changelogCursorStore,
@@ -2070,7 +2074,7 @@ async function runDaemonInnerWithStartupOwnership(
       commitAutomaticApproval: async (input) =>
         dashDb.commitContextGraphAutomaticApproval(input),
     },
-    messengerOutboxDrain: config.messengerOutboxDrain,
+    messengerOutboxDrain: startupConfig.messengerOutboxDrain,
     messengerStores: {
       idempotencyStore: messengerIdempotencyStore,
       outboxStore: messengerOutboxStore,
@@ -2098,7 +2102,7 @@ async function runDaemonInnerWithStartupOwnership(
     },
   });
 
-  let publisherState: PublisherState = createInitialPublisherState(config);
+  let publisherState: PublisherState = createInitialPublisherState(startupConfig);
   // Holds the running async-promote worker lifecycle (PR #3 of the
   // async-promote-queue series). Initialised in `startPostApiPublishing`
   // after the API is up so a recoverOnStartup hiccup never blocks boot;
@@ -2112,14 +2116,14 @@ async function runDaemonInnerWithStartupOwnership(
     // #1836 — the daemon admission instance MUST carry the operator's retry
     // budget; without it every API-admitted VM-publish job was stamped with the
     // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
-    maxRetries: config.publisher?.maxRetries,
+    maxRetries: startupConfig.publisher?.maxRetries,
     // GH#2270 — the retry knobs must reach this instance too: it derives the `retryState`
     // the job-detail routes serve. A DORMANT publisher block is deliberately not resolved
     // (a typo there must not stop a node that publishes nothing — the boot gate above skips
     // it for the same reason); with no runtime there is no automatic lane at all, which is
     // exactly what `autoRetryEnabled: false` makes the projection report.
-    retryTuning: isPublisherRuntimeEnabled(config.publisher)
-      ? resolvePublisherRetryTuning(config.publisher)
+    retryTuning: isPublisherRuntimeEnabled(startupConfig.publisher)
+      ? resolvePublisherRetryTuning(startupConfig.publisher)
       : { autoRetryEnabled: false },
     // GH#2270 follow-up (🔴 3822987482) — admission asks the LIVE runtime whether an automatic
     // exit exists for this job's wallet and operation, instead of inferring "no" from its own
@@ -2148,7 +2152,7 @@ async function runDaemonInnerWithStartupOwnership(
   // the legacy "accept all authenticated peers" behaviour is preserved.
   agent.setChatAcl(
     buildChatAcl({
-      config: config.chat?.acl,
+      config: startupConfig.chat?.acl,
       dashDb,
       getLocalPeerId: () => agent.peerId,
       log,
@@ -2160,8 +2164,8 @@ async function runDaemonInnerWithStartupOwnership(
   // restore open skills with `messaging.openSkills: true`, or allowlist specific
   // peers via `messaging.skillAllowedPeers`.
   {
-    const openSkills = config.messaging?.openSkills === true;
-    const allowedSkillPeers = new Set(config.messaging?.skillAllowedPeers ?? []);
+    const openSkills = startupConfig.messaging?.openSkills === true;
+    const allowedSkillPeers = new Set(startupConfig.messaging?.skillAllowedPeers ?? []);
     agent.setSkillAcl((senderPeerId: string) => {
       if (openSkills) return { accept: true };
       if (allowedSkillPeers.has(senderPeerId)) return { accept: true };
@@ -2243,9 +2247,9 @@ async function runDaemonInnerWithStartupOwnership(
   // durable membership record for proof that catch-up completed.
   await bootstrapConfiguredContextGraphs({
     agent,
-    configuredContextGraphIds: resolveContextGraphs(config),
+    configuredContextGraphIds: resolveContextGraphs(startupConfig),
     networkDefaultContextGraphIds: resolveNetworkDefaultContextGraphs(network),
-    localBootstrapContextGraphIds: config.localBootstrapContextGraphs,
+    localBootstrapContextGraphIds: startupConfig.localBootstrapContextGraphs,
     readinessStore: dashDb,
     log,
   });
@@ -2314,11 +2318,11 @@ async function runDaemonInnerWithStartupOwnership(
         const prereq = checkCoreRelayPrereqs({
           listenAddresses: resolvedMultiaddrs,
           hostInterfaces,
-          announceAddresses: config.announceAddresses ?? [],
+          announceAddresses: startupConfig.announceAddresses ?? [],
           nodeRole: 'core',
         });
         if (prereq.looksDegraded) {
-          const allowDegraded = config.core?.allowDegradedRelay !== false;
+          const allowDegraded = startupConfig.core?.allowDegradedRelay !== false;
           const verb = allowDegraded ? 'WARNING' : 'FATAL';
           log(
             `[CORE-PREREQ] ${verb}: this Core node looks degraded as a relay. ` +
@@ -2383,7 +2387,7 @@ async function runDaemonInnerWithStartupOwnership(
     }, 0);
     if (profileTimer.unref) profileTimer.unref();
 
-    const promoteWorkerConfig = config.promoteQueue;
+    const promoteWorkerConfig = startupConfig.promoteQueue;
     promoteWorkerLifecycle = startPromoteWorkerDaemonLifecycle({
       agent,
       log,
@@ -2402,7 +2406,7 @@ async function runDaemonInnerWithStartupOwnership(
       void (async () => {
         const outcome = await startPublisherRuntimeWithOutcome({
           dataDir: dkgDir(),
-          config,
+          config: mutableConfigSnapshot(startupConfig),
           store: agent.store,
           keypair: agent.wallet.keypair,
           chainBase: publisherChainBase,
@@ -2462,7 +2466,7 @@ async function runDaemonInnerWithStartupOwnership(
   //   - undefined → don't touch on-chain (preserve manual admin flips)
   const relayRegistryTimer = setTimeout(() => {
     void agent
-      .publishRelayRegistry({ relayCapable: config.relayCapable })
+      .publishRelayRegistry({ relayCapable: startupConfig.relayCapable })
       .catch((err: unknown) => {
         log(
           `Relay registry publish failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -2507,8 +2511,8 @@ async function runDaemonInnerWithStartupOwnership(
   // in the shipped configs take effect even when the local config
   // omits the field (the common case after `dkg init` with default answers).
   let updateInterval: ReturnType<typeof setInterval> | null = null;
-  const au = resolveAutoUpdateConfig(config, network);
-  const configuredAutoUpdateSource = au?.source ?? resolveAutoUpdateSource(config, network);
+  const au = resolveAutoUpdateConfig(startupConfig, network);
+  const configuredAutoUpdateSource = au?.source ?? resolveAutoUpdateSource(startupConfig, network);
   const standalone = resolveStandaloneInstall(configuredAutoUpdateSource);
   const pollingMode = resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone);
 
@@ -2567,8 +2571,8 @@ async function runDaemonInnerWithStartupOwnership(
     // local config BEFORE network default. A disabled node with a local
     // channel / allowPrerelease pin must observe its own cohort, not the
     // network's.
-    const allowPre = au?.allowPrerelease ?? config.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
-    const channel = au?.channel ?? config.autoUpdate?.channel ?? network?.autoUpdate?.channel;
+    const allowPre = au?.allowPrerelease ?? startupConfig.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
+    const channel = au?.channel ?? startupConfig.autoUpdate?.channel ?? network?.autoUpdate?.channel;
 
     log(
       `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"}${channel ? ` channel="${channel}"` : ""} (every ${au?.checkIntervalMinutes ?? 30}min)`,
@@ -2592,7 +2596,7 @@ async function runDaemonInnerWithStartupOwnership(
       lastUpdateCheck: daemonState.lastUpdateCheck,
       allowPrerelease: allowPre,
       channel,
-      nodeRole: config.nodeRole ?? "edge",
+      nodeRole: startupConfig.nodeRole ?? "edge",
       onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
     });
 
@@ -2613,7 +2617,7 @@ async function runDaemonInnerWithStartupOwnership(
 
   // Redactor for the copy of each record that LEAVES the node. The local path
   // writes every level to daemon.log, served by the dashboard's /api/node-log.
-  const redactForRemote = createLogRedactor(config.telemetry?.logs?.redact);
+  const redactForRemote = createLogRedactor(startupConfig.telemetry?.logs?.redact);
 
   // Avoid duplicating routine logs into SQLite on the event loop. Low-volume
   // warning/error records remain available to operation and dashboard views;
@@ -2825,28 +2829,29 @@ async function runDaemonInnerWithStartupOwnership(
   function startLogExporter(
     mode: ActiveLogExporterMode,
   ): DaemonLogExporterStartResult {
+    const liveConfig = configStore.current;
     if (mode === 'otlp') {
-      const endpoint = resolveOtlpLogEndpoint(config.telemetry, process.env);
+      const endpoint = resolveOtlpLogEndpoint(liveConfig.telemetry, process.env);
       if (!endpoint) {
         return {
           ok: false,
           error: `OTLP log export is not configured for ${networkKey} (set config.telemetry.logs.endpoint or OTEL_EXPORTER_OTLP_ENDPOINT)`,
         };
       }
-      const minLevel = config.telemetry?.logs?.level ?? "info";
+      const minLevel = liveConfig.telemetry?.logs?.level ?? "info";
       const result = daemonLogController.startExporter(mode, () => {
         const worker = new OtlpLogWorker({
           endpoint,
-          token: config.telemetry?.logs?.token,
+          token: liveConfig.telemetry?.logs?.token,
           network: networkKey,
           peerId: agent.peerId,
-          nodeName: config.name,
+          nodeName: startupConfig.name,
           version: nodeVersion,
           commit: nodeCommit,
-          role: config.nodeRole ?? "edge",
-          chainId: config.chain?.chainId,
+          role: startupConfig.nodeRole ?? "edge",
+          chainId: startupConfig.chain?.chainId,
           minLevel,
-          bufferMaxEntries: config.telemetry?.logs?.bufferMaxEntries,
+          bufferMaxEntries: liveConfig.telemetry?.logs?.bufferMaxEntries,
           onError: (m) => log(`Telemetry(OTLP): ${m}`),
         });
         worker.start();
@@ -2867,17 +2872,17 @@ async function runDaemonInnerWithStartupOwnership(
         error: `Telemetry streaming is not available for ${networkKey} (no syslog endpoint configured)`,
       };
     }
-    const autoUpdateEnabled = config.autoUpdate?.enabled ?? false;
+    const autoUpdateEnabled = liveConfig.autoUpdate?.enabled ?? false;
     const result = daemonLogController.startExporter(mode, () => {
       const worker = new LogPushWorker({
         host: syslogEndpoint.host,
         port: syslogEndpoint.port,
         peerId: agent.peerId,
         network: networkKey,
-        nodeName: config.name,
+        nodeName: startupConfig.name,
         version: nodeVersion,
         commit: nodeCommit,
-        role: config.nodeRole ?? "edge",
+        role: startupConfig.nodeRole ?? "edge",
         autoUpdate: autoUpdateEnabled,
         versionStatus: () => resolveUpdateTelemetryVersionStatus({
           autoUpdateEnabled,
@@ -2910,17 +2915,17 @@ async function runDaemonInnerWithStartupOwnership(
   // OTel traces/metrics and the selected log exporter share one production
   // adapter. Boot, runtime settings changes, and shutdown all traverse it.
   const telemetrySignals = createDaemonTelemetryLifecycle({
-    config,
+    readConfig: () => configStore.current,
     resource: {
       serviceName: "dkg-node",
       serviceVersion: nodeVersion,
-      serviceInstanceId: config.name,
+      serviceInstanceId: startupConfig.name,
       network: networkKey,
       peerId: agent.peerId,
-      nodeName: config.name,
-      nodeRole: config.nodeRole ?? "edge",
+      nodeName: startupConfig.name,
+      nodeRole: startupConfig.nodeRole ?? "edge",
       commit: nodeCommit,
-      chainId: config.chain?.chainId,
+      chainId: startupConfig.chain?.chainId,
     },
     initOtel: initTelemetry,
     shutdownOtel: shutdownTelemetry,
@@ -3001,7 +3006,7 @@ async function runDaemonInnerWithStartupOwnership(
       ),
     },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
-    chainId: chainBase?.chainId ?? config.chain?.chainId,
+    chainId: chainBase?.chainId ?? startupConfig.chain?.chainId,
   });
 
   const tracker = new OperationTracker(dashDb);
@@ -3258,11 +3263,11 @@ async function runDaemonInnerWithStartupOwnership(
   const { toolContext: agentToolsContext, manager: memoryManager } = buildChatMemoryStack({
     agent,
     emitMemoryGraphChanged,
-    llmConfig: config.llm ?? { apiKey: '' },
+    llmConfig: startupConfig.llm ?? { apiKey: '' },
     agentAddress: resolveMemoryAgentAddress(agent),
   });
   log('Memory manager ready');
-  if (config.llm) log('Memory enrichment LLM ready');
+  if (startupConfig.llm) log('Memory enrichment LLM ready');
   else log('Memory enrichment LLM not configured');
 
   const llmSettings = createDaemonLlmSettings(configStore, memoryManager, log);
@@ -3299,8 +3304,8 @@ async function runDaemonInnerWithStartupOwnership(
 
   // --- Authentication ---
 
-  const authEnabled = config.auth?.enabled !== false;
-  const validTokens = await loadTokens(config.auth);
+  const authEnabled = startupConfig.auth?.enabled !== false;
+  const validTokens = await loadTokens(startupConfig.auth);
   const bridgeAuthToken =
     (await loadBridgeAuthToken()) ??
     (validTokens.size > 0
@@ -3359,10 +3364,10 @@ async function runDaemonInnerWithStartupOwnership(
   // --- Vector Store (optional, for tri-modal memory) ---
   const vectorStore = new VectorStore(dkgDir());
   let embeddingProvider: EmbeddingProvider | null = null;
-  if (config.llm?.apiKey) {
+  if (startupConfig.llm?.apiKey) {
     embeddingProvider = new OpenAIEmbeddingProvider({
-      apiKey: config.llm.apiKey,
-      baseURL: config.llm.baseURL,
+      apiKey: startupConfig.llm.apiKey,
+      baseURL: startupConfig.llm.baseURL,
     });
   }
 
@@ -3395,8 +3400,8 @@ async function runDaemonInnerWithStartupOwnership(
   // --- HTTP API ---
 
   const rateLimiter = new HttpRateLimiter(
-    config.rateLimit?.requestsPerMinute ?? 120,
-    config.rateLimit?.exempt ?? [
+    startupConfig.rateLimit?.requestsPerMinute ?? 120,
+    startupConfig.rateLimit?.exempt ?? [
       "/api/status",
       "/api/chain/rpc-health",
       "/.well-known/skill.md",
@@ -3412,7 +3417,7 @@ async function runDaemonInnerWithStartupOwnership(
   // fall back to the default instead of silently disabling the cap.
   const maxInFlight = resolveIntSetting(
     process.env.DKG_MAX_INFLIGHT,
-    config.maxInFlightRequests,
+    startupConfig.maxInFlightRequests,
     64,
     { allowNonPositive: true },
   );
@@ -3639,24 +3644,24 @@ async function runDaemonInnerWithStartupOwnership(
   // falling back to defaults rather than becoming NaN.
   applyServerLimits(server, {
     maxConnectionsEnv: process.env.DKG_MAX_CONNECTIONS,
-    maxConnectionsConfig: config.maxConnections,
+    maxConnectionsConfig: startupConfig.maxConnections,
     headersTimeoutEnv: process.env.DKG_HEADERS_TIMEOUT_MS,
   });
 
-  const apiPort = config.apiPort || 0;
-  const apiHost = config.apiHost || "127.0.0.1";
+  const apiPort = startupConfig.apiPort || 0;
+  const apiHost = startupConfig.apiHost || "127.0.0.1";
 
   // Route plugins: loaded before listen() so requests can't race the array; fail-soft per ADR 0001.
   // OT-RFC-41 §4.6.1 / Bundle B1e: bare-name specs resolve from
   // ~/.dkg/plugins (stable root) before the daemon-local node_modules,
   // so plugin installs survive Core slot swaps and Edge npm reinstalls.
   const routePlugins = await loadRoutePlugins(
-    config.routePlugins,
+    startupConfig.routePlugins,
     new Logger('route-plugins'),
     { dkgHome: dkgDir() },
   );
   // Validated count for telemetry — `configured=` is 0 for non-arrays so a typo doesn't report character count.
-  const configuredCount = countConfiguredPluginSpecs(config.routePlugins);
+  const configuredCount = countConfiguredPluginSpecs(startupConfig.routePlugins);
   log(
     `route-plugins-loaded loaded=${routePlugins.length} configured=${configuredCount}`,
   );
@@ -3668,7 +3673,7 @@ async function runDaemonInnerWithStartupOwnership(
   apiPortRef.value = boundPort;
   await writeApiPort(boundPort);
 
-  corsAllowed = buildCorsAllowlist(config, boundPort);
+  corsAllowed = buildCorsAllowlist(startupConfig, boundPort);
   daemonState.moduleCorsAllowed = corsAllowed;
   if (corsAllowed !== "*") {
     log(`CORS allowlist: ${corsAllowed.join(", ")}`);
@@ -3796,6 +3801,7 @@ async function runDaemonInnerWithStartupOwnership(
     })().catch((err: any) => {
       log(`Shutdown cleanup error: ${err?.message ?? String(err)}`);
     }).finally(async () => {
+      await configStore.close();
       detachDaemonLogTee();
       await daemonLogFileWriter.shutdown();
     });

@@ -3,6 +3,7 @@ import { copyFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveAtomicWriteDestination, writeFileAtomic } from './fs-utils.js';
+import { acquireConfigWriteLease } from './config-write-lease.js';
 
 export interface FileActivation<T> {
   apply(): T | Promise<T>;
@@ -13,13 +14,14 @@ export interface ConfigFileWriter {
   /** Includes ordinary writes admitted before the daemon claimed this file. */
   ready: Promise<string | undefined>;
   commit<T>(prepare: () => { contents: string; activation: FileActivation<T> }): Promise<T>;
+  close(): Promise<void>;
 }
 
 /** Generic atomic publication lane. Live configuration belongs to DkgConfigStore. */
 export class ConfigFileStore {
   static readonly #stores = new Map<string, ConfigFileStore>();
   #tail: Promise<unknown> = Promise.resolve();
-  #claimed = false;
+  #claim?: symbol;
   #latestContents?: string;
 
   private constructor(readonly path: string) {}
@@ -38,29 +40,52 @@ export class ConfigFileStore {
 
   /** Fence new raw writes immediately, then drain already-admitted writes. */
   claim(): ConfigFileWriter {
-    if (this.#claimed) throw new Error('Configuration file already has a live owner');
-    this.#claimed = true;
+    if (this.#claim) throw new Error('Configuration file already has a live owner');
+    const claim = Symbol();
+    this.#claim = claim;
+    const lease = this.#serialize(() => acquireConfigWriteLease(this.path));
+    // Opening failures leave the process-local lane available for a retry.
+    void lease.catch(() => { if (this.#claim === claim) this.#claim = undefined; });
+    let closing: Promise<void> | undefined;
     return {
-      ready: this.#tail.catch(() => undefined).then(() => this.#latestContents),
-      commit: prepare => this.#serialize(async () => {
+      ready: lease.then(() => this.#latestContents),
+      commit: prepare => closing ? Promise.reject(new Error('Configuration owner is closed')) : this.#serialize(async () => {
+        await lease;
         const { contents, activation } = prepare();
         return this.#publishTransaction(contents, activation);
       }),
+      close: () => {
+        closing ??= this.#serialize(async () => {
+          const owned = await lease.catch(() => undefined);
+          owned?.release();
+          if (this.#claim === claim) {
+            this.#claim = undefined;
+            this.#latestContents = undefined;
+          }
+        });
+        return closing;
+      },
     };
   }
 
   write(contents: string): Promise<void> {
-    if (this.#claimed) return Promise.reject(new Error('Live daemon configuration must be updated through DkgConfigStore.update with explicit activation'));
+    if (this.#claim) return Promise.reject(new Error('Live daemon configuration must be updated through DkgConfigStore.update with explicit activation'));
     return this.#serialize(async () => {
-      await mkdir(dirname(this.path), { recursive: true });
-      await writeFileAtomic(this.path, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
-      this.#latestContents = contents;
+      const lease = await acquireConfigWriteLease(this.path);
+      try {
+        await writeFileAtomic(this.path, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
+        this.#latestContents = contents;
+      } finally { lease.release(); }
     });
   }
 
   transaction<T>(contents: string, activation: FileActivation<T>): Promise<T> {
-    if (this.#claimed) return Promise.reject(new Error('Live daemon configuration must be updated through DkgConfigStore.update with explicit activation'));
-    return this.#serialize(() => this.#publishTransaction(contents, activation));
+    if (this.#claim) return Promise.reject(new Error('Live daemon configuration must be updated through DkgConfigStore.update with explicit activation'));
+    return this.#serialize(async () => {
+      const lease = await acquireConfigWriteLease(this.path);
+      try { return await this.#publishTransaction(contents, activation); }
+      finally { lease.release(); }
+    });
   }
 
   #serialize<T>(run: () => Promise<T>): Promise<T> {

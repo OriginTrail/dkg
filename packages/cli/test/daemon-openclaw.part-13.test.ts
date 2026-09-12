@@ -107,7 +107,7 @@ function makeOpenClawRouteContext(
       agent: {
         store: { query: vi.fn(async () => ({ bindings: [] })) },
       },
-      config: makeConfig({
+      configStore: { current: makeConfig({
         localAgentIntegrations: {
           openclaw: {
             enabled: true,
@@ -116,7 +116,7 @@ function makeOpenClawRouteContext(
           },
         },
         ...configOverrides,
-      }),
+      }) },
       memoryManager: {
         storeChatExchange: vi.fn(async () => {}),
       },

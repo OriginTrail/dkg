@@ -420,7 +420,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
     res,
     agent,
     publisherControl,
-    config,
+    configStore: { current: config },
     startedAt,
     dashDb,
     opWallets,

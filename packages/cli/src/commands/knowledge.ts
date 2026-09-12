@@ -19,13 +19,13 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, saveConfig, configExists, configPath,
+  configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
-  resolveContextGraphs, resolveNetworkDefaultContextGraphs,
+  resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
@@ -338,7 +338,7 @@ program
 program
   .command('subscribe <context-graph>')
   .description('Subscribe to a context graph\'s GossipSub topic')
-  .option('--save', 'Also save to config so it auto-subscribes on restart')
+  .option('--save', 'Persist the subscription so it auto-subscribes on restart')
   .option('--repair', 'Reconcile the graph even when existing readiness says it is complete')
   .action(async (contextGraph: string, opts: ActionOpts) => {
     try {
@@ -367,13 +367,9 @@ program
       }
 
       if (opts.save) {
-        const config = await loadConfig();
-        const cgs = new Set(resolveContextGraphs(config));
-        cgs.add(contextGraph);
-        config.contextGraphs = [...cgs];
-        config.contextGraphs = [...cgs];
-        await saveConfig(config);
-        console.log('Saved to config (will auto-subscribe on restart).');
+        // The daemon owns durable always-on subscription state. A second raw
+        // config write would race its live settings and is unnecessary.
+        console.log('Saved subscription (will auto-subscribe on restart).');
       }
     } catch (err) {
       console.error(toErrorMessage(err));

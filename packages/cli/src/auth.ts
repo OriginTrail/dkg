@@ -12,6 +12,7 @@ import { dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DkgHomeFiles } from './config.js';
+import type { DeepReadonly } from './config-snapshot.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -202,7 +203,7 @@ export async function loadApiClientToken(homeFiles: DkgHomeFiles): Promise<strin
 }
 
 /** Load daemon tokens from config and disk, generating only when both are empty. */
-export async function loadTokens(authConfig?: AuthConfig): Promise<Set<string>> {
+export async function loadTokens(authConfig?: DeepReadonly<AuthConfig>): Promise<Set<string>> {
   const filePath = tokenFilePath();
   // Keep config tokens first and retain their provenance when a token also
   // appears in the file, so rotation/reconciliation cannot revoke a pinned token.

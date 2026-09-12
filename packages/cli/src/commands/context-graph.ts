@@ -19,13 +19,13 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, saveConfig, configExists, configPath,
+  configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
-  resolveContextGraphs, resolveNetworkDefaultContextGraphs,
+  resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
@@ -134,7 +134,7 @@ contextGraphCmd
   .option('--invite <peer...>', 'Invite peers by peer ID (deprecated — use --allowed-agent)')
   .option('--private', 'Create a private local-only context graph')
   .option('--subscribe', 'Also subscribe to the context graph after creation', true)
-  .option('--save', 'Persist subscription to config')
+  .option('--save', 'Persist the subscription so it auto-subscribes on restart')
   .action(async (id: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
@@ -172,13 +172,8 @@ contextGraphCmd
       console.log(`  Run 'dkg context-graph register ${id}' to register on-chain (unlocks Verifiable Memory).`);
 
       if (opts.save) {
-        const config = await loadConfig();
-        const cgs = new Set(resolveContextGraphs(config));
-        cgs.add(id);
-        config.contextGraphs = [...cgs];
-        config.contextGraphs = [...cgs];
-        await saveConfig(config);
-        console.log('  Saved to config (will auto-subscribe on restart).');
+        await client.subscribeToContextGraph(result.created, { syncMode: 'always-on' });
+        console.log('  Saved subscription (will auto-subscribe on restart).');
       }
     } catch (err) {
       const message = toErrorMessage(err);

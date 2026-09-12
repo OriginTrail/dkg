@@ -1,5 +1,5 @@
 import type { TelemetryInitConfig } from '@origintrail-official/dkg-node-ui';
-import type { DkgConfig } from '../config.js';
+import type { ImmutableDkgConfig } from '../config-snapshot.js';
 import {
   isUnknownLogExporter,
   resolveLogExporterMode,
@@ -12,7 +12,7 @@ import type {
 } from './telemetry-runtime.js';
 
 export interface DaemonTelemetryLifecycleOptions {
-  config: DkgConfig;
+  readConfig(): Pick<ImmutableDkgConfig, 'telemetry'>;
   env?: Record<string, string | undefined>;
   resource: NonNullable<TelemetryInitConfig['resource']>;
   initOtel(config: TelemetryInitConfig): Promise<void>;
@@ -32,9 +32,9 @@ export interface DaemonTelemetryLifecycleOptions {
 export function createDaemonTelemetryLifecycle(
   options: DaemonTelemetryLifecycleOptions,
 ): TelemetrySignalAdapter {
-  const startOtelSdk = async (): Promise<void> => {
+  const startOtelSdk = async (config: Pick<ImmutableDkgConfig, 'telemetry'>): Promise<void> => {
     const { tracesEndpoint, metricsEndpoint, tracesOn, metricsOn } =
-      resolveOtelSignals(options.config.telemetry, options.env);
+      resolveOtelSignals(config.telemetry, options.env);
     if (!tracesOn && !metricsOn) return;
     try {
       await options.initOtel({
@@ -43,16 +43,16 @@ export function createDaemonTelemetryLifecycle(
         traces: tracesOn
           ? {
               endpoint: tracesEndpoint,
-              token: options.config.telemetry?.traces?.token,
-              sampleRatio: options.config.telemetry?.traces?.sampleRatio,
+              token: config.telemetry?.traces?.token,
+              sampleRatio: config.telemetry?.traces?.sampleRatio,
             }
           : undefined,
         metrics: metricsOn
           ? {
               endpoint: metricsEndpoint,
-              token: options.config.telemetry?.metrics?.token,
+              token: config.telemetry?.metrics?.token,
               exportIntervalMs:
-                options.config.telemetry?.metrics?.exportIntervalMs,
+                config.telemetry?.metrics?.exportIntervalMs,
             }
           : undefined,
       });
@@ -67,15 +67,16 @@ export function createDaemonTelemetryLifecycle(
 
   return {
     async start(): Promise<TelemetryTransitionResult> {
-      await startOtelSdk();
+      const config = options.readConfig();
+      await startOtelSdk(config);
       // Unknown user-provided values fail closed to local-only logging.
-      if (isUnknownLogExporter(options.config.telemetry)) {
+      if (isUnknownLogExporter(config.telemetry)) {
         options.log(
-          `Telemetry: unknown logs.exporter "${options.config.telemetry?.logs?.exporter}" — ` +
+          `Telemetry: unknown logs.exporter "${config.telemetry?.logs?.exporter}" — ` +
             "keeping logs local-only (no off-node forwarding). Use 'otlp', 'syslog', or 'none'.",
         );
       }
-      const mode = resolveLogExporterMode(options.config.telemetry);
+      const mode = resolveLogExporterMode(config.telemetry);
       if (mode === 'none') return { ok: true };
       return options.startLogExporter(mode);
     },

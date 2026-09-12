@@ -11,11 +11,12 @@
 
 import type { ChatAclCheck } from '@origintrail-official/dkg-agent';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
+import type { DeepReadonly } from '../config-snapshot.js';
 import type { ChatAclConfig } from '../config.js';
 
 export interface BuildChatAclOpts {
   /** From `DkgConfig.chat.acl`. Missing means "no policy" => null callback. */
-  config?: ChatAclConfig;
+  config?: DeepReadonly<ChatAclConfig>;
   /** Node UI / dashboard DB the daemon owns. Membership rows live here. */
   dashDb: DashboardDB;
   /**

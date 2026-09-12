@@ -65,7 +65,7 @@ describe('daemon runtime settings HTTP transactions', () => {
     }, { ...initial.llm! });
     otelActive = false; logsActive = false;
     signals = createDaemonTelemetryLifecycle({
-      config: initial, env: {}, resource: { serviceName: 'test-daemon' },
+      readConfig: () => store.current, env: {}, resource: { serviceName: 'test-daemon' },
       initOtel: async () => { otelActive = true; }, shutdownOtel: async () => { otelActive = false; },
       startLogExporter: async () => { logsActive = true; return { ok: true }; },
       stopLogExporter: async () => { logsActive = false; }, log: () => undefined,

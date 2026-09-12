@@ -1,4 +1,4 @@
-import type { DkgConfig } from './config.js';
+import type { ImmutableDkgConfig } from './config-snapshot.js';
 
 export interface ResolvedMetricsCollectorConfig {
   enabled: boolean;
@@ -30,7 +30,7 @@ function resolveEnabled(configValue: unknown, envValue: string | undefined): boo
  * startup rather than silently enabling collection.
  */
 export function resolveMetricsCollectorConfig(
-  config: Pick<DkgConfig, 'telemetry'> | null | undefined,
+  config: Pick<ImmutableDkgConfig, 'telemetry'> | null | undefined,
   env: Record<string, string | undefined> = process.env,
 ): ResolvedMetricsCollectorConfig {
   return {

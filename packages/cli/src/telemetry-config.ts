@@ -1,4 +1,4 @@
-import type { DkgConfig } from './config.js';
+import type { ImmutableDkgConfig } from './config-snapshot.js';
 
 /**
  * Pure resolution of the daemon's telemetry routing — extracted from
@@ -23,7 +23,7 @@ function resolveOtlpSignalEndpoint(opts: {
 
 /** Resolve OTLP logs with standard signal-specific > base > config precedence. */
 export function resolveOtlpLogEndpoint(
-  telemetry: DkgConfig['telemetry'],
+  telemetry: ImmutableDkgConfig['telemetry'],
   env: Readonly<Record<string, string | undefined>>,
 ): string | undefined {
   return resolveOtlpSignalEndpoint({
@@ -43,7 +43,7 @@ export function resolveOtlpLogEndpoint(
  * logs off-node against the operator's intent. Returns null `mode` info via the
  * second tuple element so the caller can warn on an unrecognized value.
  */
-export function resolveLogExporterMode(telemetry: DkgConfig['telemetry']): LogExporterMode {
+export function resolveLogExporterMode(telemetry: ImmutableDkgConfig['telemetry']): LogExporterMode {
   const raw = telemetry?.logs?.exporter;
   if (raw === undefined || raw === null) return 'syslog'; // documented default when UNSET
   if (raw === 'none' || raw === 'otlp' || raw === 'syslog') return raw;
@@ -51,7 +51,7 @@ export function resolveLogExporterMode(telemetry: DkgConfig['telemetry']): LogEx
 }
 
 /** True when `telemetry.logs.exporter` is set to a value outside the known enum. */
-export function isUnknownLogExporter(telemetry: DkgConfig['telemetry']): boolean {
+export function isUnknownLogExporter(telemetry: ImmutableDkgConfig['telemetry']): boolean {
   const raw = telemetry?.logs?.exporter;
   return raw !== undefined && raw !== null && raw !== 'none' && raw !== 'otlp' && raw !== 'syslog';
 }
@@ -70,7 +70,7 @@ export interface ResolvedOtelSignals {
  * not explicitly disabled — there is NO guessed/TBD production default.
  */
 export function resolveOtelSignals(
-  telemetry: DkgConfig['telemetry'],
+  telemetry: ImmutableDkgConfig['telemetry'],
   env: Record<string, string | undefined> = process.env,
 ): ResolvedOtelSignals {
   const tracesEndpoint = resolveOtlpSignalEndpoint({

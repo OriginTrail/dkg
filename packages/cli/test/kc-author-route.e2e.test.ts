@@ -98,7 +98,6 @@ function createContext(args: {
     agent: args.agent,
     publisherControl: {} as RequestContext['publisherControl'],
     publisherRuntime: null,
-    config: {} as RequestContext['config'],
     startedAt: 0,
     dashDb: {} as RequestContext['dashDb'],
     opWallets: {

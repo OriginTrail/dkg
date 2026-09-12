@@ -71,6 +71,7 @@ function queryRouteContext(
     res,
     agent,
     tracker,
+    configStore: { current: {} },
     validTokens: new Set<string>(),
     url: new URL('http://127.0.0.1/api/query'),
     path: '/api/query',
@@ -409,7 +410,7 @@ describe('/api/query request lifecycle', () => {
     }, {});
     ctx.path = '/api/genui/render';
     ctx.url = new URL('http://127.0.0.1/api/genui/render');
-    ctx.config = { llm: { apiKey: 'test-key' } } as RequestContext['config'];
+    ctx.configStore = { current: { llm: { apiKey: 'test-key' } } } as RequestContext['configStore'];
 
     await handleQueryRoutes(ctx);
 

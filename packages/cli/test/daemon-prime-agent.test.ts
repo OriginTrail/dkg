@@ -236,7 +236,7 @@ describe('/api/prime-agent-channel/health', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('GET', '/api/prime-agent-channel/health'),
       res,
-      config: makeConfig(),
+      configStore: { current: makeConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/health',
     } as any);
@@ -275,7 +275,7 @@ describe('/api/prime-agent-channel/health', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('GET', '/api/prime-agent-channel/health'),
       res,
-      config: makeConfig(),
+      configStore: { current: makeConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/health',
     } as any);
@@ -307,7 +307,7 @@ describe('/api/prime-agent-channel/send', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c1' }),
       res,
-      config: makeConfig(),
+      configStore: { current: makeConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
     } as any);
@@ -321,7 +321,7 @@ describe('/api/prime-agent-channel/send', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c1' }),
       res,
-      config: enabledConfig(),
+      configStore: { current: enabledConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
     } as any);
@@ -339,7 +339,7 @@ describe('/api/prime-agent-channel/send', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c1' }),
       res,
-      config: enabledConfig(),
+      configStore: { current: enabledConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
       requestAgentAddress: '0x0000000000000000000000000000000000000001',
@@ -378,7 +378,7 @@ describe('/api/prime-agent-channel/send', () => {
         sessionId: 'gone',
       }),
       res,
-      config: enabledConfig(),
+      configStore: { current: enabledConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
     } as any);
@@ -398,7 +398,7 @@ describe('/api/prime-agent-channel/send', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c1' }),
       res,
-      config: enabledConfig(),
+      configStore: { current: enabledConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
     } as any);
@@ -420,7 +420,7 @@ describe('/api/prime-agent-channel/send', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c1' }),
       res,
-      config: enabledConfig(),
+      configStore: { current: enabledConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
     } as any);
@@ -445,7 +445,7 @@ describe('/api/prime-agent-channel/send', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c-auth' }),
       res,
-      config: enabledConfig(),
+      configStore: { current: enabledConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
     } as any);
@@ -480,7 +480,7 @@ describe('/api/prime-agent-channel/send', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c-hard' }),
       res,
-      config: enabledConfig(),
+      configStore: { current: enabledConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
     } as any);
@@ -514,7 +514,7 @@ describe('/api/prime-agent-channel/send', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c-proto' }),
       res,
-      config: enabledConfig(),
+      configStore: { current: enabledConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
     } as any);
@@ -535,7 +535,7 @@ describe('/api/prime-agent-channel/send', () => {
     await handlePrimeAgentRoutes({
       req: makeJsonRequest('POST', '/api/prime-agent-channel/send', { text: 'hi', correlationId: 'c-t' }),
       res,
-      config: enabledConfig(),
+      configStore: { current: enabledConfig() },
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
     } as any);

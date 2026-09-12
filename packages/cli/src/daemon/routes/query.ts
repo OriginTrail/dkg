@@ -419,7 +419,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     res,
     agent,
     publisherControl,
-    config,
+    configStore: { current: config },
     startedAt,
     dashDb,
     opWallets,

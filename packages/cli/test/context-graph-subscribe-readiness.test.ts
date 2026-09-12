@@ -257,7 +257,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
         agent,
         publisherControl: {},
         publisherRuntime: null,
-        config: { auth: { enabled: false } },
+        configStore: { current: { auth: { enabled: false } } },
         startedAt: Date.now(),
         dashDb: {
           getContextGraphReadinessProvenance: () => readiness ?? null,

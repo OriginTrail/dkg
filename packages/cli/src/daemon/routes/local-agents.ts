@@ -324,7 +324,6 @@ import {
 } from '../prime-agent.js';
 
 import {
-  currentDaemonConfig,
   updateDaemonConfig,
   type RequestContext,
 } from './context.js';
@@ -520,7 +519,7 @@ export async function handleLocalAgentsRoutes(
     path,
     requestAgentAddress,
   } = ctx;
-  const config = currentDaemonConfig(ctx);
+  const config = ctx.configStore.current;
   // GET /api/local-agent-integrations — generic local agent registry/status surface
   if (req.method === 'GET' && path === '/api/local-agent-integrations') {
     return jsonResponse(res, 200, {

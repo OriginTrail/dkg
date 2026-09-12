@@ -9,21 +9,27 @@ export type { DeepReadonly, DkgConfigActivation, DkgConfigUpdate, DkgRuntimeActi
 export class DkgConfigStore {
   static readonly #handles = new WeakMap<ConfigFileStore, Promise<DkgConfigStore>>();
   #current: ImmutableDkgConfig;
+  #closing?: Promise<void>;
 
-  private constructor(readonly files: DkgHomeFiles, private readonly writer: ConfigFileWriter, initial: DkgConfig | ImmutableDkgConfig) {
+  private constructor(readonly files: DkgHomeFiles, private readonly file: ConfigFileStore, private readonly writer: ConfigFileWriter, initial: DkgConfig | ImmutableDkgConfig) {
     this.#current = immutableConfig(initial);
   }
 
-  static open(files: DkgHomeFiles, initialConfig: DkgConfig | ImmutableDkgConfig): Promise<DkgConfigStore> {
+  static open(files: DkgHomeFiles, initialConfig: DkgConfig | ImmutableDkgConfig | (() => Promise<DkgConfig>)): Promise<DkgConfigStore> {
     const file = configFileStore(files.configPath);
     let handle = this.#handles.get(file);
     if (!handle) {
+      const initial = typeof initialConfig === 'function' ? initialConfig : immutableConfig(initialConfig);
       const writer = file.claim();
-      const initial = immutableConfig(initialConfig);
       // Completed saves are full snapshots: overlaying them onto stale startup
       // state would resurrect optional settings deliberately removed by a save.
-      handle = writer.ready.then(contents => new DkgConfigStore(files, writer,
-        contents === undefined ? initial : JSON.parse(contents)));
+      handle = writer.ready.then(async contents => new DkgConfigStore(files, file, writer,
+        typeof initial === 'function' ? await initial() : contents === undefined ? initial : JSON.parse(contents)))
+        .catch(async error => {
+          await writer.close();
+          if (this.#handles.get(file) === handle) this.#handles.delete(file);
+          throw error;
+        });
       this.#handles.set(file, handle);
     }
     return handle;
@@ -31,6 +37,13 @@ export class DkgConfigStore {
 
   get current(): ImmutableDkgConfig {
     return this.#current;
+  }
+
+  /** Drain admitted updates before allowing a new owner or standalone writer. */
+  close(): Promise<void> {
+    return this.#closing ??= this.writer.close().then(() => {
+      DkgConfigStore.#handles.delete(this.file);
+    });
   }
 
   /** Rebase inside the publication lane; preparation must not mutate runtime state. */
