@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 
-import { readFile, realpath, stat } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   RemoteCanaryError,
   runRemoteCanaryArtifactLifecycleV1,
 } from './certify.mjs';
+import { pathsAliasV1 } from './path-alias.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ARTIFACT = join(HERE, 'artifacts', 'latest.json');
@@ -43,63 +44,11 @@ function parseArgs(argv) {
   return /** @type {ParsedArgsV1} */ (parsed);
 }
 
-/** @param {string} path @returns {Promise<string>} */
-async function canonicalizePotentialPath(path) {
-  let cursor = resolve(path);
-  const missingSegments = [];
-  while (true) {
-    try {
-      return join(await realpath(cursor), ...missingSegments);
-    } catch (error) {
-      if (!hasErrorCode(error, 'ENOENT')) throw error;
-      const parent = dirname(cursor);
-      if (parent === cursor) return resolve(path);
-      missingSegments.unshift(basename(cursor));
-      cursor = parent;
-    }
-  }
-}
-
-/** @param {string} path */
-async function statIfPresent(path) {
-  try {
-    return await stat(path);
-  } catch (error) {
-    if (hasErrorCode(error, 'ENOENT')) return null;
-    throw error;
-  }
-}
-
 /** @param {string} configPath @param {string} artifactPath */
 async function assertDistinctConfigAndArtifactPaths(configPath, artifactPath) {
-  const resolvedConfig = resolve(configPath);
-  const resolvedArtifact = resolve(artifactPath);
-  if (resolvedConfig === resolvedArtifact) {
+  if (await pathsAliasV1(configPath, artifactPath)) {
     throw new RemoteCanaryError('config-artifact-path-alias', 'configuration');
   }
-  const [canonicalConfig, canonicalArtifact, configStat, artifactStat] = await Promise.all([
-    canonicalizePotentialPath(resolvedConfig),
-    canonicalizePotentialPath(resolvedArtifact),
-    statIfPresent(resolvedConfig),
-    statIfPresent(resolvedArtifact),
-  ]);
-  if (
-    canonicalConfig === canonicalArtifact
-    || (
-      configStat !== null
-      && artifactStat !== null
-      && configStat.dev === artifactStat.dev
-      && configStat.ino === artifactStat.ino
-    )
-  ) throw new RemoteCanaryError('config-artifact-path-alias', 'configuration');
-}
-
-/** @param {unknown} error @param {string} code @returns {boolean} */
-function hasErrorCode(error, code) {
-  return error !== null
-    && typeof error === 'object'
-    && !Array.isArray(error)
-    && /** @type {{ code?: unknown }} */ (error).code === code;
 }
 
 try {

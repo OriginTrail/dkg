@@ -59,8 +59,10 @@ into a pass.
   to any bearer-secret or RPC-evidence input are rejected before the first
   artifact write, so the runner cannot erase an input while invalidating a
   previous result.
-- Independent node and Context Graph checks run with a four-operation cap;
-  phase ordering and the receiver stop/start critical section remain serial.
+- Independent node and Context Graph checks run with a four-operation cap.
+  Paired source/receiver catalog and VM queries count as two individual remote
+  operations under that same phase cap; phase ordering and the receiver
+  stop/start critical section remain serial.
 
 ```mermaid
 sequenceDiagram
@@ -99,7 +101,9 @@ normalization, and safety semantics. `domain-contract.ts` separately defines
 the raw input, normalized topology, closed authentication/RPC evidence unions,
 and injected dependency boundary. A typed node client is the sole owner of
 daemon routes, payloads, authentication selection, and response decoding; the
-certification phases consume only those semantic operations. Every production
+certification phases consume only those semantic operations. Raw entry points
+normalize once and pass that exact frozen topology through lifecycle safety
+checks and certification execution. Every production
 module in this runner,
 including the CLI and public facade, is checked directly from its JavaScript
 source on every required test run; there are no parallel declaration stubs that

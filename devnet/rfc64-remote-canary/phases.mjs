@@ -30,6 +30,18 @@ import { verifyVmParityEvidenceV1 } from './vm.mjs';
 /** @param {unknown} config @param {() => Date} [now] */
 export function createRemoteCanaryDryRunArtifactV1(config, now = () => new Date()) {
   const validated = runPhaseV1('config', () => validateRemoteCanaryConfigV1(config));
+  return createRemoteCanaryDryRunArtifactFromNormalizedV1(validated, now);
+}
+
+/**
+ * Internal normalized boundary used when the lifecycle already owns validation.
+ * @param {NormalizedRemoteCanaryConfigV1} validated
+ * @param {() => Date} [now]
+ */
+export function createRemoteCanaryDryRunArtifactFromNormalizedV1(
+  validated,
+  now = () => new Date(),
+) {
   const timestamp = now().toISOString();
   return Object.freeze({
     schema: ARTIFACT_SCHEMA,
@@ -48,6 +60,18 @@ export function createRemoteCanaryDryRunArtifactV1(config, now = () => new Date(
 /** @param {unknown} config @param {RemoteCanaryDependenciesV1} [dependencies] */
 export async function executeRemoteCanaryCertificationV1(config, dependencies = {}) {
   const validated = runPhaseV1('config', () => validateRemoteCanaryConfigV1(config));
+  return executeRemoteCanaryCertificationFromNormalizedV1(validated, dependencies);
+}
+
+/**
+ * Internal normalized boundary used when the lifecycle already owns validation.
+ * @param {NormalizedRemoteCanaryConfigV1} validated
+ * @param {RemoteCanaryDependenciesV1} [dependencies]
+ */
+export async function executeRemoteCanaryCertificationFromNormalizedV1(
+  validated,
+  dependencies = {},
+) {
   const fetchFn = dependencies.fetchFn ?? globalThis.fetch;
   const readFileFn = dependencies.readFileFn ?? readFile;
   const runCommand = dependencies.runCommand ?? runBoundedCommandV1;

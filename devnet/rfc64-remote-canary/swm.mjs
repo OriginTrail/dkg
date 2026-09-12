@@ -14,7 +14,7 @@ import {
   pollUntilV1,
 } from './phase-helpers.mjs';
 import { validateNodePreflightV1 } from './preflight.mjs';
-import { askQueryV1 } from './query.mjs';
+import { askContextGraphPairsV1, askQueryV1 } from './query.mjs';
 import { opaqueRef } from './references.mjs';
 
 /** @typedef {import('./domain-contract.js').CanaryCommandResultV1} CanaryCommandResultV1 */
@@ -219,8 +219,14 @@ function isRetryableRecoveryReadinessErrorV1(error) {
 }
 
 /** @param {Pick<SwmInputV1, 'config' | 'client'>} input */
-export function verifyCatalogSwmV1({ config, client }) {
-  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
+export async function verifyCatalogSwmV1({ config, client }) {
+  const queryResults = await askContextGraphPairsV1(
+    config.contextGraphs,
+    'catalogSwmAskSparql',
+    'shared-working-memory',
+    client,
+  );
+  return Object.freeze(config.contextGraphs.map((contextGraph, index) => {
     if (contextGraph.catalogSwmAskSparql === undefined) {
       return Object.freeze({
         contextGraphRef: contextGraph.contextGraphRef,
@@ -229,22 +235,9 @@ export function verifyCatalogSwmV1({ config, client }) {
         queryChecked: false,
       });
     }
-    const [sourceQueryPassed, receiverQueryPassed] = await Promise.all([
-      askQueryV1(
-        contextGraph.source,
-        contextGraph.id,
-        contextGraph.catalogSwmAskSparql,
-        'shared-working-memory',
-        client,
-      ),
-      askQueryV1(
-        contextGraph.receiver,
-        contextGraph.id,
-        contextGraph.catalogSwmAskSparql,
-        'shared-working-memory',
-        client,
-      ),
-    ]);
+    const pair = queryResults[index];
+    if (pair === null) throw new TypeError('catalog-query-result-missing');
+    const { source: sourceQueryPassed, receiver: receiverQueryPassed } = pair;
     if (!sourceQueryPassed || !receiverQueryPassed) {
       throw failure('catalog-swm-query-failed', 'swm');
     }
@@ -255,7 +248,7 @@ export function verifyCatalogSwmV1({ config, client }) {
       sourceQueryPassed,
       receiverQueryPassed,
     });
-  });
+  }));
 }
 
 /**

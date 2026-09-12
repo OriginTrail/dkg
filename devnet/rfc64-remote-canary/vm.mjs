@@ -6,7 +6,7 @@ import {
   mapCanaryPhaseV1,
   pollUntilV1,
 } from './phase-helpers.mjs';
-import { askQueryV1 } from './query.mjs';
+import { askContextGraphPairsV1 } from './query.mjs';
 import {
   equalCompleteOperationalParityV1,
 } from './status-contract.mjs';
@@ -63,16 +63,18 @@ export async function verifyVmParityEvidenceV1({ config, client, sleep }) {
     { retryError: isRetryableNodeRequestErrorV1 },
   );
 
-  const checks = await mapCanaryPhaseV1(config.contextGraphs, async (contextGraph, index) => {
+  const queryResults = await askContextGraphPairsV1(
+    config.contextGraphs,
+    'vmAskSparql',
+    'verifiable-memory',
+    client,
+  );
+  const checks = Object.freeze(config.contextGraphs.map((contextGraph, index) => {
     const vmAskSparql = contextGraph.vmAskSparql;
     if (vmAskSparql !== undefined) {
-      const queryPassed = await Promise.all([
-        contextGraph.source,
-        contextGraph.receiver,
-      ].map((node) => (
-        askQueryV1(node, contextGraph.id, vmAskSparql, 'verifiable-memory', client)
-      )));
-      if (!queryPassed.every(Boolean)) throw failure('vm-query-parity-failed', 'vm');
+      const pair = queryResults[index];
+      if (pair === null) throw new TypeError('vm-query-result-missing');
+      if (!pair.source || !pair.receiver) throw failure('vm-query-parity-failed', 'vm');
     }
     return Object.freeze({
       contextGraphRef: contextGraph.contextGraphRef,
@@ -88,7 +90,7 @@ export async function verifyVmParityEvidenceV1({ config, client, sleep }) {
         ? { requirement: 'vm-ask-query' }
         : {}),
     });
-  });
+  }));
   return Object.freeze({
     checks,
     certificationByNodeId: evidenceSnapshot.certificationByNodeId,

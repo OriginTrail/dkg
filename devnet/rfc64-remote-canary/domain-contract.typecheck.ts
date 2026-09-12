@@ -9,6 +9,10 @@ import {
   type RemoteCanaryDependenciesV1,
 } from './domain-contract.js';
 import { preflightAllNodesV1 } from './preflight.mjs';
+import {
+  createRemoteCanaryDryRunArtifactFromNormalizedV1,
+  executeRemoteCanaryCertificationFromNormalizedV1,
+} from './phases.mjs';
 
 function rpcSource(value: RawCanaryRpcUsageV1): string {
   switch (value.kind) {
@@ -31,6 +35,8 @@ declare const rawFileEvidence: Extract<RawCanaryRpcUsageV1, { kind: 'evidence-fi
 declare const normalizedConfig: NormalizedRemoteCanaryConfigV1;
 declare const client: CanaryNodeClientV1;
 
+void createRemoteCanaryDryRunArtifactFromNormalizedV1(normalizedConfig);
+void executeRemoteCanaryCertificationFromNormalizedV1(normalizedConfig, dependencies);
 void preflightAllNodesV1({ mode: 'initial', config: normalizedConfig, client });
 // @ts-expect-error Final preflight requires the complete baseline as one state.
 void preflightAllNodesV1({ mode: 'final', config: normalizedConfig, client });
