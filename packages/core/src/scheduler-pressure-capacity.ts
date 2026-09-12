@@ -102,22 +102,26 @@ export function capturePressureCapacity(capacity: SchedulerPressureCapacity): Ca
   return { value: Object.freeze(value), identity: schedulerPressureCapacityIdentity(value) };
 }
 
+export type ReconciledPressureCapacity =
+  | { readonly kind: 'uniform'; readonly capacity: SchedulerPressureCapacity }
+  | { readonly kind: 'mixed' };
+
 /** Reconcile captured owners without serializing policies in the read path. */
 export function reconcilePressureCapacity(
   sources: readonly Iterable<{ readonly capacity?: CapturedPressureCapacity }>[],
   fallback: CapturedPressureCapacity,
-): SchedulerPressureCapacity {
+): ReconciledPressureCapacity {
   let liveIdentity: string | undefined;
   let liveCapacity: SchedulerPressureCapacity | undefined;
   for (const records of sources) {
     for (const record of records) {
       const capacity = record.capacity ?? fallback;
       if (liveIdentity !== undefined && capacity.identity !== liveIdentity) {
-        return { capacityModel: 'shared' };
+        return { kind: 'mixed' };
       }
       liveIdentity = capacity.identity;
       liveCapacity = capacity.value;
     }
   }
-  return liveCapacity ?? fallback.value;
+  return { kind: 'uniform', capacity: liveCapacity ?? fallback.value };
 }

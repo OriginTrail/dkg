@@ -519,7 +519,10 @@ export function resolveSwmCatchupMaxPasses(raw: string | undefined, onRejected?:
  * explicit value keeps parsing pure and lets each driver inject the same shape
  * into its continuation loop.
  */
-export function resolveSwmCatchupPassConfig(environment: Readonly<Record<string, string | undefined>> = {
+export function resolveSwmCatchupPassConfig(environment: Readonly<{
+  DKG_SWM_CATCHUP_PASS_BUDGET_MS?: string;
+  DKG_SWM_CATCHUP_MAX_PASSES?: string;
+}> | Readonly<Record<string, string | undefined>> = {
   DKG_SWM_CATCHUP_PASS_BUDGET_MS: process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS,
   DKG_SWM_CATCHUP_MAX_PASSES: process.env.DKG_SWM_CATCHUP_MAX_PASSES,
 }, onRejected?: RejectedResourceSetting): CatchupPassConfig {

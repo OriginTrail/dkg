@@ -1956,3 +1956,6 @@ export interface DKGAgentACKTransportOptions {
   sendTimeoutMs?: number;
   log?: (message: string) => void;
 }
+
+/** @deprecated Import the canonical model from agent-config-resolution-schema.js. */
+export type { ResolvedDKGAgentConfig } from './agent-config-resolution-schema.js';

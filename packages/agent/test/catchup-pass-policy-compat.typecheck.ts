@@ -1,5 +1,22 @@
 import { resolveSwmCatchupPassConfig, type DKGAgentConfig } from '@origintrail-official/dkg-agent';
-import type { ResolvedDKGAgentConfig } from '../src/agent-config-resolution-schema.js';
+import type { ResolvedDKGAgentConfig } from '@origintrail-official/dkg-agent/dist/agent-config-resolution-schema.js';
+import type { ResolvedDKGAgentConfig as LegacyResolvedConfig } from '@origintrail-official/dkg-agent/dist/dkg-agent-types.js';
+
+// Named interfaces lack a general string index signature. Both the historical
+// package subpath and this public environment contract must remain consumable.
+interface CatchupEnv {
+  DKG_SWM_CATCHUP_PASS_BUDGET_MS?: string;
+  DKG_SWM_CATCHUP_MAX_PASSES?: string;
+}
+declare const env: CatchupEnv;
+resolveSwmCatchupPassConfig(env);
+declare const readonlyEnv: Readonly<CatchupEnv>;
+resolveSwmCatchupPassConfig(readonlyEnv);
+resolveSwmCatchupPassConfig(process.env);
+declare const legacyResolved: LegacyResolvedConfig;
+const canonicalResolved: ResolvedDKGAgentConfig = legacyResolved;
+const legacyAgain: LegacyResolvedConfig = canonicalResolved;
+void legacyAgain;
 
 const pass = resolveSwmCatchupPassConfig({});
 pass.maxPasses = 2;

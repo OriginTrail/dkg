@@ -8,6 +8,11 @@ import {
 } from '../src/backpressure-observability.js';
 import { metrics as otelMetrics } from '@opentelemetry/api';
 import { rebuildMetrics } from '../src/telemetry-api.js';
+import {
+  capturePressureCapacity,
+  reconcilePressureCapacity,
+  type SchedulerPressureCapacity,
+} from '../src/scheduler-pressure-capacity.js';
 
 interface RecordedMetric { metric: string; lane: string; value: number }
 
@@ -937,6 +942,45 @@ describe('BackpressureMonitor', () => {
     expect(tracker.snapshot()).toMatchObject({ totals: { queueLimit: null, inflightLimit: null } });
     tracker.updateCapacity(fallback);
     expect(tracker.snapshot()).toMatchObject({ totals: { queueLimit: 9, inflightLimit: 3 } });
+  });
+
+  it.each(['shared', 'partitioned'] as const)('represents differing %s policies as mixed without shared-pool pressure', (model) => {
+    const policy = (limit: number): SchedulerPressureCapacity => model === 'shared'
+      ? { capacityModel: 'shared', queueLimit: limit, inflightLimit: limit }
+      : {
+        capacityModel: 'partitioned', queueLimit: limit, inflightLimit: limit,
+        lanes: { fast: { queueLimit: limit, inflightLimit: limit }, slow: { queueLimit: limit, inflightLimit: limit } },
+      };
+    const first = policy(1);
+    const second = policy(2);
+    const fallback = capturePressureCapacity({});
+    expect(reconcilePressureCapacity([], fallback)).toEqual({ kind: 'uniform', capacity: fallback.value });
+    expect(reconcilePressureCapacity([[{ capacity: capturePressureCapacity(first) }]], fallback)).toMatchObject({
+      kind: 'uniform', capacity: { capacityModel: model, queueLimit: 1 },
+    });
+    expect(reconcilePressureCapacity([
+      [{ capacity: capturePressureCapacity(first) }], [{ capacity: capturePressureCapacity(second) }],
+    ], fallback)).toEqual({ kind: 'mixed' });
+
+    let now = 0;
+    const tracker = new SchedulerPressureTracker({ scheduler: 'explicit-mixed', now: () => now,
+      thresholds: { degradedQueueAgeMs: 100, stalledActiveAgeMs: 200, degradedQueueUtilization: 0 } });
+    const active = tracker.enqueue({ lane: 'fast', operation: 'active' }, first);
+    tracker.start(active);
+    tracker.enqueue({ lane: 'slow', operation: 'queued' }, second);
+    const snapshot = tracker.snapshot();
+    // The old outward label is a compatibility projection. Mixed owners have
+    // unknown ceilings and local lane counts; they never share a capacity pool.
+    expect(snapshot).toMatchObject({ capacityModel: 'shared', state: 'healthy',
+      totals: { queueLimit: null, inflightLimit: null, queued: 1, inflight: 1 } });
+    expect(snapshot.lanes).toMatchObject([
+      { lane: 'fast', capacityModel: 'shared', queueLimit: null, inflightLimit: null, pressureQueued: 0, pressureInflight: 1, stateReasons: [] },
+      { lane: 'slow', capacityModel: 'shared', queueLimit: null, inflightLimit: null, pressureQueued: 1, pressureInflight: 0, stateReasons: [] },
+    ]);
+    now = 100;
+    expect(tracker.snapshot()).toMatchObject({ state: 'degraded' });
+    now = 200;
+    expect(tracker.snapshot()).toMatchObject({ state: 'stalled' });
   });
 
   it('owns enqueued capacity values independently of later caller mutation', () => {
