@@ -21,6 +21,8 @@ const OPERATIONAL_DIGEST = `0x${'ab'.repeat(32)}`;
 const INVENTORY_DIGEST = `0x${'cd'.repeat(32)}`;
 const NODE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const NODE_ADDRESS = '0x1111111111111111111111111111111111111111';
+const RECEIVER_SECRET_FILE = '/tmp/daemon-contract-receiver-token';
+const RECEIVER_TOKEN = 'daemon-contract-receiver-token';
 
 test('required gate certifies through the production status, KA, and query handlers', async () => {
   const sourceState = createRouteState('source');
@@ -52,6 +54,7 @@ test('required gate certifies through the production status, KA, and query handl
       sleep: async () => undefined,
       now: () => new Date('2026-09-11T00:02:30.000Z'),
       readFileFn: async (path) => {
+        if (path === RECEIVER_SECRET_FILE) return RECEIVER_TOKEN;
         assert.equal(path, '/tmp/daemon-contract-rpc-evidence.json');
         return JSON.stringify({
           schema: 'dkg-rpc-usage-minutes-v1',
@@ -113,7 +116,10 @@ test('certification fails when independent receiver delivery is disabled', async
         runCommand: async () => { throw new Error('lifecycle must not start'); },
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         now: () => new Date('2026-09-11T00:02:30.000Z'),
-        readFileFn: async () => { throw new Error('RPC evidence must not be read'); },
+        readFileFn: async (path) => {
+          if (path === RECEIVER_SECRET_FILE) return RECEIVER_TOKEN;
+          throw new Error('RPC evidence must not be read');
+        },
       }),
       (error) => error?.code === 'swm-propagation-timeout'
         && error?.phase === 'live-swm-propagation',
@@ -136,7 +142,12 @@ function createContractConfig(sourceBaseUrl, receiverBaseUrl, expectedCommit) {
     expectedCommit,
     nodes: [
       { id: 'source-node', role: 'source', baseUrl: sourceBaseUrl, auth: { kind: 'none' } },
-      { id: 'receiver-node', role: 'receiver', baseUrl: receiverBaseUrl, auth: { kind: 'none' } },
+      {
+        id: 'receiver-node',
+        role: 'receiver',
+        baseUrl: receiverBaseUrl,
+        auth: { kind: 'bearer-file', secretFile: RECEIVER_SECRET_FILE },
+      },
     ],
     contextGraphs: [{
       id: CG,

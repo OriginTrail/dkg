@@ -18,6 +18,42 @@ import {
 } from './test-support.mjs';
 import { createRequesterV1 } from './transport.mjs';
 
+test('executable revocation evidence requires and sends a node credential', async () => {
+  const invalid = baseConfig();
+  invalid.nodes[1].auth = { kind: 'none' };
+  assert.throws(
+    () => validateRemoteCanaryConfigV1(invalid),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'revoked-authentication-credentials-required',
+  );
+
+  const validated = validateRemoteCanaryConfigV1(baseConfig());
+  const probes = [];
+  const request = createRequesterV1({
+    fetchFn: async (input, options) => {
+      const url = new URL(input);
+      probes.push({
+        path: url.pathname,
+        authorization: new Headers(options.headers).get('authorization'),
+      });
+      return jsonResponse({
+        code: url.pathname.includes('revoked') ? 'RFC64_REVOKED' : 'RFC64_DENIED',
+      }, 403);
+    },
+    readFileFn: async () => RECEIVER_SECRET,
+    secrets: new Map(),
+    timing: validated.timing,
+  });
+  const result = await verifyAuthorizationV1(validated.authorizationChecks, request);
+
+  assert.equal(result.unauthorized.status, 'PASS');
+  assert.equal(result.revoked.status, 'PASS');
+  assert.deepEqual(probes.sort((left, right) => left.path.localeCompare(right.path)), [
+    { path: '/api/rfc64/revoked-probe', authorization: `Bearer ${RECEIVER_SECRET}` },
+    { path: '/api/rfc64/unauthorized-probe', authorization: null },
+  ]);
+});
+
 test('generic 404 cannot certify authorization even with a plausible denial body', async () => {
   const probes = [];
   const config = baseConfig();
