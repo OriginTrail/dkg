@@ -82,6 +82,11 @@ test('preflight fails closed when the versioned daemon certification contract is
     (status) => {
       status.rfc64Certification.catalog.contextGraphs[0].authorityFreshness = 'stale';
     },
+    (status) => {
+      status.rfc64Certification.catalog.contextGraphs.push({
+        ...status.rfc64Certification.catalog.contextGraphs[0],
+      });
+    },
   ]) {
     const status = structuredClone(statusBody());
     mutate(status);

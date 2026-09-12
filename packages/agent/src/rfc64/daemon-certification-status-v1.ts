@@ -139,10 +139,15 @@ export function decodeRfc64DaemonCertificationStatusV1(
   if (!Array.isArray(catalog.contextGraphs)) {
     malformed('$.catalog.contextGraphs', 'array');
   }
+  const contextGraphIds = new Set<string>();
   for (const [index, value] of catalog.contextGraphs.entries()) {
     const path = `$.catalog.contextGraphs[${index}]`;
     const status = record(value, path);
     nonEmptyString(status.contextGraphId, `${path}.contextGraphId`);
+    if (contextGraphIds.has(status.contextGraphId)) {
+      malformed(`${path}.contextGraphId`, 'unique context graph ID');
+    }
+    contextGraphIds.add(status.contextGraphId);
     rolloutMode(status.effectiveMode, `${path}.effectiveMode`);
     boolean(status.legacySyncAllowed, `${path}.legacySyncAllowed`);
     oneOf(status.phase, [
