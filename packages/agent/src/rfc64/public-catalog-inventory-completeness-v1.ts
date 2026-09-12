@@ -28,6 +28,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { sha256 } from '@noble/hashes/sha2.js';
 import { ethers } from 'ethers';
+import { packKnowledgeAssetIdFromIdentity } from '../ka-identity.js';
 
 const UTF8 = new TextEncoder();
 const APPLIED_INVENTORY_DIGEST_DOMAIN_V1 = 'dkg-rfc64-applied-inventory-v1\n';
@@ -105,8 +106,10 @@ export function composeRfc64PublicCatalogInventoryEvidenceRowV1(
       );
     }
     const parsedUal = parseDeterministicKnowledgeAssetUal(input.kaUal);
-    const packedKaId = (BigInt(parsedUal.agentAddress) << 96n)
-      | BigInt(parsedUal.kaNumber);
+    const packedKaId = packKnowledgeAssetIdFromIdentity({
+      agentAddress: parsedUal.agentAddress,
+      kaNumber: parsedUal.kaNumber,
+    });
     if (parsedUal.ual !== input.kaUal || packedKaId !== BigInt(input.kaId)) {
       throw new Error('inventory evidence kaUal does not canonically encode kaId');
     }

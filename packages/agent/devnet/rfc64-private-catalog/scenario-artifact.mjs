@@ -113,13 +113,27 @@ export function buildRfc64PrivateReleaseArtifactV1(evidence, runtimeManifestDige
       failureClass: observation(outsider, 'denial').failureClass,
       failureCode: observation(outsider, 'denial').failureCode,
       appliedHeadDigest: observation(outsider, 'state').appliedHeadDigest,
-      graphCounts: observation(outsider, 'state').graphCounts,
+      graphCounts: observation(outsider, 'state').graphCounts.map(({ kaNumber, swm, vm }) => ({
+        kaNumber,
+        swm,
+        vm,
+      })),
       rpc: rpcEvidenceV1(outsider.shutdown),
     },
     revokedReceiver: {
       authority: {
-        ownerMutation: observation(ownerRevoker, 'revocation'),
-        providerObservation: receiverRevocation,
+        ownerMutation: {
+          policyDigest: observation(ownerRevoker, 'revocation').policyDigest,
+          revokedAgentAddress: observation(ownerRevoker, 'revocation').revokedAgentAddress,
+          rosterVersion: observation(ownerRevoker, 'revocation').rosterVersion,
+        },
+        providerObservation: {
+          curatorMetadataRefreshed: receiverRevocation.curatorMetadataRefreshed,
+          policyDigest: receiverRevocation.policyDigest,
+          providerMutationDenied: receiverRevocation.providerMutationDenied,
+          revokedAgentAddress: receiverRevocation.revokedAgentAddress,
+          rosterVersion: receiverRevocation.rosterVersion,
+        },
       },
       denial: {
         denied: observation(receiver, 'revokedDenial').denied,

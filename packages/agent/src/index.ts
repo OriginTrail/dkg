@@ -183,10 +183,8 @@ export type {
   PublishAuthorCatalogExactSetSuccessorParamsV1,
   PublishAuthorCatalogExactSetSuccessorResultV1,
   PublishAuthorCatalogGenesisParamsV1,
-  ReadRfc64VerifiedAppliedCatalogClosureInputV1,
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogRuntimeSelectionStatusV1,
-  VerifiedAppliedCatalogClosureV1,
 } from './dkg-agent-rfc64-catalog.js';
 export type {
   ReconcileRfc64PublicRootCatalogExactSetParamsV1,

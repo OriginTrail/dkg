@@ -21,6 +21,8 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
+import { bindRfc64PrivateReleaseProofReaderV1 } from
+  '../../src/rfc64/verified-applied-catalog-closure-v1.ts';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -341,9 +343,7 @@ async function bindRfc64PrivateFinalizedRuntimeV1({
       finalizedAuthority: registeredFinalizedAuthority,
       expectedAuthority,
     });
-  const canonicalClosureReader = (
-    (input) => created.agent.readRfc64VerifiedAppliedCatalogClosureV1(input)
-  ) satisfies Rfc64PrivateCatalogClosureReaderV1;
+  const canonicalClosureReader = bindRfc64PrivateReleaseProofReaderV1(created.agent);
   const common = Object.freeze({
     ...created,
     kind: 'run',
@@ -402,10 +402,30 @@ function decorateCatalogClosureReaderV1(
   }
   if (fault === 'expected-assets' || fault === 'duplicate-expected-assets') {
     return async (input) => {
-      await reader(input);
-      throw new Error(fault === 'expected-assets'
-        ? 'signed catalog row set differs from the expected asset identities'
-        : 'expected catalog SWM asset identities are duplicated');
+      const closure = await reader(input);
+      if (closure.rows.length < 2) {
+        throw new Error('catalog proof fault requires at least two verified rows');
+      }
+      if (fault === 'expected-assets') {
+        return Object.freeze({
+          ...closure,
+          rows: Object.freeze([
+            Object.freeze({
+              ...closure.rows[0],
+              kaNumber: closure.rows[0].kaNumber + 10_000n,
+            }),
+            ...closure.rows.slice(1),
+          ]),
+        });
+      }
+      return Object.freeze({
+        ...closure,
+        rows: Object.freeze([
+          closure.rows[0],
+          Object.freeze({ ...closure.rows[1], kaNumber: closure.rows[0].kaNumber }),
+          ...closure.rows.slice(2),
+        ]),
+      });
     };
   }
   const message = fault === 'inventory-digest'

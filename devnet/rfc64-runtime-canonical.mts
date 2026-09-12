@@ -5,7 +5,11 @@ import { createHash } from 'node:crypto';
 /** Closed artifact ceiling, including the document's single trailing LF. */
 export const MAX_CANONICAL_DOCUMENT_BYTES = 2 * 1024 * 1024;
 export const MAX_CANONICAL_DEPTH = 16;
-export const MAX_CANONICAL_NODES = 32_768;
+// Fixed-topology release provenance repeats each child's bounded loaded-file
+// manifest. Eleven real gate processes currently require ~35k JSON values;
+// retain a power-of-two ceiling while the independent 2 MiB byte bound keeps
+// the accepted document strictly bounded.
+export const MAX_CANONICAL_NODES = 65_536;
 
 const MAX_STRING_CODE_UNITS = 1_048_576;
 const DIGEST32 = /^0x[0-9a-f]{64}$/u;

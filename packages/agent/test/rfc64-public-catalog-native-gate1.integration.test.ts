@@ -47,7 +47,6 @@ import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-stora
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { DKGAgent } from '../src/index.js';
 import {
   produceEmptyAuthorCatalogGenesisV1,
   produceSparseAuthorCatalogSuccessorV1,
@@ -69,6 +68,11 @@ import {
   verifyRfc64PublicCatalogInventoryCompletenessV1,
 } from '../src/rfc64/public-catalog-inventory-completeness-v1.js';
 import { readVerifiedAppliedCatalogClosureV1 } from
+  '../src/rfc64/verified-applied-catalog-closure-v1.js';
+import {
+  bindRfc64PrivateReleaseProofReaderV1,
+  registerRfc64PrivateReleaseProofReaderV1,
+} from
   '../src/rfc64/verified-applied-catalog-closure-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1,
@@ -537,8 +541,16 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       assertRfc64CatalogNetworkMatchesTrustedSourceV1: assertTrustedNetwork,
       resolveRfc64CatalogDeploymentProfileV1: resolveDeployment,
     };
-    const readClosure = () => DKGAgent.prototype
-      .readRfc64VerifiedAppliedCatalogClosureV1.call(agentLike as never, {
+    registerRfc64PrivateReleaseProofReaderV1({
+      owner: agentLike,
+      persistence: agentLike.rfc64PersistenceV1,
+      assertTrustedNetwork,
+      resolveDeployment,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    const readClosure = () => bindRfc64PrivateReleaseProofReaderV1(
+      agentLike as never,
+    )({
         trustedCatalogScope: fixture.scope,
       });
 
@@ -574,10 +586,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       });
     await expect(readClosure()).rejects.toThrow(/changed during verified closure read/u);
 
-    await expect(DKGAgent.prototype.readRfc64VerifiedAppliedCatalogClosureV1.call(
-      { rfc64PersistenceV1: undefined } as never,
-      { trustedCatalogScope: fixture.scope },
-    )).rejects.toThrow(/no RFC-64 persistence/u);
+    expect(() => bindRfc64PrivateReleaseProofReaderV1({})).toThrow(/unavailable/u);
   }, 30_000);
 
   it('accepts an exact projection when the store post-read returns a different row order', async () => {

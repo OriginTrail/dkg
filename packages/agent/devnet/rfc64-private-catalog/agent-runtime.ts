@@ -8,7 +8,7 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { Rfc64CatalogSuccessorAssetInputV1 } from
   '../../src/dkg-agent-rfc64-catalog.js';
 import type { VerifiedAppliedCatalogClosureV1 } from
-  '../../src/dkg-agent-rfc64-catalog.js';
+  '../../src/rfc64/verified-applied-catalog-closure-v1.js';
 import type { Rfc64ReleaseNativeAuthoritySnapshotV1 } from
   '../../src/rfc64/release-native-catalog-authority-v1.js';
 import type { Rfc64PrivateDevnetChainAdapter } from './finalized-chain-fixture.mjs';

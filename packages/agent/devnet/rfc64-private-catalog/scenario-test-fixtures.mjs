@@ -94,6 +94,7 @@ export function passingScenarioEvidenceV1() {
         },
         listenerDialableAfterOwnerExit: true,
         revocationObservation: {
+          policyDigest: `0x${'ef'.repeat(32)}`,
           curatorMetadataRefreshed: true,
           providerMutationDenied: true,
           revokedAgentAddress: roleAgentAddress('receiver'),

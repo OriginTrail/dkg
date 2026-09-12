@@ -2192,15 +2192,11 @@ async function activateExactPublicProjection(
   return {
     swmGraph,
     publicQuadsDigest: workspacePublicQuadsDigest(graphQuads),
-    evidence: composeRfc64PublicCatalogInventoryEvidenceRowV1({
-      kaId: row.kaId,
-      catalogRowDigest: sealBinding.catalogRowDigest,
-      contentDigest: row.projectionDigest,
-      sealDigest: sealBinding.sealDigest,
-      bundleDigest: row.transfer.blobDigest,
-      kaUal,
-      activatedTripleCount: sealBinding.seal.publicTripleCount,
-    }),
+    // The pre-mutation verifier minted this exact immutable row from the same
+    // signed row, projection metadata, and seal. Post-read proves those bytes
+    // survived activation; retain the one canonical evidence identity rather
+    // than reconstructing a parallel mapping that could drift.
+    evidence: expectedEvidence,
   };
 }
 

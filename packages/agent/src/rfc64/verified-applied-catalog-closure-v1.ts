@@ -9,6 +9,7 @@ import {
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
+  type NetworkIdV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SignedControlEnvelopeV1,
   type VerifiedCatalogSealBindingSnapshotV1,
@@ -27,6 +28,7 @@ import {
 import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './inventory-v1/index.js';
 import type { Rfc64KaBundleOperationsV1 } from './ka-bundle-store-v1.js';
+import type { Rfc64PersistenceV1 } from './persistence-v1.js';
 import {
   composeRfc64PublicCatalogInventoryEvidenceRowV1,
   computeRfc64AppliedInventoryDigestV1,
@@ -168,4 +170,126 @@ export async function readVerifiedAppliedCatalogClosureV1(
       rows: inventoryRows,
     }),
   });
+}
+
+export type Rfc64PrivateReleaseProofReaderV1 = (
+  input: Readonly<{
+    trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
+  }>,
+) => Promise<Readonly<VerifiedAppliedCatalogClosureV1>>;
+
+export interface RegisterRfc64PrivateReleaseProofReaderOptionsV1 {
+  readonly owner: object;
+  readonly persistence: Pick<
+    Rfc64PersistenceV1,
+    'controlObjects' | 'inventory' | 'kaBundles'
+  >;
+  readonly assertTrustedNetwork: (networkId: NetworkIdV1) => void;
+  readonly resolveDeployment: (
+    networkId: NetworkIdV1,
+    signal: AbortSignal,
+  ) => Promise<CatalogSealDeploymentProfileV1>;
+  readonly verifyIssuerSignature: (
+    envelope: SignedControlEnvelopeV1,
+  ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
+}
+
+// `node --import tsx` can load the source gate beside the package build used by
+// its daemon children. Share only the private WeakMap across those two module
+// instances; no proof capability is attached to DKGAgent or its public types.
+const PROOF_READER_REGISTRY = Symbol.for(
+  '@origintrail-official/dkg-agent/internal/rfc64-private-release-proof-reader-registry-v1',
+);
+const proofReaders = resolveSharedProofReaderRegistryV1();
+
+/** Inject one internal, owner-bound proof capability for the source gate. */
+export function registerRfc64PrivateReleaseProofReaderV1(
+  options: RegisterRfc64PrivateReleaseProofReaderOptionsV1,
+): void {
+  const {
+    owner,
+    persistence,
+    assertTrustedNetwork,
+    resolveDeployment,
+    verifyIssuerSignature,
+  } = options;
+  const reader: Rfc64PrivateReleaseProofReaderV1 = async ({ trustedCatalogScope }) => {
+    assertTrustedNetwork(trustedCatalogScope.networkId);
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(trustedCatalogScope);
+    const appliedHead = persistence.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      trustedCatalogScope.authorAddress,
+    );
+    if (appliedHead === null) {
+      throw new Error('verified applied catalog closure has no durable applied head');
+    }
+    const deployment = await resolveDeployment(
+      trustedCatalogScope.networkId,
+      new AbortController().signal,
+    );
+    const closure = await readVerifiedAppliedCatalogClosureV1({
+      appliedHead,
+      controlObjects: persistence.controlObjects,
+      deployment,
+      kaBundles: persistence.kaBundles,
+      trustedCatalogScope,
+      verifyIssuerSignature,
+    });
+    const currentAppliedHead = persistence.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      trustedCatalogScope.authorAddress,
+    );
+    if (!equalAppliedCatalogHeadSnapshotV1(appliedHead, currentAppliedHead)) {
+      throw new Error('durable applied catalog head changed during verified closure read');
+    }
+    return closure;
+  };
+  proofReaders.set(owner, reader);
+}
+
+/** Bind the gate-only capability after the agent has started its catalog service. */
+export function bindRfc64PrivateReleaseProofReaderV1(
+  owner: object,
+): Rfc64PrivateReleaseProofReaderV1 {
+  const reader = proofReaders.get(owner);
+  if (reader === undefined) {
+    throw new TypeError('RFC-64 private release proof reader is unavailable');
+  }
+  return reader;
+}
+
+/** Revoke the gate-only capability as part of catalog-runtime teardown. */
+export function unregisterRfc64PrivateReleaseProofReaderV1(owner: object): void {
+  proofReaders.delete(owner);
+}
+
+function resolveSharedProofReaderRegistryV1(): WeakMap<
+  object,
+  Rfc64PrivateReleaseProofReaderV1
+> {
+  const existing = Reflect.get(globalThis, PROOF_READER_REGISTRY) as unknown;
+  if (existing instanceof WeakMap) {
+    return existing as WeakMap<object, Rfc64PrivateReleaseProofReaderV1>;
+  }
+  const created = new WeakMap<object, Rfc64PrivateReleaseProofReaderV1>();
+  Object.defineProperty(globalThis, PROOF_READER_REGISTRY, {
+    configurable: false,
+    enumerable: false,
+    value: created,
+    writable: false,
+  });
+  return created;
+}
+
+function equalAppliedCatalogHeadSnapshotV1(
+  expected: AppliedCatalogHeadSnapshotV1,
+  current: AppliedCatalogHeadSnapshotV1 | null,
+): boolean {
+  return current !== null
+    && current.catalogScopeDigest === expected.catalogScopeDigest
+    && current.authorAddress === expected.authorAddress
+    && current.currentCatalogHeadDigest === expected.currentCatalogHeadDigest
+    && current.appliedInventoryDigest === expected.appliedInventoryDigest
+    && current.catalogVersion === expected.catalogVersion
+    && current.inventoryRowCount === expected.inventoryRowCount;
 }

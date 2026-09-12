@@ -85,7 +85,7 @@ test('over-removing another member cannot certify receiver revocation', {
 for (const [fault, expected] of [
   ['inventory-digest', /differs from the durable applied inventory digest/u],
   ['expected-assets', /differs from the expected asset identities/u],
-  ['duplicate-expected-assets', /asset identities are duplicated/u],
+  ['duplicate-expected-assets', /differs from the expected asset identities/u],
   ['missing-bundle', /has no durable KA bundle/u],
   ['mismatched-bundle', /durable KA bundle differs from its signed catalog row/u],
   ['trusted-scope', /has no durable applied head/u],

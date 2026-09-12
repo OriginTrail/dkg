@@ -32,6 +32,7 @@ import {
 } from '../devnet/rfc64-private-catalog/denial-evidence.mjs';
 import {
   assertRfc64PrivateGatePassProvenanceV1,
+  decodeRfc64PrivateGatePassArtifactV1,
   runRfc64PrivateGateArtifactLifecycleV1,
 } from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
 import { runRfc64PrivateGateFromCleanBuildV1 } from '../devnet/rfc64-private-catalog/clean-launch.js';
@@ -46,6 +47,10 @@ import {
   executeRfc64PrivateReleaseGateV1,
   hasExactMemoryContents,
 } from '../devnet/rfc64-private-catalog/run.mjs';
+import { buildRfc64PrivateReleaseArtifactV1 } from
+  '../devnet/rfc64-private-catalog/scenario-artifact.mjs';
+import { passingScenarioEvidenceV1 } from
+  '../devnet/rfc64-private-catalog/scenario-test-fixtures.mjs';
 import {
   ASSET_NUMBERS,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
@@ -92,6 +97,23 @@ function runtimeManifest(sourceRevision: string, marker: string) {
     manifestDigest: `0x${marker.repeat(64)}`,
     sourceCommit: sourceRevision,
   } as never;
+}
+
+function completeScenarioPass(sourceRevision: string) {
+  const provenance = runtimeProvenance(sourceRevision);
+  return buildRfc64PrivateReleaseArtifactV1({
+    ...passingScenarioEvidenceV1(),
+    runtimeProvenance: provenance,
+  }, provenance.sourceBuild.manifestDigest);
+}
+
+function persistedScenarioPass(sourceRevision = 'b'.repeat(40)) {
+  return {
+    ...completeScenarioPass(sourceRevision),
+    startedAt: '2026-08-26T00:00:00.000Z',
+    finishedAt: '2026-08-26T00:00:01.000Z',
+    sourceRevision,
+  };
 }
 
 // Independent oracle: these bytes and this digest are intentionally NOT
@@ -155,13 +177,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       artifactPath,
       resolveSourceRevision: () => 'b'.repeat(40),
       now: () => timestamps.shift() ?? new Date('2026-08-26T00:00:02.000Z'),
-      execute: async () => ({
-        schema: 'dkg-rfc64-private-release-gate-v1',
-        status: 'PASS',
-        checks: { strict: true },
-        runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
-        runtimeProvenance: provenance,
-      }),
+      execute: async () => completeScenarioPass('b'.repeat(40)),
     });
 
     expect(artifact).toMatchObject({
@@ -173,6 +189,88 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     });
     expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toEqual(artifact);
     expect(() => assertRfc64PrivateGatePassProvenanceV1(artifact)).not.toThrow();
+    expect(decodeRfc64PrivateGatePassArtifactV1(artifact)).toBe(artifact);
+  });
+
+  it('decodes only the closed all-true PASS contract with substantiated denials', () => {
+    const artifact = persistedScenarioPass();
+    expect(decodeRfc64PrivateGatePassArtifactV1(artifact)).toBe(artifact);
+
+    const unknownTopLevel = { ...artifact, unexpected: true };
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(unknownTopLevel))
+      .toThrow(/unknown or missing fields/u);
+    const missingTopLevel = structuredClone(artifact) as Record<string, unknown>;
+    delete missingTopLevel.catalog;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(missingTopLevel))
+      .toThrow(/unknown or missing fields/u);
+
+    const falseCheck = structuredClone(artifact);
+    falseCheck.checks.outsiderDeniedBeforeApplication = false;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(falseCheck))
+      .toThrow(/check is not true/u);
+    const unknownCheck = structuredClone(artifact) as typeof artifact & {
+      checks: typeof artifact.checks & { invented?: boolean };
+    };
+    unknownCheck.checks.invented = true;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(unknownCheck))
+      .toThrow(/unknown or missing fields/u);
+
+    const outsiderApplied = structuredClone(artifact);
+    outsiderApplied.outsider.appliedHeadDigest = `0x${'1'.repeat(64)}`;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(outsiderApplied))
+      .toThrow(/applied a catalog head/u);
+    const outsiderMaterialized = structuredClone(artifact);
+    outsiderMaterialized.outsider.graphCounts[0].swm = 1;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(outsiderMaterialized))
+      .toThrow(/not empty and unique/u);
+    const untypedOutsiderDenial = structuredClone(artifact);
+    untypedOutsiderDenial.outsider.failureCode = 'transport-timeout';
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(untypedOutsiderDenial))
+      .toThrow(/not a typed RFC-64 policy denial/u);
+
+    const unobservedRevocation = structuredClone(artifact);
+    unobservedRevocation.revokedReceiver.authority.providerObservation
+      .curatorMetadataRefreshed = false;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(unobservedRevocation))
+      .toThrow(/authority evidence is inconsistent/u);
+    const mismatchedRevokedAgent = structuredClone(artifact);
+    mismatchedRevokedAgent.revokedReceiver.revokedAgentAddress = `0x${'2'.repeat(40)}`;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(mismatchedRevokedAgent))
+      .toThrow(/authority evidence is inconsistent/u);
+
+    const advancedProviderRoster = structuredClone(artifact);
+    advancedProviderRoster.revokedReceiver.rosterVersion = '2';
+    advancedProviderRoster.revokedReceiver.authority.providerObservation.rosterVersion = '2';
+    expect(decodeRfc64PrivateGatePassArtifactV1(advancedProviderRoster))
+      .toBe(advancedProviderRoster);
+    const rolledBackProviderRoster = structuredClone(advancedProviderRoster);
+    rolledBackProviderRoster.revokedReceiver.authority.ownerMutation.rosterVersion = '3';
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(rolledBackProviderRoster))
+      .toThrow(/authority evidence is inconsistent/u);
+
+    const unprojectedAuthority = structuredClone(artifact) as typeof artifact & {
+      revokedReceiver: typeof artifact.revokedReceiver & {
+        authority: typeof artifact.revokedReceiver.authority & {
+          ownerMutation: typeof artifact.revokedReceiver.authority.ownerMutation & {
+            event?: string;
+          };
+        };
+      };
+    };
+    unprojectedAuthority.revokedReceiver.authority.ownerMutation.event = 'receiver-revoked';
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(unprojectedAuthority))
+      .toThrow(/unknown or missing fields/u);
+  });
+
+  it('rejects a non-Git revision or future PASS interval', () => {
+    expect(() => decodeRfc64PrivateGatePassArtifactV1({
+      ...persistedScenarioPass(),
+      sourceRevision: 'c'.repeat(64),
+    })).toThrow(/exact Git source revision/u);
+    expect(() => decodeRfc64PrivateGatePassArtifactV1({
+      ...persistedScenarioPass(),
+      finishedAt: '2099-01-01T00:00:00.000Z',
+    })).toThrow(/interval is in the future/u);
   });
 
   it('rejects PASS provenance with a missing revision or invalid run interval', () => {

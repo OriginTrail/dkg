@@ -62,6 +62,11 @@ import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
+  registerRfc64PrivateReleaseProofReaderV1,
+  unregisterRfc64PrivateReleaseProofReaderV1,
+} from
+  './rfc64/verified-applied-catalog-closure-v1.js';
+import {
   Rfc64CatalogReplayConnectionRuntimeV1,
   type Rfc64CatalogReplayConnectionReservationV1,
 } from './rfc64/catalog-replay-connection-runtime-v1.js';
@@ -124,10 +129,6 @@ import {
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
-import {
-  readVerifiedAppliedCatalogClosureV1,
-  type VerifiedAppliedCatalogClosureV1,
-} from './rfc64/verified-applied-catalog-closure-v1.js';
 import {
   type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
@@ -303,18 +304,6 @@ export interface Rfc64AppliedCatalogHeadRefV1 {
   readonly catalogScopeDigest: Digest32V1;
   readonly authorAddress: EvmAddressV1;
 }
-
-/**
- * Public, semantic input for re-establishing a durable applied-catalog
- * closure. Storage capabilities remain owned by the agent.
- */
-export interface ReadRfc64VerifiedAppliedCatalogClosureInputV1 {
-  /** Exact semantic scope whose currently applied closure must be verified. */
-  readonly trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
-}
-
-export type { VerifiedAppliedCatalogClosureV1 } from
-  './rfc64/verified-applied-catalog-closure-v1.js';
 
 export type {
   SynchronizeRfc64PublicCatalogFromProviderParamsV1,
@@ -2559,6 +2548,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         return admission;
       },
     });
+    registerRfc64PrivateReleaseProofReaderV1({
+      owner: this,
+      persistence,
+      assertTrustedNetwork: (networkId) =>
+        this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(networkId),
+      resolveDeployment: (networkId, signal) =>
+        this.resolveRfc64CatalogDeploymentProfileV1(networkId, signal),
+      verifyIssuerSignature,
+    });
     return service;
   }
 
@@ -2585,6 +2583,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     try {
       await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
     } finally {
+      unregisterRfc64PrivateReleaseProofReaderV1(this);
       this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
@@ -3233,50 +3232,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
-   * Re-establish a verified closure through the agent-owned durable stores.
-   * Callers provide semantic catalog coordinates, never storage internals.
-   */
-  async readRfc64VerifiedAppliedCatalogClosureV1(
-    this: DKGAgent,
-    input: ReadRfc64VerifiedAppliedCatalogClosureInputV1,
-  ): Promise<Readonly<VerifiedAppliedCatalogClosureV1>> {
-    const persistence = this.rfc64PersistenceV1;
-    if (persistence === undefined) {
-      throw new Error('verified applied catalog closure has no RFC-64 persistence');
-    }
-    const { trustedCatalogScope } = input;
-    this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(trustedCatalogScope.networkId);
-    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(trustedCatalogScope);
-    const appliedHead = persistence.inventory.readAppliedCatalogHeadV1(
-      catalogScopeDigest,
-      trustedCatalogScope.authorAddress,
-    );
-    if (appliedHead === null) {
-      throw new Error('verified applied catalog closure has no durable applied head');
-    }
-    const deployment = await this.resolveRfc64CatalogDeploymentProfileV1(
-      trustedCatalogScope.networkId,
-      new AbortController().signal,
-    );
-    const closure = await readVerifiedAppliedCatalogClosureV1({
-      appliedHead,
-      controlObjects: persistence.controlObjects,
-      deployment,
-      kaBundles: persistence.kaBundles,
-      trustedCatalogScope,
-      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-    });
-    const currentAppliedHead = persistence.inventory.readAppliedCatalogHeadV1(
-      catalogScopeDigest,
-      trustedCatalogScope.authorAddress,
-    );
-    if (!equalAppliedCatalogHeadSnapshotV1(appliedHead, currentAppliedHead)) {
-      throw new Error('durable applied catalog head changed during verified closure read');
-    }
-    return closure;
-  }
-
-  /**
    * Read the receiver's exact post-verification synchronization evidence for
    * one head in this process. Durable restart truth remains the applied-head
    * API above; this process-local record proves the semantic post-read that
@@ -3614,19 +3569,6 @@ function countToSafeInteger(value: CountV1, label: string): number {
     throw new Error(`${label} is outside the exact safe-integer evidence boundary`);
   }
   return parsed;
-}
-
-function equalAppliedCatalogHeadSnapshotV1(
-  expected: AppliedCatalogHeadSnapshotV1,
-  current: AppliedCatalogHeadSnapshotV1 | null,
-): boolean {
-  return current !== null
-    && current.catalogScopeDigest === expected.catalogScopeDigest
-    && current.authorAddress === expected.authorAddress
-    && current.currentCatalogHeadDigest === expected.currentCatalogHeadDigest
-    && current.appliedInventoryDigest === expected.appliedInventoryDigest
-    && current.catalogVersion === expected.catalogVersion
-    && current.inventoryRowCount === expected.inventoryRowCount;
 }
 
 export interface BoundedAuthorCatalogHistoryV1 {
