@@ -37,7 +37,7 @@ import {
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
   isWritableQuad,
-  validateQuadObjectTerms,
+  validateWritableQuadTerms,
   respondIfReconcileUnavailable,
   respondIfStoreUnavailable,
   classifyStoreUnavailable,
@@ -1351,8 +1351,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
         }
         // GH #306/#787 (follow-up) — reject objects that are neither a quoted
-        // literal nor an absolute IRI before they reach (and crash) the parser.
-        const wmObjErr = validateQuadObjectTerms("quads", parsed.quads);
+        // literal, absolute IRI or valid blank node before they reach storage.
+        const wmObjErr = validateWritableQuadTerms("quads", parsed.quads);
         if (wmObjErr) return jsonResponse(res, 400, { error: wmObjErr });
         const literalSize = validateWritableQuadLiteralSizes("quads", parsed.quads);
         if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);

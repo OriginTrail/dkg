@@ -207,7 +207,6 @@ import {
 import {
   resolveNameToPeerId,
   isWritableQuad,
-  validateQuadObjectTerms,
   validateWritableQuadLiteralSizes,
   oversizedRdfLiteralResponseBody,
   jsonResponse,
