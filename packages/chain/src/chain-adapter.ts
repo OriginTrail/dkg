@@ -615,10 +615,30 @@ export type ContextGraphRegistryScanOptions =
   | {
       mode: 'seedFromCursor';
       pageBudget?: number;
+    }
+  | {
+      /**
+       * Low-priority historical integrity pass. Repair scans use a cursor and
+       * captured target that are independent from the live discovery cursor,
+       * never enter its reorg window, and resume within a hard page budget.
+       */
+      mode: 'repair';
+      pageBudget: number;
+      minimumIntervalMs?: number;
     };
 
 export interface ContextGraphRegistryScanPage {
   contextGraphs: ContextGraphOnChain[];
+  /** Bounded operational progress; contains no graph identifiers. */
+  scanProgress?: Readonly<{
+    mode: ContextGraphRegistryScanOptions['mode'] | 'listAll';
+    page: number;
+    pageBudget?: number;
+    fromBlock: number;
+    toBlock: number;
+    targetBlock: number;
+    completesGeneration: boolean;
+  }>;
   ack(): Promise<void>;
 }
 
@@ -635,6 +655,10 @@ export interface ContextGraphRegistryScanCursorKey {
 export interface ContextGraphRegistryScanCursorStore {
   load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
+  /** Opaque, atomically replaced repair state. Older custom stores may omit it. */
+  loadRepairAudit?(key: ContextGraphRegistryScanCursorKey): Promise<unknown>;
+  /** Opaque, atomically replaced repair state. Older custom stores may omit it. */
+  saveRepairAudit?(key: ContextGraphRegistryScanCursorKey, checkpoint: unknown): Promise<void>;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
