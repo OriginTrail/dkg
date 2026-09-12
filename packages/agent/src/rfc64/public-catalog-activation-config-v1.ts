@@ -204,7 +204,7 @@ export interface Rfc64CatalogNormalizedActivationStateV1 {
   readonly execution: Rfc64CatalogActivationExecutionV1;
 }
 
-interface ResolvedRfc64CatalogActivationsFieldsV1 {
+export interface ResolvedRfc64CatalogActivationsV1 {
   /** Policy-neutral union used by the Release-1 runtime. */
   readonly catalog: ResolvedRfc64CatalogActivationConfigV1;
   /** Compatibility projection used by the existing public status/producer path. */
@@ -221,15 +221,24 @@ interface ResolvedRfc64CatalogActivationsFieldsV1 {
  * The class boundary makes it clear that spreading or deserializing this value
  * does not produce a runtime-ready activation handle.
  */
-export class ResolvedRfc64CatalogActivationsV1
-implements ResolvedRfc64CatalogActivationsFieldsV1 {
+class ResolverIssuedRfc64CatalogActivationsV1
+implements ResolvedRfc64CatalogActivationsV1 {
+  readonly #resolverIssued = true;
   readonly catalog: ResolvedRfc64CatalogActivationConfigV1;
   readonly publicCatalog: ResolvedRfc64PublicCatalogActivationConfigV1;
   readonly selectedCatalogAuthoringControls:
     readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[];
   readonly activationState: Rfc64CatalogNormalizedActivationStateV1;
 
-  private constructor(fields: ResolvedRfc64CatalogActivationsFieldsV1) {
+  constructor(
+    resolverToken: typeof RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1,
+    fields: ResolvedRfc64CatalogActivationsV1,
+  ) {
+    if (resolverToken !== RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1) {
+      throw new TypeError(
+        'RFC-64 activation handles can only be created by the activation resolver',
+      );
+    }
     this.catalog = fields.catalog;
     this.publicCatalog = fields.publicCatalog;
     this.selectedCatalogAuthoringControls = fields.selectedCatalogAuthoringControls;
@@ -237,11 +246,15 @@ implements ResolvedRfc64CatalogActivationsFieldsV1 {
     Object.freeze(this);
   }
 
-  /** @internal Resolver-only constructor keyed by an unexported capability token. */
-  static [RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1](
-    fields: ResolvedRfc64CatalogActivationsFieldsV1,
-  ): ResolvedRfc64CatalogActivationsV1 {
-    return new ResolvedRfc64CatalogActivationsV1(fields);
+  static isResolverIssued(
+    input: unknown,
+  ): input is ResolverIssuedRfc64CatalogActivationsV1 {
+    if (typeof input !== 'object' || input === null) return false;
+    try {
+      return (input as ResolverIssuedRfc64CatalogActivationsV1).#resolverIssued;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -251,7 +264,7 @@ export function assertResolvedRfc64CatalogActivationsV1(
   chainIdentity?: Rfc64PublicCatalogActivationChainIdentityV1,
 ): asserts input is ResolvedRfc64CatalogActivationsV1 {
   if (
-    !(input instanceof ResolvedRfc64CatalogActivationsV1)
+    !ResolverIssuedRfc64CatalogActivationsV1.isResolverIssued(input)
   ) {
     throw new TypeError(
       'rfc64CatalogActivations must be an opaque handle from '
@@ -807,14 +820,15 @@ export function resolveRfc64CatalogActivationsV1(
         },
       ),
     } satisfies Rfc64CatalogNormalizedActivationStateV1);
-    return ResolvedRfc64CatalogActivationsV1[
-      RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1
-    ]({
-      catalog,
-      publicCatalog,
-      selectedCatalogAuthoringControls,
-      activationState,
-    });
+    return new ResolverIssuedRfc64CatalogActivationsV1(
+      RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1,
+      {
+        catalog,
+        publicCatalog,
+        selectedCatalogAuthoringControls,
+        activationState,
+      },
+    );
   };
   const catalog = resolveRfc64CatalogActivationInputV1(input.catalog, chainIdentity);
   // The unified block is authoritative. Its explicit compatibility rollback

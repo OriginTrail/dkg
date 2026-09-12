@@ -4212,6 +4212,29 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         },
       } as never,
     })).rejects.toThrow(/must be an opaque handle from resolveRfc64CatalogActivationsV1/u);
+    const prototypeForgedActivations = Object.setPrototypeOf({
+      catalog: activations.catalog,
+      publicCatalog: activations.publicCatalog,
+      selectedCatalogAuthoringControls: activations.selectedCatalogAuthoringControls,
+      activationState: {
+        ...activations.activationState,
+        execution: {
+          mode: 'catalog',
+          rollout: {
+            ...activations.activationState.execution.rollout,
+            defaultMode: 'catalog',
+          },
+        },
+      },
+    }, Object.getPrototypeOf(activations));
+    await expect(DKGAgent.create({
+      name: 'prototype-forged-normalized-activation',
+      rfc64CatalogActivations: prototypeForgedActivations,
+    })).rejects.toThrow(/must be an opaque handle from resolveRfc64CatalogActivationsV1/u);
+    expect(() => Reflect.construct(
+      Object.getPrototypeOf(activations).constructor,
+      [Symbol('forged-resolver-token'), prototypeForgedActivations],
+    )).toThrow(/can only be created by the activation resolver/u);
     await expect(DKGAgent.create({
       name: 'mixed-normalized-activation',
       rfc64CatalogActivations: activations,
