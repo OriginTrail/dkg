@@ -154,10 +154,6 @@ import {
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import {
-  bindRandomSampling,
-  RandomSamplingShutdownTimeoutError,
-  stopRandomSamplingHandleWithin,
-  type RandomSamplingHandle,
   type RandomSamplingStatus,
 } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
@@ -312,7 +308,6 @@ import {
   CATCHUP_ON_CONNECT_COOLDOWN_MS,
   SYNC_RECONCILER_INTERVAL_MS,
   SYNC_STALENESS_THRESHOLD_MS,
-  RANDOM_SAMPLING_BIND_RETRY_MS,
   STORAGE_ACK_REGISTRATION_RETRY_MS,
   JOIN_APPROVAL_RETRY_TICK_MS,
   MESSAGE_OUTBOX_TICK_MS,
@@ -344,7 +339,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -2225,13 +2219,9 @@ export class DKGAgent extends DKGAgentBase {
    * `random-sampling status` subcommand.
    */
   getRandomSamplingStatus(): RandomSamplingStatus {
-    if (this.randomSamplingHandle) return this.randomSamplingHandle.getStatus();
-    return {
-      enabled: false,
-      role: (this.config.nodeRole ?? 'edge') as 'core' | 'edge',
-      identityId: this.randomSamplingIdentityId.toString(),
-      disabledReason: this.randomSamplingDisabledReason,
-      loop: null,
+    return this.randomSamplingRuntime?.getStatus() ?? {
+      enabled: false, role: (this.config.nodeRole ?? 'edge') as 'core' | 'edge',
+      identityId: '0', disabledReason: 'not_started', loop: null,
     };
   }
 
@@ -2242,6 +2232,8 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    // Fence delayed eligibility lookups and handle creation before any shutdown await.
+    this.randomSamplingRuntime?.cancel();
     const authorityRetryDrain =
       this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
     // Fence membership persistence before any network callback can enqueue
@@ -2407,39 +2399,11 @@ export class DKGAgent extends DKGAgentBase {
     // rc.9 PR-10: joinApprovalRetryTimer + joinApprovalRetryQueue
     // deleted; substrate outbox owns retry state and drains itself
     // via the messengerOutboxTimer cleared just above.
-    this.clearRandomSamplingBindRetry();
     this.clearStorageACKRegistrationRetry();
     this.storageACKRegistrationRetryInFlight = false;
-    if (this.randomSamplingHandle) {
-      const handle = this.randomSamplingHandle;
-      try {
-        await stopRandomSamplingHandleWithin(
-          handle,
-          DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
-        );
-      } catch (error) {
-        if (error instanceof RandomSamplingShutdownTimeoutError) {
-          // The loop still owns a live tick and will close its builder/WAL only
-          // after that tick retires. Preserve the handle and quarantine the
-          // network/store boundary so a later stop() retry can observe the same
-          // physical shutdown instead of leaving the tick on torn-down hosts.
-          this.log.warn(
-            createOperationContext('system'),
-            `DKGAgent.stop: Random Sampling prover did not physically retire within `
-              + `${error.timeoutMs}ms; store/network teardown is blocked until stop() is retried`,
-          );
-          throw error;
-        }
-        this.log.warn(
-          createOperationContext('system'),
-          `DKGAgent.stop: Random Sampling prover close failed during shutdown: `
-            + `${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      if (this.randomSamplingHandle === handle) {
-        this.randomSamplingHandle = null;
-      }
-    }
+    // The owner joins both an installed prover and any in-flight WAL/handle
+    // creation. A timeout retains ownership and blocks store/network teardown.
+    await this.randomSamplingRuntime?.stop();
     // rc.9 PR-G codex follow-up #G3: drain background substrate
     // fan-outs spawned by `publishWorkspaceGossip` (G2's
     // fire-and-forget detach) before tearing down libp2p. Without

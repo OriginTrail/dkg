@@ -2,6 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { describeRandomSamplingDisabledStatus } from '../src/random-sampling-status.js';
 
 describe('Random Sampling disabled status', () => {
+  it('explains a prover whose physical cleanup is still pending', () => {
+    expect(describeRandomSamplingDisabledStatus({ role: 'core', identityId: '52', disabledReason: 'not_started', retiring: true }))
+      .toBe('prover disabled; waiting for physical resource cleanup');
+  });
+
   it('distinguishes a profiled core awaiting admission from a missing identity', () => {
     expect(describeRandomSamplingDisabledStatus({
       role: 'core',

@@ -39,6 +39,11 @@ export class CoalescingRecurringTask {
     return this.#closed;
   }
 
+  /** Read-only operational signal; the timer handle remains scheduler-owned. */
+  get scheduled(): boolean {
+    return this.#timer !== null;
+  }
+
   owns(signal: AbortSignal): boolean {
     return this.#abortController?.signal === signal && !signal.aborted;
   }
@@ -114,7 +119,14 @@ export class CoalescingRecurringTask {
           return;
         }
         this.#requested = false;
-        if (passResult === 'rearm') this.#schedulePeriodicPass();
+        if (passResult === 'rearm') {
+          this.#schedulePeriodicPass();
+        } else if (this.#timer !== null) {
+          // `idle` suppresses every periodic wake-up, including one retained
+          // while an explicit pass ran ahead of its existing deadline.
+          clearTimeout(this.#timer);
+          this.#timer = null;
+        }
       });
     this.#run = run;
   }

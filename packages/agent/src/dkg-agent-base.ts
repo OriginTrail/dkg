@@ -1,3 +1,4 @@
+import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -183,7 +184,6 @@ import {
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { SelectedSwmMetaTransferCoordinator } from './sync/selected-swm-meta-transfer-coordinator.js';
-import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
@@ -337,7 +337,6 @@ import {
   CATCHUP_ON_CONNECT_COOLDOWN_MS,
   SYNC_RECONCILER_INTERVAL_MS,
   SYNC_STALENESS_THRESHOLD_MS,
-  RANDOM_SAMPLING_BIND_RETRY_MS,
   STORAGE_ACK_REGISTRATION_RETRY_MS,
   JOIN_APPROVAL_RETRY_TICK_MS,
   MESSAGE_OUTBOX_TICK_MS,
@@ -368,7 +367,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -1190,11 +1188,7 @@ export class DKGAgentBase {
    * onto `/dkg/10.0.x` with x ≥ 1.
    */
   protected messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
-  protected randomSamplingHandle: RandomSamplingHandle | null = null;
-  protected randomSamplingIdentityId = 0n;
-  protected randomSamplingDisabledReason: RandomSamplingDisabledReason = 'not_started';
-  protected randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;
-  protected randomSamplingBindRetryInFlight = false;
+  protected randomSamplingRuntime: RandomSamplingRuntime | null = null;
   protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   protected storageACKRegistrationRetryInFlight = false;
   // #894 / Codex PR #901 round-3 :1685: `ensureProfile()` is a mutating

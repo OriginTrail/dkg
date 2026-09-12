@@ -15,9 +15,34 @@ import { NoEligibleContextGraphError, NoEligibleKnowledgeCollectionError, Challe
 import type { NodeChallenge, CreateChallengeResult, TxResult, ProofPeriodStatus } from './chain-adapter.js';
 import { enrichEvmError } from './evm-adapter-errors.js';
 import { withTimeout } from './evm-adapter-rpc.js';
+import type { EVMChainAdapter } from './evm-adapter.js';
+import { RandomSamplingContractsUnavailableError, type RandomSamplingAvailability } from './random-sampling-availability.js';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import { MAX_PROBE_AGE_MS, DURATION_PROBE_TIMEOUT_MS } from './evm-adapter-constants.js';
 
 export class RandomSamplingMethods extends EVMChainAdapterBase {
+  async resolveRandomSamplingAvailability(this: EVMChainAdapter, identityId: bigint): Promise<RandomSamplingAvailability> {
+    try {
+      await this.init();
+      await this.getRandomSampling();
+      const member = await this.isShardingTableMember(identityId);
+      if (!this.isRandomSamplingReady()) {
+        throw new Error('RandomSampling bindings changed during eligibility lookup');
+      }
+      return { kind: 'available', member };
+    } catch (error) {
+      if (error instanceof RandomSamplingContractsUnavailableError
+        || (error instanceof HubContractNotFoundError && (
+          error.contractName === 'RandomSampling'
+          || error.contractName === 'RandomSamplingStorage'
+          || error.contractName === 'ShardingTableStorage'
+        ))) {
+        return { kind: 'unavailable', reason: 'contracts_not_deployed' };
+      }
+      return { kind: 'indeterminate', error };
+    }
+  }
+
   /**
    * Map a caught chain error onto a typed prover error when the revert
    * matches one of the documented retry-next-period / non-retryable

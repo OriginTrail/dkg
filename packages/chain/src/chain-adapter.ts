@@ -1,3 +1,6 @@
+import type {
+  RandomSamplingAvailability,
+} from './random-sampling-availability.js';
 import type { ethers } from 'ethers';
 import type { RpcUsageWindow } from './rpc-usage.js';
 
@@ -1828,6 +1831,8 @@ export interface ChainAdapter {
    * check rather than only testing method presence.
    */
   isRandomSamplingReady?(): boolean;
+  /** Refresh RandomSampling bindings and read membership through one typed capability. */
+  resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
 
   /**
    * Returns the deployed address of `KnowledgeAssetsV10` on this chain.

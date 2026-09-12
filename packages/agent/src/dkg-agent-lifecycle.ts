@@ -1,3 +1,5 @@
+import { createRandomSamplingEligibilityResolver } from './random-sampling-eligibility.js';
+import { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -203,10 +205,7 @@ import {
 import { classifyDurableMetaGraph } from './sync/durable-integrity.js';
 import {
   bindRandomSampling,
-  RandomSamplingShutdownTimeoutError,
-  stopRandomSamplingHandleWithin,
-  type RandomSamplingHandle,
-  type RandomSamplingStatus,
+  resolveRandomSamplingBinding,
 } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -562,7 +561,6 @@ import {
   SYNC_BACKOFF_BASE_MS,
   SYNC_BACKOFF_MAX_MS,
   SYNC_BACKOFF_JITTER,
-  RANDOM_SAMPLING_BIND_RETRY_MS,
   STORAGE_ACK_REGISTRATION_RETRY_MS,
   JOIN_APPROVAL_RETRY_TICK_MS,
   MESSAGE_OUTBOX_TICK_MS,
@@ -593,7 +591,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -1313,16 +1310,6 @@ function createDurableSyncOperationBoundary(options: {
       options.signal?.removeEventListener('abort', abortFromCaller);
     },
   };
-}
-
-function isMissingShardingTableContractError(error: unknown): boolean {
-  // The EVM adapter normalizes a missing Hub binding onto these markers.
-  // Keep every other membership failure retryable because it may be a
-  // transient RPC outage.
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes('ShardingTableStorage') && (
-    message.includes('not found in Hub') || message.includes('not resolvable')
-  );
 }
 
 function waitForSyncPageFetch(
@@ -2153,6 +2140,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     this.started = true;
+    this.randomSamplingRuntime = new RandomSamplingRuntime({
+      role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
+      resolveEligibility: createRandomSamplingEligibilityResolver({
+        role: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
+        chain: this.chain, log: { warn: (message) => this.log.warn(ctx, message) },
+      }),
+      shutdownTimeoutMs: () => DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
+      log: {
+        info: (message) => this.log.info(ctx, message),
+        warn: (message) => this.log.warn(ctx, message),
+      },
+      createHandle: (identityId) => this.resolveRandomSamplingBinding({
+        role: 'core', chain: this.chain, store: this.store, identityId,
+        walPath: this.config.randomSamplingWalPath,
+        useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
+        tickIntervalMs: this.config.randomSamplingTickIntervalMs,
+        log: this.randomSamplingLogger(ctx),
+        repairMissingKnowledgeAsset: (input) => this.repairRandomSamplingKnowledgeAsset(input),
+      }),
+    });
     this.openVmReconcileRotationState();
     this.finalizationRuntime.markStarted({
       localPeerId: this.peerId,
@@ -4208,10 +4215,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // transient identity/RPC startup failures retry in the background so
     // one flaky `getIdentityId()` call does not disable proving until the
     // next process restart.
-    const rsStart = await this.tryStartRandomSamplingProver(ctx, true);
-    if (rsStart === 'retryable') {
-      this.scheduleRandomSamplingBindRetry(ctx);
-    }
+    await this.randomSamplingRuntime.start();
 
     // Arm VM work only at the final successful-start boundary. Every network,
     // subscription, protocol, and persistence dependency is now initialized,
@@ -4333,12 +4337,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
   }
 
-  /** Bind fresh resources before the lifecycle takes replacement ownership. */
+  /** Public compatibility boundary returning a directly usable handle. */
   createRandomSamplingHandle(
     this: DKGAgent,
     options: Parameters<typeof bindRandomSampling>[0],
   ): ReturnType<typeof bindRandomSampling> {
     return bindRandomSampling(options);
+  }
+
+  /** Internal binding facts used by the runtime to manage replacement ownership. */
+  protected resolveRandomSamplingBinding(
+    this: DKGAgent,
+    options: Parameters<typeof resolveRandomSamplingBinding>[0],
+  ): ReturnType<typeof resolveRandomSamplingBinding> {
+    return resolveRandomSamplingBinding(options);
   }
 
   /** Thin lifecycle adapter for the bounded proof-time exact-repair runner. */
@@ -4444,199 +4456,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       logInfo: (message) => this.log.info(ctx, message),
     } satisfies RandomSamplingExactRepairDependencies;
     return startRandomSamplingExactRepair(dependencies, input);
-  }
-
-  async tryStartRandomSamplingProver(this: DKGAgent,
-    ctx: OperationContext,
-    logDisabled: boolean,
-  ): Promise<RandomSamplingStartResult> {
-    if (!this.started) return 'disabled';
-    const rsRole: 'core' | 'edge' = (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge';
-    if (rsRole !== 'core') {
-      this.randomSamplingIdentityId = 0n;
-      this.randomSamplingDisabledReason = 'edge_node';
-      return 'disabled';
-    }
-    if (this.chain.chainId === 'none') {
-      this.randomSamplingDisabledReason = 'unsupported_chain';
-      return 'disabled';
-    }
-
-    let rsIdentityId = 0n;
-    try {
-      rsIdentityId = await this.chain.getIdentityId();
-    } catch (err) {
-      this.randomSamplingDisabledReason = 'identity_lookup_failed';
-      this.log.warn(
-        ctx,
-        `V10 Random Sampling identity lookup failed; prover bind will retry: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      return 'retryable';
-    }
-    this.randomSamplingIdentityId = rsIdentityId;
-
-    if (rsIdentityId === 0n) {
-      this.randomSamplingDisabledReason = 'no_identity';
-      if (logDisabled) {
-        this.log.info(ctx, `V10 Random Sampling prover not started (identity=0, chain=${this.chain.chainId}); will retry`);
-      }
-      return 'retryable';
-    }
-
-    const readiness = this.chain.isRandomSamplingReady;
-    if (typeof readiness === 'function') {
-      try {
-        if (!readiness.call(this.chain)) {
-          this.randomSamplingDisabledReason = 'contracts_not_deployed';
-          this.log.warn(
-            ctx,
-            'V10 Random Sampling contracts are unavailable on this chain; disabling prover',
-          );
-          return 'disabled';
-        }
-      } catch (err) {
-        this.randomSamplingDisabledReason = 'bind_failed';
-        this.log.warn(
-          ctx,
-          `V10 Random Sampling readiness probe failed; prover bind will retry: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        return 'retryable';
-      }
-    }
-
-    const membershipProbe = this.chain.isShardingTableMember?.bind(this.chain);
-    if (!membershipProbe) {
-      this.randomSamplingDisabledReason = 'unsupported_chain';
-      this.log.warn(
-        ctx,
-        'V10 Random Sampling requires isShardingTableMember(); disabling for this adapter',
-      );
-      return 'disabled';
-    }
-
-    try {
-      if (!(await membershipProbe(rsIdentityId))) {
-        this.randomSamplingDisabledReason = 'awaiting_sharding_table';
-        if (logDisabled) {
-          this.log.info(
-            ctx,
-            `V10 Random Sampling prover waiting: identityId=${rsIdentityId} ` +
-              'is not in the active sharding table; will retry after staking/admission',
-          );
-        }
-        return 'retryable';
-      }
-    } catch (err) {
-      if (isMissingShardingTableContractError(err)) {
-        this.randomSamplingDisabledReason = 'contracts_not_deployed';
-        this.log.warn(
-          ctx,
-          `V10 Random Sampling sharding-table contract is unavailable; disabling prover: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        return 'disabled';
-      }
-      this.randomSamplingDisabledReason = 'eligibility_lookup_failed';
-      this.log.warn(
-        ctx,
-        `V10 Random Sampling eligibility lookup failed; prover bind will retry: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      return 'retryable';
-    }
-    if (!this.started) return 'disabled';
-
-    try {
-      const handle = await this.createRandomSamplingHandle({
-        role: rsRole,
-        chain: this.chain,
-        store: this.store,
-        identityId: rsIdentityId,
-        walPath: this.config.randomSamplingWalPath,
-        useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
-        tickIntervalMs: this.config.randomSamplingTickIntervalMs,
-        log: this.randomSamplingLogger(ctx),
-        repairMissingKnowledgeAsset: (input) =>
-          this.repairRandomSamplingKnowledgeAsset(input),
-      });
-      if (this.randomSamplingHandle && this.randomSamplingHandle !== handle) {
-        try {
-          await stopRandomSamplingHandleWithin(
-            this.randomSamplingHandle,
-            DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
-          );
-        } catch (error) {
-          if (error instanceof RandomSamplingShutdownTimeoutError) {
-            // The replacement has not started, so retire its fresh resources
-            // and keep the old handle quarantined until its physical close can
-            // be observed by a later lifecycle retry.
-            try { await handle.stop(); } catch { /* best-effort unused-handle cleanup */ }
-            throw error;
-          }
-          this.log.warn(
-            ctx,
-            `Previous V10 Random Sampling prover close failed during replacement: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        }
-      }
-      this.randomSamplingHandle = handle;
-      if (handle.enabled) {
-        if (!this.started) {
-          try { await handle.stop(); } catch { /* swallow shutdown race cleanup */ }
-          return 'disabled';
-        }
-        this.randomSamplingDisabledReason = 'not_started';
-        handle.start();
-        this.clearRandomSamplingBindRetry();
-        this.log.info(ctx, `V10 Random Sampling prover started (identityId=${rsIdentityId})`);
-        return 'started';
-      }
-      this.randomSamplingDisabledReason = handle.getStatus().disabledReason ?? 'bind_failed';
-      if (logDisabled) {
-        this.log.info(ctx, `V10 Random Sampling prover not started (identity=${rsIdentityId}, chain=${this.chain.chainId})`);
-      }
-      return 'disabled';
-    } catch (err) {
-      this.randomSamplingDisabledReason = 'bind_failed';
-      this.log.warn(ctx, `Failed to bind V10 Random Sampling prover: ${err instanceof Error ? err.message : String(err)}`);
-      return 'retryable';
-    }
-  }
-
-  scheduleRandomSamplingBindRetry(this: DKGAgent, ctx: OperationContext): void {
-    if (this.randomSamplingBindRetryTimer) return;
-    this.log.warn(ctx, `V10 Random Sampling prover bind will retry every ${RANDOM_SAMPLING_BIND_RETRY_MS}ms`);
-    this.randomSamplingBindRetryTimer = setInterval(() => {
-      if (!this.started || this.randomSamplingBindRetryInFlight || this.randomSamplingHandle?.enabled) return;
-      this.randomSamplingBindRetryInFlight = true;
-      this.tryStartRandomSamplingProver(ctx, false)
-        .then((result) => {
-          if (result === 'started' || result === 'disabled') {
-            this.clearRandomSamplingBindRetry();
-          }
-        })
-        .catch((err: unknown) => {
-          this.log.warn(ctx, `V10 Random Sampling prover retry failed: ${err instanceof Error ? err.message : String(err)}`);
-        })
-        .finally(() => {
-          this.randomSamplingBindRetryInFlight = false;
-        });
-    }, RANDOM_SAMPLING_BIND_RETRY_MS);
-    if (this.randomSamplingBindRetryTimer.unref) this.randomSamplingBindRetryTimer.unref();
-  }
-
-  clearRandomSamplingBindRetry(this: DKGAgent): void {
-    if (!this.randomSamplingBindRetryTimer) return;
-    clearInterval(this.randomSamplingBindRetryTimer);
-    this.randomSamplingBindRetryTimer = null;
   }
 
   clearStorageACKRegistrationRetry(this: DKGAgent): void {

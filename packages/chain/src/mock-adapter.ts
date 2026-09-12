@@ -37,6 +37,7 @@ import type {
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
+import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
 import {
   NoEligibleContextGraphError,
@@ -1524,6 +1525,17 @@ export class MockChainAdapter implements ChainAdapter {
 
   isRandomSamplingReady(): boolean {
     return true;
+  }
+
+  async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
+    try {
+      if (!this.isRandomSamplingReady()) {
+        return { kind: 'unavailable', reason: 'contracts_not_deployed' };
+      }
+      return { kind: 'available', member: await this.isShardingTableMember(identityId) };
+    } catch (error) {
+      return { kind: 'indeterminate', error };
+    }
   }
 
   async verify(params: VerifyParams): Promise<TxResult> {

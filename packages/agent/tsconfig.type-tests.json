@@ -8,5 +8,8 @@
     "rootDir": ".",
     "sourceMap": false
   },
-  "include": ["test/**/*.typecheck.ts", "src/jsonld.d.ts"]
+  "include": [
+    "test/**/*.typecheck.ts",
+    "src/jsonld.d.ts"
+  ]
 }
