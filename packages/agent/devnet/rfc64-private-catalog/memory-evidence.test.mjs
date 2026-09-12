@@ -20,6 +20,7 @@ import {
   hasExactSourceSwmContents,
 } from './run.mjs';
 import {
+  hasExactPrivateCatalogFinalizedVmBaselineContents,
   parsePrivateCatalogLiteralEvidenceV1,
   readPrivateCatalogWorkspaceMemoryEvidenceV1,
 } from './memory-evidence.mjs';
@@ -57,6 +58,30 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
     { swmProofKind: 'workspace-head' },
   ), true);
   assert.equal(hasExactMemoryContents({ graphCounts: workspaceGraphCounts }), false);
+  const finalizedVmBaseline = workspaceGraphCounts.map((evidence) => ({
+    ...evidence,
+    swm: 0,
+    swmProof: { kind: 'absent' },
+  }));
+  assert.equal(hasExactPrivateCatalogFinalizedVmBaselineContents(
+    { graphCounts: finalizedVmBaseline },
+    PRIVATE_CATALOG_MEMORY_EXPECTATION,
+  ), true);
+  for (const graphCounts of [
+    finalizedVmBaseline.slice(0, 1),
+    [finalizedVmBaseline[0], finalizedVmBaseline[0]],
+    finalizedVmBaseline.map((evidence, index) => index === 0
+      ? { ...evidence, swm: 1 }
+      : evidence),
+    finalizedVmBaseline.map((evidence, index) => index === 0
+      ? { ...evidence, vmDigest: UPDATED_PROJECTION_EVIDENCE.digest }
+      : evidence),
+  ]) {
+    assert.equal(hasExactPrivateCatalogFinalizedVmBaselineContents(
+      { graphCounts },
+      PRIVATE_CATALOG_MEMORY_EXPECTATION,
+    ), false);
+  }
   const corruptions = [
     (evidence) => ({
       ...evidence,
