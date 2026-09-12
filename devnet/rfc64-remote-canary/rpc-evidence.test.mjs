@@ -131,6 +131,22 @@ test('RPC evidence rejects a minutely sample whose method counts do not match to
   );
 });
 
+test('RPC evidence treats prototype-shaped method names only as data', async () => {
+  const config = fileConfig();
+  const evidence = JSON.parse(rpcEvidence(config));
+  evidence.samples = [{
+    windowStartedAt: '2026-09-11T00:01:00.000Z',
+    windowEndedAt: '2026-09-11T00:02:00.000Z',
+    total: 3,
+    byMethod: { constructor: 1, toString: 2 },
+  }];
+  const result = await collect(config, evidenceContext(config, {
+    readFileFn: async () => JSON.stringify(evidence),
+  }));
+  assert.equal(result.status, 'PASS');
+  assert.deepEqual(result.byMethod, { constructor: 1, toString: 2 });
+});
+
 test('RPC evidence rejects unsafe counts and checked aggregate overflow', async () => {
   const config = fileConfig(2);
   const cohortRef = createRemoteCanaryCohortRefV1(config);

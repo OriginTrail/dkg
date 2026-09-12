@@ -3,6 +3,8 @@
 import {
   assertNever,
   type CanaryNodeClientV1,
+  type CompletedRemoteCanaryCertificateV1,
+  type IncompleteRemoteCanaryCertificateV1,
   type NormalizedRemoteCanaryConfigV1,
   type NormalizedCanaryRpcUsageV1,
   type RawCanaryRpcUsageV1,
@@ -81,6 +83,18 @@ const staleRpcEvidence = {
   scope: 'unbound-cohort',
 } satisfies RpcUsageEvidenceV1;
 
+type AllPassIncompleteCandidateV1 = Omit<
+  CompletedRemoteCanaryCertificateV1,
+  'status' | 'phase'
+> & {
+  readonly status: 'INCOMPLETE';
+  readonly phase: 'evidence-required';
+};
+declare const allPassIncompleteCandidate: AllPassIncompleteCandidateV1;
+// @ts-expect-error An INCOMPLETE certificate must contain at least one EVIDENCE_REQUIRED check.
+const impossibleIncompleteCertificate: IncompleteRemoteCanaryCertificateV1 =
+  allPassIncompleteCandidate;
+
 void [
   rpcSource,
   dependencies,
@@ -90,4 +104,5 @@ void [
   staleConfigSchemaDiscriminant,
   typedRpcEvidence,
   staleRpcEvidence,
+  impossibleIncompleteCertificate,
 ];

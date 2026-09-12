@@ -98,6 +98,52 @@ test('normalization resolves the canonical execution topology once', () => {
   assert.match(contextGraph.source.nodeRef, /^node:[0-9a-f]{20}$/u);
 });
 
+test('private-gate companion is absolute, bounded, and used only for authorization gaps', () => {
+  const companionConfig = baseConfig({
+    authorizationChecks: {
+      unauthorized: {
+        kind: 'not-exposed',
+        reasonCode: 'catalog-protocol-api-not-exposed',
+      },
+      revoked: {
+        kind: 'not-exposed',
+        reasonCode: 'revocation-api-not-exposed',
+      },
+      companionEvidence: {
+        kind: 'private-gate-artifact',
+        path: '/run/evidence/private-gate.json',
+      },
+    },
+  });
+  assert.deepEqual(
+    validateRemoteCanaryConfigV1(companionConfig).authorizationChecks.companionEvidence,
+    {
+      kind: 'private-gate-artifact',
+      path: '/run/evidence/private-gate.json',
+      maxAgeMinutes: 1_440,
+    },
+  );
+
+  const relative = structuredClone(companionConfig);
+  relative.authorizationChecks.companionEvidence.path = 'private-gate.json';
+  assert.throws(
+    () => validateRemoteCanaryConfigV1(relative),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'private-gate-evidence-path-must-be-absolute',
+  );
+
+  const unused = baseConfig();
+  unused.authorizationChecks.companionEvidence = {
+    kind: 'private-gate-artifact',
+    path: '/run/evidence/private-gate.json',
+  };
+  assert.throws(
+    () => validateRemoteCanaryConfigV1(unused),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'private-gate-evidence-unused',
+  );
+});
+
 test('cohort references are clone-stable, order-independent, and bind every topology field', () => {
   const raw = baseConfig();
   raw.nodes.push({

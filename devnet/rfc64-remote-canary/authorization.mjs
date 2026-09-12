@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { failure } from './errors.mjs';
+import { collectPrivateGateAuthorizationEvidenceV1 } from './private-gate-evidence.mjs';
 /** @typedef {import('./domain-contract.js').CanaryNodeClientV1} CanaryNodeClientV1 */
 /** @typedef {import('./domain-contract.js').JsonValue} JsonValue */
 /** @typedef {import('./domain-contract.js').NormalizedCanaryAuthorizationCheckV1} NormalizedCanaryAuthorizationCheckV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryPrivateGateEvidenceV1} NormalizedCanaryPrivateGateEvidenceV1 */
+/** @typedef {import('./domain-contract.js').RemoteCanaryPrivateGateEvidenceResultV1} RemoteCanaryPrivateGateEvidenceResultV1 */
 
 /** @param {unknown} value @param {string} pointer @returns {unknown} */
 function jsonPointer(value, pointer) {
@@ -16,21 +19,42 @@ function jsonPointer(value, pointer) {
 }
 
 /**
- * @param {Readonly<{ unauthorized: NormalizedCanaryAuthorizationCheckV1, revoked: NormalizedCanaryAuthorizationCheckV1 }>} checks
+ * @param {Readonly<{ unauthorized: NormalizedCanaryAuthorizationCheckV1, revoked: NormalizedCanaryAuthorizationCheckV1, companionEvidence: NormalizedCanaryPrivateGateEvidenceV1 | null }>} checks
  * @param {CanaryNodeClientV1} client
+ * @param {Readonly<{ readFileFn?: (path: string, encoding: BufferEncoding) => Promise<string>, expectedCommit?: string, runStartedAt?: string }>} [context]
  * @returns {Promise<import('./domain-contract.js').RemoteCanaryAuthorizationResultV1>}
  */
-export async function verifyAuthorizationV1(checks, client) {
+export async function verifyAuthorizationV1(checks, client, context = {}) {
+  /** @type {Readonly<RemoteCanaryPrivateGateEvidenceResultV1> | null} */
+  let companionEvidence = null;
+  if (checks.companionEvidence !== null) {
+    if (
+      typeof context.readFileFn !== 'function'
+      || context.expectedCommit === undefined
+      || context.runStartedAt === undefined
+    ) throw failure('private-gate-evidence-read-failed', 'evidence');
+    companionEvidence = await collectPrivateGateAuthorizationEvidenceV1(
+      checks.companionEvidence,
+      {
+        readFileFn: context.readFileFn,
+        expectedCommit: context.expectedCommit,
+        runStartedAt: context.runStartedAt,
+      },
+    );
+  }
   const [unauthorized, revoked] = await Promise.all([
-    runAuthorizationCheckV1(checks.unauthorized, client),
-    runAuthorizationCheckV1(checks.revoked, client),
+    runAuthorizationCheckV1(checks.unauthorized, client, companionEvidence),
+    runAuthorizationCheckV1(checks.revoked, client, companionEvidence),
   ]);
-  return Object.freeze({ unauthorized, revoked });
+  return Object.freeze({ unauthorized, revoked, companionEvidence });
 }
 
-/** @param {NormalizedCanaryAuthorizationCheckV1} check @param {CanaryNodeClientV1} client */
-async function runAuthorizationCheckV1(check, client) {
+/** @param {NormalizedCanaryAuthorizationCheckV1} check @param {CanaryNodeClientV1} client @param {Readonly<RemoteCanaryPrivateGateEvidenceResultV1> | null} companionEvidence */
+async function runAuthorizationCheckV1(check, client, companionEvidence) {
   if (check.kind === 'not-exposed') {
+    if (companionEvidence !== null) {
+      return Object.freeze({ status: 'PASS', denialObserved: true });
+    }
     return Object.freeze({ status: 'EVIDENCE_REQUIRED', reasonCode: check.reasonCode });
   }
   const response = await client.probeAuthorization(

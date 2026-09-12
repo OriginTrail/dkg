@@ -69,6 +69,15 @@ export const REMOTE_CANARY_ERROR_CODES_V1 = /** @type {const} */ ([
   'node-status-missing',
   'offline-catchup-timeout',
   'preflight-status-malformed',
+  'private-gate-evidence-authorization-checks',
+  'private-gate-evidence-invalid',
+  'private-gate-evidence-not-bound-to-run',
+  'private-gate-evidence-path-must-be-absolute',
+  'private-gate-evidence-read-failed',
+  'private-gate-evidence-source-mismatch',
+  'private-gate-evidence-stale',
+  'private-gate-evidence-too-large',
+  'private-gate-evidence-unused',
   'receiver-became-reachable-during-offline-window',
   'receiver-did-not-recover',
   'receiver-did-not-stop',
@@ -143,6 +152,100 @@ export const REMOTE_CANARY_PHASES_V1 = /** @type {const} */ ([
   'rpc-usage',
   'vm-parity',
 ]);
+
+export const REMOTE_CANARY_EVIDENCE_GAPS_V1 = /** @type {const} */ ([
+  'offline-catchup',
+  'vm-parity',
+  'catalog-swm',
+  'authorization-unauthorized',
+  'authorization-revoked',
+  'rpc-usage',
+]);
+
+/** Executable proof that an INCOMPLETE certificate contains a real evidence gap. */
+export const REMOTE_CANARY_INCOMPLETE_CHECKS_SCHEMA_V1 = /** @type {const} */ ({
+  type: 'object',
+  anyOf: [
+    {
+      required: ['offlineCatchup'],
+      properties: {
+        offlineCatchup: {
+          type: 'object',
+          required: ['status'],
+          properties: { status: { const: 'EVIDENCE_REQUIRED' } },
+        },
+      },
+    },
+    {
+      required: ['vmParity'],
+      properties: {
+        vmParity: {
+          type: 'array',
+          contains: {
+            type: 'object',
+            required: ['status'],
+            properties: { status: { const: 'EVIDENCE_REQUIRED' } },
+          },
+        },
+      },
+    },
+    {
+      required: ['catalogSwm'],
+      properties: {
+        catalogSwm: {
+          type: 'array',
+          contains: {
+            type: 'object',
+            required: ['status'],
+            properties: { status: { const: 'EVIDENCE_REQUIRED' } },
+          },
+        },
+      },
+    },
+    {
+      required: ['authorization'],
+      properties: {
+        authorization: {
+          type: 'object',
+          required: ['unauthorized'],
+          properties: {
+            unauthorized: {
+              type: 'object',
+              required: ['status'],
+              properties: { status: { const: 'EVIDENCE_REQUIRED' } },
+            },
+          },
+        },
+      },
+    },
+    {
+      required: ['authorization'],
+      properties: {
+        authorization: {
+          type: 'object',
+          required: ['revoked'],
+          properties: {
+            revoked: {
+              type: 'object',
+              required: ['status'],
+              properties: { status: { const: 'EVIDENCE_REQUIRED' } },
+            },
+          },
+        },
+      },
+    },
+    {
+      required: ['rpcUsage'],
+      properties: {
+        rpcUsage: {
+          type: 'object',
+          required: ['status'],
+          properties: { status: { const: 'EVIDENCE_REQUIRED' } },
+        },
+      },
+    },
+  ],
+});
 
 /** Executable, type-level canonical contract for every certificate-v1 variant. */
 export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
@@ -242,10 +345,11 @@ export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
             authorization: {
               type: 'object',
               additionalProperties: false,
-              required: ['unauthorized', 'revoked'],
+              required: ['unauthorized', 'revoked', 'companionEvidence'],
               properties: {
                 unauthorized: { enum: ['PLANNED', 'EVIDENCE_REQUIRED'] },
                 revoked: { enum: ['PLANNED', 'EVIDENCE_REQUIRED'] },
+                companionEvidence: { enum: ['PLANNED', 'NOT_CONFIGURED'] },
               },
             },
             rpcUsage: { enum: ['PLANNED', 'EVIDENCE_REQUIRED'] },
@@ -383,6 +487,23 @@ export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
         },
       ],
     },
+    privateGateEvidence: {
+      type: 'object',
+      additionalProperties: false,
+      required: [
+        'schema', 'artifactRef', 'sourceRevision', 'runtimeManifestDigest',
+        'runtimeProvenanceRef', 'startedAt', 'finishedAt',
+      ],
+      properties: {
+        schema: { const: 'dkg-rfc64-private-release-gate-v1' },
+        artifactRef: { $ref: '#/$defs/opaqueRef' },
+        sourceRevision: { $ref: '#/$defs/shaCommit' },
+        runtimeManifestDigest: { type: 'string', pattern: '^0x[0-9a-f]{64}$' },
+        runtimeProvenanceRef: { $ref: '#/$defs/opaqueRef' },
+        startedAt: { $ref: '#/$defs/instant' },
+        finishedAt: { $ref: '#/$defs/instant' },
+      },
+    },
     rpcUsage: {
       oneOf: [
         {
@@ -487,10 +608,16 @@ export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
         authorization: {
           type: 'object',
           additionalProperties: false,
-          required: ['unauthorized', 'revoked'],
+          required: ['unauthorized', 'revoked', 'companionEvidence'],
           properties: {
             unauthorized: { $ref: '#/$defs/authorizationCheck' },
             revoked: { $ref: '#/$defs/authorizationCheck' },
+            companionEvidence: {
+              oneOf: [
+                { type: 'null' },
+                { $ref: '#/$defs/privateGateEvidence' },
+              ],
+            },
           },
         },
         rpcUsage: { $ref: '#/$defs/rpcUsage' },
@@ -557,6 +684,7 @@ export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
       required: [
         'schema', 'status', 'phase', 'startedAt', 'finishedAt',
         'expectedCommit', 'cohortRef', 'topology', 'preflight', 'checks',
+        'evidenceRequired',
       ],
       properties: {
         schema: { const: ARTIFACT_SCHEMA },
@@ -569,6 +697,13 @@ export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
         topology: { $ref: '#/$defs/topology' },
         preflight: { $ref: '#/$defs/preflight' },
         checks: { $ref: '#/$defs/checks' },
+        evidenceRequired: {
+          type: 'array',
+          uniqueItems: true,
+          items: {
+            enum: REMOTE_CANARY_EVIDENCE_GAPS_V1,
+          },
+        },
       },
     },
     pass: {
@@ -576,11 +711,12 @@ export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
         { $ref: '#/$defs/completedBase' },
         {
           type: 'object',
-          required: ['status', 'phase', 'checks'],
+          required: ['status', 'phase', 'checks', 'evidenceRequired'],
           properties: {
             status: { const: 'PASS' },
             phase: { const: 'complete' },
             checks: { $ref: '#/$defs/passChecks' },
+            evidenceRequired: { type: 'array', maxItems: 0 },
           },
         },
       ],
@@ -590,93 +726,12 @@ export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
         { $ref: '#/$defs/completedBase' },
         {
           type: 'object',
-          required: ['status', 'phase', 'checks'],
+          required: ['status', 'phase', 'checks', 'evidenceRequired'],
           properties: {
             status: { const: 'INCOMPLETE' },
             phase: { const: 'evidence-required' },
-            checks: {
-              type: 'object',
-              anyOf: [
-                {
-                  required: ['offlineCatchup'],
-                  properties: {
-                    offlineCatchup: {
-                      type: 'object',
-                      required: ['status'],
-                      properties: { status: { const: 'EVIDENCE_REQUIRED' } },
-                    },
-                  },
-                },
-                {
-                  required: ['vmParity'],
-                  properties: {
-                    vmParity: {
-                      type: 'array',
-                      contains: {
-                        type: 'object',
-                        required: ['status'],
-                        properties: { status: { const: 'EVIDENCE_REQUIRED' } },
-                      },
-                    },
-                  },
-                },
-                {
-                  required: ['catalogSwm'],
-                  properties: {
-                    catalogSwm: {
-                      type: 'array',
-                      contains: {
-                        type: 'object',
-                        required: ['status'],
-                        properties: { status: { const: 'EVIDENCE_REQUIRED' } },
-                      },
-                    },
-                  },
-                },
-                {
-                  required: ['authorization'],
-                  properties: {
-                    authorization: {
-                      type: 'object',
-                      required: ['unauthorized'],
-                      properties: {
-                        unauthorized: {
-                          type: 'object',
-                          required: ['status'],
-                          properties: { status: { const: 'EVIDENCE_REQUIRED' } },
-                        },
-                      },
-                    },
-                  },
-                },
-                {
-                  required: ['authorization'],
-                  properties: {
-                    authorization: {
-                      type: 'object',
-                      required: ['revoked'],
-                      properties: {
-                        revoked: {
-                          type: 'object',
-                          required: ['status'],
-                          properties: { status: { const: 'EVIDENCE_REQUIRED' } },
-                        },
-                      },
-                    },
-                  },
-                },
-                {
-                  required: ['rpcUsage'],
-                  properties: {
-                    rpcUsage: {
-                      type: 'object',
-                      required: ['status'],
-                      properties: { status: { const: 'EVIDENCE_REQUIRED' } },
-                    },
-                  },
-                },
-              ],
-            },
+            checks: REMOTE_CANARY_INCOMPLETE_CHECKS_SCHEMA_V1,
+            evidenceRequired: { type: 'array', minItems: 1 },
           },
         },
       ],
@@ -700,6 +755,30 @@ export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
       },
     },
   },
+});
+
+// Export each executable variant as an independent schema so TypeScript can
+// derive the persisted union without recursively expanding all five branches
+// and every shared definition in one instantiation.
+export const REMOTE_CANARY_STARTING_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
+  ...REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs.starting,
+  $defs: REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs,
+});
+export const REMOTE_CANARY_DRY_RUN_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
+  ...REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs.dryRun,
+  $defs: REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs,
+});
+export const REMOTE_CANARY_PASS_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
+  ...REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs.pass,
+  $defs: REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs,
+});
+export const REMOTE_CANARY_INCOMPLETE_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
+  ...REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs.incomplete,
+  $defs: REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs,
+});
+export const REMOTE_CANARY_FAILED_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
+  ...REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs.fail,
+  $defs: REMOTE_CANARY_CERTIFICATE_SCHEMA_V1.$defs,
 });
 
 // NodeNext sees these CommonJS-compatible packages as namespaces even though

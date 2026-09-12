@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { readFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -10,6 +10,7 @@ import {
   runRemoteCanaryArtifactLifecycleV1,
 } from './certify.mjs';
 import { pathsAliasV1 } from './path-alias.mjs';
+import { resolveStableJsonArtifactPathV1 } from '../rfc64-artifact-publication-v1.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ARTIFACT = join(HERE, 'artifacts', 'latest.json');
@@ -40,7 +41,7 @@ function parseArgs(argv) {
   }
   if (typeof parsed.config !== 'string') throw new Error('config-required');
   if (!isAbsolute(parsed.config)) throw new Error('config-path-must-be-absolute');
-  parsed.artifact = resolve(parsed.artifact);
+  parsed.artifact = resolveStableJsonArtifactPathV1(parsed.artifact);
   return /** @type {ParsedArgsV1} */ (parsed);
 }
 

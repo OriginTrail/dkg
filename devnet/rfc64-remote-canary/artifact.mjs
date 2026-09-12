@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { writeRfc64ArtifactAtomicV1 } from '../rfc64-artifact-v1.mjs';
+import { resolveStableJsonArtifactPathV1 } from '../rfc64-artifact-publication-v1.mjs';
 import {
   ARTIFACT_SCHEMA,
   createRemoteCanaryCertificateV1,
@@ -34,12 +35,13 @@ export async function runRemoteCanaryArtifactLifecycleV1({
   dependencies = {},
 }) {
   if (typeof loadConfig !== 'function') throw new TypeError('config-loader-required');
+  const targetArtifactPath = resolveStableJsonArtifactPathV1(artifactPath);
   const now = dependencies.now ?? (() => new Date());
   const startedAt = now().toISOString();
   const loadedConfig = await loadConfig();
   const validatedConfig = validateRemoteCanaryConfigV1(loadedConfig);
-  await assertArtifactDoesNotAliasConfiguredInputV1(artifactPath, validatedConfig);
-  await writeArtifactAtomicV1(artifactPath, createRemoteCanaryCertificateV1({
+  await assertArtifactDoesNotAliasConfiguredInputV1(targetArtifactPath, validatedConfig);
+  await writeArtifactAtomicV1(targetArtifactPath, createRemoteCanaryCertificateV1({
     schema: ARTIFACT_SCHEMA,
     status: 'INCOMPLETE',
     phase: 'starting',
@@ -52,7 +54,7 @@ export async function runRemoteCanaryArtifactLifecycleV1({
           validatedConfig,
           { ...dependencies, now },
         );
-    await writeArtifactAtomicV1(artifactPath, artifact);
+    await writeArtifactAtomicV1(targetArtifactPath, artifact);
     return artifact;
   } catch (error) {
     const failed = createRemoteCanaryCertificateV1({
@@ -68,7 +70,7 @@ export async function runRemoteCanaryArtifactLifecycleV1({
       }),
     });
     try {
-      await writeArtifactAtomicV1(artifactPath, failed);
+      await writeArtifactAtomicV1(targetArtifactPath, failed);
     } catch (artifactError) {
       throw new AggregateError([error, artifactError], 'certificate-and-artifact-write-failed');
     }
@@ -97,6 +99,9 @@ export async function assertArtifactDoesNotAliasConfiguredInputV1(artifactPath, 
       node.auth.kind === 'bearer-file' ? [node.auth.secretFile] : []
     )),
     ...(config.rpcUsage.kind === 'evidence-file' ? [config.rpcUsage.path] : []),
+    ...(config.authorizationChecks.companionEvidence === null
+      ? []
+      : [config.authorizationChecks.companionEvidence.path]),
   ];
   for (const configuredInput of new Set(configuredInputs)) {
     if (await pathsAliasV1(artifactPath, configuredInput)) {

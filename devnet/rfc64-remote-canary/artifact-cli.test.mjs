@@ -134,7 +134,7 @@ test('operator CLI dry-run performs no network, secret, evidence, or command I/O
 });
 
 test('operator CLI rejects config/artifact aliases before changing configuration bytes', async () => {
-  for (const aliasKind of ['same', 'normalized', 'symlink', 'hard-link']) {
+  for (const aliasKind of ['same', 'normalized', 'symlink', 'hard-link', 'whitespace']) {
     const directory = await createTemporaryDirectoryV1('rfc64-remote-canary-alias-test-');
     const configPath = join(directory, 'config.json');
     const original = JSON.stringify(baseConfig());
@@ -150,6 +150,8 @@ test('operator CLI rejects config/artifact aliases before changing configuration
       } else if (aliasKind === 'hard-link') {
         artifactPath = join(directory, 'artifact.json');
         await link(configPath, artifactPath);
+      } else if (aliasKind === 'whitespace') {
+        artifactPath = `${configPath} `;
       }
       await assert.rejects(
         execFileAsync(process.execPath, [
@@ -159,7 +161,12 @@ test('operator CLI rejects config/artifact aliases before changing configuration
         ], { cwd: AGENT_DIRECTORY }),
         (error) => {
           assert.equal(error.code, 1);
-          assert.match(error.stderr, /FAIL config-artifact-path-alias/u);
+          assert.match(
+            error.stderr,
+            aliasKind === 'whitespace'
+              ? /FAIL runner-failed/u
+              : /FAIL config-artifact-path-alias/u,
+          );
           return true;
         },
         aliasKind,
@@ -288,8 +295,11 @@ test('runner never replaces configured credential or RPC evidence inputs', async
   for (const scenario of [
     { label: 'credential-direct-dry', input: 'credential', alias: 'direct', dryRun: true },
     { label: 'credential-normalized-live', input: 'credential', alias: 'normalized', dryRun: false },
+    { label: 'credential-whitespace-live', input: 'credential', alias: 'whitespace', dryRun: false },
     { label: 'evidence-symlink-dry', input: 'evidence', alias: 'symlink', dryRun: true },
     { label: 'evidence-hard-link-live', input: 'evidence', alias: 'hard-link', dryRun: false },
+    { label: 'evidence-whitespace-dry', input: 'evidence', alias: 'whitespace', dryRun: true },
+    { label: 'companion-direct-dry', input: 'companion', alias: 'direct', dryRun: true },
   ]) {
     const directory = await createTemporaryDirectoryV1(`rfc64-input-alias-${scenario.label}-`);
     const inputPath = join(directory, 'configured-input');
@@ -307,12 +317,29 @@ test('runner never replaces configured credential or RPC evidence inputs', async
       } else if (scenario.alias === 'hard-link') {
         artifactPath = join(directory, 'artifact.json');
         await link(inputPath, artifactPath);
+      } else if (scenario.alias === 'whitespace') {
+        artifactPath = `${inputPath} `;
       }
       const config = baseConfig();
       if (scenario.input === 'credential') {
         config.nodes[0].auth.secretFile = inputPath;
-      } else {
+      } else if (scenario.input === 'evidence') {
         config.rpcUsage.path = inputPath;
+      } else {
+        config.authorizationChecks = {
+          unauthorized: {
+            kind: 'not-exposed',
+            reasonCode: 'catalog-protocol-api-not-exposed',
+          },
+          revoked: {
+            kind: 'not-exposed',
+            reasonCode: 'revocation-api-not-exposed',
+          },
+          companionEvidence: {
+            kind: 'private-gate-artifact',
+            path: inputPath,
+          },
+        };
       }
       await writeFile(configPath, JSON.stringify(config));
       await assert.rejects(
@@ -324,7 +351,12 @@ test('runner never replaces configured credential or RPC evidence inputs', async
         ], { cwd: AGENT_DIRECTORY }),
         (error) => {
           assert.equal(error.code, 1);
-          assert.match(error.stderr, /FAIL artifact-input-path-alias/u);
+          assert.match(
+            error.stderr,
+            scenario.alias === 'whitespace'
+              ? /FAIL runner-failed/u
+              : /FAIL artifact-input-path-alias/u,
+          );
           return true;
         },
         scenario.label,

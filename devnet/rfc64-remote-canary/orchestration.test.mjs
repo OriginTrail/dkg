@@ -28,6 +28,7 @@ test('full run certifies propagation, one-node catch-up, VM parity, denials, and
   const runtime = createCertificationRuntime();
   const artifact = await executeRemoteCanaryCertificationV1(baseConfig(), runtime);
   assert.equal(artifact.status, 'PASS');
+  assert.deepEqual(artifact.evidenceRequired, []);
   assert.deepEqual(runtime.state.commands, ['stop', 'start']);
   assert.equal(artifact.checks.liveSwmPropagation[0].status, 'PASS');
   assert.equal(artifact.checks.offlineCatchup.status, 'PASS');
@@ -159,6 +160,14 @@ test('missing live-only surfaces remain explicit and cannot produce PASS', async
   assert.equal(dryRun.plan.rpcUsage, 'EVIDENCE_REQUIRED');
   const artifact = await executeRemoteCanaryCertificationV1(config, runtime);
   assert.equal(artifact.status, 'INCOMPLETE');
+  assert.deepEqual(artifact.evidenceRequired, [
+    'offline-catchup',
+    'vm-parity',
+    'catalog-swm',
+    'authorization-unauthorized',
+    'authorization-revoked',
+    'rpc-usage',
+  ]);
   assert.equal(artifact.checks.offlineCatchup.status, 'EVIDENCE_REQUIRED');
   assert.equal(artifact.checks.authorization.revoked.status, 'EVIDENCE_REQUIRED');
   assert.equal(artifact.checks.rpcUsage.status, 'EVIDENCE_REQUIRED');

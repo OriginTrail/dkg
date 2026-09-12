@@ -97,6 +97,16 @@ export const REMOTE_CANARY_CONFIG_SCHEMA_V1 = /** @type {const} */ ({
       properties: {
         unauthorized: { $ref: '#/$defs/authorizationCheck' },
         revoked: { $ref: '#/$defs/authorizationCheck' },
+        companionEvidence: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['kind', 'path'],
+          properties: {
+            kind: { const: 'private-gate-artifact' },
+            path: { type: 'string', minLength: 1 },
+            maxAgeMinutes: { type: 'integer', minimum: 1, maximum: 10080 },
+          },
+        },
       },
     },
     rpcUsage: {

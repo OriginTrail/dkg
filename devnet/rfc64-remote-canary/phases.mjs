@@ -141,6 +141,11 @@ export async function executeRemoteCanaryCertificationFromNormalizedV1(
     const authorization = await runPhaseV1('authorization', () => verifyAuthorizationV1(
       validated.authorizationChecks,
       client,
+      {
+        readFileFn,
+        expectedCommit: validated.expectedCommit,
+        runStartedAt: startedAt,
+      },
     ));
 
     const rpcUsage = await runPhaseV1('rpc-usage', () => collectRpcUsageEvidenceV1(
@@ -177,15 +182,7 @@ export async function executeRemoteCanaryCertificationFromNormalizedV1(
       authorization,
       rpcUsage,
     });
-    const incomplete = [
-      ...checks.liveSwmPropagation,
-      checks.offlineCatchup,
-      ...checks.vmParity,
-      ...checks.catalogSwm,
-      checks.authorization.unauthorized,
-      checks.authorization.revoked,
-      checks.rpcUsage,
-    ].some(({ status }) => status !== 'PASS');
+    const evidenceRequired = collectEvidenceRequiredV1(checks);
     const completed = Object.freeze({
       schema: ARTIFACT_SCHEMA,
       startedAt,
@@ -196,11 +193,15 @@ export async function executeRemoteCanaryCertificationFromNormalizedV1(
       preflight: Object.freeze({ status: 'PASS', nodes: finalPreflight.nodes }),
       checks,
     });
-    if (incomplete) {
+    if (evidenceRequired.length > 0) {
+      const incompleteEvidence = /** @type {readonly [import('./domain-contract.js').RemoteCanaryEvidenceGapV1, ...import('./domain-contract.js').RemoteCanaryEvidenceGapV1[]]} */ (
+        evidenceRequired
+      );
       return createRemoteCanaryCertificateV1({
         ...completed,
         status: 'INCOMPLETE',
         phase: 'evidence-required',
+        evidenceRequired: incompleteEvidence,
       });
     }
     assertPassChecksV1(checks);
@@ -209,6 +210,7 @@ export async function executeRemoteCanaryCertificationFromNormalizedV1(
       status: 'PASS',
       phase: 'complete',
       checks,
+      evidenceRequired: Object.freeze([]),
     });
   } finally {
     secrets.clear();
@@ -237,6 +239,26 @@ function assertPassChecksV1(checks) {
   }
 }
 
+/**
+ * @param {import('./domain-contract.js').RemoteCanaryChecksV1} checks
+ * @returns {readonly import('./domain-contract.js').RemoteCanaryEvidenceGapV1[]}
+ */
+function collectEvidenceRequiredV1(checks) {
+  /** @type {import('./domain-contract.js').RemoteCanaryEvidenceGapV1[]} */
+  const required = [];
+  if (checks.offlineCatchup.status !== 'PASS') required.push('offline-catchup');
+  if (checks.vmParity.some(({ status }) => status !== 'PASS')) required.push('vm-parity');
+  if (checks.catalogSwm.some(({ status }) => status !== 'PASS')) required.push('catalog-swm');
+  if (checks.authorization.unauthorized.status !== 'PASS') {
+    required.push('authorization-unauthorized');
+  }
+  if (checks.authorization.revoked.status !== 'PASS') {
+    required.push('authorization-revoked');
+  }
+  if (checks.rpcUsage.status !== 'PASS') required.push('rpc-usage');
+  return Object.freeze(required);
+}
+
 /** @param {NormalizedRemoteCanaryConfigV1} config @returns {import('./domain-contract.js').RemoteCanaryDryRunPlanV1} */
 function createDryRunPlan(config) {
   return Object.freeze({
@@ -247,8 +269,17 @@ function createDryRunPlan(config) {
     vmParityEvidence: summarizeAskEvidence(config.contextGraphs, 'vmAskSparql'),
     catalogSwmEvidence: summarizeAskEvidence(config.contextGraphs, 'catalogSwmAskSparql'),
     authorization: Object.freeze({
-      unauthorized: authorizationEvidenceState(config.authorizationChecks.unauthorized),
-      revoked: authorizationEvidenceState(config.authorizationChecks.revoked),
+      unauthorized: authorizationEvidenceState(
+        config.authorizationChecks.unauthorized,
+        config.authorizationChecks.companionEvidence,
+      ),
+      revoked: authorizationEvidenceState(
+        config.authorizationChecks.revoked,
+        config.authorizationChecks.companionEvidence,
+      ),
+      companionEvidence: config.authorizationChecks.companionEvidence === null
+        ? 'NOT_CONFIGURED'
+        : 'PLANNED',
     }),
     rpcUsage: config.rpcUsage.kind === 'required' ? 'EVIDENCE_REQUIRED' : 'PLANNED',
   });
@@ -264,9 +295,11 @@ function summarizeAskEvidence(checks, field) {
     : 'EVIDENCE_REQUIRED';
 }
 
-/** @param {NormalizedCanaryAuthorizationCheckV1} check */
-function authorizationEvidenceState(check) {
-  return check.kind === 'not-exposed' ? 'EVIDENCE_REQUIRED' : 'PLANNED';
+/** @param {NormalizedCanaryAuthorizationCheckV1} check @param {import('./domain-contract.js').NormalizedCanaryPrivateGateEvidenceV1 | null} companionEvidence */
+function authorizationEvidenceState(check, companionEvidence) {
+  return check.kind === 'not-exposed' && companionEvidence === null
+    ? 'EVIDENCE_REQUIRED'
+    : 'PLANNED';
 }
 
 /** @param {NormalizedRemoteCanaryConfigV1} config @returns {import('./domain-contract.js').RemoteCanaryTopologyV1} */

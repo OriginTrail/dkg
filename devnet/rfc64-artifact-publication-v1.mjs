@@ -59,7 +59,22 @@ function requiredLabel(value, label) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Rfc64EvidenceValidationError(`${label} must be a non-empty string`);
   }
-  return value.trim();
+  if (value !== value.trim()) {
+    throw new Rfc64EvidenceValidationError(
+      `${label} must not contain surrounding whitespace`,
+    );
+  }
+  return value;
+}
+
+/** Resolve the one exact target used by alias checks and artifact publication. */
+/** @param {string} path @returns {string} */
+export function resolveStableJsonArtifactPathV1(path) {
+  const target = resolve(requiredLabel(path, 'path'));
+  if (basename(target).length === 0) {
+    throw new Rfc64EvidenceValidationError('path must identify an artifact file');
+  }
+  return target;
 }
 
 /**
@@ -374,12 +389,8 @@ function cleanupTemporaryArtifact(temporaryPath, topology) {
  * }>}
  */
 export function writeStableJsonArtifact(path, value) {
-  const requestedTarget = requiredLabel(path, 'path');
-  const target = resolve(requestedTarget);
+  const target = resolveStableJsonArtifactPathV1(path);
   const targetName = basename(target);
-  if (targetName.length === 0) {
-    throw new Rfc64EvidenceValidationError('path must identify an artifact file');
-  }
   const json = stableJsonStringify(value);
   const directory = dirname(target);
   const topology = ensureArtifactDirectoryTopology(directory);

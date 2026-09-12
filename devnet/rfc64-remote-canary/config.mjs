@@ -43,6 +43,7 @@ const DEFAULT_RPC_USAGE = Object.freeze({
   minimumSamples: 1,
   commandTimeoutMs: 60_000,
 });
+const DEFAULT_PRIVATE_GATE_EVIDENCE_MAX_AGE_MINUTES = 1_440;
 // NodeNext sees these CommonJS-compatible packages as namespaces even though
 // their runtime default exports are constructable/callable.
 // @ts-expect-error Runtime interop is covered by the configuration tests.
@@ -108,17 +109,28 @@ export function validateRemoteCanaryConfigV1(input) {
   const lifecycle = raw.lifecycle === undefined || raw.lifecycle === null
     ? null
     : normalizeLifecycle(raw.lifecycle, nodeById, receiverNodeId);
+  const unauthorized = normalizeAuthorizationCheck(
+    raw.authorizationChecks.unauthorized,
+    'unauthorized',
+    nodeById,
+  );
+  const revoked = normalizeAuthorizationCheck(
+    raw.authorizationChecks.revoked,
+    'revoked',
+    nodeById,
+  );
+  const companionEvidence = raw.authorizationChecks.companionEvidence === undefined
+    ? null
+    : normalizePrivateGateEvidence(raw.authorizationChecks.companionEvidence);
+  if (
+    companionEvidence !== null
+    && unauthorized.kind !== 'not-exposed'
+    && revoked.kind !== 'not-exposed'
+  ) invalid('private-gate-evidence-unused');
   const authorizationChecks = Object.freeze({
-    unauthorized: normalizeAuthorizationCheck(
-      raw.authorizationChecks.unauthorized,
-      'unauthorized',
-      nodeById,
-    ),
-    revoked: normalizeAuthorizationCheck(
-      raw.authorizationChecks.revoked,
-      'revoked',
-      nodeById,
-    ),
+    unauthorized,
+    revoked,
+    companionEvidence,
   });
   const rpcUsage = normalizeRpcUsage(raw.rpcUsage);
   const timing = normalizeTiming(raw.timing);
@@ -164,6 +176,19 @@ function compareCanonicalText(left, right) {
 function validateSecretFile(value) {
   if (!isAbsolute(value)) invalid('auth-secret-file-must-be-absolute');
   return value;
+}
+
+/**
+ * @param {import('./domain-contract.js').RawCanaryPrivateGateEvidenceV1} value
+ * @returns {Readonly<import('./domain-contract.js').NormalizedCanaryPrivateGateEvidenceV1>}
+ */
+function normalizePrivateGateEvidence(value) {
+  if (!isAbsolute(value.path)) invalid('private-gate-evidence-path-must-be-absolute');
+  return Object.freeze({
+    kind: value.kind,
+    path: value.path,
+    maxAgeMinutes: value.maxAgeMinutes ?? DEFAULT_PRIVATE_GATE_EVIDENCE_MAX_AGE_MINUTES,
+  });
 }
 
 /**

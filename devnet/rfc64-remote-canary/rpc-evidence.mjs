@@ -56,15 +56,15 @@ export async function collectRpcUsageEvidenceV1(config, context) {
   }
   const evidence = /** @type {RpcUsageEvidenceV1} */ (parsed);
   const samples = validateRpcEvidenceV1(evidence, config.minimumSamples, context);
-  /** @type {Record<string, number>} */
-  const byMethod = {};
+  /** @type {Map<string, number>} */
+  const byMethod = new Map();
   let total = 0;
   let durationSeconds = 0;
   for (const sample of samples) {
     total = checkedRpcCountAddV1(total, sample.total);
     durationSeconds += (Date.parse(sample.windowEndedAt) - Date.parse(sample.windowStartedAt)) / 1000;
     for (const [method, count] of Object.entries(sample.byMethod)) {
-      byMethod[method] = checkedRpcCountAddV1(byMethod[method] ?? 0, count);
+      byMethod.set(method, checkedRpcCountAddV1(byMethod.get(method) ?? 0, count));
     }
   }
   const firstSample = samples[0];
@@ -82,7 +82,7 @@ export async function collectRpcUsageEvidenceV1(config, context) {
     measuredSeconds: durationSeconds,
     total,
     requestsPerMinute: durationSeconds === 0 ? 0 : round(total * 60 / durationSeconds),
-    byMethod: Object.freeze(Object.fromEntries(Object.entries(byMethod).sort())),
+    byMethod: Object.freeze(Object.fromEntries([...byMethod.entries()].sort())),
   });
 }
 

@@ -10,10 +10,12 @@ expected commit, the sync reconciler and catalog mode were active, new SWM data
 propagated, one receiver caught up after a real stop/start, VM status reached
 exact digest/count parity, a pre-existing catalog-owned SWM assertion remained
 queryable on both nodes, authorization denials were observed, and minutely RPC
-evidence was supplied. A missing lifecycle command, known-catalog SWM query,
-unavailable denial API, or missing RPC evidence produces `INCOMPLETE` with a
-machine-readable evidence requirement. It never turns an unperformed check
-into a pass.
+evidence was supplied. When the denial APIs are not exposed remotely, the
+runner can consume the source-bound PASS artifact from the RFC-64 private gate
+as companion authorization evidence. A missing lifecycle command,
+known-catalog SWM query, unavailable denial proof, or missing RPC evidence
+produces `INCOMPLETE` with a machine-readable evidence requirement. It never
+turns an unperformed check into a pass.
 
 ## Safety and artifact boundary
 
@@ -34,6 +36,10 @@ into a pass.
   invokes exactly one recovery command through the receiver lifecycle bracket.
 - Artifacts contain role aliases and opaque hashes instead of URLs, command
   arguments, secret paths, CG ids, peer ids, query text, or HTTP bodies.
+- The output target rejects surrounding whitespace and is resolved exactly
+  once before alias checks or publication. Normalized paths, symlinks, hard
+  links, and the companion private-gate artifact are protected inputs just like
+  bearer secrets and RPC evidence.
 - Each CG needs a read-only `vmAskSparql` assertion for a full `PASS`. Catalog
   cursor/digest parity is always checked, but without an application-level VM
   assertion the result remains `INCOMPLETE` rather than treating status alone
@@ -71,6 +77,7 @@ sequenceDiagram
   participant C as Certifier
   participant S as Source node
   participant R as One receiver
+  participant P as Private RFC-64 gate artifact
   participant E as RPC evidence source
 
   C->>S: GET /api/status (exact build and catalog mode)
@@ -91,6 +98,12 @@ sequenceDiagram
   C->>R: Read RFC-64 VM parity status
   C->>S: ASK pre-existing catalog assertion in SWM
   C->>R: ASK pre-existing catalog assertion in SWM
+  alt denial APIs are exposed
+    C->>R: Read-only unauthorized and revoked probes
+  else denial APIs are not exposed
+    C->>P: Decode exact-source PASS + all 18 closed checks
+    C->>C: Enforce pre-run completion and maximum age
+  end
   C->>E: Read strict minutely request-count evidence
   C->>C: Atomically write redacted certificate
 ```
@@ -101,12 +114,13 @@ sequenceDiagram
 canonical shape contract; handwritten checks only enforce cross-reference,
 normalization, and safety semantics. A focused typed SPARQL AST adapter owns
 ASK data-dependence and reserved-vocabulary policy. `domain-contract.ts`
-mechanically derives raw configuration and RPC-evidence types from those same
-runtime schemas, then separately defines only normalized execution types and
-the injected dependency boundary. `artifact-contract.mjs` similarly owns the
-executable discriminated certificate schema and its closed phase, category,
-and failure-code vocabularies; every artifact variant is checked there before
-publication. A typed node client is the sole owner of
+mechanically derives raw configuration, RPC-evidence, and persisted
+certificate types from those same runtime schemas, then separately defines
+only normalized execution types and the injected dependency boundary.
+`artifact-contract.mjs` owns the executable discriminated certificate schema,
+its independently derivable variants, and its closed phase, evidence-gap,
+category, and failure-code vocabularies; every artifact variant is checked
+there before publication. A typed node client is the sole owner of
 daemon routes, payloads, authentication selection, and response decoding; the
 certification phases consume only those semantic operations. Raw entry points
 normalize once and pass that exact frozen topology through lifecycle safety
@@ -115,10 +129,9 @@ module in this runner,
 including the CLI and public facade, is checked directly from its JavaScript
 source on every required test run; there are no parallel declaration stubs that
 can drift from runtime behavior. A new union member or a drifted normalized
-field therefore fails typechecking before execution. This minimal
-shape deliberately declares the current catalog wire-denial APIs unavailable;
-the resulting certificate is `INCOMPLETE` until executable read-only denial
-probes are configured.
+field therefore fails typechecking before execution. The example deliberately
+declares the current catalog wire-denial APIs unavailable and supplies the
+private release gate artifact that closes only those authorization gaps.
 
 ```json
 {
@@ -167,6 +180,11 @@ probes are configured.
     "revoked": {
       "kind": "not-exposed",
       "reasonCode": "revocation-api-not-exposed"
+    },
+    "companionEvidence": {
+      "kind": "private-gate-artifact",
+      "path": "/tmp/rfc64-private-gate-pass.json",
+      "maxAgeMinutes": 1440
     }
   },
   "rpcUsage": {
@@ -188,6 +206,28 @@ control node's bearer credential, preventing a misspelled route from certifying
 a denial. Previously committed
 local data remaining queryable after revocation is not itself a denial failure:
 revocation is expected to block subsequent network reads, not erase history.
+
+### Companion authorization evidence
+
+`companionEvidence` is optional and is used only when at least one configured
+authorization probe is `not-exposed`. Its input must be an absolute path to a
+`dkg-rfc64-private-release-gate-v1` PASS artifact produced from the exact same
+40-character Git commit as this remote run. The producer's public provenance
+decoder must accept the schema, status, canonical run interval, runtime
+manifest, and per-process source binding. The consumer additionally requires
+the exact closed set of all 18 private-gate checks, with every value `true`.
+That set includes the outsider denial before application, zero private graphs
+on the outsider, an empty non-member query, and denial after finalized roster
+revocation.
+
+The private gate must finish before the remote run starts and, by default, no
+more than 1,440 minutes earlier. `maxAgeMinutes` can tighten that bound but
+cannot exceed seven days. Missing, unreadable, oversized, stale, future,
+source-mismatched, `INCOMPLETE`, or `FAIL` evidence makes the remote
+certificate fail closed. The output never copies the companion path, topology,
+process records, or diagnostics. It binds only opaque hashes plus the source
+revision, runtime manifest digest, and canonical timestamps. Live SWM, VM,
+catalog, lifecycle, preflight, and RPC gates are unchanged.
 
 ## RPC evidence
 
