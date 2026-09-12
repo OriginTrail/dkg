@@ -277,6 +277,7 @@ test('final preflight rejects a node build that changed during certification', a
     const body = await response.json();
     body.commit = 'f'.repeat(40);
     body.commitShort = 'ffffffff';
+    body.rfc64Certification.commit = 'f'.repeat(40);
     return new Response(JSON.stringify(body), {
       status: response.status,
       headers: { 'Content-Type': 'application/json' },
@@ -291,6 +292,53 @@ test('final preflight rejects a node build that changed during certification', a
       && error.phase === 'final-preflight',
   );
   assert.equal(observerStatusReads, 2);
+  assert.deepEqual(runtime.state.commands, ['stop', 'start']);
+});
+
+test('final preflight rejects catalog state that becomes blocked after VM parity', async () => {
+  const runtime = createCertificationRuntime();
+  const delegateFetch = runtime.fetchFn;
+  let sourceStatusReads = 0;
+  runtime.fetchFn = async (input, options) => {
+    const response = await delegateFetch(input, options);
+    const url = new URL(input);
+    if (
+      url.origin !== SOURCE_URL
+      || url.pathname !== '/api/status'
+      || (options?.method ?? 'GET') !== 'GET'
+    ) return response;
+    sourceStatusReads += 1;
+    if (sourceStatusReads < 3) return response;
+    const body = await response.json();
+    const operational = body.rfc64Certification.catalog.contextGraphs[0];
+    operational.phase = 'blocked';
+    operational.authorityState = 'blocked';
+    operational.authorityFreshness = 'unknown';
+    for (const field of [
+      'expectedCatalogHeadDigest',
+      'appliedCatalogHeadDigest',
+      'expectedInventoryDigest',
+      'appliedInventoryDigest',
+      'expectedRowCount',
+      'appliedRowCount',
+      'missingRowCount',
+      'catalogVersion',
+      'lastSuccessfulAdvanceAt',
+    ]) operational[field] = null;
+    return new Response(JSON.stringify(body), {
+      status: response.status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rfc64-operational-incomplete'
+      && error.category === 'invariant'
+      && error.phase === 'final-preflight',
+  );
+  assert.equal(sourceStatusReads, 3);
   assert.deepEqual(runtime.state.commands, ['stop', 'start']);
 });
 

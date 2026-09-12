@@ -4,6 +4,7 @@ import {
   createRemoteCanaryCohortRefV1,
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
+import { createRfc64DaemonCertificationStatusV1 } from '../../src/rfc64/daemon-certification-status-v1.ts';
 
 export const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 export const CG = '0x1111111111111111111111111111111111111111/testnet-canary';
@@ -79,7 +80,7 @@ export function baseConfig(overrides = {}) {
 export function statusBody({ legacySyncAllowed = false, contextGraphIds = [CG] } = {}) {
   const digest = `0x${'ab'.repeat(32)}`;
   const inventory = `0x${'cd'.repeat(32)}`;
-  return {
+  const status = {
     commit: COMMIT,
     commitShort: COMMIT.slice(0, 8),
     peerId: '12D3KooWNeverPersistThisPeer',
@@ -112,6 +113,19 @@ export function statusBody({ legacySyncAllowed = false, contextGraphIds = [CG] }
       })),
     },
   };
+  status.rfc64Certification = createRfc64DaemonCertificationStatusV1({
+    commit: status.commit,
+    networkId: status.networkId,
+    syncReconcilerEnabled: status.syncLifecycle.syncReconcilerEnabled,
+    chain: status.chain,
+    catalog: {
+      enabled: status.rfc64Catalog.enabled,
+      killSwitch: status.rfc64Catalog.rollout.killSwitch,
+      contextGraphModes: status.rfc64Catalog.rollout.contextGraphModes,
+      contextGraphs: status.rfc64Catalog.contextGraphs,
+    },
+  });
+  return status;
 }
 
 export function rpcEvidence(config = baseConfig()) {
