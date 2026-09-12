@@ -62,6 +62,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
 
   try {
     const initialPreflight = await runPhaseV1('preflight', () => preflightAllNodesV1({
+      mode: 'initial',
       config: validated,
       request,
     }));
@@ -128,11 +129,14 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
     // Re-establish build, network, sync, and catalog invariants immediately
     // before issuing PASS, and bind the certificate to this fresh snapshot.
     const finalPreflight = await runPhaseV1('final-preflight', () => preflightAllNodesV1({
+      mode: 'final',
       config: validated,
       request,
-      expectedNetworkKey: initialPreflight.networkKey,
-      expectedNodeIdentities: initialPreflight.nodeIdentities,
-      expectedOperationalCertificationByNodeId: vmParityEvidence.certificationByNodeId,
+      baseline: {
+        networkKey: initialPreflight.networkKey,
+        nodeIdentities: initialPreflight.nodeIdentities,
+        operationalCertificationByNodeId: vmParityEvidence.certificationByNodeId,
+      },
     }));
 
     const checks = Object.freeze({
