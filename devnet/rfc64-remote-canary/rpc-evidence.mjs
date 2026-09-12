@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { readFileSync } from 'node:fs';
-
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 
 import { failure } from './errors.mjs';
+import { RPC_USAGE_EVIDENCE_SCHEMA_V1 } from './schemas.mjs';
 
 /** @typedef {import('./domain-contract.js').CanaryCommandResultV1} CanaryCommandResultV1 */
 /** @typedef {import('./domain-contract.js').NormalizedCanaryRpcUsageV1} NormalizedCanaryRpcUsageV1 */
-/** @typedef {Readonly<{ windowStartedAt: string, windowEndedAt: string, total: number, byMethod: Readonly<Record<string, number>> }>} RpcUsageSampleV1 */
-/** @typedef {Readonly<{ schema: 'dkg-rpc-usage-minutes-v1', scope: 'certified-cohort', expectedCommit: string, cohortRef: string, samples: readonly RpcUsageSampleV1[] }>} RpcUsageEvidenceV1 */
+/** @typedef {import('./domain-contract.js').RpcUsageSampleV1} RpcUsageSampleV1 */
+/** @typedef {import('./domain-contract.js').RpcUsageEvidenceV1} RpcUsageEvidenceV1 */
 /** @typedef {Readonly<{ readFileFn: (path: string, encoding: BufferEncoding) => Promise<string>, runCommand: (command: import('./domain-contract.js').CanaryCommandV1, timeoutMs?: number) => Promise<CanaryCommandResultV1>, startedAt: string, observedAt: string, expectedCommit: string, cohortRef: string }>} RpcEvidenceContextV1 */
 
 const MAX_RPC_EVIDENCE_BYTES = 1_048_576;
@@ -18,24 +17,20 @@ const RPC_EVIDENCE_CLOCK_SKEW_MS = 60_000;
 const RPC_EVIDENCE_MAX_PRECEDING_MS = 5 * 60_000;
 const RPC_EVIDENCE_SCHEMA = 'dkg-rpc-usage-minutes-v1';
 
-const rpcEvidenceSchema = JSON.parse(readFileSync(
-  new URL('./rpc-usage-evidence.schema.json', import.meta.url),
-  'utf8',
-));
 // @ts-expect-error Runtime ESM interop is covered by the evidence tests.
 const rpcSchemaValidator = new Ajv2020({ allErrors: false, strict: true });
 // @ts-expect-error Runtime ESM interop is covered by the evidence tests.
 addFormats(rpcSchemaValidator);
 /** @type {import('ajv').ValidateFunction<RpcUsageEvidenceV1>} */
-const matchesRpcEvidenceV1 = rpcSchemaValidator.compile(rpcEvidenceSchema);
+const matchesRpcEvidenceV1 = rpcSchemaValidator.compile(RPC_USAGE_EVIDENCE_SCHEMA_V1);
 
-/** @param {NormalizedCanaryRpcUsageV1} config @param {RpcEvidenceContextV1} context */
+/** @param {NormalizedCanaryRpcUsageV1} config @param {RpcEvidenceContextV1} context @returns {Promise<import('./domain-contract.js').RemoteCanaryRpcUsageResultV1>} */
 export async function collectRpcUsageEvidenceV1(config, context) {
   if (config.kind === 'required') {
     return Object.freeze({
       status: 'EVIDENCE_REQUIRED',
       requirement: RPC_EVIDENCE_SCHEMA,
-      acceptedSources: Object.freeze(['evidence-file', 'command']),
+      acceptedSources: Object.freeze(/** @type {const} */ (['evidence-file', 'command'])),
     });
   }
   let text = '';
@@ -133,12 +128,16 @@ export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
     throw failure('rpc-evidence-sample-count', 'evidence');
   }
   const earliest = Date.parse(firstSample.windowStartedAt);
+  const latestStart = Date.parse(lastSample.windowStartedAt);
   const latest = Date.parse(lastSample.windowEndedAt);
   if (latest < runStart - RPC_EVIDENCE_MAX_PRECEDING_MS) {
     throw failure('rpc-evidence-stale', 'evidence');
   }
   if (earliest > observed + RPC_EVIDENCE_CLOCK_SKEW_MS || latest > observed + RPC_EVIDENCE_CLOCK_SKEW_MS) {
     throw failure('rpc-evidence-future', 'evidence');
+  }
+  if (latestStart > runStart) {
+    throw failure('rpc-evidence-window-not-bound-to-run', 'evidence');
   }
   return samples;
 }

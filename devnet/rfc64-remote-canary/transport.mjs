@@ -200,7 +200,7 @@ export function createRequesterV1({ fetchFn, readFileFn, secrets, timing }) {
   });
 }
 
-/** @param {CanaryHttpResponseV1} response @param {string} code @returns {unknown} */
+/** @param {CanaryHttpResponseV1} response @param {import('./domain-contract.js').RemoteCanaryErrorCodeV1} code @returns {unknown} */
 export function parseResponseJsonV1(response, code) {
   try {
     return JSON.parse(response.text);

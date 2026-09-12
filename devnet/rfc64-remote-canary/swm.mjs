@@ -41,7 +41,7 @@ function createMarker() {
   });
 }
 
-/** @param {SwmInputV1} input */
+/** @param {SwmInputV1} input @returns {Promise<import('./domain-contract.js').RemoteCanaryLiveSwmResultV1>} */
 export function verifyLiveSwmPropagationV1({ config, client, sleep }) {
   return mapCanaryPhaseDrainedV1(config.contextGraphs, async (contextGraph) => {
     const marker = createMarker();
@@ -73,7 +73,7 @@ export function verifyLiveSwmPropagationV1({ config, client, sleep }) {
   });
 }
 
-/** @param {OfflineInputV1} input */
+/** @param {OfflineInputV1} input @returns {Promise<import('./domain-contract.js').RemoteCanaryOfflineCatchupResultV1>} */
 export async function verifyOfflineCatchupV1({
   config,
   lifecycle,
@@ -218,7 +218,7 @@ function isRetryableRecoveryReadinessErrorV1(error) {
     ].includes(error.code));
 }
 
-/** @param {Pick<SwmInputV1, 'config' | 'client'>} input */
+/** @param {Pick<SwmInputV1, 'config' | 'client'>} input @returns {Promise<import('./domain-contract.js').RemoteCanaryCatalogSwmResultV1>} */
 export async function verifyCatalogSwmV1({ config, client }) {
   const queryResults = await askContextGraphPairsV1(
     config.contextGraphs,

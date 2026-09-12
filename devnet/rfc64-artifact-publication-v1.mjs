@@ -63,12 +63,24 @@ function requiredLabel(value, label) {
 }
 
 /**
+ * Capture a value as stable JSON without exposing the recursive walker's
+ * mutable cycle-detection state to callers.
+ *
+ * @param {unknown} value
+ * @param {string} [label]
+ * @returns {unknown}
+ */
+export function normalizeStableJsonValue(value, label = '$') {
+  return stableJsonValue(value, label, new Set());
+}
+
+/**
  * @param {unknown} value
  * @param {string} path
  * @param {Set<object>} ancestors
  * @returns {unknown}
  */
-export function stableJsonValue(value, path, ancestors) {
+function stableJsonValue(value, path, ancestors) {
   if (
     value !== null
     && (typeof value === 'object' || typeof value === 'function')
@@ -179,7 +191,7 @@ export function stableJsonValue(value, path, ancestors) {
 /** Recursively sort object keys and append exactly one LF. */
 /** @param {unknown} value @returns {string} */
 export function stableJsonStringify(value) {
-  return `${JSON.stringify(stableJsonValue(value, '$', new Set()), null, 2)}\n`;
+  return `${JSON.stringify(normalizeStableJsonValue(value), null, 2)}\n`;
 }
 
 /** @typedef {Readonly<{ path: string, dev: number, ino: number }>} DirectoryTopologyEntry */

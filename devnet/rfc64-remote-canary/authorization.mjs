@@ -18,6 +18,7 @@ function jsonPointer(value, pointer) {
 /**
  * @param {Readonly<{ unauthorized: NormalizedCanaryAuthorizationCheckV1, revoked: NormalizedCanaryAuthorizationCheckV1 }>} checks
  * @param {CanaryNodeClientV1} client
+ * @returns {Promise<import('./domain-contract.js').RemoteCanaryAuthorizationResultV1>}
  */
 export async function verifyAuthorizationV1(checks, client) {
   const [unauthorized, revoked] = await Promise.all([

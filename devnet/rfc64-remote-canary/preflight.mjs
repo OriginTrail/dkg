@@ -37,6 +37,7 @@ function canonicalChainId(value) {
 
 /**
  * @param {PreflightInputV1} input
+ * @returns {Promise<Readonly<{ networkKey: string, nodeIdentities: ReadonlyMap<string, string>, nodes: import('./domain-contract.js').RemoteCanaryPreflightEvidenceV1['nodes'] }>>}
  */
 export async function preflightAllNodesV1(input) {
   const { config, client } = input;
@@ -99,16 +100,18 @@ export async function preflightAllNodesV1(input) {
   }
   const nodes = Object.freeze(config.nodes.map((node) => {
     const status = requiredCertification(raw, node.id);
+    const commit = status.commit;
+    if (commit === null) throw failure('node-build-mismatch', 'invariant');
     const relevant = config.contextGraphs.filter((entry) => (
       entry.source === node || entry.receiver === node
     ));
     return Object.freeze({
       nodeRef: node.nodeRef,
       role: node.role,
-      commit: status.commit,
+      commit,
       chainId: canonicalChainId(status.chain?.chainId),
       syncReconcilerEnabled: true,
-      catalogServiceEnabled: status.catalog.enabled,
+      catalogServiceEnabled: true,
       contextGraphs: Object.freeze(relevant.map((entry) => Object.freeze({
         contextGraphRef: entry.contextGraphRef,
         mode: 'catalog',

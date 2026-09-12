@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
+/** @typedef {import('./domain-contract.js').RemoteCanaryErrorCategoryV1} RemoteCanaryErrorCategoryV1 */
+/** @typedef {import('./domain-contract.js').RemoteCanaryErrorCodeV1} RemoteCanaryErrorCodeV1 */
+/** @typedef {import('./domain-contract.js').RemoteCanaryPhaseV1} RemoteCanaryPhaseV1 */
+
 export class RemoteCanaryError extends Error {
   /**
-   * @param {string} code
-   * @param {string} category
-   * @param {ErrorOptions & { phase?: string }} [options]
+   * @param {RemoteCanaryErrorCodeV1} code
+   * @param {RemoteCanaryErrorCategoryV1} category
+   * @param {ErrorOptions & { phase?: RemoteCanaryPhaseV1 }} [options]
    */
   constructor(code, category, options = {}) {
     super(code, options);
@@ -15,7 +19,7 @@ export class RemoteCanaryError extends Error {
   }
 }
 
-/** @param {string} code @param {string} category @param {unknown} [cause] */
+/** @param {RemoteCanaryErrorCodeV1} code @param {RemoteCanaryErrorCategoryV1} category @param {unknown} [cause] */
 export function failure(code, category, cause) {
   return new RemoteCanaryError(code, category, cause === undefined ? {} : { cause });
 }
@@ -23,7 +27,7 @@ export function failure(code, category, cause) {
 /**
  * Attach the owning certification stage without changing the low-level error code/category.
  * @template Result
- * @param {string} phase
+ * @param {RemoteCanaryPhaseV1} phase
  * @param {() => Result} operation
  * @returns {Result}
  */
@@ -58,7 +62,7 @@ function isPromiseLike(value) {
     && typeof /** @type {{ then?: unknown }} */ (value).then === 'function';
 }
 
-/** @param {string} code @returns {never} */
+/** @param {RemoteCanaryErrorCodeV1} code @returns {never} */
 export function invalid(code) {
   throw failure(code, 'configuration');
 }

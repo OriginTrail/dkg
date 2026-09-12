@@ -20,7 +20,7 @@ import {
 
 export { completeOperationalParityV1 } from './status-contract.mjs';
 
-/** @param {VmParityInputV1} input */
+/** @param {VmParityInputV1} input @returns {Promise<import('./domain-contract.js').RemoteCanaryVmParityResultV1>} */
 export async function verifyVmParityV1({ config, client, sleep }) {
   return (await verifyVmParityEvidenceV1({ config, client, sleep })).checks;
 }
@@ -30,7 +30,7 @@ export async function verifyVmParityV1({ config, client, sleep }) {
  * Final preflight uses them to reject even synchronized cursor advancement
  * between application evidence and certificate issuance.
  */
-/** @param {VmParityInputV1} input */
+/** @param {VmParityInputV1} input @returns {Promise<Readonly<{ checks: import('./domain-contract.js').RemoteCanaryVmParityResultV1, certificationByNodeId: ReadonlyMap<string, Readonly<CertificationStatusV1>> }>>} */
 export async function verifyVmParityEvidenceV1({ config, client, sleep }) {
   const participatingNodes = [...new Set(config.contextGraphs.flatMap(
     ({ source, receiver }) => [source, receiver],
@@ -71,24 +71,29 @@ export async function verifyVmParityEvidenceV1({ config, client, sleep }) {
   );
   const checks = Object.freeze(config.contextGraphs.map((contextGraph, index) => {
     const vmAskSparql = contextGraph.vmAskSparql;
-    if (vmAskSparql !== undefined) {
-      const pair = queryResults[index];
-      if (pair === null) throw new TypeError('vm-query-result-missing');
-      if (!pair.source || !pair.receiver) throw failure('vm-query-parity-failed', 'vm');
+    if (vmAskSparql === undefined) {
+      return Object.freeze({
+        contextGraphRef: contextGraph.contextGraphRef,
+        status: 'EVIDENCE_REQUIRED',
+        statusParity: 'PASS',
+        cursorPresent: evidenceSnapshot.parity[index].cursorPresent,
+        digestParity: evidenceSnapshot.parity[index].digestParity,
+        rowCountParity: evidenceSnapshot.parity[index].rowCountParity,
+        vmQueryChecked: false,
+        requirement: 'vm-ask-query',
+      });
     }
+    const pair = queryResults[index];
+    if (pair === null) throw new TypeError('vm-query-result-missing');
+    if (!pair.source || !pair.receiver) throw failure('vm-query-parity-failed', 'vm');
     return Object.freeze({
       contextGraphRef: contextGraph.contextGraphRef,
-      status: contextGraph.vmAskSparql === undefined
-        ? 'EVIDENCE_REQUIRED'
-        : 'PASS',
+      status: 'PASS',
       statusParity: 'PASS',
       cursorPresent: evidenceSnapshot.parity[index].cursorPresent,
       digestParity: evidenceSnapshot.parity[index].digestParity,
       rowCountParity: evidenceSnapshot.parity[index].rowCountParity,
-      vmQueryChecked: contextGraph.vmAskSparql !== undefined,
-      ...(contextGraph.vmAskSparql === undefined
-        ? { requirement: 'vm-ask-query' }
-        : {}),
+      vmQueryChecked: true,
     });
   }));
   return Object.freeze({

@@ -6,7 +6,9 @@ import {
   type NormalizedRemoteCanaryConfigV1,
   type NormalizedCanaryRpcUsageV1,
   type RawCanaryRpcUsageV1,
+  type RawRemoteCanaryConfigV1,
   type RemoteCanaryDependenciesV1,
+  type RpcUsageEvidenceV1,
 } from './domain-contract.js';
 import { preflightAllNodesV1 } from './preflight.mjs';
 import {
@@ -56,4 +58,36 @@ const normalizedFileEvidence: NormalizedCanaryRpcUsageV1 = rawFileEvidence;
 // @ts-expect-error Evidence modes are a closed discriminated union.
 const unknownEvidence: RawCanaryRpcUsageV1 = { kind: 'provider-api' };
 
-void [rpcSource, dependencies, normalizedFileEvidence, unknownEvidence];
+const configSchemaDiscriminant: RawRemoteCanaryConfigV1['schema'] =
+  'dkg-rfc64-remote-canary-config-v1';
+// @ts-expect-error Configuration discriminants are derived from the canonical schema.
+const staleConfigSchemaDiscriminant: RawRemoteCanaryConfigV1['schema'] =
+  'dkg-rfc64-remote-canary-config-v2';
+const typedRpcEvidence = {
+  schema: 'dkg-rpc-usage-minutes-v1',
+  scope: 'certified-cohort',
+  expectedCommit: 'a'.repeat(40),
+  cohortRef: 'cohort:00000000000000000000',
+  samples: [{
+    windowStartedAt: '2026-09-11T00:00:00.000Z',
+    windowEndedAt: '2026-09-11T00:01:00.000Z',
+    total: 1,
+    byMethod: { eth_call: 1 },
+  }],
+} satisfies RpcUsageEvidenceV1;
+const staleRpcEvidence = {
+  ...typedRpcEvidence,
+  // @ts-expect-error RPC evidence discriminants are derived from the canonical schema.
+  scope: 'unbound-cohort',
+} satisfies RpcUsageEvidenceV1;
+
+void [
+  rpcSource,
+  dependencies,
+  normalizedFileEvidence,
+  unknownEvidence,
+  configSchemaDiscriminant,
+  staleConfigSchemaDiscriminant,
+  typedRpcEvidence,
+  staleRpcEvidence,
+];

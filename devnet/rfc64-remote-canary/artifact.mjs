@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { writeRfc64ArtifactAtomicV1 } from '../rfc64-artifact-v1.mjs';
-import { ARTIFACT_SCHEMA } from './artifact-contract.mjs';
+import {
+  ARTIFACT_SCHEMA,
+  createRemoteCanaryCertificateV1,
+  validateRemoteCanaryCertificateV1,
+} from './artifact-contract.mjs';
 import { validateRemoteCanaryConfigV1 } from './config.mjs';
 import { RemoteCanaryError } from './errors.mjs';
 import { pathsAliasV1 } from './path-alias.mjs';
@@ -35,12 +39,12 @@ export async function runRemoteCanaryArtifactLifecycleV1({
   const loadedConfig = await loadConfig();
   const validatedConfig = validateRemoteCanaryConfigV1(loadedConfig);
   await assertArtifactDoesNotAliasConfiguredInputV1(artifactPath, validatedConfig);
-  await writeArtifactAtomicV1(artifactPath, {
+  await writeArtifactAtomicV1(artifactPath, createRemoteCanaryCertificateV1({
     schema: ARTIFACT_SCHEMA,
     status: 'INCOMPLETE',
     phase: 'starting',
     startedAt,
-  });
+  }));
   try {
     const artifact = dryRun
       ? createRemoteCanaryDryRunArtifactFromNormalizedV1(validatedConfig, now)
@@ -51,10 +55,10 @@ export async function runRemoteCanaryArtifactLifecycleV1({
     await writeArtifactAtomicV1(artifactPath, artifact);
     return artifact;
   } catch (error) {
-    const failed = Object.freeze({
+    const failed = createRemoteCanaryCertificateV1({
       schema: ARTIFACT_SCHEMA,
       status: 'FAIL',
-      phase: error instanceof RemoteCanaryError ? error.phase : 'failed',
+      phase: error instanceof RemoteCanaryError ? (error.phase ?? 'failed') : 'failed',
       startedAt,
       finishedAt: now().toISOString(),
       failure: Object.freeze({
@@ -72,9 +76,12 @@ export async function runRemoteCanaryArtifactLifecycleV1({
   }
 }
 
-/** @param {string} artifactPath @param {unknown} artifact */
+/** @param {string} artifactPath @param {import('./domain-contract.js').RemoteCanaryCertificateV1} artifact */
 export function writeArtifactAtomicV1(artifactPath, artifact) {
-  return writeRfc64ArtifactAtomicV1(artifactPath, artifact);
+  return writeRfc64ArtifactAtomicV1(
+    artifactPath,
+    validateRemoteCanaryCertificateV1(artifact),
+  );
 }
 
 /**

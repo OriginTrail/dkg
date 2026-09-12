@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import evidenceVitestConfig from './vitest.evidence.config.js';
+import { normalizeStableJsonValue } from '../rfc64-artifact-publication-v1.mjs';
 import {
   RFC64_ARTIFACT_POSIX_ACCESS_POLICY,
   RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY,
@@ -763,6 +764,13 @@ describe('RFC-64 devnet run artifact', () => {
       .toThrow(Rfc64EvidenceValidationError);
     expect(() => stableJsonStringify({ value: Number.NaN }))
       .toThrow(/non-finite number/);
+  });
+
+  it('owns stable-JSON traversal state behind the public normalization facade', () => {
+    const nested = { value: 1 };
+    const callerOwnedAncestors = new Set<object>([nested]);
+    expect(normalizeStableJsonValue({ nested }, 'evidence')).toEqual({ nested });
+    expect(callerOwnedAncestors).toEqual(new Set([nested]));
   });
 
   it('rejects sparse, custom, accessor, symbol, and custom-prototype JSON containers', () => {

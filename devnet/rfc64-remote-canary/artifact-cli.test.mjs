@@ -43,8 +43,11 @@ test('private gate and remote canary publish through one canonical artifact writ
   const privatePath = join(directory, 'private.json');
   const remotePath = join(directory, 'remote.json');
   const directPath = join(directory, 'direct.json');
-  const privateValue = { z: [{ beta: 2, alpha: 1 }], a: { right: true, left: false } };
-  const remoteValue = { a: { left: false, right: true }, z: [{ alpha: 1, beta: 2 }] };
+  const remoteValue = createRemoteCanaryDryRunArtifactV1(
+    baseConfig(),
+    () => new Date('2026-09-11T01:00:00.000Z'),
+  );
+  const privateValue = structuredClone(remoteValue);
   try {
     const privateWritten = await writeGateArtifactAtomicV1(privatePath, privateValue);
     const remoteWritten = await writeArtifactAtomicV1(remotePath, remoteValue);

@@ -237,6 +237,45 @@ test('RPC evidence accepts old history when its final sample is fresh for this r
   assert.equal(result.sampleCount, 3);
 });
 
+test('RPC evidence is bound to run start and rejects wholly post-start samples', async () => {
+  const config = fileConfig();
+  const postStart = JSON.parse(rpcEvidence(config));
+  postStart.samples = [{
+    windowStartedAt: '2026-09-11T00:09:00.000Z',
+    windowEndedAt: '2026-09-11T00:10:00.000Z',
+    total: 1,
+    byMethod: { eth_call: 1 },
+  }];
+  await assert.rejects(
+    collect(config, evidenceContext(config, {
+      startedAt: '2026-09-11T00:00:00.000Z',
+      observedAt: '2026-09-11T00:10:30.000Z',
+      readFileFn: async () => JSON.stringify(postStart),
+    })),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rpc-evidence-window-not-bound-to-run',
+  );
+
+  for (const [windowStartedAt, windowEndedAt] of [
+    ['2026-09-10T23:59:30.000Z', '2026-09-11T00:00:30.000Z'],
+    ['2026-09-10T23:59:00.000Z', '2026-09-11T00:00:00.000Z'],
+  ]) {
+    const bound = JSON.parse(rpcEvidence(config));
+    bound.samples = [{
+      windowStartedAt,
+      windowEndedAt,
+      total: 1,
+      byMethod: { eth_call: 1 },
+    }];
+    const result = await collect(config, evidenceContext(config, {
+      startedAt: '2026-09-11T00:00:00.000Z',
+      observedAt: '2026-09-11T00:00:30.000Z',
+      readFileFn: async () => JSON.stringify(bound),
+    }));
+    assert.equal(result.status, 'PASS');
+  }
+});
+
 test('command-backed RPC evidence crosses the real subprocess boundary', async () => {
   const rawConfig = baseConfig({
     rpcUsage: {

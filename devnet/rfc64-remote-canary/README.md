@@ -97,12 +97,16 @@ sequenceDiagram
 
 ## Configuration
 
-[`config.schema.json`](./config.schema.json) is executed by the runner as its
+[`schemas.mjs`](./schemas.mjs) exports the canonical configuration schema used by the runner as its
 canonical shape contract; handwritten checks only enforce cross-reference,
 normalization, and safety semantics. A focused typed SPARQL AST adapter owns
-ASK data-dependence and reserved-vocabulary policy. `domain-contract.ts` separately defines
-the raw input, normalized topology, closed authentication/RPC evidence unions,
-and injected dependency boundary. A typed node client is the sole owner of
+ASK data-dependence and reserved-vocabulary policy. `domain-contract.ts`
+mechanically derives raw configuration and RPC-evidence types from those same
+runtime schemas, then separately defines only normalized execution types and
+the injected dependency boundary. `artifact-contract.mjs` similarly owns the
+executable discriminated certificate schema and its closed phase, category,
+and failure-code vocabularies; every artifact variant is checked there before
+publication. A typed node client is the sole owner of
 daemon routes, payloads, authentication selection, and response decoding; the
 certification phases consume only those semantic operations. Raw entry points
 normalize once and pass that exact frozen topology through lifecycle safety
@@ -189,7 +193,7 @@ revocation is expected to block subsequent network reads, not erase history.
 
 The daemon emits raw provider-billing request counts in minutely `rpc_usage`
 telemetry. Export only the count fields into the schema in
-[`rpc-usage-evidence.schema.json`](./rpc-usage-evidence.schema.json):
+the canonical `RPC_USAGE_EVIDENCE_SCHEMA_V1` export in [`schemas.mjs`](./schemas.mjs):
 
 ```json
 {

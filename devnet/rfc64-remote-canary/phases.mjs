@@ -8,7 +8,10 @@
 
 import { readFile } from 'node:fs/promises';
 
-import { ARTIFACT_SCHEMA } from './artifact-contract.mjs';
+import {
+  ARTIFACT_SCHEMA,
+  createRemoteCanaryCertificateV1,
+} from './artifact-contract.mjs';
 import { verifyAuthorizationV1 } from './authorization.mjs';
 import {
   createRemoteCanaryCohortRefV1,
@@ -43,7 +46,7 @@ export function createRemoteCanaryDryRunArtifactFromNormalizedV1(
   now = () => new Date(),
 ) {
   const timestamp = now().toISOString();
-  return Object.freeze({
+  return createRemoteCanaryCertificateV1({
     schema: ARTIFACT_SCHEMA,
     status: 'DRY_RUN',
     phase: 'planned',
@@ -183,10 +186,8 @@ export async function executeRemoteCanaryCertificationFromNormalizedV1(
       checks.authorization.revoked,
       checks.rpcUsage,
     ].some(({ status }) => status !== 'PASS');
-    return Object.freeze({
+    const completed = Object.freeze({
       schema: ARTIFACT_SCHEMA,
-      status: incomplete ? 'INCOMPLETE' : 'PASS',
-      phase: incomplete ? 'evidence-required' : 'complete',
       startedAt,
       finishedAt: now().toISOString(),
       expectedCommit: validated.expectedCommit,
@@ -195,12 +196,48 @@ export async function executeRemoteCanaryCertificationFromNormalizedV1(
       preflight: Object.freeze({ status: 'PASS', nodes: finalPreflight.nodes }),
       checks,
     });
+    if (incomplete) {
+      return createRemoteCanaryCertificateV1({
+        ...completed,
+        status: 'INCOMPLETE',
+        phase: 'evidence-required',
+      });
+    }
+    assertPassChecksV1(checks);
+    return createRemoteCanaryCertificateV1({
+      ...completed,
+      status: 'PASS',
+      phase: 'complete',
+      checks,
+    });
   } finally {
     secrets.clear();
   }
 }
 
-/** @param {NormalizedRemoteCanaryConfigV1} config */
+/**
+ * Keep the static PASS certificate discriminant aligned with the same runtime
+ * predicate used to select PASS rather than INCOMPLETE.
+ *
+ * @param {import('./domain-contract.js').RemoteCanaryChecksV1} checks
+ * @returns {asserts checks is import('./domain-contract.js').RemoteCanaryPassChecksV1}
+ */
+function assertPassChecksV1(checks) {
+  const statuses = [
+    ...checks.liveSwmPropagation,
+    checks.offlineCatchup,
+    ...checks.vmParity,
+    ...checks.catalogSwm,
+    checks.authorization.unauthorized,
+    checks.authorization.revoked,
+    checks.rpcUsage,
+  ];
+  if (statuses.some(({ status }) => status !== 'PASS')) {
+    throw new TypeError('remote-canary-pass-check-contract');
+  }
+}
+
+/** @param {NormalizedRemoteCanaryConfigV1} config @returns {import('./domain-contract.js').RemoteCanaryDryRunPlanV1} */
 function createDryRunPlan(config) {
   return Object.freeze({
     preflight: 'exact-build-network-sync-and-catalog-mode',
@@ -232,7 +269,7 @@ function authorizationEvidenceState(check) {
   return check.kind === 'not-exposed' ? 'EVIDENCE_REQUIRED' : 'PLANNED';
 }
 
-/** @param {NormalizedRemoteCanaryConfigV1} config */
+/** @param {NormalizedRemoteCanaryConfigV1} config @returns {import('./domain-contract.js').RemoteCanaryTopologyV1} */
 function redactedTopology(config) {
   return Object.freeze({
     nodeCount: config.nodes.length,

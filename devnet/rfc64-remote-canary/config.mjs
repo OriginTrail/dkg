@@ -15,7 +15,6 @@
 /** @typedef {import('./domain-contract.js').RawCanaryTimingV1} RawCanaryTimingV1 */
 /** @typedef {import('./domain-contract.js').RawRemoteCanaryConfigV1} RawRemoteCanaryConfigV1 */
 
-import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 
 import Ajv2020 from 'ajv/dist/2020.js';
@@ -23,6 +22,7 @@ import addFormats from 'ajv-formats';
 import { validateCommandV1 } from './command-policy.mjs';
 import { invalid } from './errors.mjs';
 import { opaqueRef } from './references.mjs';
+import { REMOTE_CANARY_CONFIG_SCHEMA_V1 } from './schemas.mjs';
 import { validateAskSparqlPolicyV1 } from './sparql-policy.mjs';
 
 const CONFIG_SCHEMA = 'dkg-rfc64-remote-canary-config-v1';
@@ -43,10 +43,6 @@ const DEFAULT_RPC_USAGE = Object.freeze({
   minimumSamples: 1,
   commandTimeoutMs: 60_000,
 });
-const configSchema = JSON.parse(readFileSync(
-  new URL('./config.schema.json', import.meta.url),
-  'utf8',
-));
 // NodeNext sees these CommonJS-compatible packages as namespaces even though
 // their runtime default exports are constructable/callable.
 // @ts-expect-error Runtime interop is covered by the configuration tests.
@@ -54,7 +50,7 @@ const schemaValidator = new Ajv2020({ allErrors: false, strict: true });
 // @ts-expect-error Runtime interop is covered by the configuration tests.
 addFormats(schemaValidator);
 /** @type {import('ajv').ValidateFunction<RawRemoteCanaryConfigV1>} */
-const matchesRemoteCanaryConfigV1 = schemaValidator.compile(configSchema);
+const matchesRemoteCanaryConfigV1 = schemaValidator.compile(REMOTE_CANARY_CONFIG_SCHEMA_V1);
 
 /**
  * The JSON Schema is the canonical shape contract. Handwritten checks below
@@ -184,31 +180,30 @@ function normalizeAuthentication(value) {
 
 /**
  * @param {unknown} value
- * @param {string} field
  * @param {Set<object>} [seen]
- * @returns {void}
+ * @returns {asserts value is JsonValue}
  */
-function assertJsonData(value, field, seen = new Set()) {
+function assertJsonData(value, seen = new Set()) {
   if (value === null || ['string', 'boolean'].includes(typeof value)) return;
   if (typeof value === 'number' && Number.isFinite(value)) return;
   if (Array.isArray(value)) {
-    if (seen.has(value)) invalid(`${field}-circular`);
+    if (seen.has(value)) invalid('authorization-body-circular');
     seen.add(value);
-    for (const entry of value) assertJsonData(entry, field, seen);
+    for (const entry of value) assertJsonData(entry, seen);
     seen.delete(value);
     return;
   }
   if (typeof value === 'object') {
-    if (seen.has(value)) invalid(`${field}-circular`);
+    if (seen.has(value)) invalid('authorization-body-circular');
     seen.add(value);
     for (const [key, entry] of Object.entries(value)) {
-      if (key.length > 256) invalid(`${field}-key-too-long`);
-      assertJsonData(entry, field, seen);
+      if (key.length > 256) invalid('authorization-body-key-too-long');
+      assertJsonData(entry, seen);
     }
     seen.delete(value);
     return;
   }
-  invalid(`${field}-not-json`);
+  invalid('authorization-body-not-json');
 }
 
 /** @param {string} value @param {boolean} allowTailscaleHttp @returns {string} */
@@ -228,7 +223,7 @@ function validateBaseUrl(value, allowTailscaleHttp) {
 /**
  * @param {ReadonlyMap<string, NormalizedCanaryNodeV1>} nodeById
  * @param {string} nodeId
- * @param {string} errorCode
+ * @param {import('./domain-contract.js').RemoteCanaryErrorCodeV1} errorCode
  * @returns {NormalizedCanaryNodeV1}
  */
 function requiredNode(nodeById, nodeId, errorCode) {
@@ -285,7 +280,7 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
   if (value.method === 'POST' && value.path.split('?')[0] !== '/api/query') {
     invalid('authorization-post-must-be-read-only-query');
   }
-  if (value.body !== undefined) assertJsonData(value.body, 'authorization-body');
+  if (value.body !== undefined) assertJsonData(value.body);
   if (value.expectedCodes.some((code) => !/^RFC64_[A-Z0-9_]+$/u.test(code))) {
     invalid('authorization-code-not-rfc64-specific');
   }
@@ -306,9 +301,10 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
   } else if (value.notFoundControlNodeId !== undefined) {
     invalid('authorization-404-control-without-404');
   }
+  const { body, ...withoutBody } = value;
   return Object.freeze({
-    ...value,
-    ...(value.body === undefined ? {} : { body: cloneFrozenJsonObject(value.body) }),
+    ...withoutBody,
+    ...(body === undefined ? {} : { body: cloneFrozenJsonObject(body) }),
     node,
     ...(notFoundControlNode === undefined ? {} : { notFoundControlNode }),
     expectedStatuses: Object.freeze([...new Set(value.expectedStatuses)]),

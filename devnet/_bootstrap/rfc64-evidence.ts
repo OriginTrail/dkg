@@ -16,8 +16,8 @@ import {
   RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY,
   RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY,
   Rfc64EvidenceValidationError,
+  normalizeStableJsonValue,
   stableJsonStringify,
-  stableJsonValue,
   writeStableJsonArtifact,
 } from '../rfc64-artifact-publication-v1.mjs';
 
@@ -192,7 +192,7 @@ function canonicalUal(rawUal: string): string {
 }
 
 function nquadsInputText(input: string | readonly string[]): string {
-  const captured = stableJsonValue(input, 'semanticNQuads', new Set());
+  const captured = normalizeStableJsonValue(input, 'semanticNQuads');
   if (typeof captured === 'string') return captured;
   if (!Array.isArray(captured)) {
     throw new Rfc64EvidenceValidationError(
@@ -358,10 +358,9 @@ export async function createRfc64SemanticSnapshot(
   // The capture reads data descriptors once, rejects proxies/accessors and
   // exotic containers, and gives the rest of this function ordinary arrays it
   // owns. In particular, never dispatch through a caller-provided `map` method.
-  const captured = stableJsonValue(
+  const captured = normalizeStableJsonValue(
     observations,
     'observations',
-    new Set(),
   );
   if (!Array.isArray(captured)) {
     throw new Rfc64EvidenceValidationError('observations must be an array');
@@ -441,10 +440,9 @@ export function validateRfc64SemanticSnapshot(
   // Capture each own data property exactly once before validation. This keeps
   // accessors, proxies, sparse/custom arrays, and other exotic containers from
   // changing the value between a successful check and the frozen result.
-  const captured = stableJsonValue(
+  const captured = normalizeStableJsonValue(
     snapshot,
     'snapshot',
-    new Set(),
   ) as unknown as Rfc64SemanticSnapshotV1;
   if (captured.schemaVersion !== RFC64_SEMANTIC_SNAPSHOT_SCHEMA) {
     throw new Rfc64EvidenceValidationError(
@@ -649,7 +647,7 @@ function captureFailureRecord(
   value: Rfc64FailureV1,
   label: string,
 ): Record<string, unknown> {
-  const captured = stableJsonValue(value, label, new Set());
+  const captured = normalizeStableJsonValue(value, label);
   if (!captured || typeof captured !== 'object' || Array.isArray(captured)) {
     throw new Rfc64EvidenceValidationError(`${label} must be an object`);
   }
@@ -796,10 +794,9 @@ export function createRfc64DevnetEvidence(
     );
   }
 
-  const capturedRetryFailures = stableJsonValue(
+  const capturedRetryFailures = normalizeStableJsonValue(
     capturedInput.retryFailures ?? [],
     'retryFailures',
-    new Set(),
   );
   if (!Array.isArray(capturedRetryFailures)) {
     throw new Rfc64EvidenceValidationError('retryFailures must be an array');
