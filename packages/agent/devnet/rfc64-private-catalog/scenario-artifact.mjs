@@ -86,7 +86,7 @@ export function buildRfc64PrivateReleaseArtifactV1(evidence, runtimeManifestDige
     failoverBarrier: {
       ownerExitCode: owner.shutdown.exit.code,
       ownerExitedAt: owner.shutdown.exit.exitedAt,
-      ownerExitedBeforeReceiverSpawn: owner.spawnSequence < receiver.spawnSequence,
+      ownerExitedBeforeReceiverSpawn: exitedBeforeSpawnV1(owner, receiver),
       ownerListenerClosed: observation(owner, 'listenerClosed'),
       provider2ExactHeadAfterOwnerExit:
         observation(provider2, 'stateAfterOwnerExit').exactExpectedHead === true,
@@ -193,7 +193,7 @@ function buildRfc64PrivateReleaseChecksV1(evidence) {
       owner.shutdown.exit.error === null
       && observation(owner, 'listenerClosed')
       && observation(provider2, 'listenerDialableAfterOwnerExit')
-      && owner.spawnSequence < receiver.spawnSequence,
+      && exitedBeforeSpawnV1(owner, receiver),
     receiverCaughtUpSwmV2AndVmV1: hasExactMemoryContents(receiverState),
     ...rpcVerdict,
     outsiderDeniedBeforeApplication:
@@ -229,6 +229,12 @@ function actor(evidence, processId) {
     throw new Error(`RFC-64 private scenario is missing process evidence: ${processId}`);
   }
   return process;
+}
+
+function exitedBeforeSpawnV1(exitedProcess, spawnedProcess) {
+  return Number.isSafeInteger(exitedProcess.exitSequence)
+    && Number.isSafeInteger(spawnedProcess.spawnSequence)
+    && exitedProcess.exitSequence < spawnedProcess.spawnSequence;
 }
 
 function observation(process, key) {
