@@ -536,8 +536,10 @@ export function resolveRfc64LegacySyncContextGraphsV1(input: Readonly<{
 /** Resolve legacy and Track-2 owner scopes once, before either lane starts. */
 export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   configuredContextGraphs: readonly string[];
-  /** DKG 10.0.16 supplies catalog; legacy preserves explicit enabled=false. */
+  /** Compatibility override for callers that have not adopted effectiveRollout. */
   responsibilityDefaultMode?: Rfc64CatalogRolloutModeV1;
+  /** Resolver-issued rollout after compatibility rollback/ephemeral normalization. */
+  effectiveRollout?: ResolvedRfc64CatalogRolloutConfigV1;
   /** Legacy public bootstrap remains active beside additive catalog selection. */
   standaloneTrack2ContextGraphs?: readonly string[];
   /** Normalized activation state; omit only for pre-normalization embedders. */
@@ -550,16 +552,22 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     rollout: ResolvedRfc64CatalogRolloutConfigV1;
   }>;
 }>): Rfc64CatalogExecutionPlanV1 {
-  const responsibilityDefaultMode = input.responsibilityDefaultMode ?? 'legacy';
+  const rollout = input.effectiveRollout ?? input.activation.rollout;
+  const responsibilityDefaultMode = input.responsibilityDefaultMode
+    ?? input.effectiveRollout?.defaultMode
+    ?? 'legacy';
   if (!RFC64_CATALOG_ROLLOUT_MODES_V1.has(responsibilityDefaultMode)) {
     throw new TypeError('RFC-64 responsibility default mode must be legacy, shadow, or catalog');
   }
   const selectedAuthority: Record<string, Rfc64CatalogAuthorityPolicyV1> =
     Object.create(null);
   const track2ContextGraphs: string[] = [];
+  const effectiveActivation = input.effectiveRollout === undefined
+    ? input.activation
+    : Object.freeze({ ...input.activation, rollout });
   for (const contextGraphId of input.activation.selectedContextGraphs) {
     const authority = resolveRfc64CatalogConfiguredAuthorityDecisionV1(
-      input.activation,
+      effectiveActivation,
       contextGraphId,
     );
     selectedAuthority[contextGraphId] = authority;
@@ -570,7 +578,7 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     // retain catalog discovery while allowing legacy sync, even when another
     // graph is under an additive rollout.
     if (
-      input.activation.rollout.killSwitch
+      rollout.killSwitch
       || selectedAuthority[contextGraphId] !== undefined
     ) continue;
     selectedAuthority[contextGraphId] = Object.freeze({
@@ -593,8 +601,8 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
     selectedAuthorityByWireId[wireId] = authority;
   }
-  const contextGraphModes = Object.freeze({ ...input.activation.rollout.contextGraphModes });
-  if (!input.activation.rollout.killSwitch) {
+  const contextGraphModes = Object.freeze({ ...rollout.contextGraphModes });
+  if (!rollout.killSwitch) {
     for (const [contextGraphId, mode] of Object.entries(contextGraphModes)) {
       // A predeclared lifecycle override is not selected authority, but its
       // Track-2 service must exist before that responsibility is discovered.
@@ -612,10 +620,10 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
       return configuredAuthority.legacySyncAllowed;
     }
     const mode = contextGraphModes[contextGraphId] ?? responsibilityDefaultMode;
-    return input.activation.rollout.killSwitch || mode !== 'catalog';
+    return rollout.killSwitch || mode !== 'catalog';
   }));
   return Object.freeze({
-    killSwitchActive: input.activation.rollout.killSwitch,
+    killSwitchActive: rollout.killSwitch,
     responsibilityDefaultMode,
     contextGraphModes,
     legacyContextGraphs,
@@ -624,7 +632,7 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     selectedAuthorityByWireId: Object.freeze(selectedAuthorityByWireId),
     standaloneTrack2Enabled: (input.standaloneTrack2Enabled
       ?? input.activation.enabled === false)
-      && !input.activation.rollout.killSwitch,
+      && !rollout.killSwitch,
   });
 }
 

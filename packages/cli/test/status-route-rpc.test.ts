@@ -578,7 +578,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       enabled: false,
       rollout: {
         killSwitch: false,
-        defaultMode: 'catalog',
+        defaultMode: 'legacy',
         contextGraphModes: {},
       },
     });
@@ -811,8 +811,22 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         }),
       },
       {
+        rfc64Catalog: {
+          rollout: {
+            killSwitch: true,
+            contextGraphModes: {
+              [publicContextGraph]: 'shadow',
+              [privateContextGraph]: 'legacy',
+            },
+          },
+        },
         rfc64PublicCatalog: {
           enabled: true,
+          rollout: {
+            contextGraphModes: {
+              [publicContextGraph]: 'shadow',
+            },
+          },
           bootstrap: {
             acceptedPublicPolicies: [rfc64PublicCatalogPolicy(publicContextGraph)],
           },

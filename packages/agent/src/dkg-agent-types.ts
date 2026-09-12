@@ -1332,8 +1332,10 @@ export interface DKGAgentConfig {
    */
   rfc64PublicCatalogActivation?: Rfc64PublicCatalogActivationInputV1;
   /**
-   * Resolver-issued activation snapshot for daemon embedders. Mutually
-   * exclusive with raw activation and loose compatibility controls.
+   * Opaque process-local activation-resolution handle for daemon embedders.
+   * It must be passed intact from `resolveRfc64CatalogActivationsV1`; spreading
+   * or deserializing it is not a supported runtime boundary. Mutually exclusive
+   * with raw activation and loose compatibility controls.
    */
   rfc64CatalogActivations?: ResolvedRfc64CatalogActivationsV1;
   /**

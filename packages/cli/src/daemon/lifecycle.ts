@@ -1354,14 +1354,15 @@ async function runDaemonInnerWithStartupOwnership(
   const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
   const rfc64CatalogActivationState = rfc64CatalogActivations.activationState;
   const rfc64RollbackTimestamp = new Date().toISOString();
-  if (rfc64CatalogActivationState.explicitlyDisabled) {
+  if (rfc64CatalogActivationState.execution.mode === 'compatibility-rollback') {
     log(
       `[rfc64-catalog-rollback] WARNING source=operator-override reason=deprecated-enabled-false `
       + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs; `
       + 'RFC-64 default correctness is disabled for this compatibility release',
     );
   }
-  const emergencyModes = Object.entries(rfc64Catalog.rollout.contextGraphModes)
+  const effectiveRfc64Rollout = rfc64CatalogActivationState.execution.rollout;
+  const emergencyModes = Object.entries(effectiveRfc64Rollout.contextGraphModes)
     .filter(([, mode]) => mode === 'legacy' || mode === 'shadow')
     .sort(([left], [right]) => left.localeCompare(right));
   if (emergencyModes.length > 0) {
@@ -1370,7 +1371,7 @@ async function runDaemonInnerWithStartupOwnership(
       + `timestamp=${rfc64RollbackTimestamp} affected=${JSON.stringify(emergencyModes)}`,
     );
   }
-  if (rfc64Catalog.rollout.killSwitch) {
+  if (effectiveRfc64Rollout.killSwitch) {
     log(
       `[rfc64-catalog-rollback] WARNING source=kill-switch reason=global-emergency-stop `
       + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs`,

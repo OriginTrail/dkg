@@ -123,18 +123,15 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
     expect(rollback.publicCatalog.bootstrap).toBeUndefined();
     expect(rollback.selectedCatalogAuthoringControls).toEqual([]);
     expect(rollback.activationState).toMatchObject({
-      controlSource: 'unified',
-      executionMode: 'compatibility-rollback',
-      configurationSource: 'explicit-disabled',
-      catalogControlPresent: true,
-      deprecatedPublicControlPresent: true,
-      activationManifestPresent: false,
-      explicitlyDisabled: true,
-      compatibilityControlsSuppressed: true,
-      deprecatedPublicActivationSelected: false,
-      standaloneLegacyControlsAllowed: false,
-      responsibilityDefaultMode: 'legacy',
-      standaloneTrack2Enabled: false,
+      configuration: {
+        source: 'unified',
+        deprecatedPublicControlPresent: true,
+        activationManifestPresent: false,
+      },
+      execution: {
+        mode: 'compatibility-rollback',
+        rollout: { defaultMode: 'legacy' },
+      },
     });
   });
 
@@ -150,10 +147,12 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
     expect(rollback.catalog.enabled).toBe(false);
     expect(rollback.publicCatalog.enabled).toBe(false);
     expect(rollback.activationState).toMatchObject({
-      controlSource: 'unified',
-      deprecatedPublicControlPresent: true,
-      activationManifestPresent: false,
-      compatibilityControlsSuppressed: true,
+      configuration: {
+        source: 'unified',
+        deprecatedPublicControlPresent: true,
+        activationManifestPresent: false,
+      },
+      execution: { mode: 'compatibility-rollback' },
     });
   });
 
@@ -179,13 +178,14 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
     });
     expect(rollback.selectedCatalogAuthoringControls).toEqual([]);
     expect(rollback.activationState).toMatchObject({
-      controlSource: 'deprecated-public',
-      executionMode: 'compatibility-rollback',
-      configurationSource: 'explicit-disabled',
-      explicitlyDisabled: true,
-      deprecatedPublicActivationSelected: false,
-      responsibilityDefaultMode: 'legacy',
-      standaloneTrack2Enabled: false,
+      configuration: {
+        source: 'deprecated-public',
+        activationManifestPresent: false,
+      },
+      execution: {
+        mode: 'compatibility-rollback',
+        rollout: { defaultMode: 'legacy' },
+      },
     });
   });
 
@@ -195,13 +195,11 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
     }, chainIdentity);
     expect(ephemeral.catalog.enabled).toBe(true);
     expect(ephemeral.activationState).toMatchObject({
-      controlSource: 'omitted',
-      executionMode: 'ephemeral-legacy',
-      configurationSource: 'default-omitted',
-      configurationOmitted: true,
-      explicitlyDisabled: false,
-      responsibilityDefaultMode: 'legacy',
-      standaloneTrack2Enabled: false,
+      configuration: { source: 'omitted' },
+      execution: {
+        mode: 'ephemeral-legacy',
+        rollout: { defaultMode: 'legacy' },
+      },
     });
 
     const configured = resolveRfc64CatalogActivationsV1({
@@ -210,9 +208,11 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
     }, chainIdentity);
     expect(configured.catalog.enabled).toBe(true);
     expect(configured.activationState).toMatchObject({
-      executionMode: 'catalog',
-      configurationOmitted: false,
-      responsibilityDefaultMode: 'legacy',
+      configuration: { source: 'unified' },
+      execution: {
+        mode: 'catalog',
+        rollout: { defaultMode: 'legacy' },
+      },
     });
   });
 
@@ -222,8 +222,8 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
     }, chainIdentity);
     const plan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: ['legacy-cg'],
-      responsibilityDefaultMode: rollback.activationState.responsibilityDefaultMode,
-      standaloneTrack2Enabled: rollback.activationState.standaloneTrack2Enabled,
+      effectiveRollout: rollback.activationState.execution.rollout,
+      standaloneTrack2Enabled: false,
       activation: rollback.catalog,
     });
 

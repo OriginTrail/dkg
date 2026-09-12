@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
-  rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
 } from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
 
@@ -59,23 +58,35 @@ export interface Rfc64CatalogConfigurationEvidenceV1 {
 export function buildRfc64CatalogConfigurationEvidenceV1(
   activationState: Rfc64CatalogNormalizedActivationState,
 ): Rfc64CatalogConfigurationEvidenceV1 {
-  const {
-    catalogControlPresent,
-    deprecatedPublicControlPresent,
-    activationManifestPresent,
-  } = activationState;
-  const deprecatedDisabledOverride = activationState.explicitlyDisabled;
-  const modes = Object.entries(activationState.rollout.contextGraphModes)
+  const { configuration, execution } = activationState;
+  const catalogControlPresent = configuration.source === 'unified';
+  const deprecatedPublicControlPresent = configuration.source === 'deprecated-public'
+    || (
+      configuration.source === 'unified'
+      && configuration.deprecatedPublicControlPresent
+    );
+  const activationManifestPresent = configuration.source === 'unified'
+    || configuration.source === 'deprecated-public'
+    ? configuration.activationManifestPresent
+    : false;
+  const deprecatedDisabledOverride = execution.mode === 'compatibility-rollback';
+  const modes = Object.entries(execution.rollout.contextGraphModes)
     .sort(([left], [right]) => left.localeCompare(right));
-  const defaultMode = activationState.responsibilityDefaultMode;
-  const source = activationState.configurationSource;
+  const defaultMode = execution.rollout.defaultMode ?? 'catalog';
+  const source = deprecatedDisabledOverride
+    ? 'explicit-disabled'
+    : configuration.source === 'omitted'
+      ? 'default-omitted'
+      : activationManifestPresent
+        ? 'compatibility-seed'
+        : 'operator-override';
   const digestPayload = {
     schemaVersion: 1,
     catalogControlPresent,
     deprecatedPublicControlPresent,
     activationManifestPresent,
     deprecatedDisabledOverride,
-    killSwitch: activationState.rollout.killSwitch,
+    killSwitch: execution.rollout.killSwitch,
     defaultMode,
     contextGraphModes: modes,
   };
@@ -86,7 +97,7 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
     deprecatedPublicControlPresent,
     activationManifestPresent,
     deprecatedDisabledOverride,
-    killSwitch: activationState.rollout.killSwitch,
+    killSwitch: execution.rollout.killSwitch,
     defaultMode,
     legacyOverrideCount:
       defaultMode === 'legacy' ? 0 : modes.filter(([, mode]) => mode === 'legacy').length,
@@ -124,18 +135,7 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
     autoPublish: publicCatalogActivation.autoPublish,
     rollout: publicCatalogActivation.rollout,
   };
-  const rollout = catalogActivation.rollout ?? {
-    // Compatibility for older direct JS embedders that supply the pre-rollout
-    // resolved shape at the package boundary.
-    killSwitch: rfc64CatalogKillSwitchActiveV1(catalogActivation),
-    defaultMode: 'catalog' as const,
-    contextGraphModes: Object.fromEntries(
-      catalogActivation.selectedContextGraphs.map((contextGraphId) => [
-        contextGraphId,
-        rfc64CatalogRolloutModeForContextGraphV1(catalogActivation, contextGraphId),
-      ]),
-    ),
-  };
+  const rollout = input.activationState.execution.rollout;
   const configuration = buildRfc64CatalogConfigurationEvidenceV1(input.activationState);
   const service = catalogActivation.enabled
     && typeof agent.rfc64PublicCatalogStatsV1 === 'function'

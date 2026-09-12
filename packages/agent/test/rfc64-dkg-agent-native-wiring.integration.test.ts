@@ -4151,7 +4151,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   });
 
-  it('consumes a resolver-issued rollback snapshot without reinterpreting enabled', async () => {
+  it('consumes a resolver-issued rollback handle without reinterpreting enabled', async () => {
     const activations = resolveRfc64CatalogActivationsV1({
       catalog: { enabled: false },
       publicCatalog: { enabled: true } as never,
@@ -4170,6 +4170,19 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   });
 
+  it('rejects an enabled resolver handle issued for a different agent chain', async () => {
+    const chainAActivations = resolveRfc64CatalogActivationsV1({
+      catalog: { deploymentProfile: NATIVE_DEPLOYMENT },
+      persistenceAvailable: false,
+    }, resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK_ID));
+
+    await expect(DKGAgent.create({
+      name: 'cross-chain-normalized-activation',
+      networkIdentity: { networkId: 'chain-b', chainId: 'evm:31337' },
+      rfc64CatalogActivations: chainAActivations,
+    })).rejects.toThrow(/deployment network differs from the daemon effective chain id/u);
+  });
+
   it('rejects forged or mixed normalized activation state', async () => {
     const activations = resolveRfc64CatalogActivationsV1({
       catalog: { enabled: false },
@@ -4182,17 +4195,23 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         selectedCatalogAuthoringControls: activations.selectedCatalogAuthoringControls,
         activationState: activations.activationState,
       } as never,
-    })).rejects.toThrow(/must come from resolveRfc64CatalogActivationsV1/u);
+    })).rejects.toThrow(/must be an opaque handle from resolveRfc64CatalogActivationsV1/u);
     await expect(DKGAgent.create({
       name: 'copied-normalized-activation',
       rfc64CatalogActivations: {
         ...activations,
         activationState: {
           ...activations.activationState,
-          responsibilityDefaultMode: 'catalog',
+          execution: {
+            ...activations.activationState.execution,
+            rollout: {
+              ...activations.activationState.execution.rollout,
+              defaultMode: 'catalog',
+            },
+          },
         },
       } as never,
-    })).rejects.toThrow(/must come from resolveRfc64CatalogActivationsV1/u);
+    })).rejects.toThrow(/must be an opaque handle from resolveRfc64CatalogActivationsV1/u);
     await expect(DKGAgent.create({
       name: 'mixed-normalized-activation',
       rfc64CatalogActivations: activations,

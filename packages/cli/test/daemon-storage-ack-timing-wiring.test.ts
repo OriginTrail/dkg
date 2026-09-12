@@ -636,9 +636,8 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       accessPolicyAuthority: rfc64Catalog.accessPolicyAuthority,
     });
     expect(createArg.rfc64CatalogActivations.activationState).toMatchObject({
-      controlSource: 'unified',
-      executionMode: 'catalog',
-      explicitlyDisabled: false,
+      configuration: { source: 'unified' },
+      execution: { mode: 'catalog' },
     });
   });
 
@@ -698,9 +697,8 @@ describe('runDaemonInner StorageACK timing wiring', () => {
 
     expect(createArg.rfc64CatalogActivations.publicCatalog.enabled).toBe(false);
     expect(createArg.rfc64CatalogActivations.activationState).toMatchObject({
-      controlSource: 'deprecated-public',
-      executionMode: 'compatibility-rollback',
-      explicitlyDisabled: true,
+      configuration: { source: 'deprecated-public' },
+      execution: { mode: 'compatibility-rollback' },
     });
     expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
@@ -730,8 +728,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
     expect(createArg.rfc64CatalogActivations.publicCatalog.bootstrap).toBeUndefined();
     expect(createArg.rfc64CatalogActivations.activationState).toMatchObject({
-      executionMode: 'compatibility-rollback',
-      compatibilityControlsSuppressed: true,
+      execution: { mode: 'compatibility-rollback' },
     });
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
@@ -768,10 +765,11 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       selectedContextGraphs: [],
     });
     expect(createArg.rfc64CatalogActivations.activationState).toMatchObject({
-      controlSource: 'unified',
-      executionMode: 'compatibility-rollback',
-      deprecatedPublicControlPresent: true,
-      compatibilityControlsSuppressed: true,
+      configuration: {
+        source: 'unified',
+        deprecatedPublicControlPresent: true,
+      },
+      execution: { mode: 'compatibility-rollback' },
     });
     expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();

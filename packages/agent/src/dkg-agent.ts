@@ -1236,31 +1236,45 @@ export class DKGAgent extends DKGAgentBase {
     }, chainIdentity);
     const catalogActivation = activations.catalog;
     const activationState = activations.activationState;
-    const activation = activationState.deprecatedPublicActivationSelected
+    const compatibilityControlsSuppressed =
+      activationState.execution.mode === 'compatibility-rollback';
+    const deprecatedPublicControlPresent =
+      activationState.configuration.source === 'deprecated-public'
+      || (
+        activationState.configuration.source === 'unified'
+        && activationState.configuration.deprecatedPublicControlPresent
+      );
+    const deprecatedPublicActivationSelected =
+      activationState.execution.mode === 'catalog'
+      && deprecatedPublicControlPresent;
+    const standaloneLegacyControlsAllowed =
+      activationState.execution.mode === 'catalog'
+      && !deprecatedPublicControlPresent;
+    const activation = deprecatedPublicActivationSelected
       ? activations.publicCatalog
       : undefined;
     const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
       activation,
-      legacyDeploymentProfile: activationState.compatibilityControlsSuppressed
+      legacyDeploymentProfile: compatibilityControlsSuppressed
         ? undefined
         : normalizedConfig.rfc64CatalogDeploymentProfile,
-      legacyAutoPublish: activationState.compatibilityControlsSuppressed
+      legacyAutoPublish: compatibilityControlsSuppressed
         ? undefined
         : normalizedConfig.rfc64PublicCatalogAutoPublish,
-      legacyBootstrap: activationState.compatibilityControlsSuppressed
+      legacyBootstrap: compatibilityControlsSuppressed
         ? undefined
         : normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
-      responsibilityDefaultMode: activationState.responsibilityDefaultMode,
+      effectiveRollout: activationState.execution.rollout,
       standaloneTrack2ContextGraphs:
-        activationState.standaloneLegacyControlsAllowed
+        standaloneLegacyControlsAllowed
           ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(
             ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
           ) ?? [])
           : [],
-      standaloneTrack2Enabled: activationState.standaloneTrack2Enabled,
+      standaloneTrack2Enabled: false,
       activation: catalogActivation,
     });
     const config: StorageAckNormalizedDKGAgentConfig = {
@@ -1300,7 +1314,7 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64CatalogDeploymentProfile = catalogActivation.deploymentProfile
       ?? rfc64PublicCatalogControls.deploymentProfile;
     const legacyRfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
-      activationState.compatibilityControlsSuppressed
+      compatibilityControlsSuppressed
         ? undefined
         : config.rfc64CatalogAccessPolicyAuthority,
     );
@@ -1332,7 +1346,7 @@ export class DKGAgent extends DKGAgentBase {
       // resolveRfc64CatalogActivationsV1 already folds the compatibility
       // activation into catalogActivation. Only the legacy standalone block
       // still has to be added here.
-      activationState.standaloneLegacyControlsAllowed
+      standaloneLegacyControlsAllowed
         ? rfc64PublicCatalogBootstrap
         : undefined,
     );
