@@ -93,7 +93,11 @@ sequenceDiagram
 
 [`config.schema.json`](./config.schema.json) is executed by the runner as its
 canonical shape contract; handwritten checks only enforce cross-reference,
-normalization, and safety semantics. This minimal
+normalization, and safety semantics. `domain-contract.ts` separately defines
+the raw input, normalized topology, closed authentication/RPC evidence unions,
+and injected dependency boundary. The configuration and orchestration modules
+are checked against that contract on every required test run, so a new union
+member or a drifted normalized field fails typechecking before execution. This minimal
 shape deliberately declares the current catalog wire-denial APIs unavailable;
 the resulting certificate is `INCOMPLETE` until executable read-only denial
 probes are configured.
