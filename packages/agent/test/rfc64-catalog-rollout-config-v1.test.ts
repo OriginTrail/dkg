@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   rfc64CatalogKillSwitchActiveV1,
   rfc64CatalogRolloutModeForContextGraphV1,
+  resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogActivationsV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import {
@@ -121,6 +122,39 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
     expect(rollback.catalog.bootstrap).toBeUndefined();
     expect(rollback.publicCatalog.bootstrap).toBeUndefined();
     expect(rollback.selectedCatalogAuthoringControls).toEqual([]);
+    expect(rollback.activationState).toMatchObject({
+      controlSource: 'unified',
+      executionMode: 'compatibility-rollback',
+      configurationSource: 'explicit-disabled',
+      catalogControlPresent: true,
+      deprecatedPublicControlPresent: true,
+      activationManifestPresent: false,
+      explicitlyDisabled: true,
+      compatibilityControlsSuppressed: true,
+      deprecatedPublicActivationSelected: false,
+      standaloneLegacyControlsAllowed: false,
+      responsibilityDefaultMode: 'legacy',
+      standaloneTrack2Enabled: false,
+    });
+  });
+
+  it('does not parse stale deprecated controls behind the unified rollback', () => {
+    const rollback = resolveRfc64CatalogActivationsV1({
+      catalog: { enabled: false },
+      publicCatalog: {
+        enabled: true,
+        bootstrap: { stale: 'must-not-be-read' },
+      } as never,
+    }, chainIdentity);
+
+    expect(rollback.catalog.enabled).toBe(false);
+    expect(rollback.publicCatalog.enabled).toBe(false);
+    expect(rollback.activationState).toMatchObject({
+      controlSource: 'unified',
+      deprecatedPublicControlPresent: true,
+      activationManifestPresent: false,
+      compatibilityControlsSuppressed: true,
+    });
   });
 
   it('normalizes the deprecated disabled switch into the same full rollback', () => {
@@ -144,6 +178,61 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
       selectedContextGraphs: [],
     });
     expect(rollback.selectedCatalogAuthoringControls).toEqual([]);
+    expect(rollback.activationState).toMatchObject({
+      controlSource: 'deprecated-public',
+      executionMode: 'compatibility-rollback',
+      configurationSource: 'explicit-disabled',
+      explicitlyDisabled: true,
+      deprecatedPublicActivationSelected: false,
+      responsibilityDefaultMode: 'legacy',
+      standaloneTrack2Enabled: false,
+    });
+  });
+
+  it('normalizes omitted ephemeral operation without changing activation.enabled', () => {
+    const ephemeral = resolveRfc64CatalogActivationsV1({
+      persistenceAvailable: false,
+    }, chainIdentity);
+    expect(ephemeral.catalog.enabled).toBe(true);
+    expect(ephemeral.activationState).toMatchObject({
+      controlSource: 'omitted',
+      executionMode: 'ephemeral-legacy',
+      configurationSource: 'default-omitted',
+      configurationOmitted: true,
+      explicitlyDisabled: false,
+      responsibilityDefaultMode: 'legacy',
+      standaloneTrack2Enabled: false,
+    });
+
+    const configured = resolveRfc64CatalogActivationsV1({
+      persistenceAvailable: false,
+      catalog: { rollout: { defaultMode: 'legacy' } },
+    }, chainIdentity);
+    expect(configured.catalog.enabled).toBe(true);
+    expect(configured.activationState).toMatchObject({
+      executionMode: 'catalog',
+      configurationOmitted: false,
+      responsibilityDefaultMode: 'legacy',
+    });
+  });
+
+  it('uses explicit normalized standalone state without rewriting enabled', () => {
+    const rollback = resolveRfc64CatalogActivationsV1({
+      catalog: { enabled: false },
+    }, chainIdentity);
+    const plan = resolveRfc64CatalogExecutionPlanV1({
+      configuredContextGraphs: ['legacy-cg'],
+      responsibilityDefaultMode: rollback.activationState.responsibilityDefaultMode,
+      standaloneTrack2Enabled: rollback.activationState.standaloneTrack2Enabled,
+      activation: rollback.catalog,
+    });
+
+    expect(rollback.catalog.enabled).toBe(false);
+    expect(plan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      legacyContextGraphs: ['legacy-cg'],
+      standaloneTrack2Enabled: false,
+    });
   });
 
   it('unions disjoint rollout modes and lets either block engage the shared kill switch', () => {

@@ -461,6 +461,7 @@ import { Rfc64CatalogShadowObservabilityRuntimeV1 } from
 import { Rfc64PublicCatalogWorkloadOwnerV1 } from
   './rfc64/public-catalog-workload-owner-v1.js';
 import {
+  assertResolvedRfc64CatalogActivationsV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogActivationsV1,
@@ -1206,67 +1207,61 @@ export class DKGAgent extends DKGAgentBase {
     const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(
       constructedAgentChainId,
     );
-    const rfc64UnifiedCatalogExplicitlyDisabled =
-      normalizedConfig.rfc64CatalogActivation?.enabled === false;
-    const rfc64CatalogExplicitlyDisabled =
-      rfc64UnifiedCatalogExplicitlyDisabled
-      || (
-        normalizedConfig.rfc64CatalogActivation === undefined
-        && normalizedConfig.rfc64PublicCatalogActivation?.enabled === false
+    const legacyStandaloneControlsPresent =
+      normalizedConfig.rfc64CatalogDeploymentProfile !== undefined
+      || normalizedConfig.rfc64CatalogAccessPolicyAuthority !== undefined
+      || normalizedConfig.rfc64PublicCatalogAutoPublish !== undefined
+      || normalizedConfig.rfc64PublicCatalogBootstrap !== undefined;
+    const suppliedActivations = normalizedConfig.rfc64CatalogActivations;
+    if (
+      suppliedActivations !== undefined
+      && (
+        normalizedConfig.rfc64CatalogActivation !== undefined
+        || normalizedConfig.rfc64PublicCatalogActivation !== undefined
+        || legacyStandaloneControlsPresent
+      )
+    ) {
+      throw new TypeError(
+        'rfc64CatalogActivations is mutually exclusive with raw RFC-64 controls',
       );
-    const activations = resolveRfc64CatalogActivationsV1({
+    }
+    if (suppliedActivations !== undefined) {
+      assertResolvedRfc64CatalogActivationsV1(suppliedActivations, chainIdentity);
+    }
+    const activations = suppliedActivations ?? resolveRfc64CatalogActivationsV1({
       catalog: normalizedConfig.rfc64CatalogActivation,
       publicCatalog: normalizedConfig.rfc64PublicCatalogActivation,
+      legacyStandaloneControlsPresent,
+      persistenceAvailable: normalizedConfig.dataDir !== undefined,
     }, chainIdentity);
     const catalogActivation = activations.catalog;
-    const activation = normalizedConfig.rfc64PublicCatalogActivation === undefined
-      ? undefined
-      : activations.publicCatalog;
+    const activationState = activations.activationState;
+    const activation = activationState.deprecatedPublicActivationSelected
+      ? activations.publicCatalog
+      : undefined;
     const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
       activation,
-      legacyDeploymentProfile: rfc64CatalogExplicitlyDisabled
+      legacyDeploymentProfile: activationState.compatibilityControlsSuppressed
         ? undefined
         : normalizedConfig.rfc64CatalogDeploymentProfile,
-      legacyAutoPublish: rfc64CatalogExplicitlyDisabled
+      legacyAutoPublish: activationState.compatibilityControlsSuppressed
         ? undefined
         : normalizedConfig.rfc64PublicCatalogAutoPublish,
-      legacyBootstrap: rfc64CatalogExplicitlyDisabled
+      legacyBootstrap: activationState.compatibilityControlsSuppressed
         ? undefined
         : normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
-    // The unified block owns precedence over the deprecated public-only
-    // alias. Omission is the 10.0.16 product default; explicit enabled=false
-    // remains a one-release compatibility rollback.
-    const rfc64CatalogConfigurationOmitted =
-      normalizedConfig.rfc64CatalogActivation === undefined
-      && normalizedConfig.rfc64PublicCatalogActivation === undefined
-      && normalizedConfig.rfc64CatalogDeploymentProfile === undefined
-      && normalizedConfig.rfc64CatalogAccessPolicyAuthority === undefined
-      && normalizedConfig.rfc64PublicCatalogAutoPublish === undefined
-      && normalizedConfig.rfc64PublicCatalogBootstrap === undefined;
-    // Agents without a persistence root cannot run the catalog service. Preserve
-    // the historical in-memory legacy lane only for a truly omitted RFC-64
-    // configuration; an explicit catalog request is rejected below instead of
-    // silently suppressing both catalog and legacy delivery.
-    const rfc64CatalogEphemeralLegacyFallback =
-      !normalizedConfig.dataDir && rfc64CatalogConfigurationOmitted;
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
-      responsibilityDefaultMode:
-        rfc64CatalogExplicitlyDisabled || rfc64CatalogEphemeralLegacyFallback
-          ? 'legacy'
-          : catalogActivation.rollout.defaultMode ?? 'catalog',
+      responsibilityDefaultMode: activationState.responsibilityDefaultMode,
       standaloneTrack2ContextGraphs:
-        normalizedConfig.rfc64PublicCatalogActivation === undefined
+        activationState.standaloneLegacyControlsAllowed
           ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(
             ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
           ) ?? [])
           : [],
-      // Any explicit compatibility rollback must not be reinterpreted as the
-      // pre-activation standalone Track-2 mode by the execution-plan adapter.
-      activation: rfc64CatalogExplicitlyDisabled
-        ? Object.freeze({ ...catalogActivation, enabled: true })
-        : catalogActivation,
+      standaloneTrack2Enabled: activationState.standaloneTrack2Enabled,
+      activation: catalogActivation,
     });
     const config: StorageAckNormalizedDKGAgentConfig = {
       ...normalizedConfig,
@@ -1305,7 +1300,7 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64CatalogDeploymentProfile = catalogActivation.deploymentProfile
       ?? rfc64PublicCatalogControls.deploymentProfile;
     const legacyRfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
-      rfc64CatalogExplicitlyDisabled
+      activationState.compatibilityControlsSuppressed
         ? undefined
         : config.rfc64CatalogAccessPolicyAuthority,
     );
@@ -1337,7 +1332,7 @@ export class DKGAgent extends DKGAgentBase {
       // resolveRfc64CatalogActivationsV1 already folds the compatibility
       // activation into catalogActivation. Only the legacy standalone block
       // still has to be added here.
-      normalizedConfig.rfc64PublicCatalogActivation === undefined
+      activationState.standaloneLegacyControlsAllowed
         ? rfc64PublicCatalogBootstrap
         : undefined,
     );
@@ -1409,6 +1404,7 @@ export class DKGAgent extends DKGAgentBase {
     const configWithoutRfc64CatalogControls = { ...config };
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;
     delete configWithoutRfc64CatalogControls.rfc64CatalogActivation;
+    delete configWithoutRfc64CatalogControls.rfc64CatalogActivations;
     delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;

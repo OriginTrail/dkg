@@ -540,6 +540,8 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
   responsibilityDefaultMode?: Rfc64CatalogRolloutModeV1;
   /** Legacy public bootstrap remains active beside additive catalog selection. */
   standaloneTrack2ContextGraphs?: readonly string[];
+  /** Normalized activation state; omit only for pre-normalization embedders. */
+  standaloneTrack2Enabled?: boolean;
   activation: Readonly<{
     enabled?: boolean;
     selectedContextGraphs: readonly string[];
@@ -620,7 +622,8 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     track2ContextGraphs: Object.freeze(track2ContextGraphs),
     selectedAuthority: Object.freeze(selectedAuthority),
     selectedAuthorityByWireId: Object.freeze(selectedAuthorityByWireId),
-    standaloneTrack2Enabled: input.activation.enabled === false
+    standaloneTrack2Enabled: (input.standaloneTrack2Enabled
+      ?? input.activation.enabled === false)
       && !input.activation.rollout.killSwitch,
   });
 }

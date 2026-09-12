@@ -78,6 +78,7 @@ import type { ContextGraphDormancyProjection } from './context-graph-subscriptio
 import type {
   Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
+  ResolvedRfc64CatalogActivationsV1,
   ResolvedRfc64CatalogAuthoringPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
@@ -1331,6 +1332,11 @@ export interface DKGAgentConfig {
    */
   rfc64PublicCatalogActivation?: Rfc64PublicCatalogActivationInputV1;
   /**
+   * Resolver-issued activation snapshot for daemon embedders. Mutually
+   * exclusive with raw activation and loose compatibility controls.
+   */
+  rfc64CatalogActivations?: ResolvedRfc64CatalogActivationsV1;
+  /**
    * Legacy all-accepted-public-CG producer configuration. Omission preserves
    * existing publication behavior. New daemons should use the unified
    * selected-public activation above.
@@ -1805,6 +1811,7 @@ export type ResolvedDKGAgentConfig =
     | 'syncBackoffMaxMs'
     | 'syncBackoffJitter'
     | 'rfc64CatalogActivation'
+    | 'rfc64CatalogActivations'
     | 'rfc64PublicCatalogActivation'
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'

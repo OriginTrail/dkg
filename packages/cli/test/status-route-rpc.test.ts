@@ -66,6 +66,13 @@ const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
   selectedContextGraphs: [],
 };
 
+function resolveStatusActivationState(config: Record<string, unknown>) {
+  return resolveRfc64CatalogActivations(
+    config as never,
+    resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+  ).activationState;
+}
+
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
   configOverrides: Record<string, unknown> = {},
@@ -90,6 +97,7 @@ async function requestStatusWithAgent(
       url,
       network: networkOverride,
       config,
+      rfc64CatalogActivationState: resolveStatusActivationState(config),
       rfc64PublicCatalog: rfc64PublicCatalogOverride
         ?? resolveRfc64PublicCatalogActivation(
           config as never,
@@ -508,14 +516,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
   it('attests rollback configuration without exposing private CG identifiers', () => {
     const privateContextGraph =
       '0x1111111111111111111111111111111111111111/private-config-evidence';
-    const evidence = buildRfc64CatalogConfigurationEvidenceV1({
+    const evidence = buildRfc64CatalogConfigurationEvidenceV1(resolveStatusActivationState({
       rfc64Catalog: {
         rollout: { contextGraphModes: { [privateContextGraph]: 'legacy' } },
       },
-    }, {
-      killSwitch: false,
-      contextGraphModes: { [privateContextGraph]: 'legacy' },
-    });
+    }));
 
     expect(evidence).toMatchObject({
       source: 'operator-override',
@@ -526,27 +531,18 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     });
     expect(JSON.stringify(evidence)).not.toContain(privateContextGraph);
 
-    const catalogDefault = buildRfc64CatalogConfigurationEvidenceV1({
+    const catalogDefault = buildRfc64CatalogConfigurationEvidenceV1(resolveStatusActivationState({
       rfc64Catalog: { rollout: { defaultMode: 'catalog' } },
-    }, {
-      killSwitch: false,
-      defaultMode: 'catalog',
-      contextGraphModes: {},
-    });
-    const legacyDefault = buildRfc64CatalogConfigurationEvidenceV1({
+    }));
+    const legacyDefault = buildRfc64CatalogConfigurationEvidenceV1(resolveStatusActivationState({
       rfc64Catalog: { rollout: { defaultMode: 'legacy' } },
-    }, {
-      killSwitch: false,
-      defaultMode: 'legacy',
-      contextGraphModes: {},
-    });
+    }));
     expect(catalogDefault.digest).not.toBe(legacyDefault.digest);
     expect(JSON.stringify([catalogDefault, legacyDefault])).not.toContain(privateContextGraph);
 
-    expect(buildRfc64CatalogConfigurationEvidenceV1({}, {
-      killSwitch: false,
-      contextGraphModes: {},
-    })).toMatchObject({
+    expect(buildRfc64CatalogConfigurationEvidenceV1(
+      resolveStatusActivationState({}),
+    )).toMatchObject({
       source: 'default-omitted',
       catalogControlPresent: false,
       deprecatedPublicControlPresent: false,
@@ -1377,6 +1373,7 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'mock' },
         },
+        rfc64CatalogActivationState: resolveStatusActivationState({}),
         rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: {
@@ -1450,6 +1447,7 @@ describe('/api/status selected overlay details', () => {
               chainId: 'evm:31337',
             },
           },
+          rfc64CatalogActivationState: resolveStatusActivationState({}),
           rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
           startedAt: Date.now(),
           agent: {
@@ -1512,6 +1510,7 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'evm', rpcUrl: 'http://127.0.0.1:9', hubAddress: `0x${'ab'.repeat(20)}`, chainId: 'evm:31337' },
         },
+        rfc64CatalogActivationState: resolveStatusActivationState({}),
         rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: { ensureIdentity: async () => { throw err; } },

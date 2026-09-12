@@ -76,6 +76,7 @@ const RFC64_CATALOG_ACTIVATION_FIELDS_V1 = new Set([
   'rollout',
 ]);
 const ZERO_ADDRESS_V1 = `0x${'0'.repeat(40)}`;
+const resolvedRfc64CatalogActivationsV1 = new WeakSet<object>();
 
 function assertRfc64PublicCatalogActivationConfigV1(
   input: unknown,
@@ -174,6 +175,68 @@ export interface ResolvedRfc64CatalogActivationsV1 {
   /** Fully resolved unified-selection controls before compatibility manifests are unioned. */
   readonly selectedCatalogAuthoringControls:
     readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[];
+  /** Canonical activation/execution decision consumed by agent and daemon. */
+  readonly activationState: Rfc64CatalogNormalizedActivationStateV1;
+}
+
+/** Reject hand-assembled normalized state at the runtime configuration boundary. */
+export function assertResolvedRfc64CatalogActivationsV1(
+  input: unknown,
+  chainIdentity?: Rfc64PublicCatalogActivationChainIdentityV1,
+): asserts input is ResolvedRfc64CatalogActivationsV1 {
+  if (
+    input === null
+    || typeof input !== 'object'
+    || !resolvedRfc64CatalogActivationsV1.has(input)
+  ) {
+    throw new TypeError(
+      'rfc64CatalogActivations must come from resolveRfc64CatalogActivationsV1',
+    );
+  }
+  if (chainIdentity !== undefined) {
+    const resolved = input as ResolvedRfc64CatalogActivationsV1;
+    // Preserve the resolver's provenance decision while rechecking every
+    // manifest/deployment identity against the adapter this agent constructed.
+    resolveRfc64CatalogActivationInputV1(resolved.catalog, chainIdentity);
+    resolveRfc64PublicCatalogActivationInputV1(resolved.publicCatalog, chainIdentity);
+  }
+}
+
+export type Rfc64CatalogActivationControlSourceV1 =
+  | 'omitted'
+  | 'unified'
+  | 'deprecated-public';
+
+export type Rfc64CatalogActivationExecutionModeV1 =
+  | 'catalog'
+  | 'compatibility-rollback'
+  | 'ephemeral-legacy';
+
+/** One immutable interpretation of activation precedence and runtime fallback. */
+export interface Rfc64CatalogNormalizedActivationStateV1 {
+  readonly controlSource: Rfc64CatalogActivationControlSourceV1;
+  readonly executionMode: Rfc64CatalogActivationExecutionModeV1;
+  readonly configurationSource:
+    | 'default-omitted'
+    | 'operator-override'
+    | 'compatibility-seed'
+    | 'explicit-disabled';
+  readonly catalogControlPresent: boolean;
+  readonly deprecatedPublicControlPresent: boolean;
+  readonly activationManifestPresent: boolean;
+  readonly legacyStandaloneControlsPresent: boolean;
+  readonly configurationOmitted: boolean;
+  readonly explicitlyDisabled: boolean;
+  /** Disabled activation suppresses both deprecated blocks and loose controls. */
+  readonly compatibilityControlsSuppressed: boolean;
+  /** Whether the deprecated activation is the selected compatibility input. */
+  readonly deprecatedPublicActivationSelected: boolean;
+  /** Whether loose pre-activation public controls may form a standalone lane. */
+  readonly standaloneLegacyControlsAllowed: boolean;
+  readonly responsibilityDefaultMode: Rfc64CatalogRolloutModeV1;
+  /** Explicit adapter input; a rollback is never standalone Track-2. */
+  readonly standaloneTrack2Enabled: boolean;
+  readonly rollout: ResolvedRfc64CatalogRolloutConfigV1;
 }
 
 /**
@@ -633,19 +696,93 @@ export function resolveRfc64CatalogActivationsV1(
   input: {
     readonly catalog?: Rfc64CatalogActivationInputV1;
     readonly publicCatalog?: Rfc64PublicCatalogActivationInputV1;
+    /** Loose pre-activation deployment/authority/publisher/bootstrap controls. */
+    readonly legacyStandaloneControlsPresent?: boolean;
+    /** Omit outside a runtime boundary; configuration-only consumers are durable. */
+    readonly persistenceAvailable?: boolean;
   },
   chainIdentity: Rfc64PublicCatalogActivationChainIdentityV1,
 ): ResolvedRfc64CatalogActivationsV1 {
+  const catalogControlPresent = input.catalog !== undefined;
+  const deprecatedPublicControlPresent = input.publicCatalog !== undefined;
+  const legacyStandaloneControlsPresent = input.legacyStandaloneControlsPresent === true;
+  const activationManifestPresent = input.catalog?.bootstrap !== undefined
+    || (input.catalog?.enabled === false
+      ? false
+      : input.publicCatalog?.bootstrap !== undefined);
+  const finish = (
+    catalog: ResolvedRfc64CatalogActivationConfigV1,
+    publicCatalog: ResolvedRfc64PublicCatalogActivationConfigV1,
+    selectedCatalogAuthoringControls:
+      readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[],
+    explicitlyDisabled: boolean,
+  ): ResolvedRfc64CatalogActivationsV1 => {
+    const configurationOmitted = !catalogControlPresent
+      && !deprecatedPublicControlPresent
+      && !legacyStandaloneControlsPresent;
+    const ephemeralLegacy = !explicitlyDisabled
+      && input.persistenceAvailable === false
+      && configurationOmitted;
+    const executionMode: Rfc64CatalogActivationExecutionModeV1 = explicitlyDisabled
+      ? 'compatibility-rollback'
+      : ephemeralLegacy
+        ? 'ephemeral-legacy'
+        : 'catalog';
+    const controlSource: Rfc64CatalogActivationControlSourceV1 = catalogControlPresent
+      ? 'unified'
+      : deprecatedPublicControlPresent
+        ? 'deprecated-public'
+        : 'omitted';
+    const configurationSource: Rfc64CatalogNormalizedActivationStateV1[
+      'configurationSource'
+    ] = explicitlyDisabled
+      ? 'explicit-disabled'
+      : configurationOmitted
+        ? 'default-omitted'
+        : activationManifestPresent
+          ? 'compatibility-seed'
+          : 'operator-override';
+    const activationState = Object.freeze({
+      controlSource,
+      executionMode,
+      configurationSource,
+      catalogControlPresent,
+      deprecatedPublicControlPresent,
+      activationManifestPresent,
+      legacyStandaloneControlsPresent,
+      configurationOmitted,
+      explicitlyDisabled,
+      compatibilityControlsSuppressed: explicitlyDisabled,
+      deprecatedPublicActivationSelected:
+        !explicitlyDisabled && deprecatedPublicControlPresent,
+      standaloneLegacyControlsAllowed:
+        !explicitlyDisabled && !deprecatedPublicControlPresent,
+      responsibilityDefaultMode: executionMode === 'catalog'
+        ? catalog.rollout.defaultMode ?? 'catalog'
+        : 'legacy',
+      standaloneTrack2Enabled: false,
+      rollout: catalog.rollout,
+    } satisfies Rfc64CatalogNormalizedActivationStateV1);
+    const resolved: ResolvedRfc64CatalogActivationsV1 = Object.freeze({
+      catalog,
+      publicCatalog,
+      selectedCatalogAuthoringControls,
+      activationState,
+    });
+    resolvedRfc64CatalogActivationsV1.add(resolved);
+    return resolved;
+  };
   const catalog = resolveRfc64CatalogActivationInputV1(input.catalog, chainIdentity);
   // The unified block is authoritative. Its explicit compatibility rollback
   // must suppress every deprecated public selection, including stale nested
   // data that should not be parsed while operators are disabling the feature.
   if (!catalog.enabled) {
-    return Object.freeze({
+    return finish(
       catalog,
-      publicCatalog: disabledRfc64PublicCatalogActivationV1(),
-      selectedCatalogAuthoringControls: Object.freeze([]),
-    });
+      disabledRfc64PublicCatalogActivationV1(),
+      Object.freeze([]),
+      true,
+    );
   }
   const publicCatalog = resolveRfc64PublicCatalogActivationInputV1(
     input.publicCatalog,
@@ -660,18 +797,19 @@ export function resolveRfc64CatalogActivationsV1(
     && input.publicCatalog !== undefined
     && !publicCatalog.enabled
   ) {
-    return Object.freeze({
-      catalog: disabledRfc64CatalogActivationV1(),
+    return finish(
+      disabledRfc64CatalogActivationV1(),
       publicCatalog,
-      selectedCatalogAuthoringControls: Object.freeze([]),
-    });
+      Object.freeze([]),
+      true,
+    );
   }
   const selectedCatalogAuthoringControls = catalog.selectedCatalogAuthoringControls;
   if (!catalog.enabled && !publicCatalog.enabled) {
-    return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });
+    return finish(catalog, publicCatalog, selectedCatalogAuthoringControls, false);
   }
   if (!publicCatalog.enabled) {
-    return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });
+    return finish(catalog, publicCatalog, selectedCatalogAuthoringControls, false);
   }
 
   const byGraph = new Map<string, Rfc64CatalogBootstrapConfigV1['acceptedPolicies'][number]>();
@@ -769,11 +907,7 @@ export function resolveRfc64CatalogActivationsV1(
     selectedCatalogAuthoringControls,
     rollout,
   });
-  return Object.freeze({
-    catalog: mergedCatalog,
-    publicCatalog,
-    selectedCatalogAuthoringControls,
-  });
+  return finish(mergedCatalog, publicCatalog, selectedCatalogAuthoringControls, false);
 }
 
 /** Join source precedence once at the configuration boundary. */

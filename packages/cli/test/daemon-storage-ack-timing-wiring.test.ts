@@ -588,7 +588,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       'rfc64-selected-a',
       'rfc64-selected-b',
     ]);
-    expect(createArg.rfc64PublicCatalogActivation).toMatchObject({
+    expect(createArg.rfc64CatalogActivations.publicCatalog).toMatchObject({
       enabled: true,
       deploymentProfile,
       autoPublish: {
@@ -617,7 +617,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
 
     expect(createArg.syncContextGraphs).toEqual([]);
-    expect(createArg.rfc64PublicCatalogActivation.bootstrap.acceptedPublicPolicies[0]
+    expect(createArg.rfc64CatalogActivations.publicCatalog.bootstrap.acceptedPublicPolicies[0]
       .policyEnvelope.payload.contextGraphId).toBe(manifestContextGraph);
   });
 
@@ -630,7 +630,16 @@ describe('runDaemonInner StorageACK timing wiring', () => {
 
     expect(createArg.syncContextGraphs).toEqual(['legacy-explicit-cg']);
     expect(createArg.syncContextGraphs).not.toContain(PRIVATE_RFC64_CONTEXT_GRAPH);
-    expect(createArg.rfc64CatalogActivation).toEqual(rfc64Catalog);
+    expect(createArg.rfc64CatalogActivations.catalog).toMatchObject({
+      enabled: true,
+      selectedPrivateContextGraphs: [PRIVATE_RFC64_CONTEXT_GRAPH],
+      accessPolicyAuthority: rfc64Catalog.accessPolicyAuthority,
+    });
+    expect(createArg.rfc64CatalogActivations.activationState).toMatchObject({
+      controlSource: 'unified',
+      executionMode: 'catalog',
+      explicitlyDisabled: false,
+    });
   });
 
   it('keeps receiver-only RFC-64 bootstrap active without enabling auto-publish', async () => {
@@ -646,9 +655,9 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
 
     expect(createArg.syncContextGraphs).toContain('rfc64-receiver-only');
-    expect(createArg.rfc64PublicCatalogActivation.autoPublish).toBeUndefined();
+    expect(createArg.rfc64CatalogActivations.publicCatalog.autoPublish).toBeUndefined();
     expect(
-      createArg.rfc64PublicCatalogActivation.bootstrap.acceptedPublicPolicies[0]
+      createArg.rfc64CatalogActivations.publicCatalog.bootstrap.acceptedPublicPolicies[0]
         .policyEnvelope.payload.contextGraphId,
     ).toBe('rfc64-receiver-only');
   });
@@ -687,7 +696,12 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       rfc64PublicCatalog: { enabled: false },
     });
 
-    expect(createArg.rfc64PublicCatalogActivation).toEqual({ enabled: false });
+    expect(createArg.rfc64CatalogActivations.publicCatalog.enabled).toBe(false);
+    expect(createArg.rfc64CatalogActivations.activationState).toMatchObject({
+      controlSource: 'deprecated-public',
+      executionMode: 'compatibility-rollback',
+      explicitlyDisabled: true,
+    });
     expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
@@ -710,7 +724,15 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
 
     expect(createArg.syncContextGraphs).not.toContain('rfc64-ignored-disabled');
-    expect(createArg.rfc64PublicCatalogActivation).toEqual({ enabled: false });
+    expect(createArg.rfc64CatalogActivations.publicCatalog).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+    expect(createArg.rfc64CatalogActivations.publicCatalog.bootstrap).toBeUndefined();
+    expect(createArg.rfc64CatalogActivations.activationState).toMatchObject({
+      executionMode: 'compatibility-rollback',
+      compatibilityControlsSuppressed: true,
+    });
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();
   });
@@ -737,8 +759,20 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
 
     expect(createArg.syncContextGraphs).toEqual(['ordinary-legacy-sync']);
-    expect(createArg.rfc64CatalogActivation).toEqual({ enabled: false });
-    expect(createArg.rfc64PublicCatalogActivation).toEqual({ enabled: false });
+    expect(createArg.rfc64CatalogActivations.catalog).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+    expect(createArg.rfc64CatalogActivations.publicCatalog).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+    expect(createArg.rfc64CatalogActivations.activationState).toMatchObject({
+      controlSource: 'unified',
+      executionMode: 'compatibility-rollback',
+      deprecatedPublicControlPresent: true,
+      compatibilityControlsSuppressed: true,
+    });
     expect(createArg.rfc64CatalogDeploymentProfile).toBeUndefined();
     expect(createArg.rfc64PublicCatalogAutoPublish).toBeUndefined();
     expect(createArg.rfc64PublicCatalogBootstrap).toBeUndefined();

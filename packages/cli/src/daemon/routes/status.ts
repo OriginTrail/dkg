@@ -771,7 +771,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     const buildInfo = loadBuildInfo();
     const rfc64PublicCatalogActivation = ctx.rfc64PublicCatalog;
     const { rfc64PublicCatalog, rfc64Catalog } = await buildRfc64StatusBlocksV1({
-      config,
+      activationState: ctx.rfc64CatalogActivationState,
       catalogActivation: ctx.rfc64Catalog,
       publicCatalogActivation: rfc64PublicCatalogActivation,
       agent,

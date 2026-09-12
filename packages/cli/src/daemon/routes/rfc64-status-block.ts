@@ -9,7 +9,7 @@ import {
 } from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
 
 import type {
-  DkgConfig,
+  Rfc64CatalogNormalizedActivationState,
   ResolvedRfc64CatalogActivationConfig,
   ResolvedRfc64PublicCatalogActivationConfig,
 } from '../../config.js';
@@ -57,41 +57,25 @@ export interface Rfc64CatalogConfigurationEvidenceV1 {
  * leave the node; a release harness can still prove the clean omission case.
  */
 export function buildRfc64CatalogConfigurationEvidenceV1(
-  config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
-  effectiveRollout: Readonly<{
-    killSwitch: boolean;
-    defaultMode?: 'legacy' | 'shadow' | 'catalog';
-    contextGraphModes: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
-  }>,
+  activationState: Rfc64CatalogNormalizedActivationState,
 ): Rfc64CatalogConfigurationEvidenceV1 {
-  const catalogControlPresent = config.rfc64Catalog !== undefined;
-  const deprecatedPublicControlPresent = config.rfc64PublicCatalog !== undefined;
-  const catalog = config.rfc64Catalog;
-  const publicCatalog = config.rfc64PublicCatalog;
-  const deprecatedDisabledOverride = catalog?.enabled === false
-    || (catalog === undefined && publicCatalog?.enabled === false);
-  const activationManifestPresent = catalog?.bootstrap !== undefined
-    || publicCatalog?.bootstrap !== undefined;
-  const modes = Object.entries(effectiveRollout.contextGraphModes)
+  const {
+    catalogControlPresent,
+    deprecatedPublicControlPresent,
+    activationManifestPresent,
+  } = activationState;
+  const deprecatedDisabledOverride = activationState.explicitlyDisabled;
+  const modes = Object.entries(activationState.rollout.contextGraphModes)
     .sort(([left], [right]) => left.localeCompare(right));
-  const defaultMode = deprecatedDisabledOverride
-    ? 'legacy'
-    : effectiveRollout.defaultMode ?? 'catalog';
-  const source: Rfc64CatalogConfigurationEvidenceV1['source'] =
-    deprecatedDisabledOverride
-      ? 'explicit-disabled'
-      : !catalogControlPresent && !deprecatedPublicControlPresent
-        ? 'default-omitted'
-        : activationManifestPresent
-          ? 'compatibility-seed'
-          : 'operator-override';
+  const defaultMode = activationState.responsibilityDefaultMode;
+  const source = activationState.configurationSource;
   const digestPayload = {
     schemaVersion: 1,
     catalogControlPresent,
     deprecatedPublicControlPresent,
     activationManifestPresent,
     deprecatedDisabledOverride,
-    killSwitch: effectiveRollout.killSwitch,
+    killSwitch: activationState.rollout.killSwitch,
     defaultMode,
     contextGraphModes: modes,
   };
@@ -102,7 +86,7 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
     deprecatedPublicControlPresent,
     activationManifestPresent,
     deprecatedDisabledOverride,
-    killSwitch: effectiveRollout.killSwitch,
+    killSwitch: activationState.rollout.killSwitch,
     defaultMode,
     legacyOverrideCount:
       defaultMode === 'legacy' ? 0 : modes.filter(([, mode]) => mode === 'legacy').length,
@@ -120,13 +104,12 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
  * feature-specific agent methods or forwarding provider-owned objects.
  */
 export async function buildRfc64StatusBlocksV1(input: Readonly<{
-  config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>;
+  activationState: Rfc64CatalogNormalizedActivationState;
   catalogActivation?: ResolvedRfc64CatalogActivationConfig;
   publicCatalogActivation: ResolvedRfc64PublicCatalogActivationConfig;
   agent: Rfc64StatusReaderV1;
 }>) {
   const {
-    config,
     publicCatalogActivation,
     agent,
   } = input;
@@ -153,10 +136,7 @@ export async function buildRfc64StatusBlocksV1(input: Readonly<{
       ]),
     ),
   };
-  const configuration = buildRfc64CatalogConfigurationEvidenceV1(
-    config,
-    rollout,
-  );
+  const configuration = buildRfc64CatalogConfigurationEvidenceV1(input.activationState);
   const service = catalogActivation.enabled
     && typeof agent.rfc64PublicCatalogStatsV1 === 'function'
     ? agent.rfc64PublicCatalogStatsV1()

@@ -84,6 +84,7 @@ import {
 } from
   '../src/rfc64/release-native-catalog-authority-v1.js';
 import {
+  resolveRfc64CatalogActivationsV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
   resolveRfc64PublicCatalogControlsV1,
@@ -4135,6 +4136,68 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         }],
       },
     })).rejects.toThrow(/rfc64PublicCatalogBootstrap requires dataDir/u);
+  });
+
+  it('keeps a truly omitted ephemeral configuration on the legacy lane', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ephemeral-omitted-catalog-is-legacy',
+    });
+    agents.push(agent);
+
+    expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      track2ContextGraphs: [],
+      standaloneTrack2Enabled: false,
+    });
+  });
+
+  it('consumes a resolver-issued rollback snapshot without reinterpreting enabled', async () => {
+    const activations = resolveRfc64CatalogActivationsV1({
+      catalog: { enabled: false },
+      publicCatalog: { enabled: true } as never,
+      persistenceAvailable: false,
+    }, resolveRfc64PublicCatalogActivationChainIdentityV1(undefined));
+    const agent = await DKGAgent.create({
+      name: 'ephemeral-normalized-rollback-is-legacy',
+      rfc64CatalogActivations: activations,
+    });
+    agents.push(agent);
+
+    expect(activations.catalog.enabled).toBe(false);
+    expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      standaloneTrack2Enabled: false,
+    });
+  });
+
+  it('rejects forged or mixed normalized activation state', async () => {
+    const activations = resolveRfc64CatalogActivationsV1({
+      catalog: { enabled: false },
+    }, resolveRfc64PublicCatalogActivationChainIdentityV1(undefined));
+    await expect(DKGAgent.create({
+      name: 'forged-normalized-activation',
+      rfc64CatalogActivations: {
+        catalog: activations.catalog,
+        publicCatalog: activations.publicCatalog,
+        selectedCatalogAuthoringControls: activations.selectedCatalogAuthoringControls,
+        activationState: activations.activationState,
+      } as never,
+    })).rejects.toThrow(/must come from resolveRfc64CatalogActivationsV1/u);
+    await expect(DKGAgent.create({
+      name: 'copied-normalized-activation',
+      rfc64CatalogActivations: {
+        ...activations,
+        activationState: {
+          ...activations.activationState,
+          responsibilityDefaultMode: 'catalog',
+        },
+      } as never,
+    })).rejects.toThrow(/must come from resolveRfc64CatalogActivationsV1/u);
+    await expect(DKGAgent.create({
+      name: 'mixed-normalized-activation',
+      rfc64CatalogActivations: activations,
+      rfc64CatalogActivation: { enabled: false },
+    })).rejects.toThrow(/mutually exclusive with raw RFC-64 controls/u);
   });
 
   it('rejects an explicit catalog default without persistence before node startup', async () => {
