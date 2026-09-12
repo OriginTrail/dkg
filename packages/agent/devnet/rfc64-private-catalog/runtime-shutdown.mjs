@@ -10,12 +10,13 @@
 export async function emitAuthoritativeRuntimeShutdownReceiptV1({
   agent,
   emitReceipt,
-  executedRuntimeManifest,
   rpc,
+  sealExecutedRuntimeManifest,
 }) {
   await agent?.stop();
   const rpcCallCounts = rpc?.snapshot() ?? Object.freeze({});
   await rpc?.close();
+  const executedRuntimeManifest = sealExecutedRuntimeManifest();
   await emitReceipt({
     executedRuntimeManifest,
     rpcCallCounts,

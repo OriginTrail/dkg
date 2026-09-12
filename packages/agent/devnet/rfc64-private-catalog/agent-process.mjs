@@ -144,7 +144,7 @@ async function shutdown(
   await emitAuthoritativeRuntimeShutdownReceiptV1({
     agent: runtime.agent,
     rpc: runtime.rpc,
-    executedRuntimeManifest: sealExecutedRuntimeManifestV1(),
+    sealExecutedRuntimeManifest: sealExecutedRuntimeManifestV1,
     emitReceipt: (fields) => emitAndFlush(responseEvent, requestId, fields),
   });
   process.exit(code);
