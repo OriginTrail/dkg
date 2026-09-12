@@ -13,7 +13,7 @@ import { RemoteCanaryError, failure } from './errors.mjs';
 export const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
 const MAX_HTTP_BODY_BYTES = 1_048_576;
 
-export async function runBoundedCommandV1(command, timeoutMs = 60_000) {
+export async function runBoundedCommandV1(command, timeoutMs = 60_000, options = {}) {
   validateCommandV1(command);
   const [file, ...args] = command.argv;
   return new Promise((resolve, reject) => {
@@ -23,6 +23,7 @@ export async function runBoundedCommandV1(command, timeoutMs = 60_000) {
       env: process.env,
     });
     let stdout = '';
+    let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
     let terminationError = null;
@@ -31,7 +32,7 @@ export async function runBoundedCommandV1(command, timeoutMs = 60_000) {
       if (terminationError !== null) return;
       terminationError = error;
       child.kill('SIGTERM');
-      killTimer = setTimeout(() => child.kill('SIGKILL'), 5_000);
+      killTimer = setTimeout(() => child.kill('SIGKILL'), options.terminationGraceMs ?? 5_000);
     };
     const timer = setTimeout(() => terminate(failure('command-timeout', 'command')), timeoutMs);
     const finish = (error, value) => {
@@ -44,16 +45,30 @@ export async function runBoundedCommandV1(command, timeoutMs = 60_000) {
     };
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-      if (Buffer.byteLength(stdout) > MAX_COMMAND_OUTPUT_BYTES) {
-        terminate(failure('command-output-too-large', 'command'));
+      if (terminationError !== null) {
+        options.observeRetainedOutputBytes?.({ stdoutBytes, stderrBytes });
+        return;
       }
+      const chunkBytes = Buffer.byteLength(chunk);
+      if (chunkBytes > MAX_COMMAND_OUTPUT_BYTES - stdoutBytes) {
+        terminate(failure('command-output-too-large', 'command'));
+      } else {
+        stdout += chunk;
+        stdoutBytes += chunkBytes;
+      }
+      options.observeRetainedOutputBytes?.({ stdoutBytes, stderrBytes });
     });
     child.stderr.on('data', (chunk) => {
-      stderrBytes += chunk.length;
-      if (stderrBytes > MAX_COMMAND_OUTPUT_BYTES) {
-        terminate(failure('command-output-too-large', 'command'));
+      if (terminationError !== null) {
+        options.observeRetainedOutputBytes?.({ stdoutBytes, stderrBytes });
+        return;
       }
+      if (chunk.length > MAX_COMMAND_OUTPUT_BYTES - stderrBytes) {
+        terminate(failure('command-output-too-large', 'command'));
+      } else {
+        stderrBytes += chunk.length;
+      }
+      options.observeRetainedOutputBytes?.({ stdoutBytes, stderrBytes });
     });
     child.once('error', () => finish(failure('command-start-failed', 'command')));
     child.once('exit', (code, signal) => {

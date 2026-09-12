@@ -440,9 +440,6 @@ importers:
 
   devnet/rfc64-remote-canary:
     dependencies:
-      '@origintrail-official/dkg':
-        specifier: workspace:*
-        version: link:../../packages/cli
       '@origintrail-official/dkg-agent':
         specifier: workspace:*
         version: link:../../packages/agent

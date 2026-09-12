@@ -11,7 +11,6 @@
     "test": "node --test *.test.mjs"
   },
   "dependencies": {
-    "@origintrail-official/dkg": "workspace:*",
     "@origintrail-official/dkg-agent": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-http-utils": "workspace:*",

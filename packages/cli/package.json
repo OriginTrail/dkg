@@ -16,10 +16,6 @@
       "types": "./dist/daemon/plugin-api.d.ts",
       "import": "./dist/daemon/plugin-api.js"
     },
-    "./daemon/certification-api": {
-      "types": "./dist/daemon/certification-api.d.ts",
-      "import": "./dist/daemon/certification-api.js"
-    },
     "./blazegraph-runtime-contract": {
       "types": "./blazegraph-runtime-contract.d.cts",
       "import": "./blazegraph-image-metadata.cjs",
