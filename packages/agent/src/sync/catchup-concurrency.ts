@@ -1,8 +1,9 @@
+import { AGENT_RESOURCE_ENV } from '../resource-runtime.js';
+import { RESOURCE_MAX, resourceInteger } from '../resource-limits.js';
+
 /** Sync-owned catch-up policy; generic worker-pool mechanics live separately. */
-export const CATCHUP_MAX_CONCURRENT_PEER_SYNCS: number = (() => {
-  const raw = Number(process.env.DKG_CATCHUP_MAX_CONCURRENT_PEERS);
-  return Number.isInteger(raw) && raw > 0 ? raw : 4;
-})();
+export const CATCHUP_MAX_CONCURRENT_PEER_SYNCS: number =
+  AGENT_RESOURCE_ENV.values.DKG_CATCHUP_MAX_CONCURRENT_PEERS;
 
 /** The spellings `DKG_CATCHUP_STOP_ON_PROOF` accepts as "off"; documented verbatim. */
 const CATCHUP_STOP_ON_PROOF_OFF_VALUES = ['0', 'false', 'no', 'off'] as const;
@@ -53,10 +54,10 @@ export function catchupWaveSizes(
   maxConcurrency: number,
   startWidth = 1,
 ): number[] {
-  const cap = Number.isInteger(maxConcurrency) && maxConcurrency > 0 ? maxConcurrency : 1;
+  const cap = resourceInteger(maxConcurrency, { min: 1, max: RESOURCE_MAX.concurrency }, 'maxConcurrency') ?? 1;
   const sizes: number[] = [];
   let remaining = Math.max(0, Math.trunc(peerCount));
-  let size = Number.isInteger(startWidth) && startWidth > 0 ? Math.min(cap, startWidth) : 1;
+  let size = Number.isSafeInteger(startWidth) && startWidth > 0 ? Math.min(cap, startWidth) : 1;
   while (remaining > 0) {
     const take = Math.min(size, remaining);
     sizes.push(take);

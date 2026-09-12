@@ -15,6 +15,8 @@
  */
 
 import type { ethers } from 'ethers';
+import type { AgentConfigResolutionInputKey } from './resolved-agent-config.js';
+import type { StartupResourcePolicy } from './resource-policy.js';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
 import type {
   MessengerOutboxDrainOptions,
@@ -1966,21 +1968,13 @@ export type ResolvedDKGAgentConfig =
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
-    | 'syncReconcilerIntervalMs'
-    | 'syncStalenessThresholdMs'
-    | 'syncBackoffBaseMs'
-    | 'syncBackoffMaxMs'
-    | 'syncBackoffJitter'
-    | 'rfc64CatalogActivation'
-    | 'rfc64PublicCatalogActivation'
-    | 'rfc64PublicCatalogAutoPublish'
-    | 'rfc64PublicCatalogBootstrap'
-    | 'rfc64CatalogDeploymentProfile'
-    | 'contextGraphSubscriptionRehydrationEnabled'
+    | AgentConfigResolutionInputKey
   > & {
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;
+    /** Executable startup resource policy and the diagnostics derived from it. */
+    resourcePolicy: StartupResourcePolicy;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */

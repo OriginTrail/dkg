@@ -1,3 +1,6 @@
+import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
+import { resolveStartupResourcePolicy } from '../src/resource-policy.js';
+import { resolveAgentResourceEnvironment } from '../src/resource-limits.js';
 import { describe, expect, it } from 'vitest';
 import {
   backpressureRegistry,
@@ -19,6 +22,10 @@ import {
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
+
+function withResourcePolicy<T extends Parameters<typeof resolveStartupResourcePolicy>[0]>(config: T) {
+  return { ...config, resourcePolicy: resolveStartupResourcePolicy(config, {}, resolveAgentResourceEnvironment({})) };
+}
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -299,7 +306,7 @@ describe('sync global backpressure', () => {
     // /api/diagnostics/backpressure, which is the attribution issue #2006 had to
     // reconstruct from daemon logs.
     const agentLike = {
-      config: { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 },
+      config: withResourcePolicy({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 1 }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -1579,6 +1586,129 @@ describe('sync global backpressure', () => {
     });
   });
 
+  it('preserves explicit capacity installation for standalone queues', () => {
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => true, onStart: () => () => {},
+      observability: { scheduler: 'test-capacity-installation', operation: (entry) => entry.payload },
+    });
+    queue.configureObservabilityCapacity({ capacityModel: 'shared', inflightLimit: 3, queueLimit: 6 });
+    expect(queue.getBackpressureSnapshot()).toMatchObject({ totals: { inflightLimit: 3, queueLimit: 6 } });
+  });
+
+  it('forgets dynamic capacity and pumps queued work even when a release hook throws', async () => {
+    let running = 0;
+    const queue = new PriorityAdmissionQueue<'first' | 'second'>({
+      canRun: () => running < 1,
+      onStart: (entry) => {
+        running += 1;
+        return () => {
+          running -= 1;
+          if (entry.payload === 'first') throw new Error('release failed');
+        };
+      },
+      observability: {
+        scheduler: 'test-release-cleanup',
+        operation: (entry) => entry.payload,
+        capacityFor: (entry) => ({
+          capacityModel: 'shared',
+          inflightLimit: entry.payload === 'first' ? 1 : 3,
+          queueLimit: entry.payload === 'first' ? 2 : 6,
+        }),
+      },
+    });
+    const options = (payload: 'first' | 'second'): PriorityAdmissionAcquireOptions<'first' | 'second'> => ({
+      payload,
+      lane: 'durable',
+      priority: 0,
+      priorityClass: 'default',
+      queueLimit: 6,
+      agingThresholdMs: 30_000,
+      createBusyError: () => new Error('full'),
+      createDisplacedError: () => new Error('displaced'),
+    });
+
+    const first = queue.acquire(options('first'));
+    const releaseFirst = await first.release;
+    const second = queue.acquire(options('second'));
+    expect(() => releaseFirst()).toThrow('release failed');
+
+    const releaseSecond = await second.release;
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      totals: { inflight: 1, inflightLimit: 3, queueLimit: 6 },
+    });
+    releaseSecond();
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      totals: { inflight: 0, inflightLimit: null, queueLimit: null },
+    });
+  });
+
+  it('coalesces equivalent dynamic capacities across object and lane property order', async () => {
+    let running = 0;
+    const queue = new PriorityAdmissionQueue<'first' | 'second'>({
+      canRun: () => running < 2,
+      onStart: () => {
+        running += 1;
+        return () => { running -= 1; };
+      },
+      observability: {
+        scheduler: 'test-equivalent-capacity',
+        operation: (entry) => entry.payload,
+        capacityFor: (entry) => entry.payload === 'first'
+          ? {
+            capacityModel: 'partitioned',
+            queueLimit: 4,
+            inflightLimit: 2,
+            lanes: {
+              fast: { queueLimit: 2, inflightLimit: 1 },
+              slow: { queueLimit: 2, inflightLimit: 1 },
+            },
+          }
+          : {
+            lanes: {
+              slow: { inflightLimit: 1, queueLimit: 2 },
+              fast: { inflightLimit: 1, queueLimit: 2 },
+            },
+            inflightLimit: 2,
+            queueLimit: 4,
+          },
+      },
+    });
+    const options = (
+      payload: 'first' | 'second',
+    ): PriorityAdmissionAcquireOptions<'first' | 'second'> => ({
+      payload,
+      lane: payload === 'first' ? 'fast' : 'slow',
+      priority: 0,
+      priorityClass: 'default',
+      queueLimit: 4,
+      agingThresholdMs: 30_000,
+      createBusyError: () => new Error('full'),
+      createDisplacedError: () => new Error('displaced'),
+    });
+
+    const releaseFirst = await queue.acquire(options('first')).release;
+    const releaseSecond = await queue.acquire(options('second')).release;
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      capacityModel: 'partitioned',
+      totals: { inflight: 2, inflightLimit: 2, queueLimit: 4 },
+      lanes: [
+        { lane: 'fast', inflight: 1, inflightLimit: 1, queueLimit: 2 },
+        { lane: 'slow', inflight: 1, inflightLimit: 1, queueLimit: 2 },
+      ],
+    });
+
+    releaseFirst();
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      capacityModel: 'partitioned',
+      totals: { inflight: 1, inflightLimit: 2, queueLimit: 4 },
+    });
+    releaseSecond();
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      capacityModel: 'shared',
+      totals: { inflight: 0, inflightLimit: null, queueLimit: null },
+    });
+  });
+
   it('keeps an explicitly disabled partitioned scheduler healthy while idle', () => {
     const queue = new PriorityAdmissionQueue<string>({
       canRun: () => false,
@@ -1605,53 +1735,53 @@ describe('sync global backpressure', () => {
     });
   });
 
-  it('publishes the resolved partitioned policy before its first admission', () => {
-    resolveSyncGlobalBackpressure({ syncAdmission: {} });
-
-    const snapshot = backpressureRegistry.capture().schedulers.find(
-      (scheduler) => scheduler.scheduler === 'sync-global',
-    );
-    expect(snapshot).toMatchObject({
-      capacityModel: 'partitioned',
-      totals: { queueLimit: 72, inflightLimit: 10, inflight: 0 },
-    });
-    expect(snapshot!.lanes.find((lane) => lane.lane === 'fast')).toMatchObject({
-      capacityModel: 'partitioned',
-      queueLimit: 64,
-      inflightLimit: 8,
-    });
-    expect(snapshot!.lanes.find((lane) => lane.lane === 'slow')).toMatchObject({
-      capacityModel: 'partitioned',
-      queueLimit: 8,
-      inflightLimit: 2,
+  it('publishes the resolved partitioned policy while its admission is live', async () => {
+    const policy = resolveSyncGlobalBackpressure({ syncAdmission: {} });
+    await withGlobalSyncBackpressure({ policy, ctx: createOperationContext('sync'), label: 'changelog:partitioned', lane: 'changelog' }, async () => {
+      const snapshot = backpressureRegistry.capture().schedulers.find((entry) => entry.scheduler === 'sync-global');
+      expect(snapshot).toMatchObject({ capacityModel: 'partitioned', totals: { queueLimit: 72, inflightLimit: 10, inflight: 1 } });
+      expect(snapshot!.lanes.find((lane) => lane.lane === 'fast')).toMatchObject({ capacityModel: 'partitioned', queueLimit: 64, inflightLimit: 8 });
+      expect(snapshot!.lanes.find((lane) => lane.lane === 'slow')).toMatchObject({ capacityModel: 'partitioned', queueLimit: 8, inflightLimit: 2 });
     });
   });
 
-  it('preserves partitioned diagnostics when global admission is disabled', () => {
-    const policy = resolveSyncGlobalBackpressure({
-      syncAdmission: { globalMaxInflight: 0 },
-    });
+  it('resolving disabled admission leaves registered scheduler capacity unchanged', () => {
+    const capture = () => backpressureRegistry.capture().schedulers.find((entry) => entry.scheduler === 'sync-global');
+    const before = capture();
+    const policy = resolveSyncGlobalBackpressure({ syncAdmission: { globalMaxInflight: 0 } });
+    expect(policy).toEqual({ mode: 'partitioned', limit: undefined, queueLimit: undefined });
+    expect(capture()).toMatchObject({ capacityModel: before!.capacityModel, totals: {
+      queueLimit: before!.totals.queueLimit, inflightLimit: before!.totals.inflightLimit,
+    } });
+  });
 
-    expect(policy).toEqual({
-      mode: 'partitioned',
-      limit: undefined,
-      queueLimit: undefined,
-    });
-    const snapshot = backpressureRegistry.capture().schedulers.find(
-      (scheduler) => scheduler.scheduler === 'sync-global',
-    );
-    expect(snapshot).toMatchObject({
-      capacityModel: 'partitioned',
-      totals: { queueLimit: 0, inflightLimit: 0, inflight: 0 },
-    });
-    expect(snapshot!.lanes.find((lane) => lane.lane === 'fast')).toMatchObject({
-      queueLimit: 0,
-      inflightLimit: 0,
-    });
-    expect(snapshot!.lanes.find((lane) => lane.lane === 'slow')).toMatchObject({
-      queueLimit: 0,
-      inflightLimit: 0,
-    });
+  it('reports live owner policies across interleaved admission and release', async () => {
+    const first = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 2 });
+    const second = resolveSyncGlobalBackpressure({ syncGlobalMaxInflight: 10, syncGlobalQueueLimit: 20 });
+    const capacity = () => backpressureRegistry.capture().schedulers.find((entry) => entry.scheduler === 'sync-global')!.totals;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const runningFirst = withGlobalSyncBackpressure({ policy: first, ctx: createOperationContext('sync'), label: 'durable:first' },
+      () => new Promise<void>((resolve) => { releaseFirst = resolve; }));
+    await tick();
+    let runningSecond: Promise<void> | undefined;
+    try {
+      expect(capacity()).toMatchObject({ inflight: 1, inflightLimit: 1, queueLimit: 2 });
+      runningSecond = withGlobalSyncBackpressure({ policy: second, ctx: createOperationContext('sync'), label: 'durable:second' },
+        () => new Promise<void>((resolve) => { releaseSecond = resolve; }));
+      await tick();
+      // Both owners retain their established per-entry admission semantics.
+      // There is no truthful single ceiling for this mixed set of live work.
+      expect(capacity()).toMatchObject({ inflight: 2, inflightLimit: null, queueLimit: null });
+      releaseSecond();
+      await runningSecond;
+      expect(capacity()).toMatchObject({ inflight: 1, inflightLimit: 1, queueLimit: 2 });
+    } finally {
+      releaseFirst();
+      releaseSecond?.();
+      await Promise.all([runningFirst, runningSecond]);
+    }
+    expect(capacity()).toMatchObject({ inflight: 0, inflightLimit: null, queueLimit: null });
   });
 
   it('publishes the shared-pool capacity model from the production sync-global queue', async () => {
@@ -1777,14 +1907,17 @@ describe('sync global backpressure', () => {
     ]);
   });
 
-  it('keeps one selected-scope slot available while foreground catch-up fans out', async () => {
+  it.each(['resolved', 'copied'] as const)('keeps selected-scope reservation in the %s policy', async (representation) => {
     const ctx = createOperationContext('sync');
     const selectedCg = 'urn:cg:selected';
-    const policy = resolveSyncGlobalBackpressure({
+    const resolved = resolveSyncGlobalBackpressure({
       syncGlobalMaxInflight: 2,
       syncGlobalQueueLimit: 6,
       selectedRecoveryContextGraphIds: [selectedCg],
     });
+    expect(JSON.parse(JSON.stringify(resolved)).selectedRecoveryContextGraphIds).toEqual([selectedCg]);
+    expect(Object.isFrozen(resolved.selectedRecoveryContextGraphIds)).toBe(true);
+    const policy = representation === 'copied' ? { ...resolved } : resolved;
     const events: string[] = [];
     let releaseFirst!: () => void;
     let releaseRecovery!: () => void;
@@ -1904,12 +2037,13 @@ describe('sync global backpressure', () => {
     ]);
   });
 
-  it('derives the selected reservation from RFC-64 config and excludes unrelated recovery', async () => {
+  it('uses the startup-selected RFC-64 reservation and excludes unrelated recovery', async () => {
     const selectedCg = 'urn:cg:rfc64-selected';
     const agentLike = {
-      config: {
+      config: withResourcePolicy({
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 6,
+        selectedRecoveryContextGraphIds: [selectedCg],
         rfc64PublicCatalogBootstrap: {
           acceptedPublicPolicies: [{
             policyEnvelope: { payload: { contextGraphId: selectedCg, accessPolicy: 0 } },
@@ -1928,7 +2062,7 @@ describe('sync global backpressure', () => {
             },
           },
         }),
-      },
+      }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -2008,12 +2142,12 @@ describe('sync global backpressure', () => {
   ])('reserves $label capacity for a runtime-selected Context Graph', async ({ nodeRole }) => {
     const selectedCg = 'urn:cg:edge-selected';
     const agentLike = {
-      config: {
+      config: withResourcePolicy({
         ...(nodeRole === undefined ? {} : { nodeRole }),
         syncContextGraphs: [selectedCg],
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 6,
-      },
+      }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -2082,12 +2216,12 @@ describe('sync global backpressure', () => {
   it('does not reserve Core capacity for its all-CG sync inventory', async () => {
     const trackedCg = 'urn:cg:core-hosted';
     const agentLike = {
-      config: {
+      config: withResourcePolicy({
         nodeRole: 'core',
         syncContextGraphs: [trackedCg],
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 4,
-      },
+      }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -2122,7 +2256,7 @@ describe('sync global backpressure', () => {
   it('does not derive a reservation from an RFC-64 policy without complete providers', async () => {
     const contextGraphId = 'urn:cg:rfc64-no-complete-provider';
     const agentLike = {
-      config: {
+      config: withResourcePolicy({
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 4,
         rfc64PublicCatalogBootstrap: {
@@ -2131,7 +2265,7 @@ describe('sync global backpressure', () => {
             completeSwmProviders: [],
           }],
         },
-      },
+      }),
       node: { stopSignal: undefined },
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -2257,6 +2391,99 @@ describe('sync global backpressure', () => {
       releaseForeground?.();
       releaseFast?.();
       await Promise.all([background, foreground, fast]);
+    }
+  });
+
+  it('treats a zero fast queue timeout as fail-fast', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncAdmission: {
+        globalMaxInflight: 1,
+        fast: { maxInflight: 1, queueLimit: 1, queueTimeoutMs: 0 },
+        slow: {
+          maxInflight: 0,
+          foregroundReserved: 0,
+          foregroundQueueLimit: 0,
+          backgroundMaxInflight: 0,
+          backgroundQueueLimit: 0,
+        },
+      },
+    });
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const first = withGlobalSyncBackpressure({
+      policy, ctx, label: 'changelog:first', lane: 'changelog', source: 'reconcile',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('first-start');
+      releaseFirst = resolve;
+    }));
+    await tick();
+    try {
+      await expect(withGlobalSyncBackpressure({
+        policy, ctx, label: 'changelog:second', lane: 'changelog', source: 'reconcile',
+      }, async () => { events.push('second-start'); }))
+        .rejects.toMatchObject({ reason: 'queue_timeout' });
+      expect(events).toEqual(['first-start']);
+      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
+    } finally {
+      releaseFirst();
+      await first;
+    }
+  });
+
+  it('applies changing Edge recovery scopes to the immutable partitioned startup policy', async () => {
+    const selectedCg = 'urn:cg:runtime-partitioned';
+    const agentLike = {
+      config: withResourcePolicy({
+        nodeRole: 'edge', syncContextGraphs: [] as string[],
+        syncAdmission: {
+          globalMaxInflight: 3,
+          fast: { maxInflight: 1, queueLimit: 0, queueTimeoutMs: 100 },
+          slow: {
+            maxInflight: 2, foregroundReserved: 1, foregroundQueueLimit: 0,
+            backgroundMaxInflight: 1, backgroundQueueLimit: 0,
+          },
+        },
+      }),
+      node: { stopSignal: undefined },
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const policy = agentLike.config.resourcePolicy.admission;
+    const serialized = JSON.stringify(policy);
+    const run = (contextGraphId: string, work: () => Promise<void>) =>
+      LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+        agentLike as never, createOperationContext('sync'), contextGraphId,
+        'durable' as never, 'durable:runtime-selection', work, { source: 'vm-recovery' },
+      );
+    let releaseBackground!: () => void;
+    const background = run('urn:cg:background', () => new Promise<void>((resolve) => { releaseBackground = resolve; }));
+    await tick();
+    const starts: string[] = [];
+    try {
+      // Selection changes after startup and after background work occupies its slot.
+      const originalScopes = agentLike.config.syncContextGraphs;
+      expect(SwmSubstrateMethods.prototype.trackSyncContextGraph.call(agentLike as never, selectedCg)).toBe(true);
+      expect(agentLike.config.syncContextGraphs).not.toBe(originalScopes);
+      await run(selectedCg, async () => {
+        starts.push(selectedCg);
+        expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 2, queued: 0, limit: 3, queueLimit: 0 });
+      });
+      await expect(run('urn:cg:unrelated', async () => { starts.push('unrelated'); }))
+        .rejects.toMatchObject({ reason: 'queue_full' });
+      const selectedScopes = agentLike.config.syncContextGraphs;
+      // Unsubscribe replaces this array after removing the selected graph.
+      agentLike.config.syncContextGraphs = selectedScopes.filter((cg) => cg !== selectedCg);
+      expect(agentLike.config.syncContextGraphs).not.toBe(selectedScopes);
+      await expect(run(selectedCg, async () => { starts.push('removed-selection'); }))
+        .rejects.toMatchObject({ reason: 'queue_full' });
+      expect(starts).toEqual([selectedCg]);
+      expect(agentLike.config.resourcePolicy.admission).toBe(policy);
+      expect(JSON.stringify(policy)).toBe(serialized);
+      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0, limit: 3, queueLimit: 0 });
+    } finally {
+      releaseBackground();
+      await background;
     }
   });
 

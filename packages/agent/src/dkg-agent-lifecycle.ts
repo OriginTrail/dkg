@@ -1,3 +1,4 @@
+import { projectStartupResourceDiagnostics } from './resource-policy.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -356,7 +357,6 @@ import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-bu
 import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import {
   registerSyncHandler,
-  resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
 import {
   runSelectedSharedMemoryRetry,
@@ -394,8 +394,8 @@ import {
 import {
   SwmCatchupPassTracker,
   catchupPassNowMs,
-  resolveSwmCatchupPassConfig,
   runSwmCatchupContinuations,
+  resolveSwmCatchupPassConfig,
   type CatchupPassConfig,
 } from './sync/catchup-pass-policy.js';
 import {
@@ -431,7 +431,6 @@ import {
   resolveNonNegativeIntegerSwitch,
   resolveBooleanSwitch,
   resolveSyncReconcilerEnabled,
-  resolveSyncGlobalBackpressure,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
 import {
@@ -689,16 +688,12 @@ import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import {
   isRfc64PrivateRecoveryOwnerV1,
   resolveRfc64PrivateRecoveryContextGraphIdsV1,
-  resolveRfc64SelectedRecoveryContextGraphIdsV1,
   resolveRfc64SwmRecoveryLaneV1,
   type Rfc64AuthorizedSwmRecoveryPlanV1,
   type Rfc64PeerSwmRecoveryPlanV1,
   type Rfc64SwmRecoveryTargetV1,
 } from './rfc64/swm-recovery-plan-v1.js';
-import {
-  rfc64ExecutionPlanAllowsLegacySyncV1,
-  resolveRfc64RuntimeCatalogBootstrapConfigV1,
-} from
+import { resolveRfc64RuntimeCatalogBootstrapConfigV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 import { reconcileRfc64CatalogAuthorityPlanV1 } from
   './rfc64/catalog-rollout-authority-reconciliation-v1.js';
@@ -708,34 +703,17 @@ import { initializeRfc64LegacySwmBoundaryV1 } from
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 
-function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
-  // `trackSyncContextGraph()` mutates this list when an Edge explicitly
-  // subscribes or starts a foreground catch-up. Those operator-selected graphs
-  // need the same admission guarantee as an RFC-64 pinned scope: otherwise a
-  // mature Edge can fill every global slot with unrelated background VM
-  // recovery and repeatedly reject the graph the user just selected.
-  //
-  // Keep this Edge-only. Core nodes intentionally host the public corpus and
-  // grow `syncContextGraphs` through discovery; treating that all-CG inventory
-  // as one selected scope would permanently reduce Core background throughput.
-  const edgeSelectedContextGraphIds = (config.nodeRole ?? 'edge') === 'edge'
-    ? config.syncContextGraphs ?? []
-    : [];
-  return resolveSyncGlobalBackpressure({
-    ...config,
-    selectedRecoveryContextGraphIds: [...new Set([
-      ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
-        resolveRfc64RuntimeCatalogBootstrapConfigV1(
-          config.rfc64CatalogBootstrap,
-          config.rfc64PublicCatalogBootstrap,
-        ),
-      ).filter((contextGraphId) => rfc64ExecutionPlanAllowsLegacySyncV1(
-        config.rfc64CatalogExecutionPlan,
-        contextGraphId,
-      )),
-      ...edgeSelectedContextGraphIds,
-    ])],
-  });
+function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig, contextGraphId: string) {
+  const startupScopes = config.resourcePolicy.admission.selectedRecoveryContextGraphIds ?? [];
+  // Core's discovered all-CG corpus is not an operator recovery selection.
+  const edgeScopes = (config.nodeRole ?? 'edge') === 'edge' ? config.syncContextGraphs : undefined;
+  return {
+    policy: config.resourcePolicy.admission,
+    recoveryReservation: {
+      reservationActive: startupScopes.length > 0 || (edgeScopes?.some((id) => typeof id === 'string' && id.length > 0) ?? false),
+      selectedRecoveryScope: startupScopes.includes(contextGraphId) || (edgeScopes?.includes(contextGraphId) ?? false),
+    },
+  };
 }
 
 interface SharedMemorySyncFromPeerOptions {
@@ -2039,7 +2017,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     try {
       return await withGlobalSyncBackpressure(
         {
-          policy: resolveAgentSyncGlobalBackpressure(this.config),
+          ...resolveAgentSyncGlobalBackpressure(this.config, contextGraphId),
           ctx,
           label,
           contextGraphId,
@@ -2867,7 +2845,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               },
               onDecline: (details) => {
-                const syncPressure = getSyncBackpressureSnapshot(resolveAgentSyncGlobalBackpressure(this.config));
+                const syncPressure = getSyncBackpressureSnapshot(this.config.resourcePolicy.admission);
                 const syncPressureLabel =
                   `syncGlobalInflight=${syncPressure.inflight} ` +
                   `syncGlobalQueued=${syncPressure.queued} ` +
@@ -3365,35 +3343,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // parseSyncRequest expects — and the adapter re-exposes the string
     // peerId contract registerSyncHandler relies on. (Reverts rc.9 PR-E
     // for sync only; other substrate protocols keep their dedup.)
-    const snapshotPolicy = resolveSyncResponderSnapshotPolicy(
-      this.config.syncResponderSnapshotLimits,
-      process.env,
-      (message) => this.log.warn(ctx, message),
-    );
-    const syncGlobalPolicy = resolveAgentSyncGlobalBackpressure(this.config);
-    const syncPartitions = syncGlobalPolicy.mode === 'partitioned'
-      && syncGlobalPolicy.limit !== undefined
-      ? syncGlobalPolicy.partitions
-      : undefined;
-    const configuredPriorityCounts = countSyncPriorityClasses(this.config.syncContextGraphPriorities);
-    this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
-      syncAdmissionMode: syncGlobalPolicy.mode,
-      snapshotGlobalRows: snapshotPolicy.budget.maxRows,
-      snapshotGlobalBytesEstimate: snapshotPolicy.budget.maxBytesEstimate,
-      snapshotLocalRows: snapshotPolicy.budget.maxSnapshotRows,
-      snapshotLocalBytesEstimate: snapshotPolicy.budget.maxSnapshotBytesEstimate,
-      syncGlobalInflightLimit: syncGlobalPolicy.limit ?? 0,
-      syncGlobalQueueLimit: syncGlobalPolicy.queueLimit ?? 0,
-      syncFastInflightLimit: syncPartitions?.fast.maxInflight,
-      syncFastQueueLimit: syncPartitions?.fast.queueLimit,
-      syncSlowInflightLimit: syncPartitions?.slow.maxInflight,
-      syncSlowForegroundReserved: syncPartitions?.slow.foregroundReserved,
-      syncSlowForegroundQueueLimit: syncPartitions?.slow.foregroundQueueLimit,
-      syncSlowBackgroundInflightLimit: syncPartitions?.slow.backgroundMaxInflight,
-      syncSlowBackgroundQueueLimit: syncPartitions?.slow.backgroundQueueLimit,
-      configuredPriorities: configuredPriorityCounts,
-      snapshotLocalClamped: snapshotPolicy.localRowsClamped || snapshotPolicy.localBytesEstimateClamped,
-    })}`);
+    const resourcePolicy = this.config.resourcePolicy;
+    if (resourcePolicy.diagnostics.warning) this.log.warn(ctx, resourcePolicy.diagnostics.warning);
+    const snapshotPolicy = resourcePolicy.snapshot;
+    this.log.info(ctx, `Resolved sync policy ${JSON.stringify(projectStartupResourceDiagnostics(
+      resourcePolicy, countSyncPriorityClasses(this.config.syncContextGraphPriorities),
+    ))}`);
     // Keep one framed sync stream (and therefore its circuit-relay connection)
     // alive across page requests. Old peers do not advertise this wire id and
     // transparently fall back to PROTOCOL_SYNC. Set DKG_POOLED_SYNC=0 only as
@@ -7623,10 +7578,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       : null;
     const selectedMetaRetentionBudget = selectedSwmEnabled
       ? (() => {
-        const budget = resolveSyncResponderSnapshotPolicy(
-          this.config.syncResponderSnapshotLimits,
-          process.env,
-        ).budget;
+        const budget = this.config.resourcePolicy.snapshot.budget;
         return selectedSwmMetaRetentionBudgetFor(this, {
           maxRows: budget.maxRows,
           maxBytesEstimate: budget.maxBytesEstimate,
@@ -7855,7 +7807,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         providerPeerId: remotePeerId,
         units: selectedContinuationUnits,
         priorities: this.config.syncContextGraphPriorities,
-        passConfig: resolveSwmCatchupPassConfig(),
+        passConfig: resolveSwmCatchupPassConfig(process.env),
         nowMs: catchupPassNowMs,
         emptyResult: emptySharedMemorySyncResult,
         runWithAdmission: (item, run) => this.runContextGraphSyncWithBackpressure(
@@ -8711,7 +8663,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
 
     if (includeSharedMemory) {
-      const passConfig = stats?.swmCatchupPassConfig ?? resolveSwmCatchupPassConfig();
+      const passConfig = stats?.swmCatchupPassConfig ?? resolveSwmCatchupPassConfig(process.env);
       const execution = await runSwmCatchupContinuations({
         units: [{
           key: contextGraphId,

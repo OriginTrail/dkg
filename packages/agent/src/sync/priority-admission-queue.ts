@@ -62,8 +62,10 @@ export interface PriorityAdmissionQueueHooks<Payload> {
     scheduler: string;
     operation: (entry: PriorityAdmissionEntry<Payload>) => string;
     inflightLimit?: (entry: PriorityAdmissionEntry<Payload>) => number | null;
-    /** Static scheduler capacity. Omit only when acquire options define a shared pool. */
+    /** Fixed capacity for schedulers with one process-wide policy. */
     capacity?: SchedulerPressureCapacity;
+    /** Per-entry capacity for shared schedulers whose owners retain distinct policies. */
+    capacityFor?: (entry: PriorityAdmissionEntry<Payload>) => SchedulerPressureCapacity;
     thresholds?: SchedulerPressureThresholds;
     register?: boolean;
   };
@@ -113,7 +115,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
   private readonly pressureTickets = new WeakMap<PriorityAdmissionEntry<Payload>, SchedulerPressureTicket>();
   private readonly hooks: PriorityAdmissionQueueHooks<Payload>;
   private readonly now: () => number;
-  private hasStaticObservabilityCapacity: boolean;
+  private hasInstalledObservabilityCapacity: boolean;
   private nextSequence = 0;
   private agedTurnOwed = false;
 
@@ -127,14 +129,14 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     });
     this.hooks = hooks;
     this.now = now;
-    this.hasStaticObservabilityCapacity = hooks.observability?.capacity !== undefined;
+    this.hasInstalledObservabilityCapacity = hooks.observability?.capacity !== undefined;
     if (hooks.observability?.register) backpressureRegistry.register(this);
   }
 
-  /** Configure one scheduler-wide capacity model before any admission. */
+  /** Explicit capacity installation retained for standalone queue callers. */
   configureObservabilityCapacity(capacity: SchedulerPressureCapacity): void {
     if (!this.hooks.observability) return;
-    this.hasStaticObservabilityCapacity = true;
+    this.hasInstalledObservabilityCapacity = true;
     this.updatePressureCapacity(capacity);
   }
 
@@ -186,7 +188,11 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       enqueuedAt: this.now(),
       agingThresholdMs: options.agingThresholdMs,
     };
-    if (this.hooks.observability && !this.hasStaticObservabilityCapacity) {
+    if (
+      this.hooks.observability
+      && !this.hasInstalledObservabilityCapacity
+      && !this.hooks.observability.capacityFor
+    ) {
       this.updatePressureCapacity({
         queueLimit: options.queueLimit,
         inflightLimit: this.hooks.observability.inflightLimit?.(base) ?? null,
@@ -450,9 +456,12 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       if (released) return;
       released = true;
       this.handoffReservations.delete(entry.sequence);
-      release();
-      this.observePressureFinish(entry);
-      this.pump();
+      try {
+        release();
+      } finally {
+        this.observePressureFinish(entry);
+        this.pump();
+      }
     };
   }
 
@@ -525,7 +534,11 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
 
   private observePressureEnqueue(entry: PriorityAdmissionEntry<Payload>): void {
     if (!this.hooks.observability) return;
-    this.pressureTickets.set(entry, this.pressureEnqueue(this.pressureWork(entry)));
+    const capacity = this.hooks.observability.capacityFor?.(entry);
+    this.pressureTickets.set(
+      entry,
+      this.pressureEnqueue(this.pressureWork(entry), capacity),
+    );
   }
 
   private observePressureStart(entry: PriorityAdmissionEntry<Payload>): void {
@@ -538,7 +551,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     const ticket = this.pressureTickets.get(entry);
     if (ticket) {
       this.pressureRejectQueued(ticket, reason);
-      this.pressureTickets.delete(entry);
+      this.forgetPressureEntry(entry);
       return;
     }
     this.pressureReject(this.pressureWork(entry), reason);
@@ -548,13 +561,17 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
     const ticket = this.pressureTickets.get(entry);
     if (!ticket) return;
     this.pressureCancelQueued(ticket, reason);
-    this.pressureTickets.delete(entry);
+    this.forgetPressureEntry(entry);
   }
 
   private observePressureFinish(entry: PriorityAdmissionEntry<Payload>): void {
     const ticket = this.pressureTickets.get(entry);
     if (!ticket) return;
     this.pressureFinish(ticket, 'released');
+    this.forgetPressureEntry(entry);
+  }
+
+  private forgetPressureEntry(entry: PriorityAdmissionEntry<Payload>): void {
     this.pressureTickets.delete(entry);
   }
 }

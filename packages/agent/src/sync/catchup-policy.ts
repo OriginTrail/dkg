@@ -1,3 +1,5 @@
+import { AGENT_RESOURCE_ENV } from '../resource-runtime.js';
+import { AGENT_RESOURCE_ENV_SPECS, RESOURCE_MAX, resourceIntegerEnv } from '../resource-limits.js';
 import { normalizeSyncAdmissionSource, type SyncAdmissionSource } from './policy.js';
 
 export type CatchupMode = 'background' | 'foreground';
@@ -27,7 +29,8 @@ export const CATCHUP_BACKPRESSURE_JITTER_RATIO = 0.25;
  * saturated node fails the catch-up job with a retryable status instead of
  * pinning it at `running` forever.
  */
-export const DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = 180_000;
+export const DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS =
+  AGENT_RESOURCE_ENV_SPECS.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS.fallback;
 
 /**
  * Parse the operator-facing retry budget.
@@ -41,19 +44,12 @@ export const DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = 180_000;
  * means "do not retry".
  */
 export function resolveCatchupBackpressureMaxWaitMs(raw: string | undefined): number {
-  const trimmed = raw?.trim();
-  if (!trimmed) return DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
-  const parsed = Number(trimmed);
-  // `Number.isInteger` alone accepts `1e308`, which is an integer by IEEE-754 and
-  // a budget no operator meant. Require a SAFE integer so an unusable value falls
-  // back to the documented default instead of becoming an unbounded wait.
-  return Number.isSafeInteger(parsed) && parsed >= 0
-    ? parsed
-    : DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
+  return resourceIntegerEnv(raw, { min: 0, max: RESOURCE_MAX.retryMs },
+    'DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS') ?? DEFAULT_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
 }
 
 export const CATCHUP_BACKPRESSURE_MAX_WAIT_MS: number =
-  resolveCatchupBackpressureMaxWaitMs(process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS);
+  AGENT_RESOURCE_ENV.values.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
 
 /**
  * Bounded admission origin recorded on node-wide scheduler diagnostics.
@@ -309,9 +305,9 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
   // a spin under persistent refusal.
   const configuredMaxWait = options.retry?.maxWaitMs;
   if (configuredMaxWait !== undefined
-    && !(Number.isSafeInteger(configuredMaxWait) && configuredMaxWait >= 0)) {
+    && !(Number.isSafeInteger(configuredMaxWait) && configuredMaxWait >= 0 && configuredMaxWait <= RESOURCE_MAX.retryMs)) {
     throw new TypeError(
-      `runCatchupPlaneWithPolicy: retry.maxWaitMs must be a non-negative safe integer, got ${String(configuredMaxWait)}.`,
+      `runCatchupPlaneWithPolicy: retry.maxWaitMs must be a non-negative safe integer <= ${RESOURCE_MAX.retryMs}.`,
     );
   }
 

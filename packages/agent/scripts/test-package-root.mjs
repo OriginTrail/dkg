@@ -1,9 +1,36 @@
+import assert from 'node:assert/strict';
 import { readdir } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const snapshotPolicyCompat = await import(
+  '@origintrail-official/dkg-agent/dist/sync/responder/sync-handler.js'
+);
+const snapshotWarnings = [];
+const legacySnapshotPolicy = snapshotPolicyCompat.resolveSyncResponderSnapshotPolicy({
+  global: { rows: 100, bytesEstimate: 200 },
+  local: { rows: 150, bytesEstimate: 250 },
+}, {}, (message) => snapshotWarnings.push(message));
+assert.deepEqual(legacySnapshotPolicy, {
+  budget: { maxRows: 100, maxBytesEstimate: 200, maxSnapshotRows: 100, maxSnapshotBytesEstimate: 200 },
+  localRowsClamped: true,
+  localBytesEstimateClamped: true,
+});
+assert.deepEqual(snapshotWarnings, [
+  'Clamped syncResponderSnapshotLimits.local.rows from 150 to global.rows 100',
+  'Clamped syncResponderSnapshotLimits.local.bytesEstimate from 250 to global.bytesEstimate 200',
+]);
+const defaultSnapshotPolicy = snapshotPolicyCompat.resolveSyncResponderSnapshotPolicy(undefined, {});
+assert.equal(defaultSnapshotPolicy.localRowsClamped, false);
+assert.equal(defaultSnapshotPolicy.localBytesEstimateClamped, false);
+assert.throws(() => snapshotPolicyCompat.resolveSyncResponderSnapshotPolicy({ local: { rows: 0 } }, {}), TypeError);
+
 const root = await import('@origintrail-official/dkg-agent');
+const customizedPass = root.resolveSwmCatchupPassConfig({});
+customizedPass.maxPasses = 2;
+customizedPass.budgetMs = 123;
+assert.deepEqual(customizedPass, { maxPasses: 2, budgetMs: 123 });
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'

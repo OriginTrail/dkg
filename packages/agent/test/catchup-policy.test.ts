@@ -1,3 +1,4 @@
+import { RESOURCE_MAX } from '../src/resource-limits.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CATCHUP_BACKPRESSURE_BASE_DELAY_MS,
@@ -321,6 +322,7 @@ describe('the retry budget is bounded even under bad input or a moving clock', (
     ['an unsafe integer', 1e308],
     ['a negative budget', -1],
     ['a fractional budget', 5.5],
+    ['the first safe integer above the retry ceiling', RESOURCE_MAX.retryMs + 1],
   ])('rejects %s supplied through the in-process retry seam', async (_label, maxWaitMs) => {
     // This path bypasses the env parser entirely. A NaN budget makes every
     // computed delay NaN, which the default timer treats as "immediately" —
@@ -330,6 +332,16 @@ describe('the retry budget is bounded even under bad input or a moving clock', (
         retry: { maxWaitMs: maxWaitMs as number },
       }),
     ).rejects.toThrow(/non-negative safe integer/);
+  });
+
+  it('accepts the maximum in-process retry budget without waiting when the first attempt succeeds', async () => {
+    let attempts = 0;
+    const result = await runCatchupPlaneWithPolicy('foreground', async () => {
+      attempts++;
+      return { deferredBackpressure: 0, synced: 1 };
+    }, { retry: { maxWaitMs: RESOURCE_MAX.retryMs } });
+    expect(attempts).toBe(1);
+    expect(result).toMatchObject({ synced: 1 });
   });
 
   it('reads the deadline from a MONOTONIC clock, not the wall clock', async () => {
