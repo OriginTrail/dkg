@@ -173,6 +173,7 @@ import {
 } from './rfc64/catalog-authority-revision-projection-v1.js';
 import type {
   Rfc64CatalogAuthorityRevisionReadV1,
+  Rfc64CatalogAuthorityRevisionSourceV1,
 } from
   './rfc64/catalog-authority-refresh-loop-v1.js';
 
@@ -1320,41 +1321,39 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     );
   }
 
-  /**
-   * Project local RFC-64 responsibilities onto opaque revisions from the
-   * daemon-owned contract-wide authority index. Missing local bindings remain
-   * absent so the refresh loop keeps their legacy full-reconciliation path.
-   */
-  async readRfc64CatalogAuthorityIndexRevisionsV1(
+  /** Build the paired local projection and physical lifecycle capability. */
+  createRfc64CatalogAuthorityRevisionSourceV1(
     this: DKGAgent,
-    contextGraphIds: readonly string[],
-    signal: AbortSignal,
-  ): Promise<Rfc64CatalogAuthorityRevisionReadV1> {
+  ): Rfc64CatalogAuthorityRevisionSourceV1 | undefined {
     const reader = this.chain.contextGraphAuthorityIndexRevisionReader;
-    if (reader === undefined) return new Map();
-
-    const targets = projectRfc64CatalogAuthorityRevisionTargetsV1(
-      contextGraphIds,
-      (contextGraphId) => this.contextGraphBindingState.authorityIndexOnChainIdFor(
-        contextGraphId,
-        this.subscribedContextGraphs.get(contextGraphId),
-      ),
-    );
-    if (targets.onChainContextGraphIds.length === 0) {
-      return new Map();
-    }
-
-    const revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
-      signal,
-      (readSignal) => reader.readContextGraphAuthorityIndexRevisions(
-          targets.onChainContextGraphIds,
-          { signal: readSignal },
-      ),
-    );
-    return mapRfc64CatalogAuthorityRevisionsToLocalV1(
-      revisions,
-      targets.localContextGraphIdsByOnChainId,
-    );
+    if (reader === undefined) return undefined;
+    return Object.freeze({
+      read: async (
+        contextGraphIds: readonly string[],
+        signal: AbortSignal,
+      ): Promise<Rfc64CatalogAuthorityRevisionReadV1> => {
+        const targets = projectRfc64CatalogAuthorityRevisionTargetsV1(
+          contextGraphIds,
+          (contextGraphId) => this.contextGraphBindingState.authorityIndexOnChainIdFor(
+            contextGraphId,
+            this.subscribedContextGraphs.get(contextGraphId),
+          ),
+        );
+        if (targets.onChainContextGraphIds.length === 0) return new Map();
+        const revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
+          signal,
+          (readSignal) => reader.readContextGraphAuthorityIndexRevisions(
+              targets.onChainContextGraphIds,
+              { signal: readSignal },
+          ),
+        );
+        return mapRfc64CatalogAuthorityRevisionsToLocalV1(
+          revisions,
+          targets.localContextGraphIdsByOnChainId,
+        );
+      },
+      whenIdle: () => reader.whenIdle(),
+    });
   }
 
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */

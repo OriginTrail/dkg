@@ -1268,10 +1268,13 @@ describe('RFC-64 rollout authority integration', () => {
     });
     reader.readContextGraphAuthorityIndexRevisions.mockClear();
 
-    const revisions = await edge.readRfc64CatalogAuthorityIndexRevisionsV1(
+    const revisionSource = edge.createRfc64CatalogAuthorityRevisionSourceV1();
+    expect(revisionSource).toBeDefined();
+    const revisions = await revisionSource!.read(
       [CONTEXT_GRAPH_ID, duplicateLocalId, '11', `${AUTHOR}/unbound`],
       new AbortController().signal,
     );
+    await revisionSource!.whenIdle();
 
     expect(revisions).toEqual(new Map([
       [CONTEXT_GRAPH_ID, revision],
@@ -1281,6 +1284,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(reader.readContextGraphAuthorityIndexRevisions).toHaveBeenCalledWith(['9'], {
       signal: expect.any(AbortSignal),
     });
+    expect(reader.whenIdle).toHaveBeenCalledOnce();
   });
 
   it('uses legacy refresh semantics when the adapter has no revision reader', async () => {
@@ -1289,10 +1293,7 @@ describe('RFC-64 rollout authority integration', () => {
       config: { chainAdapter: new NoChainAdapter() },
     });
 
-    await expect(edge.readRfc64CatalogAuthorityIndexRevisionsV1(
-      [CONTEXT_GRAPH_ID],
-      new AbortController().signal,
-    )).resolves.toEqual(new Map());
+    expect(edge.createRfc64CatalogAuthorityRevisionSourceV1()).toBeUndefined();
   });
 
   it('propagates a supported authority-index reader failure', async () => {
@@ -1321,7 +1322,9 @@ describe('RFC-64 rollout authority integration', () => {
     expect(subscription).toBeDefined();
     (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
 
-    await expect(edge.readRfc64CatalogAuthorityIndexRevisionsV1(
+    const revisionSource = edge.createRfc64CatalogAuthorityRevisionSourceV1();
+    expect(revisionSource).toBeDefined();
+    await expect(revisionSource!.read(
       [CONTEXT_GRAPH_ID, `${AUTHOR}/unbound`],
       new AbortController().signal,
     )).rejects.toBe(failure);

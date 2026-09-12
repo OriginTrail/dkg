@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import { Rfc64CatalogAuthorityRefreshLoopV1 } from
   '../src/rfc64/catalog-authority-refresh-loop-v1.js';
-import type { Rfc64CatalogAuthorityRevisionReadV1 } from
+import type {
+  Rfc64CatalogAuthorityRevisionReadV1,
+  Rfc64CatalogAuthorityRevisionSourceV1,
+} from
   '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
@@ -38,6 +41,13 @@ function completeRevisionRead(
   revisions: ReadonlyMap<string, string>,
 ): Rfc64CatalogAuthorityRevisionReadV1 {
   return revisions;
+}
+
+function revisionSource(
+  read: Rfc64CatalogAuthorityRevisionSourceV1['read'],
+  whenIdle: Rfc64CatalogAuthorityRevisionSourceV1['whenIdle'] = async () => undefined,
+): Rfc64CatalogAuthorityRevisionSourceV1 {
+  return Object.freeze({ read, whenIdle });
 }
 
 describe('RFC-64 catalog authority refresh loop', () => {
@@ -306,13 +316,12 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async (_contextGraphIds, signal) => {
+      authorityRevisionSource: revisionSource(async (_contextGraphIds, signal) => {
         markReadStarted();
         return new Promise<Rfc64CatalogAuthorityRevisionReadV1>((_resolve, reject) => {
           signal.addEventListener('abort', () => reject(signal.reason), { once: true });
         });
-      },
-      whenAuthorityRevisionsIdle: () => physicalRead,
+      }, () => physicalRead),
       refreshContextGraph: async () => COMMITTED,
       onRefreshFailure: () => undefined,
     });
@@ -384,7 +393,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => completeRevisionRead(revisions),
+      authorityRevisionSource: revisionSource(
+        async () => completeRevisionRead(revisions),
+      ),
       refreshContextGraph: async (contextGraphId) => {
         attempts.push(contextGraphId);
         return COMMITTED;
@@ -423,9 +434,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['registered', 'unregistered'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => completeRevisionRead(
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
         new Map([['registered', 'revision-1']]),
-      ),
+      )),
       refreshContextGraph: async (contextGraphId) => {
         attempts.push(contextGraphId);
         return COMMITTED;
@@ -451,13 +462,13 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => {
+      authorityRevisionSource: revisionSource(async () => {
         reads += 1;
         if (reads === 1) {
           return completeRevisionRead(new Map([['cg-a', 'a-1'], ['cg-b', 'b-1']]));
         }
         throw failure;
-      },
+      }),
       onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
       refreshContextGraph: async (contextGraphId) => {
         attempts.push(contextGraphId);
@@ -492,14 +503,14 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => {
+      authorityRevisionSource: revisionSource(async () => {
         reads += 1;
         if (reads === 1) throw failure;
         return completeRevisionRead(new Map([
           ['cg-a', 'revision-a-1'],
           ['cg-b', 'revision-b-1'],
         ]));
-      },
+      }),
       onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
       refreshContextGraph: async (contextGraphId) => {
         attempts.push(contextGraphId);
@@ -532,9 +543,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => completeRevisionRead(
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
         new Map([['cg-a', 'revision-1']]),
-      ),
+      )),
       refreshContextGraph: async () => {
         calls += 1;
         if (calls === 1) throw failure;
@@ -566,9 +577,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => completeRevisionRead(
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
         new Map([['cg-a', 'revision-1']]),
-      ),
+      )),
       refreshContextGraph: async () => outcomes[calls++]!,
       onRefreshFailure: () => undefined,
       scheduler,
@@ -593,9 +604,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => completeRevisionRead(
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
         new Map([['cg-a', 'revision-1']]),
-      ),
+      )),
       refreshContextGraph: async () => outcomes[calls++]!,
       onRefreshFailure: () => undefined,
       scheduler,
@@ -631,9 +642,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => completeRevisionRead(
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(
         new Map([['cg-a', revision]]),
-      ),
+      )),
       refreshContextGraph: async () => {
         calls += 1;
         if (calls === 1) {
@@ -688,14 +699,14 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['cg-a'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => {
+      authorityRevisionSource: revisionSource(async () => {
         reads += 1;
         if (reads === 2) {
           markSecondReadStarted();
           await secondReadGate;
         }
         return completeRevisionRead(new Map([['cg-a', revision]]));
-      },
+      }),
       refreshContextGraph: async () => {
         refreshes += 1;
         if (refreshes === 1) {
@@ -742,13 +753,13 @@ describe('RFC-64 catalog authority refresh loop', () => {
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
       readActiveContextGraphIds: () => ['registered', 'unregistered'],
       onActiveContextGraphIdsReadFailure: () => undefined,
-      readAuthorityRevisions: async () => {
+      authorityRevisionSource: revisionSource(async () => {
         reads += 1;
         if (reads > 1) throw failure;
         return completeRevisionRead(
           new Map([['registered', 'revision-1']]),
         );
-      },
+      }),
       onAuthorityRevisionsReadFailure: (error) => { readFailures.push(error); },
       refreshContextGraph: async (contextGraphId) => {
         attempts.push(contextGraphId);

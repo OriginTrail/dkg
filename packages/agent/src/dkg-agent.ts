@@ -1072,13 +1072,7 @@ export class DKGAgent extends DKGAgentBase {
         this.readRfc64CatalogAuthorityRefreshResponsibilitiesV1()
       )
         .map(({ contextGraphId }) => contextGraphId),
-      readAuthorityRevisions: (contextGraphIds, signal) => (
-        this.readRfc64CatalogAuthorityIndexRevisionsV1(contextGraphIds, signal)
-      ),
-      whenAuthorityRevisionsIdle: () => (
-        this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle()
-        ?? Promise.resolve()
-      ),
+      authorityRevisionSource: this.createRfc64CatalogAuthorityRevisionSourceV1(),
       onActiveContextGraphIdsReadFailure: (error) => {
         this.log.warn(
           createOperationContext('system'),

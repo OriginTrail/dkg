@@ -32,6 +32,15 @@ const rfc64CatalogAuthorityRefreshSchedulerV1:
  */
 export type Rfc64CatalogAuthorityRevisionReadV1 = ReadonlyMap<string, string>;
 
+/** Paired revision-read and physical-lifecycle capability. */
+export interface Rfc64CatalogAuthorityRevisionSourceV1 {
+  read(
+    contextGraphIds: readonly string[],
+    signal: AbortSignal,
+  ): Promise<Rfc64CatalogAuthorityRevisionReadV1>;
+  whenIdle(): Promise<void>;
+}
+
 export type Rfc64CatalogAuthorityRefreshResultV1 =
   | Readonly<{ kind: 'committed' }>
   | Readonly<{ kind: 'superseded' }>;
@@ -39,13 +48,8 @@ export type Rfc64CatalogAuthorityRefreshResultV1 =
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
   readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
-  /** Optional shared-index projection; omitted CGs retain legacy refreshes. */
-  readonly readAuthorityRevisions?: (
-    contextGraphIds: readonly string[],
-    signal: AbortSignal,
-  ) => Promise<Rfc64CatalogAuthorityRevisionReadV1>;
-  /** Drain physical revision scans after the cancellable selector retires. */
-  readonly whenAuthorityRevisionsIdle?: () => Promise<void>;
+  /** Optional shared-index capability; omission retains legacy refreshes. */
+  readonly authorityRevisionSource?: Rfc64CatalogAuthorityRevisionSourceV1;
   readonly onAuthorityRevisionsReadFailure?: (error: unknown) => void;
   readonly refreshContextGraph: (
     contextGraphId: string,
@@ -55,8 +59,15 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly scheduler?: Rfc64CatalogAuthorityRefreshSchedulerV1;
 }
 
-const EMPTY_RFC64_CATALOG_AUTHORITY_REVISIONS_V1 = async ():
-Promise<Rfc64CatalogAuthorityRevisionReadV1> => new Map();
+const EMPTY_RFC64_CATALOG_AUTHORITY_REVISION_SOURCE_V1:
+Rfc64CatalogAuthorityRevisionSourceV1 = Object.freeze({
+  async read(): Promise<Rfc64CatalogAuthorityRevisionReadV1> {
+    return new Map();
+  },
+  async whenIdle(): Promise<void> {
+    // The unsupported-reader path never starts physical revision work.
+  },
+});
 
 /** One graph's physical worker and all revision state it owns. */
 class Rfc64CatalogAuthorityRefreshLaneV1 {
@@ -124,9 +135,7 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
 /** Bounded independent authority lanes with explicit scheduling and shutdown ownership. */
 export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadOwnerV1 {
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
-  readonly #readAuthorityRevisions: NonNullable<
-    Rfc64CatalogAuthorityRefreshLoopOptionsV1['readAuthorityRevisions']
-  >;
+  readonly #authorityRevisionSource: Rfc64CatalogAuthorityRevisionSourceV1;
   readonly #lanes = new Map<string, Rfc64CatalogAuthorityRefreshLaneV1>();
   readonly #retirements = new Set<Promise<void>>();
   #passOwner: CoalescingRecurringTask | null = null;
@@ -138,8 +147,8 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
 
   constructor(private readonly options: Rfc64CatalogAuthorityRefreshLoopOptionsV1) {
     this.#scheduler = options.scheduler ?? rfc64CatalogAuthorityRefreshSchedulerV1;
-    this.#readAuthorityRevisions = options.readAuthorityRevisions
-      ?? EMPTY_RFC64_CATALOG_AUTHORITY_REVISIONS_V1;
+    this.#authorityRevisionSource = options.authorityRevisionSource
+      ?? EMPTY_RFC64_CATALOG_AUTHORITY_REVISION_SOURCE_V1;
   }
 
   #createPassOwner(): CoalescingRecurringTask {
@@ -222,7 +231,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       % RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.safetyRevalidationIntervalCount === 0;
     let revisions: Rfc64CatalogAuthorityRevisionReadV1 = new Map();
     try {
-      revisions = await this.#readAuthorityRevisions(
+      revisions = await this.#authorityRevisionSource.read(
         Object.freeze([...desiredContextGraphIds]),
         signal,
       );
@@ -290,7 +299,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       const lanes = [...this.#lanes.values()];
       const retirements = [...this.#retirements];
       await Promise.all([
-        this.options.whenAuthorityRevisionsIdle?.(),
+        this.#authorityRevisionSource.whenIdle(),
         ...lanes.map((lane) => lane.close()),
         ...retirements,
       ]);
