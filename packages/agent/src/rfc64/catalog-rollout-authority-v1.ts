@@ -8,19 +8,25 @@ export type Rfc64CatalogRolloutModeV1 = 'legacy' | 'shadow' | 'catalog';
 export interface Rfc64CatalogRolloutConfigV1 {
   /** Emergency stop for every Track-2 protocol and worker on this node. */
   readonly killSwitch?: boolean;
-  /** Omitted selected CGs retain the pre-D18 catalog-authoritative behavior. */
+  /** Mode for lifecycle-discovered responsibilities without a per-CG override. */
+  readonly defaultMode?: Rfc64CatalogRolloutModeV1;
+  /** Restart-stable overrides; omitted CGs use `defaultMode`. */
   readonly contextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
 }
 
-/** Total immutable runtime plan: every selected graph has one explicit mode. */
+/** Immutable rollout controls; selected effective modes live on the activation plan. */
 export interface ResolvedRfc64CatalogRolloutConfigV1 {
   readonly killSwitch: boolean;
+  /** Omitted only by pre-defaultMode resolved snapshots accepted for compatibility. */
+  readonly defaultMode?: Rfc64CatalogRolloutModeV1;
   readonly contextGraphModes: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
 }
 
 type Rfc64CatalogAuthorityActivationV1 = Readonly<{
   enabled?: boolean;
   selectedContextGraphs: readonly string[];
+  /** Effective selected-manifest modes, kept separate from operator overrides. */
+  selectedContextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
   rollout: ResolvedRfc64CatalogRolloutConfigV1;
 }>;
 
@@ -238,6 +244,7 @@ export function resolveRfc64CatalogResponsibilityAuthorityV1(
 
 const RFC64_CATALOG_ROLLOUT_FIELDS_V1 = new Set([
   'contextGraphModes',
+  'defaultMode',
   'killSwitch',
 ]);
 const RFC64_CATALOG_ROLLOUT_MODES_V1 = new Set<Rfc64CatalogRolloutModeV1>([
@@ -245,7 +252,6 @@ const RFC64_CATALOG_ROLLOUT_MODES_V1 = new Set<Rfc64CatalogRolloutModeV1>([
   'shadow',
   'catalog',
 ]);
-
 export function resolveRfc64CatalogRolloutConfigV1(
   input: Rfc64CatalogRolloutConfigV1 | undefined,
   selectedContextGraphs: readonly string[],
@@ -253,6 +259,7 @@ export function resolveRfc64CatalogRolloutConfigV1(
 ): ResolvedRfc64CatalogRolloutConfigV1 {
   if (input !== undefined) assertRolloutInputV1(input, label);
   const selected = new Set(selectedContextGraphs);
+  const defaultMode = input?.defaultMode ?? 'catalog';
   const suppliedModes = input?.contextGraphModes ?? {};
   for (const contextGraphId of Object.keys(suppliedModes)) {
     if (label === 'rfc64PublicCatalog' && !selected.has(contextGraphId)) {
@@ -265,11 +272,9 @@ export function resolveRfc64CatalogRolloutConfigV1(
   for (const [contextGraphId, mode] of Object.entries(suppliedModes)) {
     contextGraphModes[contextGraphId] = mode;
   }
-  for (const contextGraphId of selectedContextGraphs) {
-    contextGraphModes[contextGraphId] = suppliedModes[contextGraphId] ?? 'catalog';
-  }
   return Object.freeze({
     killSwitch: input?.killSwitch ?? false,
+    defaultMode,
     contextGraphModes: Object.freeze(contextGraphModes),
   });
 }
@@ -292,6 +297,9 @@ export function mergeRfc64CatalogRolloutConfigsV1(
   }
   return Object.freeze({
     killSwitch: catalog.killSwitch || publicCatalog.killSwitch,
+    // Only the unified block accepts this lifecycle-wide control. The public
+    // compatibility block remains scoped to its explicit manifest.
+    defaultMode: catalog.defaultMode ?? 'catalog',
     contextGraphModes: Object.freeze(contextGraphModes),
   });
 }
@@ -310,7 +318,10 @@ export function rfc64CatalogRolloutModeForContextGraphV1(
   // Resolved activations produced by this release always carry a total plan.
   // Retain the pre-D18 catalog default for older direct JS callers that pass a
   // previously resolved activation shape across the package boundary.
-  const mode = activation.rollout?.contextGraphModes[contextGraphId] ?? 'catalog';
+  const mode = activation.selectedContextGraphModes?.[contextGraphId]
+    ?? activation.rollout?.contextGraphModes[contextGraphId]
+    ?? activation.rollout?.defaultMode
+    ?? 'catalog';
   if (mode === undefined) {
     throw new Error(`resolved RFC-64 rollout plan is missing selected graph ${contextGraphId}`);
   }
@@ -325,7 +336,7 @@ export function rfc64CatalogConfiguredRolloutModeForContextGraphV1(
   if (activation === undefined || !activation.selectedContextGraphs.includes(contextGraphId)) {
     return 'legacy';
   }
-  return activation.rollout?.contextGraphModes[contextGraphId] ?? 'catalog';
+  return rfc64CatalogRolloutModeForContextGraphV1(activation, contextGraphId);
 }
 
 /**
@@ -497,6 +508,7 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     enabled?: boolean;
     selectedContextGraphs: readonly string[];
     selectedPublicContextGraphs: readonly string[];
+    selectedContextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
     rollout: ResolvedRfc64CatalogRolloutConfigV1;
   }>;
 }>): Rfc64CatalogExecutionPlanV1 {
@@ -544,6 +556,15 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     selectedAuthorityByWireId[wireId] = authority;
   }
   const contextGraphModes = Object.freeze({ ...input.activation.rollout.contextGraphModes });
+  if (!input.activation.rollout.killSwitch) {
+    for (const [contextGraphId, mode] of Object.entries(contextGraphModes)) {
+      // A predeclared lifecycle override is not selected authority, but its
+      // Track-2 service must exist before that responsibility is discovered.
+      if (mode !== 'legacy' && !track2ContextGraphs.includes(contextGraphId)) {
+        track2ContextGraphs.push(contextGraphId);
+      }
+    }
+  }
   const legacyContextGraphs = Object.freeze([...new Set([
     ...input.configuredContextGraphs,
     ...input.activation.selectedPublicContextGraphs,
@@ -598,6 +619,19 @@ function assertRolloutInputV1(
   }
   if (input.killSwitch !== undefined && typeof input.killSwitch !== 'boolean') {
     throw new TypeError(`${label}.rollout.killSwitch must be a boolean`);
+  }
+  if (input.defaultMode !== undefined) {
+    if (label === 'rfc64PublicCatalog' && input.defaultMode !== 'catalog') {
+      throw new TypeError(
+        'rfc64PublicCatalog.rollout.defaultMode must remain catalog; '
+        + 'configure lifecycle defaults under rfc64Catalog',
+      );
+    }
+    if (!RFC64_CATALOG_ROLLOUT_MODES_V1.has(input.defaultMode)) {
+      throw new TypeError(
+        `${label}.rollout.defaultMode must be legacy, shadow, or catalog`,
+      );
+    }
   }
   const modeInput = input.contextGraphModes;
   if (

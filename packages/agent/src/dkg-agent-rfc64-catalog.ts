@@ -75,6 +75,8 @@ import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
   './rfc64/catalog-limits-v1.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
+import type { Rfc64CatalogShadowExecutionStatusV1 } from
+  './rfc64/catalog-shadow-observability-v1.js';
 import {
   RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1,
   snapshotRfc64CatalogDeploymentProfileV1,
@@ -149,6 +151,8 @@ import {
   resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
+import type { Rfc64AuthorityReadCoordinatorSnapshotV1 } from
+  './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -1298,6 +1302,39 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
+  /** Constant-time point lookup for rollout-owned hot-path classification. */
+  readRfc64CatalogResponsibilityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Rfc64CatalogResponsibilitySelectionV1 {
+    return rfc64CatalogResponsibilityRegistryForV1(
+      this,
+      this.config.rfc64CatalogExecutionPlan,
+    ).read(contextGraphId);
+  }
+
+  /**
+   * Privacy-safe operator view of the node-wide RFC-64 authority-read circuit.
+   * The snapshot contains no provider URLs, graph identifiers, or RPC payloads.
+   */
+  readRfc64AuthorityRpcCircuitSnapshotV1(
+    this: DKGAgent,
+  ): Rfc64AuthorityReadCoordinatorSnapshotV1 {
+    return this.rfc64AuthorityReadCoordinatorV1.snapshot();
+  }
+
+  /** Privacy-safe agent-wide evidence composed from public subsystem snapshots. */
+  readRfc64CatalogShadowExecutionStatusV1(
+    this: DKGAgent,
+  ): Readonly<Rfc64CatalogShadowExecutionStatusV1> | null {
+    return this.rfc64CatalogShadowObservabilityV1.snapshot({
+      inventoryObserver: this.rfc64SwmAuthorInventoryShadowStatusV1(),
+      projectionSupervisor: this.readRfc64SwmCatalogProjectionSupervisorStatusV1(),
+      bootstrap: this.readRfc64PublicCatalogBootstrapStatusV1(),
+      inFlightInventoryObservers: this.inFlightRfc64SwmInventoryObserverCountV1(),
+    });
+  }
+
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */
   async readRfc64CatalogOperationalStatusV1(
     this: DKGAgent,
@@ -2344,6 +2381,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       },
       receiver: {
+        onTerminalEvent: ({ announcement, outcome }) => {
+          this.rfc64CatalogShadowObservabilityV1.recordTerminalEvent({
+            kind: 'receiver-completed',
+            contextGraphId: announcement.contextGraphId,
+            outcome,
+          });
+        },
         onReconciliationAttemptStart: (announcement) => {
           const token = ++nextReconciliationAttemptToken;
           reconciliationAttempts.set(token, Object.freeze({
@@ -2362,39 +2406,36 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           if (attempt === undefined) return;
           attempt.succeeded.value = true;
         },
-        onVerifiedCurrentHeadTargetAccepted: (announcement, targetToken) => {
-          verifiedTargetLeases.set(
-            targetToken,
-            recordRfc64CatalogTargetAnnouncementV1(this, announcement),
-          );
-        },
-        onVerifiedCurrentHeadTargetRejected: (announcement) => {
-          rejectRfc64CatalogTargetAnnouncementV1(this, announcement);
-          this.rfc64PublicCatalogReconciliationFailuresV1.record(
-            announcement.catalogHeadObjectDigest,
-            Object.assign(
-              new Error('RFC-64 verified current-head admission queue is full'),
-              {
-                name: 'Rfc64VerifiedCurrentHeadAdmissionErrorV1',
-                code: 'catalog-receiver-queue-full',
-              },
-            ),
-          );
-        },
-        onVerifiedCurrentHeadTargetSettled: (
-          announcement,
-          targetToken,
-          token,
-          outcome,
-        ) => {
-          if (token !== null) {
-            const attempt = reconciliationAttempts.get(token);
-            if (attempt !== undefined) attempt.terminalOutcome.value = outcome;
+        onVerifiedCurrentHeadTargetLifecycleEvent: (event) => {
+          if (event.kind === 'admission-result') {
+            if (event.result === 'accepted') {
+              verifiedTargetLeases.set(
+                event.targetToken,
+                recordRfc64CatalogTargetAnnouncementV1(this, event.announcement),
+              );
+              return;
+            }
+            rejectRfc64CatalogTargetAnnouncementV1(this, event.announcement);
+            this.rfc64PublicCatalogReconciliationFailuresV1.record(
+              event.announcement.catalogHeadObjectDigest,
+              Object.assign(
+                new Error('RFC-64 verified current-head admission queue is full'),
+                {
+                  name: 'Rfc64VerifiedCurrentHeadAdmissionErrorV1',
+                  code: 'catalog-receiver-queue-full',
+                },
+              ),
+            );
+            return;
           }
-          const lease = verifiedTargetLeases.get(targetToken);
-          verifiedTargetLeases.delete(targetToken);
+          if (event.attemptToken !== null) {
+            const attempt = reconciliationAttempts.get(event.attemptToken);
+            if (attempt !== undefined) attempt.terminalOutcome.value = event.outcome;
+          }
+          const lease = verifiedTargetLeases.get(event.targetToken);
+          verifiedTargetLeases.delete(event.targetToken);
           if (lease !== undefined) {
-            rfc64CatalogTargetAnnouncementsV1.get(this)?.settle(lease, outcome);
+            rfc64CatalogTargetAnnouncementsV1.get(this)?.settle(lease, event.outcome);
           }
         },
         onReconciliationAttemptEnd: (_announcement, token) => {

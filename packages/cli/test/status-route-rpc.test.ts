@@ -36,6 +36,7 @@ import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import {
   loadNetworkConfig,
+  resolveRfc64CatalogActivations,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
 } from '../src/config.js';
@@ -43,6 +44,8 @@ import {
   buildRfc64CatalogConfigurationEvidenceV1,
   handleStatusRoutes,
 } from '../src/daemon/routes/status.js';
+import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from
+  '../src/daemon/routes/rfc64-status-contract.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
@@ -69,6 +72,7 @@ async function requestStatusWithAgent(
   requestPath = '/api/status',
   networkOverride: RequestContext['network'] = null,
   rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
+  rfc64PublicCatalogOverride?: RequestContext['rfc64PublicCatalog'],
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -86,10 +90,11 @@ async function requestStatusWithAgent(
       url,
       network: networkOverride,
       config,
-      rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
-        config as never,
-        resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
-      ),
+      rfc64PublicCatalog: rfc64PublicCatalogOverride
+        ?? resolveRfc64PublicCatalogActivation(
+          config as never,
+          resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+        ),
       ...(rfc64CatalogOverride === undefined
         ? {}
         : { rfc64Catalog: rfc64CatalogOverride }),
@@ -124,6 +129,286 @@ async function requestStatusWithAgent(
 }
 
 describe('/api/status RFC-64 private recovery privacy', () => {
+  it('surfaces only the privacy-safe RFC-64 authority RPC circuit snapshot', async () => {
+    const readCircuit = vi.fn(() => ({
+      state: 'open' as const,
+      consecutiveExhaustions: 3,
+      retryAtMs: 1_893_456_000_000,
+      endpointUrl: 'https://user:pass@rpc.example',
+      requestPayload: { method: 'eth_call', params: ['private'] },
+      contextGraphId: 'private-context-graph',
+    }));
+    const response = await requestStatusWithAgent({
+      readRfc64AuthorityRpcCircuitSnapshotV1: readCircuit,
+    });
+
+    expect(response.status).toBe(200);
+    expect(readCircuit).toHaveBeenCalledOnce();
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 3,
+      retryAtMs: 1_893_456_000_000,
+    });
+    expect(Object.keys(response.body.rfc64Catalog.authorityRpcCircuit).sort()).toEqual([
+      'consecutiveExhaustions',
+      'retryAtMs',
+      'state',
+    ]);
+    expect(JSON.stringify(response.body.rfc64Catalog.authorityRpcCircuit))
+      .not.toContain('rpc.example');
+    expect(JSON.stringify(response.body.rfc64Catalog.authorityRpcCircuit))
+      .not.toContain('private-context-graph');
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'default-omitted',
+      defaultMode: 'catalog',
+    });
+  });
+
+  it.each([
+    ['unknown state', { state: 'tripped', consecutiveExhaustions: 1, retryAtMs: null }],
+    ['negative count', { state: 'open', consecutiveExhaustions: -1, retryAtMs: null }],
+    ['unsafe retry', {
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: Number.MAX_SAFE_INTEGER + 1,
+    }],
+  ])('degrades malformed authority RPC circuit input to null: %s', async (
+    _label,
+    circuit,
+  ) => {
+    const response = await requestStatusWithAgent({
+      readRfc64AuthorityRpcCircuitSnapshotV1: () => circuit,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toBeNull();
+  });
+
+  it('exposes bounded shadow execution evidence without raw supervisor identities', async () => {
+    const shadowContextGraph =
+      '0x1111111111111111111111111111111111111111/private-shadow-status';
+    const privateProvider = '12D3KooPrivateShadowProviderMustNotLeak';
+    const privateAuthor = '0x2222222222222222222222222222222222222222';
+    const privateDigest = `0x${'33'.repeat(32)}`;
+    const readShadowExecution = vi.fn(() => ({
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 4,
+        attemptedRemovals: 1,
+        committedMutations: 3,
+        noOpMutations: 1,
+        failedMutations: 1,
+        casRetries: 2,
+        authorAddress: privateAuthor,
+        lastHeadDigest: privateDigest,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 2,
+        trackedAuthorScopes: 1,
+        pending: 0,
+        reconciled: 1,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+        repairs: [{ authorAddress: privateAuthor }],
+      },
+      receiverStaging: {
+        running: false,
+        passes: 3,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: 30,
+        lastPassCompletedAtMs: 40,
+        providers: [privateProvider],
+        lastHeadDigest: privateDigest,
+      },
+      // A route boundary must not forward unknown fields introduced by a
+      // mismatched package or unsafe test double.
+      repairs: [{ authorAddress: privateAuthor }],
+      providers: [privateProvider],
+      lastHeadDigest: privateDigest,
+    }));
+    const response = await requestStatusWithAgent(
+      { readRfc64CatalogShadowExecutionStatusV1: readShadowExecution },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [shadowContextGraph],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [shadowContextGraph],
+        rollout: {
+          killSwitch: false,
+          contextGraphModes: { [shadowContextGraph]: 'shadow' },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(readShadowExecution).toHaveBeenCalledOnce();
+    expect(response.body.rfc64Catalog.shadowExecution).toEqual({
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 4,
+        attemptedRemovals: 1,
+        committedMutations: 3,
+        noOpMutations: 1,
+        failedMutations: 1,
+        casRetries: 2,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 2,
+        trackedAuthorScopes: 1,
+        pending: 0,
+        reconciled: 1,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+      },
+      receiverStaging: {
+        running: false,
+        passes: 3,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: 30,
+        lastPassCompletedAtMs: 40,
+      },
+    });
+    const serialized = JSON.stringify(response.body.rfc64Catalog.shadowExecution);
+    expect(serialized).not.toContain(privateProvider);
+    expect(serialized).not.toContain(privateAuthor);
+    expect(serialized).not.toContain(privateDigest);
+    expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('repairs');
+    expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('providers');
+    expect(response.body.rfc64Catalog.shadowExecution.inventoryObserver)
+      .not.toHaveProperty('authorAddress');
+    expect(response.body.rfc64Catalog.shadowExecution.inventoryObserver)
+      .not.toHaveProperty('lastHeadDigest');
+    expect(response.body.rfc64Catalog.shadowExecution.projectionSupervisor)
+      .not.toHaveProperty('repairs');
+    expect(response.body.rfc64Catalog.shadowExecution.receiverStaging)
+      .not.toHaveProperty('providers');
+    expect(response.body.rfc64Catalog.shadowExecution.receiverStaging)
+      .not.toHaveProperty('lastHeadDigest');
+  });
+
+  it('keeps status available when a shadow provider is structurally version-skewed', async () => {
+    const response = await requestStatusWithAgent(
+      {
+        readRfc64CatalogShadowExecutionStatusV1: () => ({
+          schemaVersion: 0,
+          unknownPrivateField: 'must-not-leak',
+        }),
+      },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: ['shadow-version-skew'],
+        selectedPublicContextGraphs: ['shadow-version-skew'],
+        selectedPrivateContextGraphs: [],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'shadow',
+          contextGraphModes: {},
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.shadowExecution).toBeNull();
+    expect(JSON.stringify(response.body)).not.toContain('must-not-leak');
+  });
+
+  it('rejects contradictory derived shadow-safety evidence at the HTTP boundary', () => {
+    const valid = {
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 0,
+        attemptedRemovals: 0,
+        committedMutations: 0,
+        noOpMutations: 0,
+        failedMutations: 0,
+        casRetries: 0,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 0,
+        trackedAuthorScopes: 0,
+        pending: 0,
+        reconciled: 0,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: null,
+        lastPassCompletedAtMs: null,
+      },
+      receiverStaging: {
+        running: false,
+        passes: 0,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: null,
+        lastPassCompletedAtMs: null,
+      },
+    } as const;
+
+    expect(sanitizeRfc64CatalogShadowExecutionStatusV1({
+      ...valid,
+      receiverStaging: {
+        ...valid.receiverStaging,
+        authoritativeApplyCount: 1,
+      },
+    })).toBeNull();
+    expect(sanitizeRfc64CatalogShadowExecutionStatusV1({
+      ...valid,
+      receiverStaging: {
+        ...valid.receiverStaging,
+        stagingObserved: false,
+      },
+    })).toBeNull();
+  });
+
   it('projects live mixed edge selection without leaking private ids into public status', async () => {
     const publicContextGraph = 'runtime-selected-public';
     const privateContextGraph =
@@ -170,6 +455,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         selectedPrivateContextGraphs: [privateContextGraph],
         rollout: {
           killSwitch: false,
+          defaultMode: 'catalog',
           contextGraphModes: {
             [publicContextGraph]: 'catalog',
             [privateContextGraph]: 'catalog',
@@ -208,6 +494,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       activationManifestPresent: true,
       deprecatedDisabledOverride: false,
       killSwitch: false,
+      defaultMode: 'catalog',
     });
     expect(response.body.rfc64Catalog.configuration.digest)
       .toMatch(/^sha256:[0-9a-f]{64}$/u);
@@ -239,6 +526,23 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     });
     expect(JSON.stringify(evidence)).not.toContain(privateContextGraph);
 
+    const catalogDefault = buildRfc64CatalogConfigurationEvidenceV1({
+      rfc64Catalog: { rollout: { defaultMode: 'catalog' } },
+    }, {
+      killSwitch: false,
+      defaultMode: 'catalog',
+      contextGraphModes: {},
+    });
+    const legacyDefault = buildRfc64CatalogConfigurationEvidenceV1({
+      rfc64Catalog: { rollout: { defaultMode: 'legacy' } },
+    }, {
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: {},
+    });
+    expect(catalogDefault.digest).not.toBe(legacyDefault.digest);
+    expect(JSON.stringify([catalogDefault, legacyDefault])).not.toContain(privateContextGraph);
+
     expect(buildRfc64CatalogConfigurationEvidenceV1({}, {
       killSwitch: false,
       contextGraphModes: {},
@@ -250,6 +554,131 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       deprecatedDisabledOverride: false,
       legacyOverrideCount: 0,
       shadowOverrideCount: 0,
+    });
+  });
+
+  it.each([
+    ['unified', { rfc64Catalog: { enabled: false } }],
+    ['deprecated', { rfc64PublicCatalog: { enabled: false } }],
+  ])('reports the effective legacy lane for an explicitly disabled %s activation', async (
+    _label,
+    configOverrides,
+  ) => {
+    const activations = resolveRfc64CatalogActivations(
+      configOverrides,
+      resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+    );
+    const response = await requestStatusWithAgent(
+      {},
+      configOverrides,
+      '/api/status',
+      null,
+      activations.catalog,
+      activations.publicCatalog,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog).toMatchObject({
+      enabled: false,
+      rollout: {
+        killSwitch: false,
+        defaultMode: 'catalog',
+        contextGraphModes: {},
+      },
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'explicit-disabled',
+      deprecatedDisabledOverride: true,
+      defaultMode: 'legacy',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
+    });
+  });
+
+  it('reports a bounded lifecycle default and its explicit canary override', async () => {
+    const canary = 'bounded-status-canary';
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        rfc64Catalog: {
+          rollout: {
+            defaultMode: 'legacy',
+            contextGraphModes: { [canary]: 'shadow' },
+          },
+        },
+      },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'legacy',
+          contextGraphModes: { [canary]: 'shadow' },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [canary]: 'shadow' },
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'operator-override',
+      defaultMode: 'legacy',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 1,
+    });
+  });
+
+  it('does not report a selected inherited mode as a per-CG override', async () => {
+    const selected = 'selected-inherited-shadow';
+    const response = await requestStatusWithAgent(
+      {},
+      { rfc64Catalog: { rollout: { defaultMode: 'shadow' } } },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [selected],
+        selectedPublicContextGraphs: [selected],
+        selectedPrivateContextGraphs: [],
+        selectedContextGraphModes: { [selected]: 'shadow' },
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'shadow',
+          contextGraphModes: {},
+        },
+      } as never,
+      {
+        enabled: true,
+        selectedContextGraphs: [selected],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {},
+        },
+      },
+    );
+
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'shadow',
+      contextGraphModes: {},
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      defaultMode: 'shadow',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
+    });
+    expect(response.body.rfc64PublicCatalog.rollout).toEqual({
+      killSwitch: false,
+      contextGraphModes: { [selected]: 'shadow' },
     });
   });
 
@@ -406,6 +835,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         },
         rollout: {
           killSwitch: true,
+          defaultMode: 'catalog',
           contextGraphModes: {
             [publicContextGraph]: 'shadow',
             [privateContextGraph]: 'legacy',
@@ -457,6 +887,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     });
     expect(response.body.rfc64Catalog.rollout).toEqual({
       killSwitch: true,
+      defaultMode: 'catalog',
       contextGraphModes: {
         [publicContextGraph]: 'shadow',
         [privateContextGraph]: 'legacy',

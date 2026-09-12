@@ -94,7 +94,10 @@ import {
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
   '../src/rfc64/public-catalog-native-reconciler-v1.js';
-import { Rfc64PublicCatalogReceiverV1 } from
+import {
+  Rfc64PublicCatalogReceiverV1,
+  type Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
+} from
   '../src/rfc64/public-catalog-receiver-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
@@ -993,15 +996,15 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       string | null,
     ]> = [];
     const observers = {
-      onVerifiedCurrentHeadTargetAccepted: (
-        announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-      ) => events.push(['start', announcement.catalogHeadObjectDigest, null]),
-      onVerifiedCurrentHeadTargetSettled: (
-        announcement: Rfc64PublicCatalogHeadAnnouncementV1,
-        _targetToken: number,
-        _attemptToken: number | null,
-        outcome: string,
-      ) => events.push(['end', announcement.catalogHeadObjectDigest, outcome]),
+      onVerifiedCurrentHeadTargetLifecycleEvent: (
+        event: Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
+      ) => {
+        if (event.kind === 'settled') {
+          events.push(['end', event.announcement.catalogHeadObjectDigest, event.outcome]);
+        } else if (event.result === 'accepted') {
+          events.push(['start', event.announcement.catalogHeadObjectDigest, null]);
+        }
+      },
     };
     const stagedTarget = catalogOperationalTarget(0, 0, 10_000);
     const stagedReceiver = new Rfc64PublicCatalogReceiverV1({
@@ -1117,8 +1120,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     }, {
       maxConcurrent: 1,
       maxQueue: 1,
-      onVerifiedCurrentHeadTargetRejected: (announcement) => {
-        rejected.push(announcement.catalogHeadObjectDigest);
+      onVerifiedCurrentHeadTargetLifecycleEvent: (event) => {
+        if (event.kind === 'admission-result' && event.result === 'rejected') {
+          rejected.push(event.announcement.catalogHeadObjectDigest);
+        }
       },
     });
     const active = blockingReceiver.scheduleVerifiedCurrentHeadAndWait([{
@@ -3280,6 +3285,39 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect((agent as any).config.rfc64CatalogAuthoringPolicy).toBeUndefined();
   });
 
+  it('accepts pre-defaultMode disabled snapshots at the DKGAgent.create boundary', async () => {
+    const unified = await startNativeAgentWithOptions({
+      name: 'legacy-disabled-rollout-snapshot',
+      omitLegacyDeployment: true,
+      catalogActivation: {
+        enabled: false,
+        selectedContextGraphs: [],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [],
+        rollout: { killSwitch: false, contextGraphModes: {} },
+      },
+    });
+
+    const deprecatedPublic = await startNativeAgentWithOptions({
+      name: 'legacy-disabled-public-rollout-snapshot',
+      omitLegacyDeployment: true,
+      activation: {
+        enabled: false,
+        selectedContextGraphs: [],
+        rollout: { killSwitch: false, contextGraphModes: {} },
+      },
+    });
+
+    for (const agent of [unified, deprecatedPublic]) {
+      expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+        killSwitchActive: false,
+        responsibilityDefaultMode: 'legacy',
+        contextGraphModes: {},
+        track2ContextGraphs: [],
+      });
+    }
+  });
+
   it('snapshots a bounded public-root bootstrap manifest', () => {
     const policy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
@@ -4103,7 +4141,86 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await expect(DKGAgent.create({
       name: 'ephemeral-explicit-catalog-is-invalid',
       rfc64CatalogActivation: { enabled: true },
-    })).rejects.toThrow(/RFC-64 catalog mode requires dataDir/u);
+    })).rejects.toThrow(/RFC-64 Track-2 mode requires dataDir/u);
+  });
+
+  it.each([
+    {
+      name: 'ephemeral-shadow-default-is-invalid',
+      activation: { rollout: { defaultMode: 'shadow' as const } },
+    },
+    {
+      name: 'ephemeral-shadow-canary-is-invalid',
+      activation: {
+        rollout: {
+          defaultMode: 'legacy' as const,
+          contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' as const },
+        },
+      },
+    },
+    {
+      name: 'ephemeral-catalog-canary-is-invalid',
+      activation: {
+        rollout: {
+          defaultMode: 'legacy' as const,
+          contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' as const },
+        },
+      },
+    },
+  ])('rejects $name before constructing an ephemeral Track-2 runtime', async ({
+    name,
+    activation,
+  }) => {
+    await expect(DKGAgent.create({
+      name,
+      rfc64CatalogActivation: activation,
+    })).rejects.toThrow(/RFC-64 Track-2 mode requires dataDir/u);
+  });
+
+  it('keeps predeclared Track-2 overrides dormant under the kill switch', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ephemeral-kill-switch-predeclared-canary',
+      rfc64CatalogActivation: {
+        enabled: true,
+        rollout: {
+          killSwitch: true,
+          defaultMode: 'legacy',
+          contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+        },
+      },
+    });
+    agents.push(agent);
+    await agent.start();
+
+    expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      killSwitchActive: true,
+      responsibilityDefaultMode: 'legacy',
+      contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+      track2ContextGraphs: [],
+      standaloneTrack2Enabled: false,
+    });
+    expect((agent as any).rfc64PublicCatalogServiceV1).toBeUndefined();
+    expect(agent.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
+  });
+
+  it('preserves explicit all-legacy operation without persistence', async () => {
+    const agent = await DKGAgent.create({
+      name: 'ephemeral-explicit-legacy-is-valid',
+      rfc64CatalogActivation: {
+        enabled: true,
+        rollout: {
+          defaultMode: 'legacy',
+          contextGraphModes: { [CONTEXT_GRAPH_ID]: 'legacy' },
+        },
+      },
+    });
+    agents.push(agent);
+
+    expect((agent as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      track2ContextGraphs: [],
+      standaloneTrack2Enabled: false,
+    });
   });
 
   it('rejects selected activation bootstrap without persistence before node startup', async () => {

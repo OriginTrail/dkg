@@ -783,7 +783,7 @@ describe('durable sync lifecycle chain binding', () => {
             enabled: false,
             selectedContextGraphs: [],
             selectedPublicContextGraphs: [],
-            rollout: { killSwitch: false, contextGraphModes: {} },
+            rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
           },
         }),
       },

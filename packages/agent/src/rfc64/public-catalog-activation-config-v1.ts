@@ -27,9 +27,11 @@ import {
 import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './catalog-peers-v1.js';
 import {
   mergeRfc64CatalogRolloutConfigsV1,
+  rfc64CatalogRolloutModeForContextGraphV1,
   resolveRfc64CatalogRolloutConfigV1,
   type ResolvedRfc64CatalogRolloutConfigV1,
   type Rfc64CatalogRolloutConfigV1,
+  type Rfc64CatalogRolloutModeV1,
 } from './catalog-rollout-authority-v1.js';
 
 export {
@@ -145,6 +147,8 @@ export interface ResolvedRfc64CatalogActivationConfigV1 {
   readonly selectedContextGraphs: readonly string[];
   readonly selectedPublicContextGraphs: readonly string[];
   readonly selectedPrivateContextGraphs: readonly string[];
+  /** Effective manifest modes; inherited defaults never enter the override map. */
+  readonly selectedContextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
   readonly deploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
   readonly accessPolicyAuthority?: Readonly<{
     readonly localAgentAddress: EvmAddressV1;
@@ -562,7 +566,9 @@ export function resolveRfc64CatalogActivationInputV1(
         || resolvedInput.accessPolicyAuthority !== undefined
         || resolvedInput.autoPublish !== undefined
         || (resolvedInput.selectedCatalogAuthoringControls?.length ?? 0) !== 0
+        || Object.keys(resolvedInput.selectedContextGraphModes ?? {}).length !== 0
         || rollout.killSwitch
+        || (rollout.defaultMode ?? 'catalog') !== 'catalog'
         || Object.keys(rollout.contextGraphModes).length !== 0
       ) {
         throw new TypeError('disabled rfc64Catalog activation must not carry controls');
@@ -598,10 +604,17 @@ export function resolveRfc64CatalogActivationInputV1(
         resolved.bootstrap,
         autoPublish,
       );
+    const selectedContextGraphModes = resolvedInput.selectedContextGraphModes === undefined
+      ? undefined
+      : snapshotResolvedSelectedContextGraphModesV1(
+        resolvedInput.selectedContextGraphModes,
+        resolved.selectedContextGraphs,
+      );
     return Object.freeze({
       ...resolved,
       autoPublish,
       selectedCatalogAuthoringControls,
+      ...(selectedContextGraphModes === undefined ? {} : { selectedContextGraphModes }),
     });
   }
   return resolveRfc64CatalogActivationConfigV1(
@@ -638,6 +651,21 @@ export function resolveRfc64CatalogActivationsV1(
     input.publicCatalog,
     chainIdentity,
   );
+  // Before the unified block existed, the deprecated public-only switch was
+  // the release rollback. Preserve that meaning when it is the only supplied
+  // control, and expose the same disabled state to daemon status consumers
+  // that the agent runtime already applies.
+  if (
+    input.catalog === undefined
+    && input.publicCatalog !== undefined
+    && !publicCatalog.enabled
+  ) {
+    return Object.freeze({
+      catalog: disabledRfc64CatalogActivationV1(),
+      publicCatalog,
+      selectedCatalogAuthoringControls: Object.freeze([]),
+    });
+  }
   const selectedCatalogAuthoringControls = catalog.selectedCatalogAuthoringControls;
   if (!catalog.enabled && !publicCatalog.enabled) {
     return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });
@@ -703,6 +731,28 @@ export function resolveRfc64CatalogActivationsV1(
     catalog.rollout,
     publicCatalog.rollout,
   );
+  const selectedContextGraphModes: Record<string, Rfc64CatalogRolloutModeV1> =
+    Object.create(null);
+  for (const contextGraphId of catalog.selectedContextGraphs) {
+    selectedContextGraphModes[contextGraphId] =
+      rfc64CatalogRolloutModeForContextGraphV1(catalog, contextGraphId);
+  }
+  for (const contextGraphId of publicCatalog.selectedContextGraphs) {
+    const publicMode = rfc64CatalogRolloutModeForContextGraphV1(
+      publicCatalog,
+      contextGraphId,
+    );
+    const existingMode = selectedContextGraphModes[contextGraphId]
+      ?? catalog.rollout.contextGraphModes[contextGraphId];
+    if (existingMode !== undefined && existingMode !== publicMode) {
+      throw new TypeError(
+        `rfc64Catalog and rfc64PublicCatalog rollout modes conflict for selected graph ${
+          contextGraphId
+        }`,
+      );
+    }
+    selectedContextGraphModes[contextGraphId] = publicMode;
+  }
   const mergedCatalog = Object.freeze({
     enabled: true,
     selectedContextGraphs: Object.freeze([
@@ -711,6 +761,7 @@ export function resolveRfc64CatalogActivationsV1(
     ]),
     selectedPublicContextGraphs: Object.freeze(selectedPublicContextGraphs),
     selectedPrivateContextGraphs: Object.freeze(selectedPrivateContextGraphs),
+    selectedContextGraphModes: Object.freeze(selectedContextGraphModes),
     deploymentProfile,
     accessPolicyAuthority: catalog.accessPolicyAuthority,
     autoPublish: catalog.autoPublish,
@@ -1027,6 +1078,37 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function snapshotResolvedSelectedContextGraphModesV1(
+  input: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>,
+  selectedContextGraphs: readonly string[],
+): Readonly<Record<string, Rfc64CatalogRolloutModeV1>> {
+  if (
+    input === null
+    || typeof input !== 'object'
+    || Array.isArray(input)
+    || (
+      Object.getPrototypeOf(input) !== Object.prototype
+      && Object.getPrototypeOf(input) !== null
+    )
+  ) {
+    throw new TypeError('resolved rfc64Catalog selectedContextGraphModes must be a plain object');
+  }
+  const selected = new Set(selectedContextGraphs);
+  const entries = Object.entries(input);
+  if (
+    entries.length !== selected.size
+    || entries.some(([contextGraphId, mode]) => (
+      !selected.has(contextGraphId)
+      || (mode !== 'legacy' && mode !== 'shadow' && mode !== 'catalog')
+    ))
+  ) {
+    throw new TypeError(
+      'resolved rfc64Catalog selectedContextGraphModes must exactly cover selected graphs',
+    );
+  }
+  return Object.freeze(Object.fromEntries(entries));
+}
+
 /**
  * Re-snapshot a caller-supplied resolved activation at the agent boundary.
  * The selected graph list must exactly equal the manifest-derived list, so a
@@ -1060,6 +1142,7 @@ export function snapshotResolvedRfc64PublicCatalogActivationConfigV1(
       || autoPublishInput !== undefined
       || bootstrapInput !== undefined
       || rolloutInput.killSwitch
+      || (rolloutInput.defaultMode ?? 'catalog') !== 'catalog'
       || Object.keys(rolloutInput.contextGraphModes).length !== 0
     ) {
       throw new TypeError('disabled rfc64PublicCatalogActivation must not carry controls');

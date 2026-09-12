@@ -2,17 +2,9 @@
 
 import { describe, expect, it } from 'vitest';
 import {
-  CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
-  CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
-  MEMBER_ROSTER_OBJECT_TYPE_V1,
   computeContextGraphPolicyObjectDigestV1,
   type ContextGraphIdV1,
   type ContextGraphPolicyV1,
-  type EvmAddressV1,
-  type MemberRosterV1,
-  type NetworkIdV1,
-  type UnsignedContextGraphPolicyEnvelopeV1,
-  type UnsignedMemberRosterEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 
 import {
@@ -26,12 +18,10 @@ import {
   resolveRfc64CatalogActivationInputV1,
   resolveRfc64CatalogActivationsV1,
   resolveRfc64LegacySyncContextGraphsV1,
-  resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import {
   snapshotRfc64CatalogBootstrapConfigV1,
-  snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from '../src/rfc64/catalog-authority-config-v1.js';
 import {
   resolveRfc64ActivePeerSwmRecoveryPlanV1,
@@ -40,144 +30,23 @@ import {
   resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
   resolveRfc64SwmRecoveryRuntimeAuthorityV1,
 } from '../src/rfc64/swm-recovery-plan-v1.js';
-import { mergeRfc64CatalogBootstrapsV1 } from '../src/dkg-agent.js';
 import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
-
-const NETWORK = 'otp:20430' as NetworkIdV1;
-const PRIVATE_CG = (
-  '0x1111111111111111111111111111111111111111/private-release-1'
-) as ContextGraphIdV1;
-const PUBLIC_CG = (
-  '0x1111111111111111111111111111111111111111/public-compat'
-) as ContextGraphIdV1;
-const OWNER = '0x1111111111111111111111111111111111111111' as EvmAddressV1;
-const LOCAL = '0x2222222222222222222222222222222222222222' as EvmAddressV1;
-const PROVIDER = '0x3333333333333333333333333333333333333333' as EvmAddressV1;
-const OUTSIDER = '0x4444444444444444444444444444444444444444' as EvmAddressV1;
-const PROVIDER_TWO = '0x5555555555555555555555555555555555555555' as EvmAddressV1;
-const PROVIDER_PEER = '12D3KooPrivateProvider';
-const PROVIDER_TWO_PEER = '12D3KooPrivateProviderTwo';
-const HOLDER_PEER = '12D3KooPrivateHolder';
-
-function policy(contextGraphId: ContextGraphIdV1, accessPolicy: 0 | 1): ContextGraphPolicyV1 {
-  return {
-    networkId: NETWORK,
-    contextGraphId,
-    governanceChainId: null,
-    governanceContractAddress: null,
-    ownershipTransitionDigest: null,
-    era: '0',
-    version: '0',
-    previousPolicyDigest: null,
-    accessPolicy,
-    publishPolicy: 1,
-    publishAuthority: null,
-    publishAuthorityAccountId: '0',
-    projectionId: CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1,
-    administrativeDelegationDigest: null,
-    source: {
-      kind: 'owner-signed-unregistered',
-      ownerAddress: OWNER,
-      ownerAuthorityEra: '0',
-    },
-    effectiveAt: '0',
-    issuedAt: '0',
-  };
-}
-
-function policyEnvelope(input: ContextGraphPolicyV1): UnsignedContextGraphPolicyEnvelopeV1 {
-  return {
-    issuer: OWNER,
-    objectType: CONTEXT_GRAPH_POLICY_OBJECT_TYPE_V1,
-    payload: input,
-    signatureEvidence: { kind: 'none' },
-    signatureSuite: 'eip191-personal-sign-digest-v1',
-  };
-}
-
-function rosterEnvelope(
-  acceptedPolicyEnvelope: UnsignedContextGraphPolicyEnvelopeV1,
-  options: { localMember?: boolean; providerRole?: boolean } = {},
-): UnsignedMemberRosterEnvelopeV1 {
-  const policyDigest = computeContextGraphPolicyObjectDigestV1(acceptedPolicyEnvelope);
-  const payload: MemberRosterV1 = {
-    networkId: acceptedPolicyEnvelope.payload.networkId,
-    contextGraphId: acceptedPolicyEnvelope.payload.contextGraphId,
-    ownershipTransitionDigest: acceptedPolicyEnvelope.payload.ownershipTransitionDigest,
-    era: acceptedPolicyEnvelope.payload.era,
-    version: '0',
-    previousRosterDigest: null,
-    policyDigest,
-    administrativeDelegationDigest:
-      acceptedPolicyEnvelope.payload.administrativeDelegationDigest,
-    members: [
-      ...(options.localMember === false
-        ? []
-        : [{ agentAddress: LOCAL, roles: ['holder'] as const }]),
-      {
-        agentAddress: PROVIDER,
-        roles: options.providerRole === false
-          ? ['holder'] as const
-          : ['holder', 'provider'] as const,
-      },
-      { agentAddress: PROVIDER_TWO, roles: ['holder', 'provider'] as const },
-    ],
-    issuedAt: '0',
-  };
-  return {
-    issuer: OWNER,
-    objectType: MEMBER_ROSTER_OBJECT_TYPE_V1,
-    payload,
-    signatureEvidence: { kind: 'none' },
-    signatureSuite: 'eip191-personal-sign-digest-v1',
-  };
-}
-
-function privateActivation(options: {
-  roster?: UnsignedMemberRosterEnvelopeV1;
-  localAgentAddress?: EvmAddressV1;
-  boundAgentAddress?: EvmAddressV1;
-  providers?: readonly string[];
-} = {}) {
-  const envelope = policyEnvelope(policy(PRIVATE_CG, 1));
-  const providers = options.providers ?? [PROVIDER_PEER];
-  return {
-    bootstrap: {
-      acceptedPolicies: [{
-        policyEnvelope: envelope,
-        rosterEnvelope: options.roster ?? rosterEnvelope(envelope),
-        targets: [{ authorAddress: PROVIDER, providers }],
-        completeSwmProviders: providers,
-      }],
-      retryIntervalMs: 1_000,
-    },
-    accessPolicyAuthority: {
-      localAgentAddress: options.localAgentAddress ?? LOCAL,
-      peerAgentBindings: [{
-        peerId: PROVIDER_PEER,
-        agentAddress: options.boundAgentAddress ?? PROVIDER,
-      }, ...(providers.includes(PROVIDER_TWO_PEER)
-        ? [{ peerId: PROVIDER_TWO_PEER, agentAddress: PROVIDER_TWO }]
-        : [])],
-    },
-  } as const;
-}
-
-function publicBootstrapPolicy(index: number, targetCount = 0) {
-  const contextGraphId = `${OWNER}/bounded-public-${index}` as ContextGraphIdV1;
-  return {
-    policyEnvelope: policyEnvelope(policy(contextGraphId, 0)),
-    targets: Array.from({ length: targetCount }, (_, targetIndex) => ({
-      authorAddress: `0x${(
-        BigInt(index + 1) * 1_000n + BigInt(targetIndex + 1)
-      ).toString(16).padStart(40, '0')}` as EvmAddressV1,
-      providers: [PROVIDER_PEER],
-    })),
-  } as const;
-}
-
-const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(NETWORK);
+import {
+  HOLDER_PEER,
+  LOCAL,
+  OUTSIDER,
+  PRIVATE_CG,
+  PROVIDER,
+  PROVIDER_PEER,
+  PROVIDER_TWO_PEER,
+  PUBLIC_CG,
+  chainIdentity,
+  policy,
+  policyEnvelope,
+  privateActivation,
+  rosterEnvelope,
+} from './rfc64-catalog-activation-fixtures.js';
 
 describe('RFC-64 private catalog activation', () => {
   it.each([
@@ -556,20 +425,22 @@ describe('RFC-64 private catalog activation', () => {
     expect(resolveRfc64PublicCatalogActivationInputV1({
       enabled: false,
       selectedContextGraphs: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
     } as never, chainIdentity)).toMatchObject({
       enabled: false,
       selectedContextGraphs: [],
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
     });
     expect(resolveRfc64CatalogActivationInputV1({
       enabled: false,
       selectedContextGraphs: [],
       selectedPublicContextGraphs: [],
       selectedPrivateContextGraphs: [],
+      rollout: { killSwitch: false, contextGraphModes: {} },
     } as never, chainIdentity)).toMatchObject({
       enabled: false,
       selectedContextGraphs: [],
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
     });
   });
 
@@ -639,6 +510,41 @@ describe('RFC-64 private catalog activation', () => {
       ...privateActivation(),
       rollout: { killSwitch: 'yes' },
     } as never, chainIdentity)).toThrow(/killSwitch must be a boolean/u);
+
+    expect(() => resolveRfc64CatalogActivationConfigV1({
+      rollout: { defaultMode: 'automatic' },
+    } as never, chainIdentity)).toThrow(/defaultMode must be legacy, shadow, or catalog/u);
+    expect(() => resolveRfc64PublicCatalogActivationInputV1({
+      rollout: { defaultMode: 'legacy' },
+      bootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: policyEnvelope(policy(PUBLIC_CG, 0)),
+          targets: [],
+        }],
+      },
+    } as never, chainIdentity)).toThrow(/configure lifecycle defaults under rfc64Catalog/u);
+  });
+
+  it('uses a validated unified default mode for unlisted responsibilities', () => {
+    const resolved = resolveRfc64CatalogActivationConfigV1({
+      rollout: {
+        defaultMode: 'legacy',
+        contextGraphModes: { [PUBLIC_CG]: 'shadow' },
+      },
+    }, chainIdentity);
+
+    expect(resolved.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [PUBLIC_CG]: 'shadow' },
+    });
+
+    const inherited = resolveRfc64CatalogActivationConfigV1({
+      ...privateActivation(),
+      rollout: { defaultMode: 'legacy' },
+    }, chainIdentity);
+    expect(inherited.rollout.contextGraphModes).toEqual({});
+    expect(rfc64CatalogRolloutModeForContextGraphV1(inherited, PRIVATE_CG)).toBe('legacy');
   });
 
   it('treats omitted unified activation as enabled with an optional seed', () => {
@@ -651,7 +557,7 @@ describe('RFC-64 private catalog activation', () => {
       selectedPublicContextGraphs: [],
       selectedPrivateContextGraphs: [],
       selectedCatalogAuthoringControls: [],
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
     });
   });
 
@@ -790,187 +696,4 @@ describe('RFC-64 private catalog activation', () => {
     }, chainIdentity)).toThrow(/target author is not a current roster member/u);
   });
 
-  it('keeps public compatibility, unions disjoint blocks, and rejects overlap conflicts', () => {
-    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
-    const publicCatalog = {
-      bootstrap: {
-        acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
-        retryIntervalMs: 1_000,
-      },
-    } as const;
-    const union = resolveRfc64CatalogActivationsV1({
-      catalog: privateActivation(),
-      publicCatalog,
-    }, chainIdentity);
-    expect(union.catalog.selectedContextGraphs).toEqual([PUBLIC_CG, PRIVATE_CG]);
-    expect(union.publicCatalog.selectedContextGraphs).toEqual([PUBLIC_CG]);
-
-    const conflictingPublic = {
-      bootstrap: {
-        acceptedPublicPolicies: [{
-          policyEnvelope: policyEnvelope(policy(PRIVATE_CG, 0)),
-          targets: [],
-        }],
-        retryIntervalMs: 1_000,
-      },
-    } as const;
-    expect(() => resolveRfc64CatalogActivationsV1({
-      catalog: privateActivation(),
-      publicCatalog: conflictingPublic,
-    }, chainIdentity)).toThrow(/conflict for selected graph/u);
-  });
-
-  it('lets the unified rollback suppress every deprecated public selection', () => {
-    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
-    const rollback = resolveRfc64CatalogActivationsV1({
-      catalog: { enabled: false },
-      publicCatalog: {
-        enabled: true,
-        bootstrap: {
-          acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
-          retryIntervalMs: 1_000,
-        },
-      },
-    }, chainIdentity);
-
-    expect(rollback.catalog).toMatchObject({
-      enabled: false,
-      selectedContextGraphs: [],
-      selectedPublicContextGraphs: [],
-      selectedPrivateContextGraphs: [],
-    });
-    expect(rollback.publicCatalog).toMatchObject({
-      enabled: false,
-      selectedContextGraphs: [],
-    });
-    expect(rollback.catalog.bootstrap).toBeUndefined();
-    expect(rollback.publicCatalog.bootstrap).toBeUndefined();
-    expect(rollback.selectedCatalogAuthoringControls).toEqual([]);
-  });
-
-  it('unions disjoint rollout modes and lets either block engage the shared kill switch', () => {
-    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
-    const union = resolveRfc64CatalogActivationsV1({
-      catalog: {
-        ...privateActivation(),
-        rollout: { contextGraphModes: { [PRIVATE_CG]: 'catalog' } },
-      },
-      publicCatalog: {
-        rollout: {
-          killSwitch: true,
-          contextGraphModes: { [PUBLIC_CG]: 'shadow' },
-        },
-        bootstrap: {
-          acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
-          retryIntervalMs: 1_000,
-        },
-      },
-    }, chainIdentity);
-
-    expect(rfc64CatalogRolloutModeForContextGraphV1(union.catalog, PRIVATE_CG))
-      .toBe('catalog');
-    expect(rfc64CatalogRolloutModeForContextGraphV1(union.catalog, PUBLIC_CG))
-      .toBe('shadow');
-    expect(rfc64CatalogKillSwitchActiveV1(union.catalog)).toBe(true);
-  });
-
-  it('enforces the global policy limit after additive and compatibility blocks are merged', () => {
-    const additivePolicies = Array.from(
-      { length: 32 },
-      (_, index) => publicBootstrapPolicy(index),
-    );
-    const compatibilityPolicies = Array.from(
-      { length: 33 },
-      (_, index) => publicBootstrapPolicy(index + additivePolicies.length),
-    );
-
-    expect(() => resolveRfc64CatalogActivationsV1({
-      catalog: {
-        bootstrap: {
-          acceptedPolicies: additivePolicies,
-          retryIntervalMs: 1_000,
-        },
-      },
-      publicCatalog: {
-        bootstrap: {
-          acceptedPublicPolicies: compatibilityPolicies,
-          retryIntervalMs: 1_000,
-        },
-      },
-    }, chainIdentity)).toThrow(/acceptedPolicies must contain at most 64 policies/u);
-  });
-
-  it('enforces the global target limit after additive and compatibility blocks are merged', () => {
-    expect(() => resolveRfc64CatalogActivationsV1({
-      catalog: {
-        bootstrap: {
-          acceptedPolicies: [publicBootstrapPolicy(0, 128)],
-          retryIntervalMs: 1_000,
-        },
-      },
-      publicCatalog: {
-        bootstrap: {
-          acceptedPublicPolicies: [publicBootstrapPolicy(1, 129)],
-          retryIntervalMs: 1_000,
-        },
-      },
-    }, chainIdentity)).toThrow(/targets must contain at most 256 catalogs/u);
-  });
-
-  it('merges additive private bootstrap with legacy public bootstrap without dropping either', () => {
-    const privateBootstrap = privateActivation().bootstrap;
-    const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
-    const legacyPublic = {
-      acceptedPublicPolicies: [{ policyEnvelope: publicEnvelope, targets: [] }],
-      retryIntervalMs: 1_000,
-    } as const;
-
-    const merged = mergeRfc64CatalogBootstrapsV1(privateBootstrap, legacyPublic);
-
-    expect(merged?.acceptedPolicies.map(({ policyEnvelope: envelope }) => (
-      envelope.payload.contextGraphId
-    ))).toEqual([PRIVATE_CG, PUBLIC_CG]);
-    expect(merged?.retryIntervalMs).toBe(1_000);
-    expect(() => mergeRfc64CatalogBootstrapsV1(privateBootstrap, {
-      ...legacyPublic,
-      acceptedPublicPolicies: [{
-        policyEnvelope: privateBootstrap.acceptedPolicies[0]!.policyEnvelope,
-        targets: [],
-      }],
-    })).toThrow(/configured twice/u);
-  });
-
-  it('enforces the policy limit in the daemon additive/legacy bootstrap merge', () => {
-    const catalog = snapshotRfc64CatalogBootstrapConfigV1({
-      acceptedPolicies: Array.from(
-        { length: 32 },
-        (_, index) => publicBootstrapPolicy(index),
-      ),
-      retryIntervalMs: 1_000,
-    })!;
-    const legacyPublic = snapshotRfc64PublicCatalogBootstrapConfigV1({
-      acceptedPublicPolicies: Array.from(
-        { length: 33 },
-        (_, index) => publicBootstrapPolicy(index + 32),
-      ),
-      retryIntervalMs: 1_000,
-    })!;
-
-    expect(() => mergeRfc64CatalogBootstrapsV1(catalog, legacyPublic))
-      .toThrow(/acceptedPolicies must contain at most 64 policies/u);
-  });
-
-  it('enforces the target limit in the daemon additive/legacy bootstrap merge', () => {
-    const catalog = snapshotRfc64CatalogBootstrapConfigV1({
-      acceptedPolicies: [publicBootstrapPolicy(0, 128)],
-      retryIntervalMs: 1_000,
-    })!;
-    const legacyPublic = snapshotRfc64PublicCatalogBootstrapConfigV1({
-      acceptedPublicPolicies: [publicBootstrapPolicy(1, 129)],
-      retryIntervalMs: 1_000,
-    })!;
-
-    expect(() => mergeRfc64CatalogBootstrapsV1(catalog, legacyPublic))
-      .toThrow(/targets must contain at most 256 catalogs/u);
-  });
 });

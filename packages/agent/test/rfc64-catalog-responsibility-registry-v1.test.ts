@@ -169,6 +169,42 @@ describe('Rfc64CatalogResponsibilityRegistryV1', () => {
     });
   });
 
+  it('bounds a canary while keeping newly discovered responsibilities on legacy', () => {
+    const registry = new Rfc64CatalogResponsibilityRegistryV1({
+      defaultMode: 'legacy',
+      contextGraphModes: { canary: 'shadow' },
+    });
+
+    registry.setResponsibility('canary', 'edge-subscription');
+    registry.setResponsibility('existing-unlisted', 'edge-subscription');
+    registry.setResponsibility('later-discovered', 'core-public');
+
+    expect(registry.read('canary')).toMatchObject({
+      active: true,
+      mode: 'shadow',
+      selectionSource: 'operator-override',
+    });
+    for (const contextGraphId of ['existing-unlisted', 'later-discovered']) {
+      expect(registry.read(contextGraphId)).toMatchObject({
+        active: true,
+        mode: 'legacy',
+        selectionSource: 'operator-override',
+      });
+    }
+  });
+
+  it('projects live responsibility modes inherited from a shadow default', () => {
+    const registry = new Rfc64CatalogResponsibilityRegistryV1({ defaultMode: 'shadow' });
+
+    registry.setResponsibility('discovered', 'edge-subscription');
+    expect(registry.read('discovered')).toMatchObject({
+      responsible: true,
+      mode: 'shadow',
+    });
+    registry.setResponsibility('discovered', null);
+    expect(registry.snapshot()).toEqual([]);
+  });
+
   it('makes the kill switch visible without silently changing the desired mode', () => {
     const registry = new Rfc64CatalogResponsibilityRegistryV1({
       killSwitchActive: true,
