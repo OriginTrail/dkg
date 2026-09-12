@@ -137,6 +137,7 @@ interface HarnessOverrides {
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
   metadataFetcher?: SharedMemoryMetadataFetcher;
+  metadataFetcherPlacement?: 'context' | 'mode';
   recoveryGuard?: RecoveryExecutionGuard;
 }
 
@@ -159,17 +160,13 @@ function harness(overrides: HarnessOverrides = {}) {
     if (overrides.preseedSnapshot !== false) {
       await snapshotStore.putSnapshot({ digest: fx.digest, quads: fx.payload });
     }
-    const selectedMode = overrides.metadataFetcher !== undefined
-      || overrides.recoveryGuard !== undefined;
     return runSharedMemorySync({
-      mode: selectedMode
+      metadataFetcher: overrides.metadataFetcherPlacement === 'mode' ? undefined : overrides.metadataFetcher,
+      mode: overrides.recoveryGuard
         ? {
           kind: 'selected-recovery',
-          recoveryGuard: overrides.recoveryGuard ?? {
-            signal: new AbortController().signal,
-            assertCurrent: () => undefined,
-          },
-          metadataFetcher: overrides.metadataFetcher,
+          recoveryGuard: overrides.recoveryGuard,
+          ...(overrides.metadataFetcherPlacement === 'mode' ? { metadataFetcher: overrides.metadataFetcher } : {}),
           snapshotRecoveryOrder: 'recent-balanced',
         }
         : { kind: 'ordinary' },
@@ -179,7 +176,10 @@ function harness(overrides: HarnessOverrides = {}) {
       createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
       fetchSyncPages: async (_c, _p, _cg, _inc, phase, _g, _dl, fetchOptions): Promise<SyncPageResult> => {
         const snapshotRef = fetchOptions?.snapshotRef;
-        if (phase === 'meta') return page([...fx.meta, ...(overrides.additionalVerifiedMeta ?? [])]);
+        if (phase === 'meta') {
+          events.push('direct-metadata-fetch');
+          return page([...fx.meta, ...(overrides.additionalVerifiedMeta ?? [])]);
+        }
         if (phase === 'snapshot') {
           events.push('snapshot-fetched');
           snapshotFetches.push(String(snapshotRef));
@@ -208,9 +208,6 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
-        // Private-lane mutations are outside this public orchestration fixture.
-        preserveStoredIdentityForSkippedAsset: async () => { throw new Error('unexpected private recovery'); },
-        replaceMetaForGraphAssets: async () => { throw new Error('unexpected private recovery'); },
         withKaWriteLock: async (contextGraphId, subGraphName, kaUal, fn) => {
           events.push('lock-requested');
           overrides.onLockRequested?.();
@@ -253,6 +250,12 @@ function harness(overrides: HarnessOverrides = {}) {
           events.push('head-repaired-preserving-identity');
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
           void winnerShareOperationId;
+        },
+        preserveStoredIdentityForSkippedAsset: async () => {
+          throw new Error('Skipped-asset identity rewrites are outside this decision fixture');
+        },
+        replaceMetaForGraphAssets: async () => {
+          throw new Error('Bulk metadata replacement is outside this decision fixture');
         },
       },
       reconcileFinalizedTwin: async () => {
@@ -384,7 +387,23 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events.slice(reconciliation + 1)).not.toContain('meta-inserted');
   });
 
-  it('captures first-round suppression and reapplies it before a resumed bulk metadata insert', async () => {
+  it.each(['ordinary', 'selected-recovery'] as const)('preserves one-page direct metadata retrieval for %s callers', async kind => {
+    const subject = harness({
+      recoveryGuard: kind === 'selected-recovery'
+        ? { signal: new AbortController().signal, assertCurrent: () => undefined }
+        : undefined,
+    });
+    const summary = await subject.run();
+    expect(summary.failedPhases).toBe(0);
+    expect(subject.events.filter(event => event === 'direct-metadata-fetch')).toHaveLength(1);
+    expect(subject.replaced).toHaveLength(1);
+  });
+
+  it.each(['ordinary', 'selected-recovery', 'legacy-selected'] as const)('captures suppression and reapplies it on resume with a %s metadata session', async kind => {
+    const recoveryGuard = kind !== 'ordinary'
+      ? { signal: new AbortController().signal, assertCurrent: () => undefined }
+      : undefined;
+    const metadataFetcherPlacement = kind === 'legacy-selected' ? 'mode' : 'context';
     const fx = fixture();
     const manifest = [{ ref: fx.digest, digest: fx.digest, count: fx.payload.length }];
     const resolved = new Set<string>();
@@ -408,11 +427,14 @@ describe('public SWM snapshot materialization', () => {
     const first = harness({
       reconcileDisposition: 'suppress-metadata',
       metadataFetcher,
+      metadataFetcherPlacement,
+      recoveryGuard,
     });
 
     const firstSummary = await first.run();
 
     expect(firstSummary.failedPhases).toBe(0);
+    expect(first.events).not.toContain('direct-metadata-fetch');
     expect(first.replaced).toHaveLength(1);
     expect(resolved).toEqual(new Set([fx.digest]));
     const retiredSubjects = new Set([
@@ -424,6 +446,8 @@ describe('public SWM snapshot materialization', () => {
       .toBeGreaterThan(0);
 
     const resumed = harness({
+      recoveryGuard,
+      metadataFetcherPlacement,
       metadataFetcher: {
         ...metadataFetcher,
       },
@@ -432,6 +456,7 @@ describe('public SWM snapshot materialization', () => {
     const resumedSummary = await resumed.run();
 
     expect(resumedSummary.failedPhases).toBe(0);
+    expect(resumed.events).not.toContain('direct-metadata-fetch');
     expect(resumed.replaced).toHaveLength(0);
     expect(resumed.events).not.toContain('finalized-twin-reconciled');
     expect(resumed.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))

@@ -17,7 +17,7 @@ import {
   type SelectedSwmFreshnessResolution,
 } from './shared-memory-freshness.js';
 import type { SyncContextGraphPriorityConfig } from './policy.js';
-import type { SelectedSwmMetaContinuation } from './selected-swm-meta-fetcher.js';
+import type { SwmMetaContinuation } from './swm-meta-fetcher.js';
 import {
   MAX_CONSECUTIVE_PEER_TRANSPORT_FAILURES,
   runOrderedContextGraphSyncs,
@@ -27,7 +27,7 @@ import {
 /** One completed selected-provider round and its immutable metadata evidence. */
 export interface SelectedSwmContinuationRound {
   readonly result: SharedMemorySyncResult;
-  readonly metadataContinuation: SelectedSwmMetaContinuation;
+  readonly metadataContinuation: SwmMetaContinuation;
 }
 
 export interface SelectedSwmContinuationUnit {

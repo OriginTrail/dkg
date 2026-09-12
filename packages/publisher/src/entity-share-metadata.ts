@@ -1,6 +1,6 @@
+import { SWM_PREDICATES } from './swm-metadata-schema.js';
 import {
   contextGraphSharedMemoryMetaUri,
-  DKG_ROOT_ENTITY_LEGACY,
   isEntityPredicate,
   isSafeIri,
   validateSubGraphName,
@@ -10,8 +10,6 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { isWorkspaceKnowledgeAssetHeadSubject, workspaceOperationPublicSliceSubject, workspaceOperationSubject } from './workspace-metadata-subjects.js';
 
 const DKG = 'http://dkg.io/ontology/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const PROV_ATTRIBUTION = 'http://www.w3.org/ns/prov#wasAttributedTo';
 export const ENTITY_SHARE_SNAPSHOT_MERKLE_ROOT_PREDICATE = `${DKG}snapshotMerkleRoot`;
 export const ENTITY_SHARE_SNAPSHOT_CONTENT_DIGEST_PREDICATE = `${DKG}snapshotContentDigest`;
 /** Agent-local annotations accepted as sidecars, never as protocol rows. */
@@ -23,19 +21,19 @@ export const ENTITY_SHARE_METADATA_SIDECAR_PREDICATES: ReadonlySet<string> =
 
 /** Canonical field vocabulary shared by the entity-share writer and decoder. */
 export const ENTITY_SHARE_METADATA_PREDICATES = Object.freeze({
-  type: RDF_TYPE,
-  contextGraphId: `${DKG}contextGraphId`,
-  shareOperationId: `${DKG}shareOperationId`,
-  subGraphName: `${DKG}subGraphName`,
-  publisherPeerId: `${DKG}publisherPeerId`,
-  publishedAt: `${DKG}publishedAt`,
-  wasAttributedTo: PROV_ATTRIBUTION,
-  rootEntity: DKG_ROOT_ENTITY_LEGACY,
-  publicSliceRootEntity: `${DKG}publicSliceRootEntity`,
-  publicQuadsDigest: `${DKG}publicQuadsDigest`,
-  publicQuadsCount: `${DKG}publicQuadsCount`,
-  publicSnapshotRef: `${DKG}publicSnapshotRef`,
-  publicSnapshotGraph: `${DKG}publicSnapshotGraph`,
+  type: SWM_PREDICATES.type,
+  contextGraphId: SWM_PREDICATES.contextGraphId,
+  shareOperationId: SWM_PREDICATES.shareOperationId,
+  subGraphName: SWM_PREDICATES.subGraphName,
+  publisherPeerId: SWM_PREDICATES.publisherPeerId,
+  publishedAt: SWM_PREDICATES.publishedAt,
+  wasAttributedTo: SWM_PREDICATES.wasAttributedTo,
+  rootEntity: SWM_PREDICATES.rootEntity,
+  publicSliceRootEntity: SWM_PREDICATES.publicSliceRootEntity,
+  publicQuadsDigest: SWM_PREDICATES.publicQuadsDigest,
+  publicQuadsCount: SWM_PREDICATES.publicQuadsCount,
+  publicSnapshotRef: SWM_PREDICATES.publicSnapshotRef,
+  publicSnapshotGraph: SWM_PREDICATES.publicSnapshotGraph,
 });
 const F = ENTITY_SHARE_METADATA_PREDICATES;
 const COMMON_FIELDS = [

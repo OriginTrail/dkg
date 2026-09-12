@@ -11,6 +11,40 @@ import {
 } from './selected-swm-test-helpers.js';
 
 describe('selected RFC-64 SWM lifecycle retained sessions', () => {
+  it('completes private-only recovery without creating a public metadata transfer', async () => {
+    const publicCg = 'private-only-public-control';
+    const privateCg = '0x1111111111111111111111111111111111111111/private-only';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg, private: privateCg },
+      manifest: snapshotManifest(publicCg, 0),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      reportEmptyResponse: true,
+    });
+    const getTransfers = vi.spyOn(harness.agent, 'getSwmMetaTransfers');
+
+    try {
+      const recovery = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [privateCg],
+        {
+          selectedSwmPriority: true,
+          requestedScope: { kind: 'rfc64-recovery-plan' },
+          recoveryTargets: [{ contextGraphId: privateCg, lane: 'ordinary-private' }],
+        },
+      );
+
+      expect(recovery.scopeComplete).toBe(true);
+      expect(recovery.targetDiagnostics.ordinaryPrivate).toEqual({ completed: 1, total: 1 });
+      expect(getTransfers).not.toHaveBeenCalled();
+      // Private recovery still reads its own metadata page without allocating
+      // a public retained-transfer scope.
+      expect(harness.probes.metaRequesterScopes).toEqual([undefined]);
+    } finally {
+      getTransfers.mockRestore();
+      await harness.close();
+    }
+  });
+
   it('releases retained prefixes on node-lifecycle cleanup', async () => {
     const publicCg = 'selected-cross-outer-node-close';
     const manifest = snapshotManifest(publicCg, 2);
@@ -46,7 +80,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
         selectedSwmPriority: true,
         recoveryTargets: plan.targets,
       });
-      await harness.agent.closeSelectedSwmMetaTransfers();
+      await harness.agent.closeSwmMetaTransfers();
       await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         recoveryTargets: plan.targets,
@@ -396,6 +430,61 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     }
   });
 
+  it('shares one row of retention across ordinary and selected owners until the ordinary prefix is released', async () => {
+    const publicCg = 'ordinary-selected-global-retention';
+    const manifest = snapshotManifest(publicCg, 1);
+    const oneRow = manifest.meta.slice(0, 1);
+    const allowances: Array<{ scope: string | undefined; rows: number | undefined }> = [];
+    const previousBudget = process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+    process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = '0';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaContinuationLimits: { rows: 1, globalRows: 1, bytesEstimate: 4096, globalBytesEstimate: 4096 },
+      metaPages: [
+        { quads: oneRow, resumedFromOffset: 0, nextOffset: 1, completed: false, timedOut: true },
+        // The selected owner must reject this row because the ordinary owner
+        // still retains the only process-wide row allowance.
+        { quads: oneRow, resumedFromOffset: 0, nextOffset: 1, completed: false, timedOut: true },
+        // The ordinary owner's empty EOF consumes no additional capacity and
+        // retires its retained prefix through the real lifecycle path.
+        { quads: [], resumedFromOffset: 1, nextOffset: 1, completed: true, timedOut: false },
+        { quads: oneRow, resumedFromOffset: 0, nextOffset: 1, completed: false, timedOut: true },
+      ],
+      onMetaFetch: ({ requesterScope, maxAcceptedQuads }) => {
+        allowances.push({ scope: requesterScope, rows: maxAcceptedQuads });
+      },
+    });
+    const plan = { targets: [{ contextGraphId: publicCg, lane: 'selected-public' as const }] };
+    const ordinary = () => callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], { sharedMemorySyncPlan: plan });
+    const selected = () => callSelectedSharedMemorySummary(harness.agent, [publicCg], {
+      selectedSwmPriority: true, recoveryTargets: plan.targets,
+    });
+    try {
+      const first = await ordinary();
+      expect(first.metadataContinuationYields).toBe(1);
+      expect(harness.agent.syncCheckpoints.size).toBe(1);
+      const blocked = await selected();
+      expect(blocked.failedPhases).toBeGreaterThan(0);
+      expect(allowances.map(item => item.rows)).toEqual([1, 0]);
+      expect(harness.agent.syncCheckpoints.size).toBe(1);
+      expect(allowances[0]!.scope).toMatch(/^ordinary-swm-meta:/);
+      expect(allowances[1]!.scope).toMatch(/^selected-swm-meta:/);
+      await ordinary();
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
+      const admitted = await selected();
+      expect(admitted.metadataContinuationYields).toBe(1);
+      expect(allowances.map(item => item.rows)).toEqual([1, 0, 0, 1]);
+      expect(allowances[2]!.scope).toBe(allowances[0]!.scope);
+      expect(harness.agent.syncCheckpoints.size).toBe(1);
+    } finally {
+      if (previousBudget === undefined) delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+      else process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = previousBudget;
+      await harness.close();
+    }
+  });
+
   it('does not coalesce selected SWM into an ordinary same-priority flight', async () => {
     const publicCg = 'selected-ordinary-single-flight-isolation';
     const manifest = snapshotManifest(publicCg, 2);
@@ -468,7 +557,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       const selectedSummary = selectedResult.shared;
       expect(ordinarySummary).not.toBe(selectedSummary);
       expect(harness.probes.metaFetches()).toBe(3);
-      expect(harness.probes.metaRequesterScopes[0]).toBeUndefined();
+      expect(harness.probes.metaRequesterScopes[0]).toMatch(/^ordinary-swm-meta:retained:\d+$/);
       expect(harness.probes.metaRequesterScopes[1]).toMatch(/^selected-swm-meta:retained:\d+$/);
       expect(harness.probes.metaRequesterScopes[2]).toBe(
         harness.probes.metaRequesterScopes[1],

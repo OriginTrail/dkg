@@ -1,5 +1,5 @@
 import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-subjects.js';
-import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
+import { emitLegacySwmOperation, emitGraphSwmOperationHeader, emitSwmOwnership, SWM_WORKSPACE_OPERATION } from './swm-metadata-schema.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {
@@ -1083,18 +1083,15 @@ export function generateShareMetadata(
   meta: ShareMetadata,
   swmMetaGraph: string,
 ): Quad[] {
-  const subject = formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId);
-  const rows: Quad[] = [
-    mq(subject, ENTITY_SHARE.type, `${DKG}WorkspaceOperation`, swmMetaGraph),
-    mq(subject, ENTITY_SHARE.contextGraphId, lit(meta.contextGraphId), swmMetaGraph),
-    mq(subject, ENTITY_SHARE.shareOperationId, lit(meta.shareOperationId), swmMetaGraph),
-    mq(subject, ENTITY_SHARE.publisherPeerId, lit(meta.publisherPeerId), swmMetaGraph),
-    mq(subject, ENTITY_SHARE.wasAttributedTo, meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId), swmMetaGraph),
-    mq(subject, ENTITY_SHARE.publishedAt, dateLit(meta.timestamp), swmMetaGraph),
-  ];
-  if (meta.subGraphName) rows.push(mq(subject, ENTITY_SHARE.subGraphName, lit(meta.subGraphName), swmMetaGraph));
-  for (const rootEntity of meta.rootEntities) rows.push(mq(subject, ENTITY_SHARE.rootEntity, rootEntity, swmMetaGraph));
-  return rows;
+  return emitLegacySwmOperation(formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
+    type: SWM_WORKSPACE_OPERATION,
+    contextGraphId: lit(meta.contextGraphId), shareOperationId: lit(meta.shareOperationId),
+    publisherPeerId: lit(meta.publisherPeerId),
+    wasAttributedTo: meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId),
+    publishedAt: dateLit(meta.timestamp),
+    ...(meta.subGraphName ? { subGraphName: lit(meta.subGraphName) } : {}),
+    rootEntity: meta.rootEntities,
+  });
 }
 
 /** @deprecated Use generateShareMetadata */
@@ -1157,40 +1154,18 @@ export function generateKnowledgeAssetShareMetadata(
   ) {
     throw new Error('Graph-scoped KA share has an invalid access-policy peer envelope');
   }
-  const subject = formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId);
-  const quads = [
-    mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
-    mq(subject, `${DKG}contextGraphId`, lit(meta.contextGraphId), swmMetaGraph),
-    mq(subject, `${DKG}shareOperationId`, lit(meta.shareOperationId), swmMetaGraph),
-    mq(subject, `${DKG}contentScopeVersion`, intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), swmMetaGraph),
-    mq(subject, `${DKG}kaUal`, scope.ual, swmMetaGraph),
-    mq(subject, `${DKG}assertionVersion`, intLit(BigInt(scope.assertionVersion)), swmMetaGraph),
-    mq(subject, `${DKG}publicQuadsCount`, intLit(meta.publicTripleCount), swmMetaGraph),
-    mq(subject, `${DKG}privateTripleCount`, intLit(privateTripleCount), swmMetaGraph),
-    mq(subject, `${DKG}publisherPeerId`, lit(meta.publisherPeerId), swmMetaGraph),
-    mq(
-      subject,
-      `${PROV}wasAttributedTo`,
-      meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId),
-      swmMetaGraph,
-    ),
-    mq(subject, `${DKG}publishedAt`, dateLit(meta.timestamp), swmMetaGraph),
-  ];
-  if (privateMerkleRoot?.length === 32) {
-    quads.push(
-      mq(subject, `${DKG}privateMerkleRoot`, lit(`0x${toHex(privateMerkleRoot)}`), swmMetaGraph),
-    );
-  }
-  if (meta.accessPolicy) {
-    quads.push(mq(subject, `${DKG}accessPolicy`, lit(meta.accessPolicy), swmMetaGraph));
-    for (const peer of allowedPeers) {
-      quads.push(mq(subject, `${DKG}allowedPeer`, lit(peer), swmMetaGraph));
-    }
-  }
-  if (meta.subGraphName) {
-    quads.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), swmMetaGraph));
-  }
-  return quads;
+  return emitGraphSwmOperationHeader(formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId), swmMetaGraph, {
+    type: SWM_WORKSPACE_OPERATION,
+    contextGraphId: lit(meta.contextGraphId), shareOperationId: lit(meta.shareOperationId),
+    contentScopeVersion: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), kaUal: scope.ual,
+    assertionVersion: intLit(BigInt(scope.assertionVersion)), publicQuadsCount: intLit(meta.publicTripleCount),
+    privateTripleCount: intLit(privateTripleCount), publisherPeerId: lit(meta.publisherPeerId),
+    wasAttributedTo: meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId),
+    publishedAt: dateLit(meta.timestamp),
+    ...(privateMerkleRoot?.length === 32 ? { privateMerkleRoot: lit(`0x${toHex(privateMerkleRoot)}`) } : {}),
+    ...(meta.accessPolicy ? { accessPolicy: lit(meta.accessPolicy), allowedPeer: allowedPeers.map(lit) } : {}),
+    ...(meta.subGraphName ? { subGraphName: lit(meta.subGraphName) } : {}),
+  });
 }
 
 /**
@@ -1202,9 +1177,9 @@ export function generateOwnershipQuads(
   rootEntities: { rootEntity: string; creatorPeerId: string }[],
   swmMetaGraph: string,
 ): Quad[] {
-  return rootEntities.map((entry) =>
-    mq(entry.rootEntity, `${DKG}workspaceOwner`, lit(entry.creatorPeerId), swmMetaGraph),
-  );
+  return rootEntities.flatMap((entry) => emitSwmOwnership(entry.rootEntity, swmMetaGraph, {
+    workspaceOwner: lit(entry.creatorPeerId),
+  }));
 }
 
 /**

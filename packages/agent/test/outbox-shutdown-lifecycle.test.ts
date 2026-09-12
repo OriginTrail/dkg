@@ -14,10 +14,10 @@ import {
   VmReconcileShutdownTimeoutError,
 } from '../src/vm-reconcile-service.js';
 import {
-  createSelectedSwmMetaFetcher,
-} from '../src/sync/selected-swm-meta-fetcher.js';
-import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
-import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
+  createSwmMetaFetcher,
+} from '../src/sync/swm-meta-fetcher.js';
+import { SwmMetaTransferCoordinator, type SwmMetaTransferSession } from '../src/sync/swm-meta-transfer-coordinator.js';
+import { createSwmMetaRetentionBudget } from '../src/sync/swm-meta-budget.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 
 function syntheticShutdownAgent(): any {
@@ -106,7 +106,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
 
   it('drains an in-flight selected-SWM owner after network stop and before store close', async () => {
     const events: string[] = [];
-    const transfers = new SelectedSwmMetaTransferCoordinator();
+    const transfers = new SwmMetaTransferCoordinator();
     const deleteCheckpoint = vi.fn(() => events.push('prefix-cleaned'));
     const peerId = 'peer-stop-order';
     let releaseTransfer!: () => void;
@@ -115,34 +115,35 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const transferStarted = new Promise<void>((resolve) => {
       signalTransferStarted = resolve;
     });
-    const transfer = transfers.run(
-      peerId,
-      () => createSelectedSwmMetaFetcher({
-        remotePeerId: peerId,
-        requesterScope: 'selected-swm-meta:retained:1',
-        retentionBudget: createSelectedSwmMetaRetentionBudget({
-          maxRows: 10,
-          maxBytesEstimate: 1024,
-          maxPrefixRows: 10,
-          maxPrefixBytesEstimate: 1024,
-        }),
-        deleteCheckpoint,
-        fetchPage: async () => {
-          signalTransferStarted();
-          await transferGate;
-          return {
-            quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }],
-            bytesReceived: 1,
-            resumedFromOffset: 0,
-            nextOffset: 1,
-            checkpointKey: 'retained-stop-checkpoint',
-            completed: false,
-            timedOut: true,
-          };
-        },
+    const createFetcher = vi.fn((session: SwmMetaTransferSession) => createSwmMetaFetcher({
+      remotePeerId: session.remotePeerId,
+      requesterScope: session.requesterScope,
+      retentionBudget: createSwmMetaRetentionBudget({
+        maxRows: 10,
+        maxBytesEstimate: 1024,
+        maxPrefixRows: 10,
+        maxPrefixBytesEstimate: 1024,
       }),
+      deleteCheckpoint,
+      fetchPage: async () => {
+        signalTransferStarted();
+        await transferGate;
+        return {
+          quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }],
+          bytesReceived: 1,
+          resumedFromOffset: 0,
+          nextOffset: 1,
+          checkpointKey: 'retained-stop-checkpoint',
+          completed: false,
+          timedOut: true,
+        };
+      },
+    }));
+    const transfer = transfers.run(
+      { mode: 'selected', remotePeerId: peerId },
+      createFetcher,
       (fetcher) => fetcher.strategy.fetch({
-        ctx: { operationId: 'stop-order', operationName: 'sync' } as never,
+        ctx: { operationId: 'stop-order', operationName: 'sync' },
         remotePeerId: peerId,
         contextGraphId: 'cg-stop-order',
         graphUri: 'urn:g',
@@ -150,6 +151,12 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       }),
     );
     await transferStarted;
+    expect(createFetcher).toHaveBeenCalledOnce();
+    expect(createFetcher.mock.calls[0][0]).toEqual({
+      mode: 'selected',
+      remotePeerId: peerId,
+      requesterScope: expect.stringMatching(/^selected-swm-meta:retained:\d+$/),
+    });
     // Initial ownership deliberately clears any orphaned cursor for this fresh
     // scope; observe only the later shutdown release.
     deleteCheckpoint.mockClear();
@@ -159,7 +166,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     Object.assign(agent, {
       started: true,
       chainPoller: null,
-      selectedSwmMetaTransfers: transfers,
+      swmMetaTransfers: transfers,
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
@@ -174,7 +181,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       store: {
         close: vi.fn(async () => {
           expect(deleteCheckpoint).toHaveBeenCalledWith('retained-stop-checkpoint');
-          expect(agent.selectedSwmMetaTransfers).toBeUndefined();
+          expect(agent.swmMetaTransfers).toBeUndefined();
           events.push('store-close');
         }),
       },
@@ -185,7 +192,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     await vi.waitFor(() => expect(agent.node.stop).toHaveBeenCalledOnce());
     expect(agent.store.close).not.toHaveBeenCalled();
     expect(deleteCheckpoint).not.toHaveBeenCalled();
-    expect(agent.selectedSwmMetaTransfers).toBe(transfers);
+    expect(agent.swmMetaTransfers).toBe(transfers);
 
     releaseTransfer();
     await Promise.all([transfer, stopping]);
@@ -246,9 +253,8 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
         queuedStarted = true;
       }
     }, () => undefined);
-    const { dispatcher } = scheduling;
-    const active = dispatcher.triggerManual('active');
-    const queuedOutcome = dispatcher.triggerManual('queued').catch((error) => error);
+    const active = scheduling.triggerManual('active');
+    const queuedOutcome = scheduling.triggerManual('queued').catch((error) => error);
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
     const agent = syntheticShutdownAgent();
@@ -303,8 +309,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
         async () => activeGate,
         () => undefined,
       );
-      const { dispatcher } = scheduling;
-      void dispatcher.triggerManual('stuck');
+        void scheduling.triggerManual('stuck');
       await new Promise((resolve) => setTimeout(resolve, 0));
 
       const closeStore = vi.fn(async () => {});
