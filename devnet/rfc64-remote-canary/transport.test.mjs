@@ -55,6 +55,40 @@ test('bounded commands reject oversized stdout and stderr', async () => {
   }
 });
 
+test('oversized command output is discarded while a SIGTERM-resistant child drains', {
+  skip: process.platform === 'win32',
+}, async () => {
+  let samples = 0;
+  let maxRetainedBytes = 0;
+  await assert.rejects(
+    runBoundedCommandV1({
+      argv: [
+        process.execPath,
+        '-e',
+        [
+          "process.on('SIGTERM', () => {});",
+          "const chunk = 'x'.repeat(65536);",
+          'function write() {',
+          '  while (process.stdout.write(chunk)) {}',
+          "  process.stdout.once('drain', write);",
+          '}',
+          'write();',
+        ].join('\n'),
+      ],
+    }, 5_000, {
+      terminationGraceMs: 100,
+      observeRetainedOutputBytes: ({ stdoutBytes, stderrBytes }) => {
+        samples += 1;
+        maxRetainedBytes = Math.max(maxRetainedBytes, stdoutBytes + stderrBytes);
+      },
+    }),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'command-output-too-large',
+  );
+  assert.ok(samples > 2, 'child output was drained after termination started');
+  assert.ok(maxRetainedBytes <= MAX_COMMAND_OUTPUT_BYTES);
+});
+
 test('bounded commands reject spawn failures', async () => {
   await assert.rejects(
     runBoundedCommandV1({ argv: ['/definitely/missing-rfc64-command'] }),
