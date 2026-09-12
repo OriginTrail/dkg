@@ -190,6 +190,19 @@ export function resolveRfc64CatalogExecutionPlanAuthorityV1(
   });
 }
 
+/**
+ * Resolve the effective mode for one graph without mistaking the sparse
+ * operator-override map for the complete selected-authority plan.
+ */
+export function resolveRfc64CatalogExecutionPlanModeV1(
+  plan: Rfc64CatalogExecutionPlanV1,
+  contextGraphId: string,
+): Rfc64CatalogRolloutModeV1 {
+  return plan.selectedAuthority[contextGraphId]?.mode
+    ?? plan.contextGraphModes[contextGraphId]
+    ?? plan.responsibilityDefaultMode;
+}
+
 export interface Rfc64CatalogResponsibilityAuthorityInputV1 {
   readonly contextGraphId: string;
   readonly responsible: boolean;
@@ -643,11 +656,8 @@ export function rfc64ExecutionPlanAllowsLegacySyncV1(
 ): boolean {
   if (plan.killSwitchActive) return true;
   const configuredAuthority = plan.selectedAuthority[contextGraphId];
-  if (configuredAuthority !== undefined) {
-    return configuredAuthority.legacySyncAllowed;
-  }
-  return (plan.contextGraphModes[contextGraphId] ?? plan.responsibilityDefaultMode)
-    !== 'catalog';
+  return configuredAuthority?.legacySyncAllowed
+    ?? resolveRfc64CatalogExecutionPlanModeV1(plan, contextGraphId) !== 'catalog';
 }
 
 function assertRolloutInputV1(

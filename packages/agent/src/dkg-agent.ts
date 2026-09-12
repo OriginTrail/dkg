@@ -464,6 +464,7 @@ import {
   assertResolvedRfc64CatalogActivationsV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
+  resolveRfc64CatalogExecutionPlanModeV1,
   resolveRfc64CatalogActivationsV1,
   resolveRfc64CatalogAuthoringPolicyV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
@@ -1518,8 +1519,10 @@ export class DKGAgent extends DKGAgentBase {
       provenanceEvents: config.metadataProvenanceEvents,
       resolveDurableRootPromotionAtomicCompanion: (input) => {
         const executionPlan = resolvedConfig.rfc64CatalogExecutionPlan;
-        const configuredMode = executionPlan.contextGraphModes[input.contextGraphId]
-          ?? executionPlan.responsibilityDefaultMode;
+        const configuredMode = resolveRfc64CatalogExecutionPlanModeV1(
+          executionPlan,
+          input.contextGraphId,
+        );
         if (!executionPlan.killSwitchActive && configuredMode !== 'legacy') return;
 
         // Ephemeral legacy mode has no durable state to protect across a later

@@ -95,6 +95,8 @@ import {
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
   '../src/rfc64/public-catalog-native-reconciler-v1.js';
+import { readRfc64LegacySwmBoundaryCountV1 } from
+  '../src/rfc64/legacy-swm-boundary-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
   type Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
@@ -6658,6 +6660,95 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         appliedRowCount: '1',
       }),
     );
+  }, 60_000);
+
+  it('publishes inherited deprecated-public catalog authority without a legacy boundary', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const author = await startNativeAgentWithOptions({
+      name: 'inherited-deprecated-public-catalog-publisher',
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
+      catalogActivation: {
+        rollout: { defaultMode: 'legacy' },
+      },
+      activation: {
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+            targets: [],
+          }],
+        },
+      },
+    });
+    const executionPlan = (author as any).config.rfc64CatalogExecutionPlan;
+    expect(executionPlan.contextGraphModes).toEqual({});
+    expect(executionPlan.selectedAuthority[CONTEXT_GRAPH_ID]).toMatchObject({
+      mode: 'catalog',
+      track2Enabled: true,
+    });
+
+    const assertionCoordinate = 'inherited-catalog-promotion';
+    const seeded = await seedSignedSwmWorkspaceV1(author, {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      shareOperationId: 'inherited-catalog-share',
+      kaNumber: 86n,
+      accessPolicy: 'public',
+    });
+    const lifecycleUri = assertionLifecycleUri(
+      CONTEXT_GRAPH_ID,
+      AUTHOR,
+      assertionCoordinate,
+    );
+    const metaGraph = contextGraphMetaUri(CONTEXT_GRAPH_ID);
+    const workingGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH_ID,
+      MemoryLayer.WorkingMemory,
+      createGraphKnowledgeAssetScope(
+        seeded.canonicalSeal.kaUal,
+        seeded.canonicalSeal.assertionVersion,
+      ),
+    );
+    await author.store.insert([
+      ...PROJECTION_QUADS.map((quad) => ({ ...quad, graph: workingGraph })),
+      {
+        graph: metaGraph,
+        subject: lifecycleUri,
+        predicate: 'http://dkg.io/ontology/kaId',
+        object: '"86"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      },
+      {
+        graph: metaGraph,
+        subject: lifecycleUri,
+        predicate: 'http://dkg.io/ontology/reservedUal',
+        object: JSON.stringify(seeded.canonicalSeal.kaUal),
+      },
+      {
+        graph: metaGraph,
+        subject: lifecycleUri,
+        predicate: ASSERTION_SEAL_PREDICATES.CONTENT_SCOPE_VERSION,
+        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      },
+      {
+        graph: metaGraph,
+        subject: lifecycleUri,
+        predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
+        object: `"${seeded.canonicalSeal.assertionVersion}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+      },
+    ]);
+    await expect(author.publisher.assertionPromote(
+      CONTEXT_GRAPH_ID,
+      assertionCoordinate,
+      AUTHOR,
+      { publisherPeerId: author.peerId, accessPolicy: 'public' },
+    )).resolves.toMatchObject({
+      promotedAllRoots: true,
+    });
+    expect(readRfc64LegacySwmBoundaryCountV1(author, CONTEXT_GRAPH_ID)).toBe(0);
   }, 60_000);
 
   it('keeps a root SHARE written after legacy capture incomplete across catalog re-enable', async () => {
