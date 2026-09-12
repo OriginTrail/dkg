@@ -17,8 +17,20 @@ import { validateNodePreflightV1 } from './preflight.mjs';
 import { askConfiguredQueryV1 } from './query.mjs';
 import { opaqueRef } from './references.mjs';
 
+/** @typedef {import('./domain-contract.js').CanaryCommandResultV1} CanaryCommandResultV1 */
+/** @typedef {import('./domain-contract.js').CanaryRequesterV1} CanaryRequesterV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryLifecycleV1} NormalizedCanaryLifecycleV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryNodeV1} NormalizedCanaryNodeV1 */
+/** @typedef {import('./domain-contract.js').NormalizedRemoteCanaryConfigV1} NormalizedRemoteCanaryConfigV1 */
+/** @typedef {Readonly<{ assetName: string, subject: string, predicate: string, value: string }>} CanaryMarkerV1 */
+/** @typedef {(command: import('./domain-contract.js').CanaryCommandV1, timeoutMs?: number) => Promise<CanaryCommandResultV1>} RunCommandV1 */
+/** @typedef {(milliseconds: number) => Promise<void>} SleepV1 */
+/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, request: CanaryRequesterV1, sleep: SleepV1 }>} SwmInputV1 */
+/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, lifecycle: NormalizedCanaryLifecycleV1, request: CanaryRequesterV1, runCommand: RunCommandV1, sleep: SleepV1 }>} OfflineInputV1 */
+
 const REQUIRED_OFFLINE_PROBES = 3;
 
+/** @returns {CanaryMarkerV1} */
 function createMarker() {
   const nonce = randomUUID();
   return Object.freeze({
@@ -29,6 +41,7 @@ function createMarker() {
   });
 }
 
+/** @param {SwmInputV1} input */
 export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
     const marker = createMarker();
@@ -60,6 +73,7 @@ export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
   });
 }
 
+/** @param {OfflineInputV1} input */
 export async function verifyOfflineCatchupV1({
   config,
   lifecycle,
@@ -83,7 +97,7 @@ export async function verifyOfflineCatchupV1({
       request,
     );
     await assertReceiverOfflineV1(lifecycle.receiver, request);
-    return [contextGraph, marker];
+    return /** @type {const} */ ([contextGraph, marker]);
   }));
 
   const evidence = await mapCanaryPhaseV1(markers, async ([contextGraph, marker]) => {
@@ -111,6 +125,12 @@ export async function verifyOfflineCatchupV1({
 }
 
 /** Own the receiver lifecycle boundary independently of catch-up evidence. */
+/**
+ * @template Result
+ * @param {OfflineInputV1} input
+ * @param {() => Result | Promise<Result>} operation
+ * @returns {Promise<Result>}
+ */
 export async function withReceiverOfflineV1({
   config,
   lifecycle,
@@ -182,9 +202,10 @@ export async function withReceiverOfflineV1({
     () => failure('receiver-did-not-recover', 'lifecycle'),
     { retryError: isRetryableRecoveryReadinessErrorV1 },
   );
-  return operationResult;
+  return /** @type {Result} */ (operationResult);
 }
 
+/** @param {unknown} error @returns {boolean} */
 function isRetryableRecoveryReadinessErrorV1(error) {
   return isRetryableNodeRequestErrorV1(error)
     || (error instanceof RemoteCanaryError && [
@@ -194,6 +215,7 @@ function isRetryableRecoveryReadinessErrorV1(error) {
     ].includes(error.code));
 }
 
+/** @param {Pick<SwmInputV1, 'config' | 'request'>} input */
 export function verifyCatalogSwmV1({ config, request }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
     if (contextGraph.catalogSwmAskSparql === undefined) {
@@ -233,6 +255,12 @@ export function verifyCatalogSwmV1({ config, request }) {
   });
 }
 
+/**
+ * @param {NormalizedCanaryNodeV1} node
+ * @param {string} contextGraphId
+ * @param {CanaryMarkerV1} marker
+ * @param {CanaryRequesterV1} request
+ */
 async function shareMarkerV1(node, contextGraphId, marker, request) {
   const result = await request.json(node, 'POST', '/api/knowledge-assets', {
     contextGraphId,
@@ -244,20 +272,39 @@ async function shareMarkerV1(node, contextGraphId, marker, request) {
     }],
     alsoShareSwm: true,
   });
-  if (result.swmShared !== true) throw failure('swm-share-not-confirmed', 'swm');
+  if (
+    result === null
+    || typeof result !== 'object'
+    || Array.isArray(result)
+    || /** @type {Record<string, unknown>} */ (result).swmShared !== true
+  ) throw failure('swm-share-not-confirmed', 'swm');
 }
 
+/** @param {NormalizedCanaryNodeV1} receiver @param {CanaryRequesterV1} request */
 async function assertReceiverOfflineV1(receiver, request) {
   if (await request.reachable(receiver)) {
     throw failure('receiver-became-reachable-during-offline-window', 'lifecycle');
   }
 }
 
+/**
+ * @param {NormalizedCanaryNodeV1} node
+ * @param {string} contextGraphId
+ * @param {CanaryMarkerV1} marker
+ * @param {'shared-working-memory'} view
+ * @param {CanaryRequesterV1} request
+ */
 async function askMarkerV1(node, contextGraphId, marker, view, request) {
   const result = await request.json(node, 'POST', '/api/query', {
     sparql: `ASK { <${marker.subject}> <${marker.predicate}> ${JSON.stringify(marker.value)} . }`,
     contextGraphId,
     view,
   });
-  return result.result?.type === 'boolean' && result.result.value === true;
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) return false;
+  const queryResult = /** @type {Record<string, unknown>} */ (result).result;
+  return queryResult !== null
+    && typeof queryResult === 'object'
+    && !Array.isArray(queryResult)
+    && /** @type {Record<string, unknown>} */ (queryResult).type === 'boolean'
+    && /** @type {Record<string, unknown>} */ (queryResult).value === true;
 }

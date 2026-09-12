@@ -157,6 +157,28 @@ export interface CanaryCommandResultV1 {
   readonly stdout: string;
 }
 
+export interface CanaryHttpResponseV1 {
+  readonly status: number;
+  readonly text: string;
+}
+
+export interface CanaryRequesterV1 {
+  raw(
+    node: NormalizedCanaryNodeV1,
+    method: string,
+    path: string,
+    body?: unknown,
+    authentication?: 'node' | 'none',
+  ): Promise<CanaryHttpResponseV1>;
+  json(
+    node: NormalizedCanaryNodeV1,
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<unknown>;
+  reachable(node: NormalizedCanaryNodeV1): Promise<boolean>;
+}
+
 export interface RemoteCanaryDependenciesV1 {
   readonly fetchFn?: typeof fetch;
   readonly readFileFn?: (path: string, encoding: BufferEncoding) => Promise<string>;

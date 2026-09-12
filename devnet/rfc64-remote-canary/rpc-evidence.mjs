@@ -7,6 +7,12 @@ import addFormats from 'ajv-formats';
 
 import { failure } from './errors.mjs';
 
+/** @typedef {import('./domain-contract.js').CanaryCommandResultV1} CanaryCommandResultV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryRpcUsageV1} NormalizedCanaryRpcUsageV1 */
+/** @typedef {Readonly<{ windowStartedAt: string, windowEndedAt: string, total: number, byMethod: Readonly<Record<string, number>> }>} RpcUsageSampleV1 */
+/** @typedef {Readonly<{ schema: 'dkg-rpc-usage-minutes-v1', scope: 'certified-cohort', expectedCommit: string, cohortRef: string, samples: readonly RpcUsageSampleV1[] }>} RpcUsageEvidenceV1 */
+/** @typedef {Readonly<{ readFileFn: (path: string, encoding: BufferEncoding) => Promise<string>, runCommand: (command: import('./domain-contract.js').CanaryCommandV1, timeoutMs?: number) => Promise<CanaryCommandResultV1>, startedAt: string, observedAt: string, expectedCommit: string, cohortRef: string }>} RpcEvidenceContextV1 */
+
 const MAX_RPC_EVIDENCE_BYTES = 1_048_576;
 const RPC_EVIDENCE_CLOCK_SKEW_MS = 60_000;
 const RPC_EVIDENCE_MAX_PRECEDING_MS = 5 * 60_000;
@@ -16,10 +22,14 @@ const rpcEvidenceSchema = JSON.parse(readFileSync(
   new URL('./rpc-usage-evidence.schema.json', import.meta.url),
   'utf8',
 ));
+// @ts-expect-error Runtime ESM interop is covered by the evidence tests.
 const rpcSchemaValidator = new Ajv2020({ allErrors: false, strict: true });
+// @ts-expect-error Runtime ESM interop is covered by the evidence tests.
 addFormats(rpcSchemaValidator);
+/** @type {import('ajv').ValidateFunction<RpcUsageEvidenceV1>} */
 const matchesRpcEvidenceV1 = rpcSchemaValidator.compile(rpcEvidenceSchema);
 
+/** @param {NormalizedCanaryRpcUsageV1} config @param {RpcEvidenceContextV1} context */
 export async function collectRpcUsageEvidenceV1(config, context) {
   if (config.kind === 'required') {
     return Object.freeze({
@@ -28,7 +38,7 @@ export async function collectRpcUsageEvidenceV1(config, context) {
       acceptedSources: Object.freeze(['evidence-file', 'command']),
     });
   }
-  let text;
+  let text = '';
   if (config.kind === 'evidence-file') {
     text = await context.readFileFn(config.path, 'utf8').catch(() => {
       throw failure('rpc-evidence-read-failed', 'evidence');
@@ -41,14 +51,17 @@ export async function collectRpcUsageEvidenceV1(config, context) {
   if (Buffer.byteLength(text) > MAX_RPC_EVIDENCE_BYTES) {
     throw failure('rpc-evidence-too-large', 'evidence');
   }
-  let evidence;
+  /** @type {unknown} */
+  let parsed;
   try {
-    evidence = JSON.parse(text);
-    if (!matchesRpcEvidenceV1(evidence)) throw new Error('rpc-evidence-malformed');
+    parsed = JSON.parse(text);
+    if (!matchesRpcEvidenceV1(parsed)) throw new Error('rpc-evidence-malformed');
   } catch {
     throw failure('rpc-evidence-malformed', 'evidence');
   }
+  const evidence = /** @type {RpcUsageEvidenceV1} */ (parsed);
   const samples = validateRpcEvidenceV1(evidence, config.minimumSamples, context);
+  /** @type {Record<string, number>} */
   const byMethod = {};
   let total = 0;
   let durationSeconds = 0;
@@ -59,12 +72,17 @@ export async function collectRpcUsageEvidenceV1(config, context) {
       byMethod[method] = checkedRpcCountAddV1(byMethod[method] ?? 0, count);
     }
   }
+  const firstSample = samples[0];
+  const lastSample = samples.at(-1);
+  if (firstSample === undefined || lastSample === undefined) {
+    throw failure('rpc-evidence-sample-count', 'evidence');
+  }
   return Object.freeze({
     status: 'PASS',
     source: config.kind,
     cohortRef: context.cohortRef,
-    windowStartedAt: samples[0].windowStartedAt,
-    windowEndedAt: samples.at(-1).windowEndedAt,
+    windowStartedAt: firstSample.windowStartedAt,
+    windowEndedAt: lastSample.windowEndedAt,
     sampleCount: samples.length,
     measuredSeconds: durationSeconds,
     total,
@@ -73,6 +91,12 @@ export async function collectRpcUsageEvidenceV1(config, context) {
   });
 }
 
+/**
+ * @param {RpcUsageEvidenceV1} evidence
+ * @param {number} minimumSamples
+ * @param {RpcEvidenceContextV1} context
+ * @returns {readonly RpcUsageSampleV1[]}
+ */
 export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
   if (evidence.expectedCommit.toLowerCase() !== context.expectedCommit) {
     throw failure('rpc-evidence-commit-mismatch', 'evidence');
@@ -103,8 +127,13 @@ export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
   });
   const runStart = Date.parse(context.startedAt);
   const observed = Date.parse(context.observedAt);
-  const earliest = Date.parse(samples[0].windowStartedAt);
-  const latest = Date.parse(samples.at(-1).windowEndedAt);
+  const firstSample = samples[0];
+  const lastSample = samples.at(-1);
+  if (firstSample === undefined || lastSample === undefined) {
+    throw failure('rpc-evidence-sample-count', 'evidence');
+  }
+  const earliest = Date.parse(firstSample.windowStartedAt);
+  const latest = Date.parse(lastSample.windowEndedAt);
   if (latest < runStart - RPC_EVIDENCE_MAX_PRECEDING_MS) {
     throw failure('rpc-evidence-stale', 'evidence');
   }
@@ -114,12 +143,14 @@ export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
   return samples;
 }
 
+/** @param {number} value */
 function assertRpcCountV1(value) {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw failure('rpc-evidence-count-out-of-range', 'evidence');
   }
 }
 
+/** @param {unknown} value @returns {number} */
 function canonicalInstant(value) {
   if (typeof value !== 'string') throw failure('rpc-evidence-time-invalid', 'evidence');
   const timestamp = Date.parse(value);
@@ -129,10 +160,12 @@ function canonicalInstant(value) {
   return timestamp;
 }
 
+/** @param {number} value @returns {number} */
 function round(value) {
   return Math.round(value * 1_000) / 1_000;
 }
 
+/** @param {number} left @param {number} right @returns {number} */
 function checkedRpcCountAddV1(left, right) {
   assertRpcCountV1(left);
   assertRpcCountV1(right);

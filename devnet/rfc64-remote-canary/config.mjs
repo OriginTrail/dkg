@@ -72,9 +72,10 @@ const sparqlParser = new SparqlParser();
  */
 export function validateRemoteCanaryConfigV1(input) {
   if (!matchesRemoteCanaryConfigV1(input)) invalid('config-shape');
+  const raw = /** @type {RawRemoteCanaryConfigV1} */ (input);
 
   const nodeIds = new Set();
-  const nodes = input.nodes.map((node) => {
+  const nodes = raw.nodes.map((node) => {
     if (nodeIds.has(node.id)) invalid('duplicate-node-id');
     nodeIds.add(node.id);
     const baseUrl = validateBaseUrl(node.baseUrl, node.allowTailscaleHttp === true);
@@ -86,7 +87,7 @@ export function validateRemoteCanaryConfigV1(input) {
 
   const nodeById = new Map(nodes.map((node) => [node.id, node]));
   const contextGraphIds = new Set();
-  const contextGraphs = input.contextGraphs.map((entry) => {
+  const contextGraphs = raw.contextGraphs.map((entry) => {
     if (contextGraphIds.has(entry.id)) invalid('duplicate-context-graph');
     contextGraphIds.add(entry.id);
     if (!nodeIds.has(entry.sourceNodeId) || !nodeIds.has(entry.receiverNodeId)) {
@@ -112,27 +113,27 @@ export function validateRemoteCanaryConfigV1(input) {
   if (receiverNodeIds.size !== 1) invalid('exactly-one-receiver-required');
   const receiverNodeId = [...receiverNodeIds][0];
   if (receiverNodeId === undefined) invalid('exactly-one-receiver-required');
-  const lifecycle = input.lifecycle === undefined || input.lifecycle === null
+  const lifecycle = raw.lifecycle === undefined || raw.lifecycle === null
     ? null
-    : normalizeLifecycle(input.lifecycle, nodeById, receiverNodeId);
+    : normalizeLifecycle(raw.lifecycle, nodeById, receiverNodeId);
   const authorizationChecks = Object.freeze({
     unauthorized: normalizeAuthorizationCheck(
-      input.authorizationChecks.unauthorized,
+      raw.authorizationChecks.unauthorized,
       'unauthorized',
       nodeById,
     ),
     revoked: normalizeAuthorizationCheck(
-      input.authorizationChecks.revoked,
+      raw.authorizationChecks.revoked,
       'revoked',
       nodeById,
     ),
   });
-  const rpcUsage = normalizeRpcUsage(input.rpcUsage);
-  const timing = normalizeTiming(input.timing);
+  const rpcUsage = normalizeRpcUsage(raw.rpcUsage);
+  const timing = normalizeTiming(raw.timing);
 
   return Object.freeze({
     schema: CONFIG_SCHEMA,
-    expectedCommit: input.expectedCommit.toLowerCase(),
+    expectedCommit: raw.expectedCommit.toLowerCase(),
     nodes: Object.freeze(nodes),
     contextGraphs: Object.freeze(contextGraphs),
     lifecycle,
@@ -149,13 +150,22 @@ export function validateRemoteCanaryConfigV1(input) {
 export function createRemoteCanaryCohortRefV1(config) {
   return opaqueRef('cohort', JSON.stringify({
     expectedCommit: config.expectedCommit,
-    nodes: config.nodes.map(({ id, role, baseUrl }) => ({ id, role, baseUrl })),
-    contextGraphs: config.contextGraphs.map((entry) => ({
-      id: entry.id,
-      sourceNodeId: entry.sourceNodeId,
-      receiverNodeId: entry.receiverNodeId,
-    })),
+    nodes: config.nodes
+      .map(({ id, role, baseUrl }) => ({ id, role, baseUrl }))
+      .sort((left, right) => compareCanonicalText(left.id, right.id)),
+    contextGraphs: config.contextGraphs
+      .map(({ id, sourceNodeId, receiverNodeId }) => ({
+        id,
+        sourceNodeId,
+        receiverNodeId,
+      }))
+      .sort((left, right) => compareCanonicalText(left.id, right.id)),
   }));
+}
+
+/** @param {string} left @param {string} right @returns {number} */
+function compareCanonicalText(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 /** @param {string} value @returns {string} */
@@ -376,22 +386,49 @@ function validateAskSparql(value, label) {
   if (parsed.type !== 'query' || parsed.subType !== 'ask') {
     invalid(`${label}-query-must-be-ask`);
   }
-  const patterns = parsed.where?.subType === 'group' ? parsed.where.patterns : [];
-  const triples = patterns.flatMap((pattern) => (
-    pattern.subType === 'bgp' && Array.isArray(pattern.triples) ? pattern.triples : []
-  ));
-  const terms = triples.flatMap((triple) => {
+  const askQuery = /** @type {{ where?: unknown, context?: unknown }} */ (parsed);
+  const where = askQuery.where;
+  const whereRecord = where !== null && typeof where === 'object' && !Array.isArray(where)
+    ? /** @type {Record<string, unknown>} */ (where)
+    : null;
+  const patterns = whereRecord?.subType === 'group' && Array.isArray(whereRecord.patterns)
+    ? whereRecord.patterns
+    : [];
+  const triples = patterns.flatMap((candidate) => {
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+    const pattern = /** @type {Record<string, unknown>} */ (candidate);
+    return pattern.subType === 'bgp' && Array.isArray(pattern.triples) ? pattern.triples : [];
+  });
+  const terms = triples.flatMap((candidate) => {
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
+    const triple = /** @type {Record<string, unknown>} */ (candidate);
     if (!('subject' in triple) || !('predicate' in triple) || !('object' in triple)) return [];
     return [triple.subject, triple.predicate, triple.object];
   });
   const nestedTerms = terms.flatMap(collectSparqlTerms);
-  const iriContext = resolveSparqlIriContext(parsed.context ?? []);
+  const iriContext = resolveSparqlIriContext(
+    Array.isArray(askQuery.context) ? askQuery.context : [],
+  );
   if (
     patterns.length === 0
-    || patterns.some((pattern) => pattern.subType !== 'bgp' || pattern.triples.length === 0)
+    || patterns.some((candidate) => {
+      if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+        return true;
+      }
+      const pattern = /** @type {Record<string, unknown>} */ (candidate);
+      return pattern.subType !== 'bgp'
+        || !Array.isArray(pattern.triples)
+        || pattern.triples.length === 0;
+    })
     || triples.length === 0
     || !terms.some((term) => (
-      term?.type === 'term' && ['namedNode', 'literal'].includes(term.subType)
+      term !== null
+      && typeof term === 'object'
+      && !Array.isArray(term)
+      && /** @type {Record<string, unknown>} */ (term).type === 'term'
+      && ['namedNode', 'literal'].includes(
+        String(/** @type {Record<string, unknown>} */ (term).subType),
+      )
     ))
   ) invalid(`${label}-query-must-depend-on-data`);
   if (

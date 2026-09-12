@@ -5,9 +5,10 @@ import test from 'node:test';
 
 import {
   RemoteCanaryError,
+  createRemoteCanaryCohortRefV1,
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
-import { baseConfig } from './test-support.mjs';
+import { SECOND_CG, baseConfig } from './test-support.mjs';
 
 test('strict config rejects inline credentials and multiple receivers', () => {
   assert.throws(
@@ -95,6 +96,88 @@ test('normalization resolves the canonical execution topology once', () => {
   assert.equal('evidenceState' in config.rpcUsage, false);
   assert.match(contextGraph.contextGraphRef, /^cg:[0-9a-f]{20}$/u);
   assert.match(contextGraph.source.nodeRef, /^node:[0-9a-f]{20}$/u);
+});
+
+test('cohort references are clone-stable, order-independent, and bind every topology field', () => {
+  const raw = baseConfig();
+  raw.nodes.push({
+    id: 'gamma-observer',
+    role: 'observer',
+    baseUrl: 'https://observer.internal.example',
+    auth: { kind: 'none' },
+  });
+  raw.contextGraphs.push({
+    ...structuredClone(raw.contextGraphs[0]),
+    id: SECOND_CG,
+  });
+  const normalized = validateRemoteCanaryConfigV1(raw);
+  const reference = createRemoteCanaryCohortRefV1(normalized);
+  assert.equal(createRemoteCanaryCohortRefV1(structuredClone(normalized)), reference);
+
+  const reordered = structuredClone(raw);
+  reordered.nodes.reverse();
+  reordered.contextGraphs.reverse();
+  assert.equal(
+    createRemoteCanaryCohortRefV1(validateRemoteCanaryConfigV1(reordered)),
+    reference,
+  );
+
+  for (const [field, mutate] of [
+    ['expectedCommit', (config) => { config.expectedCommit = 'f'.repeat(40); }],
+    ['node.id', (config) => { config.nodes[2].id = 'gamma-observer-renamed'; }],
+    ['node.role', (config) => { config.nodes[2].role = 'source'; }],
+    ['node.baseUrl', (config) => {
+      config.nodes[2].baseUrl = 'https://observer-two.internal.example';
+    }],
+    ['contextGraph.id', (config) => { config.contextGraphs[1].id = `${SECOND_CG}-renamed`; }],
+  ]) {
+    const changed = structuredClone(raw);
+    mutate(changed);
+    assert.notEqual(
+      createRemoteCanaryCohortRefV1(validateRemoteCanaryConfigV1(changed)),
+      reference,
+      field,
+    );
+  }
+
+  const alternateSources = structuredClone(raw);
+  alternateSources.nodes.push({
+    id: 'delta-source',
+    role: 'source',
+    baseUrl: 'https://source-two.internal.example',
+    auth: { kind: 'none' },
+  });
+  const sourceReference = createRemoteCanaryCohortRefV1(
+    validateRemoteCanaryConfigV1(alternateSources),
+  );
+  alternateSources.contextGraphs[0].sourceNodeId = 'delta-source';
+  assert.notEqual(
+    createRemoteCanaryCohortRefV1(validateRemoteCanaryConfigV1(alternateSources)),
+    sourceReference,
+    'contextGraph.sourceNodeId',
+  );
+
+  const alternateReceivers = structuredClone(raw);
+  alternateReceivers.nodes.push({
+    id: 'delta-receiver',
+    role: 'receiver',
+    baseUrl: 'https://receiver-two.internal.example',
+    auth: { kind: 'bearer-file', secretFile: '/run/secrets/receiver-two' },
+  });
+  const receiverReference = createRemoteCanaryCohortRefV1(
+    validateRemoteCanaryConfigV1(alternateReceivers),
+  );
+  for (const contextGraph of alternateReceivers.contextGraphs) {
+    contextGraph.receiverNodeId = 'delta-receiver';
+  }
+  alternateReceivers.lifecycle.receiverNodeId = 'delta-receiver';
+  alternateReceivers.authorizationChecks.unauthorized.nodeId = 'delta-receiver';
+  alternateReceivers.authorizationChecks.revoked.nodeId = 'delta-receiver';
+  assert.notEqual(
+    createRemoteCanaryCohortRefV1(validateRemoteCanaryConfigV1(alternateReceivers)),
+    receiverReference,
+    'contextGraph.receiverNodeId',
+  );
 });
 
 test('schema owns numeric bounds while normalization applies canonical defaults', () => {

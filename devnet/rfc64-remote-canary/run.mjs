@@ -13,11 +13,15 @@ import {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ARTIFACT = join(HERE, 'artifacts', 'latest.json');
 
+/** @typedef {{ config: string, artifact: string, dryRun: boolean }} ParsedArgsV1 */
+
 function usage() {
   return 'Usage: node run.mjs --config /absolute/config.json [--artifact /absolute/result.json] [--dry-run]';
 }
 
+/** @param {readonly string[]} argv @returns {ParsedArgsV1} */
 function parseArgs(argv) {
+  /** @type {Partial<ParsedArgsV1> & Pick<ParsedArgsV1, 'artifact' | 'dryRun'>} */
   const parsed = { artifact: DEFAULT_ARTIFACT, dryRun: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -25,7 +29,8 @@ function parseArgs(argv) {
     else if (arg === '--config' || arg === '--artifact') {
       const value = argv[index + 1];
       if (value === undefined) throw new Error('missing-argument');
-      parsed[arg.slice(2)] = value;
+      if (arg === '--config') parsed.config = value;
+      else parsed.artifact = value;
       index += 1;
     } else if (arg === '--help' || arg === '-h') {
       process.stdout.write(`${usage()}\n`);
@@ -35,9 +40,10 @@ function parseArgs(argv) {
   if (typeof parsed.config !== 'string') throw new Error('config-required');
   if (!isAbsolute(parsed.config)) throw new Error('config-path-must-be-absolute');
   parsed.artifact = resolve(parsed.artifact);
-  return parsed;
+  return /** @type {ParsedArgsV1} */ (parsed);
 }
 
+/** @param {string} path @returns {Promise<string>} */
 async function canonicalizePotentialPath(path) {
   let cursor = resolve(path);
   const missingSegments = [];
@@ -45,7 +51,7 @@ async function canonicalizePotentialPath(path) {
     try {
       return join(await realpath(cursor), ...missingSegments);
     } catch (error) {
-      if (error?.code !== 'ENOENT') throw error;
+      if (!hasErrorCode(error, 'ENOENT')) throw error;
       const parent = dirname(cursor);
       if (parent === cursor) return resolve(path);
       missingSegments.unshift(basename(cursor));
@@ -54,15 +60,17 @@ async function canonicalizePotentialPath(path) {
   }
 }
 
+/** @param {string} path */
 async function statIfPresent(path) {
   try {
     return await stat(path);
   } catch (error) {
-    if (error?.code === 'ENOENT') return null;
+    if (hasErrorCode(error, 'ENOENT')) return null;
     throw error;
   }
 }
 
+/** @param {string} configPath @param {string} artifactPath */
 async function assertDistinctConfigAndArtifactPaths(configPath, artifactPath) {
   const resolvedConfig = resolve(configPath);
   const resolvedArtifact = resolve(artifactPath);
@@ -84,6 +92,14 @@ async function assertDistinctConfigAndArtifactPaths(configPath, artifactPath) {
       && configStat.ino === artifactStat.ino
     )
   ) throw new RemoteCanaryError('config-artifact-path-alias', 'configuration');
+}
+
+/** @param {unknown} error @param {string} code @returns {boolean} */
+function hasErrorCode(error, code) {
+  return error !== null
+    && typeof error === 'object'
+    && !Array.isArray(error)
+    && /** @type {{ code?: unknown }} */ (error).code === code;
 }
 
 try {

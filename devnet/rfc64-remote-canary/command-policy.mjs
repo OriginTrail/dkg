@@ -3,6 +3,7 @@
 import { invalid } from './errors.mjs';
 
 /** Reject command arguments that could persist credentials in configuration or evidence. */
+/** @param {import('./domain-contract.js').CanaryCommandV1} value */
 export function validateCommandV1(value) {
   for (const arg of value.argv) {
     const concatenatedHeader = /^-H(.+)$/su.exec(arg)?.[1]
