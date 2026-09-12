@@ -148,6 +148,20 @@ describe('OriginTrail/dkg#633 — private graph stores plaintext RDF terms', () 
       },
     ]);
     await ps.storePrivateTriples(CG, EVENT, [
+      // Model a captured event list: an rdf:type alone also describes nested
+      // resources and does not establish EPCIS event identity (#709).
+      {
+        subject: 'urn:uuid:repro-633-epcis-body',
+        predicate: 'https://gs1.github.io/EPCIS/eventList',
+        object: `<${EVENT}>`,
+        graph: '',
+      },
+      {
+        subject: EVENT,
+        predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset',
+        object: '"+00:00"',
+        graph: '',
+      },
       {
         subject: EVENT,
         predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',

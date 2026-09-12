@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { parseQueryParams, hasAtLeastOneFilter, hasValidDateRange } from '../src/utils.js';
+import { parseEventsRequest, parseQueryParams, hasAtLeastOneFilter, hasValidDateRange } from '../src/utils.js';
+
+it('normalizes aliases once into disjoint filters and HTTP paging', () => {
+  const sp = new URLSearchParams('MATCH_epc=urn:standard&epc=urn:alias&limit=50&perPage=10&offset=200&finalized=false');
+  const request = parseEventsRequest(sp);
+  expect(request).toEqual({ filters: { epc: 'urn:standard' }, page: { perPage: 10, offset: 200 }, finalized: false });
+  expect(parseQueryParams(sp)).toEqual({ ...request.filters, ...request.page, finalized: request.finalized });
+  expect(parseEventsRequest(new URLSearchParams())).toEqual({ filters: {}, page: {}, finalized: true });
+});
 
 describe('parseQueryParams', () => {
   it('extracts string params from URLSearchParams', () => {
@@ -31,7 +39,7 @@ describe('parseQueryParams', () => {
 
   it('fullTrace=true without epc has no effect (fullTrace is resolved, not passed through)', () => {
     const params = parseQueryParams(new URLSearchParams('fullTrace=true'));
-    expect(params.fullTrace).toBeUndefined();
+    expect(params).not.toHaveProperty('fullTrace');
     expect(params.anyEPC).toBeUndefined();
   });
 
@@ -42,11 +50,8 @@ describe('parseQueryParams', () => {
     expect(params.offset).toBe(200);
   });
 
-  it('ignores non-numeric limit/offset', () => {
-    const params = parseQueryParams(new URLSearchParams('limit=abc&offset=xyz'));
-
-    expect(params.perPage).toBeUndefined();
-    expect(params.offset).toBeUndefined();
+  it.each(['limit=abc', 'offset=xyz'])('rejects non-numeric pagination %s', (params) => {
+    expect(() => parseQueryParams(new URLSearchParams(params))).toThrow('safe integer');
   });
 
   it('returns only defined params (no undefined keys polluting the object)', () => {
@@ -101,7 +106,7 @@ describe('parseQueryParams', () => {
 
     expect(params.anyEPC).toBe('urn:epc:trace');
     expect(params.epc).toBeUndefined();
-    expect(params.fullTrace).toBeUndefined();
+    expect(params).not.toHaveProperty('fullTrace');
   });
 
   it('MATCH_anyEPC takes precedence over epc+fullTrace combo', () => {

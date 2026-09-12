@@ -42,6 +42,14 @@ function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<s
 }
 
 describe('handleEventsQuery', () => {
+  it.each(['not an event name', 'https://example.org/Event>', 'urn:epcis:bad type'])('rejects invalid eventType %s with 400 before querying', async (eventType) => {
+    const { engine, calls } = createTrackingQueryEngine();
+    await expect(handleEventsQuery(new URLSearchParams({ eventType }), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(calls).toHaveLength(0);
+  });
+
   it('returns EPCISQueryDocument envelope with reconstructed events', async () => {
     const { engine, calls } = createTrackingQueryEngine([
       makeBindings({
@@ -201,7 +209,7 @@ describe('handleEventsQuery', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    expect(calls[0].sparql).toContain('FILTER(?eventType = <https://gs1.github.io/EPCIS/ObjectEvent>)');
+    expect(calls[0].sparql).toContain('FILTER(?eventType IN (<https://gs1.github.io/EPCIS/ObjectEvent>, <https://ref.gs1.org/epcis/ObjectEvent>))');
   });
 
   it('passes action filter through to SPARQL query via alias', async () => {
@@ -234,7 +242,7 @@ describe('handleEventsQuery', () => {
       { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
     );
 
-    expect(calls[0].sparql).toContain('epcis:readPoint <urn:epc:id:sgln:4012345.00001.0>');
+    expect(calls[0].sparql).toContain('?_epcis_readPoint_filter <urn:epc:id:sgln:4012345.00001.0>');
   });
 
   it('passes extension configurationId and shipmentId filters through to SPARQL', async () => {
@@ -419,6 +427,11 @@ describe('toEpcisEvent', () => {
     const binding = makeBindings({ eventType: 'https://gs1.github.io/EPCIS/ObjectEvent' });
     const event = toEpcisEvent(binding);
     expect(event.type).toBe('ObjectEvent');
+  });
+
+  it('preserves the namespace of a GS1 extended event type in responses', () => {
+    expect(toEpcisEvent(makeBindings({ eventType: 'https://gs1.github.io/EPCIS/CustomEvent' })).type)
+      .toBe('https://gs1.github.io/EPCIS/CustomEvent');
   });
 
   it('strips AggregationEvent URI to short name', () => {

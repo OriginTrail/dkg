@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { handleEpcisRoutes } from '../src/daemon/routes/epcis.js';
-import type { RequestContext } from '../src/daemon/routes/context.js';
+import { createRequestActor, type RequestContext, type RequestContextInputFields } from '../src/daemon/routes/context.js';
+import { resolveRfc64PublicCatalogActivation, resolveRfc64PublicCatalogActivationChainIdentityV1 } from '../src/config.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const VALID_OBJECT_EVENT_DOC = {
@@ -107,7 +108,7 @@ function readyPublisherState(): RequestContext['publisherState'] {
 
 function createContext(overrides: Partial<RequestContext> = {}): RequestContext {
   const url = new URL('http://127.0.0.1/api/epcis/capture');
-  const context: RequestContext = {
+  const context: Omit<RequestContextInputFields, 'actor'> = {
     req: createRequest(),
     res: createResponse() as unknown as ServerResponse,
     agent: {
@@ -121,6 +122,9 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
       epcis: { contextGraphId: 'epcis-test' },
       publisher: { enabled: true },
     } as RequestContext['config'],
+    rfc64PublicCatalog: resolveRfc64PublicCatalogActivation({}, resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430')),
+    routePlugins: [],
+    admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
     startedAt: 0,
     dashDb: {} as RequestContext['dashDb'],
     opWallets: { adminWallet: { address: '0x0', privateKey: '0x0' }, wallets: [] } as RequestContext['opWallets'],
@@ -151,7 +155,11 @@ function createContext(overrides: Partial<RequestContext> = {}): RequestContext 
       ? unavailablePublisherState('publisher_startup_failed')
       : unavailablePublisherState('publisher_disabled');
   }
-  return context;
+  // The fixture supplies the opaque dispatch brand only after building a correlated actor.
+  return {
+    ...context,
+    actor: overrides.actor ?? createRequestActor(context.authentication, () => context.requestAgentAddress),
+  } as RequestContext;
 }
 
 function responseBody(ctx: RequestContext): Record<string, unknown> {
@@ -437,6 +445,20 @@ describe('EPCIS events query route — per-request CG + sub-graph', () => {
     } as unknown as RequestContext['agent'];
     return { agent, calls };
   }
+
+  it.each([
+    ['offset=999999', 'EPCIS offset must be a safe integer no greater than 10000; narrow the event or time filters'],
+    ['perPage=abc', 'EPCIS page size must be a nonnegative safe integer'],
+    ['limit=abc', 'EPCIS page size must be a nonnegative safe integer'],
+    ['perPage=1.5', 'EPCIS page size must be a nonnegative safe integer'],
+  ])('serializes the public pagination error for %s before querying', async (params, error) => {
+    const { agent, calls } = captureSparql();
+    const ctx = createGetContext(`/api/epcis/events?${params}`, { agent });
+    await handleEpcisRoutes(ctx);
+    expect(ctx.res.statusCode).toBe(400);
+    expect(responseBody(ctx)).toEqual({ error });
+    expect(calls).toHaveLength(0);
+  });
 
   it('keeps existing config-only callers working (back-compat: no contextGraphId in query string)', async () => {
     const { agent, calls } = captureSparql();

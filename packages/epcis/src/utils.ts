@@ -1,4 +1,5 @@
-import type { EpcisQueryParams } from './types.js';
+import { EpcisQueryValidationError } from './query-validation.js';
+import type { EpcisQueryParams, EpcisEventFilters, EpcisEventsRequest, EpcisPageParams } from './types.js';
 
 /** Decode a base64 nextPageToken ("offset:N") to its numeric offset, or null if invalid. */
 export function decodePageToken(token: string): number | null {
@@ -19,7 +20,7 @@ export function encodePageToken(offset: number): string {
 const FILTER_KEYS = ['eventID', 'epc', 'bizStep', 'bizLocation', 'from', 'to', 'parentID', 'childEPC', 'inputEPC', 'outputEPC', 'configurationId', 'shipmentId', 'eventType', 'action', 'disposition', 'readPoint'] as const;
 
 /** Maps EPCIS 2.0 standard parameter names to internal canonical names. */
-const STANDARD_TO_CANONICAL: Record<string, keyof EpcisQueryParams> = {
+const STANDARD_TO_CANONICAL: Record<string, keyof EpcisEventFilters> = {
   MATCH_epc: 'epc',
   EQ_bizStep: 'bizStep',
   EQ_bizLocation: 'bizLocation',
@@ -50,14 +51,23 @@ function resolveParam(sp: URLSearchParams, canonical: string): string | undefine
   return undefined;
 }
 
-/** Parse URLSearchParams into typed EpcisQueryParams. */
-export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
-  const params: EpcisQueryParams = { finalized: true };
+/** A supplied numeric field must not silently become an omitted field. */
+function parsePaginationInteger(value: string, name: string): number {
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new EpcisQueryValidationError(`EPCIS ${name} must be a nonnegative safe integer`);
+  }
+  return Number(value);
+}
+
+/** Normalize HTTP aliases once, keeping event filters separate from paging. */
+export function parseEventsRequest(sp: URLSearchParams): EpcisEventsRequest {
+  const filters: EpcisEventFilters = {};
+  const page: EpcisPageParams = {};
 
   for (const key of FILTER_KEYS) {
     const val = resolveParam(sp, key);
     if (val !== undefined) {
-      (params as Record<string, string>)[key] = val;
+      filters[key] = val;
     }
   }
 
@@ -71,48 +81,43 @@ export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
   // failed to apply.
   const anyEpcStandard = sp.get('MATCH_anyEPC') ?? sp.get('anyEPC');
   if (anyEpcStandard != null && anyEpcStandard !== '') {
-    params.anyEPC = anyEpcStandard;
-    delete params.epc;
+    filters.anyEPC = anyEpcStandard;
+    delete filters.epc;
   } else {
     const fullTrace = sp.get('fullTrace');
-    if (fullTrace === 'true' && params.epc) {
-      params.anyEPC = params.epc;
-      delete params.epc;
+    if (fullTrace === 'true' && filters.epc) {
+      filters.anyEPC = filters.epc;
+      delete filters.epc;
     }
   }
 
-  const perPage = sp.get('perPage');
-  if (perPage != null && /^\d+$/.test(perPage)) {
-    params.perPage = Number.parseInt(perPage, 10);
-  }
-
-  // limit is an alias for perPage — only applies if perPage wasn't explicitly set
-  const limit = sp.get('limit');
-  if (params.perPage == null && limit != null && /^\d+$/.test(limit)) {
-    params.perPage = Number.parseInt(limit, 10);
-  }
+  // The explicit perPage value wins over its limit alias, including invalid input.
+  const perPage = sp.get('perPage') ?? sp.get('limit');
+  if (perPage !== null) page.perPage = parsePaginationInteger(perPage, 'page size');
 
   // nextPageToken is a base64-encoded "offset:N" — takes precedence over raw offset
   const nextPageToken = sp.get('nextPageToken');
   if (nextPageToken) {
     const decoded = decodePageToken(nextPageToken);
     if (decoded != null) {
-      params.offset = decoded;
+      page.offset = decoded;
     }
   }
 
-  if (params.offset == null) {
+  if (page.offset == null) {
     const offset = sp.get('offset');
-    if (offset != null && /^\d+$/.test(offset)) {
-      params.offset = Number.parseInt(offset, 10);
+    if (offset !== null) {
+      page.offset = parsePaginationInteger(offset, 'offset');
     }
   }
 
-  if (sp.get('finalized') === 'false') {
-    params.finalized = false;
-  }
+  return { filters, page, finalized: sp.get('finalized') !== 'false' };
+}
 
-  return params;
+/** @deprecated Use parseEventsRequest for separate filters, page and scope input. */
+export function parseQueryParams(sp: URLSearchParams): EpcisQueryParams {
+  const { filters, page, finalized } = parseEventsRequest(sp);
+  return { ...filters, ...page, finalized };
 }
 
 /** Returns true if at least one actual filter param is set (excludes fullTrace, limit, offset). */
@@ -121,7 +126,7 @@ export function hasAtLeastOneFilter(params: EpcisQueryParams): boolean {
 }
 
 /** Returns true if the date range is valid (from <= to), or if either/both are missing. */
-export function hasValidDateRange(params: Pick<EpcisQueryParams, 'from' | 'to'>): boolean {
+export function hasValidDateRange(params: Pick<EpcisEventFilters, 'from' | 'to'>): boolean {
   if (!params.from || !params.to) return true;
   return Date.parse(params.from) <= Date.parse(params.to);
 }

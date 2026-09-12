@@ -881,6 +881,9 @@ importers:
         specifier: ^3
         version: 3.0.1(ajv@8.18.0)
     devDependencies:
+      '@origintrail-official/dkg-storage':
+        specifier: workspace:*
+        version: link:../storage
       '@vitest/coverage-v8':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))

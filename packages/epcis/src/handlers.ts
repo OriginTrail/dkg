@@ -1,6 +1,11 @@
+import { EpcisQueryError } from './query-error.js';
+import { EpcisQueryValidationError } from './query-validation.js';
+export { EpcisQueryError } from './query-error.js';
+import { EpcisHttpPage } from './pagination.js';
+import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
-import { buildEpcisQuery } from './query-builder.js';
-import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
+import { createEpcisQueryPlan } from './query-builder.js';
+import { parseEventsRequest, hasValidDateRange, encodePageToken } from './utils.js';
 import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
@@ -32,16 +37,6 @@ export class EpcisValidationError extends Error {
   }
 }
 
-export class EpcisQueryError extends Error {
-  constructor(
-    message: string,
-    public readonly statusCode: number,
-  ) {
-    super(message);
-    this.name = 'EpcisQueryError';
-  }
-}
-
 export interface EventsQueryConfig {
   contextGraphId: string;
   /**
@@ -60,10 +55,8 @@ export interface EventsQueryResult {
   headers?: { link?: string };
 }
 
-const DEFAULT_PER_PAGE = 30;
-const MAX_PER_PAGE = 1000;
 
-const EPCIS_TYPE_PREFIX = 'https://gs1.github.io/EPCIS/';
+
 
 /**
  * Strip N-Quads literal wrapping from a SPARQL binding value.
@@ -107,11 +100,7 @@ export function toEpcisEvent(binding: Record<string, string>): Record<string, un
 
   // Strip eventType URI prefix to short name
   const rawType = unwrapLiteral(binding['eventType'] ?? '');
-  if (rawType.startsWith(EPCIS_TYPE_PREFIX)) {
-    event.type = rawType.slice(EPCIS_TYPE_PREFIX.length);
-  } else if (rawType) {
-    event.type = rawType;
-  }
+  if (rawType) event.type = compactEpcisEventType(rawType);
 
   // Simple string fields — unwrap N-Quads literal quoting, include only when non-empty
   const eventTime = unwrapLiteral(binding['eventTime']);
@@ -177,50 +166,37 @@ const DKG_CONTEXT = {
   shipmentId: `${DKG_BASE_IRI}epcis/shipmentId`,
 };
 
+/** Translate only request validation; engine errors retain their original identity. */
+function queryRequestBoundary<T>(operation: () => T): T {
+  try { return operation(); }
+  catch (error) {
+    if (error instanceof EpcisQueryValidationError) throw new EpcisQueryError(error.message, 400);
+    throw error;
+  }
+}
+
 export async function handleEventsQuery(
   searchParams: URLSearchParams,
   config: EventsQueryConfig,
 ): Promise<EventsQueryResult> {
-  const params = parseQueryParams(searchParams);
-
-  if (!hasValidDateRange(params)) {
-    throw new EpcisQueryError('Invalid date range: "from" must be before or equal to "to"', 400);
-  }
-
-  const perPage = Math.min(Math.max(params.perPage ?? DEFAULT_PER_PAGE, 1), MAX_PER_PAGE);
-  const offset = Math.max(params.offset ?? 0, 0);
-
-  // Request one extra row to detect if more pages exist. Sub-graph
-  // selection is per-request (route-level), not derivable from the
-  // SPARQL query string, so it lives on the config rather than in
-  // `params`.
-  const sparql = buildEpcisQuery(
-    { ...params, subGraphName: config.subGraphName, limit: perPage + 1, offset },
-    config.contextGraphId,
-  );
-  // The engine's scope guard rejects any explicit GRAPH IRI outside the
-  // allow-set it derives from the query options, so the options MUST match
-  // exactly the graphs `buildEpcisQuery` references for this route:
-  //   - `includePrivate`        → the `<cg>[/<sub>]/_private` partition the
-  //                               private-anchored-events branch always names.
-  //   - `subGraphName`          → reads `<cg>/<sub>` (finalized) /
-  //                               `<cg>/<sub>/_shared_memory` (SWM) plus the
-  //                               sub-graph private/meta graphs.
-  //   - `graphSuffix:'_shared_memory'` (finalized=false) → reads the SWM
-  //                               partition (`…/_shared_memory[_meta]`) instead
-  //                               of the canonical data graph.
-  // Omitting any of these makes the guard reject the query with
-  // "GRAPH <…> is outside the allowed graph set" (it fails for every
-  // sub-graph or non-finalized request, on every store backend).
-  const result = await config.queryEngine.query(sparql, {
-    contextGraphId: config.contextGraphId,
-    subGraphName: config.subGraphName,
-    graphSuffix: params.finalized === false ? '_shared_memory' : undefined,
-    includePrivate: true,
+  const { page, plan } = queryRequestBoundary(() => {
+    const request = parseEventsRequest(searchParams);
+    if (!hasValidDateRange(request.filters)) {
+      throw new EpcisQueryValidationError('Invalid date range: "from" must be before or equal to "to"');
+    }
+    const page = new EpcisHttpPage(request.page);
+    return {
+      page,
+      plan: createEpcisQueryPlan(request.filters, {
+        contextGraphId: config.contextGraphId,
+        subGraphName: config.subGraphName,
+        finalized: request.finalized,
+      }, page.queryWindow),
+    };
   });
+  const result = await config.queryEngine.query(plan.sparql, plan.options);
 
-  const hasMore = result.bindings.length > perPage;
-  const bindings = hasMore ? result.bindings.slice(0, perPage) : result.bindings;
+  const { bindings, nextOffset } = queryRequestBoundary(() => page.take(result.bindings));
   const eventList = bindings.map(toEpcisEvent);
 
   const body: EPCISQueryDocumentResponse = {
@@ -237,12 +213,11 @@ export async function handleEventsQuery(
     },
   };
 
-  if (!hasMore) {
+  if (nextOffset === undefined) {
     return { body };
   }
 
   // Build Link header with nextPageToken
-  const nextOffset = offset + perPage;
   const nextToken = encodePageToken(nextOffset);
   const url = new URL(config.basePath, 'http://localhost');
   // Preserve original query params

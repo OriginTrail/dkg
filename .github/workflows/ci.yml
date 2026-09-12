@@ -560,6 +560,7 @@ jobs:
         # STREAM` and leave later requests timing out. Keep the unit lanes
         # parallel; serialize only these live-server files.
         run: |
+          DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-epcis exec vitest run test/event-classification.test.ts
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance
           pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts test/rfc64-shared-projection-stream.blazegraph.integration.test.ts
           pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts
