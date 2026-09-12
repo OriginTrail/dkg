@@ -1,3 +1,4 @@
+import type { ResolvedDKGAgentConfig } from './agent-config-resolution-schema.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -398,7 +399,6 @@ import {
   type CatchupSyncDiagnostics,
   type DurableSyncResult,
   type SharedMemorySyncResult,
-  type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';

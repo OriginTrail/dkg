@@ -1737,7 +1737,13 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
-  it('runs the bounded SWM continuation policy on the inline agent path', async () => {
+  it.each([
+    { name: 'disabled job budget', startupBudget: '60000', startupPasses: '4', budget: '0', passes: '4', calls: 1 },
+    { name: 'single job pass', startupBudget: '60000', startupPasses: '4', budget: '60000', passes: '1', calls: 1 },
+    { name: 'enabled job continuation', startupBudget: '0', startupPasses: '1', budget: '60000', passes: '2', calls: 2 },
+  ])('refreshes ordinary SWM settings after construction: $name', async (setting) => {
+    vi.stubEnv('DKG_SWM_CATCHUP_PASS_BUDGET_MS', setting.startupBudget);
+    vi.stubEnv('DKG_SWM_CATCHUP_MAX_PASSES', setting.startupPasses);
     const agent = await createAgentWithSend(async () => new Uint8Array(0));
     const remotePeer = { toString: () => PEER_A };
     const durableCalls: string[] = [];
@@ -1779,19 +1785,28 @@ describe('DKGAgent sync fetch coalescing', () => {
         };
       };
 
+      const startupPolicy = (agent as unknown as { config: { resourcePolicy: import('../src/resource-policy.js').StartupResourcePolicy } }).config.resourcePolicy;
+      const startupDiagnostic = JSON.stringify(startupPolicy.initialSwmPass);
+      expect(startupPolicy.initialSwmPass).toEqual({ budgetMs: Number(setting.startupBudget), maxPasses: Number(setting.startupPasses) });
+      vi.stubEnv('DKG_SWM_CATCHUP_PASS_BUDGET_MS', setting.budget);
+      vi.stubEnv('DKG_SWM_CATCHUP_MAX_PASSES', setting.passes);
       const recovery = await agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
       });
       const result = recovery.catchup;
 
       expect(durableCalls).toEqual([PEER_A]);
-      expect(sharedCalls).toEqual([PEER_A, PEER_A]);
-      expect(result.diagnostics.sharedMemory.swmCoverage).toEqual(coverage(3));
-      expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
-      expect(result.diagnostics.sharedMemory.continuationStopReason).toBe('no-capable-peers');
-      expect(recovery.cleanMissPeerIds).toEqual([PEER_A]);
+      expect(sharedCalls).toEqual(Array.from({ length: setting.calls }, () => PEER_A));
+      expect(result.diagnostics.sharedMemory.swmCoverage).toEqual(coverage(setting.calls === 2 ? 3 : 2));
+      expect(result.diagnostics.sharedMemory.continuationPasses).toBe(setting.calls - 1);
+      expect(JSON.stringify(startupPolicy.initialSwmPass)).toBe(startupDiagnostic);
+      if (setting.calls === 2) {
+        expect(result.diagnostics.sharedMemory.continuationStopReason).toBe('no-capable-peers');
+        expect(recovery.cleanMissPeerIds).toEqual([PEER_A]);
+      }
     } finally {
       await agent.stop().catch(() => {});
+      vi.unstubAllEnvs();
     }
   });
 

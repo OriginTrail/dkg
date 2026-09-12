@@ -530,7 +530,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   ): Rfc64CatalogRecoveryQueueOutcomeV1 {
     const authorizedPlan = this.rfc64SwmRecoveryCoordinatorV1.authorizeForCatalogPass(
       plan,
-      this.config.syncReconcilerTiming.stalenessThresholdMs,
+      this.config.resourcePolicy.reconcilerTiming.stalenessThresholdMs,
     );
     if (authorizedPlan === null) return Object.freeze({ kind: 'not-authorized' });
     return Object.freeze({

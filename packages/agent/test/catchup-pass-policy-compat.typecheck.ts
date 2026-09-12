@@ -1,5 +1,5 @@
 import { resolveSwmCatchupPassConfig, type DKGAgentConfig } from '@origintrail-official/dkg-agent';
-import type { ResolvedDKGAgentConfig } from '../src/dkg-agent-types.js';
+import type { ResolvedDKGAgentConfig } from '../src/agent-config-resolution-schema.js';
 
 const pass = resolveSwmCatchupPassConfig({});
 pass.maxPasses = 2;
@@ -21,3 +21,7 @@ void resolved.syncAdmission;
 // @ts-expect-error Runtime consumers must use the resolved policy.
 void resolved.syncResponderSnapshotLimits;
 void publicInput;
+
+// @ts-expect-error Reconciler timing has one resolved owner.
+void resolved.syncReconcilerTiming;
+void resolved.resourcePolicy.reconcilerTiming;

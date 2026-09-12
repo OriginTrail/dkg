@@ -229,12 +229,12 @@ export class SchedulerPressureTracker {
   private readonly lanes = new Map<string, LaneRuntime>();
   private readonly now: () => number;
   private readonly thresholds: Required<SchedulerPressureThresholds>;
-  private capacity: SchedulerPressureCapacity;
+  private capacity: CapturedPressureCapacity;
   private nextTicketId = 1;
 
   constructor(options: SchedulerPressureTrackerOptions) {
     this.scheduler = normalizeBackpressureLabel(options.scheduler, 'scheduler');
-    this.capacity = options.capacity ?? {};
+    this.capacity = capturePressureCapacity(options.capacity ?? {});
     this.now = options.now ?? Date.now;
     this.thresholds = {
       degradedQueueAgeMs:
@@ -249,7 +249,7 @@ export class SchedulerPressureTracker {
   }
 
   updateCapacity(capacity: SchedulerPressureCapacity): void {
-    this.capacity = capacity;
+    this.capacity = capturePressureCapacity(capacity);
   }
 
   enqueue(

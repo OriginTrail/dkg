@@ -105,19 +105,19 @@ export function capturePressureCapacity(capacity: SchedulerPressureCapacity): Ca
 /** Reconcile captured owners without serializing policies in the read path. */
 export function reconcilePressureCapacity(
   sources: readonly Iterable<{ readonly capacity?: CapturedPressureCapacity }>[],
-  fallback: SchedulerPressureCapacity,
+  fallback: CapturedPressureCapacity,
 ): SchedulerPressureCapacity {
   let liveIdentity: string | undefined;
   let liveCapacity: SchedulerPressureCapacity | undefined;
   for (const records of sources) {
     for (const record of records) {
-      if (record.capacity === undefined) continue;
-      if (liveIdentity !== undefined && record.capacity.identity !== liveIdentity) {
+      const capacity = record.capacity ?? fallback;
+      if (liveIdentity !== undefined && capacity.identity !== liveIdentity) {
         return { capacityModel: 'shared' };
       }
-      liveIdentity = record.capacity.identity;
-      liveCapacity = record.capacity.value;
+      liveIdentity = capacity.identity;
+      liveCapacity = capacity.value;
     }
   }
-  return liveCapacity ?? fallback;
+  return liveCapacity ?? fallback.value;
 }

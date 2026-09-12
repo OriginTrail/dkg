@@ -904,6 +904,41 @@ describe('BackpressureMonitor', () => {
     });
   });
 
+  it.each(['queued', 'active'] as const)('includes %s fallback tickets in mixed-policy ceilings', (state) => {
+    const tracker = new SchedulerPressureTracker({
+      scheduler: 'fallback-capacity',
+      capacity: { capacityModel: 'shared', queueLimit: 9, inflightLimit: 3 },
+    });
+    const legacy = tracker.enqueue({ lane: 'default', operation: 'legacy' });
+    if (state === 'active') tracker.start(legacy);
+    const explicit = tracker.enqueue({ lane: 'default', operation: 'explicit' },
+      { capacityModel: 'shared', queueLimit: 2, inflightLimit: 1 });
+    expect(tracker.snapshot()).toMatchObject({
+      state: 'healthy', totals: { queueLimit: null, inflightLimit: null },
+    });
+    tracker.cancelQueued(explicit, 'aborted');
+    expect(tracker.snapshot()).toMatchObject({ totals: { queueLimit: 9, inflightLimit: 3 } });
+    if (state === 'active') tracker.finish(legacy, 'completed');
+    else tracker.cancelQueued(legacy, 'aborted');
+    expect(tracker.snapshot()).toMatchObject({ totals: { queued: 0, inflight: 0, queueLimit: 9 } });
+  });
+
+  it('compares explicit tickets with the current fallback without serializing on reads', () => {
+    const fallback = { capacityModel: 'shared' as const, queueLimit: 9, inflightLimit: 3 };
+    const tracker = new SchedulerPressureTracker({ scheduler: 'fallback-updates', capacity: fallback });
+    tracker.enqueue({ lane: 'default', operation: 'legacy' });
+    tracker.enqueue({ lane: 'default', operation: 'explicit' }, { inflightLimit: 3, queueLimit: 9, capacityModel: 'shared' });
+    const serialize = vi.spyOn(JSON, 'stringify');
+    try {
+      expect(tracker.snapshot()).toMatchObject({ totals: { queueLimit: 9, inflightLimit: 3 } });
+      expect(serialize).not.toHaveBeenCalled();
+    } finally { serialize.mockRestore(); }
+    tracker.updateCapacity({ capacityModel: 'shared', queueLimit: 2, inflightLimit: 1 });
+    expect(tracker.snapshot()).toMatchObject({ totals: { queueLimit: null, inflightLimit: null } });
+    tracker.updateCapacity(fallback);
+    expect(tracker.snapshot()).toMatchObject({ totals: { queueLimit: 9, inflightLimit: 3 } });
+  });
+
   it('owns enqueued capacity values independently of later caller mutation', () => {
     const tracker = new SchedulerPressureTracker({ scheduler: 'captured-capacity' });
     const capacity = {

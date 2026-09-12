@@ -15,8 +15,6 @@
  */
 
 import type { ethers } from 'ethers';
-import type { AgentConfigResolutionInputKey } from './resolved-agent-config.js';
-import type { StartupResourcePolicy } from './resource-policy.js';
 import type { CatchupPassDecisionReason } from './sync/catchup-pass-policy.js';
 import type {
   MessengerOutboxDrainOptions,
@@ -53,7 +51,6 @@ import type {
   PublicationPricingPolicy,
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
-  StorageAckTiming,
   StorageAckTimingInput,
   WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
@@ -77,14 +74,12 @@ import type { ContextGraphDormancyProjection } from './context-graph-subscriptio
 import type {
   Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
-  ResolvedRfc64CatalogAuthoringPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
   SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
-import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1961,25 +1956,3 @@ export interface DKGAgentACKTransportOptions {
   sendTimeoutMs?: number;
   log?: (message: string) => void;
 }
-
-export type ResolvedDKGAgentConfig =
-  Omit<
-    DKGAgentConfig,
-    | 'storageAckTiming'
-    | 'ackHandlerDeadlineMs'
-    | 'ackSendTimeoutMs'
-    | AgentConfigResolutionInputKey
-  > & {
-    contextGraphSubscriptionRehydrationEnabled: boolean;
-    storageAckTiming: StorageAckTiming;
-    syncReconcilerTiming: SyncReconcilerTiming;
-    /** Executable startup resource policy and the diagnostics derived from it. */
-    resourcePolicy: StartupResourcePolicy;
-    rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
-    rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
-    /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
-    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
-      .Rfc64CatalogExecutionPlanV1;
-    rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
-    rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
-  };

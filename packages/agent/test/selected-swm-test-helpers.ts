@@ -359,6 +359,9 @@ export async function callTrySyncFromPeer(
     }>;
     resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
     recordSyncReconcilerFailure: (peerId: string) => void;
+    applySyncOnConnectAccounting?: (
+      peerId: string, outcome: Parameters<NonNullable<typeof onSyncAccounting>>[0],
+    ) => void;
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
   agent.trySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer;
@@ -535,6 +538,9 @@ export interface SelectedSwmLifecycleAgentFixture {
     contextGraphId: string,
   ) => { legacySyncAllowed: boolean };
   createSwmTargetExecutorSessionV1: () => SwmTargetExecutorV1;
+  acquireRfc64SwmRecoveryTargetLeaseV1: (target: Rfc64SwmRecoveryTargetV1) => Rfc64SwmRecoveryTargetLeaseV1;
+  getSelectedSwmMetaTransfers: () => SelectedSwmMetaTransferCoordinator;
+  closeSelectedSwmMetaTransfers: () => Promise<void>;
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
 }

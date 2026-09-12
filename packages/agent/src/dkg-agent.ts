@@ -1,3 +1,4 @@
+import type { ResolvedDKGAgentConfig } from './agent-config-resolution-schema.js';
 import { omitAgentConfigResolutionInputs } from './resolved-agent-config.js';
 import { AGENT_RESOURCE_ENV } from './resource-runtime.js';
 import { resolveStartupResourcePolicy } from './resource-policy.js';
@@ -392,7 +393,6 @@ import {
   type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
-  type ResolvedDKGAgentConfig,
   type MessengerOutboxDrainOptions,
   type MessengerOutboxStats,
 } from './dkg-agent-types.js';
@@ -1429,7 +1429,6 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogExecutionPlan,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
-      syncReconcilerTiming: resourcePolicy.reconcilerTiming,
       resourcePolicy,
     };
 
