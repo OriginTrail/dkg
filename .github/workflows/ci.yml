@@ -977,6 +977,7 @@ jobs:
           status=0
           node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW" || status=$?
           pnpm --filter @origintrail-official/dkg-adapter-hermes run test:py || status=$?
+          pnpm --filter @origintrail-official/dkg-adapter-codex run test || status=$?
           pnpm --filter @origintrail-official/dkg-demo run test || status=$?
           exit "$status"
       - name: Upload Vitest JUnit and coverage reports

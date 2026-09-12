@@ -1,0 +1,9 @@
+{
+  "name": "@origintrail-official/dkg-adapter-codex",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "dependencies": { "@origintrail-official/dkg-core": "workspace:*" },
+  "scripts": { "start": "node src/server.mjs", "test": "node --test test/*.test.mjs" }
+}

@@ -35,6 +35,15 @@
     "command": "pnpm --dir packages/adapter-hermes test:py"
   },
   {
+    "pattern": "packages/adapter-codex/test/*.test.mjs",
+    "lane": "kosava-supporting",
+    "reason": "Dependency-free Node tests run explicitly in the supporting job",
+    "cadence": "required",
+    "command": "pnpm --dir packages/adapter-codex test",
+    "layer": "unit/component",
+    "prerequisites": ["Node 22 or newer"]
+  },
+  {
     "pattern": "scripts/lib/__tests__/*.test.mjs",
     "lane": "scripts",
     "reason": "Repository tooling checks run in build gate",

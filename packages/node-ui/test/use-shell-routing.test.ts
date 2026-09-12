@@ -91,6 +91,8 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       expect(TAB_TO_URL_PATH.operations).toBeDefined();
       expect(TAB_TO_URL_PATH.settings).toBeDefined();
       expect(TAB_TO_URL_PATH.dashboard).toBeDefined();
+      expect(TAB_TO_URL_PATH.codex).toBe('/ui/codex');
+      expect(URL_PATH_TO_TAB).not.toHaveProperty('/codex');
     });
   });
 
@@ -122,6 +124,15 @@ describe('useShellRouting (BUG-018 + Codex unmapped-tab follow-up)', () => {
       mountAtPath('/network', ref);
       const { activeTabId } = useTabsStore.getState();
       expect(activeTabId).toBe('dashboard');
+    });
+
+    it('keeps /ui/codex behind the adapter-injected feature gate on the ordinary node UI', () => {
+      const ref = { current: '' };
+      mountAtPath('/ui/codex', ref);
+      const { tabs, activeTabId } = useTabsStore.getState();
+      expect(tabs.find((tab) => tab.id === 'codex')).toBeUndefined();
+      expect(activeTabId).toBe('dashboard');
+      expect(ref.current).toBe('/');
     });
   });
 

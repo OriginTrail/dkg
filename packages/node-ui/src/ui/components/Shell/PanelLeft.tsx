@@ -23,6 +23,7 @@ import {
   type AgentSidebarIdentity,
 } from '../../lib/contextGraphSidebar.js';
 import { useCurrentAgent } from '../../hooks/useCurrentAgent.js';
+import { enabledShellTabFeatures } from '../../codex/tabFeature.js';
 
 // Project tree row: a flat, clickable header that opens the project tab.
 // Memory-layer expansion was removed by request — layers are surfaced inside
@@ -290,6 +291,9 @@ export function PanelLeft() {
           >
             <span>▦</span> Dashboard
           </div>
+          {enabledShellTabFeatures().map(({ id, label, closable }) => (
+            <button key={id} className={`v10-tree-dashboard ${activeTabId === id ? 'active' : ''}`} onClick={() => useTabsStore.getState().openTab({ id, label, closable })}>{label}</button>
+          ))}
 
           {/* Empty-state card hoisted ABOVE the collapsible sections so it
               stays visible if both sections are collapsed. */}
