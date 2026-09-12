@@ -20,8 +20,10 @@ export class DkgConfigStore {
     if (!handle) {
       const writer = file.claim();
       const initial = immutableConfig(initialConfig);
+      // Completed saves are full snapshots: overlaying them onto stale startup
+      // state would resurrect optional settings deliberately removed by a save.
       handle = writer.ready.then(contents => new DkgConfigStore(files, writer,
-        contents === undefined ? initial : { ...initial, ...JSON.parse(contents) }));
+        contents === undefined ? initial : JSON.parse(contents)));
       this.#handles.set(file, handle);
     }
     return handle;

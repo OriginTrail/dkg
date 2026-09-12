@@ -204,6 +204,34 @@ describe('configuration file publication', () => {
     expect(JSON.parse(await fs.readFile(path, 'utf8'))).toMatchObject({ name: 'saved before claim', sharedMemoryTtlMs: 5678 });
   });
 
+  it('keeps deletions in an admitted pre-claim save absent from later publications', async () => {
+    const files = new DkgHomeFiles(directory);
+    const initial: DkgConfig = {
+      name: 'initial', apiPort: 9200, listenPort: 0, nodeRole: 'edge',
+      llm: { apiKey: 'removed-fixture-key' },
+      localAgentIntegrations: { openclaw: { enabled: true } },
+    };
+    const replacement = { ...initial };
+    delete replacement.llm;
+    delete replacement.localAgentIntegrations;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(writeFile).mockImplementationOnce(async (...args) => { await gate; return fs.writeFile(...args); });
+    const saving = files.saveConfig(replacement);
+    const opening = DkgConfigStore.open(files, initial);
+    release();
+    await saving;
+    const owner = await opening;
+    expect(owner.current).toEqual(replacement);
+    expect(owner.current).not.toHaveProperty('llm');
+    expect(owner.current).not.toHaveProperty('localAgentIntegrations');
+    await owner.update(current => ({ ...current, name: 'later settings update' }), 'configuration-only');
+    const persisted = JSON.parse(await fs.readFile(path, 'utf8'));
+    expect(persisted).toEqual({ ...replacement, name: 'later settings update' });
+    expect(persisted).not.toHaveProperty('llm');
+    expect(persisted).not.toHaveProperty('localAgentIntegrations');
+  });
+
   it('compensates partially applied runtime state before admitting the next update', async () => {
     const files = new DkgHomeFiles(directory);
     const initial: DkgConfig = { name: 'initial', apiPort: 9200, listenPort: 0, nodeRole: 'edge', llm: { apiKey: 'old-key' } };
