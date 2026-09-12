@@ -177,7 +177,12 @@ interface PressureWorkRecord {
   operation: string;
   queuedAt: number;
   startedAt?: number;
-  capacity?: SchedulerPressureCapacity;
+  capacity?: CapturedPressureCapacity;
+}
+
+interface CapturedPressureCapacity {
+  readonly value: SchedulerPressureCapacity;
+  readonly identity: string;
 }
 
 interface LaneRuntime {
@@ -227,6 +232,28 @@ export function schedulerPressureCapacityIdentity(
     normalizeLimit(capacity.inflightLimit),
     lanes,
   ]);
+}
+
+/** Capture ticket policy and semantic identity together, once at admission. */
+function capturePressureCapacity(capacity: SchedulerPressureCapacity): CapturedPressureCapacity {
+  const limits = {
+    queueLimit: normalizeLimit(capacity.queueLimit),
+    inflightLimit: normalizeLimit(capacity.inflightLimit),
+  };
+  const value: SchedulerPressureCapacity = capacity.capacityModel === 'shared'
+    ? { ...limits, capacityModel: 'shared' }
+    : {
+      ...limits,
+      capacityModel: 'partitioned',
+      lanes: Object.freeze(Object.fromEntries(Object.entries(capacity.lanes ?? {}).map(([lane, allocation]) => [
+        lane,
+        Object.freeze({
+          queueLimit: normalizeLimit(allocation.queueLimit),
+          inflightLimit: normalizeLimit(allocation.inflightLimit),
+        }),
+      ]))),
+    };
+  return { value: Object.freeze(value), identity: schedulerPressureCapacityIdentity(value) };
 }
 
 /**
@@ -326,7 +353,7 @@ export class SchedulerPressureTracker {
       lane: normalizeBackpressureLabel(work.lane, 'default'),
       operation: normalizeBackpressureLabel(work.operation),
       queuedAt: this.now(),
-      capacity,
+      capacity: capacity === undefined ? undefined : capturePressureCapacity(capacity),
     };
     this.queued.set(record.id, record);
     this.recordEvent(record.lane, 'enqueued');
@@ -439,14 +466,15 @@ export class SchedulerPressureTracker {
   private liveCapacity(): SchedulerPressureCapacity {
     let liveIdentity: string | undefined;
     let liveCapacity: SchedulerPressureCapacity | undefined;
-    for (const record of [...this.queued.values(), ...this.active.values()]) {
-      if (record.capacity === undefined) continue;
-      const identity = schedulerPressureCapacityIdentity(record.capacity);
-      if (liveIdentity !== undefined && identity !== liveIdentity) {
-        return { capacityModel: 'shared' };
+    for (const records of [this.queued, this.active]) {
+      for (const record of records.values()) {
+        if (record.capacity === undefined) continue;
+        if (liveIdentity !== undefined && record.capacity.identity !== liveIdentity) {
+          return { capacityModel: 'shared' };
+        }
+        liveIdentity = record.capacity.identity;
+        liveCapacity = record.capacity.value;
       }
-      liveIdentity = identity;
-      liveCapacity = record.capacity;
     }
     return liveCapacity ?? this.capacity;
   }

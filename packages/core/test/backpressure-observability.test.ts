@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   BackpressureMonitor,
   BackpressureRegistry,
@@ -441,7 +441,9 @@ describe('BackpressureMonitor', () => {
     let now = 1_000;
     const tracker = new SchedulerPressureTracker({
       scheduler: 'sync-global', now: () => now,
-      capacity: { capacityModel, queueLimit: 1, lanes: { durable: { queueLimit: 1 } } },
+      capacity: capacityModel === 'shared'
+        ? { capacityModel, queueLimit: 1 }
+        : { capacityModel, queueLimit: 1, lanes: { durable: { queueLimit: 1 } } },
       thresholds: { degradedQueueAgeMs: 10_000, stalledActiveAgeMs: 20_000, rejectionStateWindowMs: 30_000 },
     });
     const registry = new BackpressureRegistry();
@@ -808,7 +810,7 @@ describe('BackpressureMonitor', () => {
     // old branch read `0 / limit >= 0` as degraded on an idle lane; that must
     // still happen for `partitioned`, and must not for `shared`.
     const now = 1_000;
-    const idleLane = (capacity: Parameters<typeof SchedulerPressureTracker>[0]['capacity']) => {
+    const idleLane = (capacity: ConstructorParameters<typeof SchedulerPressureTracker>[0]['capacity']) => {
       const tracker = new SchedulerPressureTracker({
         scheduler: 'probe',
         now: () => now,
@@ -859,12 +861,22 @@ describe('BackpressureMonitor', () => {
       { lane: 'slow', operation: 'rejected' },
       equivalentCapacity,
     );
+    // Repeated diagnostics must not serialize each queued/active policy again.
+    const serialize = vi.spyOn(JSON, 'stringify');
+    try {
+      tracker.snapshot();
+      tracker.snapshot();
+      tracker.start(active);
+      tracker.snapshot();
+      expect(serialize).not.toHaveBeenCalled();
+    } finally {
+      serialize.mockRestore();
+    }
     expect(tracker.snapshot()).toMatchObject({
       capacityModel: 'partitioned',
-      totals: { queued: 2, queueLimit: 4, inflightLimit: 2 },
+      totals: { queued: 1, inflight: 1, queueLimit: 4, inflightLimit: 2 },
     });
 
-    tracker.start(active);
     tracker.rejectQueued(rejected, 'owner_queue_full');
     expect(tracker.snapshot()).toMatchObject({
       capacityModel: 'partitioned',
@@ -890,6 +902,30 @@ describe('BackpressureMonitor', () => {
       capacityModel: 'shared',
       totals: { queued: 0, inflight: 0, queueLimit: 9, inflightLimit: 3 },
     });
+  });
+
+  it('owns enqueued capacity values independently of later caller mutation', () => {
+    const tracker = new SchedulerPressureTracker({ scheduler: 'captured-capacity' });
+    const capacity = {
+      queueLimit: 4, inflightLimit: 2,
+      lanes: { fast: { queueLimit: 4, inflightLimit: 2 } },
+    };
+    const active = tracker.enqueue({ lane: 'fast', operation: 'original' }, capacity);
+    tracker.start(active);
+    capacity.queueLimit = 8;
+    capacity.lanes.fast.queueLimit = 8;
+    expect(tracker.snapshot()).toMatchObject({
+      totals: { queueLimit: 4, inflightLimit: 2 },
+      lanes: [{ lane: 'fast', queueLimit: 4, inflightLimit: 2 }],
+    });
+
+    // The same caller object represents a new owner policy on its next enqueue.
+    const changed = tracker.enqueue({ lane: 'fast', operation: 'changed' }, capacity);
+    expect(tracker.snapshot().totals).toMatchObject({ queueLimit: null, inflightLimit: null });
+    tracker.finish(active, 'released');
+    expect(tracker.snapshot().totals).toMatchObject({ queueLimit: 8, inflightLimit: 2 });
+    tracker.cancelQueued(changed);
+    expect(tracker.snapshot().totals).toMatchObject({ queueLimit: null, inflightLimit: null });
   });
 
   it('contains logger failures', () => {

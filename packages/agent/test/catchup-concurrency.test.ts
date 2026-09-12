@@ -1,11 +1,30 @@
 import { RESOURCE_MAX } from '../src/resource-limits.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   CATCHUP_STOP_ON_PROOF,
   catchupWaveSizes,
   resolveCatchupStopOnProof,
 } from '../src/sync/catchup-concurrency.js';
+
+it.each([
+  { configured: '1024', expected: 1024 },
+  { configured: '1025', expected: 4 },
+])('captures catch-up concurrency at module load: $configured → $expected', async ({ configured, expected }) => {
+  vi.resetModules();
+  vi.stubEnv('DKG_CATCHUP_MAX_CONCURRENT_PEERS', configured);
+  try {
+    const runtime = await import('../src/sync/catchup-concurrency.js');
+    expect(runtime.CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBe(expected);
+    // Later environment changes must not replace the process-scoped snapshot.
+    vi.stubEnv('DKG_CATCHUP_MAX_CONCURRENT_PEERS', '7');
+    const reimported = await import('../src/sync/catchup-concurrency.js');
+    expect(reimported.CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBe(expected);
+  } finally {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  }
+});
 
 describe('catchupWaveSizes', () => {
   it('starts with a single peer so a proving authority costs one payload', () => {

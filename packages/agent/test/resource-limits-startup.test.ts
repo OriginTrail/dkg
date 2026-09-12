@@ -14,6 +14,8 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
   vi.stubEnv('DKG_VM_RECONCILE_BATCH_SIZE', '11');
   const { resourceInteger } = await import('../src/resource-limits.js');
   expect(resourceInteger(2, { min: 1, max: 10 }, 'example')).toBe(2);
+  const { resolveVmReconcileStartupMaxDelayMs } = await import('../src/startup-jitter.js');
+  expect(resolveVmReconcileStartupMaxDelayMs('0', 60_000)).toBe(0);
   vi.stubEnv('DKG_VM_RECONCILE_BATCH_SIZE', '17');
   vi.stubEnv('DKG_VM_RECONCILE_CONCURRENCY', 'Infinity');
   vi.stubEnv('DKG_VM_RECONCILE_ORDINAL_CONCURRENCY', 'Infinity');
