@@ -1382,11 +1382,25 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
-  async function prepareAuthorityRefreshLifecycle() {
+  async function prepareAuthorityRefreshLifecycle(
+    readRevisions?: (
+      contextGraphIds: readonly string[],
+      options?: { signal?: AbortSignal },
+    ) => Promise<ReadonlyMap<string, string>>,
+    whenRevisionReadsIdle: () => Promise<void> = async () => undefined,
+  ) {
     const legacyContextGraphId = `${AUTHOR}/authority-refresh-legacy` as ContextGraphIdV1;
     const inactiveContextGraphId = `${AUTHOR}/authority-refresh-inactive` as ContextGraphIdV1;
     const authoritySnapshot = finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [AUTHOR], '0');
     const chainAdapter = chainWithFinalizedAuthority(authoritySnapshot);
+    if (readRevisions !== undefined) {
+      Object.assign(chainAdapter, {
+        contextGraphAuthorityIndexRevisionReader: {
+          whenIdle: vi.fn(whenRevisionReadsIdle),
+          readContextGraphAuthorityIndexRevisions: readRevisions,
+        },
+      });
+    }
     const edge = await startAgent({
       name: 'authority-refresh-lifecycle',
       config: {
@@ -1435,27 +1449,83 @@ describe('RFC-64 rollout authority integration', () => {
     return { authoritySnapshot, chainAdapter, edge, runtime };
   }
 
-  it('wires refresh cadence only for active catalog responsibilities', async () => {
-    const { edge, runtime } = await prepareAuthorityRefreshLifecycle();
+  it('retries superseded runtime refreshes and suppresses committed unchanged revisions', async () => {
+    const revision = `0x${'ab'.repeat(32)}`;
+    const readRevisions = vi.fn(async () => new Map([['9', revision]]));
+    const { authoritySnapshot, edge, runtime } =
+      await prepareAuthorityRefreshLifecycle(readRevisions);
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
     const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
-      .mockResolvedValue(null);
+      .mockResolvedValueOnce(null)
+      .mockResolvedValue(authoritySnapshot as never);
     vi.useFakeTimers();
     try {
       runtime.start(createOperationContext('system'));
-      expect(reconcile).toHaveBeenCalledTimes(1);
+      await runtime.whenIdle();
+      // Runtime startup coalesces one responsibility update behind its initial
+      // pass. The first result is superseded; the follow-up must therefore run
+      // and commit instead of accepting the unchanged revision prematurely.
+      expect(reconcile).toHaveBeenCalledTimes(2);
       expect(reconcile).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(AbortSignal));
-      reconcile.mockClear();
 
       await vi.advanceTimersByTimeAsync(
         RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
       );
-      expect(reconcile).toHaveBeenCalledTimes(1);
+      await runtime.whenIdle();
+      expect(reconcile).toHaveBeenCalledTimes(2);
       expect(reconcile).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(AbortSignal));
+      await vi.advanceTimersByTimeAsync(
+        RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
+      );
+      await runtime.whenIdle();
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      expect(readRevisions).toHaveBeenCalledTimes(3);
       await runtime.close();
       reconcile.mockClear();
       await vi.advanceTimersByTimeAsync(
         RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
       );
+      expect(reconcile).not.toHaveBeenCalled();
+    } finally {
+      await runtime.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps manifest-backed authority out of release-native runtime reconciliation', async () => {
+    const edge = await startAgent({
+      name: 'authority-refresh-manifest-bypass',
+      activation: activation('catalog'),
+      config: { nodeRole: 'core', syncContextGraphs: [] },
+    });
+    const runtime = (edge as unknown as {
+      rfc64CatalogRuntimeV1: Rfc64CatalogRuntimeV1;
+    }).rfc64CatalogRuntimeV1;
+    expect((edge as any).config.rfc64CatalogExecutionPlan
+      .selectedAuthority[CONTEXT_GRAPH_ID]).toBeDefined();
+    await runtime.close();
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    (edge as any).setContextGraphSubscription(CONTEXT_GRAPH_ID, {
+      syncMode: 'always-on',
+      subscribed: false,
+      synced: false,
+      coreHosted: true,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        responsible: true,
+        responsibilityReason: 'core-public',
+      }),
+    ]);
+    const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1');
+    vi.useFakeTimers();
+    try {
+      runtime.start(createOperationContext('system'));
+      await runtime.whenIdle();
       expect(reconcile).not.toHaveBeenCalled();
     } finally {
       await runtime.close();
@@ -1501,6 +1571,59 @@ describe('RFC-64 rollout authority integration', () => {
       expect(idleSettled).toBe(true);
     } finally {
       releaseAuthorityRead();
+      await stopping?.catch(() => undefined);
+    }
+  });
+
+  it('drains a detached authority-index revision scan during public agent shutdown', async () => {
+    let blockRevisionRead = false;
+    let markRevisionReadStarted!: () => void;
+    let releasePhysicalRead = () => undefined;
+    const revisionReadStarted = new Promise<void>((resolve) => {
+      markRevisionReadStarted = resolve;
+    });
+    const physicalRead = new Promise<void>((resolve) => {
+      releasePhysicalRead = resolve;
+    });
+    const readRevisions = vi.fn(async (
+      _contextGraphIds: readonly string[],
+      options?: { signal?: AbortSignal },
+    ): Promise<ReadonlyMap<string, string>> => {
+      if (!blockRevisionRead) return new Map();
+      markRevisionReadStarted();
+      return new Promise((_, reject) => {
+        const signal = options?.signal;
+        if (signal === undefined) throw new Error('revision read signal is missing');
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      });
+    });
+    const whenRevisionReadsIdle = vi.fn(async () => {
+      if (blockRevisionRead) await physicalRead;
+    });
+    const { edge, runtime } = await prepareAuthorityRefreshLifecycle(
+      readRevisions,
+      whenRevisionReadsIdle,
+    );
+
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
+    blockRevisionRead = true;
+    let stopping: Promise<void> | undefined;
+    try {
+      runtime.start(createOperationContext('system'));
+      await revisionReadStarted;
+      let stopSettled = false;
+      stopping = edge.stop().then(() => { stopSettled = true; });
+      await Promise.resolve();
+      expect(stopSettled).toBe(false);
+      expect(whenRevisionReadsIdle).toHaveBeenCalled();
+
+      releasePhysicalRead();
+      await stopping;
+      expect(stopSettled).toBe(true);
+    } finally {
+      releasePhysicalRead();
       await stopping?.catch(() => undefined);
     }
   });
@@ -2432,8 +2555,26 @@ describe('RFC-64 rollout authority integration', () => {
         contextGraphId: CONTEXT_GRAPH_ID,
       }),
     }));
+    vi.spyOn(core, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    core.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    await core.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(core.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        responsibilityReason: 'core-public',
+        active: true,
+      }),
+    ]);
+
     const queuedRecoveryPasses = queueRecovery.mock.calls.length;
     expect(queuedRecoveryPasses).toBeGreaterThan(0);
+    const configuredTargets = core.readRfc64PublicCatalogBootstrapStatusV1()?.targets;
+    expect(configuredTargets).toEqual([
+      expect.objectContaining({
+        mode: 'catalog',
+        scope: expect.objectContaining({ contextGraphId: CONTEXT_GRAPH_ID }),
+      }),
+    ]);
     const lease = core.acquireRfc64SwmRecoveryTargetLeaseV1({
       contextGraphId: CONTEXT_GRAPH_ID,
       lane: 'selected-public',
@@ -2446,10 +2587,17 @@ describe('RFC-64 rollout authority integration', () => {
       (core as any).rfc64PublicCatalogServiceV1,
       'deactivateReceiverContextGraph',
     );
-    core.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    const clearTargets = vi.spyOn(core, 'clearRfc64CatalogOperationalTargetsV1');
     core.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+    await core.whenRfc64CatalogResponsibilitiesIdleV1();
     await core.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(core.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
+    expect(core.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID))
+      .toMatchObject({ active: true, mode: 'catalog' });
+    expect(core.readRfc64PublicCatalogBootstrapStatusV1()?.targets)
+      .toEqual(configuredTargets);
     expect(deactivate).not.toHaveBeenCalled();
+    expect(clearTargets).not.toHaveBeenCalled();
     expect(synchronize).toHaveBeenCalledTimes(1);
     expect(queueRecovery).toHaveBeenCalledTimes(queuedRecoveryPasses);
     expect(lease.isCurrent()).toBe(true);
