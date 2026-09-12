@@ -43,7 +43,7 @@ function createMarker() {
 
 /** @param {SwmInputV1} input */
 export function verifyLiveSwmPropagationV1({ config, client, sleep }) {
-  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
+  return mapCanaryPhaseDrainedV1(config.contextGraphs, async (contextGraph) => {
     const marker = createMarker();
     await shareMarkerV1(
       contextGraph.source,

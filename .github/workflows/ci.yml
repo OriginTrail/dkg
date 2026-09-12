@@ -300,6 +300,10 @@ jobs:
         run: pnpm run test:scripts
       - name: Test RFC-64 remote canary certification contracts
         run: pnpm test:rfc64-remote-canary:unit
+      - name: Typecheck RFC-64 shared artifact evidence contracts
+        run: pnpm typecheck:devnet:rfc64-evidence
+      - name: Test RFC-64 shared artifact evidence POSIX contracts
+        run: pnpm test:devnet:rfc64-evidence
       - name: Verify every test has an execution route
         run: pnpm test:inventory
       - name: Upload test execution inventory

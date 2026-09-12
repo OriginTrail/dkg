@@ -62,7 +62,9 @@ into a pass.
 - Independent node and Context Graph checks run with a four-operation cap.
   Paired source/receiver catalog and VM queries count as two individual remote
   operations under that same phase cap; phase ordering and the receiver
-  stop/start critical section remain serial.
+  stop/start critical section remain serial. Live marker workers drain to
+  quiescence before a failure is exposed, so terminal artifacts cannot race
+  later remote mutations from the same run.
 
 ```mermaid
 sequenceDiagram
@@ -97,7 +99,8 @@ sequenceDiagram
 
 [`config.schema.json`](./config.schema.json) is executed by the runner as its
 canonical shape contract; handwritten checks only enforce cross-reference,
-normalization, and safety semantics. `domain-contract.ts` separately defines
+normalization, and safety semantics. A focused typed SPARQL AST adapter owns
+ASK data-dependence and reserved-vocabulary policy. `domain-contract.ts` separately defines
 the raw input, normalized topology, closed authentication/RPC evidence unions,
 and injected dependency boundary. A typed node client is the sole owner of
 daemon routes, payloads, authentication selection, and response decoding; the

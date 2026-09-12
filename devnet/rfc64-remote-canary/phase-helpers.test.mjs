@@ -13,30 +13,46 @@ import {
 } from './phase-helpers.mjs';
 
 test('normal and drained phase mapping enforce the four-operation cap', async () => {
-  for (const [label, map, rejects] of [
-    ['normal', mapCanaryPhaseV1, false],
-    ['drained', mapCanaryPhaseDrainedV1, true],
-  ]) {
-    let active = 0;
-    let peak = 0;
-    let completed = 0;
-    const operation = map(
-      Array.from({ length: PHASE_CONCURRENCY + 5 }, (_, index) => index),
-      async (index) => {
-        active += 1;
-        peak = Math.max(peak, active);
-        await new Promise((resolve) => setImmediate(resolve));
-        active -= 1;
-        completed += 1;
-        if (rejects && index === 1) throw new Error('expected-drained-failure');
-        return index;
-      },
-    );
-    if (rejects) await assert.rejects(operation, /expected-drained-failure/u, label);
-    else assert.deepEqual(await operation, Array.from({ length: 9 }, (_, index) => index), label);
-    assert.equal(peak, PHASE_CONCURRENCY, label);
-    assert.equal(completed, PHASE_CONCURRENCY + 5, label);
-  }
+  let active = 0;
+  let peak = 0;
+  let completed = 0;
+  const items = Array.from({ length: PHASE_CONCURRENCY + 5 }, (_, index) => index);
+  const result = await mapCanaryPhaseV1(items, async (index) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setImmediate(resolve));
+    active -= 1;
+    completed += 1;
+    return index;
+  });
+  assert.deepEqual(result, items);
+  assert.equal(peak, PHASE_CONCURRENCY);
+  assert.equal(completed, items.length);
+
+  let releaseStarted;
+  const startedMaySettle = new Promise((resolve) => { releaseStarted = resolve; });
+  active = 0;
+  peak = 0;
+  const started = [];
+  const drained = mapCanaryPhaseDrainedV1(items, async (index) => {
+    started.push(index);
+    active += 1;
+    peak = Math.max(peak, active);
+    if (index === 1) {
+      active -= 1;
+      throw new Error('expected-drained-failure');
+    }
+    await startedMaySettle;
+    active -= 1;
+    return index;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(active, PHASE_CONCURRENCY - 1);
+  releaseStarted();
+  await assert.rejects(drained, /expected-drained-failure/u);
+  assert.ok(peak <= PHASE_CONCURRENCY);
+  assert.equal(active, 0);
+  assert.deepEqual(started, items.slice(0, PHASE_CONCURRENCY));
 });
 
 test('polling retries only explicitly classified failures', async () => {

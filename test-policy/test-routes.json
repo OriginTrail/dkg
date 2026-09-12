@@ -58,6 +58,18 @@
     ]
   },
   {
+    "pattern": "devnet/_bootstrap/rfc64-evidence.test.ts",
+    "lane": "devnet",
+    "reason": "Shared RFC-64 artifact writer durability and topology contracts run in the required Linux build gate",
+    "cadence": "required",
+    "command": "pnpm test:devnet:rfc64-evidence",
+    "layer": "operator certification",
+    "prerequisites": [
+      "Linux POSIX filesystem",
+      "Node.js 22 or newer"
+    ]
+  },
+  {
     "pattern": "devnet/**",
     "lane": "devnet",
     "reason": "Developer and certification suites; suite manifest and root scripts document prerequisites",

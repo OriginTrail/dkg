@@ -16,6 +16,8 @@ export function mapCanaryPhaseV1(items, mapper) {
 
 /**
  * Run a bounded phase to quiescence before surfacing its first failure.
+ * Once a failure is observed, already-started work drains and queued work is
+ * skipped so no new remote operation begins on behalf of a failed phase.
  * This is required inside lifecycle critical sections: fail-fast promises may
  * reject while sibling workers are still mutating remote state.
  *
@@ -25,16 +27,19 @@ export function mapCanaryPhaseV1(items, mapper) {
  * @returns {Promise<readonly Output[]>}
  */
 export async function mapCanaryPhaseDrainedV1(items, mapper) {
+  let failureObserved = false;
   const settled = await mapWithConcurrency(
     items,
     PHASE_CONCURRENCY,
     async (item, index) => {
+      if (failureObserved) return Object.freeze({ status: /** @type {const} */ ('skipped') });
       try {
         return Object.freeze({
           status: /** @type {const} */ ('fulfilled'),
           value: await mapper(item, index),
         });
       } catch (reason) {
+        failureObserved = true;
         return Object.freeze({ status: /** @type {const} */ ('rejected'), reason });
       }
     },
@@ -43,6 +48,7 @@ export async function mapCanaryPhaseDrainedV1(items, mapper) {
   if (rejected !== undefined && rejected.status === 'rejected') throw rejected.reason;
   return settled.map((result) => {
     if (result.status === 'rejected') throw result.reason;
+    if (result.status === 'skipped') throw new TypeError('drained-phase-skipped-without-failure');
     return result.value;
   });
 }

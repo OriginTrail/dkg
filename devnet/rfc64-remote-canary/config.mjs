@@ -20,15 +20,10 @@ import { isAbsolute } from 'node:path';
 
 import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
-import { Parser as SparqlParser } from '@traqula/parser-sparql-1-1';
-
-import {
-  CANARY_PREDICATE,
-  CANARY_SUBJECT_PREFIX,
-} from './canary-vocabulary.mjs';
 import { validateCommandV1 } from './command-policy.mjs';
 import { invalid } from './errors.mjs';
 import { opaqueRef } from './references.mjs';
+import { validateAskSparqlPolicyV1 } from './sparql-policy.mjs';
 
 const CONFIG_SCHEMA = 'dkg-rfc64-remote-canary-config-v1';
 
@@ -60,7 +55,6 @@ const schemaValidator = new Ajv2020({ allErrors: false, strict: true });
 addFormats(schemaValidator);
 /** @type {import('ajv').ValidateFunction<RawRemoteCanaryConfigV1>} */
 const matchesRemoteCanaryConfigV1 = schemaValidator.compile(configSchema);
-const sparqlParser = new SparqlParser();
 
 /**
  * The JSON Schema is the canonical shape contract. Handwritten checks below
@@ -97,9 +91,11 @@ export function validateRemoteCanaryConfigV1(input) {
     const source = requiredNode(nodeById, entry.sourceNodeId, 'context-graph-node-reference');
     const receiver = requiredNode(nodeById, entry.receiverNodeId, 'context-graph-node-reference');
     if (source.role !== 'source' || receiver.role !== 'receiver') invalid('context-graph-node-role');
-    if (entry.vmAskSparql !== undefined) validateAskSparql(entry.vmAskSparql, 'vm');
+    if (entry.vmAskSparql !== undefined) {
+      validateAskSparqlPolicyV1(entry.vmAskSparql, 'vm');
+    }
     if (entry.catalogSwmAskSparql !== undefined) {
-      validateAskSparql(entry.catalogSwmAskSparql, 'catalog-swm');
+      validateAskSparqlPolicyV1(entry.catalogSwmAskSparql, 'catalog-swm');
     }
     return Object.freeze({
       ...entry,
@@ -372,135 +368,6 @@ function cloneFrozenJsonObject(value) {
 function normalizeTiming(value) {
   if (value === undefined) return DEFAULT_TIMING;
   return Object.freeze({ ...DEFAULT_TIMING, ...value });
-}
-
-/** @param {string} value @param {'vm' | 'catalog-swm'} label @returns {void} */
-function validateAskSparql(value, label) {
-  let parsed;
-  try {
-    parsed = sparqlParser.parse(value);
-  } catch {
-    invalid(`${label}-query-must-be-ask`);
-  }
-  if (parsed.type === 'update') invalid(`${label}-query-must-be-read-only`);
-  if (parsed.type !== 'query' || parsed.subType !== 'ask') {
-    invalid(`${label}-query-must-be-ask`);
-  }
-  const askQuery = /** @type {{ where?: unknown, context?: unknown }} */ (parsed);
-  const where = askQuery.where;
-  const whereRecord = where !== null && typeof where === 'object' && !Array.isArray(where)
-    ? /** @type {Record<string, unknown>} */ (where)
-    : null;
-  const patterns = whereRecord?.subType === 'group' && Array.isArray(whereRecord.patterns)
-    ? whereRecord.patterns
-    : [];
-  const triples = patterns.flatMap((candidate) => {
-    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
-    const pattern = /** @type {Record<string, unknown>} */ (candidate);
-    return pattern.subType === 'bgp' && Array.isArray(pattern.triples) ? pattern.triples : [];
-  });
-  const terms = triples.flatMap((candidate) => {
-    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) return [];
-    const triple = /** @type {Record<string, unknown>} */ (candidate);
-    if (!('subject' in triple) || !('predicate' in triple) || !('object' in triple)) return [];
-    return [triple.subject, triple.predicate, triple.object];
-  });
-  const nestedTerms = terms.flatMap(collectSparqlTerms);
-  const iriContext = resolveSparqlIriContext(
-    Array.isArray(askQuery.context) ? askQuery.context : [],
-  );
-  if (
-    patterns.length === 0
-    || patterns.some((candidate) => {
-      if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
-        return true;
-      }
-      const pattern = /** @type {Record<string, unknown>} */ (candidate);
-      return pattern.subType !== 'bgp'
-        || !Array.isArray(pattern.triples)
-        || pattern.triples.length === 0;
-    })
-    || triples.length === 0
-    || !terms.some((term) => (
-      term !== null
-      && typeof term === 'object'
-      && !Array.isArray(term)
-      && /** @type {Record<string, unknown>} */ (term).type === 'term'
-      && ['namedNode', 'literal'].includes(
-        String(/** @type {Record<string, unknown>} */ (term).subType),
-      )
-    ))
-  ) invalid(`${label}-query-must-depend-on-data`);
-  if (
-    label === 'catalog-swm'
-    && nestedTerms.some((term) => (
-      term?.type === 'term'
-      && term.subType === 'namedNode'
-      && reservedCanaryIri(resolveNamedNodeIri(term, iriContext))
-    ))
-  ) invalid('catalog-swm-query-uses-canary-vocabulary');
-}
-
-/** @param {unknown} value @returns {Record<string, unknown>[]} */
-function collectSparqlTerms(value) {
-  if (value === null || typeof value !== 'object') return [];
-  if (Array.isArray(value)) return value.flatMap(collectSparqlTerms);
-  const recordValue = /** @type {Record<string, unknown>} */ (value);
-  const nested = Object.values(recordValue).flatMap(collectSparqlTerms);
-  return recordValue.type === 'term' ? [recordValue, ...nested] : nested;
-}
-
-/** @param {readonly unknown[]} entries */
-function resolveSparqlIriContext(entries) {
-  /** @type {string | undefined} */
-  let base;
-  const prefixes = new Map();
-  for (const candidate of entries) {
-    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
-    const entry = /** @type {Record<string, unknown>} */ (candidate);
-    const entryValue = entry.value;
-    if (entryValue === null || typeof entryValue !== 'object' || Array.isArray(entryValue)) {
-      continue;
-    }
-    const value = /** @type {Record<string, unknown>} */ (entryValue).value;
-    if (entry.subType === 'base' && typeof value === 'string') {
-      base = resolveIriReference(value, base);
-    } else if (
-      entry.subType === 'prefix'
-      && typeof entry.key === 'string'
-      && typeof value === 'string'
-    ) {
-      prefixes.set(entry.key, resolveIriReference(value, base));
-    }
-  }
-  return Object.freeze({ base, prefixes });
-}
-
-/**
- * @param {Record<string, unknown>} term
- * @param {{ base: string | undefined, prefixes: ReadonlyMap<string, string> }} context
- */
-function resolveNamedNodeIri(term, context) {
-  if (typeof term.value !== 'string') return '';
-  if (term.prefix === undefined) return resolveIriReference(term.value, context.base);
-  if (typeof term.prefix !== 'string') return term.value;
-  const prefix = context.prefixes.get(term.prefix);
-  return typeof prefix === 'string' ? `${prefix}${term.value}` : term.value;
-}
-
-/** @param {string} value @param {string | undefined} base @returns {string} */
-function resolveIriReference(value, base) {
-  if (base === undefined) return value;
-  try {
-    return new URL(value, base).href;
-  } catch {
-    return value;
-  }
-}
-
-/** @param {string} value @returns {boolean} */
-function reservedCanaryIri(value) {
-  return value === CANARY_PREDICATE || value.startsWith(CANARY_SUBJECT_PREFIX);
 }
 
 /** @param {never} value @returns {never} */

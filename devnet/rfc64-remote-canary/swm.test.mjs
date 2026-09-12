@@ -8,6 +8,7 @@ import {
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
 import { createCanaryNodeClientV1 } from './node-client.mjs';
+import { PHASE_CONCURRENCY } from './phase-helpers.mjs';
 import {
   verifyLiveSwmPropagationV1,
   verifyOfflineCatchupV1,
@@ -165,6 +166,55 @@ test('live SWM propagation fails when sharing succeeds but delivery never arrive
   );
   assert.ok(markerQueryNodes.length > 0);
   assert.equal(markerQueryNodes.every((role) => role === 'receiver'), true);
+});
+
+test('live SWM propagation drains sibling marker work before reporting failure', async () => {
+  const template = baseConfig().contextGraphs[0];
+  const contextGraphs = Array.from({ length: 5 }, (_, index) => ({
+    ...template,
+    id: `0x${(index + 1).toString(16).padStart(40, '0')}/testnet-canary`,
+  }));
+  const config = validateRemoteCanaryConfigV1(baseConfig({ contextGraphs }));
+  let releaseSiblings;
+  const siblingsReleased = new Promise((resolve) => { releaseSiblings = resolve; });
+  const shares = [];
+  let failureReported = false;
+  let mutationsAfterFailure = 0;
+  const operation = verifyLiveSwmPropagationV1({
+    config,
+    client: {
+      shareSwmMarker: async (_node, marker) => {
+        shares.push(marker.contextGraphId);
+        if (failureReported) mutationsAfterFailure += 1;
+        if (marker.contextGraphId === contextGraphs[0].id) {
+          throw new RemoteCanaryError('node-request-failed', 'http');
+        }
+        await siblingsReleased;
+        return true;
+      },
+      askQuery: async () => true,
+    },
+    sleep: async () => undefined,
+  });
+  const observed = operation.then(
+    () => null,
+    (error) => {
+      failureReported = true;
+      return error;
+    },
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(failureReported, false);
+  assert.ok(shares.length >= 4);
+  releaseSiblings();
+  const error = await observed;
+  assert.equal(error instanceof RemoteCanaryError, true);
+  assert.equal(error.code, 'node-request-failed');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(mutationsAfterFailure, 0);
+  assert.equal(shares.length, PHASE_CONCURRENCY);
+  assert.ok(shares.length < contextGraphs.length);
 });
 
 test('offline catch-up fails when a restarted receiver never receives the marker', async () => {
