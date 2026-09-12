@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
 
 import { computeAuthorCatalogScopeDigestV1 } from '@origintrail-official/dkg-core';
 
@@ -18,6 +19,15 @@ import {
 } from './fixture.mjs';
 import { assertFinalizedRuntimeV1 } from './agent-runtime.ts';
 
+/** @typedef {import('./agent-runtime.ts').Rfc64PrivateRuntimeV1} Rfc64PrivateRuntimeV1 */
+/** @typedef {import('./agent-runtime.ts').FinalizedRuntimeV1 & { role: 'owner', publication: import('./agent-runtime.ts').OwnerPublicationStateV1 }} Rfc64PrivateOwnerRuntimeV1 */
+
+const CATALOG_ISSUER_EFFECTIVE_AT =
+  /** @type {import('@origintrail-official/dkg-core').TimestampMsV1} */ ('0');
+const CATALOG_ISSUER_EXPIRES_AT =
+  /** @type {import('@origintrail-official/dkg-core').TimestampMsV1} */ ('1893456000000');
+
+/** @param {Rfc64PrivateRuntimeV1} context */
 export async function publishCatalogBaselineV1(context) {
   assertOwnerPublisherV1(context);
   context.publication.beginBaseline();
@@ -32,14 +42,15 @@ export async function publishCatalogBaselineV1(context) {
       asset,
       deployment: DEPLOYMENT,
       peers: [],
-      catalogIssuerDelegationEffectiveAt: '0',
-      catalogIssuerDelegationExpiresAt: '1893456000000',
+      catalogIssuerDelegationEffectiveAt: CATALOG_ISSUER_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: CATALOG_ISSUER_EXPIRES_AT,
     });
   }
   context.publication.commitBaseline(scope, assets);
   return publishedFieldsV1(applied, policyDigest, scope);
 }
 
+/** @param {Rfc64PrivateRuntimeV1} context */
 export async function publishCatalogUpdateV1(context) {
   assertOwnerPublisherV1(context);
   const baseline = context.publication.requireBaseline();
@@ -76,13 +87,17 @@ export async function publishCatalogUpdateV1(context) {
       asset,
       deployment: DEPLOYMENT,
       peers: [],
-      catalogIssuerDelegationEffectiveAt: '0',
-      catalogIssuerDelegationExpiresAt: '1893456000000',
+      catalogIssuerDelegationEffectiveAt: CATALOG_ISSUER_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: CATALOG_ISSUER_EXPIRES_AT,
     });
   }
   return publishedFieldsV1(applied, policyDigest, baseline.scope);
 }
 
+/**
+ * @param {Rfc64PrivateRuntimeV1} context
+ * @returns {asserts context is Rfc64PrivateOwnerRuntimeV1}
+ */
 function assertOwnerPublisherV1(context) {
   assertFinalizedRuntimeV1(context);
   if (context.role !== 'owner' || context.publication === null) {
@@ -90,6 +105,11 @@ function assertOwnerPublisherV1(context) {
   }
 }
 
+/**
+ * @param {import('../../src/rfc64/inventory-v1/index.ts').AppliedCatalogHeadSnapshotV1 | undefined} applied
+ * @param {import('@origintrail-official/dkg-core').Digest32V1} policyDigest
+ * @param {import('@origintrail-official/dkg-core').AuthorCatalogScopeV1} scope
+ */
 function publishedFieldsV1(applied, policyDigest, scope) {
   if (applied === undefined) throw new Error('catalog upsert produced no applied head');
   return {

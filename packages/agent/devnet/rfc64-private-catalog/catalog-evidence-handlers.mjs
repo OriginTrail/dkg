@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
 
 import { computeAuthorCatalogScopeDigestV1 } from '@origintrail-official/dkg-core';
 
@@ -22,6 +23,17 @@ import {
 } from './memory-evidence.mjs';
 import { readVerifiedAppliedCatalogMemoryEvidenceV1 } from './verified-catalog-swm-proof.mjs';
 
+/** @typedef {import('./agent-runtime.ts').Rfc64PrivateRuntimeV1} Rfc64PrivateRuntimeV1 */
+/** @typedef {import('./agent-runtime.ts').FinalizedRuntimeV1} FinalizedRuntimeV1 */
+/** @typedef {import('../../src/dkg-agent-rfc64-catalog-sync.ts').SynchronizeRfc64CatalogRolloutFromProvidersResultV1} Rfc64CatalogRolloutResultV1 */
+/** @typedef {{ error: string }} Rfc64PrivateBootstrapErrorV1 */
+/** @typedef {Rfc64CatalogRolloutResultV1 | Rfc64PrivateBootstrapErrorV1 | null} Rfc64PrivateBootstrapCandidateV1 */
+/** @typedef {{ accepted: true, attempts: number, last: Rfc64CatalogRolloutResultV1 } | { accepted: false, attempts: number, last: Rfc64PrivateBootstrapCandidateV1 | undefined }} Rfc64PrivateBootstrapObservationV1 */
+
+/**
+ * @param {Rfc64PrivateRuntimeV1} context
+ * @param {{ timeoutMs?: number, expectedHeadDigest?: import('@origintrail-official/dkg-core').Digest32V1, expectedMemory?: 'finalized-vm-v1' }} command
+ */
 export async function waitForBootstrapV1(context, command) {
   assertFinalizedRuntimeV1(context);
   const { role } = context;
@@ -38,7 +50,7 @@ export async function waitForBootstrapV1(context, command) {
       scope: createPrivateCatalogSyncScope(),
     }),
     isSynchronized: (last) => last !== null
-        && last.error === undefined
+        && !('error' in last)
         && ['applied', 'already-applied'].includes(last.completionOutcome)
         && (
           command.expectedHeadDigest === undefined
@@ -53,8 +65,8 @@ export async function waitForBootstrapV1(context, command) {
           });
     },
   });
-  const { last, attempts } = observation;
   if (observation.accepted) {
+    const { last, attempts } = observation;
     const synchronizationEvidence =
       context.agent.readRfc64PublicCatalogSynchronizationEvidenceV1(
         last.currentCatalogHeadDigest,
@@ -66,6 +78,7 @@ export async function waitForBootstrapV1(context, command) {
       synchronizationEvidence?.appliedProviderPeerId ?? null,
     );
   }
+  const { last } = observation;
   const graphCounts = await readPrivateCatalogWorkspaceMemoryEvidenceV1(context.agent.store, {
     assetNumbers: ASSET_NUMBERS,
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -87,6 +100,16 @@ export async function waitForBootstrapV1(context, command) {
 }
 
 /** Retry transport failures without running applied-memory proofs prematurely. */
+/**
+ * @param {{
+ *   timeoutMs: number,
+ *   synchronize: () => Promise<Rfc64CatalogRolloutResultV1 | null>,
+ *   isSynchronized: (last: Rfc64PrivateBootstrapCandidateV1) => boolean,
+ *   verify: (last: Rfc64CatalogRolloutResultV1) => Promise<boolean>,
+ *   wait?: () => Promise<void>
+ * }} input
+ * @returns {Promise<Rfc64PrivateBootstrapObservationV1>}
+ */
 export async function runRfc64PrivateBootstrapRetryLoopV1({
   timeoutMs,
   synchronize,
@@ -95,6 +118,7 @@ export async function runRfc64PrivateBootstrapRetryLoopV1({
   wait = () => delay(100),
 }) {
   const deadline = Date.now() + timeoutMs;
+  /** @type {Rfc64PrivateBootstrapCandidateV1 | undefined} */
   let last;
   let attempts = 0;
   while (Date.now() < deadline) {
@@ -106,8 +130,15 @@ export async function runRfc64PrivateBootstrapRetryLoopV1({
     }
     // `verify` owns the strict applied-memory proof. It is deliberately not
     // invoked for transport failures or null/incomplete synchronization.
-    if (isSynchronized(last) && await verify(last)) {
-      return Object.freeze({ accepted: true, attempts, last });
+    if (
+      isSynchronized(last)
+      && await verify(/** @type {Rfc64CatalogRolloutResultV1} */ (last))
+    ) {
+      return Object.freeze({
+        accepted: true,
+        attempts,
+        last: /** @type {Rfc64CatalogRolloutResultV1} */ (last),
+      });
     }
     await wait();
   }
@@ -115,6 +146,12 @@ export async function runRfc64PrivateBootstrapRetryLoopV1({
 }
 
 /** Preserve the canonical nullable provider identity instead of inferring transfer provenance. */
+/**
+ * @param {Rfc64CatalogRolloutResultV1} result
+ * @param {number} attempts
+ * @param {string} expectedProviderPeerId
+ * @param {string | null} [observedAppliedProviderPeerId]
+ */
 export function composeBootstrapEvidenceV1(
   result,
   attempts,
@@ -159,6 +196,11 @@ export function composeBootstrapEvidenceV1(
   });
 }
 
+/**
+ * @param {Rfc64PrivateRuntimeV1} context
+ * @param {import('@origintrail-official/dkg-core').Digest32V1 | undefined} expectedHeadDigest
+ * @param {{ includeNonmemberQuery?: boolean }} [options]
+ */
 export async function inspectPrivateCatalogV1(
   context,
   expectedHeadDigest,
@@ -212,6 +254,10 @@ export async function inspectPrivateCatalogV1(
   };
 }
 
+/**
+ * @param {Rfc64PrivateRuntimeV1} context
+ * @param {{ providerPeerIds: readonly string[] }} command
+ */
 export async function provePrivateCatalogDeniedV1(context, command) {
   assertFinalizedRuntimeV1(context);
   try {
@@ -235,6 +281,7 @@ export async function provePrivateCatalogDeniedV1(context, command) {
   }
 }
 
+/** @param {FinalizedRuntimeV1} context */
 async function hasExactLocalFinalizedVmBaselineV1(context) {
   const graphCounts = await readPrivateCatalogWorkspaceMemoryEvidenceV1(context.agent.store, {
     assetNumbers: ASSET_NUMBERS,
@@ -249,6 +296,10 @@ async function hasExactLocalFinalizedVmBaselineV1(context) {
   );
 }
 
+/**
+ * @param {FinalizedRuntimeV1} context
+ * @param {{ catalogVersion?: string, exactExpectedHead?: boolean }} [catalogEvidence]
+ */
 async function hasExactLocalMemoryContentsV1(context, catalogEvidence = {}) {
   const authorAddress = roleAgentAddress('owner');
   const scope = createPrivateCatalogScope({ authorAddress });
@@ -267,8 +318,15 @@ async function hasExactLocalMemoryContentsV1(context, catalogEvidence = {}) {
   );
 }
 
+/**
+ * @param {FinalizedRuntimeV1} context
+ * @param {import('../../src/rfc64/inventory-v1/index.ts').AppliedCatalogHeadSnapshotV1 | null} applied
+ * @param {import('@origintrail-official/dkg-core').AuthorCatalogScopeV1} scope
+ */
 async function readVerifiedAppliedCatalogMemoryV1(context, applied, scope) {
-  const persistence = context.agent.rfc64PersistenceV1;
+  const persistence = /** @type {{ rfc64PersistenceV1?: import('../../src/rfc64/persistence-v1.ts').Rfc64PersistenceV1 }} */ (
+    /** @type {unknown} */ (context.agent)
+  ).rfc64PersistenceV1;
   if (applied === null || persistence === undefined) {
     throw new Error('catalog-row SWM evidence has no durable applied catalog');
   }
@@ -290,16 +348,25 @@ async function readVerifiedAppliedCatalogMemoryV1(context, applied, scope) {
   });
 }
 
+/** @param {unknown} value */
 function boundedTimeoutV1(value) {
-  return Number.isSafeInteger(value) && value >= 1_000 && value <= 120_000
+  return typeof value === 'number'
+    && Number.isSafeInteger(value)
+    && value >= 1_000
+    && value <= 120_000
     ? value
     : 60_000;
 }
 
+/** @param {number} ms */
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * @param {string} _key
+ * @param {unknown} value
+ */
 function bigintToDecimal(_key, value) {
   return typeof value === 'bigint' ? value.toString(10) : value;
 }

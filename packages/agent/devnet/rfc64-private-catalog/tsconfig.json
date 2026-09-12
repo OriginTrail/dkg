@@ -11,5 +11,14 @@
     "sourceMap": false,
     "types": ["node"]
   },
-  "include": ["agent-runtime.ts", "agent-runtime-factory.ts"]
+  "include": [
+    "agent-runtime.ts",
+    "agent-runtime-factory.ts",
+    "catalog-authority-handlers.mjs",
+    "catalog-evidence-handlers.mjs",
+    "catalog-publication-handlers.mjs",
+    "fault-injection.mjs",
+    "runtime-contract.typecheck.ts",
+    "../../src/jsonld.d.ts"
+  ]
 }

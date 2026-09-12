@@ -1,15 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
 
 import {
   decodeOpaqueKaBundleV1,
   encodeOpaqueKaBundleV1,
 } from '@origintrail-official/dkg-core';
 
+/** @typedef {'omit-receiver' | 'revocation-chain-noop' | 'revocation-over-removal'} Rfc64PrivateAuthorityFaultV1 */
+/** @typedef {'inventory-digest' | 'expected-assets' | 'duplicate-expected-assets' | 'missing-bundle' | 'mismatched-bundle' | 'trusted-scope'} Rfc64PrivateCatalogProofFaultV1 */
+/** @typedef {import('./agent-runtime.ts').Rfc64PrivateFaultProfileV1} Rfc64PrivateFaultProfileV1 */
+/** @typedef {import('./agent-runtime.ts').Rfc64PrivateCatalogProofInputsV1} Rfc64PrivateCatalogProofInputsV1 */
+
+/** @type {ReadonlySet<Rfc64PrivateAuthorityFaultV1>} */
 const AUTHORITY_FAULTS = new Set([
   'omit-receiver',
   'revocation-chain-noop',
   'revocation-over-removal',
 ]);
+/** @type {ReadonlySet<Rfc64PrivateCatalogProofFaultV1>} */
 const CATALOG_PROOF_FAULTS = new Set([
   'inventory-digest',
   'expected-assets',
@@ -20,6 +28,10 @@ const CATALOG_PROOF_FAULTS = new Set([
 ]);
 
 /** Parse test-only corruption controls once into immutable strategies. */
+/**
+ * @param {NodeJS.ProcessEnv} environment
+ * @returns {Rfc64PrivateFaultProfileV1}
+ */
 export function createRfc64PrivateFaultProfileV1(environment) {
   const authorityFault = optionalFault(
     environment.DKG_RFC64_PRIVATE_AUTHORITY_FAULT,
@@ -37,6 +49,10 @@ export function createRfc64PrivateFaultProfileV1(environment) {
   });
 }
 
+/**
+ * @param {Rfc64PrivateAuthorityFaultV1 | null} fault
+ * @returns {Rfc64PrivateFaultProfileV1['authority']}
+ */
 function authorityStrategyV1(fault) {
   return Object.freeze({
     fixture(canonical, receiverAddress) {
@@ -60,8 +76,13 @@ function authorityStrategyV1(fault) {
   });
 }
 
+/**
+ * @param {Rfc64PrivateCatalogProofFaultV1 | null} fault
+ * @returns {Rfc64PrivateFaultProfileV1['proof']}
+ */
 function catalogProofStrategyV1(fault) {
   return Object.freeze({
+    /** @param {Rfc64PrivateCatalogProofInputsV1} input */
     inputs({
       appliedHead,
       expectedAssetNumbers,
@@ -71,7 +92,13 @@ function catalogProofStrategyV1(fault) {
     }) {
       return Object.freeze({
         appliedHead: fault === 'inventory-digest'
-          ? Object.freeze({ ...appliedHead, appliedInventoryDigest: `0x${'00'.repeat(32)}` })
+          ? Object.freeze({
+              ...appliedHead,
+              appliedInventoryDigest:
+                /** @type {import('@origintrail-official/dkg-core').Digest32V1} */ (
+                  `0x${'00'.repeat(32)}`
+                ),
+            })
           : appliedHead,
         expectedAssetNumbers: fault === 'expected-assets'
           ? Object.freeze([expectedAssetNumbers[0], 43])
@@ -87,6 +114,11 @@ function catalogProofStrategyV1(fault) {
   });
 }
 
+/**
+ * @param {Rfc64PrivateCatalogProofInputsV1['kaBundles']} kaBundles
+ * @param {Rfc64PrivateCatalogProofFaultV1 | null} fault
+ * @returns {Rfc64PrivateCatalogProofInputsV1['kaBundles']}
+ */
 function wrapKaBundlesV1(kaBundles, fault) {
   if (fault === 'missing-bundle') {
     return Object.freeze({ readKaBundleByDigest: async () => null });
@@ -107,10 +139,20 @@ function wrapKaBundlesV1(kaBundles, fault) {
   });
 }
 
+/**
+ * @template {string} T
+ * @param {unknown} value
+ * @param {ReadonlySet<T>} supported
+ * @param {string} label
+ * @returns {T | null}
+ */
 function optionalFault(value, supported, label) {
   if (value === undefined) return null;
-  if (typeof value !== 'string' || !supported.has(value)) {
+  if (
+    typeof value !== 'string'
+    || !supported.has(/** @type {T} */ (value))
+  ) {
     throw new Error(`unsupported RFC-64 private ${label} fault injection`);
   }
-  return value;
+  return /** @type {T} */ (value);
 }
