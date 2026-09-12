@@ -1,6 +1,6 @@
+import type { VmRecoverySlotCapture, VmRecoveryRotationSnapshot } from '../src/internal/vm-recovery-slot-registry.js';
 import { describe, expect, it } from 'vitest';
 import { VmRecoverySlotRegistry, type VmRecoverySlotScope } from '../src/internal/vm-recovery-slot-registry.js';
-import type { VmRecoverySlotCapture, VmRecoveryRotationSnapshot } from '../src/dkg-agent-types.js';
 
 const target = { localCgId: 'cg-a', onChainCgId: '1', ordinal: 0, ual: 'ka-0', merkleRoot: '0xABC' };
 

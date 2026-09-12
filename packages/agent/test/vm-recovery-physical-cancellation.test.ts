@@ -1,9 +1,10 @@
+import type { VmRecoverySlotCapture } from '../src/internal/vm-recovery-slot-registry.js';
 import { describe, expect, it, vi } from 'vitest';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, quadsToNQuads, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import type { DKGAgent } from '../src/index.js';
-import type { ContextGraphSub, DKGAgentConfig, VmRecoverySlotCapture } from '../src/dkg-agent-types.js';
+import type { ContextGraphSub, DKGAgentConfig } from '../src/dkg-agent-types.js';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import type { Messenger } from '../src/p2p/messenger.js';
 import type { SyncVerifyWorker } from '../src/sync-verify-worker.js';

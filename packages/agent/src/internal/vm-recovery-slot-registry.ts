@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
+import { VmRecoveryBatchTransaction } from './vm-recovery-batch-transaction.js';
 
 type Target = Pick<OrdinalRecoveryTarget, 'localCgId' | 'onChainCgId' | 'ordinal' | 'ual' | 'merkleRoot'>;
 type SlotLocator = Pick<Target, 'localCgId' | 'onChainCgId' | 'ordinal'>;
@@ -383,8 +384,7 @@ export class VmRecoverySlotRegistry {
         this.touch(target, record.handle);
         return { slot: this.captureState(record), suppressed: true };
       }
-      this.invalidate(target);
-      return { suppressed: false };
+      return this.retireForPreparation(target);
     }
 
     if (!record) {
@@ -476,8 +476,7 @@ export class VmRecoverySlotRegistry {
       // Expired partial evidence fails open and releases its cache slot. Return
       // evidence-free for this pass so a repeatedly ineligible roster cannot
       // refresh all collecting entries just before capacity admission runs.
-      this.invalidate(target);
-      return { suppressed: false };
+      return this.retireForPreparation(target);
     }
 
     this.touch(target, record.handle);
@@ -557,7 +556,17 @@ export class VmRecoverySlotRegistry {
     this.touch(target, record.handle);
   }
 
-  /** Observe a selected target once before a planner captures its admission owner. */
+  /** Retire only this preparation's owner; never adopt a replacement created by an abort callback. */
+  private retireForPreparation(target: Target): VmRecoveryPreparation {
+    this.invalidate(target);
+    return { suppressed: this.slots.has(vmRecoverySlotKey(target)) };
+  }
+
+  beginBatch(): VmRecoveryBatchTransaction {
+    return new VmRecoveryBatchTransaction(this);
+  }
+
+  /** Observe a selected target once before a transaction captures its admission owner. */
   observeForAdmission(target: Target): VmRecoverySlotCapture | undefined {
     this.observeTarget(target);
     return this.capture(target);

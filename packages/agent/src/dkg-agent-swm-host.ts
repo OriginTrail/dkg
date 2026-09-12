@@ -258,11 +258,12 @@ import {
   type VmRecoveryTargetFootprint,
 } from './vm-recovery-microbatch.js';
 import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
-import type { VmRecoverySlotScope } from './internal/vm-recovery-slot-registry.js';
-import {
-  VmRecoveryBatchPlan,
-  type VmRecoveryPreparedEntry,
-} from './internal/vm-recovery-batch-plan.js';
+import type {
+  VmRecoveryRotationSnapshot, VmRecoverySlotHandle, VmRecoveryPreparation,
+} from './internal/vm-recovery-slot-registry.js';
+import type {
+  VmRecoveryBatchTransaction, VmRecoveryPreparedEntry,
+} from './internal/vm-recovery-batch-transaction.js';
 import {
   VmRecoveryProviderPolicy,
   type VmRecoveryProviderAttempt,
@@ -466,9 +467,6 @@ import {
   type ContextGraphSubscriptionStore,
   type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
-  type VmRecoveryRotationSnapshot,
-  type VmRecoverySlotHandle,
-  type VmRecoveryPreparation,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -5238,16 +5236,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     signal?: AbortSignal,
     revalidateTarget?: () => Promise<boolean>,
   ): Promise<PendingOrdinalRecoveryResult> {
-    const scope = this.vmRecoverySlots.begin();
-    const signals = [scope.signal, signal, this.vmReconcileLifecycleController.signal]
+    const transaction = this.vmRecoverySlots.beginBatch();
+    const signals = [transaction.signal, signal, this.vmReconcileLifecycleController.signal]
       .filter((value): value is AbortSignal => value !== undefined);
     try {
       return await this.recoverVmReconcileBatchInScope(
         localCgId, onChainCgId, targets, headBlock, isTargetCurrent,
-        AbortSignal.any(signals), revalidateTarget, scope,
+        AbortSignal.any(signals), revalidateTarget, transaction,
       );
     } finally {
-      scope.release();
+      transaction.release();
     }
   }
 
@@ -5259,7 +5257,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isTargetCurrent: () => boolean,
     signal: AbortSignal,
     revalidateTarget: (() => Promise<boolean>) | undefined,
-    scope: VmRecoverySlotScope,
+    transaction: VmRecoveryBatchTransaction,
   ): Promise<PendingOrdinalRecoveryResult> {
     const rotationGeneration = this.vmReconcileLifecycleGeneration;
     const isRecoveryCurrent = () => !this.vmReconcileRotationClosed
@@ -5302,12 +5300,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // production ordinal/finalization check proved it still pending locally.
     const observedCandidatePeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
     const now = this.vmReconcileRotationNow();
-    const batchPlan = new VmRecoveryBatchPlan(this.vmRecoverySlots, {
+    const batchPlan = transaction.reserveBatch({
       targets: currentTargets,
       admissionCursor: this.vmReconcileRotationAdmissionCursorByCg.get(localCgId) ?? 0,
       observedCandidatePeerIds,
       now,
-      scope,
       collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
     });
     const initiallyEligible = batchPlan.initiallyEligibleTargets;
@@ -5485,7 +5482,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // set. Re-evaluate every target against that observed change. Any roster
     // change breaks backoff and starts a fresh proof cycle.
     const preparedAt = this.vmReconcileRotationNow();
-    const committedPlan = batchPlan.commit({
+    const committedPlan = transaction.commit({
       candidatePeerIds: orderedPeerIds,
       curatorRosterConfirmed: resolutionSucceeded,
       now: preparedAt,

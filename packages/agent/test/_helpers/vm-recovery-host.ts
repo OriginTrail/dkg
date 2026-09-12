@@ -1,3 +1,4 @@
+import type { VmRecoverySlotCapture, VmRecoverySlotHandle } from '../../src/internal/vm-recovery-slot-registry.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
@@ -7,7 +8,6 @@ import type {
   PendingOrdinalRecoveryResult,
 } from '../../src/chain-reconciler.js';
 import type { CuratorPeerIdsResolution } from '../../src/dkg-agent-lifecycle.js';
-import type { VmRecoverySlotCapture, VmRecoverySlotHandle } from '../../src/dkg-agent-types.js';
 import { VmRecoverySlotRegistry } from '../../src/internal/vm-recovery-slot-registry.js';
 import { DKGAgent } from '../../src/index.js';
 import {

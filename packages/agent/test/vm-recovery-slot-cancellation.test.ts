@@ -1,8 +1,9 @@
+import type { VmRecoverySlotCapture } from '../src/internal/vm-recovery-slot-registry.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import { waitForPeerProtocol } from '../src/p2p/protocol-readiness.js';
-import type { ContextGraphSub, VmRecoverySlotCapture } from '../src/dkg-agent-types.js';
+import type { ContextGraphSub } from '../src/dkg-agent-types.js';
 import {
   vmRecoverySlotKey,
   type VmRecoverySlotRegistry,
@@ -53,6 +54,33 @@ const cases = (['discovery', 'legacy-meta', 'legacy-registry', 'dial', 'protocol
 );
 
 describe('exact VM recovery slot cancellation', () => {
+  it.each(['expired', 'empty-observation'] as const)('fetches in the same pass after retiring %s evidence', async reason => {
+    const localCgId = `0x0000000000000000000000000000000000000001/retired-${reason}`;
+    const peer = '12D3KooWRetiredEvidence';
+    const harness = await createVmRecoveryHostHarness({
+      name: `Retired-${reason}`, localCgId, peers: [peer], targetCount: 1,
+      targetForOrdinal: ordinal => targetFor(localCgId, ordinal), onFetch: () => 'clean-absent',
+    });
+    try {
+      const host = harness.internals;
+      const selected = harness.targets[0]!;
+      const now = host.vmReconcileRotationNow();
+      host.vmRecoverySlots.prepare(selected, {
+        candidatePeerIds: [peer], curatorRosterConfirmed: true,
+        collectionDeadlineAt: reason === 'expired' ? now - 1 : now + 100_000,
+      }, now - 2);
+      if (reason === 'empty-observation') {
+        const connected = host.node.libp2p.getConnections;
+        host.node.libp2p.getConnections = () => [];
+        host.preferredSyncPeers.clear();
+        host.ensurePeerConnected = async () => { host.node.libp2p.getConnections = connected; };
+      }
+      const result = await harness.run();
+      expect(result.attemptedOrdinals).toEqual([selected.ordinal]);
+      expect(harness.fetched).toEqual([{ peerId: peer, uals: [selected.ual] }]);
+    } finally { await harness.agent.stop(); }
+  });
+
   it.each(['fingerprint', 'context', 'own-donation', 'own-donation-replacement'] as const)(
     'preserves donor lifecycle ownership during discovery: %s', async invalidation => {
       const localCgId = `0x0000000000000000000000000000000000000001/reserved-${invalidation}`;
