@@ -966,9 +966,7 @@ export class DKGAgent extends DKGAgentBase {
         ),
       },
       cooldown: {
-        deleteProvider: (providerPeerId) => {
-          this.rfc64ExactCatchupOnConnectAt.delete(providerPeerId);
-        },
+        deleteProvider: (providerPeerId) => this.peerSyncSession.clearExactCatchupCooldown(providerPeerId),
       },
     });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
@@ -1781,13 +1779,14 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   async getPeerDiagnostics(peerId: string): Promise<PeerDiagnostics> {
+    const peerSync = this.peerSyncSession.diagnosticsState();
     return diagnostics.getPeerDiagnostics(
       {
         node: this.node,
         messenger: this.messenger,
         peerHealth: this.peerHealth,
-        lastSuccessfulSyncAt: this.lastSuccessfulSyncAt,
-        syncReconcilerBackoff: this.syncReconcilerBackoff,
+        lastSuccessfulSyncAt: peerSync.lastSuccessfulSyncAt,
+        syncReconcilerBackoff: peerSync.syncReconcilerBackoff,
       },
       peerId,
     );
@@ -2242,6 +2241,12 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    this.peerSyncSession.close();
+    // Disconnect history survives sessions; transient freshness and cooldowns do not.
+    const disconnectedAt = Date.now();
+    for (const peer of this.node.libp2p.getPeers()) {
+      this.lastSyncDisconnectedAt.set(peer.toString(), disconnectedAt);
+    }
     const authorityRetryDrain =
       this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
     // Fence membership persistence before any network callback can enqueue

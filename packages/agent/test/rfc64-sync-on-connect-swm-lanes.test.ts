@@ -7,6 +7,7 @@ import {
   emptyDetailedSync,
   flushTimers,
   installSyncOnConnectPeerJobStub,
+  resetPeerSyncSessionForTest,
 } from './_helpers/sync-on-connect-test-fixture.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -47,7 +48,7 @@ describe('RFC-64 SWM lane partition and admission', () => {
     expect(agent.queueSyncFromPeerOnConnect(PEER_A, handleSyncError, 0)).toBe(true);
     releaseExact();
 
-    await vi.waitFor(() => expect(agent.syncOnConnectPeerScheduler.size).toBe(0));
+    await vi.waitFor(() => expect(agent.getSyncOnConnectPeerScheduler().size).toBe(0));
     expect(ordinaryRun).toHaveBeenCalledWith(PEER_A);
     expect(ordering).toEqual(['exact-in-flight', 'ordinary']);
   });
@@ -77,7 +78,8 @@ describe('RFC-64 SWM lane partition and admission', () => {
       .toBe(true);
     await flushTimers();
     expect(queuedRun).toHaveBeenCalledOnce();
-    agent.syncOnConnectPeerScheduler = null;
+    agent.peerSyncSession.close();
+    resetPeerSyncSessionForTest(agent);
 
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
     agent.planSharedMemorySyncContextGraphs = async () => ({

@@ -64,6 +64,7 @@ export interface SyncOnConnectPeerSchedulerCallbacks<SelectedPlan> {
  */
 export class SyncOnConnectPeerScheduler<SelectedPlan> {
   private readonly jobs = new Map<string, PeerJob<SelectedPlan>>();
+  private closed = false;
 
   constructor(
     private readonly callbacks: SyncOnConnectPeerSchedulerCallbacks<SelectedPlan>,
@@ -75,6 +76,12 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
 
   has(remotePeer: string): boolean {
     return this.jobs.has(remotePeer);
+  }
+
+  /** Cancel pending timers and fence final accounting from already running jobs. */
+  close(): void {
+    this.closed = true;
+    for (const peer of this.jobs.keys()) this.clear(peer);
   }
 
   clear(remotePeer: string): void {
@@ -89,6 +96,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     handleSyncError: SyncOnConnectErrorHandler,
     delayMs: number,
   ): boolean {
+    if (this.closed) return false;
     const existing = this.jobs.get(remotePeer);
     if (existing === undefined) {
       this.schedule(remotePeer, {
@@ -111,6 +119,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     delayMs: number,
     recoveryPlan?: SelectedPlan,
   ): boolean {
+    if (this.closed) return false;
     const lane: SelectedLane<SelectedPlan> = {
       kind: 'selected',
       handleSyncError,
@@ -192,6 +201,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
             await runner.runAutomaticSelectedThenOrdinary();
           }
         } catch (error: unknown) {
+          if (this.closed) return;
           // Error ownership belongs to the lane that actually failed. A later
           // enqueue may replace a pending selected lane, but it must never
           // redirect an already-running lane's rejection to the newer caller.
@@ -231,6 +241,7 @@ export class SyncOnConnectPeerScheduler<SelectedPlan> {
     error: unknown,
     stage: SyncOnConnectSchedulerInternalStage,
   ): Promise<void> {
+    if (this.closed) return;
     try {
       await this.callbacks.onInternalError(remotePeer, error, stage);
     } catch {

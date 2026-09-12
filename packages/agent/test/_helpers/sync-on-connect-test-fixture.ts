@@ -1,14 +1,16 @@
+import { PeerSyncSession } from '../../src/sync/peer-sync-session.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { PeerSyncSessionTestDriver } from './peer-sync-session-driver.js';
 
 import { DKGAgent, type DKGAgentConfig } from '../../src/index.js';
-import type { ContextGraphSub, SyncReconcilerBackoff } from '../../src/dkg-agent-types.js';
+import type { ContextGraphSub } from '../../src/dkg-agent-types.js';
 import type { Rfc64SwmRecoveryCoordinatorV1 } from '../../src/rfc64/swm-recovery-coordinator-v1.js';
 import type { Rfc64SwmRecoveryRuntimeV1 } from '../../src/dkg-agent-rfc64-swm-recovery-runtime.js';
 import type { Rfc64AuthorizedSwmRecoveryPlanV1 } from '../../src/rfc64/swm-recovery-plan-v1.js';
 import type { SelectedSwmBootstrapAdmission } from '../../src/sync/selected-swm-bootstrap-admission.js';
 import {
-  SyncOnConnectPeerScheduler,
   type SyncOnConnectPeerJobRunner,
+  type SyncOnConnectPeerSchedulerCallbacks,
 } from '../../src/sync/on-connect/peer-scheduler.js';
 
 type Rfc64CoordinatorTestPort = Pick<
@@ -18,6 +20,7 @@ type Rfc64CoordinatorTestPort = Pick<
 
 interface SyncOnConnectPrivateSeam {
   started: boolean;
+  peerSyncSession: PeerSyncSession;
   config: DKGAgentConfig;
   node: {
     node: {
@@ -30,18 +33,10 @@ interface SyncOnConnectPrivateSeam {
     isRejectedPeer: (peerId: string) => boolean;
     ensureAdmitted: (peerId: string) => Promise<boolean>;
   };
-  catchupOnConnectAt: Map<string, number>;
-  rfc64ExactCatchupOnConnectAt: Map<string, number>;
-  lastSuccessfulSyncAt: Map<string, number>;
   lastSyncDisconnectedAt: Map<string, number>;
-  lastSyncProgressAt: Map<string, number>;
-  syncReconcilerBackoff: Map<string, SyncReconcilerBackoff>;
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   rfc64SwmRecoveryRuntimeV1: Rfc64SwmRecoveryRuntimeV1;
-  syncOnConnectPeerScheduler: SyncOnConnectPeerScheduler<
-    Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>
-  > | null;
   rfc64SwmRecoveryCoordinatorV1: Rfc64CoordinatorTestPort;
 }
 
@@ -67,6 +62,49 @@ export function createSyncOnConnectPeerJobRunnerForTest(
     ) => SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>;
   };
   return internalAgent.createSyncOnConnectPeerJobRunner(remotePeer);
+}
+
+/** Open a production-shaped peer-sync session for tests that bypass start(). */
+export function resetPeerSyncSessionForTest(
+  agent: SyncOnConnectTestAgent,
+): PeerSyncSession {
+  const internalAgent = agent as unknown as {
+    createSyncOnConnectPeerJobRunner: (
+      peerId: string,
+      options?: Record<string, never>,
+      session?: PeerSyncSession,
+    ) => SyncOnConnectPeerJobRunner<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>;
+  };
+  const session = new PeerSyncSession({
+    createJob: (remotePeer, owningSession) => internalAgent.createSyncOnConnectPeerJobRunner(
+      remotePeer,
+      {},
+      owningSession,
+    ),
+    onInternalError: () => undefined,
+  });
+  agent.peerSyncSession.close();
+  agent.peerSyncSession = session;
+  return session;
+}
+
+/** Behavioral seam for seeding and inspecting peer-sync state in tests. */
+export function peerSyncSessionDriver(
+  agent: SyncOnConnectTestAgent,
+): PeerSyncSessionTestDriver {
+  return new PeerSyncSessionTestDriver(() => agent.peerSyncSession);
+}
+
+/** Install scheduler behavior when a fresh, unseeded test session is constructed. */
+export function installPeerSyncSessionSchedulerForTest(
+  agent: SyncOnConnectTestAgent,
+  callbacks: SyncOnConnectPeerSchedulerCallbacks<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>,
+): PeerSyncSession {
+  const previous = agent.peerSyncSession;
+  const session = new PeerSyncSession(callbacks);
+  previous.close();
+  agent.peerSyncSession = session;
+  return session;
 }
 
 export function createRfc64CoordinatorStub(
@@ -95,7 +133,7 @@ export function installSyncOnConnectPeerJobStub(
     finish?: (remotePeer: string) => void;
   }>,
 ): void {
-  agent.syncOnConnectPeerScheduler = new SyncOnConnectPeerScheduler({
+  installPeerSyncSessionSchedulerForTest(agent, {
     createJob: (remotePeer) => ({
       runAutomaticSelectedThenOrdinary: async () => {
         await callbacks.runOrdinary?.(remotePeer);
@@ -116,12 +154,15 @@ export async function createUnstartedAgent(
   name: string,
   overrides: Partial<DKGAgentConfig> = {},
 ): Promise<SyncOnConnectTestAgent> {
-  return asSyncOnConnectTestAgent(await DKGAgent.create({
+  const agent = asSyncOnConnectTestAgent(await DKGAgent.create({
     name,
     listenHost: '127.0.0.1',
     chainAdapter: new MockChainAdapter(),
     ...overrides,
   }));
+  // These orchestration fixtures explicitly open a session without networking.
+  resetPeerSyncSessionForTest(agent);
+  return agent;
 }
 
 export function allowAllNetworkAdmission(agent: SyncOnConnectTestAgent): void {

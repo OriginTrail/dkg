@@ -1221,16 +1221,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     let runtime = rfc64CatalogReplayConnectionRuntimesV1.get(this);
     if (runtime === undefined) {
       runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
-        selectContextGraphIds: () => [
-          ...this.readRfc64CatalogResponsibilitiesV1()
-            .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
-            .map((responsibility) => responsibility.contextGraphId),
-          ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
-            .filter((contextGraphId) => {
-              const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-              return authority.active && authority.mode !== 'legacy';
-            }),
-        ],
+        selectContextGraphIds: () => this.listActiveRfc64CatalogReplayContextGraphIdsV1(),
         acquireFence: (contextGraphId, replayPeerId) =>
           this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, replayPeerId),
         reannounce: (replayPeerId) =>
@@ -1296,6 +1287,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this,
       this.config.rfc64CatalogExecutionPlan,
     ).snapshot();
+  }
+
+  /** Canonical connection-replay targets after responsibility and authority policy. */
+  listActiveRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
+    const responsibilityIds = this.readRfc64CatalogResponsibilitiesV1()
+      .filter((selection) => selection.active && selection.mode !== 'legacy')
+      .map((selection) => selection.contextGraphId);
+    const configuredIds = Object.keys(
+      this.config.rfc64CatalogExecutionPlan.selectedAuthority,
+    ).filter((contextGraphId) => {
+      const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+      return authority.active && authority.mode !== 'legacy';
+    });
+    return Object.freeze([...new Set([...responsibilityIds, ...configuredIds])].sort());
   }
 
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */
