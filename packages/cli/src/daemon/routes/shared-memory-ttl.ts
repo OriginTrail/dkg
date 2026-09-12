@@ -31,10 +31,10 @@ export async function handleSharedMemoryTtlSettings({ req, res, configStore, age
     }
     await configStore.update(
       current => ({ ...current, sharedMemoryTtlMs: ttlMs, workspaceTtlMs: ttlMs }),
-      () => {
-        agent.setSharedMemoryTtlMs(ttlMs);
-        return undefined;
-      },
+      (_next, previous) => ({
+        apply: () => agent.setSharedMemoryTtlMs(ttlMs),
+        rollback: () => agent.setSharedMemoryTtlMs(resolveSharedMemoryTtlMs(previous) ?? 30 * 24 * 60 * 60 * 1000),
+      }),
     );
     return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
   } catch (error) {

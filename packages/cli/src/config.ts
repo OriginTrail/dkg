@@ -2168,10 +2168,9 @@ export class DkgHomeFiles {
   }
 
   async saveConfig(config: DkgConfig): Promise<void> {
-    // Capture before entering the resolved-file publication queue. Standalone CLI
-    // callers get ordinary full-snapshot persistence with no daemon-specific
-    // object-identity routing hidden behind this boundary. An attached daemon
-    // handle observes the published snapshot through the same file owner.
+    // Standalone callers publish an immutable call-time snapshot. Once a daemon
+    // claims this file, use its typed commit path so runtime activation cannot
+    // be bypassed by an ordinary save.
     const contents = JSON.stringify(config, null, 2) + '\n';
     await writeConfigFile(this.configPath, contents);
   }

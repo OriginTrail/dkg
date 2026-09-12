@@ -195,6 +195,6 @@ export async function updateDaemonConfig<T>(
     const draft = mutableConfigSnapshot(current);
     result = mutate(draft);
     return draft;
-  });
+  }, 'configuration-only');
   return result;
 }

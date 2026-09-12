@@ -898,7 +898,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         },
       },
     });
-    const configStore = DkgConfigStore.open(new DkgHomeFiles(dkgHome), initial);
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), initial);
     let probeEntered!: () => void;
     let releaseProbe!: () => void;
     const entered = new Promise<void>(resolve => { probeEntered = resolve; });
@@ -931,7 +931,7 @@ describe('Hermes local-agent registry lifecycle', () => {
       } as any);
       await entered;
       let connectEditCommitted = false;
-      edits.push(configStore.update(current => ({ ...current, name: 'committed during blocked probe' }))
+      edits.push(configStore.update(current => ({ ...current, name: 'committed during blocked probe' }), 'configuration-only')
         .then(() => { connectEditCommitted = true; }));
       await vi.waitFor(() => expect(connectEditCommitted).toBe(true));
       expect(configStore.current.name).toBe('committed during blocked probe');
@@ -967,7 +967,7 @@ describe('Hermes local-agent registry lifecycle', () => {
       });
       await refreshStarted;
       let refreshEditCommitted = false;
-      edits.push(configStore.update(current => ({ ...current, name: 'committed during blocked refresh' }))
+      edits.push(configStore.update(current => ({ ...current, name: 'committed during blocked refresh' }), 'configuration-only')
         .then(() => { refreshEditCommitted = true; }));
       await vi.waitFor(() => expect(refreshEditCommitted).toBe(true));
       expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')).name).toBe('committed during blocked refresh');
@@ -989,7 +989,7 @@ describe('Hermes local-agent registry lifecycle', () => {
 
   it('rebases deferred route attach patches and lets a newer disconnect win', async () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    const configStore = DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
     let finishAttach!: (patch: Record<string, unknown>) => Promise<void>;
     const connectFromUi: typeof connectLocalAgentIntegrationFromUi = async (candidate, body, _token, deps) => {
       const integration = connectLocalAgentIntegration(candidate, {
@@ -1028,7 +1028,7 @@ describe('Hermes local-agent registry lifecycle', () => {
           metadata: { operatorLabel: 'edited while attaching' },
         });
         return next;
-      });
+      }, 'configuration-only');
       await finishAttach({
         transport: { kind: 'custom-bridge', bridgeUrl: 'http://127.0.0.1:9444' },
         metadata: { setupAudit: 'complete' },
@@ -1071,7 +1071,7 @@ describe('Hermes local-agent registry lifecycle', () => {
 
   it('commits an explicit failed attach state before reporting the route error', async () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    const configStore = DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
     const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
       id: 'custom-agent',
       metadata: { source: 'node-ui' },
@@ -1106,7 +1106,7 @@ describe('Hermes local-agent registry lifecycle', () => {
 
   it('publishes the legacy register-adapter route through the canonical store', async () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    const configStore = DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
     const req = makeJsonRequest('POST', '/api/register-adapter', {
       id: 'openclaw',
       transport: { gatewayUrl: 'http://127.0.0.1:18789' },
@@ -1142,7 +1142,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         },
       },
     });
-    const configStore = DkgConfigStore.open(new DkgHomeFiles(dkgHome), initial);
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), initial);
     const context = { configStore };
 
     try {
@@ -1171,7 +1171,7 @@ describe('Hermes local-agent registry lifecycle', () => {
             runtime: { status: 'disconnected', ready: false, lastError: null },
           },
         },
-      }));
+      }), 'configuration-only');
       await persistLocalAgentAttachPatch(context, 'openclaw', {
         enabled: true,
         runtime: { status: 'ready', ready: true, lastError: null },
@@ -1437,7 +1437,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         },
       },
     });
-    const configStore = DkgConfigStore.open(new DkgHomeFiles(dkgHome), config);
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), config);
     const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
       enabled: false,
       runtime: { status: 'disconnected' },
@@ -1489,7 +1489,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         },
       },
     });
-    const configStore = DkgConfigStore.open(new DkgHomeFiles(dkgHome), config);
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), config);
     const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
       enabled: false,
       runtime: { status: 'disconnected' },
@@ -1536,7 +1536,7 @@ describe('Hermes local-agent registry lifecycle', () => {
         },
       },
     });
-    const configStore = DkgConfigStore.open(new DkgHomeFiles(dkgHome), config);
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), config);
     const req = makeJsonRequest('PUT', '/api/local-agent-integrations/hermes', {
       enabled: false,
       runtime: { status: 'disconnected' },

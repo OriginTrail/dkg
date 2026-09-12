@@ -11,7 +11,14 @@ export type DeepReadonly<T> = T extends string | number | boolean | bigint | sym
 
 export type ImmutableDkgConfig = DeepReadonly<DkgConfig>;
 export type DkgConfigUpdate = (current: ImmutableDkgConfig) => DkgConfig | ImmutableDkgConfig;
-export type DkgConfigActivation = (next: ImmutableDkgConfig, previous: ImmutableDkgConfig) => void;
+export interface DkgRuntimeActivation {
+  apply(): void | Promise<void>;
+  rollback(): void | Promise<void>;
+}
+
+/** Preparation is synchronous and side-effect free; every runtime change has compensation. */
+export type DkgConfigActivation = 'configuration-only'
+  | ((next: ImmutableDkgConfig, previous: ImmutableDkgConfig) => DkgRuntimeActivation);
 
 /** An explicit mutable draft; JSON configuration contains only serializable data. */
 export function mutableConfigSnapshot(config: DkgConfig | ImmutableDkgConfig): DkgConfig {

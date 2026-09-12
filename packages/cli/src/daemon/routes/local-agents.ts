@@ -440,7 +440,7 @@ export async function persistLocalAgentAttachPatch(
     const next = mutableConfigSnapshot(current);
     updateLocalAgentIntegration(next, normalizedId, attachPatch);
     return next;
-  });
+  }, 'configuration-only');
 }
 
 async function commitPreparedLocalAgentCandidate(
@@ -475,7 +475,7 @@ async function commitPreparedLocalAgentCandidate(
       if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(next);
     }
     return next;
-  });
+  }, 'configuration-only');
   return getLocalAgentIntegration(ctx.configStore.current, normalizedId)!;
 }
 

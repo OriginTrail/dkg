@@ -46,7 +46,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     config.sharedMemoryTtlMs = DAY;
     config.workspaceTtlMs = DAY;
     await saveConfig(config);
-    configStore = DkgConfigStore.open(new DkgHomeFiles(directory), config);
+    configStore = await DkgConfigStore.open(new DkgHomeFiles(directory), config);
     agent = await DKGAgent.create({ name: 'ttl-settings', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: DAY });
     server = createServer((req, res) => {
       if (!routes.includes(new URL(req.url ?? '/', 'http://localhost').pathname)) {
@@ -84,8 +84,8 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       .every(value => Object.isFrozen(value))).toBe(true);
     expect(() => { (initial as DkgConfig).name = 'illegal external mutation'; }).toThrow(TypeError);
 
-    const first = configStore.update(current => ({ ...current, name: 'first ordered update' }));
-    const second = configStore.update(current => ({ ...current, workspaceTtlMs: 2 * DAY }));
+    const first = configStore.update(current => ({ ...current, name: 'first ordered update' }), 'configuration-only');
+    const second = configStore.update(current => ({ ...current, workspaceTtlMs: 2 * DAY }), 'configuration-only');
     await Promise.all([first, second]);
 
     expect(configStore.current).toMatchObject({
@@ -109,7 +109,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       for (const alias of routes) {
         expect.soft(await (await fetch(baseUrl + alias)).json()).toMatchObject({ ttlMs: DAY, ttlDays: 1 });
       }
-      await configStore.update(current => ({ ...current, name: 'unrelated later edit' }));
+      await configStore.update(current => ({ ...current, name: 'unrelated later edit' }), 'configuration-only');
       expect.soft(JSON.parse(await readFile(configPath(), 'utf8'))).toMatchObject({ sharedMemoryTtlMs: DAY, workspaceTtlMs: DAY });
     },
   );
@@ -132,7 +132,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
   it.each(routes)('reports an unexpected setter failure as HTTP 500 through %s', async route => {
     const persistedBefore = await readFile(configPath(), 'utf8');
     const configBefore = structuredClone(config);
-    vi.spyOn(agent, 'setSharedMemoryTtlMs').mockImplementation(() => { throw new Error('worker failure'); });
+    vi.spyOn(agent, 'setSharedMemoryTtlMs').mockImplementationOnce(() => { throw new Error('worker failure'); });
     const response = await fetch(baseUrl + route, { method: 'PUT', body: '{"ttlDays":2}' });
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: 'worker failure' });
@@ -178,7 +178,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       });
       const changingTtl = fetch(baseUrl + route, { method: 'PUT', body: '{"ttlDays":2}' });
       await publicationEntered;
-      const saving = configStore.update(current => ({ ...current, name: 'concurrent unrelated edit' }));
+      const saving = configStore.update(current => ({ ...current, name: 'concurrent unrelated edit' }), 'configuration-only');
       const otherHome = join(directory, 'other-home');
       vi.stubEnv('DKG_HOME', otherHome);
       try {

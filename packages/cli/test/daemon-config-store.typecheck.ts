@@ -30,10 +30,15 @@ void store.update(latest => {
   const next = mutableConfigSnapshot(latest);
   next.name = 'committed through owner';
   return next;
-});
+}, 'configuration-only');
 
 // Existing mutable configurations and full chain literals remain valid reader inputs.
 resolveChainConfig(draft, null);
 resolveNetworkConfigName(draft);
 resolveNetworkConfigName(current);
 resolveNetworkConfigName({ chain: { rpcUrl: 'http://localhost:8545', rpcUrls: ['http://localhost:8546'] as const } });
+
+// @ts-expect-error A live commit must declare its activation semantics.
+void store.update(latest => latest);
+// @ts-expect-error Runtime activation must provide compensation.
+void store.update(latest => latest, () => ({ apply() {} }));

@@ -3,9 +3,14 @@ import { readFileSync, statSync } from 'node:fs';
 import { copyFile, rename, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { writeConfigFile, writeConfigSettingsTransaction } from '../src/config-file.js';
+import { writeConfigFile, writeConfigSettingsTransaction as publishWithActivation } from '../src/config-file.js';
 import { DkgHomeFiles, type DkgConfig } from '../src/config.js';
 import { DkgConfigStore } from '../src/daemon-config-store.js';
+
+// Existing file-fault cases have no runtime mutation; their compensation is empty.
+function writeConfigSettingsTransaction<T>(path: string, contents: string, apply: () => T) {
+  return publishWithActivation(path, contents, { apply, rollback() {} });
+}
 
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -150,11 +155,11 @@ describe('configuration file publication', () => {
           await fs.symlink(directory, alias, 'dir');
         }
       }
-      const first = DkgConfigStore.open(firstFiles, initial);
-      const second = DkgConfigStore.open(new DkgHomeFiles(alias), initial);
+      const first = await DkgConfigStore.open(firstFiles, initial);
+      const second = await DkgConfigStore.open(new DkgHomeFiles(alias), initial);
       expect(second).toBe(first);
-      await first.update(current => ({ ...current, name: 'first committed edit' }));
-      await second.update(current => ({ ...current, sharedMemoryTtlMs: 1234 }));
+      await first.update(current => ({ ...current, name: 'first committed edit' }), 'configuration-only');
+      await second.update(current => ({ ...current, sharedMemoryTtlMs: 1234 }), 'configuration-only');
       const expected = { name: 'first committed edit', sharedMemoryTtlMs: 1234 };
       expect(first.current).toMatchObject(expected);
       expect(second.current).toMatchObject(expected);
@@ -164,19 +169,81 @@ describe('configuration file publication', () => {
     },
   );
 
-  it('rebases daemon updates onto an ordinary call-time save', async () => {
+  it.each(['ordinary', 'transactional'] as const)('rejects %s raw writes after the daemon claims configuration', async kind => {
+    const files = new DkgHomeFiles(directory);
+    const initial: DkgConfig = { name: 'initial', apiPort: 9200, listenPort: 0, nodeRole: 'edge', llm: { apiKey: 'old-key' } };
+    await files.saveConfig(initial);
+    const owner = await DkgConfigStore.open(files, initial);
+    const before = await fs.readFile(path, 'utf8');
+    const replacement = { ...initial, llm: { apiKey: 'unactivated-key' }, sharedMemoryTtlMs: 5678 };
+    const apply = vi.fn();
+    const saving = kind === 'ordinary' ? files.saveConfig(replacement)
+      : publishWithActivation(path, JSON.stringify(replacement), { apply, rollback() {} });
+    await expect(saving).rejects.toThrow('explicit activation');
+    expect(apply).not.toHaveBeenCalled();
+    expect(owner.current).toEqual(initial);
+    expect(await fs.readFile(path, 'utf8')).toBe(before);
+    await owner.update(current => ({ ...current, name: 'typed commit still works' }), 'configuration-only');
+    expect(owner.current.name).toBe('typed commit still works');
+  });
+
+  it('drains an admitted standalone save before initializing the daemon owner', async () => {
     const files = new DkgHomeFiles(directory);
     const initial: DkgConfig = { name: 'initial', apiPort: 9200, listenPort: 0, nodeRole: 'edge' };
-    const owner = DkgConfigStore.open(files, initial);
-    const replacement = { ...initial, name: 'ordinary saved edit' };
-    const saving = files.saveConfig(replacement);
-    const updating = owner.update(current => ({ ...current, sharedMemoryTtlMs: 5678 }));
-    replacement.name = 'mutated after save';
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(writeFile).mockImplementationOnce(async (...args) => { await gate; return fs.writeFile(...args); });
+    const saving = files.saveConfig({ ...initial, name: 'saved before claim' });
+    const opening = DkgConfigStore.open(files, initial);
+    await expect(files.saveConfig(initial)).rejects.toThrow('explicit activation');
+    release();
     await saving;
-    expect(owner.current.name).toBe('ordinary saved edit');
-    await updating;
-    expect(owner.current).toMatchObject({ name: 'ordinary saved edit', sharedMemoryTtlMs: 5678 });
+    const owner = await opening;
+    expect(owner.current.name).toBe('saved before claim');
+    await owner.update(current => ({ ...current, sharedMemoryTtlMs: 5678 }), 'configuration-only');
+    expect(JSON.parse(await fs.readFile(path, 'utf8'))).toMatchObject({ name: 'saved before claim', sharedMemoryTtlMs: 5678 });
+  });
+
+  it('compensates partially applied runtime state before admitting the next update', async () => {
+    const files = new DkgHomeFiles(directory);
+    const initial: DkgConfig = { name: 'initial', apiPort: 9200, listenPort: 0, nodeRole: 'edge', llm: { apiKey: 'old-key' } };
+    await files.saveConfig(initial);
+    const before = await fs.readFile(path, 'utf8');
+    const owner = await DkgConfigStore.open(files, initial);
+    let runtime = initial.llm;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const failure = owner.update(current => ({ ...current, llm: { apiKey: 'new-key' } }), (next, previous) => ({
+      apply() { runtime = next.llm; throw new Error('activation changed runtime then failed'); },
+      async rollback() { await gate; runtime = previous.llm; },
+    }));
+    const failed = expect(failure).rejects.toThrow('activation changed runtime then failed');
+    const following = owner.update(current => {
+      expect(runtime).toEqual(initial.llm);
+      expect(readFileSync(path, 'utf8')).toBe(before);
+      return { ...current, name: 'queued successor' };
+    }, 'configuration-only');
+    await vi.waitFor(() => expect(runtime?.apiKey).toBe('new-key'));
+    expect(owner.current).toEqual(initial);
+    release();
+    await failed;
+    await following;
+    expect(runtime).toEqual(initial.llm);
     expect(JSON.parse(await fs.readFile(path, 'utf8'))).toEqual(owner.current);
+  });
+
+  it('restores the file even when runtime compensation also fails', async () => {
+    const files = new DkgHomeFiles(directory);
+    const initial: DkgConfig = { name: 'initial', apiPort: 9200, listenPort: 0, nodeRole: 'edge' };
+    await files.saveConfig(initial);
+    const before = await fs.readFile(path, 'utf8');
+    const owner = await DkgConfigStore.open(files, initial);
+    await expect(owner.update(current => ({ ...current, name: 'candidate' }), () => ({
+      apply() { throw new Error('activation failed'); },
+      rollback() { throw new Error('compensation failed'); },
+    }))).rejects.toMatchObject({ errors: [expect.objectContaining({ message: 'activation failed' }), expect.objectContaining({ message: 'compensation failed' })] });
+    expect(owner.current).toEqual(initial);
+    expect(await fs.readFile(path, 'utf8')).toBe(before);
   });
 
   it.each(['ordinary', 'transactional'] as const)(

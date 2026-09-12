@@ -12,7 +12,10 @@ describe('daemon shared-memory TTL route wiring', () => {
   let daemon: LiveDaemon | undefined;
   beforeAll(async () => {
     daemon = await startLiveDaemon({
-      extraConfig: { chain: { type: 'mock' }, sharedMemoryTtlMs: DAY, workspaceTtlMs: DAY },
+      extraConfig: {
+        chain: { type: 'mock' }, sharedMemoryTtlMs: DAY, workspaceTtlMs: DAY,
+        telemetry: { enabled: false, logs: { exporter: 'none' }, traces: { enabled: false }, metrics: { enabled: false } },
+      },
     });
   }, 60_000);
   afterAll(async () => { await stopLiveDaemon(daemon); });
@@ -42,5 +45,24 @@ describe('daemon shared-memory TTL route wiring', () => {
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: expect.stringContaining('sharedMemoryTtlMs') });
     expect(await readFile(path, 'utf8')).toBe(before);
+  });
+
+  it.each([
+    { setting: 'llm', submitted: { apiKey: 'local-fixture-key', model: 'fixture-model' }, expected: { configured: true, model: 'fixture-model' } },
+    { setting: 'telemetry', submitted: { enabled: true }, expected: { enabled: true } },
+  ])('wires the transactional $setting adapter into the built daemon', async ({ setting, submitted, expected }) => {
+    const path = join(daemon!.home, 'config.json');
+    const before = JSON.parse(await readFile(path, 'utf8'));
+    const response = await fetch(daemon!.base + '/api/settings/' + setting, {
+      method: 'PUT', headers: authHeaders(daemon!), body: JSON.stringify(submitted),
+    });
+    expect(response.status).toBe(200);
+    const read = await fetch(daemon!.base + '/api/settings/' + setting, { headers: authHeaders(daemon!) });
+    expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject(expected);
+    const saved = JSON.parse(await readFile(path, 'utf8'));
+    expect(saved[setting]).toMatchObject(submitted);
+    expect(saved.sharedMemoryTtlMs).toBe(before.sharedMemoryTtlMs);
+    expect(saved.workspaceTtlMs).toBe(before.workspaceTtlMs);
   });
 });

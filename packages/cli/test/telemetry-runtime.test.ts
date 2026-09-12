@@ -1,204 +1,147 @@
-import { describe, expect, it, vi } from 'vitest';
-import type { DkgConfig } from '../src/config.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DkgHomeFiles, type DkgConfig } from '../src/config.js';
+import { DkgConfigStore } from '../src/daemon-config-store.js';
+import * as publication from '../src/fs-utils.js';
 import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
-function configWithTelemetry(enabled: boolean): DkgConfig {
-  return {
-    name: 'telemetry-runtime-test',
-    apiPort: 0,
-    listenPort: 0,
-    nodeRole: 'edge',
-    telemetry: { enabled },
-  };
+const directories: string[] = [];
+async function storeWithTelemetry(enabled: boolean) {
+  const directory = await mkdtemp(join(tmpdir(), 'dkg-telemetry-runtime-'));
+  directories.push(directory);
+  const config: DkgConfig = { name: 'telemetry-test', apiPort: 0, listenPort: 0, nodeRole: 'edge', telemetry: { enabled } };
+  const files = new DkgHomeFiles(directory);
+  await files.saveConfig(config);
+  return { store: await DkgConfigStore.open(files, config), path: files.configPath };
 }
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
+});
 
 describe('createTelemetryRuntime', () => {
-  it('serializes overlapping disable and enable transitions around the master gate', async () => {
-    const config = configWithTelemetry(true);
+  it('serializes publication and overlapping disable/enable transitions around the live gate', async () => {
+    const { store, path } = await storeWithTelemetry(true);
     let exporterActive = true;
+    let releasePublication!: () => void;
     let releaseStop!: () => void;
-    let releaseDisabledSave!: () => void;
-    let markStopStarted!: () => void;
-    const observedStop = new Promise<void>((resolve) => { markStopStarted = resolve; });
-    const stop = vi.fn(async () => {
-      exporterActive = false;
-      markStopStarted();
-      await new Promise<void>((resolve) => { releaseStop = resolve; });
+    const publicationGate = new Promise<void>(resolve => { releasePublication = resolve; });
+    const stopGate = new Promise<void>(resolve => { releaseStop = resolve; });
+    const write = publication.writeFileAtomic;
+    const publishing = vi.spyOn(publication, 'writeFileAtomic').mockImplementationOnce(async (...args) => {
+      await publicationGate;
+      return write(...args);
     });
-    let persistCalls = 0;
-    const persist = vi.fn(async () => {
-      persistCalls += 1;
-      if (persistCalls === 1) {
-        await new Promise<void>((resolve) => { releaseDisabledSave = resolve; });
-      }
-    });
-    const start = vi.fn(async () => {
-      expect(config.telemetry?.enabled).toBe(true);
-      exporterActive = true;
-      return { ok: true };
-    });
-    const runtime = createTelemetryRuntime({
-      config,
-      persist,
-      signals: { start, stop },
-    });
-
+    const stop = vi.fn(async () => { exporterActive = false; await stopGate; });
+    const start = vi.fn(async () => { exporterActive = true; return { ok: true } as const; });
+    const runtime = createTelemetryRuntime({ configStore: store, signals: { start, stop } });
     const disabling = runtime.setEnabled(false);
-    await observedStop;
+    await vi.waitFor(() => expect(publishing).toHaveBeenCalledOnce());
     const enabling = runtime.setEnabled(true);
+    expect(stop).not.toHaveBeenCalled();
+    expect(exporterActive).toBe(true);
+    releasePublication();
+    await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce());
+    expect(runtime.isEnabled()).toBe(true);
+    expect(store.current.telemetry?.enabled).toBe(true);
     expect(exporterActive).toBe(false);
-    expect(config.telemetry?.enabled).toBe(true);
-
     releaseStop();
-    await vi.waitFor(() => expect(config.telemetry?.enabled).toBe(false));
-    expect(exporterActive).toBe(false);
-    releaseDisabledSave();
     await Promise.all([disabling, enabling]);
-
     expect(runtime.isEnabled()).toBe(true);
     expect(exporterActive).toBe(true);
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(start).toHaveBeenCalledTimes(1);
-    expect(persist).toHaveBeenCalledTimes(2);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledOnce();
+    expect(publishing).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual(store.current);
   });
 
   it('keeps boot startup best-effort without rewriting the durable gate', async () => {
-    const config = configWithTelemetry(true);
-    const persist = vi.fn(async () => undefined);
+    const { store, path } = await storeWithTelemetry(true);
+    const before = await readFile(path, 'utf8');
+    const publishing = vi.spyOn(publication, 'writeFileAtomic');
     const stop = vi.fn(async () => undefined);
     const onBootStartFailure = vi.fn();
     const runtime = createTelemetryRuntime({
-      config,
-      persist,
-      signals: {
-        start: vi.fn(async () => ({ ok: false, error: 'log unavailable' })),
-        stop,
-      },
-      onBootStartFailure,
+      configStore: store, signals: { start: async () => ({ ok: false, error: 'log unavailable' }), stop }, onBootStartFailure,
     });
-
     await runtime.startConfiguredBestEffort();
-
     expect(runtime.isEnabled()).toBe(true);
-    expect(persist).not.toHaveBeenCalled();
+    expect(publishing).not.toHaveBeenCalled();
     expect(stop).not.toHaveBeenCalled();
     expect(onBootStartFailure).toHaveBeenCalledWith('log unavailable');
+    expect(await readFile(path, 'utf8')).toBe(before);
   });
 
-  it('rolls a failed runtime enable back to a durable disabled state', async () => {
-    const config = configWithTelemetry(false);
-    const persistedValues: boolean[] = [];
-    const stop = vi.fn(async () => undefined);
-    const runtime = createTelemetryRuntime({
-      config,
-      persist: vi.fn(async (current) => {
-        persistedValues.push(current.telemetry?.enabled ?? false);
-      }),
-      signals: {
-        start: vi.fn(async () => ({ ok: false, error: 'collector refused' })),
-        stop,
-      },
-    });
-
-    await expect(runtime.setEnabled(true)).resolves.toEqual({
-      ok: false,
-      error: 'collector refused',
-    });
-
-    expect(runtime.isEnabled()).toBe(false);
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(persistedValues).toEqual([false]);
-  });
-
-  it('stops export and durably disables after enabled-state persistence fails', async () => {
-    const config = configWithTelemetry(false);
-    const persistedValues: boolean[] = [];
-    let exporterActive = false;
-    let persistCalls = 0;
-    const stop = vi.fn(async () => { exporterActive = false; });
-    const runtime = createTelemetryRuntime({
-      config,
-      persist: vi.fn(async (current) => {
-        persistCalls += 1;
-        persistedValues.push(current.telemetry?.enabled ?? false);
-        if (persistCalls === 1) throw new Error('disk full');
-      }),
-      signals: {
-        start: vi.fn(async () => {
-          exporterActive = true;
-          return { ok: true };
-        }),
-        stop,
-      },
-    });
-
-    await expect(runtime.setEnabled(true)).rejects.toThrow('disk full');
-
-    expect(exporterActive).toBe(false);
-    expect(runtime.isEnabled()).toBe(false);
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(persistedValues).toEqual([true, false]);
-  });
-
-  it('rolls back signal state and the durable gate when startup throws', async () => {
-    const config = configWithTelemetry(false);
-    const persistedValues: boolean[] = [];
+  it.each(['rejected', 'thrown'] as const)('compensates partially started signals after a %s enable', async kind => {
+    const { store, path } = await storeWithTelemetry(false);
+    const before = await readFile(path, 'utf8');
     let partialSignalActive = false;
     const stop = vi.fn(async () => { partialSignalActive = false; });
     const runtime = createTelemetryRuntime({
-      config,
-      persist: vi.fn(async (current) => {
-        persistedValues.push(current.telemetry?.enabled ?? false);
-      }),
-      signals: {
-        start: vi.fn(async () => {
+      configStore: store, signals: {
+        start: async () => {
           partialSignalActive = true;
-          throw new Error('startup exploded');
-        }),
-        stop,
+          if (kind === 'thrown') throw new Error('startup exploded');
+          return { ok: false, error: 'collector refused' };
+        }, stop,
       },
     });
-
-    await expect(runtime.setEnabled(true)).rejects.toThrow('startup exploded');
-
+    if (kind === 'thrown') await expect(runtime.setEnabled(true)).rejects.toThrow('startup exploded');
+    else await expect(runtime.setEnabled(true)).resolves.toEqual({ ok: false, error: 'collector refused' });
     expect(partialSignalActive).toBe(false);
     expect(runtime.isEnabled()).toBe(false);
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(persistedValues).toEqual([false]);
+    expect(store.current.telemetry?.enabled).toBe(false);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(await readFile(path, 'utf8')).toBe(before);
+  });
+
+  it.each([false, true])('does not change signals or the gate when publication fails from enabled=%s', async enabled => {
+    const { store, path } = await storeWithTelemetry(enabled);
+    const before = await readFile(path, 'utf8');
+    const start = vi.fn(async () => ({ ok: true } as const));
+    const stop = vi.fn(async () => undefined);
+    const runtime = createTelemetryRuntime({ configStore: store, signals: { start, stop } });
+    vi.spyOn(publication, 'writeFileAtomic').mockRejectedValueOnce(new Error('disk full'));
+    await expect(runtime.setEnabled(!enabled)).rejects.toThrow('disk full');
+    expect(start).not.toHaveBeenCalled();
+    expect(stop).not.toHaveBeenCalled();
+    expect(runtime.isEnabled()).toBe(enabled);
+    expect(store.current.telemetry?.enabled).toBe(enabled);
+    expect(await readFile(path, 'utf8')).toBe(before);
+  });
+
+  it('restores previously enabled signals after a partial disable failure', async () => {
+    const { store, path } = await storeWithTelemetry(true);
+    const before = await readFile(path, 'utf8');
+    let exporterActive = true;
+    const stop = vi.fn(async () => { exporterActive = false; });
+    stop.mockImplementationOnce(async () => { exporterActive = false; throw new Error('stop failed after mutation'); });
+    const start = vi.fn(async () => { exporterActive = true; return { ok: true } as const; });
+    const runtime = createTelemetryRuntime({ configStore: store, signals: { start, stop } });
+    await expect(runtime.setEnabled(false)).rejects.toThrow('stop failed after mutation');
+    expect(exporterActive).toBe(true);
+    expect(runtime.isEnabled()).toBe(true);
+    expect(store.current.telemetry?.enabled).toBe(true);
+    expect(await readFile(path, 'utf8')).toBe(before);
   });
 
   it('drains an active transition before orderly shutdown', async () => {
-    const config = configWithTelemetry(false);
-    let releaseStart!: () => void;
-    let markStartStarted!: () => void;
-    const observedStart = new Promise<void>((resolve) => { markStartStarted = resolve; });
+    const { store } = await storeWithTelemetry(false);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const start = vi.fn(async () => { await gate; return { ok: true } as const; });
     const stop = vi.fn(async () => undefined);
-    const runtime = createTelemetryRuntime({
-      config,
-      persist: vi.fn(async () => undefined),
-      signals: {
-        start: vi.fn(async () => {
-          markStartStarted();
-          await new Promise<void>((resolve) => { releaseStart = resolve; });
-          return { ok: true };
-        }),
-        stop,
-      },
-    });
-
+    const runtime = createTelemetryRuntime({ configStore: store, signals: { start, stop } });
     const enabling = runtime.setEnabled(true);
-    await observedStart;
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
     const shuttingDown = runtime.shutdown();
     expect(stop).not.toHaveBeenCalled();
-    await expect(runtime.setEnabled(true)).resolves.toEqual({
-      ok: false,
-      error: 'Telemetry runtime is shutting down',
-    });
-
-    releaseStart();
+    await expect(runtime.setEnabled(true)).resolves.toEqual({ ok: false, error: 'Telemetry runtime is shutting down' });
+    release();
     await enabling;
     await shuttingDown;
-    await runtime.shutdown();
-    expect(stop).toHaveBeenCalledTimes(1);
+    expect(stop).toHaveBeenCalledOnce();
   });
 });

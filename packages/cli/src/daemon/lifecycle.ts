@@ -184,6 +184,7 @@ import {
   createTelemetryRuntime,
 } from './telemetry-runtime.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
+import { createDaemonLlmSettings } from './llm-settings.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import {
@@ -1120,7 +1121,8 @@ async function runDaemonInnerWithStartupOwnership(
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
-  const configStore = DkgConfigStore.open(new DkgHomeFiles(), config);
+  const configStore = await DkgConfigStore.open(new DkgHomeFiles(), config);
+  config = mutableConfigSnapshot(configStore.current);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
       config.contextGraphSubscriptionRehydrationEnabled,
@@ -2927,16 +2929,8 @@ async function runDaemonInnerWithStartupOwnership(
     log,
   });
 
-  const telemetryRuntimeConfig = mutableConfigSnapshot(configStore.current);
   const telemetryRuntime = createTelemetryRuntime({
-    config: telemetryRuntimeConfig,
-    persist: async submitted => {
-      await configStore.update(current => {
-        const next = mutableConfigSnapshot(current);
-        next.telemetry = submitted.telemetry ? { ...submitted.telemetry } : undefined;
-        return next;
-      });
-    },
+    configStore,
     signals: telemetrySignals,
     onBootStartFailure: (error) => {
       // Boot remains best-effort per signal: a failed log shipper must not
@@ -3271,22 +3265,7 @@ async function runDaemonInnerWithStartupOwnership(
   if (config.llm) log('Memory enrichment LLM ready');
   else log('Memory enrichment LLM not configured');
 
-  const llmSettings = {
-    getLlm: () => configStore.current.llm,
-    setLlm: async (
-      llm: { apiKey: string; model?: string; baseURL?: string } | null,
-    ) => {
-      await configStore.update(current => {
-        const next = mutableConfigSnapshot(current);
-        if (llm) next.llm = llm;
-        else delete next.llm;
-        return next;
-      }, () => {
-        memoryManager.updateConfig(llm ?? { apiKey: '' });
-      });
-      log(llm ? "LLM config updated via settings" : 'LLM config cleared via settings');
-    },
-  };
+  const llmSettings = createDaemonLlmSettings(configStore, memoryManager, log);
 
   const telemetrySettings = createTelemetrySettings(telemetryRuntime);
 

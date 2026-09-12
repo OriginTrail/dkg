@@ -1,16 +1,25 @@
-import type { DkgConfig } from './config.js';
 import { constants, lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { copyFile, mkdir, rename, unlink } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveAtomicWriteDestination, writeFileAtomic } from './fs-utils.js';
-import { immutableConfig, type DkgConfigActivation, type DkgConfigUpdate, type ImmutableDkgConfig } from './config-snapshot.js';
 
-/** One owner of committed configuration state, ordering and atomic publication. */
+export interface FileActivation<T> {
+  apply(): T | Promise<T>;
+  rollback(): void | Promise<void>;
+}
+
+export interface ConfigFileWriter {
+  /** Includes ordinary writes admitted before the daemon claimed this file. */
+  ready: Promise<string | undefined>;
+  commit<T>(prepare: () => { contents: string; activation: FileActivation<T> }): Promise<T>;
+}
+
+/** Generic atomic publication lane. Live configuration belongs to DkgConfigStore. */
 export class ConfigFileStore {
   static readonly #stores = new Map<string, ConfigFileStore>();
   #tail: Promise<unknown> = Promise.resolve();
-  #current?: ImmutableDkgConfig;
+  #claimed = false;
   #latestContents?: string;
 
   private constructor(readonly path: string) {}
@@ -27,51 +36,31 @@ export class ConfigFileStore {
     return store;
   }
 
-  initializeConfig(initial: DkgConfig | ImmutableDkgConfig): void {
-    this.#current ??= immutableConfig(this.#latestContents === undefined
-      ? initial : { ...initial, ...JSON.parse(this.#latestContents) });
-  }
-
-  get currentConfig(): ImmutableDkgConfig {
-    if (!this.#current) throw new Error('Configuration owner has not been initialized');
-    return this.#current;
-  }
-
-  /** Rebase a synchronous update; discovery and probes finish before admission. */
-  updateConfig(update: DkgConfigUpdate, activate: DkgConfigActivation = () => undefined): Promise<ImmutableDkgConfig> {
-    return this.#serialize(async () => {
-      const previous = this.currentConfig;
-      const next = immutableConfig(update(previous));
-      const contents = JSON.stringify(next, null, 2) + '\n';
-      return this.#publishTransaction(contents, () => {
-        activate(next, previous);
-        this.#current = next;
-        this.#latestContents = contents;
-        return next;
-      });
-    });
+  /** Fence new raw writes immediately, then drain already-admitted writes. */
+  claim(): ConfigFileWriter {
+    if (this.#claimed) throw new Error('Configuration file already has a live owner');
+    this.#claimed = true;
+    return {
+      ready: this.#tail.catch(() => undefined).then(() => this.#latestContents),
+      commit: prepare => this.#serialize(async () => {
+        const { contents, activation } = prepare();
+        return this.#publishTransaction(contents, activation);
+      }),
+    };
   }
 
   write(contents: string): Promise<void> {
+    if (this.#claimed) return Promise.reject(new Error('Live daemon configuration must be updated through DkgConfigStore.update with explicit activation'));
     return this.#serialize(async () => {
-      const next = this.#current ? immutableConfig(JSON.parse(contents)) : undefined;
       await mkdir(dirname(this.path), { recursive: true });
       await writeFileAtomic(this.path, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
       this.#latestContents = contents;
-      if (next) this.#current = next;
     });
   }
 
-  transaction<T>(contents: string, activate: () => T): Promise<T> {
-    return this.#serialize(() => {
-      const next = this.#current ? immutableConfig(JSON.parse(contents)) : undefined;
-      return this.#publishTransaction(contents, () => {
-        const result = activate();
-        this.#latestContents = contents;
-        if (next) this.#current = next;
-        return result;
-      });
-    });
+  transaction<T>(contents: string, activation: FileActivation<T>): Promise<T> {
+    if (this.#claimed) return Promise.reject(new Error('Live daemon configuration must be updated through DkgConfigStore.update with explicit activation'));
+    return this.#serialize(() => this.#publishTransaction(contents, activation));
   }
 
   #serialize<T>(run: () => Promise<T>): Promise<T> {
@@ -80,7 +69,7 @@ export class ConfigFileStore {
     return operation;
   }
 
-  async #publishTransaction<T>(contents: string, activate: () => T): Promise<T> {
+  async #publishTransaction<T>(contents: string, activation: FileActivation<T>): Promise<T> {
     const destination = await resolveAtomicWriteDestination(this.path);
     let backup: string | undefined;
     let preserveBackup = false;
@@ -96,15 +85,24 @@ export class ConfigFileStore {
       }
       await writeFileAtomic(destination, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
       try {
-        return activate();
+        const result = await activation.apply();
+        this.#latestContents = contents;
+        return result;
       } catch (error) {
+        // Compensation and file restoration are independent: attempt both even
+        // when one fails, and retain every failure plus the recovery-copy path.
+        const rollbackErrors: unknown[] = [];
+        try { await activation.rollback(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
         try {
           if (backup) await rename(backup, destination);
           else await unlink(destination);
         } catch (rollbackError) {
           preserveBackup = true;
-          throw new AggregateError([error, rollbackError],
-            `Runtime activation failed and configuration rollback failed${backup ? `; previous configuration retained at ${backup}` : ''}`);
+          rollbackErrors.push(rollbackError);
+        }
+        if (rollbackErrors.length) {
+          throw new AggregateError([error, ...rollbackErrors],
+            `Runtime activation failed and configuration rollback failed${preserveBackup && backup ? `; previous configuration retained at ${backup}` : ''}`);
         }
         throw error;
       }
@@ -140,13 +138,13 @@ export async function writeConfigFile(path: string, contents: string): Promise<v
 }
 
 /**
- * Publish a settings candidate, activate it synchronously, and restore the
- * previous file if activation rejects the candidate.
+ * Publish a candidate, then apply its prepared runtime change. On failure,
+ * compensate runtime state and restore the previous file before releasing the lane.
  */
 export async function writeConfigSettingsTransaction<T>(
   path: string,
   contents: string,
-  activate: () => T,
+  activation: FileActivation<T>,
 ): Promise<T> {
-  return configFileStore(path).transaction(contents, activate);
+  return configFileStore(path).transaction(contents, activation);
 }
