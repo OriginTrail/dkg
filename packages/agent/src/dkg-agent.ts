@@ -2240,6 +2240,15 @@ export class DKGAgent extends DKGAgentBase {
     await this.chainPoller?.waitForCurrentPoll();
   }
 
+  /** Fence chain scans and event-admitted VM recovery before daemon teardown awaits. */
+  closeChainEventAdmission(): void {
+    this.chainPoller?.closeAdmission();
+    // Live nudges hand off to the VM scheduler before their poll checkpoints.
+    // Retire that lifecycle at the same outer shutdown boundary, even when
+    // agent.stop must wait behind another producer's drain.
+    this.closeVmReconcileRotationState();
+  }
+
   async stop(): Promise<void> {
     if (!this.started) return;
     const authorityRetryDrain =

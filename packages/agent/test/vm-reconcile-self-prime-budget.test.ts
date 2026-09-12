@@ -19,7 +19,7 @@ interface Internals {
   resolveVmReconcileTarget(cg: string, isCurrent?: () => boolean, signal?: AbortSignal): Promise<unknown>;
   runVmReconcileSweep(): Promise<void>;
   scheduleVmReconcileSweep(): void;
-  handleKARegisteredNudge(id: string, ka: bigint, context: ReturnType<typeof createOperationContext>): Promise<string | null>;
+  handleKARegisteredNudge(id: string, ka: bigint, context: ReturnType<typeof createOperationContext>, signal: AbortSignal): Promise<string | null>;
   openVmReconcileRotationState(): void;
   closeVmReconcileRotationState(): void;
   resolveContextGraphOnChainIdBinding(id: string): Promise<{ onChainId: string; provenance: 'ontology' } | null>;
@@ -91,7 +91,7 @@ it('answers selected membership for subscribed, hosted, discovery and catalog ta
 it('performs zero unbound resolution calls for a burst of unmatched live events', async () => {
   const { internals, resolve, canRead, triggerLive } = await fixture(50);
   for (let event = 0; event < 100; event++) {
-    expect(await internals.handleKARegisteredNudge(String(1_000 + event), BigInt(event), createOperationContext('system'))).toBeNull();
+    expect(await internals.handleKARegisteredNudge(String(1_000 + event), BigInt(event), createOperationContext('system'), new AbortController().signal)).toBeNull();
   }
   expect(resolve.mock.calls.length).toBe(0);
   expect(canRead.mock.calls.length).toBe(0);

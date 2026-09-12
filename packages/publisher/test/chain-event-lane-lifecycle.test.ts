@@ -31,17 +31,16 @@ describe('ChainEventPoller lifecycle', () => {
 
     const startPromise = poller.start();
     await restoreStartedPromise;
-    await poller.stop();
+    let stopped = false;
+    const stopping = poller.stop().then(() => { stopped = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(stopped).toBe(false);
     releaseRestore();
-    await startPromise;
+    await Promise.all([startPromise, stopping]);
     await new Promise((resolve) => setTimeout(resolve, 30));
 
-    const state = poller as unknown as {
-      timer: ReturnType<typeof setInterval> | null;
-      inFlightPoll: Promise<void> | null;
-    };
-    expect(state.timer).toBeNull();
-    expect(state.inFlightPoll).toBeNull();
+    expect(stopped).toBe(true);
+    await poller.waitForCurrentPoll();
     expect(filters).toEqual([]);
   });
 });

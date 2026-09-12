@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
@@ -87,6 +88,7 @@ function createFakeAgent() {
     onChat: vi.fn(),
     start: vi.fn(async () => undefined),
     stop: vi.fn(async () => undefined),
+    closeChainEventAdmission: vi.fn(),
     publishProfile: vi.fn(async () => undefined),
     ensureProfilePublished: vi.fn(async () => undefined),
     publishRelayRegistry: vi.fn(async () => undefined),
@@ -110,6 +112,28 @@ function closeDashboardDbFromAgentCreateArg(createArg: any): void {
     createArg?.chainEventCursorStore?.cursors?.db
     ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
   db?.close?.();
+}
+
+async function startDaemonFixture(): Promise<void> {
+  await runDaemonInner(true, {
+    name: 'snapshot-index-wiring-test',
+    networkConfig: 'mainnet-gnosis',
+    listenPort: 0,
+    apiPort: 0,
+    bootstrapPeers: ['/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
+    nodeRole: 'edge',
+    auth: { enabled: false },
+    promoteQueue: { enabled: false },
+    source: 'monorepo',
+    publisher: { enabled: true },
+    chain: {
+      type: 'evm',
+      rpcUrl: 'https://private-rpc.example',
+      hubAddress: '0x1234567890123456789012345678901234567890',
+      chainId: 'evm:100',
+    },
+  } as any, Date.now(), resolveShutdownPolicy(undefined));
+
 }
 
 describe('runDaemonInner public snapshot page-index wiring', () => {
@@ -194,24 +218,7 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
     };
     mocks.createPublicSnapshotStore.mockReturnValue(publicSnapshotStore);
 
-    await runDaemonInner(true, {
-      name: 'snapshot-index-wiring-test',
-      networkConfig: 'mainnet-gnosis',
-      listenPort: 0,
-      apiPort: 0,
-      bootstrapPeers: ['/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M'],
-      nodeRole: 'edge',
-      auth: { enabled: false },
-      promoteQueue: { enabled: false },
-      source: 'monorepo',
-      publisher: { enabled: true },
-      chain: {
-        type: 'evm',
-        rpcUrl: 'https://private-rpc.example',
-        hubAddress: '0x1234567890123456789012345678901234567890',
-        chainId: 'evm:100',
-      },
-    } as any, Date.now(), resolveShutdownPolicy(undefined));
+    await startDaemonFixture();
 
     await vi.advanceTimersByTimeAsync(0);
 
@@ -231,4 +238,30 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
     const publisherRuntimeArg = mocks.startPublisherRuntimeWithOutcome.mock.calls[0]?.[0] as any;
     expect(publisherRuntimeArg.publicSnapshotStore).toBe(publicSnapshotStore);
   });
+
+  it('fences chain events at the real daemon entry point before removing readiness or stopping the agent', async () => {
+    vi.useFakeTimers();
+    const events: string[] = [];
+    const agent = createFakeAgent();
+    agent.closeChainEventAdmission.mockImplementation(() => {
+      events.push('fence');
+      expect(existsSync(join(tempHome!, 'api.port'))).toBe(true);
+    });
+    agent.stop.mockImplementation(async () => {
+      events.push('stop');
+      expect(existsSync(join(tempHome!, 'api.port'))).toBe(false);
+    });
+    mocks.agentCreate.mockResolvedValue(agent);
+    mocks.createPublicSnapshotStore.mockReturnValue({});
+    await startDaemonFixture();
+    const shutdown = process.listeners('SIGTERM').find(listener => !sigtermListeners.includes(listener));
+    expect(shutdown).toBeTypeOf('function');
+    // Invoke the registered production handler directly so process.exit can be
+    // asserted without terminating this test worker. The separate daemon suite
+    // delivers a real OS signal to the built CLI process.
+    await expect(Promise.resolve(shutdown!.call(process, 'SIGTERM'))).rejects.toThrow('process.exit:0');
+    expect(events).toEqual(['fence', 'stop']);
+    expect(agent.closeChainEventAdmission).toHaveBeenCalledOnce();
+  });
+
 });

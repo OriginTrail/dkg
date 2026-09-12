@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChainEvent } from '@origintrail-official/dkg-chain';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import { PublishHandler } from '../src/publish-handler.js';
-import { makeChain, makeHandler, markPending, journalEntry } from './helpers/chain-event-lane-fixture.js';
+import { pollOnce, makeChain, makeHandler, markPending, journalEntry } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller publish', () => {
   it('cold-starts a restored pending publish lane from block 0 without allocator callbacks', async () => {
@@ -109,14 +109,14 @@ describe('ChainEventPoller publish', () => {
       onContextGraphCreated: async () => { /* idle always-on lane */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     expect(filters.map((f) => f.eventTypes)).toEqual([
       ['NameClaimed', 'ContextGraphCreated'],
     ]);
 
     head = 20_000_050;
     markPending(handler, false);
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     const publishFilter = filters.find((f) => f.eventTypes.includes('KCCreated'));
     expect(publishFilter).toBeDefined();
@@ -154,7 +154,7 @@ describe('ChainEventPoller publish', () => {
       intervalMs: 60_000,
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters).toHaveLength(1);
     expect(filters[0].eventTypes).toEqual(['KCCreated']);
@@ -217,8 +217,8 @@ describe('ChainEventPoller publish', () => {
       intervalMs: 60_000,
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
+    await pollOnce(poller);
 
     expect(filters).toHaveLength(2);
     expect(filters[0].eventTypes).toEqual(['KCCreated']);

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createOperationContext } from '@origintrail-official/dkg-core';
 import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
 import { projectContextGraphSubscriptionPersistence } from '../src/context-graph-subscription-policy.js';
 import {
@@ -373,6 +374,7 @@ describe('cold current-state Context Graph name binding', () => {
       fixture.subscription,
     )).resolves.toBe('42');
 
+    expect(fixture.agent.vmReconcilePhysicalRuns.size).toBe(0);
     expect(fixture.agent.persistContextGraphSubscriptionStrict).not.toHaveBeenCalled();
     expect(fixture.subscription.onChainId).toBeUndefined();
     expect(fixture.agent.contextGraphBindingState.currentBindingFor(
@@ -467,7 +469,7 @@ describe('cold current-state Context Graph name binding', () => {
         '42',
         NAME_HASH,
       );
-      await expect(fixture.agent.handleKARegisteredNudge('42', 99n, {}))
+      await expect(fixture.agent.handleKARegisteredNudge('42', 99n, createOperationContext('system'), new AbortController().signal))
         .resolves.toBe(LOCAL_ID);
       await runtime.waitForIdle(LOCAL_ID);
 
@@ -619,7 +621,8 @@ describe('cold current-state Context Graph name binding', () => {
     await expect(fixture.agent.handleKARegisteredNudge(
       '42',
       99n,
-      {},
+      createOperationContext('system'),
+      new AbortController().signal,
     )).resolves.toBe(LOCAL_ID);
     expect(triggerLive).toHaveBeenCalledWith(LOCAL_ID);
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();

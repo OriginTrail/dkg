@@ -662,6 +662,17 @@ function stripBindingQuotes(v: string): string {
   return v;
 }
 
+/** Logical cancellation never releases ownership of an unsettled physical run. */
+function raceTrackedVmReconcile<T>(
+  physicalRuns: Set<Promise<unknown>>,
+  work: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  physicalRuns.add(work);
+  void work.finally(() => { physicalRuns.delete(work); }).catch(() => undefined);
+  return raceVmReconcileAbort(work, signal);
+}
+
 async function raceVmReconcileAbort<T>(
   work: Promise<T>,
   signal: AbortSignal | undefined,
@@ -679,14 +690,6 @@ async function raceVmReconcileAbort<T>(
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort);
   }
-}
-
-/** Track the raw dependency even if an abort race releases its caller first. */
-function trackVmReconcilePhysicalRun<T>(runs: Set<Promise<unknown>>, run: Promise<T>): Promise<T> {
-  runs.add(run);
-  const retire = () => { runs.delete(run); };
-  void run.then(retire, retire);
-  return run;
 }
 
 export class SwmHostModeMethods extends DKGAgentBase {
@@ -2993,13 +2996,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
     ) | null = null;
     try {
-      resolved = await raceVmReconcileAbort(
-        this.resolveContextGraphOnChainIdBinding(localCgId, {
-          signal,
-          source: 'agent.vmReconcile.resolveOnChainId',
-        }),
+      const read = this.resolveContextGraphOnChainIdBinding(localCgId, {
         signal,
-      );
+        source: 'agent.vmReconcile.resolveOnChainId',
+      });
+      // Logical cancellation may win before a noncooperative adapter settles.
+      // Keep the physical read in the existing retirement drain so backing
+      // stores remain quarantined until it actually finishes.
+      resolved = await raceTrackedVmReconcile(this.vmReconcilePhysicalRuns, read, signal);
     } catch {
       return null;
     }
@@ -3052,11 +3056,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     onChainId: string,
     kaId: bigint,
     ctx: OperationContext,
+    pollSignal: AbortSignal,
   ): Promise<string | null> {
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleSignal = this.vmReconcileLifecycleController
+      ? AbortSignal.any([this.vmReconcileLifecycleController.signal, pollSignal])
+      : pollSignal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
-      && !lifecycleSignal?.aborted
+      && !lifecycleSignal.aborted
       && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
     if (!isLifecycleCurrent()) return null;
     let targetOnChain: bigint | null = null;
@@ -3268,8 +3275,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw error;
     });
 
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
-    return raceVmReconcileAbort(physicalRun, signal);
+    return raceTrackedVmReconcile(this.vmReconcilePhysicalRuns, physicalRun, signal);
   }
 
   ensureVmReconcileScheduling(
@@ -3398,8 +3404,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       return response;
     })();
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
-    return raceVmReconcileAbort(physicalRun, lifecycleSignal);
+    return raceTrackedVmReconcile(this.vmReconcilePhysicalRuns, physicalRun, lifecycleSignal);
   }
 
   async resolveVmReconcileTarget(
@@ -3434,8 +3439,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     });
     // Cancellation releases the dispatcher worker, but an underlying store/RPC
     // read may ignore it. Keep that physical dependency in the shutdown drain.
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
-    const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
+    const canRead = await raceTrackedVmReconcile(this.vmReconcilePhysicalRuns, authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) throw new ContextGraphNotFoundError(localCgId);
     if (

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import type { ChainEventPollerLane } from '../src/chain-event-poller.js';
 import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
-import { makeChain, makeHandler, markPending } from './helpers/chain-event-lane-fixture.js';
+import { pollOnce, makeChain, makeHandler, markPending } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller cursor persistence', () => {
   it('saves and restores a legacy aggregate cursor when active lanes can safely share it', async () => {
@@ -82,7 +82,7 @@ describe('ChainEventPoller cursor persistence', () => {
       onKARegisteredToContextGraph: async () => { /* sink */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters.map((f) => f.eventTypes)).toEqual([
       ['NameClaimed', 'ContextGraphCreated'],
@@ -96,7 +96,7 @@ describe('ChainEventPoller cursor persistence', () => {
 
     failContextLane = false;
     now = 60_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters[2].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
     expect(filters[2].fromBlock).toBe(1);

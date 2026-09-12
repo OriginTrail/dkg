@@ -73,6 +73,10 @@ const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 // shape from being chosen merely to evade the runtime parity audit.
 const EVM_INTERNAL_METHODS = new Set<string>([
   'getContextGraphNameHashResolver',
+  'readHubAddress', // TS-private Hub lookup with caller-owned cancellation.
+  'resolveEventContracts', // Protected event subset of the canonical Hub registry.
+  'loadHubContractBinding', // TS-private physical loader used by subset and full initialization.
+  'cancellableLogs', // TS-private event iterator; not a ChainAdapter method.
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.

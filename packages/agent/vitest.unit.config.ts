@@ -155,6 +155,8 @@ export default defineConfig({
       "test/chain-cursor-wiring.test.ts",
       "test/chain-reconciler.test.ts",
       "test/vm-reconcile-self-prime.test.ts",
+      "test/chain-event-recovery-waits.test.ts",
+      "test/p2p-peer-connect.test.ts",
       "test/vm-reconcile-self-prime-budget.test.ts",
       "test/vm-reconcile-sweep.test.ts",
       "test/vm-reconcile-lifecycle-timer.test.ts",

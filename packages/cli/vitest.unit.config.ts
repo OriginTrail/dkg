@@ -92,6 +92,7 @@ export default defineConfig({
           // producer-quiescent shutdown drain. Real WorkerCatchupRunner behind
           // a fake worker thread; no hardhat.
           'test/daemon-catchup-telemetry-shutdown.test.ts',
+          'test/daemon-chain-event-shutdown.test.ts',
           'test/catchup-runner-worker-killswitch.test.ts',
           // #2050 — `DKG_SWM_CATCHUP_PASS_BUDGET_MS=0` continuation-pass kill
           // switch, end to end through the worker with per-job config resolution.

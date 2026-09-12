@@ -5,7 +5,7 @@ import type { ChainEventPollerLane } from '../src/chain-event-poller.js';
 import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
 import { ChainEventLaneRunner } from '../src/chain-event-lane-runner.js';
 import type { ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
-import { makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
+import { pollOnce, createLaneRunContext, makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller scheduler', () => {
   it('live-tails context graph discovery near the current head on cold start', async () => {
@@ -77,7 +77,7 @@ describe('ChainEventPoller scheduler', () => {
       onKARegisteredToContextGraph: async () => { /* normal-cadence lane */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     expect(filters.map((f) => f.eventTypes)).toEqual([
       ['NameClaimed', 'ContextGraphCreated'],
       ['KnowledgeAssetRegisteredToContextGraph'],
@@ -85,7 +85,7 @@ describe('ChainEventPoller scheduler', () => {
 
     now = 25;
     head = 1100;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(blockNumberCalls).toBe(2);
     expect(filters.map((f) => f.eventTypes)).toEqual([
@@ -124,13 +124,13 @@ describe('ChainEventPoller scheduler', () => {
       onContextGraphCreated: async () => { /* sink */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 20;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     expect(filters).toHaveLength(1);
 
     now = 60_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters).toHaveLength(2);
     expect(filters[0].eventTypes).toEqual(['NameClaimed', 'ContextGraphCreated']);
@@ -167,13 +167,13 @@ describe('ChainEventPoller scheduler', () => {
       onContextGraphCreated: async () => { /* sink */ },
     });
 
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 60_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 120_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 180_000;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
       [1, 100],
@@ -184,11 +184,11 @@ describe('ChainEventPoller scheduler', () => {
 
     head = 200;
     now = 180_020;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 240_019;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
     now = 240_020;
-    await (poller as unknown as { poll(): Promise<void> }).poll();
+    await pollOnce(poller);
 
     expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
       [1, 100],
@@ -221,6 +221,7 @@ describe('ChainEventPoller scheduler', () => {
       cadenceMs: 20,
       dispatch: async () => { /* sink */ },
     };
+    const runContext = createLaneRunContext();
     const runner = new ChainEventLaneRunner({
       chain: adapter,
       lanes: [lane],
@@ -229,27 +230,27 @@ describe('ChainEventPoller scheduler', () => {
       log: { info() {}, warn() {}, error() {} } as any,
     });
 
-    await runner.poll();
+    await runner.poll(runContext);
     now = 59_999;
-    await runner.poll();
+    await runner.poll(runContext);
     now = 60_000;
-    await runner.poll();
+    await runner.poll(runContext);
     now = 179_999;
-    await runner.poll();
+    await runner.poll(runContext);
     now = 180_000;
-    await runner.poll();
+    await runner.poll(runContext);
     now = 419_999;
-    await runner.poll();
+    await runner.poll(runContext);
     now = 420_000;
-    await runner.poll();
+    await runner.poll(runContext);
     now = 719_999;
-    await runner.poll();
+    await runner.poll(runContext);
     now = 720_000;
-    await runner.poll();
+    await runner.poll(runContext);
     now = 1_019_999;
-    await runner.poll();
+    await runner.poll(runContext);
     now = 1_020_000;
-    await runner.poll();
+    await runner.poll(runContext);
 
     expect(filters.map((f) => [f.fromBlock, f.toBlock])).toEqual([
       [1, 100],

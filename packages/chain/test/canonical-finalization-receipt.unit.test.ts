@@ -1,7 +1,8 @@
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { loadAbi } from '../src/evm-adapter-abi.js';
-import { PublishMethods } from '../src/evm-adapter-publish.js';
+import type { PublishMethods } from '../src/evm-adapter-publish.js';
+import { createPublishAdapterFixture } from './publish-adapter-fixture.js';
 
 const TX_HASH = `0x${'ab'.repeat(32)}`;
 const BLOCK_HASH = `0x${'cd'.repeat(32)}`;
@@ -14,7 +15,7 @@ function adapter(
   overrides: Record<string, unknown> = {},
   useProductionV10Parser = false,
 ) {
-  const chain = Object.assign(Object.create(PublishMethods.prototype), {
+  const chain = Object.assign(createPublishAdapterFixture(), {
     init: vi.fn(async () => undefined),
     contracts: { knowledgeAssetStorage: {} },
     getTransactionReceiptWithFailover: vi.fn(async () => null),
@@ -140,7 +141,9 @@ describe('canonical finalization receipt capability', () => {
         },
       ],
     };
+    const getBlockTimestamp = vi.fn(async () => 1_234_567);
     const chain = adapter({
+      getBlockTimestamp,
       contracts: {
         knowledgeAssetStorage: { interface: storageInterface, target: storageAddress },
       },
@@ -164,7 +167,7 @@ describe('canonical finalization receipt capability', () => {
         knowledgeAssetsContract: storageAddress,
       },
     });
-    expect(chain.getBlockTimestamp).toHaveBeenCalledWith(123, {});
+    expect(getBlockTimestamp).toHaveBeenCalledWith(123, {});
   });
 
   it('resolves canonical V9 evidence through the production receipt parser', async () => {
@@ -199,7 +202,9 @@ describe('canonical finalization receipt capability', () => {
         data: encodedBatch.data,
       }],
     };
+    const getBlockTimestamp = vi.fn(async () => 1_234_567);
     const chain = adapter({
+      getBlockTimestamp,
       contracts: {
         knowledgeAssetsStorage: { interface: storageInterface, target: storageAddress },
       },
@@ -222,7 +227,7 @@ describe('canonical finalization receipt capability', () => {
       },
     });
     expect(chain.parseV10PublishReceipt).not.toHaveBeenCalled();
-    expect(chain.getBlockTimestamp).toHaveBeenCalledWith(123, {});
+    expect(getBlockTimestamp).toHaveBeenCalledWith(123, {});
   });
 
   it('resolvePublishTransaction projects the SAME read, V9 fallback included [GH#2270]', async () => {
