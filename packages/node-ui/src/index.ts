@@ -17,6 +17,8 @@ export {
 } from './db.js';
 export {
   SqliteChainEventCursorStore,
+  SqliteContextGraphAuthorityIndexStore,
+  SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 export type {

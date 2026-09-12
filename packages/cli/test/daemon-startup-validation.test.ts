@@ -247,7 +247,51 @@ describe('daemon startup network validation', () => {
         load: expect.any(Function),
         save: expect.any(Function),
       },
+      localContextGraphAuthorityHistoryStore: {
+        load: expect.any(Function),
+        save: expect.any(Function),
+        delete: expect.any(Function),
+      },
+      localContextGraphAuthorityIndexStore: {
+        load: expect.any(Function),
+        compareAndSwap: expect.any(Function),
+        invalidate: expect.any(Function),
+      },
     });
+    const authorityCheckpoint = {
+      version: 1,
+      state: { throughBlockNumber: 30 },
+      integrity: `0x${'11'.repeat(32)}`,
+    };
+    await createArg.localContextGraphAuthorityHistoryStore.save(
+      'daemon-startup-wiring',
+      authorityCheckpoint,
+    );
+    await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+      .resolves.toEqual(authorityCheckpoint);
+    await createArg.localContextGraphAuthorityHistoryStore.delete('daemon-startup-wiring');
+    await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+      .resolves.toBeUndefined();
+    const indexCheckpoint = {
+      version: 1,
+      cursor: { throughBlockNumber: 30 },
+      integrity: `0x${'22'.repeat(32)}`,
+    };
+    await expect(createArg.localContextGraphAuthorityIndexStore.compareAndSwap(
+      'daemon-startup-index-wiring',
+      undefined,
+      indexCheckpoint,
+    )).resolves.toBe(1);
+    await expect(createArg.localContextGraphAuthorityIndexStore.load(
+      'daemon-startup-index-wiring',
+    )).resolves.toEqual({ token: 1, value: indexCheckpoint });
+    await expect(createArg.localContextGraphAuthorityIndexStore.invalidate(
+      'daemon-startup-index-wiring',
+      1,
+    )).resolves.toBe(2);
+    await expect(createArg.localContextGraphAuthorityIndexStore.load(
+      'daemon-startup-index-wiring',
+    )).resolves.toEqual({ token: 2, value: null });
     expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
       chainId: 'gnosis:100',
       hubAddress: '0x1234567890123456789012345678901234567890',

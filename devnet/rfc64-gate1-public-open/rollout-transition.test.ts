@@ -189,6 +189,11 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     manualTargets: 1,
     bootstrap: true,
   }));
+  const unselectedStatus = await shadow.child.requestRollout('rolloutStatus', 'shadow-unselected-status', {
+    contextGraphId: `${CONTEXT_GRAPH_ID}-unselected`,
+    completeProviderPeerId: authorReady.peerId as string,
+  });
+  assert.equal(unselectedStatus.vmChainInventorySelected, false);
   const seededVmSource = await shadow.child.requestRollout(
     'seedVmSourceSwm',
     'shadow-seed-vm-source',

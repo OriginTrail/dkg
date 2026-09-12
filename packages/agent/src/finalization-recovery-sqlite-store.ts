@@ -3,6 +3,8 @@ import { VerifiedGraphScopedFinalizationEvidenceCodec } from './finalization-gra
 import {
   type FinalizationRecoveryEntry,
   type FinalizationRecoveryHealth,
+  type FinalizationRecoveryAttemptPolicy,
+  type FinalizationRecoveryAttemptResult,
   type FinalizationRecoveryVerifiedEvidenceCommit,
   type FinalizationRecoveryReceiveInput,
   type FinalizationRecoveryReceiveResult,
@@ -11,6 +13,7 @@ import {
   type FinalizationRecoveryStore,
   type FinalizationRecoveryVerifyResult,
   planFinalizationRecoveryVerifiedEvidenceTransition,
+  planFinalizationRecoveryAttempt,
 } from './finalization-recovery-store.js';
 import {
   finalizationEnvelopeFromRow,
@@ -483,6 +486,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
               verified_evidence_json = NULL,
               generation = generation + 1,
               attempt_count = 0,
+              failure_signature = NULL,
+              failure_streak = 0,
               next_attempt_at = NULL,
               last_error = ?,
               updated_at = ?
@@ -556,6 +561,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
             verified_evidence_json = ?,
             generation = ?,
             attempt_count = ?,
+            failure_signature = ?,
+            failure_streak = ?,
             next_attempt_at = ?,
             last_error = ?,
             updated_at = ?
@@ -571,6 +578,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         JSON.stringify(fields.verifiedEvidence),
         fields.generation,
         fields.attemptCount,
+        fields.failureSignature,
+        fields.failureStreak,
         fields.nextAttemptAt,
         fields.lastError,
         this.#policy.now(),
@@ -617,6 +626,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
               verified_evidence_json = NULL,
               generation = generation + 1,
               attempt_count = 0,
+              failure_signature = NULL,
+              failure_streak = 0,
               next_attempt_at = NULL,
               last_error = ?,
               updated_at = ?
@@ -635,6 +646,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       this.database.prepare(`
         UPDATE finalization_inbox_v1
         SET attempt_count = 0,
+            failure_signature = NULL,
+            failure_streak = 0,
             next_attempt_at = NULL,
             last_error = NULL,
             updated_at = ?
@@ -654,6 +667,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           UPDATE finalization_inbox_v1
           SET state = 'REJECTED',
               publisher_upgrade_pending = 0,
+              failure_signature = NULL,
+              failure_streak = 0,
               next_attempt_at = NULL,
               last_error = ?,
               updated_at = ?
@@ -741,6 +756,8 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           SET state = ?,
               publisher_upgrade_pending = 0,
               attempt_count = CASE WHEN ? = 'SETTLED' THEN 0 ELSE attempt_count END,
+              failure_signature = NULL,
+              failure_streak = 0,
               last_error = ?,
               next_attempt_at = NULL,
               updated_at = ?
@@ -758,34 +775,56 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     key: string,
     generation: number,
     lastError?: string,
-    retryDelayMs?: number,
-  ): Promise<void> {
-    if (this.#closed || this.#closing) return Promise.resolve();
+    policy: FinalizationRecoveryAttemptPolicy = { mode: 'ordinary' },
+  ): Promise<FinalizationRecoveryAttemptResult> {
+    if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
     return this.mutate(() => {
-      if (this.#closed) return;
+      if (this.#closed) return { status: 'closed' as const };
       const now = this.#policy.now();
-      const nextAttemptAt = retryDelayMs === undefined ? null : now + retryDelayMs;
-      this.database.prepare(`
-        UPDATE finalization_inbox_v1
-        SET attempt_count = attempt_count + 1,
-            last_error = ?,
-            next_attempt_at = CASE
-              WHEN ? IS NULL THEN next_attempt_at
-              WHEN next_attempt_at IS NULL THEN ?
-              ELSE MAX(next_attempt_at, ?)
-            END,
-            updated_at = ?
-        WHERE key = ? AND generation = ?
-          AND state IN ('RECEIVED','VERIFIED','REORGED','SETTLED')
-      `).run(
-        lastError ?? null,
-        nextAttemptAt,
-        nextAttemptAt,
-        nextAttemptAt,
-        now,
-        key,
-        generation,
-      );
+      let outcome: FinalizationRecoveryAttemptResult = { status: 'stale' };
+      this.transaction(() => {
+        const row = this.database.prepare(
+          'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
+        ).get(key);
+        if (!row) return;
+        const current = finalizationRecoveryRowToEntry(row);
+        if (
+          current.generation !== generation
+          || !['RECEIVED', 'VERIFIED', 'REORGED', 'SETTLED'].includes(current.state)
+        ) return;
+        const update = planFinalizationRecoveryAttempt(current, lastError, policy, now);
+        const result = this.database.prepare(`
+          UPDATE finalization_inbox_v1
+          SET attempt_count = ?,
+              last_error = ?,
+              failure_signature = ?,
+              failure_streak = ?,
+              next_attempt_at = ?,
+              updated_at = ?
+          WHERE key = ? AND generation = ?
+            AND state IN ('RECEIVED','VERIFIED','REORGED','SETTLED')
+        `).run(
+          update.attemptCount,
+          update.lastError,
+          update.failureSignature,
+          update.failureStreak,
+          update.nextAttemptAt,
+          now,
+          key,
+          generation,
+        );
+        if (result.changes === 0) return;
+        const updated = this.database.prepare(
+          'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
+        ).get(key);
+        if (updated) {
+          outcome = {
+            status: 'updated',
+            entry: finalizationRecoveryRowToEntry(updated),
+          };
+        }
+      });
+      return outcome;
     });
   }
 

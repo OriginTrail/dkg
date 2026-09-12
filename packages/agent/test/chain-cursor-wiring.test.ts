@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+} from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 
 const OPERATIONAL_KEY =
@@ -18,6 +20,16 @@ describe('DKGAgent chain cursor wiring', () => {
       load: vi.fn(async () => undefined),
       save: vi.fn(async () => {}),
     };
+    const authorityHistoryStore = {
+      load: vi.fn(async () => undefined),
+      save: vi.fn(async () => {}),
+      delete: vi.fn(async () => {}),
+    };
+    const authorityIndexStore = {
+      load: vi.fn(async () => undefined),
+      compareAndSwap: vi.fn(async () => 1),
+      invalidate: vi.fn(async () => 2),
+    };
 
     agent = await DKGAgent.create({
       name: 'RegistryCursorWiring',
@@ -32,9 +44,13 @@ describe('DKGAgent chain cursor wiring', () => {
         minPublisherTracWei: 456n,
       },
       contextGraphRegistryScanCursorStore: registryCursorStore,
+      localContextGraphAuthorityHistoryStore: authorityHistoryStore,
+      localContextGraphAuthorityIndexStore: authorityIndexStore,
     });
 
     expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
+    expect((agent as any).chain.contextGraphAuthorityHistory?.localStore).toBe(authorityHistoryStore);
+    expect((agent as any).chain.contextGraphAuthorityIndex?.localStore).toBe(authorityIndexStore);
     expect((agent as any).chain.minPublisherNativeWei).toBe(123n);
     expect((agent as any).chain.minPublisherTracWei).toBe(456n);
     expect((agent as any).chain.receiptTimeoutMs).toBe(1_200_000);

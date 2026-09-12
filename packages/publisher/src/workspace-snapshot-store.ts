@@ -1,7 +1,5 @@
 import {
   mkdir,
-  open,
-  readFile,
   readdir,
   rename,
   stat,
@@ -12,8 +10,10 @@ import {
 import { createHash } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { createInterface } from 'node:readline';
+import { StringDecoder } from 'node:string_decoder';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameSnapshotSource, sameSnapshotFileIdentity, snapshotPath, SnapshotSourceChangedError, type OpenedSnapshotSource, type SnapshotFileSource, type SnapshotFileIdentity, type SnapshotFileReader } from './workspace-snapshot-source.js';
+import { BoundedLruCache } from '@origintrail-official/dkg-core';
 
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
@@ -70,6 +70,12 @@ export interface WorkspacePublicSnapshotStore {
     readonly quads: readonly Quad[];
   }): Promise<{ readonly ref: string; readonly byteLength: number }>;
   getSnapshot(ref: string): Promise<Quad[] | null>;
+  /** Validate complete contents, optionally reusing unchanged file evidence. */
+  validateSnapshot?(
+    ref: string,
+    expectedDigest: string,
+    expectedCount: number,
+  ): Promise<boolean>;
   /**
    * Read one immutable snapshot page without materializing the complete file.
    * Optional for compatibility with custom/legacy stores; sync responders fall
@@ -153,22 +159,17 @@ export class SnapshotStorageCapacityError extends Error {
 }
 
 interface SnapshotPageIndexCore {
-  version: typeof SNAPSHOT_PAGE_INDEX_VERSION;
-  stride: number;
-  offsets: number[];
-  fileBytes: number;
-  mtimeMs: number;
-  ctimeMs: number;
-}
-
-interface SnapshotFileFingerprint {
-  size: number;
-  mtimeMs: number;
-  ctimeMs: number;
+  readonly identity: SnapshotFileIdentity;
+  readonly version: typeof SNAPSHOT_PAGE_INDEX_VERSION;
+  readonly stride: number;
+  readonly offsets: readonly number[];
 }
 
 export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshotStore {
-  private readonly pageIndexCache = new Map<string, Promise<SnapshotPageIndexCore>>();
+  private readonly validationCache = new BoundedLruCache<string, {
+    source: SnapshotFileSource; digest: string; count: number;
+  }>(2048);
+  private readonly pageIndexCache = new BoundedLruCache<string, Promise<SnapshotPageIndexCore>>(SNAPSHOT_PAGE_INDEX_CACHE_MAX);
   private readonly pendingWrites = new Map<
     string,
     Promise<{ readonly ref: string; readonly byteLength: number }>
@@ -272,17 +273,15 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
       });
     }
 
-    const fingerprint = await stat(filePath);
+    const fingerprint = await readSnapshotFileIdentity(filePath);
     const index: SnapshotPageIndexCore = {
       version: SNAPSHOT_PAGE_INDEX_VERSION,
+      identity: fingerprint,
       stride: SNAPSHOT_PAGE_INDEX_STRIDE,
       offsets,
-      fileBytes,
-      mtimeMs: fingerprint.mtimeMs,
-      ctimeMs: fingerprint.ctimeMs,
     };
     await this.persistSnapshotPageIndexBestEffort(input.digest, index);
-    this.rememberPageIndex(input.digest, Promise.resolve(index));
+    this.pageIndexCache.set(hash, Promise.resolve(index));
 
     return {
       ref: input.digest,
@@ -292,18 +291,43 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
 
   async getSnapshot(ref: string): Promise<Quad[] | null> {
     const hash = snapshotHash(ref);
-    return this.withActiveSnapshot(hash, async () => {
-      const nquadsPath = snapshotPath(this.directory, hash, 'nq');
-      let raw: string;
-      try {
-        raw = await readFile(nquadsPath, 'utf8');
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        return this.getLegacyJsonSnapshot(ref, hash);
-      }
+    return this.withActiveSnapshotSource(hash, async source =>
+      source === null ? null : this.readSnapshot(source, ref));
+  }
 
-      return parseWorkspacePublicSnapshotNQuads(raw, ref);
-    });
+  /** Lease-free primitive over the source already opened by the owning operation. */
+  private async readSnapshot(source: OpenedSnapshotSource, ref: string): Promise<Quad[] | null> {
+    const raw = await readSnapshotSource(source);
+    return source.reference.format === 'nq'
+      ? parseWorkspacePublicSnapshotNQuads(raw, ref)
+      : parseLegacyJsonSnapshot(raw, ref);
+  }
+
+  async validateSnapshot(ref: string, expectedDigest: string, expectedCount: number): Promise<boolean> {
+    if (!Number.isSafeInteger(expectedCount) || expectedCount < 0) return false;
+    let hash: string;
+    try { hash = snapshotHash(ref); } catch { return false; }
+    try {
+      return await this.withActiveSnapshotSource(hash, async source => {
+        if (source === null) { this.validationCache.delete(hash); return false; }
+        const cached = this.validationCache.get(hash);
+        if (cached && sameSnapshotSource(cached.source, source.reference)) {
+          await source.assertCurrent();
+          return cached.digest === expectedDigest && cached.count === expectedCount;
+        }
+        this.validationCache.delete(hash);
+        const quads = await this.readSnapshot(source, ref);
+        if (quads === null) return false;
+        const observed = { count: quads.length, digest: workspacePublicQuadsDigest(quads) };
+        await source.assertCurrent();
+        this.validationCache.set(hash, { source: source.reference, ...observed });
+        return observed.digest === expectedDigest && observed.count === expectedCount;
+      });
+    } catch {
+      this.validationCache.delete(hash);
+      // Missing/unreadable/corrupt or changed sources remain recovery candidates.
+      return false;
+    }
   }
 
   async getSnapshotPage(
@@ -316,43 +340,28 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const safeLimit = Math.max(0, Math.floor(limit));
     if (safeLimit === 0) return [];
     const hash = snapshotHash(ref);
-    return this.withActiveSnapshot(hash, async () => {
-      const nquadsPath = snapshotPath(this.directory, hash, 'nq');
-      let file: Awaited<ReturnType<typeof open>>;
-      try {
-        file = await open(nquadsPath, 'r');
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        const legacy = await this.getLegacyJsonSnapshot(ref, hash);
+    return this.withActiveSnapshotSource(hash, async source => {
+      if (source === null) return null;
+      if (source.reference.format === 'json') {
+        const legacy = await this.readSnapshot(source, ref);
         return legacy?.slice(safeOffset, safeOffset + safeLimit) ?? null;
       }
-
-      let startRow = 0;
-      let startByte = 0;
-      try {
-        const index = await this.getPageIndex(ref, nquadsPath);
-        const checkpoint = Math.min(
-          Math.floor(safeOffset / index.stride),
-          Math.max(0, index.offsets.length - 1),
-        );
-        startRow = checkpoint * index.stride;
-        startByte = index.offsets[checkpoint] ?? 0;
-      } catch {
-        // Page indexes are derived data. The already-open snapshot remains the
-        // source of truth, so index failures fall back to scanning from row zero.
-      }
-
-      const input = file.createReadStream({
-        encoding: 'utf8',
-        autoClose: false,
-        start: startByte,
-        signal: options?.signal,
-      });
-      const lines = createInterface({ input, crlfDelay: Infinity });
-      const page: Quad[] = [];
-      let row = startRow;
-      try {
-        for await (const rawLine of lines) {
+      return source.read(async file => {
+        let startRow = 0;
+        let startByte = 0;
+        try {
+          const index = await this.getPageIndex(hash, source);
+          const checkpoint = Math.min(Math.floor(safeOffset / index.stride), Math.max(0, index.offsets.length - 1));
+          startRow = checkpoint * index.stride;
+          startByte = index.offsets[checkpoint] ?? 0;
+        } catch (error) {
+          if (error instanceof SnapshotSourceChangedError) throw error;
+          // Derived index failures can fall back to this same opened source.
+          // The source boundary still rejects any concurrent file change.
+        }
+        const page: Quad[] = [];
+        let row = startRow;
+        for await (const rawLine of readSnapshotLines(file, startByte, options?.signal)) {
           const line = rawLine.trim();
           if (!line) continue;
           if (row >= safeOffset) {
@@ -362,11 +371,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
           row += 1;
         }
         return page;
-      } finally {
-        lines.close();
-        input.destroy();
-        await file.close().catch(() => {});
-      }
+      });
     });
   }
 
@@ -467,7 +472,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
           deletedSnapshots += 1;
           deletedSnapshotBytes += file.size;
           availableBytesAfter += file.size;
-          this.forgetPageIndex(file.hash);
+          this.pageIndexCache.delete(file.hash);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failedDeletions += 1;
         }
@@ -526,6 +531,14 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     }
   }
 
+  /** Keep the GC lease from source selection through descriptor retirement. */
+  private withActiveSnapshotSource<T>(
+    hash: string,
+    operation: (source: OpenedSnapshotSource | null) => Promise<T>,
+  ): Promise<T> {
+    return this.withActiveSnapshot(hash, () => withSnapshotSource(this.directory, hash, operation));
+  }
+
   private async withActiveSnapshot<T>(hash: string, operation: () => Promise<T>): Promise<T> {
     this.activeSnapshots.set(hash, (this.activeSnapshots.get(hash) ?? 0) + 1);
     try {
@@ -541,12 +554,6 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     return (this.activeSnapshots.get(hash) ?? 0) > 0;
   }
 
-  private forgetPageIndex(hash: string): void {
-    for (const ref of this.pageIndexCache.keys()) {
-      if (snapshotHash(ref) === hash) this.pageIndexCache.delete(ref);
-    }
-  }
-
   private logGarbageCollection(result: SnapshotGarbageCollectionResult): void {
     this.log?.(
       `[SWM-SNAPSHOT-GC] triggered=${result.triggered} snapshots=${result.deletedSnapshots} `
@@ -557,48 +564,34 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     );
   }
 
-  private getPageIndex(ref: string, nquadsPath: string): Promise<SnapshotPageIndexCore> {
-    const existing = this.pageIndexCache.get(ref);
+  private async getPageIndex(hash: string, source: OpenedSnapshotSource): Promise<SnapshotPageIndexCore> {
+    const existing = this.pageIndexCache.get(hash);
     if (existing) {
-      this.rememberPageIndex(ref, existing);
-      return existing;
+      const index = await existing;
+      if (sameSnapshotFileIdentity(index.identity, source.reference.identity)) return index;
+      if (this.pageIndexCache.get(hash) === existing) this.pageIndexCache.delete(hash);
     }
-    const load = this.loadOrBuildPageIndex(ref, nquadsPath).catch((error) => {
-      if (this.pageIndexCache.get(ref) === load) this.pageIndexCache.delete(ref);
+    const load = this.loadOrBuildPageIndex(hash, source).catch(error => {
+      if (this.pageIndexCache.get(hash) === load) this.pageIndexCache.delete(hash);
       throw error;
     });
-    this.rememberPageIndex(ref, load);
+    this.pageIndexCache.set(hash, load);
     return load;
   }
 
-  private async loadOrBuildPageIndex(
-    ref: string,
-    nquadsPath: string,
-  ): Promise<SnapshotPageIndexCore> {
-    const fingerprint = await stat(nquadsPath);
+  private async loadOrBuildPageIndex(hash: string, source: OpenedSnapshotSource): Promise<SnapshotPageIndexCore> {
     if (this.pageIndexStore) {
       try {
-        const record = await this.pageIndexStore.get(canonicalSnapshotDigest(ref));
-        const index = decodeSnapshotPageIndexRecord(record, fingerprint, ref);
+        const record = await this.pageIndexStore.get(canonicalSnapshotDigest(hash));
+        const index = decodeSnapshotPageIndexRecord(record, source.reference.identity, hash);
         if (index) return index;
       } catch {
         // The index is derived data; a failed SQLite read must not block paging.
       }
     }
-
-    const index = await buildSnapshotPageIndex(nquadsPath);
-    await this.persistSnapshotPageIndexBestEffort(ref, index);
+    const index = await buildSnapshotPageIndex(source);
+    await this.persistSnapshotPageIndexBestEffort(hash, index);
     return index;
-  }
-
-  private rememberPageIndex(ref: string, index: Promise<SnapshotPageIndexCore>): void {
-    this.pageIndexCache.delete(ref);
-    this.pageIndexCache.set(ref, index);
-    while (this.pageIndexCache.size > SNAPSHOT_PAGE_INDEX_CACHE_MAX) {
-      const oldest = this.pageIndexCache.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.pageIndexCache.delete(oldest);
-    }
   }
 
   private async persistSnapshotPageIndexBestEffort(
@@ -612,8 +605,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
         snapshotDigest: canonicalSnapshotDigest(ref),
         formatVersion: index.version,
         stride: index.stride,
-        snapshotFileSize: index.fileBytes,
-        modificationFingerprint: snapshotModificationFingerprint(index),
+        snapshotFileSize: index.identity.size,
+        modificationFingerprint: snapshotModificationFingerprint(index.identity),
         offsetCount: index.offsets.length,
         offsetsBlob,
       };
@@ -626,30 +619,22 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     }
   }
 
-  private async getLegacyJsonSnapshot(ref: string, hash: string): Promise<Quad[] | null> {
-    const jsonPath = snapshotPath(this.directory, hash, 'json');
-    let raw: string;
-    try {
-      raw = await readFile(jsonPath, 'utf8');
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-      throw err;
-    }
+}
 
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return null;
-    return parsed.map((entry) => {
-      if (!Array.isArray(entry) || entry.length < 3) {
-        throw new Error(`Invalid shared-memory public snapshot blob ${ref}`);
-      }
-      return {
-        subject: String(entry[0]),
-        predicate: String(entry[1]),
-        object: String(entry[2]),
-        graph: '',
-      };
-    });
-  }
+function parseLegacyJsonSnapshot(raw: string, ref: string): Quad[] | null {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) return null;
+  return parsed.map((entry) => {
+    if (!Array.isArray(entry) || entry.length < 3) {
+      throw new Error(`Invalid shared-memory public snapshot blob ${ref}`);
+    }
+    return {
+      subject: String(entry[0]),
+      predicate: String(entry[1]),
+      object: String(entry[2]),
+      graph: '',
+    };
+  });
 }
 
 function snapshotHash(ref: string): string {
@@ -663,10 +648,6 @@ function snapshotHash(ref: string): string {
 
 function canonicalSnapshotDigest(ref: string): string {
   return `sha256:${snapshotHash(ref)}`;
-}
-
-function snapshotPath(directory: string, hash: string, extension: 'json' | 'nq'): string {
-  return join(directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.${extension}`);
 }
 
 function resolveSnapshotGarbageCollectionConfig(
@@ -870,37 +851,50 @@ function serializeWorkspacePublicSnapshotWithIndex(quads: readonly Quad[]): {
   return { payload: `${lines.join('\n')}\n`, offsets, fileBytes };
 }
 
-async function buildSnapshotPageIndex(nquadsPath: string): Promise<SnapshotPageIndexCore> {
-  const file = await open(nquadsPath, 'r');
-  const offsets = [0];
+/** No prefetch or stream-owned close: each physical read finishes inside the source lease. */
+async function* readSnapshotLines(file: SnapshotFileReader, start: number, signal?: AbortSignal): AsyncGenerator<string> {
   const buffer = Buffer.allocUnsafe(64 * 1024);
-  let absoluteOffset = 0;
-  let rows = 0;
-  try {
+  const decoder = new StringDecoder('utf8');
+  let position = start;
+  let pending = '';
+  while (true) {
+    signal?.throwIfAborted();
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
+    signal?.throwIfAborted();
+    if (bytesRead === 0) break;
+    position += bytesRead;
+    pending += decoder.write(buffer.subarray(0, bytesRead));
+    let lineStart = 0;
+    let newline: number;
+    while ((newline = pending.indexOf('\n', lineStart)) !== -1) {
+      signal?.throwIfAborted();
+      yield pending.slice(lineStart, newline);
+      lineStart = newline + 1;
+    }
+    pending = pending.slice(lineStart);
+  }
+  pending += decoder.end();
+  if (pending) yield pending;
+}
+
+async function buildSnapshotPageIndex(source: OpenedSnapshotSource): Promise<SnapshotPageIndexCore> {
+  return source.read(async file => {
+    const offsets = [0];
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let absoluteOffset = 0;
+    let rows = 0;
     while (true) {
       const { bytesRead } = await file.read(buffer, 0, buffer.length, absoluteOffset);
       if (bytesRead === 0) break;
       for (let index = 0; index < bytesRead; index += 1) {
         if (buffer[index] !== 0x0a) continue;
         rows += 1;
-        if (isSnapshotPageIndexCheckpoint(rows)) {
-          offsets.push(absoluteOffset + index + 1);
-        }
+        if (isSnapshotPageIndexCheckpoint(rows)) offsets.push(absoluteOffset + index + 1);
       }
       absoluteOffset += bytesRead;
     }
-  } finally {
-    await file.close();
-  }
-  const fingerprint = await stat(nquadsPath);
-  return {
-    version: SNAPSHOT_PAGE_INDEX_VERSION,
-    stride: SNAPSHOT_PAGE_INDEX_STRIDE,
-    offsets,
-    fileBytes: fingerprint.size,
-    mtimeMs: fingerprint.mtimeMs,
-    ctimeMs: fingerprint.ctimeMs,
-  };
+    return { version: SNAPSHOT_PAGE_INDEX_VERSION, identity: source.reference.identity, stride: SNAPSHOT_PAGE_INDEX_STRIDE, offsets };
+  });
 }
 
 function isSnapshotPageIndexCheckpoint(row: number): boolean {
@@ -908,9 +902,9 @@ function isSnapshotPageIndexCheckpoint(row: number): boolean {
 }
 
 function snapshotModificationFingerprint(
-  index: Pick<SnapshotPageIndexCore, 'mtimeMs' | 'ctimeMs'>,
+  identity: SnapshotFileIdentity,
 ): string {
-  return `${index.mtimeMs}:${index.ctimeMs}`;
+  return `${Number(identity.mtimeNs) / 1_000_000}:${Number(identity.ctimeNs) / 1_000_000}`;
 }
 
 function encodeSnapshotPageIndexOffsets(offsets: readonly number[]): Uint8Array {
@@ -939,7 +933,7 @@ function snapshotPageIndexRecordChecksum(
 
 function decodeSnapshotPageIndexRecord(
   value: SnapshotPageIndexRecord | null,
-  fingerprint: SnapshotFileFingerprint,
+  fingerprint: SnapshotFileIdentity,
   ref: string,
 ): SnapshotPageIndexCore | null {
   if (!value || typeof value !== 'object') return null;
@@ -972,11 +966,9 @@ function decodeSnapshotPageIndexRecord(
 
   return {
     version: SNAPSHOT_PAGE_INDEX_VERSION,
+    identity: fingerprint,
     stride: SNAPSHOT_PAGE_INDEX_STRIDE,
     offsets,
-    fileBytes: fingerprint.size,
-    mtimeMs: fingerprint.mtimeMs,
-    ctimeMs: fingerprint.ctimeMs,
   };
 }
 

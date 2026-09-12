@@ -108,12 +108,12 @@ function announcement(
 
 /** A reconciler that reports lane contention `saturateTimes` times, then applies. */
 function contendingReconciler(saturateTimes: number) {
-  const calls = { reconcile: 0, isHeadApplied: 0 };
+  const calls = { reconcile: 0, isHeadSatisfied: 0 };
   return {
     calls,
     reconciler: {
-      isHeadApplied: async () => {
-        calls.isHeadApplied += 1;
+      isHeadSatisfied: async () => {
+        calls.isHeadSatisfied += 1;
         return false;
       },
       reconcileHead: async () => {
@@ -167,7 +167,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     let remainingDeferrals = 4;
     const receiver = new Rfc64PublicCatalogReceiverV1(
       {
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async (peerId: string) => {
           peers.push(peerId);
           if (remainingDeferrals > 0) {
@@ -259,7 +259,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     // three-attempt behaviour; widening it would hide real breakage as patience.
     const receiver = new Rfc64PublicCatalogReceiverV1(
       {
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async () => {
           throw new Error('provider exploded');
         },
@@ -339,7 +339,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     let first = true;
     const receiver = new Rfc64PublicCatalogReceiverV1(
       {
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async (_peer: string, ann: Rfc64PublicCatalogHeadAnnouncementV1) => {
           seen.push(ann.catalogHeadObjectDigest);
           if (first) {
@@ -378,7 +378,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     let peerBDeferred = false;
     const receiver = new Rfc64PublicCatalogReceiverV1(
       {
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async (peerId: string) => {
           peers.push(peerId);
           if (peerId === 'peer-a' && peers.length === 1) {
@@ -436,7 +436,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     let contentionUsed = false;
     const receiver = new Rfc64PublicCatalogReceiverV1(
       {
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async () => {
           if (ordinaryFailures === 2 && !contentionUsed) {
             contentionUsed = true;
@@ -544,7 +544,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     let thrown = 0;
     const receiver = new Rfc64PublicCatalogReceiverV1(
       {
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async () => {
           thrown += 1;
           if (thrown === 1) throw realRefusal;
@@ -563,7 +563,7 @@ describe('RFC-64 receiver defers on finalized chain-lane contention', () => {
     // The look-alike must fail fast under the same default policy.
     const lookAlike = new Rfc64PublicCatalogReceiverV1(
       {
-        isHeadApplied: async () => false,
+        isHeadSatisfied: async () => false,
         reconcileHead: async () => {
           throw Object.assign(new Error('nice try'), { code: 'concurrency-saturated' });
         },
