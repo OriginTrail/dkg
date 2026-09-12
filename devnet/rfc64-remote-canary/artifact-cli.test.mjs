@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +14,13 @@ import { promisify } from 'node:util';
 import {
   createRemoteCanaryDryRunArtifactV1,
   runRemoteCanaryArtifactLifecycleV1,
+  writeArtifactAtomicV1,
 } from './certify.mjs';
+import {
+  stableJsonStringify,
+  writeStableJsonArtifact,
+} from '../rfc64-artifact-publication-v1.mjs';
+import { writeGateArtifactAtomicV1 } from '../../packages/agent/devnet/rfc64-private-catalog/gate-artifact.mjs';
 import {
   CG,
   SOURCE_SECRET,
@@ -27,6 +33,33 @@ import {
 const execFileAsync = promisify(execFile);
 const RUNNER_PATH = fileURLToPath(new URL('./run.mjs', import.meta.url));
 const AGENT_DIRECTORY = fileURLToPath(new URL('../..', import.meta.url));
+
+async function createTemporaryDirectoryV1(prefix) {
+  return mkdtemp(join(await realpath(tmpdir()), prefix));
+}
+
+test('private gate and remote canary publish through one canonical artifact writer', async () => {
+  const directory = await createTemporaryDirectoryV1('rfc64-shared-artifact-writer-');
+  const privatePath = join(directory, 'private.json');
+  const remotePath = join(directory, 'remote.json');
+  const directPath = join(directory, 'direct.json');
+  const privateValue = { z: [{ beta: 2, alpha: 1 }], a: { right: true, left: false } };
+  const remoteValue = { a: { left: false, right: true }, z: [{ alpha: 1, beta: 2 }] };
+  try {
+    const privateWritten = await writeGateArtifactAtomicV1(privatePath, privateValue);
+    const remoteWritten = await writeArtifactAtomicV1(remotePath, remoteValue);
+    const directWritten = writeStableJsonArtifact(directPath, remoteValue);
+    const expectedBytes = stableJsonStringify(remoteValue);
+
+    assert.equal(await readFile(privatePath, 'utf8'), expectedBytes);
+    assert.equal(await readFile(remotePath, 'utf8'), expectedBytes);
+    assert.equal(await readFile(directPath, 'utf8'), expectedBytes);
+    assert.deepEqual(privateWritten, directWritten);
+    assert.deepEqual(remoteWritten, directWritten);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('dry-run validates without reading secrets, calling nodes, or running commands', () => {
   const artifact = createRemoteCanaryDryRunArtifactV1(baseConfig(), () => (
@@ -44,7 +77,7 @@ test('dry-run validates without reading secrets, calling nodes, or running comma
 });
 
 test('operator CLI dry-run performs no network, secret, evidence, or command I/O', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-cli-dry-run-'));
+  const directory = await createTemporaryDirectoryV1('rfc64-remote-canary-cli-dry-run-');
   const artifactPath = join(directory, 'result.json');
   const configPath = join(directory, 'config.json');
   const sensitive = [
@@ -99,7 +132,7 @@ test('operator CLI dry-run performs no network, secret, evidence, or command I/O
 
 test('operator CLI rejects config/artifact aliases before changing configuration bytes', async () => {
   for (const aliasKind of ['same', 'normalized', 'symlink', 'hard-link']) {
-    const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-alias-test-'));
+    const directory = await createTemporaryDirectoryV1('rfc64-remote-canary-alias-test-');
     const configPath = join(directory, 'config.json');
     const original = JSON.stringify(baseConfig());
     let artifactPath = configPath;
@@ -139,7 +172,7 @@ test('operator CLI persists INCOMPLETE and exits 2 when required evidence is abs
   const source = await startIncompleteDaemon('12D3KooIncompleteSource');
   const receiver = await startIncompleteDaemon('12D3KooIncompleteReceiver');
 
-  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-cli-incomplete-'));
+  const directory = await createTemporaryDirectoryV1('rfc64-remote-canary-cli-incomplete-');
   const artifactPath = join(directory, 'result.json');
   const configPath = join(directory, 'config.json');
   const config = baseConfig({
@@ -228,7 +261,7 @@ async function startIncompleteDaemon(daemonIdentity) {
 }
 
 test('runner invalidates a stale PASS before reading malformed configuration JSON', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-runner-test-'));
+  const directory = await createTemporaryDirectoryV1('rfc64-remote-canary-runner-test-');
   const artifactPath = join(directory, 'latest.json');
   const configPath = join(directory, 'config.json');
   try {
@@ -250,7 +283,7 @@ test('runner invalidates a stale PASS before reading malformed configuration JSO
 });
 
 test('artifact lifecycle requires a configuration loader before touching output', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-loader-test-'));
+  const directory = await createTemporaryDirectoryV1('rfc64-remote-canary-loader-test-');
   const artifactPath = join(directory, 'latest.json');
   const original = JSON.stringify({ status: 'PASS' });
   try {
@@ -266,7 +299,7 @@ test('artifact lifecycle requires a configuration loader before touching output'
 });
 
 test('artifact lifecycle replaces a stale PASS with sanitized FAIL', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-test-'));
+  const directory = await createTemporaryDirectoryV1('rfc64-remote-canary-test-');
   const artifactPath = join(directory, 'latest.json');
   try {
     await writeFile(artifactPath, JSON.stringify({ status: 'PASS', secret: SOURCE_SECRET }));

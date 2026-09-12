@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -173,7 +173,7 @@ test('missing live-only surfaces remain explicit and cannot produce PASS', async
 });
 
 test('catalog evidence must predate all fresh canary markers', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-swm-test-'));
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'rfc64-remote-canary-swm-test-'));
   const artifactPath = join(directory, 'latest.json');
   const runtime = createCertificationRuntime({
     catalogSwmPresent: false,
@@ -567,7 +567,7 @@ test('HTTP timeout covers a stalled response body and still restarts the receive
 });
 
 test('phase boundaries give domain and transport failures the same execution stage', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-phase-test-'));
+  const directory = await mkdtemp(join(await realpath(tmpdir()), 'rfc64-remote-canary-phase-test-'));
   try {
     for (const scenario of [
       {

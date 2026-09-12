@@ -6,7 +6,7 @@ import {
   mapCanaryPhaseV1,
   pollUntilV1,
 } from './phase-helpers.mjs';
-import { askConfiguredQueryV1 } from './query.mjs';
+import { askQueryV1 } from './query.mjs';
 import {
   equalCompleteOperationalParityV1,
   tryDecodeNodeCertificationStatusV1,
@@ -73,7 +73,7 @@ export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
         contextGraph.source,
         contextGraph.receiver,
       ].map((node) => (
-        askConfiguredQueryV1(node, contextGraph, vmAskSparql, 'verifiable-memory', request)
+        askQueryV1(node, contextGraph.id, vmAskSparql, 'verifiable-memory', request)
       )));
       if (!queryPassed.every(Boolean)) throw failure('vm-query-parity-failed', 'vm');
     }

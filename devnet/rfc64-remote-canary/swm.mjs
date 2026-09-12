@@ -14,7 +14,7 @@ import {
   pollUntilV1,
 } from './phase-helpers.mjs';
 import { validateNodePreflightV1 } from './preflight.mjs';
-import { askConfiguredQueryV1 } from './query.mjs';
+import { askQueryV1 } from './query.mjs';
 import { opaqueRef } from './references.mjs';
 
 /** @typedef {import('./domain-contract.js').CanaryCommandResultV1} CanaryCommandResultV1 */
@@ -227,16 +227,16 @@ export function verifyCatalogSwmV1({ config, request }) {
       });
     }
     const [sourceQueryPassed, receiverQueryPassed] = await Promise.all([
-      askConfiguredQueryV1(
+      askQueryV1(
         contextGraph.source,
-        contextGraph,
+        contextGraph.id,
         contextGraph.catalogSwmAskSparql,
         'shared-working-memory',
         request,
       ),
-      askConfiguredQueryV1(
+      askQueryV1(
         contextGraph.receiver,
-        contextGraph,
+        contextGraph.id,
         contextGraph.catalogSwmAskSparql,
         'shared-working-memory',
         request,
@@ -295,16 +295,11 @@ async function assertReceiverOfflineV1(receiver, request) {
  * @param {CanaryRequesterV1} request
  */
 async function askMarkerV1(node, contextGraphId, marker, view, request) {
-  const result = await request.json(node, 'POST', '/api/query', {
-    sparql: `ASK { <${marker.subject}> <${marker.predicate}> ${JSON.stringify(marker.value)} . }`,
+  return askQueryV1(
+    node,
     contextGraphId,
+    `ASK { <${marker.subject}> <${marker.predicate}> ${JSON.stringify(marker.value)} . }`,
     view,
-  });
-  if (result === null || typeof result !== 'object' || Array.isArray(result)) return false;
-  const queryResult = /** @type {Record<string, unknown>} */ (result).result;
-  return queryResult !== null
-    && typeof queryResult === 'object'
-    && !Array.isArray(queryResult)
-    && /** @type {Record<string, unknown>} */ (queryResult).type === 'boolean'
-    && /** @type {Record<string, unknown>} */ (queryResult).value === true;
+    request,
+  );
 }

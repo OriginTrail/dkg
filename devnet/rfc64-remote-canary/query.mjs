@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/** Execute an ASK against one configured context-graph view. */
+/** Execute an ASK against one context-graph view. */
 /**
  * @param {import('./domain-contract.js').NormalizedCanaryNodeV1} node
- * @param {import('./domain-contract.js').NormalizedCanaryContextGraphV1} contextGraph
+ * @param {string} contextGraphId
  * @param {string} sparql
  * @param {'shared-working-memory' | 'verifiable-memory'} view
  * @param {import('./domain-contract.js').CanaryRequesterV1} request
  */
-export async function askConfiguredQueryV1(node, contextGraph, sparql, view, request) {
+export async function askQueryV1(node, contextGraphId, sparql, view, request) {
   const result = await request.json(node, 'POST', '/api/query', {
     sparql,
-    contextGraphId: contextGraph.id,
+    contextGraphId,
     view,
   });
   if (result === null || typeof result !== 'object' || Array.isArray(result)) return false;
