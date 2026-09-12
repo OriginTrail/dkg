@@ -149,6 +149,8 @@ import {
   resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
+import { rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1 } from
+  './rfc64/catalog-rollout-authority-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -1818,22 +1820,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this,
       this.config.rfc64CatalogExecutionPlan,
     );
-    // Explicit activation/compatibility manifests already own this CG's
-    // authority and receiver lifecycle. The release-native responsibility
-    // registry is only for CGs discovered from ordinary daemon state; letting
-    // it also claim a configured CG creates duplicate bootstrap invalidations
-    // and can silently replace a shadow/legacy override with the default mode.
-    if (
-      this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId]
-      !== undefined
-    ) {
-      return Promise.resolve(registry.read(contextGraphId));
-    }
+    const responsibilityOwnsAuthorityWorkload =
+      rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1(
+        this.config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      );
     const commit = (
       reason: Parameters<Rfc64CatalogResponsibilityRegistryV1['setResponsibility']>[1],
     ): Rfc64CatalogResponsibilitySelectionV1 => {
       const transition = registry.setResponsibility(contextGraphId, reason);
-      if (transition.changed) {
+      if (transition.changed && responsibilityOwnsAuthorityWorkload) {
         this.handleRfc64CatalogReceiverSelectionTransitionV1(
           contextGraphId,
           {
@@ -1881,7 +1877,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       const next = commit(reason);
       if (
-        next.active
+        responsibilityOwnsAuthorityWorkload
+        && next.active
         && next.mode !== 'legacy'
         && this.resolveRfc64AcceptedCompatibilityAuthorityV1(contextGraphId) === null
       ) {

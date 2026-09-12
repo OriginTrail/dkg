@@ -169,6 +169,7 @@ function renderEventArgs(event: AuthorityScenarioEvent) {
 export interface AuthorityScenarioOptions {
   readonly deactivated?: boolean;
   readonly reorg?: boolean;
+  readonly secondContextGraph?: boolean;
 }
 
 export interface AuthorityScenarioGate {
@@ -246,6 +247,28 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
         to: OWNER,
         tokenId: 9n,
       },
+      ...(options.secondContextGraph ? [{
+        name: 'ContextGraphCreated' as const,
+        blockNumber: 18,
+        blockHash: `0x${'67'.repeat(32)}`,
+        index: 1,
+        contextGraphId: 10n,
+        owner: MEMBER,
+        nameHash: `0x${'89'.repeat(32)}`,
+        participantAgents: [MEMBER],
+        accessPolicy: 1n,
+        publishPolicy: 0n,
+        publishAuthority: SECOND_AUTHORITY,
+        publishAuthorityAccountId: 8n,
+      }, {
+        name: 'Transfer' as const,
+        blockNumber: 18,
+        blockHash: `0x${'67'.repeat(32)}`,
+        index: 0,
+        from: ethers.ZeroAddress,
+        to: MEMBER,
+        tokenId: 10n,
+      }] : []),
       {
         name: 'PublishPolicyUpdated',
         blockNumber: 20,

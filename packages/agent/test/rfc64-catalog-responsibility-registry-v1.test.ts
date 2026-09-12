@@ -62,6 +62,29 @@ describe('Rfc64CatalogResponsibilityRegistryV1', () => {
     expect(registry.snapshot()).toEqual([]);
   });
 
+  it('reports lifecycle responsibility without execution-plan arbitration', () => {
+    const registry = new Rfc64CatalogResponsibilityRegistryV1();
+
+    const transition = registry.setResponsibility('manifest-cg', 'core-public');
+    registry.setResponsibility('ordinary-cg', 'core-public');
+
+    expect(transition).toMatchObject({
+      changed: true,
+      previous: { responsible: false },
+      next: { responsible: true, active: true },
+    });
+    expect(registry.snapshot()).toEqual([
+      expect.objectContaining({
+        contextGraphId: 'manifest-cg',
+        responsible: true,
+      }),
+      expect.objectContaining({
+        contextGraphId: 'ordinary-cg',
+        responsible: true,
+      }),
+    ]);
+  });
+
   it('derives responsibility only from verified role and access facts', () => {
     expect(resolveRfc64CatalogResponsibilityReasonV1({
       nodeRole: 'edge',

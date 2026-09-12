@@ -120,7 +120,9 @@ export class Rfc64CatalogResponsibilityRegistryV1 {
       throw new TypeError(`Unknown RFC-64 responsibility reason: ${String(reason)}`);
     }
     const previous = this.read(contextGraphId);
-    if (reason === null) this.#responsibilities.delete(contextGraphId);
+    if (reason === null) {
+      this.#responsibilities.delete(contextGraphId);
+    }
     else this.#responsibilities.set(contextGraphId, reason);
     const next = this.read(contextGraphId);
     return Object.freeze({

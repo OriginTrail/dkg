@@ -389,6 +389,11 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
   });
 
+  it('does not leak the authority revision operation onto the adapter prototype', () => {
+    expect(EVM_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);
+    expect(EVM_INTERNAL_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);
+  });
+
   it('method arity (declared parameter count) is within 1 of EVMChainAdapter for each shared method', () => {
     // Arity isn't a perfect check (optional args, rest params) but an
     // off-by-two drift almost always indicates a renamed/refactored
@@ -423,6 +428,11 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
   it('isV10Ready is a capability gate — mock returns true (used to exercise V10 unit tests)', () => {
     const mock = new MockChainAdapter();
     expect(mock.isV10Ready()).toBe(true);
+  });
+
+  it('keeps authority delta refresh unsupported in offline mock mode', () => {
+    const mock = new MockChainAdapter();
+    expect('contextGraphAuthorityIndexRevisionReader' in mock).toBe(false);
   });
 
   // Codex PR #595 round-4: isShardingTableMember gates VM ACK eligibility.

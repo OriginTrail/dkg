@@ -3,7 +3,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ChainAdapter, ContextGraphAuthoritySnapshot } from '../src/chain-adapter.js';
-import { bindContextGraphAuthorityReader } from '../src/context-graph-authority-reader.js';
+import {
+  bindContextGraphAuthorityReader,
+} from '../src/context-graph-authority-reader.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
 
 const SNAPSHOT = Object.freeze({

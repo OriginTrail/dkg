@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { ethers } from 'ethers';
 import {
+  contextGraphAuthorityIndexStateRevision,
   type ContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexState,
   type ContextGraphAuthorityIndexStore,
 } from './context-graph-authority-index-checkpoint.js';
+import type { ContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
 import {
   normalizeContextGraphAuthorityHash as normalizeHash,
   normalizeContextGraphAuthorityNonNegativeSafeInteger as normalizeNonNegativeSafeInteger,
@@ -31,7 +33,6 @@ export {
 export interface ContextGraphAuthorityIndexScanInput {
   /** Deployment + physical ContextGraphStorage address; contains no secret. */
   readonly scope: string;
-  readonly contextGraphId: bigint;
   /** Physical RPC reader identity; isolates a timed-out provider attempt. */
   readonly readScope: object;
   readonly deploymentBlockNumber: number;
@@ -50,6 +51,15 @@ export interface ContextGraphAuthorityIndexScanInput {
   ) => Promise<readonly ContextGraphAuthorityIndexEvent[]>;
 }
 
+export interface ContextGraphAuthorityIndexResolveInput
+  extends ContextGraphAuthorityIndexScanInput {
+  readonly contextGraphId: ContextGraphAuthorityIndexId;
+}
+
+export interface ContextGraphAuthorityIndexRevisionInput
+  extends ContextGraphAuthorityIndexScanInput {
+  readonly contextGraphIds: readonly ContextGraphAuthorityIndexId[];
+}
 /**
  * Process-local owner for the durable contract-wide authority index.
  *
@@ -77,18 +87,36 @@ export class ContextGraphAuthorityIndex {
   }
 
   async resolve(
-    input: ContextGraphAuthorityIndexScanInput,
+    input: ContextGraphAuthorityIndexResolveInput,
   ): Promise<ContextGraphAuthorityIndexState> {
+    const checkpoint = await this.#snapshot(input);
+    // Target lookup intentionally happens after the shared contract scan, so
+    // every waiter resolves its own graph from the same complete checkpoint.
+    return this.#requireState(checkpoint, input.contextGraphId);
+  }
+
+  /** Project opaque revisions without exposing persisted checkpoint internals. */
+  async revisions(
+    input: ContextGraphAuthorityIndexRevisionInput,
+  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>> {
+    const targetIds = new Set<ContextGraphAuthorityIndexId>(input.contextGraphIds);
+    const checkpoint = await this.#snapshot(input);
+    const revisions = new Map<ContextGraphAuthorityIndexId, string>();
+    for (const state of checkpoint.states) {
+      if (targetIds.has(state.contextGraphId)) {
+        revisions.set(state.contextGraphId, contextGraphAuthorityIndexStateRevision(state));
+      }
+    }
+    return revisions;
+  }
+
+  /** Resolve the complete materialized index at one finalized chain anchor. */
+  async #snapshot(
+    input: ContextGraphAuthorityIndexScanInput,
+  ): Promise<ContextGraphAuthorityIndexCheckpoint> {
     input.signal?.throwIfAborted();
     const scope = input.scope.trim();
     if (scope.length === 0) throw new Error('Context Graph authority index scope is empty');
-    if (
-      typeof input.contextGraphId !== 'bigint'
-      || input.contextGraphId <= 0n
-      || input.contextGraphId > ethers.MaxUint256
-    ) {
-      throw new Error('Context Graph authority index target id is invalid');
-    }
     if (input.readScope === null || typeof input.readScope !== 'object') {
       throw new Error('Context Graph authority index read scope is invalid');
     }
@@ -104,10 +132,7 @@ export class ContextGraphAuthorityIndex {
         hash: finalizedHash,
       } }, lifecycleSignal);
     });
-    const checkpoint = await waitForSharedAuthorityIndexScan(pending, input.signal);
-    // Target lookup intentionally happens after the shared contract scan, so
-    // every waiter resolves its own graph from the same complete checkpoint.
-    return this.#requireState(checkpoint, input.contextGraphId);
+    return waitForSharedAuthorityIndexScan(pending, input.signal);
   }
 
   async #scan(
@@ -207,12 +232,13 @@ export class ContextGraphAuthorityIndex {
 
   #requireState(
     checkpoint: ContextGraphAuthorityIndexCheckpoint,
-    contextGraphId: bigint,
+    contextGraphId: ContextGraphAuthorityIndexId,
   ): ContextGraphAuthorityIndexState {
-    const id = contextGraphId.toString(10);
-    const state = checkpoint.states.find((candidate) => candidate.contextGraphId === id);
+    const state = checkpoint.states.find((candidate) => (
+      candidate.contextGraphId === contextGraphId
+    ));
     if (state === undefined) {
-      throw new Error(`Context Graph ${id} has no finalized creation event`);
+      throw new Error(`Context Graph ${contextGraphId} has no finalized creation event`);
     }
     return state;
   }

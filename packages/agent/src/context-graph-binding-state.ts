@@ -152,6 +152,23 @@ export class ContextGraphBindingState {
     return this.currentBindingFor(localCgId, subscription) !== undefined;
   }
 
+  /**
+   * Return the durable on-chain id that may safely suppress authority work.
+   * Numeric local names and reverse candidates remain on the full-refresh
+   * path: only the authoritative binding used by reconciliation can prove
+   * that the scheduler is observing the same chain slot.
+   */
+  authorityIndexOnChainIdFor(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+  ): string | undefined {
+    const current = this.currentBindingFor(localCgId, subscription);
+    return current?.bindingKind === 'authoritative'
+      && BigInt(current.onChainId) <= ethers.MaxUint256
+      ? current.onChainId
+      : undefined;
+  }
+
   matchesReverseCandidate(
     localCgId: string,
     subscription: ContextGraphBindingSubscription | undefined,
