@@ -12,18 +12,29 @@ export interface EPCISDocument {
   [key: string]: unknown;
 }
 
-export interface EPCISEvent {
-  type: string;
-  eventTime: string;
+/** Standard event fields reconstructed by queries and accepted by captures. */
+export interface EPCISEventFields {
+  eventID?: string;
+  type?: string;
+  eventTime?: string;
   eventTimeZoneOffset?: string;
   configurationId?: string;
   shipmentId?: string;
   epcList?: string[];
+  parentID?: string;
+  childEPCs?: string[];
+  inputEPCList?: string[];
+  outputEPCList?: string[];
   action?: string;
   bizStep?: string;
   disposition?: string;
   readPoint?: { id: string };
   bizLocation?: { id: string };
+}
+
+export interface EPCISEvent extends EPCISEventFields {
+  type: string;
+  eventTime: string;
   bizTransactionList?: Array<{ type: string; bizTransaction: string }>;
   sensorElementList?: unknown[];
   [key: string]: unknown;
@@ -91,6 +102,9 @@ export interface EpcisQueryParams {
   offset?: number;
 }
 
+/** Generic SELECT row; unbound columns remain undefined until a consumer decodes them. */
+export type SparqlBinding = Record<string, string | undefined>;
+
 /** Dependency-inversion boundary: the EPCIS package needs something that can run SPARQL queries. */
 export interface QueryEngine {
   query(
@@ -117,7 +131,18 @@ export interface QueryEngine {
        */
       includePrivate?: boolean;
     },
-  ): Promise<{ bindings: Record<string, string>[] }>;
+  ): Promise<{ bindings: SparqlBinding[] }>;
+}
+
+/** Legacy sparse projection: typed known fields plus dynamically inspected extension fields. */
+export interface EPCISEventProjection extends Omit<EPCISEventFields, 'eventID'> {
+  'dkg:ual'?: string;
+  [key: string]: unknown;
+}
+
+/** Query response adds the validated reusable identity to the open projection contract. */
+export interface EPCISQueryEvent extends EPCISEventProjection {
+  eventID: string;
 }
 
 export interface EPCISQueryDocumentResponse {
@@ -128,7 +153,7 @@ export interface EPCISQueryDocumentResponse {
     queryResults: {
       queryName: 'SimpleEventQuery';
       resultsBody: {
-        eventList: Record<string, unknown>[];
+        eventList: EPCISQueryEvent[];
       };
     };
   };

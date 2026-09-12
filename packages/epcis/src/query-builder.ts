@@ -235,6 +235,8 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     ...optionalClauses,
   ].join('\n      ');
 
+  // Query decoding exposes only these selected fields at runtime. Public types
+  // retain unknown-valued dynamic keys for compatibility with legacy consumers.
   return `${PREFIXES}
 SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?configurationId ?shipmentId ?ual
   (GROUP_CONCAT(DISTINCT ?epc; SEPARATOR=", ") AS ?epcList)

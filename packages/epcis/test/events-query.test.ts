@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { handleEventsQuery, EpcisQueryError, toEpcisEvent, unwrapLiteral } from '../src/handlers.js';
-import type { QueryEngine } from '../src/types.js';
+import type { QueryEngine, SparqlBinding } from '../src/types.js';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphSubGraphUri, contextGraphPrivateUri, contextGraphSubGraphPrivateUri, type Quad } from '@origintrail-official/dkg-core';
 
 const CONTEXT_GRAPH_ID = 'test-cg';
 const BASE_PATH = '/api/epcis/events';
@@ -10,7 +12,7 @@ interface QueryCall {
   opts: any;
 }
 
-function createTrackingQueryEngine(bindings: Record<string, string>[] = []): { engine: QueryEngine; calls: QueryCall[] } {
+function createTrackingQueryEngine(bindings: SparqlBinding[] = []): { engine: QueryEngine; calls: QueryCall[] } {
   const calls: QueryCall[] = [];
   const engine: QueryEngine = {
     query: async (sparql: string, opts?: any) => {
@@ -21,7 +23,7 @@ function createTrackingQueryEngine(bindings: Record<string, string>[] = []): { e
   return { engine, calls };
 }
 
-function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<string, string> {
+function makeBindings(overrides: Record<string, string> = {}): Record<string, string> {
   return {
     event: 'urn:uuid:event-1',
     eventType: 'https://gs1.github.io/EPCIS/ObjectEvent',
@@ -42,6 +44,87 @@ function makeBindings(overrides: Partial<Record<string, string>> = {}): Record<s
 }
 
 describe('handleEventsQuery', () => {
+  it.each([
+    { finalized: true },
+    { finalized: false },
+    { finalized: true, subGraphName: 'supply-chain' },
+    { finalized: false, subGraphName: 'supply-chain' },
+  ])('returns queryable event IDs for caller and historical roots: %j', async (params) => {
+    const store = new OxigraphStore();
+    const graph = params.finalized
+      ? params.subGraphName ? contextGraphSubGraphUri(CONTEXT_GRAPH_ID, params.subGraphName) : contextGraphDataUri(CONTEXT_GRAPH_ID)
+      : contextGraphSharedMemoryUri(CONTEXT_GRAPH_ID, params.subGraphName);
+    const privateGraph = params.subGraphName
+      ? contextGraphSubGraphPrivateUri(CONTEXT_GRAPH_ID, params.subGraphName)
+      : contextGraphPrivateUri(CONTEXT_GRAPH_ID);
+    const roots = ['urn:epc:id:event:caller-id', 'dkg:test-cg:async-publish:context-graph/legacy-hash'];
+    const engine: QueryEngine = {
+      async query(sparql) {
+        const result = await store.query(sparql);
+        if (result.type !== 'bindings') throw new Error('Expected event bindings');
+        return result;
+      },
+    };
+    const config = { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH, subGraphName: params.subGraphName };
+    try {
+      const quads: Quad[] = roots.flatMap((subject, index) => {
+        const dataGraph = index === 0 ? graph : privateGraph;
+        return [
+          { subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://gs1.github.io/EPCIS/ObjectEvent', graph: dataGraph },
+          { subject, predicate: 'https://gs1.github.io/EPCIS/eventTime', object: '"2024-03-01T08:00:00Z"', graph: dataGraph },
+          { subject, predicate: 'https://gs1.github.io/EPCIS/eventTimeZoneOffset', object: '"+00:00"', graph: dataGraph },
+          ...(index === 0 ? [] : [{ subject, predicate: 'http://dkg.io/ontology/privateDataAnchor', object: '"true"', graph }]),
+        ];
+      });
+      await store.insert(quads);
+      const paramsFor = (eventID?: string) => new URLSearchParams({
+        finalized: String(params.finalized), ...(eventID ? { eventID } : {}),
+      });
+      const all = await handleEventsQuery(paramsFor(), config);
+      const events = all.body.epcisBody.queryResults.resultsBody.eventList;
+      expect(events.map((event) => event.eventID).sort()).toEqual([...roots].sort());
+      for (const event of events) {
+        const found = await handleEventsQuery(paramsFor(event.eventID), config);
+        expect(found.body.epcisBody.queryResults.resultsBody.eventList).toEqual([event]);
+      }
+      const missing = await handleEventsQuery(paramsFor('urn:epc:id:event:missing'), config);
+      expect(missing.body.epcisBody.queryResults.resultsBody.eventList).toEqual([]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('rejects an actual blank-node event subject returned by the store', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{
+        subject: '_:event', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'https://gs1.github.io/EPCIS/ObjectEvent', graph: contextGraphDataUri(CONTEXT_GRAPH_ID),
+      }]);
+      const queryEngine: QueryEngine = {
+        async query(sparql) {
+          const result = await store.query(sparql);
+          if (result.type !== 'bindings') throw new Error('Expected event bindings');
+          expect(result.bindings).toHaveLength(1);
+          expect(result.bindings[0].event).toMatch(/^_:/);
+          return result;
+        },
+      };
+      await expect(handleEventsQuery(new URLSearchParams(), {
+        contextGraphId: CONTEXT_GRAPH_ID, queryEngine, basePath: BASE_PATH,
+      })).rejects.toMatchObject({ statusCode: 502 });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each([{}, { event: undefined }, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'https://example.org/event>' }])('rejects a query result without a reusable subject: %j', async (binding) => {
+    const { engine } = createTrackingQueryEngine([binding]);
+    await expect(handleEventsQuery(new URLSearchParams(), {
+      contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH,
+    })).rejects.toMatchObject({ statusCode: 502 });
+  });
+
   it('returns EPCISQueryDocument envelope with reconstructed events', async () => {
     const { engine, calls } = createTrackingQueryEngine([
       makeBindings({
@@ -415,6 +498,10 @@ describe('handleEventsQuery', () => {
 });
 
 describe('toEpcisEvent', () => {
+  it.each([{}, { event: undefined }, { event: '' }, { event: '_:b0' }, { event: 'relative' }, { event: 'urn:event:bad id' }, { event: 'urn:event:1' }, { event: 'https://example.org/event/1' }])('preserves the legacy sparse projection contract: %j', (binding) => {
+    expect(toEpcisEvent({ ...binding, eventTime: '"2026-09-07T00:00:00Z"' })).toEqual({ eventTime: '2026-09-07T00:00:00Z' });
+  });
+
   it('strips eventType URI prefix to short name', () => {
     const binding = makeBindings({ eventType: 'https://gs1.github.io/EPCIS/ObjectEvent' });
     const event = toEpcisEvent(binding);
@@ -431,6 +518,17 @@ describe('toEpcisEvent', () => {
     const binding = makeBindings({ epcList: 'urn:epc:id:sgtin:001.001.001, urn:epc:id:sgtin:001.001.002' });
     const event = toEpcisEvent(binding);
     expect(event.epcList).toEqual(['urn:epc:id:sgtin:001.001.001', 'urn:epc:id:sgtin:001.001.002']);
+  });
+
+  it.each([
+    ['epcList', 'epcList'], ['childEPCList', 'childEPCs'],
+    ['inputEPCs', 'inputEPCList'], ['outputEPCs', 'outputEPCList'],
+  ] as const)('normalizes the %s group-concat binding consistently', (bindingKey, outputKey) => {
+    const event = toEpcisEvent({
+      event: 'urn:event:1',
+      [bindingKey]: '" urn:epc:one, , urn:epc:two "^^<http://www.w3.org/2001/XMLSchema#string>',
+    });
+    expect(event[outputKey]).toEqual(['urn:epc:one', 'urn:epc:two']);
   });
 
   it('splits single epcList value into single-element array', () => {
@@ -667,7 +765,7 @@ describe('unwrapLiteral (CodeQL ReDoS regression)', () => {
 
   it('returns empty / falsy inputs unchanged', () => {
     expect(unwrapLiteral('')).toBe('');
-    expect(unwrapLiteral(undefined as unknown as string)).toBeUndefined();
+    expect(unwrapLiteral(undefined)).toBeUndefined();
   });
 
   it('returns bare unquoted strings unchanged (URI bindings)', () => {

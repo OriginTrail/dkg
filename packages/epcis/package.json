@@ -5,10 +5,11 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && pnpm run test:types",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage && node ../../scripts/ci/check-coverage.mjs epcis",
-    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "test:types": "tsc -p tsconfig.type-tests.json"
   },
   "dependencies": {
     "@origintrail-official/dkg-core": "workspace:*",
@@ -17,7 +18,8 @@
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "@origintrail-official/dkg-storage": "workspace:*"
   },
   "publishConfig": {
     "access": "public"
