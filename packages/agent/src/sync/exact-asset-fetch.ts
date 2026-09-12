@@ -365,8 +365,8 @@ export async function runExactAssetFetch(
           : { kind: 'done' as const, diagnostic: failure };
       }
       return failure === undefined
-        ? { kind: 'continue' as const }
-        : { kind: 'continue' as const, error: failure };
+        ? { kind: 'missed' as const, reason: 'unresolved' }
+        : { kind: 'failed' as const, error: failure };
     },
     log: deps.log,
   });

@@ -8011,9 +8011,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           preferredPeerId,
           privateOnly,
         ).map((peer) => peer.toString()),
-        isSyncCapable: (peerId) => this.waitForSyncProtocol({
-          toString: () => peerId,
-        }),
+        isSyncCapable: (peerId) => this.waitForSyncProtocol(peerId),
         executeSlice: (peerId, durableMetaContinuation) => this.syncFromPeerDetailed(
           peerId,
           [contextGraphId],
@@ -8328,7 +8326,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (DEBUG_SYNC_PROGRESS) {
         this.log.info(ctx, `Checking sync protocol for peer ${pid.toString()} in catch-up for "${contextGraphId}"`);
       }
-      const hasSync = await this.waitForSyncProtocol(pid);
+      const hasSync = await this.waitForSyncProtocol(pid.toString());
       if (!hasSync) {
         noProtocolPeers++;
         if (DEBUG_SYNC_PROGRESS) {
@@ -9115,14 +9113,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     throw new NetworkAdmissionRejectedError(peerId);
   }
 
+  /**
+   * Sync-protocol readiness for one canonical peer-ID string. The libp2p peer
+   * store only answers for a real `PeerId`, so the string is canonicalized
+   * here, once; a string that is not a peer ID can never advertise the protocol.
+   */
   async waitForSyncProtocol(
     this: DKGAgent,
-    pid: string | { toString(): string },
+    peerId: string,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const peer = typeof pid === 'string'
-      ? (await import('@libp2p/peer-id')).peerIdFromString(pid)
-      : pid;
+    const { peerIdFromString } = await import('@libp2p/peer-id');
+    let peer: ReturnType<typeof peerIdFromString>;
+    try {
+      peer = peerIdFromString(peerId);
+    } catch {
+      return false;
+    }
     return waitForPeerProtocol(
       this.node.libp2p.peerStore as any,
       peer,

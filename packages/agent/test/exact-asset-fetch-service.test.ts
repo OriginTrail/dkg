@@ -132,6 +132,37 @@ describe('exact asset fetch service', () => {
     });
   });
 
+  it('skips a declined peer without counting an attempt and fetches from the next prepared peer', async () => {
+    const present = new Set<string>();
+    const fetchCalls: Array<[string, readonly string[]]> = [];
+    const preparePeer = vi.fn(async (peerId: string) => peerId === 'peer-b');
+    const log = vi.fn();
+    const result = await runExactAssetFetch({
+      contextGraphId: CONTEXT_GRAPH,
+      requestedUals: UALS,
+      peerIds: ['peer-a', 'peer-b'],
+    }, baseDependencies({
+      inspectLocal: async (evidence) => present.has(evidence.ual) ? 'present' : 'missing',
+      preparePeer,
+      fetchFromPeer: async (peerId, uals) => {
+        fetchCalls.push([peerId, [...uals]]);
+        for (const ual of uals) present.add(ual);
+      },
+      log,
+    }));
+
+    expect(preparePeer.mock.calls.map(([peerId]) => peerId)).toEqual(['peer-a', 'peer-b']);
+    expect(fetchCalls).toEqual([['peer-b', [UALS[0], UALS[1]]]]);
+    expect(result).toMatchObject({
+      status: 'complete',
+      networkAttempted: true,
+      peerAttempts: 1,
+      fetchedAssets: 2,
+      unresolvedAssets: 0,
+    });
+    expect(log).toHaveBeenCalledWith('Exact asset fetch from peer-a skipped: unprepared');
+  });
+
   it('accounts for and flushes durable prefix progress when a peer fetch rejects', async () => {
     const present = new Set<string>();
     const fetchCalls: Array<[string, readonly string[]]> = [];

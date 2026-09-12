@@ -3354,7 +3354,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         const remotePeer = this.node.libp2p.getConnections()
           .find((connection) => connection.remotePeer.toString() === peerId)
           ?.remotePeer;
-        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer, signal))) return false;
+        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer.toString(), signal))) return false;
         return this.ensurePeerAdmittedForRecovery(
           peerId,
           ctx,
@@ -6034,7 +6034,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
         recoveryWorkRan = true;
         const protocolReady = connectedPeer
-          ? await this.waitForSyncProtocol(connectedPeer, signal)
+          ? await this.waitForSyncProtocol(connectedPeer.toString(), signal)
           : false;
         if (!isRecoveryCurrent()) return staleRecovery();
         if (!connectedPeer || !protocolReady) {

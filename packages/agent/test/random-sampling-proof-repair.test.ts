@@ -180,6 +180,7 @@ describe('Random Sampling proof-time exact repair', () => {
   it('reports every structured peer outcome when no provider recovers the asset', async () => {
     const logInfo = vi.fn();
     const attempted: string[] = [];
+    const verboseReset = `stream\n\treset ${'x'.repeat(80)}`;
 
     await expect(runRandomSamplingExactRepair({
       chainId: 'base:8453',
@@ -200,7 +201,7 @@ describe('Random Sampling proof-time exact repair', () => {
       },
       fetchExactKnowledgeAsset: async (peerId) => {
         attempted.push(peerId);
-        if (peerId === 'peer-reset') throw new Error('stream reset');
+        if (peerId === 'peer-reset') throw new Error(verboseReset);
         return { kind: 'miss', disposition: peerId === 'peer-absent' ? 'clean-absent' : 'incomplete' };
       },
       logInfo,
@@ -212,7 +213,7 @@ describe('Random Sampling proof-time exact repair', () => {
     })).rejects.toThrow(
       'did not recover: rejected=skipped:not-admitted,'
         + 'eachable=prepare:ERR_TIMEOUT:dial timed out,'
-        + 'er-reset=error:stream reset,'
+        + `er-reset=error:${`stream reset ${'x'.repeat(80)}`.slice(0, 72)},`
         + 'r-absent=missed:clean-absent,'
         + '-partial=missed:incomplete; '
         + 'asset=did:dkg:base:8453/0x0000000000000000000000000000000000001234/7',
@@ -221,7 +222,7 @@ describe('Random Sampling proof-time exact repair', () => {
     expect(logInfo.mock.calls.map(([message]) => message)).toEqual([
       expect.stringContaining('peer-rejected skipped: not-admitted'),
       expect.stringContaining('peer-unreachable failed: dial  timed out'),
-      expect.stringContaining('peer-reset failed: stream reset'),
+      expect.stringContaining(`peer-reset failed: ${verboseReset}`),
       expect.stringContaining('from r-absent: outcome=miss disposition=clean-absent'),
       expect.stringContaining('from -partial: outcome=miss disposition=incomplete'),
     ]);

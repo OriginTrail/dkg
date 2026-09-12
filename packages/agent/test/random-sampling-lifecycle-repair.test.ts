@@ -49,10 +49,7 @@ interface RepairAgentHarness {
     signal: AbortSignal,
   ) => Promise<boolean>;
   ensurePeerConnected: (peerId: string, options: { signal: AbortSignal }) => Promise<void>;
-  waitForSyncProtocol: (
-    peer: string | { toString(): string },
-    signal: AbortSignal,
-  ) => Promise<boolean>;
+  waitForSyncProtocol: (peerId: string, signal: AbortSignal) => Promise<boolean>;
   syncExactKnowledgeAssetsFromPeerDetailed: (
     peerId: string,
     contextGraphId: string,
@@ -169,6 +166,15 @@ describe('Random Sampling lifecycle repair adapter', () => {
       node: { libp2p: { peerStore: { get } } },
     } as never, peerId)).resolves.toBe(true);
     expect(get).toHaveBeenCalledOnce();
+  });
+
+  it('treats a string that is not a peer ID as sync-unavailable without a peer-store lookup', async () => {
+    const get = vi.fn(async () => ({ protocols: [PROTOCOL_SYNC] }));
+
+    await expect(LifecycleSyncMethods.prototype.waitForSyncProtocol.call({
+      node: { libp2p: { peerStore: { get } } },
+    } as never, 'registry-entry-without-a-peer-id')).resolves.toBe(false);
+    expect(get).not.toHaveBeenCalled();
   });
 
   it('keeps every Core eligible after a distinct graph-specific provider', async () => {
@@ -408,8 +414,7 @@ describe('Random Sampling lifecycle repair adapter', () => {
 
   it('skips peers that fail admission or lack the sync protocol without dialing past the gate', async () => {
     const ensurePeerAdmittedForRecovery = vi.fn(async (peerId: string) => peerId !== 'peer-rejected');
-    const waitForSyncProtocol = vi.fn(async (peer: string | { toString(): string }) =>
-      peer.toString() !== 'peer-legacy');
+    const waitForSyncProtocol = vi.fn(async (peerId: string) => peerId !== 'peer-legacy');
     const syncExactKnowledgeAssetsFromPeerDetailed = foundAt(['peer-holder']);
     const agentLike = makeRepairAgent({
       log: { info: vi.fn() },

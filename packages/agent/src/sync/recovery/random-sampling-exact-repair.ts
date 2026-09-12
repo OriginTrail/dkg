@@ -6,8 +6,8 @@ import {
 import { buildReconciledKnowledgeAssetUal } from '../../ka-identity.js';
 import type { ExactAssetCommitment } from '../exact-assets.js';
 import {
-  describePreparedPeerAttempt,
   runBoundedPreparedPeerTraversal,
+  type PreparedPeerAttemptRecord,
   type PreparedPeerPreparation,
 } from '../prepared-peer-traversal.js';
 
@@ -72,6 +72,32 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortReason(signal);
 }
 
+function compactError(error: unknown): string {
+  const code = typeof error === 'object' && error !== null && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : '';
+  const message = error instanceof Error ? error.message : String(error);
+  const detail = code ? `${code}:${message}` : message;
+  return detail.replace(/\s+/g, ' ').slice(0, 72);
+}
+
+/** Compact `peer=outcome` rendering of one traversal record for the aggregate failure. */
+function describeAttempt(record: PreparedPeerAttemptRecord): string {
+  const peer = record.peerId.slice(-8);
+  switch (record.kind) {
+    case 'skipped':
+      return `${peer}=skipped:${record.reason}`;
+    case 'prepare-failed':
+      return `${peer}=prepare:${compactError(record.error)}`;
+    case 'failed':
+      return `${peer}=error:${compactError(record.error)}`;
+    case 'missed':
+      return `${peer}=missed:${record.reason}`;
+    case 'done':
+      return `${peer}=done`;
+  }
+}
+
 /**
  * Bounded proof-time recovery coordinator. The challenge commitment is applied
  * to the exact descriptor before the peer payload can become ephemeral proof input.
@@ -130,7 +156,7 @@ async function executeRandomSamplingExactRepair(
         );
       } catch (error) {
         if (signal.aborted) throw abortReason(signal);
-        return { kind: 'continue', error };
+        return { kind: 'failed', error };
       }
       deps.logInfo(
         `RS exact repair for ${assetUal} from ${peerId.slice(-8)}: `
@@ -140,7 +166,7 @@ async function executeRandomSamplingExactRepair(
       );
       return result.kind === 'found'
         ? { kind: 'done', result }
-        : { kind: 'continue', reason: result.disposition };
+        : { kind: 'missed', reason: result.disposition };
     },
     log: deps.logInfo,
   });
@@ -148,10 +174,10 @@ async function executeRandomSamplingExactRepair(
     return traversal.result.material;
   }
 
-  // The traversal owns the per-peer outcomes; render the leading ones compactly.
+  // The traversal records every peer outcome; render the leading ones compactly.
   throw new Error(
     `Random Sampling exact repair did not recover: ${traversal.attempts.length > 0
-      ? traversal.attempts.slice(0, 8).map(describePreparedPeerAttempt).join(',')
+      ? traversal.attempts.slice(0, 8).map(describeAttempt).join(',')
       : 'no peer attempts'}; asset=${assetUal}`,
   );
 }
