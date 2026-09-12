@@ -741,6 +741,29 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     });
   });
 
+  it('attributes live and repair eth_getLogs pages to distinct bounded consumers', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 2_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    registry.queryFilter.setImpl(async () => []);
+    const queryPage = vi.spyOn(adapter as any, 'queryEventLogsPage');
+
+    await collectRegistryScan(adapter, { mode: 'seedFromCursor', pageBudget: 1 });
+    await collectRegistryScan(adapter, {
+      mode: 'repair',
+      pageBudget: 1,
+      minimumIntervalMs: 86_400_000,
+    });
+
+    expect(queryPage.mock.calls.map((call) => call.at(-1))).toEqual([
+      'listContextGraphsFromChain',
+      'repairContextGraphRegistry',
+    ]);
+  });
+
   it('continues cursor-resumed daemon catch-up scans from the persisted cursor', async () => {
     const store = new MemoryRegistryScanCursorStore();
     await store.save({
