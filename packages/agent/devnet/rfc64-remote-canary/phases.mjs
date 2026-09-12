@@ -5,11 +5,6 @@ import { readFile } from 'node:fs/promises';
 import { ARTIFACT_SCHEMA } from './artifact-contract.mjs';
 import { verifyAuthorizationV1 } from './authorization.mjs';
 import {
-  createCertificationPlanV1,
-  isCertificationCompleteV1,
-  serializeCertificationDryRunPlanV1,
-} from './certification-plan.mjs';
-import {
   createRemoteCanaryCohortRefV1,
   validateRemoteCanaryConfigV1,
 } from './config.mjs';
@@ -27,7 +22,6 @@ import { verifyVmParityV1 } from './vm.mjs';
 /** A network-free plan. It deliberately does not read auth or evidence files. */
 export function createRemoteCanaryDryRunArtifactV1(config, now = () => new Date()) {
   const validated = validateRemoteCanaryConfigV1(config);
-  const certificationPlan = createCertificationPlanV1(validated);
   const timestamp = now().toISOString();
   return Object.freeze({
     schema: ARTIFACT_SCHEMA,
@@ -38,14 +32,13 @@ export function createRemoteCanaryDryRunArtifactV1(config, now = () => new Date(
     expectedCommit: validated.expectedCommit,
     cohortRef: createRemoteCanaryCohortRefV1(validated),
     topology: redactedTopology(validated),
-    plan: serializeCertificationDryRunPlanV1(certificationPlan),
+    plan: createDryRunPlan(validated),
   });
 }
 
 /** Execute the ordered certification phases, parallelizing only independent checks. */
 export async function executeRemoteCanaryCertificationV1(config, dependencies = {}) {
   const validated = validateRemoteCanaryConfigV1(config);
-  const certificationPlan = createCertificationPlanV1(validated);
   const fetchFn = dependencies.fetchFn ?? globalThis.fetch;
   if (typeof fetchFn !== 'function') throw failure('fetch-unavailable', 'config');
   const readFileFn = dependencies.readFileFn ?? readFile;
@@ -72,7 +65,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
     });
 
     phase = 'offline-catchup';
-    const offlineCatchup = certificationPlan.offlineCatchup.state === 'EVIDENCE_REQUIRED'
+    const offlineCatchup = validated.lifecycle === null
       ? Object.freeze({ status: 'EVIDENCE_REQUIRED', requirement: 'single-receiver-stop-start' })
       : await verifyOfflineCatchupV1({
           config: validated,
@@ -85,7 +78,6 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
     phase = 'vm-parity';
     const vmParity = await verifyVmParityV1({
       config: validated,
-      plan: certificationPlan.vmParity,
       request,
       sleep,
     });
@@ -93,7 +85,6 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
     phase = 'catalog-swm-evidence';
     const catalogSwm = await verifyCatalogSwmV1({
       config: validated,
-      plan: certificationPlan.catalogSwm,
       request,
     });
 
@@ -101,7 +92,6 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
     const authorization = await verifyAuthorizationV1(
       validated.authorizationChecks,
       request,
-      certificationPlan.authorization,
     );
 
     phase = 'rpc-usage';
@@ -112,7 +102,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
       observedAt: now().toISOString(),
       expectedCommit: validated.expectedCommit,
       cohortRef,
-    }, certificationPlan.rpcUsage);
+    });
 
     const checks = Object.freeze({
       liveSwmPropagation: Object.freeze(liveSwmPropagation),
@@ -122,7 +112,15 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
       authorization,
       rpcUsage,
     });
-    const incomplete = !isCertificationCompleteV1(certificationPlan, checks);
+    const incomplete = [
+      ...checks.liveSwmPropagation,
+      checks.offlineCatchup,
+      ...checks.vmParity,
+      ...checks.catalogSwm,
+      checks.authorization.unauthorized,
+      checks.authorization.revoked,
+      checks.rpcUsage,
+    ].some(({ status }) => status !== 'PASS');
     return Object.freeze({
       schema: ARTIFACT_SCHEMA,
       status: incomplete ? 'INCOMPLETE' : 'PASS',
@@ -141,6 +139,31 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
   } finally {
     secrets.clear();
   }
+}
+
+function createDryRunPlan(config) {
+  return Object.freeze({
+    preflight: 'exact-build-network-sync-and-catalog-mode',
+    liveSwmPropagationChecks: config.contextGraphs.length,
+    offlineCatchup: config.lifecycle === null ? 'EVIDENCE_REQUIRED' : 'PLANNED',
+    vmParityChecks: config.contextGraphs.length,
+    vmParityEvidence: summarizeEvidenceState(config.contextGraphs, 'vmEvidenceState'),
+    catalogSwmEvidence: summarizeEvidenceState(
+      config.contextGraphs,
+      'catalogSwmEvidenceState',
+    ),
+    authorization: Object.freeze({
+      unauthorized: config.authorizationChecks.unauthorized.evidenceState,
+      revoked: config.authorizationChecks.revoked.evidenceState,
+    }),
+    rpcUsage: config.rpcUsage.evidenceState,
+  });
+}
+
+function summarizeEvidenceState(checks, field) {
+  return checks.every((check) => check[field] === 'PLANNED')
+    ? 'PLANNED'
+    : 'EVIDENCE_REQUIRED';
 }
 
 function redactedTopology(config) {

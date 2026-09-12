@@ -13,7 +13,6 @@ import {
   collectRpcUsageEvidenceV1,
   validateRpcEvidenceV1,
 } from './rpc-evidence.mjs';
-import { createCertificationPlanV1 } from './certification-plan.mjs';
 import { COMMIT, baseConfig, rpcEvidence } from './test-support.mjs';
 
 const OBSERVED_AT = '2026-09-11T00:02:30.000Z';
@@ -39,11 +38,7 @@ function fileConfig(minimumSamples = 1) {
 }
 
 function collect(config, context) {
-  return collectRpcUsageEvidenceV1(
-    config.rpcUsage,
-    context,
-    createCertificationPlanV1(config).rpcUsage,
-  );
+  return collectRpcUsageEvidenceV1(config.rpcUsage, context);
 }
 
 test('the shared standards validator enforces RPC evidence date-time formats', async () => {

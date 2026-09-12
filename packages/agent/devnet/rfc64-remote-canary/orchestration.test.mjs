@@ -217,6 +217,21 @@ test('catalog status parity alone cannot certify VM queryability', async () => {
   });
 });
 
+test('a false configured VM ASK from either node blocks full certification', async () => {
+  for (const role of ['source', 'receiver']) {
+    const runtime = createCertificationRuntime({ vmQueryFalseFor: role });
+    await assert.rejects(
+      executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === 'vm-query-parity-failed'
+        && error.phase === 'vm-parity',
+      role,
+    );
+    assert.deepEqual(runtime.state.commands, ['stop', 'start'], role);
+    assert.equal(runtime.state.receiverOnline, true, role);
+  }
+});
+
 test('receiver recovery runs when an offline share fails', async () => {
   const runtime = createCertificationRuntime({ failOfflineShare: true });
   await assert.rejects(

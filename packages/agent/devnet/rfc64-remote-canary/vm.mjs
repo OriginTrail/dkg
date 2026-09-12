@@ -15,9 +15,8 @@ import {
 import { operationalStatusV1 } from './preflight.mjs';
 import { askConfiguredQueryV1 } from './query.mjs';
 
-export function verifyVmParityV1({ config, plan, request, sleep }) {
-  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph, index) => {
-    const check = plan[index];
+export function verifyVmParityV1({ config, request, sleep }) {
+  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
     const parity = await pollUntilV1(
       async () => readVmParityV1(
         contextGraph.source,
@@ -31,7 +30,7 @@ export function verifyVmParityV1({ config, plan, request, sleep }) {
       () => failure('vm-parity-timeout', 'vm-parity'),
       { retryError: isRetryableNodeRequestErrorV1 },
     );
-    if (check.state === 'PLANNED') {
+    if (contextGraph.vmEvidenceState === 'PLANNED') {
       const queryPassed = await Promise.all([
         contextGraph.source,
         contextGraph.receiver,
@@ -42,13 +41,17 @@ export function verifyVmParityV1({ config, plan, request, sleep }) {
     }
     return Object.freeze({
       contextGraphRef: contextGraph.contextGraphRef,
-      status: check.state === 'EVIDENCE_REQUIRED' ? 'EVIDENCE_REQUIRED' : 'PASS',
+      status: contextGraph.vmEvidenceState === 'EVIDENCE_REQUIRED'
+        ? 'EVIDENCE_REQUIRED'
+        : 'PASS',
       statusParity: 'PASS',
       cursorPresent: parity.cursorPresent,
       digestParity: parity.digestParity,
       rowCountParity: parity.rowCountParity,
-      vmQueryChecked: check.state === 'PLANNED',
-      ...(check.state === 'EVIDENCE_REQUIRED' ? { requirement: 'vm-ask-query' } : {}),
+      vmQueryChecked: contextGraph.vmEvidenceState === 'PLANNED',
+      ...(contextGraph.vmEvidenceState === 'EVIDENCE_REQUIRED'
+        ? { requirement: 'vm-ask-query' }
+        : {}),
     });
   });
 }
