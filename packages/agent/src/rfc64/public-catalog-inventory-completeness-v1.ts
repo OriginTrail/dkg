@@ -65,6 +65,69 @@ export interface Rfc64PublicCatalogInventoryEvidenceRowV1 {
   readonly activatedTripleCount: number;
 }
 
+/** Canonical verified inputs for one applied-inventory evidence row. */
+export interface ComposeRfc64PublicCatalogInventoryEvidenceRowInputV1 {
+  readonly kaId: KaIdV1;
+  readonly catalogRowDigest: Digest32V1;
+  readonly contentDigest: Digest32V1;
+  readonly sealDigest: Digest32V1;
+  readonly bundleDigest: Digest32V1;
+  readonly kaUal: string;
+  /** Canonical decimal count from the verified projection/seal boundary. */
+  readonly activatedTripleCount: CountV1;
+}
+
+/**
+ * Compose the one canonical inventory row used by receiver activation and
+ * authoritative read-back. The decimal count is narrowed only here, after
+ * proving it is positive and exactly representable as a JavaScript number.
+ */
+export function composeRfc64PublicCatalogInventoryEvidenceRowV1(
+  input: ComposeRfc64PublicCatalogInventoryEvidenceRowInputV1,
+): Readonly<Rfc64PublicCatalogInventoryEvidenceRowV1> {
+  let activatedTripleCount: bigint;
+  try {
+    assertCanonicalKaId(input.kaId, 'inventory evidence kaId');
+    assertCanonicalDigest(input.catalogRowDigest, 'inventory evidence catalogRowDigest');
+    assertCanonicalDigest(input.contentDigest, 'inventory evidence contentDigest');
+    assertCanonicalDigest(input.sealDigest, 'inventory evidence sealDigest');
+    assertCanonicalDigest(input.bundleDigest, 'inventory evidence bundleDigest');
+    activatedTripleCount = parseCanonicalDecimalU64(
+      input.activatedTripleCount,
+      'inventory evidence activatedTripleCount',
+    );
+    if (
+      activatedTripleCount < 1n
+      || activatedTripleCount > BigInt(Number.MAX_SAFE_INTEGER)
+    ) {
+      throw new Error(
+        'inventory evidence activatedTripleCount must be a positive safe integer',
+      );
+    }
+    const parsedUal = parseDeterministicKnowledgeAssetUal(input.kaUal);
+    const packedKaId = (BigInt(parsedUal.agentAddress) << 96n)
+      | BigInt(parsedUal.kaNumber);
+    if (parsedUal.ual !== input.kaUal || packedKaId !== BigInt(input.kaId)) {
+      throw new Error('inventory evidence kaUal does not canonically encode kaId');
+    }
+  } catch (cause) {
+    fail(
+      'catalog-inventory-completeness-input',
+      'inventory evidence row inputs are not exact canonical values',
+      cause,
+    );
+  }
+  return Object.freeze({
+    kaId: input.kaId,
+    catalogRowDigest: input.catalogRowDigest,
+    contentDigest: input.contentDigest,
+    sealDigest: input.sealDigest,
+    bundleDigest: input.bundleDigest,
+    kaUal: input.kaUal,
+    activatedTripleCount: Number(activatedTripleCount),
+  });
+}
+
 /**
  * Exact row fields committed by the durable applied-inventory digest.
  *

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
 
 import {
   MemoryLayer,
@@ -21,6 +22,7 @@ import {
 } from '../memory-evidence.mjs';
 
 /** Seed the one canonical SWM-v2/VM-v1 state used by private-gate tests. */
+/** @param {import('@origintrail-official/dkg-storage').TripleStore} store */
 export async function seedExpectedPrivateMemoryV1(store) {
   const authorAddress = roleAgentAddress('owner');
   const quads = ASSET_NUMBERS.flatMap((kaNumber) => {
@@ -75,6 +77,10 @@ export async function seedExpectedPrivateMemoryV1(store) {
   await store.insert(quads);
 }
 
+/**
+ * @param {import('@origintrail-official/dkg-storage').TripleStore} store
+ * @returns {Promise<readonly Readonly<import('../memory-evidence.mjs').Rfc64PrivateCatalogMemoryEvidenceRowV1>[]>}
+ */
 export function readExpectedPrivateMemoryV1(store) {
   return readPrivateCatalogWorkspaceMemoryEvidenceV1(store, {
     assetNumbers: ASSET_NUMBERS,

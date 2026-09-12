@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
 
 import { readPrivateCatalogAppliedProjectionEvidenceV1 } from './memory-evidence.mjs';
 
+/** @typedef {{ readonly expectedAssetNumbers: readonly number[], readonly readVerifiedAppliedCatalogClosure: import('./agent-runtime.ts').Rfc64PrivateCatalogClosureReaderV1, readonly store: import('@origintrail-official/dkg-storage').TripleStore, readonly trustedCatalogScope: Readonly<import('@origintrail-official/dkg-core').AuthorCatalogScopeV1> }} ReadVerifiedAppliedCatalogMemoryEvidenceInputV1 */
+/** @typedef {import('./memory-evidence.mjs').Rfc64PrivateCatalogRowSwmProofV1} Rfc64PrivateCatalogRowSwmProofV1 */
+
 /** Project the canonical verified closure into the fixture's per-asset evidence. */
+/**
+ * @param {ReadVerifiedAppliedCatalogMemoryEvidenceInputV1} input
+ * @returns {Promise<readonly Readonly<import('./memory-evidence.mjs').Rfc64PrivateCatalogMemoryEvidenceRowV1>[]>}
+ */
 export async function readVerifiedAppliedCatalogMemoryEvidenceV1({
   expectedAssetNumbers,
   readVerifiedAppliedCatalogClosure,
@@ -20,6 +28,7 @@ export async function readVerifiedAppliedCatalogMemoryEvidenceV1({
     throw new Error('expected catalog SWM asset identities are duplicated');
   }
   const closure = await readVerifiedAppliedCatalogClosure(closureCoordinates);
+  /** @type {Map<bigint, Readonly<Rfc64PrivateCatalogRowSwmProofV1>>} */
   const byKaNumber = new Map();
   for (const { kaNumber, row } of closure.rows) {
     if (!expectedNumbers.has(kaNumber) || byKaNumber.has(kaNumber)) {

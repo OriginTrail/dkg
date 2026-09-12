@@ -10,6 +10,7 @@ import {
 } from '@origintrail-official/dkg-core';
 
 import {
+  composeRfc64PublicCatalogInventoryEvidenceRowV1,
   computeRfc64AppliedInventoryDigestV1,
   Rfc64PublicCatalogInventoryCompletenessErrorV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
@@ -30,6 +31,33 @@ const SCOPE = Object.freeze({
 }) as AuthorCatalogScopeV1;
 
 describe('RFC-64 public catalog bounded inventory completeness', () => {
+  it('composes one frozen canonical row from an exact decimal triple count', () => {
+    const expected = row(7);
+    const { activatedTripleCount: _activatedTripleCount, ...identity } = expected;
+    const composed = composeRfc64PublicCatalogInventoryEvidenceRowV1({
+      ...identity,
+      activatedTripleCount: '8' as CountV1,
+    });
+    expect(composed).toEqual(expected);
+    expect(Object.isFrozen(composed)).toBe(true);
+
+    for (const activatedTripleCount of [
+      '0',
+      '01',
+      (BigInt(Number.MAX_SAFE_INTEGER) + 1n).toString(),
+    ]) {
+      expectCode(() => composeRfc64PublicCatalogInventoryEvidenceRowV1({
+        ...identity,
+        activatedTripleCount: activatedTripleCount as CountV1,
+      }), 'catalog-inventory-completeness-input');
+    }
+    expectCode(() => composeRfc64PublicCatalogInventoryEvidenceRowV1({
+      ...identity,
+      kaUal: `did:dkg:otp:20430/${AUTHOR}/8`,
+      activatedTripleCount: '8' as CountV1,
+    }), 'catalog-inventory-completeness-input');
+  });
+
   it('mints deterministic exact-set evidence in numeric KA-ID order', () => {
     const expected = [row(2), row(10), row(100)];
     const evidence = verifyRfc64PublicCatalogInventoryCompletenessV1({

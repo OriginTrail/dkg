@@ -119,6 +119,10 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
     }),
     (evidence) => ({
       ...evidence,
+      vmHead: { ...evidence.vmHead, uncheckedProducerField: true },
+    }),
+    (evidence) => ({
+      ...evidence,
       swmProof: { ...evidence.swmProof, shareOperationId: 'wrong-operation' },
     }),
     (evidence) => ({ ...evidence, swmDigest: PROJECTION_EVIDENCE.digest }),

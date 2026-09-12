@@ -28,6 +28,7 @@ import type { Rfc64ControlObjectOperationsV1 } from './control-object-store-v1.j
 import type { AppliedCatalogHeadSnapshotV1 } from './inventory-v1/index.js';
 import type { Rfc64KaBundleOperationsV1 } from './ka-bundle-store-v1.js';
 import {
+  composeRfc64PublicCatalogInventoryEvidenceRowV1,
   computeRfc64AppliedInventoryDigestV1,
   type Rfc64PublicCatalogInventoryEvidenceRowV1,
 } from './public-catalog-inventory-completeness-v1.js';
@@ -128,8 +129,8 @@ export async function readVerifiedAppliedCatalogClosureV1(
       ) {
         throw new Error('signed catalog row identity differs from its verified bundle binding');
       }
-      const inventoryEvidence = Object.freeze({
-        activatedTripleCount: Number(bundleBinding.seal.publicTripleCount),
+      const inventoryEvidence = composeRfc64PublicCatalogInventoryEvidenceRowV1({
+        activatedTripleCount: bundleBinding.seal.publicTripleCount,
         bundleDigest: row.transfer.blobDigest,
         catalogRowDigest: bundleBinding.catalogRowDigest,
         contentDigest: row.projectionDigest,
