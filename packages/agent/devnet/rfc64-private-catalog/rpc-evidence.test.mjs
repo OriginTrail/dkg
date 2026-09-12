@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import test from 'node:test';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { AgentChild } from './run.mjs';
+import { createRuntimeLoadEvidenceV1 } from
+  '../../../../devnet/rfc64-runtime-load-evidence.mts';
+import { RFC64_RUNTIME_EVIDENCE_V1 } from
+  '../../../../devnet/rfc64-runtime-provenance.mts';
 import {
   RFC64_PRIVATE_GATE_RPC_BUDGET_V1,
   finalizedRuntimeRpcVerdictV1,
@@ -32,7 +37,7 @@ test('shutdown receipt is emitted only after a successful agent drain', async ()
         snapshot: () => { failedOrder.push('snapshot'); return { eth_call: 1 }; },
         close: async () => { failedOrder.push('close'); },
       },
-      executedRuntimeManifest: {},
+      sealExecutedRuntimeManifest: () => { failedOrder.push('seal'); return {}; },
       emitReceipt: async () => { failedOrder.push('receipt'); },
     }),
     /agent drain failed/,
@@ -47,17 +52,60 @@ test('shutdown receipt is emitted only after a successful agent drain', async ()
       snapshot: () => { successfulOrder.push('snapshot'); return { eth_call: 1 }; },
       close: async () => { successfulOrder.push('close'); },
     },
-    executedRuntimeManifest: { manifestDigest: 'sha256:fixture' },
+    sealExecutedRuntimeManifest: () => {
+      successfulOrder.push('seal');
+      return { manifestDigest: 'sha256:fixture' };
+    },
     emitReceipt: async (value) => {
       successfulOrder.push('receipt');
       receipt = value;
     },
   });
-  assert.deepEqual(successfulOrder, ['stop', 'snapshot', 'close', 'receipt']);
+  assert.deepEqual(successfulOrder, ['stop', 'snapshot', 'close', 'seal', 'receipt']);
   assert.deepEqual(receipt, {
     executedRuntimeManifest: { manifestDigest: 'sha256:fixture' },
     rpcCallCounts: { eth_call: 1 },
   });
+});
+
+test('shutdown-time workspace artifacts are captured before the provenance seal', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'rfc64-private-shutdown-provenance-'));
+  try {
+    const artifactPath = join(root, 'packages', 'agent', 'dist', 'shutdown.js');
+    const source = Buffer.from('export const shutdown = true;\n');
+    await mkdir(dirname(artifactPath), { recursive: true });
+    await writeFile(artifactPath, source);
+    const artifactUrl = pathToFileURL(artifactPath).href;
+    const evidence = createRuntimeLoadEvidenceV1({
+      repoRoot: root,
+      sourceCommit: 'a'.repeat(40),
+    });
+    let receipt;
+    await emitAuthoritativeRuntimeShutdownReceiptV1({
+      agent: {
+        stop: async () => {
+          evidence.resolve(artifactUrl, {}, () => ({
+            format: 'module',
+            url: artifactUrl,
+          }));
+          evidence.load(artifactUrl, { format: 'module' }, () => {
+            throw new Error('workspace artifact load must be short-circuited');
+          });
+        },
+      },
+      rpc: undefined,
+      sealExecutedRuntimeManifest:
+        evidence.createSealer(RFC64_RUNTIME_EVIDENCE_V1),
+      emitReceipt: async (value) => { receipt = value; },
+    });
+    assert.deepEqual(receipt.executedRuntimeManifest.runtimeFiles, [{
+      byteLength: source.byteLength,
+      path: 'packages/agent/dist/shutdown.js',
+      sha256: `0x${createHash('sha256').update(source).digest('hex')}`,
+    }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('RPC evidence is method-attributed and rejects unknown or over-budget work', async () => {
