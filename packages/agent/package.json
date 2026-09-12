@@ -56,6 +56,7 @@
     "./dist/rfc64/legacy-swm-boundary-v1.js": null,
     "./dist/rfc64/catalog-rollout-authority-reconciliation-v1.js": null,
     "./dist/rfc64/applied-catalog-authority-transition-v1.js": null,
+    "./dist/rfc64/verified-applied-catalog-closure-v1.js": null,
     "./dist/rfc64/catalog-semantic-authority-transition-v1.js": null,
     "./dist/rfc64/public-catalog-native-errors-v1.js": null,
     "./dist/rfc64/catalog-applied-head-coordinator-v1.js": null,

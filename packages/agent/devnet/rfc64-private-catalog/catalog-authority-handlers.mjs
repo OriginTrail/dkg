@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
 
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
@@ -14,6 +15,12 @@ import {
 import { assertFinalizedRuntimeV1 } from './agent-runtime.ts';
 import { assertAuthorityEvidenceParityV1 } from './initial-authority.mjs';
 
+/** @typedef {import('./agent-runtime.ts').Rfc64PrivateRuntimeV1} Rfc64PrivateRuntimeV1 */
+/** @typedef {import('./agent-runtime.ts').FinalizedRuntimeV1} FinalizedRuntimeV1 */
+/** @typedef {import('./agent-runtime.ts').Rfc64PrivateRuntimeRoleV1} Rfc64PrivateRuntimeRoleV1 */
+/** @typedef {import('../../src/rfc64/release-native-catalog-authority-v1.ts').Rfc64ReleaseNativeAuthoritySnapshotV1 & { roster: NonNullable<import('../../src/rfc64/release-native-catalog-authority-v1.ts').Rfc64ReleaseNativeAuthoritySnapshotV1['roster']> }} Rfc64PrivateRosterAuthorityV1 */
+
+/** @param {Rfc64PrivateRuntimeV1} context */
 export async function revokeReceiverV1(context) {
   assertFinalizedRuntimeV1(context);
   const { role } = context;
@@ -32,6 +39,7 @@ export async function revokeReceiverV1(context) {
   };
 }
 
+/** @param {Rfc64PrivateRuntimeV1} context */
 export async function observeReceiverRevocationV1(context) {
   assertFinalizedRuntimeV1(context);
   const { role } = context;
@@ -70,6 +78,7 @@ export async function observeReceiverRevocationV1(context) {
   }
   if (
     authority.roster === null
+    || context.initialFinalizedAuthority.roster === null
     || authority.source !== 'finalized-chain'
     || BigInt(authority.roster.version)
       <= BigInt(context.initialFinalizedAuthority.roster.version)
@@ -91,6 +100,11 @@ export async function observeReceiverRevocationV1(context) {
   };
 }
 
+/**
+ * @param {FinalizedRuntimeV1} context
+ * @param {Rfc64PrivateRuntimeRoleV1} role
+ * @returns {Promise<Rfc64PrivateRosterAuthorityV1>}
+ */
 async function readExactReceiverRevokedFinalizedAuthorityV1(context, role) {
   if (context.chainAdapter === undefined) {
     throw new Error(`${role} has no finalized chain adapter`);
@@ -122,5 +136,5 @@ async function readExactReceiverRevokedFinalizedAuthorityV1(context, role) {
     expected,
     message: 'finalized chain authority did not exactly apply the receiver revocation',
   });
-  return finalizedAuthority;
+  return /** @type {Rfc64PrivateRosterAuthorityV1} */ (finalizedAuthority);
 }

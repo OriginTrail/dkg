@@ -26,8 +26,10 @@ const ROLE_KEYS = Object.freeze({
   outsider: `0x${'67'.repeat(32)}`,
 });
 
+/** @type {import('@origintrail-official/dkg-core').NetworkIdV1} */
 export const NETWORK_ID = 'otp:20430';
 export const CHAIN_ID = '20430';
+/** @type {import('@origintrail-official/dkg-core').ContextGraphIdV1} */
 export const CONTEXT_GRAPH_ID =
   '0x1111111111111111111111111111111111111111/rfc64-private-release-gate';
 export const ON_CHAIN_CONTEXT_GRAPH_ID = '14';
@@ -44,11 +46,13 @@ export const PROJECTION_QUADS = Object.freeze([
     subject: 'https://example.org/alice',
     predicate: 'https://schema.org/age',
     object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    graph: '',
   }),
   Object.freeze({
     subject: 'https://example.org/alice',
     predicate: 'https://schema.org/name',
     object: '"Alice"',
+    graph: '',
   }),
 ]);
 export const PROJECTION_NQUADS = canonicalGraphlessProjectionNQuads(PROJECTION_QUADS);
@@ -61,11 +65,13 @@ export const UPDATED_PROJECTION_QUADS = Object.freeze([
     subject: 'https://example.org/alice',
     predicate: 'https://schema.org/age',
     object: '"43"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    graph: '',
   }),
   Object.freeze({
     subject: 'https://example.org/alice',
     predicate: 'https://schema.org/name',
     object: '"Alice v2"',
+    graph: '',
   }),
 ]);
 export const UPDATED_PROJECTION_EVIDENCE = computeGraphlessMemoryEvidence(
@@ -110,12 +116,14 @@ export const PRIVATE_CATALOG_MEMORY_EXPECTATION = Object.freeze({
 });
 export const PRIVATE_MEMBER_ROLES = Object.freeze(['owner', 'provider2', 'receiver']);
 export const RUNTIME_ROLES = RFC64_PRIVATE_RUNTIME_ROLES_V1;
+/** @type {import('@origintrail-official/dkg-core').CatalogSealDeploymentProfileV1} */
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,
   assertedAtKav10Address: KAV10,
 });
 
+/** @returns {import('@origintrail-official/dkg-core').EvmAddressV1} */
 export function roleAgentAddress(role) {
   return new ethers.Wallet(rolePrivateKey(role)).address.toLowerCase();
 }
@@ -131,6 +139,7 @@ export function ownerWallet() {
 }
 
 /** Canonical private-catalog identity derived from the declared gate policy. */
+/** @returns {import('@origintrail-official/dkg-core').AuthorCatalogScopeV1} */
 export function createPrivateCatalogScope({
   authorAddress = roleAgentAddress('owner'),
 } = {}) {
@@ -149,6 +158,9 @@ export function createPrivateCatalogScope({
 }
 
 /** Derive the receiver API's catalog-era spelling from the canonical scope. */
+/**
+ * @returns {import('../../src/rfc64/public-catalog-current-head-discovery-v1.ts').Rfc64PublicCatalogCurrentHeadScopeV1}
+ */
 export function createPrivateCatalogSyncScope() {
   const scope = createPrivateCatalogScope();
   return Object.freeze({
@@ -290,6 +302,9 @@ export function createFinalizedChainFixture() {
   });
 }
 
+/**
+ * @returns {Promise<readonly import('../../src/dkg-agent-rfc64-catalog.ts').Rfc64CatalogSuccessorAssetInputV1[]>}
+ */
 export async function createCatalogAssets({
   assertionRoot = ASSERTION_ROOT,
   assertionVersion = '1',

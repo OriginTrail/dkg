@@ -67,6 +67,8 @@ import {
   computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
 } from '../src/rfc64/public-catalog-inventory-completeness-v1.js';
+import { readVerifiedAppliedCatalogClosureV1 } from
+  '../src/rfc64/verified-applied-catalog-closure-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1,
   Rfc64PublicCatalogNativeTransportV1,
@@ -387,6 +389,60 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     })).resolves.toMatchObject({
       envelope: { objectDigest: fixture.catalogIssuerDelegation.objectDigest },
     });
+
+    const appliedHead = fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    if (appliedHead === null) throw new Error('receiver did not retain its applied head');
+    const closureInput = {
+      appliedHead,
+      controlObjects: fixture.receiverPersistence.controlObjects,
+      deployment: DEPLOYMENT,
+      kaBundles: fixture.receiverPersistence.kaBundles,
+      trustedCatalogScope: fixture.scope,
+    };
+    const closure = await readVerifiedAppliedCatalogClosureV1(closureInput);
+    expect(closure).toMatchObject({
+      appliedHead,
+      head: { objectDigest: fixture.successor.head.objectDigest },
+      catalogScope: fixture.scope,
+      inventoryEvidence: {
+        catalogScopeDigest: fixture.scopeDigest,
+        inventoryRowCount: '1',
+        inventoryDigest: appliedHead.appliedInventoryDigest,
+      },
+    });
+    expect(closure.rows).toHaveLength(1);
+    expect(closure.rows[0]).toMatchObject({
+      kaNumber: Number(KA_NUMBER),
+      row: fixture.rowBundle.row,
+      bundleBinding: {
+        catalogScopeDigest: fixture.scopeDigest,
+        kaId: KA_ID,
+      },
+      inventoryEvidence: {
+        kaId: KA_ID,
+        kaUal: UAL,
+        bundleDigest: fixture.rowBundle.row.transfer.blobDigest,
+        activatedTripleCount: 2,
+      },
+    });
+    expect(Object.isFrozen(closure)).toBe(true);
+    expect(Object.isFrozen(closure.rows)).toBe(true);
+    expect(Object.isFrozen(closure.rows[0]?.bundleBinding)).toBe(true);
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
+      appliedHead: { ...appliedHead, appliedInventoryDigest: MISSING_DELEGATION_DIGEST },
+    })).rejects.toThrow(/durable applied inventory digest/u);
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
+      kaBundles: { readKaBundleByDigest: async () => null },
+    })).rejects.toThrow(/no durable KA bundle/u);
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
+      trustedCatalogScope: { ...fixture.scope, authorAddress: GOVERNANCE_CONTRACT },
+    })).rejects.toThrow(/differs from its signed SWM proof closure/u);
   }, 30_000);
 
   it('accepts an exact projection when the store post-read returns a different row order', async () => {

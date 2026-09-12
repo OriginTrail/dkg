@@ -258,6 +258,7 @@ const blockedRfc64Modules = [
   'catalog-rollout-authority-v1.js',
   'catalog-rollout-authority-reconciliation-v1.js',
   'applied-catalog-authority-transition-v1.js',
+  'verified-applied-catalog-closure-v1.js',
   'catalog-semantic-authority-transition-v1.js',
   'public-catalog-native-errors-v1.js',
   'catalog-applied-head-coordinator-v1.js',
