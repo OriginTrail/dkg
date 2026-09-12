@@ -559,6 +559,121 @@ AsyncPublisher --> SharedWorkingMemory : reads source data
 AsyncPublisher --> VerifiableMemory : publishes
 ```
 
+## LLM Extraction Pipeline
+
+The memory ingestion path runs two extraction passes against a markdown
+intermediate. Layer 1 (`extractFromMarkdown` in
+`packages/cli/src/extraction/markdown-extractor.ts`) is deterministic and
+structural: it parses frontmatter, sections, and declared metadata into
+byte-stable triples that any party can re-derive from the same markdown.
+Layer 2 (`extractWithLlm` in `packages/cli/src/extraction/llm-extractor.ts`)
+is non-deterministic and semantic: it asks an LLM to emit RDF N-Triples for
+implicit knowledge — prose claims, entity relationships, quantitative
+facts — and tags every triple with extraction provenance so consumers can
+treat it as endorsable rather than verifiable. The only invocation site is
+`POST /api/memory/turn` in `packages/cli/src/daemon/routes/memory.ts`,
+which runs Layer 1 then Layer 2 inside a try/catch and merges the union
+into the turn's target graph.
+
+```mermaid
+classDiagram
+direction LR
+class extractWithLlm {
+  +input: LlmExtractionInput
+  +config: LlmConfig
+  +resolveProvider(config)
+  +returns: LlmExtractionOutput
+}
+class LlmProvider {
+  <<interface>>
+  +name
+  +defaultModel
+  +invoke(input, config)
+}
+class OpenaiProvider {
+  <<provider>>
+  +name = "openai"
+  +defaultModel = "gpt-5-nano"
+  +endpoint = POST baseURL/chat/completions
+  +auth = Bearer apiKey
+}
+class AnthropicProvider {
+  <<provider>>
+  +name = "anthropic"
+  +defaultModel = "claude-sonnet-4-6"
+  +endpoint = POST baseURL/v1/messages
+  +auth = x-api-key + anthropic-version
+}
+class DOCUMENT_KG_PROMPT {
+  +shared system prompt
+}
+class parseNTriples {
+  +tolerant N-Triples parser
+  +strips fences and comments
+}
+class LlmConfig {
+  +provider
+  +apiKey
+  +model
+  +baseURL
+}
+class MemoryTurnRoute {
+  +POST /api/memory/turn
+}
+
+MemoryTurnRoute --> extractWithLlm : best-effort call
+extractWithLlm --> LlmProvider : dispatches to
+OpenaiProvider ..|> LlmProvider : implements
+AnthropicProvider ..|> LlmProvider : implements
+OpenaiProvider --> DOCUMENT_KG_PROMPT : uses
+AnthropicProvider --> DOCUMENT_KG_PROMPT : uses
+OpenaiProvider --> parseNTriples : uses
+AnthropicProvider --> parseNTriples : uses
+extractWithLlm --> LlmConfig : reads
+```
+
+### Provider Selection
+
+`extractWithLlm` resolves the active provider on every call. Precedence,
+highest first:
+
+| Source | Value | Precedence |
+|---|---|---|
+| Environment variable | `DKG_EXTRACTION_PROVIDER` (`'openai'` or `'anthropic'`) | 1 (overrides config) |
+| Config field | `LlmConfig.provider` in `packages/cli/src/config.ts` | 2 |
+| Default | `'openai'` | 3 (fallback) |
+
+Any unknown value (typo, removed provider, future placeholder) emits a
+`console.warn` and falls back to OpenAI so a misconfigured env never blocks
+extraction.
+
+### Fail-soft Contract
+
+`extractWithLlm` never throws. Missing API key, non-200 HTTP responses,
+abort/timeout errors, malformed JSON, an empty assistant body, and the
+literal sentinel `NONE` all return `{ triples: [], model }` with a
+`console.warn`. Provider implementations may throw internally; the
+dispatcher catches at the seam and degrades. The caller in
+`memory.ts` therefore gets the same shape whether the LLM responded with
+triples, was unavailable, or has not been configured at all — Layer 1
+output alone is sufficient for the system to function.
+
+### Module Map
+
+Files under `packages/cli/src/extraction/`:
+
+| File | Purpose |
+|---|---|
+| `llm-extractor.ts` | Dispatcher: resolves provider, invokes it, applies the never-throw seam. |
+| `llm-provider.ts` | `LlmProvider` interface and the shared `DOCUMENT_KG_PROMPT`. |
+| `providers/openai.ts` | OpenAI Chat Completions transport. Default `gpt-5-nano`, baseURL `https://api.openai.com/v1`. |
+| `providers/anthropic.ts` | Anthropic Messages transport. Default `claude-sonnet-4-6`, baseURL `https://api.anthropic.com`. |
+| `parse-ntriples.ts` | Tolerant N-Triples parser shared by both providers; strips fences and comment lines. |
+| `markdown-extractor.ts` | Layer 1 structural extractor; runs independently of any LLM. |
+| `markitdown-converter.ts` | Bytes → markdown converter that feeds both layers. |
+| `markitdown-bundle-metadata.ts` | Validates the bundled MarkItDown binary fingerprint. |
+| `index.ts` | Barrel re-exporting the extractor entry points for daemon route handlers. |
+
 ## Shared Memory Gossip Authentication
 
 Shared Working Memory gossip is authenticated at the agent layer when a local
