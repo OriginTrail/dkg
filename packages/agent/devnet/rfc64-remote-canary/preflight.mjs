@@ -5,6 +5,7 @@ import { mapCanaryPhaseV1 } from './phase-helpers.mjs';
 import {
   completeOperationalParityV1,
   decodeNodeCertificationStatusV1,
+  equalCompleteOperationalParityV1,
   operationalStatusV1,
 } from './status-contract.mjs';
 
@@ -32,6 +33,15 @@ export async function preflightAllNodesV1({ config, request, expectedNetworkKey 
   const networkKey = [...networkKeys][0];
   if (expectedNetworkKey !== undefined && networkKey !== expectedNetworkKey) {
     throw failure('node-network-changed', 'invariant');
+  }
+  if (expectedNetworkKey !== undefined) {
+    for (const contextGraph of config.contextGraphs) {
+      if (!equalCompleteOperationalParityV1(
+        raw.get(contextGraph.source.id),
+        raw.get(contextGraph.receiver.id),
+        contextGraph.id,
+      )) throw failure('rfc64-operational-parity-changed', 'invariant');
+    }
   }
   const nodes = Object.freeze(config.nodes.map((node) => {
     const status = raw.get(node.id);

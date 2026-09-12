@@ -8,7 +8,7 @@ import {
 } from './phase-helpers.mjs';
 import { askConfiguredQueryV1 } from './query.mjs';
 import {
-  completeOperationalParityV1,
+  equalCompleteOperationalParityV1,
   tryDecodeNodeCertificationStatusV1,
 } from './status-contract.mjs';
 
@@ -75,19 +75,10 @@ async function verifyVmParityFromSnapshotsV1({ config, request, sleep }) {
 }
 
 function readVmParityV1(sourceStatus, receiverStatus, contextGraph) {
-  const sourceOperational = completeOperationalParityV1(sourceStatus, contextGraph.id);
-  const receiverOperational = completeOperationalParityV1(receiverStatus, contextGraph.id);
-  if (sourceOperational === null || receiverOperational === null) return false;
-  const keys = [
-    'expectedCatalogHeadDigest',
-    'appliedCatalogHeadDigest',
-    'expectedInventoryDigest',
-    'appliedInventoryDigest',
-    'expectedRowCount',
-    'appliedRowCount',
-    'missingRowCount',
-    'catalogVersion',
-  ];
-  if (!keys.every((key) => sourceOperational[key] === receiverOperational[key])) return false;
+  if (!equalCompleteOperationalParityV1(
+    sourceStatus,
+    receiverStatus,
+    contextGraph.id,
+  )) return false;
   return Object.freeze({ cursorPresent: true, digestParity: true, rowCountParity: true });
 }
