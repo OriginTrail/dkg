@@ -2,7 +2,7 @@
  * Shared graph-scoped SWM share fixtures (#2050).
  *
  * Extracted from `swm-snapshot-materializer.test.ts` so the throw-path row in
- * `sync-requester-progress.test.ts` can build DESCRIPTOR-shaped metadata rather
+ * `swm-snapshot-throw-progress.test.ts` can build DESCRIPTOR-shaped metadata rather
  * than hand-rolling a fourth one.
  *
  * Why sharing matters more than the duplication it saves: materialization is

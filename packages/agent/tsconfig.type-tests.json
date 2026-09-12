@@ -8,5 +8,9 @@
     "rootDir": ".",
     "sourceMap": false
   },
-  "include": ["test/**/*.typecheck.ts", "src/jsonld.d.ts"]
+  "include": [
+    "test/**/*.typecheck.ts",
+    "src/jsonld.d.ts",
+    "test/sync-requester-fixtures.ts"
+  ]
 }
