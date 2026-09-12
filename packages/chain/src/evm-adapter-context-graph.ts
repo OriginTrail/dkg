@@ -432,7 +432,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
     }
 
-    const { fromBlock: deployBlock, head, scanProviders, degradedFromGenesis = false } = scan;
+    const { head, scanProviders, degradedFromGenesis = false } = scan;
     if (start > head) {
       if (scanPlan.seedAtEnd) {
         await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
