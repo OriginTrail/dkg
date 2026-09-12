@@ -7,6 +7,10 @@ import Ajv2020 from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 import { Parser as SparqlParser } from '@traqula/parser-sparql-1-1';
 
+import {
+  CANARY_PREDICATE,
+  CANARY_SUBJECT_PREFIX,
+} from './canary-vocabulary.mjs';
 import { validateCommandV1 } from './command-policy.mjs';
 import { invalid } from './errors.mjs';
 import { opaqueRef } from './references.mjs';
@@ -286,12 +290,34 @@ function validateAskSparql(value, label) {
   const triples = patterns.flatMap((pattern) => (
     pattern.subType === 'bgp' && Array.isArray(pattern.triples) ? pattern.triples : []
   ));
+  const terms = triples.flatMap((triple) => [triple.subject, triple.predicate, triple.object]);
+  const prefixes = new Map((parsed.context ?? [])
+    .filter((entry) => entry?.subType === 'prefix')
+    .map((entry) => [entry.key, entry.value?.value]));
   if (
     patterns.length === 0
     || patterns.some((pattern) => pattern.subType !== 'bgp' || pattern.triples.length === 0)
     || triples.length === 0
-    || !triples.some((triple) => [triple.subject, triple.predicate, triple.object].some(
-      (term) => term?.type === 'term' && ['namedNode', 'literal'].includes(term.subType),
+    || !terms.some((term) => (
+      term?.type === 'term' && ['namedNode', 'literal'].includes(term.subType)
     ))
   ) invalid(`${label}-query-must-depend-on-data`);
+  if (
+    label === 'catalog-swm'
+    && terms.some((term) => (
+      term?.type === 'term'
+      && term.subType === 'namedNode'
+      && reservedCanaryIri(resolveNamedNodeIri(term, prefixes))
+    ))
+  ) invalid('catalog-swm-query-uses-canary-vocabulary');
+}
+
+function resolveNamedNodeIri(term, prefixes) {
+  if (term.prefix === undefined) return term.value;
+  const prefix = prefixes.get(term.prefix);
+  return typeof prefix === 'string' ? `${prefix}${term.value}` : term.value;
+}
+
+function reservedCanaryIri(value) {
+  return value === CANARY_PREDICATE || value.startsWith(CANARY_SUBJECT_PREFIX);
 }

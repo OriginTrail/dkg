@@ -143,6 +143,23 @@ test('standards ASK parsing preserves ordinary prefixed and literal syntax', () 
   }
 });
 
+test('catalog evidence cannot depend on reserved canary marker vocabulary', () => {
+  for (const sparql of [
+    'ASK { <urn:dkg:rfc64-canary:old-marker> ?p ?o }',
+    'ASK { ?s <https://schema.origintrail.io/rfc64/canaryValue> ?o }',
+    'PREFIX canary: <urn:dkg:rfc64-canary:> ASK { canary:old-marker ?p ?o }',
+  ]) {
+    const config = baseConfig();
+    config.contextGraphs[0].catalogSwmAskSparql = sparql;
+    assert.throws(
+      () => validateRemoteCanaryConfigV1(config),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === 'catalog-swm-query-uses-canary-vocabulary',
+      sparql,
+    );
+  }
+});
+
 test('standards ASK parsing rejects updates and non-ASK queries', () => {
   for (const [sparql, expectedCode] of [
     ['INSERT DATA { <urn:x> <urn:y> <urn:z> }', 'vm-query-must-be-read-only'],

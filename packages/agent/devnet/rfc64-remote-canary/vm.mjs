@@ -27,7 +27,7 @@ export function verifyVmParityV1({ config, request, sleep }) {
       config.timing.parityTimeoutMs,
       config.timing.pollIntervalMs,
       sleep,
-      () => failure('vm-parity-timeout', 'vm-parity'),
+      () => failure('vm-parity-timeout', 'vm'),
       { retryError: isRetryableNodeRequestErrorV1 },
     );
     if (contextGraph.vmEvidenceState === 'PLANNED') {
@@ -37,7 +37,7 @@ export function verifyVmParityV1({ config, request, sleep }) {
       ].map((node) => (
         askConfiguredQueryV1(node, contextGraph, contextGraph.vmAskSparql, 'verifiable-memory', request)
       )));
-      if (!queryPassed.every(Boolean)) throw failure('vm-query-parity-failed', 'vm-parity');
+      if (!queryPassed.every(Boolean)) throw failure('vm-query-parity-failed', 'vm');
     }
     return Object.freeze({
       contextGraphRef: contextGraph.contextGraphRef,

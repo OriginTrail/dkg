@@ -31,12 +31,12 @@ async function runAuthorizationCheckV1(check, request) {
     check.authentication,
   );
   if (!check.expectedStatuses.includes(response.status)) {
-    throw failure('authorization-denial-status-mismatch', 'authorization');
+    throw failure('authorization-denial-status-mismatch', 'policy');
   }
   const body = parseResponseJsonV1(response, 'authorization-response-malformed');
   const code = jsonPointer(body, check.bodyCodePointer);
   if (!check.expectedCodes.includes(code)) {
-    throw failure('authorization-denial-code-mismatch', 'authorization');
+    throw failure('authorization-denial-code-mismatch', 'policy');
   }
   if (response.status === 404) {
     const control = await request.raw(
@@ -47,7 +47,7 @@ async function runAuthorizationCheckV1(check, request) {
       'node',
     );
     if (control.status < 200 || control.status >= 300) {
-      throw failure('authorization-not-found-control-failed', 'authorization');
+      throw failure('authorization-not-found-control-failed', 'policy');
     }
   }
   return Object.freeze({ status: 'PASS', denialObserved: true });

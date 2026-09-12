@@ -11,10 +11,18 @@ import {
   rpcEvidence,
   statusBody,
 } from './test-support.mjs';
+import {
+  CANARY_PREDICATE,
+  CANARY_SUBJECT_PREFIX,
+} from './canary-vocabulary.mjs';
 
 export function createCertificationRuntime({
   failOfflineShare = false,
   catalogSwmPresent = true,
+  catalogSwmPresentAfterMarker = false,
+  confirmLiveShare = true,
+  deliverLiveMarkerToReceiver = true,
+  deliverOfflineMarkerToReceiver = true,
   legacySyncAllowed = false,
   contextGraphIds = [CG],
   mutateJsonBody,
@@ -37,7 +45,8 @@ export function createCertificationRuntime({
     const isReceiver = url.origin === RECEIVER_URL;
     const method = options.method ?? 'GET';
     const authorization = new Headers(options.headers).get('authorization');
-    state.requests.push({ origin: url.origin, path: url.pathname, method, authorization });
+    const requestRecord = { origin: url.origin, path: url.pathname, method, authorization };
+    state.requests.push(requestRecord);
     if (isReceiver && !state.receiverOnline) throw new TypeError('offline endpoint details');
     if (url.pathname === '/api/status') {
       if (!['GET', 'HEAD'].includes(method) || options.body !== undefined) {
@@ -59,15 +68,23 @@ export function createCertificationRuntime({
       if (failOfflineShare && !state.receiverOnline) return jsonResponse({ error: 'sensitive' }, 500);
       const marker = body.quads[0].subject;
       state.sourceMarkers.add(marker);
-      if (state.receiverOnline) state.receiverMarkers.add(marker);
+      if (state.receiverOnline && deliverLiveMarkerToReceiver) state.receiverMarkers.add(marker);
       else state.pendingMarkers.add(marker);
-      return jsonResponse({ swmShared: true, assertionUri: 'urn:must-not-persist' });
+      return jsonResponse({
+        swmShared: state.receiverOnline ? confirmLiveShare : true,
+        assertionUri: 'urn:must-not-persist',
+      });
     }
     if (url.pathname === '/api/query' && method === 'POST') {
       const body = parseFixtureBody(options.body, url.pathname, mutateJsonBody);
       if (!validQuery(body, contextGraphConfig)) {
         return jsonResponse({ error: 'invalid query request' }, 400);
       }
+      Object.assign(requestRecord, {
+        contextGraphId: body.contextGraphId,
+        sparql: body.sparql,
+        view: body.view,
+      });
       if (body.view === 'verifiable-memory') {
         const role = isReceiver ? 'receiver' : 'source';
         return jsonResponse({
@@ -75,7 +92,17 @@ export function createCertificationRuntime({
         });
       }
       if (body.sparql === CATALOG_SWM_ASK || body.sparql.includes('known:second-swm-subject')) {
-        return jsonResponse({ result: { type: 'boolean', value: catalogSwmPresent } });
+        const role = isReceiver ? 'receiver' : 'source';
+        const initiallyPresent = typeof catalogSwmPresent === 'boolean'
+          ? catalogSwmPresent
+          : catalogSwmPresent[role];
+        return jsonResponse({
+          result: {
+            type: 'boolean',
+            value: initiallyPresent
+              || (catalogSwmPresentAfterMarker && state.sourceMarkers.size > 0),
+          },
+        });
       }
       const marker = body.sparql.match(/<([^>]+)>/)?.[1];
       const present = isReceiver
@@ -106,7 +133,9 @@ export function createCertificationRuntime({
     if (command.argv[1] === 'stop') state.receiverOnline = false;
     if (command.argv[1] === 'start') {
       state.receiverOnline = true;
-      for (const marker of state.pendingMarkers) state.receiverMarkers.add(marker);
+      if (deliverOfflineMarkerToReceiver) {
+        for (const marker of state.pendingMarkers) state.receiverMarkers.add(marker);
+      }
     }
     return { code: 0, signal: null, stdout: '' };
   };
@@ -146,8 +175,8 @@ function validMarkerShare(body, contextGraphIds) {
   const quad = body.quads[0];
   return quad !== null
     && typeof quad === 'object'
-    && quad.subject === `urn:dkg:rfc64-canary:${nonce}`
-    && quad.predicate === 'https://schema.origintrail.io/rfc64/canaryValue'
+    && quad.subject === `${CANARY_SUBJECT_PREFIX}${nonce}`
+    && quad.predicate === CANARY_PREDICATE
     && quad.object === JSON.stringify(nonce);
 }
 
@@ -162,6 +191,8 @@ function validQuery(body, contextGraphConfig) {
   if (configured === undefined) return false;
   if (body.view === 'verifiable-memory') return body.sparql === configured.vmAskSparql;
   if (body.sparql === configured.catalogSwmAskSparql) return true;
-  const marker = /^ASK \{ <(urn:dkg:rfc64-canary:([0-9a-f-]{36}))> <https:\/\/schema\.origintrail\.io\/rfc64\/canaryValue> "([0-9a-f-]{36})" \. \}$/u.exec(body.sparql);
-  return marker !== null && marker[2] === marker[3];
+  const marker = /^ASK \{ <([^>]+)> <([^>]+)> "([0-9a-f-]{36})" \. \}$/u.exec(body.sparql);
+  return marker !== null
+    && marker[1] === `${CANARY_SUBJECT_PREFIX}${marker[3]}`
+    && marker[2] === CANARY_PREDICATE;
 }

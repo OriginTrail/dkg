@@ -13,6 +13,7 @@ import {
   runRemoteCanaryArtifactLifecycleV1,
 } from './certify.mjs';
 import {
+  CATALOG_SWM_ASK,
   CG,
   RECEIVER_SECRET,
   RECEIVER_URL,
@@ -41,6 +42,15 @@ test('full run certifies propagation, one-node catch-up, VM parity, denials, and
   });
   assert.equal(artifact.checks.authorization.unauthorized.status, 'PASS');
   assert.equal(artifact.checks.authorization.revoked.status, 'PASS');
+  const markerQueries = runtime.state.requests.filter(({ sparql, view }) => (
+    view === 'shared-working-memory' && sparql?.startsWith('ASK { <urn:dkg:rfc64-canary:')
+  ));
+  assert.equal(markerQueries.length, 2);
+  assert.equal(markerQueries.every(({ origin }) => origin === RECEIVER_URL), true);
+  const catalogQueries = runtime.state.requests.filter(({ sparql }) => sparql === CATALOG_SWM_ASK);
+  assert.equal(catalogQueries.length, 4);
+  assert.equal(catalogQueries.filter(({ origin }) => origin === SOURCE_URL).length, 2);
+  assert.equal(catalogQueries.filter(({ origin }) => origin === RECEIVER_URL).length, 2);
   assert.deepEqual(artifact.checks.rpcUsage, {
     status: 'PASS',
     source: 'evidence-file',
@@ -161,10 +171,13 @@ test('missing live-only surfaces remain explicit and cannot produce PASS', async
   assert.deepEqual(runtime.state.commands, []);
 });
 
-test('fresh markers and VM parity cannot hide missing catalog-owned SWM', async () => {
+test('catalog evidence must predate all fresh canary markers', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-swm-test-'));
   const artifactPath = join(directory, 'latest.json');
-  const runtime = createCertificationRuntime({ catalogSwmPresent: false });
+  const runtime = createCertificationRuntime({
+    catalogSwmPresent: false,
+    catalogSwmPresentAfterMarker: true,
+  });
   try {
     await assert.rejects(
       runRemoteCanaryArtifactLifecycleV1({
@@ -175,15 +188,37 @@ test('fresh markers and VM parity cannot hide missing catalog-owned SWM', async 
       (error) => error instanceof RemoteCanaryError
         && error.code === 'catalog-swm-query-failed',
     );
-    assert.equal(runtime.state.sourceMarkers.size, 2);
-    assert.equal(runtime.state.receiverMarkers.size, 2);
-    assert.deepEqual(runtime.state.commands, ['stop', 'start']);
+    assert.equal(runtime.state.sourceMarkers.size, 0);
+    assert.equal(runtime.state.receiverMarkers.size, 0);
+    assert.deepEqual(runtime.state.commands, []);
     const artifact = JSON.parse(await readFile(artifactPath, 'utf8'));
     assert.equal(artifact.status, 'FAIL');
     assert.equal(artifact.phase, 'catalog-swm-evidence');
     assert.equal(artifact.failure.code, 'catalog-swm-query-failed');
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('catalog evidence is mandatory on both source and receiver', async () => {
+  for (const missingRole of ['source', 'receiver']) {
+    const runtime = createCertificationRuntime({
+      catalogSwmPresent: {
+        source: missingRole !== 'source',
+        receiver: missingRole !== 'receiver',
+      },
+    });
+    await assert.rejects(
+      executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === 'catalog-swm-query-failed'
+        && error.phase === 'catalog-swm-evidence',
+      missingRole,
+    );
+    const queries = runtime.state.requests.filter(({ sparql }) => sparql === CATALOG_SWM_ASK);
+    assert.equal(queries.some(({ origin }) => origin === SOURCE_URL), true, missingRole);
+    assert.equal(queries.some(({ origin }) => origin === RECEIVER_URL), true, missingRole);
+    assert.equal(runtime.state.sourceMarkers.size, 0, missingRole);
   }
 });
 
@@ -265,4 +300,52 @@ test('HTTP timeout covers a stalled response body and still restarts the receive
   );
   assert.deepEqual(runtime.state.commands, ['stop', 'start']);
   assert.equal(runtime.state.receiverOnline, true);
+});
+
+test('phase boundaries give domain and transport failures the same execution stage', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-phase-test-'));
+  try {
+    for (const scenario of [
+      {
+        label: 'domain',
+        runtime: createCertificationRuntime({ confirmLiveShare: false }),
+        code: 'swm-share-not-confirmed',
+        category: 'swm',
+      },
+      {
+        label: 'transport',
+        runtime: createCertificationRuntime(),
+        code: 'node-request-failed',
+        category: 'http',
+      },
+    ]) {
+      if (scenario.label === 'transport') {
+        const delegateFetch = scenario.runtime.fetchFn;
+        scenario.runtime.fetchFn = async (input, options) => {
+          if (new URL(input).pathname === '/api/knowledge-assets') {
+            throw new TypeError('unreachable');
+          }
+          return delegateFetch(input, options);
+        };
+      }
+      const artifactPath = join(directory, `${scenario.label}.json`);
+      await assert.rejects(
+        runRemoteCanaryArtifactLifecycleV1({
+          loadConfig: () => baseConfig(),
+          artifactPath,
+          dependencies: scenario.runtime,
+        }),
+        (error) => error instanceof RemoteCanaryError
+          && error.code === scenario.code
+          && error.category === scenario.category
+          && error.phase === 'live-swm-propagation',
+        scenario.label,
+      );
+      const artifact = JSON.parse(await readFile(artifactPath, 'utf8'));
+      assert.equal(artifact.phase, 'live-swm-propagation', scenario.label);
+      assert.equal(artifact.failure.code, scenario.code, scenario.label);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
