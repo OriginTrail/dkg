@@ -21,6 +21,7 @@ import {
   type SnapshotPageIndexRecord,
   type SnapshotPageIndexStore,
   workspacePublicQuadsDigest,
+  serializeWorkspacePublicSnapshotQuads,
 } from '../src/workspace-snapshot-store.js';
 
 import { DIGEST, MemoryPageIndexStore, makeQuads, digestFor, snapshotDirectory, snapshotPath } from './_helpers/workspace-snapshot-store.js';
@@ -744,6 +745,182 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
       releaseIndexRead?.();
       store?.stopGarbageCollection();
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('overlaps distinct snapshot writes through gated index persistence and protects active files', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-write-overlap-'));
+    const inputs = Array.from({ length: 4 }, (_, i) => ({ digest: digestFor(900 + i), quads: makeQuads(3, `overlap-${i}`) }));
+    const releases: Array<() => void> = [];
+    const gates = inputs.map(() => new Promise<void>(resolve => { releases.push(resolve); }));
+    const entered: string[] = [];
+    const indexes = new MemoryPageIndexStore();
+    const upsert = indexes.upsert.bind(indexes);
+    vi.spyOn(indexes, 'upsert').mockImplementation(async record => {
+      entered.push(record.snapshotDigest);
+      await gates[inputs.findIndex(input => input.digest === record.snapshotDigest)];
+      await upsert(record);
+    });
+    let availableBytes = 1_000_000;
+    const store = new FileWorkspacePublicSnapshotStore(directory, indexes, {
+      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: 1000,
+        targetFreeBytes: 2000, hardReserveBytes: 500, minAgeMs: 0 },
+      getAvailableBytes: async () => availableBytes,
+      now: () => Date.now() + 60_000,
+    });
+    const writes = inputs.map(input => store.putSnapshot(input));
+    const duplicate = store.putSnapshot(inputs[0]!);
+    let settled = 0;
+    writes.forEach(write => { void write.then(() => { settled++; }, () => { settled++; }); });
+    try {
+      await vi.waitFor(() => expect(entered).toHaveLength(4));
+      expect(new Set(entered)).toEqual(new Set(inputs.map(input => input.digest)));
+      expect(settled).toBe(0);
+      for (const input of inputs) await expect(stat(snapshotPath(directory, input.digest))).resolves.toBeTruthy();
+      availableBytes = 0;
+      expect(await store.collectGarbage()).toMatchObject({ deletedSnapshots: 0, skippedActiveFiles: 4 });
+      availableBytes = 1_000_000;
+      releases.forEach(release => release());
+      expect(await Promise.all([...writes, duplicate])).toHaveLength(5);
+      expect(indexes.upsert).toHaveBeenCalledTimes(4);
+    } finally {
+      releases.forEach(release => release());
+      await Promise.allSettled([...writes, duplicate]);
+      store.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('releases a write reservation and same-digest ownership after physical persistence fails', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-write-failure-'));
+    const input = { digest: digestFor(910), quads: makeQuads(3, 'failed-write') };
+    const bytes = Buffer.byteLength(serializeWorkspacePublicSnapshotQuads(input.quads), 'utf8');
+    const hardReserveBytes = 1000;
+    const now = Date.now();
+    const tempPath = `${snapshotPath(directory, input.digest)}.${process.pid}.${now}.tmp`;
+    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
+        targetFreeBytes: hardReserveBytes + 2, hardReserveBytes },
+      getAvailableBytes: async () => hardReserveBytes + Math.floor(bytes * 1.5),
+    });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      await mkdir(tempPath, { recursive: true });
+      const failure = await store.putSnapshot(input).catch(error => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(SnapshotStorageCapacityError);
+      await rm(tempPath, { recursive: true });
+      await expect(store.putSnapshot(input)).resolves.toMatchObject({ ref: input.digest, byteLength: bytes });
+    } finally {
+      clock.mockRestore(); store.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps concurrent distinct writes above the aggregate hard reserve and recovers after rejection', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-concurrent-capacity-'));
+    const inputs = Array.from({ length: 4 }, (_, i) => ({ digest: digestFor(800 + i), quads: makeQuads(3, `concurrent-${i}`) }));
+    const writeBytes = Buffer.byteLength(serializeWorkspacePublicSnapshotQuads(inputs[0]!.quads), 'utf8');
+    const hardReserveBytes = 1000;
+    let capacity = hardReserveBytes + Math.floor(writeBytes * 2.5);
+    const committedBytes = async () => (await Promise.all(inputs.map(async ({ digest }) => {
+      try { return (await stat(snapshotPath(directory, digest))).size; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; }
+    }))).reduce((sum, bytes) => sum + bytes, 0);
+    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
+        targetFreeBytes: hardReserveBytes + 1, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
+      getAvailableBytes: async () => capacity - await committedBytes(),
+    });
+    // Hold publication after real capacity admission so filesystem usage is
+    // still zero when all four writes compete for only two reservations.
+    const admission = store as unknown as { reserveWriteCapacity(bytes: number): Promise<() => void> };
+    const reserve = admission.reserveWriteCapacity.bind(store);
+    let releaseWrites!: () => void;
+    const writesBlocked = new Promise<void>(resolve => { releaseWrites = resolve; });
+    let decisions = 0; let accepted = 0;
+    vi.spyOn(admission, 'reserveWriteCapacity').mockImplementation(async bytes => {
+      let release: () => void;
+      try { release = await reserve(bytes); }
+      catch (error) { decisions++; throw error; }
+      accepted++; decisions++;
+      await writesBlocked;
+      return release;
+    });
+    const writes = Promise.allSettled(inputs.map(input => store.putSnapshot(input)));
+    try {
+      await vi.waitFor(() => expect(decisions).toBe(4));
+      expect(accepted).toBe(2);
+      expect(await committedBytes()).toBe(0);
+      releaseWrites();
+      const outcomes = await writes;
+      expect(outcomes.filter(result => result.status === 'fulfilled')).toHaveLength(2);
+      const rejected = outcomes.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
+      expect(rejected).toHaveLength(2);
+      expect(rejected.every(error => error instanceof SnapshotStorageCapacityError)).toBe(true);
+      expect(capacity - await committedBytes()).toBeGreaterThanOrEqual(hardReserveBytes);
+      // A failed admission must release the write queue for later recovery.
+      capacity += writeBytes;
+      const retry = inputs[outcomes.findIndex(result => result.status === 'rejected')]!;
+      await expect(store.putSnapshot(retry)).resolves.toMatchObject({ ref: retry.digest });
+      expect(capacity - await committedBytes()).toBeGreaterThanOrEqual(hardReserveBytes);
+    } finally {
+      releaseWrites(); await writes;
+      store.stopGarbageCollection(); await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rechecks capacity when a reservation retires during a filesystem reading', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-capacity-reading-'));
+    const inputs = [920, 921].map(i => ({ digest: digestFor(i), quads: makeQuads(3, `reading-${i}`) }));
+    const bytes = Buffer.byteLength(serializeWorkspacePublicSnapshotQuads(inputs[0]!.quads), 'utf8');
+    const hardReserveBytes = 1000;
+    const capacity = hardReserveBytes + Math.floor(bytes * 1.5);
+    const committedBytes = async () => (await Promise.all(inputs.map(async input => {
+      try { return (await stat(snapshotPath(directory, input.digest))).size; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; }
+    }))).reduce((sum, size) => sum + size, 0);
+    let releaseWrite!: () => void; let reserved!: () => void;
+    let releaseRead!: () => void; let readStarted!: () => void;
+    const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
+    const reservedGate = new Promise<void>(resolve => { reserved = resolve; });
+    const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const readStartedGate = new Promise<void>(resolve => { readStarted = resolve; });
+    let reads = 0;
+    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
+        targetFreeBytes: hardReserveBytes + 2, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
+      getAvailableBytes: async () => {
+        const reading = ++reads;
+        const available = capacity - await committedBytes();
+        if (reading === 2) { readStarted(); await readGate; }
+        return available;
+      },
+    });
+    const admission = store as unknown as { reserveWriteCapacity(bytes: number): Promise<() => void> };
+    const reserve = admission.reserveWriteCapacity.bind(store);
+    let first = true;
+    vi.spyOn(admission, 'reserveWriteCapacity').mockImplementation(async requiredBytes => {
+      const release = await reserve(requiredBytes);
+      if (first) { first = false; reserved(); await writeGate; }
+      return release;
+    });
+    const firstWrite = store.putSnapshot(inputs[0]!);
+    let secondWrite: Promise<unknown> | undefined;
+    try {
+      await reservedGate;
+      secondWrite = store.putSnapshot(inputs[1]!).then(value => ({ value }), error => ({ error }));
+      await readStartedGate;
+      releaseWrite(); await firstWrite;
+      releaseRead();
+      const outcome = await secondWrite;
+      expect(outcome).toMatchObject({ error: expect.any(SnapshotStorageCapacityError) });
+      expect(capacity - await committedBytes()).toBeGreaterThanOrEqual(hardReserveBytes);
+      await expect(stat(snapshotPath(directory, inputs[1]!.digest))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      releaseWrite(); releaseRead();
+      await Promise.allSettled([firstWrite, secondWrite]);
+      store.stopGarbageCollection(); await rm(directory, { recursive: true, force: true });
     }
   });
 

@@ -174,6 +174,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     string,
     Promise<{ readonly ref: string; readonly byteLength: number }>
   >();
+  private capacityTail: Promise<void> = Promise.resolve();
+  private reservedWriteBytes = 0;
   private readonly activeSnapshots = new Map<string, number>();
   private readonly gcConfig: ResolvedSnapshotGarbageCollectionConfig;
   private readonly log?: (message: string) => void;
@@ -229,6 +231,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const pending = this.pendingWrites.get(hash);
     if (pending) return pending;
 
+    // Only capacity admission is serialized. Distinct snapshots may persist in
+    // parallel, while the active lease protects each complete write from GC.
     const operation = this.withActiveSnapshot(hash, () => this.putSnapshotOnce(input, hash));
     this.pendingWrites.set(hash, operation);
     try {
@@ -251,20 +255,27 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const { payload, offsets, fileBytes } = serializeWorkspacePublicSnapshotWithIndex(input.quads);
 
     await mkdir(dirname(filePath), { recursive: true });
-    await this.ensureWriteCapacity(fileBytes);
+    const releaseCapacity = await this.reserveWriteCapacity(fileBytes);
     const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
     try {
-      await writeFile(tempPath, payload, 'utf8');
-      await rename(tempPath, filePath).catch(async (err: NodeJS.ErrnoException) => {
-        if (err.code === 'EEXIST') return;
-        throw err;
-      });
+      try {
+        await writeFile(tempPath, payload, 'utf8');
+        await rename(tempPath, filePath).catch(async (err: NodeJS.ErrnoException) => {
+          if (err.code === 'EEXIST') return;
+          throw err;
+        });
+      } finally {
+        await unlink(tempPath).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== 'ENOENT') {
+            this.log?.(`[SWM-SNAPSHOT-GC] failed to remove write temp file ${tempPath}: ${error.message}`);
+          }
+        });
+      }
     } finally {
-      await unlink(tempPath).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== 'ENOENT') {
-          this.log?.(`[SWM-SNAPSHOT-GC] failed to remove write temp file ${tempPath}: ${error.message}`);
-        }
-      });
+      // Once the file is published (or the temporary write is cleaned up), a
+      // fresh filesystem reading accounts for its bytes. Index work remains
+      // protected by the active lease but does not retain a byte reservation.
+      releaseCapacity();
     }
 
     const fingerprint = await readSnapshotFileIdentity(filePath);
@@ -486,9 +497,39 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     };
   }
 
+  private reserveWriteCapacity(requiredWriteBytes: number): Promise<() => void> {
+    const admission = this.capacityTail.then(async () => {
+      await this.ensureWriteCapacity(requiredWriteBytes);
+      this.reservedWriteBytes += requiredWriteBytes;
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        this.reservedWriteBytes -= requiredWriteBytes;
+      };
+    });
+    this.capacityTail = admission.then(() => {}, () => {});
+    return admission;
+  }
+
+  private async readWriteCapacity(): Promise<{ availableBytes: number; totalBytes: number }> {
+    for (;;) {
+      const reservedBytes = this.reservedWriteBytes;
+      const filesystem = await this.getFilesystemSpace(this.directory);
+      // Admission is serialized, so reservations can only retire during this
+      // read. Retry if one retires: the reading may predate its physical write,
+      // and subtracting the new, smaller reservation would overstate capacity.
+      if (reservedBytes !== this.reservedWriteBytes) continue;
+      return {
+        ...filesystem,
+        availableBytes: Math.max(0, filesystem.availableBytes - reservedBytes),
+      };
+    }
+  }
+
   private async ensureWriteCapacity(requiredWriteBytes: number): Promise<void> {
     if (!this.gcConfig.enabled) return;
-    const filesystem = await this.getFilesystemSpace(this.directory);
+    const filesystem = await this.readWriteCapacity();
     const availableBytes = filesystem.availableBytes;
     const watermarks = snapshotGarbageCollectionWatermarks(
       this.gcConfig,
@@ -497,14 +538,15 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const needsCollection = availableBytes < watermarks.triggerFreeBytes
       || availableBytes - requiredWriteBytes < watermarks.hardReserveBytes;
     const result = needsCollection
-      ? await this.collectGarbage({ requiredWriteBytes })
+      ? await this.collectGarbage({ requiredWriteBytes: requiredWriteBytes + this.reservedWriteBytes })
       : undefined;
     // Admission is based on a fresh filesystem reading, not projected file
     // sizes: an unlinked file held open by another process may not have
     // released its blocks yet.
-    const availableAfterCollection = result
-      ? (await this.getFilesystemSpace(this.directory)).availableBytes
-      : availableBytes;
+    const filesystemAfterCollection = result
+      ? await this.readWriteCapacity()
+      : filesystem;
+    const availableAfterCollection = filesystemAfterCollection.availableBytes;
     if (availableAfterCollection - requiredWriteBytes < watermarks.hardReserveBytes) {
       throw new SnapshotStorageCapacityError(
         availableAfterCollection,

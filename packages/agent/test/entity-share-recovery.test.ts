@@ -220,7 +220,10 @@ describe('entity-share recovery beside malformed KA heads', () => {
     {
       name: 'missing entity snapshot', parseError: ambiguousVersion,
       arrange: f => ({ meta: [...f.entityMeta, ...f.duplicateHead], data: f.data, missingRef: f.digest }),
-      expected: f => recovered([], f.data, coverage(0, 2, 2, [f.digest, f.ka.digest])),
+      // The pool validates the cached KA sibling before the entity miss settles.
+      // Its malformed head still keeps it unresolved, but it is no longer an
+      // unvisited ref in the walk's bounded missing-reference sample.
+      expected: f => recovered([], f.data, coverage(0, 2, 2, [f.digest])),
     },
     {
       name: 'missing unrelated KA snapshot', parseError: ambiguousVersion,
@@ -235,7 +238,7 @@ describe('entity-share recovery beside malformed KA heads', () => {
     {
       name: 'missing sibling snapshot in a multi-root operation', parseError: ambiguousVersion,
       arrange: f => ({ meta: [...f.twoRootMeta, ...f.duplicateHead], data: f.data, missingRef: f.siblingDigest }),
-      expected: f => recovered(f.sliceMeta, f.data, coverage(1, 3, 2, [f.siblingDigest, f.ka.digest])),
+      expected: f => recovered(f.sliceMeta, f.data, coverage(1, 3, 2, [f.siblingDigest])),
     },
     {
       name: 'ready sibling cannot authorize a mixed-source root', parseError: ambiguousVersion,
