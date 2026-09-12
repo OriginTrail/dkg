@@ -67,7 +67,6 @@ export * from './rfc64/public-catalog-service-v1.js';
 export * from './rfc64/public-catalog-issuer-delegation-v1.js';
 export * from './rfc64/public-catalog-native-transport-v1.js';
 export * from './rfc64/public-catalog-native-receiver-v1.js';
-export * from './rfc64/verified-applied-catalog-closure-v1.js';
 export {
   computeRfc64AppliedInventoryDigestV1,
   type ComputeRfc64AppliedInventoryDigestInputV1,
@@ -181,8 +180,10 @@ export type {
   PublishAuthorCatalogExactSetSuccessorParamsV1,
   PublishAuthorCatalogExactSetSuccessorResultV1,
   PublishAuthorCatalogGenesisParamsV1,
+  ReadRfc64VerifiedAppliedCatalogClosureInputV1,
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogRuntimeSelectionStatusV1,
+  VerifiedAppliedCatalogClosureV1,
 } from './dkg-agent-rfc64-catalog.js';
 export type {
   ReconcileRfc64PublicRootCatalogExactSetParamsV1,

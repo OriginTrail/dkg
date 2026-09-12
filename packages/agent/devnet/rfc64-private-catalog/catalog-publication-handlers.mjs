@@ -30,24 +30,28 @@ const CATALOG_ISSUER_EXPIRES_AT =
 /** @param {Rfc64PrivateRuntimeV1} context */
 export async function publishCatalogBaselineV1(context) {
   assertOwnerPublisherV1(context);
-  context.publication.beginBaseline();
-  const { policyDigest } = createPrivatePolicyAndRoster();
-  const scope = createPrivateCatalogScope();
-  const assets = await createCatalogAssets();
-  let applied;
-  for (const asset of assets) {
-    applied = await context.agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+  return context.publication.publishBaseline(async () => {
+    const { policyDigest } = createPrivatePolicyAndRoster();
+    const scope = createPrivateCatalogScope();
+    const assets = await createCatalogAssets();
+    let applied;
+    for (const asset of assets) {
+      applied = await context.agent.upsertConfirmedRfc64PublicRootCatalogAssetV1({
+        scope,
+        author: ownerWallet(),
+        asset,
+        deployment: DEPLOYMENT,
+        peers: [],
+        catalogIssuerDelegationEffectiveAt: CATALOG_ISSUER_EFFECTIVE_AT,
+        catalogIssuerDelegationExpiresAt: CATALOG_ISSUER_EXPIRES_AT,
+      });
+    }
+    return Object.freeze({
       scope,
-      author: ownerWallet(),
-      asset,
-      deployment: DEPLOYMENT,
-      peers: [],
-      catalogIssuerDelegationEffectiveAt: CATALOG_ISSUER_EFFECTIVE_AT,
-      catalogIssuerDelegationExpiresAt: CATALOG_ISSUER_EXPIRES_AT,
+      assets,
+      result: publishedFieldsV1(applied, policyDigest, scope),
     });
-  }
-  context.publication.commitBaseline(scope, assets);
-  return publishedFieldsV1(applied, policyDigest, scope);
+  });
 }
 
 /** @param {Rfc64PrivateRuntimeV1} context */

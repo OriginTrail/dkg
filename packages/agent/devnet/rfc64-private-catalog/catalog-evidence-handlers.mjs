@@ -8,7 +8,6 @@ import { classifyExpectedPrivateCatalogDenialV1 } from './denial-evidence.mjs';
 import {
   ASSET_NUMBERS,
   CONTEXT_GRAPH_ID,
-  DEPLOYMENT,
   NETWORK_ID,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   createPrivateCatalogScope,
@@ -324,16 +323,13 @@ async function hasExactLocalMemoryContentsV1(context, catalogEvidence = {}) {
  * @param {import('@origintrail-official/dkg-core').AuthorCatalogScopeV1} scope
  */
 async function readVerifiedAppliedCatalogMemoryV1(context, applied, scope) {
-  const persistence = /** @type {{ rfc64PersistenceV1?: import('../../src/rfc64/persistence-v1.ts').Rfc64PersistenceV1 }} */ (
-    /** @type {unknown} */ (context.agent)
-  ).rfc64PersistenceV1;
-  if (applied === null || persistence === undefined) {
+  if (applied === null) {
     throw new Error('catalog-row SWM evidence has no durable applied catalog');
   }
   const proofInputs = context.faultProfile.proof.inputs({
     appliedHead: applied,
     expectedAssetNumbers: ASSET_NUMBERS,
-    kaBundles: persistence.kaBundles,
+    readVerifiedAppliedCatalogClosure: context.readVerifiedAppliedCatalogClosure,
     trustedCatalogScope: scope,
     untrustedCatalogScope: Object.freeze({
       ...scope,
@@ -342,8 +338,6 @@ async function readVerifiedAppliedCatalogMemoryV1(context, applied, scope) {
   });
   return readVerifiedAppliedCatalogMemoryEvidenceV1({
     ...proofInputs,
-    controlObjects: persistence.controlObjects,
-    deployment: DEPLOYMENT,
     store: context.agent.store,
   });
 }

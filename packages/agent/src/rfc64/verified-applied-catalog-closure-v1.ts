@@ -19,6 +19,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 
 import { unpackKnowledgeAssetId } from '../ka-identity.js';
+import { mapWithConcurrency } from '../map-with-concurrency.js';
 import {
   loadExactAppliedCatalogRowsV1,
   readValidatedRfc64AppliedCatalogHeadV1,
@@ -30,6 +31,8 @@ import {
   computeRfc64AppliedInventoryDigestV1,
   type Rfc64PublicCatalogInventoryEvidenceRowV1,
 } from './public-catalog-inventory-completeness-v1.js';
+
+const VERIFIED_CATALOG_BUNDLE_READ_CONCURRENCY_V1 = 8;
 
 export interface ReadVerifiedAppliedCatalogClosureInputV1 {
   readonly appliedHead: AppliedCatalogHeadSnapshotV1;
@@ -46,7 +49,8 @@ export interface ReadVerifiedAppliedCatalogClosureInputV1 {
 }
 
 export interface VerifiedAppliedCatalogClosureRowV1 {
-  readonly kaNumber: number;
+  /** Exact uint96 asset number; never narrowed through JavaScript Number. */
+  readonly kaNumber: bigint;
   readonly row: Readonly<AuthorCatalogRowV1>;
   readonly bundleBinding: VerifiedCatalogSealBindingSnapshotV1;
   readonly inventoryEvidence: Readonly<Rfc64PublicCatalogInventoryEvidenceRowV1>;
@@ -95,50 +99,52 @@ export async function readVerifiedAppliedCatalogClosureV1(
     input.trustedCatalogScope,
     verifyIssuerSignature,
   );
-  const rows: Readonly<VerifiedAppliedCatalogClosureRowV1>[] = [];
-  for (const row of catalogRows) {
-    const bundleBytes = await input.kaBundles.readKaBundleByDigest(row.transfer.blobDigest);
-    if (bundleBytes === null) throw new Error('signed catalog row has no durable KA bundle');
-    const bundle = decodeOpaqueKaBundleV1(bundleBytes);
-    if (
-      bundle.blobDigest !== row.transfer.blobDigest
-      || bundle.projectionDigest !== row.projectionDigest
-      || bundleBytes.byteLength.toString() !== row.transfer.byteLength
-    ) {
-      throw new Error('durable KA bundle differs from its signed catalog row');
-    }
-    const bundleBinding = readVerifiedCatalogSealBindingV1(verifyCatalogSealBindingV1(
-      input.trustedCatalogScope,
-      row,
-      bundle.sealBytes,
-      input.deployment,
-    ));
-    const identity = unpackKnowledgeAssetId(BigInt(row.kaId));
-    const kaNumber = Number(identity.kaNumber);
-    if (
-      identity.agentAddress !== input.trustedCatalogScope.authorAddress
-      || !Number.isSafeInteger(kaNumber)
-      || bundleBinding.seal.kaUal
-        !== `did:dkg:${input.trustedCatalogScope.networkId}/${identity.agentAddress}/${kaNumber}`
-    ) {
-      throw new Error('signed catalog row identity differs from its verified bundle binding');
-    }
-    const inventoryEvidence = Object.freeze({
-      activatedTripleCount: Number(bundleBinding.seal.publicTripleCount),
-      bundleDigest: row.transfer.blobDigest,
-      catalogRowDigest: bundleBinding.catalogRowDigest,
-      contentDigest: row.projectionDigest,
-      kaId: row.kaId,
-      kaUal: bundleBinding.seal.kaUal,
-      sealDigest: bundleBinding.sealDigest,
-    });
-    rows.push(Object.freeze({
-      kaNumber,
-      row,
-      bundleBinding,
-      inventoryEvidence,
-    }));
-  }
+  const rows = await mapWithConcurrency(
+    catalogRows,
+    VERIFIED_CATALOG_BUNDLE_READ_CONCURRENCY_V1,
+    async (row): Promise<Readonly<VerifiedAppliedCatalogClosureRowV1>> => {
+      const bundleBytes = await input.kaBundles.readKaBundleByDigest(row.transfer.blobDigest);
+      if (bundleBytes === null) throw new Error('signed catalog row has no durable KA bundle');
+      const bundle = decodeOpaqueKaBundleV1(bundleBytes);
+      if (
+        bundle.blobDigest !== row.transfer.blobDigest
+        || bundle.projectionDigest !== row.projectionDigest
+        || bundleBytes.byteLength.toString() !== row.transfer.byteLength
+      ) {
+        throw new Error('durable KA bundle differs from its signed catalog row');
+      }
+      const bundleBinding = readVerifiedCatalogSealBindingV1(verifyCatalogSealBindingV1(
+        input.trustedCatalogScope,
+        row,
+        bundle.sealBytes,
+        input.deployment,
+      ));
+      const identity = unpackKnowledgeAssetId(BigInt(row.kaId));
+      const kaNumber = identity.kaNumber;
+      if (
+        identity.agentAddress !== input.trustedCatalogScope.authorAddress
+        || bundleBinding.seal.kaUal
+          !== `did:dkg:${input.trustedCatalogScope.networkId}/${identity.agentAddress}/${kaNumber}`
+      ) {
+        throw new Error('signed catalog row identity differs from its verified bundle binding');
+      }
+      const inventoryEvidence = Object.freeze({
+        activatedTripleCount: Number(bundleBinding.seal.publicTripleCount),
+        bundleDigest: row.transfer.blobDigest,
+        catalogRowDigest: bundleBinding.catalogRowDigest,
+        contentDigest: row.projectionDigest,
+        kaId: row.kaId,
+        kaUal: bundleBinding.seal.kaUal,
+        sealDigest: bundleBinding.sealDigest,
+      });
+      return Object.freeze({
+        kaNumber,
+        row,
+        bundleBinding,
+        inventoryEvidence,
+      });
+    },
+  );
   if (rows.length.toString() !== input.appliedHead.inventoryRowCount) {
     throw new Error('signed catalog closure row count differs from the durable applied head');
   }

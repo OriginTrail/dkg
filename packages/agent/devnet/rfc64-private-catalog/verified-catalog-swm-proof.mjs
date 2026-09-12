@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { readVerifiedAppliedCatalogClosureV1 } from
-  '../../src/rfc64/verified-applied-catalog-closure-v1.ts';
 import { readPrivateCatalogAppliedProjectionEvidenceV1 } from './memory-evidence.mjs';
 
 /** Project the canonical verified closure into the fixture's per-asset evidence. */
 export async function readVerifiedAppliedCatalogMemoryEvidenceV1({
   expectedAssetNumbers,
+  readVerifiedAppliedCatalogClosure,
   store,
-  ...closureInput
+  ...closureCoordinates
 }) {
   if (
     !Array.isArray(expectedAssetNumbers)
@@ -16,11 +15,11 @@ export async function readVerifiedAppliedCatalogMemoryEvidenceV1({
   ) {
     throw new TypeError('expected catalog SWM asset numbers must be safe integers');
   }
-  const expectedNumbers = new Set(expectedAssetNumbers);
+  const expectedNumbers = new Set(expectedAssetNumbers.map((value) => BigInt(value)));
   if (expectedNumbers.size !== expectedAssetNumbers.length) {
     throw new Error('expected catalog SWM asset identities are duplicated');
   }
-  const closure = await readVerifiedAppliedCatalogClosureV1(closureInput);
+  const closure = await readVerifiedAppliedCatalogClosure(closureCoordinates);
   const byKaNumber = new Map();
   for (const { kaNumber, row } of closure.rows) {
     if (!expectedNumbers.has(kaNumber) || byKaNumber.has(kaNumber)) {
@@ -47,7 +46,7 @@ export async function readVerifiedAppliedCatalogMemoryEvidenceV1({
     networkId: closure.catalogScope.networkId,
   });
   return Object.freeze(projections.map((entry) => {
-    const swmProof = byKaNumber.get(entry.kaNumber);
+    const swmProof = byKaNumber.get(BigInt(entry.kaNumber));
     if (swmProof === undefined) {
       throw new Error('verified catalog closure has no proof for stored SWM projection');
     }

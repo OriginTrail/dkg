@@ -152,6 +152,23 @@ describe('RFC-64 catalog synchronization evidence', () => {
     }]);
   });
 
+  it('replaces provider provenance when the same head is durably applied again', () => {
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([]),
+      'provider-original',
+    );
+    const reapplied = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([]),
+      'provider-reapplication',
+    );
+
+    expect(reduceRfc64CatalogSynchronizationEvidenceReplayV1(first, reapplied))
+      .toMatchObject({
+        appliedHeadStatus: 'applied',
+        appliedProviderPeerId: 'provider-reapplication',
+      });
+  });
+
   it.each([
     ['content mismatch', { swmReconciliationOutcome: 'content-mismatch' as const }],
     ['VM change', { swmReconciliationOutcome: 'vm-changed' as const }],

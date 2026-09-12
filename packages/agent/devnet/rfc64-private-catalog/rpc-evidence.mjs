@@ -1,5 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import {
+  RFC64_PRIVATE_FINALIZED_READ_PROCESS_IDS_V1,
+  RFC64_PRIVATE_RUNTIME_RPC_PROCESS_IDS_V1,
+} from './scenario-actors.ts';
+
+export {
+  RFC64_PRIVATE_FINALIZED_READ_PROCESS_IDS_V1,
+  RFC64_PRIVATE_RUNTIME_RPC_PROCESS_IDS_V1,
+} from './scenario-actors.ts';
+
 /** Fixed release-gate ceilings, attributed by method to expose load regressions. */
 export const RFC64_PRIVATE_GATE_RPC_BUDGET_V1 = Object.freeze({
   total: 128,
@@ -14,22 +24,6 @@ export const RFC64_PRIVATE_GATE_RPC_BUDGET_V1 = Object.freeze({
     eth_getCode: 24,
   }),
 });
-
-// These are the actors that materialize finalized VM authority through RPC in this
-// scenario. The owner, outsider, and restarted receiver still have mandatory RPC
-// receipts and ceilings below, but are expected to complete from local evidence.
-export const RFC64_PRIVATE_FINALIZED_READ_PROCESS_IDS_V1 = Object.freeze([
-  'provider2',
-  'receiver-seed',
-  'receiver',
-]);
-export const RFC64_PRIVATE_RUNTIME_RPC_PROCESS_IDS_V1 = Object.freeze([
-  'owner',
-  ...RFC64_PRIVATE_FINALIZED_READ_PROCESS_IDS_V1,
-  'owner-revoker',
-  'outsider',
-  'receiver-restart',
-]);
 
 export function rpcEvidenceV1(state) {
   const calls = state?.rpcCallCounts;

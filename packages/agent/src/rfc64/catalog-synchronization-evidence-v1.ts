@@ -27,8 +27,9 @@ export type Rfc64CatalogSynchronizationEvidenceV1 = Readonly<
   Rfc64NativeSynchronizationEvidenceWithoutExtensionV1 & {
     /**
      * The authenticated remote peer whose native invocation won the durable
-     * applied-head transition. A replay that observes an existing head has no
-     * provider of its own and retains the first applied provider below.
+     * applied-head transition. A later genuine applied transition replaces
+     * that provider; an exact replay that observes an existing head has no
+     * provider of its own and preserves the latest applied transition below.
      */
     readonly appliedProviderPeerId: string | null;
     readonly finalizedSwmRetirementLifecycleReceipts:
@@ -101,7 +102,7 @@ export function reduceRfc64CatalogSynchronizationEvidenceReplayV1(
   return Object.freeze({
     ...current,
     appliedProviderPeerId:
-      previous.appliedProviderPeerId ?? current.appliedProviderPeerId,
+      current.appliedProviderPeerId ?? previous.appliedProviderPeerId,
     finalizedSwmRetirementLifecycleReceipts: Object.freeze(
       current.finalizedSwmRetirementLifecycleReceipts.map((receipt) => {
         const prior = previousByUal.get(receipt.kaUal);
