@@ -2831,12 +2831,17 @@ export class EVMChainAdapterBase {
   }
 
   protected async initContracts(): Promise<void> {
+    const bootContractKeys = ALL_EVM_HUB_CONTRACT_KEYS.filter(key => key !== 'token');
     for (;;) {
       const generation = this.hubContractBindings.generation;
-      await this.hubContractBindings.resolve(ALL_EVM_HUB_CONTRACT_KEYS, spec => this.loadHubContractBinding(spec));
+      await this.hubContractBindings.resolve(bootContractKeys, spec => this.loadHubContractBinding(spec));
       // Random Sampling retains its existing pair/TTL owner and generation guard.
       await optionalEvmContract(() => this.resolveAndAssignRandomSamplingPair());
       await this.startHubRotationListener();
+      // A rotation during slow Random Sampling initialization can age out of
+      // the watcher's replay window. Resolve Token after that wait and watcher
+      // startup, while retaining the generation check for observed rotations.
+      await this.hubContractBindings.resolve(['token'], spec => this.loadHubContractBinding(spec));
       // A watcher started by an event-only scan can rotate any boot binding
       // during these awaits. Never overwrite that invalidation with readiness.
       if (this.hubContractBindings.completeInitialization(generation)) return;

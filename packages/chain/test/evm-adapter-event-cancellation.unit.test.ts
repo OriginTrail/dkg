@@ -1,9 +1,10 @@
-import { createServer, type ServerResponse } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { Contract, Interface } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import type { ChainEvent, EventFilter } from '../src/chain-adapter.js';
 import { eventContractKeysFor } from '../src/evm-event-contracts.js';
+import { createLoopbackJsonRpcTestHarness, sendJsonRpcResult } from './loopback-rpc-harness.js';
 
 const PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const address = '0x0000000000000000000000000000000000000012';
@@ -31,6 +32,70 @@ async function collect(adapter: EVMChainAdapter, filter: EventFilter) {
 }
 
 describe('event scan RPC cancellation', () => {
+  it('resolves the current Token after cold initialization outlives the rotation replay window', async () => {
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const hub = new Interface([
+      'function getContractAddress(string name) view returns (address)',
+      'function getAssetStorageAddress(string name) view returns (address)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+    ]);
+    const replacement = '0x0000000000000000000000000000000000000034';
+    const rotationBlock = 110;
+    const rotation = hub.encodeEventLog(hub.getEvent('ContractChanged')!, ['Token', replacement]);
+    let head = 100;
+    let tokenAddress = address;
+    let paused = false;
+    let release!: () => void;
+    const released = new Promise<void>(resolve => { release = resolve; });
+    const scanStarts: number[] = [];
+    const server = await rpc.start(async (payload, response) => {
+      let result: unknown = '0x7a69';
+      if (payload.method === 'eth_call') {
+        const call = hub.parseTransaction({ data: (payload.params[0] as { data: string }).data });
+        if (!call) throw new Error('expected Hub lookup');
+        const name = String(call.args[0]);
+        if (name === 'RandomSampling' && !paused) { paused = true; await released; }
+        result = hub.encodeFunctionResult(call.fragment, [name === 'Token' ? tokenAddress : address]);
+      } else if (payload.method === 'eth_blockNumber') {
+        result = `0x${head.toString(16)}`;
+      } else if (payload.method === 'eth_getLogs') {
+        const filter = payload.params[0] as { fromBlock: string; toBlock: string };
+        const from = Number(filter.fromBlock);
+        scanStarts.push(from);
+        result = from <= rotationBlock && Number(filter.toBlock) >= rotationBlock ? [{
+          address, blockNumber: '0x6e', blockHash: `0x${'11'.repeat(32)}`,
+          transactionHash: `0x${'22'.repeat(32)}`, transactionIndex: '0x0', logIndex: '0x0',
+          removed: false, ...rotation,
+        }] : [];
+      }
+      sendJsonRpcResult(response, payload, result);
+    });
+    const adapter = new EVMChainAdapter({ rpcUrl: server.url,
+      privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const internal = adapter as unknown as {
+      init(): Promise<void>; contracts: { token?: Contract };
+      hubRotationPoller: { inFlight: Promise<void> | null; pollOnce(): Promise<void> };
+    };
+    const initialization = internal.init();
+    try {
+      await vi.waitFor(() => expect(paused).toBe(true));
+      tokenAddress = replacement;
+      head = 200; // The rotation at 110 is now outside the 50-block replay window.
+      release();
+      await initialization;
+      await internal.hubRotationPoller.inFlight;
+      await internal.hubRotationPoller.pollOnce();
+      expect(scanStarts.length).toBeGreaterThan(0);
+      expect(scanStarts.every(from => from > rotationBlock)).toBe(true);
+      expect(await internal.contracts.token?.getAddress()).toBe(replacement);
+    } finally {
+      release();
+      await initialization.catch(() => {});
+      adapter.destroy();
+      await rpc.stopAll();
+    }
+  });
+
   it.each(['Staking', 'Token', 'RandomSampling'])('reloads event bindings when Hub rotation overlaps full initialization at %s', async pausedName => {
     const hub = new Interface([
       'function getContractAddress(string name) view returns (address)',
@@ -45,13 +110,11 @@ describe('event scan RPC cancellation', () => {
     const released = new Promise<void>(resolve => { release = resolve; });
     const scans: string[] = [];
     const storageLookups: string[] = [];
-    const server = createServer(async (request, response) => {
-      let body = '';
-      for await (const part of request) body += part;
-      const payload = JSON.parse(body) as { method: string; id: number; params: [{ data: string; address: string }] };
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const server = await rpc.start(async (payload, response) => {
       let result: unknown = '0x7a69';
       if (payload.method === 'eth_call') {
-        const call = hub.parseTransaction({ data: payload.params[0].data });
+        const call = hub.parseTransaction({ data: (payload.params[0] as { data: string }).data });
         if (!call) throw new Error('expected Hub lookup');
         const name = String(call.args[0]);
         if (name === pausedName && pauseInitialization) {
@@ -63,16 +126,12 @@ describe('event scan RPC cancellation', () => {
         if (name === 'ContextGraphStorage') storageLookups.push(resolved);
         result = hub.encodeFunctionResult(call.fragment, [resolved]);
       } else if (payload.method === 'eth_getLogs') {
-        scans.push(payload.params[0].address.toLowerCase());
+        scans.push((payload.params[0] as { address: string }).address.toLowerCase());
         result = [];
       }
-      response.setHeader('content-type', 'application/json');
-      response.end(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result }));
+      sendJsonRpcResult(response, payload, result);
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    const bound = server.address();
-    if (!bound || typeof bound === 'string') throw new Error('missing RPC listener');
-    const adapter = new EVMChainAdapter({ rpcUrl: `http://127.0.0.1:${bound.port}`,
+    const adapter = new EVMChainAdapter({ rpcUrl: server.url,
       privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
     const internal = adapter as unknown as {
       initialized: boolean; contracts: { contextGraphStorage?: Contract };
@@ -103,8 +162,7 @@ describe('event scan RPC cancellation', () => {
       release();
       await initialization?.catch(() => {});
       adapter.destroy();
-      server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await rpc.stopAll();
     }
   });
 
@@ -114,13 +172,10 @@ describe('event scan RPC cancellation', () => {
     let disconnected!: () => void;
     const requestDisconnected = new Promise<void>(resolve => { disconnected = resolve; });
     const methods: string[] = [];
-    const server = createServer(async (request, response) => {
-      let body = '';
-      for await (const part of request) body += part;
-      const payload = JSON.parse(body) as { method: string; id: number };
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const server = await rpc.start(async (payload, response) => {
       if (payload.method === 'eth_chainId') {
-        response.setHeader('content-type', 'application/json');
-        response.end(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result: '0x7a69' }));
+        sendJsonRpcResult(response, payload, '0x7a69');
         return;
       }
       methods.push(payload.method);
@@ -128,10 +183,7 @@ describe('event scan RPC cancellation', () => {
       entered();
       // No response: only transport cancellation can retire this request.
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    const bound = server.address();
-    if (!bound || typeof bound === 'string') throw new Error('missing RPC listener');
-    const rpcUrl = `http://127.0.0.1:${bound.port}`;
+    const rpcUrl = server.url;
     const adapter = adapterAt(rpcUrl, [`${rpcUrl}/backup`]);
     const controller = new AbortController();
     const pending = (boundary === 'head'
@@ -147,8 +199,7 @@ describe('event scan RPC cancellation', () => {
     } finally {
       controller.abort();
       adapter.destroy();
-      server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await rpc.stopAll();
       await pending;
     }
   });
@@ -172,16 +223,11 @@ describe('event scan RPC cancellation', () => {
         })]);
       } finally { clearTimeout(timeout); }
     }
-    const server = createServer(async (request, response) => {
-      let body = '';
-      for await (const part of request) body += part;
-      const payload = JSON.parse(body) as { method: string; id: number; params: [{ data: string }] };
-      const reply = (result: unknown) => {
-        response.setHeader('content-type', 'application/json');
-        response.end(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result }));
-      };
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const server = await rpc.start(async (payload, response, request) => {
+      const reply = (result: unknown) => sendJsonRpcResult(response, payload, result);
       if (payload.method === 'eth_call') {
-        const call = hub.parseTransaction({ data: payload.params[0].data });
+        const call = hub.parseTransaction({ data: (payload.params[0] as { data: string }).data });
         if (!call || call.args[0] !== 'ProfileStorage') throw new Error('unexpected event binding');
         requests.push(request.url ?? '');
         if (requests.length === 1) {
@@ -198,10 +244,7 @@ describe('event scan RPC cancellation', () => {
       }
       reply(payload.method === 'eth_getLogs' ? [] : '0x7a69');
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    const bound = server.address();
-    if (!bound || typeof bound === 'string') throw new Error('missing RPC listener');
-    const rpcUrl = `http://127.0.0.1:${bound.port}`;
+    const rpcUrl = server.url;
     const adapter = new EVMChainAdapter({ rpcUrl, rpcUrls: [`${rpcUrl}/backup`],
       privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
     const internal = adapter as unknown as { resolveContract(name: string): Promise<Contract> };
@@ -232,8 +275,7 @@ describe('event scan RPC cancellation', () => {
       controller.abort();
       releaseShared?.();
       adapter.destroy();
-      server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await rpc.stopAll();
       await Promise.allSettled([shared, pending]);
     }
   });
@@ -256,13 +298,11 @@ describe('event scan RPC cancellation', () => {
     const requestEntered = new Promise<void>(resolve => { entered = resolve; });
     let disconnected!: () => void;
     const requestDisconnected = new Promise<void>(resolve => { disconnected = resolve; });
-    const server = createServer(async (request, response) => {
-      let body = '';
-      for await (const part of request) body += part;
-      const payload = JSON.parse(body) as { method: string; id: number; params: [{ data: string }] };
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const server = await rpc.start(async (payload, response, request) => {
       let result: unknown = '0x7a69';
       if (payload.method === 'eth_call') {
-        const call = hub.parseTransaction({ data: payload.params[0].data });
+        const call = hub.parseTransaction({ data: (payload.params[0] as { data: string }).data });
         if (!call) throw new Error('expected Hub lookup');
         const name = String(call.args[0]);
         requests.push({ path: request.url ?? '', name });
@@ -275,13 +315,9 @@ describe('event scan RPC cancellation', () => {
       } else if (payload.method === 'eth_getLogs') {
         result = [];
       }
-      response.setHeader('content-type', 'application/json');
-      response.end(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result }));
+      sendJsonRpcResult(response, payload, result);
     });
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-    const bound = server.address();
-    if (!bound || typeof bound === 'string') throw new Error('missing RPC listener');
-    const rpcUrl = `http://127.0.0.1:${bound.port}`;
+    const rpcUrl = server.url;
     const adapter = new EVMChainAdapter({ rpcUrl, rpcUrls: [`${rpcUrl}/backup`],
       privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
     const internal = adapter as unknown as {
@@ -338,8 +374,7 @@ describe('event scan RPC cancellation', () => {
       clearTimeout(timeout);
       controller.abort();
       adapter.destroy();
-      server.closeAllConnections();
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await rpc.stopAll();
       await pending;
     }
   });
