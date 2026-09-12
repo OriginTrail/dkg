@@ -577,7 +577,7 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 export type DiscoverContextGraphsFromChainOptions = {
   throwOnChainScanFailure?: boolean;
   pageBudget?: number;
-  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor' | 'repair';
+  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor' | 'seedLiveTail' | 'repair';
   minimumIntervalMs?: number;
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
@@ -589,6 +589,7 @@ type NormalizedContextGraphDiscoveryScan =
   | { mode: 'incremental'; pageBudget?: number }
   | { mode: 'seedFull' }
   | { mode: 'seedFromCursor'; pageBudget?: number }
+  | { mode: 'seedLiveTail'; pageBudget?: number }
   | { mode: 'repair'; pageBudget: number; minimumIntervalMs?: number };
 
 function normalizeContextGraphDiscoveryScan(
@@ -605,6 +606,12 @@ function normalizeContextGraphDiscoveryScan(
     if (options.mode === 'seedFromCursor') {
       return {
         mode: 'seedFromCursor',
+        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+      };
+    }
+    if (options.mode === 'seedLiveTail') {
+      return {
+        mode: 'seedLiveTail',
         ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
       };
     }
@@ -1152,9 +1159,10 @@ export class DKGAgent extends DKGAgentBase {
     });
   }
 
-  private chainContextGraphScanFailure:
-    | { signature: string; count: number }
-    | undefined;
+  private readonly chainContextGraphScanFailures = new Map<
+    'live' | 'repair',
+    { signature: string; count: number }
+  >();
   /**
    * StorageACK handlers perform store verification. A wallet pool can start
    * several publishes at once, but sending every ACK round at once overloads
@@ -2100,6 +2108,10 @@ export class DKGAgent extends DKGAgentBase {
   ): Promise<number> {
     const ctx = createOperationContext('system');
     const scanMode = normalizeContextGraphDiscoveryScan(options);
+    const scanFailureLane = scanMode.mode === 'repair' ? 'repair' : 'live';
+    const scanFailureLabel = scanFailureLane === 'repair'
+      ? 'Chain context graph repair scan'
+      : 'Chain context graph scan';
     const legacyListOptions = legacyChainListScanOptions(options);
     const useLegacyListFallback =
       scanMode.mode !== 'listAll' &&
@@ -2130,11 +2142,12 @@ export class DKGAgent extends DKGAgentBase {
         .replace(/stopped after block \d+/g, 'stopped after block N')
         .replace(/\[\d+,\s*\d+\]/g, '[range]')
         .replace(/\b\d+\s+eth_getLogs calls/g, 'N eth_getLogs calls');
-      if (this.chainContextGraphScanFailure?.signature !== signature) {
-        this.log.warn(ctx, `Chain context graph scan failed: ${message}`);
-        this.chainContextGraphScanFailure = { signature, count: 1 };
+      const priorFailure = this.chainContextGraphScanFailures.get(scanFailureLane);
+      if (priorFailure?.signature !== signature) {
+        this.log.warn(ctx, `${scanFailureLabel} failed: ${message}`);
+        this.chainContextGraphScanFailures.set(scanFailureLane, { signature, count: 1 });
       } else {
-        this.chainContextGraphScanFailure.count += 1;
+        priorFailure.count += 1;
       }
       const partialError = isContextGraphChainScanPartialError(err);
       if (options.throwOnChainScanFailure && !partialError) throw err;
@@ -2307,12 +2320,13 @@ export class DKGAgent extends DKGAgentBase {
         await iterator.return?.();
       }
     }
-    if (!partialChainScan && this.chainContextGraphScanFailure) {
+    const priorFailure = this.chainContextGraphScanFailures.get(scanFailureLane);
+    if (!partialChainScan && priorFailure) {
       this.log.info(
         ctx,
-        `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
+        `${scanFailureLabel} recovered after ${priorFailure.count} failed attempt(s)`,
       );
-      this.chainContextGraphScanFailure = undefined;
+      this.chainContextGraphScanFailures.delete(scanFailureLane);
     }
 
     if (discovered > 0) {

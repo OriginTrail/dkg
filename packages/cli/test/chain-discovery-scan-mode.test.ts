@@ -17,9 +17,9 @@ import {
 } from '../src/daemon/lifecycle.js';
 
 describe('chainDiscoveryScanOptions', () => {
-  it('uses bounded cursor-resumable seeding before a live watermark exists', () => {
+  it('seeds the reorg-protected live tail before a live watermark exists', () => {
     expect(chainDiscoveryScanOptions({ watermarkSeeded: false })).toEqual({
-      mode: 'seedFromCursor',
+      mode: 'seedLiveTail',
       throwOnChainScanFailure: true,
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
     });
@@ -28,6 +28,7 @@ describe('chainDiscoveryScanOptions', () => {
   it('trusts a durable watermark on startup and on the former daily full-scan slot', () => {
     expect(chainDiscoveryScanOptions({ watermarkSeeded: true, run: 0 })).toEqual({
       mode: 'incremental',
+      throwOnChainScanFailure: true,
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
     });
     expect(chainDiscoveryScanOptions({
@@ -36,6 +37,7 @@ describe('chainDiscoveryScanOptions', () => {
       fullScanEvery: CHAIN_FULL_SCAN_EVERY,
     })).toEqual({
       mode: 'incremental',
+      throwOnChainScanFailure: true,
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
     });
   });
@@ -43,10 +45,12 @@ describe('chainDiscoveryScanOptions', () => {
   it('normalizes the hard per-tick page budget', () => {
     expect(chainDiscoveryScanOptions({ watermarkSeeded: true, pageBudget: 7.9 })).toEqual({
       mode: 'incremental',
+      throwOnChainScanFailure: true,
       pageBudget: 7,
     });
     expect(chainDiscoveryScanOptions({ watermarkSeeded: true, pageBudget: 0 })).toEqual({
       mode: 'incremental',
+      throwOnChainScanFailure: true,
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
     });
   });
@@ -101,7 +105,7 @@ describe('createChainDiscoveryScanRunner', () => {
     expect(agent.repairContextGraphRegistry).toHaveBeenCalledTimes(1);
   });
 
-  it('pins partially completed first-install seeding without changing mode', async () => {
+  it('pins a failed first-install live-tail seed without changing mode', async () => {
     const agent = {
       hasContextGraphRegistryScanWatermark: vi
         .fn<() => Promise<boolean>>()
@@ -119,8 +123,8 @@ describe('createChainDiscoveryScanRunner', () => {
     await runner();
 
     expect(agent.discoverContextGraphsFromChain.mock.calls.map(([scan]) => scan.mode)).toEqual([
-      'seedFromCursor',
-      'seedFromCursor',
+      'seedLiveTail',
+      'seedLiveTail',
       'incremental',
     ]);
     expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
@@ -198,8 +202,30 @@ describe('createChainDiscoveryScanRunner', () => {
     await runner();
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledWith({
       mode: 'incremental',
+      throwOnChainScanFailure: true,
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
     });
+  });
+
+  it('makes real daemon incremental failures strict before repair eligibility', async () => {
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi.fn(async (options: ScanOptions) => {
+        if (options.throwOnChainScanFailure) throw new Error('partial live scan');
+        return 0;
+      }),
+      repairContextGraphRegistry: vi.fn(async () => 0),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    await runner();
+
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledWith({
+      mode: 'incremental',
+      throwOnChainScanFailure: true,
+      pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+    });
+    expect(agent.repairContextGraphRegistry).not.toHaveBeenCalled();
   });
 
   it('contains broken logging and hostile rejection values', async () => {

@@ -21,8 +21,8 @@ export const MAX_CONSECUTIVE_SAME_SCAN_RETRIES = 3;
 export const OVERDUE_FULL_RESYNC_RETRY_EVERY = 4;
 
 export type ScanOptions =
-  | { mode: 'incremental'; pageBudget: number }
-  | { mode: 'seedFromCursor'; throwOnChainScanFailure: true; pageBudget: number };
+  | { mode: 'incremental'; throwOnChainScanFailure: true; pageBudget: number }
+  | { mode: 'seedLiveTail'; throwOnChainScanFailure: true; pageBudget: number };
 
 export function chainDiscoveryScanOptions(input: {
   watermarkSeeded: boolean;
@@ -41,8 +41,8 @@ export function chainDiscoveryScanOptions(input: {
     ? Math.floor(configuredPageBudget)
     : CHAIN_DISCOVERY_SCAN_PAGE_BUDGET;
   return input.watermarkSeeded
-    ? { mode: 'incremental', pageBudget }
-    : { mode: 'seedFromCursor', throwOnChainScanFailure: true, pageBudget };
+    ? { mode: 'incremental', throwOnChainScanFailure: true, pageBudget }
+    : { mode: 'seedLiveTail', throwOnChainScanFailure: true, pageBudget };
 }
 
 export interface ScanSchedulerConfig {
