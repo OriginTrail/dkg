@@ -278,7 +278,16 @@ describe('sync requester bailout', () => {
     expect(summary.failedPeers).toBe(1);
     expect(summary.backoffWorthyFailures).toBe(1);
     expect(fetchSyncPages.calls).toEqual([
-      [ctx, 'peer-a', 'pressured-swm', true, 'meta', expect.any(String), expect.any(Number)],
+      [
+        ctx,
+        'peer-a',
+        'pressured-swm',
+        true,
+        'meta',
+        expect.any(String),
+        expect.any(Number),
+        expect.objectContaining({ workAdmission: expect.any(Object) }),
+      ],
     ]);
   });
 });

@@ -16,6 +16,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { getMetrics } from '@origintrail-official/dkg-core';
 import { sendSyncRequest } from '../src/p2p/sync-transport.js';
+import { UNRESTRICTED_SYNC_WORK } from '../src/sync/work-admission.js';
 import {
   activeSyncAdmissionSource,
   normalizeSyncAttemptOutcome,
@@ -57,6 +58,7 @@ function attemptParams(overrides: Record<string, unknown> = {}): any {
     retryAttempts: 1,
     contextGraphId: 'cg-1',
     offset: 0,
+    workAdmission: UNRESTRICTED_SYNC_WORK,
     protocolId: PROTO,
     plane: 'durable',
     phase: 'data',

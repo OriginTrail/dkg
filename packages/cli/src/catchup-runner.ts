@@ -118,7 +118,9 @@ export interface CatchupJobResult {
        * are attributed to and the missing sample are never mixed across peers.
        */
       swmCoverage?: SwmSnapshotCoverage;
-      /** Snapshot phases that yielded on the local clock — see the agent-side field. */
+      /** Plane-neutral evidence that local admission yielded. */
+      localYield?: true;
+      /** Snapshot phases left incomplete specifically by a local yield; zero on clean results. */
       snapshotPlaneIncomplete: number;
       /** Extra passes over the peer set beyond the first. */
       continuationPasses: number;

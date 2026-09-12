@@ -1,5 +1,4 @@
 import type {
-  SharedMemorySyncDiagnostics,
   SharedMemorySyncResult,
 } from '../dkg-agent-types.js';
 import type {
@@ -12,8 +11,8 @@ import {
   type DurableProgressClassificationOptions,
   type DurableProgressSummary,
 } from './durable-progress.js';
-
 export interface SharedMemoryFreshnessSummary extends DurableProgressSummary {
+  readonly localYield?: true;
   readonly snapshotPlaneIncomplete?: number;
   readonly resolvedSnapshotPlaneIncomplete?: number;
   readonly metadataContinuationYields?: number;
@@ -139,24 +138,6 @@ export function classifySelectedSwmRoundFreshness(
       && coverage.materializationFailures === 0
       && coverage.snapshotsResolved === coverage.snapshotsTotal
       && progress.completedWithoutFailure,
-  };
-}
-
-/** Keep the freshness-only diagnostic additive when per-round results merge. */
-export function mergeSharedMemoryFreshnessDiagnostics(
-  a: SharedMemorySyncDiagnostics,
-  b: SharedMemorySyncDiagnostics,
-): Pick<
-  SharedMemorySyncDiagnostics,
-  'resolvedSnapshotPlaneIncomplete' | 'resolvedMetadataContinuationYields'
-> {
-  return {
-    resolvedSnapshotPlaneIncomplete:
-      (a.resolvedSnapshotPlaneIncomplete ?? 0)
-      + (b.resolvedSnapshotPlaneIncomplete ?? 0),
-    resolvedMetadataContinuationYields:
-      (a.resolvedMetadataContinuationYields ?? 0)
-      + (b.resolvedMetadataContinuationYields ?? 0),
   };
 }
 

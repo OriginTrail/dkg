@@ -16,6 +16,7 @@ import {
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
   collectPublicSnapshotMetadata,
@@ -24,9 +25,11 @@ import {
   type PublicSnapshotMetadata,
 } from '../src/sync/requester/shared-memory-sync.js';
 import {
+  createSyncWorkAdmission,
+  UNRESTRICTED_SYNC_WORK,
+} from '../src/sync/work-admission.js';
+import {
   recoverContextGraphSwm,
-  recoverContextGraphSwmWithProgressRetries,
-  type RecoverContextGraphSwmResult,
 } from '../src/sync/requester/swm-recovery.js';
 import {
   CG,
@@ -57,123 +60,35 @@ const SUBGRAPH = 'research';
 const SUB_WS = `did:dkg:context-graph:${CG}/${SUBGRAPH}/_shared_memory`;
 const SUB_WS_META = `did:dkg:context-graph:${CG}/${SUBGRAPH}/_shared_memory_meta`;
 
-function recoveryResult(
-  readySnapshots: number,
-  totalSnapshots: number,
-  completed = false,
-): RecoverContextGraphSwmResult {
-  return {
-    replacedRoots: 0,
-    replacedGraphs: completed ? totalSnapshots : 0,
-    insertedDataQuads: completed ? totalSnapshots : 0,
-    insertedMetaQuads: completed ? totalSnapshots : 0,
-    droppedDataTriples: 0,
-    readySnapshots,
-    totalSnapshots,
-    completed,
-  };
-}
-
-describe('recoverContextGraphSwmWithProgressRetries', () => {
-  it('consumes monotonic immutable-snapshot progress inside one bounded catch-up job', async () => {
-    const outcomes = [
-      recoveryResult(5, 20),
-      recoveryResult(10, 20),
-      recoveryResult(15, 20),
-      recoveryResult(20, 20, true),
-    ];
-    const retries: string[] = [];
-    let calls = 0;
-
-    const result = await recoverContextGraphSwmWithProgressRetries({
-      recover: async () => outcomes[calls++]!,
-      onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
-        retries.push(`${completedRound}:${readySnapshots}/${totalSnapshots}`);
-      },
-    });
-
-    expect(result).toMatchObject({ completed: true, readySnapshots: 20, totalSnapshots: 20 });
-    expect(calls).toBe(4);
-    expect(retries).toEqual(['1:5/20', '2:10/20', '3:15/20']);
-  });
-
-  it('stops after one transient retry when snapshot progress is flat', async () => {
-    let calls = 0;
-    const result = await recoverContextGraphSwmWithProgressRetries({
-      recover: async () => {
-        calls += 1;
-        return recoveryResult(0, 20);
-      },
-    });
-
-    expect(result.completed).toBe(false);
-    expect(calls).toBe(3);
-  });
-
-  it('continues after one flat transport window when snapshot progress resumes', async () => {
-    const outcomes = [
-      recoveryResult(5, 20),
-      recoveryResult(5, 20),
-      recoveryResult(10, 20),
-      recoveryResult(20, 20, true),
-    ];
-    const retries: string[] = [];
-    let calls = 0;
-
-    const result = await recoverContextGraphSwmWithProgressRetries({
-      recover: async () => outcomes[calls++]!,
-      onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
-        retries.push(`${completedRound}:${readySnapshots}/${totalSnapshots}`);
-      },
-    });
-
-    expect(result).toMatchObject({ completed: true, readySnapshots: 20, totalSnapshots: 20 });
-    expect(calls).toBe(4);
-    expect(retries).toEqual(['1:5/20', '2:5/20', '3:10/20']);
-  });
-
-  it('extends the default cap while declared snapshots keep making progress', async () => {
-    let calls = 0;
-    const result = await recoverContextGraphSwmWithProgressRetries({
-      recover: async () => {
-        calls += 1;
-        return recoveryResult(calls, 20, calls === 20);
-      },
-    });
-
-    expect(result).toMatchObject({ completed: true, readySnapshots: 20, totalSnapshots: 20 });
-    expect(calls).toBe(20);
-  });
-
-  it('keeps snapshot-aware progress retries under an absolute ceiling', async () => {
-    let calls = 0;
-    const result = await recoverContextGraphSwmWithProgressRetries({
-      recover: async () => {
-        calls += 1;
-        return recoveryResult(calls, 100);
-      },
-    });
-
-    expect(result).toMatchObject({ completed: false, readySnapshots: 24, totalSnapshots: 100 });
-    expect(calls).toBe(24);
-  });
-
-  it('honours the hard recovery-round cap while progress continues', async () => {
-    let calls = 0;
-    const result = await recoverContextGraphSwmWithProgressRetries({
-      maxRounds: 3,
-      recover: async () => {
-        calls += 1;
-        return recoveryResult(calls, 100);
-      },
-    });
-
-    expect(result).toMatchObject({ completed: false, readySnapshots: 3, totalSnapshots: 100 });
-    expect(calls).toBe(3);
-  });
-});
-
 describe('syncPublicSnapshotsForMeta', () => {
+  it('does not start a network fetch when cache validation consumes the remaining budget', async () => {
+    const quads: Quad[] = [{ subject: SUBJ, predicate: STATUS, object: '"new"', graph: '' }];
+    const digest = workspacePublicQuadsDigest(quads);
+    let remaining = 5;
+    const fetchSyncPages = vi.fn(async () => page(quads));
+    const result = await syncPublicSnapshotsForMeta({
+      ctx, remotePeerId: 'peer-source', contextGraphId: CG,
+      deadline: Number.MAX_SAFE_INTEGER,
+      workAdmission: createSyncWorkAdmission(() => remaining),
+      metaQuads: [
+        { subject: 'urn:share:budget', predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: WS_META },
+        { subject: 'urn:share:budget', predicate: `${DKG}publicQuadsCount`, object: '"1"', graph: WS_META },
+      ],
+      publicSnapshotStore: {
+        getSnapshot: async () => { remaining = 0; return null; },
+        putSnapshot: async () => ({ ref: digest, byteLength: 0 }),
+      },
+      fetchSyncPages, deleteCheckpoint: () => {}, setCheckpoint: () => {},
+    });
+    expect(fetchSyncPages).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      completed: false,
+      readySnapshots: 0,
+      timedOutPhases: 0,
+      localYield: true as const,
+    });
+  });
+
   it('prioritizes three recent snapshots for every historical snapshot', () => {
     const snapshots: PublicSnapshotMetadata[] = Array.from({ length: 8 }, (_, index) => ({
       ref: `sha256:${index.toString(16).padStart(64, '0')}`,
@@ -227,6 +142,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       remotePeerId: 'peer-source',
       contextGraphId: CG,
       deadline: Number.MAX_SAFE_INTEGER,
+      workAdmission: UNRESTRICTED_SYNC_WORK,
       metaQuads: [
         { subject: snapshotSubject, predicate: `${DKG}publicQuadsDigest`, object: `"${digest}"`, graph: WS_META },
         { subject: snapshotSubject, predicate: `${DKG}publicQuadsCount`, object: `"${expected.length}"^^<${XSD_INTEGER}>`, graph: WS_META },
@@ -295,6 +211,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       // An expired deadline would abandon the tail for an unrelated reason and
       // the row would pass even with the skip reverted.
       deadline: Number.MAX_SAFE_INTEGER,
+      workAdmission: UNRESTRICTED_SYNC_WORK,
       // Digest-only (store-backed) rows: no explicit `dkg:publicSnapshotRef`,
       // so each ref IS its digest. Both rows carry digest AND count — a row
       // missing either is silently dropped from the manifest, which would
@@ -336,7 +253,6 @@ describe('syncPublicSnapshotsForMeta', () => {
       completedPhases: 1,
       // A skip is OUR classification of the peer's response, not a local budget
       // decision, so the voluntary-yield flag must stay down.
-      yieldedAtDeadline: false,
     });
     // The shortfall names the ref that was skipped, not the one that succeeded.
     expect(result.missingSample).toEqual([shortDigest]);
@@ -359,8 +275,8 @@ describe('syncPublicSnapshotsForMeta', () => {
     //
     // The contract being pinned is an ATTRIBUTION rule, not a counting rule:
     // stopping on OUR OWN round budget is a local scheduling decision, so it
-    // must surface as an incomplete snapshot plane (`yieldedAtDeadline`, which
-    // the caller in `runSharedMemorySync` turns into `snapshotPlaneIncomplete`
+    // must surface as the canonical local-yield completion (which carries its
+    // snapshot-plane count without a second independently optional field
     // + `failedPhases`) and must NEVER touch `timedOutPhases` — that field
     // feeds `backoffWorthyFailure` in `durable-progress.ts`, so folding a
     // yield into it would back off a perfectly healthy responder for the
@@ -399,6 +315,7 @@ describe('syncPublicSnapshotsForMeta', () => {
         remotePeerId: 'peer-source',
         contextGraphId: CG,
         deadline,
+        workAdmission: createSyncWorkAdmission(() => deadline - Date.now()),
         // Order is load-bearing: the cached ref FIRST, the deferred ref second.
         // The clock is only pushed past the deadline once the first one is
         // resolved, so the walk is forced to stop mid-manifest — which is the
@@ -424,8 +341,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       });
 
       expect(result).toMatchObject({
-        // The local yield signal the caller maps to `snapshotPlaneIncomplete`.
-        yieldedAtDeadline: true,
+        localYield: true as const,
         // A yield is not a clean round: `completed` is derived from
         // `missingCount === 0`, so the abandoned tail keeps the graph from
         // being stamped caught-up while Knowledge Assets are still missing.
@@ -465,6 +381,29 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
   const stores: OxigraphStore[] = [];
   afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
 
+  it('yields between progressing metadata pages and clears the unusable prefix checkpoint', async () => {
+    const store = new OxigraphStore(); stores.push(store);
+    await store.insert([{ subject: SUBJ, predicate: STATUS, object: '"old"', graph: WS }]);
+    let remaining = 5;
+    const fetchSyncPages = vi.fn(async () => {
+      remaining = 0;
+      return page([{ subject: SUBJ, predicate: STATUS, object: '"prefix"', graph: WS_META }], false);
+    });
+    const checkpoints = new Map<string, number>();
+    const result = await recoverContextGraphSwm({
+      ...makeDeps(store, []),
+      workAdmission: createSyncWorkAdmission(() => remaining),
+      fetchSyncPages,
+      setCheckpoint: (key, offset) => { checkpoints.set(key, offset); },
+      deleteCheckpoint: (key) => { checkpoints.delete(key); },
+    });
+    expect(result.completed).toBe(false);
+    expect(result.localYield).toBe(true);
+    expect(fetchSyncPages).toHaveBeenCalledTimes(1);
+    expect(checkpoints.size).toBe(0);
+    expect(await statusValues(store)).toEqual(['"old"']);
+  });
+
   it('replaces a stale local value with the source value (no union corruption)', async () => {
     const store = new OxigraphStore();
     stores.push(store);
@@ -497,7 +436,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       includeRootScope: false,
       fetchSyncPages: async (
         _c: OperationContext, _p: string, _cg: string, _inc: boolean,
-        phase: 'data' | 'meta',
+        phase: SyncPhase,
       ): Promise<SyncPageResult> => page(
         phase === 'data' ? [rootData, subData] : [rootMeta, subMeta],
       ),
@@ -594,7 +533,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     const partialDeps = {
       ...deps,
       fetchSyncPages: async (
-        _c: OperationContext, _p: string, _cg: string, _inc: boolean, phase: 'data' | 'meta',
+        _c: OperationContext, _p: string, _cg: string, _inc: boolean, phase: SyncPhase,
       ): Promise<SyncPageResult> =>
         phase === 'data'
           ? { ...page([{ subject: SUBJ, predicate: STATUS, object: '"v2"', graph: WS }], false), nextOffset: 0, resumedFromOffset: 0 }
@@ -713,7 +652,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     }
   });
 
-  it('makes monotonic per-KA progress across a deadline without rescanning aggregate SWM data', async () => {
+  it.each(['transport', 'time-budget'] as const)('makes per-KA progress across %s expiry without rescanning aggregate SWM data', async (expiry) => {
     const store = new OxigraphStore();
     stores.push(store);
     const assets = [
@@ -760,6 +699,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     const sourceMeta = assets.flatMap((asset) => asset.meta);
     const snapshotStore = new MemorySnapshotStore();
     const snapshotFetches = new Map<string, number>();
+    let remaining = 10;
     let round = 1;
     let dataFetches = 0;
     const recover = () => recoverContextGraphSwm({
@@ -767,6 +707,7 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       remotePeerId: 'peer-source',
       contextGraphId: CG,
       deadline: Number.MAX_SAFE_INTEGER,
+      workAdmission: expiry === 'time-budget' ? createSyncWorkAdmission(() => remaining) : undefined,
       fetchSyncPages: async (
         _c, _p, _cg, _inc, phase, _graph, _deadline, fetchOptions,
       ): Promise<SyncPageResult> => {
@@ -780,9 +721,10 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
         );
         if (!asset) throw new Error(`Unexpected snapshot ref ${fetchOptions?.snapshotRef}`);
         snapshotFetches.set(asset.digest, (snapshotFetches.get(asset.digest) ?? 0) + 1);
-        if (round === 1 && asset === assets[1]) {
+        if (expiry === 'transport' && round === 1 && asset === assets[1]) {
           return { ...page([], false), checkpointKey: `snapshot:${asset.digest}` };
         }
+        if (expiry === 'time-budget' && round === 1) remaining = 0;
         return { ...page(asset.payload), checkpointKey: `snapshot:${asset.digest}` };
       },
       processSharedMemoryBatch: async (_dataQuads, metaQuads) => ({
@@ -811,10 +753,11 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     expect(secondStillHidden.type === 'bindings' ? secondStillHidden.bindings : []).toHaveLength(0);
 
     round = 2;
+    remaining = 10;
     const completed = await recover();
     expect(completed).toMatchObject({ completed: true, replacedGraphs: 2, insertedDataQuads: 2 });
     expect(snapshotFetches.get(assets[0]!.digest)).toBe(1);
-    expect(snapshotFetches.get(assets[1]!.digest)).toBe(2);
+    expect(snapshotFetches.get(assets[1]!.digest)).toBe(expiry === 'transport' ? 2 : 1);
     expect(dataFetches).toBe(0);
     for (const asset of assets) {
       const result = await store.query(

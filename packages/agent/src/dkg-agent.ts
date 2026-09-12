@@ -1,3 +1,4 @@
+import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -873,6 +874,7 @@ export class DKGAgent extends DKGAgentBase {
       publicSnapshotStore,
     );
     this.configureSwmTargetExecutorSessionsV1({
+      privateRecoveryBudgetMs: resolvePrivateSwmRecoveryBudgetMs(),
       store: this.store,
       writeLocks: this.writeLocks,
       listSubGraphs: (contextGraphId) => this.listSubGraphs(contextGraphId),

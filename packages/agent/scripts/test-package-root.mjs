@@ -11,6 +11,9 @@ const legacyChainReconciler = await import(
 const legacyCatalogSync = await import(
   '@origintrail-official/dkg-agent/dist/dkg-agent-rfc64-catalog-sync.js'
 );
+const legacySharedMemorySync = await import(
+  '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js'
+);
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
@@ -53,6 +56,7 @@ if (
   || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
   || typeof root.Rfc64CatalogResponsibilityRegistryV1 !== 'function'
   || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
+  || typeof legacySharedMemorySync.selectSwmSnapshotCoverage !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }

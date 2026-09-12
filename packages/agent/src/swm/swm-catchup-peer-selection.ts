@@ -141,32 +141,51 @@ export function createSwmCatchupPeerSelector(options?: SwmCatchupPeerSelectorOpt
   return new SwmCatchupPeerSelector(options);
 }
 
-export function classifySwmCatchupPeerOutcome(input: {
+interface SwmCatchupPeerTelemetry {
   insertedTriples?: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
   deniedPhases?: number;
   failedPeers?: number;
   failedPhases?: number;
+  localYieldFailedPhases?: number;
   timedOutPhases?: number;
   backoffWorthyFailures?: number;
   errorMessage?: string;
-}): SwmCatchupPeerOutcome {
+}
+
+export type SwmCatchupPeerOutcomeInput = SwmCatchupPeerTelemetry & {
+  /** A local scheduler decision is not itself peer-health evidence. */
+  localYield?: true;
+};
+
+export function classifySwmCatchupPeerOutcome(
+  input: SwmCatchupPeerTelemetry & { localYield?: never },
+): SwmCatchupPeerOutcome;
+export function classifySwmCatchupPeerOutcome(
+  input: SwmCatchupPeerOutcomeInput,
+): SwmCatchupPeerOutcome | undefined;
+export function classifySwmCatchupPeerOutcome(
+  input: SwmCatchupPeerOutcomeInput,
+): SwmCatchupPeerOutcome | undefined {
   if ((input.insertedTriples ?? 0) > 0 || (input.fetchedDataTriples ?? 0) > 0 || (input.fetchedMetaTriples ?? 0) > 0) {
     return 'good';
   }
   if ((input.deniedPhases ?? 0) > 0 || isDeniedMessage(input.errorMessage)) {
     return 'denied';
   }
+  const failedPhases = input.failedPhases ?? 0;
   if (
     input.errorMessage ||
     (input.failedPeers ?? 0) > 0 ||
-    (input.failedPhases ?? 0) > 0 ||
     (input.timedOutPhases ?? 0) > 0 ||
     (input.backoffWorthyFailures ?? 0) > 0
   ) {
     return 'transportFailed';
   }
+  const localYieldFailedPhases = input.localYield ? input.localYieldFailedPhases ?? 0 : 0;
+  if (failedPhases > localYieldFailedPhases) return 'transportFailed';
+  if (input.localYield) return undefined;
   return 'empty';
 }
 

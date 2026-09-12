@@ -1,3 +1,9 @@
+import {
+  assertSyncWorkAdmission,
+  composeSyncWorkAdmission,
+  SyncWorkAdmissionExhaustedError,
+  type SyncWorkAdmission,
+} from '../work-admission.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -42,6 +48,11 @@ import {
   SYNC_REQUEST_INITIAL_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
+import {
+  sharedMemoryCompletionFields,
+  type SharedMemoryCompletionFields,
+  type SharedMemoryWorkOutcome,
+} from '../shared-memory-completion.js';
 
 const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
@@ -166,7 +177,7 @@ function createResponderSessionId(includeSharedMemory: boolean, phase: SyncPhase
   return createSyncResponderSessionId(`${includeSharedMemory ? 'swm' : 'durable'}-${phase}`);
 }
 
-export interface SyncPageResult {
+interface SyncPageResultFields {
   quads: Quad[];
   /** Absolute raw responder row coordinate for every retained quad. */
   quadRawOffsets?: number[];
@@ -187,9 +198,13 @@ export interface SyncPageResult {
   /** Raw responder-session coordinate after the last accepted page. */
   rawNextOffset?: number;
   checkpointKey: string;
-  completed: boolean;
-  timedOut: boolean;
 }
+
+/**
+ * Page completion prevents a local scheduler yield from being paired with a
+ * contradictory successful completion at construction time.
+ */
+export type SyncPageResult = SyncPageResultFields & SharedMemoryCompletionFields;
 
 export interface SyncPageProgress {
   readonly resumedFromOffset: number;
@@ -197,13 +212,24 @@ export interface SyncPageProgress {
 }
 
 function acceptedIncompletePrefixResult(
-  result: Omit<SyncPageResult, 'completed' | 'timedOut'>,
+  result: SyncPageResultFields,
 ): SyncPageResult {
   return {
     ...result,
-    completed: false,
-    timedOut: true,
+    ...sharedMemoryCompletionFields('timed-out'),
   };
+}
+
+type SyncAdmissionTerminalOutcome = Extract<
+  SharedMemoryWorkOutcome,
+  'timed-out' | 'local-budget-yield'
+>;
+
+function syncAdmissionTerminalOutcome(
+  error: unknown,
+): SyncAdmissionTerminalOutcome | undefined {
+  if (!(error instanceof SyncWorkAdmissionExhaustedError)) return undefined;
+  return error.outcome === 'timed_out' ? 'timed-out' : 'local-budget-yield';
 }
 
 /** Canonical transport path identity for learned requester page sizing. */
@@ -379,6 +405,7 @@ class AdaptiveSyncPageSizer {
  * too easy for a new modifier to occupy an older modifier's slot.
  */
 export interface SyncPageFetchOptions {
+  readonly workAdmission?: SyncWorkAdmission;
   readonly snapshotRef?: string;
   readonly sinceBatchId?: string;
   readonly signal?: AbortSignal;
@@ -428,6 +455,8 @@ export class SyncPageAccumulationLimitError extends Error {
 }
 
 interface FetchSyncPagesParams {
+  /** Compatibility entry point only; the stateful implementation requires this. */
+  workAdmission?: SyncWorkAdmission;
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
@@ -580,15 +609,34 @@ function checkpointKeyForFetch(params: FetchSyncPagesParams): string {
 }
 
 export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<SyncPageResult> {
-  if (params.ephemeralRequesterState !== true) return fetchSyncPagesWithState(params);
+  // This exported low-level entry point is the deadline-only compatibility
+  // boundary. Every requester above it forwards one already-composed
+  // capability, and the stateful implementation below requires it.
+  const admittedParams: AdmittedFetchSyncPagesParams = {
+    ...params,
+    workAdmission: params.workAdmission ?? composeSyncWorkAdmission({
+      deadline: params.deadline,
+      scope: { sharing: 'coalescible', key: 'direct-page-fetch' },
+    }),
+  };
+  if (admittedParams.ephemeralRequesterState !== true) {
+    return fetchSyncPagesWithState(admittedParams);
+  }
   try {
-    return await fetchSyncPagesWithState(params);
+    return await fetchSyncPagesWithState(admittedParams);
   } finally {
-    deleteSyncPageCheckpoint(params.checkpointStore, checkpointKeyForFetch(params));
+    deleteSyncPageCheckpoint(
+      admittedParams.checkpointStore,
+      checkpointKeyForFetch(admittedParams),
+    );
   }
 }
 
-async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<SyncPageResult> {
+type AdmittedFetchSyncPagesParams = FetchSyncPagesParams & {
+  workAdmission: SyncWorkAdmission;
+};
+
+async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Promise<SyncPageResult> {
   const {
     ctx,
     remotePeerId,
@@ -597,9 +645,8 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     phase,
     graphUri,
     snapshotRef,
-    deadline,
     syncPageTimeoutMs,
-    syncRouterAttempts,
+    workAdmission,
     syncPageRetryAttempts,
     syncPageSize,
     syncDeniedResponse,
@@ -732,7 +779,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
   let bytesReceived = 0;
   let acceptedHeapBytesEstimate = 0;
   let responsePages = 0;
-  let timedOut = false;
+  let admissionOutcome: SyncAdmissionTerminalOutcome | undefined;
   let yielded = false;
   // Start an unknown peer/path at the conservative initial page size, then
   // grow toward the throughput ceiling only after sustained success. Reduce
@@ -786,10 +833,15 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     onRetry: (attempt: number, delay: number, error: unknown) => void,
   ): Promise<Uint8Array> => sendSyncRequest({
     remotePeerId,
-    timeoutMs: Math.min(
+    // Leave part of this round for a fresh request after a stalled attempt.
+    // Recompute after authentication on every retry; transport admission then
+    // applies the remaining monotonic private-job allowance.
+    timeoutMs: syncPageTimeoutMs,
+    attemptTimeoutMs: ({ remainingAttempts }) => Math.min(
       syncPageTimeoutMs,
-      Math.max(2000, Math.floor(Math.max(0, deadline - Date.now()) / syncRouterAttempts)),
+      Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
     ),
+    workAdmission,
     retryAttempts: syncPageRetryAttempts,
     signal,
     contextGraphId,
@@ -888,10 +940,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
 
     while (true) {
       throwIfAborted(signal);
-      if (Date.now() > deadline) {
-        timedOut = true;
-        break;
-      }
+      assertSyncWorkAdmission(workAdmission);
 
       const curOffset = offset;
       const transportStartedAt = Date.now();
@@ -1030,6 +1079,14 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
       if (!usesByteBudgetPagination && parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
+    const terminalOutcome = syncAdmissionTerminalOutcome(err);
+    if (terminalOutcome !== undefined) {
+      if (signal?.aborted) {
+        phaseTelemetry.finish('error', allQuads.length);
+        throw asAbortError(signal.reason);
+      }
+      admissionOutcome = terminalOutcome;
+    } else {
     // The transport retry helper has no onRetry callback after its terminal
     // attempt. Persist one final backoff step so the next bounded continuation
     // does not repeat the same known-failing page size from scratch.
@@ -1221,9 +1278,12 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
 
     phaseTelemetry.finish('error', allQuads.length);
     throw err;
+    }
   }
 
-  if (usesPageSession && responderSession) {
+  if (admissionOutcome === 'local-budget-yield') {
+    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+  } else if (usesPageSession && responderSession) {
     // R10 recovery has its own responder-session scope and MUST rebuild the
     // COMPLETE state from offset 0 on every (re)try (see swm-recovery
     // `fetchPhaseFully`, which deletes the checkpoint on a partial abandon). It
@@ -1259,7 +1319,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     }
   }
 
-  if (timedOut) {
+  if (admissionOutcome === 'timed-out') {
     const scope = includeSharedMemory ? 'shared-memory' : 'durable';
     logWarn(
       ctx,
@@ -1267,7 +1327,14 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     );
   }
 
-  phaseTelemetry.finish(timedOut ? 'timed_out' : 'completed', allQuads.length);
+  phaseTelemetry.finish(
+    admissionOutcome === 'timed-out'
+      ? 'timed_out'
+      : admissionOutcome === 'local-budget-yield'
+        ? 'local_yield'
+        : 'completed',
+    allQuads.length,
+  );
 
   return {
     quads: allQuads,
@@ -1282,7 +1349,8 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     nextOffset: offset,
     rawNextOffset: offset,
     checkpointKey,
-    completed: !timedOut && !yielded,
-    timedOut,
+    ...sharedMemoryCompletionFields(
+      admissionOutcome ?? (yielded ? 'incomplete' : 'completed'),
+    ),
   };
 }

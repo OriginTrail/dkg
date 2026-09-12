@@ -532,7 +532,12 @@ export {
 // walk reduces across peers with the same rule the agent uses across Context
 // Graphs — two implementations is how a numerator and a denominator end up
 // coming from different peers.
-export { selectSwmSnapshotCoverage } from './sync/requester/shared-memory-sync.js';
+export {
+  emptySharedMemorySyncResult,
+  mergeFleetSharedMemoryDiagnostics,
+  mergeSamePeerSharedMemoryDiagnostics,
+  selectSwmSnapshotCoverage,
+} from './sync/shared-memory-diagnostics.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.

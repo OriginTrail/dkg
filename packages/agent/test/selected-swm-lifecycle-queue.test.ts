@@ -360,6 +360,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
     const shared = {
       ...result(ordinaryContextGraphId, 3, 3),
       failedPhases: 2,
+      localYield: true as const,
       snapshotPlaneIncomplete: 1,
       resolvedSnapshotPlaneIncomplete: 1,
     };

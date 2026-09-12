@@ -150,6 +150,7 @@ export function graphBackedManifest(contextGraphId: string): ReturnType<typeof s
 
 export function cleanDurableResult(): SharedMemorySyncResult {
   return {
+    snapshotPlaneIncomplete: 0,
     insertedTriples: 0,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
@@ -167,7 +168,6 @@ export function cleanDurableResult(): SharedMemorySyncResult {
     deniedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
-    snapshotPlaneIncomplete: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
   };
@@ -216,6 +216,7 @@ export function result(
     backoffWorthyFailures: 0,
     deferredBackpressure: options.deferredBackpressure ?? 0,
     snapshotPlaneIncomplete: completed ? 0 : 1,
+    ...(completed ? {} : { localYield: true as const }),
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
     swmCoverage,

@@ -284,6 +284,7 @@ import {
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
+import { composeSyncWorkAdmission } from './sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -337,9 +338,13 @@ import {
   type SelectedSwmMetaRetentionLimits,
 } from './sync/selected-swm-meta-budget.js';
 import {
-  selectSwmSnapshotCoverage,
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
+import {
+  emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
+  mergeFleetSharedMemoryDiagnostics,
+  mergeSamePeerSharedMemoryDiagnostics,
+} from './sync/shared-memory-diagnostics.js';
 import {
   createSelectedSwmMetaFetcher,
   type SelectedSwmMetaFetcher,
@@ -349,7 +354,6 @@ import {
   type ContextGraphSyncWork,
 } from './sync/requester/ordered-sync.js';
 import {
-  recoverContextGraphSwmWithProgressRetries,
   type RecoverContextGraphSwmResult,
 } from './sync/requester/swm-recovery.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -408,7 +412,6 @@ import {
 } from './sync/selected-swm-graph-sync-status.js';
 import {
   applySelectedSwmFreshnessResolution,
-  mergeSharedMemoryFreshnessDiagnostics,
 } from './sync/shared-memory-freshness.js';
 import {
   classifyDurableProgress,
@@ -1742,69 +1745,15 @@ function durableSyncEnabled(config: DKGAgentConfig): boolean {
 const CHANGELOG_MAX_SCAN_LIMIT = 2000;
 
 function emptySharedMemorySyncResult(): SharedMemorySyncResult {
-  return {
-    insertedTriples: 0,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 0,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 0,
-    bytesReceived: 0,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    droppedDataTriples: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    deniedPhases: 0,
-    backoffWorthyFailures: 0,
-    deferredBackpressure: 0,
-    snapshotPlaneIncomplete: 0,
-    metadataContinuationYields: 0,
-    replayPhaseBytesReceived: 0,
-    snapshotPhaseBytesReceived: 0,
-  };
+  return createEmptySharedMemorySyncResult();
 }
 
 function mergeSharedMemorySyncResults(
   a: SharedMemorySyncResult,
   b: SharedMemorySyncResult,
 ): SharedMemorySyncResult {
-  const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
   return {
-    insertedTriples: a.insertedTriples + b.insertedTriples,
-    fetchedMetaTriples: a.fetchedMetaTriples + b.fetchedMetaTriples,
-    fetchedDataTriples: a.fetchedDataTriples + b.fetchedDataTriples,
-    insertedMetaTriples: a.insertedMetaTriples + b.insertedMetaTriples,
-    insertedDataTriples: a.insertedDataTriples + b.insertedDataTriples,
-    bytesReceived: a.bytesReceived + b.bytesReceived,
-    resumedPhases: a.resumedPhases + b.resumedPhases,
-    timedOutPhases: a.timedOutPhases + b.timedOutPhases,
-    completedPhases: a.completedPhases + b.completedPhases,
-    checkpointAdvances: a.checkpointAdvances + b.checkpointAdvances,
-    emptyResponses: a.emptyResponses + b.emptyResponses,
-    droppedDataTriples: a.droppedDataTriples + b.droppedDataTriples,
-    // This accumulator is also scoped to one remote peer across several CGs.
-    failedPeers: Math.max(a.failedPeers, b.failedPeers),
-    failedPhases: a.failedPhases + b.failedPhases,
-    deniedPhases: a.deniedPhases + b.deniedPhases,
-    backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
-    deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
-    snapshotPlaneIncomplete: (a.snapshotPlaneIncomplete ?? 0) + (b.snapshotPlaneIncomplete ?? 0),
-    metadataContinuationYields:
-      (a.metadataContinuationYields ?? 0) + (b.metadataContinuationYields ?? 0),
-    continuationPasses: (a.continuationPasses ?? 0) + (b.continuationPasses ?? 0),
-    ...mergeSharedMemoryFreshnessDiagnostics(a, b),
-    // The two halves of `bytesReceived`, kept apart so replay cost stays
-    // measurable once passes repeat.
-    replayPhaseBytesReceived: (a.replayPhaseBytesReceived ?? 0) + (b.replayPhaseBytesReceived ?? 0),
-    snapshotPhaseBytesReceived:
-      (a.snapshotPhaseBytesReceived ?? 0) + (b.snapshotPhaseBytesReceived ?? 0),
-    // Scalars above sum; coverage does NOT. It is selected whole from one round
-    // so the counts, their peer and the sample can never be spliced together
-    // from different manifests — see `selectSwmSnapshotCoverage`.
-    ...(swmCoverage ? { swmCoverage } : {}),
+    ...mergeSamePeerSharedMemoryDiagnostics(a, b),
   };
 }
 
@@ -7143,6 +7092,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       manifestDigest,
       manifestPrefixDigestAtOffset,
       shouldStopAfterPage,
+      workAdmission,
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
@@ -7155,13 +7105,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       maxAcceptedQuads,
       maxAcceptedHeapBytesEstimate,
     } = options;
+    const effectiveWorkAdmission = workAdmission ?? composeSyncWorkAdmission({
+      deadline,
+      scope: { sharing: 'coalescible', key: 'default-page-fetch' },
+    });
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
       : exactSyncPhaseAccumulationLimits(assetUals);
-    // A caller signal defines an operation-owned cancellation contract. Do not
-    // place those fetches in the shared page map: even equal wall-clock
-    // deadlines do not make independently abortable operations compatible.
-    const coalescingKey = signal || shouldStopAfterPage
+    // Coalescing is declared by the capability, never inferred from singleton
+    // identity. Exclusive private rounds cannot inherit another job's clock.
+    const coalescingScopeKey = effectiveWorkAdmission.scope.sharing === 'coalescible'
+      ? effectiveWorkAdmission.scope.key
+      : null;
+    const coalescingKeyBase = signal || shouldStopAfterPage || coalescingScopeKey === null
       ? null
       : syncPageFetchCoalescingKey({
         remotePeerId,
@@ -7180,6 +7136,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         maxAcceptedQuads,
         maxAcceptedHeapBytesEstimate,
       });
+    const coalescingKey = coalescingKeyBase === null
+      ? null
+      : `${coalescingKeyBase}|admission:${coalescingScopeKey}`;
     const inFlight = inFlightSyncPageFetchesFor(this);
     // Read once, here: this fetch runs inside the admitted operation, so the
     // ambient source is the trigger that both a join and the shared fetch's
@@ -7264,6 +7223,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       manifestDigest,
       manifestPrefixDigestAtOffset,
       shouldStopAfterPage,
+      workAdmission: effectiveWorkAdmission,
       buildSyncRequest: this.buildSyncRequest.bind(this),
       parseAndFilter: (nquadsText, targetGraphUri, targetContextGraphId) => {
         if (phase === 'snapshot') {
@@ -7541,12 +7501,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const recoverPrivateContextGraph = (
       contextGraphId: string,
       recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
+      onRetry?: Parameters<typeof recoveryExecutor.recoverPrivateTarget>[0]['onRetry'],
     ) => recoveryExecutor.recoverPrivateTarget({
       remotePeerId,
       contextGraphId,
       includeRootScope: requestedScope !== null
         || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
       recoveryGuard: recoveryLease,
+      onRetry,
     });
     if (
       requestedTargets !== null
@@ -7653,6 +7615,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             request.graphUri,
             request.deadline,
             {
+              workAdmission: request.workAdmission,
               returnAcceptedPrefixOnRetryableTransportFailure:
                 request.returnAcceptedPrefixOnRetryableTransportFailure,
               requesterScope: request.requesterScope,
@@ -7732,30 +7695,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           run: async (): Promise<SharedMemorySyncResult> => {
             const recoveryLease = recoveryLeaseFor(contextGraphId);
             try {
-              const recovered = await recoverContextGraphSwmWithProgressRetries({
-                recover: () => recoverPrivateContextGraph(contextGraphId, recoveryLease),
-                onRetry: ({ completedRound, readySnapshots, totalSnapshots }) => {
+              const recovered = await recoverPrivateContextGraph(
+                contextGraphId, recoveryLease,
+                ({ completedRound, readySnapshots, totalSnapshots }) => {
                   this.log.info(
                     ctx,
                     `Continuing private SWM recovery for "${contextGraphId}" from ${remotePeerId.slice(-8)} `
                     + `after round ${completedRound}: snapshots=${readySnapshots}/${totalSnapshots}`,
                   );
                 },
-              });
+              );
               const result = emptySharedMemorySyncResult();
               result.insertedDataTriples = recovered.insertedDataQuads;
               result.insertedMetaTriples = recovered.insertedMetaQuads;
               result.insertedTriples = recovered.insertedDataQuads + recovered.insertedMetaQuads;
               result.droppedDataTriples = recovered.droppedDataTriples;
-              // A deadline-bounded recovery returns `completed=false` without
-              // mutating the store. Keep that retry signal inside this work item
-              // so every requester lane shares the same orchestration loop.
+              // An incomplete recovery can retain whole verified KAs, but must
+              // remain retryable. A local admission yield is not a peer failure.
               if (recovered.completed) {
                 result.completedPhases = 1;
                 completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
               } else {
                 result.failedPhases = 1;
-                result.backoffWorthyFailures = 1;
+                if (recovered.localYield) {
+                  result.localYield = recovered.localYield;
+                  result.localYieldFailedPhases = recovered.localYieldFailedPhases ?? 0;
+                } else {
+                  result.backoffWorthyFailures = 1;
+                }
               }
               return result;
             } catch (error) {
@@ -8320,6 +8287,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         deferredBackpressure: 0,
       },
       sharedMemory: {
+        snapshotPlaneIncomplete: 0,
         fetchedMetaTriples: 0,
         fetchedDataTriples: 0,
         insertedMetaTriples: 0,
@@ -8334,7 +8302,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         failedPeers: 0,
         failedPhases: 0,
         deferredBackpressure: 0,
-        snapshotPlaneIncomplete: 0,
         continuationPasses: 0,
         replayPhaseBytesReceived: 0,
         snapshotPhaseBytesReceived: 0,
@@ -8382,23 +8349,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // into HEAD's `accessDeniedPeers` counter so the existing daemon
     // catchup-status endpoint and UI keep working — see
     // `cli/src/daemon.ts` subscribe job and `catchup-runner.ts`.
-    const emptyShared = (): SharedMemorySyncResult => ({
-      insertedTriples: 0,
-      fetchedMetaTriples: 0,
-      fetchedDataTriples: 0,
-      insertedMetaTriples: 0,
-      insertedDataTriples: 0,
-      bytesReceived: 0,
-      resumedPhases: 0,
-      timedOutPhases: 0,
-      completedPhases: 0,
-      checkpointAdvances: 0,
-      emptyResponses: 0,
-      droppedDataTriples: 0,
-      failedPeers: 1,
-      failedPhases: 0,
-      deniedPhases: 0,
-    });
+    const emptyShared = (): SharedMemorySyncResult =>
+      createEmptySharedMemorySyncResult(1);
     // Bounded fan-out: at most CATCHUP_MAX_CONCURRENT_PEER_SYNCS peer syncs run
     // at once. The pre-cap unbounded `Promise.all` over every sync-capable peer
     // was the top amplifier of the 2026-07-07 mainnet sync storm — one
@@ -8592,43 +8544,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       let peerDenied = durableProgress.denied;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
-        // The #2050 signals. Without these the in-agent walk silently drops the
-        // only per-graph SWM coverage the plane has ever produced, and a job run
-        // through the inline runner reports a shortfall it cannot name — while
-        // the worker-backed runner reports it fully. Coverage is SELECTED, never
-        // summed: independent maxima over resolved and total would combine a peer
-        // reporting 178/250 with one reporting 200/200 into 200/250, a state no
-        // peer described.
-        if (r.shared.swmCoverage) {
-          diagnostics.sharedMemory.swmCoverage = selectSwmSnapshotCoverage(
-            diagnostics.sharedMemory.swmCoverage,
-            r.shared.swmCoverage,
-          );
-        }
-        diagnostics.sharedMemory.snapshotPlaneIncomplete =
-          (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
-          + (r.shared.snapshotPlaneIncomplete ?? 0);
-        diagnostics.sharedMemory.replayPhaseBytesReceived =
-          (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
-          + (r.shared.replayPhaseBytesReceived ?? 0);
-        diagnostics.sharedMemory.snapshotPhaseBytesReceived =
-          (diagnostics.sharedMemory.snapshotPhaseBytesReceived ?? 0)
-          + (r.shared.snapshotPhaseBytesReceived ?? 0);
-        diagnostics.sharedMemory.fetchedMetaTriples += r.shared.fetchedMetaTriples;
-        diagnostics.sharedMemory.fetchedDataTriples += r.shared.fetchedDataTriples;
-        diagnostics.sharedMemory.insertedMetaTriples += r.shared.insertedMetaTriples;
-        diagnostics.sharedMemory.insertedDataTriples += r.shared.insertedDataTriples;
-        diagnostics.sharedMemory.bytesReceived += r.shared.bytesReceived;
-        diagnostics.sharedMemory.resumedPhases += r.shared.resumedPhases;
-        diagnostics.sharedMemory.timedOutPhases += r.shared.timedOutPhases;
-        diagnostics.sharedMemory.completedPhases += r.shared.completedPhases;
-        diagnostics.sharedMemory.checkpointAdvances += r.shared.checkpointAdvances;
-        diagnostics.sharedMemory.emptyResponses += r.shared.emptyResponses;
-        diagnostics.sharedMemory.droppedDataTriples += r.shared.droppedDataTriples;
-        diagnostics.sharedMemory.failedPeers += r.shared.failedPeers;
-        diagnostics.sharedMemory.failedPhases += r.shared.failedPhases ?? 0;
-        diagnostics.sharedMemory.deferredBackpressure = (diagnostics.sharedMemory.deferredBackpressure ?? 0)
-          + (r.shared.deferredBackpressure ?? 0);
+        diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
+          diagnostics.sharedMemory,
+          r.shared,
+        );
         deferredBackpressure += r.shared.deferredBackpressure ?? 0;
         peerDenied = peerDenied || Boolean(sharedProgress?.denied);
       }
@@ -8650,37 +8569,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
 
       sharedMemorySynced += shared.insertedDataTriples;
-      if (shared.swmCoverage) {
-        diagnostics.sharedMemory.swmCoverage = selectSwmSnapshotCoverage(
-          diagnostics.sharedMemory.swmCoverage,
-          shared.swmCoverage,
-        );
-      }
-      diagnostics.sharedMemory.snapshotPlaneIncomplete =
-        (diagnostics.sharedMemory.snapshotPlaneIncomplete ?? 0)
-        + (shared.snapshotPlaneIncomplete ?? 0);
-      diagnostics.sharedMemory.replayPhaseBytesReceived =
-        (diagnostics.sharedMemory.replayPhaseBytesReceived ?? 0)
-        + (shared.replayPhaseBytesReceived ?? 0);
-      diagnostics.sharedMemory.snapshotPhaseBytesReceived =
-        (diagnostics.sharedMemory.snapshotPhaseBytesReceived ?? 0)
-        + (shared.snapshotPhaseBytesReceived ?? 0);
-      diagnostics.sharedMemory.fetchedMetaTriples += shared.fetchedMetaTriples;
-      diagnostics.sharedMemory.fetchedDataTriples += shared.fetchedDataTriples;
-      diagnostics.sharedMemory.insertedMetaTriples += shared.insertedMetaTriples;
-      diagnostics.sharedMemory.insertedDataTriples += shared.insertedDataTriples;
-      diagnostics.sharedMemory.bytesReceived += shared.bytesReceived;
-      diagnostics.sharedMemory.resumedPhases += shared.resumedPhases;
-      diagnostics.sharedMemory.timedOutPhases += shared.timedOutPhases;
-      diagnostics.sharedMemory.completedPhases += shared.completedPhases;
-      diagnostics.sharedMemory.checkpointAdvances += shared.checkpointAdvances;
-      diagnostics.sharedMemory.emptyResponses += shared.emptyResponses;
-      diagnostics.sharedMemory.droppedDataTriples += shared.droppedDataTriples;
-      diagnostics.sharedMemory.failedPeers += shared.failedPeers;
-      diagnostics.sharedMemory.failedPhases += shared.failedPhases ?? 0;
-      diagnostics.sharedMemory.deferredBackpressure =
-        (diagnostics.sharedMemory.deferredBackpressure ?? 0)
-        + (shared.deferredBackpressure ?? 0);
+      diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
+        diagnostics.sharedMemory,
+        shared,
+      );
       deferredBackpressure += shared.deferredBackpressure ?? 0;
 
       const responded = !progress.transportFailed
