@@ -99,6 +99,47 @@ test('generic 404 cannot certify authorization even with a plausible denial body
   assert.equal(probes[1].authorization, `Bearer ${SOURCE_SECRET}`);
 });
 
+test('authenticated 404 control requires only success status, not a JSON body', async () => {
+  const config = baseConfig();
+  config.authorizationChecks.unauthorized = {
+    kind: 'http',
+    nodeId: 'beta-receiver',
+    method: 'GET',
+    path: '/api/rfc64/unauthorized-probe',
+    authentication: 'none',
+    expectedStatuses: [404],
+    bodyCodePointer: '/code',
+    expectedCodes: ['RFC64_DENIED'],
+    notFoundControlNodeId: 'alpha-source',
+  };
+  config.authorizationChecks.revoked = {
+    kind: 'not-exposed',
+    reasonCode: 'revocation-api-not-exposed',
+  };
+  const validated = validateRemoteCanaryConfigV1(config);
+  const request = createRequesterV1({
+    fetchFn: async (_input, options) => (
+      new Headers(options.headers).has('authorization')
+        ? new Response(null, { status: 204 })
+        : jsonResponse({ code: 'RFC64_DENIED' }, 404)
+    ),
+    readFileFn: async () => SOURCE_SECRET,
+    secrets: new Map(),
+    timing: validated.timing,
+  });
+
+  const result = await verifyAuthorizationV1(
+    validated.authorizationChecks,
+    createCanaryNodeClientV1(request),
+  );
+
+  assert.deepEqual(result.unauthorized, { status: 'PASS', denialObserved: true });
+  assert.deepEqual(result.revoked, {
+    status: 'EVIDENCE_REQUIRED',
+    reasonCode: 'revocation-api-not-exposed',
+  });
+});
+
 test('real HTTP daemon authentication 401 cannot certify a nonexistent RFC-64 route', async () => {
   const server = createServer((request, response) => {
     response.writeHead(401, { 'Content-Type': 'application/json' });

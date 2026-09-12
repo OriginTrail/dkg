@@ -222,6 +222,10 @@ export interface CanaryNodeClientV1 {
     node: NormalizedCanaryNodeV1,
     probe: CanaryAuthorizationProbeV1,
   ): Promise<Readonly<CanaryAuthorizationProbeResponseV1>>;
+  probeAuthorizationControl(
+    node: NormalizedCanaryNodeV1,
+    probe: CanaryAuthorizationProbeV1,
+  ): Promise<number>;
 }
 
 export interface RemoteCanaryDependenciesV1 {

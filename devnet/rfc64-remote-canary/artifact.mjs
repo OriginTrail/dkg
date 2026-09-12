@@ -22,7 +22,7 @@ import {
  * }>} ArtifactLifecycleInputV1
  */
 
-/** Atomically replace prior results; a stale PASS cannot survive any attempted run. */
+/** Invalidate prior results after configuration and input/output alias safety are established. */
 /** @param {ArtifactLifecycleInputV1} input */
 export async function runRemoteCanaryArtifactLifecycleV1({
   loadConfig,

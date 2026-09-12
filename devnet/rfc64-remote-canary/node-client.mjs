@@ -49,17 +49,32 @@ export function createCanaryNodeClientV1(request) {
 
   /** @param {NormalizedCanaryNodeV1} node @param {CanaryAuthorizationProbeV1} probe */
   async function probeAuthorization(node, probe) {
-    const response = await request.raw(
+    const response = await requestAuthorizationV1(node, probe);
+    return Object.freeze({
+      status: response.status,
+      body: parseResponseJsonV1(response, 'authorization-response-malformed'),
+    });
+  }
+
+  /**
+   * A 404 control proves only that the authenticated route exists. Its success
+   * body is deliberately irrelevant and may be empty or non-JSON.
+   * @param {NormalizedCanaryNodeV1} node
+   * @param {CanaryAuthorizationProbeV1} probe
+   */
+  async function probeAuthorizationControl(node, probe) {
+    return (await requestAuthorizationV1(node, probe)).status;
+  }
+
+  /** @param {NormalizedCanaryNodeV1} node @param {CanaryAuthorizationProbeV1} probe */
+  function requestAuthorizationV1(node, probe) {
+    return request.raw(
       node,
       probe.method,
       probe.path,
       probe.body,
       probe.authentication,
     );
-    return Object.freeze({
-      status: response.status,
-      body: parseResponseJsonV1(response, 'authorization-response-malformed'),
-    });
   }
 
   return Object.freeze({
@@ -68,5 +83,6 @@ export function createCanaryNodeClientV1(request) {
     shareSwmMarker,
     reachable,
     probeAuthorization,
+    probeAuthorizationControl,
   });
 }

@@ -20,7 +20,9 @@ test('node client owns exact daemon routes, payloads, authentication, and decodi
     },
     raw: async (...args) => {
       calls.push(args);
-      return { status: 403, text: '{"code":"RFC64_DENIED"}' };
+      return calls.filter((call) => call.length === 5).length === 1
+        ? { status: 403, text: '{"code":"RFC64_DENIED"}' }
+        : { status: 204, text: '' };
     },
     reachable: async (...args) => {
       calls.push(args);
@@ -53,12 +55,17 @@ test('node client owns exact daemon routes, payloads, authentication, and decodi
     status: 403,
     body: { code: 'RFC64_DENIED' },
   });
+  assert.equal(await client.probeAuthorizationControl(node, {
+    ...probe,
+    authentication: 'node',
+  }), 204);
   assert.deepEqual(calls, [
     [node, 'GET', '/api/status'],
     [node, 'POST', '/api/query', query],
     [node, 'POST', '/api/knowledge-assets', marker],
     [node],
     [node, probe.method, probe.path, probe.body, probe.authentication],
+    [node, probe.method, probe.path, probe.body, 'node'],
   ]);
 });
 

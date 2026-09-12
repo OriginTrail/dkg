@@ -49,7 +49,7 @@ async function runAuthorizationCheckV1(check, client) {
     throw failure('authorization-denial-code-mismatch', 'policy');
   }
   if (response.status === 404) {
-    const control = await client.probeAuthorization(
+    const controlStatus = await client.probeAuthorizationControl(
       requiredControlNode(check.notFoundControlNode),
       {
         method: check.method,
@@ -58,7 +58,7 @@ async function runAuthorizationCheckV1(check, client) {
         authentication: 'node',
       },
     );
-    if (control.status < 200 || control.status >= 300) {
+    if (controlStatus < 200 || controlStatus >= 300) {
       throw failure('authorization-not-found-control-failed', 'policy');
     }
   }
