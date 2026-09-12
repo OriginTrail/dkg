@@ -80,7 +80,6 @@ test('operator CLI dry-run performs no network, secret, evidence, or command I/O
   try {
     await writeFile(configPath, JSON.stringify(config));
     const { stdout, stderr } = await execFileAsync(process.execPath, [
-      '--import', 'tsx',
       RUNNER_PATH,
       '--config', configPath,
       '--artifact', artifactPath,
@@ -118,7 +117,6 @@ test('operator CLI rejects config/artifact aliases before changing configuration
       }
       await assert.rejects(
         execFileAsync(process.execPath, [
-          '--import', 'tsx',
           RUNNER_PATH,
           '--config', configPath,
           '--artifact', artifactPath,
@@ -138,11 +136,67 @@ test('operator CLI rejects config/artifact aliases before changing configuration
 });
 
 test('operator CLI persists INCOMPLETE and exits 2 when required evidence is absent', async () => {
+  const source = await startIncompleteDaemon('12D3KooIncompleteSource');
+  const receiver = await startIncompleteDaemon('12D3KooIncompleteReceiver');
+
+  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-cli-incomplete-'));
+  const artifactPath = join(directory, 'result.json');
+  const configPath = join(directory, 'config.json');
+  const config = baseConfig({
+    nodes: [
+      {
+        id: 'alpha-source',
+        role: 'source',
+        baseUrl: source.baseUrl,
+        auth: { kind: 'none' },
+      },
+      {
+        id: 'beta-receiver',
+        role: 'receiver',
+        baseUrl: receiver.baseUrl,
+        auth: { kind: 'none' },
+      },
+    ],
+    lifecycle: null,
+    authorizationChecks: {
+      unauthorized: {
+        kind: 'not-exposed',
+        reasonCode: 'catalog-protocol-api-not-exposed',
+      },
+      revoked: { kind: 'not-exposed', reasonCode: 'revocation-api-not-exposed' },
+    },
+    rpcUsage: { kind: 'required' },
+  });
+  try {
+    await writeFile(configPath, JSON.stringify(config));
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        RUNNER_PATH,
+        '--config', configPath,
+        '--artifact', artifactPath,
+      ], { cwd: AGENT_DIRECTORY }),
+      (error) => {
+        assert.equal(error.code, 2);
+        assert.equal(error.stdout, `INCOMPLETE ${artifactPath}\n`);
+        assert.equal(error.stderr, '');
+        return true;
+      },
+    );
+    const artifact = JSON.parse(await readFile(artifactPath, 'utf8'));
+    assert.equal(artifact.status, 'INCOMPLETE');
+    assert.equal(artifact.phase, 'evidence-required');
+  } finally {
+    await Promise.all([source.close(), receiver.close()]);
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function startIncompleteDaemon(daemonIdentity) {
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
     if (request.url === '/api/status' && ['GET', 'HEAD'].includes(request.method)) {
       response.writeHead(200);
-      response.end(JSON.stringify(statusBody()));
+      response.end(JSON.stringify(statusBody({ daemonIdentity })));
       return;
     }
     if (request.url === '/api/knowledge-assets' && request.method === 'POST') {
@@ -162,53 +216,16 @@ test('operator CLI persists INCOMPLETE and exits 2 when required evidence is abs
   await once(server, 'listening');
   const address = server.address();
   assert.equal(typeof address, 'object');
-
-  const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-cli-incomplete-'));
-  const artifactPath = join(directory, 'result.json');
-  const configPath = join(directory, 'config.json');
-  const baseUrl = `http://127.0.0.1:${address.port}`;
-  const config = baseConfig({
-    nodes: [
-      { id: 'alpha-source', role: 'source', baseUrl, auth: { kind: 'none' } },
-      { id: 'beta-receiver', role: 'receiver', baseUrl, auth: { kind: 'none' } },
-    ],
-    lifecycle: null,
-    authorizationChecks: {
-      unauthorized: {
-        kind: 'not-exposed',
-        reasonCode: 'catalog-protocol-api-not-exposed',
-      },
-      revoked: { kind: 'not-exposed', reasonCode: 'revocation-api-not-exposed' },
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: async () => {
+      const closed = once(server, 'close');
+      server.close();
+      server.closeAllConnections?.();
+      await closed;
     },
-    rpcUsage: { kind: 'required' },
-  });
-  try {
-    await writeFile(configPath, JSON.stringify(config));
-    await assert.rejects(
-      execFileAsync(process.execPath, [
-        '--import', 'tsx',
-        RUNNER_PATH,
-        '--config', configPath,
-        '--artifact', artifactPath,
-      ], { cwd: AGENT_DIRECTORY }),
-      (error) => {
-        assert.equal(error.code, 2);
-        assert.equal(error.stdout, `INCOMPLETE ${artifactPath}\n`);
-        assert.equal(error.stderr, '');
-        return true;
-      },
-    );
-    const artifact = JSON.parse(await readFile(artifactPath, 'utf8'));
-    assert.equal(artifact.status, 'INCOMPLETE');
-    assert.equal(artifact.phase, 'evidence-required');
-  } finally {
-    const closed = once(server, 'close');
-    server.close();
-    server.closeAllConnections?.();
-    await closed;
-    await rm(directory, { recursive: true, force: true });
-  }
-});
+  };
+}
 
 test('runner invalidates a stale PASS before reading malformed configuration JSON', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rfc64-remote-canary-runner-test-'));

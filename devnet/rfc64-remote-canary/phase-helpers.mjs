@@ -3,7 +3,7 @@
 import {
   mapWithConcurrency,
   mapWithConcurrencySettled,
-} from '../../src/map-with-concurrency.ts';
+} from '@origintrail-official/dkg-agent';
 import { RemoteCanaryError } from './errors.mjs';
 
 export const PHASE_CONCURRENCY = 4;

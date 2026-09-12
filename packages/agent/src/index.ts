@@ -441,7 +441,7 @@ export {
 // (`/api/context-graph/subscribe` → `catchup-runner-worker-impl`) runs the same
 // registry-scale per-peer fan-out and must be bounded by the SAME knob, without
 // deep-importing the compiled `dist/` module.
-export { mapWithConcurrency } from './map-with-concurrency.js';
+export { mapWithConcurrency, mapWithConcurrencySettled } from './map-with-concurrency.js';
 export {
   createVmReconcilePeerTopology,
   createVmReconcileCleanMissPeerIds,

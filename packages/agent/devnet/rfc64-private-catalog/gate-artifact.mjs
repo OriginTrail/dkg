@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { writeRfc64ArtifactAtomicV1 } from '../rfc64-artifact-v1.mjs';
+import { writeRfc64ArtifactAtomicV1 } from '../../../../devnet/rfc64-artifact-v1.mjs';
 import { assertRfc64PrivateRuntimeProvenanceV1 } from './runtime-provenance.mjs';
 
 const SCHEMA = 'dkg-rfc64-private-release-gate-v1';

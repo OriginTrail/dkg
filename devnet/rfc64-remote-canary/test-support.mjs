@@ -4,7 +4,7 @@ import {
   createRemoteCanaryCohortRefV1,
   validateRemoteCanaryConfigV1,
 } from './certify.mjs';
-import { createRfc64DaemonCertificationStatusV1 } from '../../src/rfc64/daemon-certification-status-v1.ts';
+import { createRfc64DaemonCertificationStatusV1 } from '@origintrail-official/dkg-agent';
 
 export const COMMIT = '0123456789abcdef0123456789abcdef01234567';
 export const CG = '0x1111111111111111111111111111111111111111/testnet-canary';
@@ -77,7 +77,11 @@ export function baseConfig(overrides = {}) {
   };
 }
 
-export function statusBody({ legacySyncAllowed = false, contextGraphIds = [CG] } = {}) {
+export function statusBody({
+  legacySyncAllowed = false,
+  contextGraphIds = [CG],
+  daemonIdentity = '12D3KooWNeverPersistThisPeer',
+} = {}) {
   const digest = `0x${'ab'.repeat(32)}`;
   const inventory = `0x${'cd'.repeat(32)}`;
   const status = {
@@ -114,6 +118,7 @@ export function statusBody({ legacySyncAllowed = false, contextGraphIds = [CG] }
     },
   };
   status.rfc64Certification = createRfc64DaemonCertificationStatusV1({
+    daemonIdentity,
     commit: status.commit,
     networkId: status.networkId,
     syncReconcilerEnabled: status.syncLifecycle.syncReconcilerEnabled,

@@ -1,188 +1,286 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { Rfc64CatalogOperationalStatusV1 } from '../dkg-agent-rfc64-catalog.js';
-import type { Rfc64CatalogRolloutModeV1 } from './catalog-rollout-authority-v1.js';
-
 export const RFC64_DAEMON_CERTIFICATION_STATUS_SCHEMA_V1 =
   'dkg-rfc64-daemon-certification-status-v1' as const;
 
-export interface Rfc64DaemonCertificationOperationalStatusV1 {
-  readonly contextGraphId: string;
-  readonly effectiveMode: Rfc64CatalogRolloutModeV1;
-  readonly legacySyncAllowed: boolean;
-  readonly phase: Rfc64CatalogOperationalStatusV1['phase'];
-  readonly authorityState: Rfc64CatalogOperationalStatusV1['authorityState'];
-  readonly authorityFreshness: Rfc64CatalogOperationalStatusV1['authorityFreshness'];
-  readonly catalogServiceStarted: boolean;
-  readonly expectedCatalogHeadDigest: string | null;
-  readonly appliedCatalogHeadDigest: string | null;
-  readonly expectedInventoryDigest: string | null;
-  readonly appliedInventoryDigest: string | null;
-  readonly expectedRowCount: string | null;
-  readonly appliedRowCount: string | null;
-  readonly missingRowCount: string | null;
-  readonly catalogVersion: string | null;
-  readonly lastSuccessfulAdvanceAt: string | null;
+interface Codec<Input, Output> {
+  project(input: Input, path: string): Output;
+  decode(input: unknown, path: string): Output;
 }
 
-export interface Rfc64DaemonCertificationStatusV1 {
-  readonly schema: typeof RFC64_DAEMON_CERTIFICATION_STATUS_SCHEMA_V1;
-  readonly commit: string | null;
-  readonly networkId: string;
-  readonly syncReconcilerEnabled: boolean;
-  readonly chain: Readonly<{
-    readonly configured: boolean;
-    readonly rpcEndpointCount: number;
-    readonly chainId: string | null;
-  }> | null;
-  readonly catalog: Readonly<{
-    readonly enabled: boolean;
-    readonly killSwitch: boolean;
-    readonly contextGraphModes: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
-    readonly contextGraphs: readonly Readonly<Rfc64DaemonCertificationOperationalStatusV1>[];
-  }>;
-}
+type InputOf<T> = T extends Codec<infer Input, unknown> ? Input : never;
+type OutputOf<T> = T extends Codec<unknown, infer Output> ? Output : never;
+type CodecFields = Readonly<Record<string, Codec<unknown, unknown>>>;
+type CodecInput<Fields extends CodecFields> = Readonly<{
+  [Key in keyof Fields]: InputOf<Fields[Key]>;
+}>;
+type CodecOutput<Fields extends CodecFields> = Readonly<{
+  [Key in keyof Fields]: OutputOf<Fields[Key]>;
+}>;
 
-export interface CreateRfc64DaemonCertificationStatusInputV1 {
-  readonly commit: string | null;
-  readonly networkId: string;
-  readonly syncReconcilerEnabled: boolean;
-  readonly chain: Readonly<{
-    readonly configured: boolean;
-    readonly rpcEndpointCount: number;
-    readonly chainId: string | number | null;
-  }> | null;
-  readonly catalog: Readonly<{
-    readonly enabled: boolean;
-    readonly killSwitch: boolean;
-    readonly contextGraphModes: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
-    readonly contextGraphs: readonly Readonly<Rfc64CatalogOperationalStatusV1>[];
-  }>;
-}
+const stringCodec = scalarCodec<string>((input, path) => {
+  if (typeof input !== 'string') malformed(path, 'string');
+  return input;
+});
+const nonEmptyStringCodec = scalarCodec<string>((input, path) => {
+  if (typeof input !== 'string' || input.length === 0) {
+    malformed(path, 'non-empty string');
+  }
+  return input;
+});
+const booleanCodec = scalarCodec<boolean>((input, path) => {
+  if (typeof input !== 'boolean') malformed(path, 'boolean');
+  return input;
+});
+const numberCodec = scalarCodec<number>((input, path) => {
+  if (typeof input !== 'number') malformed(path, 'number');
+  return input;
+});
+const canonicalStringCodec: Codec<string | number, string> = Object.freeze({
+  project(input: string | number, path: string) {
+    if (typeof input !== 'string' && typeof input !== 'number') {
+      malformed(path, 'string or number');
+    }
+    return String(input);
+  },
+  decode(input: unknown, path: string) {
+    return stringCodec.decode(input, path);
+  },
+});
+const rolloutModeCodec = enumCodec(['legacy', 'shadow', 'catalog'] as const);
+const phaseCodec = enumCodec([
+  'inactive',
+  'resolving-authority',
+  'bootstrapping',
+  'applying',
+  'blocked',
+  'known-incomplete',
+  'unknown-freshness',
+  'complete',
+] as const);
+const authorityStateCodec = enumCodec([
+  'inactive',
+  'resolving',
+  'accepted',
+  'blocked',
+] as const);
+const authorityFreshnessCodec = nullableCodec(enumCodec(['current', 'unknown'] as const));
+const nullableStringCodec = nullableCodec(stringCodec);
+
+const operationalStatusCodec = recordCodec({
+  contextGraphId: nonEmptyStringCodec,
+  effectiveMode: rolloutModeCodec,
+  legacySyncAllowed: booleanCodec,
+  phase: phaseCodec,
+  authorityState: authorityStateCodec,
+  authorityFreshness: authorityFreshnessCodec,
+  catalogServiceStarted: booleanCodec,
+  expectedCatalogHeadDigest: nullableStringCodec,
+  appliedCatalogHeadDigest: nullableStringCodec,
+  expectedInventoryDigest: nullableStringCodec,
+  appliedInventoryDigest: nullableStringCodec,
+  expectedRowCount: nullableStringCodec,
+  appliedRowCount: nullableStringCodec,
+  missingRowCount: nullableStringCodec,
+  catalogVersion: nullableStringCodec,
+  lastSuccessfulAdvanceAt: nullableStringCodec,
+});
+
+const daemonCertificationStatusCodec = recordCodec({
+  schema: literalCodec(RFC64_DAEMON_CERTIFICATION_STATUS_SCHEMA_V1),
+  daemonIdentity: nonEmptyStringCodec,
+  commit: nullableStringCodec,
+  networkId: stringCodec,
+  syncReconcilerEnabled: booleanCodec,
+  chain: nullableCodec(recordCodec({
+    configured: booleanCodec,
+    rpcEndpointCount: numberCodec,
+    chainId: nullableCodec(canonicalStringCodec),
+  })),
+  catalog: recordCodec({
+    enabled: booleanCodec,
+    killSwitch: booleanCodec,
+    contextGraphModes: dictionaryCodec(rolloutModeCodec),
+    contextGraphs: uniqueContextGraphsCodec(arrayCodec(operationalStatusCodec)),
+  }),
+});
+
+export type Rfc64DaemonCertificationOperationalStatusV1 =
+  OutputOf<typeof operationalStatusCodec>;
+export type Rfc64DaemonCertificationStatusV1 =
+  OutputOf<typeof daemonCertificationStatusCodec>;
+export type CreateRfc64DaemonCertificationStatusInputV1 =
+  Omit<InputOf<typeof daemonCertificationStatusCodec>, 'schema'>;
+export const RFC64_DAEMON_CERTIFICATION_COMPLETE_PARITY_KEYS_V1 = Object.freeze([
+  'expectedCatalogHeadDigest',
+  'appliedCatalogHeadDigest',
+  'expectedInventoryDigest',
+  'appliedInventoryDigest',
+  'expectedRowCount',
+  'appliedRowCount',
+  'missingRowCount',
+  'catalogVersion',
+] as const satisfies readonly (keyof Rfc64DaemonCertificationOperationalStatusV1)[]);
 
 /**
  * Build the narrow, non-secret `/api/status` projection consumed by release
- * certification. Keeping the projection at the producer boundary prevents
- * certification code from reinterpreting the daemon's larger operator shape.
+ * certification. Projection and decoding share the same typed codec so a wire
+ * field cannot be added to one side without becoming required on the other.
  */
 export function createRfc64DaemonCertificationStatusV1(
   input: CreateRfc64DaemonCertificationStatusInputV1,
 ): Readonly<Rfc64DaemonCertificationStatusV1> {
-  return Object.freeze({
+  return daemonCertificationStatusCodec.project({
+    ...input,
     schema: RFC64_DAEMON_CERTIFICATION_STATUS_SCHEMA_V1,
-    commit: input.commit,
-    networkId: input.networkId,
-    syncReconcilerEnabled: input.syncReconcilerEnabled,
-    chain: input.chain === null
-      ? null
-      : Object.freeze({
-          configured: input.chain.configured,
-          rpcEndpointCount: input.chain.rpcEndpointCount,
-          chainId: input.chain.chainId === null ? null : String(input.chain.chainId),
-        }),
-    catalog: Object.freeze({
-      enabled: input.catalog.enabled,
-      killSwitch: input.catalog.killSwitch,
-      contextGraphModes: Object.freeze({ ...input.catalog.contextGraphModes }),
-      contextGraphs: Object.freeze(input.catalog.contextGraphs.map((status) => Object.freeze({
-        contextGraphId: status.contextGraphId,
-        effectiveMode: status.effectiveMode,
-        legacySyncAllowed: status.legacySyncAllowed,
-        phase: status.phase,
-        authorityState: status.authorityState,
-        authorityFreshness: status.authorityFreshness,
-        catalogServiceStarted: status.catalogServiceStarted,
-        expectedCatalogHeadDigest: status.expectedCatalogHeadDigest,
-        appliedCatalogHeadDigest: status.appliedCatalogHeadDigest,
-        expectedInventoryDigest: status.expectedInventoryDigest,
-        appliedInventoryDigest: status.appliedInventoryDigest,
-        expectedRowCount: status.expectedRowCount,
-        appliedRowCount: status.appliedRowCount,
-        missingRowCount: status.missingRowCount,
-        catalogVersion: status.catalogVersion,
-        lastSuccessfulAdvanceAt: status.lastSuccessfulAdvanceAt,
-      }))),
-    }),
-  });
+  }, '$');
 }
 
-/** Decode an untrusted JSON value returned by the daemon status endpoint. */
+/** Decode and detach an untrusted JSON value returned by the daemon status endpoint. */
 export function decodeRfc64DaemonCertificationStatusV1(
   input: unknown,
 ): Readonly<Rfc64DaemonCertificationStatusV1> {
-  const root = record(input, '$');
-  literal(
-    root.schema,
-    RFC64_DAEMON_CERTIFICATION_STATUS_SCHEMA_V1,
-    '$.schema',
-  );
-  nullableString(root.commit, '$.commit');
-  string(root.networkId, '$.networkId');
-  boolean(root.syncReconcilerEnabled, '$.syncReconcilerEnabled');
-  const chain = root.chain === null ? null : record(root.chain, '$.chain');
-  if (chain !== null) {
-    boolean(chain.configured, '$.chain.configured');
-    number(chain.rpcEndpointCount, '$.chain.rpcEndpointCount');
-    nullableString(chain.chainId, '$.chain.chainId');
-  }
-  const catalog = record(root.catalog, '$.catalog');
-  boolean(catalog.enabled, '$.catalog.enabled');
-  boolean(catalog.killSwitch, '$.catalog.killSwitch');
-  const contextGraphModes = record(
-    catalog.contextGraphModes,
-    '$.catalog.contextGraphModes',
-  );
-  for (const [contextGraphId, mode] of Object.entries(contextGraphModes)) {
-    nonEmptyString(contextGraphId, '$.catalog.contextGraphModes key');
-    rolloutMode(mode, `$.catalog.contextGraphModes.${contextGraphId}`);
-  }
-  if (!Array.isArray(catalog.contextGraphs)) {
-    malformed('$.catalog.contextGraphs', 'array');
-  }
-  const contextGraphIds = new Set<string>();
-  for (const [index, value] of catalog.contextGraphs.entries()) {
-    const path = `$.catalog.contextGraphs[${index}]`;
-    const status = record(value, path);
-    nonEmptyString(status.contextGraphId, `${path}.contextGraphId`);
-    if (contextGraphIds.has(status.contextGraphId)) {
-      malformed(`${path}.contextGraphId`, 'unique context graph ID');
+  return daemonCertificationStatusCodec.decode(input, '$');
+}
+
+function scalarCodec<Value>(
+  validate: (input: unknown, path: string) => Value,
+): Codec<Value, Value> {
+  return Object.freeze({
+    project(input: Value, path: string) {
+      return validate(input, path);
+    },
+    decode: validate,
+  });
+}
+
+function literalCodec<const Value extends string>(value: Value): Codec<Value, Value> {
+  return scalarCodec((input, path) => {
+    if (input !== value) malformed(path, JSON.stringify(value));
+    return value;
+  });
+}
+
+function enumCodec<const Values extends readonly string[]>(
+  values: Values,
+): Codec<Values[number], Values[number]> {
+  return scalarCodec((input, path) => {
+    if (typeof input !== 'string' || !values.includes(input)) {
+      malformed(path, values.join(' | '));
     }
-    contextGraphIds.add(status.contextGraphId);
-    rolloutMode(status.effectiveMode, `${path}.effectiveMode`);
-    boolean(status.legacySyncAllowed, `${path}.legacySyncAllowed`);
-    oneOf(status.phase, [
-      'inactive',
-      'resolving-authority',
-      'bootstrapping',
-      'applying',
-      'blocked',
-      'known-incomplete',
-      'unknown-freshness',
-      'complete',
-    ], `${path}.phase`);
-    oneOf(status.authorityState, [
-      'inactive',
-      'resolving',
-      'accepted',
-      'blocked',
-    ], `${path}.authorityState`);
-    if (status.authorityFreshness !== null) {
-      oneOf(status.authorityFreshness, ['current', 'unknown'], `${path}.authorityFreshness`);
-    }
-    boolean(status.catalogServiceStarted, `${path}.catalogServiceStarted`);
-    for (const key of [
-      'expectedCatalogHeadDigest',
-      'appliedCatalogHeadDigest',
-      'expectedInventoryDigest',
-      'appliedInventoryDigest',
-      'expectedRowCount',
-      'appliedRowCount',
-      'missingRowCount',
-      'catalogVersion',
-      'lastSuccessfulAdvanceAt',
-    ]) nullableString(status[key], `${path}.${key}`);
+    return input as Values[number];
+  });
+}
+
+function nullableCodec<Input, Output>(
+  codec: Codec<Input, Output>,
+): Codec<Input | null, Output | null> {
+  return Object.freeze({
+    project(input: Input | null, path: string) {
+      return input === null ? null : codec.project(input, path);
+    },
+    decode(input: unknown, path: string) {
+      return input === null ? null : codec.decode(input, path);
+    },
+  });
+}
+
+function arrayCodec<Input, Output>(
+  codec: Codec<Input, Output>,
+): Codec<readonly Input[], readonly Readonly<Output>[]> {
+  return Object.freeze({
+    project(input: readonly Input[], path: string) {
+      if (!Array.isArray(input)) malformed(path, 'array');
+      return Object.freeze(input.map((value, index) => (
+        codec.project(value, `${path}[${index}]`)
+      )));
+    },
+    decode(input: unknown, path: string) {
+      if (!Array.isArray(input)) malformed(path, 'array');
+      return Object.freeze(input.map((value, index) => (
+        codec.decode(value, `${path}[${index}]`)
+      )));
+    },
+  });
+}
+
+function dictionaryCodec<Input, Output>(
+  codec: Codec<Input, Output>,
+): Codec<Readonly<Record<string, Input>>, Readonly<Record<string, Output>>> {
+  return Object.freeze({
+    project(input: Readonly<Record<string, Input>>, path: string) {
+      return transformDictionary(input, path, (value, valuePath) => (
+        codec.project(value as Input, valuePath)
+      ));
+    },
+    decode(input: unknown, path: string) {
+      return transformDictionary(input, path, codec.decode.bind(codec));
+    },
+  });
+}
+
+function transformDictionary<Output>(
+  input: unknown,
+  path: string,
+  transform: (value: unknown, path: string) => Output,
+): Readonly<Record<string, Output>> {
+  const source = record(input, path);
+  const output: Record<string, Output> = Object.create(null);
+  for (const [key, value] of Object.entries(source)) {
+    nonEmptyStringCodec.decode(key, `${path} key`);
+    output[key] = transform(value, `${path}.${key}`);
   }
-  return input as Readonly<Rfc64DaemonCertificationStatusV1>;
+  return Object.freeze(output);
+}
+
+function recordCodec<const Fields extends CodecFields>(
+  fields: Fields,
+): Codec<CodecInput<Fields>, CodecOutput<Fields>> {
+  const transform = (
+    input: unknown,
+    path: string,
+    operation: 'project' | 'decode',
+  ): CodecOutput<Fields> => {
+    const source = record(input, path);
+    const output: Record<string, unknown> = {};
+    for (const [key, codec] of Object.entries(fields)) {
+      output[key] = codec[operation](source[key], `${path}.${key}`);
+    }
+    // CodecOutput is derived from `fields`; this is the single dynamic-key
+    // bridge, rather than an assertion of a separately maintained DTO.
+    return Object.freeze(output) as CodecOutput<Fields>;
+  };
+  return Object.freeze({
+    project(input: CodecInput<Fields>, path: string) {
+      return transform(input, path, 'project');
+    },
+    decode(input: unknown, path: string) {
+      return transform(input, path, 'decode');
+    },
+  });
+}
+
+function uniqueContextGraphsCodec<Input extends Readonly<{ contextGraphId: string }>>(
+  codec: Codec<readonly Input[], readonly Input[]>,
+): Codec<readonly Input[], readonly Input[]> {
+  const unique = (statuses: readonly Input[], path: string) => {
+    const contextGraphIds = new Set<string>();
+    for (const [index, status] of statuses.entries()) {
+      if (contextGraphIds.has(status.contextGraphId)) {
+        malformed(`${path}[${index}].contextGraphId`, 'unique context graph ID');
+      }
+      contextGraphIds.add(status.contextGraphId);
+    }
+    return statuses;
+  };
+  return Object.freeze({
+    project(input: readonly Input[], path: string) {
+      return unique(codec.project(input, path), path);
+    },
+    decode(input: unknown, path: string) {
+      return unique(codec.decode(input, path), path);
+    },
+  });
 }
 
 function record(input: unknown, path: string): Record<string, unknown> {
@@ -190,44 +288,6 @@ function record(input: unknown, path: string): Record<string, unknown> {
     malformed(path, 'object');
   }
   return input as Record<string, unknown>;
-}
-
-function string(input: unknown, path: string): asserts input is string {
-  if (typeof input !== 'string') malformed(path, 'string');
-}
-
-function nonEmptyString(input: unknown, path: string): asserts input is string {
-  if (typeof input !== 'string' || input.length === 0) malformed(path, 'non-empty string');
-}
-
-function nullableString(input: unknown, path: string): asserts input is string | null {
-  if (input !== null && typeof input !== 'string') malformed(path, 'string or null');
-}
-
-function boolean(input: unknown, path: string): asserts input is boolean {
-  if (typeof input !== 'boolean') malformed(path, 'boolean');
-}
-
-function number(input: unknown, path: string): asserts input is number {
-  if (typeof input !== 'number') malformed(path, 'number');
-}
-
-function literal(input: unknown, expected: string, path: string): void {
-  if (input !== expected) malformed(path, JSON.stringify(expected));
-}
-
-function rolloutMode(input: unknown, path: string): asserts input is Rfc64CatalogRolloutModeV1 {
-  oneOf(input, ['legacy', 'shadow', 'catalog'], path);
-}
-
-function oneOf<T extends string>(
-  input: unknown,
-  expected: readonly T[],
-  path: string,
-): asserts input is T {
-  if (typeof input !== 'string' || !expected.includes(input as T)) {
-    malformed(path, expected.join(' | '));
-  }
 }
 
 function malformed(path: string, expected: string): never {

@@ -82,7 +82,8 @@ test('full run certifies propagation, one-node catch-up, VM parity, denials, and
     '/tmp/redacted-rpc-evidence.json',
     'alpha-source',
     'beta-receiver',
-    '12D3KooWNeverPersistThisPeer',
+    '12D3KooSourceDaemonIdentity',
+    '12D3KooReceiverDaemonIdentity',
     'urn:must-not-persist',
     'urn:known:catalog-swm-subject',
   ]) assert.equal(serialized.includes(sensitive), false, sensitive);
@@ -234,6 +235,19 @@ test('catalog preflight rejects compatibility authority with legacy sync allowed
   assert.equal(runtime.state.sourceMarkers.size, 0);
 });
 
+test('preflight rejects distinct node URLs that report the same daemon identity', async () => {
+  const runtime = createCertificationRuntime({ sameDaemonIdentity: true });
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'duplicate-node-identity'
+      && error.phase === 'preflight',
+  );
+  assert.equal(runtime.state.sourceMarkers.size, 0);
+  assert.equal(runtime.state.receiverMarkers.size, 0);
+  assert.deepEqual(runtime.state.commands, []);
+});
+
 test('catalog status parity alone cannot certify VM queryability', async () => {
   const runtime = createCertificationRuntime();
   const config = baseConfig();
@@ -292,6 +306,39 @@ test('final preflight rejects a node build that changed during certification', a
       && error.phase === 'final-preflight',
   );
   assert.equal(observerStatusReads, 2);
+  assert.deepEqual(runtime.state.commands, ['stop', 'start']);
+});
+
+test('final preflight rejects a daemon identity that changed during certification', async () => {
+  const runtime = createCertificationRuntime();
+  const delegateFetch = runtime.fetchFn;
+  let sourceStatusReads = 0;
+  runtime.fetchFn = async (input, options) => {
+    const response = await delegateFetch(input, options);
+    const url = new URL(input);
+    if (
+      url.origin !== SOURCE_URL
+      || url.pathname !== '/api/status'
+      || (options?.method ?? 'GET') !== 'GET'
+    ) return response;
+    sourceStatusReads += 1;
+    if (sourceStatusReads < 3) return response;
+    const body = await response.json();
+    body.rfc64Certification.daemonIdentity = '12D3KooReplacementDaemonIdentity';
+    return new Response(JSON.stringify(body), {
+      status: response.status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'node-identity-changed'
+      && error.category === 'invariant'
+      && error.phase === 'final-preflight',
+  );
+  assert.equal(sourceStatusReads, 3);
   assert.deepEqual(runtime.state.commands, ['stop', 'start']);
 });
 

@@ -213,7 +213,7 @@ redacted plan without reading secrets, opening a network connection, or
 executing a command.
 
 ```sh
-node --import tsx packages/agent/devnet/rfc64-remote-canary/run.mjs \
+pnpm devnet:rfc64-remote-canary -- \
   --config /absolute/path/to/canary.json \
   --artifact /absolute/path/to/certificate.json \
   --dry-run

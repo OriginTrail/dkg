@@ -438,6 +438,30 @@ importers:
         specifier: ^6.16.0
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
 
+  devnet/rfc64-remote-canary:
+    dependencies:
+      '@origintrail-official/dkg':
+        specifier: workspace:*
+        version: link:../../packages/cli
+      '@origintrail-official/dkg-agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@origintrail-official/dkg-http-utils':
+        specifier: workspace:*
+        version: link:../../packages/http-utils
+      '@traqula/parser-sparql-1-1':
+        specifier: 1.3.0
+        version: 1.3.0
+      ajv:
+        specifier: 8.18.0
+        version: 8.18.0
+      ajv-formats:
+        specifier: 3.0.1
+        version: 3.0.1(ajv@8.18.0)
+
   devnet/rich-scenario:
     dependencies:
       '@origintrail-official/dkg-chain':
@@ -594,9 +618,6 @@ importers:
       '@origintrail-official/dkg-core':
         specifier: workspace:*
         version: link:../core
-      '@origintrail-official/dkg-http-utils':
-        specifier: workspace:*
-        version: link:../http-utils
       '@origintrail-official/dkg-publisher':
         specifier: workspace:*
         version: link:../publisher
@@ -625,21 +646,12 @@ importers:
       '@opentelemetry/sdk-metrics':
         specifier: ^2.8.0
         version: 2.8.0(@opentelemetry/api@1.9.1)
-      '@traqula/parser-sparql-1-1':
-        specifier: 1.3.0
-        version: 1.3.0
       '@types/js-yaml':
         specifier: ^4.0.9
         version: 4.0.9
       '@vitest/coverage-v8':
         specifier: ^4.0.18
         version: 4.0.18(vitest@4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0))
-      ajv:
-        specifier: 8.18.0
-        version: 8.18.0
-      ajv-formats:
-        specifier: 3.0.1
-        version: 3.0.1(ajv@8.18.0)
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)

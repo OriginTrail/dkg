@@ -4,11 +4,14 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
 
-import { createAllowedHttpAuthentication } from '../../../cli/src/auth.ts';
-import { handleKnowledgeAssetsRoutes } from '../../../cli/src/daemon/routes/knowledge-assets.ts';
-import { handleQueryRoutes } from '../../../cli/src/daemon/routes/query.ts';
-import { handleStatusRoutes } from '../../../cli/src/daemon/routes/status.ts';
-import { decodeRfc64DaemonCertificationStatusV1 } from '../../src/rfc64/daemon-certification-status-v1.ts';
+import { decodeRfc64DaemonCertificationStatusV1 } from '@origintrail-official/dkg-agent';
+import {
+  createAllowedHttpAuthentication,
+  handleKnowledgeAssetsRoutes,
+  handleQueryRoutes,
+  handleStatusRoutes,
+  loadBuildInfo,
+} from '@origintrail-official/dkg/daemon/certification-api';
 
 import {
   createRemoteCanaryCohortRefV1,
@@ -20,7 +23,11 @@ import { CATALOG_SWM_ASK, CG } from './test-support.mjs';
 
 const OPERATIONAL_DIGEST = `0x${'ab'.repeat(32)}`;
 const INVENTORY_DIGEST = `0x${'cd'.repeat(32)}`;
-const NODE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+const FALLBACK_NODE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+const BUILD_INFO_COMMIT = loadBuildInfo().commit;
+const NODE_COMMIT = BUILD_INFO_COMMIT === 'uncommitted'
+  ? FALLBACK_NODE_COMMIT
+  : BUILD_INFO_COMMIT;
 const NODE_ADDRESS = '0x1111111111111111111111111111111111111111';
 const RECEIVER_SECRET_FILE = '/tmp/daemon-contract-receiver-token';
 const RECEIVER_TOKEN = 'daemon-contract-receiver-token';
@@ -33,7 +40,7 @@ test('required gate certifies through the production status, KA, and query handl
   const receiver = await startRouteServer(createRouteAgent(receiverState), receiverState);
   try {
     const liveStatus = await fetch(`${source.baseUrl}/api/status`).then((response) => response.json());
-    assert.match(liveStatus.commit, /^[0-9a-f]{40}$/u);
+    assert.equal(liveStatus.commit, NODE_COMMIT);
     assert.equal(
       liveStatus.rfc64Certification.schema,
       'dkg-rfc64-daemon-certification-status-v1',
@@ -41,9 +48,23 @@ test('required gate certifies through the production status, KA, and query handl
     const certificationStatus = decodeRfc64DaemonCertificationStatusV1(
       liveStatus.rfc64Certification,
     );
+    assert.equal(certificationStatus.commit, NODE_COMMIT);
+    assert.equal(certificationStatus.daemonIdentity, '12D3KooDaemonContractsource');
     assert.equal(certificationStatus.catalog.contextGraphs.length, 1);
+    const receiverStatus = await fetch(`${receiver.baseUrl}/api/status`).then(
+      (response) => response.json(),
+    );
+    const receiverCertificationStatus = decodeRfc64DaemonCertificationStatusV1(
+      receiverStatus.rfc64Certification,
+    );
+    assert.equal(receiverCertificationStatus.commit, NODE_COMMIT);
+    assert.equal(receiverCertificationStatus.daemonIdentity, '12D3KooDaemonContractreceiver');
+    assert.notEqual(
+      certificationStatus.daemonIdentity,
+      receiverCertificationStatus.daemonIdentity,
+    );
 
-    const config = createContractConfig(source.baseUrl, receiver.baseUrl, liveStatus.commit);
+    const config = createContractConfig(source.baseUrl, receiver.baseUrl, NODE_COMMIT);
     const normalized = validateRemoteCanaryConfigV1(config);
     const cohortRef = createRemoteCanaryCohortRefV1(normalized);
     const fetchFn = createContractFetch();
@@ -68,7 +89,7 @@ test('required gate certifies through the production status, KA, and query handl
         return JSON.stringify({
           schema: 'dkg-rpc-usage-minutes-v1',
           scope: 'certified-cohort',
-          expectedCommit: liveStatus.commit,
+          expectedCommit: NODE_COMMIT,
           cohortRef,
           samples: [{
             windowStartedAt: '2026-09-11T00:01:00.000Z',
@@ -121,8 +142,9 @@ test('certification fails when independent receiver delivery is disabled', async
     const liveStatus = await fetch(`${source.baseUrl}/api/status`).then(
       (response) => response.json(),
     );
-    assert.match(liveStatus.commit, /^[0-9a-f]{40}$/u);
-    const config = createContractConfig(source.baseUrl, receiver.baseUrl, liveStatus.commit);
+    assert.equal(liveStatus.commit, NODE_COMMIT);
+    assert.equal(liveStatus.rfc64Certification.commit, NODE_COMMIT);
+    const config = createContractConfig(source.baseUrl, receiver.baseUrl, NODE_COMMIT);
     await assert.rejects(
       executeRemoteCanaryCertificationV1(config, {
         fetchFn: createContractFetch(),
