@@ -149,10 +149,8 @@ import {
   resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
-import {
-  rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
-  selectRfc64CatalogAuthorityRefreshWorkloadV1,
-} from './rfc64/catalog-rollout-authority-v1.js';
+import { rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1 } from
+  './rfc64/catalog-rollout-authority-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -167,16 +165,6 @@ import type { Rfc64CatalogMutationCoordinatorV1 } from
 import {
   Rfc64CatalogReplaySnapshotRuntimeV1,
 } from './rfc64/catalog-replay-snapshot-runtime-v1.js';
-import {
-  mapRfc64CatalogAuthorityRevisionsToLocalV1,
-  projectRfc64CatalogAuthorityRevisionTargetsV1,
-} from './rfc64/catalog-authority-revision-projection-v1.js';
-import {
-  Rfc64CatalogAuthorityRevisionReadFailureV1,
-  type Rfc64CatalogAuthorityRevisionReadV1,
-  type Rfc64CatalogAuthorityRevisionSourceV1,
-} from
-  './rfc64/catalog-authority-refresh-loop-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -1310,68 +1298,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this,
       this.config.rfc64CatalogExecutionPlan,
     ).snapshot();
-  }
-
-  /** Lifecycle responsibilities after the execution plan assigns one owner. */
-  readRfc64CatalogAuthorityRefreshResponsibilitiesV1(
-    this: DKGAgent,
-  ): readonly Rfc64CatalogResponsibilitySelectionV1[] {
-    return selectRfc64CatalogAuthorityRefreshWorkloadV1(
-      this.config.rfc64CatalogExecutionPlan,
-      this.readRfc64CatalogResponsibilitiesV1(),
-    );
-  }
-
-  /** Build the paired local projection and physical lifecycle capability. */
-  createRfc64CatalogAuthorityRevisionSourceV1(
-    this: DKGAgent,
-  ): Rfc64CatalogAuthorityRevisionSourceV1 | undefined {
-    const reader = this.chain.contextGraphAuthorityIndexRevisionReader;
-    if (reader === undefined) return undefined;
-    return Object.freeze({
-      read: async (
-        contextGraphIds: readonly string[],
-        signal: AbortSignal,
-      ): Promise<Rfc64CatalogAuthorityRevisionReadV1> => {
-        const targets = projectRfc64CatalogAuthorityRevisionTargetsV1(
-          contextGraphIds,
-          (contextGraphId) => this.contextGraphBindingState.authorityIndexOnChainIdFor(
-            contextGraphId,
-            this.subscribedContextGraphs.get(contextGraphId),
-          ),
-        );
-        const fallbackContextGraphIds = new Set(contextGraphIds);
-        for (const localContextGraphIds of targets.localContextGraphIdsByOnChainId.values()) {
-          for (const contextGraphId of localContextGraphIds) {
-            fallbackContextGraphIds.delete(contextGraphId);
-          }
-        }
-        if (targets.onChainContextGraphIds.length === 0) return new Map();
-        let revisions: Awaited<ReturnType<
-          typeof reader.readContextGraphAuthorityIndexRevisions
-        >>;
-        try {
-          revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
-            signal,
-            (readSignal) => reader.readContextGraphAuthorityIndexRevisions(
-                targets.onChainContextGraphIds,
-                { signal: readSignal },
-            ),
-          );
-        } catch (error) {
-          if (signal.aborted) throw error;
-          throw new Rfc64CatalogAuthorityRevisionReadFailureV1(
-            error,
-            fallbackContextGraphIds,
-          );
-        }
-        return mapRfc64CatalogAuthorityRevisionsToLocalV1(
-          revisions,
-          targets.localContextGraphIdsByOnChainId,
-        );
-      },
-      whenIdle: () => reader.whenIdle(),
-    });
   }
 
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */

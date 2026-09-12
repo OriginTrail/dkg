@@ -459,8 +459,8 @@ import {
 } from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
-import { Rfc64CatalogAuthorityRefreshLoopV1 } from
-  './rfc64/catalog-authority-refresh-loop-v1.js';
+import { createRfc64CatalogAuthorityRefreshOwnerV1 } from
+  './rfc64/catalog-authority-refresh-binding-v1.js';
 import { Rfc64PublicCatalogWorkloadOwnerV1 } from
   './rfc64/public-catalog-workload-owner-v1.js';
 import {
@@ -1067,12 +1067,21 @@ export class DKGAgent extends DKGAgentBase {
         warn: (ctx, message) => this.log.warn(ctx, message),
       }),
     );
-    const authorityRefreshOwner = new Rfc64CatalogAuthorityRefreshLoopV1({
-      readActiveContextGraphIds: () => (
-        this.readRfc64CatalogAuthorityRefreshResponsibilitiesV1()
-      )
-        .map(({ contextGraphId }) => contextGraphId),
-      authorityRevisionSource: this.createRfc64CatalogAuthorityRevisionSourceV1(),
+    const authorityRefreshOwner = createRfc64CatalogAuthorityRefreshOwnerV1({
+      executionPlan: this.config.rfc64CatalogExecutionPlan,
+      readResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
+      revisionSource: {
+        revisionReader: this.chain.contextGraphAuthorityIndexRevisionReader,
+        resolveBinding: (contextGraphId) => (
+          this.contextGraphBindingState.authorityIndexOnChainIdFor(
+            contextGraphId,
+            this.subscribedContextGraphs.get(contextGraphId),
+          )
+        ),
+        runAuthorityRead: (signal, read) => (
+          this.rfc64AuthorityReadCoordinatorV1.run(signal, read)
+        ),
+      },
       onActiveContextGraphIdsReadFailure: (error) => {
         this.log.warn(
           createOperationContext('system'),
@@ -1087,8 +1096,8 @@ export class DKGAgent extends DKGAgentBase {
       },
       refreshContextGraph: async (contextGraphId, signal) => (
         await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal) === null
-          ? Object.freeze({ kind: 'superseded' as const })
-          : Object.freeze({ kind: 'committed' as const })
+          ? 'superseded'
+          : 'committed'
       ),
       onRefreshFailure: (contextGraphId, error) => {
         this.log.warn(

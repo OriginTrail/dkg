@@ -62,9 +62,7 @@ export interface Rfc64CatalogAuthorityRevisionSourceV1 {
   whenIdle(): Promise<void>;
 }
 
-export type Rfc64CatalogAuthorityRefreshResultV1 =
-  | Readonly<{ kind: 'committed' }>
-  | Readonly<{ kind: 'superseded' }>;
+export type Rfc64CatalogAuthorityRefreshResultV1 = 'committed' | 'superseded';
 
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
@@ -112,7 +110,7 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
         try {
           const result = await refresh(this.contextGraphId, signal);
           if (signal.aborted) return;
-          if (result.kind === 'superseded') {
+          if (result === 'superseded') {
             if (target.force) this.#acceptedRevision = undefined;
             return;
           }

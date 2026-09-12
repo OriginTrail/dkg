@@ -10,8 +10,8 @@ import {
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
 
-const COMMITTED = Object.freeze({ kind: 'committed' as const });
-const SUPERSEDED = Object.freeze({ kind: 'superseded' as const });
+const COMMITTED = 'committed' as const;
+const SUPERSEDED = 'superseded' as const;
 
 function createSchedulerHarness() {
   const scheduled: Array<Readonly<{

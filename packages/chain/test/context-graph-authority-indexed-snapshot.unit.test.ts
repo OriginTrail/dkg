@@ -62,7 +62,10 @@ interface IndexedAuthorityHarness {
 }
 
 function makeIndexedAuthorityAdapter(
-  options: Readonly<{ deactivated?: boolean }> = {},
+  options: Readonly<{
+    deactivated?: boolean;
+    secondContextGraph?: boolean;
+  }> = {},
 ): IndexedAuthorityHarness {
   const scenario = createAuthorityScenario(options);
   const authorityIndexStore = new MemoryAuthorityIndexStore();
@@ -221,22 +224,30 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
   });
 
   it('projects stable per-CG revisions from one shared index advance', async () => {
-    const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter();
+    const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
+      secondContextGraph: true,
+    });
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
 
     const initial = await reader.readContextGraphAuthorityIndexRevisions(
       [authorityIndexId('9'), authorityIndexId('9'), authorityIndexId('10')],
     );
-    expect(initial).toEqual(new Map([[
-      '9',
-      expect.stringMatching(/^0x[0-9a-f]{64}$/u),
-    ]]));
+    expect(initial).toEqual(new Map([
+      ['9', expect.stringMatching(/^0x[0-9a-f]{64}$/u)],
+      ['10', expect.stringMatching(/^0x[0-9a-f]{64}$/u)],
+    ]));
+    expect(initial.get(authorityIndexId('9'))).not.toBe(
+      initial.get(authorityIndexId('10')),
+    );
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
 
     const unchanged = await reader.readContextGraphAuthorityIndexRevisions([
       authorityIndexId('9'),
     ]);
-    expect(unchanged).toEqual(initial);
+    expect(unchanged).toEqual(new Map([[
+      '9',
+      initial.get(authorityIndexId('9')),
+    ]]));
     expect(evidence.indexRanges).toHaveLength(3);
 
     advanceAuthorityHead();
