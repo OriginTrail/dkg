@@ -12,7 +12,7 @@ import {
   dispatchChildCommandV1,
 } from './child-protocol.mjs';
 import { emitAuthoritativeRuntimeShutdownReceiptV1 } from './runtime-shutdown.mjs';
-import { createRfc64PrivateFaultProfileV1 } from './fault-injection.mjs';
+import { parseRfc64PrivateFaultSelectionV1 } from './fault-injection.mjs';
 import {
   createRfc64PrivateFinalizedRuntimeV1,
   createRfc64PrivateProbeRuntimeV1,
@@ -55,11 +55,9 @@ function emit(event, requestId, fields = {}) {
 }
 
 async function boot() {
-  const faultProfile = createRfc64PrivateFaultProfileV1(process.env);
   if (MODE === 'probe') {
     runtime = await createRfc64PrivateProbeRuntimeV1({
       dataDir: DATA_DIR,
-      faultProfile,
       role: ROLE,
     });
     childCommandHandlers = createChildCommandHandlersV1(runtime);
@@ -74,7 +72,7 @@ async function boot() {
   );
   runtime = await createRfc64PrivateFinalizedRuntimeV1({
     dataDir: DATA_DIR,
-    faultProfile,
+    faultSelection: parseRfc64PrivateFaultSelectionV1(process.env),
     manifest,
     role: ROLE,
   });

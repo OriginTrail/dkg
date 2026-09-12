@@ -29,7 +29,6 @@ const DEFAULT_MAX_NQUADS_BYTES = 64 * 1024;
 /** @typedef {Rfc64PrivateAbsentSwmProofV1 | Rfc64PrivateWorkspaceHeadSwmProofV1 | Rfc64PrivateCatalogRowSwmProofV1} Rfc64PrivateSwmProofV1 */
 /** @typedef {{ readonly kaNumber: number, readonly kaUal: string, readonly swmGraph: string, readonly swm: number, readonly swmDigest: string, readonly swmProof: Rfc64PrivateSwmProofV1, readonly vmGraph: string, readonly vm: number, readonly vmDigest: string, readonly vmHead: Rfc64PrivateLayerHeadEvidenceV1 | null }} Rfc64PrivateCatalogMemoryEvidenceRowV1 */
 /** @typedef {{ readonly kaNumber: number, readonly kaUal: string, readonly swmGraph: string, readonly swm: number, readonly swmDigest: string, readonly vmGraph: string, readonly vm: number, readonly vmDigest: string, readonly vmHead: Rfc64PrivateLayerHeadEvidenceV1 | null }} Rfc64PrivateCatalogAppliedProjectionEvidenceRowV1 */
-/** @typedef {Rfc64PrivateCatalogAppliedProjectionEvidenceRowV1 & { readonly swmHead?: Rfc64PrivateLayerHeadEvidenceV1 | null }} Rfc64PrivateCatalogProjectionEvidenceRowV1 */
 /** @typedef {{ readonly assetNumbers: readonly number[], readonly networkId: string, readonly contextGraphId: string, readonly authorAddress: string }} Rfc64PrivateCatalogEvidenceInputV1 */
 /** @typedef {{ readonly projection: Rfc64PrivateGraphProjectionEvidenceV1, readonly assertionVersion: string }} Rfc64PrivateVmExpectationV1 */
 /** @typedef {Rfc64PrivateVmExpectationV1 & { readonly proofKind: 'workspace-head', readonly shareOperationIdPrefix?: string }} Rfc64PrivateWorkspaceSwmExpectationV1 */
@@ -105,12 +104,17 @@ export async function readExactGraphMemoryEvidence(store, graph, options = {}) {
  */
 export async function readPrivateCatalogWorkspaceMemoryEvidenceV1(store, input) {
   assertPrivateCatalogEvidenceInput(input);
-  const evidence = await readPrivateCatalogProjectionEvidenceV1(store, input, {
-    includeWorkspaceHead: true,
-  });
-  return Object.freeze(evidence.map(({ swmHead, ...entry }) => Object.freeze({
-    ...entry,
-    swmProof: workspaceHeadProofV1(swmHead),
+  return Object.freeze(await Promise.all(input.assetNumbers.map(async (kaNumber) => {
+    const kaUal = `did:dkg:${input.networkId}/${input.authorAddress}/${kaNumber}`;
+    const [entry, swmHead] = await Promise.all([
+      readPrivateCatalogBaseProjectionEvidenceRowV1(store, input, kaNumber),
+      readLayerHeadEvidence(store, {
+        graph: contextGraphWorkspaceMetaGraphUri(input.contextGraphId),
+        subject: `${kaUal}#dkg-swm-head`,
+        includeShareOperationId: true,
+      }),
+    ]);
+    return Object.freeze({ ...entry, swmProof: workspaceHeadProofV1(swmHead) });
   })));
 }
 
@@ -122,62 +126,51 @@ export async function readPrivateCatalogWorkspaceMemoryEvidenceV1(store, input) 
  */
 export async function readPrivateCatalogAppliedProjectionEvidenceV1(store, input) {
   assertPrivateCatalogEvidenceInput(input);
-  const evidence = await readPrivateCatalogProjectionEvidenceV1(store, input, {
-    includeWorkspaceHead: false,
-  });
-  return Object.freeze(evidence.map(({ swmHead: _swmHead, ...entry }) => Object.freeze(entry)));
+  return Object.freeze(await Promise.all(input.assetNumbers.map(
+    (kaNumber) => readPrivateCatalogBaseProjectionEvidenceRowV1(store, input, kaNumber),
+  )));
 }
 
 /**
  * @param {TripleStore} store
  * @param {Rfc64PrivateCatalogEvidenceInputV1} input
- * @param {{ includeWorkspaceHead: boolean }} options
- * @returns {Promise<readonly Readonly<Rfc64PrivateCatalogProjectionEvidenceRowV1>[]>}
+ * @param {number} kaNumber
+ * @returns {Promise<Readonly<Rfc64PrivateCatalogAppliedProjectionEvidenceRowV1>>}
  */
-async function readPrivateCatalogProjectionEvidenceV1(store, input, options) {
-  return Object.freeze(await Promise.all(input.assetNumbers.map(async (kaNumber) => {
-    const kaUal = `did:dkg:${input.networkId}/${input.authorAddress}/${kaNumber}`;
-    const swmGraph = contextGraphLayerUri(
-      input.contextGraphId,
-      MemoryLayer.SharedWorkingMemory,
-      input.authorAddress,
-      kaNumber,
-    );
-    const vmGraph = contextGraphLayerUri(
-      input.contextGraphId,
-      MemoryLayer.VerifiableMemory,
-      input.authorAddress,
-      kaNumber,
-    );
-    const [swm, vm, swmHead, vmHead] = await Promise.all([
-      readExactGraphMemoryEvidence(store, swmGraph),
-      readExactGraphMemoryEvidence(store, vmGraph),
-      options.includeWorkspaceHead
-        ? readLayerHeadEvidence(store, {
-            graph: contextGraphWorkspaceMetaGraphUri(input.contextGraphId),
-            subject: `${kaUal}#dkg-swm-head`,
-            includeShareOperationId: true,
-          })
-        : undefined,
-      readLayerHeadEvidence(store, {
-        graph: contextGraphMetaUri(input.contextGraphId),
-        subject: kaUal,
-        includeShareOperationId: false,
-      }),
-    ]);
-    return Object.freeze({
-      kaNumber,
-      kaUal,
-      swmGraph,
-      swm: swm.count,
-      swmDigest: swm.digest,
-      ...(options.includeWorkspaceHead ? { swmHead } : {}),
-      vmGraph,
-      vm: vm.count,
-      vmDigest: vm.digest,
-      vmHead,
-    });
-  })));
+async function readPrivateCatalogBaseProjectionEvidenceRowV1(store, input, kaNumber) {
+  const kaUal = `did:dkg:${input.networkId}/${input.authorAddress}/${kaNumber}`;
+  const swmGraph = contextGraphLayerUri(
+    input.contextGraphId,
+    MemoryLayer.SharedWorkingMemory,
+    input.authorAddress,
+    kaNumber,
+  );
+  const vmGraph = contextGraphLayerUri(
+    input.contextGraphId,
+    MemoryLayer.VerifiableMemory,
+    input.authorAddress,
+    kaNumber,
+  );
+  const [swm, vm, vmHead] = await Promise.all([
+    readExactGraphMemoryEvidence(store, swmGraph),
+    readExactGraphMemoryEvidence(store, vmGraph),
+    readLayerHeadEvidence(store, {
+      graph: contextGraphMetaUri(input.contextGraphId),
+      subject: kaUal,
+      includeShareOperationId: false,
+    }),
+  ]);
+  return Object.freeze({
+    kaNumber,
+    kaUal,
+    swmGraph,
+    swm: swm.count,
+    swmDigest: swm.digest,
+    vmGraph,
+    vm: vm.count,
+    vmDigest: vm.digest,
+    vmHead,
+  });
 }
 
 /**

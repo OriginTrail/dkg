@@ -2,7 +2,6 @@
 
 import type {
   AuthorCatalogScopeV1,
-  EvmAddressV1,
 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 
@@ -13,9 +12,6 @@ import type { VerifiedAppliedCatalogClosureV1 } from
 import type { Rfc64ReleaseNativeAuthoritySnapshotV1 } from
   '../../src/rfc64/release-native-catalog-authority-v1.js';
 import type { Rfc64PrivateDevnetChainAdapter } from './finalized-chain-fixture.mjs';
-import type {
-  createFinalizedChainFixture,
-} from './fixture.mjs';
 import {
   RFC64_PRIVATE_RUNTIME_ROLES_V1,
   type Rfc64PrivateRuntimeRoleV1,
@@ -31,8 +27,6 @@ export type Rfc64PrivateRuntimeManifestV1 = Readonly<{
   peerIds: Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>>;
 }>;
 
-export type Rfc64PrivateFinalizedChainFixtureV1 =
-  ReturnType<typeof createFinalizedChainFixture>;
 export type Rfc64PrivateCatalogAssetV1 = Rfc64CatalogSuccessorAssetInputV1;
 
 export type Rfc64PrivateCatalogClosureReaderV1 = (
@@ -40,43 +34,6 @@ export type Rfc64PrivateCatalogClosureReaderV1 = (
     trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
   }>,
 ) => Promise<Readonly<VerifiedAppliedCatalogClosureV1>>;
-
-export type Rfc64PrivateAuthorityAdapterOptionsV1 = Readonly<{
-  authorityStatePath: string | undefined;
-  participantRemovalAlsoRemoves: EvmAddressV1 | undefined;
-  participantRemovalNoop: boolean;
-}>;
-
-export type Rfc64PrivateCatalogProofInputsV1 = Readonly<{
-  expectedAssetNumbers: readonly number[];
-  readVerifiedAppliedCatalogClosure: Rfc64PrivateCatalogClosureReaderV1;
-  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
-  untrustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
-}>;
-
-export type Rfc64PrivateCatalogProofStrategyInputsV1 = Readonly<{
-  expectedAssetNumbers: readonly number[];
-  readVerifiedAppliedCatalogClosure: Rfc64PrivateCatalogClosureReaderV1;
-  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
-}>;
-
-export type Rfc64PrivateFaultProfileV1 = Readonly<{
-  authority: Readonly<{
-    fixture: (
-      canonical: Rfc64PrivateFinalizedChainFixtureV1,
-      receiverAddress: EvmAddressV1,
-    ) => Rfc64PrivateFinalizedChainFixtureV1;
-    adapterOptions: (input: Readonly<{
-      authorityStatePath: string;
-      ownerAddress: EvmAddressV1;
-    }>) => Rfc64PrivateAuthorityAdapterOptionsV1;
-  }>;
-  proof: Readonly<{
-    inputs: (
-      input: Rfc64PrivateCatalogProofInputsV1,
-    ) => Rfc64PrivateCatalogProofStrategyInputsV1;
-  }>;
-}>;
 
 export type Rfc64PrivateFinalizedRpcV1 = Readonly<{
   url: string;
@@ -107,14 +64,12 @@ export type ProbeRuntimeV1 = Readonly<{
   kind: 'probe';
   role: Rfc64PrivateRuntimeRoleV1;
   agent: DKGAgent;
-  faultProfile: Rfc64PrivateFaultProfileV1;
 }>;
 
 type FinalizedRuntimeCommonV1 = Readonly<{
   kind: 'run';
   agent: DKGAgent;
   chainAdapter: Rfc64PrivateDevnetChainAdapter;
-  faultProfile: Rfc64PrivateFaultProfileV1;
   rpc: Rfc64PrivateFinalizedRpcV1;
   initialFinalizedAuthority: Rfc64PrivateInitialFinalizedAuthorityV1;
   peerIds: Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>>;

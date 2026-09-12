@@ -23,12 +23,52 @@ import {
 import {
   hasExactPrivateCatalogFinalizedVmBaselineContents,
   parsePrivateCatalogLiteralEvidenceV1,
+  readPrivateCatalogAppliedProjectionEvidenceV1,
   readPrivateCatalogWorkspaceMemoryEvidenceV1,
 } from './memory-evidence.mjs';
 import {
   readExpectedPrivateMemoryV1,
   seedExpectedPrivateMemoryV1,
 } from './fixtures/private-memory-fixture.mjs';
+
+test('workspace augmentation preserves parallel graph reads and stable row order', async () => {
+  const started = [];
+  let releaseInitialReads;
+  const initialReads = new Promise((resolve) => { releaseInitialReads = resolve; });
+  const store = {
+    async query(sparql) {
+      started.push(sparql);
+      if (started.length === ASSET_NUMBERS.length * 4) releaseInitialReads();
+      await initialReads;
+      return sparql.includes('COUNT(*)')
+        ? { type: 'bindings', bindings: [{ count: '0' }] }
+        : { type: 'bindings', bindings: [] };
+    },
+  };
+  const input = {
+    assetNumbers: ASSET_NUMBERS,
+    authorAddress: roleAgentAddress('owner'),
+    contextGraphId: CONTEXT_GRAPH_ID,
+    networkId: 'otp:20430',
+  };
+  const workspacePromise = readPrivateCatalogWorkspaceMemoryEvidenceV1(store, input);
+  await Promise.race([
+    initialReads,
+    new Promise((_resolve, reject) => setTimeout(
+      () => reject(new Error('workspace graph reads did not start together')),
+      1_000,
+    )),
+  ]);
+  const workspace = await workspacePromise;
+  assert.deepEqual(workspace.map(({ kaNumber }) => kaNumber), ASSET_NUMBERS);
+  assert.equal(started.slice(0, 8).filter((sparql) => sparql.includes('COUNT(*)')).length, 4);
+  assert.equal(workspace.every(({ swmProof }) => swmProof.kind === 'absent'), true);
+
+  const applied = await readPrivateCatalogAppliedProjectionEvidenceV1(store, input);
+  assert.deepEqual(applied.map(({ kaNumber }) => kaNumber), ASSET_NUMBERS);
+  assert.equal(applied.every((row) => !Object.hasOwn(row, 'swmHead')), true);
+  assert.equal(applied.every((row) => !Object.hasOwn(row, 'swmProof')), true);
+});
 
 test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async () => {
   const workspaceGraphCounts = ASSET_NUMBERS.map((kaNumber) => ({

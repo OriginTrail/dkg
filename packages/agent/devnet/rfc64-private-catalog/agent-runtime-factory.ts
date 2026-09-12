@@ -47,12 +47,16 @@ import {
   createOwnerPublicationStateV1,
   type FinalizedRuntimeV1,
   type ProbeRuntimeV1,
-  type Rfc64PrivateFaultProfileV1,
   type Rfc64PrivateCatalogClosureReaderV1,
   type Rfc64PrivateFinalizedRpcV1,
   type Rfc64PrivateRuntimeManifestV1,
   type Rfc64PrivateRuntimeRoleV1,
 } from './agent-runtime.ts';
+import type {
+  Rfc64PrivateAuthorityFaultV1,
+  Rfc64PrivateCatalogProofFaultV1,
+  Rfc64PrivateFaultSelectionV1,
+} from './fault-injection.mjs';
 import {
   assertFinalizedAuthorityMatchesExpectedV1,
   assertInitialFinalizedAuthorityV1,
@@ -60,11 +64,11 @@ import {
 
 type ProbeRuntimeFactoryInputV1 = Readonly<{
   dataDir: string;
-  faultProfile: Rfc64PrivateFaultProfileV1;
   role: Rfc64PrivateRuntimeRoleV1;
 }>;
 
 type FinalizedRuntimeFactoryInputV1 = ProbeRuntimeFactoryInputV1 & Readonly<{
+  faultSelection: Readonly<Rfc64PrivateFaultSelectionV1>;
   manifest: Rfc64PrivateRuntimeManifestV1;
 }>;
 
@@ -139,11 +143,10 @@ export async function withRfc64PrivateFinalizedRuntimeAcquisitionV1<T>(
 export async function createRfc64PrivateProbeRuntimeV1(
   input: ProbeRuntimeFactoryInputV1,
 ): Promise<ProbeRuntimeV1> {
-  const { dataDir, faultProfile, role } = input;
+  const { dataDir, role } = input;
   rolePrivateKey(role);
   const created = Object.freeze({
     agent: await DKGAgent.create(createBaseAgentConfigV1({ dataDir, role })),
-    faultProfile,
   });
   await created.agent.start();
   return Object.freeze({ ...created, kind: 'probe', role });
@@ -157,14 +160,19 @@ export async function createRfc64PrivateFinalizedRuntimeV1(
     rolePrivateKey(role);
     const created = await createRfc64PrivateFinalizedAgentV1(input, owner);
     await created.agent.start();
-    return bindRfc64PrivateFinalizedRuntimeV1({ created, manifest, role });
+    return bindRfc64PrivateFinalizedRuntimeV1({
+      catalogProofFault: input.faultSelection.catalogProof,
+      created,
+      manifest,
+      role,
+    });
   });
 }
 
 async function createRfc64PrivateFinalizedAgentV1(
   {
     dataDir,
-    faultProfile,
+    faultSelection,
     manifest,
     role,
   }: FinalizedRuntimeFactoryInputV1,
@@ -172,15 +180,16 @@ async function createRfc64PrivateFinalizedAgentV1(
 ) {
   const store = owner.ownStore(new OxigraphStore(join(dataDir, 'oxigraph')));
   const canonicalFixture = createFinalizedChainFixture();
-  const fixture = faultProfile.authority.fixture(
+  const fixture = applyAuthorityFixtureFaultV1(
     canonicalFixture,
     roleAgentAddress('receiver'),
+    faultSelection.authority,
   );
   const chainAdapter = new Rfc64PrivateDevnetChainAdapter(fixture, {
-    ...faultProfile.authority.adapterOptions({
+    ...authorityAdapterOptionsV1({
       authorityStatePath: manifest.authorityStatePath,
       ownerAddress: roleAgentAddress('owner'),
-    }),
+    }, faultSelection.authority),
     signerAddress: roleAgentAddress(role),
   });
   await chainAdapter.createOnChainContextGraph({
@@ -249,14 +258,16 @@ async function createRfc64PrivateFinalizedAgentV1(
     },
   };
   const created = owner.ownAgent(await DKGAgent.create(finalizedConfig));
-  return Object.freeze({ agent: created, chainAdapter, faultProfile, rpc });
+  return Object.freeze({ agent: created, chainAdapter, rpc });
 }
 
 async function bindRfc64PrivateFinalizedRuntimeV1({
+  catalogProofFault,
   created,
   manifest,
   role,
 }: Readonly<{
+  catalogProofFault: Rfc64PrivateCatalogProofFaultV1 | null;
   created: Awaited<ReturnType<typeof createRfc64PrivateFinalizedAgentV1>>;
   manifest: Rfc64PrivateRuntimeManifestV1;
   role: Rfc64PrivateRuntimeRoleV1;
@@ -330,18 +341,79 @@ async function bindRfc64PrivateFinalizedRuntimeV1({
       finalizedAuthority: registeredFinalizedAuthority,
       expectedAuthority,
     });
+  const canonicalClosureReader = (
+    (input) => created.agent.readRfc64VerifiedAppliedCatalogClosureV1(input)
+  ) satisfies Rfc64PrivateCatalogClosureReaderV1;
   const common = Object.freeze({
     ...created,
     kind: 'run',
     initialFinalizedAuthority,
     peerIds: Object.freeze({ ...manifest.peerIds }),
-    readVerifiedAppliedCatalogClosure: (
-      (input) => created.agent.readRfc64VerifiedAppliedCatalogClosureV1(input)
-    ) satisfies Rfc64PrivateCatalogClosureReaderV1,
+    readVerifiedAppliedCatalogClosure: decorateCatalogClosureReaderV1(
+      canonicalClosureReader,
+      catalogProofFault,
+    ),
   });
   return role === 'owner'
     ? Object.freeze({ ...common, role, publication: createOwnerPublicationStateV1() })
     : Object.freeze({ ...common, role, publication: null });
+}
+
+function applyAuthorityFixtureFaultV1(
+  canonical: ReturnType<typeof createFinalizedChainFixture>,
+  receiverAddress: EvmAddressV1,
+  fault: Rfc64PrivateAuthorityFaultV1 | null,
+): ReturnType<typeof createFinalizedChainFixture> {
+  if (fault !== 'omit-receiver') return canonical;
+  return Object.freeze({
+    ...canonical,
+    participantAgents: Object.freeze(canonical.participantAgents.filter(
+      (address) => address !== receiverAddress,
+    )),
+  });
+}
+
+function authorityAdapterOptionsV1(
+  input: Readonly<{ authorityStatePath: string; ownerAddress: EvmAddressV1 }>,
+  fault: Rfc64PrivateAuthorityFaultV1 | null,
+) {
+  return Object.freeze({
+    authorityStatePath: fault === 'omit-receiver' ? undefined : input.authorityStatePath,
+    participantRemovalAlsoRemoves: fault === 'revocation-over-removal'
+      ? input.ownerAddress
+      : undefined,
+    participantRemovalNoop: fault === 'revocation-chain-noop',
+  });
+}
+
+/** Resolve every catalog-proof fault into the exact reader capability it affects. */
+function decorateCatalogClosureReaderV1(
+  reader: Rfc64PrivateCatalogClosureReaderV1,
+  fault: Rfc64PrivateCatalogProofFaultV1 | null,
+): Rfc64PrivateCatalogClosureReaderV1 {
+  if (fault === null) return reader;
+  if (fault === 'trusted-scope') {
+    return (input) => reader({
+      trustedCatalogScope: Object.freeze({
+        ...input.trustedCatalogScope,
+        authorAddress: roleAgentAddress('outsider'),
+      }),
+    });
+  }
+  if (fault === 'expected-assets' || fault === 'duplicate-expected-assets') {
+    return async (input) => {
+      await reader(input);
+      throw new Error(fault === 'expected-assets'
+        ? 'signed catalog row set differs from the expected asset identities'
+        : 'expected catalog SWM asset identities are duplicated');
+    };
+  }
+  const message = fault === 'inventory-digest'
+    ? 'signed catalog closure differs from the durable applied inventory digest'
+    : fault === 'missing-bundle'
+      ? 'signed catalog row has no durable KA bundle'
+      : 'durable KA bundle differs from its signed catalog row';
+  return async () => { throw new Error(message); };
 }
 
 function createBaseAgentConfigV1({

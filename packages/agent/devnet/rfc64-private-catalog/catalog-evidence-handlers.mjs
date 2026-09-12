@@ -326,18 +326,11 @@ async function readVerifiedAppliedCatalogMemoryV1(context, applied, scope) {
   if (applied === null) {
     throw new Error('catalog-row SWM evidence has no durable applied catalog');
   }
-  const proofInputs = context.faultProfile.proof.inputs({
+  return readVerifiedAppliedCatalogMemoryEvidenceV1({
     expectedAssetNumbers: ASSET_NUMBERS,
     readVerifiedAppliedCatalogClosure: context.readVerifiedAppliedCatalogClosure,
-    trustedCatalogScope: scope,
-    untrustedCatalogScope: Object.freeze({
-      ...scope,
-      authorAddress: roleAgentAddress('outsider'),
-    }),
-  });
-  return readVerifiedAppliedCatalogMemoryEvidenceV1({
-    ...proofInputs,
     store: context.agent.store,
+    trustedCatalogScope: scope,
   });
 }
 

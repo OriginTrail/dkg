@@ -1,26 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  type Rfc64PrivateFaultProfileV1,
+  type FinalizedRuntimeV1,
+  type ProbeRuntimeV1,
   type Rfc64PrivateRuntimeV1,
 } from './agent-runtime.ts';
 import type { Rfc64PrivateFinalizedAgentConfigV1 } from './agent-runtime-factory.ts';
 import { waitForBootstrapV1 } from './catalog-evidence-handlers.mjs';
 import { publishCatalogBaselineV1 } from './catalog-publication-handlers.mjs';
 
-// @ts-expect-error An authority strategy must transform the concrete finalized fixture.
-const malformedAuthorityStrategy: Rfc64PrivateFaultProfileV1['authority'] = {
-  adapterOptions: () => ({
-    authorityStatePath: undefined,
-    participantRemovalAlsoRemoves: undefined,
-    participantRemovalNoop: false,
-  }),
-};
-void malformedAuthorityStrategy;
-
-// @ts-expect-error A proof strategy cannot omit its canonical inputs transformer.
-const malformedProofStrategy: Rfc64PrivateFaultProfileV1['proof'] = {};
-void malformedProofStrategy;
+declare const probeRuntime: ProbeRuntimeV1;
+declare const finalizedRuntime: FinalizedRuntimeV1;
+// @ts-expect-error Probe runtimes expose only the real agent capability.
+void probeRuntime.faultProfile;
+// @ts-expect-error Finalized runtimes expose resolved capabilities, not test strategies.
+void finalizedRuntime.faultProfile;
 
 declare const finalizedAgentConfig: Rfc64PrivateFinalizedAgentConfigV1;
 const exactFinalizedChainConfig: Rfc64PrivateFinalizedAgentConfigV1 = finalizedAgentConfig;
