@@ -43,8 +43,9 @@ async function startCore(initialMembership = true) {
     randomSamplingUseWorkerThread: false, randomSamplingTickIntervalMs: 60_000,
   });
   const handles: RandomSamplingHandle[] = [];
-  const realCreate = agent.createRandomSamplingHandle.bind(agent);
-  const create = vi.spyOn(agent, 'createRandomSamplingHandle').mockImplementation(async (options) => {
+  const bindingOwner = agent as unknown as { resolveRandomSamplingBinding: typeof resolveRandomSamplingBinding };
+  const realCreate = bindingOwner.resolveRandomSamplingBinding.bind(agent);
+  const create = vi.spyOn(bindingOwner, 'resolveRandomSamplingBinding').mockImplementation(async (options) => {
     const binding = await realCreate(options);
     if (binding.kind === 'ready') handles.push(binding.handle);
     return binding;

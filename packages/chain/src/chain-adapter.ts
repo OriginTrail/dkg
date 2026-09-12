@@ -1,6 +1,5 @@
 import type {
   RandomSamplingAvailability,
-  RandomSamplingAvailabilityReader,
 } from './random-sampling-availability.js';
 import type { ethers } from 'ethers';
 import type { RpcUsageWindow } from './rpc-usage.js';
@@ -1181,7 +1180,7 @@ export interface KnowledgeAssetUpdateContext {
  * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
-export interface ChainAdapter extends RandomSamplingAvailabilityReader {
+export interface ChainAdapter {
   chainType: 'evm' | 'solana';
   chainId: string;
   /**

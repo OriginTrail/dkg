@@ -56,6 +56,7 @@ export default defineConfig({
       "test/random-sampling-context-graph-resolver.test.ts",
       "test/random-sampling-proof-repair.test.ts",
       "test/random-sampling-membership.test.ts",
+      "test/random-sampling-handle-compatibility.test.ts",
       "test/vm-reconcile-source-labels.test.ts",
       "test/profile-fix-verify.test.ts",
       "test/pca-v10-facade.test.ts",

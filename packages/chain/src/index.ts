@@ -210,4 +210,6 @@ export {
   readRandomSamplingAvailability,
   type RandomSamplingAvailability,
   type RandomSamplingAvailabilityReader,
+  type RandomSamplingAvailabilityResolver,
+  type LegacyRandomSamplingAvailabilityReader,
 } from './random-sampling-availability.js';

@@ -4,12 +4,14 @@ export type RandomSamplingAvailability =
   | { kind: 'unavailable'; reason: 'unsupported_chain' | 'contracts_not_deployed' }
   | { kind: 'indeterminate'; error: unknown };
 
-/** Narrow capability implemented by adapters that can resolve prover readiness. */
-export interface RandomSamplingAvailabilityReader {
-  isRandomSamplingReady?(): boolean;
-  isShardingTableMember?(identityId: bigint): Promise<boolean>;
-  resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
-}
+/** Authoritative resolver capability, derived from the canonical adapter contract. */
+export type RandomSamplingAvailabilityResolver = Required<Pick<ChainAdapter, 'resolveRandomSamplingAvailability'>>;
+
+/** Older adapters may offer either or neither compatibility probe. */
+export type LegacyRandomSamplingAvailabilityReader = Pick<ChainAdapter, 'isRandomSamplingReady' | 'isShardingTableMember'>;
+
+/** Compatibility input; method declarations remain owned solely by ChainAdapter. */
+export type RandomSamplingAvailabilityReader = LegacyRandomSamplingAvailabilityReader & Partial<RandomSamplingAvailabilityResolver>;
 
 /** Typed deployment miss emitted by adapters that own Random Sampling bindings. */
 export class RandomSamplingContractsUnavailableError extends Error {
@@ -41,12 +43,14 @@ export async function readRandomSamplingAvailability(
 ): Promise<RandomSamplingAvailability> {
   try {
     if (chain.resolveRandomSamplingAvailability) return await chain.resolveRandomSamplingAvailability(identityId);
-    if (!chain.isShardingTableMember) return { kind: 'unavailable', reason: 'unsupported_chain' };
+    const membershipProbe = chain.isShardingTableMember;
+    if (!membershipProbe) return { kind: 'unavailable', reason: 'unsupported_chain' };
     if (chain.isRandomSamplingReady && !chain.isRandomSamplingReady()) {
       return { kind: 'unavailable', reason: 'contracts_not_deployed' };
     }
-    return await probeRandomSamplingAvailability(() => chain.isShardingTableMember!(identityId));
+    return await probeRandomSamplingAvailability(() => membershipProbe.call(chain, identityId));
   } catch (error) {
     return { kind: 'indeterminate', error };
   }
 }
+import type { ChainAdapter } from './chain-adapter.js';

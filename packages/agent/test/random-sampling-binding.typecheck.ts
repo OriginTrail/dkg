@@ -1,5 +1,21 @@
 import type { RandomSamplingAvailability } from '@origintrail-official/dkg-chain';
 import type { RandomSamplingBindingResult, RandomSamplingHandle } from '../src/random-sampling-bind.js';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { RandomSamplingAvailabilityResolver, LegacyRandomSamplingAvailabilityReader, RandomSamplingAvailabilityReader } from '@origintrail-official/dkg-chain';
+
+const legacyProbes: LegacyRandomSamplingAvailabilityReader = { isShardingTableMember: async () => false };
+const unsupportedLegacy: RandomSamplingAvailabilityReader = {};
+const authoritative: RandomSamplingAvailabilityResolver = { resolveRandomSamplingAvailability: async () => ({ kind: 'available', member: true }) };
+// @ts-expect-error an authoritative resolver capability must provide its resolver
+const missingResolver: RandomSamplingAvailabilityResolver = {};
+void [legacyProbes, unsupportedLegacy, authoritative, missingResolver];
+
+declare const publicAgent: DKGAgent;
+declare const publicOptions: Parameters<DKGAgent['createRandomSamplingHandle']>[0];
+const publicHandle: Promise<RandomSamplingHandle> = publicAgent.createRandomSamplingHandle(publicOptions);
+void publicHandle;
+const noPublicBindingResolver: 'resolveRandomSamplingBinding' extends keyof DKGAgent ? false : true = true;
+void noPublicBindingResolver;
 
 declare const handle: RandomSamplingHandle;
 

@@ -204,6 +204,7 @@ import {
 } from './sync-verify-worker.js';
 import { classifyDurableMetaGraph } from './sync/durable-integrity.js';
 import {
+  bindRandomSampling,
   resolveRandomSamplingBinding,
 } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
@@ -2150,7 +2151,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         info: (message) => this.log.info(ctx, message),
         warn: (message) => this.log.warn(ctx, message),
       },
-      createHandle: (identityId) => this.createRandomSamplingHandle({
+      createHandle: (identityId) => this.resolveRandomSamplingBinding({
         role: 'core', chain: this.chain, store: this.store, identityId,
         walPath: this.config.randomSamplingWalPath,
         useWorkerThread: this.config.randomSamplingUseWorkerThread ?? true,
@@ -4336,8 +4337,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
   }
 
-  /** Bind fresh resources before the lifecycle takes replacement ownership. */
+  /** Public compatibility boundary returning a directly usable handle. */
   createRandomSamplingHandle(
+    this: DKGAgent,
+    options: Parameters<typeof bindRandomSampling>[0],
+  ): ReturnType<typeof bindRandomSampling> {
+    return bindRandomSampling(options);
+  }
+
+  /** Internal binding facts used by the runtime to manage replacement ownership. */
+  protected resolveRandomSamplingBinding(
     this: DKGAgent,
     options: Parameters<typeof resolveRandomSamplingBinding>[0],
   ): ReturnType<typeof resolveRandomSamplingBinding> {

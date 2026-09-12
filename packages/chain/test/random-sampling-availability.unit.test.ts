@@ -132,6 +132,18 @@ it('preserves legacy readiness and membership capabilities', async () => {
     .toEqual({ kind: 'unavailable', reason: 'contracts_not_deployed' });
 });
 
+it('preserves the adapter receiver through legacy readiness and membership probes', async () => {
+  const chain = {
+    ready: true,
+    member: true,
+    isRandomSamplingReady() { return this.ready; },
+    async isShardingTableMember(identityId: bigint) { return this.member && identityId === 52n; },
+  };
+  expect(await readRandomSamplingAvailability(chain, 52n)).toEqual({ kind: 'available', member: true });
+  chain.ready = false;
+  expect(await readRandomSamplingAvailability(chain, 52n)).toEqual({ kind: 'unavailable', reason: 'contracts_not_deployed' });
+});
+
 it('dispatches the offline adapter through its legacy readiness and membership capabilities', async () => {
   const chain = new MockChainAdapter();
   expect(await readRandomSamplingAvailability(chain, 0n)).toEqual({ kind: 'available', member: false });
