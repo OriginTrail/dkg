@@ -388,6 +388,10 @@ class PrivateReleaseScenarioContext {
     if (process.shutdown !== undefined) {
       throw new Error(`private release process already stopped: ${processId}`);
     }
+    if (!Number.isSafeInteger(child.exitSequence) || child.exitSequence < 1) {
+      throw new Error(`private release process has no valid exit sequence: ${processId}`);
+    }
+    process.exitSequence = child.exitSequence;
     process.shutdown = shutdown;
     this.runtimeEvidence.record(processId, shutdown);
     this.active.delete(child);

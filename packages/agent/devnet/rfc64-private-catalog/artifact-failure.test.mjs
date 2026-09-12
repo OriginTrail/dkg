@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { computeAuthorCatalogScopeDigestV1 } from '@origintrail-official/dkg-core';
+import { packKnowledgeAssetIdFromIdentity } from '../../src/ka-identity.ts';
 
 import {
   RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1,
@@ -22,6 +23,8 @@ import {
   assertInitialFinalizedAuthorityV1,
 } from './initial-authority.mjs';
 import {
+  ASSET_NUMBERS,
+  PRIVATE_CATALOG_MEMORY_EXPECTATION,
   createPrivateCatalogScope,
   createPrivateCatalogSyncScope,
   createPrivatePolicyAndRoster,
@@ -33,6 +36,7 @@ import {
   createOwnerPublicationStateV1,
   createProbeRuntimeV1,
 } from './agent-runtime.mjs';
+import { buildRfc64PrivateReleaseArtifactV1 } from './scenario-artifact.mjs';
 
 const PROTOCOL_TEST_DIGEST = `0x${'ab'.repeat(32)}`;
 const VALID_CHILD_COMMANDS = Object.freeze({
@@ -167,6 +171,22 @@ test('publication and synchronization derive the exact canonical catalog scope',
   });
 });
 
+test('artifact fails when receiver startup precedes owner exit', () => {
+  const evidence = passingScenarioEvidenceV1();
+  evidence.processes.owner.exitSequence = 5;
+  evidence.processes.receiver.spawnSequence = 4;
+  const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+  assert.equal(artifact.failoverBarrier.ownerExitedBeforeReceiverSpawn, false);
+  assert.equal(artifact.checks.ownerExitedBeforeReceiverRuntimeStarted, false);
+  assert.deepEqual(
+    Object.entries(artifact.checks)
+      .filter(([name]) => name !== 'ownerExitedBeforeReceiverRuntimeStarted')
+      .filter(([, passed]) => !passed),
+    [],
+  );
+  assert.equal(artifact.status, 'FAIL');
+});
+
 test('initial authority rejects a finalized-chain roster fault before readiness', () => {
   const expected = createPrivatePolicyAndRoster();
   const expectedAuthority = {
@@ -234,3 +254,188 @@ test('initial authority rejects a finalized-chain roster fault before readiness'
     message: 'test authority mismatch',
   }));
 });
+
+function passingScenarioEvidenceV1() {
+  const peerIds = Object.freeze({
+    owner: 'owner-peer',
+    provider2: 'provider2-peer',
+    receiver: 'receiver-peer',
+    outsider: 'outsider-peer',
+  });
+  const headObjectDigest = `0x${'cd'.repeat(32)}`;
+  const scopeDigest = computeAuthorCatalogScopeDigestV1(createPrivateCatalogScope());
+  const catalogState = scenarioMemoryStateV1(headObjectDigest, scopeDigest, 'catalog-row');
+  const sourceState = scenarioMemoryStateV1(headObjectDigest, scopeDigest, 'workspace-head');
+  const emptyState = Object.freeze({
+    appliedHeadDigest: null,
+    catalogScopeDigest: scopeDigest,
+    catalogVersion: null,
+    exactExpectedHead: false,
+    graphCounts: Object.freeze(ASSET_NUMBERS.map((kaNumber) => Object.freeze({
+      kaNumber,
+      swm: 0,
+      vm: 0,
+    }))),
+    inventoryRowCount: null,
+    outsiderVisibleVmBindings: null,
+    receiverStats: null,
+  });
+  const denial = Object.freeze({
+    applied: false,
+    denied: true,
+    failureClass: 'Rfc64PublicCatalogCurrentHeadDiscoveryErrorV1',
+    failureCode: 'catalog-discovery-policy-denied',
+  });
+  const ready = (role) => Object.freeze({
+    agentClass: 'DKGAgent',
+    catalogServiceStarted: true,
+    peerId: peerIds[role],
+    role,
+  });
+  const quietShutdown = scenarioShutdownV1({});
+  const finalizedShutdown = scenarioShutdownV1({
+    eth_call: 1,
+    eth_getBlockByNumber: 1,
+  });
+  const process = (processId, role, fields = {}) => ({
+    processId,
+    ready: ready(role),
+    role,
+    spawnSequence: 1,
+    spawnedAt: '2026-09-11T00:00:00.000Z',
+    observations: {},
+    ...fields,
+  });
+  const processes = {
+    'probe-owner': process('probe-owner', 'owner', { shutdown: quietShutdown }),
+    'probe-provider2': process('probe-provider2', 'provider2', { shutdown: quietShutdown }),
+    'probe-receiver': process('probe-receiver', 'receiver', { shutdown: quietShutdown }),
+    'probe-outsider': process('probe-outsider', 'outsider', { shutdown: quietShutdown }),
+    owner: process('owner', 'owner', {
+      exitSequence: 2,
+      observations: {
+        listenerClosed: true,
+        published: {
+          catalogVersion: '4',
+          headObjectDigest,
+          inventoryRowCount: '2',
+          policyDigest: `0x${'ef'.repeat(32)}`,
+          scopeDigest,
+        },
+        sourceState,
+      },
+      shutdown: quietShutdown,
+    }),
+    provider2: process('provider2', 'provider2', {
+      observations: {
+        accessState: { ...catalogState, outsiderVisibleVmBindings: 0 },
+        bootstrap: { appliedHeadDigest: headObjectDigest, providerPeerId: peerIds.owner },
+        listenerDialableAfterOwnerExit: true,
+        revocationObservation: {
+          curatorMetadataRefreshed: true,
+          providerMutationDenied: true,
+          revokedAgentAddress: roleAgentAddress('receiver'),
+          rosterVersion: '1',
+        },
+        state: catalogState,
+        stateAfterOwnerExit: catalogState,
+        stateAfterRevocation: catalogState,
+      },
+      shutdown: finalizedShutdown,
+    }),
+    'receiver-seed': process('receiver-seed', 'receiver', {
+      observations: {
+        bootstrap: { appliedHeadDigest: headObjectDigest, providerPeerId: peerIds.provider2 },
+        state: catalogState,
+      },
+      shutdown: finalizedShutdown,
+    }),
+    receiver: process('receiver', 'receiver', {
+      observations: {
+        bootstrap: { appliedHeadDigest: headObjectDigest, providerPeerId: peerIds.provider2 },
+        revokedDenial: denial,
+        state: catalogState,
+        stateAfterRevocation: catalogState,
+      },
+      shutdown: finalizedShutdown,
+    }),
+    'owner-revoker': process('owner-revoker', 'owner', {
+      observations: {
+        revocation: {
+          policyDigest: `0x${'ef'.repeat(32)}`,
+          revokedAgentAddress: roleAgentAddress('receiver'),
+          rosterVersion: '1',
+        },
+      },
+      shutdown: quietShutdown,
+    }),
+    outsider: process('outsider', 'outsider', {
+      observations: { denial, state: emptyState },
+      shutdown: quietShutdown,
+    }),
+    'receiver-restart': process('receiver-restart', 'receiver', {
+      observations: { state: catalogState },
+      shutdown: quietShutdown,
+    }),
+  };
+  return { peerIds, processes, runtimeProvenance: {} };
+}
+
+function scenarioMemoryStateV1(headObjectDigest, catalogScopeDigest, proofKind) {
+  const expectation = PRIVATE_CATALOG_MEMORY_EXPECTATION;
+  const authorAddress = expectation.swm.authorAddress;
+  return Object.freeze({
+    appliedHeadDigest: headObjectDigest,
+    catalogScopeDigest,
+    catalogVersion: expectation.swm.catalogVersion,
+    exactExpectedHead: true,
+    graphCounts: Object.freeze(ASSET_NUMBERS.map((kaNumber) => {
+      const swmGraph = `urn:swm:${kaNumber}`;
+      const vmGraph = `urn:vm:${kaNumber}`;
+      const swmProof = proofKind === 'workspace-head'
+        ? {
+            assertionGraph: swmGraph,
+            assertionVersion: expectation.swm.assertionVersion,
+            kind: proofKind,
+            shareOperationId: `${expectation.swm.shareOperationIdPrefix}${kaNumber}`,
+          }
+        : {
+            assertionVersion: expectation.swm.assertionVersion,
+            catalogHeadDigest: headObjectDigest,
+            kaId: packKnowledgeAssetIdFromIdentity({ agentAddress: authorAddress, kaNumber })
+              .toString(),
+            kind: proofKind,
+            projectionDigest: expectation.swm.catalogProjectionDigest,
+          };
+      return Object.freeze({
+        kaNumber,
+        swm: expectation.swm.projection.count,
+        swmDigest: expectation.swm.projection.digest,
+        swmGraph,
+        swmProof: Object.freeze(swmProof),
+        vm: expectation.vm.projection.count,
+        vmDigest: expectation.vm.projection.digest,
+        vmGraph,
+        vmHead: Object.freeze({
+          assertionGraph: vmGraph,
+          assertionVersion: expectation.vm.assertionVersion,
+        }),
+      });
+    })),
+    inventoryRowCount: ASSET_NUMBERS.length.toString(),
+    outsiderVisibleVmBindings: 0,
+    receiverStats: Object.freeze({ applied: 1, failed: 0 }),
+  });
+}
+
+function scenarioShutdownV1(rpcCallCounts) {
+  return Object.freeze({
+    exit: Object.freeze({
+      code: 0,
+      error: null,
+      exitedAt: '2026-09-11T00:00:01.000Z',
+      signal: null,
+    }),
+    rpcCallCounts: Object.freeze(rpcCallCounts),
+  });
+}
