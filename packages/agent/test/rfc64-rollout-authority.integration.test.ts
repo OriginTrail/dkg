@@ -38,6 +38,8 @@ import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
 import { isRfc64AuthorityRpcCircuitOpenErrorV1 } from
   '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
+import { Rfc64CatalogAuthorityRevisionReadFailureV1 } from
+  '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import type { Rfc64CatalogRuntimeV1 } from '../src/rfc64/catalog-runtime-v1.js';
 import { deriveRfc64PublicSwmGraphV1 } from
   '../src/rfc64/catalog-semantic-authority-transition-v1.js';
@@ -1296,7 +1298,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(edge.createRfc64CatalogAuthorityRevisionSourceV1()).toBeUndefined();
   });
 
-  it('propagates a supported authority-index reader failure', async () => {
+  it('preserves locally known fallback graphs on a supported reader failure', async () => {
     const failure = new Error('authority index unavailable');
     const readRevisions = vi.fn(async () => { throw failure; });
     const edge = await startAgent({
@@ -1327,7 +1329,11 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(revisionSource!.read(
       [CONTEXT_GRAPH_ID, `${AUTHOR}/unbound`],
       new AbortController().signal,
-    )).rejects.toBe(failure);
+    )).rejects.toMatchObject({
+      name: Rfc64CatalogAuthorityRevisionReadFailureV1.name,
+      cause: failure,
+      fallbackContextGraphIds: [`${AUTHOR}/unbound`],
+    });
     expect(readRevisions).toHaveBeenCalledWith(['9'], {
       signal: expect.any(AbortSignal),
     });

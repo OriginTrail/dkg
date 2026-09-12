@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { Rfc64CatalogAuthorityRefreshLoopV1 } from
-  '../src/rfc64/catalog-authority-refresh-loop-v1.js';
-import type {
-  Rfc64CatalogAuthorityRevisionReadV1,
-  Rfc64CatalogAuthorityRevisionSourceV1,
+import {
+  Rfc64CatalogAuthorityRefreshLoopV1,
+  Rfc64CatalogAuthorityRevisionReadFailureV1,
+  type Rfc64CatalogAuthorityRevisionReadV1,
+  type Rfc64CatalogAuthorityRevisionSourceV1,
 } from
   '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
@@ -335,6 +335,34 @@ describe('RFC-64 catalog authority refresh loop', () => {
     releasePhysicalRead();
     await closing;
     expect(closeSettled).toBe(true);
+  });
+
+  it('drains detached physical revision work before reporting idle', async () => {
+    let markReadStarted!: () => void;
+    let releasePhysicalRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve; });
+    const physicalRead = new Promise<void>((resolve) => { releasePhysicalRead = resolve; });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      authorityRevisionSource: revisionSource(async () => {
+        markReadStarted();
+        throw new Error('revision selector timed out');
+      }, () => physicalRead),
+      refreshContextGraph: async () => COMMITTED,
+      onRefreshFailure: () => undefined,
+    });
+
+    loop.start();
+    await readStarted;
+    let idleSettled = false;
+    const idle = loop.whenIdle().then(() => { idleSettled = true; });
+    await Promise.resolve();
+    expect(idleSettled).toBe(false);
+    releasePhysicalRead();
+    await idle;
+    expect(idleSettled).toBe(true);
+    await loop.close();
   });
 
   it('retires lanes that leave the active responsibility set and recreates them on return', async () => {
@@ -744,7 +772,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await loop.close();
   });
 
-  it('uses rejection as the sole shared-index read failure channel', async () => {
+  it('contains mapped work after rejection but preserves known legacy refreshes', async () => {
     const { scheduled, scheduler } = createSchedulerHarness();
     const failure = new Error('shared index unavailable');
     const readFailures: unknown[] = [];
@@ -755,7 +783,12 @@ describe('RFC-64 catalog authority refresh loop', () => {
       onActiveContextGraphIdsReadFailure: () => undefined,
       authorityRevisionSource: revisionSource(async () => {
         reads += 1;
-        if (reads > 1) throw failure;
+        if (reads > 1) {
+          throw new Rfc64CatalogAuthorityRevisionReadFailureV1(
+            failure,
+            ['unregistered'],
+          );
+        }
         return completeRevisionRead(
           new Map([['registered', 'revision-1']]),
         );
@@ -774,7 +807,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     scheduled[0]!.callback();
     await loop.whenIdle();
 
-    expect(attempts).toEqual(['registered', 'unregistered']);
+    expect(attempts).toEqual(['registered', 'unregistered', 'unregistered']);
     expect(readFailures).toEqual([failure]);
     await loop.close();
   });

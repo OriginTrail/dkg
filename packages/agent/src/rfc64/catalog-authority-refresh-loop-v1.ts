@@ -32,6 +32,27 @@ const rfc64CatalogAuthorityRefreshSchedulerV1:
  */
 export type Rfc64CatalogAuthorityRevisionReadV1 = ReadonlyMap<string, string>;
 
+/**
+ * A rejected shared-index read whose local projection completed first.
+ * The cause remains the observable read failure; the fallback IDs let an
+ * ordinary pass preserve work that never depended on the failed RPC scan.
+ */
+export class Rfc64CatalogAuthorityRevisionReadFailureV1 extends Error {
+  readonly fallbackContextGraphIds: readonly string[];
+
+  constructor(cause: unknown, fallbackContextGraphIds: Iterable<string>) {
+    super(
+      cause instanceof Error ? cause.message : String(cause),
+      { cause },
+    );
+    this.name = 'Rfc64CatalogAuthorityRevisionReadFailureV1';
+    this.fallbackContextGraphIds = Object.freeze([
+      ...new Set(fallbackContextGraphIds),
+    ]);
+    Object.freeze(this);
+  }
+}
+
 /** Paired revision-read and physical-lifecycle capability. */
 export interface Rfc64CatalogAuthorityRevisionSourceV1 {
   read(
@@ -230,6 +251,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
     const safety = !initial && (pass - 1)
       % RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.safetyRevalidationIntervalCount === 0;
     let revisions: Rfc64CatalogAuthorityRevisionReadV1 = new Map();
+    let ordinaryFailureFallbackContextGraphIds: ReadonlySet<string> | undefined;
     try {
       revisions = await this.#authorityRevisionSource.read(
         Object.freeze([...desiredContextGraphIds]),
@@ -237,15 +259,31 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       );
     } catch (error) {
       if (signal.aborted) return;
-      this.options.onAuthorityRevisionsReadFailure?.(error);
+      const projectedFailure = error instanceof Rfc64CatalogAuthorityRevisionReadFailureV1
+        ? error
+        : undefined;
+      this.options.onAuthorityRevisionsReadFailure?.(
+        projectedFailure === undefined ? error : projectedFailure.cause,
+      );
       // A failed delta read cannot identify a safe subset. The initial and
       // safety passes still revalidate everything; ordinary passes retry the
-      // one shared scan at the next cadence without fanning out per-CG reads.
-      if (!initial && !safety) return;
+      // shared scan at the next cadence without fanning out mapped CG reads.
+      // A production source can still preserve the locally projected legacy
+      // subset because those lanes never depended on the failed RPC scan.
+      if (!initial && !safety) {
+        if (projectedFailure === undefined) return;
+        ordinaryFailureFallbackContextGraphIds = new Set(
+          projectedFailure.fallbackContextGraphIds,
+        );
+      }
     }
     signal.throwIfAborted();
 
     for (const contextGraphId of desiredContextGraphIds) {
+      if (
+        ordinaryFailureFallbackContextGraphIds !== undefined
+        && !ordinaryFailureFallbackContextGraphIds.has(contextGraphId)
+      ) continue;
       let lane = this.#lanes.get(contextGraphId);
       if (lane === undefined || lane.closed) {
         lane = this.#createLane(contextGraphId);
@@ -268,9 +306,11 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
         ...retirements,
       ]);
       // A pass may begin while pre-existing lanes are draining. Re-fence the
-      // pass owner, then loop if it scheduled or retired any lane after the
-      // snapshot above so its resulting work is included in the idle proof.
+      // pass owner, then drain any physical revision read which outlived its
+      // cancellable selector. Loop if the pass scheduled or retired a lane
+      // after the snapshot above so its resulting work is also included.
       await passOwner?.whenIdle();
+      await this.#authorityRevisionSource.whenIdle();
       const currentLanes = [...this.#lanes.values()];
       const currentRetirements = [...this.#retirements];
       const samePassOwner = passOwner === this.#passOwner;

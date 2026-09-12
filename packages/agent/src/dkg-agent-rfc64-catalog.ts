@@ -171,9 +171,10 @@ import {
   mapRfc64CatalogAuthorityRevisionsToLocalV1,
   projectRfc64CatalogAuthorityRevisionTargetsV1,
 } from './rfc64/catalog-authority-revision-projection-v1.js';
-import type {
-  Rfc64CatalogAuthorityRevisionReadV1,
-  Rfc64CatalogAuthorityRevisionSourceV1,
+import {
+  Rfc64CatalogAuthorityRevisionReadFailureV1,
+  type Rfc64CatalogAuthorityRevisionReadV1,
+  type Rfc64CatalogAuthorityRevisionSourceV1,
 } from
   './rfc64/catalog-authority-refresh-loop-v1.js';
 
@@ -1339,14 +1340,31 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             this.subscribedContextGraphs.get(contextGraphId),
           ),
         );
+        const fallbackContextGraphIds = new Set(contextGraphIds);
+        for (const localContextGraphIds of targets.localContextGraphIdsByOnChainId.values()) {
+          for (const contextGraphId of localContextGraphIds) {
+            fallbackContextGraphIds.delete(contextGraphId);
+          }
+        }
         if (targets.onChainContextGraphIds.length === 0) return new Map();
-        const revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
-          signal,
-          (readSignal) => reader.readContextGraphAuthorityIndexRevisions(
-              targets.onChainContextGraphIds,
-              { signal: readSignal },
-          ),
-        );
+        let revisions: Awaited<ReturnType<
+          typeof reader.readContextGraphAuthorityIndexRevisions
+        >>;
+        try {
+          revisions = await this.rfc64AuthorityReadCoordinatorV1.run(
+            signal,
+            (readSignal) => reader.readContextGraphAuthorityIndexRevisions(
+                targets.onChainContextGraphIds,
+                { signal: readSignal },
+            ),
+          );
+        } catch (error) {
+          if (signal.aborted) throw error;
+          throw new Rfc64CatalogAuthorityRevisionReadFailureV1(
+            error,
+            fallbackContextGraphIds,
+          );
+        }
         return mapRfc64CatalogAuthorityRevisionsToLocalV1(
           revisions,
           targets.localContextGraphIdsByOnChainId,
