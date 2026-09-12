@@ -147,6 +147,43 @@ test('VM parity rejects every internally valid cross-node cursor divergence', as
   }
 });
 
+test('VM parity reads each participating node once per shared polling round', async () => {
+  const secondContextGraphId = 'second-canary';
+  const input = baseConfig();
+  input.contextGraphs.push({
+    ...input.contextGraphs[0],
+    id: secondContextGraphId,
+  });
+  const normalized = validateRemoteCanaryConfigV1(input);
+  const config = {
+    ...normalized,
+    timing: { ...normalized.timing, parityTimeoutMs: 50, pollIntervalMs: 1 },
+  };
+  const matchingStatus = structuredClone(statusBody());
+  matchingStatus.rfc64Catalog.contextGraphs.push({
+    ...matchingStatus.rfc64Catalog.contextGraphs[0],
+    contextGraphId: secondContextGraphId,
+  });
+  const firstReceiverStatus = structuredClone(matchingStatus);
+  firstReceiverStatus.rfc64Catalog.contextGraphs[1].catalogVersion = '8';
+  const statusReads = new Map(config.nodes.map((node) => [node.id, 0]));
+  const result = await verifyVmParityV1({
+    config,
+    request: {
+      json: async (node, method, path) => {
+        if (path !== '/api/status') return { result: { type: 'boolean', value: true } };
+        const read = statusReads.get(node.id) + 1;
+        statusReads.set(node.id, read);
+        return node.role === 'receiver' && read === 1 ? firstReceiverStatus : matchingStatus;
+      },
+    },
+    sleep: async () => undefined,
+  });
+
+  assert.deepEqual(result.map(({ status }) => status), ['PASS', 'PASS']);
+  assert.deepEqual([...statusReads.values()], [2, 2]);
+});
+
 function vmParityRequester(sourceStatus, receiverStatus) {
   return {
     json: async (node, method, path) => (

@@ -23,94 +23,27 @@ const NODE_COMMIT = '0123456789abcdef0123456789abcdef01234567';
 const NODE_ADDRESS = '0x1111111111111111111111111111111111111111';
 
 test('required gate certifies through the production status, KA, and query handlers', async () => {
-  const state = {
-    receiverReachable: true,
-    writtenByName: new Map(),
-    sharedSubjects: new Set(),
-    routeCalls: [],
-    offlineReceiverProbes: 0,
-  };
-  const agent = createRouteAgent(state);
-  const source = await startRouteServer(agent, state);
-  const receiver = await startRouteServer(agent, state);
+  const sourceState = createRouteState('source');
+  const receiverState = createRouteState('receiver');
+  const synchronization = createSynchronizationHarness(receiverState);
+  const source = await startRouteServer(createRouteAgent(sourceState, synchronization), sourceState);
+  const receiver = await startRouteServer(createRouteAgent(receiverState), receiverState);
   try {
     const liveStatus = await fetch(`${source.baseUrl}/api/status`).then((response) => response.json());
     assert.match(liveStatus.commit, /^[0-9a-f]{40}$/u);
 
-    const config = {
-      schema: 'dkg-rfc64-remote-canary-config-v1',
-      expectedCommit: liveStatus.commit,
-      nodes: [
-        { id: 'source-node', role: 'source', baseUrl: source.baseUrl, auth: { kind: 'none' } },
-        { id: 'receiver-node', role: 'receiver', baseUrl: receiver.baseUrl, auth: { kind: 'none' } },
-      ],
-      contextGraphs: [{
-        id: CG,
-        expectedMode: 'catalog',
-        sourceNodeId: 'source-node',
-        receiverNodeId: 'receiver-node',
-        vmAskSparql: 'ASK { <urn:known:vm-subject> ?p ?o }',
-        catalogSwmAskSparql: CATALOG_SWM_ASK,
-      }],
-      lifecycle: {
-        receiverNodeId: 'receiver-node',
-        stop: { argv: ['node-control', 'stop', 'receiver-node'] },
-        start: { argv: ['node-control', 'start', 'receiver-node'] },
-        stopTimeoutMs: 1_000,
-        readyTimeoutMs: 1_000,
-      },
-      authorizationChecks: {
-        unauthorized: {
-          kind: 'http',
-          nodeId: 'receiver-node',
-          method: 'GET',
-          path: '/api/rfc64/unauthorized-probe',
-          authentication: 'none',
-          expectedStatuses: [403],
-          bodyCodePointer: '/code',
-          expectedCodes: ['RFC64_DENIED'],
-        },
-        revoked: {
-          kind: 'http',
-          nodeId: 'receiver-node',
-          method: 'GET',
-          path: '/api/rfc64/revoked-probe',
-          authentication: 'node',
-          expectedStatuses: [403],
-          bodyCodePointer: '/code',
-          expectedCodes: ['RFC64_REVOKED'],
-        },
-      },
-      rpcUsage: {
-        kind: 'evidence-file',
-        path: '/tmp/daemon-contract-rpc-evidence.json',
-      },
-      timing: {
-        requestTimeoutMs: 1_000,
-        pollIntervalMs: 250,
-        propagationTimeoutMs: 1_000,
-        catchupTimeoutMs: 1_000,
-        parityTimeoutMs: 1_000,
-      },
-    };
+    const config = createContractConfig(source.baseUrl, receiver.baseUrl, liveStatus.commit);
     const normalized = validateRemoteCanaryConfigV1(config);
     const cohortRef = createRemoteCanaryCohortRefV1(normalized);
-    const fetchFn = async (input, options) => {
-      const url = new URL(input);
-      if (url.origin === receiver.baseUrl && !state.receiverReachable) {
-        state.offlineReceiverProbes += 1;
-        throw new TypeError('receiver offline');
-      }
-      if (url.pathname === '/api/rfc64/unauthorized-probe') {
-        return jsonResponse({ code: 'RFC64_DENIED' }, 403);
-      }
-      if (url.pathname === '/api/rfc64/revoked-probe') {
-        return jsonResponse({ code: 'RFC64_REVOKED' }, 403);
-      }
-      return fetch(input, options);
-    };
+    const fetchFn = createContractFetch();
     const runCommand = async ({ argv }) => {
-      state.receiverReachable = argv[1] !== 'stop';
+      if (argv[1] === 'stop') {
+        await receiver.stop();
+        synchronization.receiverStopped();
+      } else {
+        await receiver.start();
+        synchronization.receiverStarted();
+      }
       return { code: 0, signal: null, stdout: '' };
     };
     const artifact = await executeRemoteCanaryCertificationV1(config, {
@@ -136,16 +69,29 @@ test('required gate certifies through the production status, KA, and query handl
     });
 
     assert.equal(artifact.status, 'PASS');
-    assert.ok(state.routeCalls.some(({ method, path }) => method === 'GET' && path === '/api/status'));
-    assert.equal(state.offlineReceiverProbes >= 3, true);
+    const routeCalls = [...sourceState.routeCalls, ...receiverState.routeCalls];
+    assert.ok(routeCalls.some(({ method, path }) => method === 'GET' && path === '/api/status'));
     assert.equal(
-      state.routeCalls.filter(({ method, path }) => method === 'POST' && path === '/api/knowledge-assets').length,
+      sourceState.routeCalls.filter(
+        ({ method, path }) => method === 'POST' && path === '/api/knowledge-assets',
+      ).length,
       2,
     );
-    assert.ok(state.routeCalls.some(({ method, path }) => method === 'POST' && path === '/api/query'));
-    assert.equal(state.sharedSubjects.size, 2);
+    assert.ok(receiverState.routeCalls.some(
+      ({ method, path }) => method === 'POST' && path === '/api/query',
+    ));
+    assert.notEqual(sourceState.sharedSubjects, receiverState.sharedSubjects);
+    assert.equal(sourceState.sharedSubjects.size, 2);
+    assert.equal(receiverState.sharedSubjects.size, 2);
+    assert.deepEqual(synchronization.stats(), {
+      liveDeliveries: 1,
+      queuedDeliveries: 1,
+      catchupDeliveries: 1,
+    });
     assert.equal(
-      [...state.sharedSubjects].every((subject) => subject.startsWith(CANARY_SUBJECT_PREFIX)),
+      [...receiverState.sharedSubjects].every(
+        (subject) => subject.startsWith(CANARY_SUBJECT_PREFIX),
+      ),
       true,
     );
   } finally {
@@ -153,9 +99,159 @@ test('required gate certifies through the production status, KA, and query handl
   }
 });
 
-function createRouteAgent(state) {
+test('certification fails when independent receiver delivery is disabled', async () => {
+  const sourceState = createRouteState('source');
+  const receiverState = createRouteState('receiver');
+  const synchronization = createSynchronizationHarness(receiverState, { enabled: false });
+  const source = await startRouteServer(createRouteAgent(sourceState, synchronization), sourceState);
+  const receiver = await startRouteServer(createRouteAgent(receiverState), receiverState);
+  try {
+    const config = createContractConfig(source.baseUrl, receiver.baseUrl, NODE_COMMIT);
+    await assert.rejects(
+      executeRemoteCanaryCertificationV1(config, {
+        fetchFn: createContractFetch(),
+        runCommand: async () => { throw new Error('lifecycle must not start'); },
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        now: () => new Date('2026-09-11T00:02:30.000Z'),
+        readFileFn: async () => { throw new Error('RPC evidence must not be read'); },
+      }),
+      (error) => error?.code === 'swm-propagation-timeout'
+        && error?.phase === 'live-swm-propagation',
+    );
+    assert.equal(sourceState.sharedSubjects.size, 1);
+    assert.equal(receiverState.sharedSubjects.size, 0);
+    assert.deepEqual(synchronization.stats(), {
+      liveDeliveries: 0,
+      queuedDeliveries: 0,
+      catchupDeliveries: 0,
+    });
+  } finally {
+    await Promise.all([source.close(), receiver.close()]);
+  }
+});
+
+function createContractConfig(sourceBaseUrl, receiverBaseUrl, expectedCommit) {
   return {
-    peerId: '12D3KooDaemonContractPeer',
+    schema: 'dkg-rfc64-remote-canary-config-v1',
+    expectedCommit,
+    nodes: [
+      { id: 'source-node', role: 'source', baseUrl: sourceBaseUrl, auth: { kind: 'none' } },
+      { id: 'receiver-node', role: 'receiver', baseUrl: receiverBaseUrl, auth: { kind: 'none' } },
+    ],
+    contextGraphs: [{
+      id: CG,
+      expectedMode: 'catalog',
+      sourceNodeId: 'source-node',
+      receiverNodeId: 'receiver-node',
+      vmAskSparql: 'ASK { <urn:known:vm-subject> ?p ?o }',
+      catalogSwmAskSparql: CATALOG_SWM_ASK,
+    }],
+    lifecycle: {
+      receiverNodeId: 'receiver-node',
+      stop: { argv: ['node-control', 'stop', 'receiver-node'] },
+      start: { argv: ['node-control', 'start', 'receiver-node'] },
+      stopTimeoutMs: 1_000,
+      readyTimeoutMs: 1_000,
+    },
+    authorizationChecks: {
+      unauthorized: {
+        kind: 'http',
+        nodeId: 'receiver-node',
+        method: 'GET',
+        path: '/api/rfc64/unauthorized-probe',
+        authentication: 'none',
+        expectedStatuses: [403],
+        bodyCodePointer: '/code',
+        expectedCodes: ['RFC64_DENIED'],
+      },
+      revoked: {
+        kind: 'http',
+        nodeId: 'receiver-node',
+        method: 'GET',
+        path: '/api/rfc64/revoked-probe',
+        authentication: 'node',
+        expectedStatuses: [403],
+        bodyCodePointer: '/code',
+        expectedCodes: ['RFC64_REVOKED'],
+      },
+    },
+    rpcUsage: {
+      kind: 'evidence-file',
+      path: '/tmp/daemon-contract-rpc-evidence.json',
+    },
+    timing: {
+      requestTimeoutMs: 1_000,
+      pollIntervalMs: 250,
+      propagationTimeoutMs: 1_000,
+      catchupTimeoutMs: 1_000,
+      parityTimeoutMs: 1_000,
+    },
+  };
+}
+
+function createContractFetch() {
+  return async (input, options) => {
+    const url = new URL(input);
+    if (url.pathname === '/api/rfc64/unauthorized-probe') {
+      return jsonResponse({ code: 'RFC64_DENIED' }, 403);
+    }
+    if (url.pathname === '/api/rfc64/revoked-probe') {
+      return jsonResponse({ code: 'RFC64_REVOKED' }, 403);
+    }
+    return fetch(input, options);
+  };
+}
+
+function createRouteState(role) {
+  return {
+    role,
+    writtenByName: new Map(),
+    sharedSubjects: new Set(),
+    routeCalls: [],
+  };
+}
+
+function createSynchronizationHarness(receiverState, { enabled = true } = {}) {
+  // Model the production network seam without sharing either daemon's store:
+  // live announcements apply to the receiver only while it is online; missed
+  // announcements remain detached until the receiver's restart reconciliation.
+  let receiverOnline = true;
+  const queued = [];
+  let liveDeliveries = 0;
+  let queuedDeliveries = 0;
+  let catchupDeliveries = 0;
+  const apply = (quads) => {
+    for (const quad of quads) receiverState.sharedSubjects.add(quad.subject);
+  };
+  return Object.freeze({
+    publish(quads) {
+      if (!enabled) return;
+      const detached = structuredClone(quads);
+      if (receiverOnline) {
+        apply(detached);
+        liveDeliveries += 1;
+      } else {
+        queued.push(detached);
+        queuedDeliveries += 1;
+      }
+    },
+    receiverStopped() {
+      receiverOnline = false;
+    },
+    receiverStarted() {
+      receiverOnline = true;
+      for (const quads of queued.splice(0)) {
+        apply(quads);
+        catchupDeliveries += 1;
+      }
+    },
+    stats: () => Object.freeze({ liveDeliveries, queuedDeliveries, catchupDeliveries }),
+  });
+}
+
+function createRouteAgent(state, synchronization) {
+  return {
+    peerId: `12D3KooDaemonContract${state.role}`,
     multiaddrs: [],
     node: {
       libp2p: { getConnections: () => [] },
@@ -201,9 +297,11 @@ function createRouteAgent(state) {
         authorAddress: NODE_ADDRESS,
       }),
       promote: async (_contextGraphId, name) => {
-        for (const quad of state.writtenByName.get(name) ?? []) {
+        const quads = state.writtenByName.get(name) ?? [];
+        for (const quad of quads) {
           state.sharedSubjects.add(quad.subject);
         }
+        synchronization?.publish(quads);
         return { promotedCount: 1, sealed: true, publishReady: true };
       },
     },
@@ -303,14 +401,30 @@ async function startRouteServer(agent, state) {
       }
     }
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const listen = (port) => new Promise((resolve, reject) => {
+    const onError = (error) => reject(error);
+    server.once('error', onError);
+    server.listen(port, '127.0.0.1', () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
+  const stop = () => new Promise((resolve, reject) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    server.close((error) => error === undefined ? resolve() : reject(error));
+  });
+  await listen(0);
   const address = server.address();
   if (address === null || typeof address === 'string') throw new Error('route server did not bind');
+  const port = address.port;
   return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise((resolve, reject) => {
-      server.close((error) => error === undefined ? resolve() : reject(error));
-    }),
+    baseUrl: `http://127.0.0.1:${port}`,
+    start: () => server.listening ? Promise.resolve() : listen(port),
+    stop,
+    close: stop,
   };
 }
 

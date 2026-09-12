@@ -12,6 +12,8 @@ import {
   runBoundedCommandV1,
 } from './transport.mjs';
 
+const MAX_HTTP_BODY_BYTES = 1_048_576;
+
 test('bounded commands succeed and pass argv literally without a shell', async () => {
   const literal = 'literal;$(printf never-executed)';
   const result = await runBoundedCommandV1({
@@ -74,6 +76,29 @@ test('reachability does not misclassify credential failures as an offline node',
       auth: { kind: 'bearer-file', secretFile: '/missing' },
     }),
     (error) => error instanceof RemoteCanaryError && error.code === 'auth-secret-read-failed',
+  );
+});
+
+test('canonical bounded response reader preserves the canary HTTP byte ceiling', async () => {
+  let responseBytes = MAX_HTTP_BODY_BYTES;
+  const request = createRequesterV1({
+    fetchFn: async () => new Response(new Uint8Array(responseBytes)),
+    readFileFn: async () => '',
+    secrets: new Map(),
+    timing: { requestTimeoutMs: 1_000 },
+  });
+  const node = {
+    id: 'bounded-response',
+    baseUrl: 'https://bounded.invalid',
+    auth: { kind: 'none' },
+  };
+
+  const exact = await request.raw(node, 'GET', '/api/status');
+  assert.equal(Buffer.byteLength(exact.text), MAX_HTTP_BODY_BYTES);
+  responseBytes += 1;
+  await assert.rejects(
+    request.raw(node, 'GET', '/api/status'),
+    (error) => error instanceof RemoteCanaryError && error.code === 'node-response-too-large',
   );
 });
 
