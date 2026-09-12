@@ -8,7 +8,7 @@ import {
   executeRemoteCanaryCertificationV1,
 } from './certify.mjs';
 import { createCertificationRuntime } from './orchestration-fixture.mjs';
-import { baseConfig } from './test-support.mjs';
+import { CATALOG_SWM_ASK, RECEIVER_URL, baseConfig } from './test-support.mjs';
 
 test('full-run fixture rejects every missing or renamed daemon request field', async () => {
   const requiredFields = [
@@ -26,6 +26,7 @@ test('full-run fixture rejects every missing or renamed daemon request field', a
       const runtime = createCertificationRuntime({
         mutateJsonBody: ({ path: requestPath, body }) => {
           if (requestPath !== path) return body;
+          if (requestPath === '/api/query' && body.sparql === CATALOG_SWM_ASK) return body;
           mutated = true;
           const altered = structuredClone(body);
           const value = altered[field];
@@ -53,5 +54,55 @@ test('full-run fixture rejects every missing or renamed daemon request field', a
       );
       assert.equal(mutated, true, `${mutation} ${path} ${field}`);
     }
+  }
+});
+
+test('fixture independently withholds live and offline receiver marker evidence', async () => {
+  for (const scenario of [
+    {
+      option: { deliverLiveMarkerToReceiver: false },
+      code: 'swm-propagation-timeout',
+      phase: 'live-swm-propagation',
+      commands: [],
+      sourceMarkers: 1,
+      receiverMarkers: 0,
+    },
+    {
+      option: { deliverOfflineMarkerToReceiver: false },
+      code: 'offline-catchup-timeout',
+      phase: 'offline-catchup',
+      commands: ['stop', 'start'],
+      sourceMarkers: 2,
+      receiverMarkers: 1,
+    },
+  ]) {
+    const runtime = createCertificationRuntime(scenario.option);
+    await assert.rejects(
+      executeRemoteCanaryCertificationV1(baseConfig({
+        timing: {
+          requestTimeoutMs: 1_000,
+          pollIntervalMs: 250,
+          propagationTimeoutMs: 1_000,
+          catchupTimeoutMs: 1_000,
+          parityTimeoutMs: 1_000,
+        },
+      }), runtime),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === scenario.code
+        && error.phase === scenario.phase,
+      scenario.phase,
+    );
+    assert.equal(runtime.state.sourceMarkers.size, scenario.sourceMarkers, scenario.phase);
+    assert.equal(runtime.state.receiverMarkers.size, scenario.receiverMarkers, scenario.phase);
+    assert.deepEqual(runtime.state.commands, scenario.commands, scenario.phase);
+    const markerQueries = runtime.state.requests.filter(({ sparql }) => (
+      sparql?.startsWith('ASK { <urn:dkg:rfc64-canary:')
+    ));
+    assert.ok(markerQueries.length > 0, scenario.phase);
+    assert.equal(
+      markerQueries.every(({ origin }) => origin === RECEIVER_URL),
+      true,
+      scenario.phase,
+    );
   }
 });

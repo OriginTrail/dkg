@@ -67,7 +67,7 @@ async function assertDistinctConfigAndArtifactPaths(configPath, artifactPath) {
   const resolvedConfig = resolve(configPath);
   const resolvedArtifact = resolve(artifactPath);
   if (resolvedConfig === resolvedArtifact) {
-    throw new RemoteCanaryError('config-artifact-path-alias', 'config');
+    throw new RemoteCanaryError('config-artifact-path-alias', 'configuration');
   }
   const [canonicalConfig, canonicalArtifact, configStat, artifactStat] = await Promise.all([
     canonicalizePotentialPath(resolvedConfig),
@@ -83,7 +83,7 @@ async function assertDistinctConfigAndArtifactPaths(configPath, artifactPath) {
       && configStat.dev === artifactStat.dev
       && configStat.ino === artifactStat.ino
     )
-  ) throw new RemoteCanaryError('config-artifact-path-alias', 'config');
+  ) throw new RemoteCanaryError('config-artifact-path-alias', 'configuration');
 }
 
 try {

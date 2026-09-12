@@ -2,6 +2,10 @@
 
 import { randomUUID } from 'node:crypto';
 
+import {
+  CANARY_PREDICATE,
+  CANARY_SUBJECT_PREFIX,
+} from './canary-vocabulary.mjs';
 import { failure } from './errors.mjs';
 import {
   isRetryableNodeRequestErrorV1,
@@ -19,8 +23,8 @@ function createMarker() {
   const nonce = randomUUID();
   return Object.freeze({
     assetName: `rfc64-canary-${nonce}`,
-    subject: `urn:dkg:rfc64-canary:${nonce}`,
-    predicate: 'https://schema.origintrail.io/rfc64/canaryValue',
+    subject: `${CANARY_SUBJECT_PREFIX}${nonce}`,
+    predicate: CANARY_PREDICATE,
     value: nonce,
   });
 }
@@ -33,7 +37,6 @@ export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
       contextGraph.id,
       marker,
       request,
-      'live-swm-propagation',
     );
     await pollUntilV1(
       async () => askMarkerV1(
@@ -46,7 +49,7 @@ export function verifyLiveSwmPropagationV1({ config, request, sleep }) {
       config.timing.propagationTimeoutMs,
       config.timing.pollIntervalMs,
       sleep,
-      () => failure('swm-propagation-timeout', 'live-swm-propagation'),
+      () => failure('swm-propagation-timeout', 'swm'),
       { retryError: isRetryableNodeRequestErrorV1 },
     );
     return Object.freeze({
@@ -78,7 +81,6 @@ export async function verifyOfflineCatchupV1({
       contextGraph.id,
       marker,
       request,
-      'offline-catchup',
     );
     await assertReceiverOfflineV1(lifecycle.receiver, request);
     return [contextGraph, marker];
@@ -96,7 +98,7 @@ export async function verifyOfflineCatchupV1({
       config.timing.catchupTimeoutMs,
       config.timing.pollIntervalMs,
       sleep,
-      () => failure('offline-catchup-timeout', 'offline-catchup'),
+      () => failure('offline-catchup-timeout', 'swm'),
       { retryError: isRetryableNodeRequestErrorV1 },
     );
     return Object.freeze({
@@ -123,7 +125,7 @@ export async function withReceiverOfflineV1({
   try {
     stopInvoked = true;
     const stopped = await runCommand(lifecycle.stop, lifecycle.commandTimeoutMs);
-    if (stopped.code !== 0) throw failure('receiver-stop-command-failed', 'offline-catchup');
+    if (stopped.code !== 0) throw failure('receiver-stop-command-failed', 'lifecycle');
     let consecutiveOfflineProbes = 0;
     const offlineProbeIntervalMs = Math.min(
       config.timing.pollIntervalMs,
@@ -141,7 +143,7 @@ export async function withReceiverOfflineV1({
       lifecycle.stopTimeoutMs,
       offlineProbeIntervalMs,
       sleep,
-      () => failure('receiver-did-not-stop', 'offline-catchup'),
+      () => failure('receiver-did-not-stop', 'lifecycle'),
     );
     operationResult = await operation();
   } catch (error) {
@@ -151,14 +153,14 @@ export async function withReceiverOfflineV1({
   if (stopInvoked) {
     const started = await runCommand(lifecycle.start, lifecycle.commandTimeoutMs).catch(() => null);
     if (started === null || started.code !== 0) {
-      startFailure = failure('receiver-start-command-failed', 'offline-catchup');
+      startFailure = failure('receiver-start-command-failed', 'lifecycle');
     }
   }
   if (startFailure !== null) {
     if (operationFailure === null) throw startFailure;
     throw failure(
       'receiver-start-command-failed',
-      'offline-catchup',
+      'lifecycle',
       new AggregateError([operationFailure, startFailure], 'receiver-recovery-failed'),
     );
   }
@@ -173,7 +175,7 @@ export async function withReceiverOfflineV1({
     lifecycle.readyTimeoutMs,
     config.timing.pollIntervalMs,
     sleep,
-    () => failure('receiver-did-not-recover', 'offline-catchup'),
+    () => failure('receiver-did-not-recover', 'lifecycle'),
     { retryError: isRetryableNodeRequestErrorV1 },
   );
   return operationResult;
@@ -206,7 +208,7 @@ export function verifyCatalogSwmV1({ config, request }) {
       ),
     ]);
     if (!sourceQueryPassed || !receiverQueryPassed) {
-      throw failure('catalog-swm-query-failed', 'catalog-swm-evidence');
+      throw failure('catalog-swm-query-failed', 'swm');
     }
     return Object.freeze({
       contextGraphRef: contextGraph.contextGraphRef,
@@ -218,7 +220,7 @@ export function verifyCatalogSwmV1({ config, request }) {
   });
 }
 
-async function shareMarkerV1(node, contextGraphId, marker, request, phase) {
+async function shareMarkerV1(node, contextGraphId, marker, request) {
   const result = await request.json(node, 'POST', '/api/knowledge-assets', {
     contextGraphId,
     name: marker.assetName,
@@ -229,12 +231,12 @@ async function shareMarkerV1(node, contextGraphId, marker, request, phase) {
     }],
     alsoShareSwm: true,
   });
-  if (result.swmShared !== true) throw failure('swm-share-not-confirmed', phase);
+  if (result.swmShared !== true) throw failure('swm-share-not-confirmed', 'swm');
 }
 
 async function assertReceiverOfflineV1(receiver, request) {
   if (await request.reachable(receiver)) {
-    throw failure('receiver-became-reachable-during-offline-window', 'offline-catchup');
+    throw failure('receiver-became-reachable-during-offline-window', 'lifecycle');
   }
 }
 

@@ -6,7 +6,7 @@ import { mapCanaryPhaseV1 } from './phase-helpers.mjs';
 function canonicalChainId(value) {
   const canonical = String(value);
   if (!/^(0|[1-9][0-9]*)$/u.test(canonical)) {
-    throw failure('node-chain-id-invalid', 'preflight');
+    throw failure('node-chain-id-invalid', 'invariant');
   }
   return canonical;
 }
@@ -21,7 +21,7 @@ export async function preflightAllNodesV1({ config, request }) {
   const networkKeys = new Set([...raw.values()].map((status) => (
     `${String(status.networkId)}:${String(status.chain?.chainId)}`
   )));
-  if (networkKeys.size !== 1) throw failure('node-network-mismatch', 'preflight');
+  if (networkKeys.size !== 1) throw failure('node-network-mismatch', 'invariant');
   return Object.freeze(config.nodes.map((node) => {
     const status = raw.get(node.id);
     const relevant = config.contextGraphs.filter((entry) => (
@@ -45,40 +45,40 @@ export async function preflightAllNodesV1({ config, request }) {
 
 export function validateNodePreflightV1(status, node, config) {
   if (status === null || typeof status !== 'object' || Array.isArray(status)) {
-    throw failure('preflight-status-malformed', 'preflight');
+    throw failure('preflight-status-malformed', 'invariant');
   }
-  if (status.commit !== config.expectedCommit) throw failure('node-build-mismatch', 'preflight');
+  if (status.commit !== config.expectedCommit) throw failure('node-build-mismatch', 'invariant');
   if (typeof status.networkId !== 'string' || status.networkId.length < 1) {
-    throw failure('node-network-missing', 'preflight');
+    throw failure('node-network-missing', 'invariant');
   }
   if (status.syncLifecycle?.syncReconcilerEnabled !== true) {
-    throw failure('sync-reconciler-disabled', 'preflight');
+    throw failure('sync-reconciler-disabled', 'invariant');
   }
-  if (status.rfc64Catalog?.enabled !== true) throw failure('rfc64-catalog-disabled', 'preflight');
+  if (status.rfc64Catalog?.enabled !== true) throw failure('rfc64-catalog-disabled', 'invariant');
   if (status.rfc64Catalog?.rollout?.killSwitch !== false) {
-    throw failure('rfc64-kill-switch-active', 'preflight');
+    throw failure('rfc64-kill-switch-active', 'invariant');
   }
   if (
     status.chain?.configured !== true
     || !Number.isSafeInteger(status.chain?.rpcEndpointCount)
     || status.chain.rpcEndpointCount < 1
-  ) throw failure('chain-rpc-not-configured', 'preflight');
+  ) throw failure('chain-rpc-not-configured', 'invariant');
   canonicalChainId(status.chain.chainId);
   for (const entry of config.contextGraphs.filter((candidate) => (
     candidate.source === node || candidate.receiver === node
   ))) {
     if (status.rfc64Catalog?.rollout?.contextGraphModes?.[entry.id] !== entry.expectedMode) {
-      throw failure('rfc64-mode-mismatch', 'preflight');
+      throw failure('rfc64-mode-mismatch', 'invariant');
     }
     const operational = operationalStatusV1(status, entry.id);
     if (operational === null || operational.effectiveMode !== entry.expectedMode) {
-      throw failure('rfc64-operational-mode-missing', 'preflight');
+      throw failure('rfc64-operational-mode-missing', 'invariant');
     }
     if (operational.catalogServiceStarted !== true) {
-      throw failure('rfc64-catalog-service-not-started', 'preflight');
+      throw failure('rfc64-catalog-service-not-started', 'invariant');
     }
     if (operational.legacySyncAllowed !== false) {
-      throw failure('rfc64-legacy-sync-allowed', 'preflight');
+      throw failure('rfc64-legacy-sync-allowed', 'invariant');
     }
   }
 }

@@ -31,22 +31,22 @@ export async function collectRpcUsageEvidenceV1(config, context) {
   let text;
   if (config.kind === 'evidence-file') {
     text = await context.readFileFn(config.path, 'utf8').catch(() => {
-      throw failure('rpc-evidence-read-failed', 'rpc-usage');
+      throw failure('rpc-evidence-read-failed', 'evidence');
     });
   } else {
     const result = await context.runCommand(config.command, config.commandTimeoutMs);
-    if (result.code !== 0) throw failure('rpc-evidence-command-failed', 'rpc-usage');
+    if (result.code !== 0) throw failure('rpc-evidence-command-failed', 'evidence');
     text = result.stdout;
   }
   if (Buffer.byteLength(text) > MAX_RPC_EVIDENCE_BYTES) {
-    throw failure('rpc-evidence-too-large', 'rpc-usage');
+    throw failure('rpc-evidence-too-large', 'evidence');
   }
   let evidence;
   try {
     evidence = JSON.parse(text);
     if (!matchesRpcEvidenceV1(evidence)) throw new Error('rpc-evidence-malformed');
   } catch {
-    throw failure('rpc-evidence-malformed', 'rpc-usage');
+    throw failure('rpc-evidence-malformed', 'evidence');
   }
   const samples = validateRpcEvidenceV1(evidence, config.minimumSamples, context);
   const byMethod = {};
@@ -75,13 +75,13 @@ export async function collectRpcUsageEvidenceV1(config, context) {
 
 export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
   if (evidence.expectedCommit.toLowerCase() !== context.expectedCommit) {
-    throw failure('rpc-evidence-commit-mismatch', 'rpc-usage');
+    throw failure('rpc-evidence-commit-mismatch', 'evidence');
   }
   if (evidence.cohortRef !== context.cohortRef) {
-    throw failure('rpc-evidence-cohort-mismatch', 'rpc-usage');
+    throw failure('rpc-evidence-cohort-mismatch', 'evidence');
   }
   if (evidence.samples.length < minimumSamples) {
-    throw failure('rpc-evidence-sample-count', 'rpc-usage');
+    throw failure('rpc-evidence-sample-count', 'evidence');
   }
   let precedingEnd = -Infinity;
   const samples = evidence.samples.map((sample) => {
@@ -89,7 +89,7 @@ export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
     const end = canonicalInstant(sample.windowEndedAt);
     const durationMs = end - start;
     if (durationMs < 45_000 || durationMs > 75_000 || start < precedingEnd) {
-      throw failure('rpc-evidence-window-not-minutely', 'rpc-usage');
+      throw failure('rpc-evidence-window-not-minutely', 'evidence');
     }
     precedingEnd = end;
     assertRpcCountV1(sample.total);
@@ -98,7 +98,7 @@ export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
       assertRpcCountV1(count);
       methodTotal = checkedRpcCountAddV1(methodTotal, count);
     }
-    if (methodTotal !== sample.total) throw failure('rpc-evidence-total-mismatch', 'rpc-usage');
+    if (methodTotal !== sample.total) throw failure('rpc-evidence-total-mismatch', 'evidence');
     return sample;
   });
   const runStart = Date.parse(context.startedAt);
@@ -106,25 +106,25 @@ export function validateRpcEvidenceV1(evidence, minimumSamples, context) {
   const earliest = Date.parse(samples[0].windowStartedAt);
   const latest = Date.parse(samples.at(-1).windowEndedAt);
   if (latest < runStart - RPC_EVIDENCE_MAX_PRECEDING_MS) {
-    throw failure('rpc-evidence-stale', 'rpc-usage');
+    throw failure('rpc-evidence-stale', 'evidence');
   }
   if (earliest > observed + RPC_EVIDENCE_CLOCK_SKEW_MS || latest > observed + RPC_EVIDENCE_CLOCK_SKEW_MS) {
-    throw failure('rpc-evidence-future', 'rpc-usage');
+    throw failure('rpc-evidence-future', 'evidence');
   }
   return samples;
 }
 
 function assertRpcCountV1(value) {
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw failure('rpc-evidence-count-out-of-range', 'rpc-usage');
+    throw failure('rpc-evidence-count-out-of-range', 'evidence');
   }
 }
 
 function canonicalInstant(value) {
-  if (typeof value !== 'string') throw failure('rpc-evidence-time-invalid', 'rpc-usage');
+  if (typeof value !== 'string') throw failure('rpc-evidence-time-invalid', 'evidence');
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
-    throw failure('rpc-evidence-time-invalid', 'rpc-usage');
+    throw failure('rpc-evidence-time-invalid', 'evidence');
   }
   return timestamp;
 }
@@ -137,7 +137,7 @@ function checkedRpcCountAddV1(left, right) {
   assertRpcCountV1(left);
   assertRpcCountV1(right);
   if (left > Number.MAX_SAFE_INTEGER - right) {
-    throw failure('rpc-evidence-count-overflow', 'rpc-usage');
+    throw failure('rpc-evidence-count-overflow', 'evidence');
   }
   return left + right;
 }

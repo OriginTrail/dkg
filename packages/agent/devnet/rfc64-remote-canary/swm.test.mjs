@@ -91,6 +91,7 @@ test('receiver must remain unreachable throughout offline marker sharing', async
 
 test('live SWM propagation fails when sharing succeeds but delivery never arrives', async () => {
   const config = validateRemoteCanaryConfigV1(baseConfig());
+  const markerQueryNodes = [];
   await assert.rejects(
     verifyLiveSwmPropagationV1({
       config: {
@@ -98,16 +99,18 @@ test('live SWM propagation fails when sharing succeeds but delivery never arrive
         timing: { ...config.timing, propagationTimeoutMs: 20, pollIntervalMs: 1 },
       },
       request: {
-        json: async (node, method, path) => (
-          path === '/api/knowledge-assets'
-            ? { swmShared: true }
-            : { result: { type: 'boolean', value: false } }
-        ),
+        json: async (node, method, path) => {
+          if (path === '/api/knowledge-assets') return { swmShared: true };
+          markerQueryNodes.push(node.role);
+          return { result: { type: 'boolean', value: node.role === 'source' } };
+        },
       },
       sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     }),
     (error) => error instanceof RemoteCanaryError && error.code === 'swm-propagation-timeout',
   );
+  assert.ok(markerQueryNodes.length > 0);
+  assert.equal(markerQueryNodes.every((role) => role === 'receiver'), true);
 });
 
 test('offline catch-up fails when a restarted receiver never receives the marker', async () => {
@@ -118,6 +121,7 @@ test('offline catch-up fails when a restarted receiver never receives the marker
   };
   const lifecycle = { ...validated.lifecycle, stopTimeoutMs: 100, readyTimeoutMs: 100 };
   const commands = [];
+  const markerQueryNodes = [];
   let receiverOnline = true;
   await assert.rejects(
     verifyOfflineCatchupV1({
@@ -128,7 +132,8 @@ test('offline catch-up fails when a restarted receiver never receives the marker
         json: async (node, method, path) => {
           if (path === '/api/knowledge-assets') return { swmShared: true };
           if (path === '/api/status') return statusBody();
-          return { result: { type: 'boolean', value: false } };
+          markerQueryNodes.push(node.role);
+          return { result: { type: 'boolean', value: node.role === 'source' } };
         },
       },
       runCommand: async (command) => {
@@ -142,6 +147,8 @@ test('offline catch-up fails when a restarted receiver never receives the marker
   );
   assert.deepEqual(commands, ['stop', 'start']);
   assert.equal(receiverOnline, true);
+  assert.ok(markerQueryNodes.length > 0);
+  assert.equal(markerQueryNodes.every((role) => role === 'receiver'), true);
 });
 
 test('receiver lifecycle bracket attempts exactly one recovery across failure paths', async () => {

@@ -9,7 +9,7 @@ import {
 } from './certify.mjs';
 import { preflightAllNodesV1, validateNodePreflightV1 } from './preflight.mjs';
 import { baseConfig, CG, statusBody } from './test-support.mjs';
-import { completeOperationalParityV1 } from './vm.mjs';
+import { completeOperationalParityV1, verifyVmParityV1 } from './vm.mjs';
 
 test('preflight fails closed for every release-defining status condition', () => {
   const config = validateRemoteCanaryConfigV1(baseConfig());
@@ -97,3 +97,62 @@ test('complete VM parity requires every canonical cursor field', () => {
     assert.equal(completeOperationalParityV1(status, CG), null, field);
   }
 });
+
+test('VM parity rejects every internally valid cross-node cursor divergence', async () => {
+  const normalized = validateRemoteCanaryConfigV1(baseConfig());
+  const config = {
+    ...normalized,
+    timing: {
+      ...normalized.timing,
+      parityTimeoutMs: 20,
+      pollIntervalMs: 1,
+    },
+  };
+  const matching = await verifyVmParityV1({
+    config,
+    request: vmParityRequester(statusBody(), statusBody()),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  });
+  assert.equal(matching[0].status, 'PASS');
+
+  for (const [label, mutate] of [
+    ['catalog digest', (cursor) => {
+      const digest = `0x${'ef'.repeat(32)}`;
+      cursor.expectedCatalogHeadDigest = digest;
+      cursor.appliedCatalogHeadDigest = digest;
+    }],
+    ['inventory digest', (cursor) => {
+      const digest = `0x${'12'.repeat(32)}`;
+      cursor.expectedInventoryDigest = digest;
+      cursor.appliedInventoryDigest = digest;
+    }],
+    ['row count', (cursor) => {
+      cursor.expectedRowCount = '3';
+      cursor.appliedRowCount = '3';
+    }],
+    ['catalog version', (cursor) => { cursor.catalogVersion = '8'; }],
+  ]) {
+    const receiverStatus = structuredClone(statusBody());
+    mutate(receiverStatus.rfc64Catalog.contextGraphs[0]);
+    assert.notEqual(completeOperationalParityV1(receiverStatus, CG), null, label);
+    await assert.rejects(
+      verifyVmParityV1({
+        config,
+        request: vmParityRequester(statusBody(), receiverStatus),
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+      }),
+      (error) => error instanceof RemoteCanaryError && error.code === 'vm-parity-timeout',
+      label,
+    );
+  }
+});
+
+function vmParityRequester(sourceStatus, receiverStatus) {
+  return {
+    json: async (node, method, path) => (
+      path === '/api/status'
+        ? (node.role === 'source' ? sourceStatus : receiverStatus)
+        : { result: { type: 'boolean', value: true } }
+    ),
+  };
+}

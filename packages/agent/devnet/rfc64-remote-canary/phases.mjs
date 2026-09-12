@@ -8,7 +8,7 @@ import {
   createRemoteCanaryCohortRefV1,
   validateRemoteCanaryConfigV1,
 } from './config.mjs';
-import { RemoteCanaryError, failure } from './errors.mjs';
+import { failure, runPhaseV1 } from './errors.mjs';
 import { preflightAllNodesV1 } from './preflight.mjs';
 import { collectRpcUsageEvidenceV1 } from './rpc-evidence.mjs';
 import {
@@ -21,7 +21,7 @@ import { verifyVmParityV1 } from './vm.mjs';
 
 /** A network-free plan. It deliberately does not read auth or evidence files. */
 export function createRemoteCanaryDryRunArtifactV1(config, now = () => new Date()) {
-  const validated = validateRemoteCanaryConfigV1(config);
+  const validated = runPhaseV1('config', () => validateRemoteCanaryConfigV1(config));
   const timestamp = now().toISOString();
   return Object.freeze({
     schema: ARTIFACT_SCHEMA,
@@ -38,71 +38,83 @@ export function createRemoteCanaryDryRunArtifactV1(config, now = () => new Date(
 
 /** Execute the ordered certification phases, parallelizing only independent checks. */
 export async function executeRemoteCanaryCertificationV1(config, dependencies = {}) {
-  const validated = validateRemoteCanaryConfigV1(config);
+  const validated = runPhaseV1('config', () => validateRemoteCanaryConfigV1(config));
   const fetchFn = dependencies.fetchFn ?? globalThis.fetch;
-  if (typeof fetchFn !== 'function') throw failure('fetch-unavailable', 'config');
   const readFileFn = dependencies.readFileFn ?? readFile;
   const runCommand = dependencies.runCommand ?? runBoundedCommandV1;
   const sleep = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const now = dependencies.now ?? (() => new Date());
   const secrets = new Map();
-  const request = createRequesterV1({ fetchFn, readFileFn, secrets, timing: validated.timing });
-  const startedAt = now().toISOString();
+  const request = runPhaseV1('config', () => {
+    if (typeof fetchFn !== 'function') throw failure('fetch-unavailable', 'configuration');
+    return createRequesterV1({ fetchFn, readFileFn, secrets, timing: validated.timing });
+  });
+  const startedAt = runPhaseV1('config', () => now().toISOString());
   const cohortRef = createRemoteCanaryCohortRefV1(validated);
-  let phase = 'preflight';
 
   try {
-    const preflightStatuses = await preflightAllNodesV1({
+    const preflightStatuses = await runPhaseV1('preflight', () => preflightAllNodesV1({
       config: validated,
       request,
-    });
+    }));
 
-    phase = 'live-swm-propagation';
-    const liveSwmPropagation = await verifyLiveSwmPropagationV1({
+    // Establish catalog-owned evidence before this run can write any marker vocabulary.
+    await runPhaseV1('catalog-swm-evidence', () => verifyCatalogSwmV1({
       config: validated,
       request,
-      sleep,
-    });
+    }));
 
-    phase = 'offline-catchup';
-    const offlineCatchup = validated.lifecycle === null
-      ? Object.freeze({ status: 'EVIDENCE_REQUIRED', requirement: 'single-receiver-stop-start' })
-      : await verifyOfflineCatchupV1({
-          config: validated,
-          lifecycle: validated.lifecycle,
-          request,
-          runCommand,
-          sleep,
-        });
-
-    phase = 'vm-parity';
-    const vmParity = await verifyVmParityV1({
-      config: validated,
-      request,
-      sleep,
-    });
-
-    phase = 'catalog-swm-evidence';
-    const catalogSwm = await verifyCatalogSwmV1({
-      config: validated,
-      request,
-    });
-
-    phase = 'authorization';
-    const authorization = await verifyAuthorizationV1(
-      validated.authorizationChecks,
-      request,
+    const liveSwmPropagation = await runPhaseV1(
+      'live-swm-propagation',
+      () => verifyLiveSwmPropagationV1({
+        config: validated,
+        request,
+        sleep,
+      }),
     );
 
-    phase = 'rpc-usage';
-    const rpcUsage = await collectRpcUsageEvidenceV1(validated.rpcUsage, {
-      readFileFn,
-      runCommand,
-      startedAt,
-      observedAt: now().toISOString(),
-      expectedCommit: validated.expectedCommit,
-      cohortRef,
-    });
+    const offlineCatchup = await runPhaseV1('offline-catchup', () => (
+      validated.lifecycle === null
+        ? Object.freeze({
+            status: 'EVIDENCE_REQUIRED',
+            requirement: 'single-receiver-stop-start',
+          })
+        : verifyOfflineCatchupV1({
+            config: validated,
+            lifecycle: validated.lifecycle,
+            request,
+            runCommand,
+            sleep,
+          })
+    ));
+
+    const vmParity = await runPhaseV1('vm-parity', () => verifyVmParityV1({
+      config: validated,
+      request,
+      sleep,
+    }));
+
+    const catalogSwm = await runPhaseV1('catalog-swm-evidence', () => verifyCatalogSwmV1({
+      config: validated,
+      request,
+    }));
+
+    const authorization = await runPhaseV1('authorization', () => verifyAuthorizationV1(
+      validated.authorizationChecks,
+      request,
+    ));
+
+    const rpcUsage = await runPhaseV1('rpc-usage', () => collectRpcUsageEvidenceV1(
+      validated.rpcUsage,
+      {
+        readFileFn,
+        runCommand,
+        startedAt,
+        observedAt: now().toISOString(),
+        expectedCommit: validated.expectedCommit,
+        cohortRef,
+      },
+    ));
 
     const checks = Object.freeze({
       liveSwmPropagation: Object.freeze(liveSwmPropagation),
@@ -133,9 +145,6 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
       preflight: Object.freeze({ status: 'PASS', nodes: preflightStatuses }),
       checks,
     });
-  } catch (error) {
-    if (error instanceof RemoteCanaryError) throw error;
-    throw failure('unexpected-execution-failure', phase, error);
   } finally {
     secrets.clear();
   }
