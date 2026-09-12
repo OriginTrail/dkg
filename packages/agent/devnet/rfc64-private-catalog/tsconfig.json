@@ -1,0 +1,15 @@
+{
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../../../..",
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": ["agent-runtime.ts", "agent-runtime-factory.ts"]
+}

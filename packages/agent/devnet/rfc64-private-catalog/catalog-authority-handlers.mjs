@@ -11,7 +11,7 @@ import {
   createReceiverRevokedPolicyAndRoster,
   roleAgentAddress,
 } from './fixture.mjs';
-import { assertFinalizedRuntimeV1 } from './agent-runtime.mjs';
+import { assertFinalizedRuntimeV1 } from './agent-runtime.ts';
 import { assertAuthorityEvidenceParityV1 } from './initial-authority.mjs';
 
 export async function revokeReceiverV1(context) {

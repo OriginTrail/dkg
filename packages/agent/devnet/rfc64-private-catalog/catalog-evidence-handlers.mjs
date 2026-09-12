@@ -14,7 +14,7 @@ import {
   createPrivateCatalogSyncScope,
   roleAgentAddress,
 } from './fixture.mjs';
-import { assertFinalizedRuntimeV1 } from './agent-runtime.mjs';
+import { assertFinalizedRuntimeV1 } from './agent-runtime.ts';
 import {
   hasExactPrivateCatalogFinalizedVmBaselineContents,
   hasExactPrivateCatalogMemoryContents,
@@ -58,15 +58,15 @@ export async function waitForBootstrapV1(context, command) {
         exactExpectedHead: bootstrapApplied,
       });
     if (bootstrapApplied && exactMemory) {
-      const appliedTransfer =
-        context.agent.readRfc64PublicCatalogAppliedProviderEvidenceV1(
+      const synchronizationEvidence =
+        context.agent.readRfc64PublicCatalogSynchronizationEvidenceV1(
           last.currentCatalogHeadDigest,
         );
       return composeBootstrapEvidenceV1(
         last,
         attempts,
         providerPeerId,
-        appliedTransfer?.providerPeerId ?? null,
+        synchronizationEvidence?.appliedProviderPeerId ?? null,
       );
     }
     await delay(100);

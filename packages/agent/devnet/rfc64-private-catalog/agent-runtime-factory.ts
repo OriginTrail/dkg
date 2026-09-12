@@ -3,12 +3,19 @@
 import { join } from 'node:path';
 
 import {
+  type CatalogSealDeploymentProfileV1,
+  type ContextGraphIdV1,
   DKG_ONTOLOGY,
+  type EvmAddressV1,
+  type NetworkIdV1,
   computeNetworkId,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import { DKGAgent } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  type Rfc64CatalogAccessPolicyAuthorityConfigV1,
+} from '@origintrail-official/dkg-agent';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 import {
@@ -26,7 +33,6 @@ import {
   DEPLOYMENT,
   NETWORK_ID,
   ON_CHAIN_CONTEXT_GRAPH_ID,
-  RUNTIME_ROLES,
   createFinalizedChainFixture,
   createPrivatePolicyAndRoster,
   createReceiverRevokedPolicyAndRoster,
@@ -34,18 +40,32 @@ import {
   rolePrivateKey,
 } from './fixture.mjs';
 import {
-  assertFinalizedRuntimeFactoryInputV1,
-  assertProbeRuntimeFactoryInputV1,
-  createFinalizedRuntimeV1,
-  createProbeRuntimeV1,
-} from './agent-runtime.mjs';
+  RFC64_PRIVATE_RUNTIME_ROLES_V1,
+  createOwnerPublicationStateV1,
+  type FinalizedRuntimeV1,
+  type ProbeRuntimeV1,
+  type Rfc64PrivateFaultProfileV1,
+  type Rfc64PrivateRuntimeManifestV1,
+  type Rfc64PrivateRuntimeRoleV1,
+} from './agent-runtime.ts';
 import {
   assertFinalizedAuthorityMatchesExpectedV1,
   assertInitialFinalizedAuthorityV1,
 } from './initial-authority.mjs';
 
-export async function createRfc64PrivateProbeRuntimeV1(input) {
-  assertProbeRuntimeFactoryInputV1(input);
+type ProbeRuntimeFactoryInputV1 = Readonly<{
+  dataDir: string;
+  faultProfile: Rfc64PrivateFaultProfileV1;
+  role: Rfc64PrivateRuntimeRoleV1;
+}>;
+
+type FinalizedRuntimeFactoryInputV1 = ProbeRuntimeFactoryInputV1 & Readonly<{
+  manifest: Rfc64PrivateRuntimeManifestV1;
+}>;
+
+export async function createRfc64PrivateProbeRuntimeV1(
+  input: ProbeRuntimeFactoryInputV1,
+): Promise<ProbeRuntimeV1> {
   const { dataDir, faultProfile, role } = input;
   rolePrivateKey(role);
   const created = Object.freeze({
@@ -53,11 +73,12 @@ export async function createRfc64PrivateProbeRuntimeV1(input) {
     faultProfile,
   });
   await created.agent.start();
-  return createProbeRuntimeV1(created, { role });
+  return Object.freeze({ ...created, kind: 'probe', role });
 }
 
-export async function createRfc64PrivateFinalizedRuntimeV1(input) {
-  assertFinalizedRuntimeFactoryInputV1(input);
+export async function createRfc64PrivateFinalizedRuntimeV1(
+  input: FinalizedRuntimeFactoryInputV1,
+): Promise<FinalizedRuntimeV1> {
   const { dataDir, faultProfile, manifest, role } = input;
   rolePrivateKey(role);
   const created = await createRfc64PrivateFinalizedAgentV1({
@@ -75,7 +96,7 @@ async function createRfc64PrivateFinalizedAgentV1({
   faultProfile,
   manifest,
   role,
-}) {
+}: FinalizedRuntimeFactoryInputV1) {
   const canonicalFixture = createFinalizedChainFixture();
   const fixture = faultProfile.authority.fixture(
     canonicalFixture,
@@ -93,7 +114,7 @@ async function createRfc64PrivateFinalizedAgentV1({
     publishPolicy: 0,
     publishAuthority: fixture.ownerAddress,
     publishAuthorityAccountId: 0n,
-    participantAgents: fixture.participantAgents,
+    participantAgents: [...fixture.participantAgents],
     nameHash: fixture.nameHash,
   });
   const rpc = await startRfc64PrivateDevnetFinalizedRpc(fixture, {
@@ -119,13 +140,14 @@ async function createRfc64PrivateFinalizedAgentV1({
   });
 
   const peerIds = manifest.peerIds;
-  const agentAddressByPeerId = new Map(RUNTIME_ROLES.map((runtimeRole) => [
+  const agentAddressByPeerId = new Map(RFC64_PRIVATE_RUNTIME_ROLES_V1.map((runtimeRole) => [
     peerIds[runtimeRole],
     roleAgentAddress(runtimeRole),
   ]));
-  const accessPolicyAuthority = {
-    localAgentAddress: roleAgentAddress(role),
-    resolveRemoteAgentAddress: async (peerId) => agentAddressByPeerId.get(peerId) ?? null,
+  const accessPolicyAuthority: Rfc64CatalogAccessPolicyAuthorityConfigV1 = {
+    localAgentAddress: roleAgentAddress(role) as EvmAddressV1,
+    resolveRemoteAgentAddress: async (peerId: string) =>
+      (agentAddressByPeerId.get(peerId) as EvmAddressV1 | undefined) ?? null,
   };
   const finalizedSnapshot = await chainAdapter.getContextGraphAuthoritySnapshot(
     BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
@@ -147,7 +169,7 @@ async function createRfc64PrivateFinalizedAgentV1({
     rfc64CatalogAccessPolicyAuthority: accessPolicyAuthority,
     rfc64CatalogActivation: {
       enabled: true,
-      deploymentProfile: DEPLOYMENT,
+      deploymentProfile: DEPLOYMENT as CatalogSealDeploymentProfileV1,
       rollout: {
         contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' },
       },
@@ -156,11 +178,19 @@ async function createRfc64PrivateFinalizedAgentV1({
   return Object.freeze({ agent: created, chainAdapter, faultProfile, rpc });
 }
 
-async function bindRfc64PrivateFinalizedRuntimeV1({ created, manifest, role }) {
+async function bindRfc64PrivateFinalizedRuntimeV1({
+  created,
+  manifest,
+  role,
+}: Readonly<{
+  created: Awaited<ReturnType<typeof createRfc64PrivateFinalizedAgentV1>>;
+  manifest: Rfc64PrivateRuntimeManifestV1;
+  role: Rfc64PrivateRuntimeRoleV1;
+}>): Promise<FinalizedRuntimeV1> {
   const onChainContextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
   const finalizedAuthority = composeRfc64FinalizedCatalogAuthorityV1({
-    networkId: NETWORK_ID,
-    contextGraphId: CONTEXT_GRAPH_ID,
+    networkId: NETWORK_ID as NetworkIdV1,
+    contextGraphId: CONTEXT_GRAPH_ID as ContextGraphIdV1,
     snapshot: parseRfc64AuthoritySnapshotV1(
       await created.chainAdapter.getContextGraphAuthoritySnapshot(onChainContextGraphId),
       onChainContextGraphId,
@@ -208,7 +238,10 @@ async function bindRfc64PrivateFinalizedRuntimeV1({ created, manifest, role }) {
       CONTEXT_GRAPH_ID,
     );
   } catch (error) {
-    if (runtimeIsMember || error?.code !== 'catalog-service-unavailable') throw error;
+    const code = error !== null && typeof error === 'object' && 'code' in error
+      ? error.code
+      : undefined;
+    if (runtimeIsMember || code !== 'catalog-service-unavailable') throw error;
   }
   if (runtimeIsMember && acceptedAuthority === null) {
     throw new Error('real graph produced no release-native finalized authority');
@@ -223,21 +256,33 @@ async function bindRfc64PrivateFinalizedRuntimeV1({ created, manifest, role }) {
       finalizedAuthority: registeredFinalizedAuthority,
       expectedAuthority,
     });
-  return createFinalizedRuntimeV1(created, {
+  const common = Object.freeze({
+    ...created,
+    kind: 'run',
     initialFinalizedAuthority,
-    peerIds: manifest.peerIds,
-    role,
+    peerIds: Object.freeze({ ...manifest.peerIds }),
   });
+  return role === 'owner'
+    ? Object.freeze({ ...common, role, publication: createOwnerPublicationStateV1() })
+    : Object.freeze({ ...common, role, publication: null });
 }
 
-function createBaseAgentOptionsV1({ dataDir, role, chainRuntime = {} }) {
+function createBaseAgentOptionsV1({
+  dataDir,
+  role,
+  chainRuntime = {},
+}: Readonly<{
+  dataDir: string;
+  role: Rfc64PrivateRuntimeRoleV1;
+  chainRuntime?: Readonly<Record<string, unknown>>;
+}>) {
   return {
     name: `RFC64PrivateReleaseGate-${role}`,
     dataDir,
     listenHost: '127.0.0.1',
     listenPort: 0,
     bootstrapPeers: [],
-    nodeRole: 'edge',
+    nodeRole: 'edge' as const,
     store: new OxigraphStore(join(dataDir, 'oxigraph')),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
@@ -248,7 +293,11 @@ function createBaseAgentOptionsV1({ dataDir, role, chainRuntime = {} }) {
   };
 }
 
-async function seedPrivateCatalogDefinitionV1(store, peerIds, participantAgents) {
+async function seedPrivateCatalogDefinitionV1(
+  store: OxigraphStore,
+  peerIds: Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>>,
+  participantAgents: readonly string[],
+) {
   const graph = contextGraphMetaGraphUri(CONTEXT_GRAPH_ID);
   const subject = contextGraphDataGraphUri(CONTEXT_GRAPH_ID);
   await Promise.all([
@@ -289,7 +338,7 @@ async function seedPrivateCatalogDefinitionV1(store, peerIds, participantAgents)
   ]);
 }
 
-function seededSubscriptionStoreV1(contextGraphId, onChainId) {
+function seededSubscriptionStoreV1(contextGraphId: string, onChainId: string) {
   const records = new Map([[contextGraphId, {
     id: contextGraphId,
     subscribed: true,
@@ -299,8 +348,14 @@ function seededSubscriptionStoreV1(contextGraphId, onChainId) {
   }]]);
   return {
     loadAll: async () => [...records.values()].map((record) => ({ ...record })),
-    load: async (id) => records.has(id) ? { ...records.get(id) } : null,
-    save: async (record) => { records.set(record.id, { ...record }); },
-    delete: async (id) => { records.delete(id); },
+    load: async (id: string) => records.has(id) ? { ...records.get(id) } : null,
+    save: async (record: Readonly<{
+      id: string;
+      subscribed: boolean;
+      synced: boolean;
+      syncScoped: boolean;
+      onChainId: string;
+    }>) => { records.set(record.id, { ...record }); },
+    delete: async (id: string) => { records.delete(id); },
   };
 }
