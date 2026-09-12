@@ -123,6 +123,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
       config: validated,
       request,
       expectedNetworkKey: initialPreflight.networkKey,
+      expectedNodeIdentities: initialPreflight.nodeIdentities,
     }));
 
     const checks = Object.freeze({

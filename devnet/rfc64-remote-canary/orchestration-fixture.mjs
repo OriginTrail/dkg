@@ -24,6 +24,7 @@ export function createCertificationRuntime({
   deliverLiveMarkerToReceiver = true,
   deliverOfflineMarkerToReceiver = true,
   legacySyncAllowed = false,
+  sameDaemonIdentity = false,
   contextGraphIds = [CG],
   mutateJsonBody,
   rpcEvidenceConfig = baseConfig(),
@@ -55,6 +56,11 @@ export function createCertificationRuntime({
       return new Response(method === 'HEAD' ? null : JSON.stringify(statusBody({
         legacySyncAllowed,
         contextGraphIds,
+        daemonIdentity: sameDaemonIdentity
+          ? '12D3KooSharedDaemonIdentity'
+          : isReceiver
+            ? '12D3KooReceiverDaemonIdentity'
+            : '12D3KooSourceDaemonIdentity',
       })), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },

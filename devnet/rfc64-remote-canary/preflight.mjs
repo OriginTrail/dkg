@@ -17,7 +17,12 @@ function canonicalChainId(value) {
   return canonical;
 }
 
-export async function preflightAllNodesV1({ config, request, expectedNetworkKey }) {
+export async function preflightAllNodesV1({
+  config,
+  request,
+  expectedNetworkKey,
+  expectedNodeIdentities,
+}) {
   const statuses = await mapCanaryPhaseV1(config.nodes, async (node) => {
     const status = await request.json(node, 'GET', '/api/status');
     const certification = validateNodePreflightV1(status, node, config, {
@@ -33,6 +38,22 @@ export async function preflightAllNodesV1({ config, request, expectedNetworkKey 
   const networkKey = [...networkKeys][0];
   if (expectedNetworkKey !== undefined && networkKey !== expectedNetworkKey) {
     throw failure('node-network-changed', 'invariant');
+  }
+  const participatingNodes = [...new Set(config.contextGraphs.flatMap(
+    ({ source, receiver }) => [source, receiver],
+  ))];
+  const nodeIdentities = new Map(participatingNodes.map((node) => (
+    [node.id, raw.get(node.id).daemonIdentity]
+  )));
+  if (new Set(nodeIdentities.values()).size !== nodeIdentities.size) {
+    throw failure('duplicate-node-identity', 'invariant');
+  }
+  if (expectedNodeIdentities !== undefined) {
+    for (const [nodeId, daemonIdentity] of nodeIdentities) {
+      if (expectedNodeIdentities.get(nodeId) !== daemonIdentity) {
+        throw failure('node-identity-changed', 'invariant');
+      }
+    }
   }
   if (expectedNetworkKey !== undefined) {
     for (const contextGraph of config.contextGraphs) {
@@ -62,7 +83,7 @@ export async function preflightAllNodesV1({ config, request, expectedNetworkKey 
       }))),
     });
   }));
-  return Object.freeze({ networkKey, nodes });
+  return Object.freeze({ networkKey, nodeIdentities, nodes });
 }
 
 export function validateNodePreflightV1(

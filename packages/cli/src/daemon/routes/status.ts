@@ -797,6 +797,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       config.syncReconcilerEnabled,
     );
     const rfc64Certification = createRfc64DaemonCertificationStatusV1({
+      daemonIdentity: agent.peerId,
       commit: reportedCommit,
       networkId,
       syncReconcilerEnabled,

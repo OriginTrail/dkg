@@ -17,10 +17,12 @@ const INVENTORY_DIGEST = `0x${'cd'.repeat(32)}`;
 
 describe('RFC-64 daemon certification status v1', () => {
   it('projects and decodes the narrow healthy daemon contract', () => {
-    const projected = createRfc64DaemonCertificationStatusV1(input());
+    const source = mutable(input());
+    const projected = createRfc64DaemonCertificationStatusV1(source);
 
     expect(projected).toEqual({
       schema: RFC64_DAEMON_CERTIFICATION_STATUS_SCHEMA_V1,
+      daemonIdentity: '12D3KooDaemonIdentity',
       commit: COMMIT,
       networkId: 'otp-testnet-2160',
       syncReconcilerEnabled: true,
@@ -32,13 +34,26 @@ describe('RFC-64 daemon certification status v1', () => {
         contextGraphs: [certificationOperational()],
       },
     });
-    expect(decodeRfc64DaemonCertificationStatusV1(projected)).toBe(projected);
+    const decoded = decodeRfc64DaemonCertificationStatusV1(projected);
+    expect(decoded).toEqual(projected);
+    expect(decoded).not.toBe(projected);
+    expect(decoded.catalog.contextGraphs[0]).not.toBe(projected.catalog.contextGraphs[0]);
+    expect(Object.isFrozen(decoded)).toBe(true);
+    expect(Object.isFrozen(decoded.catalog.contextGraphs[0])).toBe(true);
     expect(Object.isFrozen(projected)).toBe(true);
     expect(Object.isFrozen(projected.chain)).toBe(true);
     expect(Object.isFrozen(projected.catalog)).toBe(true);
     expect(Object.isFrozen(projected.catalog.contextGraphModes)).toBe(true);
     expect(Object.isFrozen(projected.catalog.contextGraphs)).toBe(true);
     expect(Object.isFrozen(projected.catalog.contextGraphs[0])).toBe(true);
+    expect('responsibilityReason' in projected.catalog.contextGraphs[0]).toBe(false);
+
+    source.chain!.rpcEndpointCount = 99;
+    source.catalog.contextGraphModes[CONTEXT_GRAPH_ID] = 'legacy';
+    source.catalog.contextGraphs[0].phase = 'blocked';
+    expect(projected.chain?.rpcEndpointCount).toBe(3);
+    expect(projected.catalog.contextGraphModes[CONTEXT_GRAPH_ID]).toBe('catalog');
+    expect(projected.catalog.contextGraphs[0].phase).toBe('complete');
   });
 
   it('preserves representable blocked/incomplete state and null chain metadata', () => {
@@ -59,7 +74,7 @@ describe('RFC-64 daemon certification status v1', () => {
       lastSuccessfulAdvanceAt: null,
     };
 
-    expect(decodeRfc64DaemonCertificationStatusV1(blocked)).toBe(blocked);
+    expect(decodeRfc64DaemonCertificationStatusV1(blocked)).toEqual(blocked);
     expect(blocked.chain).toBeNull();
     expect(blocked.catalog.contextGraphs[0]).toMatchObject({
       phase: 'blocked',
@@ -75,8 +90,8 @@ describe('RFC-64 daemon certification status v1', () => {
     source.catalog.contextGraphs[0].appliedCatalogHeadDigest = `0x${'ef'.repeat(32)}`;
     source.catalog.contextGraphs[0].catalogVersion = '8';
 
-    expect(decodeRfc64DaemonCertificationStatusV1(source)).toBe(source);
-    expect(decodeRfc64DaemonCertificationStatusV1(receiver)).toBe(receiver);
+    expect(decodeRfc64DaemonCertificationStatusV1(source)).toEqual(source);
+    expect(decodeRfc64DaemonCertificationStatusV1(receiver)).toEqual(receiver);
     expect(source.catalog.contextGraphs[0]).not.toEqual(receiver.catalog.contextGraphs[0]);
   });
 
@@ -84,6 +99,7 @@ describe('RFC-64 daemon certification status v1', () => {
     const cases: Array<[string, unknown]> = [
       ['root', null],
       ['schema', changed('schema', 'wrong')],
+      ['daemon identity', changed('daemonIdentity', '')],
       ['commit', changed('commit', 1)],
       ['network ID', changed('networkId', 1)],
       ['sync flag', changed('syncReconcilerEnabled', 'yes')],
@@ -123,6 +139,7 @@ function input(
   overrides: Partial<CreateRfc64DaemonCertificationStatusInputV1> = {},
 ): CreateRfc64DaemonCertificationStatusInputV1 {
   return {
+    daemonIdentity: '12D3KooDaemonIdentity',
     commit: COMMIT,
     networkId: 'otp-testnet-2160',
     syncReconcilerEnabled: true,

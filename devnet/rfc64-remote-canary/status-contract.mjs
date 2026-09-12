@@ -5,20 +5,12 @@ import {
   assertCanonicalDigest,
   assertCanonicalTimestampMs,
 } from '@origintrail-official/dkg-core';
-import { decodeRfc64DaemonCertificationStatusV1 } from '../../src/rfc64/daemon-certification-status-v1.ts';
+import {
+  decodeRfc64DaemonCertificationStatusV1,
+  RFC64_DAEMON_CERTIFICATION_COMPLETE_PARITY_KEYS_V1,
+} from '@origintrail-official/dkg-agent';
 
 import { failure } from './errors.mjs';
-
-const COMPLETE_OPERATIONAL_PARITY_KEYS_V1 = Object.freeze([
-  'expectedCatalogHeadDigest',
-  'appliedCatalogHeadDigest',
-  'expectedInventoryDigest',
-  'appliedInventoryDigest',
-  'expectedRowCount',
-  'appliedRowCount',
-  'missingRowCount',
-  'catalogVersion',
-]);
 
 export function decodeNodeCertificationStatusV1(status) {
   if (status === null || typeof status !== 'object' || Array.isArray(status)) {
@@ -90,7 +82,7 @@ export function equalCompleteOperationalParityV1(
   const receiver = completeOperationalParityV1(receiverCertification, contextGraphId);
   return source !== null
     && receiver !== null
-    && COMPLETE_OPERATIONAL_PARITY_KEYS_V1.every(
+    && RFC64_DAEMON_CERTIFICATION_COMPLETE_PARITY_KEYS_V1.every(
       (key) => source[key] === receiver[key],
     );
 }

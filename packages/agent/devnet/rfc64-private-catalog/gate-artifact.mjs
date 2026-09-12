@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { writeRfc64ArtifactAtomicV1 } from '../rfc64-artifact-v1.mjs';
+import { writeRfc64ArtifactAtomicV1 } from '../../../../devnet/rfc64-artifact-v1.mjs';
 import { isSafeChildDiagnosticPhaseV1 } from './child-protocol.mjs';
 import {
   RFC64_PRIVATE_GATE_SCHEMA_V2 as SCHEMA,
