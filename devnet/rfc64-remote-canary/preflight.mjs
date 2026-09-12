@@ -15,6 +15,18 @@ import {
 /** @typedef {import('./domain-contract.js').NormalizedCanaryNodeV1} NormalizedCanaryNodeV1 */
 /** @typedef {import('./domain-contract.js').NormalizedRemoteCanaryConfigV1} NormalizedRemoteCanaryConfigV1 */
 
+/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, request: CanaryRequesterV1 }>} PreflightBaseInputV1 */
+/** @typedef {PreflightBaseInputV1 & Readonly<{ mode: 'initial' }>} InitialPreflightInputV1 */
+/** @typedef {PreflightBaseInputV1 & Readonly<{
+ *   mode: 'final',
+ *   baseline: Readonly<{
+ *     networkKey: string,
+ *     nodeIdentities: ReadonlyMap<string, string>,
+ *     operationalCertificationByNodeId: ReadonlyMap<string, Readonly<CertificationStatusV1>>,
+ *   }>,
+ * }>} FinalPreflightInputV1 */
+/** @typedef {InitialPreflightInputV1 | FinalPreflightInputV1} PreflightInputV1 */
+
 /** @param {unknown} value @returns {string} */
 function canonicalChainId(value) {
   const canonical = String(value);
@@ -25,25 +37,15 @@ function canonicalChainId(value) {
 }
 
 /**
- * @param {Readonly<{
- *   config: NormalizedRemoteCanaryConfigV1,
- *   request: CanaryRequesterV1,
- *   expectedNetworkKey?: string,
- *   expectedNodeIdentities?: ReadonlyMap<string, string>,
- *   expectedOperationalCertificationByNodeId?: ReadonlyMap<string, Readonly<CertificationStatusV1>>,
- * }>} input
+ * @param {PreflightInputV1} input
  */
-export async function preflightAllNodesV1({
-  config,
-  request,
-  expectedNetworkKey,
-  expectedNodeIdentities,
-  expectedOperationalCertificationByNodeId,
-}) {
+export async function preflightAllNodesV1(input) {
+  const { config, request } = input;
+  const baseline = input.mode === 'final' ? input.baseline : null;
   const statuses = await mapCanaryPhaseV1(config.nodes, async (node) => {
     const status = await request.json(node, 'GET', '/api/status');
     const certification = validateNodePreflightV1(status, node, config, {
-      requireCompleteOperationalStatus: expectedNetworkKey !== undefined,
+      requireCompleteOperationalStatus: baseline !== null,
     });
     return /** @type {const} */ ([node, certification]);
   });
@@ -53,7 +55,7 @@ export async function preflightAllNodesV1({
   )));
   if (networkKeys.size !== 1) throw failure('node-network-mismatch', 'invariant');
   const networkKey = [...networkKeys][0];
-  if (expectedNetworkKey !== undefined && networkKey !== expectedNetworkKey) {
+  if (baseline !== null && networkKey !== baseline.networkKey) {
     throw failure('node-network-changed', 'invariant');
   }
   const participatingNodes = [...new Set(config.contextGraphs.flatMap(
@@ -65,14 +67,14 @@ export async function preflightAllNodesV1({
   if (new Set(nodeIdentities.values()).size !== nodeIdentities.size) {
     throw failure('duplicate-node-identity', 'invariant');
   }
-  if (expectedNodeIdentities !== undefined) {
+  if (baseline !== null) {
     for (const [nodeId, daemonIdentity] of nodeIdentities) {
-      if (expectedNodeIdentities.get(nodeId) !== daemonIdentity) {
+      if (baseline.nodeIdentities.get(nodeId) !== daemonIdentity) {
         throw failure('node-identity-changed', 'invariant');
       }
     }
   }
-  if (expectedNetworkKey !== undefined) {
+  if (baseline !== null) {
     for (const contextGraph of config.contextGraphs) {
       if (!equalCompleteOperationalParityV1(
         raw.get(contextGraph.source.id),
@@ -81,11 +83,11 @@ export async function preflightAllNodesV1({
       )) throw failure('rfc64-operational-parity-changed', 'invariant');
     }
   }
-  if (expectedOperationalCertificationByNodeId !== undefined) {
+  if (baseline !== null) {
     for (const contextGraph of config.contextGraphs) {
       for (const node of [contextGraph.source, contextGraph.receiver]) {
         if (!equalExactOperationalSnapshotV1(
-          expectedOperationalCertificationByNodeId.get(node.id),
+          baseline.operationalCertificationByNodeId.get(node.id),
           raw.get(node.id),
           contextGraph.id,
         )) throw failure('rfc64-operational-evidence-drift', 'invariant');

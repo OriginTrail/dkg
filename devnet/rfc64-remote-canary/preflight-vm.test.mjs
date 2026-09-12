@@ -58,6 +58,7 @@ test('preflight rejects a cross-node network identity mismatch', async () => {
   const config = validateRemoteCanaryConfigV1(baseConfig());
   await assert.rejects(
     preflightAllNodesV1({
+      mode: 'initial',
       config,
       request: {
         json: async (node) => ({
@@ -71,6 +72,32 @@ test('preflight rejects a cross-node network identity mismatch', async () => {
     }),
     (error) => error instanceof RemoteCanaryError && error.code === 'node-network-mismatch',
   );
+});
+
+test('preflight uses explicit initial and complete final baseline states', async () => {
+  const config = validateRemoteCanaryConfigV1(baseConfig());
+  const certificationByNodeId = new Map();
+  const request = {
+    json: async (node) => {
+      const status = statusBody({ daemonIdentity: `peer-${node.id}` });
+      certificationByNodeId.set(node.id, status.rfc64Certification);
+      return status;
+    },
+  };
+  const initial = await preflightAllNodesV1({ mode: 'initial', config, request });
+  const final = await preflightAllNodesV1({
+    mode: 'final',
+    config,
+    request,
+    baseline: {
+      networkKey: initial.networkKey,
+      nodeIdentities: initial.nodeIdentities,
+      operationalCertificationByNodeId: certificationByNodeId,
+    },
+  });
+  assert.equal(final.networkKey, initial.networkKey);
+  assert.deepEqual(final.nodeIdentities, initial.nodeIdentities);
+  assert.equal(final.nodes.length, config.nodes.length);
 });
 
 test('preflight fails closed when the versioned daemon certification contract is malformed', () => {
