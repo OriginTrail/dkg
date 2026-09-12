@@ -26,50 +26,45 @@ export async function waitForBootstrapV1(context, command) {
   assertFinalizedRuntimeV1(context);
   const { role } = context;
   const timeoutMs = boundedTimeoutV1(command.timeoutMs);
-  const deadline = Date.now() + timeoutMs;
-  let last;
-  let attempts = 0;
   const providerRole = role === 'provider2' ? 'owner' : 'provider2';
   const providerPeerId = context.peerIds[providerRole];
   if (providerPeerId === undefined) {
     throw new Error(`${role} has no configured catalog provider`);
   }
-  while (Date.now() < deadline) {
-    attempts += 1;
-    try {
-      last = await context.agent.synchronizeRfc64CatalogRolloutFromProvidersV1({
-        remotePeerIds: [providerPeerId],
-        scope: createPrivateCatalogSyncScope(),
-      });
-    } catch (error) {
-      last = { error: boundedErrorChainV1(error) };
-    }
-    const bootstrapApplied = last !== null
-      && last.error === undefined
-      && ['applied', 'already-applied'].includes(last.completionOutcome)
-      && (
-        command.expectedHeadDigest === undefined
-        || last.currentCatalogHeadDigest === command.expectedHeadDigest
+  const observation = await runRfc64PrivateBootstrapRetryLoopV1({
+    timeoutMs,
+    synchronize: () => context.agent.synchronizeRfc64CatalogRolloutFromProvidersV1({
+      remotePeerIds: [providerPeerId],
+      scope: createPrivateCatalogSyncScope(),
+    }),
+    isSynchronized: (last) => last !== null
+        && last.error === undefined
+        && ['applied', 'already-applied'].includes(last.completionOutcome)
+        && (
+          command.expectedHeadDigest === undefined
+          || last.currentCatalogHeadDigest === command.expectedHeadDigest
+        ),
+    verify: async (last) => {
+      return command.expectedMemory === 'finalized-vm-v1'
+        ? hasExactLocalFinalizedVmBaselineV1(context)
+        : hasExactLocalMemoryContentsV1(context, {
+            catalogVersion: last.catalogVersion,
+            exactExpectedHead: true,
+          });
+    },
+  });
+  const { last, attempts } = observation;
+  if (observation.accepted) {
+    const synchronizationEvidence =
+      context.agent.readRfc64PublicCatalogSynchronizationEvidenceV1(
+        last.currentCatalogHeadDigest,
       );
-    const exactMemory = command.expectedMemory === 'finalized-vm-v1'
-      ? await hasExactLocalFinalizedVmBaselineV1(context)
-      : await hasExactLocalMemoryContentsV1(context, {
-        catalogVersion: last?.catalogVersion,
-        exactExpectedHead: bootstrapApplied,
-      });
-    if (bootstrapApplied && exactMemory) {
-      const synchronizationEvidence =
-        context.agent.readRfc64PublicCatalogSynchronizationEvidenceV1(
-          last.currentCatalogHeadDigest,
-        );
-      return composeBootstrapEvidenceV1(
-        last,
-        attempts,
-        providerPeerId,
-        synchronizationEvidence?.appliedProviderPeerId ?? null,
-      );
-    }
-    await delay(100);
+    return composeBootstrapEvidenceV1(
+      last,
+      attempts,
+      providerPeerId,
+      synchronizationEvidence?.appliedProviderPeerId ?? null,
+    );
   }
   const graphCounts = await readPrivateCatalogWorkspaceMemoryEvidenceV1(context.agent.store, {
     assetNumbers: ASSET_NUMBERS,
@@ -89,6 +84,34 @@ export async function waitForBootstrapV1(context, command) {
     + `registeredAuthority=${JSON.stringify(registeredAuthority, bigintToDecimal)}; `
     + `last=${JSON.stringify(last)}`,
   );
+}
+
+/** Retry transport failures without running applied-memory proofs prematurely. */
+export async function runRfc64PrivateBootstrapRetryLoopV1({
+  timeoutMs,
+  synchronize,
+  isSynchronized,
+  verify,
+  wait = () => delay(100),
+}) {
+  const deadline = Date.now() + timeoutMs;
+  let last;
+  let attempts = 0;
+  while (Date.now() < deadline) {
+    attempts += 1;
+    try {
+      last = await synchronize();
+    } catch (error) {
+      last = { error: boundedErrorChainV1(error) };
+    }
+    // `verify` owns the strict applied-memory proof. It is deliberately not
+    // invoked for transport failures or null/incomplete synchronization.
+    if (isSynchronized(last) && await verify(last)) {
+      return Object.freeze({ accepted: true, attempts, last });
+    }
+    await wait();
+  }
+  return Object.freeze({ accepted: false, attempts, last });
 }
 
 /** Preserve the canonical nullable provider identity instead of inferring transfer provenance. */

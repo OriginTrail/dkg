@@ -37,7 +37,12 @@ import {
   parseRfc64PrivateRuntimeManifestV1,
   parseRfc64PrivateRuntimeRoleV1,
 } from './agent-runtime.ts';
-import { composeBootstrapEvidenceV1 } from './catalog-evidence-handlers.mjs';
+import { withRfc64PrivateFinalizedRuntimeAcquisitionV1 } from
+  './agent-runtime-factory.ts';
+import {
+  composeBootstrapEvidenceV1,
+  runRfc64PrivateBootstrapRetryLoopV1,
+} from './catalog-evidence-handlers.mjs';
 import { buildRfc64PrivateReleaseArtifactV1 } from './scenario-artifact.mjs';
 
 const PROTOCOL_TEST_DIGEST = `0x${'ab'.repeat(32)}`;
@@ -174,6 +179,21 @@ test('runtime external boundaries accept only canonical roles and complete manif
   }), /exactly cover unique roles/u);
 });
 
+test('finalized runtime acquisition rolls partial resources back in reverse order', async () => {
+  const releaseOrder = [];
+  const acquisitionFailure = new Error('injected post-start binding failure');
+  await assert.rejects(
+    withRfc64PrivateFinalizedRuntimeAcquisitionV1(async (owner) => {
+      owner.ownStore({ close: async () => { releaseOrder.push('store'); } });
+      owner.ownRpc({ close: async () => { releaseOrder.push('rpc'); } });
+      owner.ownAgent({ stop: async () => { releaseOrder.push('agent'); } });
+      throw acquisitionFailure;
+    }),
+    (error) => error === acquisitionFailure,
+  );
+  assert.deepEqual(releaseOrder, ['agent', 'rpc', 'store']);
+});
+
 test('publication and synchronization derive the exact canonical catalog scope', () => {
   const scope = createPrivateCatalogScope();
   const syncScope = createPrivateCatalogSyncScope();
@@ -253,6 +273,31 @@ test('bootstrap evidence preserves already-applied provider nullability', () => 
     }, 1, 'provider-peer', 'different-peer'),
     /inconsistent applied-transfer provenance/u,
   );
+});
+
+test('bootstrap retry defers strict memory proof until synchronization succeeds', async () => {
+  const transientFailure = new Error('transient provider failure');
+  const synchronized = Object.freeze({ completionOutcome: 'applied' });
+  let attempts = 0;
+  let proofReads = 0;
+  const result = await runRfc64PrivateBootstrapRetryLoopV1({
+    timeoutMs: 1_000,
+    synchronize: async () => {
+      attempts += 1;
+      if (attempts === 1) throw transientFailure;
+      return synchronized;
+    },
+    isSynchronized: (candidate) => candidate?.error === undefined,
+    verify: async (candidate) => {
+      proofReads += 1;
+      assert.equal(candidate, synchronized);
+      return true;
+    },
+    wait: async () => {},
+  });
+
+  assert.deepEqual(result, { accepted: true, attempts: 2, last: synchronized });
+  assert.equal(proofReads, 1);
 });
 
 test('artifact fails when receiver startup precedes owner exit', () => {

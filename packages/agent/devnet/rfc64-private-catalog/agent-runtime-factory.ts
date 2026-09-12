@@ -45,6 +45,7 @@ import {
   type FinalizedRuntimeV1,
   type ProbeRuntimeV1,
   type Rfc64PrivateFaultProfileV1,
+  type Rfc64PrivateFinalizedRpcV1,
   type Rfc64PrivateRuntimeManifestV1,
   type Rfc64PrivateRuntimeRoleV1,
 } from './agent-runtime.ts';
@@ -63,6 +64,62 @@ type FinalizedRuntimeFactoryInputV1 = ProbeRuntimeFactoryInputV1 & Readonly<{
   manifest: Rfc64PrivateRuntimeManifestV1;
 }>;
 
+class Rfc64PrivateFinalizedRuntimeAcquisitionV1 {
+  #store: Pick<OxigraphStore, 'close'> | undefined;
+  #rpc: Pick<Rfc64PrivateFinalizedRpcV1, 'close'> | undefined;
+  #agent: Pick<DKGAgent, 'stop'> | undefined;
+
+  ownStore<T extends Pick<OxigraphStore, 'close'>>(store: T): T {
+    this.#store = store;
+    return store;
+  }
+
+  ownRpc<T extends Pick<Rfc64PrivateFinalizedRpcV1, 'close'>>(rpc: T): T {
+    this.#rpc = rpc;
+    return rpc;
+  }
+
+  ownAgent<T extends Pick<DKGAgent, 'stop'>>(agent: T): T {
+    this.#agent = agent;
+    return agent;
+  }
+
+  async rollback(cause: unknown): Promise<never> {
+    const cleanupFailures: unknown[] = [];
+    for (const close of [
+      () => this.#agent?.stop(),
+      () => this.#rpc?.close(),
+      () => this.#store?.close(),
+    ]) {
+      try {
+        await close();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    }
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        [cause, ...cleanupFailures],
+        'RFC-64 finalized runtime acquisition and rollback both failed',
+        { cause },
+      );
+    }
+    throw cause;
+  }
+}
+
+/** Transfer ownership only after every finalized-runtime assertion succeeds. */
+export async function withRfc64PrivateFinalizedRuntimeAcquisitionV1<T>(
+  acquire: (owner: Rfc64PrivateFinalizedRuntimeAcquisitionV1) => Promise<T>,
+): Promise<T> {
+  const owner = new Rfc64PrivateFinalizedRuntimeAcquisitionV1();
+  try {
+    return await acquire(owner);
+  } catch (error) {
+    return owner.rollback(error);
+  }
+}
+
 export async function createRfc64PrivateProbeRuntimeV1(
   input: ProbeRuntimeFactoryInputV1,
 ): Promise<ProbeRuntimeV1> {
@@ -79,24 +136,25 @@ export async function createRfc64PrivateProbeRuntimeV1(
 export async function createRfc64PrivateFinalizedRuntimeV1(
   input: FinalizedRuntimeFactoryInputV1,
 ): Promise<FinalizedRuntimeV1> {
-  const { dataDir, faultProfile, manifest, role } = input;
-  rolePrivateKey(role);
-  const created = await createRfc64PrivateFinalizedAgentV1({
+  return withRfc64PrivateFinalizedRuntimeAcquisitionV1(async (owner) => {
+    const { manifest, role } = input;
+    rolePrivateKey(role);
+    const created = await createRfc64PrivateFinalizedAgentV1(input, owner);
+    await created.agent.start();
+    return bindRfc64PrivateFinalizedRuntimeV1({ created, manifest, role });
+  });
+}
+
+async function createRfc64PrivateFinalizedAgentV1(
+  {
     dataDir,
     faultProfile,
     manifest,
     role,
-  });
-  await created.agent.start();
-  return bindRfc64PrivateFinalizedRuntimeV1({ created, manifest, role });
-}
-
-async function createRfc64PrivateFinalizedAgentV1({
-  dataDir,
-  faultProfile,
-  manifest,
-  role,
-}: FinalizedRuntimeFactoryInputV1) {
+  }: FinalizedRuntimeFactoryInputV1,
+  owner: Rfc64PrivateFinalizedRuntimeAcquisitionV1,
+) {
+  const store = owner.ownStore(new OxigraphStore(join(dataDir, 'oxigraph')));
   const canonicalFixture = createFinalizedChainFixture();
   const fixture = faultProfile.authority.fixture(
     canonicalFixture,
@@ -117,14 +175,15 @@ async function createRfc64PrivateFinalizedAgentV1({
     participantAgents: [...fixture.participantAgents],
     nameHash: fixture.nameHash,
   });
-  const rpc = await startRfc64PrivateDevnetFinalizedRpc(fixture, {
+  const rpc = owner.ownRpc(await startRfc64PrivateDevnetFinalizedRpc(fixture, {
     readAuthoritySnapshot: () => chainAdapter.getContextGraphAuthoritySnapshot(
       BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
     ),
-  });
+  }));
   const base = createBaseAgentOptionsV1({
     dataDir,
     role,
+    store,
     chainRuntime: {
       chainAdapter,
       chainConfig: {
@@ -157,7 +216,7 @@ async function createRfc64PrivateFinalizedAgentV1({
     peerIds,
     finalizedSnapshot.participantAgents,
   );
-  const created = await DKGAgent.create({
+  const created = owner.ownAgent(await DKGAgent.create({
     ...base,
     networkIdentity: {
       networkId: await computeNetworkId(),
@@ -174,7 +233,7 @@ async function createRfc64PrivateFinalizedAgentV1({
         contextGraphModes: { [CONTEXT_GRAPH_ID]: 'catalog' },
       },
     },
-  });
+  }));
   return Object.freeze({ agent: created, chainAdapter, faultProfile, rpc });
 }
 
@@ -271,10 +330,12 @@ function createBaseAgentOptionsV1({
   dataDir,
   role,
   chainRuntime = {},
+  store,
 }: Readonly<{
   dataDir: string;
   role: Rfc64PrivateRuntimeRoleV1;
   chainRuntime?: Readonly<Record<string, unknown>>;
+  store?: OxigraphStore;
 }>) {
   return {
     name: `RFC64PrivateReleaseGate-${role}`,
@@ -283,7 +344,7 @@ function createBaseAgentOptionsV1({
     listenPort: 0,
     bootstrapPeers: [],
     nodeRole: 'edge' as const,
-    store: new OxigraphStore(join(dataDir, 'oxigraph')),
+    store: store ?? new OxigraphStore(join(dataDir, 'oxigraph')),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
     syncOnConnectEnabled: false,
