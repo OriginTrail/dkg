@@ -577,7 +577,8 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 export type DiscoverContextGraphsFromChainOptions = {
   throwOnChainScanFailure?: boolean;
   pageBudget?: number;
-  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor';
+  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor' | 'repair';
+  minimumIntervalMs?: number;
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
   resumeFromCursor?: boolean;
@@ -587,7 +588,8 @@ type NormalizedContextGraphDiscoveryScan =
   | { mode: 'listAll' }
   | { mode: 'incremental'; pageBudget?: number }
   | { mode: 'seedFull' }
-  | { mode: 'seedFromCursor'; pageBudget?: number };
+  | { mode: 'seedFromCursor'; pageBudget?: number }
+  | { mode: 'repair'; pageBudget: number; minimumIntervalMs?: number };
 
 function normalizeContextGraphDiscoveryScan(
   options: DiscoverContextGraphsFromChainOptions,
@@ -604,6 +606,15 @@ function normalizeContextGraphDiscoveryScan(
       return {
         mode: 'seedFromCursor',
         ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+      };
+    }
+    if (options.mode === 'repair') {
+      return {
+        mode: 'repair',
+        pageBudget: options.pageBudget ?? 1,
+        ...(options.minimumIntervalMs !== undefined
+          ? { minimumIntervalMs: options.minimumIntervalMs }
+          : {}),
       };
     }
     if (options.mode === 'listAll') return { mode: 'listAll' };
@@ -2063,6 +2074,17 @@ export class DKGAgent extends DKGAgentBase {
     return await this.chain.hasContextGraphRegistryScanWatermark?.() ?? false;
   }
 
+  async repairContextGraphRegistry(options: {
+    pageBudget: number;
+    minimumIntervalMs: number;
+  }): Promise<number> {
+    return this.discoverContextGraphsFromChain({
+      mode: 'repair',
+      throwOnChainScanFailure: true,
+      ...options,
+    });
+  }
+
   /**
    * Query the on-chain registry for all registered context graphs and
    * catalogue any not yet known locally without activating membership.
@@ -2096,6 +2118,12 @@ export class DKGAgent extends DKGAgentBase {
     let onChainContextGraphs: ContextGraphOnChain[] = [];
     let partialChainScan = false;
     let partialChainScanError: unknown;
+    const scanStartedAt = Date.now();
+    let repairPages = 0;
+    let repairFromBlock: number | undefined;
+    let repairToBlock: number | undefined;
+    let repairTargetBlock: number | undefined;
+    let repairCompleted = false;
     const handleChainScanFailure = (err: unknown): ContextGraphOnChain[] | undefined => {
       const message = err instanceof Error ? err.message : String(err);
       const signature = message
@@ -2160,12 +2188,6 @@ export class DKGAgent extends DKGAgentBase {
           continue;
         }
 
-        const durableOnChainId = await readDurableContextGraphOnChainId(binding.name);
-        if (durableOnChainId === binding.onChainId) {
-          if (registryNameHash) knownNameHashes.add(registryNameHash);
-          continue;
-        }
-
         // Curated CGs (accessPolicy=1) must not silently land in non-participants' lists.
         // We can't query the V10 ContextGraphs participant set from a NameRegistry event alone,
         // so apply the strict default: only catalogue when this node's wallet matches
@@ -2180,6 +2202,24 @@ export class DKGAgent extends DKGAgentBase {
             if (registryNameHash) knownNameHashes.add(registryNameHash);
             continue;
           }
+        }
+
+        const durableOnChainId = await readDurableContextGraphOnChainId(binding.name);
+        if (durableOnChainId === binding.onChainId) {
+          // A previous attempt may have committed the reconstructible RDF
+          // binding but failed the active/core subscription write before page
+          // acknowledgement. Rebuild/flush the active row on replay instead of
+          // letting the durable binding fast-path skip that write forever.
+          const recorded = this.recordDiscoveredContextGraph(binding.name, {
+            name: binding.name,
+            onChainId: binding.onChainId,
+            ...(registryNameHash ? { onChainHash: registryNameHash } : {}),
+          }, { trackSyncScope: false });
+          if (recorded.subscribed || recorded.coreHosted) {
+            await this.persistContextGraphSubscriptionStrict(binding.name, recorded);
+          }
+          if (registryNameHash) knownNameHashes.add(registryNameHash);
+          continue;
         }
 
         // Persist the on-chain ID to the ontology graph so the publisher's
@@ -2205,11 +2245,19 @@ export class DKGAgent extends DKGAgentBase {
           graph: ontoGraph,
         }]);
 
-        this.recordDiscoveredContextGraph(binding.name, {
+        const recorded = this.recordDiscoveredContextGraph(binding.name, {
           name: binding.name,
           onChainId: binding.onChainId,
           ...(registryNameHash ? { onChainHash: registryNameHash } : {}),
         }, { trackSyncScope: false });
+        // `recordDiscoveredContextGraph` deliberately uses the ordinary queued
+        // persistence path. Drain that queue with a final strict snapshot before
+        // the scanner may acknowledge this page. Edge catalogue-only rows need
+        // no subscription row; their awaited ontology binding is sufficient to
+        // reconstruct them after restart.
+        if (recorded.subscribed || recorded.coreHosted) {
+          await this.persistContextGraphSubscriptionStrict(binding.name, recorded);
+        }
         this.contextGraphMetaProjection.markDirty(binding.name);
         const roleOutcome = (this.config.nodeRole ?? 'edge') === 'core'
           ? 'auto-subscribed for core ACK hosting'
@@ -2245,6 +2293,13 @@ export class DKGAgent extends DKGAgentBase {
             break;
           }
           if (next.done) break;
+          if (scanMode.mode === 'repair' && next.value.scanProgress) {
+            repairPages += 1;
+            repairFromBlock ??= next.value.scanProgress.fromBlock;
+            repairToBlock = next.value.scanProgress.toBlock;
+            repairTargetBlock = next.value.scanProgress.targetBlock;
+            repairCompleted ||= next.value.scanProgress.completesGeneration;
+          }
           await applyDiscoveredContextGraphs(next.value.contextGraphs);
           await next.value.ack();
         }
@@ -2264,6 +2319,14 @@ export class DKGAgent extends DKGAgentBase {
       this.log.info(ctx, `Discovered ${discovered} new context graph(s) from chain`);
     }
     if (options.throwOnChainScanFailure && partialChainScanError) throw partialChainScanError;
+    if (scanMode.mode === 'repair' && repairPages > 0) {
+      this.log.info(
+        ctx,
+        `Chain context graph repair audit: pages=${repairPages}/${scanMode.pageBudget} `
+          + `range=[${repairFromBlock},${repairToBlock}] target=${repairTargetBlock} `
+          + `complete=${repairCompleted} durationMs=${Date.now() - scanStartedAt}`,
+      );
+    }
     return discovered;
   }
 

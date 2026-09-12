@@ -936,6 +936,9 @@ export class EVMChainAdapterBase {
 
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
+  /** Guards the independently checkpointed historical repair pass. */
+  protected contextGraphRegistryRepairScanActive = false;
+
   /** Finalized authority scan watermarks owned by this adapter lifecycle. */
   protected readonly contextGraphAuthorityHistory: ContextGraphAuthorityHistoryCache;
 

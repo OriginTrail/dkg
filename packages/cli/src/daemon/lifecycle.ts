@@ -165,12 +165,14 @@ import {
 } from './log-lifecycle.js';
 import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
 import {
+  CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
 // The scan policy lived here until GH#2323; the implementation moved to its
 // own module, but the public import path stays valid for existing consumers.
 export {
+  CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
   CHAIN_FULL_SCAN_EVERY,
   chainDiscoveryScanOptions,
@@ -2456,7 +2458,7 @@ async function runDaemonInnerWithStartupOwnership(
 
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
-  const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
+  const CHAIN_SCAN_INTERVAL_MS = CHAIN_DISCOVERY_SCAN_INTERVAL_MS;
   const runChainDiscoveryScan = createChainDiscoveryScanRunner({
     agent,
     log,

@@ -2295,6 +2295,14 @@ describe('DashboardDB — chain RPC cursor stores', () => {
 
     await store.save(key, 5000);
     expect(await store.load(key)).toBe(5000);
+    const repair = {
+      version: 1,
+      nextBlock: 1000,
+      targetBlock: 4900,
+      startedAt: 1_700_000_000_000,
+    };
+    await store.saveRepairAudit(key, repair);
+    expect(await store.loadRepairAudit(key)).toEqual(repair);
     expect(db.db.prepare(
       `SELECT value FROM runtime_cursors
        WHERE namespace = 'contextGraphRegistryScan.cursor'
@@ -2327,7 +2335,16 @@ describe('DashboardDB — chain RPC cursor stores', () => {
     db = new DashboardDB({ dataDir: dir });
     const reopened = new SqliteContextGraphRegistryScanCursorStore(db);
     expect(await reopened.load(key)).toBe(5000);
+    expect(await reopened.loadRepairAudit(key)).toEqual(repair);
     expect(await reopened.load({ ...key, registryAddress: '0x6666666666666666666666666666666666666666' })).toBe(6000);
+    expect(db.db.prepare(
+      `SELECT value FROM settings WHERE key = ?`,
+    ).get([
+      SqliteContextGraphRegistryScanCursorStore.REPAIR_KEY_PREFIX,
+      key.chainId,
+      key.deploymentId,
+      key.registryAddress.toLowerCase(),
+    ].join(':'))).toEqual({ value: JSON.stringify(repair) });
   });
 
   it('atomically persists versioned Context Graph authority checkpoints', async () => {

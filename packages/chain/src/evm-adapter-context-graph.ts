@@ -30,6 +30,8 @@ import {
   resolveEvmContextGraphAuthoritySource,
   type EvmContextGraphAuthoritySource,
 } from './evm-context-graph-authority-source.js';
+import type { ContextGraphRegistryRepairAuditCheckpoint } from
+  './context-graph-registry-scan-cursor.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
@@ -70,7 +72,18 @@ type ContextGraphRegistryScanPlan =
       allowPartialFailure: true;
       seedAtEnd: true;
       pageBudget?: number;
+    }
+  | {
+      mode: 'repair';
+      resumeFromWatermark: false;
+      persistProgress: true;
+      allowPartialFailure: true;
+      seedAtEnd: false;
+      pageBudget: number;
+      minimumIntervalMs: number;
     };
+
+const CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 function normalizePageBudget(value: number | undefined): number | undefined {
   return Number.isFinite(value) && (value ?? 0) >= 1
@@ -180,6 +193,21 @@ function buildCursorContextGraphRegistryScanPlan(
       allowPartialFailure: true,
       seedAtEnd: true,
       pageBudget: normalizePageBudget(options.pageBudget),
+    };
+  }
+
+  if (options?.mode === 'repair') {
+    return {
+      mode: 'repair',
+      resumeFromWatermark: false,
+      persistProgress: true,
+      allowPartialFailure: true,
+      seedAtEnd: false,
+      pageBudget: normalizePageBudget(options.pageBudget) ?? 1,
+      minimumIntervalMs: Number.isFinite(options.minimumIntervalMs)
+        && (options.minimumIntervalMs ?? -1) >= 0
+        ? Math.floor(options.minimumIntervalMs ?? 0)
+        : CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS,
     };
   }
 
@@ -300,7 +328,17 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!registry) return;
     const registryAddress = (await registry.getAddress()).toLowerCase();
     const scanPlan = buildCursorContextGraphRegistryScanPlan(options);
-    yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, undefined, scanPlan);
+    if (scanPlan.mode !== 'repair') {
+      yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, undefined, scanPlan);
+      return;
+    }
+    if (this.contextGraphRegistryRepairScanActive) return;
+    this.contextGraphRegistryRepairScanActive = true;
+    try {
+      yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, undefined, scanPlan);
+    } finally {
+      this.contextGraphRegistryRepairScanActive = false;
+    }
   }
 
   private async _collectContextGraphRegistryScan(
@@ -329,12 +367,56 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     scanPlan: ContextGraphRegistryScanPlan,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
     const eventFilter = registry.filters.NameClaimed();
-    const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
-      ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
-      : undefined;
-    const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
-    const scan =
-      fromBlock === undefined
+    let repairCheckpoint: ContextGraphRegistryRepairAuditCheckpoint | undefined;
+    let scan: Awaited<ReturnType<ContextGraphMethods['resolveContractDeployBlock']>>;
+    let start: number;
+
+    if (scanPlan.mode === 'repair') {
+      const discoveredRange = await this.resolveContractDeployBlock(
+        registryAddress,
+        'repairContextGraphRegistry',
+        'ContextGraphNameRegistry',
+      );
+      const stableHead = discoveredRange.head - CG_REGISTRY_REORG_BUFFER_BLOCKS;
+      if (stableHead < discoveredRange.fromBlock) return;
+
+      const now = Date.now();
+      repairCheckpoint = await this.contextGraphRegistryScanCursor.loadRepairAudit(registryAddress);
+      if (
+        repairCheckpoint?.completedAt !== undefined
+        && now - repairCheckpoint.completedAt < scanPlan.minimumIntervalMs
+      ) return;
+
+      if (!repairCheckpoint || repairCheckpoint.completedAt !== undefined) {
+        repairCheckpoint = Object.freeze({
+          version: 1,
+          nextBlock: discoveredRange.fromBlock,
+          targetBlock: stableHead,
+          startedAt: now,
+        });
+        // Persist the generation atomically before issuing its first RPC page.
+        // A crash can therefore only replay this page, never skip it.
+        await this.contextGraphRegistryScanCursor.saveRepairAudit(registryAddress, repairCheckpoint);
+      } else if (repairCheckpoint.nextBlock > repairCheckpoint.targetBlock) {
+        repairCheckpoint = Object.freeze({ ...repairCheckpoint, completedAt: now });
+        await this.contextGraphRegistryScanCursor.saveRepairAudit(registryAddress, repairCheckpoint);
+        return;
+      }
+
+      scan = {
+        ...discoveredRange,
+        // The generation's captured target is immutable, while the current
+        // stable head protects against querying into a temporarily shorter or
+        // reorganizing live tip.
+        head: Math.min(repairCheckpoint.targetBlock, stableHead),
+      };
+      start = repairCheckpoint.nextBlock;
+    } else {
+      const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
+        ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
+        : undefined;
+      const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
+      scan = fromBlock === undefined
         ? canResumeFromWatermark
           ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
           : await this.resolveContractDeployBlock(
@@ -343,12 +425,14 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
               'ContextGraphNameRegistry',
             )
         : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
+      start = fromBlock ?? (
+        canResumeFromWatermark
+          ? Math.max(0, persistedWatermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
+          : scan.fromBlock
+      );
+    }
+
     const { fromBlock: deployBlock, head, scanProviders, degradedFromGenesis = false } = scan;
-    const start = fromBlock ?? (
-      canResumeFromWatermark
-        ? Math.max(0, persistedWatermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
-        : deployBlock
-    );
     if (start > head) {
       if (scanPlan.seedAtEnd) {
         await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
@@ -425,16 +509,45 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       }
       results.push(...pageResults);
       scannedAnyPage = true;
+      const scannedPages = Math.floor((hi - start) / pageSize) + 1;
       yield {
         contextGraphs: pageResults,
+        scanProgress: Object.freeze({
+          mode: scanPlan.mode === 'explicitFromBlock' ? 'listAll' : scanPlan.mode,
+          page: scannedPages,
+          ...(scanPlan.pageBudget !== undefined ? { pageBudget: scanPlan.pageBudget } : {}),
+          fromBlock: lo,
+          toBlock: hi,
+          targetBlock: scanPlan.mode === 'repair' && repairCheckpoint
+            ? repairCheckpoint.targetBlock
+            : head,
+          completesGeneration: scanPlan.mode === 'repair'
+            && !!repairCheckpoint
+            && hi >= repairCheckpoint.targetBlock,
+        }),
         ack: scanPlan.persistProgress
           ? async () => {
-              await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, hi + 1);
+              if (scanPlan.mode === 'repair' && repairCheckpoint) {
+                const advanced = Object.freeze({ ...repairCheckpoint, nextBlock: hi + 1 });
+                await this.contextGraphRegistryScanCursor.saveRepairAudit(registryAddress, advanced);
+                repairCheckpoint = advanced;
+              } else {
+                await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, hi + 1);
+              }
             }
           : async () => {},
       };
-      const scannedPages = Math.floor((hi - start) / pageSize) + 1;
       if (scanPlan.pageBudget !== undefined && scannedPages >= scanPlan.pageBudget && hi < head) return;
+    }
+
+    if (
+      scanPlan.mode === 'repair'
+      && repairCheckpoint
+      && repairCheckpoint.nextBlock > repairCheckpoint.targetBlock
+      && repairCheckpoint.completedAt === undefined
+    ) {
+      repairCheckpoint = Object.freeze({ ...repairCheckpoint, completedAt: Date.now() });
+      await this.contextGraphRegistryScanCursor.saveRepairAudit(registryAddress, repairCheckpoint);
     }
   }
 

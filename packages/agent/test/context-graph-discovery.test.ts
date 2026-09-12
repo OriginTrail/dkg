@@ -63,6 +63,7 @@ async function createTestAgent(opts?: {
   store?: TripleStore;
   storeConfig?: TripleStoreConfig;
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  nodeRole?: 'edge' | 'core';
 }) {
   const agent = await DKGAgent.create({
     kaNumberAllocator: makeTestKaNumberAllocator(),
@@ -74,6 +75,7 @@ async function createTestAgent(opts?: {
     chainAdapter: opts?.chainAdapter ?? createEVMAdapter(HARDHAT_KEYS.CORE_OP),
     rfc64CatalogActivation: { enabled: false },
     contextGraphSubscriptionStore: opts?.contextGraphSubscriptionStore,
+    ...(opts?.nodeRole ? { nodeRole: opts.nodeRole } : {}),
   });
   return { agent, store: opts?.store ?? agent.store };
 }
@@ -2411,6 +2413,10 @@ describe('discoverContextGraphsFromChain', () => {
       mode: 'seedFromCursor',
       pageBudget: 11,
     })).toBe(0);
+    expect(await agent.repairContextGraphRegistry({
+      pageBudget: 3,
+      minimumIntervalMs: 1234,
+    })).toBe(0);
 
     expect(listCalls).toEqual([
       undefined,
@@ -2420,6 +2426,7 @@ describe('discoverContextGraphsFromChain', () => {
       { mode: 'incremental', pageBudget: 7 },
       { mode: 'seedFull' },
       { mode: 'seedFromCursor', pageBudget: 11 },
+      { mode: 'repair', pageBudget: 3, minimumIntervalMs: 1234 },
     ]);
   }, 15000);
 
@@ -2667,6 +2674,89 @@ describe('discoverContextGraphsFromChain', () => {
     if (onChainIdBinding.type === 'boolean') {
       expect(onChainIdBinding.value).toBe(true);
     }
+  }, 15000);
+
+  it('waits for the active core subscription snapshot before acknowledging a registry page', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const revealed: ContextGraphOnChain = {
+      contextGraphId: '825',
+      name: 'strict-subscription-boundary',
+      creator: '0x1234',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acked = 0;
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield { contextGraphs: [revealed], ack: async () => { acked += 1; } };
+    };
+    let releaseFirstSave: (() => void) | undefined;
+    const firstSave = new Promise<void>((resolve) => { releaseFirstSave = resolve; });
+    let saves = 0;
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => {
+        saves += 1;
+        if (saves === 1) await firstSave;
+      },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'core',
+    });
+    agent = result.agent;
+    await agent.start();
+
+    const discovery = agent.discoverContextGraphsFromChain({ mode: 'incremental' });
+    while (saves === 0) await Promise.resolve();
+    expect(acked).toBe(0);
+    releaseFirstSave?.();
+    await expect(discovery).resolves.toBe(1);
+    expect(saves).toBeGreaterThanOrEqual(2);
+    expect(acked).toBe(1);
+  }, 15000);
+
+  it('leaves the page unacknowledged on subscription failure and repairs it on replay', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const revealed: ContextGraphOnChain = {
+      contextGraphId: '826',
+      name: 'subscription-replay-boundary',
+      creator: '0x1234',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acked = 0;
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield { contextGraphs: [revealed], ack: async () => { acked += 1; } };
+    };
+    let failing = true;
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => {
+        if (failing) throw new Error('subscription store unavailable');
+      },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'core',
+    });
+    agent = result.agent;
+    await agent.start();
+
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .rejects.toThrow('subscription store unavailable');
+    expect(acked).toBe(0);
+    // The ontology binding was durable before the subscription failed. The
+    // replay fast path must still flush the active subscription, then ACK.
+    failing = false;
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .resolves.toBe(0);
+    expect(acked).toBe(1);
   }, 15000);
 
   it('warns once for repeated chain scan failures and logs recovery', async () => {
