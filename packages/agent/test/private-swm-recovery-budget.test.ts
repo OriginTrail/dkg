@@ -7,7 +7,7 @@ function recoveryResult(
   totalSnapshots: number,
   completed = false,
 ): RecoverContextGraphSwmResult {
-  return {
+  const fields = {
     replacedRoots: 0,
     replacedGraphs: completed ? totalSnapshots : 0,
     insertedDataQuads: completed ? totalSnapshots : 0,
@@ -15,8 +15,10 @@ function recoveryResult(
     droppedDataTriples: 0,
     readySnapshots,
     totalSnapshots,
-    completed,
   };
+  return completed
+    ? { ...fields, completed: true }
+    : { ...fields, completed: false, phaseFailureCause: 'transport' };
 }
 
 describe('private SWM recovery budget', () => {

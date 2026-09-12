@@ -41,6 +41,7 @@ import {
   knowledgeAssetLayerGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
+import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
 import {
   generateKnowledgeAssetShareMetadata,
   workspacePublicQuadsDigest,
@@ -620,6 +621,11 @@ describe('public SWM snapshot materialization', () => {
     const h = harness({ replaceImpl: async () => { throw new Error('store unavailable'); } });
     const summary = await h.run();
     expect(summary.failedPhases).toBe(1);
+    expect(readSharedMemoryPhaseFailureAttribution(summary)).toEqual({
+      localBudget: 0,
+      transport: 0,
+      materialization: 1,
+    });
     // No meta batch reached the store: a head marker must never certify an
     // assertion graph that was not written, or the next pass would classify
     // the asset as materialized and strand it permanently.

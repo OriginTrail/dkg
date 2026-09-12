@@ -51,6 +51,7 @@ import {
   sharedMemoryWorkOutcome,
   type SharedMemoryWorkOutcome,
 } from '../shared-memory-completion.js';
+import type { SharedMemoryPhaseFailureCause } from '../shared-memory-diagnostics.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -197,8 +198,13 @@ interface RecoverContextGraphSwmResultFields {
 
 /** Recovery completion cannot simultaneously carry a local-yield outcome. */
 export type RecoverContextGraphSwmResult = RecoverContextGraphSwmResultFields & (
-  | { readonly completed: true; readonly localYield?: never }
-  | { readonly completed: false; readonly localYield?: true }
+  | { readonly completed: true; readonly localYield?: never; readonly phaseFailureCause?: never }
+  | {
+      readonly completed: false;
+      readonly localYield?: true;
+      /** Direct internal cause consumed by lifecycle aggregation. */
+      readonly phaseFailureCause: SharedMemoryPhaseFailureCause;
+    }
 );
 
 export interface SwmRecoveryProgress {
@@ -412,6 +418,7 @@ async function recoverContextGraphSwmUnlocked(
       readySnapshots: 0,
       totalSnapshots: 0,
       ...(meta.outcome === 'local-budget-yield' ? { localYield: true as const, localYieldFailedPhases: 1 } : {}),
+      phaseFailureCause: meta.outcome === 'local-budget-yield' ? 'local-budget' : 'transport',
       completed: false,
     };
   }
@@ -573,6 +580,7 @@ async function recoverContextGraphSwmUnlocked(
       return {
         localYield: true,
         localYieldFailedPhases: 1,
+        phaseFailureCause: 'local-budget',
         replacedRoots: 0,
         replacedGraphs: 0,
         insertedDataQuads: 0,
@@ -629,6 +637,7 @@ async function recoverContextGraphSwmUnlocked(
         ...(snapshotSync.localYield
           ? { localYield: snapshotSync.localYield, localYieldFailedPhases: snapshotSync.localYieldFailedPhases }
           : {}),
+        phaseFailureCause: snapshotSync.phaseFailureCause ?? 'transport',
         completed: false,
       };
     }
@@ -659,6 +668,7 @@ async function recoverContextGraphSwmUnlocked(
       droppedDataTriples: 0,
       ...snapshotProgress,
       ...(data.outcome === 'local-budget-yield' ? { localYield: true as const, localYieldFailedPhases: 1 } : {}),
+      phaseFailureCause: data.outcome === 'local-budget-yield' ? 'local-budget' : 'transport',
       completed: false,
     };
   }

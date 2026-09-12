@@ -22,6 +22,7 @@ import type { SharedMemorySnapshotMaterializer } from '../src/sync/requester/swm
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
+import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from './_helpers/swm-target-executor-session-fixture.js';
 import { CG, WS, WS_META, DKG, XSD_INTEGER, recoveryPage as page } from './_helpers/swm-recovery-fixture.js';
 
@@ -573,6 +574,11 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         failedPeers: 0,
         backoffWorthyFailures: 0,
         insertedTriples: 0,
+      });
+      expect(readSharedMemoryPhaseFailureAttribution(result)).toEqual({
+        localBudget: 1,
+        transport: 0,
+        materialization: 0,
       });
     },
   );

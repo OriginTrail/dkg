@@ -1,3 +1,5 @@
+import { readSharedMemoryPhaseFailureAttribution } from '../sync/shared-memory-diagnostics.js';
+
 export type SwmCatchupPeerOutcome = 'good' | 'empty' | 'denied' | 'unsupported' | 'transportFailed';
 
 export const SWM_CATCHUP_PEER_GOOD_TTL_MS = 10 * 60_000;
@@ -183,6 +185,16 @@ export function classifySwmCatchupPeerOutcome(
   ) {
     return 'transportFailed';
   }
+  const attribution = readSharedMemoryPhaseFailureAttribution(input);
+  if (attribution) {
+    if (attribution.transport > 0 || attribution.materialization > 0) {
+      return 'transportFailed';
+    }
+    if (attribution.localBudget > 0 || input.localYield) return undefined;
+    return 'empty';
+  }
+  // Compatibility edge for older producers that expose only the public
+  // counters. Canonical in-process results take the typed branch above.
   const localYieldFailedPhases = input.localYield ? input.localYieldFailedPhases ?? 0 : 0;
   if (failedPhases > localYieldFailedPhases) return 'transportFailed';
   if (input.localYield) return undefined;

@@ -6,6 +6,7 @@ import {
 import { classifySwmCatchupPeerOutcome, createSwmCatchupPeerSelector, type DKGAgent, type SharedMemorySyncResult, type SwmCatchupPeerOutcome } from '@origintrail-official/dkg-agent';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { PublicSnapshotWalkPlan } from '../src/sync/requester/shared-memory-sync.js';
+import type { RecoverContextGraphSwmResult } from '../src/sync/requester/swm-recovery.js';
 
 const localYield = true as const;
 const workOutcome: SharedMemoryWorkOutcome = sharedMemoryWorkOutcome(
@@ -66,6 +67,31 @@ const timedOutAndYieldedPage: SyncPageResult = {
 };
 
 void timedOutAndYieldedPage;
+
+const attributedIncompleteRecovery: RecoverContextGraphSwmResult = {
+  replacedRoots: 0,
+  replacedGraphs: 0,
+  insertedDataQuads: 0,
+  insertedMetaQuads: 0,
+  droppedDataTriples: 0,
+  readySnapshots: 0,
+  totalSnapshots: 1,
+  completed: false,
+  phaseFailureCause: 'transport',
+};
+// @ts-expect-error every typed incomplete recovery names its direct cause
+const unattributedIncompleteRecovery: RecoverContextGraphSwmResult = {
+  replacedRoots: 0,
+  replacedGraphs: 0,
+  insertedDataQuads: 0,
+  insertedMetaQuads: 0,
+  droppedDataTriples: 0,
+  readySnapshots: 0,
+  totalSnapshots: 1,
+  completed: false,
+};
+void attributedIncompleteRecovery;
+void unattributedIncompleteRecovery;
 
 // Existing public consumers can classify an old-shaped result and pass the
 // guaranteed outcome directly to the selector, without an undefined guard.

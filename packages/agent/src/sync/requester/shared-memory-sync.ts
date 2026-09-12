@@ -13,7 +13,9 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   emptySharedMemorySyncResult,
+  recordSharedMemoryPhaseFailure,
   selectSwmSnapshotCoverage,
+  type SharedMemoryPhaseFailureCause,
   type SharedMemorySyncSummary,
 } from '../shared-memory-diagnostics.js';
 export {
@@ -1326,12 +1328,18 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if (!snapshotPhaseUsable) {
         // Retain independently verified data, but keep the phase incomplete
         // while graph-scoped assets or selected evidence remain unproven.
-        summary.failedPhases += 1;
-        if (snapshotSync.localYieldFailedPhases === 1 && materializationFailures === 0
+        const localBudgetOnly = snapshotSync.phaseFailureCause === 'local-budget'
+          && materializationFailures === 0
           && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0)
-          && snapshotEvidenceAccepted) {
-          summary.localYieldFailedPhases += 1;
-        }
+          && snapshotEvidenceAccepted;
+        recordSharedMemoryPhaseFailure(
+          summary,
+          localBudgetOnly
+            ? 'local-budget'
+            : materializationFailures > 0 || !descriptorsAuthoritativeForCg || !snapshotEvidenceAccepted
+              ? 'materialization'
+              : 'transport',
+        );
       }
       const storeStartedAt = Date.now();
       let metaForBulkInsert: Quad[] = [];
@@ -1466,7 +1474,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         didSyncPeerRespond(err) ||
         !isSyncTransportFailure(err)
       ) {
-        summary.failedPhases += 1;
+        recordSharedMemoryPhaseFailure(
+          summary,
+          isSyncTransportFailure(err) ? 'transport' : 'materialization',
+        );
       } else {
         peerFailed = true;
       }
@@ -1542,6 +1553,8 @@ export async function syncPublicSnapshotsForMeta(params: {
    * marks the peer backoff-worthy (`durable-progress.ts` `backoffWorthyFailure`).
    */
   localYield?: true;
+  /** Direct cause for this helper's single incomplete snapshot phase. */
+  phaseFailureCause?: SharedMemoryPhaseFailureCause;
   /** One incomplete phase only when every unresolved ref is due to local admission. */
   localYieldFailedPhases?: number;
 }> {
@@ -1772,6 +1785,13 @@ export async function syncPublicSnapshotsForMeta(params: {
     missingCount,
     missingSample,
     ...(localYield ? { localYield } : {}),
+    ...(missingCount === 0
+      ? {}
+      : {
+          phaseFailureCause: localYield && !hasIndependentShortfall
+            ? 'local-budget' as const
+            : 'transport' as const,
+        }),
     localYieldFailedPhases: localYield && !hasIndependentShortfall ? 1 : 0,
   };
 }

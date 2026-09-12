@@ -3,6 +3,22 @@
 import type { CatchupPassDecisionReason } from './catchup-pass-policy.js';
 import { mergeLocalBudgetYieldEvidence } from './shared-memory-completion.js';
 
+export type SharedMemoryPhaseFailureCause =
+  | 'local-budget'
+  | 'transport'
+  | 'materialization';
+
+export interface SharedMemoryPhaseFailureAttribution {
+  readonly localBudget: number;
+  readonly transport: number;
+  readonly materialization: number;
+}
+
+// Internal structured evidence travels with in-process results, including
+// object spreads, but symbols stay out of JSON and the published compatibility
+// shape. Legacy counters are derived from this record at result boundaries.
+const PHASE_FAILURE_ATTRIBUTION = Symbol('shared-memory-phase-failure-attribution');
+
 /** One peer and one round of public-SWM snapshot coverage, reduced as a unit. */
 export interface SwmSnapshotCoverage {
   contextGraphId: string;
@@ -19,6 +35,7 @@ export interface SwmSnapshotCoverage {
 
 /** Compatibility-facing diagnostic result accepted from workers and older producers. */
 interface SharedMemorySyncDiagnosticsShape {
+  readonly [PHASE_FAILURE_ATTRIBUTION]?: SharedMemoryPhaseFailureAttribution;
   readonly localYield?: true;
   /** Failed phases caused solely by local admission, never independent peer or materialization failures. */
   readonly localYieldFailedPhases?: number;
@@ -68,8 +85,11 @@ export type SharedMemorySyncAggregate = SharedMemorySyncResult & {
   snapshotPhaseBytesReceived: number;
 };
 
-/** Canonical constructors always initialize newly added counters. */
-type SharedMemorySyncAccumulator = SharedMemorySyncAggregate & { localYieldFailedPhases: number };
+/** Canonical constructors always initialize structured attribution. */
+type SharedMemorySyncAccumulator = SharedMemorySyncAggregate & {
+  localYieldFailedPhases: number;
+  [PHASE_FAILURE_ATTRIBUTION]: SharedMemoryPhaseFailureAttribution;
+};
 
 /** Requester terminology retained as an alias of the canonical aggregate. */
 export type SharedMemorySyncSummary = SharedMemorySyncAggregate;
@@ -108,6 +128,7 @@ export function selectSwmSnapshotCoverage(
 /** Canonical zero value for requester, lifecycle, and CLI orchestration. */
 export function emptySharedMemorySyncResult(failedPeers = 0): SharedMemorySyncAccumulator {
   return {
+    [PHASE_FAILURE_ATTRIBUTION]: emptyPhaseFailureAttribution(),
     localYieldFailedPhases: 0,
     snapshotPlaneIncomplete: 0,
     insertedTriples: 0,
@@ -136,6 +157,79 @@ export function emptySharedMemorySyncResult(failedPeers = 0): SharedMemorySyncAc
   };
 }
 
+function emptyPhaseFailureAttribution(): SharedMemoryPhaseFailureAttribution {
+  return { localBudget: 0, transport: 0, materialization: 0 };
+}
+
+function legacyPhaseFailureAttribution(
+  input: SharedMemorySyncMergeInput,
+): SharedMemoryPhaseFailureAttribution {
+  const failedPhases = Math.max(0, input.failedPhases ?? 0);
+  const localBudget = input.localYield
+    ? Math.min(failedPhases, Math.max(0, input.localYieldFailedPhases ?? 0))
+    : 0;
+  return {
+    localBudget,
+    // Older producers cannot distinguish transport from materialization.
+    // Conservatively retain the existing peer-outcome behavior.
+    transport: failedPhases - localBudget,
+    materialization: 0,
+  };
+}
+
+function phaseFailureAttribution(
+  input: SharedMemorySyncMergeInput,
+): SharedMemoryPhaseFailureAttribution {
+  return input[PHASE_FAILURE_ATTRIBUTION] ?? legacyPhaseFailureAttribution(input);
+}
+
+function legacyPhaseFailureFields(
+  attribution: SharedMemoryPhaseFailureAttribution,
+): Pick<SharedMemorySyncAccumulator, 'failedPhases' | 'localYieldFailedPhases'> {
+  return {
+    failedPhases: attribution.localBudget + attribution.transport + attribution.materialization,
+    localYieldFailedPhases: attribution.localBudget,
+  };
+}
+
+/** Record one typed cause and refresh the legacy compatibility counters. */
+export function recordSharedMemoryPhaseFailure(
+  result: SharedMemorySyncResult,
+  cause: SharedMemoryPhaseFailureCause,
+  count = 1,
+): void {
+  if (!Number.isSafeInteger(count) || count < 1) {
+    throw new RangeError('Shared-memory phase failure count must be a positive safe integer');
+  }
+  const previous = phaseFailureAttribution(result);
+  const next: SharedMemoryPhaseFailureAttribution = {
+    localBudget: previous.localBudget + (cause === 'local-budget' ? count : 0),
+    transport: previous.transport + (cause === 'transport' ? count : 0),
+    materialization: previous.materialization + (cause === 'materialization' ? count : 0),
+  };
+  result[PHASE_FAILURE_ATTRIBUTION] = next;
+  Object.assign(result, legacyPhaseFailureFields(next));
+  if (cause === 'local-budget') result.localYield = true;
+}
+
+/**
+ * Read coherent in-process attribution. A mismatched legacy field means a
+ * compatibility caller edited the public counters, so callers must use the
+ * conservative legacy fallback instead of trusting stale structured evidence.
+ */
+export function readSharedMemoryPhaseFailureAttribution(
+  input: object & { failedPhases?: number; localYieldFailedPhases?: number },
+): SharedMemoryPhaseFailureAttribution | undefined {
+  const attribution = (input as SharedMemorySyncMergeInput)[PHASE_FAILURE_ATTRIBUTION];
+  if (!attribution) return undefined;
+  const legacy = legacyPhaseFailureFields(attribution);
+  if ((input.failedPhases ?? 0) !== legacy.failedPhases
+    || (input.localYieldFailedPhases ?? 0) !== legacy.localYieldFailedPhases) {
+    return undefined;
+  }
+  return attribution;
+}
+
 /** Merge rounds belonging to one peer; peer failure is a maximum. */
 export function mergeSamePeerSharedMemoryDiagnostics(
   a: SharedMemorySyncMergeInput,
@@ -160,9 +254,19 @@ function mergeSharedMemoryDiagnostics(
   const sum = (key: NumericDiagnosticKey): number =>
     (a[key] ?? 0) + (b[key] ?? 0);
   const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
+  const aFailures = phaseFailureAttribution(a);
+  const bFailures = phaseFailureAttribution(b);
+  const failures: SharedMemoryPhaseFailureAttribution = {
+    localBudget: aFailures.localBudget + bFailures.localBudget,
+    transport: aFailures.transport + bFailures.transport,
+    materialization: aFailures.materialization + bFailures.materialization,
+  };
   return {
-    localYield: mergeLocalBudgetYieldEvidence(a.localYield, b.localYield),
-    localYieldFailedPhases: sum('localYieldFailedPhases'),
+    [PHASE_FAILURE_ATTRIBUTION]: failures,
+    localYield: mergeLocalBudgetYieldEvidence(
+      failures.localBudget > 0 ? true : a.localYield,
+      b.localYield,
+    ),
     snapshotPlaneIncomplete: sum('snapshotPlaneIncomplete'),
     insertedTriples: sum('insertedTriples'),
     fetchedMetaTriples: sum('fetchedMetaTriples'),
@@ -179,7 +283,7 @@ function mergeSharedMemoryDiagnostics(
     failedPeers: failedPeers === 'sum'
       ? a.failedPeers + b.failedPeers
       : Math.max(a.failedPeers, b.failedPeers),
-    failedPhases: sum('failedPhases'),
+    ...legacyPhaseFailureFields(failures),
     deniedPhases: sum('deniedPhases'),
     backoffWorthyFailures: sum('backoffWorthyFailures'),
     deferredBackpressure: sum('deferredBackpressure'),

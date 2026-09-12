@@ -344,6 +344,7 @@ import {
   emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
   mergeFleetSharedMemoryDiagnostics,
   mergeSamePeerSharedMemoryDiagnostics,
+  recordSharedMemoryPhaseFailure,
 } from './sync/shared-memory-diagnostics.js';
 import {
   createSelectedSwmMetaFetcher,
@@ -7716,11 +7717,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 result.completedPhases = 1;
                 completedTargetKeys.add(sharedMemoryRecoveryTargetKey(target));
               } else {
-                result.failedPhases = 1;
-                if (recovered.localYield) {
-                  result.localYield = recovered.localYield;
-                  result.localYieldFailedPhases = recovered.localYieldFailedPhases ?? 0;
-                } else {
+                recordSharedMemoryPhaseFailure(
+                  result,
+                  recovered.phaseFailureCause,
+                );
+                if (!recovered.localYield) {
                   result.backoffWorthyFailures = 1;
                 }
               }

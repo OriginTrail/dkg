@@ -13,6 +13,8 @@ import {
   emptySharedMemorySyncResult,
   mergeSamePeerSharedMemoryDiagnostics,
   mergeFleetSharedMemoryDiagnostics,
+  readSharedMemoryPhaseFailureAttribution,
+  recordSharedMemoryPhaseFailure,
 } from '../src/sync/shared-memory-diagnostics.js';
 
 describe('SWM catchup peer selection', () => {
@@ -20,9 +22,10 @@ describe('SWM catchup peer selection', () => {
     ['same peer', mergeSamePeerSharedMemoryDiagnostics],
     ['fleet', mergeFleetSharedMemoryDiagnostics],
   ] as const)('preserves an independent target failure when merging a local yield across %s', (_scope, merge) => {
-    const yielded = { ...emptySharedMemorySyncResult(), localYield: true as const,
-      failedPhases: 1, localYieldFailedPhases: 1 };
-    const failed = { ...emptySharedMemorySyncResult(), failedPhases: 1 };
+    const yielded = emptySharedMemorySyncResult();
+    recordSharedMemoryPhaseFailure(yielded, 'local-budget');
+    const failed = emptySharedMemorySyncResult();
+    recordSharedMemoryPhaseFailure(failed, 'transport');
     for (const merged of [merge(yielded, failed), merge(failed, yielded)]) {
       const outcome = classifySwmCatchupPeerOutcome(merged);
       expect(outcome).toBe('transportFailed');
@@ -35,6 +38,32 @@ describe('SWM catchup peer selection', () => {
         .toMatchObject({ selectedPeers: ['unknown'], skippedNegativePeers: ['peer'] });
     }
     expect(classifySwmCatchupPeerOutcome(merge(yielded, yielded))).toBeUndefined();
+  });
+
+  it('derives legacy counters from one structured cause model', () => {
+    const result = emptySharedMemorySyncResult();
+    recordSharedMemoryPhaseFailure(result, 'local-budget');
+    recordSharedMemoryPhaseFailure(result, 'transport', 2);
+    recordSharedMemoryPhaseFailure(result, 'materialization');
+
+    expect(result).toMatchObject({
+      localYield: true,
+      failedPhases: 4,
+      localYieldFailedPhases: 1,
+    });
+    expect(readSharedMemoryPhaseFailureAttribution(result)).toEqual({
+      localBudget: 1,
+      transport: 2,
+      materialization: 1,
+    });
+    expect(readSharedMemoryPhaseFailureAttribution({ ...result })).toEqual({
+      localBudget: 1,
+      transport: 2,
+      materialization: 1,
+    });
+    expect(JSON.parse(JSON.stringify(result))).not.toHaveProperty(
+      'shared-memory-phase-failure-attribution',
+    );
   });
 
   it('does not treat an unattributed failed phase as a local yield', () => {

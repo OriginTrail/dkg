@@ -460,16 +460,9 @@ function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetail
 
 function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?: string) {
   return {
-    localYield: result.localYield,
-    localYieldFailedPhases: result.localYieldFailedPhases,
-    insertedTriples: result.insertedTriples,
-    fetchedDataTriples: result.fetchedDataTriples,
-    fetchedMetaTriples: result.fetchedMetaTriples,
-    deniedPhases: result.deniedPhases,
-    failedPeers: result.failedPeers,
-    failedPhases: result.failedPhases,
-    timedOutPhases: result.timedOutPhases,
-    backoffWorthyFailures: result.backoffWorthyFailures,
+    // Preserve the agent's symbol-keyed internal cause model through this
+    // in-process edge. JSON responses still expose only the legacy fields.
+    ...result,
     errorMessage,
   };
 }
