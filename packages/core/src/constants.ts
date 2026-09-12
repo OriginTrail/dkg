@@ -296,6 +296,15 @@ export function contextGraphSharedMemoryUri(contextGraphId: string, subGraphName
 }
 
 /**
+ * Shared identity for SWM ownership caches and write-lock namespaces.
+ * Preserve identifier case and the legacy empty-name alias for the root scope,
+ * matching the SWM URI helpers. Callers retain their existing scope validation.
+ */
+export function sharedMemoryScopeKey(contextGraphId: string, subGraphName?: string): string {
+  return subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+}
+
+/**
  * SPARQL `FILTER` scoping a `GRAPH ?g` pattern to a shared-working-memory
  * bucket's OT-RFC-46 read-both layout: the bare bucket `<swmGraph>` AND its
  * per-KA layer graphs (`<swmGraph>/<addr>/<number>`), excluding the

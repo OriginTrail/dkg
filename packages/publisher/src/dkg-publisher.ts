@@ -4,7 +4,7 @@ import type { PreBroadcastRecord } from './publisher.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, sharedMemoryScopeKey } from '@origintrail-official/dkg-core';
 import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
@@ -18,7 +18,7 @@ import {
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
-import { withKeyedLocks } from './keyed-lock.js';
+import { withKeyedLocks, swmEntityWriteLockKey } from './keyed-lock.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
@@ -1790,8 +1790,7 @@ export class DKGPublisher implements Publisher {
     rejectUserAuthoredProtocolMetadata(quads);
     rejectOversizedRdfLiterals(quads, 'share.quads');
     const subjects = [...new Set(quads.map(q => q.subject))];
-    const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-    const lockKeys = subjects.map(s => `${lockPrefix}\0${s}`);
+    const lockKeys = subjects.map(s => swmEntityWriteLockKey(contextGraphId, options.subGraphName, s));
     return this.withWriteLocks(lockKeys, () => this._shareImpl(contextGraphId, quads, options));
   }
 
@@ -1841,7 +1840,7 @@ export class DKGPublisher implements Publisher {
       privateTripleCount: m.privateTripleCount,
     }));
 
-    const ownershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+    const ownershipKey = sharedMemoryScopeKey(contextGraphId, options.subGraphName);
     const dataOwned = this.ownedEntities.get(ownershipKey) ?? new Set();
     const swmOwned = this.sharedMemoryOwnedEntities.get(ownershipKey) ?? new Map<string, string>();
     const existing = new Set<string>([...dataOwned, ...swmOwned.keys()]);
@@ -2102,8 +2101,8 @@ export class DKGPublisher implements Publisher {
 
     const conditionSubjects = options.conditions.map(c => c.subject);
     const quadSubjects = [...new Set(quads.map(q => q.subject))];
-    const lockPrefix = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])].map(s => `${lockPrefix}\0${s}`);
+    const lockKeys = [...new Set([...conditionSubjects, ...quadSubjects])]
+      .map(s => swmEntityWriteLockKey(contextGraphId, options.subGraphName, s));
 
     return this.withWriteLocks(lockKeys, () => this._executeConditionalWrite(contextGraphId, quads, options));
   }
@@ -2923,7 +2922,7 @@ export class DKGPublisher implements Publisher {
 
     onPhase?.('prepare:validate', 'start');
     if (!graphPublish) {
-      const publishOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+      const publishOwnershipKey = sharedMemoryScopeKey(contextGraphId, options.subGraphName);
       const existing = this.ownedEntities.get(publishOwnershipKey) ?? new Set();
       const validation = validatePublishRequest(
         allSkolemizedQuads,
@@ -4324,7 +4323,7 @@ export class DKGPublisher implements Publisher {
 
     // Track owned entities and batch→context graph binding on confirmed publishes
     if (status === 'confirmed' && onChainResult) {
-      const confirmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
+      const confirmOwnershipKey = sharedMemoryScopeKey(contextGraphId, options.subGraphName);
       if (!this.ownedEntities.has(confirmOwnershipKey)) {
         this.ownedEntities.set(confirmOwnershipKey, new Set());
       }
@@ -5804,7 +5803,7 @@ export class DKGPublisher implements Publisher {
         // Identical to the prior behaviour on every non-colliding input
         // (`42`→root, `42/tasks`→sub, sub-graphs under slash-shaped roots→sub);
         // only the genuine collision now resolves toward the explicit root.
-        let ownershipKey = cgPath;
+        let ownershipKey = sharedMemoryScopeKey(cgPath);
         if (!(await this.isContextGraphRegistered(cgPath))) {
           const slash = cgPath.lastIndexOf('/');
           const rootId = slash > 0 ? cgPath.slice(0, slash) : '';
@@ -5815,7 +5814,7 @@ export class DKGPublisher implements Publisher {
             !subGraphName.includes('/') &&
             await this.isSubGraphRegistered(rootId, subGraphName);
           if (isRegisteredSubGraph) {
-            ownershipKey = `${rootId}\0${subGraphName}`;
+            ownershipKey = sharedMemoryScopeKey(rootId, subGraphName);
           }
         }
         if (targetKeys.has(ownershipKey)) continue;
@@ -7549,7 +7548,7 @@ export class DKGPublisher implements Publisher {
     ctx: OperationContext,
   ): Promise<void> {
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
-    const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+    const swmOwnershipKey = sharedMemoryScopeKey(contextGraphId, subGraphName);
     let ownerDeletedTotal = 0;
     for (const rootEntity of rootEntities) {
       ownerDeletedTotal += await this.store.deleteByPattern({
@@ -7570,7 +7569,7 @@ export class DKGPublisher implements Publisher {
   ): Promise<void> {
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
-    const swmOwnershipKey = subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
+    const swmOwnershipKey = sharedMemoryScopeKey(contextGraphId, subGraphName);
     let remainingCount = 0;
     for (const graph of await this.swmGraphsUnder(swmGraph)) {
       remainingCount += await this.store.deleteByPattern({ graph });

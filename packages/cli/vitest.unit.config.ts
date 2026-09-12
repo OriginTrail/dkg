@@ -36,6 +36,7 @@ export default defineConfig({
           'test/preferred-relays.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/config.test.ts',
+          'test/config-file.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
@@ -74,6 +75,8 @@ export default defineConfig({
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
+          'test/shared-memory-ttl-settings.test.ts',
+          'test/daemon-shared-memory-ttl.test.ts',
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/dkg-doctor.test.ts',

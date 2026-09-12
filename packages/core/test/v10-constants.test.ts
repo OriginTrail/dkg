@@ -29,6 +29,7 @@ import {
   contextGraphPrivateUri,
   contextGraphSharedMemoryUri,
   contextGraphSharedMemoryMetaUri,
+  sharedMemoryScopeKey,
   sharedMemoryReadBothFilter,
   contextGraphVerifiableMemoryUri,
   contextGraphVerifiableMemoryMetaUri,
@@ -164,6 +165,14 @@ describe('V10 named graph URIs', () => {
 
   it('shared memory meta URI', () => {
     expect(contextGraphSharedMemoryMetaUri(id)).toBe('did:dkg:context-graph:42/_shared_memory_meta');
+  });
+
+  it.each([
+    { name: 'root', subGraphName: undefined, expected: '0xAbCd/ExampleCG' },
+    { name: 'named subgraph', subGraphName: 'Claims', expected: '0xAbCd/ExampleCG\0Claims' },
+    { name: 'legacy empty subgraph', subGraphName: '', expected: '0xAbCd/ExampleCG' },
+  ])('preserves the SWM scope key bytes for $name', ({ subGraphName, expected }) => {
+    expect(sharedMemoryScopeKey('0xAbCd/ExampleCG', subGraphName)).toBe(expected);
   });
 
   it('verifiable memory URI', () => {

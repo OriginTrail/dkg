@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../config-snapshot.js';
 // Shared module-level mutable state for the split `daemon` modules.
 //
 // The original single-file `daemon.ts` kept a handful of module-level
@@ -13,7 +14,6 @@
 // object reference, e.g. `daemonState.isUpdating = true`.
 
 import type { CatchupRunner } from '../catchup-runner.js';
-import type { DkgConfig } from '../config.js';
 import { isStandaloneInstall } from '../config.js';
 
 export type CorsAllowlist = '*' | string[];
@@ -180,7 +180,7 @@ export function resolveAutoUpdatePollingMode(
  * only on sibling `daemon/*.ts` modules — never back on
  * `handle-request.ts` itself (which would create an import cycle).
  */
-export function resolveAutoUpdateEnabled(config: DkgConfig): boolean {
+export function resolveAutoUpdateEnabled(config: Pick<ImmutableDkgConfig, 'autoUpdate'>): boolean {
   const standalone = resolveStandaloneInstall(config.autoUpdate?.source);
   return standalone
     ? config.autoUpdate?.enabled !== false

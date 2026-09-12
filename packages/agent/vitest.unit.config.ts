@@ -20,6 +20,12 @@ export default defineConfig({
     include: [
       ...RFC64_UNIT_TESTS,
       "test/endorse.test.ts",
+      "test/swm-expiry-cleanup-pass.test.ts",
+      "test/swm-expiry-lifecycle.test.ts",
+      "test/swm-expiry-fairness.test.ts",
+      "test/swm-expiry-publisher-lock.test.ts",
+      "test/swm-expiry-external-store.test.ts",
+      "test/swm-expiry-cleanup-worker.test.ts",
       "test/bounded-curator-discovery.test.ts",
       "test/discovery-peer-pagination.test.ts",
       "test/ack-candidate-pool.test.ts",

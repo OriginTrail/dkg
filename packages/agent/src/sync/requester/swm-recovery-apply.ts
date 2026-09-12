@@ -18,7 +18,7 @@ import {
 } from '../graph-scoped-swm-recovery.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from
   '../oversize-filter.js';
-import { sharedMemoryOwnershipKeyFromGraph } from '../shared-memory-graphs.js';
+import { sharedMemoryOwnershipKeyFromGraph } from '../../shared-memory-graphs.js';
 import type { RecoveryExecutionAdmission } from './recovery-execution-guard.js';
 import { canonicalQuadKey } from './quad-key.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';

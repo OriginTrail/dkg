@@ -12,7 +12,8 @@ import {
   type DebugLogRecord,
 } from '../src/daemon/daemon-log-file-writer.js';
 import { appendBoundedDaemonLogDiagnostic } from '../src/daemon/daemon-log-diagnostics.js';
-import type { DkgConfig } from '../src/config.js';
+import { DkgHomeFiles, type DkgConfig } from '../src/config.js';
+import { DkgConfigStore } from '../src/daemon-config-store.js';
 import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
 const noRotation = async () => ({
@@ -22,10 +23,12 @@ const noRotation = async () => ({
 });
 
 describe('startDaemonLogController', () => {
-  afterEach(() => {
+  const configDirectories: string[] = [];
+  afterEach(async () => {
     vi.useRealTimers();
     Logger.setSink(null);
     vi.restoreAllMocks();
+    await Promise.all(configDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })));
   });
 
   it('forces fatal exit when the file writer never drains', async () => {
@@ -167,9 +170,12 @@ describe('startDaemonLogController', () => {
       nodeRole: 'edge',
       telemetry: { enabled: false },
     };
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-log-runtime-'));
+    configDirectories.push(directory);
+    const files = new DkgHomeFiles(directory);
+    await files.saveConfig(config);
     const runtime = createTelemetryRuntime({
-      config,
-      persist: vi.fn(async () => undefined),
+      configStore: await DkgConfigStore.open(files, config),
       signals: {
         start: async () => {
           const result = controller.startExporter('syslog', () => ({

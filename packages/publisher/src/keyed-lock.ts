@@ -1,3 +1,5 @@
+import { sharedMemoryScopeKey } from '@origintrail-official/dkg-core';
+
 /**
  * Gate-based multi-key lock — the single canonical implementation of this concurrency
  * idiom in the publisher package. The `withWriteLocks` methods in `dkg-publisher.ts`
@@ -65,8 +67,17 @@ export function swmKaWriteLockKey(
   subGraphName: string | undefined,
   kaUal: string,
 ): string {
-  const lockNamespace = subGraphName
-    ? `${contextGraphId}\0${subGraphName}`
-    : contextGraphId;
-  return `${lockNamespace}\0ka\0${kaUal.toLowerCase()}`;
+  return `${sharedMemoryScopeKey(contextGraphId, subGraphName)}\0ka\0${kaUal.toLowerCase()}`;
+}
+
+/**
+ * Shared key for entity writes and expiration cleanup on the agent's lock map.
+ * Preserve subject case: RDF subjects are case-sensitive, unlike KA addresses.
+ */
+export function swmEntityWriteLockKey(
+  contextGraphId: string,
+  subGraphName: string | undefined,
+  subject: string,
+): string {
+  return `${sharedMemoryScopeKey(contextGraphId, subGraphName)}\0${subject}`;
 }

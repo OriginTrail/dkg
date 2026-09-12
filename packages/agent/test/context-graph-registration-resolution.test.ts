@@ -21,13 +21,13 @@ describe('Context Graph registration resolution deadlines', () => {
       fixture.resolveContextGraphIdByNameHash.mockReturnValueOnce(
         new Promise<bigint | null>((resolve) => { complete = resolve; }),
       );
-  
+
       const binding = fixture.agent.resolveContextGraphRegistrationBinding(
         'cold-cleartext',
         { registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS },
       );
       await vi.advanceTimersByTimeAsync(2_501);
-  
+
       const operationSignal = fixture.resolveContextGraphIdByNameHash.mock.calls[0]?.[1]?.signal;
       expect(operationSignal?.aborted).toBe(false);
       complete(42n);
@@ -40,7 +40,7 @@ describe('Context Graph registration resolution deadlines', () => {
       vi.useRealTimers();
     }
   });
-  
+
   it('bounds a bootstrap reverse-index build at the explicit finite deadline', async () => {
     vi.useFakeTimers();
     try {
@@ -51,7 +51,7 @@ describe('Context Graph registration resolution deadlines', () => {
       fixture.resolveContextGraphIdByNameHash.mockReturnValueOnce(
         new Promise<bigint | null>(() => undefined),
       );
-  
+
       const binding = fixture.agent.resolveContextGraphRegistrationBinding(
         'cold-cleartext',
         { registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS },
@@ -60,7 +60,7 @@ describe('Context Graph registration resolution deadlines', () => {
       const operationSignal = fixture.resolveContextGraphIdByNameHash.mock.calls[0]?.[1]?.signal;
       expect(operationSignal?.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
-  
+
       expect(operationSignal?.aborted).toBe(true);
       await expect(binding).resolves.toMatchObject({
         kind: 'unavailable',
@@ -70,7 +70,7 @@ describe('Context Graph registration resolution deadlines', () => {
       vi.useRealTimers();
     }
   });
-  
+
   it.each([
     ['policy-read', CHAIN_POLICY_READ_TIMEOUT_MS],
     ['bootstrap-scan', CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS],
@@ -89,7 +89,7 @@ describe('Context Graph registration resolution deadlines', () => {
             { once: true },
           );
         }));
-  
+
       const binding = fixture.agent.resolveContextGraphRegistrationBinding(
         LOCAL_ID,
         { registrationTimeoutMs: timeoutMs },
@@ -98,7 +98,7 @@ describe('Context Graph registration resolution deadlines', () => {
       const operationSignal = resolveDirect.mock.calls[0]?.[1]?.signal;
       expect(operationSignal?.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
-  
+
       expect(operationSignal?.aborted).toBe(true);
       await expect(binding).resolves.toMatchObject({
         kind: 'unavailable',

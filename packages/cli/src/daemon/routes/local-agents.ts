@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../../config-snapshot.js';
 // daemon/routes/local-agents.ts
 //
 // Route handlers for local-agent-integrations list / connect / update / reverse / refresh.
@@ -71,7 +72,6 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
-  saveConfig,
   loadNetworkConfig,
   dkgDir,
   writePid,
@@ -258,6 +258,7 @@ import {
   restartOpenClawGateway,
   waitForOpenClawChatReady,
   type OpenClawUiAttachDeps,
+  type LocalAgentAttachStatePatch,
   formatOpenClawUiAttachFailure,
   scheduleOpenClawUiAttachJob,
   cancelPendingLocalAgentAttachJob,
@@ -316,12 +317,17 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import { mutableConfigSnapshot } from '../../daemon-config-store.js';
 import {
   primeAgentDkgSessionId,
   readPrimeAgentSessions,
 } from '../prime-agent.js';
 
-import type { RequestContext } from './context.js';
+import {
+  currentDaemonConfig,
+  updateDaemonConfig,
+  type RequestContext,
+} from './context.js';
 
 /**
  * Prime Agent is the one integration whose "is it there" answer is not derivable
@@ -374,13 +380,123 @@ function withPrimeAgentSessionCount<T extends { id: string; metadata?: Record<st
   return withPrimeAgentSessionCounts([integration])[0];
 }
 
-export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void> {
+function changedObjectFields<T extends Record<string, unknown>>(
+  before: T | undefined,
+  after: T | undefined,
+): T | undefined {
+  if (!after) return undefined;
+  const changed = Object.fromEntries(Object.entries(after).filter(([key, value]) => (
+    JSON.stringify(before?.[key]) !== JSON.stringify(value)
+  ))) as T;
+  return Object.keys(changed).length > 0 ? changed : undefined;
+}
+
+function attachStateDelta(
+  baselineEntry: LocalAgentIntegrationConfig | undefined,
+  candidateEntry: LocalAgentIntegrationConfig,
+): LocalAgentAttachStatePatch {
+  const transport = changedObjectFields(
+    baselineEntry?.transport as Record<string, unknown> | undefined,
+    candidateEntry.transport as Record<string, unknown> | undefined,
+  ) as LocalAgentIntegrationTransport | undefined;
+  const runtime = changedObjectFields(
+    baselineEntry?.runtime as Record<string, unknown> | undefined,
+    candidateEntry.runtime as Record<string, unknown> | undefined,
+  ) as LocalAgentIntegrationRuntime | undefined;
+  const metadata = changedObjectFields(
+    baselineEntry?.metadata,
+    candidateEntry.metadata,
+  );
+  return {
+    ...(baselineEntry?.enabled !== candidateEntry.enabled
+      ? { enabled: candidateEntry.enabled }
+      : {}),
+    ...(transport ? { transport } : {}),
+    ...(runtime ? { runtime } : {}),
+    ...(metadata ? { metadata } : {}),
+  };
+}
+
+/** Rebase only deferred attach-owned state through the canonical config owner. */
+export async function persistLocalAgentAttachPatch(
+  ctx: Pick<RequestContext, 'configStore'>,
+  id: string,
+  attachPatch: LocalAgentAttachStatePatch,
+): Promise<void> {
+  const normalizedId = normalizeIntegrationId(id);
+  if (!normalizedId) return;
+  await ctx.configStore.update((current): DkgConfig | ImmutableDkgConfig => {
+    const stored = getStoredLocalAgentIntegrations(current);
+    const currentEntry = stored[normalizedId];
+    if (!currentEntry) return current;
+    // An operator disconnect that completed after setup started always wins,
+    // including when a failed attach also proposes enabled:false.
+    if (
+      currentEntry?.enabled === false
+      && (isLocalAgentExplicitlyUserDisabled(currentEntry) || attachPatch.enabled !== false)
+    ) {
+      return current;
+    }
+    const next = mutableConfigSnapshot(current);
+    updateLocalAgentIntegration(next, normalizedId, attachPatch);
+    return next;
+  }, 'configuration-only');
+}
+
+async function commitPreparedLocalAgentCandidate(
+  ctx: Pick<RequestContext, 'configStore'>,
+  id: string,
+  candidate: DkgConfig,
+  baseline: ImmutableDkgConfig,
+  patch?: LocalAgentAttachStatePatch,
+): Promise<LocalAgentIntegrationRecord> {
+  const normalizedId = normalizeIntegrationId(id);
+  const candidateEntry = getStoredLocalAgentIntegrations(candidate)[normalizedId];
+  if (!normalizedId || !candidateEntry) throw new Error(`Unknown integration: ${id}`);
+  const baselineEntry = getStoredLocalAgentIntegrations(baseline)[normalizedId];
+  await ctx.configStore.update((current): DkgConfig | ImmutableDkgConfig => {
+    const currentEntry = getStoredLocalAgentIntegrations(current)[normalizedId];
+    const disconnectedWhilePreparing = !isLocalAgentExplicitlyUserDisabled(baselineEntry)
+      && currentEntry?.enabled === false
+      && isLocalAgentExplicitlyUserDisabled(currentEntry);
+    if (disconnectedWhilePreparing) return current;
+    const next = mutableConfigSnapshot(current);
+    if (patch) {
+      updateLocalAgentIntegration(next, normalizedId, patch);
+    } else {
+      next.localAgentIntegrations = {
+        ...getStoredLocalAgentIntegrations(next),
+        [normalizedId]: mergeLocalAgentIntegrationConfig(
+          getStoredLocalAgentIntegrations(next)[normalizedId],
+          structuredClone(candidateEntry),
+          { mergeTransport: normalizedId === 'hermes' },
+        ),
+      };
+      if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(next);
+    }
+    return next;
+  }, 'configuration-only');
+  return getLocalAgentIntegration(ctx.configStore.current, normalizedId)!;
+}
+
+export interface LocalAgentRoutesDeps {
+  connectFromUi?: typeof connectLocalAgentIntegrationFromUi;
+  refreshFromUi?: typeof refreshLocalAgentIntegrationFromUi;
+}
+
+type PreparedUiConnectOutcome =
+  | { ok: true; result: { integration: LocalAgentIntegrationRecord; notice?: string } }
+  | { ok: false; error: unknown };
+
+export async function handleLocalAgentsRoutes(
+  ctx: RequestContext,
+  deps: LocalAgentRoutesDeps = {},
+): Promise<void> {
   const {
     req,
     res,
     agent,
     publisherControl,
-    config,
     startedAt,
     dashDb,
     opWallets,
@@ -404,8 +520,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     path,
     requestAgentAddress,
   } = ctx;
-
-
+  const config = currentDaemonConfig(ctx);
   // GET /api/local-agent-integrations — generic local agent registry/status surface
   if (req.method === 'GET' && path === '/api/local-agent-integrations') {
     return jsonResponse(res, 200, {
@@ -437,17 +552,67 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
       const source = isPlainRecord(parsed.metadata) && typeof parsed.metadata.source === 'string'
         ? parsed.metadata.source
         : undefined;
-      const result = source === 'node-ui'
-        ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, { saveConfig })
-        : { integration: connectLocalAgentIntegration(config, parsed) };
-      await saveConfig(config);
+      if (source !== 'node-ui') {
+        const integration = await updateDaemonConfig(
+          ctx,
+          draft => connectLocalAgentIntegration(draft, parsed),
+        );
+        return jsonResponse(res, 200, {
+          ok: true,
+          integration: withPrimeAgentSessionCount(integration),
+        });
+      }
+
+      const id = String(parsed.id ?? '');
+      const baseline = ctx.configStore.current;
+      const candidate = mutableConfigSnapshot(baseline);
+      let releaseInitialCommit!: () => void;
+      const initialCommitFinished = new Promise<void>(resolve => {
+        releaseInitialCommit = resolve;
+      });
+      let outcome: PreparedUiConnectOutcome;
+      try {
+        outcome = {
+          ok: true,
+          result: await (deps.connectFromUi ?? connectLocalAgentIntegrationFromUi)(candidate, parsed, bridgeAuthToken, {
+            saveConfig: async (_deferredCandidate, patch) => {
+              await initialCommitFinished;
+              await persistLocalAgentAttachPatch(ctx, id, patch);
+            },
+          }),
+        };
+      } catch (error) {
+        outcome = { ok: false, error };
+        const normalizedId = normalizeIntegrationId(id);
+        if (normalizedId && getStoredLocalAgentIntegrations(candidate)[normalizedId]) {
+          updateLocalAgentIntegration(candidate, normalizedId, {
+            runtime: {
+              status: 'error',
+              ready: false,
+              lastError: error instanceof Error ? error.message : 'Local agent attach failed',
+            },
+          });
+        }
+      }
+
+      if (!outcome.ok && !getStoredLocalAgentIntegrations(candidate)[normalizeIntegrationId(id)]) {
+        releaseInitialCommit();
+        throw outcome.error;
+      }
+
+      let integration: LocalAgentIntegrationRecord;
+      try {
+        integration = await commitPreparedLocalAgentCandidate(ctx, id, candidate, baseline);
+      } finally {
+        releaseInitialCommit();
+      }
+      if (!outcome.ok) throw outcome.error;
       return jsonResponse(res, 200, {
         ok: true,
-        integration: withPrimeAgentSessionCount(result.integration),
-        notice: result.notice,
+        integration: withPrimeAgentSessionCount(integration),
+        notice: outcome.result.notice,
       });
     } catch (err: any) {
-      try { await saveConfig(config); } catch { /* best effort: preserve failed attach state when available */ }
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
     }
   }
@@ -469,8 +634,17 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
       return jsonResponse(res, 404, { error: 'Unknown integration' });
     }
     try {
-      const integration = await refreshLocalAgentIntegrationFromUi(config, normalizedId, bridgeAuthToken);
-      await saveConfig(config);
+      const baseline = ctx.configStore.current;
+      const candidate = mutableConfigSnapshot(baseline);
+      await (deps.refreshFromUi ?? refreshLocalAgentIntegrationFromUi)(candidate, normalizedId, bridgeAuthToken);
+      const candidateEntry = getStoredLocalAgentIntegrations(candidate)[normalizedId]!;
+      const integration = await commitPreparedLocalAgentCandidate(
+        ctx,
+        normalizedId,
+        candidate,
+        baseline,
+        attachStateDelta(getStoredLocalAgentIntegrations(baseline)[normalizedId], candidateEntry),
+      );
       return jsonResponse(res, 200, { ok: true, integration: withPrimeAgentSessionCount(integration) });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Integration refresh failed' });
@@ -504,14 +678,15 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
         try {
           await reverseLocalAgentSetupForUi(config);
         } catch (err: any) {
-          const integration = updateLocalAgentIntegration(config, id, {
-            runtime: {
-              status: 'error',
-              ready: false,
-              lastError: `OpenClaw disconnect failed: ${err?.message ?? 'unknown error'}`,
-            },
-          });
-          await saveConfig(config);
+          const integration = await updateDaemonConfig(ctx, draft => (
+            updateLocalAgentIntegration(draft, id, {
+              runtime: {
+                status: 'error',
+                ready: false,
+                lastError: `OpenClaw disconnect failed: ${err?.message ?? 'unknown error'}`,
+              },
+            })
+          ));
           return jsonResponse(res, 200, { ok: true, integration });
         }
       }
@@ -530,14 +705,15 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
         } catch (err: any) {
           restoreError = `Prime Agent restore failed: ${err?.message ?? 'unknown error'}`;
         }
-        const integration = updateLocalAgentIntegration(config, id, {
-          runtime: {
-            status: 'disconnected',
-            ready: false,
-            lastError: restoreError ?? null,
-          },
-        });
-        await saveConfig(config);
+        const integration = await updateDaemonConfig(ctx, draft => (
+          updateLocalAgentIntegration(draft, id, {
+            runtime: {
+              status: 'disconnected',
+              ready: false,
+              lastError: restoreError ?? null,
+            },
+          })
+        ));
         return jsonResponse(res, 200, { ok: true, integration });
       }
 
@@ -550,14 +726,15 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
           // Disconnect proper failed (not restore) — surface as error,
           // matching today's behavior. Restore-only failures fall through
           // to the disconnected-with-warning patch below.
-          const integration = updateLocalAgentIntegration(config, id, {
-            runtime: {
-              status: 'error',
-              ready: false,
-              lastError: `Hermes disconnect failed: ${err?.message ?? 'unknown error'}`,
-            },
-          });
-          await saveConfig(config);
+          const integration = await updateDaemonConfig(ctx, draft => (
+            updateLocalAgentIntegration(draft, id, {
+              runtime: {
+                status: 'error',
+                ready: false,
+                lastError: `Hermes disconnect failed: ${err?.message ?? 'unknown error'}`,
+              },
+            })
+          ));
           return jsonResponse(res, 200, { ok: true, integration });
         }
 
@@ -568,22 +745,25 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
         // proceeds normally. The UI's disconnected pill + warning chip
         // (PanelRight.tsx, S3 step 5) renders this combination as warning-not-error.
         if (hermesRestoreError) {
-          const integration = updateLocalAgentIntegration(config, id, {
-            ...normalizedPatch,
-            runtime: {
-              ...(isPlainRecord(normalizedPatch.runtime) ? normalizedPatch.runtime : {}),
-              status: 'disconnected',
-              ready: false,
-              lastError: hermesRestoreError,
-            },
-          });
-          await saveConfig(config);
+          const integration = await updateDaemonConfig(ctx, draft => (
+            updateLocalAgentIntegration(draft, id, {
+              ...normalizedPatch,
+              runtime: {
+                ...(isPlainRecord(normalizedPatch.runtime) ? normalizedPatch.runtime : {}),
+                status: 'disconnected',
+                ready: false,
+                lastError: hermesRestoreError,
+              },
+            })
+          ));
           return jsonResponse(res, 200, { ok: true, integration });
         }
       }
 
-      const integration = updateLocalAgentIntegration(config, id, normalizedPatch);
-      await saveConfig(config);
+      const integration = await updateDaemonConfig(
+        ctx,
+        draft => updateLocalAgentIntegration(draft, id, normalizedPatch),
+      );
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });

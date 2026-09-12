@@ -122,7 +122,7 @@ function captureHandler(
     protocolSync: '/origintrail/dkg/sync/1.0.0',
     syncDeniedResponse: 'sync-denied',
     syncPageSize: 500,
-    sharedMemoryTtlMs: 0,
+    getSharedMemoryTtlMs: () => 0,
     store,
     publicSnapshotStore: options.publicSnapshotStore,
     peerId: 'self-peer',
@@ -520,7 +520,7 @@ describe('sync responder protection', () => {
       listGraphs: async (options?: QueryOptions) => {
         listSignal = options?.signal;
         listCalls += 1;
-        return listGate.promise;
+        return [...await listGate.promise];
       },
     }), {
       authorizeSyncRequest: async () => {

@@ -1,4 +1,4 @@
-import type { DkgConfig } from '../config.js';
+import { mutableConfigSnapshot, type DkgConfigStore } from '../daemon-config-store.js';
 
 export type TelemetryTransitionResult =
   | { ok: true }
@@ -37,71 +37,71 @@ export function createTelemetrySettings(
 
 /**
  * Canonical owner of the telemetry master gate. It serializes transitions,
- * starts/stops every signal through one adapter, persists config, rolls failed
- * runtime enables back durably, and drains pending transitions on shutdown.
+ * starts/stops every signal through one adapter and commits through the daemon
+ * configuration owner, which compensates failed activation and restores disk.
+ * Pending transitions drain before shutdown.
  * Logger sink attachment remains the log controller's separate responsibility.
  */
 export function createTelemetryRuntime(opts: {
-  config: DkgConfig;
-  persist(config: DkgConfig): Promise<void>;
+  configStore: DkgConfigStore;
   signals: TelemetrySignalAdapter;
   onBootStartFailure?(error: string): void;
 }): TelemetryRuntime {
   let transitionTail: Promise<void> = Promise.resolve();
   let shuttingDown = false;
   let shutdownPromise: Promise<void> | null = null;
+  let runtimeEnabled = opts.configStore.current.telemetry?.enabled ?? false;
 
-  const setConfiguredEnabled = (enabled: boolean): void => {
-    opts.config.telemetry = { ...opts.config.telemetry, enabled };
-  };
+  class TransitionRejected extends Error {}
   const enqueue = <T>(work: () => Promise<T>): Promise<T> => {
     const transition = transitionTail.then(work, work);
     transitionTail = transition.then(() => undefined, () => undefined);
     return transition;
   };
-  const rollbackDisabled = async (): Promise<void> => {
-    await opts.signals.stop().catch(() => undefined);
-    setConfiguredEnabled(false);
-    await opts.persist(opts.config);
+  const startSignals = async (): Promise<void> => {
+    const result = await opts.signals.start();
+    if (!result.ok) throw new TransitionRejected(result.error);
   };
-  const applyEnabled = async (
-    enabled: boolean,
-  ): Promise<TelemetryTransitionResult> => {
-    if (!enabled) {
-      await opts.signals.stop();
-      setConfiguredEnabled(false);
-      await opts.persist(opts.config);
+  const applyEnabled = async (enabled: boolean): Promise<TelemetryTransitionResult> => {
+    try {
+      await opts.configStore.update(current => {
+        const next = mutableConfigSnapshot(current);
+        next.telemetry = { ...next.telemetry, enabled };
+        return next;
+      }, (_next, previous) => ({
+        apply: async () => {
+          // Never lower the live gate while exporters are still active.
+          if (enabled) {
+            runtimeEnabled = true;
+            await startSignals();
+          } else {
+            await opts.signals.stop();
+            runtimeEnabled = false;
+          }
+        },
+        rollback: async () => {
+          await opts.signals.stop();
+          const wasEnabled = previous.telemetry?.enabled ?? false;
+          if (wasEnabled) {
+            runtimeEnabled = true;
+            await startSignals();
+          } else {
+            runtimeEnabled = false;
+          }
+        },
+      }));
       return { ok: true };
-    }
-
-    // Raise the in-memory gate before any signal starts. Disable lowers it only
-    // after every signal stops, so false never coexists with active export.
-    setConfiguredEnabled(true);
-    let result: TelemetryTransitionResult;
-    try {
-      result = await opts.signals.start();
     } catch (error) {
-      await rollbackDisabled();
+      if (error instanceof TransitionRejected) return { ok: false, error: error.message };
       throw error;
     }
-    if (!result.ok) {
-      await rollbackDisabled();
-      return result;
-    }
-    try {
-      await opts.persist(opts.config);
-    } catch (error) {
-      await rollbackDisabled().catch(() => undefined);
-      throw error;
-    }
-    return { ok: true };
   };
 
   return {
-    isEnabled: () => opts.config.telemetry?.enabled ?? false,
+    isEnabled: () => runtimeEnabled,
     startConfiguredBestEffort() {
       return enqueue(async () => {
-        if (!opts.config.telemetry?.enabled) return;
+        if (!runtimeEnabled) return;
         try {
           const result = await opts.signals.start();
           if (!result.ok) opts.onBootStartFailure?.(result.error);

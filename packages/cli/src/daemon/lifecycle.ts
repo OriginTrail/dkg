@@ -69,7 +69,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
-import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
   findReservedSubjectPrefix,
@@ -105,7 +105,7 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
-  saveConfig,
+  DkgHomeFiles,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
   resolveAutoUpdateConfig,
@@ -148,6 +148,7 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
+import { DkgConfigStore, mutableConfigSnapshot } from '../daemon-config-store.js';
 import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
 import {
   resolveOtlpLogEndpoint,
@@ -183,6 +184,7 @@ import {
   createTelemetryRuntime,
 } from './telemetry-runtime.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
+import { createDaemonLlmSettings } from './llm-settings.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import {
@@ -303,7 +305,6 @@ import {
 } from './shutdown-wait.js';
 import {
   resolveNameToPeerId,
-  jsonResponse,
   safeDecodeURIComponent,
   safeParseJson,
   validateOptionalSubGraphName,
@@ -311,12 +312,10 @@ import {
   validateEntities,
   validateConditions,
   MAX_BODY_BYTES,
-  SMALL_BODY_BYTES,
   MAX_UPLOAD_BYTES,
   type ImportFileExtractionPayload,
   buildImportFileResponse,
   unregisteredSubGraphError,
-  readBody,
   readBodyBuffer,
   buildCorsAllowlist,
   resolveCorsOrigin,
@@ -458,6 +457,7 @@ import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
+import { handleSharedMemoryTtlSettings } from './routes/shared-memory-ttl.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
 import {
   createPromoteWorkerSupervisor,
@@ -1121,6 +1121,8 @@ async function runDaemonInnerWithStartupOwnership(
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
+  const configStore = await DkgConfigStore.open(new DkgHomeFiles(), config);
+  config = mutableConfigSnapshot(configStore.current);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
       config.contextGraphSubscriptionRehydrationEnabled,
@@ -2928,8 +2930,7 @@ async function runDaemonInnerWithStartupOwnership(
   });
 
   const telemetryRuntime = createTelemetryRuntime({
-    config,
-    persist: saveConfig,
+    configStore,
     signals: telemetrySignals,
     onBootStartFailure: (error) => {
       // Boot remains best-effort per signal: a failed log shipper must not
@@ -3264,23 +3265,7 @@ async function runDaemonInnerWithStartupOwnership(
   if (config.llm) log('Memory enrichment LLM ready');
   else log('Memory enrichment LLM not configured');
 
-  const llmSettings = {
-    getLlm: () => config.llm,
-    setLlm: async (
-      llm: { apiKey: string; model?: string; baseURL?: string } | null,
-    ) => {
-      if (llm) {
-        config.llm = llm;
-        memoryManager.updateConfig(llm);
-        log("LLM config updated via settings");
-      } else {
-        delete config.llm;
-        memoryManager.updateConfig({ apiKey: '' });
-        log('LLM config cleared via settings');
-      }
-      await saveConfig(config);
-    },
-  };
+  const llmSettings = createDaemonLlmSettings(configStore, memoryManager, log);
 
   const telemetrySettings = createTelemetrySettings(telemetryRuntime);
 
@@ -3563,49 +3548,9 @@ async function runDaemonInnerWithStartupOwnership(
       }
 
       // Shared memory (workspace) TTL settings — V10 and legacy routes
-      if (
-        req.method === "GET" &&
-        (reqUrl.pathname === "/api/settings/shared-memory-ttl" ||
-          reqUrl.pathname === "/api/settings/workspace-ttl")
-      ) {
-        const ttlMs =
-          resolveSharedMemoryTtlMs(config) ?? 30 * 24 * 60 * 60 * 1000;
-        return jsonResponse(res, 200, {
-          ttlMs,
-          ttlDays: Math.round(ttlMs / (24 * 60 * 60 * 1000)),
-        });
-      }
-      if (
-        req.method === "PUT" &&
-        (reqUrl.pathname === "/api/settings/shared-memory-ttl" ||
-          reqUrl.pathname === "/api/settings/workspace-ttl")
-      ) {
-        try {
-          const bodyStr = await readBody(req, SMALL_BODY_BYTES);
-          const { ttlDays } = JSON.parse(bodyStr ?? "{}") as {
-            ttlDays?: number;
-          };
-          if (
-            typeof ttlDays !== "number" ||
-            !Number.isFinite(ttlDays) ||
-            ttlDays < 0
-          ) {
-            return jsonResponse(res, 400, {
-              error: "ttlDays must be a finite non-negative number",
-            });
-          }
-          const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
-          config.sharedMemoryTtlMs = ttlMs;
-          config.workspaceTtlMs = ttlMs;
-          agent.setSharedMemoryTtlMs(ttlMs);
-          await saveConfig(config);
-          return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
-        } catch (err: any) {
-          if (err instanceof PayloadTooLargeError) throw err;
-          return jsonResponse(res, 500, {
-            error: err.message ?? "Failed to update shared memory TTL",
-          });
-        }
+      if ((req.method === "GET" || req.method === "PUT") &&
+          (reqUrl.pathname === "/api/settings/shared-memory-ttl" || reqUrl.pathname === "/api/settings/workspace-ttl")) {
+        return handleSharedMemoryTtlSettings({ req, res, configStore, agent });
       }
 
       // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
@@ -3641,7 +3586,7 @@ async function runDaemonInnerWithStartupOwnership(
         agent,
         publisherControl,
         publisherState,
-        config,
+        configStore,
         rfc64Catalog,
         rfc64PublicCatalog,
         startedAt,

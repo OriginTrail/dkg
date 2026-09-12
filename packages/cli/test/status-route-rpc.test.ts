@@ -85,7 +85,7 @@ async function requestStatusWithAgent(
       path: url.pathname,
       url,
       network: networkOverride,
-      config,
+      configStore: { current: config },
       rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
         config as never,
         resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
@@ -933,6 +933,12 @@ describe('/api/status selected overlay details', () => {
 
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const config = {
+        name: 'status-selected-overlay-test',
+        networkConfig: 'mainnet-gnosis',
+        nodeRole: 'edge',
+        chain: { type: 'mock' },
+      };
       await handleStatusRoutes({
         req,
         res,
@@ -940,12 +946,7 @@ describe('/api/status selected overlay details', () => {
         path: url.pathname,
         url,
         network,
-        config: {
-          name: 'status-selected-overlay-test',
-          networkConfig: 'mainnet-gnosis',
-          nodeRole: 'edge',
-          chain: { type: 'mock' },
-        },
+        configStore: { current: config },
         rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: {
@@ -1001,6 +1002,17 @@ describe('/api/status selected overlay details', () => {
 
       const server = createServer(async (req, res) => {
         const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        const config = {
+          name: 'status-failover-counter-test',
+          networkConfig: 'mainnet-gnosis',
+          nodeRole: 'edge',
+          chain: {
+            type: 'evm',
+            rpcUrl: 'http://127.0.0.1:9',
+            hubAddress: `0x${'ab'.repeat(20)}`,
+            chainId: 'evm:31337',
+          },
+        };
         await handleStatusRoutes({
           req,
           res,
@@ -1008,17 +1020,7 @@ describe('/api/status selected overlay details', () => {
           path: url.pathname,
           url,
           network,
-          config: {
-            name: 'status-failover-counter-test',
-            networkConfig: 'mainnet-gnosis',
-            nodeRole: 'edge',
-            chain: {
-              type: 'evm',
-              rpcUrl: 'http://127.0.0.1:9',
-              hubAddress: `0x${'ab'.repeat(20)}`,
-              chainId: 'evm:31337',
-            },
-          },
+          configStore: { current: config },
           rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
           startedAt: Date.now(),
           agent: {
@@ -1069,6 +1071,11 @@ describe('/api/status selected overlay details', () => {
   it('POST /api/identity/ensure → 503/504 (sanitized) when on-chain identity creation exhausts RPC', async () => {
     const makeServer = (err: any) => createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      const config = {
+        name: 'identity-ensure-transport-test',
+        nodeRole: 'edge',
+        chain: { type: 'evm', rpcUrl: 'http://127.0.0.1:9', hubAddress: `0x${'ab'.repeat(20)}`, chainId: 'evm:31337' },
+      };
       await handleStatusRoutes({
         req,
         res,
@@ -1076,11 +1083,7 @@ describe('/api/status selected overlay details', () => {
         path: url.pathname,
         url,
         network: null,
-        config: {
-          name: 'identity-ensure-transport-test',
-          nodeRole: 'edge',
-          chain: { type: 'evm', rpcUrl: 'http://127.0.0.1:9', hubAddress: `0x${'ab'.repeat(20)}`, chainId: 'evm:31337' },
-        },
+        configStore: { current: config },
         rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: { ensureIdentity: async () => { throw err; } },

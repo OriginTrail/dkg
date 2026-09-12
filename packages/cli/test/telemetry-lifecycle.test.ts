@@ -1,4 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DkgHomeFiles } from '../src/config.js';
+import { DkgConfigStore } from '../src/daemon-config-store.js';
 import type { TelemetryInitConfig } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../src/config.js';
 import { createDaemonTelemetryLifecycle } from '../src/daemon/telemetry-lifecycle.js';
@@ -6,6 +11,9 @@ import {
   createTelemetryRuntime,
   createTelemetrySettings,
 } from '../src/daemon/telemetry-runtime.js';
+
+const directories: string[] = [];
+afterEach(async () => { vi.restoreAllMocks(); await Promise.all(directories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))); });
 
 describe('daemon telemetry lifecycle wiring', () => {
   it('starts traces, metrics, and the selected log exporter from a boot-disabled settings transition', async () => {
@@ -59,13 +67,18 @@ describe('daemon telemetry lifecycle wiring', () => {
       stopLogExporter,
       log: vi.fn(),
     });
-    const runtime = createTelemetryRuntime({
-      config,
-      signals,
-      persist: vi.fn(async (current) => {
-        persisted.push(current.telemetry?.enabled ?? false);
-      }),
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-telemetry-lifecycle-'));
+    directories.push(directory);
+    const files = new DkgHomeFiles(directory);
+    await files.saveConfig(config);
+    const configStore = await DkgConfigStore.open(files, config);
+    const update = configStore.update.bind(configStore);
+    vi.spyOn(configStore, 'update').mockImplementation(async (...args) => {
+      const current = await update(...args);
+      persisted.push(current.telemetry?.enabled ?? false);
+      return current;
     });
+    const runtime = createTelemetryRuntime({ configStore, signals });
     const settings = createTelemetrySettings(runtime);
 
     await runtime.startConfiguredBestEffort();

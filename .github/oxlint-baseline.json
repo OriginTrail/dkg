@@ -56,9 +56,6 @@
       "packages/core/src/ka-lifecycle-logger.ts": {
         "{\"message\":\"Unexpected control characters\",\"evidence\":[{\"label\":\"'U+0000' is a control character.\",\"source\":\"\\\\u0000\"},{\"label\":\"'U+001F' is a control character.\",\"source\":\"\\\\u001f\"}]}": 1
       },
-      "packages/core/src/sparql-operation.ts": {
-        "{\"message\":\"Unexpected control character\",\"evidence\":[{\"label\":\"'U+0000' is a control character.\",\"source\":\"\\\\x00\"}]}": 2
-      },
       "packages/core/src/sparql-safe.ts": {
         "{\"message\":\"Unexpected control character\",\"evidence\":[{\"label\":\"'U+0000' is a control character.\",\"source\":\"\\\\x00\"}]}": 3
       },
@@ -1893,7 +1890,6 @@
         "{\"message\":\"Identifier 'decodeWorkspacePublishRequest' is imported but never used.\",\"evidence\":[{\"label\":\"'decodeWorkspacePublishRequest' is imported here\",\"source\":\"decodeWorkspacePublishRequest\"}]}": 1,
         "{\"message\":\"Identifier 'decryptSwmSenderKeyMessage' is imported but never used.\",\"evidence\":[{\"label\":\"'decryptSwmSenderKeyMessage' is imported here\",\"source\":\"decryptSwmSenderKeyMessage\"}]}": 1,
         "{\"message\":\"Identifier 'decryptSwmSenderKeyPackage' is imported but never used.\",\"evidence\":[{\"label\":\"'decryptSwmSenderKeyPackage' is imported here\",\"source\":\"decryptSwmSenderKeyPackage\"}]}": 1,
-        "{\"message\":\"Identifier 'DEFAULT_SWM_TTL_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'DEFAULT_SWM_TTL_MS' is imported here\",\"source\":\"DEFAULT_SWM_TTL_MS\"}]}": 1,
         "{\"message\":\"Identifier 'defaultLargeLiteralStorage' is imported but never used.\",\"evidence\":[{\"label\":\"'defaultLargeLiteralStorage' is imported here\",\"source\":\"defaultLargeLiteralStorage\"}]}": 1,
         "{\"message\":\"Identifier 'deriveCuratorDidFromCgId' is imported but never used.\",\"evidence\":[{\"label\":\"'deriveCuratorDidFromCgId' is imported here\",\"source\":\"deriveCuratorDidFromCgId\"}]}": 1,
         "{\"message\":\"Identifier 'deserializePendingSenderKeyEntry' is imported but never used.\",\"evidence\":[{\"label\":\"'deserializePendingSenderKeyEntry' is imported here\",\"source\":\"deserializePendingSenderKeyEntry\"}]}": 1,
@@ -2045,7 +2041,6 @@
         "{\"message\":\"Identifier 'StubNetworkStateRegistry' is imported but never used.\",\"evidence\":[{\"label\":\"'StubNetworkStateRegistry' is imported here\",\"source\":\"StubNetworkStateRegistry\"}]}": 1,
         "{\"message\":\"Identifier 'SUBSCRIPTION_SOURCES' is imported but never used.\",\"evidence\":[{\"label\":\"'SUBSCRIPTION_SOURCES' is imported here\",\"source\":\"SUBSCRIPTION_SOURCES\"}]}": 1,
         "{\"message\":\"Identifier 'subtractFinalizedExactQuads' is imported but never used.\",\"evidence\":[{\"label\":\"'subtractFinalizedExactQuads' is imported here\",\"source\":\"subtractFinalizedExactQuads\"}]}": 1,
-        "{\"message\":\"Identifier 'SWM_CLEANUP_INTERVAL_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'SWM_CLEANUP_INTERVAL_MS' is imported here\",\"source\":\"SWM_CLEANUP_INTERVAL_MS\"}]}": 1,
         "{\"message\":\"Identifier 'SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES' is imported but never used.\",\"evidence\":[{\"label\":\"'SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES' is imported here\",\"source\":\"SWM_HOST_CATCHUP_DEFAULT_MAX_BYTES\"}]}": 1,
         "{\"message\":\"Identifier 'SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES' is imported but never used.\",\"evidence\":[{\"label\":\"'SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES' is imported here\",\"source\":\"SWM_HOST_CATCHUP_DEFAULT_MAX_ENTRIES\"}]}": 1,
         "{\"message\":\"Identifier 'SWM_HOST_CATCHUP_WIRE_VERSION' is imported but never used.\",\"evidence\":[{\"label\":\"'SWM_HOST_CATCHUP_WIRE_VERSION' is imported here\",\"source\":\"SWM_HOST_CATCHUP_WIRE_VERSION\"}]}": 1,
@@ -2670,7 +2665,6 @@
         "{\"message\":\"Identifier 'CATCHUP_ON_CONNECT_COOLDOWN_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'CATCHUP_ON_CONNECT_COOLDOWN_MS' is imported here\",\"source\":\"CATCHUP_ON_CONNECT_COOLDOWN_MS\"}]}": 1,
         "{\"message\":\"Identifier 'CatchupReplayGuard' is imported but never used.\",\"evidence\":[{\"label\":\"'CatchupReplayGuard' is imported here\",\"source\":\"CatchupReplayGuard\"}]}": 1,
         "{\"message\":\"Identifier 'CclEvaluator' is imported but never used.\",\"evidence\":[{\"label\":\"'CclEvaluator' is imported here\",\"source\":\"CclEvaluator\"}]}": 1,
-        "{\"message\":\"Identifier 'CHAIN_POLICY_READ_TIMEOUT_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'CHAIN_POLICY_READ_TIMEOUT_MS' is imported here\",\"source\":\"CHAIN_POLICY_READ_TIMEOUT_MS\"}]}": 1,
         "{\"message\":\"Identifier 'ChainEventPoller' is imported but never used.\",\"evidence\":[{\"label\":\"'ChainEventPoller' is imported here\",\"source\":\"ChainEventPoller\"}]}": 1,
         "{\"message\":\"Identifier 'chooseFanOutTier' is imported but never used.\",\"evidence\":[{\"label\":\"'chooseFanOutTier' is imported here\",\"source\":\"chooseFanOutTier\"}]}": 1,
         "{\"message\":\"Identifier 'CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION' is imported but never used.\",\"evidence\":[{\"label\":\"'CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION' is imported here\",\"source\":\"CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION\"}]}": 1,
@@ -3105,7 +3099,6 @@
         "{\"message\":\"Identifier 'CATCHUP_ON_CONNECT_COOLDOWN_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'CATCHUP_ON_CONNECT_COOLDOWN_MS' is imported here\",\"source\":\"CATCHUP_ON_CONNECT_COOLDOWN_MS\"}]}": 1,
         "{\"message\":\"Identifier 'CatchupReplayGuard' is imported but never used.\",\"evidence\":[{\"label\":\"'CatchupReplayGuard' is imported here\",\"source\":\"CatchupReplayGuard\"}]}": 1,
         "{\"message\":\"Identifier 'CclEvaluator' is imported but never used.\",\"evidence\":[{\"label\":\"'CclEvaluator' is imported here\",\"source\":\"CclEvaluator\"}]}": 1,
-        "{\"message\":\"Identifier 'CHAIN_POLICY_READ_TIMEOUT_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'CHAIN_POLICY_READ_TIMEOUT_MS' is imported here\",\"source\":\"CHAIN_POLICY_READ_TIMEOUT_MS\"}]}": 1,
         "{\"message\":\"Identifier 'ChainEventPoller' is imported but never used.\",\"evidence\":[{\"label\":\"'ChainEventPoller' is imported here\",\"source\":\"ChainEventPoller\"}]}": 1,
         "{\"message\":\"Identifier 'chooseFanOutTier' is imported but never used.\",\"evidence\":[{\"label\":\"'chooseFanOutTier' is imported here\",\"source\":\"chooseFanOutTier\"}]}": 1,
         "{\"message\":\"Identifier 'CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION' is imported but never used.\",\"evidence\":[{\"label\":\"'CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION' is imported here\",\"source\":\"CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION\"}]}": 1,
@@ -3292,7 +3285,6 @@
         "{\"message\":\"Identifier 'PublishHandler' is imported but never used.\",\"evidence\":[{\"label\":\"'PublishHandler' is imported here\",\"source\":\"PublishHandler\"}]}": 1,
         "{\"message\":\"Identifier 'PublishJournal' is imported but never used.\",\"evidence\":[{\"label\":\"'PublishJournal' is imported here\",\"source\":\"PublishJournal\"}]}": 1,
         "{\"message\":\"Identifier 'QueryHandler' is imported but never used.\",\"evidence\":[{\"label\":\"'QueryHandler' is imported here\",\"source\":\"QueryHandler\"}]}": 1,
-        "{\"message\":\"Identifier 'raceWithBootTimeout' is imported but never used.\",\"evidence\":[{\"label\":\"'raceWithBootTimeout' is imported here\",\"source\":\"raceWithBootTimeout\"}]}": 1,
         "{\"message\":\"Identifier 'RANDOM_SAMPLING_BIND_RETRY_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'RANDOM_SAMPLING_BIND_RETRY_MS' is imported here\",\"source\":\"RANDOM_SAMPLING_BIND_RETRY_MS\"}]}": 1,
         "{\"message\":\"Identifier 'ratchetSwmSenderChainKey' is imported but never used.\",\"evidence\":[{\"label\":\"'ratchetSwmSenderChainKey' is imported here\",\"source\":\"ratchetSwmSenderChainKey\"}]}": 1,
         "{\"message\":\"Identifier 'RecentUalSet' is imported but never used.\",\"evidence\":[{\"label\":\"'RecentUalSet' is imported here\",\"source\":\"RecentUalSet\"}]}": 1,
@@ -3352,7 +3344,6 @@
         "{\"message\":\"Identifier 'SYNC_TOTAL_TIMEOUT_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'SYNC_TOTAL_TIMEOUT_MS' is imported here\",\"source\":\"SYNC_TOTAL_TIMEOUT_MS\"}]}": 1,
         "{\"message\":\"Identifier 'SyncAccessDeniedError' is imported but never used.\",\"evidence\":[{\"label\":\"'SyncAccessDeniedError' is imported here\",\"source\":\"SyncAccessDeniedError\"}]}": 1,
         "{\"message\":\"Identifier 'SyncVerifyWorker' is imported but never used.\",\"evidence\":[{\"label\":\"'SyncVerifyWorker' is imported here\",\"source\":\"SyncVerifyWorker\"}]}": 1,
-        "{\"message\":\"Identifier 'TIMEOUT_SENTINEL' is imported but never used.\",\"evidence\":[{\"label\":\"'TIMEOUT_SENTINEL' is imported here\",\"source\":\"TIMEOUT_SENTINEL\"}]}": 1,
         "{\"message\":\"Identifier 'TripleStoreAsyncLiftPublisher' is imported but never used.\",\"evidence\":[{\"label\":\"'TripleStoreAsyncLiftPublisher' is imported here\",\"source\":\"TripleStoreAsyncLiftPublisher\"}]}": 1,
         "{\"message\":\"Identifier 'TripleStoreAsyncPromoteQueue' is imported but never used.\",\"evidence\":[{\"label\":\"'TripleStoreAsyncPromoteQueue' is imported here\",\"source\":\"TripleStoreAsyncPromoteQueue\"}]}": 1,
         "{\"message\":\"Identifier 'TRUST_LEVEL_PREDICATE' is imported but never used.\",\"evidence\":[{\"label\":\"'TRUST_LEVEL_PREDICATE' is imported here\",\"source\":\"TRUST_LEVEL_PREDICATE\"}]}": 1,
@@ -4757,7 +4748,6 @@
         "{\"message\":\"Identifier 'AccessClient' is imported but never used.\",\"evidence\":[{\"label\":\"'AccessClient' is imported here\",\"source\":\"AccessClient\"}]}": 1,
         "{\"message\":\"Identifier 'AccessHandler' is imported but never used.\",\"evidence\":[{\"label\":\"'AccessHandler' is imported here\",\"source\":\"AccessHandler\"}]}": 1,
         "{\"message\":\"Identifier 'ACKCollector' is imported but never used.\",\"evidence\":[{\"label\":\"'ACKCollector' is imported here\",\"source\":\"ACKCollector\"}]}": 1,
-        "{\"message\":\"Identifier 'activeWorkspaceEncryptionKeys' is imported but never used.\",\"evidence\":[{\"label\":\"'activeWorkspaceEncryptionKeys' is imported here\",\"source\":\"activeWorkspaceEncryptionKeys\"}]}": 1,
         "{\"message\":\"Identifier 'adapterAdvertisesPublisherSigner' is imported but never used.\",\"evidence\":[{\"label\":\"'adapterAdvertisesPublisherSigner' is imported here\",\"source\":\"adapterAdvertisesPublisherSigner\"}]}": 1,
         "{\"message\":\"Identifier 'adapterGenericSignMessageMatchesAddress' is imported but never used.\",\"evidence\":[{\"label\":\"'adapterGenericSignMessageMatchesAddress' is imported here\",\"source\":\"adapterGenericSignMessageMatchesAddress\"}]}": 1,
         "{\"message\":\"Identifier 'adapterHasOperationalPrivateKey' is imported but never used.\",\"evidence\":[{\"label\":\"'adapterHasOperationalPrivateKey' is imported here\",\"source\":\"adapterHasOperationalPrivateKey\"}]}": 1,
@@ -4790,7 +4780,6 @@
         "{\"message\":\"Identifier 'buildSyncRequestEnvelope' is imported but never used.\",\"evidence\":[{\"label\":\"'buildSyncRequestEnvelope' is imported here\",\"source\":\"buildSyncRequestEnvelope\"}]}": 1,
         "{\"message\":\"Identifier 'buildTrustLevelQuads' is imported but never used.\",\"evidence\":[{\"label\":\"'buildTrustLevelQuads' is imported here\",\"source\":\"buildTrustLevelQuads\"}]}": 1,
         "{\"message\":\"Identifier 'buildVerificationMetadata' is imported but never used.\",\"evidence\":[{\"label\":\"'buildVerificationMetadata' is imported here\",\"source\":\"buildVerificationMetadata\"}]}": 1,
-        "{\"message\":\"Identifier 'canonicalAgentDidSubject' is imported but never used.\",\"evidence\":[{\"label\":\"'canonicalAgentDidSubject' is imported here\",\"source\":\"canonicalAgentDidSubject\"}]}": 1,
         "{\"message\":\"Identifier 'canonicalPublishPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'canonicalPublishPayload' is imported here\",\"source\":\"canonicalPublishPayload\"}]}": 1,
         "{\"message\":\"Identifier 'CATCHUP_ON_CONNECT_COOLDOWN_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'CATCHUP_ON_CONNECT_COOLDOWN_MS' is imported here\",\"source\":\"CATCHUP_ON_CONNECT_COOLDOWN_MS\"}]}": 1,
         "{\"message\":\"Identifier 'CatchupReplayGuard' is imported but never used.\",\"evidence\":[{\"label\":\"'CatchupReplayGuard' is imported here\",\"source\":\"CatchupReplayGuard\"}]}": 1,
@@ -4850,7 +4839,6 @@
         "{\"message\":\"Identifier 'decodeSwmSenderKeyPackage' is imported but never used.\",\"evidence\":[{\"label\":\"'decodeSwmSenderKeyPackage' is imported here\",\"source\":\"decodeSwmSenderKeyPackage\"}]}": 1,
         "{\"message\":\"Identifier 'decodeSwmSenderKeyPackageAck' is imported but never used.\",\"evidence\":[{\"label\":\"'decodeSwmSenderKeyPackageAck' is imported here\",\"source\":\"decodeSwmSenderKeyPackageAck\"}]}": 1,
         "{\"message\":\"Identifier 'decodeSwmShareAck' is imported but never used.\",\"evidence\":[{\"label\":\"'decodeSwmShareAck' is imported here\",\"source\":\"decodeSwmShareAck\"}]}": 1,
-        "{\"message\":\"Identifier 'decodeWorkspaceEncryptionKey' is imported but never used.\",\"evidence\":[{\"label\":\"'decodeWorkspaceEncryptionKey' is imported here\",\"source\":\"decodeWorkspaceEncryptionKey\"}]}": 1,
         "{\"message\":\"Identifier 'decodeWorkspacePublishRequest' is imported but never used.\",\"evidence\":[{\"label\":\"'decodeWorkspacePublishRequest' is imported here\",\"source\":\"decodeWorkspacePublishRequest\"}]}": 1,
         "{\"message\":\"Identifier 'decryptSwmSenderKeyMessage' is imported but never used.\",\"evidence\":[{\"label\":\"'decryptSwmSenderKeyMessage' is imported here\",\"source\":\"decryptSwmSenderKeyMessage\"}]}": 1,
         "{\"message\":\"Identifier 'decryptSwmSenderKeyPackage' is imported but never used.\",\"evidence\":[{\"label\":\"'decryptSwmSenderKeyPackage' is imported here\",\"source\":\"decryptSwmSenderKeyPackage\"}]}": 1,
@@ -5063,9 +5051,7 @@
         "{\"message\":\"Identifier 'WARM_CORE_KEEPALIVE_TAG' is imported but never used.\",\"evidence\":[{\"label\":\"'WARM_CORE_KEEPALIVE_TAG' is imported here\",\"source\":\"WARM_CORE_KEEPALIVE_TAG\"}]}": 1,
         "{\"message\":\"Identifier 'WARM_CORE_MAX' is imported but never used.\",\"evidence\":[{\"label\":\"'WARM_CORE_MAX' is imported here\",\"source\":\"WARM_CORE_MAX\"}]}": 1,
         "{\"message\":\"Identifier 'WARM_CORE_RECONCILE_INTERVAL_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'WARM_CORE_RECONCILE_INTERVAL_MS' is imported here\",\"source\":\"WARM_CORE_RECONCILE_INTERVAL_MS\"}]}": 1,
-        "{\"message\":\"Identifier 'WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519' is imported but never used.\",\"evidence\":[{\"label\":\"'WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519' is imported here\",\"source\":\"WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519\"}]}": 1,
         "{\"message\":\"Identifier 'WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE' is imported but never used.\",\"evidence\":[{\"label\":\"'WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE' is imported here\",\"source\":\"WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE\"}]}": 1,
-        "{\"message\":\"Identifier 'workspaceAgentEncryptionKeyId' is imported but never used.\",\"evidence\":[{\"label\":\"'workspaceAgentEncryptionKeyId' is imported here\",\"source\":\"workspaceAgentEncryptionKeyId\"}]}": 1,
         "{\"message\":\"Identifier 'wrapAsRpcPreconditionIfApplicable' is imported but never used.\",\"evidence\":[{\"label\":\"'wrapAsRpcPreconditionIfApplicable' is imported here\",\"source\":\"wrapAsRpcPreconditionIfApplicable\"}]}": 1,
         "{\"message\":\"Type 'ACKSignerResolution' is imported but never used.\",\"evidence\":[{\"label\":\"'ACKSignerResolution' is imported here\",\"source\":\"ACKSignerResolution\"}]}": 1,
         "{\"message\":\"Type 'AgentKeyRecord' is imported but never used.\",\"evidence\":[{\"label\":\"'AgentKeyRecord' is imported here\",\"source\":\"AgentKeyRecord\"}]}": 1,
@@ -5171,17 +5157,14 @@
         "{\"message\":\"Type 'SyncPageResult' is imported but never used.\",\"evidence\":[{\"label\":\"'SyncPageResult' is imported here\",\"source\":\"SyncPageResult\"}]}": 1,
         "{\"message\":\"Type 'SyncPhase' is imported but never used.\",\"evidence\":[{\"label\":\"'SyncPhase' is imported here\",\"source\":\"SyncPhase\"}]}": 1,
         "{\"message\":\"Type 'SyncRequestEnvelope' is imported but never used.\",\"evidence\":[{\"label\":\"'SyncRequestEnvelope' is imported here\",\"source\":\"SyncRequestEnvelope\"}]}": 1,
-        "{\"message\":\"Type 'TripleStore' is imported but never used.\",\"evidence\":[{\"label\":\"'TripleStore' is imported here\",\"source\":\"TripleStore\"}]}": 1,
         "{\"message\":\"Type 'TripleStoreConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'TripleStoreConfig' is imported here\",\"source\":\"TripleStoreConfig\"}]}": 1,
         "{\"message\":\"Type 'TxResult' is imported but never used.\",\"evidence\":[{\"label\":\"'TxResult' is imported here\",\"source\":\"TxResult\"}]}": 1,
         "{\"message\":\"Type 'V10PublishingConvictionAccountInfo' is imported but never used.\",\"evidence\":[{\"label\":\"'V10PublishingConvictionAccountInfo' is imported here\",\"source\":\"V10PublishingConvictionAccountInfo\"}]}": 1,
         "{\"message\":\"Type 'WarmCoreAgent' is imported but never used.\",\"evidence\":[{\"label\":\"'WarmCoreAgent' is imported here\",\"source\":\"WarmCoreAgent\"}]}": 1,
-        "{\"message\":\"Type 'WorkspaceAgentRecipient' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceAgentRecipient' is imported here\",\"source\":\"WorkspaceAgentRecipient\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceAgentRecipientResolution' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceAgentRecipientResolution' is imported here\",\"source\":\"WorkspaceAgentRecipientResolution\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceAgentRecipientResolverInput' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceAgentRecipientResolverInput' is imported here\",\"source\":\"WorkspaceAgentRecipientResolverInput\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceEncryptionKeyEntry' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceEncryptionKeyEntry' is imported here\",\"source\":\"WorkspaceEncryptionKeyEntry\"}]}": 1,
         "{\"message\":\"Type 'WorkspacePublicSnapshotStore' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspacePublicSnapshotStore' is imported here\",\"source\":\"WorkspacePublicSnapshotStore\"}]}": 1,
-        "{\"message\":\"Type 'WorkspaceRecipientEncryptionKey' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceRecipientEncryptionKey' is imported here\",\"source\":\"WorkspaceRecipientEncryptionKey\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceSenderKeyEncryptInput' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceSenderKeyEncryptInput' is imported here\",\"source\":\"WorkspaceSenderKeyEncryptInput\"}]}": 1
       },
       "packages/agent/src/dkg-agent-lifecycle.ts": {
@@ -5220,7 +5203,6 @@
         "{\"message\":\"Identifier 'canonicalPublishPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'canonicalPublishPayload' is imported here\",\"source\":\"canonicalPublishPayload\"}]}": 1,
         "{\"message\":\"Identifier 'CatchupReplayGuard' is imported but never used.\",\"evidence\":[{\"label\":\"'CatchupReplayGuard' is imported here\",\"source\":\"CatchupReplayGuard\"}]}": 1,
         "{\"message\":\"Identifier 'CclEvaluator' is imported but never used.\",\"evidence\":[{\"label\":\"'CclEvaluator' is imported here\",\"source\":\"CclEvaluator\"}]}": 1,
-        "{\"message\":\"Identifier 'CHAIN_POLICY_READ_TIMEOUT_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'CHAIN_POLICY_READ_TIMEOUT_MS' is imported here\",\"source\":\"CHAIN_POLICY_READ_TIMEOUT_MS\"}]}": 1,
         "{\"message\":\"Identifier 'chooseFanOutTier' is imported but never used.\",\"evidence\":[{\"label\":\"'chooseFanOutTier' is imported here\",\"source\":\"chooseFanOutTier\"}]}": 1,
         "{\"message\":\"Identifier 'CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION' is imported but never used.\",\"evidence\":[{\"label\":\"'CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION' is imported here\",\"source\":\"CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION\"}]}": 1,
         "{\"message\":\"Identifier 'CIPHERTEXT_CHUNK_PREDICATE' is imported but never used.\",\"evidence\":[{\"label\":\"'CIPHERTEXT_CHUNK_PREDICATE' is imported here\",\"source\":\"CIPHERTEXT_CHUNK_PREDICATE\"}]}": 1,
@@ -5427,7 +5409,7 @@
         "{\"message\":\"Identifier 'WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE' is imported but never used.\",\"evidence\":[{\"label\":\"'WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE' is imported here\",\"source\":\"WORKSPACE_RECIPIENT_ENCRYPTION_KEY_PURPOSE\"}]}": 1,
         "{\"message\":\"Identifier 'workspaceAgentEncryptionKeyId' is imported but never used.\",\"evidence\":[{\"label\":\"'workspaceAgentEncryptionKeyId' is imported here\",\"source\":\"workspaceAgentEncryptionKeyId\"}]}": 1,
         "{\"message\":\"Identifier 'wrapAsRpcPreconditionIfApplicable' is imported but never used.\",\"evidence\":[{\"label\":\"'wrapAsRpcPreconditionIfApplicable' is imported here\",\"source\":\"wrapAsRpcPreconditionIfApplicable\"}]}": 1,
-        "{\"message\":\"Parameter 'error' is declared but never used. Unused parameters should start with a '_'.\",\"evidence\":[{\"label\":\"'error' is declared here\",\"source\":\"error\"}]}": 2,
+        "{\"message\":\"Parameter 'error' is declared but never used. Unused parameters should start with a '_'.\",\"evidence\":[{\"label\":\"'error' is declared here\",\"source\":\"error\"}]}": 1,
         "{\"message\":\"Type 'ACKSignerResolution' is imported but never used.\",\"evidence\":[{\"label\":\"'ACKSignerResolution' is imported here\",\"source\":\"ACKSignerResolution\"}]}": 1,
         "{\"message\":\"Type 'AgentKeyRecord' is imported but never used.\",\"evidence\":[{\"label\":\"'AgentKeyRecord' is imported here\",\"source\":\"AgentKeyRecord\"}]}": 1,
         "{\"message\":\"Type 'AgentProfileConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'AgentProfileConfig' is imported here\",\"source\":\"AgentProfileConfig\"}]}": 1,
@@ -6329,7 +6311,6 @@
         "{\"message\":\"Type 'WorkspaceAgentRecipientResolution' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceAgentRecipientResolution' is imported here\",\"source\":\"WorkspaceAgentRecipientResolution\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceAgentRecipientResolverInput' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceAgentRecipientResolverInput' is imported here\",\"source\":\"WorkspaceAgentRecipientResolverInput\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceEncryptionKeyEntry' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceEncryptionKeyEntry' is imported here\",\"source\":\"WorkspaceEncryptionKeyEntry\"}]}": 1,
-        "{\"message\":\"Type 'WorkspacePublicSnapshotStore' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspacePublicSnapshotStore' is imported here\",\"source\":\"WorkspacePublicSnapshotStore\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceRecipientEncryptionKey' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceRecipientEncryptionKey' is imported here\",\"source\":\"WorkspaceRecipientEncryptionKey\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceSenderKeyEncryptInput' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceSenderKeyEncryptInput' is imported here\",\"source\":\"WorkspaceSenderKeyEncryptInput\"}]}": 1,
         "{\"message\":\"Type alias 'JoinApprovalRetryEntry' is declared but never used.\",\"evidence\":[{\"label\":\"'JoinApprovalRetryEntry' is declared here\",\"source\":\"JoinApprovalRetryEntry\"}]}": 1,
@@ -6378,7 +6359,6 @@
         "{\"message\":\"Identifier 'CATCHUP_ON_CONNECT_COOLDOWN_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'CATCHUP_ON_CONNECT_COOLDOWN_MS' is imported here\",\"source\":\"CATCHUP_ON_CONNECT_COOLDOWN_MS\"}]}": 1,
         "{\"message\":\"Identifier 'CatchupReplayGuard' is imported but never used.\",\"evidence\":[{\"label\":\"'CatchupReplayGuard' is imported here\",\"source\":\"CatchupReplayGuard\"}]}": 1,
         "{\"message\":\"Identifier 'CclEvaluator' is imported but never used.\",\"evidence\":[{\"label\":\"'CclEvaluator' is imported here\",\"source\":\"CclEvaluator\"}]}": 1,
-        "{\"message\":\"Identifier 'CHAIN_POLICY_READ_TIMEOUT_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'CHAIN_POLICY_READ_TIMEOUT_MS' is imported here\",\"source\":\"CHAIN_POLICY_READ_TIMEOUT_MS\"}]}": 1,
         "{\"message\":\"Identifier 'ChainEventPoller' is imported but never used.\",\"evidence\":[{\"label\":\"'ChainEventPoller' is imported here\",\"source\":\"ChainEventPoller\"}]}": 1,
         "{\"message\":\"Identifier 'chooseFanOutTier' is imported but never used.\",\"evidence\":[{\"label\":\"'chooseFanOutTier' is imported here\",\"source\":\"chooseFanOutTier\"}]}": 1,
         "{\"message\":\"Identifier 'CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION' is imported but never used.\",\"evidence\":[{\"label\":\"'CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION' is imported here\",\"source\":\"CIPHERTEXT_CHUNK_CATCHUP_WIRE_VERSION\"}]}": 1,
@@ -7187,9 +7167,6 @@
         "{\"message\":\"Type 'WorkspaceSenderKeyEncryptInput' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceSenderKeyEncryptInput' is imported here\",\"source\":\"WorkspaceSenderKeyEncryptInput\"}]}": 1,
         "{\"message\":\"Type alias 'JoinApprovalRetryEntry' is declared but never used.\",\"evidence\":[{\"label\":\"'JoinApprovalRetryEntry' is declared here\",\"source\":\"JoinApprovalRetryEntry\"}]}": 1
       },
-      "packages/agent/src/dkg-agent-rfc64-catalog.ts": {
-        "{\"message\":\"Identifier 'snapshotRfc64CatalogAccessPolicyAuthorityV1' is imported but never used.\",\"evidence\":[{\"label\":\"'snapshotRfc64CatalogAccessPolicyAuthorityV1' is imported here\",\"source\":\"snapshotRfc64CatalogAccessPolicyAuthorityV1\"}]}": 1
-      },
       "packages/agent/src/dkg-agent-swm-host.ts": {
         "{\"message\":\"Identifier 'AccessClient' is imported but never used.\",\"evidence\":[{\"label\":\"'AccessClient' is imported here\",\"source\":\"AccessClient\"}]}": 1,
         "{\"message\":\"Identifier 'AccessHandler' is imported but never used.\",\"evidence\":[{\"label\":\"'AccessHandler' is imported here\",\"source\":\"AccessHandler\"}]}": 1,
@@ -7808,7 +7785,6 @@
         "{\"message\":\"Identifier 'registerSyncHandler' is imported but never used.\",\"evidence\":[{\"label\":\"'registerSyncHandler' is imported here\",\"source\":\"registerSyncHandler\"}]}": 1,
         "{\"message\":\"Identifier 'resolveFactsFromSnapshot' is imported but never used.\",\"evidence\":[{\"label\":\"'resolveFactsFromSnapshot' is imported here\",\"source\":\"resolveFactsFromSnapshot\"}]}": 1,
         "{\"message\":\"Identifier 'resolveLiftWorkspaceSlice' is imported but never used.\",\"evidence\":[{\"label\":\"'resolveLiftWorkspaceSlice' is imported here\",\"source\":\"resolveLiftWorkspaceSlice\"}]}": 1,
-        "{\"message\":\"Identifier 'resolveWorkspaceAgentRecipients' is imported but never used.\",\"evidence\":[{\"label\":\"'resolveWorkspaceAgentRecipients' is imported here\",\"source\":\"resolveWorkspaceAgentRecipients\"}]}": 1,
         "{\"message\":\"Identifier 'revokeCustodialWorkspaceEncryptionKey' is imported but never used.\",\"evidence\":[{\"label\":\"'revokeCustodialWorkspaceEncryptionKey' is imported here\",\"source\":\"revokeCustodialWorkspaceEncryptionKey\"}]}": 1,
         "{\"message\":\"Identifier 'runDurableSync' is imported but never used.\",\"evidence\":[{\"label\":\"'runDurableSync' is imported here\",\"source\":\"runDurableSync\"}]}": 1,
         "{\"message\":\"Identifier 'runSharedMemorySync' is imported but never used.\",\"evidence\":[{\"label\":\"'runSharedMemorySync' is imported here\",\"source\":\"runSharedMemorySync\"}]}": 1,
@@ -8093,7 +8069,6 @@
         "{\"message\":\"Identifier 'decodeWorkspacePublishRequest' is imported but never used.\",\"evidence\":[{\"label\":\"'decodeWorkspacePublishRequest' is imported here\",\"source\":\"decodeWorkspacePublishRequest\"}]}": 1,
         "{\"message\":\"Identifier 'decryptSwmSenderKeyMessage' is imported but never used.\",\"evidence\":[{\"label\":\"'decryptSwmSenderKeyMessage' is imported here\",\"source\":\"decryptSwmSenderKeyMessage\"}]}": 1,
         "{\"message\":\"Identifier 'decryptSwmSenderKeyPackage' is imported but never used.\",\"evidence\":[{\"label\":\"'decryptSwmSenderKeyPackage' is imported here\",\"source\":\"decryptSwmSenderKeyPackage\"}]}": 1,
-        "{\"message\":\"Identifier 'DEFAULT_SWM_TTL_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'DEFAULT_SWM_TTL_MS' is imported here\",\"source\":\"DEFAULT_SWM_TTL_MS\"}]}": 1,
         "{\"message\":\"Identifier 'deriveCuratorDidFromCgId' is imported but never used.\",\"evidence\":[{\"label\":\"'deriveCuratorDidFromCgId' is imported here\",\"source\":\"deriveCuratorDidFromCgId\"}]}": 1,
         "{\"message\":\"Identifier 'deserializePendingSenderKeyEntry' is imported but never used.\",\"evidence\":[{\"label\":\"'deserializePendingSenderKeyEntry' is imported here\",\"source\":\"deserializePendingSenderKeyEntry\"}]}": 1,
         "{\"message\":\"Identifier 'deserializeSwmSenderReceiveState' is imported but never used.\",\"evidence\":[{\"label\":\"'deserializeSwmSenderReceiveState' is imported here\",\"source\":\"deserializeSwmSenderReceiveState\"}]}": 1,
@@ -8368,7 +8343,6 @@
         "{\"message\":\"Type 'WorkspaceAgentRecipientResolution' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceAgentRecipientResolution' is imported here\",\"source\":\"WorkspaceAgentRecipientResolution\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceAgentRecipientResolverInput' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceAgentRecipientResolverInput' is imported here\",\"source\":\"WorkspaceAgentRecipientResolverInput\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceEncryptionKeyEntry' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceEncryptionKeyEntry' is imported here\",\"source\":\"WorkspaceEncryptionKeyEntry\"}]}": 1,
-        "{\"message\":\"Type 'WorkspacePublicSnapshotStore' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspacePublicSnapshotStore' is imported here\",\"source\":\"WorkspacePublicSnapshotStore\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceRecipientEncryptionKey' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceRecipientEncryptionKey' is imported here\",\"source\":\"WorkspaceRecipientEncryptionKey\"}]}": 1,
         "{\"message\":\"Type 'WorkspaceSenderKeyEncryptInput' is imported but never used.\",\"evidence\":[{\"label\":\"'WorkspaceSenderKeyEncryptInput' is imported here\",\"source\":\"WorkspaceSenderKeyEncryptInput\"}]}": 1,
         "{\"message\":\"Type alias 'JoinApprovalRetryEntry' is declared but never used.\",\"evidence\":[{\"label\":\"'JoinApprovalRetryEntry' is declared here\",\"source\":\"JoinApprovalRetryEntry\"}]}": 1
@@ -8996,12 +8970,10 @@
         "{\"message\":\"Identifier 'CclEvaluator' is imported but never used.\",\"evidence\":[{\"label\":\"'CclEvaluator' is imported here\",\"source\":\"CclEvaluator\"}]}": 1,
         "{\"message\":\"Identifier 'collectPublishableMultiaddrs' is imported but never used.\",\"evidence\":[{\"label\":\"'collectPublishableMultiaddrs' is imported here\",\"source\":\"collectPublishableMultiaddrs\"}]}": 1,
         "{\"message\":\"Identifier 'ContextAuthorizedPublisherChainAdapter' is imported but never used.\",\"evidence\":[{\"label\":\"'ContextAuthorizedPublisherChainAdapter' is imported here\",\"source\":\"ContextAuthorizedPublisherChainAdapter\"}]}": 1,
-        "{\"message\":\"Identifier 'contextGraphDataGraphUri' is imported but never used.\",\"evidence\":[{\"label\":\"'contextGraphDataGraphUri' is imported here\",\"source\":\"contextGraphDataGraphUri\"}]}": 1,
         "{\"message\":\"Identifier 'contextGraphMetaUri' is imported but never used.\",\"evidence\":[{\"label\":\"'contextGraphMetaUri' is imported here\",\"source\":\"contextGraphMetaUri\"}]}": 1,
         "{\"message\":\"Identifier 'contextGraphWorkspaceGraphUri' is imported but never used.\",\"evidence\":[{\"label\":\"'contextGraphWorkspaceGraphUri' is imported here\",\"source\":\"contextGraphWorkspaceGraphUri\"}]}": 1,
         "{\"message\":\"Identifier 'decrypt' is imported but never used.\",\"evidence\":[{\"label\":\"'decrypt' is imported here\",\"source\":\"decrypt\"}]}": 1,
         "{\"message\":\"Identifier 'DiscoveryClient' is imported but never used.\",\"evidence\":[{\"label\":\"'DiscoveryClient' is imported here\",\"source\":\"DiscoveryClient\"}]}": 1,
-        "{\"message\":\"Identifier 'DKG_ONTOLOGY' is imported but never used.\",\"evidence\":[{\"label\":\"'DKG_ONTOLOGY' is imported here\",\"source\":\"DKG_ONTOLOGY\"}]}": 1,
         "{\"message\":\"Identifier 'DKGAgentWallet' is imported but never used.\",\"evidence\":[{\"label\":\"'DKGAgentWallet' is imported here\",\"source\":\"DKGAgentWallet\"}]}": 1,
         "{\"message\":\"Identifier 'DKGQueryEngine' is imported but never used.\",\"evidence\":[{\"label\":\"'DKGQueryEngine' is imported here\",\"source\":\"DKGQueryEngine\"}]}": 1,
         "{\"message\":\"Identifier 'ed25519ToX25519Private' is imported but never used.\",\"evidence\":[{\"label\":\"'ed25519ToX25519Private' is imported here\",\"source\":\"ed25519ToX25519Private\"}]}": 1,
@@ -9036,7 +9008,6 @@
         "{\"message\":\"Identifier 'SingleAddressMismatchedGenericSignMessagePublishChainAdapter' is imported but never used.\",\"evidence\":[{\"label\":\"'SingleAddressMismatchedGenericSignMessagePublishChainAdapter' is imported here\",\"source\":\"SingleAddressMismatchedGenericSignMessagePublishChainAdapter\"}]}": 1,
         "{\"message\":\"Identifier 'SingleSignerAdapterPublishChainAdapter' is imported but never used.\",\"evidence\":[{\"label\":\"'SingleSignerAdapterPublishChainAdapter' is imported here\",\"source\":\"SingleSignerAdapterPublishChainAdapter\"}]}": 1,
         "{\"message\":\"Identifier 'sparqlString' is imported but never used.\",\"evidence\":[{\"label\":\"'sparqlString' is imported here\",\"source\":\"sparqlString\"}]}": 1,
-        "{\"message\":\"Identifier 'SYSTEM_CONTEXT_GRAPHS' is imported but never used.\",\"evidence\":[{\"label\":\"'SYSTEM_CONTEXT_GRAPHS' is imported here\",\"source\":\"SYSTEM_CONTEXT_GRAPHS\"}]}": 1,
         "{\"message\":\"Identifier 'tmpdir' is imported but never used.\",\"evidence\":[{\"label\":\"'tmpdir' is imported here\",\"source\":\"tmpdir\"}]}": 1,
         "{\"message\":\"Identifier 'TransientIdentityFailureChainAdapter' is imported but never used.\",\"evidence\":[{\"label\":\"'TransientIdentityFailureChainAdapter' is imported here\",\"source\":\"TransientIdentityFailureChainAdapter\"}]}": 1,
         "{\"message\":\"Identifier 'vi' is imported but never used.\",\"evidence\":[{\"label\":\"'vi' is imported here\",\"source\":\"vi\"}]}": 1,
@@ -9355,7 +9326,6 @@
         "{\"message\":\"Identifier 'SingleSignerAdapterPublishChainAdapter' is imported but never used.\",\"evidence\":[{\"label\":\"'SingleSignerAdapterPublishChainAdapter' is imported here\",\"source\":\"SingleSignerAdapterPublishChainAdapter\"}]}": 1,
         "{\"message\":\"Identifier 'tmpdir' is imported but never used.\",\"evidence\":[{\"label\":\"'tmpdir' is imported here\",\"source\":\"tmpdir\"}]}": 1,
         "{\"message\":\"Identifier 'TransientIdentityFailureChainAdapter' is imported but never used.\",\"evidence\":[{\"label\":\"'TransientIdentityFailureChainAdapter' is imported here\",\"source\":\"TransientIdentityFailureChainAdapter\"}]}": 1,
-        "{\"message\":\"Identifier 'vi' is imported but never used.\",\"evidence\":[{\"label\":\"'vi' is imported here\",\"source\":\"vi\"}]}": 1,
         "{\"message\":\"Identifier 'x25519SharedSecret' is imported but never used.\",\"evidence\":[{\"label\":\"'x25519SharedSecret' is imported here\",\"source\":\"x25519SharedSecret\"}]}": 1,
         "{\"message\":\"Type 'ChainAdapter' is imported but never used.\",\"evidence\":[{\"label\":\"'ChainAdapter' is imported here\",\"source\":\"ChainAdapter\"}]}": 1,
         "{\"message\":\"Type 'CreateOnChainContextGraphParams' is imported but never used.\",\"evidence\":[{\"label\":\"'CreateOnChainContextGraphParams' is imported here\",\"source\":\"CreateOnChainContextGraphParams\"}]}": 1,
@@ -9498,9 +9468,6 @@
       "packages/agent/test/agent.publish-adapters.shared.ts": {
         "{\"message\":\"Identifier 'expect' is imported but never used.\",\"evidence\":[{\"label\":\"'expect' is imported here\",\"source\":\"expect\"}]}": 1,
         "{\"message\":\"Identifier 'MockChainAdapter' is imported but never used.\",\"evidence\":[{\"label\":\"'MockChainAdapter' is imported here\",\"source\":\"MockChainAdapter\"}]}": 1
-      },
-      "packages/agent/test/durable-sync-graph-scoped-materialization.test.ts": {
-        "{\"message\":\"Function 'authenticatedV2Chain' is declared but never used.\",\"evidence\":[{\"label\":\"'authenticatedV2Chain' is declared here\",\"source\":\"authenticatedV2Chain\"}]}": 1
       },
       "packages/agent/test/e2e-chain.test.ts": {
         "{\"message\":\"Identifier 'Contract' is imported but never used.\",\"evidence\":[{\"label\":\"'Contract' is imported here\",\"source\":\"Contract\"}]}": 1
@@ -10933,7 +10900,6 @@
         "{\"message\":\"Identifier 'VERIFY_COLLECTION_TIMEOUT_MIN_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'VERIFY_COLLECTION_TIMEOUT_MIN_MS' is imported here\",\"source\":\"VERIFY_COLLECTION_TIMEOUT_MIN_MS\"}]}": 1,
         "{\"message\":\"Identifier 'withSelectedDkgHome' is imported but never used.\",\"evidence\":[{\"label\":\"'withSelectedDkgHome' is imported here\",\"source\":\"withSelectedDkgHome\"}]}": 1,
         "{\"message\":\"Identifier 'yaml' is imported but never used.\",\"evidence\":[{\"label\":\"'yaml' is imported here\",\"source\":\"yaml\"}]}": 1,
-        "{\"message\":\"Type 'AutoUpdateConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'AutoUpdateConfig' is imported here\",\"source\":\"AutoUpdateConfig\"}]}": 1,
         "{\"message\":\"Type 'CatchupStatusCommandOptions' is imported but never used.\",\"evidence\":[{\"label\":\"'CatchupStatusCommandOptions' is imported here\",\"source\":\"CatchupStatusCommandOptions\"}]}": 1
       },
       "packages/cli/src/commands/mcp.ts": {
@@ -11036,7 +11002,6 @@
         "{\"message\":\"Identifier 'stripQuotes' is imported but never used.\",\"evidence\":[{\"label\":\"'stripQuotes' is imported here\",\"source\":\"stripQuotes\"}]}": 1,
         "{\"message\":\"Identifier 'supervisorWarn' is imported but never used.\",\"evidence\":[{\"label\":\"'supervisorWarn' is imported here\",\"source\":\"supervisorWarn\"}]}": 1,
         "{\"message\":\"Identifier 'swapSlot' is imported but never used.\",\"evidence\":[{\"label\":\"'swapSlot' is imported here\",\"source\":\"swapSlot\"}]}": 1,
-        "{\"message\":\"Identifier 'toErrorMessage' is imported but never used.\",\"evidence\":[{\"label\":\"'toErrorMessage' is imported here\",\"source\":\"toErrorMessage\"}]}": 1,
         "{\"message\":\"Identifier 'unlink' is imported but never used.\",\"evidence\":[{\"label\":\"'unlink' is imported here\",\"source\":\"unlink\"}]}": 1,
         "{\"message\":\"Identifier 'VERIFY_COLLECTION_TIMEOUT_MAX_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'VERIFY_COLLECTION_TIMEOUT_MAX_MS' is imported here\",\"source\":\"VERIFY_COLLECTION_TIMEOUT_MAX_MS\"}]}": 1,
         "{\"message\":\"Identifier 'VERIFY_COLLECTION_TIMEOUT_MIN_MS' is imported but never used.\",\"evidence\":[{\"label\":\"'VERIFY_COLLECTION_TIMEOUT_MIN_MS' is imported here\",\"source\":\"VERIFY_COLLECTION_TIMEOUT_MIN_MS\"}]}": 1,
@@ -12159,7 +12124,6 @@
         "{\"message\":\"Identifier 'hasOpenClawChatTurnContent' is imported but never used.\",\"evidence\":[{\"label\":\"'hasOpenClawChatTurnContent' is imported here\",\"source\":\"hasOpenClawChatTurnContent\"}]}": 1,
         "{\"message\":\"Identifier 'hasStoredLocalAgentTransportConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'hasStoredLocalAgentTransportConfig' is imported here\",\"source\":\"hasStoredLocalAgentTransportConfig\"}]}": 1,
         "{\"message\":\"Identifier 'hasVerifiedBundledMarkItDownBinary' is imported but never used.\",\"evidence\":[{\"label\":\"'hasVerifiedBundledMarkItDownBinary' is imported here\",\"source\":\"hasVerifiedBundledMarkItDownBinary\"}]}": 1,
-        "{\"message\":\"Identifier 'httpAuthGuard' is imported but never used.\",\"evidence\":[{\"label\":\"'httpAuthGuard' is imported here\",\"source\":\"httpAuthGuard\"}]}": 1,
         "{\"message\":\"Identifier 'HttpRateLimiter' is imported but never used.\",\"evidence\":[{\"label\":\"'HttpRateLimiter' is imported here\",\"source\":\"HttpRateLimiter\"}]}": 1,
         "{\"message\":\"Identifier 'inactiveSlot' is imported but never used.\",\"evidence\":[{\"label\":\"'inactiveSlot' is imported here\",\"source\":\"inactiveSlot\"}]}": 1,
         "{\"message\":\"Identifier 'isExplicitLocalAgentDisconnectPatch' is imported but never used.\",\"evidence\":[{\"label\":\"'isExplicitLocalAgentDisconnectPatch' is imported here\",\"source\":\"isExplicitLocalAgentDisconnectPatch\"}]}": 1,
@@ -12175,7 +12139,6 @@
         "{\"message\":\"Identifier 'isSafeIri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSafeIri' is imported here\",\"source\":\"isSafeIri\"}]}": 1,
         "{\"message\":\"Identifier 'isSkolemizedUri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSkolemizedUri' is imported here\",\"source\":\"isSkolemizedUri\"}]}": 1,
         "{\"message\":\"Identifier 'isStandaloneInstall' is imported but never used.\",\"evidence\":[{\"label\":\"'isStandaloneInstall' is imported here\",\"source\":\"isStandaloneInstall\"}]}": 1,
-        "{\"message\":\"Identifier 'isValidContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidContextGraphId' is imported here\",\"source\":\"isValidContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'isValidOpenClawPersistTurnPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidOpenClawPersistTurnPayload' is imported here\",\"source\":\"isValidOpenClawPersistTurnPayload\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRef' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRef' is imported here\",\"source\":\"isValidRef\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRepoSpec' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRepoSpec' is imported here\",\"source\":\"isValidRepoSpec\"}]}": 1,
@@ -12188,7 +12151,6 @@
         "{\"message\":\"Identifier 'loadNetworkConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'loadNetworkConfig' is imported here\",\"source\":\"loadNetworkConfig\"}]}": 1,
         "{\"message\":\"Identifier 'loadOpWallets' is imported but never used.\",\"evidence\":[{\"label\":\"'loadOpWallets' is imported here\",\"source\":\"loadOpWallets\"}]}": 1,
         "{\"message\":\"Identifier 'loadSkillTemplate' is imported but never used.\",\"evidence\":[{\"label\":\"'loadSkillTemplate' is imported here\",\"source\":\"loadSkillTemplate\"}]}": 1,
-        "{\"message\":\"Identifier 'loadTokens' is imported but never used.\",\"evidence\":[{\"label\":\"'loadTokens' is imported here\",\"source\":\"loadTokens\"}]}": 1,
         "{\"message\":\"Identifier 'LOCAL_AGENT_INTEGRATION_DEFINITIONS' is imported but never used.\",\"evidence\":[{\"label\":\"'LOCAL_AGENT_INTEGRATION_DEFINITIONS' is imported here\",\"source\":\"LOCAL_AGENT_INTEGRATION_DEFINITIONS\"}]}": 1,
         "{\"message\":\"Identifier 'localOpenclawConfigPath' is imported but never used.\",\"evidence\":[{\"label\":\"'localOpenclawConfigPath' is imported here\",\"source\":\"localOpenclawConfigPath\"}]}": 1,
         "{\"message\":\"Identifier 'Logger' is imported but never used.\",\"evidence\":[{\"label\":\"'Logger' is imported here\",\"source\":\"Logger\"}]}": 1,
@@ -12439,7 +12401,6 @@
         "{\"message\":\"Identifier 'isSafeIri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSafeIri' is imported here\",\"source\":\"isSafeIri\"}]}": 1,
         "{\"message\":\"Identifier 'isSkolemizedUri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSkolemizedUri' is imported here\",\"source\":\"isSkolemizedUri\"}]}": 1,
         "{\"message\":\"Identifier 'isStandaloneInstall' is imported but never used.\",\"evidence\":[{\"label\":\"'isStandaloneInstall' is imported here\",\"source\":\"isStandaloneInstall\"}]}": 1,
-        "{\"message\":\"Identifier 'isValidContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidContextGraphId' is imported here\",\"source\":\"isValidContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'isValidOpenClawPersistTurnPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidOpenClawPersistTurnPayload' is imported here\",\"source\":\"isValidOpenClawPersistTurnPayload\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRef' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRef' is imported here\",\"source\":\"isValidRef\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRepoSpec' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRepoSpec' is imported here\",\"source\":\"isValidRepoSpec\"}]}": 1,
@@ -12618,7 +12579,6 @@
         "{\"message\":\"Identifier 'resolve' is imported but never used.\",\"evidence\":[{\"label\":\"'resolve' is imported here\",\"source\":\"resolve\"}]}": 1,
         "{\"message\":\"Identifier 'saveConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'saveConfig' is imported here\",\"source\":\"saveConfig\"}]}": 1,
         "{\"message\":\"Identifier 'writeFile' is imported but never used.\",\"evidence\":[{\"label\":\"'writeFile' is imported here\",\"source\":\"writeFile\"}]}": 1,
-        "{\"message\":\"Type 'LocalAgentIntegrationConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'LocalAgentIntegrationConfig' is imported here\",\"source\":\"LocalAgentIntegrationConfig\"}]}": 1,
         "{\"message\":\"Type 'Logger' is imported but never used.\",\"evidence\":[{\"label\":\"'Logger' is imported here\",\"source\":\"Logger\"}]}": 1,
         "{\"message\":\"Variable 'daemonRequire' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'daemonRequire' is declared here\",\"source\":\"daemonRequire\"}]}": 1,
         "{\"message\":\"Variable 'execAsync' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'execAsync' is declared here\",\"source\":\"execAsync\"}]}": 1
@@ -12668,7 +12628,6 @@
         "{\"message\":\"Identifier 'DEBUG_SYNC_TRACE' is imported but never used.\",\"evidence\":[{\"label\":\"'DEBUG_SYNC_TRACE' is imported here\",\"source\":\"DEBUG_SYNC_TRACE\"}]}": 1,
         "{\"message\":\"Identifier 'deriveBlockExplorerUrl' is imported but never used.\",\"evidence\":[{\"label\":\"'deriveBlockExplorerUrl' is imported here\",\"source\":\"deriveBlockExplorerUrl\"}]}": 1,
         "{\"message\":\"Identifier 'dirname' is imported but never used.\",\"evidence\":[{\"label\":\"'dirname' is imported here\",\"source\":\"dirname\"}]}": 1,
-        "{\"message\":\"Identifier 'DKGAgent' is imported but never used.\",\"evidence\":[{\"label\":\"'DKGAgent' is imported here\",\"source\":\"DKGAgent\"}]}": 1,
         "{\"message\":\"Identifier 'DkgClient' is imported but never used.\",\"evidence\":[{\"label\":\"'DkgClient' is imported here\",\"source\":\"DkgClient\"}]}": 1,
         "{\"message\":\"Identifier 'dkgDir' is imported but never used.\",\"evidence\":[{\"label\":\"'dkgDir' is imported here\",\"source\":\"dkgDir\"}]}": 1,
         "{\"message\":\"Identifier 'DKGEvent' is imported but never used.\",\"evidence\":[{\"label\":\"'DKGEvent' is imported here\",\"source\":\"DKGEvent\"}]}": 1,
@@ -12723,7 +12682,6 @@
         "{\"message\":\"Identifier 'isSafeIri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSafeIri' is imported here\",\"source\":\"isSafeIri\"}]}": 1,
         "{\"message\":\"Identifier 'isSkolemizedUri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSkolemizedUri' is imported here\",\"source\":\"isSkolemizedUri\"}]}": 1,
         "{\"message\":\"Identifier 'isStandaloneInstall' is imported but never used.\",\"evidence\":[{\"label\":\"'isStandaloneInstall' is imported here\",\"source\":\"isStandaloneInstall\"}]}": 1,
-        "{\"message\":\"Identifier 'isValidContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidContextGraphId' is imported here\",\"source\":\"isValidContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'isValidOpenClawPersistTurnPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidOpenClawPersistTurnPayload' is imported here\",\"source\":\"isValidOpenClawPersistTurnPayload\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRef' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRef' is imported here\",\"source\":\"isValidRef\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRepoSpec' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRepoSpec' is imported here\",\"source\":\"isValidRepoSpec\"}]}": 1,
@@ -12922,7 +12880,6 @@
         "{\"message\":\"Variable 'nodeVersion' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'nodeVersion' is declared here\",\"source\":\"nodeVersion\"}]}": 1,
         "{\"message\":\"Variable 'opWallets' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'opWallets' is declared here\",\"source\":\"opWallets\"}]}": 1,
         "{\"message\":\"Variable 'publisherControl' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'publisherControl' is declared here\",\"source\":\"publisherControl\"}]}": 1,
-        "{\"message\":\"Variable 'requestAgentAddress' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'requestAgentAddress' is declared here\",\"source\":\"requestAgentAddress\"}]}": 1,
         "{\"message\":\"Variable 'startedAt' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'startedAt' is declared here\",\"source\":\"startedAt\"}]}": 1,
         "{\"message\":\"Variable 'vectorStore' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'vectorStore' is declared here\",\"source\":\"vectorStore\"}]}": 1
       },
@@ -13134,7 +13091,6 @@
         "{\"message\":\"Identifier 'updateLocalAgentIntegration' is imported but never used.\",\"evidence\":[{\"label\":\"'updateLocalAgentIntegration' is imported here\",\"source\":\"updateLocalAgentIntegration\"}]}": 1,
         "{\"message\":\"Identifier 'validateAssertionName' is imported but never used.\",\"evidence\":[{\"label\":\"'validateAssertionName' is imported here\",\"source\":\"validateAssertionName\"}]}": 1,
         "{\"message\":\"Identifier 'validateConditions' is imported but never used.\",\"evidence\":[{\"label\":\"'validateConditions' is imported here\",\"source\":\"validateConditions\"}]}": 1,
-        "{\"message\":\"Identifier 'validateContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'validateContextGraphId' is imported here\",\"source\":\"validateContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'validateEntities' is imported but never used.\",\"evidence\":[{\"label\":\"'validateEntities' is imported here\",\"source\":\"validateEntities\"}]}": 1,
         "{\"message\":\"Identifier 'validateOptionalSubGraphName' is imported but never used.\",\"evidence\":[{\"label\":\"'validateOptionalSubGraphName' is imported here\",\"source\":\"validateOptionalSubGraphName\"}]}": 1,
         "{\"message\":\"Identifier 'VectorStore' is imported but never used.\",\"evidence\":[{\"label\":\"'VectorStore' is imported here\",\"source\":\"VectorStore\"}]}": 1,
@@ -13309,7 +13265,6 @@
         "{\"message\":\"Identifier 'isSafeIri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSafeIri' is imported here\",\"source\":\"isSafeIri\"}]}": 1,
         "{\"message\":\"Identifier 'isSkolemizedUri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSkolemizedUri' is imported here\",\"source\":\"isSkolemizedUri\"}]}": 1,
         "{\"message\":\"Identifier 'isStandaloneInstall' is imported but never used.\",\"evidence\":[{\"label\":\"'isStandaloneInstall' is imported here\",\"source\":\"isStandaloneInstall\"}]}": 1,
-        "{\"message\":\"Identifier 'isValidContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidContextGraphId' is imported here\",\"source\":\"isValidContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'isValidOpenClawPersistTurnPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidOpenClawPersistTurnPayload' is imported here\",\"source\":\"isValidOpenClawPersistTurnPayload\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRef' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRef' is imported here\",\"source\":\"isValidRef\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRepoSpec' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRepoSpec' is imported here\",\"source\":\"isValidRepoSpec\"}]}": 1,
@@ -13510,7 +13465,6 @@
         "{\"message\":\"Variable 'nodeCommit' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'nodeCommit' is declared here\",\"source\":\"nodeCommit\"}]}": 1,
         "{\"message\":\"Variable 'nodeVersion' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'nodeVersion' is declared here\",\"source\":\"nodeVersion\"}]}": 1,
         "{\"message\":\"Variable 'opWallets' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'opWallets' is declared here\",\"source\":\"opWallets\"}]}": 1,
-        "{\"message\":\"Variable 'requestToken' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'requestToken' is declared here\",\"source\":\"requestToken\"}]}": 1,
         "{\"message\":\"Variable 'startedAt' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'startedAt' is declared here\",\"source\":\"startedAt\"}]}": 1,
         "{\"message\":\"Variable 'tracker' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'tracker' is declared here\",\"source\":\"tracker\"}]}": 1,
         "{\"message\":\"Variable 'url' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'url' is declared here\",\"source\":\"url\"}]}": 1,
@@ -13597,7 +13551,6 @@
         "{\"message\":\"Identifier 'getExtractionStatusRecord' is imported but never used.\",\"evidence\":[{\"label\":\"'getExtractionStatusRecord' is imported here\",\"source\":\"getExtractionStatusRecord\"}]}": 1,
         "{\"message\":\"Identifier 'getNodeVersion' is imported but never used.\",\"evidence\":[{\"label\":\"'getNodeVersion' is imported here\",\"source\":\"getNodeVersion\"}]}": 1,
         "{\"message\":\"Identifier 'getOpenClawChannelTargets' is imported but never used.\",\"evidence\":[{\"label\":\"'getOpenClawChannelTargets' is imported here\",\"source\":\"getOpenClawChannelTargets\"}]}": 1,
-        "{\"message\":\"Identifier 'getStoredLocalAgentIntegrations' is imported but never used.\",\"evidence\":[{\"label\":\"'getStoredLocalAgentIntegrations' is imported here\",\"source\":\"getStoredLocalAgentIntegrations\"}]}": 1,
         "{\"message\":\"Identifier 'gitCommandArgs' is imported but never used.\",\"evidence\":[{\"label\":\"'gitCommandArgs' is imported here\",\"source\":\"gitCommandArgs\"}]}": 1,
         "{\"message\":\"Identifier 'gitCommandEnv' is imported but never used.\",\"evidence\":[{\"label\":\"'gitCommandEnv' is imported here\",\"source\":\"gitCommandEnv\"}]}": 1,
         "{\"message\":\"Identifier 'githubRepoForApi' is imported but never used.\",\"evidence\":[{\"label\":\"'githubRepoForApi' is imported here\",\"source\":\"githubRepoForApi\"}]}": 1,
@@ -13610,7 +13563,6 @@
         "{\"message\":\"Identifier 'HttpRateLimiter' is imported but never used.\",\"evidence\":[{\"label\":\"'HttpRateLimiter' is imported here\",\"source\":\"HttpRateLimiter\"}]}": 1,
         "{\"message\":\"Identifier 'inactiveSlot' is imported but never used.\",\"evidence\":[{\"label\":\"'inactiveSlot' is imported here\",\"source\":\"inactiveSlot\"}]}": 1,
         "{\"message\":\"Identifier 'isExplicitLocalAgentDisconnectPatch' is imported but never used.\",\"evidence\":[{\"label\":\"'isExplicitLocalAgentDisconnectPatch' is imported here\",\"source\":\"isExplicitLocalAgentDisconnectPatch\"}]}": 1,
-        "{\"message\":\"Identifier 'isLocalAgentExplicitlyUserDisabled' is imported but never used.\",\"evidence\":[{\"label\":\"'isLocalAgentExplicitlyUserDisabled' is imported here\",\"source\":\"isLocalAgentExplicitlyUserDisabled\"}]}": 1,
         "{\"message\":\"Identifier 'isLoopbackClientIp' is imported but never used.\",\"evidence\":[{\"label\":\"'isLoopbackClientIp' is imported here\",\"source\":\"isLoopbackClientIp\"}]}": 1,
         "{\"message\":\"Identifier 'isLoopbackRateLimitExemptPath' is imported but never used.\",\"evidence\":[{\"label\":\"'isLoopbackRateLimitExemptPath' is imported here\",\"source\":\"isLoopbackRateLimitExemptPath\"}]}": 1,
         "{\"message\":\"Identifier 'isMarkItDownAvailable' is imported but never used.\",\"evidence\":[{\"label\":\"'isMarkItDownAvailable' is imported here\",\"source\":\"isMarkItDownAvailable\"}]}": 1,
@@ -13621,7 +13573,6 @@
         "{\"message\":\"Identifier 'isSafeIri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSafeIri' is imported here\",\"source\":\"isSafeIri\"}]}": 1,
         "{\"message\":\"Identifier 'isSkolemizedUri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSkolemizedUri' is imported here\",\"source\":\"isSkolemizedUri\"}]}": 1,
         "{\"message\":\"Identifier 'isStandaloneInstall' is imported but never used.\",\"evidence\":[{\"label\":\"'isStandaloneInstall' is imported here\",\"source\":\"isStandaloneInstall\"}]}": 1,
-        "{\"message\":\"Identifier 'isValidContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidContextGraphId' is imported here\",\"source\":\"isValidContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'isValidOpenClawPersistTurnPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidOpenClawPersistTurnPayload' is imported here\",\"source\":\"isValidOpenClawPersistTurnPayload\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRef' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRef' is imported here\",\"source\":\"isValidRef\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRepoSpec' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRepoSpec' is imported here\",\"source\":\"isValidRepoSpec\"}]}": 1,
@@ -13647,7 +13598,6 @@
         "{\"message\":\"Identifier 'markItDownMetadataPath' is imported but never used.\",\"evidence\":[{\"label\":\"'markItDownMetadataPath' is imported here\",\"source\":\"markItDownMetadataPath\"}]}": 1,
         "{\"message\":\"Identifier 'MAX_BODY_BYTES' is imported but never used.\",\"evidence\":[{\"label\":\"'MAX_BODY_BYTES' is imported here\",\"source\":\"MAX_BODY_BYTES\"}]}": 1,
         "{\"message\":\"Identifier 'MAX_UPLOAD_BYTES' is imported but never used.\",\"evidence\":[{\"label\":\"'MAX_UPLOAD_BYTES' is imported here\",\"source\":\"MAX_UPLOAD_BYTES\"}]}": 1,
-        "{\"message\":\"Identifier 'mergeLocalAgentIntegrationConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'mergeLocalAgentIntegrationConfig' is imported here\",\"source\":\"mergeLocalAgentIntegrationConfig\"}]}": 1,
         "{\"message\":\"Identifier 'MetricsCollector' is imported but never used.\",\"evidence\":[{\"label\":\"'MetricsCollector' is imported here\",\"source\":\"MetricsCollector\"}]}": 1,
         "{\"message\":\"Identifier 'mkdir' is imported but never used.\",\"evidence\":[{\"label\":\"'mkdir' is imported here\",\"source\":\"mkdir\"}]}": 1,
         "{\"message\":\"Identifier 'MockChainAdapter' is imported but never used.\",\"evidence\":[{\"label\":\"'MockChainAdapter' is imported here\",\"source\":\"MockChainAdapter\"}]}": 1,
@@ -13680,7 +13630,6 @@
         "{\"message\":\"Identifier 'pipeOpenClawStream' is imported but never used.\",\"evidence\":[{\"label\":\"'pipeOpenClawStream' is imported here\",\"source\":\"pipeOpenClawStream\"}]}": 1,
         "{\"message\":\"Identifier 'planInstallImpl' is imported but never used.\",\"evidence\":[{\"label\":\"'planInstallImpl' is imported here\",\"source\":\"planInstallImpl\"}]}": 1,
         "{\"message\":\"Identifier 'probeOpenClawChannelHealth' is imported but never used.\",\"evidence\":[{\"label\":\"'probeOpenClawChannelHealth' is imported here\",\"source\":\"probeOpenClawChannelHealth\"}]}": 1,
-        "{\"message\":\"Identifier 'pruneLegacyOpenClawConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'pruneLegacyOpenClawConfig' is imported here\",\"source\":\"pruneLegacyOpenClawConfig\"}]}": 1,
         "{\"message\":\"Identifier 'publishManifestImpl' is imported but never used.\",\"evidence\":[{\"label\":\"'publishManifestImpl' is imported here\",\"source\":\"publishManifestImpl\"}]}": 1,
         "{\"message\":\"Identifier 'randomUUID' is imported but never used.\",\"evidence\":[{\"label\":\"'randomUUID' is imported here\",\"source\":\"randomUUID\"}]}": 1,
         "{\"message\":\"Identifier 'readBodyBuffer' is imported but never used.\",\"evidence\":[{\"label\":\"'readBodyBuffer' is imported here\",\"source\":\"readBodyBuffer\"}]}": 1,
@@ -13760,20 +13709,15 @@
         "{\"message\":\"Type 'CatchupTracker' is imported but never used.\",\"evidence\":[{\"label\":\"'CatchupTracker' is imported here\",\"source\":\"CatchupTracker\"}]}": 1,
         "{\"message\":\"Type 'CommitCheckStatus' is imported but never used.\",\"evidence\":[{\"label\":\"'CommitCheckStatus' is imported here\",\"source\":\"CommitCheckStatus\"}]}": 1,
         "{\"message\":\"Type 'CorsAllowlist' is imported but never used.\",\"evidence\":[{\"label\":\"'CorsAllowlist' is imported here\",\"source\":\"CorsAllowlist\"}]}": 1,
-        "{\"message\":\"Type 'DkgConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'DkgConfig' is imported here\",\"source\":\"DkgConfig\"}]}": 1,
         "{\"message\":\"Type 'EmbeddingProvider' is imported but never used.\",\"evidence\":[{\"label\":\"'EmbeddingProvider' is imported here\",\"source\":\"EmbeddingProvider\"}]}": 1,
         "{\"message\":\"Type 'ExtractionStatusRecord' is imported but never used.\",\"evidence\":[{\"label\":\"'ExtractionStatusRecord' is imported here\",\"source\":\"ExtractionStatusRecord\"}]}": 1,
         "{\"message\":\"Type 'ImportFileExtractionPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'ImportFileExtractionPayload' is imported here\",\"source\":\"ImportFileExtractionPayload\"}]}": 1,
         "{\"message\":\"Type 'IncomingMessage' is imported but never used.\",\"evidence\":[{\"label\":\"'IncomingMessage' is imported here\",\"source\":\"IncomingMessage\"}]}": 1,
         "{\"message\":\"Type 'InstallContext' is imported but never used.\",\"evidence\":[{\"label\":\"'InstallContext' is imported here\",\"source\":\"InstallContext\"}]}": 1,
         "{\"message\":\"Type 'LocalAgentIntegrationCapabilities' is imported but never used.\",\"evidence\":[{\"label\":\"'LocalAgentIntegrationCapabilities' is imported here\",\"source\":\"LocalAgentIntegrationCapabilities\"}]}": 1,
-        "{\"message\":\"Type 'LocalAgentIntegrationConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'LocalAgentIntegrationConfig' is imported here\",\"source\":\"LocalAgentIntegrationConfig\"}]}": 1,
         "{\"message\":\"Type 'LocalAgentIntegrationDefinition' is imported but never used.\",\"evidence\":[{\"label\":\"'LocalAgentIntegrationDefinition' is imported here\",\"source\":\"LocalAgentIntegrationDefinition\"}]}": 1,
         "{\"message\":\"Type 'LocalAgentIntegrationManifest' is imported but never used.\",\"evidence\":[{\"label\":\"'LocalAgentIntegrationManifest' is imported here\",\"source\":\"LocalAgentIntegrationManifest\"}]}": 1,
-        "{\"message\":\"Type 'LocalAgentIntegrationRecord' is imported but never used.\",\"evidence\":[{\"label\":\"'LocalAgentIntegrationRecord' is imported here\",\"source\":\"LocalAgentIntegrationRecord\"}]}": 1,
-        "{\"message\":\"Type 'LocalAgentIntegrationRuntime' is imported but never used.\",\"evidence\":[{\"label\":\"'LocalAgentIntegrationRuntime' is imported here\",\"source\":\"LocalAgentIntegrationRuntime\"}]}": 1,
         "{\"message\":\"Type 'LocalAgentIntegrationStatus' is imported but never used.\",\"evidence\":[{\"label\":\"'LocalAgentIntegrationStatus' is imported here\",\"source\":\"LocalAgentIntegrationStatus\"}]}": 1,
-        "{\"message\":\"Type 'LocalAgentIntegrationTransport' is imported but never used.\",\"evidence\":[{\"label\":\"'LocalAgentIntegrationTransport' is imported here\",\"source\":\"LocalAgentIntegrationTransport\"}]}": 1,
         "{\"message\":\"Type 'MarkItDownTarget' is imported but never used.\",\"evidence\":[{\"label\":\"'MarkItDownTarget' is imported here\",\"source\":\"MarkItDownTarget\"}]}": 1,
         "{\"message\":\"Type 'McpDkgAssets' is imported but never used.\",\"evidence\":[{\"label\":\"'McpDkgAssets' is imported here\",\"source\":\"McpDkgAssets\"}]}": 1,
         "{\"message\":\"Type 'MetricsSource' is imported but never used.\",\"evidence\":[{\"label\":\"'MetricsSource' is imported here\",\"source\":\"MetricsSource\"}]}": 1,
@@ -13817,7 +13761,6 @@
         "{\"message\":\"Variable 'opWallets' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'opWallets' is declared here\",\"source\":\"opWallets\"}]}": 1,
         "{\"message\":\"Variable 'publisherControl' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'publisherControl' is declared here\",\"source\":\"publisherControl\"}]}": 1,
         "{\"message\":\"Variable 'requestAgentAddress' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'requestAgentAddress' is declared here\",\"source\":\"requestAgentAddress\"}]}": 1,
-        "{\"message\":\"Variable 'requestToken' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'requestToken' is declared here\",\"source\":\"requestToken\"}]}": 1,
         "{\"message\":\"Variable 'startedAt' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'startedAt' is declared here\",\"source\":\"startedAt\"}]}": 1,
         "{\"message\":\"Variable 'tracker' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'tracker' is declared here\",\"source\":\"tracker\"}]}": 1,
         "{\"message\":\"Variable 'url' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'url' is declared here\",\"source\":\"url\"}]}": 1,
@@ -13920,7 +13863,6 @@
         "{\"message\":\"Identifier 'isPlainRecord' is imported but never used.\",\"evidence\":[{\"label\":\"'isPlainRecord' is imported here\",\"source\":\"isPlainRecord\"}]}": 1,
         "{\"message\":\"Identifier 'isSameAgentAddress' is imported but never used.\",\"evidence\":[{\"label\":\"'isSameAgentAddress' is imported here\",\"source\":\"isSameAgentAddress\"}]}": 1,
         "{\"message\":\"Identifier 'isStandaloneInstall' is imported but never used.\",\"evidence\":[{\"label\":\"'isStandaloneInstall' is imported here\",\"source\":\"isStandaloneInstall\"}]}": 1,
-        "{\"message\":\"Identifier 'isValidContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidContextGraphId' is imported here\",\"source\":\"isValidContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'isValidOpenClawPersistTurnPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidOpenClawPersistTurnPayload' is imported here\",\"source\":\"isValidOpenClawPersistTurnPayload\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRef' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRef' is imported here\",\"source\":\"isValidRef\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRepoSpec' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRepoSpec' is imported here\",\"source\":\"isValidRepoSpec\"}]}": 1,
@@ -14097,7 +14039,6 @@
         "{\"message\":\"Type 'PendingOpenClawUiAttachJob' is imported but never used.\",\"evidence\":[{\"label\":\"'PendingOpenClawUiAttachJob' is imported here\",\"source\":\"PendingOpenClawUiAttachJob\"}]}": 1,
         "{\"message\":\"Type 'PendingUpdateState' is imported but never used.\",\"evidence\":[{\"label\":\"'PendingUpdateState' is imported here\",\"source\":\"PendingUpdateState\"}]}": 1,
         "{\"message\":\"Type 'PublisherRuntime' is imported but never used.\",\"evidence\":[{\"label\":\"'PublisherRuntime' is imported here\",\"source\":\"PublisherRuntime\"}]}": 1,
-        "{\"message\":\"Type 'Quad' is imported but never used.\",\"evidence\":[{\"label\":\"'Quad' is imported here\",\"source\":\"Quad\"}]}": 1,
         "{\"message\":\"Type 'ReverseLocalAgentSetupDeps' is imported but never used.\",\"evidence\":[{\"label\":\"'ReverseLocalAgentSetupDeps' is imported here\",\"source\":\"ReverseLocalAgentSetupDeps\"}]}": 1,
         "{\"message\":\"Type 'SupportedTool' is imported but never used.\",\"evidence\":[{\"label\":\"'SupportedTool' is imported here\",\"source\":\"SupportedTool\"}]}": 1,
         "{\"message\":\"Type 'UpdateStatus' is imported but never used.\",\"evidence\":[{\"label\":\"'UpdateStatus' is imported here\",\"source\":\"UpdateStatus\"}]}": 1,
@@ -14221,7 +14162,6 @@
         "{\"message\":\"Identifier 'isSafeIri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSafeIri' is imported here\",\"source\":\"isSafeIri\"}]}": 1,
         "{\"message\":\"Identifier 'isSkolemizedUri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSkolemizedUri' is imported here\",\"source\":\"isSkolemizedUri\"}]}": 1,
         "{\"message\":\"Identifier 'isStandaloneInstall' is imported but never used.\",\"evidence\":[{\"label\":\"'isStandaloneInstall' is imported here\",\"source\":\"isStandaloneInstall\"}]}": 1,
-        "{\"message\":\"Identifier 'isValidContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidContextGraphId' is imported here\",\"source\":\"isValidContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRef' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRef' is imported here\",\"source\":\"isValidRef\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRepoSpec' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRepoSpec' is imported here\",\"source\":\"isValidRepoSpec\"}]}": 1,
         "{\"message\":\"Identifier 'join' is imported but never used.\",\"evidence\":[{\"label\":\"'join' is imported here\",\"source\":\"join\"}]}": 1,
@@ -14409,7 +14349,6 @@
         "{\"message\":\"Variable 'opWallets' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'opWallets' is declared here\",\"source\":\"opWallets\"}]}": 1,
         "{\"message\":\"Variable 'publisherControl' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'publisherControl' is declared here\",\"source\":\"publisherControl\"}]}": 1,
         "{\"message\":\"Variable 'requestAgentAddress' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'requestAgentAddress' is declared here\",\"source\":\"requestAgentAddress\"}]}": 1,
-        "{\"message\":\"Variable 'requestToken' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'requestToken' is declared here\",\"source\":\"requestToken\"}]}": 1,
         "{\"message\":\"Variable 'startedAt' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'startedAt' is declared here\",\"source\":\"startedAt\"}]}": 1,
         "{\"message\":\"Variable 'tracker' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'tracker' is declared here\",\"source\":\"tracker\"}]}": 1,
         "{\"message\":\"Variable 'url' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'url' is declared here\",\"source\":\"url\"}]}": 1,
@@ -14473,7 +14412,6 @@
         "{\"message\":\"Identifier 'execSync' is imported but never used.\",\"evidence\":[{\"label\":\"'execSync' is imported here\",\"source\":\"execSync\"}]}": 1,
         "{\"message\":\"Identifier 'existsSync' is imported but never used.\",\"evidence\":[{\"label\":\"'existsSync' is imported here\",\"source\":\"existsSync\"}]}": 1,
         "{\"message\":\"Identifier 'expectedBundledMarkItDownBuildMetadata' is imported but never used.\",\"evidence\":[{\"label\":\"'expectedBundledMarkItDownBuildMetadata' is imported here\",\"source\":\"expectedBundledMarkItDownBuildMetadata\"}]}": 1,
-        "{\"message\":\"Identifier 'extractBearerToken' is imported but never used.\",\"evidence\":[{\"label\":\"'extractBearerToken' is imported here\",\"source\":\"extractBearerToken\"}]}": 1,
         "{\"message\":\"Identifier 'extractFromMarkdown' is imported but never used.\",\"evidence\":[{\"label\":\"'extractFromMarkdown' is imported here\",\"source\":\"extractFromMarkdown\"}]}": 1,
         "{\"message\":\"Identifier 'ExtractionPipelineRegistry' is imported but never used.\",\"evidence\":[{\"label\":\"'ExtractionPipelineRegistry' is imported here\",\"source\":\"ExtractionPipelineRegistry\"}]}": 1,
         "{\"message\":\"Identifier 'extractionRecordMatchesOpenClawAttachmentRef' is imported but never used.\",\"evidence\":[{\"label\":\"'extractionRecordMatchesOpenClawAttachmentRef' is imported here\",\"source\":\"extractionRecordMatchesOpenClawAttachmentRef\"}]}": 1,
@@ -14517,7 +14455,6 @@
         "{\"message\":\"Identifier 'isSafeIri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSafeIri' is imported here\",\"source\":\"isSafeIri\"}]}": 1,
         "{\"message\":\"Identifier 'isSkolemizedUri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSkolemizedUri' is imported here\",\"source\":\"isSkolemizedUri\"}]}": 1,
         "{\"message\":\"Identifier 'isStandaloneInstall' is imported but never used.\",\"evidence\":[{\"label\":\"'isStandaloneInstall' is imported here\",\"source\":\"isStandaloneInstall\"}]}": 1,
-        "{\"message\":\"Identifier 'isValidContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidContextGraphId' is imported here\",\"source\":\"isValidContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'isValidOpenClawPersistTurnPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidOpenClawPersistTurnPayload' is imported here\",\"source\":\"isValidOpenClawPersistTurnPayload\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRef' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRef' is imported here\",\"source\":\"isValidRef\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRepoSpec' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRepoSpec' is imported here\",\"source\":\"isValidRepoSpec\"}]}": 1,
@@ -14719,7 +14656,6 @@
         "{\"message\":\"Variable 'nodeCommit' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'nodeCommit' is declared here\",\"source\":\"nodeCommit\"}]}": 1,
         "{\"message\":\"Variable 'nodeVersion' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'nodeVersion' is declared here\",\"source\":\"nodeVersion\"}]}": 1,
         "{\"message\":\"Variable 'opWallets' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'opWallets' is declared here\",\"source\":\"opWallets\"}]}": 1,
-        "{\"message\":\"Variable 'requestToken' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'requestToken' is declared here\",\"source\":\"requestToken\"}]}": 1,
         "{\"message\":\"Variable 'startedAt' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'startedAt' is declared here\",\"source\":\"startedAt\"}]}": 1,
         "{\"message\":\"Variable 'tracker' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'tracker' is declared here\",\"source\":\"tracker\"}]}": 1,
         "{\"message\":\"Variable 'validTokens' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'validTokens' is declared here\",\"source\":\"validTokens\"}]}": 1,
@@ -14823,7 +14759,6 @@
         "{\"message\":\"Identifier 'isPlainRecord' is imported but never used.\",\"evidence\":[{\"label\":\"'isPlainRecord' is imported here\",\"source\":\"isPlainRecord\"}]}": 1,
         "{\"message\":\"Identifier 'isSkolemizedUri' is imported but never used.\",\"evidence\":[{\"label\":\"'isSkolemizedUri' is imported here\",\"source\":\"isSkolemizedUri\"}]}": 1,
         "{\"message\":\"Identifier 'isStandaloneInstall' is imported but never used.\",\"evidence\":[{\"label\":\"'isStandaloneInstall' is imported here\",\"source\":\"isStandaloneInstall\"}]}": 1,
-        "{\"message\":\"Identifier 'isValidContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidContextGraphId' is imported here\",\"source\":\"isValidContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'isValidOpenClawPersistTurnPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidOpenClawPersistTurnPayload' is imported here\",\"source\":\"isValidOpenClawPersistTurnPayload\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRef' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRef' is imported here\",\"source\":\"isValidRef\"}]}": 1,
         "{\"message\":\"Identifier 'isValidRepoSpec' is imported but never used.\",\"evidence\":[{\"label\":\"'isValidRepoSpec' is imported here\",\"source\":\"isValidRepoSpec\"}]}": 1,
@@ -15049,7 +14984,6 @@
         "{\"message\":\"Identifier 'copyFile' is imported but never used.\",\"evidence\":[{\"label\":\"'copyFile' is imported here\",\"source\":\"copyFile\"}]}": 1,
         "{\"message\":\"Identifier 'corsHeaders' is imported but never used.\",\"evidence\":[{\"label\":\"'corsHeaders' is imported here\",\"source\":\"corsHeaders\"}]}": 1,
         "{\"message\":\"Identifier 'createCatchupRunner' is imported but never used.\",\"evidence\":[{\"label\":\"'createCatchupRunner' is imported here\",\"source\":\"createCatchupRunner\"}]}": 1,
-        "{\"message\":\"Identifier 'createHash' is imported but never used.\",\"evidence\":[{\"label\":\"'createHash' is imported here\",\"source\":\"createHash\"}]}": 1,
         "{\"message\":\"Identifier 'createOperationContext' is imported but never used.\",\"evidence\":[{\"label\":\"'createOperationContext' is imported here\",\"source\":\"createOperationContext\"}]}": 1,
         "{\"message\":\"Identifier 'createPublisherControlFromStore' is imported but never used.\",\"evidence\":[{\"label\":\"'createPublisherControlFromStore' is imported here\",\"source\":\"createPublisherControlFromStore\"}]}": 1,
         "{\"message\":\"Identifier 'createServer' is imported but never used.\",\"evidence\":[{\"label\":\"'createServer' is imported here\",\"source\":\"createServer\"}]}": 1,
@@ -15222,7 +15156,6 @@
         "{\"message\":\"Identifier 'updateLocalAgentIntegration' is imported but never used.\",\"evidence\":[{\"label\":\"'updateLocalAgentIntegration' is imported here\",\"source\":\"updateLocalAgentIntegration\"}]}": 1,
         "{\"message\":\"Identifier 'validateAssertionName' is imported but never used.\",\"evidence\":[{\"label\":\"'validateAssertionName' is imported here\",\"source\":\"validateAssertionName\"}]}": 1,
         "{\"message\":\"Identifier 'validateConditions' is imported but never used.\",\"evidence\":[{\"label\":\"'validateConditions' is imported here\",\"source\":\"validateConditions\"}]}": 1,
-        "{\"message\":\"Identifier 'validateContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'validateContextGraphId' is imported here\",\"source\":\"validateContextGraphId\"}]}": 1,
         "{\"message\":\"Identifier 'validateEntities' is imported but never used.\",\"evidence\":[{\"label\":\"'validateEntities' is imported here\",\"source\":\"validateEntities\"}]}": 1,
         "{\"message\":\"Identifier 'validateOptionalSubGraphName' is imported but never used.\",\"evidence\":[{\"label\":\"'validateOptionalSubGraphName' is imported here\",\"source\":\"validateOptionalSubGraphName\"}]}": 1,
         "{\"message\":\"Identifier 'validateRequiredContextGraphId' is imported but never used.\",\"evidence\":[{\"label\":\"'validateRequiredContextGraphId' is imported here\",\"source\":\"validateRequiredContextGraphId\"}]}": 1,
@@ -15246,7 +15179,6 @@
         "{\"message\":\"Type 'CatchupTracker' is imported but never used.\",\"evidence\":[{\"label\":\"'CatchupTracker' is imported here\",\"source\":\"CatchupTracker\"}]}": 1,
         "{\"message\":\"Type 'CommitCheckStatus' is imported but never used.\",\"evidence\":[{\"label\":\"'CommitCheckStatus' is imported here\",\"source\":\"CommitCheckStatus\"}]}": 1,
         "{\"message\":\"Type 'CorsAllowlist' is imported but never used.\",\"evidence\":[{\"label\":\"'CorsAllowlist' is imported here\",\"source\":\"CorsAllowlist\"}]}": 1,
-        "{\"message\":\"Type 'DkgConfig' is imported but never used.\",\"evidence\":[{\"label\":\"'DkgConfig' is imported here\",\"source\":\"DkgConfig\"}]}": 1,
         "{\"message\":\"Type 'EmbeddingProvider' is imported but never used.\",\"evidence\":[{\"label\":\"'EmbeddingProvider' is imported here\",\"source\":\"EmbeddingProvider\"}]}": 1,
         "{\"message\":\"Type 'ExtractionStatusRecord' is imported but never used.\",\"evidence\":[{\"label\":\"'ExtractionStatusRecord' is imported here\",\"source\":\"ExtractionStatusRecord\"}]}": 1,
         "{\"message\":\"Type 'ImportFileExtractionPayload' is imported but never used.\",\"evidence\":[{\"label\":\"'ImportFileExtractionPayload' is imported here\",\"source\":\"ImportFileExtractionPayload\"}]}": 1,
@@ -15297,7 +15229,6 @@
         "{\"message\":\"Variable 'memoryManager' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'memoryManager' is declared here\",\"source\":\"memoryManager\"}]}": 1,
         "{\"message\":\"Variable 'publisherControl' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'publisherControl' is declared here\",\"source\":\"publisherControl\"}]}": 1,
         "{\"message\":\"Variable 'requestAgentAddress' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'requestAgentAddress' is declared here\",\"source\":\"requestAgentAddress\"}]}": 1,
-        "{\"message\":\"Variable 'requestToken' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'requestToken' is declared here\",\"source\":\"requestToken\"}]}": 1,
         "{\"message\":\"Variable 'tracker' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'tracker' is declared here\",\"source\":\"tracker\"}]}": 1,
         "{\"message\":\"Variable 'validTokens' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'validTokens' is declared here\",\"source\":\"validTokens\"}]}": 1,
         "{\"message\":\"Variable 'vectorStore' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'vectorStore' is declared here\",\"source\":\"vectorStore\"}]}": 1
@@ -16323,9 +16254,6 @@
       "packages/core/src/assertion-seal.ts": {
         "{\"message\":\"Function 'hexBinaryLexical' is declared but never used.\",\"evidence\":[{\"label\":\"'hexBinaryLexical' is declared here\",\"source\":\"hexBinaryLexical\"}]}": 1
       },
-      "packages/core/src/cg-shared-projection.ts": {
-        "{\"message\":\"Variable 'UTF8' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'UTF8' is declared here\",\"source\":\"UTF8\"}]}": 1
-      },
       "packages/core/src/crypto/swm-sender-key.ts": {
         "{\"message\":\"Identifier 'computeSwmSenderKeyPackageAAD' is imported but never used.\",\"evidence\":[{\"label\":\"'computeSwmSenderKeyPackageAAD' is imported here\",\"source\":\"computeSwmSenderKeyPackageAAD\"}]}": 1
       },
@@ -16737,9 +16665,6 @@
       "packages/node-ui/test/dashboard-memorystack-contract.test.ts": {
         "{\"message\":\"Variable 'RDF_TYPE' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'RDF_TYPE' is declared here\",\"source\":\"RDF_TYPE\"}]}": 1
       },
-      "packages/node-ui/test/log-push-worker.test.ts": {
-        "{\"message\":\"Type 'LogPushWorkerOptions' is imported but never used.\",\"evidence\":[{\"label\":\"'LogPushWorkerOptions' is imported here\",\"source\":\"LogPushWorkerOptions\"}]}": 1
-      },
       "packages/node-ui/test/operation-tracker.test.ts": {
         "{\"message\":\"Identifier 'vi' is imported but never used.\",\"evidence\":[{\"label\":\"'vi' is imported here\",\"source\":\"vi\"}]}": 1
       },
@@ -16786,9 +16711,6 @@
       },
       "packages/publisher/src/async-promote-queue-impl.ts": {
         "{\"message\":\"Identifier 'uniquenessKey' is imported but never used.\",\"evidence\":[{\"label\":\"'uniquenessKey' is imported here\",\"source\":\"uniquenessKey\"}]}": 1
-      },
-      "packages/publisher/src/auto-partition.ts": {
-        "{\"message\":\"Variable 'skolemized' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'skolemized' is declared here\",\"source\":\"skolemized\"}]}": 1
       },
       "packages/publisher/src/dkg-publisher.ts": {
         "{\"message\":\"Identifier 'AUTHOR_SCHEME_VERSION_V1' is imported but never used.\",\"evidence\":[{\"label\":\"'AUTHOR_SCHEME_VERSION_V1' is imported here\",\"source\":\"AUTHOR_SCHEME_VERSION_V1\"}]}": 1,
@@ -16916,12 +16838,9 @@
         "{\"message\":\"Identifier 'DEFAULT_MAX_READ_BYTES' is imported but never used.\",\"evidence\":[{\"label\":\"'DEFAULT_MAX_READ_BYTES' is imported here\",\"source\":\"DEFAULT_MAX_READ_BYTES\"}]}": 1
       },
       "packages/query/src/dkg-query-engine.ts": {
-        "{\"message\":\"Identifier 'contextGraphLayerUri' is imported but never used.\",\"evidence\":[{\"label\":\"'contextGraphLayerUri' is imported here\",\"source\":\"contextGraphLayerUri\"}]}": 1,
-        "{\"message\":\"Type 'SparqlPrefixName' is imported but never used.\",\"evidence\":[{\"label\":\"'SparqlPrefixName' is imported here\",\"source\":\"SparqlPrefixName\"}]}": 1,
-        "{\"message\":\"Variable 'word' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'word' is declared here\",\"source\":\"word\"}]}": 3
+        "{\"message\":\"Identifier 'contextGraphLayerUri' is imported but never used.\",\"evidence\":[{\"label\":\"'contextGraphLayerUri' is imported here\",\"source\":\"contextGraphLayerUri\"}]}": 1
       },
       "packages/query/src/query-handler.ts": {
-        "{\"message\":\"Catch parameter 'err' is caught but never used.\",\"evidence\":[{\"label\":\"'err' is declared here\",\"source\":\"err\"}]}": 1,
         "{\"message\":\"Identifier 'escapeSparqlLiteral' is imported but never used.\",\"evidence\":[{\"label\":\"'escapeSparqlLiteral' is imported here\",\"source\":\"escapeSparqlLiteral\"}]}": 1
       },
       "packages/query/test/query-handler.test.ts": {
@@ -16949,9 +16868,6 @@
       },
       "packages/storage/test/graph-manager-swm-bound.test.ts": {
         "{\"message\":\"Identifier 'resolveSharedMemoryScopeGraphs' is imported but never used.\",\"evidence\":[{\"label\":\"'resolveSharedMemoryScopeGraphs' is imported here\",\"source\":\"resolveSharedMemoryScopeGraphs\"}]}": 1
-      },
-      "packages/storage/test/oxigraph-persistence.test.ts": {
-        "{\"message\":\"Identifier 'mkdirSync' is imported but never used.\",\"evidence\":[{\"label\":\"'mkdirSync' is imported here\",\"source\":\"mkdirSync\"}]}": 1
       },
       "scripts/chain-analysis.ts": {
         "{\"message\":\"Variable 'epochStorage' is declared but never used. Unused variables should start with a '_'.\",\"evidence\":[{\"label\":\"'epochStorage' is declared here\",\"source\":\"epochStorage\"}]}": 1
@@ -17014,9 +16930,6 @@
       "packages/cli/src/daemon/auto-update.ts": {
         "{\"message\":\"Unnecessary escape character '-'\",\"evidence\":[{\"label\":\"\",\"source\":\"\\\\-\"}]}": 1
       },
-      "packages/cli/src/daemon/http-utils.ts": {
-        "{\"message\":\"Unnecessary escape character '-'\",\"evidence\":[{\"label\":\"\",\"source\":\"\\\\-\"}]}": 1
-      },
       "packages/core/src/assertion-seal.ts": {
         "{\"message\":\"Unnecessary escape character '\\\"'\",\"evidence\":[{\"label\":\"\",\"source\":\"\\\\\\\"\"}]}": 4
       },
@@ -17070,18 +16983,6 @@
       "packages/core/test/protocol-router.test.ts": {
         "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"() {\\n          await new Promise(() => undefined);\\n        }\"}]}": 1,
         "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"() {\\n          throw new Error('stream returned in closed state');\\n        }\"}]}": 1
-      },
-      "packages/publisher/test/chain-event-lane-cursor-persistence.test.ts": {
-        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n        if (f.eventTypes.includes('ContextGraphCreated') && failContextLane) {\\n          throw new Error('context lane unavailable');\\n        }\\n      }\"}]}": 1
-      },
-      "packages/publisher/test/chain-event-lane-publish.test.ts": {
-        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n      }\"}]}": 1
-      },
-      "packages/publisher/test/chain-event-lane-scheduler.test.ts": {
-        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n        calls++;\\n        if (calls <= 5) throw new Error('rpc down');\\n      }\"}]}": 1,
-        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n        calls++;\\n        if (calls === 1 || calls === 2 || calls === 4) throw new Error('rpc down');\\n      }\"}]}": 1,
-        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n        calls++;\\n        if (calls === 1) throw new Error('rpc down');\\n      }\"}]}": 1,
-        "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n        filters.push(f);\\n      }\"}]}": 2
       },
       "packages/publisher/test/chain-event-poller-v10-only.test.ts": {
         "{\"message\":\"This generator function does not have `yield`\",\"evidence\":[{\"label\":\"\",\"source\":\"async function* (f: EventFilter): AsyncIterable<ChainEvent> {\\n      filters.push(f);\\n      // yield nothing\\n    }\"}]}": 1
@@ -17211,9 +17112,6 @@
       "packages/core/src/author-catalog-directory.ts": {
         "{\"message\":\"Do not use `new Array(singleArgument)`.\",\"evidence\":[{\"label\":\"\",\"source\":\"new Array(\\n    unvalidatedEnvelopes.length,\\n  )\"}]}": 1
       },
-      "packages/core/src/sparql-operation.ts": {
-        "{\"message\":\"Do not use `new Array(singleArgument)`.\",\"evidence\":[{\"label\":\"\",\"source\":\"new Array<string>(sparql.length)\"}]}": 1
-      },
       "packages/core/test/author-catalog-directory.test.ts": {
         "{\"message\":\"Do not use `new Array(singleArgument)`.\",\"evidence\":[{\"label\":\"\",\"source\":\"new Array(1)\"}]}": 1,
         "{\"message\":\"Do not use `new Array(singleArgument)`.\",\"evidence\":[{\"label\":\"\",\"source\":\"new Array(2)\"}]}": 1,
@@ -17238,9 +17136,6 @@
       },
       "packages/evm-module/scripts/phase0-measure.mjs": {
         "{\"message\":\"Do not use `new Array(singleArgument)`.\",\"evidence\":[{\"label\":\"\",\"source\":\"new Array(N)\"}]}": 1
-      },
-      "packages/query/src/dkg-query-engine.ts": {
-        "{\"message\":\"Do not use `new Array(singleArgument)`.\",\"evidence\":[{\"label\":\"\",\"source\":\"new Array(n)\"}]}": 1
       },
       "packages/storage/test/oxigraph-worker-resilience.test.ts": {
         "{\"message\":\"Do not use `new Array(singleArgument)`.\",\"evidence\":[{\"label\":\"\",\"source\":\"new Array(n)\"}]}": 1
@@ -17368,9 +17263,6 @@
       "packages/node-ui/test/pca-wallet-owner-actions.test.ts": {
         "{\"message\":\"Empty fallbacks in spreads are unnecessary\",\"evidence\":[{\"label\":\"\",\"source\":\"...(opts.receipts ?? {})\"}]}": 1
       },
-      "packages/publisher/src/async-lift-publisher-impl.ts": {
-        "{\"message\":\"Empty fallbacks in spreads are unnecessary\",\"evidence\":[{\"label\":\"\",\"source\":\"...(data.timestamps ?? {})\"}]}": 1
-      },
       "scripts/release-packages.mjs": {
         "{\"message\":\"Empty fallbacks in spreads are unnecessary\",\"evidence\":[{\"label\":\"\",\"source\":\"...(options.env ?? {})\"}]}": 2
       }
@@ -17437,9 +17329,6 @@
       },
       "packages/cli/src/daemon/metrics-queries.ts": {
         "{\"message\":\"Using a spread operator here creates a new array unnecessarily.\",\"evidence\":[{\"label\":\"\",\"source\":\"...\"}]}": 1
-      },
-      "packages/cli/src/daemon/routes/agent-chat.ts": {
-        "{\"message\":\"Using a spread operator here creates a new object unnecessarily.\",\"evidence\":[{\"label\":\"\",\"source\":\"...\"}]}": 1
       },
       "packages/cli/test/publisher-retry-surfacing-2270.test.ts": {
         "{\"message\":\"Using a spread operator here creates a new object unnecessarily.\",\"evidence\":[{\"label\":\"\",\"source\":\"...\"}]}": 1

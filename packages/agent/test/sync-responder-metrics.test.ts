@@ -31,7 +31,7 @@ function captureHandler(options: {
     protocolSync: '/origintrail/dkg/sync/1.0.0',
     syncDeniedResponse: 'sync-denied',
     syncPageSize: 500,
-    sharedMemoryTtlMs: 0,
+    getSharedMemoryTtlMs: () => 0,
     store: options.store ?? ({} as any), // untouched on malformed-request paths
     peerId: 'self-peer',
     parseSyncRequest: (data: Uint8Array) => JSON.parse(new TextDecoder().decode(data)),

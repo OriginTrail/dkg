@@ -1,3 +1,4 @@
+import { validateSharedMemoryTtlMs } from './dkg-agent-config-validation.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -1152,6 +1153,8 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    const sharedMemoryTtlMs = inputConfig.sharedMemoryTtlMs ?? DEFAULT_SWM_TTL_MS;
+    validateSharedMemoryTtlMs(sharedMemoryTtlMs);
     const contextGraphSubscriptionRehydrationEnabled =
       inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
         ? true
@@ -1393,6 +1396,7 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.syncBackoffJitter;
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
+      sharedMemoryTtlMs,
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
@@ -2241,7 +2245,9 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   async stop(): Promise<void> {
-    if (!this.started) return;
+    // Explicit cleanup can own physical work even before start().
+    const swmCleanupDrain = this.swmExpiryCleanupWorker?.stop();
+    if (!this.started) { await swmCleanupDrain; return; }
     const authorityRetryDrain =
       this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
     // Fence membership persistence before any network callback can enqueue
@@ -2260,10 +2266,6 @@ export class DKGAgent extends DKGAgentBase {
     // ignores cancellation must quarantine shutdown instead of preventing the
     // retirement timeout from ever being reached.
     const chainPollerDrain = chainPoller?.stop();
-    if (this.swmCleanupTimer) {
-      clearInterval(this.swmCleanupTimer);
-      this.swmCleanupTimer = null;
-    }
     if (this.hostModeReconcilerTimer) {
       clearInterval(this.hostModeReconcilerTimer);
       this.hostModeReconcilerTimer = null;
@@ -2325,6 +2327,7 @@ export class DKGAgent extends DKGAgentBase {
     const drains: Promise<unknown>[] = [drainPhysicalRuns()];
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
+    if (swmCleanupDrain) drains.push(swmCleanupDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
     if (dispatcherDrain) drains.push(dispatcherDrain);
 

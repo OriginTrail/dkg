@@ -4,14 +4,42 @@ import {
   contextGraphSharedMemoryUri,
 } from '@origintrail-official/dkg-core';
 import {
+  describeSharedMemoryGraphs,
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
-} from '../src/sync/shared-memory-graphs.js';
+  parseSharedMemoryDataGraph,
+  parseSharedMemoryMetaGraph,
+} from '../src/shared-memory-graphs.js';
 
 const CG = '0x0000000000000000000000000000000000000001/scope-test';
 const SUBGRAPH = 'research';
 
 describe('named-subgraph Shared Memory graph classification', () => {
+  it('returns one canonical descriptor for root and named data/meta graphs', () => {
+    const root = describeSharedMemoryGraphs(CG);
+    const named = describeSharedMemoryGraphs(CG, SUBGRAPH)!;
+
+    expect(root.ownershipKey).toBe(CG);
+    expect(parseSharedMemoryMetaGraph(CG, root.metaGraph)).toEqual(root);
+    expect(parseSharedMemoryDataGraph(CG, `${root.dataGraph}/0xabc/7`)).toEqual(root);
+    expect(parseSharedMemoryMetaGraph(CG, named.metaGraph)).toEqual(named);
+    expect(parseSharedMemoryDataGraph(CG, `${named.dataGraph}/0xabc/7`)).toEqual(named);
+    expect(named).toMatchObject({
+      subGraphName: SUBGRAPH,
+      ownershipKey: `${CG}\0${SUBGRAPH}`,
+      dataGraph: contextGraphSharedMemoryUri(CG, SUBGRAPH),
+      metaGraph: contextGraphSharedMemoryMetaUri(CG, SUBGRAPH),
+    });
+  });
+
+  it('rejects invalid or near-miss graph addresses', () => {
+    expect(describeSharedMemoryGraphs(CG, '')).toBeUndefined();
+    expect(describeSharedMemoryGraphs(CG, '_reserved')).toBeUndefined();
+    expect(parseSharedMemoryMetaGraph(CG, `${contextGraphSharedMemoryMetaUri(CG, SUBGRAPH)}/child`)).toBeUndefined();
+    expect(parseSharedMemoryDataGraph(CG, `${contextGraphSharedMemoryUri(CG, SUBGRAPH)}/staging/op`)).toBeUndefined();
+    expect(parseSharedMemoryDataGraph(CG, `did:dkg:context-graph:${CG}/other/_shared_memoryish`)).toBeUndefined();
+  });
+
   it('accepts only named-subgraph data buckets and canonical per-KA descendants', () => {
     const root = contextGraphSharedMemoryUri(CG);
     const named = contextGraphSharedMemoryUri(CG, SUBGRAPH);

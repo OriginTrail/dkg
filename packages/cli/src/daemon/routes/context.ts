@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../../config-snapshot.js';
 // daemon/routes/context.ts
 //
 // Per-request context bag passed to every route-group handler.
@@ -25,6 +26,10 @@ import type {
   ResolvedRfc64PublicCatalogActivationConfig,
   loadNetworkConfig,
 } from '../../config.js';
+import {
+  mutableConfigSnapshot,
+  type DkgConfigStore,
+} from '../../daemon-config-store.js';
 import type { VmPublisherControl } from '@origintrail-official/dkg-publisher';
 import type { PublisherState } from '../../publisher-runner.js';
 import type { ExtractionStatusRecord } from '../../extraction-status.js';
@@ -116,7 +121,10 @@ export interface RequestContext {
   publisherControl: VmPublisherControl;
   /** Lifecycle-owned runtime and readiness as one correlated state. */
   publisherState: PublisherState;
-  config: DkgConfig;
+  /** Live read-only projection of `configStore.current`; never an independent snapshot. */
+  readonly config: ImmutableDkgConfig;
+  /** Canonical owner of the daemon's immutable committed configuration. */
+  configStore: DkgConfigStore;
   /** Immutable RFC-64 activation resolved once during daemon startup. */
   rfc64Catalog?: ResolvedRfc64CatalogActivationConfig;
   /** Compatibility projection for the selected-public operator surface. */
@@ -167,3 +175,26 @@ export interface RequestContext {
 
 /** Unbranded input fields accepted only by the daemon's request-context factory. */
 export type RequestContextInputFields = Omit<RequestContext, typeof REQUEST_CONTEXT_BRAND>;
+
+export function currentDaemonConfig(
+  ctx: Pick<RequestContext, 'configStore'>,
+): ImmutableDkgConfig {
+  return ctx.configStore.current;
+}
+
+/**
+ * Run one daemon mutation against an isolated draft and publish it through the
+ * canonical configuration owner.
+ */
+export async function updateDaemonConfig<T>(
+  ctx: Pick<RequestContext, 'configStore'>,
+  mutate: (draft: DkgConfig) => T,
+): Promise<T> {
+  let result!: T;
+  await ctx.configStore.update(current => {
+    const draft = mutableConfigSnapshot(current);
+    result = mutate(draft);
+    return draft;
+  }, 'configuration-only');
+  return result;
+}

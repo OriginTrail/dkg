@@ -1,4 +1,6 @@
+import type { DeepReadonly, ImmutableDkgConfig } from './config-snapshot.js';
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
+import { writeConfigFile } from './config-file.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
@@ -1121,8 +1123,8 @@ export {
 };
 
 /** Resolve context graphs from config. */
-export function resolveContextGraphs(config: DkgConfig): string[] {
-  return config.contextGraphs ?? [];
+export function resolveContextGraphs(config: Pick<ImmutableDkgConfig, 'contextGraphs'>): string[] {
+  return [...(config.contextGraphs ?? [])];
 }
 
 const CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV =
@@ -1259,7 +1261,7 @@ export function assertNetworkConfigReadiness(
 }
 
 /** Resolve shared memory TTL from config, accepting both V10 and legacy keys. */
-export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined {
+export function resolveSharedMemoryTtlMs(config: Pick<ImmutableDkgConfig, 'sharedMemoryTtlMs' | 'workspaceTtlMs'>): number | undefined {
   return config.sharedMemoryTtlMs ?? config.workspaceTtlMs;
 }
 
@@ -1621,7 +1623,7 @@ function isLoopbackRpcUrl(url: string): boolean {
  * CLI/daemon activation boundaries that must reject pre-deployment networks.
  */
 export function resolveChainConfig(
-  config: Pick<DkgConfig, 'chain'> | null | undefined,
+  config: Pick<ImmutableDkgConfig, 'chain'> | null | undefined,
   network: Pick<NetworkConfig, 'chain'> | null | undefined,
 ): ResolvedChainConfig | undefined {
   const cfg = config?.chain;
@@ -1746,7 +1748,7 @@ export function resolveChainConfig(
 }
 
 export function resolveReadyChainConfig(
-  config: Pick<DkgConfig, 'chain'> | null | undefined,
+  config: Pick<ImmutableDkgConfig, 'chain'> | null | undefined,
   network: (Pick<NetworkConfig, 'chain'> & NetworkReadinessInput) | null | undefined,
 ): ResolvedChainConfig | undefined {
   if (config?.chain?.type !== 'mock') {
@@ -1866,6 +1868,12 @@ export function inferNetworkConfigNameFromChainId(
   return matchedName;
 }
 
+/** Network selection reads only the persisted name and chain identity. */
+export interface NetworkConfigSelection {
+  readonly networkConfig?: string;
+  readonly chain?: DeepReadonly<Partial<ChainConfig>>;
+}
+
 /**
  * Resolve only network identities that are actually known from persisted
  * state. Unlike {@link resolveNetworkConfigName}, this does not collapse an
@@ -1873,7 +1881,7 @@ export function inferNetworkConfigNameFromChainId(
  * when deciding whether it is safe to discard operator chain overrides.
  */
 export function resolveKnownNetworkConfigName(
-  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  config?: NetworkConfigSelection | null,
   registry: Readonly<Record<string, NetworkChainIdentity>> = loadBundledNetworkRegistry(),
 ): string | undefined {
   const explicitNetwork = config?.networkConfig?.trim();
@@ -1890,7 +1898,7 @@ export function resolveKnownNetworkConfigName(
  * from chainId; explicit operator selection always takes precedence.
  */
 export function resolveNetworkConfigName(
-  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  config?: NetworkConfigSelection | null,
 ): string {
   return resolveKnownNetworkConfigName(config) ?? loadProjectConfig().defaultNetwork;
 }
@@ -1906,7 +1914,7 @@ export interface LoadedResolvedNetworkConfig {
  * manually composing resolveNetworkConfigName() and loadNetworkConfig().
  */
 export async function loadResolvedNetworkConfig(
-  config?: Pick<DkgConfig, 'networkConfig' | 'chain'> | null,
+  config?: NetworkConfigSelection | null,
   loader: (name: string) => Promise<NetworkConfig | null> = loadNetworkConfig,
 ): Promise<LoadedResolvedNetworkConfig> {
   const name = resolveNetworkConfigName(config);
@@ -2160,8 +2168,11 @@ export class DkgHomeFiles {
   }
 
   async saveConfig(config: DkgConfig): Promise<void> {
-    await mkdir(this.home, { recursive: true });
-    await writeFile(this.configPath, JSON.stringify(config, null, 2) + '\n');
+    // Standalone callers publish an immutable call-time snapshot. Once a daemon
+    // claims this file, use its typed commit path so runtime activation cannot
+    // be bypassed by an ordinary save.
+    const contents = JSON.stringify(config, null, 2) + '\n';
+    await writeConfigFile(this.configPath, contents);
   }
 
   readPid(): Promise<number | null> { return this.readControlNumber(this.pidPath); }

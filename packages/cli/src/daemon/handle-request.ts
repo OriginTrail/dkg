@@ -342,6 +342,7 @@ import type { RoutePlugin } from './plugin-api.js';
 
 export type HandleRequestInput = Omit<
   RequestContextInputFields,
+  | 'config'
   | 'url'
   | 'path'
   | 'actor'
@@ -370,6 +371,10 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
     actor,
   };
   const ctx = Object.defineProperties(ctxBase, {
+    config: {
+      enumerable: true,
+      get: () => contextInput.configStore.current,
+    },
     authentication: {
       enumerable: true,
       get: () => actor.authentication,

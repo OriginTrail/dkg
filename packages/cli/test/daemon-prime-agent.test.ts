@@ -729,10 +729,11 @@ describe('local-agent integrations listing', () => {
     writeDescriptor('s1', bridge.url);
 
     const res = makeJsonResponse();
+    const config = makeConfig();
     await handleLocalAgentsRoutes({
       req: makeJsonRequest('GET', '/api/local-agent-integrations'),
       res,
-      config: makeConfig(),
+      configStore: { current: config },
       path: '/api/local-agent-integrations',
       url: new URL('http://127.0.0.1:9200/api/local-agent-integrations'),
     } as any);
@@ -768,7 +769,7 @@ describe('local-agent integrations listing', () => {
     await handleLocalAgentsRoutes({
       req: makeJsonRequest('GET', '/api/local-agent-integrations'),
       res,
-      config,
+      configStore: { current: config },
       path: '/api/local-agent-integrations',
       url: new URL('http://127.0.0.1:9200/api/local-agent-integrations'),
     } as any);
@@ -801,7 +802,7 @@ describe('local-agent integrations listing', () => {
     await handleLocalAgentsRoutes({
       req: makeJsonRequest('GET', '/api/local-agent-integrations/prime-agent'),
       res,
-      config,
+      configStore: { current: config },
       path: '/api/local-agent-integrations/prime-agent',
       url: new URL('http://127.0.0.1:9200/api/local-agent-integrations/prime-agent'),
     } as any);

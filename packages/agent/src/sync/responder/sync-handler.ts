@@ -91,7 +91,8 @@ interface RegisterSyncHandlerParams {
   protocolSync: string;
   syncDeniedResponse: string;
   syncPageSize: number;
-  sharedMemoryTtlMs: number;
+  /** Required live setting, shared with expiry cleanup and read per workspace request. */
+  getSharedMemoryTtlMs: () => number;
   store: TripleStore;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   peerId: string;
@@ -413,7 +414,6 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     protocolSync,
     syncDeniedResponse,
     syncPageSize,
-    sharedMemoryTtlMs,
     store,
     publicSnapshotStore,
     parseSyncRequest,
@@ -650,6 +650,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
         );
       }
       if (isWorkspace) {
+        const sharedMemoryTtlMs = params.getSharedMemoryTtlMs();
         const cutoff = sharedMemoryTtlMs > 0 ? new Date(Date.now() - sharedMemoryTtlMs).toISOString() : null;
         if (phase === 'snapshot') {
           const snapshotRef = request.snapshotRef?.trim();

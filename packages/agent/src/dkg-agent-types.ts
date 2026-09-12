@@ -1963,6 +1963,7 @@ export interface DKGAgentACKTransportOptions {
 export type ResolvedDKGAgentConfig =
   Omit<
     DKGAgentConfig,
+    | 'sharedMemoryTtlMs'
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
@@ -1978,6 +1979,7 @@ export type ResolvedDKGAgentConfig =
     | 'rfc64CatalogDeploymentProfile'
     | 'contextGraphSubscriptionRehydrationEnabled'
   > & {
+    sharedMemoryTtlMs: number;
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;

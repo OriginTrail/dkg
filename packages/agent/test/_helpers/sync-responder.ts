@@ -61,7 +61,7 @@ export function registerTestSyncHandler(
     protocolSync: TEST_SYNC_PROTOCOL,
     syncDeniedResponse: TEST_SYNC_DENIED,
     syncPageSize: options.syncPageSize ?? 5000,
-    sharedMemoryTtlMs: options.sharedMemoryTtlMs ?? 0,
+    getSharedMemoryTtlMs: () => options.sharedMemoryTtlMs ?? 0,
     store,
     publicSnapshotStore: options.publicSnapshotStore,
     peerId: 'self-peer',

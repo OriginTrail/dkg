@@ -71,7 +71,7 @@ describe('sync responder — Phase C sinceBatchId delta filter', () => {
       protocolSync: '/origintrail/dkg/sync/1.0.0',
       syncDeniedResponse: 'sync-denied',
       syncPageSize: 5000,
-      sharedMemoryTtlMs: 0,
+      getSharedMemoryTtlMs: () => 0,
       store,
       peerId: 'self-peer',
       parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,

@@ -43,6 +43,15 @@ async function startStatusServer(query: () => Promise<unknown>): Promise<{
 }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    const config = {
+      name: 'status-store-quads-test',
+      nodeRole: 'edge',
+      chain: { type: 'mock' },
+      store: {
+        backend: 'sparql-http',
+        options: { url: 'http://127.0.0.1:9/query' },
+      },
+    };
     await handleStatusRoutes({
       req,
       res,
@@ -50,15 +59,7 @@ async function startStatusServer(query: () => Promise<unknown>): Promise<{
       path: url.pathname,
       url,
       network: null,
-      config: {
-        name: 'status-store-quads-test',
-        nodeRole: 'edge',
-        chain: { type: 'mock' },
-        store: {
-          backend: 'sparql-http',
-          options: { url: 'http://127.0.0.1:9/query' },
-        },
-      },
+      configStore: { current: config },
       rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
       startedAt: Date.now(),
       agent: {

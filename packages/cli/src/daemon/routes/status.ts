@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../../config-snapshot.js';
 // daemon/routes/status.ts
 //
 // Route handlers for status, info, connections, host, wallet, chain, identity, integrations, shutdown.
@@ -81,7 +82,6 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
-  saveConfig,
   loadNetworkConfig,
   resolveChainConfig,
   dkgDir,
@@ -92,7 +92,6 @@ import {
   logPath,
   ensureDkgDir,
   TELEMETRY_ENDPOINTS,
-  type DkgConfig,
   type ResolvedChainConfig,
   type AutoUpdateConfig,
   type LocalAgentIntegrationCapabilities,
@@ -336,7 +335,11 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import {
+  currentDaemonConfig,
+  updateDaemonConfig,
+  type RequestContext,
+} from './context.js';
 
 // In-process cache for the dkg-integrations registry. Sidebar polls
 // open/close and 60s refresh would otherwise hit GitHub on every tick;
@@ -626,7 +629,7 @@ export interface Rfc64CatalogConfigurationEvidenceV1 {
  * leave the node; a release harness can still prove the clean omission case.
  */
 export function buildRfc64CatalogConfigurationEvidenceV1(
-  config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
+  config: Pick<ImmutableDkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
   effectiveRollout: Readonly<{
     killSwitch: boolean;
     contextGraphModes: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
@@ -681,7 +684,6 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     agent,
     publisherControl,
     publisherState,
-    config,
     startedAt,
     dashDb,
     opWallets,
@@ -706,6 +708,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     path,
     requestAgentAddress,
   } = ctx;
+  const config = currentDaemonConfig(ctx);
 
   if ((req.method === "GET" || req.method === "HEAD") && path === "/.well-known/skill.md") {
     // HEAD must return the same ETag/Cache-Control/Vary headers as GET so HTTP-cache-aware clients
@@ -824,7 +827,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       relayStats,
       natStatus: daemonState.natStatus,
       advertisedAddresses: agent.multiaddrs,
-      configuredAnnounceAddresses: config.announceAddresses ?? [],
+      configuredAnnounceAddresses: [...(config.announceAddresses ?? [])],
     });
     const reportsExternalStoreQuads =
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
@@ -1315,23 +1318,24 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       return jsonResponse(res, 400, { error: `Unknown adapter id: ${String(parsed.id ?? adapterId)}` });
     }
     try {
-      const integration = connectLocalAgentIntegration(config, {
-        ...parsed,
-        id: adapterId,
-        transport: {
-          kind: definition.transportKind,
-          ...(isPlainRecord(parsed.transport) ? parsed.transport : {}),
-        },
-        manifest: {
-          ...(definition.manifest ?? {}),
-          ...(isPlainRecord(parsed.manifest) ? parsed.manifest : {}),
-        },
-        capabilities: {
-          ...definition.capabilities,
-          ...(isPlainRecord(parsed.capabilities) ? parsed.capabilities : {}),
-        },
-      });
-      await saveConfig(config);
+      const integration = await updateDaemonConfig(ctx, draft => (
+        connectLocalAgentIntegration(draft, {
+          ...parsed,
+          id: adapterId,
+          transport: {
+            kind: definition.transportKind,
+            ...(isPlainRecord(parsed.transport) ? parsed.transport : {}),
+          },
+          manifest: {
+            ...(definition.manifest ?? {}),
+            ...(isPlainRecord(parsed.manifest) ? parsed.manifest : {}),
+          },
+          capabilities: {
+            ...definition.capabilities,
+            ...(isPlainRecord(parsed.capabilities) ? parsed.capabilities : {}),
+          },
+        })
+      ));
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid JSON body' });

@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../config-snapshot.js';
 // OpenClaw channel/bridge/attach machinery extracted from the legacy
 // monolithic `daemon.ts`. Owns the gateway helpers, UI-attach job
 // machinery, channel headers, the streaming pipe, attachment-ref
@@ -176,7 +177,7 @@ export async function loadBridgeAuthToken(): Promise<string | undefined> {
 }
 
 
-export function getOpenClawChannelTargets(config: DkgConfig): OpenClawChannelTarget[] {
+export function getOpenClawChannelTargets(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): OpenClawChannelTarget[] {
   const storedOpenClawIntegration = getStoredLocalAgentIntegrations(config).openclaw;
   if (storedOpenClawIntegration?.enabled === false) return [];
 
@@ -265,7 +266,7 @@ export interface OpenClawChannelHealthReport {
 }
 
 export function transportPatchFromOpenClawTarget(
-  config: DkgConfig,
+  config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
   targetName: 'bridge' | 'gateway' | undefined,
 ): LocalAgentIntegrationTransport | undefined {
   if (!targetName) return undefined;
@@ -297,7 +298,7 @@ export function transportPatchFromOpenClawTarget(
 }
 
 export async function probeOpenClawChannelHealth(
-  config: DkgConfig,
+  config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
   bridgeAuthToken: string | undefined,
   opts: { ignoreBridgeCache?: boolean; timeoutMs?: number } = {},
 ): Promise<OpenClawChannelHealthReport> {
@@ -419,7 +420,7 @@ export async function restartOpenClawGateway(signal?: AbortSignal): Promise<void
 }
 
 export async function waitForOpenClawChatReady(
-  config: DkgConfig,
+  config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
   bridgeAuthToken: string | undefined,
   signal?: AbortSignal,
 ): Promise<OpenClawChannelHealthReport> {
@@ -461,19 +462,32 @@ export type OpenClawUiAttachDeps = {
   runSetup?: (signal?: AbortSignal) => Promise<void>;
   restartGateway?: (signal?: AbortSignal) => Promise<void>;
   waitForReady?: (
-    config: DkgConfig,
+    config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
     bridgeAuthToken: string | undefined,
     signal?: AbortSignal,
   ) => Promise<OpenClawChannelHealthReport>;
   probeHealth?: (
-    config: DkgConfig,
+    config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
     bridgeAuthToken: string | undefined,
     opts?: { ignoreBridgeCache?: boolean; timeoutMs?: number },
   ) => Promise<OpenClawChannelHealthReport>;
-  saveConfig?: (config: DkgConfig) => Promise<void>;
+  saveConfig?: (
+    config: DkgConfig,
+    patch: LocalAgentAttachStatePatch,
+  ) => Promise<void>;
   onAttachScheduled?: (id: string, job: Promise<void>) => void;
   verifyMemorySlot?: () => boolean;
 };
+
+/**
+ * State owned by a deferred UI attach job. Keeping this patch explicit stops a
+ * late completion from replacing capabilities or operator metadata that were
+ * edited while setup was running.
+ */
+export type LocalAgentAttachStatePatch = Partial<Pick<
+  LocalAgentIntegrationConfig,
+  'enabled' | 'transport' | 'runtime' | 'metadata'
+>>;
 
 export function formatOpenClawUiAttachFailure(err: any): string {
   return err?.stderr?.trim?.()

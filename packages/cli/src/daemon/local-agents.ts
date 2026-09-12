@@ -1,3 +1,4 @@
+import type { DeepReadonly, ImmutableDkgConfig } from '../config-snapshot.js';
 // Local-agent integration code extracted from the legacy monolithic
 // `daemon.ts`. Owns the integration registry, normalize/merge
 // helpers, and the UI-driven connect / reverse / refresh flows that
@@ -35,6 +36,7 @@ import {
   OpenClawChannelTarget,
   OpenClawChannelHealthReport,
   OpenClawUiAttachDeps,
+  type LocalAgentAttachStatePatch,
   cancelPendingLocalAgentAttachJob,
   scheduleOpenClawUiAttachJob,
   isOpenClawUiAttachCancelled,
@@ -288,7 +290,7 @@ export function mergeLocalAgentIntegrationConfig(
   };
 }
 
-export function getStoredLocalAgentIntegrations(config: DkgConfig): Record<string, LocalAgentIntegrationConfig> {
+export function getStoredLocalAgentIntegrations(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): DeepReadonly<Record<string, LocalAgentIntegrationConfig>> {
   return config.localAgentIntegrations ?? {};
 }
 
@@ -344,7 +346,7 @@ export function buildLocalAgentIntegrationRecord(
   };
 }
 
-export function listLocalAgentIntegrations(config: DkgConfig): LocalAgentIntegrationRecord[] {
+export function listLocalAgentIntegrations(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): LocalAgentIntegrationRecord[] {
   const ids = new Set<string>([
     ...Object.keys(LOCAL_AGENT_INTEGRATION_DEFINITIONS),
     ...Object.keys(getStoredLocalAgentIntegrations(config)),
@@ -354,7 +356,7 @@ export function listLocalAgentIntegrations(config: DkgConfig): LocalAgentIntegra
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export function getLocalAgentIntegration(config: DkgConfig, id: string): LocalAgentIntegrationRecord | null {
+export function getLocalAgentIntegration(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>, id: string): LocalAgentIntegrationRecord | null {
   const normalizedId = normalizeIntegrationId(id);
   return listLocalAgentIntegrations(config).find((integration) => integration.id === normalizedId) ?? null;
 }
@@ -448,7 +450,7 @@ export function updateLocalAgentIntegration(
   return getLocalAgentIntegration(config, normalizedId)!;
 }
 
-export function hasConfiguredLocalAgentChat(config: DkgConfig, id: string): boolean {
+export function hasConfiguredLocalAgentChat(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>, id: string): boolean {
   const integration = getLocalAgentIntegration(config, id);
   return integration?.enabled === true
     && integration.capabilities.localChat === true;
@@ -468,7 +470,7 @@ export function hasStoredLocalAgentTransportConfig(
 
 export type LocalAgentUiAttachDeps = OpenClawUiAttachDeps & {
   probeHermesHealth?: (
-    config: DkgConfig,
+    config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
     bridgeAuthToken: string | undefined,
     opts?: { timeoutMs?: number },
   ) => Promise<HermesChannelHealthReport>;
@@ -675,14 +677,14 @@ export async function connectLocalAgentIntegrationFromUi(
       };
     }
 
-    const persistHermesIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
+    const persistHermesIntegrationState = async (patch: LocalAgentAttachStatePatch): Promise<LocalAgentIntegrationRecord | null> => {
       const current = getLocalAgentIntegration(config, requested.id);
       if (current?.enabled === false && patch.enabled !== false) {
         return null;
       }
       const integration = updateLocalAgentIntegration(config, requested.id, patch);
       if (saveConfigState) {
-        await saveConfigState(config);
+        await saveConfigState(config, patch);
       }
       return integration;
     };
@@ -799,14 +801,14 @@ export async function connectLocalAgentIntegrationFromUi(
     };
   }
 
-  const persistIntegrationState = async (patch: Record<string, unknown>): Promise<LocalAgentIntegrationRecord | null> => {
+  const persistIntegrationState = async (patch: LocalAgentAttachStatePatch): Promise<LocalAgentIntegrationRecord | null> => {
     const current = getLocalAgentIntegration(config, requested.id);
     if (current?.enabled === false && patch.enabled !== false) {
       return null;
     }
     const integration = updateLocalAgentIntegration(config, requested.id, patch);
     if (saveConfigState) {
-      await saveConfigState(config);
+      await saveConfigState(config, patch);
     }
     return integration;
   };
@@ -939,7 +941,7 @@ function stringMetadataValue(metadata: Record<string, unknown>, key: string): st
 }
 
 export async function reverseHermesSetupForUi(
-  config: DkgConfig,
+  config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
   deps: ReverseHermesSetupDeps = {},
 ): Promise<{ restoreError?: string }> {
   const stored = getStoredLocalAgentIntegrations(config).hermes;
@@ -994,7 +996,7 @@ export async function reverseHermesSetupForUi(
 }
 
 export async function reverseLocalAgentSetupForUi(
-  _config: DkgConfig,
+  _config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
   openclawConfigPath?: string,
   deps: ReverseLocalAgentSetupDeps = {},
 ): Promise<void> {
