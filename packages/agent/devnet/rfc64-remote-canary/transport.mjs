@@ -2,6 +2,11 @@
 
 import { spawn } from 'node:child_process';
 
+import {
+  BoundedResponseBodyLimitError,
+  readResponseBodyBytesBounded,
+} from '@origintrail-official/dkg-http-utils';
+
 import { validateCommandV1 } from './command-policy.mjs';
 import { RemoteCanaryError, failure } from './errors.mjs';
 
@@ -137,35 +142,19 @@ export function parseResponseJsonV1(response, code) {
 }
 
 async function readBodyBoundedV1(response, signal) {
-  if (response.body === null) return '';
-  const reader = response.body.getReader();
-  const chunks = [];
-  let total = 0;
-  let abortListener;
-  const aborted = new Promise((resolve, reject) => {
-    abortListener = () => {
-      reader.cancel().catch(() => undefined);
-      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
-    };
-    signal.addEventListener('abort', abortListener, { once: true });
-  });
+  const boundedResponse = response.body === null
+    ? response
+    : new Response(response.body.pipeThrough(new TransformStream(), { signal }), {
+        headers: response.headers,
+      });
   try {
-    while (true) {
-      const { done, value } = await Promise.race([reader.read(), aborted]);
-      if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_HTTP_BODY_BYTES) {
-        await reader.cancel().catch(() => undefined);
-        throw failure('node-response-too-large', 'http');
-      }
-      chunks.push(Buffer.from(value));
+    const bytes = await readResponseBodyBytesBounded(boundedResponse, MAX_HTTP_BODY_BYTES);
+    return Buffer.from(bytes).toString('utf8');
+  } catch (error) {
+    if (error instanceof BoundedResponseBodyLimitError) {
+      throw failure('node-response-too-large', 'http');
     }
-    if (signal.aborted) throw signal.reason ?? new DOMException('Aborted', 'AbortError');
-    return Buffer.concat(chunks, total).toString('utf8');
-  } finally {
-    signal.removeEventListener('abort', abortListener);
-    reader.releaseLock();
+    throw error;
   }
 }
 

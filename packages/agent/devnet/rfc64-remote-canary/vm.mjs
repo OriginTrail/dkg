@@ -16,20 +16,34 @@ import { operationalStatusV1 } from './preflight.mjs';
 import { askConfiguredQueryV1 } from './query.mjs';
 
 export function verifyVmParityV1({ config, request, sleep }) {
-  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
-    const parity = await pollUntilV1(
-      async () => readVmParityV1(
-        contextGraph.source,
-        contextGraph.receiver,
+  return verifyVmParityFromSnapshotsV1({ config, request, sleep });
+}
+
+async function verifyVmParityFromSnapshotsV1({ config, request, sleep }) {
+  const participatingNodes = [...new Set(config.contextGraphs.flatMap(
+    ({ source, receiver }) => [source, receiver],
+  ))];
+  const parity = await pollUntilV1(
+    async () => {
+      const statusEntries = await mapCanaryPhaseV1(participatingNodes, async (node) => (
+        [node.id, await request.json(node, 'GET', '/api/status')]
+      ));
+      const statusByNodeId = new Map(statusEntries);
+      const snapshot = config.contextGraphs.map((contextGraph) => readVmParityV1(
+        statusByNodeId.get(contextGraph.source.id),
+        statusByNodeId.get(contextGraph.receiver.id),
         contextGraph,
-        request,
-      ),
-      config.timing.parityTimeoutMs,
-      config.timing.pollIntervalMs,
-      sleep,
-      () => failure('vm-parity-timeout', 'vm'),
-      { retryError: isRetryableNodeRequestErrorV1 },
-    );
+      ));
+      return snapshot.every(Boolean) ? snapshot : false;
+    },
+    config.timing.parityTimeoutMs,
+    config.timing.pollIntervalMs,
+    sleep,
+    () => failure('vm-parity-timeout', 'vm'),
+    { retryError: isRetryableNodeRequestErrorV1 },
+  );
+
+  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph, index) => {
     if (contextGraph.vmAskSparql !== undefined) {
       const queryPassed = await Promise.all([
         contextGraph.source,
@@ -45,9 +59,9 @@ export function verifyVmParityV1({ config, request, sleep }) {
         ? 'EVIDENCE_REQUIRED'
         : 'PASS',
       statusParity: 'PASS',
-      cursorPresent: parity.cursorPresent,
-      digestParity: parity.digestParity,
-      rowCountParity: parity.rowCountParity,
+      cursorPresent: parity[index].cursorPresent,
+      digestParity: parity[index].digestParity,
+      rowCountParity: parity[index].rowCountParity,
       vmQueryChecked: contextGraph.vmAskSparql !== undefined,
       ...(contextGraph.vmAskSparql === undefined
         ? { requirement: 'vm-ask-query' }
@@ -56,11 +70,7 @@ export function verifyVmParityV1({ config, request, sleep }) {
   });
 }
 
-async function readVmParityV1(source, receiver, contextGraph, request) {
-  const [sourceStatus, receiverStatus] = await Promise.all([
-    request.json(source, 'GET', '/api/status'),
-    request.json(receiver, 'GET', '/api/status'),
-  ]);
+function readVmParityV1(sourceStatus, receiverStatus, contextGraph) {
   const sourceOperational = completeOperationalParityV1(sourceStatus, contextGraph.id);
   const receiverOperational = completeOperationalParityV1(receiverStatus, contextGraph.id);
   if (sourceOperational === null || receiverOperational === null) return false;
