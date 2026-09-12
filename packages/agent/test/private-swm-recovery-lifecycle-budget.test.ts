@@ -569,6 +569,7 @@ describe('private recovery job ownership and lifecycle outcome', () => {
         localYield: true as const,
         completedPhases: 0,
         failedPhases: 1,
+        localYieldFailedPhases: 1,
         failedPeers: 0,
         backoffWorthyFailures: 0,
         insertedTriples: 0,

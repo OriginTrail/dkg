@@ -189,6 +189,36 @@ function sharedMemoryProcessResult() {
 }
 
 describe('selected snapshot walk continuation', () => {
+  it('does not attribute a short snapshot prefix to a later local yield', async () => {
+    let canAdmit = true;
+    const fetched: string[] = [];
+    const result = await syncPublicSnapshotsForMeta({
+      ctx,
+      remotePeerId: 'peer-short-prefix',
+      contextGraphId: 'cg-short-prefix',
+      deadline: Number.MAX_SAFE_INTEGER,
+      workAdmission: { ...UNRESTRICTED_SYNC_WORK, canAdmitWork: () => canAdmit },
+      snapshotWalk: {
+        entries: ['short', 'later'].map(ref => ({ snapshot: { ref, digest: ref, count: 1 }, reuse: false })),
+      },
+      publicSnapshotStore: {
+        getSnapshot: async () => null,
+        putSnapshot: async () => { throw new Error('Incomplete snapshots must not be stored'); },
+      },
+      fetchSyncPages: async (_ctx, _peer, cg, _swm, phase, _graph, _deadline, options) => {
+        fetched.push(options!.snapshotRef!);
+        canAdmit = false;
+        return pageResult(cg, phase, { quads: [] });
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+    });
+    expect(fetched).toEqual(['short']);
+    expect(result).toMatchObject({
+      completed: false, localYield: true, localYieldFailedPhases: 0, missingCount: 2,
+    });
+  });
+
   it('skips an exact resolved prefix and spends the next slice on unresolved snapshots', async () => {
     const first = [quad('resolved-prefix')].map((row) => ({ ...row, graph: '' }));
     const second = [quad('next-unresolved')].map((row) => ({ ...row, graph: '' }));
@@ -209,8 +239,7 @@ describe('selected snapshot walk continuation', () => {
       deadline: Date.now() + 60_000,
       workAdmission: UNRESTRICTED_SYNC_WORK,
       snapshotWalk: {
-        snapshots,
-        reusableRefs: [firstDigest],
+        entries: snapshots.map(snapshot => ({ snapshot, reuse: snapshot.ref === firstDigest })),
       },
       publicSnapshotStore: {
         getSnapshot: async (ref) => {
@@ -267,8 +296,7 @@ describe('selected snapshot walk continuation', () => {
       deadline: Date.now() + 60_000,
       workAdmission: UNRESTRICTED_SYNC_WORK,
       snapshotWalk: {
-        snapshots,
-        reusableRefs: [],
+        entries: snapshots.map(snapshot => ({ snapshot, reuse: false })),
       },
       publicSnapshotStore: {
         getSnapshot: async () => null,

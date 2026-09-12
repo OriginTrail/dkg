@@ -71,8 +71,8 @@ describe('selected snapshot-walk adapter', () => {
     walk.markResolved('a', rows);
     rows[0]!.object = '"changed"';
     const plan = walk.prepare({ order: 'manifest', canReuseResolved: () => true });
-    expect(plan.snapshots.map(({ ref }) => ref)).toEqual(['a', 'b']);
-    expect(plan.reusableRefs.includes('a')).toBe(true);
+    expect(plan.entries.map(({ snapshot }) => snapshot.ref)).toEqual(['a', 'b']);
+    expect(plan.entries.find(({ snapshot }) => snapshot.ref === 'a')?.reuse).toBe(true);
     expect(walk.suppressedMetadataRows('a')[0]!.object).toBe('"original"');
     walk.invalidateResolved('a');
     expect(walk.suppressedMetadataRows('a')).toEqual([]);
@@ -111,8 +111,8 @@ describe('private snapshot-walk coordinator', () => {
     });
     expect(unresolved.kind).toBe('prepared');
     if (unresolved.kind !== 'prepared') throw new Error('Expected prepared walk');
-    expect(unresolved.plan.snapshots.map(({ ref }) => ref)).toEqual(['b', 'a']);
-    expect(unresolved.plan.reusableRefs.includes('a')).toBe(false);
+    expect(unresolved.plan.entries.map(({ snapshot }) => snapshot.ref)).toEqual(['b', 'a']);
+    expect(unresolved.plan.entries.find(({ snapshot }) => snapshot.ref === 'a')?.reuse).toBe(false);
 
     state.markResolved('b');
     const revalidated = await preparePrivateSwmSnapshotWalk(state, {
@@ -121,7 +121,7 @@ describe('private snapshot-walk coordinator', () => {
     });
     expect(revalidated.kind).toBe('prepared');
     if (revalidated.kind !== 'prepared') throw new Error('Expected prepared walk');
-    expect(revalidated.plan.reusableRefs.includes('a')).toBe(true);
+    expect(revalidated.plan.entries.find(({ snapshot }) => snapshot.ref === 'a')?.reuse).toBe(true);
     expect(state.isResolved('b')).toBe(false);
   });
 
@@ -155,7 +155,7 @@ describe('private snapshot-walk coordinator', () => {
     expect(second.kind).toBe('prepared');
     if (second.kind !== 'prepared') throw new Error('Expected completed validation walk');
     expect(second.validatedRefs).toBe(2);
-    expect(second.plan.reusableRefs).toEqual(['a', 'b']);
+    expect(second.plan.entries).toEqual(manifest.map(snapshot => ({ snapshot, reuse: true })));
     expect(validateRef.mock.calls.map(([ref]) => ref)).toEqual(['a', 'b']);
   });
 
@@ -187,8 +187,8 @@ it('prepares plans without adding owner policy to the progress core', () => {
     order: 'unresolved-first',
     canReuseResolved: () => false,
   });
-  expect(plan.snapshots.map(({ ref }) => ref)).toEqual(['b', 'a']);
-  expect(plan.reusableRefs.includes('a')).toBe(false);
+  expect(plan.entries.map(({ snapshot }) => snapshot.ref)).toEqual(['b', 'a']);
+  expect(plan.entries.find(({ snapshot }) => snapshot.ref === 'a')?.reuse).toBe(false);
 });
 
 it.each(['progress', 'evidence'])('captures reusable decisions before later %s changes', change => {
@@ -199,11 +199,15 @@ it.each(['progress', 'evidence'])('captures reusable decisions before later %s c
   const plan = prepareManifestBoundSnapshotWalk(state, { order: 'unresolved-first', canReuseResolved });
   if (change === 'progress') { state.invalidateResolved('a'); state.markResolved('b'); }
   else verified = false;
-  expect(plan.snapshots.map(({ ref }) => ref)).toEqual(['b', 'a']);
-  expect(plan.reusableRefs.includes('a')).toBe(true);
-  expect(plan.reusableRefs.includes('b')).toBe(false);
+  expect(plan.entries.map(({ snapshot }) => snapshot.ref)).toEqual(['b', 'a']);
+  expect(plan.entries.find(({ snapshot }) => snapshot.ref === 'a')?.reuse).toBe(true);
+  expect(plan.entries.find(({ snapshot }) => snapshot.ref === 'b')?.reuse).toBe(false);
   expect(canReuseResolved).toHaveBeenCalledOnce();
-  expect(Object.isFrozen(plan.reusableRefs)).toBe(true);
-  expect(() => Reflect.set(plan.reusableRefs, 0, "mutated")).not.toThrow();
-  expect(plan.reusableRefs).toEqual(["a"]);
+  expect(Object.isFrozen(plan.entries)).toBe(true);
+  expect(plan.entries.every(entry => Object.isFrozen(entry) && Object.isFrozen(entry.snapshot))).toBe(true);
+  expect(Reflect.set(plan.entries[1]!, "reuse", false)).toBe(false);
+  expect(Reflect.set(plan.entries[1]!.snapshot, "digest", "mutated")).toBe(false);
+  expect(plan.entries).toEqual([
+    { snapshot: manifest[1], reuse: false }, { snapshot: manifest[0], reuse: true },
+  ]);
 });

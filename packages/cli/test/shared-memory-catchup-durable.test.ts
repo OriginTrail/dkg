@@ -1189,8 +1189,8 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     ]);
   });
 
-  it('keeps a peer eligible after the detailed route reports a local budget yield', async () => {
-    const cgId = 'typed-local-yield-route-cg';
+  it.each([1, 2])('preserves local-yield attribution through route selection with %i failed phases', async (failedPhases) => {
+    const cgId = `typed-local-yield-route-cg-${failedPhases}`;
     const peerId = 'peer-local-yield';
     const unknownPeer = 'peer-unknown-competitor';
     let connectedPeers = [peerId];
@@ -1199,7 +1199,8 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
       if (selectedPeerId === peerId && yieldingPeerCalls++ === 0) return {
         insertedTriples: 0,
         localYield: true as const,
-        failedPhases: 1,
+        localYieldFailedPhases: 1,
+        failedPhases,
         backoffWorthyFailures: 0,
       };
       return { insertedTriples: 0 };
@@ -1224,14 +1225,13 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     await handleMemoryRoutes(first.ctx);
     expect(first.res.statusCode).toBe(200);
 
-    // A transport-negative cache entry would make the selector prefer only
-    // this unknown competitor. A local yield must leave the original peer in
-    // the eligible set and cause it to be invoked again.
+    // A pure local yield preserves eligibility; an independent failed phase
+    // makes the selector prefer the unknown competitor on the next request.
     connectedPeers = [peerId, unknownPeer];
     const second = buildCatchupCtx({ contextGraphId: cgId, hostCatchupFallback: false }, agent);
     await handleMemoryRoutes(second.ctx);
     expect(second.res.statusCode).toBe(200);
     expect(syncSharedMemoryFromPeerDetailed.mock.calls
-      .filter(([selectedPeerId]) => selectedPeerId === peerId)).toHaveLength(2);
+      .filter(([selectedPeerId]) => selectedPeerId === peerId)).toHaveLength(failedPhases === 1 ? 2 : 1);
   });
 });

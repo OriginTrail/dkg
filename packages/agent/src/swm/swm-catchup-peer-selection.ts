@@ -148,6 +148,7 @@ interface SwmCatchupPeerTelemetry {
   deniedPhases?: number;
   failedPeers?: number;
   failedPhases?: number;
+  localYieldFailedPhases?: number;
   timedOutPhases?: number;
   backoffWorthyFailures?: number;
   errorMessage?: string;
@@ -182,8 +183,9 @@ export function classifySwmCatchupPeerOutcome(
   ) {
     return 'transportFailed';
   }
+  const localYieldFailedPhases = input.localYield ? input.localYieldFailedPhases ?? 0 : 0;
+  if (failedPhases > localYieldFailedPhases) return 'transportFailed';
   if (input.localYield) return undefined;
-  if (failedPhases > 0) return 'transportFailed';
   return 'empty';
 }
 

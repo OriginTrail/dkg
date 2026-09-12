@@ -5,6 +5,7 @@ import {
 } from '../src/sync/shared-memory-completion.js';
 import { classifySwmCatchupPeerOutcome, createSwmCatchupPeerSelector, type DKGAgent, type SharedMemorySyncResult, type SwmCatchupPeerOutcome } from '@origintrail-official/dkg-agent';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import type { PublicSnapshotWalkPlan } from '../src/sync/requester/shared-memory-sync.js';
 
 const localYield = true as const;
 const workOutcome: SharedMemoryWorkOutcome = sharedMemoryWorkOutcome(
@@ -17,6 +18,22 @@ classifySwmCatchupPeerOutcome({ localYield });
 // Progress telemetry may coexist with a local scheduler yield. The classifier
 // decides peer health from the telemetry while the yield itself remains neutral.
 classifySwmCatchupPeerOutcome({ localYield, failedPhases: 1 });
+classifySwmCatchupPeerOutcome({ localYield, failedPhases: 2, localYieldFailedPhases: 1 });
+
+const snapshotPlan: PublicSnapshotWalkPlan = {
+  entries: [{ snapshot: { ref: 'a', digest: 'new', count: 2 }, reuse: false }],
+};
+const detachedReuse: PublicSnapshotWalkPlan = {
+  // @ts-expect-error reuse must accompany the full snapshot identity
+  entries: [{ reuse: true }],
+};
+const parallelReuse: PublicSnapshotWalkPlan = {
+  entries: snapshotPlan.entries,
+  // @ts-expect-error a reference-only reuse list cannot be supplied independently
+  reusableRefs: ['a'],
+};
+void detachedReuse;
+void parallelReuse;
 
 // @ts-expect-error arbitrary strings are not coherent work outcomes
 const invalidOutcome: SharedMemoryWorkOutcome = 'yielded';

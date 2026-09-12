@@ -180,6 +180,8 @@ export interface RecoverContextGraphSwmDeps {
 }
 
 interface RecoverContextGraphSwmResultFields {
+  /** Attribution for the single incomplete recovery phase emitted by the lifecycle. */
+  readonly localYieldFailedPhases?: number;
   readonly replacedRoots: number;
   readonly replacedGraphs: number;
   readonly insertedDataQuads: number;
@@ -409,7 +411,7 @@ async function recoverContextGraphSwmUnlocked(
       droppedDataTriples: 0,
       readySnapshots: 0,
       totalSnapshots: 0,
-      ...(meta.outcome === 'local-budget-yield' ? { localYield: true as const } : {}),
+      ...(meta.outcome === 'local-budget-yield' ? { localYield: true as const, localYieldFailedPhases: 1 } : {}),
       completed: false,
     };
   }
@@ -570,6 +572,7 @@ async function recoverContextGraphSwmUnlocked(
       );
       return {
         localYield: true,
+        localYieldFailedPhases: 1,
         replacedRoots: 0,
         replacedGraphs: 0,
         insertedDataQuads: 0,
@@ -624,7 +627,7 @@ async function recoverContextGraphSwmUnlocked(
         droppedDataTriples: 0,
         ...snapshotProgress,
         ...(snapshotSync.localYield
-          ? { localYield: snapshotSync.localYield }
+          ? { localYield: snapshotSync.localYield, localYieldFailedPhases: snapshotSync.localYieldFailedPhases }
           : {}),
         completed: false,
       };
@@ -655,7 +658,7 @@ async function recoverContextGraphSwmUnlocked(
       insertedMetaQuads: incrementallyInsertedMetaQuads,
       droppedDataTriples: 0,
       ...snapshotProgress,
-      ...(data.outcome === 'local-budget-yield' ? { localYield: true as const } : {}),
+      ...(data.outcome === 'local-budget-yield' ? { localYield: true as const, localYieldFailedPhases: 1 } : {}),
       completed: false,
     };
   }

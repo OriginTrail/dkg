@@ -7719,6 +7719,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 result.failedPhases = 1;
                 if (recovered.localYield) {
                   result.localYield = recovered.localYield;
+                  result.localYieldFailedPhases = recovered.localYieldFailedPhases ?? 0;
                 } else {
                   result.backoffWorthyFailures = 1;
                 }

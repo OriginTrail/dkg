@@ -20,6 +20,8 @@ export interface SwmSnapshotCoverage {
 /** Compatibility-facing diagnostic result accepted from workers and older producers. */
 interface SharedMemorySyncDiagnosticsShape {
   readonly localYield?: true;
+  /** Failed phases caused solely by local admission, never independent peer or materialization failures. */
+  readonly localYieldFailedPhases?: number;
   readonly snapshotPlaneIncomplete?: number;
   readonly fetchedMetaTriples: number;
   readonly fetchedDataTriples: number;
@@ -53,7 +55,7 @@ export type SharedMemorySyncResult = SharedMemorySyncDiagnostics & {
   deniedPhases: number;
 };
 
-/** Canonical in-process accumulator/result: every additive counter is concrete. */
+/** Aggregate contract retaining its existing required counters for compatibility. */
 export type SharedMemorySyncAggregate = SharedMemorySyncResult & {
   snapshotPlaneIncomplete: number;
   backoffWorthyFailures: number;
@@ -65,6 +67,9 @@ export type SharedMemorySyncAggregate = SharedMemorySyncResult & {
   replayPhaseBytesReceived: number;
   snapshotPhaseBytesReceived: number;
 };
+
+/** Canonical constructors always initialize newly added counters. */
+type SharedMemorySyncAccumulator = SharedMemorySyncAggregate & { localYieldFailedPhases: number };
 
 /** Requester terminology retained as an alias of the canonical aggregate. */
 export type SharedMemorySyncSummary = SharedMemorySyncAggregate;
@@ -101,8 +106,9 @@ export function selectSwmSnapshotCoverage(
 }
 
 /** Canonical zero value for requester, lifecycle, and CLI orchestration. */
-export function emptySharedMemorySyncResult(failedPeers = 0): SharedMemorySyncAggregate {
+export function emptySharedMemorySyncResult(failedPeers = 0): SharedMemorySyncAccumulator {
   return {
+    localYieldFailedPhases: 0,
     snapshotPlaneIncomplete: 0,
     insertedTriples: 0,
     fetchedMetaTriples: 0,
@@ -134,7 +140,7 @@ export function emptySharedMemorySyncResult(failedPeers = 0): SharedMemorySyncAg
 export function mergeSamePeerSharedMemoryDiagnostics(
   a: SharedMemorySyncMergeInput,
   b: SharedMemorySyncMergeInput,
-): SharedMemorySyncAggregate {
+): SharedMemorySyncAccumulator {
   return mergeSharedMemoryDiagnostics(a, b, 'max');
 }
 
@@ -142,7 +148,7 @@ export function mergeSamePeerSharedMemoryDiagnostics(
 export function mergeFleetSharedMemoryDiagnostics(
   a: SharedMemorySyncMergeInput,
   b: SharedMemorySyncMergeInput,
-): SharedMemorySyncAggregate {
+): SharedMemorySyncAccumulator {
   return mergeSharedMemoryDiagnostics(a, b, 'sum');
 }
 
@@ -150,12 +156,13 @@ function mergeSharedMemoryDiagnostics(
   a: SharedMemorySyncMergeInput,
   b: SharedMemorySyncMergeInput,
   failedPeers: 'max' | 'sum',
-): SharedMemorySyncAggregate {
+): SharedMemorySyncAccumulator {
   const sum = (key: NumericDiagnosticKey): number =>
     (a[key] ?? 0) + (b[key] ?? 0);
   const swmCoverage = selectSwmSnapshotCoverage(a.swmCoverage, b.swmCoverage);
   return {
     localYield: mergeLocalBudgetYieldEvidence(a.localYield, b.localYield),
+    localYieldFailedPhases: sum('localYieldFailedPhases'),
     snapshotPlaneIncomplete: sum('snapshotPlaneIncomplete'),
     insertedTriples: sum('insertedTriples'),
     fetchedMetaTriples: sum('fetchedMetaTriples'),

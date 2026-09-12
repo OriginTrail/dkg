@@ -12,6 +12,7 @@ import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
+  emptySharedMemorySyncResult,
   selectSwmSnapshotCoverage,
   type SharedMemorySyncSummary,
 } from '../shared-memory-diagnostics.js';
@@ -263,8 +264,10 @@ export interface SharedMemoryMetadataFetchOutcome {
 
 /** Immutable manifest order and validated reuse decisions for one pass. */
 export interface PublicSnapshotWalkPlan {
-  readonly snapshots: readonly PublicSnapshotMetadata[];
-  readonly reusableRefs: readonly string[];
+  readonly entries: readonly {
+    readonly snapshot: PublicSnapshotMetadata;
+    readonly reuse: boolean;
+  }[];
 }
 
 export interface SnapshotWalkPreparation {
@@ -481,32 +484,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     });
   };
 
-  const summary: SharedMemorySyncSummary = {
-    snapshotPlaneIncomplete: 0,
-    insertedTriples: 0,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 0,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 0,
-    bytesReceived: 0,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 0,
-    checkpointAdvances: 0,
-    deniedPhases: 0,
-    emptyResponses: 0,
-    droppedDataTriples: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    backoffWorthyFailures: 0,
-    deferredBackpressure: 0,
-    metadataContinuationYields: 0,
-    continuationPasses: 0,
-    resolvedSnapshotPlaneIncomplete: 0,
-    resolvedMetadataContinuationYields: 0,
-    replayPhaseBytesReceived: 0,
-    snapshotPhaseBytesReceived: 0,
-  };
+  const summary = emptySharedMemorySyncResult();
 
   const recordPhaseOutcome = (
     result: SyncPageResult,
@@ -1349,6 +1327,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // Retain independently verified data, but keep the phase incomplete
         // while graph-scoped assets or selected evidence remain unproven.
         summary.failedPhases += 1;
+        if (snapshotSync.localYieldFailedPhases === 1 && materializationFailures === 0
+          && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0)
+          && snapshotEvidenceAccepted) {
+          summary.localYieldFailedPhases += 1;
+        }
       }
       const storeStartedAt = Date.now();
       let metaForBulkInsert: Quad[] = [];
@@ -1559,6 +1542,8 @@ export async function syncPublicSnapshotsForMeta(params: {
    * marks the peer backoff-worthy (`durable-progress.ts` `backoffWorthyFailure`).
    */
   localYield?: true;
+  /** One incomplete phase only when every unresolved ref is due to local admission. */
+  localYieldFailedPhases?: number;
 }> {
   const workAdmission = params.workAdmission;
   const executionBoundary = params.executionBoundary
@@ -1567,12 +1552,12 @@ export async function syncPublicSnapshotsForMeta(params: {
   const manifestSnapshots = params.snapshotWalk
     ? []
     : collectPublicSnapshotMetadata(params.metaQuads);
-  const snapshots = params.snapshotWalk
-    ? params.snapshotWalk.snapshots
-    : params.recoveryOrder === 'recent-balanced'
+  const entries = params.snapshotWalk?.entries ?? (
+    params.recoveryOrder === 'recent-balanced'
       ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
-      : manifestSnapshots;
-  if (snapshots.length === 0) {
+      : manifestSnapshots
+  ).map(snapshot => ({ snapshot, reuse: false }));
+  if (entries.length === 0) {
     return {
       bytesReceived: 0,
       resumedPhases: 0,
@@ -1599,6 +1584,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   let checkpointAdvances = 0;
   let readySnapshots = 0;
   let missingCount = 0;
+  let hasIndependentShortfall = false;
   let localYield: true | undefined;
   const missingSample: string[] = [];
   const noteMissing = (ref: string): void => {
@@ -1609,7 +1595,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   };
   /** Every ref from `index` onward is unresolved; record them and stop. */
   const abandonFrom = (index: number): void => {
-    for (let i = index; i < snapshots.length; i += 1) noteMissing(snapshots[i]!.ref);
+    for (let i = index; i < entries.length; i += 1) noteMissing(entries[i]!.snapshot.ref);
   };
 
   /**
@@ -1625,20 +1611,19 @@ export async function syncPublicSnapshotsForMeta(params: {
     abandonFrom(index);
     attachPublicSnapshotWalkProgress(err, {
       readySnapshots,
-      totalSnapshots: snapshots.length,
+      totalSnapshots: entries.length,
       missingCount,
       missingSample,
     });
     throw err;
   };
 
-  const reusableRefs = new Set(params.snapshotWalk?.reusableRefs);
-  for (const [index, snapshot] of snapshots.entries()) {
+  for (const [index, { snapshot, reuse }] of entries.entries()) {
     executionBoundary.assertCurrent();
     // The owner decides which manifest-bound evidence this pass can reuse.
     // Avoid repeating blob and assertion validation when that owner has
     // already established it, leaving time for unresolved refs to advance.
-    if (reusableRefs.has(snapshot.ref)) {
+    if (reuse) {
       readySnapshots += 1;
       continue;
     }
@@ -1704,6 +1689,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
       }
       else {
+        hasIndependentShortfall ||= !result.localYield;
         // `fetchSyncPages` returns only the quads fetched during THIS call. We do
         // not persist an unverified prefix, so resuming a snapshot at nextOffset
         // would validate only the tail against the full digest/count and can never
@@ -1735,6 +1721,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         // retried from offset zero next pass.
         executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
         noteMissing(snapshot.ref);
+        hasIndependentShortfall = true;
         continue;
       }
       const actualDigest = workspacePublicQuadsDigest(snapshotQuads);
@@ -1771,7 +1758,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     completedPhases,
     checkpointAdvances,
     readySnapshots,
-    totalSnapshots: snapshots.length,
+    totalSnapshots: entries.length,
     // The ONLY completion expression, and it is derived rather than asserted.
     // Every path that gives up on a ref — the deadline yield, a fetch that did
     // not complete, and the skipped short prefix — routes through
@@ -1782,6 +1769,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     missingCount,
     missingSample,
     ...(localYield ? { localYield } : {}),
+    localYieldFailedPhases: localYield && !hasIndependentShortfall ? 1 : 0,
   };
 }
 

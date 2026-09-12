@@ -163,10 +163,10 @@ export function prepareManifestBoundSnapshotWalk(
       ...manifest.filter(({ ref }) => resolvedRefs.has(ref)),
     ]);
   return Object.freeze({
-    snapshots,
-    reusableRefs: Object.freeze(manifest
-      .filter(({ ref }) => resolvedRefs.has(ref) && canReuseResolved(ref))
-      .map(({ ref }) => ref)),
+    entries: Object.freeze(snapshots.map(snapshot => Object.freeze({
+      snapshot,
+      reuse: resolvedRefs.has(snapshot.ref) && canReuseResolved(snapshot.ref),
+    }))),
   });
 }
 

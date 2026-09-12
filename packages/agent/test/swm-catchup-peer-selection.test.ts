@@ -9,8 +9,39 @@ import {
   sharedMemoryWorkOutcome,
   type SharedMemoryWorkOutcome,
 } from '../src/sync/shared-memory-completion.js';
+import {
+  emptySharedMemorySyncResult,
+  mergeSamePeerSharedMemoryDiagnostics,
+  mergeFleetSharedMemoryDiagnostics,
+} from '../src/sync/shared-memory-diagnostics.js';
 
 describe('SWM catchup peer selection', () => {
+  it.each([
+    ['same peer', mergeSamePeerSharedMemoryDiagnostics],
+    ['fleet', mergeFleetSharedMemoryDiagnostics],
+  ] as const)('preserves an independent target failure when merging a local yield across %s', (_scope, merge) => {
+    const yielded = { ...emptySharedMemorySyncResult(), localYield: true as const,
+      failedPhases: 1, localYieldFailedPhases: 1 };
+    const failed = { ...emptySharedMemorySyncResult(), failedPhases: 1 };
+    for (const merged of [merge(yielded, failed), merge(failed, yielded)]) {
+      const outcome = classifySwmCatchupPeerOutcome(merged);
+      expect(outcome).toBe('transportFailed');
+      expect(merged.failedPhases).toBe(2);
+      expect(merged.localYieldFailedPhases).toBe(1);
+      const selector = createSwmCatchupPeerSelector();
+      if (outcome) selector.record('cg', 'peer', outcome, 100);
+      expect(selector.get('cg', 'peer', 101)).toBe('transportFailed');
+      expect(selector.select({ contextGraphId: 'cg', candidatePeers: ['peer', 'unknown'], now: 101 }))
+        .toMatchObject({ selectedPeers: ['unknown'], skippedNegativePeers: ['peer'] });
+    }
+    expect(classifySwmCatchupPeerOutcome(merge(yielded, yielded))).toBeUndefined();
+  });
+
+  it('does not treat an unattributed failed phase as a local yield', () => {
+    expect(classifySwmCatchupPeerOutcome({ localYield: true, failedPhases: 1 }))
+      .toBe('transportFailed');
+  });
+
   it('round-trips every coherent work outcome through compatibility fields', () => {
     const outcomes: SharedMemoryWorkOutcome[] = [
       'completed', 'timed-out', 'local-budget-yield', 'incomplete',

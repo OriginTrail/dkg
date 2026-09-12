@@ -443,6 +443,7 @@ const swmCatchupPeerSelector = createSwmCatchupPeerSelector();
 
 type SwmCatchupDetailedResult = {
   localYield?: true;
+  localYieldFailedPhases?: number;
   insertedTriples: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
@@ -460,6 +461,7 @@ function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetail
 function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?: string) {
   return {
     localYield: result.localYield,
+    localYieldFailedPhases: result.localYieldFailedPhases,
     insertedTriples: result.insertedTriples,
     fetchedDataTriples: result.fetchedDataTriples,
     fetchedMetaTriples: result.fetchedMetaTriples,
