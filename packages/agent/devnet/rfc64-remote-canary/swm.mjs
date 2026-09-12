@@ -183,7 +183,7 @@ export async function withReceiverOfflineV1({
 
 export function verifyCatalogSwmV1({ config, request }) {
   return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
-    if (contextGraph.catalogSwmEvidenceState === 'EVIDENCE_REQUIRED') {
+    if (contextGraph.catalogSwmAskSparql === undefined) {
       return Object.freeze({
         contextGraphRef: contextGraph.contextGraphRef,
         status: 'EVIDENCE_REQUIRED',

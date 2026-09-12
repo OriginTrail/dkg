@@ -21,7 +21,7 @@ addFormats(rpcSchemaValidator);
 const matchesRpcEvidenceV1 = rpcSchemaValidator.compile(rpcEvidenceSchema);
 
 export async function collectRpcUsageEvidenceV1(config, context) {
-  if (config.evidenceState === 'EVIDENCE_REQUIRED') {
+  if (config.kind === 'required') {
     return Object.freeze({
       status: 'EVIDENCE_REQUIRED',
       requirement: RPC_EVIDENCE_SCHEMA,

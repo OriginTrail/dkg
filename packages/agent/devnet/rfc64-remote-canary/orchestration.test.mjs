@@ -252,6 +252,48 @@ test('catalog status parity alone cannot certify VM queryability', async () => {
   });
 });
 
+test('final preflight rejects a node build that changed during certification', async () => {
+  const observerUrl = 'https://observer.internal.example';
+  const config = baseConfig();
+  config.nodes.push({
+    id: 'gamma-observer',
+    role: 'observer',
+    baseUrl: observerUrl,
+    auth: { kind: 'none' },
+  });
+  const runtime = createCertificationRuntime({ rpcEvidenceConfig: config });
+  const delegateFetch = runtime.fetchFn;
+  let observerStatusReads = 0;
+  runtime.fetchFn = async (input, options) => {
+    const response = await delegateFetch(input, options);
+    const url = new URL(input);
+    if (
+      url.origin !== observerUrl
+      || url.pathname !== '/api/status'
+      || (options?.method ?? 'GET') !== 'GET'
+    ) return response;
+    observerStatusReads += 1;
+    if (observerStatusReads === 1) return response;
+    const body = await response.json();
+    body.commit = 'f'.repeat(40);
+    body.commitShort = 'ffffffff';
+    return new Response(JSON.stringify(body), {
+      status: response.status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(config, runtime),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'node-build-mismatch'
+      && error.category === 'invariant'
+      && error.phase === 'final-preflight',
+  );
+  assert.equal(observerStatusReads, 2);
+  assert.deepEqual(runtime.state.commands, ['stop', 'start']);
+});
+
 test('a false configured VM ASK from either node blocks full certification', async () => {
   for (const role of ['source', 'receiver']) {
     const runtime = createCertificationRuntime({ vmQueryFalseFor: role });

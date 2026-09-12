@@ -83,10 +83,6 @@ export function validateRemoteCanaryConfigV1(input) {
       source,
       receiver,
       contextGraphRef: opaqueRef('cg', entry.id),
-      vmEvidenceState: entry.vmAskSparql === undefined ? 'EVIDENCE_REQUIRED' : 'PLANNED',
-      catalogSwmEvidenceState: entry.catalogSwmAskSparql === undefined
-        ? 'EVIDENCE_REQUIRED'
-        : 'PLANNED',
     });
   });
 
@@ -197,7 +193,7 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
       ? 'catalog-protocol-api-not-exposed'
       : 'revocation-api-not-exposed';
     if (value.reasonCode !== expected) invalid('authorization-gap-reason');
-    return Object.freeze({ ...value, evidenceState: 'EVIDENCE_REQUIRED' });
+    return Object.freeze({ ...value });
   }
   const requiredAuthentication = label === 'unauthorized' ? 'none' : 'node';
   if (value.authentication !== requiredAuthentication) {
@@ -234,13 +230,12 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
     ...(notFoundControlNode === undefined ? {} : { notFoundControlNode }),
     expectedStatuses: Object.freeze([...new Set(value.expectedStatuses)]),
     expectedCodes: Object.freeze([...new Set(value.expectedCodes)]),
-    evidenceState: 'PLANNED',
   });
 }
 
 function normalizeRpcUsage(value) {
   if (value.kind === 'required') {
-    return Object.freeze({ kind: 'required', evidenceState: 'EVIDENCE_REQUIRED' });
+    return Object.freeze({ kind: 'required' });
   }
   if (value.kind === 'evidence-file') {
     if (!isAbsolute(value.path)) invalid('rpc-evidence-path-must-be-absolute');
@@ -248,7 +243,6 @@ function normalizeRpcUsage(value) {
       kind: value.kind,
       path: value.path,
       minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
-      evidenceState: 'PLANNED',
     });
   }
   return Object.freeze({
@@ -256,7 +250,6 @@ function normalizeRpcUsage(value) {
     command: validateCommandV1(value.command),
     minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
     commandTimeoutMs: value.commandTimeoutMs ?? DEFAULT_RPC_USAGE.commandTimeoutMs,
-    evidenceState: 'PLANNED',
   });
 }
 
@@ -291,6 +284,7 @@ function validateAskSparql(value, label) {
     pattern.subType === 'bgp' && Array.isArray(pattern.triples) ? pattern.triples : []
   ));
   const terms = triples.flatMap((triple) => [triple.subject, triple.predicate, triple.object]);
+  const nestedTerms = terms.flatMap(collectSparqlTerms);
   const prefixes = new Map((parsed.context ?? [])
     .filter((entry) => entry?.subType === 'prefix')
     .map((entry) => [entry.key, entry.value?.value]));
@@ -304,12 +298,19 @@ function validateAskSparql(value, label) {
   ) invalid(`${label}-query-must-depend-on-data`);
   if (
     label === 'catalog-swm'
-    && terms.some((term) => (
+    && nestedTerms.some((term) => (
       term?.type === 'term'
       && term.subType === 'namedNode'
       && reservedCanaryIri(resolveNamedNodeIri(term, prefixes))
     ))
   ) invalid('catalog-swm-query-uses-canary-vocabulary');
+}
+
+function collectSparqlTerms(value) {
+  if (value === null || typeof value !== 'object') return [];
+  if (value.type === 'term') return [value];
+  if (Array.isArray(value)) return value.flatMap(collectSparqlTerms);
+  return Object.values(value).flatMap(collectSparqlTerms);
 }
 
 function resolveNamedNodeIri(term, prefixes) {

@@ -30,7 +30,7 @@ export function verifyVmParityV1({ config, request, sleep }) {
       () => failure('vm-parity-timeout', 'vm'),
       { retryError: isRetryableNodeRequestErrorV1 },
     );
-    if (contextGraph.vmEvidenceState === 'PLANNED') {
+    if (contextGraph.vmAskSparql !== undefined) {
       const queryPassed = await Promise.all([
         contextGraph.source,
         contextGraph.receiver,
@@ -41,15 +41,15 @@ export function verifyVmParityV1({ config, request, sleep }) {
     }
     return Object.freeze({
       contextGraphRef: contextGraph.contextGraphRef,
-      status: contextGraph.vmEvidenceState === 'EVIDENCE_REQUIRED'
+      status: contextGraph.vmAskSparql === undefined
         ? 'EVIDENCE_REQUIRED'
         : 'PASS',
       statusParity: 'PASS',
       cursorPresent: parity.cursorPresent,
       digestParity: parity.digestParity,
       rowCountParity: parity.rowCountParity,
-      vmQueryChecked: contextGraph.vmEvidenceState === 'PLANNED',
-      ...(contextGraph.vmEvidenceState === 'EVIDENCE_REQUIRED'
+      vmQueryChecked: contextGraph.vmAskSparql !== undefined,
+      ...(contextGraph.vmAskSparql === undefined
         ? { requirement: 'vm-ask-query' }
         : {}),
     });

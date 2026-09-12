@@ -85,10 +85,14 @@ test('normalization resolves the canonical execution topology once', () => {
   assert.equal(contextGraph.receiver, config.nodes[1]);
   assert.equal(config.lifecycle.receiver, contextGraph.receiver);
   assert.equal(config.authorizationChecks.unauthorized.node, contextGraph.receiver);
-  assert.equal(contextGraph.vmEvidenceState, 'PLANNED');
-  assert.equal(contextGraph.catalogSwmEvidenceState, 'PLANNED');
-  assert.equal(config.authorizationChecks.unauthorized.evidenceState, 'PLANNED');
-  assert.equal(config.rpcUsage.evidenceState, 'PLANNED');
+  assert.equal(contextGraph.vmAskSparql, 'ASK { <urn:known:vm-subject> ?p ?o }');
+  assert.equal(contextGraph.catalogSwmAskSparql, 'ASK { <urn:known:catalog-swm-subject> ?p ?o }');
+  assert.equal(config.authorizationChecks.unauthorized.kind, 'http');
+  assert.equal(config.rpcUsage.kind, 'evidence-file');
+  assert.equal('vmEvidenceState' in contextGraph, false);
+  assert.equal('catalogSwmEvidenceState' in contextGraph, false);
+  assert.equal('evidenceState' in config.authorizationChecks.unauthorized, false);
+  assert.equal('evidenceState' in config.rpcUsage, false);
   assert.match(contextGraph.contextGraphRef, /^cg:[0-9a-f]{20}$/u);
   assert.match(contextGraph.source.nodeRef, /^node:[0-9a-f]{20}$/u);
 });
@@ -148,6 +152,7 @@ test('catalog evidence cannot depend on reserved canary marker vocabulary', () =
     'ASK { <urn:dkg:rfc64-canary:old-marker> ?p ?o }',
     'ASK { ?s <https://schema.origintrail.io/rfc64/canaryValue> ?o }',
     'PREFIX canary: <urn:dkg:rfc64-canary:> ASK { canary:old-marker ?p ?o }',
+    'ASK { "known-old-marker" ^<https://schema.origintrail.io/rfc64/canaryValue> ?s }',
   ]) {
     const config = baseConfig();
     config.contextGraphs[0].catalogSwmAskSparql = sparql;
@@ -157,6 +162,36 @@ test('catalog evidence cannot depend on reserved canary marker vocabulary', () =
         && error.code === 'catalog-swm-query-uses-canary-vocabulary',
       sparql,
     );
+  }
+});
+
+test('node base URLs enforce the remote trust boundary', () => {
+  for (const [baseUrl, expectedCode] of [
+    ['http://node.example', 'node-base-url-requires-https'],
+    ['ftp://node.example', 'node-base-url-requires-https'],
+    ['https://user:pass@node.example', 'node-base-url-credentials-or-query'],
+    ['https://node.example?token=x', 'node-base-url-credentials-or-query'],
+    ['https://node.example#fragment', 'node-base-url-credentials-or-query'],
+    ['https://node.example/api', 'node-base-url-path'],
+  ]) {
+    const config = baseConfig();
+    config.nodes[0].baseUrl = baseUrl;
+    assert.throws(
+      () => validateRemoteCanaryConfigV1(config),
+      (error) => error instanceof RemoteCanaryError && error.code === expectedCode,
+      baseUrl,
+    );
+  }
+
+  for (const [baseUrl, allowTailscaleHttp, expected] of [
+    ['https://node.example', false, 'https://node.example'],
+    ['http://127.0.0.1', false, 'http://127.0.0.1'],
+    ['http://100.64.0.10', true, 'http://100.64.0.10'],
+  ]) {
+    const config = baseConfig();
+    config.nodes[0].baseUrl = baseUrl;
+    if (allowTailscaleHttp) config.nodes[0].allowTailscaleHttp = true;
+    assert.equal(validateRemoteCanaryConfigV1(config).nodes[0].baseUrl, expected, baseUrl);
   }
 });
 

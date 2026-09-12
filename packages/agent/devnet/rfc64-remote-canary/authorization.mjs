@@ -20,7 +20,7 @@ export async function verifyAuthorizationV1(checks, request) {
 }
 
 async function runAuthorizationCheckV1(check, request) {
-  if (check.evidenceState === 'EVIDENCE_REQUIRED') {
+  if (check.kind === 'not-exposed') {
     return Object.freeze({ status: 'EVIDENCE_REQUIRED', reasonCode: check.reasonCode });
   }
   const response = await request.raw(

@@ -11,7 +11,7 @@ function canonicalChainId(value) {
   return canonical;
 }
 
-export async function preflightAllNodesV1({ config, request }) {
+export async function preflightAllNodesV1({ config, request, expectedNetworkKey }) {
   const statuses = await mapCanaryPhaseV1(config.nodes, async (node) => {
     const status = await request.json(node, 'GET', '/api/status');
     validateNodePreflightV1(status, node, config);
@@ -22,7 +22,11 @@ export async function preflightAllNodesV1({ config, request }) {
     `${String(status.networkId)}:${String(status.chain?.chainId)}`
   )));
   if (networkKeys.size !== 1) throw failure('node-network-mismatch', 'invariant');
-  return Object.freeze(config.nodes.map((node) => {
+  const networkKey = [...networkKeys][0];
+  if (expectedNetworkKey !== undefined && networkKey !== expectedNetworkKey) {
+    throw failure('node-network-changed', 'invariant');
+  }
+  const nodes = Object.freeze(config.nodes.map((node) => {
     const status = raw.get(node.id);
     const relevant = config.contextGraphs.filter((entry) => (
       entry.source === node || entry.receiver === node
@@ -41,6 +45,7 @@ export async function preflightAllNodesV1({ config, request }) {
       }))),
     });
   }));
+  return Object.freeze({ networkKey, nodes });
 }
 
 export function validateNodePreflightV1(status, node, config) {
