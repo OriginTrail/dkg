@@ -175,6 +175,7 @@ export {
   CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
   CHAIN_FULL_SCAN_EVERY,
+  CHAIN_REPAIR_AUDIT_EVERY_TICKS,
   chainDiscoveryScanOptions,
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';

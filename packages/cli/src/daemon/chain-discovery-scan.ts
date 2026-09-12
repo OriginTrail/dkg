@@ -10,8 +10,10 @@ import { withRpcRequestContext } from '@origintrail-official/dkg-chain';
  * an independent atomic cursor/target, and is bounded on every invocation.
  */
 
-/** Legacy cadence name retained for import compatibility; now the repair-generation interval. */
-export const CHAIN_FULL_SCAN_EVERY = 48; // about once per day at the 30-minute cadence
+/** Default completed-repair generation interval: about once per day. */
+export const CHAIN_REPAIR_AUDIT_EVERY_TICKS = 48;
+/** @deprecated Use CHAIN_REPAIR_AUDIT_EVERY_TICKS. */
+export const CHAIN_FULL_SCAN_EVERY = CHAIN_REPAIR_AUDIT_EVERY_TICKS;
 export const CHAIN_DISCOVERY_SCAN_PAGE_BUDGET = 30;
 export const CHAIN_DISCOVERY_SCAN_INTERVAL_MS = 30 * 60 * 1_000;
 export const MAX_CONSECUTIVE_SAME_SCAN_RETRIES = 3;
@@ -28,10 +30,6 @@ export type ScanOptions =
 
 export function chainDiscoveryScanOptions(input: {
   watermarkSeeded: boolean;
-  /** @deprecated Startup and cadence no longer select unbounded scans. */
-  run?: number;
-  /** @deprecated Configures repair cadence in the runner, not live scan mode. */
-  fullScanEvery?: number;
   pageBudget?: number;
 }): ScanOptions {
   const configuredPageBudget = input.pageBudget;
@@ -50,6 +48,8 @@ export function chainDiscoveryScanOptions(input: {
 export interface ScanSchedulerConfig {
   pageBudget?: number;
   /** Number of 30-minute ticks between completed historical repair generations. */
+  repairEveryTicks?: number;
+  /** @deprecated Use repairEveryTicks. Compatibility is isolated at the runner boundary. */
   fullScanEvery?: number;
 }
 
@@ -102,7 +102,6 @@ export function planScan(
     complete: (watermarkSeeded: boolean): ScanPlan => ({
       scan: chainDiscoveryScanOptions({
         watermarkSeeded,
-        run: state.run,
         pageBudget: config.pageBudget,
       }),
       priorFailures: 0,
@@ -167,6 +166,8 @@ export function createChainDiscoveryScanRunner(input: {
   };
   log: (msg: string) => void;
   pageBudget?: number;
+  repairEveryTicks?: number;
+  /** @deprecated Use repairEveryTicks. */
   fullScanEvery?: number;
 }): () => Promise<void> {
   let state = INITIAL_SCAN_SCHEDULER_STATE;
@@ -240,12 +241,12 @@ export function createChainDiscoveryScanRunner(input: {
       // Do not add repair traffic while live catch-up is unhealthy. On success,
       // live has already committed before this independently bounded lane starts.
       if (outcome.ok && input.agent.repairContextGraphRegistry) {
-        const configuredRepairEvery = input.fullScanEvery;
+        const configuredRepairEvery = input.repairEveryTicks ?? input.fullScanEvery;
         const repairEvery = typeof configuredRepairEvery === 'number'
           && Number.isFinite(configuredRepairEvery)
           && configuredRepairEvery >= 1
           ? Math.floor(configuredRepairEvery)
-          : CHAIN_FULL_SCAN_EVERY;
+          : CHAIN_REPAIR_AUDIT_EVERY_TICKS;
         try {
           const found = await withRpcRequestContext(
             { requestClass: 'background' },

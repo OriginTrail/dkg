@@ -65,6 +65,17 @@ class MemoryRegistryScanCursorStore {
   readonly repairAudits = new Map<string, unknown>();
   readonly loads: string[] = [];
   readonly saves: Array<{ key: string; nextBlock: number }> = [];
+  readonly repairAudit = {
+    load: async (
+      key: { chainId: string; deploymentId: string; registryAddress: string },
+    ): Promise<unknown> => this.repairAudits.get(this.key(key)),
+    save: async (
+      key: { chainId: string; deploymentId: string; registryAddress: string },
+      checkpoint: unknown,
+    ): Promise<void> => {
+      this.repairAudits.set(this.key(key), checkpoint);
+    },
+  };
 
   async load(key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<number | undefined> {
     const encoded = this.key(key);
@@ -76,19 +87,6 @@ class MemoryRegistryScanCursorStore {
     const encoded = this.key(key);
     this.saves.push({ key: encoded, nextBlock });
     this.values.set(encoded, nextBlock);
-  }
-
-  async loadRepairAudit(
-    key: { chainId: string; deploymentId: string; registryAddress: string },
-  ): Promise<unknown> {
-    return this.repairAudits.get(this.key(key));
-  }
-
-  async saveRepairAudit(
-    key: { chainId: string; deploymentId: string; registryAddress: string },
-    checkpoint: unknown,
-  ): Promise<void> {
-    this.repairAudits.set(this.key(key), checkpoint);
   }
 
   private key(key: { chainId: string; deploymentId: string; registryAddress: string }): string {
@@ -671,11 +669,10 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.values.get((store as any).key(key))).toBe(2_101);
   });
 
-  it('fails repair closed before chain RPC when durable repair methods are not paired', async () => {
+  it('fails repair closed before chain RPC when the durable repair capability is absent', async () => {
     const store = {
       load: vi.fn(async () => undefined),
       save: vi.fn(async () => {}),
-      loadRepairAudit: vi.fn(async () => undefined),
     };
     const registry = makeRegistry();
     const { adapter, provider } = makeAdapter(registry, 2_100, {
@@ -686,7 +683,7 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       pageBudget: 1,
     })[Symbol.asyncIterator]();
 
-    await expect(iterator.next()).rejects.toThrow('paired durable loadRepairAudit/saveRepairAudit');
+    await expect(iterator.next()).rejects.toThrow('durable repairAudit load/save capability');
     expect(provider.getBlockNumber.calls).toEqual([]);
     expect(provider.getCode.calls).toEqual([]);
     expect(registry.queryFilter.calls).toEqual([]);
@@ -758,6 +755,87 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(restartedRegistry.queryFilter.calls).toEqual([]);
     expect(restartedProvider.getBlockNumber.calls).toEqual([]);
     expect(restartedProvider.getCode.calls).toEqual([]);
+
+    const completed = store.repairAudits.get((store as any).key(key)) as Record<string, unknown>;
+    store.repairAudits.set((store as any).key(key), {
+      ...completed,
+      completedAt: Date.now() - 86_400_001,
+    });
+    const renewedRegistry = makeRegistry();
+    const { adapter: renewed } = makeAdapter(renewedRegistry, 4_000, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    renewedRegistry.queryFilter.setImpl(async () => []);
+    await collectRegistryScan(renewed, {
+      mode: 'repair',
+      pageBudget: 1,
+      minimumIntervalMs: 86_400_000,
+    });
+    expect(renewedRegistry.queryFilter.calls.map(
+      ([, lo, hi]: [unknown, number, number]) => [lo, hi],
+    )).toEqual([[0, 999]]);
+    expect(store.repairAudits.get((store as any).key(key))).toMatchObject({
+      nextBlock: 1_000,
+      targetBlock: 3_950,
+    });
+    expect(store.repairAudits.get((store as any).key(key))).not.toHaveProperty('completedAt');
+  });
+
+  it('does not advance repair progress when atomic checkpoint persistence rejects', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const key = {
+      chainId: 'evm:31337',
+      deploymentId: 'evm:31337:hub=0x0000000000000000000000000000000000000001',
+      registryAddress: REGISTRY,
+    };
+    const durableSave = store.repairAudit.save;
+    let saveCalls = 0;
+    store.repairAudit.save = async (cursorKey, checkpoint) => {
+      saveCalls += 1;
+      if (saveCalls === 2) throw new Error('repair checkpoint unavailable');
+      await durableSave(cursorKey, checkpoint);
+    };
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    registry.queryFilter.setImpl(async () => []);
+    const iterator = adapter.scanContextGraphRegistryPages({
+      mode: 'repair',
+      pageBudget: 1,
+      minimumIntervalMs: 86_400_000,
+    })[Symbol.asyncIterator]();
+    const page = await iterator.next();
+    expect(page.done).toBe(false);
+    await expect(page.value.ack()).rejects.toThrow('repair checkpoint unavailable');
+    await iterator.return?.();
+    expect(store.repairAudits.get((store as any).key(key))).toMatchObject({
+      nextBlock: 0,
+      targetBlock: 2_050,
+    });
+    expect(store.repairAudits.get((store as any).key(key))).not.toHaveProperty('completedAt');
+
+    store.repairAudit.save = durableSave;
+    const replayRegistry = makeRegistry();
+    const { adapter: replay } = makeAdapter(replayRegistry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    replayRegistry.queryFilter.setImpl(async () => []);
+    await collectRegistryScan(replay, {
+      mode: 'repair',
+      pageBudget: 1,
+      minimumIntervalMs: 86_400_000,
+    });
+    expect(replayRegistry.queryFilter.calls.map(
+      ([, lo, hi]: [unknown, number, number]) => [lo, hi],
+    )).toEqual([[0, 999]]);
+    expect(store.repairAudits.get((store as any).key(key))).toMatchObject({
+      nextBlock: 1_000,
+      targetBlock: 2_050,
+    });
   });
 
   it('rejects inconsistent persisted repair checkpoints and cannot be suppressed by future time', async () => {

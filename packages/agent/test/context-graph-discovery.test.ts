@@ -12,7 +12,12 @@ function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
   };
   return Object.assign(fn, { calls });
 }
-import { DKGAgent, type ContextGraphSub, type ContextGraphSubscriptionStore } from '../src/index.js';
+import {
+  DKGAgent,
+  type ContextGraphSub,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
+} from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { OxigraphStore, SharedMemoryLiteralBlobStore, SparqlHttpStore, registerTripleStoreAdapter, type TripleStore, type TripleStoreConfig } from '@origintrail-official/dkg-storage';
 import { SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphSharedMemoryUri, contextGraphMetaGraphUri, Logger } from '@origintrail-official/dkg-core';
@@ -2743,7 +2748,8 @@ describe('discoverContextGraphsFromChain', () => {
     let saves = 0;
     const subscriptionStore: ContextGraphSubscriptionStore = {
       loadAll: async () => [],
-      save: async () => {
+      save: async (record) => {
+        if (record.id !== revealed.name) return;
         saves += 1;
         if (saves === 1) await firstSave;
       },
@@ -2762,8 +2768,81 @@ describe('discoverContextGraphsFromChain', () => {
     expect(acked).toBe(0);
     releaseFirstSave?.();
     await expect(discovery).resolves.toBe(1);
-    expect(saves).toBeGreaterThanOrEqual(2);
+    expect(saves).toBe(1);
     expect(acked).toBe(1);
+  }, 15000);
+
+  it('acknowledges on-demand rows while durably flushing only host state', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const memberName = 'on-demand-member-boundary';
+    const hostName = 'on-demand-host-boundary';
+    const revealed = [
+      {
+        contextGraphId: '827',
+        name: memberName,
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 100,
+        metadataRevealed: true,
+      },
+      {
+        contextGraphId: '828',
+        name: hostName,
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 100,
+        metadataRevealed: true,
+      },
+    ] satisfies ContextGraphOnChain[];
+    let acknowledged = 0;
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: revealed,
+        ack: async () => {
+          acknowledged += 1;
+        },
+      };
+    };
+    const targetSaves: ContextGraphSubscriptionRecord[] = [];
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record) => {
+        if (record.id === memberName || record.id === hostName) targetSaves.push(record);
+      },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'edge',
+    });
+    agent = result.agent;
+    await agent.start();
+    (agent as any).setContextGraphSubscription(memberName, {
+      name: memberName,
+      subscribed: true,
+      synced: false,
+      syncMode: 'on-demand',
+    }, { persist: false });
+    (agent as any).setContextGraphSubscription(hostName, {
+      name: hostName,
+      subscribed: false,
+      synced: false,
+      coreHosted: true,
+      syncMode: 'on-demand',
+    }, { persist: false });
+
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .resolves.toBe(2);
+
+    expect(acknowledged).toBe(1);
+    expect(targetSaves).toEqual([
+      expect.objectContaining({
+        id: hostName,
+        subscribed: false,
+        coreHosted: true,
+      }),
+    ]);
   }, 15000);
 
   it('leaves the page unacknowledged on subscription failure and repairs it on replay', async () => {
@@ -2783,8 +2862,10 @@ describe('discoverContextGraphsFromChain', () => {
     let failing = true;
     const subscriptionStore: ContextGraphSubscriptionStore = {
       loadAll: async () => [],
-      save: async () => {
-        if (failing) throw new Error('subscription store unavailable');
+      save: async (record) => {
+        if (record.id === revealed.name && failing) {
+          throw new Error('subscription store unavailable');
+        }
       },
       delete: async () => {},
     };
