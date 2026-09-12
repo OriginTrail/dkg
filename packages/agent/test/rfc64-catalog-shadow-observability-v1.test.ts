@@ -9,11 +9,7 @@ import type { Rfc64CatalogResponsibilitySelectionV1 } from
   '../src/rfc64/catalog-responsibility-registry-v1.js';
 import { Rfc64PublicCatalogReceiverV1 } from
   '../src/rfc64/public-catalog-receiver-v1.js';
-import {
-  bindRfc64SwmCatalogProjectionOwnerV1,
-  Rfc64SwmCatalogProjectionOwnerV1,
-  Rfc64SwmCatalogProjectionSupervisorMethods,
-} from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 import type { DKGAgent } from '../src/dkg-agent.js';
 
 const SHADOW_CG = '0x1111111111111111111111111111111111111111/private-shadow';
@@ -155,51 +151,61 @@ describe('RFC-64 catalog shadow observability projection', () => {
     expect(readResponsibilities).toHaveBeenCalledOnce();
   });
 
-  it('reads the safe projection from the agent-owned supervisor and inventory runtime', () => {
+  it('composes the safe projection from public subsystem status accessors', () => {
     const shadowObservability = createShadowRuntimeV1({
       selectedContextGraphIds: [SHADOW_CG],
     });
+    const readInventory = vi.fn(() => ({
+      attemptedUpserts: 0,
+      appliedUpserts: 0,
+      existingUpserts: 0,
+      attemptedRemovals: 0,
+      appliedRemovals: 0,
+      absentRemovals: 0,
+      failed: 0,
+      casRetries: 0,
+      lastAction: null,
+      lastContextGraphId: null,
+      lastKaUal: null,
+      lastHeadDigest: null,
+      lastError: null,
+    }));
+    const readProjection = vi.fn(() => ({
+      running: false,
+      pass: 0,
+      retryIntervalMs: 5_000,
+      lastPassStartedAtMs: null,
+      lastPassCompletedAtMs: null,
+      repairs: [],
+    }));
+    const readBootstrap = vi.fn(() => ({
+      running: false,
+      pass: 1,
+      retryIntervalMs: 5_000,
+      lastPassStartedAtMs: 10,
+      lastPassCompletedAtMs: 20,
+      targets: [{
+        scope: { contextGraphId: SHADOW_CG },
+        mode: 'shadow',
+        outcome: 'shadow-staged',
+        appliedHeadDigest: null,
+      }],
+    }));
+    const readInFlight = vi.fn(() => 0);
     const agent = {
-      config: {
-        rfc64CatalogExecutionPlan: {
-          selectedAuthority: { [SHADOW_CG]: { mode: 'shadow' } },
-        },
-      },
       rfc64CatalogShadowObservabilityV1: shadowObservability,
-      readRfc64PublicCatalogBootstrapStatusV1: () => ({
-        running: false,
-        pass: 1,
-        retryIntervalMs: 5_000,
-        lastPassStartedAtMs: 10,
-        lastPassCompletedAtMs: 20,
-        targets: [{
-          scope: { contextGraphId: SHADOW_CG },
-          mode: 'shadow',
-          outcome: 'shadow-staged',
-          appliedHeadDigest: null,
-        }],
-      }),
+      rfc64SwmAuthorInventoryShadowStatusV1: readInventory,
+      readRfc64SwmCatalogProjectionSupervisorStatusV1: readProjection,
+      readRfc64PublicCatalogBootstrapStatusV1: readBootstrap,
+      inFlightRfc64SwmInventoryObserverCountV1: readInFlight,
     } as unknown as DKGAgent;
-    bindRfc64SwmCatalogProjectionOwnerV1(
-      agent,
-      new Rfc64SwmCatalogProjectionOwnerV1({
-        resolvePartition: () => undefined,
-        listLocalAuthorAddresses: () => [],
-        acceptsPublicRootLane: () => false,
-        acceptsFinalizedPrivateLane: () => false,
-        listFinalizedPrivateRepairs: () => [],
-        repairFinalizedPrivatePlacement: async () => undefined,
-        reconcile: async () => null,
-        warn: () => undefined,
-      }),
-    );
     shadowObservability.recordTerminalEvent({
       kind: 'receiver-completed',
       contextGraphId: SHADOW_CG,
       outcome: 'staged-only',
     });
 
-    const status = Rfc64SwmCatalogProjectionSupervisorMethods.prototype
+    const status = Rfc64CatalogMethods.prototype
       .readRfc64CatalogShadowExecutionStatusV1.call(agent);
 
     expect(status).toMatchObject({
@@ -216,6 +222,10 @@ describe('RFC-64 catalog shadow observability projection', () => {
         stageOnlyInvariantSatisfied: true,
       },
     });
+    expect(readInventory).toHaveBeenCalledOnce();
+    expect(readProjection).toHaveBeenCalledOnce();
+    expect(readBootstrap).toHaveBeenCalledOnce();
+    expect(readInFlight).toHaveBeenCalledOnce();
   });
 
   it('proves staged-only progress with fixed aggregate counters and no identifiers', () => {

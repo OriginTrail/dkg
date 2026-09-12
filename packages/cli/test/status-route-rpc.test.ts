@@ -71,6 +71,7 @@ async function requestStatusWithAgent(
   requestPath = '/api/status',
   networkOverride: RequestContext['network'] = null,
   rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
+  rfc64PublicCatalogOverride?: RequestContext['rfc64PublicCatalog'],
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -88,10 +89,11 @@ async function requestStatusWithAgent(
       url,
       network: networkOverride,
       config,
-      rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
-        config as never,
-        resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
-      ),
+      rfc64PublicCatalog: rfc64PublicCatalogOverride
+        ?? resolveRfc64PublicCatalogActivation(
+          config as never,
+          resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+        ),
       ...(rfc64CatalogOverride === undefined
         ? {}
         : { rfc64Catalog: rfc64CatalogOverride }),
@@ -635,6 +637,15 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           contextGraphModes: {},
         },
       } as never,
+      {
+        enabled: true,
+        selectedContextGraphs: [selected],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {},
+        },
+      },
     );
 
     expect(response.body.rfc64Catalog.rollout).toEqual({
@@ -646,6 +657,10 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       defaultMode: 'shadow',
       legacyOverrideCount: 0,
       shadowOverrideCount: 0,
+    });
+    expect(response.body.rfc64PublicCatalog.rollout).toEqual({
+      killSwitch: false,
+      contextGraphModes: { [selected]: 'shadow' },
     });
   });
 

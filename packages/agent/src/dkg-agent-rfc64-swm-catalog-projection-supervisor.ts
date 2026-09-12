@@ -21,15 +21,10 @@ import type { Rfc64CatalogWorkloadOwnerV1 } from './rfc64/catalog-runtime-v1.js'
 import { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   './rfc64/finalized-private-placement-repair-store-v1.js';
-import { rfc64SwmInventoryShadowRuntimeV1 } from
-  './rfc64/swm-inventory-shadow-runtime-v1.js';
 import {
   boundedRfc64SupervisorErrorV1,
   rfc64SupervisorErrorMessageV1,
 } from './rfc64/supervisor-status-v1.js';
-import {
-  type Rfc64CatalogShadowExecutionStatusV1,
-} from './rfc64/catalog-shadow-observability-v1.js';
 
 const MAX_CONCURRENT_REPAIRS_V1 = 4;
 const DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1 = 5_000;
@@ -536,19 +531,6 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
     this: DKGAgent,
   ): Readonly<Rfc64SwmCatalogProjectionSupervisorStatusV1> | null {
     return projectionOwnerV1(this).status();
-  }
-
-  /** Privacy-safe, fixed-cardinality evidence for release shadow validation. */
-  readRfc64CatalogShadowExecutionStatusV1(
-    this: DKGAgent,
-  ): Readonly<Rfc64CatalogShadowExecutionStatusV1> | null {
-    const inventoryRuntime = rfc64SwmInventoryShadowRuntimeV1(this);
-    return this.rfc64CatalogShadowObservabilityV1.snapshot({
-      inventoryObserver: inventoryRuntime.status(),
-      projectionSupervisor: projectionOwnerV1(this).status(),
-      bootstrap: this.readRfc64PublicCatalogBootstrapStatusV1(),
-      inFlightInventoryObservers: inventoryRuntime.inFlightCount,
-    });
   }
 
   async whenRfc64SwmCatalogProjectionSupervisorIdleV1(this: DKGAgent): Promise<void> {
