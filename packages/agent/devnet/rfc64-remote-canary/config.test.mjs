@@ -54,6 +54,30 @@ test('the standards-based config validator enforces authorization body shape', (
   );
 });
 
+test('normalization detaches and recursively freezes authorization request bodies', () => {
+  const input = baseConfig();
+  input.authorizationChecks.unauthorized.method = 'POST';
+  input.authorizationChecks.unauthorized.path = '/api/query';
+  input.authorizationChecks.unauthorized.body = {
+    probe: {
+      values: [{ state: 'original' }],
+    },
+  };
+  const expectedBody = JSON.stringify(input.authorizationChecks.unauthorized.body);
+  const normalized = validateRemoteCanaryConfigV1(input);
+  const body = normalized.authorizationChecks.unauthorized.body;
+
+  input.authorizationChecks.unauthorized.body.probe.values[0].state = 'caller-mutated';
+  input.authorizationChecks.unauthorized.body.probe.values.push({ state: 'added' });
+
+  assert.equal(JSON.stringify(body), expectedBody);
+  assert.equal(Object.isFrozen(body), true);
+  assert.equal(Object.isFrozen(body.probe), true);
+  assert.equal(Object.isFrozen(body.probe.values), true);
+  assert.equal(Object.isFrozen(body.probe.values[0]), true);
+  assert.throws(() => { body.probe.values[0].state = 'normalized-mutated'; }, TypeError);
+});
+
 test('normalization resolves the canonical execution topology once', () => {
   const config = validateRemoteCanaryConfigV1(baseConfig());
   const contextGraph = config.contextGraphs[0];
@@ -61,6 +85,10 @@ test('normalization resolves the canonical execution topology once', () => {
   assert.equal(contextGraph.receiver, config.nodes[1]);
   assert.equal(config.lifecycle.receiver, contextGraph.receiver);
   assert.equal(config.authorizationChecks.unauthorized.node, contextGraph.receiver);
+  assert.equal(contextGraph.vmEvidenceState, 'PLANNED');
+  assert.equal(contextGraph.catalogSwmEvidenceState, 'PLANNED');
+  assert.equal(config.authorizationChecks.unauthorized.evidenceState, 'PLANNED');
+  assert.equal(config.rpcUsage.evidenceState, 'PLANNED');
   assert.match(contextGraph.contextGraphRef, /^cg:[0-9a-f]{20}$/u);
   assert.match(contextGraph.source.nodeRef, /^node:[0-9a-f]{20}$/u);
 });

@@ -179,9 +179,9 @@ export async function withReceiverOfflineV1({
   return operationResult;
 }
 
-export function verifyCatalogSwmV1({ config, plan, request }) {
-  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph, index) => {
-    if (plan[index].state === 'EVIDENCE_REQUIRED') {
+export function verifyCatalogSwmV1({ config, request }) {
+  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph) => {
+    if (contextGraph.catalogSwmEvidenceState === 'EVIDENCE_REQUIRED') {
       return Object.freeze({
         contextGraphRef: contextGraph.contextGraphRef,
         status: 'EVIDENCE_REQUIRED',

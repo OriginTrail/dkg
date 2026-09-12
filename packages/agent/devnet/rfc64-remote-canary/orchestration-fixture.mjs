@@ -19,6 +19,7 @@ export function createCertificationRuntime({
   contextGraphIds = [CG],
   mutateJsonBody,
   rpcEvidenceConfig = baseConfig(),
+  vmQueryFalseFor = null,
 } = {}) {
   const contextGraphConfig = new Map(
     rpcEvidenceConfig.contextGraphs.map((entry) => [entry.id, entry]),
@@ -68,7 +69,10 @@ export function createCertificationRuntime({
         return jsonResponse({ error: 'invalid query request' }, 400);
       }
       if (body.view === 'verifiable-memory') {
-        return jsonResponse({ result: { type: 'boolean', value: true } });
+        const role = isReceiver ? 'receiver' : 'source';
+        return jsonResponse({
+          result: { type: 'boolean', value: vmQueryFalseFor !== role },
+        });
       }
       if (body.sparql === CATALOG_SWM_ASK || body.sparql.includes('known:second-swm-subject')) {
         return jsonResponse({ result: { type: 'boolean', value: catalogSwmPresent } });

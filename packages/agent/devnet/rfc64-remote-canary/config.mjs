@@ -79,6 +79,10 @@ export function validateRemoteCanaryConfigV1(input) {
       source,
       receiver,
       contextGraphRef: opaqueRef('cg', entry.id),
+      vmEvidenceState: entry.vmAskSparql === undefined ? 'EVIDENCE_REQUIRED' : 'PLANNED',
+      catalogSwmEvidenceState: entry.catalogSwmAskSparql === undefined
+        ? 'EVIDENCE_REQUIRED'
+        : 'PLANNED',
     });
   });
 
@@ -189,7 +193,7 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
       ? 'catalog-protocol-api-not-exposed'
       : 'revocation-api-not-exposed';
     if (value.reasonCode !== expected) invalid('authorization-gap-reason');
-    return Object.freeze({ ...value });
+    return Object.freeze({ ...value, evidenceState: 'EVIDENCE_REQUIRED' });
   }
   const requiredAuthentication = label === 'unauthorized' ? 'none' : 'node';
   if (value.authentication !== requiredAuthentication) {
@@ -221,21 +225,26 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
     : nodeById.get(value.notFoundControlNodeId);
   return Object.freeze({
     ...value,
+    ...(value.body === undefined ? {} : { body: cloneFrozenJson(value.body) }),
     node,
     ...(notFoundControlNode === undefined ? {} : { notFoundControlNode }),
     expectedStatuses: Object.freeze([...new Set(value.expectedStatuses)]),
     expectedCodes: Object.freeze([...new Set(value.expectedCodes)]),
+    evidenceState: 'PLANNED',
   });
 }
 
 function normalizeRpcUsage(value) {
-  if (value.kind === 'required') return Object.freeze({ kind: 'required' });
+  if (value.kind === 'required') {
+    return Object.freeze({ kind: 'required', evidenceState: 'EVIDENCE_REQUIRED' });
+  }
   if (value.kind === 'evidence-file') {
     if (!isAbsolute(value.path)) invalid('rpc-evidence-path-must-be-absolute');
     return Object.freeze({
       kind: value.kind,
       path: value.path,
       minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
+      evidenceState: 'PLANNED',
     });
   }
   return Object.freeze({
@@ -243,7 +252,18 @@ function normalizeRpcUsage(value) {
     command: validateCommandV1(value.command),
     minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
     commandTimeoutMs: value.commandTimeoutMs ?? DEFAULT_RPC_USAGE.commandTimeoutMs,
+    evidenceState: 'PLANNED',
   });
+}
+
+function cloneFrozenJson(value) {
+  if (Array.isArray(value)) return Object.freeze(value.map(cloneFrozenJson));
+  if (value !== null && typeof value === 'object') {
+    return Object.freeze(Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, cloneFrozenJson(entry)]),
+    ));
+  }
+  return value;
 }
 
 function normalizeTiming(value) {
