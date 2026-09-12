@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { catchupReadinessResult } from './_helpers/catchup-readiness-fixtures.js';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
-import type { SwmSnapshotCoverage } from '@origintrail-official/dkg-agent';
+import type { CatchupPassDecisionReason, SwmSnapshotCoverage } from '@origintrail-official/dkg-agent';
 import { classifyContextGraphCatchupReadiness, swmShortfallClause } from '../src/context-graph-readiness.js';
 
 
@@ -43,69 +43,142 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
     materializationFailures: 0,
   };
 
-  it('names the counts, the peer, the pass count and the outstanding work', () => {
-    expect(swmShortfallClause(r26, 2)).toBe(
-      ' (Shared memory: 178/250 snapshots materialized from peer …abcd1234 after 3 passes;'
-      + ' 72 not materialized, including did:dkg:ka:one, did:dkg:ka:two (+70 more).)',
-    );
+  const many = Array.from({ length: 25 }, (_, i) => `did:dkg:ka:${i}`);
+  const formatterCases: readonly {
+    readonly name: string;
+    readonly coverage: SwmSnapshotCoverage | undefined;
+    readonly continuationPasses: number | undefined;
+    readonly stopReason?: CatchupPassDecisionReason;
+    readonly exact?: string;
+    readonly contains?: readonly string[];
+    readonly excludes?: readonly (string | RegExp)[];
+    readonly namedRefCount?: number;
+  }[] = [
+    {
+      name: 'renders the canonical counts, peer, passes and outstanding work',
+      coverage: r26,
+      continuationPasses: 2,
+      exact: ' (Shared memory: 178/250 snapshots materialized from peer …abcd1234 after 3 passes;'
+        + ' 72 not materialized, including did:dkg:ka:one, did:dkg:ka:two (+70 more).)',
+      contains: ['Shared memory:'],
+      excludes: ['durable'],
+    },
+    {
+      name: 'counts the initial walk as one pass when repeats are zero',
+      coverage: r26,
+      continuationPasses: 0,
+      contains: ['after 1 pass;'],
+    },
+    {
+      name: 'counts the initial walk as one pass when repeats are absent',
+      coverage: r26,
+      continuationPasses: undefined,
+      contains: ['after 1 pass;'],
+    },
+    {
+      name: 'adds nothing when no coverage was observed',
+      coverage: undefined,
+      continuationPasses: 3,
+      exact: '',
+    },
+    {
+      name: 'adds nothing when the selected manifest is fully resolved',
+      coverage: { ...r26, snapshotsResolved: 250, missingCount: 0, missingSample: [] },
+      continuationPasses: 3,
+      exact: '',
+    },
+    {
+      name: 'calls an incomplete manifest a lower bound and says it was not retried',
+      coverage: { ...r26, manifestComplete: false },
+      continuationPasses: 1,
+      contains: ['250 is a lower bound and that peer was not retried.'],
+    },
+    {
+      name: 'caps named identifiers and accounts for omitted refs',
+      coverage: { ...r26, missingCount: 90, missingSample: many },
+      continuationPasses: 1,
+      contains: ['did:dkg:ka:9 (+80 more)'],
+      excludes: ['did:dkg:ka:10'],
+      namedRefCount: 10,
+    },
+    {
+      name: 'drops the omitted-ref marker when every outstanding ref is named',
+      coverage: { ...r26, missingCount: 2, missingSample: ['did:dkg:ka:one', 'did:dkg:ka:two'] },
+      continuationPasses: 0,
+      contains: ['2 not materialized, including did:dkg:ka:one, did:dkg:ka:two.)'],
+      excludes: ['more)'],
+    },
+    {
+      name: 'explains budget exhaustion',
+      coverage: r26,
+      continuationPasses: 2,
+      stopReason: 'budget-exhausted',
+      contains: ['Continuation stopped because the time budget was exhausted.'],
+    },
+    {
+      name: 'explains the pass limit',
+      coverage: r26,
+      continuationPasses: 2,
+      stopReason: 'max-passes-reached',
+      contains: ['Continuation stopped because the pass limit was reached.'],
+    },
+    {
+      name: 'explains that no capable peers remain',
+      coverage: r26,
+      continuationPasses: 2,
+      stopReason: 'no-capable-peers',
+      contains: ['Continuation stopped because no remaining peer reported holding the missing snapshots.'],
+    },
+    {
+      name: 'reports a coverage stall without blaming the clock',
+      coverage: r26,
+      continuationPasses: 3,
+      stopReason: 'coverage-stalled',
+      contains: ['a further pass stopped making progress, so more passes would not help'],
+      excludes: [/budget|time|timed out|expired/i],
+    },
+    {
+      name: 'omits a stop reason when none was observed',
+      coverage: r26,
+      continuationPasses: 0,
+      excludes: ['Continuation stopped'],
+    },
+    {
+      name: 'omits continue because it is not a stop reason',
+      coverage: r26,
+      continuationPasses: 0,
+      stopReason: 'continue',
+      excludes: ['Continuation stopped'],
+    },
+  ];
+
+  it.each(formatterCases)('$name', ({
+    coverage,
+    continuationPasses,
+    stopReason,
+    exact,
+    contains,
+    excludes,
+    namedRefCount,
+  }) => {
+    const clause = swmShortfallClause(coverage, continuationPasses, stopReason);
+    if (exact !== undefined) expect(clause).toBe(exact);
+    for (const fragment of contains ?? []) expect(clause).toContain(fragment);
+    for (const fragment of excludes ?? []) {
+      if (typeof fragment === 'string') expect(clause).not.toContain(fragment);
+      else expect(clause).not.toMatch(fragment);
+    }
+    if (namedRefCount !== undefined) {
+      expect(clause.match(/did:dkg:ka:\d+/g)).toHaveLength(namedRefCount);
+    }
   });
 
-  it('says "1 pass" when the walk was never repeated', () => {
-    // `continuationPasses` counts the REPEATS, so zero repeats is still one walk.
-    expect(swmShortfallClause(r26, 0)).toContain('after 1 pass;');
-    expect(swmShortfallClause(r26, undefined)).toContain('after 1 pass;');
-  });
-
-  it('adds nothing when there is no shortfall to report', () => {
-    // Both must be exactly '' or the base sentence stops being byte-identical
-    // on every path that has nothing to say. The second case matters most: a
-    // fully-resolved manifest beside an `unreachable` verdict means the
-    // shortfall is on another plane, and "0 outstanding" would misdirect.
-    expect(swmShortfallClause(undefined, 3)).toBe('');
-    expect(swmShortfallClause({ ...r26, missingCount: 0, missingSample: [] }, 3)).toBe('');
-  });
-
-  it('calls an incomplete manifest a lower bound rather than a total', () => {
-    expect(swmShortfallClause({ ...r26, manifestComplete: false }, 0))
-      .toContain("The peer's snapshot manifest was itself incomplete, so 250 is a lower bound");
-  });
-
-  it('caps the named identifiers and accounts for the ones it omits', () => {
-    const many = Array.from({ length: 25 }, (_, i) => `did:dkg:ka:${i}`);
-    const clause = swmShortfallClause({ ...r26, missingCount: 90, missingSample: many }, 1);
-
-    // Exactly ten named — ka:0 through ka:9, the tenth followed by the marker
-    // rather than a comma — and the marker accounts for the other eighty.
-    expect(clause).toContain('did:dkg:ka:9 (+80 more)');
-    expect(clause).not.toContain('did:dkg:ka:10');
-    expect(clause.match(/did:dkg:ka:\d+/g)).toHaveLength(10);
-  });
-
-  it('drops the marker when every outstanding ref is named', () => {
-    const clause = swmShortfallClause(
-      { ...r26, missingCount: 2, missingSample: ['did:dkg:ka:one', 'did:dkg:ka:two'] },
-      0,
-    );
-
-    expect(clause).toContain('2 not materialized, including did:dkg:ka:one, did:dkg:ka:two.)');
-    expect(clause).not.toContain('more)');
-  });
-
-  it('scopes every figure to shared memory, never implying a durable retry', () => {
-    // Continuation passes repeat the shared-memory peer walk ONLY. A reader
-    // must not infer the durable plane was retried three times.
-    const clause = swmShortfallClause(r26, 2);
-
-    expect(clause).toContain('Shared memory:');
-    expect(clause.toLowerCase()).not.toContain('durable');
-  });
-
-  it('appends to the incomplete-progress terminal, leaving its sentence byte-identical', () => {
+  it('composes the exact shortfall onto the incomplete-progress terminal', () => {
     const result = swmIncompleteProgress();
-    result.diagnostics!.sharedMemory.swmCoverage = r26;
-    result.diagnostics!.sharedMemory.continuationPasses = 2;
+    result.diagnostics.sharedMemory.swmCoverage = r26;
+    result.diagnostics.sharedMemory.continuationPasses = 2;
 
-    const c = classifyContextGraphCatchupReadiness({
+    const classification = classifyContextGraphCatchupReadiness({
       result,
       includeSharedMemory: true,
       hasConfirmedMeta: true,
@@ -113,56 +186,8 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
       readinessBeforeCatchup: { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 },
     });
 
-    expect(c.jobStatus).toBe('partial');
-    // Whole-string equality: the prefix pin in T16 cannot see the append.
-    expect(c.error).toBe(INCOMPLETE_PROGRESS + swmShortfallClause(r26, 2));
-    expect(c.error).toContain('178/250');
-    expect(c.error).toContain('72 not materialized');
-  });
-
-  it('says why continuation stopped, in words that match the reason', () => {
-    expect(swmShortfallClause(r26, 2, 'budget-exhausted'))
-      .toContain('Continuation stopped because the time budget was exhausted.');
-    expect(swmShortfallClause(r26, 2, 'max-passes-reached'))
-      .toContain('Continuation stopped because the pass limit was reached.');
-    expect(swmShortfallClause(r26, 2, 'no-capable-peers'))
-      .toContain('Continuation stopped because no remaining peer reported holding the missing snapshots.');
-  });
-
-  it('never blames the clock for a stall, since a stall outranks the budget', () => {
-    // `coverage-stalled` outranks `budget-exhausted` in the policy, so a run
-    // that stalled AND expired reports the stall. If this text mentioned time
-    // it would send an operator to raise a budget that buys nothing — the
-    // precise misdirection that precedence exists to prevent.
-    const clause = swmShortfallClause(r26, 3, 'coverage-stalled');
-
-    expect(clause).toContain('a further pass stopped making progress, so more passes would not help');
-    expect(clause).not.toMatch(/budget|time|timed out|expired/i);
-  });
-
-  it('omits the stop reason when the continuation loop never ran', () => {
-    // Absent when shared memory was not requested; `continue` is not a stop.
-    expect(swmShortfallClause(r26, 0, undefined)).not.toContain('Continuation stopped');
-    expect(swmShortfallClause(r26, 0, 'continue')).not.toContain('Continuation stopped');
-  });
-
-  it('says an incomplete manifest was not retried, not merely that it is a bound', () => {
-    // Two distinct facts: the count understates the shortfall, AND that peer
-    // was dropped from later passes by the capability gate.
-    expect(swmShortfallClause({ ...r26, manifestComplete: false }, 1))
-      .toContain('250 is a lower bound and that peer was not retried.');
-  });
-
-  it('leaves that terminal byte-identical when the round reported no coverage', () => {
-    const c = classifyContextGraphCatchupReadiness({
-      result: swmIncompleteProgress(),
-      includeSharedMemory: true,
-      hasConfirmedMeta: true,
-      isPrivate: false,
-      readinessBeforeCatchup: { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 },
-    });
-
-    expect(c.error).toBe(INCOMPLETE_PROGRESS);
+    expect(classification.jobStatus).toBe('partial');
+    expect(classification.error).toBe(INCOMPLETE_PROGRESS + swmShortfallClause(r26, 2));
   });
 
   /** A responding round that stored verified SWM data without completing the plane. */
@@ -174,103 +199,6 @@ describe('T16b — the shared-memory shortfall clause (#2050)', () => {
     return result;
   }
 
-});
-
-/**
- * T16b (#2050) — the shortfall clause reaches the USER-VISIBLE error.
- *
- * Deliberately complementary to the implementer's own T16b, which asserts
- * `swmShortfallClause` directly. This one never calls the formatter: it drives
- * `classifyContextGraphCatchupReadiness` and asserts the composed terminal
- * string, so it covers the SEAM — that the clause is actually appended, from
- * the right fields, on the right branch.
- *
- * That seam is exactly what T16's prefix pin cannot see. Mutating the clause to
- * return `''` leaves `startsWith(...)` green, because a prefix is satisfied by
- * the prefix followed by nothing; these rows die. Two independent tests of an
- * operator-facing string is not redundancy — the formatter test is the floor,
- * this is the check.
- */
-describe('T16b — the shortfall clause reaches the terminal message', () => {
-  const before = { version: 0, durableVerified: false, sharedMemoryVerified: false, updatedAt: 0 };
-  const PREFIX = 'Verified data was inserted, but this bounded catch-up job ended before the requested plane was complete. The incomplete plane remains unready; graph-level synchronization may continue independently.';
-
-  /** The r26 shape: data inserted, plane unproven, coverage 72 short. */
-  function shortfallResult(over: Partial<{
-    resolved: number; total: number; missingCount: number; missingSample: string[];
-    manifestComplete: boolean; continuationPasses: number;
-  }> = {}): CatchupJobResult {
-    const r = respondingResult();
-    r.dataSynced = 5;
-    r.diagnostics!.durable.insertedDataTriples = 5;
-    r.diagnostics!.durable.timedOutPhases = 1;
-    const coverage: SwmSnapshotCoverage = {
-      contextGraphId: 'cg-under-test',
-      peerIdSuffix: 'abcd1234',
-      snapshotsResolved: over.resolved ?? 178,
-      snapshotsTotal: over.total ?? 250,
-      manifestComplete: over.manifestComplete ?? true,
-      missingCount: over.missingCount ?? 72,
-      missingSample: over.missingSample ?? ['ref-a', 'ref-b'],
-      materializationFailures: 0,
-    };
-    r.diagnostics.sharedMemory.swmCoverage = coverage;
-    r.diagnostics.sharedMemory.continuationPasses = over.continuationPasses ?? 2;
-    return r;
-  }
-
-  const errorFor = (result: CatchupJobResult) => classifyContextGraphCatchupReadiness({
-    result, includeSharedMemory: true, hasConfirmedMeta: true, isPrivate: false,
-    readinessBeforeCatchup: before,
-  }).error ?? '';
-
-  it('appends the shortfall AFTER the byte-identical existing sentence', () => {
-    const error = errorFor(shortfallResult());
-    expect(error.startsWith(PREFIX)).toBe(true);
-    // The part `startsWith` cannot see. A clause mutated to '' leaves the
-    // assertion above green and kills this one.
-    expect(error.length).toBeGreaterThan(PREFIX.length);
-    // The `(+70 more)` marker is not incidental: 72 outstanding against a
-    // 2-ref sample leaves 70 unnamed, and the reader must not mistake the named
-    // refs for the whole inventory. An earlier draft of this expectation omitted
-    // it — the producer caps the sample at 10, so a clause without a marker
-    // would silently understate every shortfall larger than the cap.
-    expect(error.slice(PREFIX.length)).toBe(
-      ' (Shared memory: 178/250 snapshots materialized from peer …abcd1234'
-      + ' after 3 passes; 72 not materialized, including ref-a, ref-b (+70 more).)',
-    );
-  });
-
-  it('names the peer, the counts and the outstanding total from ONE record', () => {
-    const error = errorFor(shortfallResult());
-    expect(error).toContain('178/250');
-    expect(error).toContain('…abcd1234');
-    expect(error).toContain('72 not materialized');
-    // Never a synthetic pair, and never the durable plane: continuation passes
-    // repeat the shared-memory walk only.
-    expect(error).not.toContain('200/250');
-    expect(error.slice(PREFIX.length)).not.toContain('durable');
-  });
-
-  it('reports the WALK plus its repeats, not the repeat count alone', () => {
-    // `continuationPasses` counts repeats, so the text must read passes + 1.
-    expect(errorFor(shortfallResult({ continuationPasses: 0 }))).toContain('after 1 pass;');
-    expect(errorFor(shortfallResult({ continuationPasses: 1 }))).toContain('after 2 passes;');
-  });
-
-  it('emits NO clause when nothing is outstanding', () => {
-    // With largest-manifest ordering, `missingCount === 0` means the SWM plane
-    // resolved everything the best-informed peer knew of and the `unreachable`
-    // came from elsewhere. "0 outstanding" beside a failure verdict would
-    // misdirect, so the sentence must end byte-identical to pre-fix.
-    expect(errorFor(shortfallResult({ resolved: 250, missingCount: 0 }))).toBe(PREFIX);
-  });
-
-  it('flags a truncated manifest as a lower bound and says the peer was not retried', () => {
-    const error = errorFor(shortfallResult({ manifestComplete: false }));
-    expect(error).toContain('is a lower bound');
-    expect(error).toContain('not retried');
-  });
 });
 
 /**

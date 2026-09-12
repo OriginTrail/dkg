@@ -5,14 +5,8 @@
  * SWM materialization and coverage scenarios need.
  */
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import {
-  workspaceOperationPublicSliceSubject,
-  workspacePublicQuadsDigest,
-  type WorkspacePublicSnapshotStore,
-} from '@origintrail-official/dkg-publisher';
-import { storeWorkspaceOperationPublicQuads } from
-  '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
-import { GraphManager, OxigraphStore, type Quad, type TripleStore } from
+import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import { OxigraphStore, type Quad, type TripleStore } from
   '@origintrail-official/dkg-storage';
 import type { SyncPhase } from '../../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../../src/sync/requester/page-fetch.js';
@@ -45,13 +39,10 @@ export interface SwmSyncHarnessFetchInput {
   readonly snapshotRef: string | undefined;
 }
 
-export interface SwmSyncHarnessOptions {
+interface SwmSyncHarnessBaseOptions {
   readonly ctx: OperationContext;
   readonly contextGraphId: string;
   readonly store: TripleStore;
-  readonly served?: SwmSyncHarnessShare;
-  /** Meta payload override (defaults to the served share's meta). */
-  readonly servedMeta?: readonly Quad[];
   readonly cachedSnapshots?: ReadonlyMap<string, readonly Quad[]>;
   readonly remotePeerId?: string;
   readonly fetchPage?: (
@@ -63,6 +54,20 @@ export interface SwmSyncHarnessOptions {
   /** Runs before real graph replacement; throwing models a write failure. */
   readonly onReplaceGraph?: (graphUri: string, quads: readonly Quad[]) => void;
 }
+
+type SwmSyncHarnessSource =
+  | {
+    readonly served: SwmSyncHarnessShare;
+    readonly servedMeta?: never;
+  }
+  | {
+    readonly served?: never;
+    /** An explicit metadata-only source, including `[]` for an empty source. */
+    readonly servedMeta: readonly Quad[];
+  };
+
+export type SwmSyncHarnessOptions = SwmSyncHarnessBaseOptions & SwmSyncHarnessSource;
+type ManagedSwmSyncHarnessOptions = Omit<SwmSyncHarnessBaseOptions, 'store'> & SwmSyncHarnessSource;
 
 export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
   const snapshotStore = new MemorySnapshotStore();
@@ -80,7 +85,7 @@ export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
       await replaceGraph(graphUri, quads);
     };
   }
-  const servedMeta = options.servedMeta ?? options.served?.meta ?? [];
+  const servedMeta = options.served !== undefined ? options.served.meta : options.servedMeta;
   const snapshotFetches: string[] = [];
   const run = async () => {
     const cachedSnapshots = options.cachedSnapshots
@@ -149,57 +154,13 @@ export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
 
 /** Real-store scenario runner with one canonical store lifecycle boundary. */
 export async function runManagedSwmSyncHarness(
-  options: Omit<SwmSyncHarnessOptions, 'store'>,
+  options: ManagedSwmSyncHarnessOptions,
 ): Promise<{ summary: SharedMemorySyncSummary; snapshotFetches: string[] }> {
   const store = new OxigraphStore();
   try {
     const harness = makeSwmSyncHarness({ ...options, store });
     const summary = await harness.run();
     return { summary, snapshotFetches: harness.snapshotFetches };
-  } finally {
-    await store.close().catch(() => {});
-  }
-}
-
-/** Entity-share manifest generated exclusively through the publisher boundary. */
-export async function makeEntityShareSwmHarnessFixture(options: {
-  readonly contextGraphId: string;
-  readonly shareOperationId: string;
-  readonly rootEntity: string;
-  readonly payload: readonly Quad[];
-  readonly publisherPeerId: string;
-}): Promise<SwmSyncHarnessShare & { readonly sliceSubject: string }> {
-  const store = new OxigraphStore();
-  const graphManager = new GraphManager(store);
-  const snapshots = new MemorySnapshotStore();
-  try {
-    await storeWorkspaceOperationPublicQuads({
-      store,
-      graphManager,
-      contextGraphId: options.contextGraphId,
-      shareOperationId: options.shareOperationId,
-      rootEntities: [options.rootEntity],
-      quads: options.payload,
-      publisherPeerId: options.publisherPeerId,
-      timestamp: new Date(0),
-      publicSnapshotStore: snapshots,
-    });
-    const metaGraph = graphManager.sharedMemoryMetaUri(options.contextGraphId);
-    const result = await store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`,
-    );
-    if (result.type !== 'quads') throw new Error('Entity-share fixture metadata query did not return quads');
-    const digest = workspacePublicQuadsDigest(options.payload);
-    return {
-      digest,
-      payload: options.payload.map((quad) => ({ ...quad, graph: '' })),
-      meta: result.quads.map((quad) => ({ ...quad, graph: metaGraph })),
-      sliceSubject: workspaceOperationPublicSliceSubject(
-        options.contextGraphId,
-        options.shareOperationId,
-        options.rootEntity,
-      ),
-    };
   } finally {
     await store.close().catch(() => {});
   }

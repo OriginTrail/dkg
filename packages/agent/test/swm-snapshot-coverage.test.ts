@@ -6,8 +6,8 @@ import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped
 import { collectPublicSnapshotMetadata, selectSwmSnapshotCoverage } from '../src/sync/requester/shared-memory-sync.js';
 import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import { ctx, quad } from './sync-requester-fixtures.js';
+import { makeEntityShareSwmHarnessFixture } from './_helpers/swm-entity-share-publisher-fixture.js';
 import {
-  makeEntityShareSwmHarnessFixture,
   runManagedSwmSyncHarness,
 } from './_helpers/swm-sync-harness.js';
 
@@ -228,20 +228,30 @@ describe('public SWM snapshot coverage (#2050)', () => {
     // `hasValidSnapshot` re-checks both against the cached blob: a hand-written
     // count would turn a cache hit into a network fetch and quietly move the
     // row onto a different branch of the walk.
-    const payload: Quad[] = [
+    const publishedSlice: Quad[] = [
       { subject: ROOT, predicate: 'https://schema.org/name', object: '"Thing One"', graph: '' } as Quad,
       { subject: ROOT, predicate: 'https://schema.org/color', object: '"blue"', graph: '' } as Quad,
+    ];
+    const payload: Quad[] = [
+      ...publishedSlice,
+      {
+        subject: 'https://example.org/thing/not-shared',
+        predicate: 'https://schema.org/name',
+        object: '"Not part of this root slice"',
+        graph: '',
+      } as Quad,
     ];
     // The real publisher owns the slice subject, complete metadata schema,
     // snapshot digest/count, and metadata-graph placement. This fixture cannot
     // remain green if production entity-share metadata changes underneath it.
-    const { digest, meta, sliceSubject } = await makeEntityShareSwmHarnessFixture({
+    const { digest, payload: publishedPayload, meta, sliceSubject } = await makeEntityShareSwmHarnessFixture({
       contextGraphId: COVERAGE_CG,
       shareOperationId: SHARE_OP,
       rootEntity: ROOT,
       payload,
       publisherPeerId: 'peer-source',
     });
+    expect(publishedPayload).toEqual(publishedSlice);
 
     // Fixture integrity across BOTH readers, asserted before the sync so a
     // fixture that drifted names itself instead of surfacing as an unexplained
@@ -254,14 +264,14 @@ describe('public SWM snapshot coverage (#2050)', () => {
     expect(collectPublicSnapshotMetadata(meta)).toEqual([{
       ref: digest,
       digest,
-      count: payload.length,
+      count: publishedPayload.length,
       publishedAtMs: 0,
     }]);
     expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta })).toEqual([]);
 
     // The blob is already cached: the state of a node whose earlier pass
     // fetched it. Nothing here is missing — the peer owes this node nothing.
-    const cached = new Map<string, Quad[]>([[digest, payload]]);
+    const cached = new Map<string, readonly Quad[]>([[digest, publishedPayload]]);
     const { summary, snapshotFetches } = await runManagedSwmSyncHarness({
       ctx,
       remotePeerId: 'peer-entity-share-1a2b3c4d',
