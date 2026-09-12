@@ -2346,6 +2346,52 @@ describe('RFC-64 rollout authority integration', () => {
     expect((edge as any).rfc64PublicCatalogServiceV1).toBeUndefined();
   });
 
+  it('keeps the deprecated disabled rollback out of standalone Track-2 mode', async () => {
+    const edge = await startAgent({
+      name: 'deprecated-disabled-rollback',
+      config: {
+        rfc64PublicCatalogActivation: { enabled: false },
+        // A rollback must remain usable while an operator removes stale
+        // pre-activation controls in a later configuration change.
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async () => AUTHOR,
+        },
+        rfc64PublicCatalogAutoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      },
+    });
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Deprecated disabled rollback',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        active: true,
+        mode: 'legacy',
+        selectionSource: 'operator-override',
+      }),
+    );
+    expect((edge as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      selectedAuthority: {},
+      track2ContextGraphs: [],
+      standaloneTrack2Enabled: false,
+    });
+    expect((edge as any).config.rfc64CatalogDeploymentProfile).toBeUndefined();
+    expect((edge as any).config.rfc64CatalogAccessPolicyAuthority).toBeUndefined();
+    expect((edge as any).config.rfc64CatalogAuthoringPolicy).toBeUndefined();
+    expect((edge as any).rfc64PublicCatalogServiceV1).toBeUndefined();
+  });
+
   it('keeps an eligible edge CG dormant until subscribe and deactivates it on unsubscribe', async () => {
     const providerPeerId = '12D3KooWSubscriptionOwnedCatalogProvider';
     let synchronize!: ReturnType<typeof vi.spyOn>;

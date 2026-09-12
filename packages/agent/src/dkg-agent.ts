@@ -1195,6 +1195,12 @@ export class DKGAgent extends DKGAgentBase {
     );
     const rfc64UnifiedCatalogExplicitlyDisabled =
       normalizedConfig.rfc64CatalogActivation?.enabled === false;
+    const rfc64CatalogExplicitlyDisabled =
+      rfc64UnifiedCatalogExplicitlyDisabled
+      || (
+        normalizedConfig.rfc64CatalogActivation === undefined
+        && normalizedConfig.rfc64PublicCatalogActivation?.enabled === false
+      );
     const activations = resolveRfc64CatalogActivationsV1({
       catalog: normalizedConfig.rfc64CatalogActivation,
       publicCatalog: normalizedConfig.rfc64PublicCatalogActivation,
@@ -1205,25 +1211,19 @@ export class DKGAgent extends DKGAgentBase {
       : activations.publicCatalog;
     const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
       activation,
-      legacyDeploymentProfile: rfc64UnifiedCatalogExplicitlyDisabled
+      legacyDeploymentProfile: rfc64CatalogExplicitlyDisabled
         ? undefined
         : normalizedConfig.rfc64CatalogDeploymentProfile,
-      legacyAutoPublish: rfc64UnifiedCatalogExplicitlyDisabled
+      legacyAutoPublish: rfc64CatalogExplicitlyDisabled
         ? undefined
         : normalizedConfig.rfc64PublicCatalogAutoPublish,
-      legacyBootstrap: rfc64UnifiedCatalogExplicitlyDisabled
+      legacyBootstrap: rfc64CatalogExplicitlyDisabled
         ? undefined
         : normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
     // The unified block owns precedence over the deprecated public-only
     // alias. Omission is the 10.0.16 product default; explicit enabled=false
     // remains a one-release compatibility rollback.
-    const rfc64CatalogExplicitlyDisabled =
-      rfc64UnifiedCatalogExplicitlyDisabled
-      || (
-        normalizedConfig.rfc64CatalogActivation === undefined
-        && normalizedConfig.rfc64PublicCatalogActivation?.enabled === false
-      );
     const rfc64CatalogConfigurationOmitted =
       normalizedConfig.rfc64CatalogActivation === undefined
       && normalizedConfig.rfc64PublicCatalogActivation === undefined
@@ -1249,7 +1249,9 @@ export class DKGAgent extends DKGAgentBase {
             ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
           ) ?? [])
           : [],
-      activation: rfc64UnifiedCatalogExplicitlyDisabled
+      // Any explicit compatibility rollback must not be reinterpreted as the
+      // pre-activation standalone Track-2 mode by the execution-plan adapter.
+      activation: rfc64CatalogExplicitlyDisabled
         ? Object.freeze({ ...catalogActivation, enabled: true })
         : catalogActivation,
     });
@@ -1290,7 +1292,7 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64CatalogDeploymentProfile = catalogActivation.deploymentProfile
       ?? rfc64PublicCatalogControls.deploymentProfile;
     const legacyRfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
-      rfc64UnifiedCatalogExplicitlyDisabled
+      rfc64CatalogExplicitlyDisabled
         ? undefined
         : config.rfc64CatalogAccessPolicyAuthority,
     );

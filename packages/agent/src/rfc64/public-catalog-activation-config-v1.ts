@@ -651,6 +651,21 @@ export function resolveRfc64CatalogActivationsV1(
     input.publicCatalog,
     chainIdentity,
   );
+  // Before the unified block existed, the deprecated public-only switch was
+  // the release rollback. Preserve that meaning when it is the only supplied
+  // control, and expose the same disabled state to daemon status consumers
+  // that the agent runtime already applies.
+  if (
+    input.catalog === undefined
+    && input.publicCatalog !== undefined
+    && !publicCatalog.enabled
+  ) {
+    return Object.freeze({
+      catalog: disabledRfc64CatalogActivationV1(),
+      publicCatalog,
+      selectedCatalogAuthoringControls: Object.freeze([]),
+    });
+  }
   const selectedCatalogAuthoringControls = catalog.selectedCatalogAuthoringControls;
   if (!catalog.enabled && !publicCatalog.enabled) {
     return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });

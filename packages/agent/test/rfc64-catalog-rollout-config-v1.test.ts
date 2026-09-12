@@ -123,6 +123,29 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
     expect(rollback.selectedCatalogAuthoringControls).toEqual([]);
   });
 
+  it('normalizes the deprecated disabled switch into the same full rollback', () => {
+    const rollback = resolveRfc64CatalogActivationsV1({
+      publicCatalog: { enabled: false },
+    }, chainIdentity);
+
+    expect(rollback.catalog).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+      selectedPublicContextGraphs: [],
+      selectedPrivateContextGraphs: [],
+      rollout: {
+        killSwitch: false,
+        defaultMode: 'catalog',
+        contextGraphModes: {},
+      },
+    });
+    expect(rollback.publicCatalog).toMatchObject({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+    expect(rollback.selectedCatalogAuthoringControls).toEqual([]);
+  });
+
   it('unions disjoint rollout modes and lets either block engage the shared kill switch', () => {
     const publicEnvelope = policyEnvelope(policy(PUBLIC_CG, 0));
     const union = resolveRfc64CatalogActivationsV1({
