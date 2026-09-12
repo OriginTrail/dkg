@@ -8,7 +8,8 @@
   },
   "scripts": {
     "certify": "node run.mjs",
-    "test": "node --test *.test.mjs"
+    "test": "pnpm run typecheck && node --test *.test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@origintrail-official/dkg-agent": "workspace:*",

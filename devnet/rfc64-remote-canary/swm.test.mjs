@@ -223,6 +223,64 @@ test('receiver lifecycle bracket confirms readiness before returning operation r
   assert.deepEqual(events, ['stop', 'operation', 'start', 'ready']);
 });
 
+test('receiver recovery retries transient startup status until the daemon becomes ready', async () => {
+  const config = validateRemoteCanaryConfigV1(baseConfig());
+  let receiverOnline = true;
+  let statusReads = 0;
+  const result = await withReceiverOfflineV1({
+    config,
+    lifecycle: { ...config.lifecycle, readyTimeoutMs: 100 },
+    request: {
+      reachable: async () => receiverOnline,
+      json: async () => {
+        statusReads += 1;
+        const status = structuredClone(statusBody());
+        if (statusReads === 1) {
+          status.rfc64Certification.catalog.contextGraphs[0].phase = 'bootstrapping';
+          status.rfc64Certification.catalog.contextGraphs[0].catalogServiceStarted = false;
+        }
+        return status;
+      },
+    },
+    runCommand: async (command) => {
+      receiverOnline = command.argv[1] !== 'stop';
+      return { code: 0, signal: null, stdout: '' };
+    },
+    sleep: async () => undefined,
+  }, async () => 'markers');
+
+  assert.equal(result, 'markers');
+  assert.equal(statusReads, 2);
+});
+
+test('receiver recovery fails immediately for a permanent build mismatch', async () => {
+  const config = validateRemoteCanaryConfigV1(baseConfig());
+  let receiverOnline = true;
+  let statusReads = 0;
+  await assert.rejects(
+    withReceiverOfflineV1({
+      config,
+      lifecycle: { ...config.lifecycle, readyTimeoutMs: 100 },
+      request: {
+        reachable: async () => receiverOnline,
+        json: async () => {
+          statusReads += 1;
+          const status = structuredClone(statusBody());
+          status.rfc64Certification.commit = 'f'.repeat(40);
+          return status;
+        },
+      },
+      runCommand: async (command) => {
+        receiverOnline = command.argv[1] !== 'stop';
+        return { code: 0, signal: null, stdout: '' };
+      },
+      sleep: async () => undefined,
+    }, async () => 'markers'),
+    (error) => error instanceof RemoteCanaryError && error.code === 'node-build-mismatch',
+  );
+  assert.equal(statusReads, 1);
+});
+
 test('offline marker failure drains in-flight shares before receiver restart', async () => {
   const rawConfig = baseConfig();
   rawConfig.contextGraphs.push({

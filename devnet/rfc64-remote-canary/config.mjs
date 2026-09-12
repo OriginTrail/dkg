@@ -1,4 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
+
+/** @typedef {import('./domain-contract.js').JsonValue} JsonValue */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryAuthorizationCheckV1} NormalizedCanaryAuthorizationCheckV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryLifecycleV1} NormalizedCanaryLifecycleV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryNodeV1} NormalizedCanaryNodeV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryRpcUsageV1} NormalizedCanaryRpcUsageV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryTimingV1} NormalizedCanaryTimingV1 */
+/** @typedef {import('./domain-contract.js').NormalizedRemoteCanaryConfigV1} NormalizedRemoteCanaryConfigV1 */
+/** @typedef {import('./domain-contract.js').RawCanaryAuthorizationCheckV1} RawCanaryAuthorizationCheckV1 */
+/** @typedef {import('./domain-contract.js').RawCanaryLifecycleV1} RawCanaryLifecycleV1 */
+/** @typedef {import('./domain-contract.js').RawCanaryNodeV1} RawCanaryNodeV1 */
+/** @typedef {import('./domain-contract.js').RawCanaryRpcUsageV1} RawCanaryRpcUsageV1 */
+/** @typedef {import('./domain-contract.js').RawCanaryTimingV1} RawCanaryTimingV1 */
+/** @typedef {import('./domain-contract.js').RawRemoteCanaryConfigV1} RawRemoteCanaryConfigV1 */
 
 import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
@@ -37,14 +52,23 @@ const configSchema = JSON.parse(readFileSync(
   new URL('./config.schema.json', import.meta.url),
   'utf8',
 ));
+// NodeNext sees these CommonJS-compatible packages as namespaces even though
+// their runtime default exports are constructable/callable.
+// @ts-expect-error Runtime interop is covered by the configuration tests.
 const schemaValidator = new Ajv2020({ allErrors: false, strict: true });
+// @ts-expect-error Runtime interop is covered by the configuration tests.
 addFormats(schemaValidator);
+/** @type {import('ajv').ValidateFunction<RawRemoteCanaryConfigV1>} */
 const matchesRemoteCanaryConfigV1 = schemaValidator.compile(configSchema);
 const sparqlParser = new SparqlParser();
 
 /**
  * The JSON Schema is the canonical shape contract. Handwritten checks below
  * are limited to cross-references, normalization, and safety semantics.
+ */
+/**
+ * @param {unknown} input
+ * @returns {Readonly<NormalizedRemoteCanaryConfigV1>}
  */
 export function validateRemoteCanaryConfigV1(input) {
   if (!matchesRemoteCanaryConfigV1(input)) invalid('config-shape');
@@ -54,9 +78,7 @@ export function validateRemoteCanaryConfigV1(input) {
     if (nodeIds.has(node.id)) invalid('duplicate-node-id');
     nodeIds.add(node.id);
     const baseUrl = validateBaseUrl(node.baseUrl, node.allowTailscaleHttp === true);
-    const auth = node.auth.kind === 'none'
-      ? Object.freeze({ kind: 'none' })
-      : Object.freeze({ kind: 'bearer-file', secretFile: validateSecretFile(node.auth.secretFile) });
+    const auth = normalizeAuthentication(node.auth);
     return Object.freeze({ ...node, baseUrl, auth, nodeRef: opaqueRef('node', node.id) });
   });
   if (!nodes.some(({ role }) => role === 'source')) invalid('source-node-required');
@@ -71,8 +93,8 @@ export function validateRemoteCanaryConfigV1(input) {
       invalid('context-graph-node-reference');
     }
     if (entry.sourceNodeId === entry.receiverNodeId) invalid('source-receiver-must-differ');
-    const source = nodeById.get(entry.sourceNodeId);
-    const receiver = nodeById.get(entry.receiverNodeId);
+    const source = requiredNode(nodeById, entry.sourceNodeId, 'context-graph-node-reference');
+    const receiver = requiredNode(nodeById, entry.receiverNodeId, 'context-graph-node-reference');
     if (source.role !== 'source' || receiver.role !== 'receiver') invalid('context-graph-node-role');
     if (entry.vmAskSparql !== undefined) validateAskSparql(entry.vmAskSparql, 'vm');
     if (entry.catalogSwmAskSparql !== undefined) {
@@ -89,6 +111,7 @@ export function validateRemoteCanaryConfigV1(input) {
   const receiverNodeIds = new Set(contextGraphs.map(({ receiverNodeId }) => receiverNodeId));
   if (receiverNodeIds.size !== 1) invalid('exactly-one-receiver-required');
   const receiverNodeId = [...receiverNodeIds][0];
+  if (receiverNodeId === undefined) invalid('exactly-one-receiver-required');
   const lifecycle = input.lifecycle === undefined || input.lifecycle === null
     ? null
     : normalizeLifecycle(input.lifecycle, nodeById, receiverNodeId);
@@ -119,6 +142,10 @@ export function validateRemoteCanaryConfigV1(input) {
   });
 }
 
+/**
+ * @param {NormalizedRemoteCanaryConfigV1} config
+ * @returns {string}
+ */
 export function createRemoteCanaryCohortRefV1(config) {
   return opaqueRef('cohort', JSON.stringify({
     expectedCommit: config.expectedCommit,
@@ -131,11 +158,30 @@ export function createRemoteCanaryCohortRefV1(config) {
   }));
 }
 
+/** @param {string} value @returns {string} */
 function validateSecretFile(value) {
   if (!isAbsolute(value)) invalid('auth-secret-file-must-be-absolute');
   return value;
 }
 
+/**
+ * @param {import('./domain-contract.js').RawCanaryAuthenticationV1} value
+ * @returns {import('./domain-contract.js').RawCanaryAuthenticationV1}
+ */
+function normalizeAuthentication(value) {
+  if (value.kind === 'none') return Object.freeze({ kind: 'none' });
+  if (value.kind === 'bearer-file') {
+    return Object.freeze({ kind: 'bearer-file', secretFile: validateSecretFile(value.secretFile) });
+  }
+  return assertNever(value);
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} field
+ * @param {Set<object>} [seen]
+ * @returns {void}
+ */
 function assertJsonData(value, field, seen = new Set()) {
   if (value === null || ['string', 'boolean'].includes(typeof value)) return;
   if (typeof value === 'number' && Number.isFinite(value)) return;
@@ -159,6 +205,7 @@ function assertJsonData(value, field, seen = new Set()) {
   invalid(`${field}-not-json`);
 }
 
+/** @param {string} value @param {boolean} allowTailscaleHttp @returns {string} */
 function validateBaseUrl(value, allowTailscaleHttp) {
   let url;
   try { url = new URL(value); } catch { invalid('node-base-url'); }
@@ -172,13 +219,31 @@ function validateBaseUrl(value, allowTailscaleHttp) {
   return url.origin;
 }
 
+/**
+ * @param {ReadonlyMap<string, NormalizedCanaryNodeV1>} nodeById
+ * @param {string} nodeId
+ * @param {string} errorCode
+ * @returns {NormalizedCanaryNodeV1}
+ */
+function requiredNode(nodeById, nodeId, errorCode) {
+  const node = nodeById.get(nodeId);
+  if (node === undefined) invalid(errorCode);
+  return node;
+}
+
+/**
+ * @param {RawCanaryLifecycleV1} value
+ * @param {ReadonlyMap<string, NormalizedCanaryNodeV1>} nodeById
+ * @param {string} receiverNodeId
+ * @returns {Readonly<NormalizedCanaryLifecycleV1>}
+ */
 function normalizeLifecycle(value, nodeById, receiverNodeId) {
   if (!nodeById.has(value.receiverNodeId) || value.receiverNodeId !== receiverNodeId) {
     invalid('lifecycle-receiver-mismatch');
   }
   return Object.freeze({
     receiverNodeId: value.receiverNodeId,
-    receiver: nodeById.get(value.receiverNodeId),
+    receiver: requiredNode(nodeById, value.receiverNodeId, 'lifecycle-receiver-mismatch'),
     stop: validateCommandV1(value.stop),
     start: validateCommandV1(value.start),
     commandTimeoutMs: value.commandTimeoutMs ?? DEFAULT_LIFECYCLE.commandTimeoutMs,
@@ -187,6 +252,12 @@ function normalizeLifecycle(value, nodeById, receiverNodeId) {
   });
 }
 
+/**
+ * @param {RawCanaryAuthorizationCheckV1} value
+ * @param {'unauthorized' | 'revoked'} label
+ * @param {ReadonlyMap<string, NormalizedCanaryNodeV1>} nodeById
+ * @returns {Readonly<NormalizedCanaryAuthorizationCheckV1>}
+ */
 function normalizeAuthorizationCheck(value, label, nodeById) {
   if (value.kind === 'not-exposed') {
     const expected = label === 'unauthorized'
@@ -195,12 +266,12 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
     if (value.reasonCode !== expected) invalid('authorization-gap-reason');
     return Object.freeze({ ...value });
   }
+  if (value.kind !== 'http') return assertNever(value);
   const requiredAuthentication = label === 'unauthorized' ? 'none' : 'node';
   if (value.authentication !== requiredAuthentication) {
     invalid(`${label}-authentication-mode`);
   }
-  if (!nodeById.has(value.nodeId)) invalid('authorization-node-reference');
-  const node = nodeById.get(value.nodeId);
+  const node = requiredNode(nodeById, value.nodeId, 'authorization-node-reference');
   if (label === 'revoked' && node.auth.kind !== 'bearer-file') {
     invalid('revoked-authentication-credentials-required');
   }
@@ -212,23 +283,26 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
   if (value.expectedCodes.some((code) => !/^RFC64_[A-Z0-9_]+$/u.test(code))) {
     invalid('authorization-code-not-rfc64-specific');
   }
+  /** @type {NormalizedCanaryNodeV1 | undefined} */
+  let notFoundControlNode;
   if (value.expectedStatuses.includes(404)) {
     if (value.notFoundControlNodeId === undefined) {
       invalid('authorization-404-requires-code-and-control');
     }
-    const controlNode = nodeById.get(value.notFoundControlNodeId);
-    if (controlNode === undefined || controlNode.auth.kind === 'none') {
+    notFoundControlNode = requiredNode(
+      nodeById,
+      value.notFoundControlNodeId,
+      'authorization-404-control-node',
+    );
+    if (notFoundControlNode.auth.kind === 'none') {
       invalid('authorization-404-control-node');
     }
   } else if (value.notFoundControlNodeId !== undefined) {
     invalid('authorization-404-control-without-404');
   }
-  const notFoundControlNode = value.notFoundControlNodeId === undefined
-    ? undefined
-    : nodeById.get(value.notFoundControlNodeId);
   return Object.freeze({
     ...value,
-    ...(value.body === undefined ? {} : { body: cloneFrozenJson(value.body) }),
+    ...(value.body === undefined ? {} : { body: cloneFrozenJsonObject(value.body) }),
     node,
     ...(notFoundControlNode === undefined ? {} : { notFoundControlNode }),
     expectedStatuses: Object.freeze([...new Set(value.expectedStatuses)]),
@@ -236,26 +310,31 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
   });
 }
 
+/** @param {RawCanaryRpcUsageV1} value @returns {Readonly<NormalizedCanaryRpcUsageV1>} */
 function normalizeRpcUsage(value) {
-  if (value.kind === 'required') {
-    return Object.freeze({ kind: 'required' });
+  switch (value.kind) {
+    case 'required':
+      return Object.freeze({ kind: 'required' });
+    case 'evidence-file':
+      if (!isAbsolute(value.path)) invalid('rpc-evidence-path-must-be-absolute');
+      return Object.freeze({
+        kind: value.kind,
+        path: value.path,
+        minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
+      });
+    case 'command':
+      return Object.freeze({
+        kind: value.kind,
+        command: validateCommandV1(value.command),
+        minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
+        commandTimeoutMs: value.commandTimeoutMs ?? DEFAULT_RPC_USAGE.commandTimeoutMs,
+      });
+    default:
+      return assertNever(value);
   }
-  if (value.kind === 'evidence-file') {
-    if (!isAbsolute(value.path)) invalid('rpc-evidence-path-must-be-absolute');
-    return Object.freeze({
-      kind: value.kind,
-      path: value.path,
-      minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
-    });
-  }
-  return Object.freeze({
-    kind: value.kind,
-    command: validateCommandV1(value.command),
-    minimumSamples: value.minimumSamples ?? DEFAULT_RPC_USAGE.minimumSamples,
-    commandTimeoutMs: value.commandTimeoutMs ?? DEFAULT_RPC_USAGE.commandTimeoutMs,
-  });
 }
 
+/** @param {JsonValue} value @returns {JsonValue} */
 function cloneFrozenJson(value) {
   if (Array.isArray(value)) return Object.freeze(value.map(cloneFrozenJson));
   if (value !== null && typeof value === 'object') {
@@ -266,11 +345,26 @@ function cloneFrozenJson(value) {
   return value;
 }
 
+/**
+ * @param {Readonly<{ [key: string]: JsonValue }>} value
+ * @returns {Readonly<{ [key: string]: JsonValue }>}
+ */
+function cloneFrozenJsonObject(value) {
+  return Object.freeze(Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, cloneFrozenJson(entry)]),
+  ));
+}
+
+/**
+ * @param {RawCanaryTimingV1 | undefined} value
+ * @returns {Readonly<NormalizedCanaryTimingV1>}
+ */
 function normalizeTiming(value) {
   if (value === undefined) return DEFAULT_TIMING;
   return Object.freeze({ ...DEFAULT_TIMING, ...value });
 }
 
+/** @param {string} value @param {'vm' | 'catalog-swm'} label @returns {void} */
 function validateAskSparql(value, label) {
   let parsed;
   try {
@@ -286,7 +380,10 @@ function validateAskSparql(value, label) {
   const triples = patterns.flatMap((pattern) => (
     pattern.subType === 'bgp' && Array.isArray(pattern.triples) ? pattern.triples : []
   ));
-  const terms = triples.flatMap((triple) => [triple.subject, triple.predicate, triple.object]);
+  const terms = triples.flatMap((triple) => {
+    if (!('subject' in triple) || !('predicate' in triple) || !('object' in triple)) return [];
+    return [triple.subject, triple.predicate, triple.object];
+  });
   const nestedTerms = terms.flatMap(collectSparqlTerms);
   const iriContext = resolveSparqlIriContext(parsed.context ?? []);
   if (
@@ -307,32 +404,54 @@ function validateAskSparql(value, label) {
   ) invalid('catalog-swm-query-uses-canary-vocabulary');
 }
 
+/** @param {unknown} value @returns {Record<string, unknown>[]} */
 function collectSparqlTerms(value) {
   if (value === null || typeof value !== 'object') return [];
   if (Array.isArray(value)) return value.flatMap(collectSparqlTerms);
-  const nested = Object.values(value).flatMap(collectSparqlTerms);
-  return value.type === 'term' ? [value, ...nested] : nested;
+  const recordValue = /** @type {Record<string, unknown>} */ (value);
+  const nested = Object.values(recordValue).flatMap(collectSparqlTerms);
+  return recordValue.type === 'term' ? [recordValue, ...nested] : nested;
 }
 
+/** @param {readonly unknown[]} entries */
 function resolveSparqlIriContext(entries) {
+  /** @type {string | undefined} */
   let base;
   const prefixes = new Map();
-  for (const entry of entries) {
-    if (entry?.subType === 'base' && typeof entry.value?.value === 'string') {
-      base = resolveIriReference(entry.value.value, base);
-    } else if (entry?.subType === 'prefix' && typeof entry.value?.value === 'string') {
-      prefixes.set(entry.key, resolveIriReference(entry.value.value, base));
+  for (const candidate of entries) {
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) continue;
+    const entry = /** @type {Record<string, unknown>} */ (candidate);
+    const entryValue = entry.value;
+    if (entryValue === null || typeof entryValue !== 'object' || Array.isArray(entryValue)) {
+      continue;
+    }
+    const value = /** @type {Record<string, unknown>} */ (entryValue).value;
+    if (entry.subType === 'base' && typeof value === 'string') {
+      base = resolveIriReference(value, base);
+    } else if (
+      entry.subType === 'prefix'
+      && typeof entry.key === 'string'
+      && typeof value === 'string'
+    ) {
+      prefixes.set(entry.key, resolveIriReference(value, base));
     }
   }
   return Object.freeze({ base, prefixes });
 }
 
+/**
+ * @param {Record<string, unknown>} term
+ * @param {{ base: string | undefined, prefixes: ReadonlyMap<string, string> }} context
+ */
 function resolveNamedNodeIri(term, context) {
+  if (typeof term.value !== 'string') return '';
   if (term.prefix === undefined) return resolveIriReference(term.value, context.base);
+  if (typeof term.prefix !== 'string') return term.value;
   const prefix = context.prefixes.get(term.prefix);
   return typeof prefix === 'string' ? `${prefix}${term.value}` : term.value;
 }
 
+/** @param {string} value @param {string | undefined} base @returns {string} */
 function resolveIriReference(value, base) {
   if (base === undefined) return value;
   try {
@@ -342,6 +461,12 @@ function resolveIriReference(value, base) {
   }
 }
 
+/** @param {string} value @returns {boolean} */
 function reservedCanaryIri(value) {
   return value === CANARY_PREDICATE || value.startsWith(CANARY_SUBJECT_PREFIX);
+}
+
+/** @param {never} value @returns {never} */
+function assertNever(value) {
+  throw new TypeError(`Unhandled RFC-64 canary discriminant: ${String(value)}`);
 }

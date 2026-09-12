@@ -6,7 +6,7 @@ import {
   CANARY_PREDICATE,
   CANARY_SUBJECT_PREFIX,
 } from './canary-vocabulary.mjs';
-import { failure } from './errors.mjs';
+import { RemoteCanaryError, failure } from './errors.mjs';
 import {
   isRetryableNodeRequestErrorV1,
   mapCanaryPhaseDrainedV1,
@@ -176,9 +176,18 @@ export async function withReceiverOfflineV1({
     config.timing.pollIntervalMs,
     sleep,
     () => failure('receiver-did-not-recover', 'lifecycle'),
-    { retryError: isRetryableNodeRequestErrorV1 },
+    { retryError: isRetryableRecoveryReadinessErrorV1 },
   );
   return operationResult;
+}
+
+function isRetryableRecoveryReadinessErrorV1(error) {
+  return isRetryableNodeRequestErrorV1(error)
+    || (error instanceof RemoteCanaryError && [
+      'rfc64-operational-mode-missing',
+      'rfc64-catalog-service-not-started',
+      'rfc64-operational-incomplete',
+    ].includes(error.code));
 }
 
 export function verifyCatalogSwmV1({ config, request }) {

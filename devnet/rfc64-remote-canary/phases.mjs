@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
+
+/** @typedef {import('./domain-contract.js').NormalizedCanaryAuthorizationCheckV1} NormalizedCanaryAuthorizationCheckV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryContextGraphV1} NormalizedCanaryContextGraphV1 */
+/** @typedef {import('./domain-contract.js').NormalizedRemoteCanaryConfigV1} NormalizedRemoteCanaryConfigV1 */
+/** @typedef {import('./domain-contract.js').RemoteCanaryDependenciesV1} RemoteCanaryDependenciesV1 */
 
 import { readFile } from 'node:fs/promises';
 
@@ -20,6 +26,7 @@ import { createRequesterV1, runBoundedCommandV1 } from './transport.mjs';
 import { verifyVmParityV1 } from './vm.mjs';
 
 /** A network-free plan. It deliberately does not read auth or evidence files. */
+/** @param {unknown} config @param {() => Date} [now] */
 export function createRemoteCanaryDryRunArtifactV1(config, now = () => new Date()) {
   const validated = runPhaseV1('config', () => validateRemoteCanaryConfigV1(config));
   const timestamp = now().toISOString();
@@ -37,6 +44,7 @@ export function createRemoteCanaryDryRunArtifactV1(config, now = () => new Date(
 }
 
 /** Execute the ordered certification phases, parallelizing only independent checks. */
+/** @param {unknown} config @param {RemoteCanaryDependenciesV1} [dependencies] */
 export async function executeRemoteCanaryCertificationV1(config, dependencies = {}) {
   const validated = runPhaseV1('config', () => validateRemoteCanaryConfigV1(config));
   const fetchFn = dependencies.fetchFn ?? globalThis.fetch;
@@ -160,6 +168,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
   }
 }
 
+/** @param {NormalizedRemoteCanaryConfigV1} config */
 function createDryRunPlan(config) {
   return Object.freeze({
     preflight: 'exact-build-network-sync-and-catalog-mode',
@@ -176,16 +185,22 @@ function createDryRunPlan(config) {
   });
 }
 
+/**
+ * @param {readonly NormalizedCanaryContextGraphV1[]} checks
+ * @param {'vmAskSparql' | 'catalogSwmAskSparql'} field
+ */
 function summarizeAskEvidence(checks, field) {
   return checks.every((check) => check[field] !== undefined)
     ? 'PLANNED'
     : 'EVIDENCE_REQUIRED';
 }
 
+/** @param {NormalizedCanaryAuthorizationCheckV1} check */
 function authorizationEvidenceState(check) {
   return check.kind === 'not-exposed' ? 'EVIDENCE_REQUIRED' : 'PLANNED';
 }
 
+/** @param {NormalizedRemoteCanaryConfigV1} config */
 function redactedTopology(config) {
   return Object.freeze({
     nodeCount: config.nodes.length,
