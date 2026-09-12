@@ -367,6 +367,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     scanPlan: ContextGraphRegistryScanPlan,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
     const eventFilter = registry.filters.NameClaimed();
+    const rpcUsageConsumer = scanPlan.mode === 'repair'
+      ? 'repairContextGraphRegistry'
+      : 'listContextGraphsFromChain';
     let repairCheckpoint: ContextGraphRegistryRepairAuditCheckpoint | undefined;
     let scan: Awaited<ReturnType<ContextGraphMethods['resolveContractDeployBlock']>>;
     let start: number;
@@ -475,7 +478,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           connected,
           'listContextGraphsFromChain NameClaimed',
           preferred,
-          'listContextGraphsFromChain',
+          rpcUsageConsumer,
         );
         preferred = page.provider;
         pageResults = [];
