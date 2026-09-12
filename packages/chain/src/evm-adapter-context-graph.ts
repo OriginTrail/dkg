@@ -27,15 +27,16 @@ import {
   type ContextGraphAuthorityHistoryEventQuery,
 } from './context-graph-authority-history.js';
 import {
-  contextGraphAuthorityEventTopics,
-  normalizeContextGraphAuthorityIndexLog,
   resolveEvmContextGraphAuthoritySource,
   type EvmContextGraphAuthoritySource,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
-import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
+import { contextGraphAuthorityIndexIdFromBigInt } from
+  './context-graph-authority-index-id.js';
+import { readEvmContextGraphAuthorityStateV1 } from
+  './evm-context-graph-authority-index-reader.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -948,57 +949,30 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         );
         const authoritySource: EvmContextGraphAuthoritySource =
           this.contextGraphAuthorityIndex !== undefined ? await (async () => {
+          // Reject invalid indexed ids before deployment discovery or any log scan.
+          const authorityIndexId = contextGraphAuthorityIndexIdFromBigInt(contextGraphId);
           const deploymentBlockNumber = (await this.resolveContractDeployBlock(
             contractAddress,
             'getContextGraphAuthoritySnapshot',
             'ContextGraphStorage',
           )).fromBlock;
-          const authorityTopics = contextGraphAuthorityEventTopics(contract.interface);
+          const indexed = await readEvmContextGraphAuthorityStateV1({
+            index: this.contextGraphAuthorityIndex!,
+            deploymentId: this.deploymentId,
+            contract,
+            contractAddress,
+            provider,
+            deploymentBlockNumber,
+            finalized: { number: finalized.number, hash: finalizedHash },
+            pageSize: this.cgRegistryScanPageSize,
+            stabilizationOperation: 'resolution',
+            contextGraphId: authorityIndexId,
+            signal: options.signal,
+          });
           return Object.freeze({
             kind: 'indexed' as const,
-            readSnapshot: () => this.contextGraphAuthorityIndex!.resolve({
-              scope: [this.deploymentId, contractAddress].join(':'),
-              contextGraphId,
-              readScope: provider,
-              deploymentBlockNumber,
-              finalized: { number: finalized.number, hash: finalizedHash },
-              pageSize: this.cgRegistryScanPageSize,
-              signal: options.signal,
-              readBlockHash: async (blockNumber, lifecycleSignal) => (
-                (await withRpcRequestAbortSignal(
-                  lifecycleSignal,
-                  () => provider.getBlock(blockNumber),
-                ))?.hash ?? null
-              ),
-              readPage: async (fromBlock, toBlock, lifecycleSignal) => {
-                const logs = await readAdaptiveEvmLogRange({
-                  read: (rangeFrom, rangeTo) => withRpcRequestAbortSignal(
-                    lifecycleSignal,
-                    () => provider.getLogs({
-                      address: contractAddress,
-                      topics: [[...authorityTopics]],
-                      fromBlock: rangeFrom,
-                      toBlock: rangeTo,
-                    }),
-                  ),
-                  fromBlock,
-                  toBlock,
-                  signal: lifecycleSignal,
-                });
-                return logs.map((log) => normalizeContextGraphAuthorityIndexLog(
-                  contract.interface,
-                  log,
-                ));
-              },
-            }),
-            stabilize: async () => {
-              const stable = await provider.getBlock(finalized.number);
-              if (stable?.hash?.toLowerCase() !== finalizedHash.toLowerCase()) {
-                throw new Error(
-                  'finalized Context Graph authority anchor changed during resolution',
-                );
-              }
-            },
+            readSnapshot: async () => indexed.value,
+            stabilize: indexed.stabilize,
           });
         })() : (() => {
           const cache = this.contextGraphAuthorityHistory;
