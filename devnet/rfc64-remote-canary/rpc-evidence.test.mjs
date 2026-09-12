@@ -271,3 +271,25 @@ test('RPC evidence must identify the certified commit and cohort', async () => {
     );
   }
 });
+
+test('RPC evidence from one valid topology cannot be replayed against another', async () => {
+  const original = fileConfig(2);
+  const changedRaw = baseConfig({
+    rpcUsage: {
+      kind: 'evidence-file',
+      path: '/tmp/redacted-rpc-evidence.json',
+      minimumSamples: 2,
+    },
+  });
+  changedRaw.nodes[1].baseUrl = 'https://replacement-receiver.internal.example';
+  const changed = validateRemoteCanaryConfigV1(changedRaw);
+  const evidence = rpcEvidence(original);
+
+  await assert.rejects(
+    collect(changed, evidenceContext(changed, {
+      readFileFn: async () => evidence,
+    })),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rpc-evidence-cohort-mismatch',
+  );
+});

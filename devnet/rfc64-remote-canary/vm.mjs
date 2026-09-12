@@ -12,8 +12,16 @@ import {
   tryDecodeNodeCertificationStatusV1,
 } from './status-contract.mjs';
 
+/** @typedef {import('@origintrail-official/dkg-agent').Rfc64DaemonCertificationStatusV1} CertificationStatusV1 */
+/** @typedef {import('./domain-contract.js').CanaryRequesterV1} CanaryRequesterV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryContextGraphV1} NormalizedCanaryContextGraphV1 */
+/** @typedef {import('./domain-contract.js').NormalizedRemoteCanaryConfigV1} NormalizedRemoteCanaryConfigV1 */
+/** @typedef {Readonly<{ cursorPresent: true, digestParity: true, rowCountParity: true }>} VmParitySnapshotV1 */
+/** @typedef {Readonly<{ config: NormalizedRemoteCanaryConfigV1, request: CanaryRequesterV1, sleep: (milliseconds: number) => Promise<void> }>} VmParityInputV1 */
+
 export { completeOperationalParityV1 } from './status-contract.mjs';
 
+/** @param {VmParityInputV1} input */
 export async function verifyVmParityV1({ config, request, sleep }) {
   return (await verifyVmParityEvidenceV1({ config, request, sleep })).checks;
 }
@@ -23,6 +31,7 @@ export async function verifyVmParityV1({ config, request, sleep }) {
  * Final preflight uses them to reject even synchronized cursor advancement
  * between application evidence and certificate issuance.
  */
+/** @param {VmParityInputV1} input */
 export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
   const participatingNodes = [...new Set(config.contextGraphs.flatMap(
     ({ source, receiver }) => [source, receiver],
@@ -30,12 +39,12 @@ export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
   const evidenceSnapshot = await pollUntilV1(
     async () => {
       const statusEntries = await mapCanaryPhaseV1(participatingNodes, async (node) => (
-        [
+        /** @type {const} */ ([
           node.id,
           tryDecodeNodeCertificationStatusV1(
             await request.json(node, 'GET', '/api/status'),
           ),
-        ]
+        ])
       ));
       const statusByNodeId = new Map(statusEntries);
       const snapshot = config.contextGraphs.map((contextGraph) => readVmParityV1(
@@ -43,9 +52,12 @@ export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
         statusByNodeId.get(contextGraph.receiver.id),
         contextGraph,
       ));
-      return snapshot.every(Boolean)
-        ? Object.freeze({ parity: snapshot, certificationByNodeId: statusByNodeId })
-        : false;
+      if (snapshot.some((entry) => entry === false)) return false;
+      const parity = /** @type {readonly VmParitySnapshotV1[]} */ (snapshot);
+      const certificationByNodeId = /** @type {ReadonlyMap<string, Readonly<CertificationStatusV1>>} */ (
+        statusByNodeId
+      );
+      return Object.freeze({ parity, certificationByNodeId });
     },
     config.timing.parityTimeoutMs,
     config.timing.pollIntervalMs,
@@ -55,12 +67,13 @@ export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
   );
 
   const checks = await mapCanaryPhaseV1(config.contextGraphs, async (contextGraph, index) => {
-    if (contextGraph.vmAskSparql !== undefined) {
+    const vmAskSparql = contextGraph.vmAskSparql;
+    if (vmAskSparql !== undefined) {
       const queryPassed = await Promise.all([
         contextGraph.source,
         contextGraph.receiver,
       ].map((node) => (
-        askConfiguredQueryV1(node, contextGraph, contextGraph.vmAskSparql, 'verifiable-memory', request)
+        askConfiguredQueryV1(node, contextGraph, vmAskSparql, 'verifiable-memory', request)
       )));
       if (!queryPassed.every(Boolean)) throw failure('vm-query-parity-failed', 'vm');
     }
@@ -85,6 +98,12 @@ export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
   });
 }
 
+/**
+ * @param {Readonly<CertificationStatusV1> | null | undefined} sourceStatus
+ * @param {Readonly<CertificationStatusV1> | null | undefined} receiverStatus
+ * @param {NormalizedCanaryContextGraphV1} contextGraph
+ * @returns {VmParitySnapshotV1 | false}
+ */
 function readVmParityV1(sourceStatus, receiverStatus, contextGraph) {
   if (!equalCompleteOperationalParityV1(
     sourceStatus,

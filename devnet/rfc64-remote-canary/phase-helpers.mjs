@@ -8,6 +8,11 @@ import { RemoteCanaryError } from './errors.mjs';
 
 export const PHASE_CONCURRENCY = 4;
 
+/**
+ * @template Input, Output
+ * @param {readonly Input[]} items
+ * @param {(item: Input, index: number) => Promise<Output>} mapper
+ */
 export function mapCanaryPhaseV1(items, mapper) {
   return mapWithConcurrency(items, PHASE_CONCURRENCY, mapper);
 }
@@ -16,14 +21,32 @@ export function mapCanaryPhaseV1(items, mapper) {
  * Run a bounded phase to quiescence before surfacing its first failure.
  * This is required inside lifecycle critical sections: fail-fast promises may
  * reject while sibling workers are still mutating remote state.
+ *
+ * @template Input, Output
+ * @param {readonly Input[]} items
+ * @param {(item: Input, index: number) => Promise<Output>} mapper
+ * @returns {Promise<readonly Output[]>}
  */
 export async function mapCanaryPhaseDrainedV1(items, mapper) {
   const settled = await mapWithConcurrencySettled(items, PHASE_CONCURRENCY, mapper);
   const rejected = settled.find((result) => result.status === 'rejected');
-  if (rejected !== undefined) throw rejected.reason;
-  return settled.map((result) => result.value);
+  if (rejected !== undefined && rejected.status === 'rejected') throw rejected.reason;
+  return settled.map((result) => {
+    if (result.status === 'rejected') throw result.reason;
+    return result.value;
+  });
 }
 
+/**
+ * @template Result
+ * @param {() => Result | false | Promise<Result | false>} check
+ * @param {number} timeoutMs
+ * @param {number} intervalMs
+ * @param {(milliseconds: number) => Promise<void>} sleep
+ * @param {() => Error} failureFactory
+ * @param {{ retryError?: (error: unknown) => boolean }} [options]
+ * @returns {Promise<Result>}
+ */
 export async function pollUntilV1(
   check,
   timeoutMs,
@@ -46,6 +69,7 @@ export async function pollUntilV1(
   throw failureFactory();
 }
 
+/** @param {unknown} error @returns {boolean} */
 export function isRetryableNodeRequestErrorV1(error) {
   return error instanceof RemoteCanaryError
     && ['node-request-failed', 'node-http-status-failed'].includes(error.code);

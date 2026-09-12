@@ -10,6 +10,12 @@ import {
   operationalStatusV1,
 } from './status-contract.mjs';
 
+/** @typedef {import('@origintrail-official/dkg-agent').Rfc64DaemonCertificationStatusV1} CertificationStatusV1 */
+/** @typedef {import('./domain-contract.js').CanaryRequesterV1} CanaryRequesterV1 */
+/** @typedef {import('./domain-contract.js').NormalizedCanaryNodeV1} NormalizedCanaryNodeV1 */
+/** @typedef {import('./domain-contract.js').NormalizedRemoteCanaryConfigV1} NormalizedRemoteCanaryConfigV1 */
+
+/** @param {unknown} value @returns {string} */
 function canonicalChainId(value) {
   const canonical = String(value);
   if (!/^(0|[1-9][0-9]*)$/u.test(canonical)) {
@@ -18,6 +24,15 @@ function canonicalChainId(value) {
   return canonical;
 }
 
+/**
+ * @param {Readonly<{
+ *   config: NormalizedRemoteCanaryConfigV1,
+ *   request: CanaryRequesterV1,
+ *   expectedNetworkKey?: string,
+ *   expectedNodeIdentities?: ReadonlyMap<string, string>,
+ *   expectedOperationalCertificationByNodeId?: ReadonlyMap<string, Readonly<CertificationStatusV1>>,
+ * }>} input
+ */
 export async function preflightAllNodesV1({
   config,
   request,
@@ -30,7 +45,7 @@ export async function preflightAllNodesV1({
     const certification = validateNodePreflightV1(status, node, config, {
       requireCompleteOperationalStatus: expectedNetworkKey !== undefined,
     });
-    return [node, certification];
+    return /** @type {const} */ ([node, certification]);
   });
   const raw = new Map(statuses.map(([node, status]) => [node.id, status]));
   const networkKeys = new Set([...raw.values()].map((status) => (
@@ -45,7 +60,7 @@ export async function preflightAllNodesV1({
     ({ source, receiver }) => [source, receiver],
   ))];
   const nodeIdentities = new Map(participatingNodes.map((node) => (
-    [node.id, raw.get(node.id).daemonIdentity]
+    [node.id, requiredCertification(raw, node.id).daemonIdentity]
   )));
   if (new Set(nodeIdentities.values()).size !== nodeIdentities.size) {
     throw failure('duplicate-node-identity', 'invariant');
@@ -78,7 +93,7 @@ export async function preflightAllNodesV1({
     }
   }
   const nodes = Object.freeze(config.nodes.map((node) => {
-    const status = raw.get(node.id);
+    const status = requiredCertification(raw, node.id);
     const relevant = config.contextGraphs.filter((entry) => (
       entry.source === node || entry.receiver === node
     ));
@@ -99,6 +114,13 @@ export async function preflightAllNodesV1({
   return Object.freeze({ networkKey, nodeIdentities, nodes });
 }
 
+/**
+ * @param {unknown} status
+ * @param {NormalizedCanaryNodeV1} node
+ * @param {NormalizedRemoteCanaryConfigV1} config
+ * @param {{ requireCompleteOperationalStatus?: boolean }} [options]
+ * @returns {Readonly<CertificationStatusV1>}
+ */
 export function validateNodePreflightV1(
   status,
   node,
@@ -145,4 +167,15 @@ export function validateNodePreflightV1(
     ) throw failure('rfc64-operational-incomplete', 'invariant');
   }
   return certification;
+}
+
+/**
+ * @param {ReadonlyMap<string, Readonly<CertificationStatusV1>>} values
+ * @param {string} nodeId
+ * @returns {Readonly<CertificationStatusV1>}
+ */
+function requiredCertification(values, nodeId) {
+  const value = values.get(nodeId);
+  if (value === undefined) throw failure('node-status-missing', 'invariant');
+  return value;
 }

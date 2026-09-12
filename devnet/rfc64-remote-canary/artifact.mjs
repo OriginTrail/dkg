@@ -8,7 +8,19 @@ import {
   executeRemoteCanaryCertificationV1,
 } from './phases.mjs';
 
+/** @typedef {import('./domain-contract.js').RemoteCanaryDependenciesV1} RemoteCanaryDependenciesV1 */
+
+/**
+ * @typedef {Readonly<{
+ *   loadConfig: () => unknown | Promise<unknown>,
+ *   artifactPath: string,
+ *   dryRun?: boolean,
+ *   dependencies?: RemoteCanaryDependenciesV1,
+ * }>} ArtifactLifecycleInputV1
+ */
+
 /** Atomically replace prior results; a stale PASS cannot survive any attempted run. */
+/** @param {ArtifactLifecycleInputV1} input */
 export async function runRemoteCanaryArtifactLifecycleV1({
   loadConfig,
   artifactPath,
@@ -53,6 +65,7 @@ export async function runRemoteCanaryArtifactLifecycleV1({
   }
 }
 
+/** @param {string} artifactPath @param {unknown} artifact */
 export function writeArtifactAtomicV1(artifactPath, artifact) {
   return writeRfc64ArtifactAtomicV1(artifactPath, artifact);
 }

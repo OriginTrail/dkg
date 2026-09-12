@@ -57,7 +57,51 @@ test('receiver must remain unreachable throughout offline marker sharing', async
   const commands = [];
   const source = { id: 'source' };
   const receiver = { id: 'receiver' };
-  let probes = 0;
+  let receiverOnline = true;
+  let shares = 0;
+  await assert.rejects(
+    verifyOfflineCatchupV1({
+      config: {
+        contextGraphs: [{ id: CG, source, receiver }],
+        timing: { pollIntervalMs: 1 },
+      },
+      lifecycle: {
+        receiver,
+        stop: { argv: ['control', 'stop'] },
+        start: { argv: ['control', 'start'] },
+        commandTimeoutMs: 1_000,
+        stopTimeoutMs: 100,
+      },
+      request: {
+        reachable: async () => receiverOnline,
+        json: async (_node, _method, path) => {
+          assert.equal(path, '/api/knowledge-assets');
+          shares += 1;
+          receiverOnline = true;
+          return { swmShared: true };
+        },
+      },
+      runCommand: async (command) => {
+        commands.push(command.argv[1]);
+        receiverOnline = command.argv[1] !== 'stop';
+        return { code: 0, signal: null, stdout: '' };
+      },
+      sleep: async () => undefined,
+    }),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'receiver-became-reachable-during-offline-window',
+  );
+  assert.deepEqual(commands, ['stop', 'start']);
+  assert.equal(shares, 1);
+});
+
+test('receiver reachability before marker sharing prevents any offline publish', async () => {
+  const commands = [];
+  const source = { id: 'source' };
+  const receiver = { id: 'receiver' };
+  let receiverOnline = true;
+  let offlineChecks = 0;
+  let shares = 0;
   await assert.rejects(
     verifyOfflineCatchupV1({
       config: {
@@ -73,12 +117,20 @@ test('receiver must remain unreachable throughout offline marker sharing', async
       },
       request: {
         reachable: async () => {
-          probes += 1;
-          return probes > 3;
+          if (!receiverOnline) {
+            offlineChecks += 1;
+            if (offlineChecks > 3) receiverOnline = true;
+          }
+          return receiverOnline;
+        },
+        json: async () => {
+          shares += 1;
+          return { swmShared: true };
         },
       },
       runCommand: async (command) => {
         commands.push(command.argv[1]);
+        receiverOnline = command.argv[1] !== 'stop';
         return { code: 0, signal: null, stdout: '' };
       },
       sleep: async () => undefined,
@@ -87,6 +139,7 @@ test('receiver must remain unreachable throughout offline marker sharing', async
       && error.code === 'receiver-became-reachable-during-offline-window',
   );
   assert.deepEqual(commands, ['stop', 'start']);
+  assert.equal(shares, 0);
 });
 
 test('live SWM propagation fails when sharing succeeds but delivery never arrives', async () => {
