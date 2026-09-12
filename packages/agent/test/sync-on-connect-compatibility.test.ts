@@ -5,7 +5,6 @@ import {
   runSelectedSharedMemoryRetry,
   type PeerSyncLease,
 } from '@origintrail-official/dkg-agent/dist/sync/on-connect/sync-on-connect.js';
-import { emptySharedMemorySyncResult } from '@origintrail-official/dkg-agent/dist/sync/shared-memory-diagnostics.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -32,7 +31,14 @@ function fixture(kind: 'ordinary' | 'selected', syncingPeers: Set<string> | Peer
         requestedScope: { kind: 'selected-public' as const, targets: [{ contextGraphId: 'legacy-cg', lane: 'selected-public' as const }] },
         scopeComplete: true, selectedScopeComplete: true,
         targetDiagnostics: { selectedPublic: { completed: 1, total: 1 }, ordinaryPrivate: { completed: 0, total: 0 } },
-        shared: { ...emptySharedMemorySyncResult(), insertedTriples: await transfer(), completedPhases: 1 },
+        shared: {
+          insertedTriples: await transfer(), completedPhases: 1,
+          fetchedMetaTriples: 0, fetchedDataTriples: 0,
+          insertedMetaTriples: 0, insertedDataTriples: 0,
+          bytesReceived: 0, resumedPhases: 0, timedOutPhases: 0,
+          checkpointAdvances: 0, emptyResponses: 0, droppedDataTriples: 0,
+          failedPeers: 0, failedPhases: 0, deniedPhases: 0,
+        },
       }),
     }) },
   };
@@ -45,6 +51,42 @@ function fixture(kind: 'ordinary' | 'selected', syncingPeers: Set<string> | Peer
 }
 
 describe.each(['ordinary', 'selected'] as const)('published %s on-connect compatibility', kind => {
+  it.each(['legacy', 'modern'] as const)('preserves a frozen %s class context with prototype callbacks', async ownership => {
+    const peers = new Set<string>();
+    const release = vi.fn();
+    const owner = { tryAcquirePeer: vi.fn(() => release) };
+    const f = fixture(kind, ownership === 'legacy' ? peers : owner);
+    class Context {
+      remotePeer = f.context.remotePeer;
+      syncingPeers = f.context.syncingPeers;
+      signal = ownership === 'modern' ? new AbortController().signal : undefined;
+      knownCorePeerIds = f.context.knownCorePeerIds;
+      #accountingCalls = 0;
+      get accountingCalls() { return this.#accountingCalls; }
+      getPeerProtocols() { return f.context.getPeerProtocols(); }
+      getSyncContextGraphs() { return f.context.getSyncContextGraphs(); }
+      getDurableSyncContextGraphs() { return f.context.getDurableSyncContextGraphs(); }
+      syncFromPeer() { return f.context.syncFromPeer(); }
+      refreshMetaSyncedFlags() { return f.context.refreshMetaSyncedFlags(); }
+      discoverContextGraphsFromStore() { return f.context.discoverContextGraphsFromStore(); }
+      get selectedSharedMemoryLane() { return f.context.selectedSharedMemoryLane; }
+      logInfo() {}
+      onSyncAccounting() { this.#accountingCalls++; }
+    }
+    const context = Object.freeze(new Context());
+    expect(Object.hasOwn(context, 'getPeerProtocols')).toBe(false);
+    expect(await (kind === 'ordinary'
+      ? runSyncOnConnect(context)
+      : runSelectedSharedMemoryRetry(context))).toBe('synced');
+    expect(f.transfer).toHaveBeenCalledOnce();
+    expect(context.accountingCalls).toBe(1);
+    expect(peers.size).toBe(0);
+    if (ownership === 'modern') {
+      expect(owner.tryAcquirePeer).toHaveBeenCalledExactlyOnceWith('legacy-peer');
+      expect(release).toHaveBeenCalledOnce();
+    }
+  });
+
   it('executes a legacy Set caller without a signal and releases its peer', async () => {
     const peers = new Set<string>();
     const f = fixture(kind, peers);
