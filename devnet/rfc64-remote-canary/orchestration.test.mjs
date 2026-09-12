@@ -427,6 +427,95 @@ test('final preflight rejects complete source and receiver cursors that diverge 
   assert.deepEqual(runtime.state.commands, ['stop', 'start']);
 });
 
+test('final preflight rejects synchronized cursor drift after application ASK evidence', async () => {
+  const runtime = createCertificationRuntime();
+  const delegateFetch = runtime.fetchFn;
+  let vmQueryReads = 0;
+  let catalogQueryReads = 0;
+  let applicationEvidenceComplete = false;
+  runtime.fetchFn = async (input, options) => {
+    const response = await delegateFetch(input, options);
+    const url = new URL(input);
+    const method = options?.method ?? 'GET';
+    if (url.pathname === '/api/query' && method === 'POST') {
+      const body = JSON.parse(options.body);
+      if (body.view === 'verifiable-memory') vmQueryReads += 1;
+      if (body.sparql === CATALOG_SWM_ASK) catalogQueryReads += 1;
+      applicationEvidenceComplete = vmQueryReads === 2 && catalogQueryReads === 4;
+      return response;
+    }
+    if (
+      !applicationEvidenceComplete
+      || url.pathname !== '/api/status'
+      || method !== 'GET'
+    ) return response;
+    const body = await response.json();
+    const operational = body.rfc64Certification.catalog.contextGraphs[0];
+    operational.expectedCatalogHeadDigest = `0x${'ef'.repeat(32)}`;
+    operational.appliedCatalogHeadDigest = operational.expectedCatalogHeadDigest;
+    operational.expectedInventoryDigest = `0x${'12'.repeat(32)}`;
+    operational.appliedInventoryDigest = operational.expectedInventoryDigest;
+    operational.catalogVersion = '8';
+    return new Response(JSON.stringify(body), {
+      status: response.status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rfc64-operational-evidence-drift'
+      && error.category === 'invariant'
+      && error.phase === 'final-preflight',
+  );
+  assert.equal(vmQueryReads, 2);
+  assert.equal(catalogQueryReads, 4);
+  assert.deepEqual(runtime.state.commands, ['stop', 'start']);
+});
+
+test('final preflight rejects node-local timestamp drift after application ASK evidence', async () => {
+  const runtime = createCertificationRuntime();
+  const delegateFetch = runtime.fetchFn;
+  let vmQueryReads = 0;
+  let catalogQueryReads = 0;
+  let applicationEvidenceComplete = false;
+  runtime.fetchFn = async (input, options) => {
+    const response = await delegateFetch(input, options);
+    const url = new URL(input);
+    const method = options?.method ?? 'GET';
+    if (url.pathname === '/api/query' && method === 'POST') {
+      const body = JSON.parse(options.body);
+      if (body.view === 'verifiable-memory') vmQueryReads += 1;
+      if (body.sparql === CATALOG_SWM_ASK) catalogQueryReads += 1;
+      applicationEvidenceComplete = vmQueryReads === 2 && catalogQueryReads === 4;
+      return response;
+    }
+    if (
+      !applicationEvidenceComplete
+      || url.pathname !== '/api/status'
+      || method !== 'GET'
+    ) return response;
+    const body = await response.json();
+    body.rfc64Certification.catalog.contextGraphs[0].lastSuccessfulAdvanceAt = '1893456001';
+    return new Response(JSON.stringify(body), {
+      status: response.status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  await assert.rejects(
+    executeRemoteCanaryCertificationV1(baseConfig(), runtime),
+    (error) => error instanceof RemoteCanaryError
+      && error.code === 'rfc64-operational-evidence-drift'
+      && error.category === 'invariant'
+      && error.phase === 'final-preflight',
+  );
+  assert.equal(vmQueryReads, 2);
+  assert.equal(catalogQueryReads, 4);
+  assert.deepEqual(runtime.state.commands, ['stop', 'start']);
+});
+
 test('a false configured VM ASK from either node blocks full certification', async () => {
   for (const role of ['source', 'receiver']) {
     const runtime = createCertificationRuntime({ vmQueryFalseFor: role });

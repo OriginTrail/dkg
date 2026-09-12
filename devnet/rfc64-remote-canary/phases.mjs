@@ -23,7 +23,7 @@ import {
   verifyOfflineCatchupV1,
 } from './swm.mjs';
 import { createRequesterV1, runBoundedCommandV1 } from './transport.mjs';
-import { verifyVmParityV1 } from './vm.mjs';
+import { verifyVmParityEvidenceV1 } from './vm.mjs';
 
 /** A network-free plan. It deliberately does not read auth or evidence files. */
 /** @param {unknown} config @param {() => Date} [now] */
@@ -96,7 +96,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
           })
     ));
 
-    const vmParity = await runPhaseV1('vm-parity', () => verifyVmParityV1({
+    const vmParityEvidence = await runPhaseV1('vm-parity', () => verifyVmParityEvidenceV1({
       config: validated,
       request,
       sleep,
@@ -132,12 +132,13 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
       request,
       expectedNetworkKey: initialPreflight.networkKey,
       expectedNodeIdentities: initialPreflight.nodeIdentities,
+      expectedOperationalCertificationByNodeId: vmParityEvidence.certificationByNodeId,
     }));
 
     const checks = Object.freeze({
       liveSwmPropagation: Object.freeze(liveSwmPropagation),
       offlineCatchup,
-      vmParity: Object.freeze(vmParity),
+      vmParity: Object.freeze(vmParityEvidence.checks),
       catalogSwm: Object.freeze(catalogSwm),
       authorization,
       rpcUsage,

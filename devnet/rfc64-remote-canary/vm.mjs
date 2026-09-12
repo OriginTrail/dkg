@@ -14,15 +14,20 @@ import {
 
 export { completeOperationalParityV1 } from './status-contract.mjs';
 
-export function verifyVmParityV1({ config, request, sleep }) {
-  return verifyVmParityFromSnapshotsV1({ config, request, sleep });
+export async function verifyVmParityV1({ config, request, sleep }) {
+  return (await verifyVmParityEvidenceV1({ config, request, sleep })).checks;
 }
 
-async function verifyVmParityFromSnapshotsV1({ config, request, sleep }) {
+/**
+ * Retain the exact daemon snapshots against which the ASK evidence was read.
+ * Final preflight uses them to reject even synchronized cursor advancement
+ * between application evidence and certificate issuance.
+ */
+export async function verifyVmParityEvidenceV1({ config, request, sleep }) {
   const participatingNodes = [...new Set(config.contextGraphs.flatMap(
     ({ source, receiver }) => [source, receiver],
   ))];
-  const parity = await pollUntilV1(
+  const evidenceSnapshot = await pollUntilV1(
     async () => {
       const statusEntries = await mapCanaryPhaseV1(participatingNodes, async (node) => (
         [
@@ -38,7 +43,9 @@ async function verifyVmParityFromSnapshotsV1({ config, request, sleep }) {
         statusByNodeId.get(contextGraph.receiver.id),
         contextGraph,
       ));
-      return snapshot.every(Boolean) ? snapshot : false;
+      return snapshot.every(Boolean)
+        ? Object.freeze({ parity: snapshot, certificationByNodeId: statusByNodeId })
+        : false;
     },
     config.timing.parityTimeoutMs,
     config.timing.pollIntervalMs,
@@ -47,7 +54,7 @@ async function verifyVmParityFromSnapshotsV1({ config, request, sleep }) {
     { retryError: isRetryableNodeRequestErrorV1 },
   );
 
-  return mapCanaryPhaseV1(config.contextGraphs, async (contextGraph, index) => {
+  const checks = await mapCanaryPhaseV1(config.contextGraphs, async (contextGraph, index) => {
     if (contextGraph.vmAskSparql !== undefined) {
       const queryPassed = await Promise.all([
         contextGraph.source,
@@ -63,14 +70,18 @@ async function verifyVmParityFromSnapshotsV1({ config, request, sleep }) {
         ? 'EVIDENCE_REQUIRED'
         : 'PASS',
       statusParity: 'PASS',
-      cursorPresent: parity[index].cursorPresent,
-      digestParity: parity[index].digestParity,
-      rowCountParity: parity[index].rowCountParity,
+      cursorPresent: evidenceSnapshot.parity[index].cursorPresent,
+      digestParity: evidenceSnapshot.parity[index].digestParity,
+      rowCountParity: evidenceSnapshot.parity[index].rowCountParity,
       vmQueryChecked: contextGraph.vmAskSparql !== undefined,
       ...(contextGraph.vmAskSparql === undefined
         ? { requirement: 'vm-ask-query' }
         : {}),
     });
+  });
+  return Object.freeze({
+    checks,
+    certificationByNodeId: evidenceSnapshot.certificationByNodeId,
   });
 }
 

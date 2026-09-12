@@ -4,9 +4,8 @@ import { createServer, type ServerResponse } from 'node:http';
 
 import { createAllowedHttpAuthentication } from '../../src/auth.js';
 import {
-  createRequestActor,
+  createRequestContext,
   type RequestContext,
-  type RequestContextInputFields,
 } from '../../src/daemon/routes/context.js';
 import { handleKnowledgeAssetsRoutes } from '../../src/daemon/routes/knowledge-assets.js';
 import { handleQueryRoutes } from '../../src/daemon/routes/query.js';
@@ -113,9 +112,6 @@ export async function startCertificationRouteServer(
 ): Promise<CertificationRouteServer> {
   const agent = createRouteAgent(state, options, synchronization);
   const server = createServer(async (req, res) => {
-    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    const path = url.pathname;
-    state.routeCalls.push({ method: req.method, path });
     const authentication = createAllowedHttpAuthentication({ mode: 'public' });
     const catalogActivation = {
       enabled: true,
@@ -144,7 +140,7 @@ export async function startCertificationRouteServer(
       fail: () => undefined,
       cancel: () => undefined,
     };
-    const context = {
+    const routeContext = createRequestContext({
       req,
       res,
       // The fixture deliberately implements only the production-handler surface
@@ -200,18 +196,13 @@ export async function startCertificationRouteServer(
       apiPortRef: { value: 0 },
       routePlugins: [],
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
-      url,
-      path,
-      actor: createRequestActor(authentication, () => options.nodeAddress),
       authentication,
-      requestAgentAddress: options.nodeAddress,
       emitMemoryGraphChanged: () => undefined,
       emitNotification: () => undefined,
-    } satisfies RequestContextInputFields;
+    });
+    const { path } = routeContext;
+    state.routeCalls.push({ method: req.method, path });
     try {
-      // RequestContext's private brand is normally applied by the daemon
-      // dispatcher. This CLI-owned fixture has already satisfied every field.
-      const routeContext = context as unknown as RequestContext;
       if (path === '/api/status') await handleStatusRoutes(routeContext);
       else if (path === '/api/knowledge-assets') {
         await handleKnowledgeAssetsRoutes(routeContext);
@@ -268,6 +259,7 @@ function createRouteAgent(
     },
     publisher: { getIdentityId: () => 1n },
     getSyncContextGraphIds: () => [options.contextGraphId],
+    resolveAgentAddress: () => options.nodeAddress,
     readRfc64CatalogOperationalStatusV1: async () => [{
       contextGraphId: options.contextGraphId,
       effectiveMode: 'catalog',
