@@ -200,6 +200,10 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
     invalid(`${label}-authentication-mode`);
   }
   if (!nodeById.has(value.nodeId)) invalid('authorization-node-reference');
+  const node = nodeById.get(value.nodeId);
+  if (label === 'revoked' && node.auth.kind !== 'bearer-file') {
+    invalid('revoked-authentication-credentials-required');
+  }
   if (value.path.includes('#') || value.path.startsWith('//')) invalid('authorization-path');
   if (value.method === 'POST' && value.path.split('?')[0] !== '/api/query') {
     invalid('authorization-post-must-be-read-only-query');
@@ -219,7 +223,6 @@ function normalizeAuthorizationCheck(value, label, nodeById) {
   } else if (value.notFoundControlNodeId !== undefined) {
     invalid('authorization-404-control-without-404');
   }
-  const node = nodeById.get(value.nodeId);
   const notFoundControlNode = value.notFoundControlNodeId === undefined
     ? undefined
     : nodeById.get(value.notFoundControlNodeId);
