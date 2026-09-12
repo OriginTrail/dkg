@@ -151,9 +151,13 @@ export async function withReceiverOfflineV1({
   }
   let startFailure = null;
   if (stopInvoked) {
-    const started = await runCommand(lifecycle.start, lifecycle.commandTimeoutMs).catch(() => null);
-    if (started === null || started.code !== 0) {
-      startFailure = failure('receiver-start-command-failed', 'lifecycle');
+    try {
+      const started = await runCommand(lifecycle.start, lifecycle.commandTimeoutMs);
+      if (started.code !== 0) {
+        startFailure = failure('receiver-start-command-failed', 'lifecycle');
+      }
+    } catch (error) {
+      startFailure = failure('receiver-start-command-failed', 'lifecycle', error);
     }
   }
   if (startFailure !== null) {

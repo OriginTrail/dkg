@@ -15,4 +15,5 @@ export function preflightAllNodesV1(input: {
   readonly request: PreflightRequestV1;
   readonly expectedNetworkKey?: string;
   readonly expectedNodeIdentities?: ReadonlyMap<string, string>;
+  readonly expectedOperationalCertificationByNodeId?: ReadonlyMap<string, unknown>;
 }): Promise<PreflightResultV1>;

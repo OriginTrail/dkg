@@ -6,6 +6,7 @@ import {
   completeOperationalParityV1,
   decodeNodeCertificationStatusV1,
   equalCompleteOperationalParityV1,
+  equalExactOperationalSnapshotV1,
   operationalStatusV1,
 } from './status-contract.mjs';
 
@@ -22,6 +23,7 @@ export async function preflightAllNodesV1({
   request,
   expectedNetworkKey,
   expectedNodeIdentities,
+  expectedOperationalCertificationByNodeId,
 }) {
   const statuses = await mapCanaryPhaseV1(config.nodes, async (node) => {
     const status = await request.json(node, 'GET', '/api/status');
@@ -62,6 +64,17 @@ export async function preflightAllNodesV1({
         raw.get(contextGraph.receiver.id),
         contextGraph.id,
       )) throw failure('rfc64-operational-parity-changed', 'invariant');
+    }
+  }
+  if (expectedOperationalCertificationByNodeId !== undefined) {
+    for (const contextGraph of config.contextGraphs) {
+      for (const node of [contextGraph.source, contextGraph.receiver]) {
+        if (!equalExactOperationalSnapshotV1(
+          expectedOperationalCertificationByNodeId.get(node.id),
+          raw.get(node.id),
+          contextGraph.id,
+        )) throw failure('rfc64-operational-evidence-drift', 'invariant');
+      }
     }
   }
   const nodes = Object.freeze(config.nodes.map((node) => {

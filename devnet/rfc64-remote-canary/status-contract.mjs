@@ -86,3 +86,23 @@ export function equalCompleteOperationalParityV1(
       (key) => source[key] === receiver[key],
     );
 }
+
+/**
+ * Compare one node's exact complete snapshot across time. The successful
+ * application timestamp is node-local, so it belongs here rather than in the
+ * cross-node parity predicate above.
+ */
+export function equalExactOperationalSnapshotV1(
+  expectedCertification,
+  currentCertification,
+  contextGraphId,
+) {
+  const expected = completeOperationalParityV1(expectedCertification, contextGraphId);
+  const current = completeOperationalParityV1(currentCertification, contextGraphId);
+  return expected !== null
+    && current !== null
+    && [
+      ...RFC64_DAEMON_CERTIFICATION_COMPLETE_PARITY_KEYS_V1,
+      'lastSuccessfulAdvanceAt',
+    ].every((key) => expected[key] === current[key]);
+}

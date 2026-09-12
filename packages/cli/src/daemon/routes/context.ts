@@ -167,3 +167,44 @@ export interface RequestContext {
 
 /** Unbranded input fields accepted only by the daemon's request-context factory. */
 export type RequestContextInputFields = Omit<RequestContext, typeof REQUEST_CONTEXT_BRAND>;
+
+/**
+ * Inputs accepted by the one daemon-owned request-context constructor. The URL,
+ * path, actor, and legacy compatibility projections are derived together so a
+ * route embedder cannot assemble contradictory request authority.
+ */
+export type RequestContextFactoryInput = Omit<
+  RequestContextInputFields,
+  | 'url'
+  | 'path'
+  | 'actor'
+  | 'authentication'
+  | 'requestAgentAddress'
+> & { readonly authentication: AllowedHttpAuthentication };
+
+export function createRequestContext(input: RequestContextFactoryInput): RequestContext {
+  const { req, agent, authentication, ...contextInput } = input;
+  const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+  const actor = createRequestActor(
+    authentication,
+    (acceptedToken) => agent.resolveAgentAddress(acceptedToken),
+  );
+  const context = {
+    ...contextInput,
+    req,
+    agent,
+    url,
+    path: url.pathname,
+    actor,
+  };
+  return Object.defineProperties(context, {
+    authentication: {
+      enumerable: true,
+      get: () => actor.authentication,
+    },
+    requestAgentAddress: {
+      enumerable: true,
+      get: () => actor.effectiveAgentAddress,
+    },
+  }) as RequestContext;
+}

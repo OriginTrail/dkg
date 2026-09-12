@@ -154,11 +154,14 @@ test('offline catch-up fails when a restarted receiver never receives the marker
 test('receiver lifecycle bracket attempts exactly one recovery across failure paths', async () => {
   for (const scenario of [
     { label: 'stop', stopCode: 1, operationFails: false, startCode: 0, expected: 'receiver-stop-command-failed' },
+    { label: 'stop-rejection', stopRejects: true, stopCode: 0, operationFails: false, startCode: 0, expected: 'command-timeout' },
     { label: 'callback', stopCode: 0, operationFails: true, startCode: 0, expected: 'offline-operation-failed' },
     { label: 'start', stopCode: 0, operationFails: false, startCode: 1, expected: 'receiver-start-command-failed' },
+    { label: 'start-rejection', startRejects: true, stopCode: 0, operationFails: false, startCode: 0, expected: 'receiver-start-command-failed', startCause: 'command-output-limit' },
     { label: 'callback-and-start', stopCode: 0, operationFails: true, startCode: 1, expected: 'receiver-start-command-failed', combined: true },
   ]) {
     const commands = [];
+    let operationCalls = 0;
     await assert.rejects(
       withReceiverOfflineV1({
         config: { timing: { pollIntervalMs: 1 } },
@@ -173,6 +176,12 @@ test('receiver lifecycle bracket attempts exactly one recovery across failure pa
         runCommand: async (command) => {
           const action = command.argv[1];
           commands.push(action);
+          if (action === 'stop' && scenario.stopRejects) {
+            throw new RemoteCanaryError('command-timeout', 'transport');
+          }
+          if (action === 'start' && scenario.startRejects) {
+            throw new RemoteCanaryError('command-output-limit', 'transport');
+          }
           return {
             code: action === 'stop' ? scenario.stopCode : scenario.startCode,
             signal: null,
@@ -181,16 +190,23 @@ test('receiver lifecycle bracket attempts exactly one recovery across failure pa
         },
         sleep: async () => undefined,
       }, async () => {
+        operationCalls += 1;
         if (scenario.operationFails) {
           throw new RemoteCanaryError('offline-operation-failed', 'offline-catchup');
         }
       }),
       (error) => error instanceof RemoteCanaryError
         && error.code === scenario.expected
+        && (!scenario.startCause || error.cause?.code === scenario.startCause)
         && (!scenario.combined || error.cause instanceof AggregateError),
       scenario.label,
     );
     assert.deepEqual(commands, ['stop', 'start'], scenario.label);
+    assert.equal(
+      operationCalls,
+      scenario.stopRejects || scenario.stopCode !== 0 ? 0 : 1,
+      scenario.label,
+    );
   }
 });
 
