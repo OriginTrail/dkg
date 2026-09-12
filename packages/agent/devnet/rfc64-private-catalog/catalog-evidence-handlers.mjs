@@ -22,8 +22,9 @@ import {
 } from './memory-evidence.mjs';
 import { readVerifiedAppliedCatalogMemoryEvidenceV1 } from './verified-catalog-swm-proof.mjs';
 
-export async function waitForBootstrapV1(context, command, role) {
+export async function waitForBootstrapV1(context, command) {
   assertFinalizedRuntimeV1(context);
+  const { role } = context;
   const timeoutMs = boundedTimeoutV1(command.timeoutMs);
   const deadline = Date.now() + timeoutMs;
   let last;
@@ -36,7 +37,7 @@ export async function waitForBootstrapV1(context, command, role) {
   while (Date.now() < deadline) {
     attempts += 1;
     try {
-      last = await context.agent.synchronizeRfc64CatalogFromProvidersV1({
+      last = await context.agent.synchronizeRfc64CatalogRolloutFromProvidersV1({
         remotePeerIds: [providerPeerId],
         scope: createPrivateCatalogSyncScope(),
       });
@@ -45,6 +46,7 @@ export async function waitForBootstrapV1(context, command, role) {
     }
     const bootstrapApplied = last !== null
       && last.error === undefined
+      && ['applied', 'already-applied'].includes(last.completionOutcome)
       && (
         command.expectedHeadDigest === undefined
         || last.currentCatalogHeadDigest === command.expectedHeadDigest
@@ -56,14 +58,16 @@ export async function waitForBootstrapV1(context, command, role) {
         exactExpectedHead: bootstrapApplied,
       });
     if (bootstrapApplied && exactMemory) {
-      return {
-        outcome: 'applied',
-        providerPeerId: last.appliedProviderPeerId ?? providerPeerId,
-        appliedHeadDigest: last.currentCatalogHeadDigest,
-        catalogVersion: last.catalogVersion,
-        inventoryRowCount: last.inventoryRowCount,
+      const appliedTransfer =
+        context.agent.readRfc64PublicCatalogAppliedProviderEvidenceV1(
+          last.currentCatalogHeadDigest,
+        );
+      return composeBootstrapEvidenceV1(
+        last,
         attempts,
-      };
+        providerPeerId,
+        appliedTransfer?.providerPeerId ?? null,
+      );
     }
     await delay(100);
   }
@@ -87,12 +91,58 @@ export async function waitForBootstrapV1(context, command, role) {
   );
 }
 
+/** Preserve the canonical nullable provider identity instead of inferring transfer provenance. */
+export function composeBootstrapEvidenceV1(
+  result,
+  attempts,
+  expectedProviderPeerId,
+  observedAppliedProviderPeerId = null,
+) {
+  if (
+    result === null
+    || typeof result !== 'object'
+    || !['applied', 'already-applied'].includes(result.completionOutcome)
+    || !Number.isSafeInteger(attempts)
+    || attempts < 1
+  ) {
+    throw new TypeError('bootstrap evidence requires a successful bounded result');
+  }
+  const providerPeerId = result.appliedProviderPeerId;
+  if (
+    result.completionOutcome === 'applied'
+      ? typeof providerPeerId !== 'string'
+        || providerPeerId.length === 0
+        || providerPeerId !== expectedProviderPeerId
+      : providerPeerId !== null
+  ) {
+    throw new TypeError('bootstrap evidence has inconsistent provider provenance');
+  }
+  if (
+    observedAppliedProviderPeerId !== null
+    && observedAppliedProviderPeerId !== expectedProviderPeerId
+  ) {
+    throw new TypeError('bootstrap evidence has inconsistent applied-transfer provenance');
+  }
+  return Object.freeze({
+    outcome: result.completionOutcome,
+    providerPeerId,
+    appliedTransferProviderPeerId: result.completionOutcome === 'applied'
+      ? providerPeerId
+      : observedAppliedProviderPeerId,
+    appliedHeadDigest: result.currentCatalogHeadDigest,
+    catalogVersion: result.catalogVersion,
+    inventoryRowCount: result.inventoryRowCount,
+    attempts,
+  });
+}
+
 export async function inspectPrivateCatalogV1(
   context,
   expectedHeadDigest,
-  role,
   { includeNonmemberQuery = true } = {},
 ) {
+  assertFinalizedRuntimeV1(context);
+  const { role } = context;
   const authorAddress = roleAgentAddress('owner');
   const scope = createPrivateCatalogScope({ authorAddress });
   const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
@@ -172,6 +222,7 @@ async function hasExactLocalFinalizedVmBaselineV1(context) {
   return hasExactPrivateCatalogFinalizedVmBaselineContents(
     { graphCounts },
     PRIVATE_CATALOG_MEMORY_EXPECTATION,
+    { swmProofKind: 'absent' },
   );
 }
 

@@ -18,8 +18,8 @@ import {
 } from './fixture.mjs';
 import { assertFinalizedRuntimeV1 } from './agent-runtime.mjs';
 
-export async function publishCatalogBaselineV1(context, role) {
-  assertOwnerPublisherV1(context, role);
+export async function publishCatalogBaselineV1(context) {
+  assertOwnerPublisherV1(context);
   context.publication.beginBaseline();
   const { policyDigest } = createPrivatePolicyAndRoster();
   const scope = createPrivateCatalogScope();
@@ -40,8 +40,8 @@ export async function publishCatalogBaselineV1(context, role) {
   return publishedFieldsV1(applied, policyDigest, scope);
 }
 
-export async function publishCatalogUpdateV1(context, role) {
-  assertOwnerPublisherV1(context, role);
+export async function publishCatalogUpdateV1(context) {
+  assertOwnerPublisherV1(context);
   const baseline = context.publication.requireBaseline();
   const { policyDigest } = createPrivatePolicyAndRoster();
   // The catalog establishes the finalized VM baseline first. These staged
@@ -83,9 +83,9 @@ export async function publishCatalogUpdateV1(context, role) {
   return publishedFieldsV1(applied, policyDigest, baseline.scope);
 }
 
-function assertOwnerPublisherV1(context, role) {
+function assertOwnerPublisherV1(context) {
   assertFinalizedRuntimeV1(context);
-  if (role !== 'owner' || context.publication === null) {
+  if (context.role !== 'owner' || context.publication === null) {
     throw new Error('only the owner role can publish');
   }
 }

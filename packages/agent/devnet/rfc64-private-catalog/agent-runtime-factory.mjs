@@ -33,16 +33,46 @@ import {
   roleAgentAddress,
   rolePrivateKey,
 } from './fixture.mjs';
-import { createFinalizedRuntimeV1 } from './agent-runtime.mjs';
+import {
+  assertFinalizedRuntimeFactoryInputV1,
+  assertProbeRuntimeFactoryInputV1,
+  createFinalizedRuntimeV1,
+  createProbeRuntimeV1,
+} from './agent-runtime.mjs';
 import {
   assertFinalizedAuthorityMatchesExpectedV1,
   assertInitialFinalizedAuthorityV1,
 } from './initial-authority.mjs';
 
-export async function createRfc64PrivateAgentV1({
+export async function createRfc64PrivateProbeRuntimeV1(input) {
+  assertProbeRuntimeFactoryInputV1(input);
+  const { dataDir, faultProfile, role } = input;
+  rolePrivateKey(role);
+  const created = Object.freeze({
+    agent: await DKGAgent.create(createBaseAgentOptionsV1({ dataDir, role })),
+    faultProfile,
+  });
+  await created.agent.start();
+  return createProbeRuntimeV1(created, { role });
+}
+
+export async function createRfc64PrivateFinalizedRuntimeV1(input) {
+  assertFinalizedRuntimeFactoryInputV1(input);
+  const { dataDir, faultProfile, manifest, role } = input;
+  rolePrivateKey(role);
+  const created = await createRfc64PrivateFinalizedAgentV1({
+    dataDir,
+    faultProfile,
+    manifest,
+    role,
+  });
+  await created.agent.start();
+  return bindRfc64PrivateFinalizedRuntimeV1({ created, manifest, role });
+}
+
+async function createRfc64PrivateFinalizedAgentV1({
   dataDir,
   faultProfile,
-  finalizedRuntime,
   manifest,
   role,
 }) {
@@ -51,31 +81,30 @@ export async function createRfc64PrivateAgentV1({
     canonicalFixture,
     roleAgentAddress('receiver'),
   );
-  let chainAdapter;
-  let rpc;
-  let chainRuntime = {};
-  if (finalizedRuntime) {
-    chainAdapter = new Rfc64PrivateDevnetChainAdapter(fixture, {
-      ...faultProfile.authority.adapterOptions({
-        authorityStatePath: manifest.authorityStatePath,
-        ownerAddress: roleAgentAddress('owner'),
-      }),
-      signerAddress: roleAgentAddress(role),
-    });
-    await chainAdapter.createOnChainContextGraph({
-      accessPolicy: 1,
-      publishPolicy: 0,
-      publishAuthority: fixture.ownerAddress,
-      publishAuthorityAccountId: 0n,
-      participantAgents: fixture.participantAgents,
-      nameHash: fixture.nameHash,
-    });
-    rpc = await startRfc64PrivateDevnetFinalizedRpc(fixture, {
-      readAuthoritySnapshot: () => chainAdapter.getContextGraphAuthoritySnapshot(
-        BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
-      ),
-    });
-    chainRuntime = {
+  const chainAdapter = new Rfc64PrivateDevnetChainAdapter(fixture, {
+    ...faultProfile.authority.adapterOptions({
+      authorityStatePath: manifest.authorityStatePath,
+      ownerAddress: roleAgentAddress('owner'),
+    }),
+    signerAddress: roleAgentAddress(role),
+  });
+  await chainAdapter.createOnChainContextGraph({
+    accessPolicy: 1,
+    publishPolicy: 0,
+    publishAuthority: fixture.ownerAddress,
+    publishAuthorityAccountId: 0n,
+    participantAgents: fixture.participantAgents,
+    nameHash: fixture.nameHash,
+  });
+  const rpc = await startRfc64PrivateDevnetFinalizedRpc(fixture, {
+    readAuthoritySnapshot: () => chainAdapter.getContextGraphAuthoritySnapshot(
+      BigInt(ON_CHAIN_CONTEXT_GRAPH_ID),
+    ),
+  });
+  const base = createBaseAgentOptionsV1({
+    dataDir,
+    role,
+    chainRuntime: {
       chainAdapter,
       chainConfig: {
         rpcUrl: rpc.url,
@@ -86,31 +115,8 @@ export async function createRfc64PrivateAgentV1({
         CONTEXT_GRAPH_ID,
         ON_CHAIN_CONTEXT_GRAPH_ID,
       ),
-    };
-  }
-  const base = {
-    name: `RFC64PrivateReleaseGate-${role}`,
-    dataDir,
-    listenHost: '127.0.0.1',
-    listenPort: 0,
-    bootstrapPeers: [],
-    nodeRole: 'edge',
-    store: new OxigraphStore(join(dataDir, 'oxigraph')),
-    syncSharedMemoryOnConnect: false,
-    syncReconcilerEnabled: false,
-    syncOnConnectEnabled: false,
-    durableSyncEnabled: true,
-    agentProfileHeartbeatMs: 0,
-    ...chainRuntime,
-  };
-  if (manifest === undefined) {
-    return Object.freeze({
-      agent: await DKGAgent.create(base),
-      chainAdapter: undefined,
-      faultProfile,
-      rpc: undefined,
-    });
-  }
+    },
+  });
 
   const peerIds = manifest.peerIds;
   const agentAddressByPeerId = new Map(RUNTIME_ROLES.map((runtimeRole) => [
@@ -150,10 +156,7 @@ export async function createRfc64PrivateAgentV1({
   return Object.freeze({ agent: created, chainAdapter, faultProfile, rpc });
 }
 
-export async function createRfc64PrivateFinalizedRuntimeV1({ created, manifest, role }) {
-  if (created.chainAdapter === undefined) {
-    throw new Error('finalized runtime produced no chain adapter');
-  }
+async function bindRfc64PrivateFinalizedRuntimeV1({ created, manifest, role }) {
   const onChainContextGraphId = BigInt(ON_CHAIN_CONTEXT_GRAPH_ID);
   const finalizedAuthority = composeRfc64FinalizedCatalogAuthorityV1({
     networkId: NETWORK_ID,
@@ -225,6 +228,24 @@ export async function createRfc64PrivateFinalizedRuntimeV1({ created, manifest, 
     peerIds: manifest.peerIds,
     role,
   });
+}
+
+function createBaseAgentOptionsV1({ dataDir, role, chainRuntime = {} }) {
+  return {
+    name: `RFC64PrivateReleaseGate-${role}`,
+    dataDir,
+    listenHost: '127.0.0.1',
+    listenPort: 0,
+    bootstrapPeers: [],
+    nodeRole: 'edge',
+    store: new OxigraphStore(join(dataDir, 'oxigraph')),
+    syncSharedMemoryOnConnect: false,
+    syncReconcilerEnabled: false,
+    syncOnConnectEnabled: false,
+    durableSyncEnabled: true,
+    agentProfileHeartbeatMs: 0,
+    ...chainRuntime,
+  };
 }
 
 async function seedPrivateCatalogDefinitionV1(store, peerIds, participantAgents) {

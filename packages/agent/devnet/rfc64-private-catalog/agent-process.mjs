@@ -13,10 +13,9 @@ import {
 } from './child-protocol.mjs';
 import { emitAuthoritativeRuntimeShutdownReceiptV1 } from './runtime-shutdown.mjs';
 import { createRfc64PrivateFaultProfileV1 } from './fault-injection.mjs';
-import { createProbeRuntimeV1 } from './agent-runtime.mjs';
 import {
-  createRfc64PrivateAgentV1,
   createRfc64PrivateFinalizedRuntimeV1,
+  createRfc64PrivateProbeRuntimeV1,
 } from './agent-runtime-factory.mjs';
 import {
   publishCatalogBaselineV1,
@@ -54,15 +53,11 @@ function emit(event, requestId, fields = {}) {
 async function boot() {
   const faultProfile = createRfc64PrivateFaultProfileV1(process.env);
   if (MODE === 'probe') {
-    const created = await createRfc64PrivateAgentV1({
+    runtime = await createRfc64PrivateProbeRuntimeV1({
       dataDir: DATA_DIR,
       faultProfile,
-      finalizedRuntime: false,
-      manifest: undefined,
       role: ROLE,
     });
-    await created.agent.start();
-    runtime = createProbeRuntimeV1(created);
     childCommandHandlers = createChildCommandHandlersV1(runtime);
     emit(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready, undefined, readyFields(runtime));
     return;
@@ -71,16 +66,9 @@ async function boot() {
     throw new Error('runtime mode requires a manifest');
   }
   const manifest = JSON.parse(await readFile(MANIFEST_PATH, 'utf8'));
-  const created = await createRfc64PrivateAgentV1({
+  runtime = await createRfc64PrivateFinalizedRuntimeV1({
     dataDir: DATA_DIR,
     faultProfile,
-    finalizedRuntime: true,
-    manifest,
-    role: ROLE,
-  });
-  await created.agent.start();
-  runtime = await createRfc64PrivateFinalizedRuntimeV1({
-    created,
     manifest,
     role: ROLE,
   });
@@ -126,19 +114,18 @@ function createChildCommandHandlersV1(context) {
       await context.agent.node.libp2p.dial(multiaddr(command.multiaddr));
       return { peerId: command.peerId };
     },
-    publish: () => publishCatalogBaselineV1(context, ROLE),
-    'publish-update': () => publishCatalogUpdateV1(context, ROLE),
-    'wait-bootstrap': (command) => waitForBootstrapV1(context, command, ROLE),
-    inspect: (command) => inspectPrivateCatalogV1(context, command.expectedHeadDigest, ROLE),
+    publish: () => publishCatalogBaselineV1(context),
+    'publish-update': () => publishCatalogUpdateV1(context),
+    'wait-bootstrap': (command) => waitForBootstrapV1(context, command),
+    inspect: (command) => inspectPrivateCatalogV1(context, command.expectedHeadDigest),
     'inspect-persisted': (command) => inspectPrivateCatalogV1(
       context,
       command.expectedHeadDigest,
-      ROLE,
       { includeNonmemberQuery: false },
     ),
     'sync-denied': (command) => provePrivateCatalogDeniedV1(context, command),
-    'revoke-receiver': () => revokeReceiverV1(context, ROLE),
-    'observe-receiver-revocation': () => observeReceiverRevocationV1(context, ROLE),
+    'revoke-receiver': () => revokeReceiverV1(context),
+    'observe-receiver-revocation': () => observeReceiverRevocationV1(context),
     stop: async () => Object.freeze({}),
   });
 }

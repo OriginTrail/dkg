@@ -638,7 +638,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     temporaryRoots.push(root);
     const sourceRevision = 'a'.repeat(40);
     const cleanBuild = buildRuntimeManifestV1(REPO_ROOT, sourceRevision);
-    const child = new AgentChild('production-probe', root, undefined, 'probe', {
+    const child = new AgentChild('owner', root, undefined, 'probe', {
       runtimeProvenance: {
         runtimeManifestDigest: cleanBuild.manifestDigest,
         sourceRevision,

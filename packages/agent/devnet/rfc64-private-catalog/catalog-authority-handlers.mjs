@@ -14,8 +14,9 @@ import {
 import { assertFinalizedRuntimeV1 } from './agent-runtime.mjs';
 import { assertAuthorityEvidenceParityV1 } from './initial-authority.mjs';
 
-export async function revokeReceiverV1(context, role) {
+export async function revokeReceiverV1(context) {
   assertFinalizedRuntimeV1(context);
+  const { role } = context;
   if (role !== 'owner') throw new Error('only the owner can advance the gate roster');
   if (context.chainAdapter === undefined) throw new Error('owner has no finalized chain adapter');
   await context.agent.removeAgentFromContextGraph(
@@ -31,8 +32,9 @@ export async function revokeReceiverV1(context, role) {
   };
 }
 
-export async function observeReceiverRevocationV1(context, role) {
+export async function observeReceiverRevocationV1(context) {
   assertFinalizedRuntimeV1(context);
+  const { role } = context;
   if (role !== 'provider2') throw new Error('only provider2 can observe the gate revocation');
   let providerMutationDenied = false;
   try {
