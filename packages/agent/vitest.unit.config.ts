@@ -139,6 +139,7 @@ export default defineConfig({
       "test/sync-on-connect-retry.test.ts",
       "test/peer-event-lifecycle.test.ts",
       "test/sync-on-connect-churn.test.ts",
+      "test/sync-on-connect-compatibility.test.ts",
       "test/rfc64-sync-on-connect-recovery-plan-queue.test.ts",
       "test/rfc64-sync-on-connect-peer-job-accounting.test.ts",
       "test/rfc64-sync-on-connect-swm-lanes.test.ts",

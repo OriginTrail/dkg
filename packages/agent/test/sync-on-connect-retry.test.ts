@@ -11,7 +11,7 @@ import {
 } from '../src/sync/on-connect/sync-on-connect.js';
 import { ordinaryLane } from './_helpers/run-sync-on-connect.js';
 import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import type { OperationContext, PeerResolver } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
   asSyncOnConnectTestAgent,
@@ -1737,6 +1737,14 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       stubDurableSyncExternalIo(agent);
       (agent as any).fetchSyncPages = async (...args: unknown[]) => emptySyncPage(String(args[4]));
 
+      // The durable recovery coordinator reconnects its requested candidate.
+      // Keep this synthetic peer's connection I/O local, just like its page
+      // fetches, while exercising real durable and private SWM admission.
+      const connectPeer = vi.spyOn(
+        (agent as unknown as { peerResolver: Pick<PeerResolver, 'connect'> }).peerResolver,
+        'connect',
+      ).mockResolvedValue({ status: 'connected', resolvedAddresses: [] });
+
       const peerA = freshPeerIdString();
       const origGetPeers = agent.node.libp2p.getPeers.bind(agent.node.libp2p);
       (agent.node.libp2p as any).getPeers = recorder(
@@ -1776,6 +1784,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
         connectionKey: null,
       });
       expect(outcome).toBe('deferred-backpressure');
+      expect(connectPeer).toHaveBeenCalledWith(peerA, {});
       expect(recoverContextGraphSwmFromPeer.calls).toEqual([]);
       expect(syncState(agent).snapshot(peerA).backoff !== undefined).toBe(false);
     } finally {

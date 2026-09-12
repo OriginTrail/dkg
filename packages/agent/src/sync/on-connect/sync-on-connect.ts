@@ -71,14 +71,7 @@ export class InMemoryPeerSyncLease implements PeerSyncLease {
   }
 
   tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null {
-    if (this.#activePeers.has(peerId)) return null;
-    this.#activePeers.add(peerId);
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.#activePeers.delete(peerId);
-    };
+    return acquireSetPeerSyncLease(this.#activePeers, peerId);
   }
 
   isHeld(peerId: string): boolean { return this.#activePeers.has(peerId); }
@@ -86,11 +79,41 @@ export class InMemoryPeerSyncLease implements PeerSyncLease {
   clear(): void { this.#activePeers.clear(); }
 }
 
-export interface SyncOnConnectContext {
-  /** Required owner lifetime for every session-scoped continuation. */
+function acquireSetPeerSyncLease(peers: Set<string>, peerId: string): ReleasePeerSyncLease | null {
+  if (peers.has(peerId)) return null;
+  peers.add(peerId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    peers.delete(peerId);
+  };
+}
+
+interface CompatiblePeerSyncContext {
+  /** Omitted by legacy callers whose invocation runs until it settles. */
+  signal?: AbortSignal;
+  syncingPeers: PeerSyncLease | Set<string>;
+}
+
+interface SessionPeerSyncContext {
   signal: AbortSignal;
-  remotePeer: string;
   syncingPeers: PeerSyncLease;
+}
+
+/** Normalize ownership once at the published helper boundary. */
+function admitPeerSyncContext(context: CompatiblePeerSyncContext): SessionPeerSyncContext {
+  const peers = context.syncingPeers;
+  return {
+    signal: context.signal ?? new AbortController().signal,
+    syncingPeers: 'tryAcquirePeer' in peers
+      ? peers
+      : { tryAcquirePeer: peerId => acquireSetPeerSyncLease(peers, peerId) },
+  };
+}
+
+export interface SyncOnConnectContext extends CompatiblePeerSyncContext {
+  remotePeer: string;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2?: Set<string>;
@@ -127,17 +150,17 @@ export interface SyncOnConnectContext {
   onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
+/** Every continuation inside an admitted session has an explicit lifetime and lease owner. */
+export type SessionSyncOnConnectContext = SyncOnConnectContext & SessionPeerSyncContext;
+
 /**
  * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectContext}, this
  * shape cannot express durable, discovery, or ordinary shared-memory work, so
  * a selected retry cannot fall through when the broad on-connect workflow is
  * changed later.
  */
-interface SelectedSharedMemoryRetryContext {
-  /** Required owner lifetime for every session-scoped continuation. */
-  signal: AbortSignal;
+interface SelectedSharedMemoryRetryContext extends CompatiblePeerSyncContext {
   remotePeer: string;
-  syncingPeers: PeerSyncLease;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   selectedSharedMemoryLane: SelectedSharedMemorySyncLane;
   logInfo: (ctx: OperationContext, message: string) => void;
@@ -234,6 +257,12 @@ function classifySyncResult(
 export async function runSelectedSharedMemoryRetry(
   context: SelectedSharedMemoryRetryContext,
 ): Promise<SyncOnConnectOutcome> {
+  return runSessionSelectedSharedMemoryRetry({ ...context, ...admitPeerSyncContext(context) });
+}
+
+async function runSessionSelectedSharedMemoryRetry(
+  context: SelectedSharedMemoryRetryContext & SessionPeerSyncContext,
+): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
     syncingPeers,
@@ -326,6 +355,12 @@ export async function runSelectedSharedMemoryRetry(
 
 export async function runSyncOnConnect(
   context: SyncOnConnectContext,
+): Promise<SyncOnConnectOutcome> {
+  return runSessionSyncOnConnect({ ...context, ...admitPeerSyncContext(context) });
+}
+
+async function runSessionSyncOnConnect(
+  context: SessionSyncOnConnectContext,
 ): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
