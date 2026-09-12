@@ -1,6 +1,6 @@
 {
   "name": "@devnet/rfc64-remote-canary",
-  "version": "10.0.16",
+  "version": "0.0.0",
   "private": true,
   "type": "module",
   "engines": {
