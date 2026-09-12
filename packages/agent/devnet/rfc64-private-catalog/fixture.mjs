@@ -11,6 +11,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
+
+import { RFC64_PRIVATE_RUNTIME_ROLES_V1 } from './agent-runtime.ts';
 import { packKnowledgeAssetIdFromIdentity } from '../../src/ka-identity.ts';
 import {
   canonicalGraphlessProjectionNQuads,
@@ -107,10 +109,7 @@ export const PRIVATE_CATALOG_MEMORY_EXPECTATION = Object.freeze({
   }),
 });
 export const PRIVATE_MEMBER_ROLES = Object.freeze(['owner', 'provider2', 'receiver']);
-export const RUNTIME_ROLES = Object.freeze([
-  ...PRIVATE_MEMBER_ROLES,
-  'outsider',
-]);
+export const RUNTIME_ROLES = RFC64_PRIVATE_RUNTIME_ROLES_V1;
 export const DEPLOYMENT = Object.freeze({
   networkId: NETWORK_ID,
   assertedAtChainId: CHAIN_ID,

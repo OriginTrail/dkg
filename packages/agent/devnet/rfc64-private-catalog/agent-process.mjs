@@ -16,7 +16,11 @@ import { createRfc64PrivateFaultProfileV1 } from './fault-injection.mjs';
 import {
   createRfc64PrivateFinalizedRuntimeV1,
   createRfc64PrivateProbeRuntimeV1,
-} from './agent-runtime-factory.mjs';
+} from './agent-runtime-factory.ts';
+import {
+  parseRfc64PrivateRuntimeManifestV1,
+  parseRfc64PrivateRuntimeRoleV1,
+} from './agent-runtime.ts';
 import {
   publishCatalogBaselineV1,
   publishCatalogUpdateV1,
@@ -32,7 +36,7 @@ import {
 } from './catalog-authority-handlers.mjs';
 import { boundedErrorChainV1 } from './bounded-error.mjs';
 
-const ROLE = requiredEnv('DKG_RFC64_PRIVATE_ROLE');
+const ROLE = parseRfc64PrivateRuntimeRoleV1(requiredEnv('DKG_RFC64_PRIVATE_ROLE'));
 const MODE = requiredEnv('DKG_RFC64_PRIVATE_MODE');
 const DATA_DIR = requiredEnv('DKG_RFC64_PRIVATE_DATA_DIR');
 const RUNTIME_MANIFEST_DIGEST = requiredEnv('DKG_RFC64_RUNTIME_MANIFEST_DIGEST');
@@ -65,7 +69,9 @@ async function boot() {
   if (MODE !== 'run' || MANIFEST_PATH === undefined) {
     throw new Error('runtime mode requires a manifest');
   }
-  const manifest = JSON.parse(await readFile(MANIFEST_PATH, 'utf8'));
+  const manifest = parseRfc64PrivateRuntimeManifestV1(
+    JSON.parse(await readFile(MANIFEST_PATH, 'utf8')),
+  );
   runtime = await createRfc64PrivateFinalizedRuntimeV1({
     dataDir: DATA_DIR,
     faultProfile,

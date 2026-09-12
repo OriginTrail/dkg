@@ -7011,28 +7011,34 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     }
   });
 
-  it('cold-starts after publication from a provider current-head snapshot', async () => {
-    const [author, provider] = await Promise.all([
+  it('preserves applied-provider evidence across replay and clears it on restart', async () => {
+    const [author, provider, replayProvider] = await Promise.all([
       startNativeAgent('cold-author'),
       startNativeAgent('cold-provider'),
+      startNativeAgent('cold-replay-provider'),
     ]);
-    provider.acceptOpenContextGraphPolicyV1({
-      networkId: NETWORK_ID,
-      contextGraphId: CONTEXT_GRAPH_ID,
-      ownerAddress: AUTHOR,
-    });
-    await connectBothWays(author, provider);
+    for (const peer of [provider, replayProvider]) {
+      peer.acceptOpenContextGraphPolicyV1({
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        ownerAddress: AUTHOR,
+      });
+      await connectBothWays(author, peer);
+    }
 
     const genesis = await author.publishOpenAuthorCatalogGenesisV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
       author: AUTHOR_WALLET,
-      peers: [provider.peerId],
+      peers: [provider.peerId, replayProvider.peerId],
       issuedAt: FIXED_HEAD_ISSUED_AT,
       catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
       catalogIssuerDelegationExpiresAt: MULTI_DELEGATION_EXPIRES_AT,
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
+    await Promise.all([
+      provider.whenRfc64PublicCatalogReceiverIdleV1(),
+      replayProvider.whenRfc64PublicCatalogReceiverIdleV1(),
+    ]);
     const successor = await author.publishOpenAuthorCatalogSuccessorV1({
       previousHead: {
         objectDigest: genesis.headObjectDigest,
@@ -7045,17 +7051,28 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       seal: await authorSeal(7n),
       deployment: NATIVE_DEPLOYMENT,
       issuedAt: SUCCESSOR_ISSUED_AT,
-      peers: [provider.peerId],
+      peers: [provider.peerId, replayProvider.peerId],
     });
-    await provider.whenRfc64PublicCatalogReceiverIdleV1();
-    expect(provider.readRfc64AppliedCatalogHeadV1({
-      catalogScopeDigest: catalogScopeDigest(),
-      authorAddress: AUTHOR,
-    })?.currentCatalogHeadDigest).toBe(successor.headObjectDigest);
+    await Promise.all([
+      provider.whenRfc64PublicCatalogReceiverIdleV1(),
+      replayProvider.whenRfc64PublicCatalogReceiverIdleV1(),
+    ]);
+    for (const peer of [provider, replayProvider]) {
+      expect(peer.readRfc64AppliedCatalogHeadV1({
+        catalogScopeDigest: catalogScopeDigest(),
+        authorAddress: AUTHOR,
+      })?.currentCatalogHeadDigest).toBe(successor.headObjectDigest);
+    }
 
     // The third agent does not exist until after the successor is durable on
     // the provider, so it cannot have observed either publication hint.
-    const cold = await startNativeAgent('cold-late-receiver');
+    const coldDataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-native-cold-lifecycle-'));
+    tempDirs.push(coldDataDir);
+    const cold = await startNativeAgent(
+      'cold-late-receiver',
+      NATIVE_DEPLOYMENT,
+      coldDataDir,
+    );
     cold.acceptOpenContextGraphPolicyV1({
       networkId: NETWORK_ID,
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -7066,6 +7083,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })).toBeNull();
     await connectBothWays(provider, cold);
+    await connectBothWays(replayProvider, cold);
 
     const synchronized = await cold.synchronizeRfc64PublicCatalogFromProviderV1({
       remotePeerId: provider.peerId,
@@ -7097,7 +7115,23 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       activatedTripleCount: 2,
       removedRowCount: 0,
       appliedHeadStatus: 'applied',
+      appliedProviderPeerId: provider.peerId,
     });
+
+    const replayed = await cold.synchronizeRfc64PublicCatalogFromProviderV1({
+      remotePeerId: replayProvider.peerId,
+      scope: {
+        networkId: NETWORK_ID,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        subGraphName: null,
+        authorAddress: AUTHOR,
+        catalogEra: '0',
+      },
+    });
+    expect(replayed.currentCatalogHeadDigest).toBe(successor.headObjectDigest);
+    expect(cold.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      successor.headObjectDigest,
+    )).toMatchObject({ appliedProviderPeerId: provider.peerId });
     const coldReceiverStats = cold.rfc64PublicCatalogStatsV1()?.receiver;
     expect(coldReceiverStats).toMatchObject({
       applied: 1,
@@ -7119,6 +7153,22 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         expect.objectContaining({ s: 'https://example.org/alice' }),
       ]),
     });
+
+    const coldPeerId = cold.peerId;
+    await cold.stop();
+    agents.splice(agents.indexOf(cold), 1);
+    expect(cold.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      successor.headObjectDigest,
+    )).toBeNull();
+    const restartedCold = await startNativeAgent(
+      'cold-late-receiver-restarted',
+      NATIVE_DEPLOYMENT,
+      coldDataDir,
+    );
+    expect(restartedCold.peerId).toBe(coldPeerId);
+    expect(restartedCold.readRfc64PublicCatalogSynchronizationEvidenceV1(
+      successor.headObjectDigest,
+    )).toBeNull();
   }, 60_000);
 
   it('rejects the provider-sync API when scheduled semantic activation fails', async () => {

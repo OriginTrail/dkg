@@ -123,6 +123,7 @@
     "benchmark:sync-worker-responsiveness": "node scripts/sync-worker-responsiveness-benchmark.cjs",
     "devnet:rfc64-private-release-gate": "node --import tsx devnet/rfc64-private-catalog/launch-live.ts",
     "test:rfc64-private-release-gate:unit": "node --import tsx --test --test-concurrency=1 devnet/rfc64-private-catalog/*.test.mjs",
+    "typecheck:rfc64-private-release-gate": "tsc --project devnet/rfc64-private-catalog/tsconfig.json",
     "test": "vitest run",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:rfc64-m0-recovery:unit": "node --test scripts/run-rfc64-m0-recovery-scenario.test.mjs",

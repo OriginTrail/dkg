@@ -32,13 +32,11 @@ import {
   roleAgentAddress,
 } from './fixture.mjs';
 import {
-  assertFinalizedRuntimeFactoryInputV1,
   assertFinalizedRuntimeV1,
-  assertProbeRuntimeFactoryInputV1,
-  createFinalizedRuntimeV1,
   createOwnerPublicationStateV1,
-  createProbeRuntimeV1,
-} from './agent-runtime.mjs';
+  parseRfc64PrivateRuntimeManifestV1,
+  parseRfc64PrivateRuntimeRoleV1,
+} from './agent-runtime.ts';
 import { composeBootstrapEvidenceV1 } from './catalog-evidence-handlers.mjs';
 import { buildRfc64PrivateReleaseArtifactV1 } from './scenario-artifact.mjs';
 
@@ -131,20 +129,10 @@ test('child command failures retain only a bounded command phase', () => {
   ), { failureClass: 'gate-execution-failed' });
 });
 
-test('runtime variants make role and resource boundaries explicit', () => {
-  const probeCreated = { agent: {}, faultProfile: {} };
-  const probe = createProbeRuntimeV1(probeCreated, { role: 'owner' });
-  assert.equal(probe.kind, 'probe');
-  assert.equal(probe.role, 'owner');
+test('runtime discriminant and owner publication enforce behavioral transitions', () => {
+  const probe = { kind: 'probe', role: 'owner' };
   assert.throws(() => assertFinalizedRuntimeV1(probe), /requires a finalized runtime/u);
-  assert.throws(
-    () => createProbeRuntimeV1({ ...probeCreated, chainAdapter: {} }, { role: 'owner' }),
-    /only probe agent resources/u,
-  );
-  assert.throws(
-    () => createProbeRuntimeV1(probeCreated, { role: 'unknown' }),
-    /role is invalid/u,
-  );
+  assert.doesNotThrow(() => assertFinalizedRuntimeV1({ kind: 'run', role: 'provider2' }));
 
   const publication = createOwnerPublicationStateV1();
   assert.throws(() => publication.requireBaseline(), /requires a published/u);
@@ -157,48 +145,33 @@ test('runtime variants make role and resource boundaries explicit', () => {
     scope,
     assets: [{ asset: 1 }],
   });
+});
 
-  const finalizedCreated = {
-    agent: {},
-    chainAdapter: {},
-    faultProfile: {},
-    rpc: {},
+test('runtime external boundaries accept only canonical roles and complete manifests', () => {
+  assert.equal(parseRfc64PrivateRuntimeRoleV1('receiver'), 'receiver');
+  assert.throws(() => parseRfc64PrivateRuntimeRoleV1('unknown'), /role is invalid/u);
+  const manifest = {
+    authorityStatePath: '/not-used/authority.json',
+    peerIds: {
+      owner: 'owner-peer',
+      provider2: 'provider2-peer',
+      receiver: 'receiver-peer',
+      outsider: 'outsider-peer',
+    },
   };
-  const finalized = createFinalizedRuntimeV1(finalizedCreated, {
-    initialFinalizedAuthority: {},
-    peerIds: { owner: 'owner-peer' },
-    role: 'provider2',
-  });
-  assert.equal(finalized.kind, 'run');
-  assert.equal(finalized.publication, null);
-  assert.doesNotThrow(() => assertFinalizedRuntimeV1(finalized));
-  assert.throws(
-    () => createFinalizedRuntimeV1(probeCreated, {
-      initialFinalizedAuthority: {},
-      peerIds: {},
-      role: 'owner',
-    }),
-    /requires agent, chain adapter, and RPC resources/u,
-  );
-  assert.throws(
-    () => assertProbeRuntimeFactoryInputV1({
-      dataDir: '/not-used',
-      faultProfile: {},
-      manifest: {},
-      role: 'owner',
-    }),
-    /exact runtime inputs/u,
-  );
-  assert.throws(
-    () => assertFinalizedRuntimeFactoryInputV1({
-      dataDir: '/not-used',
-      faultProfile: {},
-      finalizedRuntime: true,
-      manifest: {},
-      role: 'owner',
-    }),
-    /exact runtime inputs/u,
-  );
+  assert.deepEqual(parseRfc64PrivateRuntimeManifestV1(manifest), manifest);
+  assert.throws(() => parseRfc64PrivateRuntimeManifestV1({
+    ...manifest,
+    unexpected: true,
+  }), /unexpected fields/u);
+  assert.throws(() => parseRfc64PrivateRuntimeManifestV1({
+    ...manifest,
+    peerIds: { ...manifest.peerIds, unexpected: 'unexpected-peer' },
+  }), /exactly cover unique roles/u);
+  assert.throws(() => parseRfc64PrivateRuntimeManifestV1({
+    ...manifest,
+    peerIds: { ...manifest.peerIds, outsider: manifest.peerIds.owner },
+  }), /exactly cover unique roles/u);
 });
 
 test('publication and synchronization derive the exact canonical catalog scope', () => {

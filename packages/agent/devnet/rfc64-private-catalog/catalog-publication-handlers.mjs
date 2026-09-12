@@ -16,7 +16,7 @@ import {
   privateCatalogSwmShareOperationId,
   roleAgentAddress,
 } from './fixture.mjs';
-import { assertFinalizedRuntimeV1 } from './agent-runtime.mjs';
+import { assertFinalizedRuntimeV1 } from './agent-runtime.ts';
 
 export async function publishCatalogBaselineV1(context) {
   assertOwnerPublisherV1(context);

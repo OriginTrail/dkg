@@ -111,7 +111,6 @@ import {
 import type { Rfc64CatalogAppliedHeadEvidenceV1 } from
   './rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js';
 import {
-  recordRfc64AppliedProviderPeerIdV1,
   reduceRfc64CatalogSynchronizationEvidenceReplayV1,
   snapshotRfc64CatalogSynchronizationEvidenceV1,
   type Rfc64CatalogSynchronizationEvidenceV1,
@@ -2496,7 +2495,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       await this.rfc64CatalogMutationCoordinatorV1.closeAndDrain();
     } finally {
       this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-      this.rfc64PublicCatalogAppliedProviderPeerIdsV1.clear();
       this.rfc64PublicCatalogReconciliationFailuresV1.clear();
       rfc64DirectAcceptedCompatibilityV1.delete(this);
       rfc64CatalogReplayRuntimesV1.delete(this);
@@ -3160,22 +3158,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
-   * Read the process-local provider that produced one real applied-head
-   * transition. Exact-head replays never manufacture or replace this witness.
-   */
-  readRfc64PublicCatalogAppliedProviderEvidenceV1(
-    this: DKGAgent,
-    catalogHeadDigest: Digest32V1,
-  ): Readonly<{ catalogHeadDigest: Digest32V1; providerPeerId: string }> | null {
-    const providerPeerId = this.rfc64PublicCatalogAppliedProviderPeerIdsV1.get(
-      catalogHeadDigest,
-    );
-    return providerPeerId === undefined
-      ? null
-      : Object.freeze({ catalogHeadDigest, providerPeerId });
-  }
-
-  /**
    * Read the immutable process-local terminal failure for one announced head.
    * This is diagnostic evidence only; it is neither durable nor an input to
    * receiver retry, deduplication, reconciliation, or authorization decisions.
@@ -3240,7 +3222,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return undefined;
     }
     this.rfc64PublicCatalogSynchronizationEvidenceV1.clear();
-    this.rfc64PublicCatalogAppliedProviderPeerIdsV1.clear();
     const resolveDeployment: Rfc64BoundedPublicRootCatalogDeploymentResolverV1 =
       (announcement, signal) => this.resolveRfc64CatalogDeploymentProfileV1(
         announcement.networkId,
@@ -3354,12 +3335,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               deployment,
               signal,
             );
-            recordRfc64AppliedProviderPeerIdV1(
-              this.rfc64PublicCatalogAppliedProviderPeerIdsV1,
+            const current = snapshotRfc64CatalogSynchronizationEvidenceV1(
               evidence,
               remotePeerId,
             );
-            const current = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence);
             const previous = this.rfc64PublicCatalogSynchronizationEvidenceV1.get(
               evidence.catalogHeadDigest,
             );
