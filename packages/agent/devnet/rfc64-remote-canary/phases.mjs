@@ -53,7 +53,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
   const cohortRef = createRemoteCanaryCohortRefV1(validated);
 
   try {
-    const preflightStatuses = await runPhaseV1('preflight', () => preflightAllNodesV1({
+    const initialPreflight = await runPhaseV1('preflight', () => preflightAllNodesV1({
       config: validated,
       request,
     }));
@@ -116,6 +116,15 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
       },
     ));
 
+    // A disruptive certification run can overlap a rollout or node restart.
+    // Re-establish build, network, sync, and catalog invariants immediately
+    // before issuing PASS, and bind the certificate to this fresh snapshot.
+    const finalPreflight = await runPhaseV1('final-preflight', () => preflightAllNodesV1({
+      config: validated,
+      request,
+      expectedNetworkKey: initialPreflight.networkKey,
+    }));
+
     const checks = Object.freeze({
       liveSwmPropagation: Object.freeze(liveSwmPropagation),
       offlineCatchup,
@@ -142,7 +151,7 @@ export async function executeRemoteCanaryCertificationV1(config, dependencies = 
       expectedCommit: validated.expectedCommit,
       cohortRef,
       topology: redactedTopology(validated),
-      preflight: Object.freeze({ status: 'PASS', nodes: preflightStatuses }),
+      preflight: Object.freeze({ status: 'PASS', nodes: finalPreflight.nodes }),
       checks,
     });
   } finally {
@@ -156,23 +165,24 @@ function createDryRunPlan(config) {
     liveSwmPropagationChecks: config.contextGraphs.length,
     offlineCatchup: config.lifecycle === null ? 'EVIDENCE_REQUIRED' : 'PLANNED',
     vmParityChecks: config.contextGraphs.length,
-    vmParityEvidence: summarizeEvidenceState(config.contextGraphs, 'vmEvidenceState'),
-    catalogSwmEvidence: summarizeEvidenceState(
-      config.contextGraphs,
-      'catalogSwmEvidenceState',
-    ),
+    vmParityEvidence: summarizeAskEvidence(config.contextGraphs, 'vmAskSparql'),
+    catalogSwmEvidence: summarizeAskEvidence(config.contextGraphs, 'catalogSwmAskSparql'),
     authorization: Object.freeze({
-      unauthorized: config.authorizationChecks.unauthorized.evidenceState,
-      revoked: config.authorizationChecks.revoked.evidenceState,
+      unauthorized: authorizationEvidenceState(config.authorizationChecks.unauthorized),
+      revoked: authorizationEvidenceState(config.authorizationChecks.revoked),
     }),
-    rpcUsage: config.rpcUsage.evidenceState,
+    rpcUsage: config.rpcUsage.kind === 'required' ? 'EVIDENCE_REQUIRED' : 'PLANNED',
   });
 }
 
-function summarizeEvidenceState(checks, field) {
-  return checks.every((check) => check[field] === 'PLANNED')
+function summarizeAskEvidence(checks, field) {
+  return checks.every((check) => check[field] !== undefined)
     ? 'PLANNED'
     : 'EVIDENCE_REQUIRED';
+}
+
+function authorizationEvidenceState(check) {
+  return check.kind === 'not-exposed' ? 'EVIDENCE_REQUIRED' : 'PLANNED';
 }
 
 function redactedTopology(config) {
