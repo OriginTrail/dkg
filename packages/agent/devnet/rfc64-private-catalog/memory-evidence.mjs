@@ -227,6 +227,15 @@ export function hasExactPrivateCatalogMemoryContents(state, expected) {
   });
 }
 
+/** Exact pre-update state: canonical finalized VM evidence and no staged SWM. */
+export function hasExactPrivateCatalogFinalizedVmBaselineContents(state, expected) {
+  return hasExactPrivateCatalogVmContents(state, {
+    assetNumbers: expected?.assetNumbers,
+    ...expected?.vm,
+  })
+    && state.graphCounts.every((evidence) => evidence.swm === 0);
+}
+
 export function hasExactPrivateCatalogSwmContents(state, expected) {
   return hasExactPrivateCatalogLayerContents(state, expected, 'swm');
 }

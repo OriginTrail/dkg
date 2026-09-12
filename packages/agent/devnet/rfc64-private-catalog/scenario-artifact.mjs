@@ -6,6 +6,7 @@ import {
 } from './fixture.mjs';
 import { isExpectedPrivateCatalogDenialResultV1 } from './denial-evidence.mjs';
 import {
+  hasExactPrivateCatalogFinalizedVmBaselineContents,
   hasExactPrivateCatalogMemoryContents,
   hasExactPrivateCatalogSwmContents,
 } from './memory-evidence.mjs';
@@ -185,7 +186,11 @@ function buildRfc64PrivateReleaseChecksV1(evidence) {
     provider2HasSwmV2AndVmV1: hasExactMemoryContents(provider2State),
     receiverBaselineSeededThroughProvider2:
       receiverSeedBootstrap.providerPeerId === peerIds.provider2
-      && observation(receiverSeed, 'state').exactExpectedHead === true,
+      && observation(receiverSeed, 'state').exactExpectedHead === true
+      && hasExactPrivateCatalogFinalizedVmBaselineContents(
+        observation(receiverSeed, 'state'),
+        EXPECTED_MEMORY_CONTENTS,
+      ),
     receiverUsedProvider2AfterOwnerStopped:
       observation(receiver, 'bootstrap').appliedHeadDigest === published.headObjectDigest
       && observation(receiver, 'bootstrap').providerPeerId === peerIds.provider2,

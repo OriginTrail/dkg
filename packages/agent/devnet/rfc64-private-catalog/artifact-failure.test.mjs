@@ -187,6 +187,23 @@ test('artifact fails when receiver startup precedes owner exit', () => {
   assert.equal(artifact.status, 'FAIL');
 });
 
+test('artifact fails without exact finalized-VM receiver baseline evidence', () => {
+  const evidence = passingScenarioEvidenceV1();
+  evidence.processes['receiver-seed'].observations.state = Object.freeze({
+    ...evidence.processes['receiver-seed'].observations.state,
+    graphCounts: Object.freeze([]),
+  });
+  const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+  assert.equal(artifact.checks.receiverBaselineSeededThroughProvider2, false);
+  assert.deepEqual(
+    Object.entries(artifact.checks)
+      .filter(([name]) => name !== 'receiverBaselineSeededThroughProvider2')
+      .filter(([, passed]) => !passed),
+    [],
+  );
+  assert.equal(artifact.status, 'FAIL');
+});
+
 test('initial authority rejects a finalized-chain roster fault before readiness', () => {
   const expected = createPrivatePolicyAndRoster();
   const expectedAuthority = {
@@ -265,6 +282,7 @@ function passingScenarioEvidenceV1() {
   const headObjectDigest = `0x${'cd'.repeat(32)}`;
   const scopeDigest = computeAuthorCatalogScopeDigestV1(createPrivateCatalogScope());
   const catalogState = scenarioMemoryStateV1(headObjectDigest, scopeDigest, 'catalog-row');
+  const baselineState = scenarioFinalizedVmBaselineStateV1(headObjectDigest, scopeDigest);
   const sourceState = scenarioMemoryStateV1(headObjectDigest, scopeDigest, 'workspace-head');
   const emptyState = Object.freeze({
     appliedHeadDigest: null,
@@ -346,11 +364,12 @@ function passingScenarioEvidenceV1() {
     'receiver-seed': process('receiver-seed', 'receiver', {
       observations: {
         bootstrap: { appliedHeadDigest: headObjectDigest, providerPeerId: peerIds.provider2 },
-        state: catalogState,
+        state: baselineState,
       },
       shutdown: finalizedShutdown,
     }),
     receiver: process('receiver', 'receiver', {
+      spawnSequence: 3,
       observations: {
         bootstrap: { appliedHeadDigest: headObjectDigest, providerPeerId: peerIds.provider2 },
         revokedDenial: denial,
@@ -379,6 +398,19 @@ function passingScenarioEvidenceV1() {
     }),
   };
   return { peerIds, processes, runtimeProvenance: {} };
+}
+
+function scenarioFinalizedVmBaselineStateV1(headObjectDigest, catalogScopeDigest) {
+  const state = scenarioMemoryStateV1(headObjectDigest, catalogScopeDigest, 'catalog-row');
+  return Object.freeze({
+    ...state,
+    graphCounts: Object.freeze(state.graphCounts.map((evidence) => Object.freeze({
+      ...evidence,
+      swm: 0,
+      swmDigest: PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.projection.digest,
+      swmProof: Object.freeze({ kind: 'absent' }),
+    }))),
+  });
 }
 
 function scenarioMemoryStateV1(headObjectDigest, catalogScopeDigest, proofKind) {
