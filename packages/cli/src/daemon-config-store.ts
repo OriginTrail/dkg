@@ -1,65 +1,32 @@
-import { configFileStore } from './config-file.js';
+import { configFileStore, type ConfigFileStore } from './config-file.js';
 import type { DkgConfig, DkgHomeFiles } from './config.js';
+import type { DkgConfigActivation, DkgConfigUpdate, ImmutableDkgConfig } from './config-snapshot.js';
 
-export type DkgConfigUpdate = (
-  current: Readonly<DkgConfig>,
-) => DkgConfig;
+export { mutableConfigSnapshot } from './config-snapshot.js';
+export type { DeepReadonly, DkgConfigActivation, DkgConfigUpdate, ImmutableDkgConfig } from './config-snapshot.js';
 
-export type DkgConfigActivation = (
-  next: Readonly<DkgConfig>,
-  previous: Readonly<DkgConfig>,
-) => void;
-
-/**
- * The explicit owner of one daemon's durable and in-memory configuration.
- * Every commit is serialized and derived from the latest immutable snapshot.
- * Updaters are deliberately synchronous: discovery, probes, and other workflow
- * work must finish before entering this short rebase/publish/activate section.
- */
+/** A daemon handle to the file owner's single immutable state and commit queue. */
 export class DkgConfigStore {
-  readonly files: DkgHomeFiles;
-  #current: Readonly<DkgConfig>;
+  static readonly #handles = new WeakMap<ConfigFileStore, DkgConfigStore>();
 
-  constructor(files: DkgHomeFiles, initialConfig: Readonly<DkgConfig>) {
-    this.files = files;
-    this.#current = immutableConfig(initialConfig);
+  private constructor(readonly files: DkgHomeFiles, private readonly owner: ConfigFileStore) {}
+
+  static open(files: DkgHomeFiles, initialConfig: DkgConfig | ImmutableDkgConfig): DkgConfigStore {
+    const owner = configFileStore(files.configPath);
+    let handle = this.#handles.get(owner);
+    if (!handle) {
+      owner.initializeConfig(initialConfig);
+      handle = new DkgConfigStore(files, owner);
+      this.#handles.set(owner, handle);
+    }
+    return handle;
   }
 
-  get current(): Readonly<DkgConfig> {
-    return this.#current;
+  get current(): ImmutableDkgConfig {
+    return this.owner.currentConfig;
   }
 
-  update(
-    update: DkgConfigUpdate,
-    activate: DkgConfigActivation = () => undefined,
-  ): Promise<Readonly<DkgConfig>> {
-    return configFileStore(this.files.configPath).transition(() => {
-      const previous = this.#current;
-      const next = immutableConfig(update(previous));
-      return {
-        contents: JSON.stringify(next, null, 2) + '\n',
-        activate: () => {
-          activate(next, previous);
-          this.#current = next;
-          return next;
-        },
-      };
-    });
+  update(update: DkgConfigUpdate, activate?: DkgConfigActivation): Promise<ImmutableDkgConfig> {
+    return this.owner.updateConfig(update, activate);
   }
-}
-
-export function mutableConfigSnapshot(config: Readonly<DkgConfig>): DkgConfig {
-  return JSON.parse(JSON.stringify(config)) as DkgConfig;
-}
-
-function immutableConfig(config: Readonly<DkgConfig>): Readonly<DkgConfig> {
-  return deepFreeze(mutableConfigSnapshot(config));
-}
-
-function deepFreeze<T>(value: T): T {
-  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
-    Object.freeze(value);
-    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
-  }
-  return value;
 }

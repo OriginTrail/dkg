@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { writeConfigFile, writeConfigSettingsTransaction } from '../src/config-file.js';
 import { DkgHomeFiles, type DkgConfig } from '../src/config.js';
+import { DkgConfigStore } from '../src/daemon-config-store.js';
 
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -134,6 +135,63 @@ describe('configuration file publication', () => {
     expect(await fs.readFile(path, 'utf8')).toBe('ordinary');
     expect(await fs.readdir(directory)).toEqual(['config.json']);
   });
+
+  it.each(['same path', 'file symlink', 'directory symlink'] as const)(
+    'rebases updates from two handles through the %s owner', async aliasKind => {
+      const initial: DkgConfig = { name: 'initial', apiPort: 9200, listenPort: 0, nodeRole: 'edge' };
+      const firstFiles = new DkgHomeFiles(directory);
+      let alias = directory;
+      if (aliasKind !== 'same path') {
+        alias = join(directory, 'alias');
+        if (aliasKind === 'file symlink') {
+          await fs.mkdir(alias);
+          await fs.symlink('../config.json', join(alias, 'config.json'));
+        } else {
+          await fs.symlink(directory, alias, 'dir');
+        }
+      }
+      const first = DkgConfigStore.open(firstFiles, initial);
+      const second = DkgConfigStore.open(new DkgHomeFiles(alias), initial);
+      expect(second).toBe(first);
+      await first.update(current => ({ ...current, name: 'first committed edit' }));
+      await second.update(current => ({ ...current, sharedMemoryTtlMs: 1234 }));
+      const expected = { name: 'first committed edit', sharedMemoryTtlMs: 1234 };
+      expect(first.current).toMatchObject(expected);
+      expect(second.current).toMatchObject(expected);
+      expect(JSON.parse(await fs.readFile(path, 'utf8'))).toMatchObject(expected);
+      if (aliasKind === 'file symlink') expect((await fs.lstat(join(alias, 'config.json'))).isSymbolicLink()).toBe(true);
+      if (aliasKind === 'directory symlink') expect((await fs.lstat(alias)).isSymbolicLink()).toBe(true);
+    },
+  );
+
+  it('rebases daemon updates onto an ordinary call-time save', async () => {
+    const files = new DkgHomeFiles(directory);
+    const initial: DkgConfig = { name: 'initial', apiPort: 9200, listenPort: 0, nodeRole: 'edge' };
+    const owner = DkgConfigStore.open(files, initial);
+    const replacement = { ...initial, name: 'ordinary saved edit' };
+    const saving = files.saveConfig(replacement);
+    const updating = owner.update(current => ({ ...current, sharedMemoryTtlMs: 5678 }));
+    replacement.name = 'mutated after save';
+    await saving;
+    expect(owner.current.name).toBe('ordinary saved edit');
+    await updating;
+    expect(owner.current).toMatchObject({ name: 'ordinary saved edit', sharedMemoryTtlMs: 5678 });
+    expect(JSON.parse(await fs.readFile(path, 'utf8'))).toEqual(owner.current);
+  });
+
+  it.each(['ordinary', 'transactional'] as const)(
+    'rejects %s cyclic-link publication asynchronously', async kind => {
+      await fs.unlink(path);
+      await fs.symlink('config.json', path);
+      let publication!: Promise<void>;
+      expect(() => {
+        publication = kind === 'ordinary'
+          ? writeConfigFile(path, 'unused')
+          : writeConfigSettingsTransaction(path, 'unused', () => undefined);
+      }).not.toThrow();
+      await expect(publication).rejects.toMatchObject({ code: 'ELOOP' });
+    },
+  );
 
   it('keeps ordinary config writes focused on atomic persistence', async () => {
     await writeConfigFile(path, 'persisted only\n');

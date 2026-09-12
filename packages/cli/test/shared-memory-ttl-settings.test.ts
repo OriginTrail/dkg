@@ -46,7 +46,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     config.sharedMemoryTtlMs = DAY;
     config.workspaceTtlMs = DAY;
     await saveConfig(config);
-    configStore = new DkgConfigStore(new DkgHomeFiles(directory), config);
+    configStore = DkgConfigStore.open(new DkgHomeFiles(directory), config);
     agent = await DKGAgent.create({ name: 'ttl-settings', chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: DAY });
     server = createServer((req, res) => {
       if (!routes.includes(new URL(req.url ?? '/', 'http://localhost').pathname)) {

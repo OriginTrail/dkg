@@ -1120,7 +1120,7 @@ async function runDaemonInnerWithStartupOwnership(
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
-  const configStore = new DkgConfigStore(new DkgHomeFiles(), config);
+  const configStore = DkgConfigStore.open(new DkgHomeFiles(), config);
   const contextGraphSubscriptionRehydrationEnabled =
     resolveContextGraphSubscriptionRehydrationEnabled(
       config.contextGraphSubscriptionRehydrationEnabled,

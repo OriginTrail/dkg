@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../config-snapshot.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
@@ -9,7 +10,6 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { parseDotenvValue } from '@origintrail-official/dkg-core';
 import type { ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
 import type {
-  DkgConfig,
   LocalAgentIntegrationTransport,
 } from '../config.js';
 import type { ExtractionStatusRecord } from '../extraction-status.js';
@@ -158,7 +158,7 @@ export function isHermesLoopbackUrl(value: string | undefined): boolean {
   }
 }
 
-export function getHermesChannelTargets(config: DkgConfig): HermesChannelTarget[] {
+export function getHermesChannelTargets(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): HermesChannelTarget[] {
   const storedHermesIntegration = getStoredLocalAgentIntegrations(config).hermes;
   if (storedHermesIntegration?.enabled === false) return [];
 
@@ -286,7 +286,7 @@ export function buildHermesChannelHeaders(
  * the key comes exclusively from the local profile `.env`. Returns undefined
  * when no key is available (older key-less Hermes → no bearer is sent).
  */
-export function resolveHermesApiServerKey(config: DkgConfig): string | undefined {
+export function resolveHermesApiServerKey(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): string | undefined {
   const key = resolveRawHermesApiServerKey(config);
   // A bearer can't contain CR/LF or other control characters: `fetch`/`Headers`
   // throw on them, and Hermes' own HTTP api_server could never receive such a
@@ -297,7 +297,7 @@ export function resolveHermesApiServerKey(config: DkgConfig): string | undefined
   return key;
 }
 
-function resolveRawHermesApiServerKey(config: DkgConfig): string | undefined {
+function resolveRawHermesApiServerKey(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): string | undefined {
   const override = optionalTrimmedString(process.env.DKG_HERMES_API_SERVER_KEY);
   // Non-loopback `--gateway-url`: the Hermes `.env` is on another host, so the
   // explicit override is the only source.
@@ -327,7 +327,7 @@ function resolveRawHermesApiServerKey(config: DkgConfig): string | undefined {
  * caller surfaces the actionable "run dkg hermes setup" missing-key hint
  * instead of silently sending another profile's secret.
  */
-function resolveHermesHomeForKey(config: DkgConfig): string | undefined {
+function resolveHermesHomeForKey(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): string | undefined {
   const metadata = getLocalAgentIntegration(config, 'hermes')?.metadata as
     | Record<string, unknown>
     | undefined;
@@ -351,7 +351,7 @@ function resolveHermesHomeForKey(config: DkgConfig): string | undefined {
 }
 
 /** True when the active hermes-openai target is a loopback api_server. */
-function hasLoopbackHermesOpenAiTarget(config: DkgConfig): boolean {
+function hasLoopbackHermesOpenAiTarget(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): boolean {
   const target = getHermesChannelTargets(config).find((t) => t.protocol === 'hermes-openai');
   return !!target && isHermesLoopbackUrl(target.inboundUrl);
 }
@@ -362,7 +362,7 @@ function hasLoopbackHermesOpenAiTarget(config: DkgConfig): boolean {
  * the local `.env`); a remote/WSL gateway is fixed by the daemon-side
  * DKG_HERMES_API_SERVER_KEY override, since setup never touches a remote `.env`.
  */
-export function hermesApiServerKeyRemediation(config: DkgConfig): string {
+export function hermesApiServerKeyRemediation(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): string {
   return hasLoopbackHermesOpenAiTarget(config)
     ? 'run "dkg hermes setup" to provision API_SERVER_KEY, then restart "hermes gateway run --replace -v"'
     : 'set DKG_HERMES_API_SERVER_KEY in the daemon environment to the remote Hermes API_SERVER_KEY (setup does not modify a remote .env), then restart the daemon';
@@ -374,7 +374,7 @@ export function hermesApiServerKeyRemediation(config: DkgConfig): string {
  * overwrites an existing API_SERVER_KEY). The fix is to realign or rotate the
  * key so DKG forwards what the running gateway expects.
  */
-export function hermesApiServerKeyRejectionRemediation(config: DkgConfig): string {
+export function hermesApiServerKeyRejectionRemediation(config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>): string {
   return hasLoopbackHermesOpenAiTarget(config)
     ? 'the API_SERVER_KEY in the Hermes profile .env does not match the running gateway — align them, or clear API_SERVER_KEY and re-run "dkg hermes setup" to regenerate (setup never overwrites an existing key), then restart "hermes gateway run --replace -v"'
     : 'set DKG_HERMES_API_SERVER_KEY in the daemon environment to the key the remote Hermes is running with, then restart the daemon';
@@ -403,7 +403,7 @@ function readApiServerKeyFromEnv(envPath: string): string | undefined {
 }
 
 export function transportPatchFromHermesTarget(
-  config: DkgConfig,
+  config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
   targetName: 'bridge' | 'gateway' | undefined,
 ): LocalAgentIntegrationTransport | undefined {
   if (!targetName) return undefined;
@@ -456,7 +456,7 @@ export function transportPatchFromHermesTarget(
 }
 
 export async function probeHermesChannelHealth(
-  config: DkgConfig,
+  config: Pick<ImmutableDkgConfig, 'localAgentIntegrations'>,
   bridgeAuthToken: string | undefined,
   opts: { timeoutMs?: number } = {},
 ): Promise<HermesChannelHealthReport> {

@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../../config-snapshot.js';
 // daemon/routes/context.ts
 //
 // Per-request context bag passed to every route-group handler.
@@ -121,7 +122,7 @@ export interface RequestContext {
   /** Lifecycle-owned runtime and readiness as one correlated state. */
   publisherState: PublisherState;
   /** Live read-only projection of `configStore.current`; never an independent snapshot. */
-  readonly config: Readonly<DkgConfig>;
+  readonly config: ImmutableDkgConfig;
   /** Canonical owner of the daemon's immutable committed configuration. */
   configStore: DkgConfigStore;
   /** Immutable RFC-64 activation resolved once during daemon startup. */
@@ -177,7 +178,7 @@ export type RequestContextInputFields = Omit<RequestContext, typeof REQUEST_CONT
 
 export function currentDaemonConfig(
   ctx: Pick<RequestContext, 'configStore'>,
-): Readonly<DkgConfig> {
+): ImmutableDkgConfig {
   return ctx.configStore.current;
 }
 

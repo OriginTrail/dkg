@@ -1,39 +1,76 @@
-import { constants } from 'node:fs';
+import type { DkgConfig } from './config.js';
+import { constants, lstatSync, readlinkSync, realpathSync } from 'node:fs';
 import { copyFile, mkdir, rename, unlink } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveAtomicWriteDestination, writeFileAtomic } from './fs-utils.js';
+import { immutableConfig, type DkgConfigActivation, type DkgConfigUpdate, type ImmutableDkgConfig } from './config-snapshot.js';
 
-export interface ConfigFileTransition<T> {
-  readonly contents: string;
-  readonly activate: () => T;
-}
-
-export type ConfigFileTransitionPreparation<T> =
-  () => ConfigFileTransition<T> | Promise<ConfigFileTransition<T>>;
-
-/** One explicit serialization and publication owner for a configuration path. */
+/** One owner of committed configuration state, ordering and atomic publication. */
 export class ConfigFileStore {
+  static readonly #stores = new Map<string, ConfigFileStore>();
   #tail: Promise<unknown> = Promise.resolve();
+  #current?: ImmutableDkgConfig;
+  #latestContents?: string;
 
-  constructor(readonly path: string) {}
+  private constructor(readonly path: string) {}
+
+  static open(path: string): ConfigFileStore {
+    // Resolve synchronously before enqueueing so aliases share call ordering,
+    // including an ordinary save immediately followed by a daemon update.
+    const destination = resolvedConfigDestination(path);
+    let store = this.#stores.get(destination);
+    if (!store) {
+      store = new ConfigFileStore(destination);
+      this.#stores.set(destination, store);
+    }
+    return store;
+  }
+
+  initializeConfig(initial: DkgConfig | ImmutableDkgConfig): void {
+    this.#current ??= immutableConfig(this.#latestContents === undefined
+      ? initial : { ...initial, ...JSON.parse(this.#latestContents) });
+  }
+
+  get currentConfig(): ImmutableDkgConfig {
+    if (!this.#current) throw new Error('Configuration owner has not been initialized');
+    return this.#current;
+  }
+
+  /** Rebase a synchronous update; discovery and probes finish before admission. */
+  updateConfig(update: DkgConfigUpdate, activate: DkgConfigActivation = () => undefined): Promise<ImmutableDkgConfig> {
+    return this.#serialize(async () => {
+      const previous = this.currentConfig;
+      const next = immutableConfig(update(previous));
+      const contents = JSON.stringify(next, null, 2) + '\n';
+      return this.#publishTransaction(contents, () => {
+        activate(next, previous);
+        this.#current = next;
+        this.#latestContents = contents;
+        return next;
+      });
+    });
+  }
 
   write(contents: string): Promise<void> {
     return this.#serialize(async () => {
+      const next = this.#current ? immutableConfig(JSON.parse(contents)) : undefined;
       await mkdir(dirname(this.path), { recursive: true });
       await writeFileAtomic(this.path, contents, { writeOptions: { flag: 'wx', mode: 0o600 } });
+      this.#latestContents = contents;
+      if (next) this.#current = next;
     });
   }
 
   transaction<T>(contents: string, activate: () => T): Promise<T> {
-    return this.#serialize(() => this.#publishTransaction(contents, activate));
-  }
-
-  /** Prepare an ordered state transition from the latest committed owner state. */
-  transition<T>(prepare: ConfigFileTransitionPreparation<T>): Promise<T> {
-    return this.#serialize(async () => {
-      const transition = await prepare();
-      return this.#publishTransaction(transition.contents, transition.activate);
+    return this.#serialize(() => {
+      const next = this.#current ? immutableConfig(JSON.parse(contents)) : undefined;
+      return this.#publishTransaction(contents, () => {
+        const result = activate();
+        this.#latestContents = contents;
+        if (next) this.#current = next;
+        return result;
+      });
     });
   }
 
@@ -77,19 +114,28 @@ export class ConfigFileStore {
   }
 }
 
-const stores = new Map<string, ConfigFileStore>();
+/** Canonicalize file and parent-directory aliases, including not-yet-created targets. */
+function resolvedConfigDestination(path: string, followedLinks = 0): string {
+  const absolute = resolve(path);
+  try { return realpathSync.native(absolute); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  try {
+    if (lstatSync(absolute).isSymbolicLink()) {
+      if (followedLinks >= 40) throw Object.assign(new Error(`Too many symbolic links resolving ${path}`), { code: 'ELOOP' });
+      return resolvedConfigDestination(resolve(dirname(absolute), readlinkSync(absolute)), followedLinks + 1);
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  const parent = dirname(absolute);
+  if (parent === absolute) return absolute;
+  return resolve(resolvedConfigDestination(parent, followedLinks), basename(absolute));
+}
 
 export function configFileStore(path: string): ConfigFileStore {
-  let store = stores.get(path);
-  if (!store) {
-    store = new ConfigFileStore(path);
-    stores.set(path, store);
-  }
-  return store;
+  return ConfigFileStore.open(path);
 }
 
 /** Persist one immutable, call-time configuration snapshot. */
-export function writeConfigFile(path: string, contents: string): Promise<void> {
+export async function writeConfigFile(path: string, contents: string): Promise<void> {
   return configFileStore(path).write(contents);
 }
 
@@ -97,7 +143,7 @@ export function writeConfigFile(path: string, contents: string): Promise<void> {
  * Publish a settings candidate, activate it synchronously, and restore the
  * previous file if activation rejects the candidate.
  */
-export function writeConfigSettingsTransaction<T>(
+export async function writeConfigSettingsTransaction<T>(
   path: string,
   contents: string,
   activate: () => T,

@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../../config-snapshot.js';
 // daemon/routes/status.ts
 //
 // Route handlers for status, info, connections, host, wallet, chain, identity, integrations, shutdown.
@@ -91,7 +92,6 @@ import {
   logPath,
   ensureDkgDir,
   TELEMETRY_ENDPOINTS,
-  type DkgConfig,
   type ResolvedChainConfig,
   type AutoUpdateConfig,
   type LocalAgentIntegrationCapabilities,
@@ -629,7 +629,7 @@ export interface Rfc64CatalogConfigurationEvidenceV1 {
  * leave the node; a release harness can still prove the clean omission case.
  */
 export function buildRfc64CatalogConfigurationEvidenceV1(
-  config: Pick<DkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
+  config: Pick<ImmutableDkgConfig, 'rfc64Catalog' | 'rfc64PublicCatalog'>,
   effectiveRollout: Readonly<{
     killSwitch: boolean;
     contextGraphModes: Readonly<Record<string, 'legacy' | 'shadow' | 'catalog'>>;
@@ -827,7 +827,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       relayStats,
       natStatus: daemonState.natStatus,
       advertisedAddresses: agent.multiaddrs,
-      configuredAnnounceAddresses: config.announceAddresses ?? [],
+      configuredAnnounceAddresses: [...(config.announceAddresses ?? [])],
     });
     const reportsExternalStoreQuads =
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';

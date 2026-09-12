@@ -1,3 +1,4 @@
+import type { ImmutableDkgConfig } from '../../config-snapshot.js';
 // daemon/routes/local-agents.ts
 //
 // Route handlers for local-agent-integrations list / connect / update / reverse / refresh.
@@ -424,7 +425,7 @@ export async function persistLocalAgentAttachPatch(
 ): Promise<void> {
   const normalizedId = normalizeIntegrationId(id);
   if (!normalizedId) return;
-  await ctx.configStore.update(current => {
+  await ctx.configStore.update((current): DkgConfig | ImmutableDkgConfig => {
     const stored = getStoredLocalAgentIntegrations(current);
     const currentEntry = stored[normalizedId];
     if (!currentEntry) return current;
@@ -446,14 +447,14 @@ async function commitPreparedLocalAgentCandidate(
   ctx: Pick<RequestContext, 'configStore'>,
   id: string,
   candidate: DkgConfig,
-  baseline: Readonly<DkgConfig>,
+  baseline: ImmutableDkgConfig,
   patch?: LocalAgentAttachStatePatch,
 ): Promise<LocalAgentIntegrationRecord> {
   const normalizedId = normalizeIntegrationId(id);
   const candidateEntry = getStoredLocalAgentIntegrations(candidate)[normalizedId];
   if (!normalizedId || !candidateEntry) throw new Error(`Unknown integration: ${id}`);
   const baselineEntry = getStoredLocalAgentIntegrations(baseline)[normalizedId];
-  await ctx.configStore.update(current => {
+  await ctx.configStore.update((current): DkgConfig | ImmutableDkgConfig => {
     const currentEntry = getStoredLocalAgentIntegrations(current)[normalizedId];
     const disconnectedWhilePreparing = !isLocalAgentExplicitlyUserDisabled(baselineEntry)
       && currentEntry?.enabled === false
@@ -475,7 +476,7 @@ async function commitPreparedLocalAgentCandidate(
     }
     return next;
   });
-  return getLocalAgentIntegration(ctx.configStore.current as DkgConfig, normalizedId)!;
+  return getLocalAgentIntegration(ctx.configStore.current, normalizedId)!;
 }
 
 export interface LocalAgentRoutesDeps {
