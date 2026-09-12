@@ -3,6 +3,7 @@ import { Contract, ZeroAddress } from 'ethers';
 import { afterEach, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { readRandomSamplingAvailability } from '../src/random-sampling-availability.js';
+import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
 
 // Exercise the real public capability with deterministic contract-resolution
 // ports. Hub cache rotation itself also has a real-chain integration witness.
@@ -50,7 +51,7 @@ const deployedAddresses: Readonly<Record<string, string>> = {
 };
 
 function stubHubReads(
-  chain: HubLookupAvailabilityAdapter,
+  chain: EVMChainAdapter,
   resolveAddress: (name: string) => string,
 ) {
   type ReadContractPort = {
@@ -89,13 +90,44 @@ it('refreshes invalidated EVM bindings before returning membership', async () =>
   expect(proof).not.toHaveBeenCalled();
 });
 
-it.each(['RandomSampling', 'ShardingTableStorage'] as const)(
+it.each(['RandomSampling', 'RandomSamplingStorage', 'ShardingTableStorage'] as const)(
   'normalizes a real Hub zero-address miss for %s',
   async (missingContract) => {
   const chain = new HubLookupAvailabilityAdapter();
   adapters.push(chain);
   stubHubReads(chain, (name) => name === missingContract ? ZeroAddress : deployedAddresses[name]!);
   expect(await chain.resolveRandomSamplingAvailability(52n)).toEqual({ kind: 'unavailable', reason: 'contracts_not_deployed' });
+  },
+);
+
+it.each(['Identity', 'Profile', 'ParametersStorage'] as const)(
+  'keeps an unrelated missing %s contract indeterminate during real initialization',
+  async (missingContract) => {
+    const resolveAddress = (name: string) => name === missingContract
+      ? ZeroAddress
+      : deployedAddresses[name] ?? '0x0000000000000000000000000000000000000005';
+
+    // Prove the same Hub fixture can resolve the complete sampling deployment.
+    const deployment = new HubLookupAvailabilityAdapter();
+    adapters.push(deployment);
+    stubHubReads(deployment, resolveAddress);
+    expect(await deployment.resolveRandomSamplingAvailability(52n))
+      .toEqual({ kind: 'available', member: true });
+
+    // Keep init() and contract resolution real on the fresh adapter: only the
+    // RPC read boundary is stubbed, so the missing mandatory binding originates
+    // from production Hub resolution rather than an injected typed error.
+    const chain = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1', privateKey: '0x' + '33'.repeat(32),
+      hubAddress: '0x0000000000000000000000000000000000000001', chainId: 'evm:31337',
+    });
+    adapters.push(chain);
+    stubHubReads(chain, resolveAddress);
+    const result = await chain.resolveRandomSamplingAvailability(52n);
+    expect(result.kind).toBe('indeterminate');
+    if (result.kind !== 'indeterminate') throw new Error('Expected initialization failure');
+    expect(result.error).toBeInstanceOf(HubContractNotFoundError);
+    expect(result.error).toMatchObject({ contractName: missingContract });
   },
 );
 

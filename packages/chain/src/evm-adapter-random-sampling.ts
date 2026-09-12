@@ -32,7 +32,11 @@ export class RandomSamplingMethods extends EVMChainAdapterBase {
       return { kind: 'available', member };
     } catch (error) {
       if (error instanceof RandomSamplingContractsUnavailableError
-        || error instanceof HubContractNotFoundError) {
+        || (error instanceof HubContractNotFoundError && (
+          error.contractName === 'RandomSampling'
+          || error.contractName === 'RandomSamplingStorage'
+          || error.contractName === 'ShardingTableStorage'
+        ))) {
         return { kind: 'unavailable', reason: 'contracts_not_deployed' };
       }
       return { kind: 'indeterminate', error };
