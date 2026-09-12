@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { Digest32V1 } from '@origintrail-official/dkg-core';
+
 import type {
   Rfc64CatalogAppliedHeadEvidenceV1,
   Rfc64FinalizedSwmRetirementLifecycleReceiptV2,
@@ -64,6 +66,21 @@ export function snapshotRfc64CatalogSynchronizationEvidenceV1(
     finalizedSwmRetirementLifecycleReceipts: Object.freeze(receipts.map((receipt) =>
       Object.freeze({ ...receipt }))),
   });
+}
+
+/** Record only the native invocation that won the durable applied-head CAS. */
+export function recordRfc64AppliedProviderPeerIdV1(
+  appliedProviderPeerIds: Map<string, string>,
+  evidence: Readonly<{ catalogHeadDigest: Digest32V1; appliedHeadStatus: string }>,
+  remotePeerId: string,
+): void {
+  if (evidence.appliedHeadStatus !== 'applied') return;
+  if (typeof remotePeerId !== 'string' || remotePeerId.length === 0) {
+    throw new TypeError('RFC-64 applied provider peer identity is invalid');
+  }
+  if (!appliedProviderPeerIds.has(evidence.catalogHeadDigest)) {
+    appliedProviderPeerIds.set(evidence.catalogHeadDigest, remotePeerId);
+  }
 }
 
 /**

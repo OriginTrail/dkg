@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { Digest32V1 } from '@origintrail-official/dkg-core';
 
 import {
+  recordRfc64AppliedProviderPeerIdV1,
   reduceRfc64CatalogSynchronizationEvidenceReplayV1,
   snapshotRfc64CatalogSynchronizationEvidenceV1,
 } from
@@ -52,6 +53,40 @@ function evidence(
 }
 
 describe('RFC-64 catalog synchronization evidence', () => {
+  it('records only a fresh applied transition and keeps first-writer provenance', () => {
+    const providers = new Map<string, string>();
+    const catalogHeadDigest = digest('11');
+    for (const appliedHeadStatus of ['existing', 'staged-only', 'failed']) {
+      recordRfc64AppliedProviderPeerIdV1(
+        providers,
+        { appliedHeadStatus, catalogHeadDigest },
+        'provider-ignored',
+      );
+    }
+    expect(providers.size).toBe(0);
+
+    recordRfc64AppliedProviderPeerIdV1(
+      providers,
+      { appliedHeadStatus: 'applied', catalogHeadDigest },
+      'provider-original',
+    );
+    recordRfc64AppliedProviderPeerIdV1(
+      providers,
+      { appliedHeadStatus: 'applied', catalogHeadDigest },
+      'provider-replacement',
+    );
+    expect(providers.get(catalogHeadDigest)).toBe('provider-original');
+
+    providers.clear();
+    expect(providers.has(catalogHeadDigest)).toBe(false);
+    expect(() => recordRfc64AppliedProviderPeerIdV1(
+      providers,
+      { appliedHeadStatus: 'applied', catalogHeadDigest },
+      '',
+    )).toThrow('provider peer identity is invalid');
+    expect(providers.size).toBe(0);
+  });
+
   it('snapshots immutable receipts owned by the exact synchronization head', () => {
     const source = receipt();
     const snapshot = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([source]));

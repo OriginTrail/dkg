@@ -228,12 +228,30 @@ export function hasExactPrivateCatalogMemoryContents(state, expected) {
 }
 
 /** Exact pre-update state: canonical finalized VM evidence and no staged SWM. */
-export function hasExactPrivateCatalogFinalizedVmBaselineContents(state, expected) {
+export function hasExactPrivateCatalogFinalizedVmBaselineContents(
+  state,
+  expected,
+  { swmProofKind = 'catalog-row' } = {},
+) {
+  const baseline = expected?.finalizedVmBaseline;
   return hasExactPrivateCatalogVmContents(state, {
     assetNumbers: expected?.assetNumbers,
     ...expected?.vm,
   })
-    && state.graphCounts.every((evidence) => evidence.swm === 0);
+    && state.graphCounts.every((evidence) => (
+      evidence.swm === baseline?.projection?.count
+      && evidence.swmDigest === baseline?.projection?.digest
+      && (
+        swmProofKind === 'absent'
+          ? hasExactKeysV1(evidence.swmProof, ['kind'])
+            && evidence.swmProof.kind === 'absent'
+          : swmProofKind === 'catalog-row'
+            && hasExactSwmProofV1(state, evidence, {
+              ...baseline,
+              proofKind: 'catalog-row',
+            })
+      )
+    ));
 }
 
 export function hasExactPrivateCatalogSwmContents(state, expected) {

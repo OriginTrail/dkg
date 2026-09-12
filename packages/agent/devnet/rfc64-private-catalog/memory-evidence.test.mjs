@@ -8,6 +8,7 @@ import { packKnowledgeAssetIdFromIdentity } from '../../src/ka-identity.ts';
 import {
   ASSET_NUMBERS,
   CONTEXT_GRAPH_ID,
+  EMPTY_PROJECTION_EVIDENCE,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   PROJECTION_EVIDENCE,
   UPDATED_PROJECTION_EVIDENCE,
@@ -61,11 +62,13 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
   const finalizedVmBaseline = workspaceGraphCounts.map((evidence) => ({
     ...evidence,
     swm: 0,
+    swmDigest: EMPTY_PROJECTION_EVIDENCE.digest,
     swmProof: { kind: 'absent' },
   }));
   assert.equal(hasExactPrivateCatalogFinalizedVmBaselineContents(
     { graphCounts: finalizedVmBaseline },
     PRIVATE_CATALOG_MEMORY_EXPECTATION,
+    { swmProofKind: 'absent' },
   ), true);
   for (const graphCounts of [
     finalizedVmBaseline.slice(0, 1),
@@ -74,12 +77,27 @@ test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async ()
       ? { ...evidence, swm: 1 }
       : evidence),
     finalizedVmBaseline.map((evidence, index) => index === 0
+      ? {
+          ...evidence,
+          swmProof: {
+            kind: 'workspace-head',
+            assertionVersion: '2',
+            assertionGraph: evidence.swmGraph,
+            shareOperationId: privateCatalogSwmShareOperationId(evidence.kaNumber),
+          },
+        }
+      : evidence),
+    finalizedVmBaseline.map((evidence, index) => index === 0
+      ? { ...evidence, swmProof: { kind: 'absent', stale: true } }
+      : evidence),
+    finalizedVmBaseline.map((evidence, index) => index === 0
       ? { ...evidence, vmDigest: UPDATED_PROJECTION_EVIDENCE.digest }
       : evidence),
   ]) {
     assert.equal(hasExactPrivateCatalogFinalizedVmBaselineContents(
       { graphCounts },
       PRIVATE_CATALOG_MEMORY_EXPECTATION,
+      { swmProofKind: 'absent' },
     ), false);
   }
   const corruptions = [

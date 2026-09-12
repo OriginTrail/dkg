@@ -53,6 +53,7 @@ export const PROJECTION_NQUADS = canonicalGraphlessProjectionNQuads(PROJECTION_Q
 export const PROJECTION = new TextEncoder().encode(`${PROJECTION_NQUADS}\n`);
 export const PROJECTION_EVIDENCE = computeGraphlessMemoryEvidence(PROJECTION_QUADS);
 export const PROJECTION_DIGEST = PROJECTION_EVIDENCE.digest;
+export const EMPTY_PROJECTION_EVIDENCE = computeGraphlessMemoryEvidence([]);
 export const UPDATED_PROJECTION_QUADS = Object.freeze([
   Object.freeze({
     subject: 'https://example.org/alice',
@@ -84,6 +85,13 @@ export function privateCatalogSwmShareOperationId(kaNumber) {
 }
 export const PRIVATE_CATALOG_MEMORY_EXPECTATION = Object.freeze({
   assetNumbers: ASSET_NUMBERS,
+  finalizedVmBaseline: Object.freeze({
+    projection: EMPTY_PROJECTION_EVIDENCE,
+    assertionVersion: '1',
+    authorAddress: roleAgentAddress('owner'),
+    catalogProjectionDigest: computeKaProjectionDigestV1(PROJECTION),
+    catalogVersion: ASSET_NUMBERS.length.toString(),
+  }),
   swm: Object.freeze({
     projection: UPDATED_PROJECTION_EVIDENCE,
     assertionVersion: '2',

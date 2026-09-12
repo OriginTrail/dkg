@@ -28,14 +28,18 @@ import {
   createPrivateCatalogScope,
   createPrivateCatalogSyncScope,
   createPrivatePolicyAndRoster,
+  privateCatalogSwmShareOperationId,
   roleAgentAddress,
 } from './fixture.mjs';
 import {
+  assertFinalizedRuntimeFactoryInputV1,
   assertFinalizedRuntimeV1,
+  assertProbeRuntimeFactoryInputV1,
   createFinalizedRuntimeV1,
   createOwnerPublicationStateV1,
   createProbeRuntimeV1,
 } from './agent-runtime.mjs';
+import { composeBootstrapEvidenceV1 } from './catalog-evidence-handlers.mjs';
 import { buildRfc64PrivateReleaseArtifactV1 } from './scenario-artifact.mjs';
 
 const PROTOCOL_TEST_DIGEST = `0x${'ab'.repeat(32)}`;
@@ -127,11 +131,20 @@ test('child command failures retain only a bounded command phase', () => {
   ), { failureClass: 'gate-execution-failed' });
 });
 
-test('runtime variants make owner publication ordering explicit', () => {
-  const created = { agent: {}, chainAdapter: undefined, rpc: undefined };
-  const probe = createProbeRuntimeV1(created);
+test('runtime variants make role and resource boundaries explicit', () => {
+  const probeCreated = { agent: {}, faultProfile: {} };
+  const probe = createProbeRuntimeV1(probeCreated, { role: 'owner' });
   assert.equal(probe.kind, 'probe');
+  assert.equal(probe.role, 'owner');
   assert.throws(() => assertFinalizedRuntimeV1(probe), /requires a finalized runtime/u);
+  assert.throws(
+    () => createProbeRuntimeV1({ ...probeCreated, chainAdapter: {} }, { role: 'owner' }),
+    /only probe agent resources/u,
+  );
+  assert.throws(
+    () => createProbeRuntimeV1(probeCreated, { role: 'unknown' }),
+    /role is invalid/u,
+  );
 
   const publication = createOwnerPublicationStateV1();
   assert.throws(() => publication.requireBaseline(), /requires a published/u);
@@ -145,7 +158,13 @@ test('runtime variants make owner publication ordering explicit', () => {
     assets: [{ asset: 1 }],
   });
 
-  const finalized = createFinalizedRuntimeV1(created, {
+  const finalizedCreated = {
+    agent: {},
+    chainAdapter: {},
+    faultProfile: {},
+    rpc: {},
+  };
+  const finalized = createFinalizedRuntimeV1(finalizedCreated, {
     initialFinalizedAuthority: {},
     peerIds: { owner: 'owner-peer' },
     role: 'provider2',
@@ -153,6 +172,33 @@ test('runtime variants make owner publication ordering explicit', () => {
   assert.equal(finalized.kind, 'run');
   assert.equal(finalized.publication, null);
   assert.doesNotThrow(() => assertFinalizedRuntimeV1(finalized));
+  assert.throws(
+    () => createFinalizedRuntimeV1(probeCreated, {
+      initialFinalizedAuthority: {},
+      peerIds: {},
+      role: 'owner',
+    }),
+    /requires agent, chain adapter, and RPC resources/u,
+  );
+  assert.throws(
+    () => assertProbeRuntimeFactoryInputV1({
+      dataDir: '/not-used',
+      faultProfile: {},
+      manifest: {},
+      role: 'owner',
+    }),
+    /exact runtime inputs/u,
+  );
+  assert.throws(
+    () => assertFinalizedRuntimeFactoryInputV1({
+      dataDir: '/not-used',
+      faultProfile: {},
+      finalizedRuntime: true,
+      manifest: {},
+      role: 'owner',
+    }),
+    /exact runtime inputs/u,
+  );
 });
 
 test('publication and synchronization derive the exact canonical catalog scope', () => {
@@ -171,6 +217,71 @@ test('publication and synchronization derive the exact canonical catalog scope',
   });
 });
 
+test('bootstrap evidence preserves already-applied provider nullability', () => {
+  const common = {
+    currentCatalogHeadDigest: PROTOCOL_TEST_DIGEST,
+    catalogVersion: '2',
+    inventoryRowCount: '2',
+  };
+  assert.deepEqual(composeBootstrapEvidenceV1({
+    ...common,
+    completionOutcome: 'applied',
+    appliedProviderPeerId: 'provider-peer',
+  }, 1, 'provider-peer'), {
+    outcome: 'applied',
+    providerPeerId: 'provider-peer',
+    appliedTransferProviderPeerId: 'provider-peer',
+    appliedHeadDigest: PROTOCOL_TEST_DIGEST,
+    catalogVersion: '2',
+    inventoryRowCount: '2',
+    attempts: 1,
+  });
+  assert.deepEqual(composeBootstrapEvidenceV1({
+    ...common,
+    completionOutcome: 'already-applied',
+    appliedProviderPeerId: null,
+  }, 2, 'provider-peer'), {
+    outcome: 'already-applied',
+    providerPeerId: null,
+    appliedTransferProviderPeerId: null,
+    appliedHeadDigest: PROTOCOL_TEST_DIGEST,
+    catalogVersion: '2',
+    inventoryRowCount: '2',
+    attempts: 2,
+  });
+  assert.deepEqual(composeBootstrapEvidenceV1({
+    ...common,
+    completionOutcome: 'already-applied',
+    appliedProviderPeerId: null,
+  }, 3, 'provider-peer', 'provider-peer'), {
+    outcome: 'already-applied',
+    providerPeerId: null,
+    appliedTransferProviderPeerId: 'provider-peer',
+    appliedHeadDigest: PROTOCOL_TEST_DIGEST,
+    catalogVersion: '2',
+    inventoryRowCount: '2',
+    attempts: 3,
+  });
+  for (const result of [
+    { ...common, completionOutcome: 'applied', appliedProviderPeerId: null },
+    { ...common, completionOutcome: 'applied', appliedProviderPeerId: 'different-peer' },
+    { ...common, completionOutcome: 'already-applied', appliedProviderPeerId: 'provider-peer' },
+  ]) {
+    assert.throws(
+      () => composeBootstrapEvidenceV1(result, 1, 'provider-peer'),
+      /inconsistent provider provenance/u,
+    );
+  }
+  assert.throws(
+    () => composeBootstrapEvidenceV1({
+      ...common,
+      completionOutcome: 'already-applied',
+      appliedProviderPeerId: null,
+    }, 1, 'provider-peer', 'different-peer'),
+    /inconsistent applied-transfer provenance/u,
+  );
+});
+
 test('artifact fails when receiver startup precedes owner exit', () => {
   const evidence = passingScenarioEvidenceV1();
   evidence.processes.owner.exitSequence = 5;
@@ -185,6 +296,26 @@ test('artifact fails when receiver startup precedes owner exit', () => {
     [],
   );
   assert.equal(artifact.status, 'FAIL');
+});
+
+test('artifact does not certify already-applied heads as provider transfers', () => {
+  for (const [processId, observationKey, check] of [
+    ['provider2', 'bootstrap', 'provider2ReceivedExactHead'],
+    ['receiver-seed', 'bootstrap', 'receiverBaselineSeededThroughProvider2'],
+    ['receiver', 'bootstrap', 'receiverUsedProvider2AfterOwnerStopped'],
+  ]) {
+    const evidence = passingScenarioEvidenceV1();
+    const bootstrap = evidence.processes[processId].observations[observationKey];
+    evidence.processes[processId].observations[observationKey] = {
+      ...bootstrap,
+      outcome: 'already-applied',
+      providerPeerId: null,
+      appliedTransferProviderPeerId: null,
+    };
+    const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+    assert.equal(artifact.checks[check], false, check);
+    assert.equal(artifact.status, 'FAIL', check);
+  }
 });
 
 test('artifact fails without exact finalized-VM receiver baseline evidence', () => {
@@ -202,6 +333,58 @@ test('artifact fails without exact finalized-VM receiver baseline evidence', () 
     [],
   );
   assert.equal(artifact.status, 'FAIL');
+});
+
+test('artifact fails when the finalized-VM receiver baseline retains an SWM head', () => {
+  const evidence = passingScenarioEvidenceV1();
+  const state = evidence.processes['receiver-seed'].observations.state;
+  evidence.processes['receiver-seed'].observations.state = Object.freeze({
+    ...state,
+    graphCounts: Object.freeze(state.graphCounts.map((entry, index) => Object.freeze(
+      index === 0
+        ? {
+            ...entry,
+            swm: 0,
+            swmProof: {
+              kind: 'workspace-head',
+              assertionVersion: '2',
+              assertionGraph: entry.swmGraph,
+              shareOperationId: privateCatalogSwmShareOperationId(entry.kaNumber),
+            },
+          }
+        : entry,
+    ))),
+  });
+  const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+  assert.equal(artifact.checks.receiverBaselineSeededThroughProvider2, false);
+  assert.equal(artifact.status, 'FAIL');
+});
+
+test('artifact requires the exact finalized-VM baseline catalog-row closure', () => {
+  const corruptions = [
+    ['catalog generation', (state) => ({ ...state, catalogVersion: '4' })],
+    ['empty SWM digest', (state) => corruptBaselineRowV1(state, {
+      swmDigest: PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.projection.digest,
+    })],
+    ['row assertion version', (state) => corruptBaselineProofV1(state, {
+      assertionVersion: '2',
+    })],
+    ['row catalog head', (state) => corruptBaselineProofV1(state, {
+      catalogHeadDigest: `0x${'00'.repeat(32)}`,
+    })],
+    ['row KA identity', (state) => corruptBaselineProofV1(state, { kaId: '1' })],
+    ['row projection digest', (state) => corruptBaselineProofV1(state, {
+      projectionDigest: PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.catalogProjectionDigest,
+    })],
+  ];
+  for (const [label, corrupt] of corruptions) {
+    const evidence = passingScenarioEvidenceV1();
+    const state = evidence.processes['receiver-seed'].observations.state;
+    evidence.processes['receiver-seed'].observations.state = Object.freeze(corrupt(state));
+    const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+    assert.equal(artifact.checks.receiverBaselineSeededThroughProvider2, false, label);
+    assert.equal(artifact.status, 'FAIL', label);
+  }
 });
 
 test('initial authority rejects a finalized-chain roster fault before readiness', () => {
@@ -347,7 +530,12 @@ function passingScenarioEvidenceV1() {
     provider2: process('provider2', 'provider2', {
       observations: {
         accessState: { ...catalogState, outsiderVisibleVmBindings: 0 },
-        bootstrap: { appliedHeadDigest: headObjectDigest, providerPeerId: peerIds.owner },
+        bootstrap: {
+          appliedHeadDigest: headObjectDigest,
+          outcome: 'applied',
+          providerPeerId: peerIds.owner,
+          appliedTransferProviderPeerId: peerIds.owner,
+        },
         listenerDialableAfterOwnerExit: true,
         revocationObservation: {
           curatorMetadataRefreshed: true,
@@ -363,7 +551,12 @@ function passingScenarioEvidenceV1() {
     }),
     'receiver-seed': process('receiver-seed', 'receiver', {
       observations: {
-        bootstrap: { appliedHeadDigest: headObjectDigest, providerPeerId: peerIds.provider2 },
+        bootstrap: {
+          appliedHeadDigest: headObjectDigest,
+          outcome: 'applied',
+          providerPeerId: peerIds.provider2,
+          appliedTransferProviderPeerId: peerIds.provider2,
+        },
         state: baselineState,
       },
       shutdown: finalizedShutdown,
@@ -371,7 +564,12 @@ function passingScenarioEvidenceV1() {
     receiver: process('receiver', 'receiver', {
       spawnSequence: 3,
       observations: {
-        bootstrap: { appliedHeadDigest: headObjectDigest, providerPeerId: peerIds.provider2 },
+        bootstrap: {
+          appliedHeadDigest: headObjectDigest,
+          outcome: 'applied',
+          providerPeerId: peerIds.provider2,
+          appliedTransferProviderPeerId: peerIds.provider2,
+        },
         revokedDenial: denial,
         state: catalogState,
         stateAfterRevocation: catalogState,
@@ -402,14 +600,43 @@ function passingScenarioEvidenceV1() {
 
 function scenarioFinalizedVmBaselineStateV1(headObjectDigest, catalogScopeDigest) {
   const state = scenarioMemoryStateV1(headObjectDigest, catalogScopeDigest, 'catalog-row');
+  const baseline = PRIVATE_CATALOG_MEMORY_EXPECTATION.finalizedVmBaseline;
   return Object.freeze({
     ...state,
+    catalogVersion: baseline.catalogVersion,
     graphCounts: Object.freeze(state.graphCounts.map((evidence) => Object.freeze({
       ...evidence,
-      swm: 0,
-      swmDigest: PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.projection.digest,
-      swmProof: Object.freeze({ kind: 'absent' }),
+      swm: baseline.projection.count,
+      swmDigest: baseline.projection.digest,
+      swmProof: Object.freeze({
+        assertionVersion: baseline.assertionVersion,
+        catalogHeadDigest: headObjectDigest,
+        kaId: packKnowledgeAssetIdFromIdentity({
+          agentAddress: baseline.authorAddress,
+          kaNumber: evidence.kaNumber,
+        }).toString(),
+        kind: 'catalog-row',
+        projectionDigest: baseline.catalogProjectionDigest,
+      }),
     }))),
+  });
+}
+
+function corruptBaselineRowV1(state, fields) {
+  return {
+    ...state,
+    graphCounts: Object.freeze(state.graphCounts.map((entry, index) => Object.freeze(
+      index === 0 ? { ...entry, ...fields } : entry,
+    ))),
+  };
+}
+
+function corruptBaselineProofV1(state, fields) {
+  return corruptBaselineRowV1(state, {
+    swmProof: {
+      ...state.graphCounts[0].swmProof,
+      ...fields,
+    },
   });
 }
 

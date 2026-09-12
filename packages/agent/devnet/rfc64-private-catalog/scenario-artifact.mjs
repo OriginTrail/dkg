@@ -180,20 +180,31 @@ function buildRfc64PrivateReleaseChecksV1(evidence) {
         observation(receiverRestart, 'state'),
       ].every(({ catalogScopeDigest }) => catalogScopeDigest === published.scopeDigest),
     provider2ReceivedExactHead:
-      provider2Bootstrap.appliedHeadDigest === published.headObjectDigest
+      hasExactAppliedTransferV1(
+        provider2Bootstrap,
+        peerIds.owner,
+        published.headObjectDigest,
+      )
       && provider2State.exactExpectedHead === true
       && provider2State.inventoryRowCount === '2',
     provider2HasSwmV2AndVmV1: hasExactMemoryContents(provider2State),
     receiverBaselineSeededThroughProvider2:
-      receiverSeedBootstrap.providerPeerId === peerIds.provider2
+      hasExactAppliedTransferV1(
+        receiverSeedBootstrap,
+        peerIds.provider2,
+        observation(receiverSeed, 'state').appliedHeadDigest,
+      )
       && observation(receiverSeed, 'state').exactExpectedHead === true
       && hasExactPrivateCatalogFinalizedVmBaselineContents(
         observation(receiverSeed, 'state'),
         EXPECTED_MEMORY_CONTENTS,
       ),
     receiverUsedProvider2AfterOwnerStopped:
-      observation(receiver, 'bootstrap').appliedHeadDigest === published.headObjectDigest
-      && observation(receiver, 'bootstrap').providerPeerId === peerIds.provider2,
+      hasExactAppliedTransferV1(
+        observation(receiver, 'bootstrap'),
+        peerIds.provider2,
+        published.headObjectDigest,
+      ),
     ownerExitedBeforeReceiverRuntimeStarted:
       owner.shutdown.exit.error === null
       && observation(owner, 'listenerClosed')
@@ -275,8 +286,20 @@ function safeState(state, bootstrap, shutdownReceipt) {
       bootstrap: {
         outcome: bootstrap.outcome,
         providerPeerId: bootstrap.providerPeerId,
+        appliedTransferProviderPeerId: bootstrap.appliedTransferProviderPeerId,
         attempts: bootstrap.attempts,
       },
     }),
   };
+}
+
+function hasExactAppliedTransferV1(bootstrap, providerPeerId, headObjectDigest) {
+  return bootstrap.appliedHeadDigest === headObjectDigest
+    && bootstrap.appliedTransferProviderPeerId === providerPeerId
+    && (
+      bootstrap.outcome === 'applied'
+        ? bootstrap.providerPeerId === providerPeerId
+        : bootstrap.outcome === 'already-applied'
+          && bootstrap.providerPeerId === null
+    );
 }

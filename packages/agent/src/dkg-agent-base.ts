@@ -1230,6 +1230,9 @@ export class DKGAgentBase {
   /** Exact process-local post-verification evidence, keyed by applied head. */
   protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
     new Map<string, Rfc64CatalogSynchronizationEvidenceV1>();
+  /** Exact process-local peer that produced each applied-head transition. */
+  protected readonly rfc64PublicCatalogAppliedProviderPeerIdsV1 =
+    new Map<string, string>();
   /** Bounded process-local terminal receiver failures, keyed by announced head. */
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
