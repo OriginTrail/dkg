@@ -688,7 +688,7 @@ describe('Random Sampling proof-time exact repair', () => {
       await expect(runtime.start()).resolves.toBeUndefined();
       getIdentityId.mockResolvedValue(42n);
       await expect(runtime.reconcile()).resolves.toBeUndefined();
-      expect(runtime.getStatus()).toMatchObject({ enabled: false, disabledReason: 'retiring', identityId: '41' });
+      expect(runtime.getStatus()).toMatchObject({ enabled: false, disabledReason: 'not_started', retiring: true, identityId: '41' });
       expect(oldStop).toHaveBeenCalledOnce();
       expect(createHandle).toHaveBeenCalledOnce();
       expect(replacement.start).not.toHaveBeenCalled();

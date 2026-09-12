@@ -3,7 +3,7 @@ import type { RandomSamplingStatusResponse } from './api-client.js';
 
 type DisabledStatus = Pick<
   RandomSamplingStatusResponse,
-  'role' | 'identityId' | 'disabledReason'
+  'role' | 'identityId' | 'disabledReason' | 'retiring'
 >;
 
 const DISABLED_REASON_MESSAGES: Record<RandomSamplingDisabledReason, string> = {
@@ -15,11 +15,11 @@ const DISABLED_REASON_MESSAGES: Record<RandomSamplingDisabledReason, string> = {
   unsupported_chain: 'chain adapter does not support Random Sampling',
   contracts_not_deployed: 'Random Sampling contracts are not available on this network',
   bind_failed: 'prover setup failed; inspect daemon logs',
-  retiring: 'prover disabled; waiting for physical resource cleanup',
   not_started: 'prover has not started yet',
 };
 
 export function describeRandomSamplingDisabledStatus(status: DisabledStatus): string {
+  if (status.retiring) return 'prover disabled; waiting for physical resource cleanup';
   if (status.disabledReason) {
     return DISABLED_REASON_MESSAGES[status.disabledReason];
   }

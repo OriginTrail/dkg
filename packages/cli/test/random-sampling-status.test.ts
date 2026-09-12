@@ -3,7 +3,7 @@ import { describeRandomSamplingDisabledStatus } from '../src/random-sampling-sta
 
 describe('Random Sampling disabled status', () => {
   it('explains a prover whose physical cleanup is still pending', () => {
-    expect(describeRandomSamplingDisabledStatus({ role: 'core', identityId: '52', disabledReason: 'retiring' }))
+    expect(describeRandomSamplingDisabledStatus({ role: 'core', identityId: '52', disabledReason: 'not_started', retiring: true }))
       .toBe('prover disabled; waiting for physical resource cleanup');
   });
 

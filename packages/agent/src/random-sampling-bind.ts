@@ -86,6 +86,8 @@ export interface RandomSamplingStatus {
    * Built-in agent handles always populate it.
    */
   disabledReason?: RandomSamplingDisabledReason | null;
+  /** Work is disabled while the owned prover finishes stopping. */
+  retiring?: boolean;
   loop: ProverLoopStatus | null;
 }
 
@@ -98,8 +100,7 @@ export type RandomSamplingDisabledReason =
   | 'eligibility_lookup_failed'
   | 'unsupported_chain'
   | 'contracts_not_deployed'
-  | 'bind_failed'
-  | 'retiring';
+  | 'bind_failed';
 
 /**
  * Handle returned by {@link bindRandomSampling}. The agent owns its

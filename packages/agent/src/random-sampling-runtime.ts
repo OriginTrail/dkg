@@ -144,7 +144,8 @@ export class RandomSamplingRuntime {
     const retiring = state.kind === 'retiring' || (state.kind === 'running' && this.reconciler.closed);
     return {
       enabled: false, role: this.options.role, identityId: state.identityId.toString(),
-      disabledReason: retiring ? 'retiring' : (state.kind === 'waiting' || state.kind === 'disabled') ? state.reason : 'not_started',
+      disabledReason: (state.kind === 'waiting' || state.kind === 'disabled') ? state.reason : 'not_started',
+      ...(retiring ? { retiring: true } : {}),
       loop: retiring ? state.handle.getStatus().loop : null,
     };
   }

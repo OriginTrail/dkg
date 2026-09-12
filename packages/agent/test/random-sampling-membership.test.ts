@@ -207,9 +207,10 @@ describe('Random Sampling membership reconciliation', () => {
       await entered.promise;
       expect(stopNode).not.toHaveBeenCalled();
       expect(closeStore).not.toHaveBeenCalled();
-      expect(f.agent.getRandomSamplingStatus().disabledReason).toBe('retiring');
+      expect(f.agent.getRandomSamplingStatus()).toMatchObject({ disabledReason: 'not_started', retiring: true });
       gate.resolve();
       await settling;
+      expect(f.agent.getRandomSamplingStatus()).not.toHaveProperty('retiring', true);
       expect(stop).toHaveBeenCalledOnce();
       if (stage === 'shutdown') {
         expect(stopNode).toHaveBeenCalledOnce();
@@ -224,6 +225,7 @@ describe('Random Sampling membership reconciliation', () => {
       }
       expect(f.create).toHaveBeenCalledTimes(2);
       expect(f.agent.getRandomSamplingStatus().enabled).toBe(true);
+      expect(f.agent.getRandomSamplingStatus()).not.toHaveProperty('retiring', true);
     } finally { gate.resolve(); await f.agent.stop(); }
   });
 
@@ -622,7 +624,7 @@ describe('Random Sampling membership reconciliation', () => {
       f.setMember(false);
       await f.tick();
       expect(f.handles.at(-1)).toBe(original);
-      expect(f.agent.getRandomSamplingStatus()).toMatchObject({ enabled: false, disabledReason: 'retiring', identityId: '52' });
+      expect(f.agent.getRandomSamplingStatus()).toMatchObject({ enabled: false, disabledReason: 'not_started', retiring: true, identityId: '52' });
       f.setMember(true);
       await f.tick();
       expect(f.create).toHaveBeenCalledOnce();
