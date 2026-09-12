@@ -2,7 +2,7 @@ import { expect, it } from 'vitest';
 import { OversizedRdfLiteralError } from '@origintrail-official/dkg-core';
 import {
   combineSyncFailures, didSyncPeerRespond, isKnownRetryableSyncTransportInterruption,
-  isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure,
+  isSyncBackoffWorthyError, isSyncDeniedError, isSyncPermanentRejection, isSyncTransportFailure,
   isSyncValidationRejection, toSyncPeerRespondedError, toSyncTransportFailureError,
   toSyncValidationRejectionError,
 } from '../src/sync/error-tags.js';
@@ -13,6 +13,38 @@ it('preserves single frozen error identity and side-channel tags', () => {
   expect(combined).toBe(error);
   expect(isSyncTransportFailure(combined)).toBe(true);
   expect(isKnownRetryableSyncTransportInterruption(combined)).toBe(true);
+});
+
+it('applies any-cause and every-cause rules across nested groups and later group tags', () => {
+  const first = toSyncTransportFailureError(Object.freeze(new Error('first reset')));
+  const second = toSyncTransportFailureError(Object.freeze(new Error('second reset')));
+  const inner = combineSyncFailures(first, [second]);
+  const outer = combineSyncFailures(inner, [toSyncTransportFailureError(new Error('third reset'))]);
+  expect(outer).toMatchObject({ cause: inner });
+  expect(isKnownRetryableSyncTransportInterruption(outer)).toBe(true);
+  toSyncPeerRespondedError(inner);
+  expect(didSyncPeerRespond(outer)).toBe(true);
+  expect(isKnownRetryableSyncTransportInterruption(outer)).toBe(false);
+
+  const busy = new Error('sync responder queue full');
+  const oversized = new OversizedRdfLiteralError({ actualBytes: 100, maxBytes: 10 });
+  const mixed = combineSyncFailures(new Error('local disk error'), [combineSyncFailures(busy, [oversized])]);
+  expect(isSyncBackoffWorthyError(mixed)).toBe(true);
+  expect(isSyncPermanentRejection(mixed)).toBe(true);
+  expect(isKnownRetryableSyncTransportInterruption(mixed)).toBe(false);
+});
+
+it('derives denial evidence from current causes instead of a construction-time copy', () => {
+  const response = toSyncTransportFailureError(new Error('first response'));
+  const group = combineSyncFailures(response, [toSyncTransportFailureError(new Error('second response'))]);
+  expect(isSyncDeniedError(group)).toBe(false);
+  expect(isKnownRetryableSyncTransportInterruption(group)).toBe(true);
+  Object.assign(response, { syncDenied: true });
+  expect(group).toMatchObject({ syncDenied: true });
+  expect(Object.assign({}, group)).toMatchObject({ syncDenied: true });
+  expect(isSyncDeniedError(group)).toBe(true);
+  expect(didSyncPeerRespond(group)).toBe(true);
+  expect(isKnownRetryableSyncTransportInterruption(group)).toBe(false);
 });
 
 it('retains every secondary classification without replacing the triggering local failure', () => {

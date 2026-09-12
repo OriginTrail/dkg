@@ -1,11 +1,13 @@
 import {
-  recoverPublicSnapshots,
+  settlePublicSnapshots,
+  unwrapPublicSnapshotRecovery,
   readPublicSnapshotWalkProgress,
   PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT,
   boundSampledRef,
   type PublicSnapshotMetadata,
   type PublicSnapshotWalkProgress,
   type PublicSnapshotRecoveryResult,
+  type PublicSnapshotRecoveryOutcome,
 } from './public-snapshot-recovery.js';
 export {
   PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
@@ -25,7 +27,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
 import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
-import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
+import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncDeniedError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
@@ -611,7 +613,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     let materializedFailuresForCg = 0;
     let materializedRefsForCg = 0;
     let descriptorsAuthoritativeForCg = true;
-    let snapshotProgressForCg: PublicSnapshotWalkProgress | undefined;
+    let snapshotProgressForCg: PublicSnapshotRecoveryResult | undefined;
     const unresolvedRefSampleForCg: string[] = [];
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
@@ -1210,7 +1212,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const snapshotStartedAt = Date.now();
       recoveryBoundary.assertCurrent();
-      const snapshotSync = await syncPublicSnapshotsForMeta({
+      const snapshotRecovery = await settlePublicSnapshotsForMeta({
         ctx,
         remotePeerId,
         contextGraphId: pid,
@@ -1265,6 +1267,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           }
         },
       });
+      const snapshotSync = snapshotRecovery.result;
       snapshotProgressForCg = snapshotSync;
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
@@ -1290,6 +1293,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         logInfo(ctx, `SWM sync for "${pid}": yielded at the round deadline with `
           + `${snapshotSync.missingCount} of ${snapshotSync.totalSnapshots} snapshot(s) unresolved`);
       }
+      // Fatal and nonfatal siblings can coexist. Account the complete settled
+      // round above before preserving the original failure below, including
+      // primitive throwables that cannot carry an attached metrics record.
+      unwrapPublicSnapshotRecovery(snapshotRecovery);
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
       // A snapshot that verified but could not be written must be treated
       // exactly like a snapshot phase that did not complete. Otherwise the meta
@@ -1458,11 +1465,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // guard should have filtered this before the insert.
         logWarn(ctx, `PERMANENT ingest rejection for "${pid}" reached the SWM sync catch — an insert seam is missing the oversize guard (sync/oversize-filter.ts): ${err instanceof Error ? err.message : String(err)}`);
       }
-      const backoffWorthy = isSyncBackoffWorthyError(err);
+      const backoffWorthy = isSyncBackoffWorthyError(err)
+        || (snapshotProgressForCg?.timedOutPhases ?? 0) > 0;
       if (backoffWorthy) {
         summary.backoffWorthyFailures += 1;
       }
-      if ((err as Error & { syncDenied?: boolean }).syncDenied) {
+      if (isSyncDeniedError(err)) {
         summary.deniedPhases += 1;
       } else if (
         peerRespondedForContextGraph ||
@@ -1511,6 +1519,12 @@ export async function syncPublicSnapshotsForMeta(params: {
     source: 'cache' | 'network',
   ) => Promise<void>;
 } & PublicSnapshotWalkSource): Promise<PublicSnapshotRecoveryResult> {
+  return unwrapPublicSnapshotRecovery(await settlePublicSnapshotsForMeta(params));
+}
+
+async function settlePublicSnapshotsForMeta(
+  params: Parameters<typeof syncPublicSnapshotsForMeta>[0],
+): Promise<PublicSnapshotRecoveryOutcome> {
   const executionBoundary = params.executionBoundary ?? createRecoveryExecutionAdmission();
   executionBoundary.assertCurrent();
   const manifestSnapshots = params.snapshotWalk ? [] : collectPublicSnapshotMetadata(params.metaQuads);
@@ -1519,7 +1533,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     : params.recoveryOrder === 'recent-balanced'
       ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
       : manifestSnapshots;
-  return recoverPublicSnapshots({
+  return settlePublicSnapshots({
     snapshots,
     contextGraphId: params.contextGraphId,
     deadline: params.deadline,

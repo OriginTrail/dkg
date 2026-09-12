@@ -38,6 +38,17 @@ export interface PublicSnapshotRecoveryResult extends PublicSnapshotWalkProgress
   readonly yieldedAtDeadline: boolean;
 }
 
+export type PublicSnapshotRecoveryOutcome =
+  | { readonly kind: 'result'; readonly result: PublicSnapshotRecoveryResult }
+  | { readonly kind: 'failure'; readonly result: PublicSnapshotRecoveryResult; readonly error: unknown };
+
+interface PublicSnapshotRecoveryParams extends Omit<SnapshotRecoveryPorts, 'store'> {
+  readonly snapshots: readonly PublicSnapshotMetadata[];
+  readonly contextGraphId: string;
+  readonly concurrency?: number;
+  readonly store?: WorkspacePublicSnapshotStore;
+}
+
 /** One operation owns its metrics and always settles into a discriminated result. */
 async function attemptSnapshot(snapshot: PublicSnapshotMetadata, ports: SnapshotRecoveryPorts): Promise<SnapshotAttempt> {
   const boundary = ports.executionBoundary;
@@ -116,12 +127,12 @@ async function runSnapshotPool(
 }
 
 /** Recover one manifest with a bounded pool and one ordered progress reduction. */
-export async function recoverPublicSnapshots(params: Omit<SnapshotRecoveryPorts, 'store'> & {
-  readonly snapshots: readonly PublicSnapshotMetadata[];
-  readonly contextGraphId: string;
-  readonly concurrency?: number;
-  readonly store?: WorkspacePublicSnapshotStore;
-}): Promise<PublicSnapshotRecoveryResult> {
+export async function recoverPublicSnapshots(params: PublicSnapshotRecoveryParams): Promise<PublicSnapshotRecoveryResult> {
+  return unwrapPublicSnapshotRecovery(await settlePublicSnapshots(params));
+}
+
+/** Let the owning sync round account every admitted outcome before rethrowing. */
+export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams): Promise<PublicSnapshotRecoveryOutcome> {
   params.executionBoundary.assertCurrent();
   const concurrency = params.concurrency ?? PUBLIC_SNAPSHOT_FETCH_CONCURRENCY;
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > PUBLIC_SNAPSHOT_FETCH_CONCURRENCY) {
@@ -132,7 +143,7 @@ export async function recoverPublicSnapshots(params: Omit<SnapshotRecoveryPorts,
     readySnapshots: 0, totalSnapshots: params.snapshots.length,
     missingCount: 0, missingSample: [] as string[], yieldedAtDeadline: false,
   };
-  if (params.snapshots.length === 0) return { ...progress, completed: true };
+  if (params.snapshots.length === 0) return { kind: 'result', result: { ...progress, completed: true } };
   if (!params.store) {
     throw new Error(`Cannot sync shared-memory public snapshot refs for "${params.contextGraphId}" without a public snapshot store`);
   }
@@ -154,15 +165,19 @@ export async function recoverPublicSnapshots(params: Omit<SnapshotRecoveryPorts,
       if (outcome.kind === 'missing' && outcome.reason === 'deadline') progress.yieldedAtDeadline = true;
     }
   }
-  if (failures.length > 0) {
-    const error = combineSyncFailures(failures[0], failures.slice(1));
-    attachPublicSnapshotWalkProgress(error, {
-      readySnapshots: progress.readySnapshots, totalSnapshots: progress.totalSnapshots,
-      missingCount: progress.missingCount, missingSample: progress.missingSample,
-    });
-    throw error;
+  const result = { ...progress, completed: progress.missingCount === 0 };
+  return failures.length > 0
+    ? { kind: 'failure', result, error: combineSyncFailures(failures[0], failures.slice(1)) }
+    : { kind: 'result', result };
+}
+
+/** Preserve the published throwing contract and the original triggering error. */
+export function unwrapPublicSnapshotRecovery(outcome: PublicSnapshotRecoveryOutcome): PublicSnapshotRecoveryResult {
+  if (outcome.kind === 'failure') {
+    attachPublicSnapshotRecoveryResult(outcome.error, outcome.result);
+    throw outcome.error;
   }
-  return { ...progress, completed: progress.missingCount === 0 };
+  return outcome.result;
 }
 
 /**
@@ -228,9 +243,12 @@ export interface PublicSnapshotWalkProgress {
 
 /** Non-enumerable so the payload never widens a structured-clone or log dump. */
 const PUBLIC_SNAPSHOT_PROGRESS_KEY = '__swmPublicSnapshotProgress';
+const recoveryResults = new WeakMap<object, PublicSnapshotRecoveryResult>();
 
-function attachPublicSnapshotWalkProgress(err: unknown, progress: PublicSnapshotWalkProgress): void {
-  if (typeof err !== 'object' || err === null) return;
+function attachPublicSnapshotRecoveryResult(err: unknown, result: PublicSnapshotRecoveryResult): void {
+  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return;
+  recoveryResults.set(err, { ...result, missingSample: [...result.missingSample] });
+  const progress = walkProgress(result);
   try {
     Object.defineProperty(err, PUBLIC_SNAPSHOT_PROGRESS_KEY, {
       value: progress,
@@ -239,15 +257,33 @@ function attachPublicSnapshotWalkProgress(err: unknown, progress: PublicSnapshot
       writable: true,
     });
   } catch {
-    // A frozen or exotic error is not worth failing the round over; the
-    // caller simply records no coverage for it, exactly as before.
+    // Frozen and exotic errors retain their identity and evidence through the
+    // side channel. The property remains for older progress-only consumers.
   }
+}
+
+function walkProgress(result: PublicSnapshotRecoveryResult): PublicSnapshotWalkProgress {
+  return {
+    readySnapshots: result.readySnapshots, totalSnapshots: result.totalSnapshots,
+    missingCount: result.missingCount, missingSample: [...result.missingSample],
+  };
+}
+
+/** Complete settled metrics for object/function throwables, including frozen errors. */
+export function readPublicSnapshotRecoveryResult(err: unknown): PublicSnapshotRecoveryResult | undefined {
+  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return undefined;
+  const result = recoveryResults.get(err);
+  return result && { ...result, missingSample: [...result.missingSample] };
 }
 
 /** Read progress attached by {@link recoverPublicSnapshots} before it rethrew. */
 export function readPublicSnapshotWalkProgress(err: unknown): PublicSnapshotWalkProgress | undefined {
+  const result = readPublicSnapshotRecoveryResult(err);
+  if (result) return walkProgress(result);
   if (typeof err !== 'object' || err === null) return undefined;
-  const progress = (err as Record<string, unknown>)[PUBLIC_SNAPSHOT_PROGRESS_KEY];
+  let progress: unknown;
+  try { progress = (err as Record<string, unknown>)[PUBLIC_SNAPSHOT_PROGRESS_KEY]; }
+  catch { return undefined; }
   if (typeof progress !== 'object' || progress === null) return undefined;
   const candidate = progress as Partial<PublicSnapshotWalkProgress>;
   // Validated rather than trusted: this crosses an `unknown` boundary, and a
