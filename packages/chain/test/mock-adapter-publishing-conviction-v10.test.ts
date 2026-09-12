@@ -229,6 +229,10 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     expect(c.nft).toBe(ethers.getAddress(c.nft));
     expect(c.token).toBe(ethers.getAddress(c.token));
     expect(c.nft).not.toBe(c.token);
+    expect(c.identityWallets).toBeDefined();
+    expect(c.identityWallets!.profile).toBe(ethers.getAddress(c.identityWallets!.profile));
+    expect(c.identityWallets!.identity).toBe(ethers.getAddress(c.identityWallets!.identity));
+    expect(c.identityWallets!.storage).toBe(ethers.getAddress(c.identityWallets!.storage));
     expect(c.chainId).toBe('mock:31337');
     expect(c.rpcUrls).toEqual([]);
     expect(c.walletRpcUrls).toEqual([]);

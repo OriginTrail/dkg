@@ -1280,6 +1280,11 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
   const CONTRACTS_FIXTURE = {
     nft: ethers.getAddress('0x' + 'ab'.repeat(20)),
     token: ethers.getAddress('0x' + 'cd'.repeat(20)),
+    identityWallets: {
+      profile: ethers.getAddress('0x' + '12'.repeat(20)),
+      identity: ethers.getAddress('0x' + '23'.repeat(20)),
+      storage: ethers.getAddress('0x' + '34'.repeat(20)),
+    },
     chainId: 'base:84532',
     rpcUrls: ['https://rpc.example/v2/SECRETKEY', 'https://rpc.example/2'],
     walletRpcUrls: ['https://wallet-rpc.example/base-sepolia', '/api/pca/rpc', 'ws://wallet-rpc.example'],
@@ -1505,6 +1510,49 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
       expect(rpcMock).toHaveBeenLastCalledWith('eth_call', params);
     }
     expect(rpcMock).toHaveBeenCalledTimes(cases.length);
+  });
+
+  it('POST /api/pca/rpc allows only the identity key reads needed by hardware-wallet management', async () => {
+    const identityStorage = new ethers.Interface([
+      'function keyHasPurpose(uint72 identityId, bytes32 key, uint256 purpose) view returns (bool)',
+      'function getKeysByPurpose(uint72 identityId, uint256 purpose) view returns (bytes32[])',
+      'function getIdentityId(address operational) view returns (uint72)',
+    ]);
+    const key = ethers.keccak256(ethers.solidityPacked(['address'], [ethers.getAddress('0x' + '45'.repeat(20))]));
+    const allowed = [
+      identityStorage.encodeFunctionData('keyHasPurpose', [61n, key, 1n]),
+      identityStorage.encodeFunctionData('getKeysByPurpose', [61n, 2n]),
+    ];
+    const rpcMock = vi.fn(async () => '0x');
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE,
+      requestPublishingConvictionRpc: rpcMock,
+    };
+
+    for (const [index, data] of allowed.entries()) {
+      const params = [{ to: CONTRACTS_FIXTURE.identityWallets.storage, data }, 'latest'];
+      const request = runCtx('POST', '/api/pca/rpc', agent, {
+        jsonrpc: '2.0', id: index + 1, method: 'eth_call', params,
+      });
+      await request.done;
+      expect(JSON.parse(request.res.body)).toEqual({ jsonrpc: '2.0', id: index + 1, result: '0x' });
+      expect(rpcMock).toHaveBeenLastCalledWith('eth_call', params);
+    }
+
+    rpcMock.mockClear();
+    const rejected = runCtx('POST', '/api/pca/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'eth_call',
+      params: [{
+        to: CONTRACTS_FIXTURE.identityWallets.storage,
+        data: identityStorage.encodeFunctionData('getIdentityId', [ethers.getAddress('0x' + '45'.repeat(20))]),
+      }, 'latest'],
+    });
+    await rejected.done;
+    expect(JSON.parse(rejected.res.body).error.code).toBe(-32602);
+    expect(rpcMock).not.toHaveBeenCalled();
   });
 
   it('POST /api/pca/rpc rejects over-broad eth_call params before adapter delegation', async () => {

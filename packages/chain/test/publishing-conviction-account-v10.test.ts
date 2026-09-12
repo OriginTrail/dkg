@@ -282,10 +282,18 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     );
     const expectedNft = ethers.getAddress(await hub.getContractAddress('DKGPublishingConvictionNFT'));
     const expectedToken = ethers.getAddress(await hub.getContractAddress('Token'));
+    const expectedProfile = ethers.getAddress(await hub.getContractAddress('Profile'));
+    const expectedIdentity = ethers.getAddress(await hub.getContractAddress('Identity'));
+    const expectedIdentityStorage = ethers.getAddress(await hub.getContractAddress('IdentityStorage'));
 
     const c = await reader.getPublishingConvictionContracts();
     expect(c.nft).toBe(expectedNft);     // the deployed wrapper, EIP-55 checksummed
     expect(c.token).toBe(expectedToken); // the deployed TRAC, EIP-55 checksummed
+    expect(c.identityWallets).toEqual({
+      profile: expectedProfile,
+      identity: expectedIdentity,
+      storage: expectedIdentityStorage,
+    });
     expect(c.nft).not.toBe(c.token);
     expect(c.chainId).toBe(reader.chainId);       // AS-IS, the adapter's configured chainId
     expect(c.rpcUrls).toEqual([]);                // raw operator RPC URLs stay daemon-internal

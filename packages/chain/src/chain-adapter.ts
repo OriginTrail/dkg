@@ -81,10 +81,19 @@ export interface ShardingTableNode {
   stake: bigint;
 }
 
-/** Browser-bootstrap contract addresses + chain params for wallet-signed PCA actions. */
+/** Browser-bootstrap contract addresses + chain params for wallet-signed PCA and identity-key actions. */
 export interface PcaContracts {
   nft: string;
   token: string;
+  /** Identity-key management capability. Omitted as a unit on older deployments. */
+  identityWallets?: {
+    /** Profile entrypoint used by an admin wallet to register operational keys. */
+    profile: string;
+    /** Identity entrypoint used by an admin wallet to add/remove hashed keys. */
+    identity: string;
+    /** Read-only key-purpose store used to verify the connected admin wallet. */
+    storage: string;
+  };
   chainId: string;
   rpcUrls: string[];
   walletRpcUrls?: string[];

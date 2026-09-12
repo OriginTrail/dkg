@@ -1107,6 +1107,11 @@ export class MockChainAdapter implements ChainAdapter {
     return {
       nft: ethers.getAddress('0x' + '11'.repeat(20)),
       token: ethers.getAddress('0x' + '22'.repeat(20)),
+      identityWallets: {
+        profile: ethers.getAddress('0x' + '33'.repeat(20)),
+        identity: ethers.getAddress('0x' + '44'.repeat(20)),
+        storage: ethers.getAddress('0x' + '55'.repeat(20)),
+      },
       chainId: this.chainId,
       rpcUrls: [],
       walletRpcUrls: [],

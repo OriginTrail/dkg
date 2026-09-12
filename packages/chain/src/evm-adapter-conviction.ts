@@ -861,31 +861,46 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
   }
 
   /**
-   * Browser bootstrap (sub-PR #2 HW signing) — the minimal resolved contract
-   * addresses + chain params the in-browser viem layer needs to submit
-   * owner-actions direct-to-contract, in ONE call (no in-browser Hub
-   * resolution, H2). Returns `{ nft, token, chainId, rpcUrls }`:
+   * Browser bootstrap (sub-PR #2 HW signing) — the resolved contract
+   * addresses + chain params the in-browser viem layer needs to submit PCA
+   * owner-actions and identity-key rotations direct-to-contract, in ONE call (no in-browser Hub
+   * resolution, H2). Returns the PCA plus identity-management contract addresses,
+   * chain ID, and RPC URLs:
    *   - `nft` = DKGPublishingConvictionNFT (wrapper) — every wallet-signed write
    *     (create/topUp/registerAgent/deregisterAgent) targets it, and it's the
    *     ERC721Enumerable + mint-Transfer source for discovery/accountId parse.
    *   - `token` = the TRAC ERC-20 the approve pre-step allows the wrapper to pull.
-   * Both EIP-55 checksummed. `chainId` is returned AS-IS (may be the compound
+   *   - `identityWallets` = the all-or-none Profile / Identity / IdentityStorage
+   *     write/read capability used by the PCA wallet page. These addresses are
+   *     public chain metadata; no configured signer or RPC credential is exposed.
+   * All addresses are EIP-55 checksummed. `chainId` is returned AS-IS (may be the compound
    * `base:84532` form — the FE extracts the numeric tail for viem's Chain.id).
    * `rpcUrls` contains only configured wallet-public endpoints. The daemon route
    * replaces it with same-origin `/api/pca/rpc` for node-UI browser reads so
    * configured operator RPC URLs/API keys never leave the node process.
    * Undeployed NFT/token → PcaUnavailableError (route → 503), the same
-   * capability signal as the other PCA reads. NO Hub/logic/ShardingTable — no
-   * browser owner-action touches them.
+   * capability signal as the other PCA reads. NO Hub/logic/ShardingTable: the
+   * identity addresses are the only additional browser contract surfaces.
    */
   async getPublishingConvictionContracts(): Promise<PcaContracts> {
     await this.init();
     const nft = this.requireConvictionNFT();
     const token = this.contracts.token;
     if (!token) throw new PcaUnavailableError();
+    const profile = this.contracts.profile;
+    const identity = this.contracts.identity;
+    const identityStorage = await this.getIdentityStorage();
+    if (!profile || !identity || !identityStorage) {
+      throw new Error('Identity wallet contracts are not available on this Hub.');
+    }
     return {
       nft: ethers.getAddress(await nft.getAddress()),
       token: ethers.getAddress(await token.getAddress()),
+      identityWallets: {
+        profile: ethers.getAddress(await profile.getAddress()),
+        identity: ethers.getAddress(await identity.getAddress()),
+        storage: ethers.getAddress(await identityStorage.getAddress()),
+      },
       chainId: this.chainId,
       rpcUrls: [...this.walletRpcUrls],
       walletRpcUrls: [...this.walletRpcUrls],

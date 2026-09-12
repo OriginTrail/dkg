@@ -256,7 +256,8 @@ export const listDesignatableNodes = (opts?: { fresh?: boolean }) =>
   );
 
 /**
- * Resolved PCA contract addresses + chain — the bootstrap the in-browser wallet (web3) layer needs.
+ * Resolved PCA + identity contract addresses and chain — the bootstrap the in-browser wallet
+ * (web3) layer needs.
  * The daemon resolves these via its Hub config (the browser does NOT re-resolve the Hub). Minimal
  * set: the NFT wrapper (every wallet-signed write + the ERC721Enumerable owned-PCA walk + the mint
  * `Transfer` accountId decode all target it), the TRAC token (approve/allowance), the chain id, and
@@ -268,6 +269,15 @@ export interface PcaContracts {
   nft: string;
   /** TRAC ERC-20 address (EIP-55) — `approve`/`allowance`. */
   token: string;
+  /** Identity-key management capability. Omitted as a unit on older deployments. */
+  identityWallets?: {
+    /** Profile entrypoint for admin-signed operational-key registration. */
+    profile: string;
+    /** Identity entrypoint for admin-key registration and key removal. */
+    identity: string;
+    /** Identity key-purpose read surface. */
+    storage: string;
+  };
   /** Chain id; may be the compound `"slug:chainId"` form (e.g. `"base:84532"`) — extract the numeric
    *  tail for the viem `Chain.id`. */
   chainId: string | number;

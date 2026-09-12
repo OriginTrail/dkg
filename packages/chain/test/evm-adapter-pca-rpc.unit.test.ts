@@ -184,16 +184,28 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
       contracts: {
         dkgPublishingConvictionNFT: { getAddress: () => Promise<string> };
         token: { getAddress: () => Promise<string> };
+        profile: { getAddress: () => Promise<string> };
+        identity: { getAddress: () => Promise<string> };
+        identityStorage: { getAddress: () => Promise<string> };
       };
     }).contracts = {
       dkgPublishingConvictionNFT: { getAddress: async () => '0x' + '11'.repeat(20) },
       token: { getAddress: async () => '0x' + '22'.repeat(20) },
+      profile: { getAddress: async () => '0x' + '33'.repeat(20) },
+      identity: { getAddress: async () => '0x' + '44'.repeat(20) },
+      identityStorage: { getAddress: async () => '0x' + '55'.repeat(20) },
     };
+    (adapter as any).getIdentityStorage = async () => (adapter as any).contracts.identityStorage;
 
     const contracts = await adapter.getPublishingConvictionContracts();
 
     expect(contracts.rpcUrls).toEqual(['https://wallet-rpc.example/base-sepolia']);
     expect(contracts.walletRpcUrls).toEqual(['https://wallet-rpc.example/base-sepolia']);
+    expect(contracts.identityWallets).toEqual({
+      profile: '0x' + '33'.repeat(20),
+      identity: '0x' + '44'.repeat(20),
+      storage: '0x' + '55'.repeat(20),
+    });
     expect(JSON.stringify(contracts)).not.toContain('SECRETKEY');
     expect(JSON.stringify(contracts)).not.toContain('private-rpc.example');
   });
