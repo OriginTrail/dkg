@@ -8,6 +8,7 @@ import { createAllowedHttpAuthentication } from '../../../cli/src/auth.ts';
 import { handleKnowledgeAssetsRoutes } from '../../../cli/src/daemon/routes/knowledge-assets.ts';
 import { handleQueryRoutes } from '../../../cli/src/daemon/routes/query.ts';
 import { handleStatusRoutes } from '../../../cli/src/daemon/routes/status.ts';
+import { decodeRfc64DaemonCertificationStatusV1 } from '../../src/rfc64/daemon-certification-status-v1.ts';
 
 import {
   createRemoteCanaryCohortRefV1,
@@ -33,6 +34,14 @@ test('required gate certifies through the production status, KA, and query handl
   try {
     const liveStatus = await fetch(`${source.baseUrl}/api/status`).then((response) => response.json());
     assert.match(liveStatus.commit, /^[0-9a-f]{40}$/u);
+    assert.equal(
+      liveStatus.rfc64Certification.schema,
+      'dkg-rfc64-daemon-certification-status-v1',
+    );
+    const certificationStatus = decodeRfc64DaemonCertificationStatusV1(
+      liveStatus.rfc64Certification,
+    );
+    assert.equal(certificationStatus.catalog.contextGraphs.length, 1);
 
     const config = createContractConfig(source.baseUrl, receiver.baseUrl, liveStatus.commit);
     const normalized = validateRemoteCanaryConfigV1(config);
@@ -109,7 +118,11 @@ test('certification fails when independent receiver delivery is disabled', async
   const source = await startRouteServer(createRouteAgent(sourceState, synchronization), sourceState);
   const receiver = await startRouteServer(createRouteAgent(receiverState), receiverState);
   try {
-    const config = createContractConfig(source.baseUrl, receiver.baseUrl, NODE_COMMIT);
+    const liveStatus = await fetch(`${source.baseUrl}/api/status`).then(
+      (response) => response.json(),
+    );
+    assert.match(liveStatus.commit, /^[0-9a-f]{40}$/u);
+    const config = createContractConfig(source.baseUrl, receiver.baseUrl, liveStatus.commit);
     await assert.rejects(
       executeRemoteCanaryCertificationV1(config, {
         fetchFn: createContractFetch(),

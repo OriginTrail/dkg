@@ -63,6 +63,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 import {
+  createRfc64DaemonCertificationStatusV1,
   DKGAgent,
   loadOpWallets,
   resolveSyncReconcilerEnabled,
@@ -789,10 +790,28 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         );
       }
     }
+    const reportedCommit = buildInfo.commit !== "uncommitted"
+      ? buildInfo.commit
+      : (nodeCommit || null);
+    const syncReconcilerEnabled = resolveSyncReconcilerEnabled(
+      config.syncReconcilerEnabled,
+    );
+    const rfc64Certification = createRfc64DaemonCertificationStatusV1({
+      commit: reportedCommit,
+      networkId,
+      syncReconcilerEnabled,
+      chain: publicChainSummary,
+      catalog: {
+        enabled: rfc64CatalogActivation.enabled,
+        killSwitch: rfc64CatalogRollout.killSwitch,
+        contextGraphModes: rfc64CatalogRollout.contextGraphModes,
+        contextGraphs: rfc64CatalogContextGraphs,
+      },
+    });
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
-      commit: buildInfo.commit !== "uncommitted" ? buildInfo.commit : (nodeCommit || null),
+      commit: reportedCommit,
       commitShort: buildInfo.commitShort !== "00000000"
         ? buildInfo.commitShort
         : (nodeCommit ? nodeCommit.slice(0, 8) : null),
@@ -858,9 +877,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // deliberately uses the same resolver as both runtime reconcile gates,
       // including environment-variable precedence.
       syncLifecycle: {
-        syncReconcilerEnabled: resolveSyncReconcilerEnabled(
-          config.syncReconcilerEnabled,
-        ),
+        syncReconcilerEnabled,
       },
       connectedPeers: uniquePeers.size,
       connections: {
@@ -878,6 +895,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       finalizationRecovery,
       rfc64PublicCatalog,
       rfc64Catalog,
+      rfc64Certification,
       // Product-default scheduling is deliberately separate from the signed
       // catalog authority surface above. Every explicitly requested CG is
       // eligible for RFC-64 selected PUBLIC-SWM scheduling; private CGs retain

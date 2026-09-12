@@ -15,30 +15,32 @@ test('preflight fails closed for every release-defining status condition', () =>
   const config = validateRemoteCanaryConfigV1(baseConfig());
   const node = config.contextGraphs[0].source;
   const cases = [
-    ['build', (status) => { status.commit = 'f'.repeat(40); }, 'node-build-mismatch'],
+    ['build', (status) => {
+      status.rfc64Certification.commit = 'f'.repeat(40);
+    }, 'node-build-mismatch'],
     ['reconciler', (status) => {
-      status.syncLifecycle.syncReconcilerEnabled = false;
+      status.rfc64Certification.syncReconcilerEnabled = false;
     }, 'sync-reconciler-disabled'],
     ['kill switch', (status) => {
-      status.rfc64Catalog.rollout.killSwitch = true;
+      status.rfc64Certification.catalog.killSwitch = true;
     }, 'rfc64-kill-switch-active'],
     ['catalog enabled', (status) => {
-      status.rfc64Catalog.enabled = false;
+      status.rfc64Certification.catalog.enabled = false;
     }, 'rfc64-catalog-disabled'],
     ['catalog service', (status) => {
-      status.rfc64Catalog.contextGraphs[0].catalogServiceStarted = false;
+      status.rfc64Certification.catalog.contextGraphs[0].catalogServiceStarted = false;
     }, 'rfc64-catalog-service-not-started'],
     ['configured mode', (status) => {
-      status.rfc64Catalog.rollout.contextGraphModes[CG] = 'shadow';
+      status.rfc64Certification.catalog.contextGraphModes[CG] = 'shadow';
     }, 'rfc64-mode-mismatch'],
     ['operational mode', (status) => {
-      status.rfc64Catalog.contextGraphs[0].effectiveMode = 'shadow';
+      status.rfc64Certification.catalog.contextGraphs[0].effectiveMode = 'shadow';
     }, 'rfc64-operational-mode-missing'],
     ['chain', (status) => {
-      status.chain.configured = false;
+      status.rfc64Certification.chain.configured = false;
     }, 'chain-rpc-not-configured'],
     ['network', (status) => {
-      status.networkId = '';
+      status.rfc64Certification.networkId = '';
     }, 'node-network-missing'],
   ];
   for (const [label, mutate, expectedCode] of cases) {
@@ -60,12 +62,35 @@ test('preflight rejects a cross-node network identity mismatch', async () => {
       request: {
         json: async (node) => ({
           ...statusBody(),
-          networkId: node.role === 'source' ? 'otp-testnet-2160' : 'otp-other',
+          rfc64Certification: {
+            ...statusBody().rfc64Certification,
+            networkId: node.role === 'source' ? 'otp-testnet-2160' : 'otp-other',
+          },
         }),
       },
     }),
     (error) => error instanceof RemoteCanaryError && error.code === 'node-network-mismatch',
   );
+});
+
+test('preflight fails closed when the versioned daemon certification contract is malformed', () => {
+  const config = validateRemoteCanaryConfigV1(baseConfig());
+  const node = config.contextGraphs[0].source;
+  for (const mutate of [
+    (status) => { delete status.rfc64Certification.schema; },
+    (status) => { status.rfc64Certification.chain.chainId = 2160; },
+    (status) => {
+      status.rfc64Certification.catalog.contextGraphs[0].authorityFreshness = 'stale';
+    },
+  ]) {
+    const status = structuredClone(statusBody());
+    mutate(status);
+    assert.throws(
+      () => validateNodePreflightV1(status, node, config),
+      (error) => error instanceof RemoteCanaryError
+        && error.code === 'preflight-status-malformed',
+    );
+  }
 });
 
 test('complete VM parity requires every canonical cursor field', () => {
@@ -80,11 +105,11 @@ test('complete VM parity requires every canonical cursor field', () => {
     'catalogVersion',
     'lastSuccessfulAdvanceAt',
   ];
-  assert.notEqual(completeOperationalParityV1(statusBody(), CG), null);
+  assert.notEqual(completeOperationalParityV1(statusBody().rfc64Certification, CG), null);
   for (const field of required) {
     const status = structuredClone(statusBody());
-    delete status.rfc64Catalog.contextGraphs[0][field];
-    assert.equal(completeOperationalParityV1(status, CG), null, field);
+    delete status.rfc64Certification.catalog.contextGraphs[0][field];
+    assert.equal(completeOperationalParityV1(status.rfc64Certification, CG), null, field);
   }
   for (const [field, value] of [
     ['appliedCatalogHeadDigest', `0x${'AB'.repeat(32)}`],
@@ -93,8 +118,8 @@ test('complete VM parity requires every canonical cursor field', () => {
     ['lastSuccessfulAdvanceAt', 1893456000],
   ]) {
     const status = structuredClone(statusBody());
-    status.rfc64Catalog.contextGraphs[0][field] = value;
-    assert.equal(completeOperationalParityV1(status, CG), null, field);
+    status.rfc64Certification.catalog.contextGraphs[0][field] = value;
+    assert.equal(completeOperationalParityV1(status.rfc64Certification, CG), null, field);
   }
 });
 
@@ -133,8 +158,12 @@ test('VM parity rejects every internally valid cross-node cursor divergence', as
     ['catalog version', (cursor) => { cursor.catalogVersion = '8'; }],
   ]) {
     const receiverStatus = structuredClone(statusBody());
-    mutate(receiverStatus.rfc64Catalog.contextGraphs[0]);
-    assert.notEqual(completeOperationalParityV1(receiverStatus, CG), null, label);
+    mutate(receiverStatus.rfc64Certification.catalog.contextGraphs[0]);
+    assert.notEqual(
+      completeOperationalParityV1(receiverStatus.rfc64Certification, CG),
+      null,
+      label,
+    );
     await assert.rejects(
       verifyVmParityV1({
         config,
@@ -160,12 +189,12 @@ test('VM parity reads each participating node once per shared polling round', as
     timing: { ...normalized.timing, parityTimeoutMs: 50, pollIntervalMs: 1 },
   };
   const matchingStatus = structuredClone(statusBody());
-  matchingStatus.rfc64Catalog.contextGraphs.push({
-    ...matchingStatus.rfc64Catalog.contextGraphs[0],
+  matchingStatus.rfc64Certification.catalog.contextGraphs.push({
+    ...matchingStatus.rfc64Certification.catalog.contextGraphs[0],
     contextGraphId: secondContextGraphId,
   });
   const firstReceiverStatus = structuredClone(matchingStatus);
-  firstReceiverStatus.rfc64Catalog.contextGraphs[1].catalogVersion = '8';
+  firstReceiverStatus.rfc64Certification.catalog.contextGraphs[1].catalogVersion = '8';
   const statusReads = new Map(config.nodes.map((node) => [node.id, 0]));
   const result = await verifyVmParityV1({
     config,
