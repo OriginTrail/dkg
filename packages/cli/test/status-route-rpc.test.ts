@@ -36,6 +36,7 @@ import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import {
   loadNetworkConfig,
+  resolveRfc64CatalogActivations,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
 } from '../src/config.js';
@@ -202,6 +203,8 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         noOpMutations: 1,
         failedMutations: 1,
         casRetries: 2,
+        authorAddress: privateAuthor,
+        lastHeadDigest: privateDigest,
       },
       projectionSupervisor: {
         running: false,
@@ -213,6 +216,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         failed: 0,
         lastPassStartedAtMs: 10,
         lastPassCompletedAtMs: 20,
+        repairs: [{ authorAddress: privateAuthor }],
       },
       receiverStaging: {
         running: false,
@@ -228,6 +232,8 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         stageOnlyInvariantSatisfied: true,
         lastPassStartedAtMs: 30,
         lastPassCompletedAtMs: 40,
+        providers: [privateProvider],
+        lastHeadDigest: privateDigest,
       },
       // A route boundary must not forward unknown fields introduced by a
       // mismatched package or unsafe test double.
@@ -302,6 +308,16 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     expect(serialized).not.toContain(privateDigest);
     expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('repairs');
     expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('providers');
+    expect(response.body.rfc64Catalog.shadowExecution.inventoryObserver)
+      .not.toHaveProperty('authorAddress');
+    expect(response.body.rfc64Catalog.shadowExecution.inventoryObserver)
+      .not.toHaveProperty('lastHeadDigest');
+    expect(response.body.rfc64Catalog.shadowExecution.projectionSupervisor)
+      .not.toHaveProperty('repairs');
+    expect(response.body.rfc64Catalog.shadowExecution.receiverStaging)
+      .not.toHaveProperty('providers');
+    expect(response.body.rfc64Catalog.shadowExecution.receiverStaging)
+      .not.toHaveProperty('lastHeadDigest');
   });
 
   it('keeps status available when a shadow provider is structurally version-skewed', async () => {
@@ -548,26 +564,28 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     _label,
     configOverrides,
   ) => {
+    const activations = resolveRfc64CatalogActivations(
+      configOverrides,
+      resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+    );
     const response = await requestStatusWithAgent(
       {},
       configOverrides,
       '/api/status',
       null,
-      {
-        enabled: false,
-        selectedContextGraphs: [],
-        selectedPublicContextGraphs: [],
-        selectedPrivateContextGraphs: [],
-        selectedCatalogAuthoringControls: [],
-        rollout: {
-          killSwitch: false,
-          defaultMode: 'catalog',
-          contextGraphModes: {},
-        },
-      } as never,
+      activations.catalog,
+      activations.publicCatalog,
     );
 
     expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog).toMatchObject({
+      enabled: false,
+      rollout: {
+        killSwitch: false,
+        defaultMode: 'catalog',
+        contextGraphModes: {},
+      },
+    });
     expect(response.body.rfc64Catalog.configuration).toMatchObject({
       source: 'explicit-disabled',
       deprecatedDisabledOverride: true,
