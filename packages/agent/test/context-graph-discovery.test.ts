@@ -2435,6 +2435,49 @@ describe('discoverContextGraphsFromChain', () => {
     ]);
   }, 15000);
 
+  it('reports bounded repair progress after each acknowledged repair page', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    let acknowledged = 0;
+    (chain as any).listContextGraphsFromChain = async () => [];
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [],
+        scanProgress: {
+          mode: 'repair',
+          page: 1,
+          pageBudget: 30,
+          fromBlock: 100,
+          toBlock: 199,
+          targetBlock: 199,
+          completesGeneration: true,
+        },
+        ack: async () => {
+          acknowledged += 1;
+        },
+      };
+    };
+    const entries: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => entries.push({ level: entry.level, message: entry.message }));
+    try {
+      const result = await createTestAgent({ chainAdapter: chain });
+      agent = result.agent;
+      await agent.start();
+
+      await expect(agent.repairContextGraphRegistry({
+        pageBudget: 30,
+        minimumIntervalMs: 0,
+      })).resolves.toBe(0);
+    } finally {
+      Logger.setSink(null);
+    }
+
+    expect(acknowledged).toBe(1);
+    expect(entries.some((entry) =>
+      entry.level === 'info'
+      && entry.message.includes('pages=1/30 range=[100,199] target=199 complete=true'),
+    )).toBe(true);
+  }, 15000);
+
   it('keeps legacy chain discovery scan options as explicit cursor-mode aliases', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const scanCalls: unknown[] = [];
@@ -2894,6 +2937,7 @@ describe('discoverContextGraphsFromChain', () => {
       if (options.mode === 'repair' ? repairFails : liveFails) {
         throw new Error(`${options.mode} unavailable`);
       }
+      yield* [];
     };
     const entries: Array<{ level: string; message: string }> = [];
     Logger.setSink((entry) => entries.push({ level: entry.level, message: entry.message }));

@@ -1,3 +1,5 @@
+import { withRpcRequestContext } from '@origintrail-official/dkg-chain';
+
 /**
  * Bounded ContextGraphNameRegistry discovery scheduling.
  *
@@ -245,10 +247,13 @@ export function createChainDiscoveryScanRunner(input: {
           ? Math.floor(configuredRepairEvery)
           : CHAIN_FULL_SCAN_EVERY;
         try {
-          const found = await input.agent.repairContextGraphRegistry({
-            pageBudget: input.pageBudget ?? CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
-            minimumIntervalMs: repairEvery * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
-          });
+          const found = await withRpcRequestContext(
+            { requestClass: 'background' },
+            () => input.agent.repairContextGraphRegistry!({
+              pageBudget: input.pageBudget ?? CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+              minimumIntervalMs: repairEvery * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
+            }),
+          );
           if (found > 0) safeLog(`Chain repair audit: discovered ${found} new context graph(s)`);
         } catch (error) {
           safeLog(`Chain repair audit failed; retrying next tick: ${describeError(error)}`);
