@@ -105,6 +105,7 @@ export default defineConfig({
       "test/sync-memory-metrics.test.ts",
       "test/sync-responder-metrics.test.ts",
       "test/sync-transport-metrics.test.ts",
+      "test/sync-snapshot-helper-compatibility.test.ts",
       "test/sync-attempt-telemetry.test.ts",
       "test/sync-operation-telemetry.test.ts",
       "test/sync-fetch-coalescing.test.ts",

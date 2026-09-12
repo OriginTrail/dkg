@@ -1500,8 +1500,8 @@ export async function syncPublicSnapshotsForMeta(params: {
   remotePeerId: string;
   contextGraphId: string;
   deadline: number;
-  /** Admission owned by the enclosing operation, shared by cache checks and transport. */
-  workAdmission: SyncWorkAdmission;
+  /** Shared operation admission; legacy callers use their existing deadline. */
+  workAdmission?: SyncWorkAdmission;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
@@ -1545,7 +1545,10 @@ export async function syncPublicSnapshotsForMeta(params: {
   /** One incomplete phase only when every unresolved ref is due to local admission. */
   localYieldFailedPhases?: number;
 }> {
-  const workAdmission = params.workAdmission;
+  const workAdmission = params.workAdmission ?? composeSyncWorkAdmission({
+    deadline: params.deadline,
+    scope: { sharing: 'coalescible', key: 'direct-snapshot-walk' },
+  });
   const executionBoundary = params.executionBoundary
     ?? createRecoveryExecutionAdmission();
   executionBoundary.assertCurrent();

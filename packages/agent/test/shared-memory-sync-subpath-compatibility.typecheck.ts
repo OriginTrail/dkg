@@ -2,6 +2,13 @@ import {
   selectSwmSnapshotCoverage,
   type SharedMemorySyncSummary,
 } from '../src/sync/requester/shared-memory-sync.js';
+import { syncPublicSnapshotsForMeta } from '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js';
+import type { Quad } from '@origintrail-official/dkg-storage';
+
+declare const legacySnapshotParams: Omit<Parameters<typeof syncPublicSnapshotsForMeta>[0], 'workAdmission' | 'snapshotWalk'> & {
+  metaQuads: Quad[];
+};
+void syncPublicSnapshotsForMeta(legacySnapshotParams);
 
 const summary: SharedMemorySyncSummary = {
   snapshotPlaneIncomplete: 0,
