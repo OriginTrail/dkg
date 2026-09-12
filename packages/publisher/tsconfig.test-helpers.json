@@ -9,6 +9,7 @@
     "src",
     "test/_helpers/chain-event-run-context.ts",
     "test/_helpers/claim-fencing-types.ts",
+    "test/helpers/chain-event-lane-fixture.ts",
     "../../scripts/testing/ka-vm-publish.ts",
     "test/_helpers/legacy-raw-lift.ts",
     "test/_helpers/promote-operation-intent-types.ts",

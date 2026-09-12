@@ -97,6 +97,7 @@ import {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
+  SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteKaNumberStore,
@@ -1768,6 +1769,8 @@ async function runDaemonInnerWithStartupOwnership(
   // deliberately explicit rather than inferred from a structural store type.
   const localContextGraphAuthorityHistoryStore =
     new SqliteContextGraphAuthorityHistoryStore(dashDb);
+  const localContextGraphAuthorityIndexStore =
+    new SqliteContextGraphAuthorityIndexStore(dashDb);
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -1898,6 +1901,7 @@ async function runDaemonInnerWithStartupOwnership(
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
     localContextGraphAuthorityHistoryStore,
+    localContextGraphAuthorityIndexStore,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,

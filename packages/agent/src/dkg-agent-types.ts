@@ -60,6 +60,7 @@ import type {
   ApprovalPolicy,
   ChainAdapter,
   ContextGraphAuthorityHistoryStore,
+  ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
 } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
@@ -665,7 +666,6 @@ export interface ChatSendResult {
  */
 export type ContextGraphSyncMode = 'on-demand' | 'always-on';
 
-/** Tracks the subscription and sync state of a context graph. */
 export interface ContextGraphSub {
   name?: string;
   /** Requested synchronization lifetime, normalized before entering live state. */
@@ -1899,6 +1899,8 @@ export interface DKGAgentConfig {
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
   /** Process-owned local durable finalized Context Graph authority-history checkpoints. */
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
+  /** Process-owned durable contract-wide Context Graph authority index. */
+  localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
   /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.
