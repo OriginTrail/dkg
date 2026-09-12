@@ -306,9 +306,9 @@ function validateAskSparql(value, label) {
 
 function collectSparqlTerms(value) {
   if (value === null || typeof value !== 'object') return [];
-  if (value.type === 'term') return [value];
   if (Array.isArray(value)) return value.flatMap(collectSparqlTerms);
-  return Object.values(value).flatMap(collectSparqlTerms);
+  const nested = Object.values(value).flatMap(collectSparqlTerms);
+  return value.type === 'term' ? [value, ...nested] : nested;
 }
 
 function resolveSparqlIriContext(entries) {

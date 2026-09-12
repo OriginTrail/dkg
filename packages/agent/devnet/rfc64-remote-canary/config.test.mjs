@@ -153,6 +153,7 @@ test('catalog evidence cannot depend on reserved canary marker vocabulary', () =
     'ASK { ?s <https://schema.origintrail.io/rfc64/canaryValue> ?o }',
     'PREFIX canary: <urn:dkg:rfc64-canary:> ASK { canary:old-marker ?p ?o }',
     'ASK { "known-old-marker" ^<https://schema.origintrail.io/rfc64/canaryValue> ?s }',
+    'ASK { <urn:known> ?p "value"^^<https://schema.origintrail.io/rfc64/canaryValue> }',
     'BASE <https://schema.origintrail.io/rfc64/> ASK { <urn:known> <canaryValue> ?o }',
     'BASE <https://schema.origintrail.io/> PREFIX canary: <rfc64/> ASK { <urn:known> canary:canaryValue ?o }',
   ]) {
