@@ -285,9 +285,7 @@ function validateAskSparql(value, label) {
   ));
   const terms = triples.flatMap((triple) => [triple.subject, triple.predicate, triple.object]);
   const nestedTerms = terms.flatMap(collectSparqlTerms);
-  const prefixes = new Map((parsed.context ?? [])
-    .filter((entry) => entry?.subType === 'prefix')
-    .map((entry) => [entry.key, entry.value?.value]));
+  const iriContext = resolveSparqlIriContext(parsed.context ?? []);
   if (
     patterns.length === 0
     || patterns.some((pattern) => pattern.subType !== 'bgp' || pattern.triples.length === 0)
@@ -301,7 +299,7 @@ function validateAskSparql(value, label) {
     && nestedTerms.some((term) => (
       term?.type === 'term'
       && term.subType === 'namedNode'
-      && reservedCanaryIri(resolveNamedNodeIri(term, prefixes))
+      && reservedCanaryIri(resolveNamedNodeIri(term, iriContext))
     ))
   ) invalid('catalog-swm-query-uses-canary-vocabulary');
 }
@@ -313,10 +311,32 @@ function collectSparqlTerms(value) {
   return Object.values(value).flatMap(collectSparqlTerms);
 }
 
-function resolveNamedNodeIri(term, prefixes) {
-  if (term.prefix === undefined) return term.value;
-  const prefix = prefixes.get(term.prefix);
+function resolveSparqlIriContext(entries) {
+  let base;
+  const prefixes = new Map();
+  for (const entry of entries) {
+    if (entry?.subType === 'base' && typeof entry.value?.value === 'string') {
+      base = resolveIriReference(entry.value.value, base);
+    } else if (entry?.subType === 'prefix' && typeof entry.value?.value === 'string') {
+      prefixes.set(entry.key, resolveIriReference(entry.value.value, base));
+    }
+  }
+  return Object.freeze({ base, prefixes });
+}
+
+function resolveNamedNodeIri(term, context) {
+  if (term.prefix === undefined) return resolveIriReference(term.value, context.base);
+  const prefix = context.prefixes.get(term.prefix);
   return typeof prefix === 'string' ? `${prefix}${term.value}` : term.value;
+}
+
+function resolveIriReference(value, base) {
+  if (base === undefined) return value;
+  try {
+    return new URL(value, base).href;
+  } catch {
+    return value;
+  }
 }
 
 function reservedCanaryIri(value) {
