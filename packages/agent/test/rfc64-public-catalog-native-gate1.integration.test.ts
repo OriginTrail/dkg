@@ -47,6 +47,7 @@ import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-stora
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { DKGAgent } from '../src/index.js';
 import {
   produceEmptyAuthorCatalogGenesisV1,
   produceSparseAuthorCatalogSuccessorV1,
@@ -442,6 +443,12 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     })).rejects.toThrow(/no durable KA bundle/u);
     await expect(readVerifiedAppliedCatalogClosureV1({
       ...closureInput,
+      kaBundles: {
+        readKaBundleByDigest: async () => fixture.secondRowBundle.bundleBytes,
+      },
+    })).rejects.toThrow(/differs from its signed catalog row/u);
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
       trustedCatalogScope: { ...fixture.scope, authorAddress: GOVERNANCE_CONTRACT },
     })).rejects.toThrow(/differs from its signed SWM proof closure/u);
   }, 30_000);
@@ -506,6 +513,71 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       KA_NUMBER,
       SECOND_KA_NUMBER,
     ]);
+  }, 30_000);
+
+  it('binds the agent closure reader to its authoritative applied head', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    const appliedHead = fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    if (appliedHead === null) throw new Error('receiver did not retain its applied head');
+
+    const readAppliedCatalogHeadV1 = vi.fn(() => appliedHead);
+    const assertTrustedNetwork = vi.fn();
+    const resolveDeployment = vi.fn(async () => DEPLOYMENT);
+    const agentLike = {
+      rfc64PersistenceV1: {
+        controlObjects: fixture.receiverPersistence.controlObjects,
+        inventory: { readAppliedCatalogHeadV1 },
+        kaBundles: fixture.receiverPersistence.kaBundles,
+      },
+      assertRfc64CatalogNetworkMatchesTrustedSourceV1: assertTrustedNetwork,
+      resolveRfc64CatalogDeploymentProfileV1: resolveDeployment,
+    };
+    const readClosure = () => DKGAgent.prototype
+      .readRfc64VerifiedAppliedCatalogClosureV1.call(agentLike as never, {
+        trustedCatalogScope: fixture.scope,
+      });
+
+    await expect(readClosure()).resolves.toMatchObject({
+      appliedHead,
+      head: { objectDigest: fixture.successor.head.objectDigest },
+    });
+    expect(readAppliedCatalogHeadV1).toHaveBeenCalledTimes(2);
+    expect(readAppliedCatalogHeadV1).toHaveBeenNthCalledWith(
+      1,
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    expect(readAppliedCatalogHeadV1).toHaveBeenNthCalledWith(
+      2,
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    expect(assertTrustedNetwork).toHaveBeenCalledWith(NETWORK_ID);
+    expect(resolveDeployment).toHaveBeenCalledWith(NETWORK_ID, expect.any(AbortSignal));
+
+    readAppliedCatalogHeadV1.mockReset();
+    readAppliedCatalogHeadV1.mockReturnValue(null);
+    await expect(readClosure()).rejects.toThrow(/no durable applied head/u);
+    expect(resolveDeployment).toHaveBeenCalledOnce();
+
+    readAppliedCatalogHeadV1.mockReset();
+    readAppliedCatalogHeadV1
+      .mockReturnValueOnce(appliedHead)
+      .mockReturnValueOnce({
+        ...appliedHead,
+        currentCatalogHeadDigest: fixture.genesis.head.objectDigest,
+      });
+    await expect(readClosure()).rejects.toThrow(/changed during verified closure read/u);
+
+    await expect(DKGAgent.prototype.readRfc64VerifiedAppliedCatalogClosureV1.call(
+      { rfc64PersistenceV1: undefined } as never,
+      { trustedCatalogScope: fixture.scope },
+    )).rejects.toThrow(/no RFC-64 persistence/u);
   }, 30_000);
 
   it('accepts an exact projection when the store post-read returns a different row order', async () => {

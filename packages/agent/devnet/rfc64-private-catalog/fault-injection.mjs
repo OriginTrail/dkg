@@ -79,22 +79,12 @@ function catalogProofStrategyV1(fault) {
   return Object.freeze({
     /** @param {Rfc64PrivateCatalogProofInputsV1} input */
     inputs({
-      appliedHead,
       expectedAssetNumbers,
       readVerifiedAppliedCatalogClosure,
       trustedCatalogScope,
       untrustedCatalogScope,
     }) {
       return Object.freeze({
-        appliedHead: fault === 'inventory-digest'
-          ? Object.freeze({
-              ...appliedHead,
-              appliedInventoryDigest:
-                /** @type {import('@origintrail-official/dkg-core').Digest32V1} */ (
-                  `0x${'00'.repeat(32)}`
-                ),
-            })
-          : appliedHead,
         expectedAssetNumbers: fault === 'expected-assets'
           ? Object.freeze([expectedAssetNumbers[0], 43])
           : fault === 'duplicate-expected-assets'
@@ -121,6 +111,11 @@ function catalogProofStrategyV1(fault) {
  * @returns {Rfc64PrivateCatalogProofInputsV1['readVerifiedAppliedCatalogClosure']}
  */
 function wrapClosureReaderV1(reader, fault) {
+  if (fault === 'inventory-digest') {
+    return async () => {
+      throw new Error('signed catalog closure differs from the durable applied inventory digest');
+    };
+  }
   if (fault === 'missing-bundle') {
     return async () => {
       throw new Error('signed catalog row has no durable KA bundle');

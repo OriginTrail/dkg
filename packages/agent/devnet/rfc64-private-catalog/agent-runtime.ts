@@ -10,8 +10,6 @@ import type { Rfc64CatalogSuccessorAssetInputV1 } from
   '../../src/dkg-agent-rfc64-catalog.js';
 import type { VerifiedAppliedCatalogClosureV1 } from
   '../../src/dkg-agent-rfc64-catalog.js';
-import type { AppliedCatalogHeadSnapshotV1 } from
-  '../../src/rfc64/inventory-v1/index.js';
 import type { Rfc64ReleaseNativeAuthoritySnapshotV1 } from
   '../../src/rfc64/release-native-catalog-authority-v1.js';
 import type { Rfc64PrivateDevnetChainAdapter } from './finalized-chain-fixture.mjs';
@@ -39,7 +37,6 @@ export type Rfc64PrivateCatalogAssetV1 = Rfc64CatalogSuccessorAssetInputV1;
 
 export type Rfc64PrivateCatalogClosureReaderV1 = (
   input: Readonly<{
-    appliedHead: AppliedCatalogHeadSnapshotV1;
     trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
   }>,
 ) => Promise<Readonly<VerifiedAppliedCatalogClosureV1>>;
@@ -51,7 +48,6 @@ export type Rfc64PrivateAuthorityAdapterOptionsV1 = Readonly<{
 }>;
 
 export type Rfc64PrivateCatalogProofInputsV1 = Readonly<{
-  appliedHead: AppliedCatalogHeadSnapshotV1;
   expectedAssetNumbers: readonly number[];
   readVerifiedAppliedCatalogClosure: Rfc64PrivateCatalogClosureReaderV1;
   trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
@@ -59,7 +55,6 @@ export type Rfc64PrivateCatalogProofInputsV1 = Readonly<{
 }>;
 
 export type Rfc64PrivateCatalogProofStrategyInputsV1 = Readonly<{
-  appliedHead: AppliedCatalogHeadSnapshotV1;
   expectedAssetNumbers: readonly number[];
   readVerifiedAppliedCatalogClosure: Rfc64PrivateCatalogClosureReaderV1;
   trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;

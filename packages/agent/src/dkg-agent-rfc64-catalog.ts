@@ -126,7 +126,6 @@ import {
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
 import {
   readVerifiedAppliedCatalogClosureV1,
-  type ReadVerifiedAppliedCatalogClosureInputV1,
   type VerifiedAppliedCatalogClosureV1,
 } from './rfc64/verified-applied-catalog-closure-v1.js';
 import {
@@ -309,10 +308,10 @@ export interface Rfc64AppliedCatalogHeadRefV1 {
  * Public, semantic input for re-establishing a durable applied-catalog
  * closure. Storage capabilities remain owned by the agent.
  */
-export type ReadRfc64VerifiedAppliedCatalogClosureInputV1 = Pick<
-  ReadVerifiedAppliedCatalogClosureInputV1,
-  'appliedHead' | 'deployment' | 'trustedCatalogScope'
->;
+export interface ReadRfc64VerifiedAppliedCatalogClosureInputV1 {
+  /** Exact semantic scope whose currently applied closure must be verified. */
+  readonly trustedCatalogScope: Readonly<AuthorCatalogScopeV1>;
+}
 
 export type { VerifiedAppliedCatalogClosureV1 } from
   './rfc64/verified-applied-catalog-closure-v1.js';
@@ -3245,12 +3244,36 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (persistence === undefined) {
       throw new Error('verified applied catalog closure has no RFC-64 persistence');
     }
-    return readVerifiedAppliedCatalogClosureV1({
-      ...input,
+    const { trustedCatalogScope } = input;
+    this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(trustedCatalogScope.networkId);
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(trustedCatalogScope);
+    const appliedHead = persistence.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      trustedCatalogScope.authorAddress,
+    );
+    if (appliedHead === null) {
+      throw new Error('verified applied catalog closure has no durable applied head');
+    }
+    const deployment = await this.resolveRfc64CatalogDeploymentProfileV1(
+      trustedCatalogScope.networkId,
+      new AbortController().signal,
+    );
+    const closure = await readVerifiedAppliedCatalogClosureV1({
+      appliedHead,
       controlObjects: persistence.controlObjects,
+      deployment,
       kaBundles: persistence.kaBundles,
+      trustedCatalogScope,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     });
+    const currentAppliedHead = persistence.inventory.readAppliedCatalogHeadV1(
+      catalogScopeDigest,
+      trustedCatalogScope.authorAddress,
+    );
+    if (!equalAppliedCatalogHeadSnapshotV1(appliedHead, currentAppliedHead)) {
+      throw new Error('durable applied catalog head changed during verified closure read');
+    }
+    return closure;
   }
 
   /**
@@ -3591,6 +3614,19 @@ function countToSafeInteger(value: CountV1, label: string): number {
     throw new Error(`${label} is outside the exact safe-integer evidence boundary`);
   }
   return parsed;
+}
+
+function equalAppliedCatalogHeadSnapshotV1(
+  expected: AppliedCatalogHeadSnapshotV1,
+  current: AppliedCatalogHeadSnapshotV1 | null,
+): boolean {
+  return current !== null
+    && current.catalogScopeDigest === expected.catalogScopeDigest
+    && current.authorAddress === expected.authorAddress
+    && current.currentCatalogHeadDigest === expected.currentCatalogHeadDigest
+    && current.appliedInventoryDigest === expected.appliedInventoryDigest
+    && current.catalogVersion === expected.catalogVersion
+    && current.inventoryRowCount === expected.inventoryRowCount;
 }
 
 export interface BoundedAuthorCatalogHistoryV1 {

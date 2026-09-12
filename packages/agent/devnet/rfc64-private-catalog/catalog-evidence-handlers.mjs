@@ -327,7 +327,6 @@ async function readVerifiedAppliedCatalogMemoryV1(context, applied, scope) {
     throw new Error('catalog-row SWM evidence has no durable applied catalog');
   }
   const proofInputs = context.faultProfile.proof.inputs({
-    appliedHead: applied,
     expectedAssetNumbers: ASSET_NUMBERS,
     readVerifiedAppliedCatalogClosure: context.readVerifiedAppliedCatalogClosure,
     trustedCatalogScope: scope,

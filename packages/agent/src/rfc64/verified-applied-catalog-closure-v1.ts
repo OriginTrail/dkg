@@ -145,9 +145,8 @@ export async function readVerifiedAppliedCatalogClosureV1(
       });
     },
   );
-  if (rows.length.toString() !== input.appliedHead.inventoryRowCount) {
-    throw new Error('signed catalog closure row count differs from the durable applied head');
-  }
+  // loadExactAppliedCatalogRowsV1 has already bound this exact row set to the
+  // signed head, whose totalRows was bound to the applied snapshot above.
   const inventoryRows = Object.freeze(rows.map(({ inventoryEvidence }) => inventoryEvidence));
   const inventoryDigest = computeRfc64AppliedInventoryDigestV1({
     catalogScopeDigest: input.appliedHead.catalogScopeDigest,

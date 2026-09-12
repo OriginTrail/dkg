@@ -335,11 +335,9 @@ async function bindRfc64PrivateFinalizedRuntimeV1({
     kind: 'run',
     initialFinalizedAuthority,
     peerIds: Object.freeze({ ...manifest.peerIds }),
-    readVerifiedAppliedCatalogClosure: ((input) =>
-      created.agent.readRfc64VerifiedAppliedCatalogClosureV1({
-        ...input,
-        deployment: DEPLOYMENT as CatalogSealDeploymentProfileV1,
-      })) satisfies Rfc64PrivateCatalogClosureReaderV1,
+    readVerifiedAppliedCatalogClosure: (
+      (input) => created.agent.readRfc64VerifiedAppliedCatalogClosureV1(input)
+    ) satisfies Rfc64PrivateCatalogClosureReaderV1,
   });
   return role === 'owner'
     ? Object.freeze({ ...common, role, publication: createOwnerPublicationStateV1() })
