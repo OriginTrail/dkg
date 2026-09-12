@@ -1,3 +1,4 @@
+import type { VmRecoverySlotCapture, VmRecoverySlotHandle } from '../../src/internal/vm-recovery-slot-registry.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
@@ -6,10 +7,14 @@ import type {
   OrdinalRecoveryTarget,
   PendingOrdinalRecoveryResult,
 } from '../../src/chain-reconciler.js';
-import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
 import type { CuratorPeerIdsResolution } from '../../src/dkg-agent-lifecycle.js';
+import { VmRecoverySlotRegistry } from '../../src/internal/vm-recovery-slot-registry.js';
 import { DKGAgent } from '../../src/index.js';
-import type { ExactAssetSelection } from '../../src/sync/exact-assets.js';
+import {
+  exactAssetUalsForSelection,
+  requireExactAssetSelection,
+  type ExactAssetSelection,
+} from '../../src/sync/exact-assets.js';
 import type {
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-provider-policy.js';
@@ -25,7 +30,7 @@ interface ExactFetchResult {
     insertedTriples: number;
     failedPeers: number;
     failedPhases: number;
-    deferredBackpressure: number;
+    deferredBackpressure?: number;
   };
   disposition: VmRecoveryUalDisposition;
 }
@@ -45,9 +50,8 @@ export interface VmRecoveryHostInternals {
     };
   };
   preferredSyncPeers: Map<string, string>;
-  vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
+  vmRecoverySlots: VmRecoverySlotRegistry;
   vmReconcileRotationNow(): number;
-  vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;
   installVmReconcileActiveFetchCooldown(localCgId: string, now: number): symbol;
   readVmReconcileActiveFetchCooldown(
@@ -76,7 +80,7 @@ export interface VmRecoveryHostInternals {
   syncExactKnowledgeAssetsFromPeerDetailed(
     peerId: string,
     contextGraphId: string,
-    selection: ExactAssetSelection,
+    selection: ExactAssetSelection | readonly string[],
     options?: { signal?: AbortSignal; isCurrent?: () => boolean },
   ): Promise<ExactFetchResult>;
   reconcileChainOrdinal(
@@ -97,9 +101,9 @@ export interface VmRecoveryHostInternals {
       entry: {
         index: number;
         target: OrdinalRecoveryTarget;
-        prepared: { slotKey: string; suppressed: boolean };
+        prepared: { slot?: VmRecoverySlotCapture; suppressed: boolean };
       };
-      installedRecord: VmReconcileRotationRecord | undefined;
+      slotHandle: VmRecoverySlotHandle | undefined;
       candidatePeerIds: readonly string[];
     }[];
     unavailablePeerIds: readonly string[];
@@ -142,6 +146,8 @@ export interface VmRecoveryHostHarnessOptions<TTarget extends OrdinalRecoveryTar
   readonly peers: readonly string[];
   readonly targetCount: number;
   readonly targetForOrdinal: (ordinal: number) => TTarget;
+  /** Override the production registry capacity for focused admission tests. */
+  readonly recoverySlotCapacity?: number;
   readonly sizingUnavailable?: boolean;
   /**
    * Keep MockChainAdapter's prototype implementation so integration tests can
@@ -177,6 +183,9 @@ export async function createVmRecoveryHostHarness<
 
   const agent = await DKGAgent.create({ name: options.name, chainAdapter });
   const internals = agent as unknown as VmRecoveryHostInternals;
+  if (options.recoverySlotCapacity !== undefined) {
+    internals.vmRecoverySlots = new VmRecoverySlotRegistry(options.recoverySlotCapacity);
+  }
   const connected = options.peers.map((peerId): TestPeerId => ({
     toString: () => peerId,
   }));
@@ -212,10 +221,11 @@ export async function createVmRecoveryHostHarness<
     chainAdapter.getKnowledgeAssetUpdateContext = async (kaId) => {
       const ordinal = Number(kaId);
       if (options.sizingUnavailable) {
-        return { merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0 };
+        return { minted: 0n, endEpoch: 0n, tokenAmount: 0n, isImmutable: false, merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0 };
       }
       const footprint = options.footprintForOrdinal?.(ordinal);
       return {
+        minted: 1n, endEpoch: 100n, tokenAmount: 0n, isImmutable: false,
         merkleRootsCount: footprint?.merkleRootsCount ?? 1n,
         byteSize: footprint?.byteSize ?? 1_024n,
         merkleLeafCount: Number(footprint?.merkleLeafCount ?? 8),
@@ -231,12 +241,14 @@ export async function createVmRecoveryHostHarness<
     activeFetches += 1;
     maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
     try {
-      const requested = uals.map((ual) => {
+      const requestedUals: readonly string[] = Array.isArray(uals)
+        ? uals : exactAssetUalsForSelection(requireExactAssetSelection(uals));
+      const requested = requestedUals.map((ual) => {
         const target = targetsByUal.get(ual);
         if (!target) throw new Error(`unexpected UAL ${ual}`);
         return target;
       });
-      fetched.push({ peerId, uals: [...uals] });
+      fetched.push({ peerId, uals: [...requestedUals] });
       const disposition = await options.onFetch(
         peerId,
         requested,

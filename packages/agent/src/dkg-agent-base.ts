@@ -284,6 +284,7 @@ import {
   type OrdinalOutcome,
 } from './chain-reconciler.js';
 import type { ContextGraphReconcileResult } from './vm-reconcile-service.js';
+import { VmRecoverySlotRegistry } from './internal/vm-recovery-slot-registry.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
@@ -388,7 +389,6 @@ import {
   type VmReconcileNegativeRecord,
   type VmReconcilePeerTopology,
   type SelectedVmReconcileCursorRecord,
-  type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
@@ -1136,8 +1136,10 @@ export class DKGAgentBase {
   /** Bounded access-ordered keys already consulted in the durable store. */
   protected readonly vmReconcileNegativeCacheHydrated = new Map<string, string>();
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
-  /** Bounded, process-local clean-absence rotations for production VM recovery. */
-  protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  /** Owns retained absence evidence and active recovery slot generations together. */
+  protected readonly vmRecoverySlots = new VmRecoverySlotRegistry(
+    DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES,
+  );
   /** Next stable batch index to consider when the bounded rotation cache has waiters. */
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */

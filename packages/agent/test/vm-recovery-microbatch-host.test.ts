@@ -4,6 +4,7 @@ import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { vmRecoverySlotKey } from '../src/internal/vm-recovery-slot-registry.js';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 
 interface RecoveryTarget extends OrdinalRecoveryTarget {
@@ -63,6 +64,31 @@ describe('VM recovery microbatch host — adversarial integration', () => {
   afterEach(async () => {
     await Promise.all(agents.splice(0).map((agent) =>
       agent.stop().catch(() => undefined)));
+  });
+
+  it('leaves zero-peer targets without absence evidence and retries immediately when a peer appears', async () => {
+    const localCgId = '0x0000000000000000000000000000000000000001/empty-roster';
+    const peers: string[] = [];
+    const harness = await createRecoveryHarness({
+      name: 'ExactVmEmptyRoster', localCgId, peers, targetCount: 1,
+      onFetch: (_peer, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+    const empty = await harness.run();
+    expect.soft(empty.attemptedOrdinals).toEqual([]);
+    expect.soft(harness.fetched).toEqual([]);
+    expect.soft(harness.internals.vmRecoverySlots.recordCount).toBe(0);
+    expect.soft(harness.internals.readVmReconcileActiveFetchCooldown(localCgId)).toBeUndefined();
+
+    peers.push('12D3KooWNewlyAvailableHolder');
+    harness.internals.node.libp2p.getConnections = () => peers.map(peer => ({ remotePeer: { toString: () => peer } }));
+    const recovered = await harness.run();
+    expect(recovered.outcomes.get(0)?.status).toBe('reconciled');
+    expect(harness.fetched).toEqual([{ peerId: peers[0], uals: [harness.targets[0]!.ual] }]);
+    expect(harness.internals.vmRecoverySlots.recordCount).toBe(0);
   });
 
   it('rotates after spending one proven-holder reuse in the recovery slice', async () => {
@@ -256,14 +282,14 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
     for (const target of harness.targets.slice(1)) {
       expect(result.outcomes.get(target.ordinal)?.status).toBe('pending');
-      const record = harness.internals.vmReconcileRotationState.get(
-        harness.internals.vmReconcileRotationSlotKey(target),
+      const record = harness.internals.vmRecoverySlots.snapshot().get(
+        vmRecoverySlotKey(target),
       );
       expect(record).toMatchObject({
         phase: 'backoff',
         backoffKind: 'clean-absence',
       });
-      expect(record?.cleanAbsentPeerIds).toEqual(new Set([holder]));
+      expect(record?.cleanAbsentPeerIds).toEqual([holder]);
       expect(record?.nextRetryAt).toBeGreaterThan(before);
     }
   });
@@ -642,7 +668,6 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     });
     agents.push(harness.agent);
     const target = harness.targets[0]!;
-    const slotKey = harness.internals.vmReconcileRotationSlotKey(target);
     const replication = vi.spyOn(
       harness.agent as unknown as { emitReplication(event: unknown): void },
       'emitReplication',
@@ -656,9 +681,9 @@ describe('VM recovery microbatch host — adversarial integration', () => {
         entry: {
           index: 0,
           target,
-          prepared: { slotKey, suppressed: false },
+          prepared: { suppressed: false },
         },
-        installedRecord: undefined,
+        slotHandle: undefined,
         candidatePeerIds: [peerId],
       }],
       unavailablePeerIds: [],
@@ -669,7 +694,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
 
     expect(result).toEqual({ kind: 'not-started-stale' });
     expect(harness.fetched).toEqual([]);
-    expect(harness.internals.vmReconcileRotationState.size).toBe(0);
+    expect(harness.internals.vmRecoverySlots.snapshot().size).toBe(0);
     expect(replication).not.toHaveBeenCalled();
   });
 
