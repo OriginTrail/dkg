@@ -803,10 +803,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       syncReconcilerEnabled,
       chain: publicChainSummary,
       catalog: {
-        enabled: rfc64CatalogActivation.enabled,
-        killSwitch: rfc64CatalogRollout.killSwitch,
-        contextGraphModes: rfc64CatalogRollout.contextGraphModes,
-        contextGraphs: rfc64CatalogContextGraphs,
+        enabled: rfc64Catalog.enabled,
+        killSwitch: rfc64Catalog.rollout.killSwitch,
+        contextGraphModes: rfc64Catalog.rollout.contextGraphModes,
+        contextGraphs: rfc64Catalog.contextGraphs,
       },
     });
     return jsonResponse(res, 200, {

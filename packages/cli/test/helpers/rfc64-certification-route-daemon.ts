@@ -4,6 +4,10 @@ import { createServer, type ServerResponse } from 'node:http';
 
 import { createAllowedHttpAuthentication } from '../../src/auth.js';
 import {
+  resolveRfc64CatalogActivations,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+} from '../../src/config.js';
+import {
   createRequestContext,
   type RequestContext,
 } from '../../src/daemon/routes/context.js';
@@ -168,6 +172,17 @@ export async function startCertificationRouteServer(
         },
       } as RequestContext['config'],
       rfc64Catalog: catalogActivation,
+      rfc64CatalogActivationState: resolveRfc64CatalogActivations(
+        {
+          rfc64Catalog: {
+            enabled: true,
+            rollout: {
+              contextGraphModes: { [options.contextGraphId]: 'catalog' },
+            },
+          },
+        },
+        resolveRfc64PublicCatalogActivationChainIdentityV1(options.networkId),
+      ).activationState,
       rfc64PublicCatalog: publicCatalogActivation,
       startedAt: Date.now(),
       dashDb: {} as RequestContext['dashDb'],

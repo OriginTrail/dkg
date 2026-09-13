@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ASSET_NUMBERS } from './fixture.mjs';
-import { composeRfc64RegisteredRosterVersionV1 } from
-  '../../src/rfc64/release-native-catalog-authority-v1.ts';
 import {
   assertExactKeysV1,
   boundedArrayV1,
@@ -17,6 +15,9 @@ import {
 import {
   decodePrivateGateRevokedReceiverStateV1,
 } from './gate-artifact-state-codecs.mjs';
+
+const LOCAL_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
+const MAX_U64_V1 = (1n << 64n) - 1n;
 
 const EXPECTED_PRIVATE_DENIAL_CLASSIFICATIONS_V1 = Object.freeze([
   Object.freeze([
@@ -166,7 +167,7 @@ export function decodePrivateGateRevokedReceiverDenialEvidenceV1(
   const current = parseCanonicalDecimalV1(revoked.rosterVersion, false);
   let composedProviderVersion = null;
   try {
-    composedProviderVersion = composeRfc64RegisteredRosterVersionV1(
+    composedProviderVersion = composeRegisteredRosterVersionV1(
       provider.chainRosterVersion,
       provider.localRosterVersion,
     );
@@ -202,6 +203,21 @@ export function decodePrivateGateRevokedReceiverDenialEvidenceV1(
     throw new TypeError('RFC-64 private gate revoked-receiver authority evidence is inconsistent');
   }
   return decodePrivateGateRevokedReceiverStateV1(revoked.state, catalog, topology);
+}
+
+function composeRegisteredRosterVersionV1(chainRosterVersion, localRosterVersion) {
+  const chain = parseCanonicalDecimalV1(chainRosterVersion, true);
+  const local = parseCanonicalDecimalV1(localRosterVersion, true);
+  if (
+    chain === null
+    || local === null
+    || local >= LOCAL_ROSTER_VERSION_RADIX_V1
+  ) throw new TypeError('RFC-64 private gate roster generation is invalid');
+  const combined = chain * LOCAL_ROSTER_VERSION_RADIX_V1 + local;
+  if (combined > MAX_U64_V1) {
+    throw new TypeError('RFC-64 private gate roster generation exceeds uint64');
+  }
+  return combined.toString(10);
 }
 
 function assertDenialClassificationV1(value, label) {

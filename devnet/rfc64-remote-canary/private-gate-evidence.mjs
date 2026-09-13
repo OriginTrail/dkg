@@ -2,6 +2,8 @@
 // @ts-check
 
 import { stableJsonV1 } from '../rfc64-artifact-v1.mjs';
+import { RFC64_PRIVATE_RELEASE_CHECK_KEYS_V1 } from
+  '../../packages/agent/devnet/rfc64-private-catalog/gate-artifact-contract.mjs';
 import { failure } from './errors.mjs';
 import { opaqueRef } from './references.mjs';
 
@@ -11,34 +13,15 @@ import { opaqueRef } from './references.mjs';
 
 const MAX_PRIVATE_GATE_EVIDENCE_BYTES = 4 * 1_048_576;
 const PRIVATE_GATE_SCHEMA = 'dkg-rfc64-private-release-gate-v1';
-const PRIVATE_GATE_VALIDATOR_URL = new URL(
-  '../../packages/agent/devnet/rfc64-private-catalog/gate-artifact.mjs',
+const PRIVATE_GATE_PASS_DECODER_URL = new URL(
+  '../../packages/agent/devnet/rfc64-private-catalog/gate-artifact-pass-codec.mjs',
   import.meta.url,
 );
 // This is a deliberately closed compatibility boundary with #2560's
 // dkg-rfc64-private-release-gate-v1 PASS artifact. A producer-side check added,
 // removed, renamed, or left false must stop release certification until both
 // contracts are consciously advanced together.
-export const PRIVATE_GATE_PASS_CHECKS_V1 = Object.freeze([
-  'fourStableUniqueDaemonIdentities',
-  'productionCatalogServiceOnAllRoles',
-  'exactTwoAssetPrivateCatalog',
-  'provider2ReceivedExactHead',
-  'provider2HasSwmV2AndVmV1',
-  'receiverBaselineSeededThroughProvider2',
-  'receiverUsedProvider2AfterOwnerStopped',
-  'ownerExitedBeforeReceiverRuntimeStarted',
-  'receiverCaughtUpSwmV2AndVmV1',
-  'finalizedChainPathExecuted',
-  'finalizedChainRpcWithinBudget',
-  'outsiderDeniedBeforeApplication',
-  'outsiderReceivedNoPrivateGraphs',
-  'nonmemberQueryIsEmpty',
-  'revokedReceiverDeniedAfterFinalizedRosterAdvance',
-  'revocationDoesNotCorruptPreviouslyCommittedMemory',
-  'restartPreservedIdentityAndExactHead',
-  'restartPreservedSwmV2AndVmV1',
-]);
+export const PRIVATE_GATE_PASS_CHECKS_V1 = RFC64_PRIVATE_RELEASE_CHECK_KEYS_V1;
 
 /**
  * Consume one already-completed private gate as companion evidence for remote
@@ -60,20 +43,27 @@ export async function collectPrivateGateAuthorizationEvidenceV1(config, context)
   let parsed;
   try {
     parsed = JSON.parse(text);
-    const validatorModule = await import(PRIVATE_GATE_VALIDATOR_URL.href);
-    if (typeof validatorModule.assertRfc64PrivateGatePassProvenanceV1 !== 'function') {
-      throw new TypeError('private-gate-pass-validator-unavailable');
-    }
-    validatorModule.assertRfc64PrivateGatePassProvenanceV1(parsed);
   } catch {
     throw failure('private-gate-evidence-invalid', 'evidence');
   }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw failure('private-gate-evidence-invalid', 'evidence');
+  }
   const artifact = /** @type {Record<string, unknown>} */ (parsed);
+  assertAuthorizationChecksV1(artifact.checks);
+  try {
+    const decoderModule = await import(PRIVATE_GATE_PASS_DECODER_URL.href);
+    if (typeof decoderModule.decodeRfc64PrivateGatePassArtifactV1 !== 'function') {
+      throw new TypeError('private-gate-pass-decoder-unavailable');
+    }
+    decoderModule.decodeRfc64PrivateGatePassArtifactV1(artifact);
+  } catch {
+    throw failure('private-gate-evidence-invalid', 'evidence');
+  }
   if (artifact.sourceRevision !== context.expectedCommit) {
     throw failure('private-gate-evidence-source-mismatch', 'evidence');
   }
 
-  assertAuthorizationChecksV1(artifact.checks);
   const runStartedAt = Date.parse(context.runStartedAt);
   const finishedAt = Date.parse(/** @type {string} */ (artifact.finishedAt));
   if (!Number.isFinite(runStartedAt) || finishedAt > runStartedAt) {

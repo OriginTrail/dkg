@@ -11,6 +11,10 @@ import {
   RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
   buildRfc64PrivateRuntimeProvenanceV1,
 } from '../../packages/agent/devnet/rfc64-private-catalog/runtime-provenance.mjs';
+import { buildRfc64PrivateReleaseArtifactV1 } from
+  '../../packages/agent/devnet/rfc64-private-catalog/scenario-artifact.mjs';
+import { passingScenarioEvidenceV1 } from
+  '../../packages/agent/devnet/rfc64-private-catalog/scenario-test-fixtures.mjs';
 import {
   RemoteCanaryError,
   executeRemoteCanaryCertificationV1,
@@ -55,24 +59,35 @@ const RUNTIME_FILES = Object.freeze([
 })));
 
 function privateGateArtifact(overrides = {}) {
+  const {
+    startedAt = '2026-09-11T00:45:00.000Z',
+    finishedAt = '2026-09-11T00:50:00.000Z',
+    ...artifactOverrides
+  } = overrides;
   const sourceBuild = buildRuntimeManifestFromEntriesV1(COMMIT, RUNTIME_FILES);
   const loaded = buildExecutedRuntimeManifestV1(COMMIT, RUNTIME_FILES);
   const runtimeProvenance = buildRfc64PrivateRuntimeProvenanceV1(
     sourceBuild,
     RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({ id, loaded })),
   );
+  const scenarioEvidence = passingScenarioEvidenceV1();
+  scenarioEvidence.runtimeProvenance = runtimeProvenance;
+  const artifact = buildRfc64PrivateReleaseArtifactV1(
+    scenarioEvidence,
+    sourceBuild.manifestDigest,
+  );
+  const gateStart = Date.parse(startedAt);
   return {
-    schema: 'dkg-rfc64-private-release-gate-v1',
-    status: 'PASS',
-    startedAt: '2026-09-11T00:45:00.000Z',
-    finishedAt: '2026-09-11T00:50:00.000Z',
+    ...artifact,
+    failoverBarrier: {
+      ...artifact.failoverBarrier,
+      ownerExitedAt: new Date(gateStart + 1_000).toISOString(),
+      receiverSpawnedAt: new Date(gateStart + 2_000).toISOString(),
+    },
+    startedAt,
+    finishedAt,
     sourceRevision: COMMIT,
-    runtimeManifestDigest: sourceBuild.manifestDigest,
-    runtimeProvenance,
-    checks: Object.fromEntries(
-      EXPECTED_PRIVATE_GATE_PASS_CHECKS.map((check) => [check, true]),
-    ),
-    ...overrides,
+    ...artifactOverrides,
   };
 }
 
@@ -94,9 +109,8 @@ function collect(artifact, overrides = {}) {
 
 test('private-gate companion reuses the public provenance validator and emits only redacted binding', async () => {
   assert.deepEqual([...PRIVATE_GATE_PASS_CHECKS_V1].sort(), EXPECTED_PRIVATE_GATE_PASS_CHECKS);
-  const artifact = privateGateArtifact({
-    secretDiagnostic: 'must-not-enter-remote-certificate',
-  });
+  const artifact = privateGateArtifact();
+  const privatePeerId = artifact.topology.ownerProvider.peerId;
   const evidence = await collect(artifact);
   assert.deepEqual(evidence, {
     schema: 'dkg-rfc64-private-release-gate-v1',
@@ -109,7 +123,7 @@ test('private-gate companion reuses the public provenance validator and emits on
   });
   assert.match(evidence.artifactRef, /^evidence:[0-9a-f]{20}$/u);
   assert.match(evidence.runtimeProvenanceRef, /^provenance:[0-9a-f]{20}$/u);
-  assert.equal(JSON.stringify(evidence).includes(artifact.secretDiagnostic), false);
+  assert.equal(JSON.stringify(evidence).includes(privatePeerId), false);
 });
 
 test('private-gate companion closes only not-exposed authorization gaps in a full remote certificate', async () => {
@@ -218,7 +232,7 @@ test('private-gate companion requires the exact release commit and closed PASS c
 
   for (const check of PRIVATE_GATE_PASS_CHECKS_V1) {
     const artifact = privateGateArtifact();
-    artifact.checks[check] = false;
+    artifact.checks = { ...artifact.checks, [check]: false };
     await assert.rejects(
       collect(artifact),
       (error) => error instanceof RemoteCanaryError
@@ -232,6 +246,7 @@ test('private-gate companion requires the exact release commit and closed PASS c
     (checks) => { checks.futureUnreviewedCheck = true; },
   ]) {
     const artifact = privateGateArtifact();
+    artifact.checks = { ...artifact.checks };
     mutate(artifact.checks);
     await assert.rejects(
       collect(artifact),
