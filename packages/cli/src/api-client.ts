@@ -339,6 +339,8 @@ export interface RandomSamplingStatusResponse {
   identityId: string;
   /** Optional for compatibility with daemons that predate explicit status reasons. */
   disabledReason?: RandomSamplingDisabledReason | null;
+  /** Optional for older daemons; true while disabled prover resources are draining. */
+  retiring?: boolean;
   loop: null | {
     totalTicks: number;
     inflight: boolean;
