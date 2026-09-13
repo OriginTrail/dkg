@@ -36,6 +36,39 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(2);
   });
 
+  it('cancels the physical chain lookup when its final waiter leaves', async () => {
+    const { adapter, readContractWithOptions } = fixture([NAME_HASH]);
+    let blockFirstHighWater = true;
+    let physicalSignal: AbortSignal | undefined;
+    readContractWithOptions.mockImplementation(async (
+      _contract: unknown,
+      _label: string,
+      method: string,
+    ) => {
+      if (method === 'getLatestContextGraphId' && blockFirstHighWater) {
+        blockFirstHighWater = false;
+        physicalSignal = activeRpcRequestContext().signal;
+        return new Promise<never>((_resolve, reject) => {
+          const rejectOnAbort = () => reject(physicalSignal?.reason);
+          physicalSignal?.addEventListener('abort', rejectOnAbort, { once: true });
+          if (physicalSignal?.aborted) rejectOnAbort();
+        });
+      }
+      return method === 'getLatestContextGraphId' ? 1n : NAME_HASH;
+    });
+    const controller = new AbortController();
+    const abandoned = adapter.resolveContextGraphIdByNameHash(NAME_HASH, {
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(physicalSignal).toBeDefined());
+
+    controller.abort(new Error('caller deadline'));
+    await expect(abandoned).rejects.toThrow('caller deadline');
+    expect(physicalSignal?.aborted).toBe(true);
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(1n);
+  });
+
   it('does not make a foreground lookup join same-hash background admission', async () => {
     const { adapter, readContractWithOptions } = fixture([NAME_HASH]);
     const backgroundRelease = deferred<void>();
@@ -266,7 +299,10 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     const survivor = adapter.resolveContextGraphIdByNameHash(OTHER_HASH);
     release.resolve(undefined);
     await expect(survivor).resolves.toBe(2n);
-    expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(4);
+    // The abandoned lookup cannot publish its partial slot state. Its two
+    // already-started reads retire, then the survivor performs a clean scan
+    // and exact candidate verification.
+    expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(5);
   });
 
   it('discards a refresh invalidated while its slot reads are in flight', async () => {
@@ -290,7 +326,7 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     adapter.invalidatePublishPreflightCache();
     blockFirst = false;
     firstRead.resolve(NAME_HASH);
-    await expect(invalidated).rejects.toThrow(/binding changed during current-slot refresh/i);
+    await expect(invalidated).rejects.toThrow(/binding changed during current-slot resolution/i);
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(1n);
     expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(3);
@@ -341,6 +377,7 @@ describe('Context Graph name-hash cache and index invalidation', () => {
       await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
       await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
       expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(1);
+      expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(2);
 
       vi.setSystemTime(30_001);
       hashes.set(2n, NAME_HASH);

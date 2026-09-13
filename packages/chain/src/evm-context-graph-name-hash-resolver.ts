@@ -9,7 +9,10 @@
  */
 
 import { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
-import { activeRpcRequestContext } from './rpc-request-transport.js';
+import {
+  activeRpcRequestContext,
+  withRpcRequestContext,
+} from './rpc-request-transport.js';
 import {
   type EvmContextGraphNameHashSource,
 } from './evm-context-graph-name-hash-fence.js';
@@ -26,7 +29,7 @@ export class EvmContextGraphNameHashResolver {
   constructor(dependencies: EvmContextGraphNameHashResolverDependencies) {
     this.source = dependencies.source;
     this.resolutionCache = new ContextGraphNameHashResolver({
-      load: (nameHash) => this.loadFromChain(nameHash),
+      load: (nameHash, signal) => this.loadFromChain(nameHash, signal),
       generation: () => this.source.currentSlotRevision,
     });
   }
@@ -44,7 +47,19 @@ export class EvmContextGraphNameHashResolver {
   }
 
   /** One uncached, fully fenced lookup across the adapter-owned chain source. */
-  async loadFromChain(normalizedNameHash: string): Promise<bigint | null> {
-    return this.source.resolve(normalizedNameHash);
+  async loadFromChain(
+    normalizedNameHash: string,
+    signal: AbortSignal,
+  ): Promise<bigint | null> {
+    try {
+      return await withRpcRequestContext({ signal, inheritSignal: false }, () =>
+        this.source.resolve(normalizedNameHash));
+    } catch (error) {
+      // A provider-consensus fence may summarize individually cancelled reads
+      // as incomplete quorum. Preserve the physical owner's stronger lifecycle
+      // reason so invalidation and final-waiter abandonment remain observable.
+      signal.throwIfAborted();
+      throw error;
+    }
   }
 }

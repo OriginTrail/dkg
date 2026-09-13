@@ -8,10 +8,7 @@
 
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 
-import {
-  CG_REGISTRY_MAX_SCAN_PAGES,
-  RPC_READ_STALL_TIMEOUT_MS,
-} from './evm-adapter-constants.js';
+import { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 import { withRpcRequestContext, withRpcRequestTimeout } from './rpc-request-transport.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
 import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
@@ -27,6 +24,18 @@ export const CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS = 64n;
 
 /** Fixed pressure bound for the current-state getNameHash enumeration. */
 export const CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY = 4;
+
+/**
+ * Queue-aware deadline for the fail-closed reverse-name lookup.
+ *
+ * The generic 4s point-read deadline is intentionally shorter than the RPC
+ * governor's 30s background startup jitter. Using it here made a healthy,
+ * admitted-later catalog bootstrap abort locally before its request could be
+ * dispatched, then retry the same fenced lookup. The complete cold lookup is
+ * already bounded by its caller; this per-read ceiling lets one request remain
+ * queued through startup without weakening the resolver's chain fences.
+ */
+export const CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS = 60_000;
 
 interface ContextGraphNameHashSlotScope {
   readonly storageAddress: string;
@@ -841,7 +850,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     for (const candidate of headProviders) {
       try {
         const block = await withRpcRequestTimeout(
-          RPC_READ_STALL_TIMEOUT_MS,
+          CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
           'resolveContextGraphIdByNameHash historical head anchor',
           () => candidate.provider.getBlock(head),
         );
@@ -875,7 +884,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
   ): Promise<void> {
     for (const provider of usedProviders) {
       const block = await withRpcRequestTimeout(
-        RPC_READ_STALL_TIMEOUT_MS,
+        CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
         'resolveContextGraphIdByNameHash historical head revalidation',
         () => provider.getBlock(anchor.head),
       );
@@ -895,13 +904,13 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     blockTag?: number,
   ): Promise<bigint> {
     await withRpcRequestTimeout(
-      RPC_READ_STALL_TIMEOUT_MS,
+      CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
       `resolveContextGraphIdByNameHash ${lane} high-water chainId validation`,
       () => this.dependencies.ensureConfiguredStaticChainIdValidated(provider),
     );
     const connected = this.dependencies.rebindContract(contextGraphStorage, provider);
     const raw = await withRpcRequestTimeout(
-      RPC_READ_STALL_TIMEOUT_MS,
+      CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
       `resolveContextGraphIdByNameHash ${lane} high-water read`,
       () => blockTag === undefined
         ? connected.getLatestContextGraphId()
@@ -932,7 +941,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
       ).getNameHash(contextGraphId) as Promise<string>,
     );
     const raw: string = await withRpcRequestTimeout(
-      RPC_READ_STALL_TIMEOUT_MS,
+      CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
       `resolveContextGraphIdByNameHash current-slot getNameHash(${contextGraphId.toString()})`,
       () => {
         const physicalRead = signal

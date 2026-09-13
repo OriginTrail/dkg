@@ -3,9 +3,13 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY,
   CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS,
+  CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
 } from '../src/evm-context-graph-name-hash-fence.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
-import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
+import {
+  DEFAULT_RPC_REQUEST_GOVERNOR_POLICY,
+  RpcRequestGovernor,
+} from '../src/rpc-request-governor.js';
 import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import {
   callsForMethod,
@@ -23,6 +27,11 @@ import {
 describe('current-slot Context Graph name-hash reverse resolution', () => {
   it('keeps cold current-slot enumeration below the expensive large-registry range', () => {
     expect(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS).toBeLessThanOrEqual(64n);
+  });
+
+  it('lets one governed name-hash read survive the default startup jitter', () => {
+    expect(CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS)
+      .toBeGreaterThan(DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.startupJitterMs);
   });
 
   it('enumerates every current slot and returns the one exact match', async () => {
@@ -93,7 +102,7 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
     const load = vi.spyOn(resolver, 'loadFromChain');
 
     await expect(adapter.resolveContextGraphIdByNameHash(upperCaseHash)).resolves.toBe(1n);
-    expect(load).toHaveBeenCalledWith(NAME_HASH);
+    expect(load).toHaveBeenCalledWith(NAME_HASH, expect.any(AbortSignal));
   });
 
   it('normalizes an uppercase bytes32 input before the historical exact-topic filter', async () => {
