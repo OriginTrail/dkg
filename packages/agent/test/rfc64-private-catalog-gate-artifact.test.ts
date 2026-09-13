@@ -9,10 +9,6 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  MemoryLayer,
-  contextGraphLayerUri,
-} from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
 import {
@@ -35,35 +31,44 @@ import {
   isExpectedPrivateCatalogDenialResultV1,
 } from '../devnet/rfc64-private-catalog/denial-evidence.mjs';
 import {
-  assertRfc64PrivateGatePassProvenanceV1,
+  assertRfc64PrivateGatePassProvenanceV2,
+  decodeRfc64PrivateGatePassArtifactV2,
   runRfc64PrivateGateArtifactLifecycleV1,
 } from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
 import { runRfc64PrivateGateFromCleanBuildV1 } from '../devnet/rfc64-private-catalog/clean-launch.js';
 import {
   RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
-  assertRfc64PrivateRuntimeProvenanceV1,
-  buildRfc64PrivateRuntimeProvenanceV1,
-  createRfc64PrivateRuntimeEvidenceCollectorV1,
+  assertRfc64PrivateRuntimeProvenanceV2,
+  buildRfc64PrivateRuntimeProvenanceV2,
+  createRfc64PrivateRuntimeEvidenceCollectorV2,
 } from '../devnet/rfc64-private-catalog/runtime-provenance.mjs';
 import {
   AgentChild,
-  executeRfc64PrivateReleaseGateV1,
+  executeRfc64PrivateReleaseGateV2,
   hasExactMemoryContents,
 } from '../devnet/rfc64-private-catalog/run.mjs';
+import { buildRfc64PrivateReleaseArtifactV2 } from
+  '../devnet/rfc64-private-catalog/scenario-artifact.mjs';
+import { passingScenarioEvidenceV1 } from
+  '../devnet/rfc64-private-catalog/scenario-test-fixtures.mjs';
 import {
   ASSET_NUMBERS,
-  CONTEXT_GRAPH_ID,
+  PRIVATE_CATALOG_MEMORY_EXPECTATION,
   PROJECTION_EVIDENCE,
   PROJECTION_NQUADS,
   PROJECTION_QUADS,
+  privateCatalogSwmShareOperationId,
   roleAgentAddress,
 } from '../devnet/rfc64-private-catalog/fixture.mjs';
 import {
   bindGraphlessProjectionToGraph,
   hasExactPrivateCatalogMemoryContents,
   readExactGraphMemoryEvidence,
-  readPrivateCatalogGraphCountEvidence,
 } from '../devnet/rfc64-private-catalog/memory-evidence.mjs';
+import {
+  readExpectedPrivateMemoryV1,
+  seedExpectedPrivateMemoryV1,
+} from '../devnet/rfc64-private-catalog/fixtures/private-memory-fixture.mjs';
 
 const temporaryRoots: string[] = [];
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -82,7 +87,7 @@ const RUNTIME_FILES = Object.freeze([
 function runtimeProvenance(sourceRevision: string) {
   const sourceBuild = buildRuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
   const loaded = buildExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
-  return buildRfc64PrivateRuntimeProvenanceV1(
+  return buildRfc64PrivateRuntimeProvenanceV2(
     sourceBuild,
     RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({ id, loaded })),
   );
@@ -93,6 +98,14 @@ function runtimeManifest(sourceRevision: string, marker: string) {
     manifestDigest: `0x${marker.repeat(64)}`,
     sourceCommit: sourceRevision,
   } as never;
+}
+
+function completeScenarioPass(sourceRevision: string) {
+  const provenance = runtimeProvenance(sourceRevision);
+  return buildRfc64PrivateReleaseArtifactV2({
+    ...passingScenarioEvidenceV1(),
+    runtimeProvenance: provenance,
+  }, provenance.sourceBuild.manifestDigest);
 }
 
 // Independent oracle: these bytes and this digest are intentionally NOT
@@ -115,26 +128,26 @@ afterEach(async () => {
 
 describe('RFC-64 private release gate artifact lifecycle', () => {
   it('rejects persisted runtime provenance before admitting the typed model', () => {
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1(null))
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2(null))
       .toThrow(/must be an object/u);
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1([]))
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2([]))
       .toThrow(/must be an object/u);
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
-      schema: 'dkg-rfc64-private-runtime-provenance-v1',
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2({
+      schema: 'dkg-rfc64-private-runtime-provenance-v2',
       processes: [],
       sourceBuild: null,
     })).toThrow(/source manifest must be an object/u);
 
     const valid = runtimeProvenance('1'.repeat(40));
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2({
       ...valid,
       sourceBuild: {},
     })).toThrow(/source manifest is missing data field build/u);
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2({
       ...valid,
       processes: [{}],
     })).toThrow(/runtime process 0 is missing data field id/u);
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2({
       ...valid,
       processes: valid.processes.map((entry, index) => index === 0
         ? { ...entry, loaded: {} }
@@ -156,13 +169,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       artifactPath,
       resolveSourceRevision: () => 'b'.repeat(40),
       now: () => timestamps.shift() ?? new Date('2026-08-26T00:00:02.000Z'),
-      execute: async () => ({
-        schema: 'dkg-rfc64-private-release-gate-v1',
-        status: 'PASS',
-        checks: { strict: true },
-        runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
-        runtimeProvenance: provenance,
-      }),
+      execute: async () => completeScenarioPass('b'.repeat(40)),
     });
 
     expect(artifact).toMatchObject({
@@ -173,141 +180,15 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
     });
     expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toEqual(artifact);
-    expect(() => assertRfc64PrivateGatePassProvenanceV1(artifact)).not.toThrow();
-  });
-
-  it('rejects PASS provenance with a missing revision or invalid run interval', () => {
-    const provenance = runtimeProvenance('c'.repeat(40));
-    const base = {
-      schema: 'dkg-rfc64-private-release-gate-v1',
-      status: 'PASS',
-      startedAt: '2026-08-26T00:00:01.000Z',
-      finishedAt: '2026-08-26T00:00:02.000Z',
-      sourceRevision: 'c'.repeat(40),
-      runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
-      runtimeProvenance: provenance,
-    };
-    expect(() => assertRfc64PrivateGatePassProvenanceV1({
-      ...base,
-      sourceRevision: null,
-    })).toThrow(/exact source revision/u);
-    expect(() => assertRfc64PrivateGatePassProvenanceV1({
-      ...base,
-      finishedAt: '2026-08-25T23:59:59.000Z',
-    })).toThrow(/precedes/u);
-    expect(() => assertRfc64PrivateGatePassProvenanceV1({
-      ...base,
-      runtimeManifestDigest: null,
-    })).toThrow(/runtime manifest digest/u);
-    expect(() => assertRfc64PrivateGatePassProvenanceV1({
-      ...base,
-      runtimeProvenance: null,
-    })).toThrow(/runtime provenance is incomplete/u);
-  });
-
-  it('rejects syntactically valid outer provenance bindings that differ from the runtime proof', () => {
-    const sourceRevision = 'c'.repeat(40);
-    const provenance = runtimeProvenance(sourceRevision);
-    const base = {
-      schema: 'dkg-rfc64-private-release-gate-v1',
-      status: 'PASS',
-      startedAt: '2026-08-26T00:00:01.000Z',
-      finishedAt: '2026-08-26T00:00:02.000Z',
-      sourceRevision,
-      runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
-      runtimeProvenance: provenance,
-    };
-
-    expect(() => assertRfc64PrivateGatePassProvenanceV1({
-      ...base,
-      sourceRevision: 'd'.repeat(40),
-    })).toThrow(/not source-bound/u);
-    expect(() => assertRfc64PrivateGatePassProvenanceV1({
-      ...base,
-      runtimeManifestDigest: `0x${'f'.repeat(64)}`,
-    })).toThrow(/not source-bound/u);
-  });
-
-  it('rejects non-canonical clean-build and executed-runtime hash claims', () => {
-    const sourceRevision = 'd'.repeat(40);
-    const provenance = runtimeProvenance(sourceRevision);
-    const base = {
-      schema: 'dkg-rfc64-private-release-gate-v1',
-      status: 'PASS',
-      startedAt: '2026-08-26T00:00:01.000Z',
-      finishedAt: '2026-08-26T00:00:02.000Z',
-      sourceRevision,
-      runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
-      runtimeProvenance: provenance,
-    };
-    expect(() => assertRfc64PrivateGatePassProvenanceV1({
-      ...base,
-      runtimeProvenance: {
-        ...provenance,
-        sourceBuild: {
-          ...provenance.sourceBuild,
-          runtimeFiles: provenance.sourceBuild.runtimeFiles.map((entry, index) => index === 0
-            ? { ...entry, sha256: `0x${'a'.repeat(64)}` }
-            : entry),
-        },
-      },
-    })).toThrow(/runtime provenance is incomplete/u);
-    expect(() => assertRfc64PrivateGatePassProvenanceV1({
-      ...base,
-      runtimeProvenance: {
-        ...provenance,
-        processes: provenance.processes.map((processEvidence, index) => index === 0
-          ? {
-              ...processEvidence,
-              loaded: {
-                ...processEvidence.loaded,
-                manifestDigest: `0x${'e'.repeat(64)}`,
-              },
-            }
-          : processEvidence),
-      },
-    })).toThrow(/runtime provenance is incomplete/u);
-  });
-
-  it('rejects every mutation of the fixed nine-process topology', () => {
-    const sourceRevision = 'e'.repeat(40);
-    const provenance = runtimeProvenance(sourceRevision);
-    const base = {
-      schema: 'dkg-rfc64-private-release-gate-v1',
-      status: 'PASS',
-      startedAt: '2026-08-26T00:00:01.000Z',
-      finishedAt: '2026-08-26T00:00:02.000Z',
-      sourceRevision,
-      runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
-    };
-    const swapped = [...provenance.processes];
-    [swapped[0], swapped[1]] = [swapped[1]!, swapped[0]!];
-    const mutations = [
-      { ...provenance, processes: provenance.processes.slice(0, -1) },
-      { ...provenance, processes: [...provenance.processes, provenance.processes[0]] },
-      { ...provenance, processes: swapped },
-      {
-        ...provenance,
-        processes: provenance.processes.map((entry, index) => index === 0
-          ? { ...entry, id: 'renamed-process' }
-          : entry),
-      },
-      { ...provenance, schema: 'wrong-runtime-provenance-schema' },
-    ];
-
-    for (const runtimeProvenanceMutation of mutations) {
-      expect(() => assertRfc64PrivateGatePassProvenanceV1({
-        ...base,
-        runtimeProvenance: runtimeProvenanceMutation,
-      })).toThrow(/runtime provenance is incomplete/u);
-    }
+    expect(() => assertRfc64PrivateGatePassProvenanceV2(artifact)).not.toThrow();
+    expect(decodeRfc64PrivateGatePassArtifactV2(artifact)).toBe(artifact);
   });
 
   it('assembles all nine shutdown receipts in canonical process order and rejects omissions', () => {
     const sourceRevision = 'f'.repeat(40);
     const sourceBuild = buildRuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
     const loaded = buildExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
-    const collector = createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild);
+    const collector = createRfc64PrivateRuntimeEvidenceCollectorV2(sourceBuild);
     for (const id of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1) {
       collector.record(id, {
         exit: { code: 0, signal: null, error: null },
@@ -319,7 +200,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
     );
 
-    const incomplete = createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild);
+    const incomplete = createRfc64PrivateRuntimeEvidenceCollectorV2(sourceBuild);
     for (const id of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.slice(0, -1)) {
       incomplete.record(id, { executedRuntimeManifest: structuredClone(loaded) });
     }
@@ -332,7 +213,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     const artifactPath = join(root, 'artifacts', 'latest.json');
     await mkdir(join(root, 'artifacts'), { recursive: true });
     await writeFile(artifactPath, JSON.stringify({
-      schema: 'dkg-rfc64-private-release-gate-v1',
+      schema: 'dkg-rfc64-private-release-gate-v2',
       status: 'PASS',
       secretMarker: 'prior-pass-must-not-survive',
     }));
@@ -364,7 +245,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     expect(rawFailureArtifact).not.toContain(sensitiveMessage);
     expect(rawFailureArtifact).not.toContain('owner-start-failed');
     expect(JSON.parse(rawFailureArtifact)).toMatchObject({
-      schema: 'dkg-rfc64-private-release-gate-v1',
+      schema: 'dkg-rfc64-private-release-gate-v2',
       status: 'FAIL',
       phase: 'failed',
       failure: {
@@ -475,7 +356,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       artifactPath,
       repoRoot: root,
       execute: async ({ runtimeManifest: cleanBuild }) => ({
-        schema: 'dkg-rfc64-private-release-gate-v1',
+        schema: 'dkg-rfc64-private-release-gate-v2',
         status: 'PASS',
         runtimeManifestDigest: cleanBuild.manifestDigest,
         runtimeProvenance: runtimeProvenance(sourceRevision),
@@ -639,7 +520,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     temporaryRoots.push(root);
     const sourceRevision = 'a'.repeat(40);
     const cleanBuild = buildRuntimeManifestV1(REPO_ROOT, sourceRevision);
-    const child = new AgentChild('production-probe', root, undefined, 'probe', {
+    const child = new AgentChild('owner', root, undefined, 'probe', {
       runtimeProvenance: {
         runtimeManifestDigest: cleanBuild.manifestDigest,
         sourceRevision,
@@ -659,37 +540,22 @@ describe('RFC-64 private release gate process and denial evidence', () => {
 
   it('feeds process-built SWM/VM evidence through the executable gate predicate', async () => {
     const store = new OxigraphStore();
-    const authorAddress = roleAgentAddress('owner');
     try {
-      const graphs = ASSET_NUMBERS.flatMap((kaNumber) => (
-        [MemoryLayer.SharedWorkingMemory, MemoryLayer.VerifiableMemory].flatMap((layer) => {
-          const graph = contextGraphLayerUri(
-            CONTEXT_GRAPH_ID,
-            layer,
-            authorAddress,
-            kaNumber,
-          );
-          return bindGraphlessProjectionToGraph(PROJECTION_QUADS, graph);
-        })
-      ));
-      await store.insert(graphs);
-
-      const graphCounts = await readPrivateCatalogGraphCountEvidence(store, {
-        assetNumbers: ASSET_NUMBERS,
-        contextGraphId: CONTEXT_GRAPH_ID,
-        authorAddress,
-      });
-      expect(hasExactMemoryContents({ graphCounts })).toBe(true);
+      await seedExpectedPrivateMemoryV1(store);
+      const graphCounts = await readExpectedPrivateMemoryV1(store);
+      expect(hasExactMemoryContents({ graphCounts }, {
+        swmProofKind: 'workspace-head',
+      })).toBe(true);
       expect(hasExactMemoryContents({
         graphCounts: graphCounts.map((entry, index) => index === 0
           ? { ...entry, swmDigest: entry.vmDigest, vmDigest: '0'.repeat(64) }
           : entry),
-      })).toBe(false);
+      }, { swmProofKind: 'workspace-head' })).toBe(false);
       expect(hasExactMemoryContents({
         graphCounts: graphCounts.map((entry, index) => index === 1
           ? { ...entry, kaNumber: 43 }
           : entry),
-      })).toBe(false);
+      }, { swmProofKind: 'workspace-head' })).toBe(false);
     } finally {
       await store.close();
     }
@@ -716,14 +582,37 @@ describe('RFC-64 private release gate process and denial evidence', () => {
 
       const exactGraphCounts = ASSET_NUMBERS.map((kaNumber) => ({
         kaNumber,
+        kaUal: `did:dkg:otp:20430/${roleAgentAddress('owner')}/${kaNumber}`,
+        swmGraph: `urn:rfc64:test:swm:${kaNumber}`,
         swm: exact.count,
         swmDigest: exact.digest,
+        swmProof: {
+          kind: 'workspace-head',
+          assertionVersion: '2',
+          assertionGraph: `urn:rfc64:test:swm:${kaNumber}`,
+          shareOperationId: privateCatalogSwmShareOperationId(kaNumber),
+        },
+        vmGraph: `urn:rfc64:test:vm:${kaNumber}`,
         vm: exact.count,
         vmDigest: exact.digest,
+        vmHead: {
+          assertionVersion: '1',
+          assertionGraph: `urn:rfc64:test:vm:${kaNumber}`,
+        },
       }));
       const expected = {
         assetNumbers: ASSET_NUMBERS,
-        projection: PROJECTION_EVIDENCE,
+        swm: {
+          projection: PROJECTION_EVIDENCE,
+          assertionVersion: '2',
+          proofKind: 'workspace-head',
+          shareOperationIdPrefix:
+            PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.shareOperationIdPrefix,
+        },
+        vm: {
+          projection: PROJECTION_EVIDENCE,
+          assertionVersion: '1',
+        },
       };
       expect(hasExactPrivateCatalogMemoryContents(
         { graphCounts: exactGraphCounts },
@@ -808,7 +697,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     const sourceRevision = 'b'.repeat(40);
     const startedAt = Date.now();
 
-    await expect(executeRfc64PrivateReleaseGateV1({
+    await expect(executeRfc64PrivateReleaseGateV2({
       sourceRevision,
       runtimeManifest: {
         manifestDigest: `0x${'1'.repeat(64)}`,

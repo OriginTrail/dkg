@@ -26,6 +26,9 @@ import {
   encodeOpaqueKaBundleV1,
   parseCanonicalGraphScopedAuthorSealV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
+  readVerifiedCatalogSealBindingV1,
+  readVerifiedTransferredCatalogBundleMetadataV1,
+  verifyTransferredCatalogBundleV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
   type AuthorCatalogHeadV1,
@@ -67,6 +70,17 @@ import {
   computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
 } from '../src/rfc64/public-catalog-inventory-completeness-v1.js';
+import {
+  assertVerifiedAppliedCatalogRowIdentityV1,
+  readVerifiedAppliedCatalogClosureV1,
+} from
+  '../src/rfc64/verified-applied-catalog-closure-v1.js';
+import {
+  bindRfc64PrivateReleaseProofReaderV1,
+  registerRfc64PrivateReleaseProofReaderV1,
+  unregisterRfc64PrivateReleaseProofReaderV1,
+} from
+  '../src/rfc64/verified-applied-catalog-closure-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_EXACT_SET_BUNDLE_BYTES_MAX_V1,
   Rfc64PublicCatalogNativeTransportV1,
@@ -142,6 +156,7 @@ const SECOND_KA_NUMBER = 8n;
 const SECOND_KA_ID = ((BigInt(AUTHOR) << 96n) | SECOND_KA_NUMBER).toString();
 const SECOND_UAL = `did:dkg:${NETWORK_ID}/${AUTHOR}/${SECOND_KA_NUMBER}`;
 const THIRD_KA_NUMBER = 9n;
+const LARGE_KA_NUMBER = (2n ** 53n) + 123n;
 const PROJECTION =
   '<https://example.org/alice> <https://schema.org/age> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
   + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n';
@@ -387,6 +402,291 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     })).resolves.toMatchObject({
       envelope: { objectDigest: fixture.catalogIssuerDelegation.objectDigest },
     });
+
+    const appliedHead = fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    if (appliedHead === null) throw new Error('receiver did not retain its applied head');
+    const closureInput = {
+      appliedHead,
+      controlObjects: fixture.receiverPersistence.controlObjects,
+      deployment: DEPLOYMENT,
+      kaBundles: fixture.receiverPersistence.kaBundles,
+      trustedCatalogScope: fixture.scope,
+    };
+    const closure = await readVerifiedAppliedCatalogClosureV1(closureInput);
+    expect(closure).toMatchObject({
+      appliedHead,
+      head: { objectDigest: fixture.successor.head.objectDigest },
+      catalogScope: fixture.scope,
+      inventoryEvidence: {
+        catalogScopeDigest: fixture.scopeDigest,
+        inventoryRowCount: '1',
+        inventoryDigest: appliedHead.appliedInventoryDigest,
+      },
+    });
+    expect(closure.rows).toHaveLength(1);
+    expect(closure.rows[0]).toMatchObject({
+      kaNumber: KA_NUMBER,
+      row: fixture.rowBundle.row,
+      bundleBinding: {
+        catalogScopeDigest: fixture.scopeDigest,
+        kaId: KA_ID,
+      },
+      inventoryEvidence: {
+        kaId: KA_ID,
+        kaUal: UAL,
+        bundleDigest: fixture.rowBundle.row.transfer.blobDigest,
+        activatedTripleCount: 2,
+      },
+    });
+    expect(Object.isFrozen(closure)).toBe(true);
+    expect(Object.isFrozen(closure.rows)).toBe(true);
+    expect(Object.isFrozen(closure.rows[0]?.bundleBinding)).toBe(true);
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
+      appliedHead: { ...appliedHead, appliedInventoryDigest: MISSING_DELEGATION_DIGEST },
+    })).rejects.toThrow(/durable applied inventory digest/u);
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
+      kaBundles: { readKaBundleByDigest: async () => null },
+    })).rejects.toThrow(/no durable KA bundle/u);
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
+      kaBundles: {
+        readKaBundleByDigest: async () => fixture.secondRowBundle.bundleBytes,
+      },
+    })).rejects.toThrow(/transferred-bundle-/u);
+    const sharedBundle = new Uint8Array(
+      new SharedArrayBuffer(fixture.rowBundle.bundleBytes.byteLength),
+    );
+    sharedBundle.set(fixture.rowBundle.bundleBytes);
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
+      kaBundles: { readKaBundleByDigest: async () => sharedBundle },
+    })).rejects.toMatchObject({
+      code: 'transferred-bundle-input',
+    });
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
+      trustedCatalogScope: { ...fixture.scope, authorAddress: GOVERNANCE_CONTRACT },
+    })).rejects.toThrow(/differs from its signed SWM proof closure/u);
+  }, 30_000);
+
+  it('preserves uint96 asset numbers and ordered closure rows across concurrent reads', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronizeAny(fixture.largeNumberAnnouncement);
+    const largeApplied = fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    if (largeApplied === null) throw new Error('large-number successor was not applied');
+    const largeClosure = await readVerifiedAppliedCatalogClosureV1({
+      appliedHead: largeApplied,
+      controlObjects: fixture.receiverPersistence.controlObjects,
+      deployment: DEPLOYMENT,
+      kaBundles: fixture.receiverPersistence.kaBundles,
+      trustedCatalogScope: fixture.scope,
+    });
+    expect(largeClosure.rows).toHaveLength(1);
+    expect(largeClosure.rows[0]).toMatchObject({
+      kaNumber: LARGE_KA_NUMBER,
+      row: { kaId: fixture.largeRowBundle.row.kaId },
+      bundleBinding: { kaId: fixture.largeRowBundle.row.kaId },
+      inventoryEvidence: { kaUal: fixture.largeRowBundle.kaUal },
+    });
+
+    const orderedFixture = await setupLiveReceiver();
+    await orderedFixture.bootstrap();
+    await orderedFixture.synchronize();
+    await orderedFixture.synchronizeAny(orderedFixture.multiAssetAnnouncement);
+    const multiApplied = orderedFixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      orderedFixture.scopeDigest,
+      AUTHOR,
+    );
+    if (multiApplied === null) throw new Error('multi-asset successor was not applied');
+    const completionOrder: Digest32V1[] = [];
+    const firstDigest = orderedFixture.rowBundle.row.transfer.blobDigest;
+    const delayedBundles = {
+      readKaBundleByDigest: async (digest: Digest32V1) => {
+        await new Promise((resolve) => setTimeout(
+          resolve,
+          digest === firstDigest ? 30 : 0,
+        ));
+        completionOrder.push(digest);
+        return orderedFixture.receiverPersistence.kaBundles.readKaBundleByDigest(digest);
+      },
+    };
+    const orderedClosure = await readVerifiedAppliedCatalogClosureV1({
+      appliedHead: multiApplied,
+      controlObjects: orderedFixture.receiverPersistence.controlObjects,
+      deployment: DEPLOYMENT,
+      kaBundles: delayedBundles,
+      trustedCatalogScope: orderedFixture.scope,
+    });
+    expect(completionOrder).toEqual([
+      orderedFixture.secondRowBundle.row.transfer.blobDigest,
+      firstDigest,
+    ]);
+    expect(orderedClosure.rows.map(({ kaNumber }) => kaNumber)).toEqual([
+      KA_NUMBER,
+      SECOND_KA_NUMBER,
+    ]);
+  }, 30_000);
+
+  it('rejects a self-consistent foreign-author row at the trusted-author closure boundary', async () => {
+    const foreignWallet = new ethers.Wallet(`0x${'79'.repeat(32)}`);
+    const foreignAuthor = foreignWallet.address.toLowerCase() as EvmAddressV1;
+    const foreignScope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: foreignAuthor,
+      era: '0',
+      bucketCount: '1',
+    }) as AuthorCatalogScopeV1;
+    const foreignSigner = {
+      issuer: foreignAuthor,
+      signDigest: async (digest: Uint8Array) => foreignWallet.signMessage(digest),
+    };
+    const foreignRowBundle = await buildRowBundle(foreignWallet, {
+      authorAddress: foreignAuthor,
+    });
+    const foreignGenesis = await produceEmptyAuthorCatalogGenesisV1({
+      scope: foreignScope,
+      catalogIssuerDelegationDigest: MISSING_DELEGATION_DIGEST,
+      issuedAt: '1773900000000' as never,
+      signer: foreignSigner,
+    });
+    const foreignSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+      previousHead: foreignGenesis.head,
+      previousDirectoryPath: foreignGenesis.directoryPath,
+      previousBucket: null,
+      selectedBucketId: '0' as never,
+      nextRows: [foreignRowBundle.row],
+      issuedAt: '1773900001011' as never,
+      signer: foreignSigner,
+    });
+    const transferred = verifyTransferredCatalogBundleV1(
+      foreignSuccessor.head,
+      foreignRowBundle.row,
+      foreignRowBundle.bundleBytes,
+      DEPLOYMENT,
+    );
+    const transferredMetadata = readVerifiedTransferredCatalogBundleMetadataV1(
+      transferred,
+      foreignSuccessor.head,
+      foreignRowBundle.row,
+      DEPLOYMENT,
+    );
+    const bundleBinding = readVerifiedCatalogSealBindingV1(
+      transferredMetadata.catalogSealBinding,
+    );
+    const trustedCatalogScope = Object.freeze({
+      ...foreignScope,
+      authorAddress: AUTHOR,
+    }) as AuthorCatalogScopeV1;
+
+    expect(foreignRowBundle.row.kaId).toBe(
+      ((BigInt(foreignAuthor) << 96n) | KA_NUMBER).toString(),
+    );
+    expect(foreignRowBundle.kaUal).toBe(
+      `did:dkg:${NETWORK_ID}/${foreignAuthor}/${KA_NUMBER}`,
+    );
+    expect(bundleBinding.seal.authorAddress).toBe(foreignAuthor);
+    expect(() => assertVerifiedAppliedCatalogRowIdentityV1(
+      foreignRowBundle.row,
+      bundleBinding,
+      trustedCatalogScope,
+    )).toThrow(
+      /signed catalog row identity differs from its verified bundle binding/u,
+    );
+  });
+
+  it('binds the agent closure reader to its authoritative applied head', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    const appliedHead = fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    if (appliedHead === null) throw new Error('receiver did not retain its applied head');
+
+    const readAppliedCatalogHeadV1 = vi.fn(() => appliedHead);
+    const assertTrustedNetwork = vi.fn();
+    const resolveDeployment = vi.fn(async () => DEPLOYMENT);
+    const agentLike = {
+      rfc64PersistenceV1: {
+        controlObjects: fixture.receiverPersistence.controlObjects,
+        inventory: { readAppliedCatalogHeadV1 },
+        kaBundles: fixture.receiverPersistence.kaBundles,
+      },
+      assertRfc64CatalogNetworkMatchesTrustedSourceV1: assertTrustedNetwork,
+      resolveRfc64CatalogDeploymentProfileV1: resolveDeployment,
+    };
+    registerRfc64PrivateReleaseProofReaderV1({
+      owner: agentLike,
+      persistence: agentLike.rfc64PersistenceV1,
+      assertTrustedNetwork,
+      resolveDeployment,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    });
+    expect(() => registerRfc64PrivateReleaseProofReaderV1({
+      owner: agentLike,
+      persistence: agentLike.rfc64PersistenceV1,
+      assertTrustedNetwork,
+      resolveDeployment,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).toThrow(/already registered/u);
+    const readClosure = () => bindRfc64PrivateReleaseProofReaderV1(
+      agentLike as never,
+    )({
+        trustedCatalogScope: fixture.scope,
+      });
+
+    await expect(readClosure()).resolves.toMatchObject({
+      appliedHead,
+      head: { objectDigest: fixture.successor.head.objectDigest },
+    });
+    expect(readAppliedCatalogHeadV1).toHaveBeenCalledTimes(2);
+    expect(readAppliedCatalogHeadV1).toHaveBeenNthCalledWith(
+      1,
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    expect(readAppliedCatalogHeadV1).toHaveBeenNthCalledWith(
+      2,
+      fixture.scopeDigest,
+      AUTHOR,
+    );
+    expect(assertTrustedNetwork).toHaveBeenCalledWith(NETWORK_ID);
+    expect(resolveDeployment).toHaveBeenCalledWith(NETWORK_ID, expect.any(AbortSignal));
+
+    readAppliedCatalogHeadV1.mockReset();
+    readAppliedCatalogHeadV1.mockReturnValue(null);
+    await expect(readClosure()).rejects.toThrow(/no durable applied head/u);
+    expect(resolveDeployment).toHaveBeenCalledOnce();
+
+    readAppliedCatalogHeadV1.mockReset();
+    readAppliedCatalogHeadV1
+      .mockReturnValueOnce(appliedHead)
+      .mockReturnValueOnce({
+        ...appliedHead,
+        currentCatalogHeadDigest: fixture.genesis.head.objectDigest,
+      });
+    await expect(readClosure()).rejects.toThrow(/changed during verified closure read/u);
+
+    const unrelatedOwner = {};
+    expect(() => bindRfc64PrivateReleaseProofReaderV1(unrelatedOwner)).toThrow(/unavailable/u);
+    unregisterRfc64PrivateReleaseProofReaderV1(agentLike);
+    expect(() => bindRfc64PrivateReleaseProofReaderV1(agentLike)).toThrow(/unavailable/u);
+    expect(() => bindRfc64PrivateReleaseProofReaderV1(unrelatedOwner)).toThrow(/unavailable/u);
   }, 30_000);
 
   it('accepts an exact projection when the store post-read returns a different row order', async () => {
@@ -2457,6 +2757,10 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     kaNumber: THIRD_KA_NUMBER,
     assertionCoordinate: 'gate-2-replacement-object',
   });
+  const largeRowBundle = await buildRowBundle(signingWallet, {
+    kaNumber: LARGE_KA_NUMBER,
+    assertionCoordinate: 'gate-large-number-object',
+  });
   const genesis = await produceEmptyAuthorCatalogGenesisV1({
     scope,
     catalogIssuerDelegationDigest: catalogIssuerDelegation.objectDigest,
@@ -2486,6 +2790,15 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     selectedBucketId: '0' as never,
     nextRows: [rowBundle.row, secondRowBundle.row],
     issuedAt: '1773900001002' as never,
+    signer,
+  });
+  const largeNumberSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+    previousHead: genesis.head,
+    previousDirectoryPath: genesis.directoryPath,
+    previousBucket: null,
+    selectedBucketId: '0' as never,
+    nextRows: [largeRowBundle.row],
+    issuedAt: '1773900001010' as never,
     signer,
   });
   const emptySuccessor = await produceSparseAuthorCatalogSuccessorV1({
@@ -2604,6 +2917,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     ...emptySuccessor.stagedObjects,
     ...malformedEmptySuccessors.flatMap(({ stagedObjects }) => stagedObjects),
     ...multiAssetSuccessor.stagedObjects,
+    ...largeNumberSuccessor.stagedObjects,
     ...removalSuccessor.stagedObjects,
     ...threeAssetSuccessor.stagedObjects,
     ...replacementSuccessor.stagedObjects,
@@ -2625,6 +2939,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     [rowBundle.row.transfer.blobDigest, rowBundle.bundleBytes],
     [secondRowBundle.row.transfer.blobDigest, secondRowBundle.bundleBytes],
     [thirdRowBundle.row.transfer.blobDigest, thirdRowBundle.bundleBytes],
+    [largeRowBundle.row.transfer.blobDigest, largeRowBundle.bundleBytes],
   ]);
   const authorBundleRead = vi.fn(async (digest: Digest32V1) =>
     bundleBytesByDigest.get(digest) ?? null);
@@ -2774,6 +3089,7 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
   const announcement = announcementFor(successor.head);
   const genesisAnnouncement = announcementFor(genesis.head);
   const multiAssetAnnouncement = announcementFor(multiAssetSuccessor.head);
+  const largeNumberAnnouncement = announcementFor(largeNumberSuccessor.head);
   const emptySuccessorAnnouncement = announcementFor(emptySuccessor.head);
   const malformedEmptySuccessorAnnouncements = malformedEmptySuccessors.map(({ head }) => (
     announcementFor(head)
@@ -2907,6 +3223,8 @@ async function setupLiveReceiver(signingWallet = AUTHOR_WALLET) {
     governedSuccessor,
     governedSuccessorAnnouncement,
     invalidGenesisAnnouncement,
+    largeNumberAnnouncement,
+    largeRowBundle,
     receiver,
     receiverBundleFetch,
     missingDelegationAnnouncement,
@@ -3187,18 +3505,20 @@ function alternateRecoveryEncoding(signature: string): string {
 async function buildRowBundle(
   signingWallet: ethers.Wallet = AUTHOR_WALLET,
   options: {
+    readonly authorAddress?: EvmAddressV1;
     readonly kaNumber?: bigint;
     readonly assertionCoordinate?: string;
   } = {},
 ): Promise<{ row: AuthorCatalogRowV1; bundleBytes: Uint8Array; kaUal: string }> {
+  const authorAddress = options.authorAddress ?? AUTHOR;
   const kaNumber = options.kaNumber ?? KA_NUMBER;
-  const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
-  const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
+  const kaId = ((BigInt(authorAddress) << 96n) | kaNumber).toString();
+  const kaUal = `did:dkg:${NETWORK_ID}/${authorAddress}/${kaNumber}`;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(DEPLOYMENT.assertedAtChainId),
     kav10Address: DEPLOYMENT.assertedAtKav10Address,
     merkleRoot: ethers.getBytes(ASSERTION_ROOT),
-    authorAddress: AUTHOR,
+    authorAddress,
     reservedKaId: BigInt(kaId),
   });
   const authorSignature = ethers.Signature.from(await signingWallet.signTypedData(
@@ -3208,7 +3528,7 @@ async function buildRowBundle(
   ));
   const seal = {
     assertionMerkleRoot: ASSERTION_ROOT,
-    authorAddress: AUTHOR,
+    authorAddress,
     authorAttestationR: authorSignature.r,
     authorAttestationVS: authorSignature.yParityAndS,
     authorSchemeVersion: '1',

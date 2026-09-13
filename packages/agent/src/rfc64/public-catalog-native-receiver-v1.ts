@@ -101,6 +101,7 @@ import type {
 import type { Rfc64KaBundleOperationsV1 } from './ka-bundle-store-v1.js';
 import { assertRecoverableAuthorAttestationCapabilityV1 } from './recoverable-author-attestation-v1.js';
 import {
+  composeRfc64PublicCatalogInventoryEvidenceRowV1,
   computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
   type Rfc64PublicCatalogInventoryEvidenceRowV1,
@@ -1054,15 +1055,15 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           cause,
         );
       }
-      const expectedEvidence = Object.freeze({
+      const expectedEvidence = composeRfc64PublicCatalogInventoryEvidenceRowV1({
         kaId: row.kaId,
         catalogRowDigest: projectionMetadata.catalogRowDigest,
         contentDigest: projectionMetadata.projectionDigest,
         sealDigest: sealBinding.sealDigest,
         bundleDigest: row.transfer.blobDigest,
         kaUal: projectionMetadata.kaUal,
-        activatedTripleCount: Number(projectionMetadata.publicTripleCount),
-      }) satisfies Rfc64PublicCatalogInventoryEvidenceRowV1;
+        activatedTripleCount: projectionMetadata.publicTripleCount,
+      });
       preparedRows.push(Object.freeze({
         row,
         authorship,
@@ -1202,9 +1203,8 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           this.options.store,
           head,
           prepared.row,
-          prepared.projectionMetadata.kaUal,
+          prepared.expectedEvidence,
           prepared.projectionBytes,
-          Number(prepared.projectionMetadata.publicTripleCount),
           prepared.sealBinding,
         );
         activatedRows.push(Object.freeze({
@@ -2087,15 +2087,15 @@ async function activateExactPublicProjection(
   store: TripleStore,
   head: SignedAuthorCatalogHeadEnvelopeV1,
   row: AuthorCatalogRowV1,
-  kaUal: string,
+  expectedEvidence: Readonly<Rfc64PublicCatalogInventoryEvidenceRowV1>,
   projectionBytes: Uint8Array,
-  expectedTripleCount: number,
   sealBinding: VerifiedCatalogSealBindingSnapshotV1,
 ): Promise<{
   readonly swmGraph: string;
   readonly publicQuadsDigest: string;
   readonly evidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
 }> {
+  const { kaUal, activatedTripleCount: expectedTripleCount } = expectedEvidence;
   let projectionText: string;
   let quads;
   try {
@@ -2192,15 +2192,11 @@ async function activateExactPublicProjection(
   return {
     swmGraph,
     publicQuadsDigest: workspacePublicQuadsDigest(graphQuads),
-    evidence: Object.freeze({
-      kaId: row.kaId,
-      catalogRowDigest: sealBinding.catalogRowDigest,
-      contentDigest: row.projectionDigest,
-      sealDigest: sealBinding.sealDigest,
-      bundleDigest: row.transfer.blobDigest,
-      kaUal,
-      activatedTripleCount: expectedTripleCount,
-    }),
+    // The pre-mutation verifier minted this exact immutable row from the same
+    // signed row, projection metadata, and seal. Post-read proves those bytes
+    // survived activation; retain the one canonical evidence identity rather
+    // than reconstructing a parallel mapping that could drift.
+    evidence: expectedEvidence,
   };
 }
 

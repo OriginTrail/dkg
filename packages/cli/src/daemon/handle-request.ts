@@ -311,11 +311,9 @@ import {
 import type {
   MemoryGraphChangedEvent,
   NotificationSseEvent,
-  RequestContext,
-  RequestContextInputFields,
+  RequestContextFactoryInput,
 } from './routes/context.js';
-import { createRequestActor } from './routes/context.js';
-import type { AllowedHttpAuthentication } from '../auth.js';
+import { createRequestContext } from './routes/context.js';
 import { handleStatusRoutes } from './routes/status.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
@@ -340,45 +338,11 @@ import { handlePluginRoutes } from './routes/plugins.js';
 import type { RoutePlugin } from './plugin-api.js';
 
 
-export type HandleRequestInput = Omit<
-  RequestContextInputFields,
-  | 'url'
-  | 'path'
-  | 'actor'
-  | 'authentication'
-  | 'requestAgentAddress'
-> & { readonly authentication: AllowedHttpAuthentication };
+export type HandleRequestInput = RequestContextFactoryInput;
 
 export async function handleRequest(input: HandleRequestInput): Promise<void> {
-  const { req, res, agent, authentication, ...contextInput } = input;
-  const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
-  const path = url.pathname;
-
-  // Build one actor from the accepted authentication decision. Compatibility properties are
-  // read-only getters over this value, never independently stored request state.
-  const actor = createRequestActor(
-    authentication,
-    (acceptedToken) => agent.resolveAgentAddress(acceptedToken),
-  );
-  const ctxBase = {
-    ...contextInput,
-    req,
-    res,
-    agent,
-    url,
-    path,
-    actor,
-  };
-  const ctx = Object.defineProperties(ctxBase, {
-    authentication: {
-      enumerable: true,
-      get: () => actor.authentication,
-    },
-    requestAgentAddress: {
-      enumerable: true,
-      get: () => actor.effectiveAgentAddress,
-    },
-  }) as RequestContext;
+  const { res } = input;
+  const ctx = createRequestContext(input);
 
   await handleStatusRoutes(ctx);
   if (res.writableEnded) return;

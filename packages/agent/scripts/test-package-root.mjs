@@ -58,6 +58,8 @@ if (
   || typeof root.Rfc64CatalogReconciliationTerminalErrorV1 !== 'function'
   || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
   || typeof root.Rfc64CatalogResponsibilityRegistryV1 !== 'function'
+  || typeof root.createRfc64DaemonCertificationStatusV1 !== 'function'
+  || typeof root.decodeRfc64DaemonCertificationStatusV1 !== 'function'
   || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
   || typeof legacySharedMemorySync.selectSwmSnapshotCoverage !== 'function'
 ) {
@@ -158,6 +160,12 @@ for (const method of requiredCatalogMethods) {
     throw new Error(`published DKGAgent entry points did not expose ${method}`);
   }
 }
+if ('readVerifiedAppliedCatalogClosureV1' in root) {
+  throw new Error('storage-level verified closure reader leaked from the package root');
+}
+if ('readRfc64VerifiedAppliedCatalogClosureV1' in root.DKGAgent.prototype) {
+  throw new Error('private release proof plumbing leaked onto the public DKGAgent API');
+}
 if (
   !Array.isArray(root.RFC64_POLICY_CELLS_V1)
   || !Object.isFrozen(root.RFC64_POLICY_CELLS_V1)
@@ -254,6 +262,7 @@ const publicRfc64Modules = [
 ];
 const blockedRfc64Modules = [
   'catalog-synchronization-error-v1.js',
+  'daemon-certification-status-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
   'catalog-authority-refresh-binding-v1.js',
@@ -267,6 +276,7 @@ const blockedRfc64Modules = [
   'catalog-rollout-authority-v1.js',
   'catalog-rollout-authority-reconciliation-v1.js',
   'applied-catalog-authority-transition-v1.js',
+  'verified-applied-catalog-closure-v1.js',
   'catalog-semantic-authority-transition-v1.js',
   'public-catalog-native-errors-v1.js',
   'catalog-applied-head-coordinator-v1.js',
@@ -333,7 +343,9 @@ const blockedRfc64Modules = [
   'catalog-replay-recovery-runtime-v1.js',
   'catalog-replay-snapshot-runtime-v1.js',
   'catalog-runtime-v1.js',
+  'background-work-dispatcher-v1.js',
   'supervisor-status-v1.js',
+  'catalog-shadow-observability-v1.js',
   'serialized-scope-runtime-v1.js',
 ];
 const emittedRfc64Modules = await listEmittedRfc64Modules();

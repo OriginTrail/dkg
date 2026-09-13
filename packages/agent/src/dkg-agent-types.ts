@@ -65,6 +65,7 @@ import type {
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
+  RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
@@ -78,6 +79,7 @@ import type { ContextGraphDormancyProjection } from './context-graph-subscriptio
 import type {
   Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
+  ResolvedRfc64CatalogActivationsV1,
   ResolvedRfc64CatalogAuthoringPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
@@ -1331,6 +1333,13 @@ export interface DKGAgentConfig {
    */
   rfc64PublicCatalogActivation?: Rfc64PublicCatalogActivationInputV1;
   /**
+   * Opaque process-local activation-resolution handle for daemon embedders.
+   * It must be passed intact from `resolveRfc64CatalogActivationsV1`; spreading
+   * or deserializing it is not a supported runtime boundary. Mutually exclusive
+   * with raw activation and loose compatibility controls.
+   */
+  rfc64CatalogActivations?: ResolvedRfc64CatalogActivationsV1;
+  /**
    * Legacy all-accepted-public-CG producer configuration. Omission preserves
    * existing publication behavior. New daemons should use the unified
    * selected-public activation above.
@@ -1608,6 +1617,8 @@ export interface DKGAgentConfig {
   chainConfig?: {
     rpcUrl: string;
     rpcUrls?: string[];
+    /** Shared transport budget injected by the daemon composition root. */
+    rpcRequestAdmission?: RpcRequestAdmission;
     /** Public RPC URLs safe for wallet_addEthereumChain. Never use private operator RPC URLs here. */
     walletRpcUrls?: string[];
     hubAddress: string;
@@ -1805,6 +1816,7 @@ export type ResolvedDKGAgentConfig =
     | 'syncBackoffMaxMs'
     | 'syncBackoffJitter'
     | 'rfc64CatalogActivation'
+    | 'rfc64CatalogActivations'
     | 'rfc64PublicCatalogActivation'
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'

@@ -1,0 +1,32 @@
+{
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "allowJs": true,
+    "checkJs": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "rootDir": "../../../..",
+    "sourceMap": false,
+    "types": ["node"]
+  },
+  "include": [
+    "agent-runtime.ts",
+    "agent-runtime-factory.ts",
+    "catalog-authority-handlers.mjs",
+    "catalog-evidence-handlers.mjs",
+    "catalog-publication-handlers.mjs",
+    "fault-injection.mjs",
+    "fixtures/private-memory-fixture.mjs",
+    "memory-evidence.mjs",
+    "run.mjs",
+    "runtime-contract.typecheck.ts",
+    "scenario-artifact.mjs",
+    "scenario-actors.ts",
+    "scenario-result.ts",
+    "scenario-test-fixtures.mjs",
+    "verified-catalog-swm-proof.mjs",
+    "../../src/jsonld.d.ts"
+  ]
+}

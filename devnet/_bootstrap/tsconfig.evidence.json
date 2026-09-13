@@ -1,6 +1,8 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
     "declaration": false,
     "declarationMap": false,
     "noEmit": true,
@@ -9,6 +11,7 @@
     "types": ["node", "vitest"]
   },
   "include": [
+    "../rfc64-artifact-publication-v1.mjs",
     "rdf-canonize.d.ts",
     "rfc64-evidence.ts",
     "rfc64-evidence.test.ts"

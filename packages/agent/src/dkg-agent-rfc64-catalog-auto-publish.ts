@@ -35,6 +35,7 @@ import {
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
+import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
 import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
@@ -317,80 +318,87 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
-    try {
-      const shutdownSignal = rfc64SwmInventoryShadowRuntimeV1(this).shutdownSignal;
-      if (shutdownSignal.aborted) return;
-      let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
-      let lastResponsibilityFailure: unknown = null;
-      for (const delayMs of RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1) {
-        if (result.status !== 'dormant' || result.dormantReason !== 'inactive-lane') break;
+    const observerSignal = rfc64SwmInventoryShadowRuntimeV1(this).shutdownSignal;
+    return withOwnedRpcRequestContext({
+      requestClass: 'background',
+      signal: observerSignal,
+    }, async () => {
+      const shutdownSignal = observerSignal;
+      try {
         if (shutdownSignal.aborted) return;
-        // A durable promotion can race the asynchronous default-responsibility
-        // and authority transition for a newly created CG. Refresh and retry
-        // that normal lifecycle boundary for a bounded settlement window before
-        // classifying the row as deliberately unselected. The durable workspace
-        // and VM-confirmation fence are re-read by every retry, so this cannot
-        // resurrect a finalized public row.
-        let responsibility: Awaited<ReturnType<
-          DKGAgent['reconcileRfc64CatalogResponsibilityV1']
-        >>;
-        try {
-          responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
-            params.contextGraphId,
-          );
-          lastResponsibilityFailure = null;
-        } catch (cause) {
-          lastResponsibilityFailure = cause;
+        let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
+        let lastResponsibilityFailure: unknown = null;
+        for (const delayMs of RFC64_DEFAULT_RESPONSIBILITY_SETTLE_RETRY_DELAYS_MS_V1) {
+          if (result.status !== 'dormant' || result.dormantReason !== 'inactive-lane') break;
           if (shutdownSignal.aborted) return;
+          // A durable promotion can race the asynchronous default-responsibility
+          // and authority transition for a newly created CG. Refresh and retry
+          // that normal lifecycle boundary for a bounded settlement window before
+          // classifying the row as deliberately unselected. The durable workspace
+          // and VM-confirmation fence are re-read by every retry, so this cannot
+          // resurrect a finalized public row.
+          let responsibility: Awaited<ReturnType<
+            DKGAgent['reconcileRfc64CatalogResponsibilityV1']
+          >>;
+          try {
+            responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
+              params.contextGraphId,
+            );
+            lastResponsibilityFailure = null;
+          } catch (cause) {
+            lastResponsibilityFailure = cause;
+            if (shutdownSignal.aborted) return;
+            if (!await waitForRfc64DefaultResponsibilitySettlementV1(
+              delayMs,
+              shutdownSignal,
+            )) return;
+            continue;
+          }
+          if (
+            responsibility.selectionSource !== 'default'
+            || responsibility.mode !== 'catalog'
+          ) {
+            break;
+          }
           if (!await waitForRfc64DefaultResponsibilitySettlementV1(
             delayMs,
             shutdownSignal,
           )) return;
-          continue;
+          result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
         }
         if (
-          responsibility.selectionSource !== 'default'
-          || responsibility.mode !== 'catalog'
+          result.status === 'dormant'
+          && result.dormantReason === 'inactive-lane'
+          && lastResponsibilityFailure !== null
         ) {
-          break;
+          throw lastResponsibilityFailure;
         }
-        if (!await waitForRfc64DefaultResponsibilitySettlementV1(
-          delayMs,
-          shutdownSignal,
-        )) return;
-        result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
-      }
-      if (
-        result.status === 'dormant'
-        && result.dormantReason === 'inactive-lane'
-        && lastResponsibilityFailure !== null
-      ) {
-        throw lastResponsibilityFailure;
-      }
-      if (result.status === 'applied' || result.status === 'existing') {
-        const projection = {
-          contextGraphId: params.contextGraphId as ContextGraphIdV1,
-          authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
-          ctx: params.ctx,
-        } as const;
-        if (!this.requestRfc64SwmCatalogProjectionV1(projection)) {
-          // The authority can turn over between the durable inventory CAS and
-          // projection admission. Reconcile once and retry the exact scope;
-          // ordinary supervisor backoff owns any later transient failure.
-          const responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
-            params.contextGraphId,
-          );
-          if (responsibility.active && responsibility.mode !== 'legacy') {
-            this.requestRfc64SwmCatalogProjectionV1(projection);
+        if (result.status === 'applied' || result.status === 'existing') {
+          const projection = {
+            contextGraphId: params.contextGraphId as ContextGraphIdV1,
+            authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
+            ctx: params.ctx,
+          } as const;
+          if (!this.requestRfc64SwmCatalogProjectionV1(projection)) {
+            // The authority can turn over between the durable inventory CAS and
+            // projection admission. Reconcile once and retry the exact scope;
+            // ordinary supervisor backoff owns any later transient failure.
+            const responsibility = await this.reconcileRfc64CatalogResponsibilityV1(
+              params.contextGraphId,
+            );
+            if (responsibility.active && responsibility.mode !== 'legacy') {
+              this.requestRfc64SwmCatalogProjectionV1(projection);
+            }
           }
         }
+      } catch (cause) {
+        if (shutdownSignal.aborted) return;
+        this.log.warn(
+          params.ctx,
+          `RFC-64 SWM inventory/catalog lifecycle escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
       }
-    } catch (cause) {
-      this.log.warn(
-        params.ctx,
-        `RFC-64 SWM inventory/catalog lifecycle escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-    }
+    });
   }
 
   /** Await a point-in-time observer snapshot for tests and controlled drains. */

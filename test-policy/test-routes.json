@@ -47,6 +47,29 @@
     ]
   },
   {
+    "pattern": "devnet/rfc64-remote-canary/*.test.mjs",
+    "lane": "devnet",
+    "reason": "Remote canary security and certification contracts run in the required build gate",
+    "cadence": "required",
+    "command": "pnpm test:rfc64-remote-canary:unit",
+    "layer": "operator certification",
+    "prerequisites": [
+      "Node.js 22 or newer"
+    ]
+  },
+  {
+    "pattern": "devnet/_bootstrap/rfc64-evidence.test.ts",
+    "lane": "devnet",
+    "reason": "Shared RFC-64 artifact writer durability and topology contracts run in the required Linux build gate",
+    "cadence": "required",
+    "command": "pnpm test:devnet:rfc64-evidence",
+    "layer": "operator certification",
+    "prerequisites": [
+      "Linux POSIX filesystem",
+      "Node.js 22 or newer"
+    ]
+  },
+  {
     "pattern": "devnet/**",
     "lane": "devnet",
     "reason": "Developer and certification suites; suite manifest and root scripts document prerequisites",
@@ -73,6 +96,18 @@
     "reason": "Recovery scenario operator script contract",
     "cadence": "required",
     "command": "node --test packages/agent/scripts/*.test.mjs"
+  },
+  {
+    "pattern": "packages/agent/devnet/rfc64-private-catalog/*.test.mjs",
+    "lane": "scripts",
+    "reason": "Deterministic private RFC-64 release-gate contract checks run in the build gate",
+    "cadence": "required",
+    "command": "pnpm test:scripts",
+    "layer": "repository tooling",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies"
+    ]
   },
   {
     "pattern": "test-systems/*.test.ts",

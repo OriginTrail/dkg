@@ -1,12 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { randomUUID } from 'node:crypto';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { writeRfc64ArtifactAtomicV1 } from '../../../../devnet/rfc64-artifact-v1.mjs';
+import { isSafeChildDiagnosticPhaseV1 } from './child-protocol.mjs';
+import {
+  RFC64_PRIVATE_GATE_SCHEMA_V2 as SCHEMA,
+  RFC64_PRIVATE_RELEASE_CHECK_KEYS_V1,
+  RFC64_PRIVATE_RELEASE_LIMITATION_V1,
+} from './gate-artifact-contract.mjs';
+import {
+  assertRfc64PrivateGatePassProvenanceV2,
+  decodeRfc64PrivateGatePassArtifactV2,
+} from './gate-artifact-pass-codec.mjs';
 
-import { assertRfc64PrivateRuntimeProvenanceV1 } from './runtime-provenance.mjs';
+export {
+  RFC64_PRIVATE_RELEASE_CHECK_KEYS_V1,
+  RFC64_PRIVATE_RELEASE_LIMITATION_V1,
+  assertRfc64PrivateGatePassProvenanceV2,
+  decodeRfc64PrivateGatePassArtifactV2,
+};
 
-const SCHEMA = 'dkg-rfc64-private-release-gate-v1';
+/** Tag a child-command failure with fixed diagnostics safe for gate artifacts. */
+export function createGateCommandFailureV1(commandPhase, cause) {
+  const error = new Error(`RFC-64 private gate child command failed during ${commandPhase}`, {
+    cause,
+  });
+  error.name = 'Rfc64PrivateGateCommandFailureV1';
+  error.commandPhase = commandPhase;
+  return error;
+}
 
 /**
  * Run one gate invocation with an artifact that can never retain an earlier
@@ -45,7 +66,7 @@ export async function runRfc64PrivateGateArtifactLifecycleV1({
       sourceRevision: canonicalSourceRevision,
     };
     if (completed.status === 'PASS') {
-      assertRfc64PrivateGatePassProvenanceV1(completed);
+      decodeRfc64PrivateGatePassArtifactV2(completed);
     }
     await writeGateArtifactAtomicV1(artifactPath, completed);
     return completed;
@@ -71,69 +92,23 @@ export async function runRfc64PrivateGateArtifactLifecycleV1({
   }
 }
 
-/** A committed PASS must name one exact source revision, runtime build, and bounded run. */
-export function assertRfc64PrivateGatePassProvenanceV1(artifact) {
-  if (artifact === null || typeof artifact !== 'object') {
-    throw new TypeError('RFC-64 private gate PASS artifact must be an object');
-  }
-  if (artifact.schema !== SCHEMA || artifact.status !== 'PASS') {
-    throw new TypeError('RFC-64 private gate PASS artifact has an invalid schema or status');
-  }
-  const startedAt = canonicalIsoInstantV1(artifact.startedAt, 'startedAt');
-  const finishedAt = canonicalIsoInstantV1(artifact.finishedAt, 'finishedAt');
-  if (finishedAt < startedAt) {
-    throw new TypeError('RFC-64 private gate PASS finishedAt precedes startedAt');
-  }
-  if (
-    typeof artifact.sourceRevision !== 'string'
-    || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u.test(artifact.sourceRevision)
-  ) {
-    throw new TypeError('RFC-64 private gate PASS requires an exact source revision');
-  }
-  if (
-    typeof artifact.runtimeManifestDigest !== 'string'
-    || !/^0x[0-9a-f]{64}$/u.test(artifact.runtimeManifestDigest)
-  ) {
-    throw new TypeError('RFC-64 private gate PASS requires an exact runtime manifest digest');
-  }
-  let provenance;
-  try {
-    provenance = assertRfc64PrivateRuntimeProvenanceV1(artifact.runtimeProvenance);
-  } catch {
-    throw new TypeError('RFC-64 private gate PASS runtime provenance is incomplete');
-  }
-  if (
-    provenance.sourceBuild.sourceCommit !== artifact.sourceRevision
-    || provenance.sourceBuild.manifestDigest !== artifact.runtimeManifestDigest
-  ) {
-    throw new TypeError('RFC-64 private gate PASS runtime provenance is not source-bound');
-  }
-  return artifact;
-}
-
 /** Replace the artifact with one same-directory atomic rename. */
 export async function writeGateArtifactAtomicV1(artifactPath, artifact) {
-  const artifactDirectory = dirname(artifactPath);
-  await mkdir(artifactDirectory, { recursive: true });
-  const temporaryPath = join(
-    artifactDirectory,
-    `.${basename(artifactPath)}.${process.pid}.${randomUUID()}.tmp`,
-  );
-  try {
-    await writeFile(temporaryPath, `${stableJsonV1(artifact)}\n`, {
-      encoding: 'utf8',
-      mode: 0o644,
-      flag: 'wx',
-    });
-    await rename(temporaryPath, artifactPath);
-  } catch (error) {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
-    throw error;
-  }
+  return writeRfc64ArtifactAtomicV1(artifactPath, artifact);
 }
 
 /** Return only fixed classifications. Never retain caller-controlled error data. */
 export function sanitizeGateFailureV1(error) {
+  if (
+    error instanceof Error
+    && error.name === 'Rfc64PrivateGateCommandFailureV1'
+    && isSafeChildDiagnosticPhaseV1(error.commandPhase)
+  ) {
+    return Object.freeze({
+      failureClass: 'gate-command-failed',
+      commandPhase: error.commandPhase,
+    });
+  }
   const failureClass = error instanceof AggregateError
     ? 'gate-and-artifact-failed'
     : error instanceof Error && error.name === 'AbortError'
@@ -145,29 +120,4 @@ export function sanitizeGateFailureV1(error) {
 function canonicalSourceRevisionV1(value) {
   if (typeof value !== 'string' || !/^[0-9a-f]{7,64}$/iu.test(value)) return null;
   return value.toLowerCase();
-}
-
-function canonicalIsoInstantV1(value, field) {
-  if (typeof value !== 'string') {
-    throw new TypeError(`RFC-64 private gate PASS ${field} must be an ISO instant`);
-  }
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString() !== value) {
-    throw new TypeError(`RFC-64 private gate PASS ${field} must be a canonical ISO instant`);
-  }
-  return timestamp;
-}
-
-function stableJsonV1(value) {
-  return JSON.stringify(sortKeysV1(value), null, 2);
-}
-
-function sortKeysV1(value) {
-  if (Array.isArray(value)) return value.map(sortKeysV1);
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.keys(value).sort().map((key) => [key, sortKeysV1(value[key])]),
-    );
-  }
-  return value;
 }

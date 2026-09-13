@@ -604,7 +604,7 @@ export type ContextGraphChainScanOptions =
   | ContextGraphLegacyIncrementalScanOptions;
 
 /** Cursor-backed daemon ContextGraphNameRegistry scan modes. */
-export type ContextGraphRegistryScanOptions =
+export type ContextGraphRegistryScanOptions = (
   | {
       mode: 'incremental';
       pageBudget?: number;
@@ -615,10 +615,42 @@ export type ContextGraphRegistryScanOptions =
   | {
       mode: 'seedFromCursor';
       pageBudget?: number;
-    };
+    }
+  | {
+      /**
+       * Establish the daemon's live cursor at the current reorg-protected tail.
+       * Historical discovery is deliberately left to the independent repair
+       * lane so a missing/corrupt live watermark cannot delay new registrations.
+       */
+      mode: 'seedLiveTail';
+      pageBudget?: number;
+    }
+  | {
+      /**
+       * Low-priority historical integrity pass. Repair scans use a cursor and
+       * captured target that are independent from the live discovery cursor,
+       * never enter its reorg window, and resume within a logical page budget.
+       * Provider retry/failover attempts are governed independently by RPC
+       * request-class policy and may exceed the number of logical pages.
+       */
+      mode: 'repair';
+      pageBudget: number;
+      minimumIntervalMs?: number;
+    }
+) & ChainReadOptions;
 
 export interface ContextGraphRegistryScanPage {
   contextGraphs: ContextGraphOnChain[];
+  /** Bounded operational progress; contains no graph identifiers. */
+  scanProgress?: Readonly<{
+    mode: ContextGraphRegistryScanOptions['mode'] | 'listAll';
+    page: number;
+    pageBudget?: number;
+    fromBlock: number;
+    toBlock: number;
+    targetBlock: number;
+    completesGeneration: boolean;
+  }>;
   ack(): Promise<void>;
 }
 
@@ -632,9 +664,16 @@ export interface ContextGraphRegistryScanCursorKey {
   registryAddress: string;
 }
 
+export interface ContextGraphRegistryRepairAuditStore {
+  load(key: ContextGraphRegistryScanCursorKey): Promise<unknown>;
+  save(key: ContextGraphRegistryScanCursorKey, checkpoint: unknown): Promise<void>;
+}
+
 export interface ContextGraphRegistryScanCursorStore {
   load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
+  /** Optional grouped capability for opaque, atomically replaced repair state. */
+  repairAudit?: ContextGraphRegistryRepairAuditStore;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----

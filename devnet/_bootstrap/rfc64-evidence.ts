@@ -6,34 +6,30 @@
  * Harnesses pass their observations in after those protocol-owned operations
  * finish, then persist the returned fail-closed comparison artifact.
  */
-import { createHash, randomUUID } from 'node:crypto';
-import {
-  closeSync,
-  constants as fsConstants,
-  fchmodSync,
-  fstatSync,
-  fsyncSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
-import type { Stats } from 'node:fs';
-import {
-  basename,
-  dirname,
-  join,
-  parse as parsePath,
-  relative,
-  resolve,
-  sep,
-} from 'node:path';
+import { createHash } from 'node:crypto';
 import { types as utilTypes } from 'node:util';
 import rdfCanonize from 'rdf-canonize';
 import { parseDeterministicKnowledgeAssetUal } from '../../packages/core/src/ka-content-scope.js';
+import {
+  RFC64_ARTIFACT_POSIX_ACCESS_POLICY,
+  RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY,
+  RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY,
+  RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY,
+  Rfc64EvidenceValidationError,
+  normalizeStableJsonValue,
+  stableJsonStringify,
+  writeStableJsonArtifact,
+} from '../rfc64-artifact-publication-v1.mjs';
+
+export {
+  RFC64_ARTIFACT_POSIX_ACCESS_POLICY,
+  RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY,
+  RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY,
+  RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY,
+  Rfc64EvidenceValidationError,
+  stableJsonStringify,
+  writeStableJsonArtifact,
+};
 
 export const RFC64_SEMANTIC_SNAPSHOT_SCHEMA =
   'rfc64-semantic-snapshot/v1' as const;
@@ -46,16 +42,8 @@ const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
 const RFC3339_INSTANT_RE =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/u;
 
-export const RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY =
-  'file-fsync-rename-directory-fsync' as const;
-export const RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY =
-  'file-flush-rename-no-directory-flush' as const;
-export const RFC64_ARTIFACT_POSIX_ACCESS_POLICY =
-  'posix-owner-read-write-mode-0600' as const;
-export const RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY =
-  'windows-inherited-acl' as const;
-
 export type Sha256Digest = `sha256:${string}`;
+export type WrittenStableJsonArtifact = ReturnType<typeof writeStableJsonArtifact>;
 
 export interface Rfc64KnowledgeAssetObservation {
   readonly ual: string;
@@ -166,26 +154,6 @@ export interface Rfc64DevnetEvidenceV1 {
   readonly passed: boolean;
 }
 
-export interface WrittenStableJsonArtifact {
-  readonly byteLength: number;
-  readonly sha256: Sha256Digest;
-  /** Windows Node.js cannot flush directory handles through fsync. */
-  readonly namespaceDurability:
-    | typeof RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY
-    | typeof RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY;
-  /** POSIX mode bits are not presented as an ACL guarantee on Windows. */
-  readonly accessPolicy:
-    | typeof RFC64_ARTIFACT_POSIX_ACCESS_POLICY
-    | typeof RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY;
-}
-
-export class Rfc64EvidenceValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'Rfc64EvidenceValidationError';
-  }
-}
-
 export class Rfc64EvidenceMismatchError extends Error {
   readonly comparison: Rfc64SnapshotComparisonV1;
 
@@ -224,7 +192,7 @@ function canonicalUal(rawUal: string): string {
 }
 
 function nquadsInputText(input: string | readonly string[]): string {
-  const captured = stableJsonValue(input, 'semanticNQuads', new Set());
+  const captured = normalizeStableJsonValue(input, 'semanticNQuads');
   if (typeof captured === 'string') return captured;
   if (!Array.isArray(captured)) {
     throw new Rfc64EvidenceValidationError(
@@ -390,10 +358,9 @@ export async function createRfc64SemanticSnapshot(
   // The capture reads data descriptors once, rejects proxies/accessors and
   // exotic containers, and gives the rest of this function ordinary arrays it
   // owns. In particular, never dispatch through a caller-provided `map` method.
-  const captured = stableJsonValue(
+  const captured = normalizeStableJsonValue(
     observations,
     'observations',
-    new Set(),
   );
   if (!Array.isArray(captured)) {
     throw new Rfc64EvidenceValidationError('observations must be an array');
@@ -473,10 +440,9 @@ export function validateRfc64SemanticSnapshot(
   // Capture each own data property exactly once before validation. This keeps
   // accessors, proxies, sparse/custom arrays, and other exotic containers from
   // changing the value between a successful check and the frozen result.
-  const captured = stableJsonValue(
+  const captured = normalizeStableJsonValue(
     snapshot,
     'snapshot',
-    new Set(),
   ) as unknown as Rfc64SemanticSnapshotV1;
   if (captured.schemaVersion !== RFC64_SEMANTIC_SNAPSHOT_SCHEMA) {
     throw new Rfc64EvidenceValidationError(
@@ -681,7 +647,7 @@ function captureFailureRecord(
   value: Rfc64FailureV1,
   label: string,
 ): Record<string, unknown> {
-  const captured = stableJsonValue(value, label, new Set());
+  const captured = normalizeStableJsonValue(value, label);
   if (!captured || typeof captured !== 'object' || Array.isArray(captured)) {
     throw new Rfc64EvidenceValidationError(`${label} must be an object`);
   }
@@ -828,10 +794,9 @@ export function createRfc64DevnetEvidence(
     );
   }
 
-  const capturedRetryFailures = stableJsonValue(
+  const capturedRetryFailures = normalizeStableJsonValue(
     capturedInput.retryFailures ?? [],
     'retryFailures',
-    new Set(),
   );
   if (!Array.isArray(capturedRetryFailures)) {
     throw new Rfc64EvidenceValidationError('retryFailures must be an array');
@@ -905,375 +870,4 @@ export function createRfc64DevnetEvidence(
     terminalFailure,
     passed: comparison.passed && terminalFailure === null,
   });
-}
-
-function stableJsonValue(value: unknown, path: string, ancestors: Set<object>): unknown {
-  if (
-    value !== null
-    && (typeof value === 'object' || typeof value === 'function')
-    && utilTypes.isProxy(value)
-  ) {
-    throw new Rfc64EvidenceValidationError(`${path} must not be a proxy`);
-  }
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') {
-    return value;
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) {
-      throw new Rfc64EvidenceValidationError(`${path} contains a non-finite number`);
-    }
-    return Object.is(value, -0) ? 0 : value;
-  }
-  if (Array.isArray(value)) {
-    if (Object.getPrototypeOf(value) !== Array.prototype) {
-      throw new Rfc64EvidenceValidationError(
-        `${path} must not use a custom array prototype`,
-      );
-    }
-    if (ancestors.has(value)) {
-      throw new Rfc64EvidenceValidationError(`${path} contains a cycle`);
-    }
-    const ownKeys = Reflect.ownKeys(value);
-    if (ownKeys.some((key) => typeof key === 'symbol')) {
-      throw new Rfc64EvidenceValidationError(`${path} must not contain symbol keys`);
-    }
-    const allowedKeys = new Set<string>(['length']);
-    for (let index = 0; index < value.length; index += 1) {
-      allowedKeys.add(String(index));
-      if (!Object.hasOwn(value, index)) {
-        throw new Rfc64EvidenceValidationError(`${path} must not be a sparse array`);
-      }
-    }
-    for (const key of ownKeys as string[]) {
-      if (!allowedKeys.has(key)) {
-        throw new Rfc64EvidenceValidationError(
-          `${path} must not contain custom array property ${JSON.stringify(key)}`,
-        );
-      }
-      if (key === 'length') continue;
-      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
-      if (!('value' in descriptor) || !descriptor.enumerable) {
-        throw new Rfc64EvidenceValidationError(
-          `${path}[${key}] must be an enumerable data property`,
-        );
-      }
-    }
-    ancestors.add(value);
-    const result = Array.from({ length: value.length }, (_, index) => {
-      const descriptor = Object.getOwnPropertyDescriptor(value, String(index))!;
-      return stableJsonValue(descriptor.value, `${path}[${index}]`, ancestors);
-    });
-    ancestors.delete(value);
-    return result;
-  }
-  if (typeof value === 'object' && value !== null) {
-    if (ancestors.has(value)) {
-      throw new Rfc64EvidenceValidationError(`${path} contains a cycle`);
-    }
-    const prototype = Object.getPrototypeOf(value);
-    if (prototype !== Object.prototype && prototype !== null) {
-      throw new Rfc64EvidenceValidationError(
-        `${path} must contain only plain JSON objects`,
-      );
-    }
-    ancestors.add(value);
-    const source = value as Record<string, unknown>;
-    const ownKeys = Reflect.ownKeys(source);
-    if (ownKeys.some((key) => typeof key === 'symbol')) {
-      throw new Rfc64EvidenceValidationError(`${path} must not contain symbol keys`);
-    }
-    const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-    for (const key of (ownKeys as string[]).sort(compareText)) {
-      const descriptor = Object.getOwnPropertyDescriptor(source, key)!;
-      if (!('value' in descriptor)) {
-        throw new Rfc64EvidenceValidationError(
-          `${path}.${key} must not be an accessor property`,
-        );
-      }
-      if (!descriptor.enumerable) {
-        throw new Rfc64EvidenceValidationError(
-          `${path}.${key} must not be a hidden non-enumerable property`,
-        );
-      }
-      const entry = descriptor.value;
-      if (entry === undefined || typeof entry === 'bigint' || typeof entry === 'function') {
-        throw new Rfc64EvidenceValidationError(
-          `${path}.${key} is not a stable JSON value`,
-        );
-      }
-      result[key] = stableJsonValue(entry, `${path}.${key}`, ancestors);
-    }
-    ancestors.delete(value);
-    return result;
-  }
-  throw new Rfc64EvidenceValidationError(`${path} is not a stable JSON value`);
-}
-
-/** Recursively sort object keys and append exactly one LF. */
-export function stableJsonStringify(value: unknown): string {
-  return `${JSON.stringify(stableJsonValue(value, '$', new Set()), null, 2)}\n`;
-}
-
-interface DirectoryTopologyEntry {
-  readonly path: string;
-  readonly dev: number;
-  readonly ino: number;
-}
-
-function lstatOptional(path: string): Stats | null {
-  try {
-    return lstatSync(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  }
-}
-
-function assertDirectory(path: string, stat: Stats): void {
-  if (stat.isSymbolicLink()) {
-    throw new Rfc64EvidenceValidationError(
-      `artifact directory topology contains a symbolic link: ${path}`,
-    );
-  }
-  if (!stat.isDirectory()) {
-    throw new Rfc64EvidenceValidationError(
-      `artifact directory topology contains a non-directory: ${path}`,
-    );
-  }
-}
-
-function ensureArtifactDirectoryTopology(
-  directory: string,
-): readonly DirectoryTopologyEntry[] {
-  const root = parsePath(directory).root;
-  const relativeDirectory = relative(root, directory);
-  const components = relativeDirectory.length === 0
-    ? []
-    : relativeDirectory.split(sep);
-  const entries: DirectoryTopologyEntry[] = [];
-  let current = root;
-
-  const rootStat = lstatSync(root);
-  assertDirectory(root, rootStat);
-  entries.push({ path: root, dev: rootStat.dev, ino: rootStat.ino });
-
-  for (const component of components) {
-    current = join(current, component);
-    let stat = lstatOptional(current);
-    let observedMissing = false;
-    if (stat === null) {
-      observedMissing = true;
-      try {
-        mkdirSync(current, { mode: 0o700 });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      }
-      stat = lstatSync(current);
-    }
-    assertDirectory(current, stat);
-    if (observedMissing) {
-      // Persist the new directory entry before relying on it as the parent of
-      // another directory or of the artifact itself. Also issue this barrier
-      // when a concurrent creator won the ENOENT-to-mkdir EEXIST race.
-      fsyncArtifactDirectory(dirname(current), entries);
-    }
-    entries.push({ path: current, dev: stat.dev, ino: stat.ino });
-  }
-  return Object.freeze(entries.map((entry) => Object.freeze(entry)));
-}
-
-function assertArtifactDirectoryTopology(
-  entries: readonly DirectoryTopologyEntry[],
-): void {
-  for (const expected of entries) {
-    const actual = lstatOptional(expected.path);
-    if (actual === null) {
-      throw new Rfc64EvidenceValidationError(
-        `artifact directory disappeared during publication: ${expected.path}`,
-      );
-    }
-    assertDirectory(expected.path, actual);
-    if (actual.dev !== expected.dev || actual.ino !== expected.ino) {
-      throw new Rfc64EvidenceValidationError(
-        `artifact directory topology changed during publication: ${expected.path}`,
-      );
-    }
-  }
-}
-
-function assertArtifactTargetReplaceable(target: string): void {
-  const stat = lstatOptional(target);
-  if (stat === null) return;
-  if (stat.isSymbolicLink()) {
-    throw new Rfc64EvidenceValidationError(
-      `artifact target must not be a symbolic link: ${target}`,
-    );
-  }
-  if (!stat.isFile()) {
-    throw new Rfc64EvidenceValidationError(
-      `artifact target must be a regular file: ${target}`,
-    );
-  }
-}
-
-function verifyPublishedArtifact(target: string, expectedJson: string): void {
-  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
-  const fd = openSync(target, fsConstants.O_RDONLY | noFollow);
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) {
-      throw new Rfc64EvidenceValidationError(
-        `published artifact is not a regular file: ${target}`,
-      );
-    }
-    if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600) {
-      throw new Rfc64EvidenceValidationError(
-        `published artifact mode must be 0600, got 0${(stat.mode & 0o777).toString(8)}`,
-      );
-    }
-    if (readFileSync(fd, 'utf8') !== expectedJson) {
-      throw new Rfc64EvidenceValidationError(
-        `published artifact bytes changed during publication: ${target}`,
-      );
-    }
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function fsyncArtifactDirectory(
-  directory: string,
-  topology: readonly DirectoryTopologyEntry[],
-): void {
-  // Node/libuv opens this directory with read access, but Windows implements
-  // fsync with FlushFileBuffers, which requires a writable handle. Report the
-  // weaker namespace policy instead of publishing successfully and then
-  // throwing a false failure from an unsupported durability operation.
-  if (process.platform === 'win32') return;
-  const expected = topology[topology.length - 1]!;
-  if (expected.path !== directory) {
-    throw new Rfc64EvidenceValidationError(
-      `artifact directory barrier does not match checked topology: ${directory}`,
-    );
-  }
-  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
-  const directoryOnly = fsConstants.O_DIRECTORY ?? 0;
-  const fd = openSync(
-    directory,
-    fsConstants.O_RDONLY | noFollow | directoryOnly,
-  );
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isDirectory() || stat.dev !== expected.dev || stat.ino !== expected.ino) {
-      throw new Rfc64EvidenceValidationError(
-        `artifact directory handle does not match checked topology: ${directory}`,
-      );
-    }
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function cleanupTemporaryArtifact(
-  temporaryPath: string,
-  topology: readonly DirectoryTopologyEntry[],
-): void {
-  try {
-    assertArtifactDirectoryTopology(topology);
-  } catch {
-    // Do not traverse a directory topology which changed under us.
-    return;
-  }
-  try {
-    unlinkSync(temporaryPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-}
-
-/**
- * Atomically publish byte-stable JSON through a same-directory temporary file.
- * POSIX publication enforces mode 0600 and directory-fsync namespace barriers;
- * Windows flushes the file and reports rename-only namespace durability plus
- * inherited ACL protection. The caller must keep the parent directory topology
- * trusted and static for the duration of this call: Node exposes no portable
- * directory-handle-relative rename/open API with which to close path TOCTOU.
- * The checks below reject pre-existing symlinks and detect many concurrent
- * changes, but a post-rename error can still leave publication side effects.
- */
-export function writeStableJsonArtifact(
-  path: string,
-  value: unknown,
-): WrittenStableJsonArtifact {
-  const requestedTarget = requiredLabel(path, 'path');
-  const target = resolve(requestedTarget);
-  const targetName = basename(target);
-  if (targetName.length === 0) {
-    throw new Rfc64EvidenceValidationError('path must identify an artifact file');
-  }
-  const json = stableJsonStringify(value);
-  const directory = dirname(target);
-  const topology = ensureArtifactDirectoryTopology(directory);
-  assertArtifactDirectoryTopology(topology);
-  assertArtifactTargetReplaceable(target);
-
-  const temporaryPath = join(
-    directory,
-    `.${targetName}.${process.pid}.${randomUUID()}.tmp`,
-  );
-  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
-  let temporaryFd: number | null = null;
-  let renamed = false;
-  try {
-    temporaryFd = openSync(
-      temporaryPath,
-      fsConstants.O_WRONLY
-        | fsConstants.O_CREAT
-        | fsConstants.O_EXCL
-        | noFollow,
-      0o600,
-    );
-    const opened = fstatSync(temporaryFd);
-    if (!opened.isFile()) {
-      throw new Rfc64EvidenceValidationError(
-        `temporary artifact is not a regular file: ${temporaryPath}`,
-      );
-    }
-    if (process.platform !== 'win32') fchmodSync(temporaryFd, 0o600);
-    writeFileSync(temporaryFd, json, { encoding: 'utf8' });
-    fsyncSync(temporaryFd);
-    closeSync(temporaryFd);
-    temporaryFd = null;
-
-    assertArtifactDirectoryTopology(topology);
-    assertArtifactTargetReplaceable(target);
-    renameSync(temporaryPath, target);
-    renamed = true;
-
-    assertArtifactDirectoryTopology(topology);
-    verifyPublishedArtifact(target, json);
-    fsyncArtifactDirectory(directory, topology);
-    assertArtifactDirectoryTopology(topology);
-  } catch (error) {
-    if (temporaryFd !== null) {
-      try {
-        closeSync(temporaryFd);
-      } catch {
-        // Preserve the primary publication error.
-      }
-    }
-    if (!renamed) cleanupTemporaryArtifact(temporaryPath, topology);
-    throw error;
-  }
-  return {
-    byteLength: Buffer.byteLength(json, 'utf8'),
-    sha256: sha256Text(json),
-    namespaceDurability: process.platform === 'win32'
-      ? RFC64_ARTIFACT_WINDOWS_NAMESPACE_DURABILITY
-      : RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY,
-    accessPolicy: process.platform === 'win32'
-      ? RFC64_ARTIFACT_WINDOWS_ACCESS_POLICY
-      : RFC64_ARTIFACT_POSIX_ACCESS_POLICY,
-  };
 }

@@ -52,9 +52,27 @@ function evidence(
 }
 
 describe('RFC-64 catalog synchronization evidence', () => {
+  it('owns applied-provider provenance and rejects an invalid provider boundary', () => {
+    expect(snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([]),
+      'provider-original',
+    ).appliedProviderPeerId).toBe('provider-original');
+    expect(snapshotRfc64CatalogSynchronizationEvidenceV1(
+      { ...evidence([]), appliedHeadStatus: 'existing' as const },
+      'provider-replay',
+    ).appliedProviderPeerId).toBeNull();
+    expect(() => snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([]),
+      '',
+    )).toThrow('provider peer identity is invalid');
+  });
+
   it('snapshots immutable receipts owned by the exact synchronization head', () => {
     const source = receipt();
-    const snapshot = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([source]));
+    const snapshot = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([source]),
+      'provider-original',
+    );
 
     source.kaUal = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/2';
 
@@ -69,6 +87,7 @@ describe('RFC-64 catalog synchronization evidence', () => {
   it('rejects applied-head evidence associated with a different synchronization head', () => {
     expect(() => snapshotRfc64CatalogSynchronizationEvidenceV1(
       evidence([receipt()], digest('44')),
+      'provider-original',
     )).toThrow('applied-head evidence differs from its synchronization evidence head');
   });
 
@@ -76,11 +95,15 @@ describe('RFC-64 catalog synchronization evidence', () => {
     const same = receipt();
     expect(() => snapshotRfc64CatalogSynchronizationEvidenceV1(
       evidence([same, receipt()]),
+      'provider-original',
     )).toThrow('duplicates receipt');
   });
 
   it('preserves original materialization proof across an exact-head replay', () => {
-    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([receipt()]));
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([receipt()]),
+      'provider-original',
+    );
     const replayReceipt = {
       ...receipt(),
       vmMaterializationStatus: 'existing' as const,
@@ -90,10 +113,12 @@ describe('RFC-64 catalog synchronization evidence', () => {
       first,
       snapshotRfc64CatalogSynchronizationEvidenceV1(
         { ...evidence([replayReceipt]), appliedHeadStatus: 'existing' as const },
+        'provider-replay',
       ),
     );
 
     expect(replay.appliedHeadStatus).toBe('existing');
+    expect(replay.appliedProviderPeerId).toBe('provider-original');
     expect(replay.finalizedSwmRetirementLifecycleReceipts).toEqual([
       expect.objectContaining({
         vmMaterializationStatus: 'materialized',
@@ -110,11 +135,14 @@ describe('RFC-64 catalog synchronization evidence', () => {
       swmReconciliationOutcome: 'retired' as const,
     };
     const replay = reduceRfc64CatalogSynchronizationEvidenceReplayV1(
-      snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([originalReceipt])),
+      snapshotRfc64CatalogSynchronizationEvidenceV1(
+        evidence([originalReceipt]),
+        'provider-original',
+      ),
       snapshotRfc64CatalogSynchronizationEvidenceV1({
         ...evidence([replayReceipt]),
         appliedHeadStatus: 'existing' as const,
-      }),
+      }, 'provider-replay'),
     );
 
     expect(replay.finalizedSwmRetirementLifecycleReceipts).toEqual([{
@@ -122,6 +150,23 @@ describe('RFC-64 catalog synchronization evidence', () => {
       vmMaterializationStatus: 'materialized',
       swmReconciliationOutcome: 'retired',
     }]);
+  });
+
+  it('replaces provider provenance when the same head is durably applied again', () => {
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([]),
+      'provider-original',
+    );
+    const reapplied = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([]),
+      'provider-reapplication',
+    );
+
+    expect(reduceRfc64CatalogSynchronizationEvidenceReplayV1(first, reapplied))
+      .toMatchObject({
+        appliedHeadStatus: 'applied',
+        appliedProviderPeerId: 'provider-reapplication',
+      });
   });
 
   it.each([
@@ -132,7 +177,10 @@ describe('RFC-64 catalog synchronization evidence', () => {
     ['receipt metadata mismatch', { assertionVersion: '2' }],
     ['post-read mismatch', { vmPostReadDigest: digest('55') }],
   ])('keeps current %s evidence visible instead of retaining stale success', (_label, change) => {
-    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([receipt()]));
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([receipt()]),
+      'provider-original',
+    );
     const currentReceipt = {
       ...receipt(),
       vmMaterializationStatus: 'existing' as const,
@@ -142,7 +190,7 @@ describe('RFC-64 catalog synchronization evidence', () => {
     const current = snapshotRfc64CatalogSynchronizationEvidenceV1({
       ...evidence([currentReceipt]),
       appliedHeadStatus: 'existing' as const,
-    });
+    }, 'provider-replay');
 
     const reduced = reduceRfc64CatalogSynchronizationEvidenceReplayV1(first, current);
 
@@ -150,20 +198,26 @@ describe('RFC-64 catalog synchronization evidence', () => {
   });
 
   it('rejects replay accumulation across different synchronization heads', () => {
-    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([receipt()]));
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([receipt()]),
+      'provider-original',
+    );
     const otherHead = digest('66');
     const current = snapshotRfc64CatalogSynchronizationEvidenceV1({
       ...evidence([receipt()], otherHead),
       catalogHeadDigest: otherHead,
       appliedHeadStatus: 'existing' as const,
-    });
+    }, 'provider-replay');
 
     expect(() => reduceRfc64CatalogSynchronizationEvidenceReplayV1(first, current))
       .toThrow('belongs to a different head');
   });
 
   it('uses a repaired rematerialization receipt as the new current proof', () => {
-    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(evidence([receipt()]));
+    const first = snapshotRfc64CatalogSynchronizationEvidenceV1(
+      evidence([receipt()]),
+      'provider-original',
+    );
     const rematerializedReceipt = {
       ...receipt(),
       vmPostReadDigest: digest('77'),
@@ -171,7 +225,7 @@ describe('RFC-64 catalog synchronization evidence', () => {
     const current = snapshotRfc64CatalogSynchronizationEvidenceV1({
       ...evidence([rematerializedReceipt]),
       appliedHeadStatus: 'existing' as const,
-    });
+    }, 'provider-replay');
 
     expect(reduceRfc64CatalogSynchronizationEvidenceReplayV1(first, current)
       .finalizedSwmRetirementLifecycleReceipts).toEqual([rematerializedReceipt]);

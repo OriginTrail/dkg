@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import evidenceVitestConfig from './vitest.evidence.config.js';
+import * as artifactPublication from '../rfc64-artifact-publication-v1.mjs';
 import {
   RFC64_ARTIFACT_POSIX_ACCESS_POLICY,
   RFC64_ARTIFACT_POSIX_NAMESPACE_DURABILITY,
@@ -765,6 +766,15 @@ describe('RFC-64 devnet run artifact', () => {
       .toThrow(/non-finite number/);
   });
 
+  it('owns stable-JSON traversal state behind the public normalization facade', () => {
+    const nested = { value: 1 };
+    expect(artifactPublication.normalizeStableJsonValue({ nested }, 'evidence'))
+      .toEqual({ nested });
+    expect(artifactPublication.normalizeStableJsonValue.length).toBe(1);
+    expect(Object.hasOwn(artifactPublication, 'normalizeStableJsonValue')).toBe(true);
+    expect(Object.hasOwn(artifactPublication, 'stableJsonValue')).toBe(false);
+  });
+
   it('rejects sparse, custom, accessor, symbol, and custom-prototype JSON containers', () => {
     const sparse: unknown[] = [];
     sparse[1] = 'present';
@@ -820,6 +830,17 @@ describe('RFC-64 devnet run artifact', () => {
       expect(statSync(target).mode & 0o777).toBe(0o600);
     }
     expect(readdirSync(directory)).toEqual(['artifact.json']);
+  });
+
+  it('rejects surrounding artifact-path whitespace without touching either name', () => {
+    const directory = createTemporaryDirectory();
+    const target = join(directory, 'artifact.json');
+    writeFileSync(target, 'sentinel');
+
+    expect(() => writeStableJsonArtifact(`${target} `, { generation: 2 }))
+      .toThrow(/must not contain surrounding whitespace/);
+    expect(readFileSync(target, 'utf8')).toBe('sentinel');
+    expect(existsSync(`${target} `)).toBe(false);
   });
 
   it.runIf(process.platform !== 'win32')(

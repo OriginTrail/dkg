@@ -75,3 +75,18 @@ test('each matrix leg builds once and only inventory runs named evidence steps',
     assert.equal(selected.length, group.group === 'inventory' ? 6 : 0);
   }
 });
+
+test('the required Linux gate exercises shared artifact POSIX and type contracts', () => {
+  const build = ciWorkflow.jobs.build;
+  assert.equal(build['runs-on'], 'ubuntu-latest');
+  assert.notEqual(build.if, false);
+  const commands = build.steps.map((step) => step.run).filter(Boolean);
+  const remoteCanary = commands.indexOf('pnpm test:rfc64-remote-canary:unit');
+  const evidenceTypecheck = commands.indexOf('pnpm typecheck:devnet:rfc64-evidence');
+  const evidenceTests = commands.indexOf('pnpm test:devnet:rfc64-evidence');
+  const inventory = commands.indexOf('pnpm test:inventory');
+  assert.ok(remoteCanary >= 0);
+  assert.ok(remoteCanary < evidenceTypecheck);
+  assert.ok(evidenceTypecheck < evidenceTests);
+  assert.ok(evidenceTests < inventory);
+});

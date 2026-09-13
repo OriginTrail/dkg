@@ -1,30 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  assertPersistedRuntimeProcessProvenanceV1,
-  buildRuntimeProcessProvenanceV1,
+  assertPersistedRuntimeProcessProvenanceV2,
+  buildRuntimeProcessProvenanceV2,
 } from '../../../../devnet/rfc64-runtime-provenance.mts';
+import { RFC64_PRIVATE_SCENARIO_PROCESS_IDS_V1 } from './scenario-actors.ts';
 
-export const RFC64_PRIVATE_RUNTIME_PROVENANCE_SCHEMA_V1 =
-  'dkg-rfc64-private-runtime-provenance-v1';
+export const RFC64_PRIVATE_RUNTIME_PROVENANCE_SCHEMA_V2 =
+  'dkg-rfc64-private-runtime-provenance-v2';
 
-export const RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1 = Object.freeze([
-  'probe-owner',
-  'probe-provider2',
-  'probe-receiver',
-  'probe-outsider',
-  'owner',
-  'provider2',
-  'receiver',
-  'outsider',
-  'receiver-restart',
-]);
+export const RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1 =
+  RFC64_PRIVATE_SCENARIO_PROCESS_IDS_V1;
 
-export function buildRfc64PrivateRuntimeProvenanceV1(sourceBuild, processes) {
-  return buildRuntimeProcessProvenanceV1({
+export function buildRfc64PrivateRuntimeProvenanceV2(sourceBuild, processes) {
+  return buildRuntimeProcessProvenanceV2({
     expectedProcessIds: RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
     processes,
-    schema: RFC64_PRIVATE_RUNTIME_PROVENANCE_SCHEMA_V1,
+    schema: RFC64_PRIVATE_RUNTIME_PROVENANCE_SCHEMA_V2,
     sourceBuild,
   });
 }
@@ -34,7 +26,7 @@ export function buildRfc64PrivateRuntimeProvenanceV1(sourceBuild, processes) {
  * Evidence becomes available only through a successful provenance-aware stop;
  * callers cannot accidentally seal mutable child side state or omit a role.
  */
-export function createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild) {
+export function createRfc64PrivateRuntimeEvidenceCollectorV2(sourceBuild) {
   const expectedIds = new Set(RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1);
   const evidenceById = new Map();
   return Object.freeze({
@@ -59,14 +51,14 @@ export function createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild) {
         }
         return evidence;
       });
-      return buildRfc64PrivateRuntimeProvenanceV1(sourceBuild, processes);
+      return buildRfc64PrivateRuntimeProvenanceV2(sourceBuild, processes);
     },
   });
 }
 
-export function assertRfc64PrivateRuntimeProvenanceV1(provenance) {
-  return assertPersistedRuntimeProcessProvenanceV1(provenance, {
+export function assertRfc64PrivateRuntimeProvenanceV2(provenance) {
+  return assertPersistedRuntimeProcessProvenanceV2(provenance, {
     processIds: RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
-    schema: RFC64_PRIVATE_RUNTIME_PROVENANCE_SCHEMA_V1,
+    schema: RFC64_PRIVATE_RUNTIME_PROVENANCE_SCHEMA_V2,
   });
 }
