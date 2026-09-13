@@ -1,35 +1,41 @@
-import { createHash } from 'node:crypto';
-import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
+// SPDX-License-Identifier: Apache-2.0
+
 import { VmRecoveryBatchTransaction } from './vm-recovery-batch-transaction.js';
+import {
+  captureRotation,
+  createRotationRecord,
+  hasUnconfirmedAbsence,
+  membershipMatches,
+  reviseRotationRoster,
+  rotationSnapshot,
+  settleRotationAttempt,
+  vmRecoverySlotKey,
+  vmRecoveryTargetFingerprint,
+  type VmRecoveryAdmissionParams,
+  type VmRecoveryAttemptDisposition,
+  type VmRecoveryRotationPolicy,
+  type VmRecoveryRotationRecord,
+  type VmRecoveryRotationSnapshot,
+  type VmRecoverySlotCapture,
+  type VmRecoverySlotHandle,
+  type VmRecoverySlotLocator,
+  type VmRecoveryTarget,
+} from './vm-recovery-rotation-evidence.js';
+import { VmRecoverySlotCapacity, type VmRecoveryPendingAdmission } from './vm-recovery-slot-capacity.js';
 import { VmRecoverySlotGeneration, VmRecoverySlotLease } from './vm-recovery-slot-lifetimes.js';
 
-type Target = Pick<OrdinalRecoveryTarget, 'localCgId' | 'onChainCgId' | 'ordinal' | 'ual' | 'merkleRoot'>;
-type SlotLocator = Pick<Target, 'localCgId' | 'onChainCgId' | 'ordinal'>;
+export type {
+  VmRecoveryAdmissionParams,
+  VmRecoveryAttemptDisposition,
+  VmRecoveryRotationPolicy,
+  VmRecoveryRotationSnapshot,
+  VmRecoverySlotCapture,
+  VmRecoverySlotHandle,
+} from './vm-recovery-rotation-evidence.js';
+export { vmRecoverySlotKey, vmRecoveryTargetFingerprint } from './vm-recovery-rotation-evidence.js';
 
-/** Point-in-time evidence, independent of the token authorizing slot commands. */
-export interface VmRecoveryRotationSnapshot extends Readonly<SlotLocator> {
-  readonly fingerprint: string;
-  readonly phase: 'collecting' | 'backoff';
-  readonly backoffKind?: 'clean-absence' | 'incomplete-cycle';
-  readonly candidatePeerIds: readonly string[];
-  readonly attemptedPeerIds: readonly string[];
-  readonly cleanAbsentPeerIds: readonly string[];
-  readonly curatorRosterConfirmed: boolean;
-  readonly collectionDeadlineAt: number;
-  readonly lastAttemptedPeerId?: string;
-  readonly failures: number;
-  readonly nextRetryAt: number;
-}
-
-
-declare const slotHandleBrand: unique symbol;
-/** Opaque authority for exactly one retained slot generation. */
-export type VmRecoverySlotHandle = symbol & { readonly [slotHandleBrand]: true };
-
-export interface VmRecoverySlotCapture {
-  readonly handle: VmRecoverySlotHandle;
-  readonly snapshot: VmRecoveryRotationSnapshot;
-}
+type Target = VmRecoveryTarget;
+type SlotLocator = VmRecoverySlotLocator;
 
 /** Explicit outcome of one preparation; a slot travels only with the states that retain one. */
 export type VmRecoveryPreparation =
@@ -47,20 +53,6 @@ export type VmRecoveryPreparation =
 /** Preparations that expose a target for transport. */
 export type VmRecoveryEligiblePreparation = Extract<VmRecoveryPreparation, { kind: 'owned' | 'evidence-free' }>;
 
-type MutableRotationRecord = { readonly handle: VmRecoverySlotHandle } & {
-  -readonly [K in keyof VmRecoveryRotationSnapshot]: VmRecoveryRotationSnapshot[K] extends readonly (infer V)[]
-    ? Set<V> : VmRecoveryRotationSnapshot[K];
-};
-
-export interface VmRecoveryRotationPolicy {
-  readonly now: number;
-  readonly getLocalPeerId: () => string;
-  readonly baseBackoffMs: number;
-  readonly maxBackoffMs: number;
-}
-
-export type VmRecoveryAttemptDisposition = 'found' | 'clean-absent' | 'incomplete';
-
 /** One completed physical attempt awaiting credit against the roster it was captured under. */
 export interface VmRecoveryAttemptSettlement {
   readonly peerId: string | undefined;
@@ -72,41 +64,12 @@ export interface VmRecoveryAttemptSettlement {
 /** Outcome of the post-fetch transition. */
 export type VmRecoveryPostFetchTransition = 'settled' | 'revalidated' | 'stale';
 
-
-function membershipMatches(left: ReadonlySet<string>, right: readonly string[]): boolean {
-  return left.size === right.length && right.every(peer => left.has(peer));
-}
-
-export function vmRecoverySlotKey(target: SlotLocator): string {
-  return `${target.localCgId}\0${target.onChainCgId}\0${target.ordinal}`;
-}
-
-export function vmRecoveryTargetFingerprint(target: Pick<Target, 'ual' | 'merkleRoot'>): string {
-  return `${target.ual}\0${target.merkleRoot.toLowerCase()}`;
-}
-
+/** One keyed aggregate: retained evidence plus the active cancellation generation. */
 interface SlotState {
   readonly localCgId: string;
   readonly fingerprint: string;
-  record?: MutableRotationRecord;
+  record?: VmRecoveryRotationRecord;
   generation?: VmRecoverySlotGeneration;
-  reservation?: { readonly kind: 'requester' | 'donor'; readonly admission: SlotAdmission };
-}
-
-interface SlotAdmission {
-  readonly key: string;
-  readonly target: Target;
-  readonly slot: SlotState;
-  readonly donor?: { readonly key: string; readonly slot: SlotState; readonly record: MutableRotationRecord };
-  /** The requesting lease: its own successful donation detaches it instead of canceling it. */
-  readonly exempt?: VmRecoverySlotLease;
-  active: boolean;
-}
-
-export interface VmRecoveryAdmissionParams {
-  readonly candidatePeerIds: readonly string[];
-  readonly curatorRosterConfirmed: boolean;
-  readonly collectionDeadlineAt: number;
 }
 
 export interface VmRecoverySlotScope {
@@ -132,33 +95,18 @@ export type VmRecoverySlotReservation =
   | { readonly kind: 'reserved'; readonly reservation: VmRecoverySlotAdmissionReservation }
   | { readonly kind: 'deferred' };
 
-/** One aggregate owns each slot's retained proof, active generation, and reservation. */
+/**
+ * Coordinates one slot aggregate per target. Evidence transitions live in the
+ * rotation-evidence reducer, bounded capacity and donor reservations in the
+ * capacity store, and cancellation in the lifetimes module; this class owns
+ * the storage and the order in which those pieces observe each transition.
+ */
 export class VmRecoverySlotRegistry {
   private readonly slots = new Map<string, SlotState>();
-  private rotationSnapshot(state: MutableRotationRecord): VmRecoveryRotationSnapshot {
-    const { handle: _handle, candidatePeerIds, attemptedPeerIds, cleanAbsentPeerIds, ...fields } = state;
-    return Object.freeze({
-      ...fields,
-      candidatePeerIds: Object.freeze([...candidatePeerIds]),
-      attemptedPeerIds: Object.freeze([...attemptedPeerIds]),
-      cleanAbsentPeerIds: Object.freeze([...cleanAbsentPeerIds]),
-    });
-  }
+  private readonly capacity: VmRecoverySlotCapacity;
 
-  private captureState(state: MutableRotationRecord): VmRecoverySlotCapture {
-    return Object.freeze({ handle: state.handle, snapshot: this.rotationSnapshot(state) });
-  }
-
-  private peekState(target: Target): MutableRotationRecord | undefined {
-    const slot = this.slots.get(vmRecoverySlotKey(target));
-    return slot?.fingerprint === vmRecoveryTargetFingerprint(target) ? slot.record : undefined;
-  }
-
-
-  constructor(private readonly maxEntries: number) {
-    if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0) {
-      throw new RangeError('VM recovery slot capacity must be a positive safe integer');
-    }
+  constructor(maxEntries: number) {
+    this.capacity = new VmRecoverySlotCapacity(maxEntries);
   }
 
   get recordCount(): number {
@@ -170,37 +118,42 @@ export class VmRecoverySlotRegistry {
   /** Detached point-in-time values for diagnostics; snapshots carry no command authority. */
   snapshot(): ReadonlyMap<string, VmRecoveryRotationSnapshot> {
     const records = new Map<string, VmRecoveryRotationSnapshot>();
-    for (const [key, slot] of this.slots) if (slot.record) records.set(key, this.rotationSnapshot(slot.record));
+    for (const [key, slot] of this.slots) if (slot.record) records.set(key, rotationSnapshot(slot.record));
     return records;
   }
 
   /** Capture a stable read model and the current generation's command token. */
   capture(target: Target): VmRecoverySlotCapture | undefined {
     const state = this.peekState(target);
-    return state ? this.captureState(state) : undefined;
+    return state ? captureRotation(state) : undefined;
   }
 
   peekSnapshot(target: Target): VmRecoveryRotationSnapshot | undefined {
     const state = this.peekState(target);
-    return state ? this.rotationSnapshot(state) : undefined;
-  }
-
-  private currentState(target: Target, handle: VmRecoverySlotHandle): MutableRotationRecord | undefined {
-    const state = this.peekState(target);
-    return state && state.handle === handle ? state : undefined;
+    return state ? rotationSnapshot(state) : undefined;
   }
 
   read(target: Target, handle: VmRecoverySlotHandle): VmRecoveryRotationSnapshot | undefined {
     const state = this.currentState(target, handle);
-    return state ? this.rotationSnapshot(state) : undefined;
+    return state ? rotationSnapshot(state) : undefined;
   }
 
   isCurrent(target: Target, handle: VmRecoverySlotHandle): boolean {
     return this.currentState(target, handle) !== undefined;
   }
 
+  private peekState(target: Target): VmRecoveryRotationRecord | undefined {
+    const slot = this.slots.get(vmRecoverySlotKey(target));
+    return slot?.fingerprint === vmRecoveryTargetFingerprint(target) ? slot.record : undefined;
+  }
+
+  private currentState(target: Target, handle: VmRecoverySlotHandle): VmRecoveryRotationRecord | undefined {
+    const state = this.peekState(target);
+    return state && state.handle === handle ? state : undefined;
+  }
+
   private prune(key: string, slot: SlotState): void {
-    if (!slot.record && !slot.generation && !slot.reservation && this.slots.get(key) === slot) {
+    if (!slot.record && !slot.generation && !this.capacity.pendingAt(key) && this.slots.get(key) === slot) {
       this.slots.delete(key);
     }
   }
@@ -210,7 +163,8 @@ export class VmRecoverySlotRegistry {
     const key = vmRecoverySlotKey(target);
     const slot = this.slots.get(key);
     if (!slot) return;
-    if (slot.reservation) this.releaseAdmission(slot.reservation.admission);
+    const pending = this.capacity.pendingAt(key);
+    if (pending) this.releaseAdmission(pending);
     slot.record = undefined;
     this.prune(key, slot);
   }
@@ -221,36 +175,6 @@ export class VmRecoverySlotRegistry {
     const slot = this.slots.get(key)!;
     this.slots.delete(key);
     this.slots.set(key, slot);
-  }
-
-  /** Count the requester that will own reserved capacity, not its departing donor. */
-  private ownsCapacity(slot: SlotState): boolean {
-    return slot.reservation?.kind === 'requester' || (slot.record !== undefined && slot.reservation?.kind !== 'donor');
-  }
-
-  private occupiedCapacity(): number {
-    let count = 0;
-    for (const slot of this.slots.values()) if (this.ownsCapacity(slot)) count++;
-    return count;
-  }
-
-  private findDonor(requestingCgId: string, now: number): SlotAdmission['donor'] {
-    const countsByCg = new Map<string, number>();
-    for (const [key, slot] of this.slots) {
-      if (this.ownsCapacity(slot)) countsByCg.set(slot.localCgId, (countsByCg.get(slot.localCgId) ?? 0) + 1);
-      const record = slot.record;
-      if (!record || slot.reservation) continue;
-      if ((record.phase === 'backoff' && now < record.nextRetryAt)
-        || (record.phase === 'collecting' && now < record.collectionDeadlineAt)) continue;
-      return { key, slot, record };
-    }
-    if (!requestingCgId || (countsByCg.get(requestingCgId) ?? 0) !== 0) return undefined;
-    for (const [key, slot] of this.slots) {
-      if (slot.record && !slot.reservation && (countsByCg.get(slot.localCgId) ?? 0) > 1) {
-        return { key, slot, record: slot.record };
-      }
-    }
-    return undefined;
   }
 
   private observedSlot(target: Target): SlotState | undefined {
@@ -275,67 +199,50 @@ export class VmRecoverySlotRegistry {
     return admission.kind === 'reserved' ? admission.reservation.commit(params) : admission;
   }
 
-  private reserveAdmission(
-    target: Target,
-    now: number,
-    exempt?: VmRecoverySlotLease,
-  ): VmRecoverySlotReservation {
+  private reserveAdmission(target: Target, now: number, exempt?: VmRecoverySlotLease): VmRecoverySlotReservation {
     const key = vmRecoverySlotKey(target);
     const slot = this.observedSlot(target);
     if (!slot) return { kind: 'deferred' };
-    if (slot.record) return { kind: 'existing', slot: this.captureState(slot.record) };
-    if (slot.reservation) return { kind: 'deferred' };
-    const hasOpenCapacity = this.occupiedCapacity() < this.maxEntries;
-    const donor = hasOpenCapacity ? undefined : this.findDonor(target.localCgId, now);
-    if (!hasOpenCapacity && !donor) {
+    if (slot.record) return { kind: 'existing', slot: captureRotation(slot.record) };
+    const pending = this.capacity.reserve(key, target.localCgId, this.slots, now, exempt);
+    if (!pending) {
       this.prune(key, slot);
       return { kind: 'deferred' };
     }
-    const admission: SlotAdmission = { key, target: { ...target }, slot, donor, exempt, active: true };
-    slot.reservation = { kind: 'requester', admission };
-    if (donor) donor.slot.reservation = { kind: 'donor', admission };
+    const claimed = { ...target };
     return {
       kind: 'reserved',
       reservation: {
-        commit: params => this.commitAdmission(admission, params),
-        release: () => this.releaseAdmission(admission),
+        commit: params => this.commitAdmission(claimed, pending, params),
+        release: () => this.releaseAdmission(pending),
       },
     };
   }
 
-  private releaseAdmission(admission: SlotAdmission): void {
-    if (!admission.active) return;
-    admission.active = false;
-    for (const entry of [admission, admission.donor]) {
-      if (!entry) continue;
-      if (entry.slot.reservation?.admission === admission) entry.slot.reservation = undefined;
-      this.prune(entry.key, entry.slot);
+  private releaseAdmission(pending: VmRecoveryPendingAdmission): void {
+    for (const key of this.capacity.release(pending)) {
+      const slot = this.slots.get(key);
+      if (slot) this.prune(key, slot);
     }
   }
 
-  private commitAdmission(admission: SlotAdmission, params: VmRecoveryAdmissionParams): VmRecoverySlotAdmission {
-    const { key, slot, donor, target } = admission;
-    let record: MutableRotationRecord | undefined;
+  private commitAdmission(
+    target: Target,
+    pending: VmRecoveryPendingAdmission,
+    params: VmRecoveryAdmissionParams,
+  ): VmRecoverySlotAdmission {
+    const { key, donor: donation } = pending;
+    const slot = this.slots.get(key);
+    const donor = donation && this.slots.get(donation.key);
+    let record: VmRecoveryRotationRecord | undefined;
     let installed = false;
     let donorDetached = false;
     try {
-      if (params.candidatePeerIds.length === 0) return { kind: 'deferred' };
-      if (!admission.active || this.slots.get(key) !== slot
-        || slot.reservation?.admission !== admission) return { kind: 'deferred' };
-      record = {
-        handle: Symbol('vm-recovery-slot') as VmRecoverySlotHandle,
-        localCgId: target.localCgId, onChainCgId: target.onChainCgId, ordinal: target.ordinal,
-        fingerprint: slot.fingerprint, phase: 'collecting',
-        candidatePeerIds: new Set(params.candidatePeerIds), attemptedPeerIds: new Set(),
-        cleanAbsentPeerIds: new Set(), curatorRosterConfirmed: params.curatorRosterConfirmed,
-        collectionDeadlineAt: params.collectionDeadlineAt, failures: 0, nextRetryAt: 0,
-      };
-      if (!admission.active || this.slots.get(key) !== slot || slot.record
-        || (donor && (this.slots.get(donor.key) !== donor.slot || donor.slot.record !== donor.record))) {
-        return { kind: 'deferred' };
-      }
+      if (params.candidatePeerIds.length === 0 || !this.capacity.isActive(pending) || !slot || slot.record
+        || (donation && donor?.record !== donation.record)) return { kind: 'deferred' };
+      record = createRotationRecord(target, slot.fingerprint, params);
       if (donor) {
-        donor.slot.record = undefined;
+        donor.record = undefined;
         donorDetached = true;
       }
       this.onRetention('before', key);
@@ -344,19 +251,19 @@ export class VmRecoverySlotRegistry {
       this.slots.set(key, slot);
       this.onRetention('after', key);
       installed = this.slots.get(key) === slot && slot.record === record;
-      return installed ? { kind: 'admitted', slot: this.captureState(record) } : { kind: 'deferred' };
+      return installed ? { kind: 'admitted', slot: captureRotation(record) } : { kind: 'deferred' };
     } finally {
       if (!installed) {
-        if (record && slot.record === record) slot.record = undefined;
-        if (donorDetached && donor && this.slots.get(donor.key) === donor.slot && !donor.slot.record) {
-          donor.slot.record = donor.record;
+        if (slot && record && slot.record === record) slot.record = undefined;
+        if (donorDetached && donor && donation && this.slots.get(donation.key) === donor && !donor.record) {
+          donor.record = donation.record;
         }
       }
-      this.releaseAdmission(admission);
+      this.releaseAdmission(pending);
       // The requester is installed and capacity accounting is settled before
       // donor abort listeners run. Only the requesting lease is detached
       // without cancellation; external invalidations exempt no one.
-      if (installed && donor) this.invalidateSlot(donor.key, donor.slot, admission.exempt);
+      if (installed && donor && donation) this.invalidateSlot(donation.key, donor, pending.exempt);
     }
   }
 
@@ -370,9 +277,9 @@ export class VmRecoverySlotRegistry {
     now: number,
     reservation?: VmRecoverySlotAdmissionReservation,
   ): VmRecoveryPreparation {
-    const { candidatePeerIds, curatorRosterConfirmed } = params;
     this.observeTarget(target);
-    const observed = this.slots.get(vmRecoverySlotKey(target));
+    const key = vmRecoverySlotKey(target);
+    const observed = this.slots.get(key);
     if (observed && observed.fingerprint !== vmRecoveryTargetFingerprint(target)) {
       // Invalidation listeners may install a replacement synchronously. This
       // command cannot observe the old target again and retire that new owner.
@@ -380,15 +287,11 @@ export class VmRecoverySlotRegistry {
       return { kind: 'invalidated' };
     }
     let record = this.peekState(target);
-    if (
-      record?.phase === 'backoff'
-      && record.backoffKind === 'clean-absence'
-      && (!record.curatorRosterConfirmed || !curatorRosterConfirmed)
-    ) {
+    if (record && hasUnconfirmedAbsence(record, params.curatorRosterConfirmed)) {
       // Absence gathered while curator discovery was unavailable must not
       // suppress the next lookup: that lookup may reveal the only holder.
       this.invalidate(target);
-      if (this.slots.has(vmRecoverySlotKey(target))) {
+      if (this.slots.has(key)) {
         // Abort callbacks may already have installed a new owner, including
         // one with the same fingerprint. Do not re-observe or adopt it here.
         reservation?.release();
@@ -396,135 +299,34 @@ export class VmRecoverySlotRegistry {
       }
       record = undefined;
     }
-    if (candidatePeerIds.length === 0 && !record) {
-      reservation?.release();
-      return { kind: 'evidence-free' };
-    }
-    if (candidatePeerIds.length === 0 && record) {
-      // A transient empty socket view cannot invalidate a completed proof: doing
-      // so would redial and refetch every sweep after ordinary disconnects.
-      // Partial evidence is different and remains fail-open; drop it so the next
-      // non-empty roster starts a genuinely fresh cycle.
-      if (record?.phase === 'backoff' && now < record.nextRetryAt) {
-        this.touch(target, record.handle);
-        return { kind: 'backoff', slot: this.captureState(record) };
-      }
-      return this.retireForPreparation(target);
-    }
-
     if (!record) {
-      const admission = reservation
-        ? reservation.commit(params)
-        : this.admit(target, params, now);
-      if (admission.kind === 'deferred') {
-        // Preserve the pressure bound at cap: an unowned target cannot retain
-        // exponential retry state, so running elevated exact transport here
-        // would replay it every sweep. Defer until an expired/resolved slot is
-        // available; this is process-local scheduling, never absence evidence.
-        return { kind: 'deferred' };
+      if (params.candidatePeerIds.length === 0) {
+        reservation?.release();
+        return { kind: 'evidence-free' };
       }
-      return { kind: 'owned', slot: admission.slot };
+      const admission = reservation ? reservation.commit(params) : this.admit(target, params, now);
+      // Preserve the pressure bound at cap: an unowned target cannot retain
+      // exponential retry state, so running elevated exact transport here
+      // would replay it every sweep. Defer until an expired/resolved slot is
+      // available; this is process-local scheduling, never absence evidence.
+      return admission.kind === 'deferred' ? { kind: 'deferred' } : { kind: 'owned', slot: admission.slot };
     }
-
-    const membershipUnchanged = membershipMatches(
-      record.candidatePeerIds,
-      candidatePeerIds,
-    );
-    const rosterProofUpgraded = !record.curatorRosterConfirmed && curatorRosterConfirmed;
-    if (!membershipUnchanged) {
-      const priorCycleWasIncomplete = record.backoffKind === 'incomplete-cycle'
-        || [...record.attemptedPeerIds]
-          .some((peerId) => !record.cleanAbsentPeerIds.has(peerId));
-      const previousCandidatePeerIds = record.candidatePeerIds;
-      const nextCandidatePeerIds = new Set(candidatePeerIds);
-      record.candidatePeerIds = new Set(candidatePeerIds);
-      record.curatorRosterConfirmed = curatorRosterConfirmed;
-      const removedPeer = [...previousCandidatePeerIds]
-        .some((peerId) => !nextCandidatePeerIds.has(peerId));
-      if (removedPeer) {
-        // A proof roster is a set, not an accumulation of surviving credits.
-        // Any removal/replacement invalidates the whole cycle so shrink can
-        // never manufacture exhaustion or preserve an active suppression.
-        record.phase = 'collecting';
-        record.backoffKind = undefined;
-        record.nextRetryAt = 0;
-        record.attemptedPeerIds.clear();
-        record.cleanAbsentPeerIds.clear();
-        record.lastAttemptedPeerId = undefined;
-        record.collectionDeadlineAt = params.collectionDeadlineAt;
-      } else if (!rosterProofUpgraded) {
-        // Pure growth preserves valid credits for retained identities, but the
-        // newly observed peer is uncredited and immediately breaks backoff.
-        // Do not let a publication-window incomplete response compound into
-        // multi-minute suppression merely because startup discovers the same
-        // recovery roster one peer at a time. Clean-absence history still
-        // keeps its exponential damping; only transport/timing uncertainty
-        // starts a fresh base-delay epoch when the evidence universe grows.
-        record.phase = 'collecting';
-        record.backoffKind = undefined;
-        record.nextRetryAt = 0;
-        if (priorCycleWasIncomplete) record.failures = 0;
-        record.collectionDeadlineAt = params.collectionDeadlineAt;
-      }
-    } else {
-      record.curatorRosterConfirmed = curatorRosterConfirmed;
-    }
-    if (rosterProofUpgraded) {
-      // A peer response gathered while curator discovery was unconfirmed is
-      // useful transport evidence, not authoritative absence proof. Reprobe
-      // the complete now-authoritative roster even when that roster also grew.
-      record.phase = 'collecting';
-      record.backoffKind = undefined;
-      record.nextRetryAt = 0;
-      record.attemptedPeerIds.clear();
-      record.cleanAbsentPeerIds.clear();
-      record.lastAttemptedPeerId = undefined;
-      record.collectionDeadlineAt = params.collectionDeadlineAt;
-    }
-    if (record.phase === 'backoff') {
-      if (now < record.nextRetryAt) {
+    switch (reviseRotationRoster(record, params, now)) {
+      case 'backoff':
         this.touch(target, record.handle);
-        return { kind: 'backoff', slot: this.captureState(record) };
-      }
-      // A deadline only opens a new collection cycle. It never earns another
-      // failure/backoff without fresh clean-absence evidence from every peer.
-      record.phase = 'collecting';
-      record.backoffKind = undefined;
-      record.attemptedPeerIds.clear();
-      record.cleanAbsentPeerIds.clear();
-      record.collectionDeadlineAt = params.collectionDeadlineAt;
-      record.nextRetryAt = 0;
-    } else if (now >= record.collectionDeadlineAt) {
-      // Expired partial evidence fails open and releases its cache slot. Return
-      // evidence-free for this pass so a repeatedly ineligible roster cannot
-      // refresh all collecting entries just before capacity admission runs.
-      return this.retireForPreparation(target);
+        return { kind: 'backoff', slot: captureRotation(record) };
+      case 'expired':
+        return this.retireForPreparation(target);
+      case 'collecting':
+        this.touch(target, record.handle);
+        return { kind: 'owned', slot: captureRotation(record) };
     }
-
-    this.touch(target, record.handle);
-    return { kind: 'owned', slot: this.captureState(record) };
   }
 
-  private enterBackoff(target: Target, record: MutableRotationRecord,
-    kind: NonNullable<VmRecoveryRotationSnapshot['backoffKind']>, policy: VmRecoveryRotationPolicy): void {
-    record.failures += 1;
-    const exponentialBackoff = Math.min(
-      policy.maxBackoffMs,
-      policy.baseBackoffMs
-        * 2 ** Math.max(0, record.failures - 1),
-    );
-    const jitterSample = createHash('sha256')
-      .update(`${policy.getLocalPeerId()}\0${target.localCgId}\0${target.onChainCgId}\0${target.ordinal}\0${record.fingerprint}\0${record.failures}`)
-      .digest()
-      .readUInt32BE(0) / 0x1_0000_0000;
-    const backoff = Math.min(
-      policy.maxBackoffMs,
-      Math.max(1, Math.round(exponentialBackoff * (0.8 + jitterSample * 0.4))),
-    );
-    record.phase = 'backoff';
-    record.backoffKind = kind;
-    record.collectionDeadlineAt = 0;
-    record.nextRetryAt = policy.now + backoff;
+  /** Retire only this preparation's owner; never adopt a replacement created by an abort callback. */
+  private retireForPreparation(target: Target): VmRecoveryPreparation {
+    this.invalidate(target);
+    return { kind: this.slots.has(vmRecoverySlotKey(target)) ? 'invalidated' : 'evidence-free' };
   }
 
   settleAttempt(
@@ -538,44 +340,9 @@ export class VmRecoverySlotRegistry {
   ): void {
     const record = this.currentState(target, handle);
     if (!record) return;
-    if (!membershipMatches(
-      record.candidatePeerIds,
-      expectedCandidatePeerIds,
-    )) return;
-    if (peerId !== undefined && !record.candidatePeerIds.has(peerId)) return;
-
-    if (peerId !== undefined) {
-      record.lastAttemptedPeerId = peerId;
-      record.attemptedPeerIds.add(peerId);
-      if (disposition === 'clean-absent') record.cleanAbsentPeerIds.add(peerId);
-      // Preserve fairly accumulated proof progress while other targets share
-      // the bounded peer budget. A cycle expires only after this slot itself
-      // stops making physical progress for the effective maximum.
-      record.collectionDeadlineAt = policy.now
-        + policy.maxBackoffMs;
+    if (settleRotationAttempt(target, record, peerId, disposition, expectedCandidatePeerIds, policy, unavailablePeerIds)) {
+      this.touch(target, record.handle);
     }
-    const scheduledEveryPeer = record.candidatePeerIds.size > 0 && [...record.candidatePeerIds]
-      .every((candidatePeerId) => record.attemptedPeerIds.has(candidatePeerId)
-        || unavailablePeerIds.has(candidatePeerId));
-    const cleanAbsentFromEveryPeer = record.candidatePeerIds.size > 0 && [...record.candidatePeerIds]
-      .every((candidatePeerId) => record.cleanAbsentPeerIds.has(candidatePeerId));
-    const completedBackoffKind = cleanAbsentFromEveryPeer
-      ? 'clean-absence'
-      : scheduledEveryPeer
-        ? 'incomplete-cycle'
-        : undefined;
-    if (completedBackoffKind && record.curatorRosterConfirmed) {
-      if (record.phase === 'backoff') {
-        // Post-fetch reconciliation may upgrade the physical attempt already
-        // credited above. It is the same cycle, so retain one failure epoch.
-        if (completedBackoffKind === 'clean-absence') {
-          record.backoffKind = 'clean-absence';
-        }
-      } else {
-        this.enterBackoff(target, record, completedBackoffKind, policy);
-      }
-    }
-    this.touch(target, record.handle);
   }
 
   /**
@@ -608,12 +375,6 @@ export class VmRecoverySlotRegistry {
     return 'settled';
   }
 
-  /** Retire only this preparation's owner; never adopt a replacement created by an abort callback. */
-  private retireForPreparation(target: Target): VmRecoveryPreparation {
-    this.invalidate(target);
-    return { kind: this.slots.has(vmRecoverySlotKey(target)) ? 'invalidated' : 'evidence-free' };
-  }
-
   beginBatch(): VmRecoveryBatchTransaction {
     return new VmRecoveryBatchTransaction(this);
   }
@@ -626,8 +387,8 @@ export class VmRecoverySlotRegistry {
 
   /** Reserved donor evidence is immutable until its atomic donation commits or rolls back. */
   isReservedDonor(target: Target, handle: VmRecoverySlotHandle): boolean {
-    const slot = this.slots.get(vmRecoverySlotKey(target));
-    return slot?.record?.handle === handle && slot.reservation?.kind === 'donor';
+    const key = vmRecoverySlotKey(target);
+    return this.slots.get(key)?.record?.handle === handle && this.capacity.isReservedDonor(key);
   }
 
   begin(): VmRecoverySlotScope {
@@ -702,7 +463,8 @@ export class VmRecoverySlotRegistry {
   private invalidateSlot(key: string, slot: SlotState, exempt?: VmRecoverySlotLease): void {
     if (this.slots.get(key) !== slot) return;
     this.slots.delete(key);
-    if (slot.reservation) this.releaseAdmission(slot.reservation.admission);
+    const pending = this.capacity.pendingAt(key);
+    if (pending) this.releaseAdmission(pending);
     slot.record = undefined;
     slot.generation?.end(exempt);
   }
