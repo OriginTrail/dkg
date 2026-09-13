@@ -458,8 +458,23 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       { source: 'agent.contextGraph.registrationStatus' },
     );
     if (result.type !== 'bindings') return null;
-    const status = result.bindings[0]?.['status']?.replace(/^"|"$/g, '');
+    const rawStatus = result.bindings[0]?.['status'];
+    const status = rawStatus === undefined ? undefined : stripLiteral(rawStatus);
     return status === 'registered' || status === 'unregistered' ? status : null;
+  }
+
+  /**
+   * Canonical proof for the no-chain local-first path. Origin alone is not
+   * enough: the graph must also lack a bound numeric slot and carry the exact
+   * durable unregistered marker.
+   */
+  async isLocalFirstUnregisteredContextGraph(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<boolean> {
+    return this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
+      && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
+      && await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered';
   }
 
   /**
@@ -677,12 +692,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // populated only by the local create boundary (and its durable membership
     // record), while the RDF status is the transactionally updated register
     // boundary; neither fact is inferred from remote discovery.
-    if (
-      this.locallyCreatedContextGraphs?.has(contextGraphId) === true
-      && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
-    ) {
+    if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
       try {
-        if (await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered') {
+        if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
           return { kind: 'unregistered' };
         }
       } catch (err) {
@@ -963,12 +975,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // rule: only this node's local-create projection plus the explicit durable
     // `unregistered` value can short-circuit. Missing/malformed state and
     // remotely discovered graphs continue through authoritative resolution.
-    if (
-      this.locallyCreatedContextGraphs?.has(contextGraphId) === true
-      && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
-    ) {
+    if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
       try {
-        if (await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered') {
+        if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
           return {};
         }
       } catch {

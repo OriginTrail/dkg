@@ -12,7 +12,7 @@ import {
 describe('Context Graph registration resolution deadlines', () => {
   it('keeps an explicitly local-created unregistered graph independent of chain RPC', async () => {
     const fixture = selectedFixture();
-    fixture.agent.locallyCreatedContextGraphs.add(LOCAL_ID);
+    fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
     fixture.query.mockResolvedValueOnce({
       type: 'bindings',
       bindings: [{ status: '"unregistered"' }],
@@ -28,7 +28,7 @@ describe('Context Graph registration resolution deadlines', () => {
 
   it('does not infer unregistered when the durable local marker is missing', async () => {
     const fixture = selectedFixture();
-    fixture.agent.locallyCreatedContextGraphs.add(LOCAL_ID);
+    fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
 
     await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
       .resolves.toEqual({

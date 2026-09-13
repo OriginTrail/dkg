@@ -700,6 +700,11 @@ export class ContextGraphMethods extends DKGAgentBase {
     // before the caller is told it succeeded.
     await this.store.flush?.();
 
+    // From this boundary onward the graph exists durably. Origin is an
+    // immutable fact, so publish its runtime projection before any best-effort
+    // subscription, membership, gossip, or RFC-64 follow-up can run.
+    this.localContextGraphProvenance.recordLocalCreate(opts.id);
+
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
       subscribed: !opts.private,
@@ -721,27 +726,18 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     const curatorAgentAddress = opts.callerAgentAddress ?? this.defaultAgentAddress;
     if (curatorAgentAddress) {
-      // This record is the restart-safe provenance for the local-first SWM
-      // path. Publish the process-local projection before reconciliation, but
-      // roll it back if the durable write fails.
-      this.locallyCreatedContextGraphs.add(opts.id);
-      try {
-        await this.upsertContextGraphMember({
-          contextGraphId: opts.id,
-          principalType: 'agent',
-          principalId: curatorAgentAddress,
-          role: 'curator',
-          status: 'active',
-          source: 'local-create',
-        }, { strict: true });
-      } catch (error) {
-        this.locallyCreatedContextGraphs.delete(opts.id);
-        throw error;
-      }
-    } else {
-      // A graph without a configured agent cannot author SWM yet, but it still
-      // keeps local-first semantics for the lifetime of this process.
-      this.locallyCreatedContextGraphs.add(opts.id);
+      // Membership is a restart hint and roster projection, not the graph
+      // creation transaction. A configured-store failure after store.flush()
+      // must not report that the already-durable graph failed to be created.
+      // The creator RDF fact is the compatible restart fallback.
+      await this.upsertContextGraphMember({
+        contextGraphId: opts.id,
+        principalType: 'agent',
+        principalId: curatorAgentAddress,
+        role: 'curator',
+        status: 'active',
+        source: 'local-create',
+      });
     }
 
     for (const peer of opts.allowedPeers ?? []) {

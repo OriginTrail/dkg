@@ -2662,6 +2662,7 @@ export class PublishMethods extends DKGAgentBase {
     this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
+    this.localContextGraphProvenance.recordLocalCreate(contextGraphId);
     const promotedSub = this.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
     this.setContextGraphSubscription(contextGraphId, {
       ...promotedSub,

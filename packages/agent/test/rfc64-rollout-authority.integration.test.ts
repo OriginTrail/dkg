@@ -1594,6 +1594,71 @@ describe('RFC-64 rollout authority integration', () => {
     });
   });
 
+  it('accepts local unregistered authority while the shared RPC circuit is open', async () => {
+    const contextGraphId = `${AUTHOR}/local-unregistered-open-circuit` as ContextGraphIdV1;
+    const resolveContextGraphIdByNameHash = vi.fn(async () => {
+      throw new Error('local unregistered authority must not query the CG registry');
+    });
+    const readAuthority = vi.fn(async () => {
+      throw new Error('local unregistered authority must not read a chain snapshot');
+    });
+    const edge = await startAgent({
+      name: 'local-unregistered-open-rpc-circuit',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          resolveContextGraphIdByNameHash,
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    await expect((edge as any).rfc64AuthorityReadCoordinatorV1.run(
+      undefined,
+      async () => {
+        throw new RpcEndpointsExhaustedError(
+          'unrelated registered authority exhausted every provider',
+          { exhaustionKind: 'mixed', retryAfterMs: 30_000 },
+        );
+      },
+    )).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({ state: 'open' });
+    const getContextGraphOnChainId = vi.spyOn(edge, 'getContextGraphOnChainId')
+      .mockRejectedValue(new Error('local unregistered authority must not resolve a chain id'));
+
+    await expect(edge.createContextGraph({
+      id: contextGraphId,
+      name: 'Local unregistered open circuit',
+      callerAgentAddress: AUTHOR,
+    })).resolves.toBeUndefined();
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
+      .resolves.toMatchObject({
+        policy: {
+          contextGraphId,
+          source: {
+            kind: 'owner-signed-unregistered',
+            ownerAddress: AUTHOR,
+          },
+        },
+      });
+
+    expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      contextGraphId,
+    )).toMatchObject({
+      policy: {
+        contextGraphId,
+        source: {
+          kind: 'owner-signed-unregistered',
+          ownerAddress: AUTHOR,
+        },
+      },
+    });
+    expect(getContextGraphOnChainId).not.toHaveBeenCalled();
+    expect(resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+    expect(readAuthority).not.toHaveBeenCalled();
+    expect(edge.readRfc64AuthorityRpcCircuitSnapshotV1()).toMatchObject({ state: 'open' });
+  });
+
   it('propagates caller cancellation into the registered authority snapshot read', async () => {
     let readSignal: AbortSignal | undefined;
     const readAuthority = vi.fn(async (

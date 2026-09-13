@@ -1725,11 +1725,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     // state. RFC-64 derives that graph's authority from authenticated local
     // metadata and must not start a contract-wide index scan merely to prove
     // the absence of a registration that this node has not requested.
-    if (
-      this.locallyCreatedContextGraphs?.has(contextGraphId) === true
-      && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
-      && await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered'
-    ) return null;
+    if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) return null;
 
     const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
     const expectedNameHash = explicitNameHash === undefined
@@ -2215,13 +2211,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         throw new Error('RFC-64 release-native authority requires a trusted chain network');
       }
       const boundOnChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId;
+      // This proof is entirely local. Run it before the shared RPC circuit so
+      // unrelated provider exhaustion cannot block authority for a graph that
+      // this node durably created and has not requested to register on-chain.
+      const localFirstUnregistered = boundOnChainId === undefined
+        && await this.isLocalFirstUnregisteredContextGraph(contextGraphId);
       const batchedSnapshot = boundOnChainId === undefined
         ? undefined
         : await this.readRfc64BatchedFinalizedAuthoritySnapshotV1(
             boundOnChainId,
             signal,
           );
-      const registeredAuthorityRead = batchedSnapshot !== undefined
+      const registeredAuthorityRead = localFirstUnregistered
+        ? null
+        : batchedSnapshot !== undefined
         ? (() => {
           if (batchedSnapshot === null || boundOnChainId === undefined) {
             throw new Rfc64CatalogAuthorityResolutionErrorV1(

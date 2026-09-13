@@ -60,11 +60,12 @@ interface AgentStub {
    * the cache-hit path will fall through to the chain-RPC fallback.
    */
   onChainPublishPolicyCacheUpdatedAt: Map<string, number>;
-  locallyCreatedContextGraphs: Set<string>;
+  localContextGraphProvenance: { hasLocalCreate(id: string): boolean };
   subscribedContextGraphs: Map<string, { onChainId?: string }>;
   readLocalContextGraphRegistrationStatus: (
     id: string,
   ) => Promise<'registered' | 'unregistered' | null>;
+  isLocalFirstUnregisteredContextGraph: (id: string) => Promise<boolean>;
   getContextGraphOnChainId: (id: string) => Promise<string | null>;
   isContextGraphRegistered: (id: string) => Promise<boolean>;
   getStoredContextGraphRegistrationOptions: (id: string) => Promise<{
@@ -81,9 +82,10 @@ function makeStub(overrides: Partial<AgentStub> = {}): AgentStub {
     onChainAccessPolicyCache: new Map(),
     onChainPublishPolicyCache: new Map(),
     onChainPublishPolicyCacheUpdatedAt: new Map(),
-    locallyCreatedContextGraphs: new Set(),
+    localContextGraphProvenance: { hasLocalCreate: () => false },
     subscribedContextGraphs: new Map(),
     readLocalContextGraphRegistrationStatus: recorder(async () => null),
+    isLocalFirstUnregisteredContextGraph: recorder(async () => false),
     getContextGraphOnChainId: recorder(async () => null),
     isContextGraphRegistered: recorder(async () => false),
     getStoredContextGraphRegistrationOptions: recorder(async () => ({})),
@@ -214,15 +216,36 @@ describe('DKGAgent.resolveCgCurationForAck', () => {
 });
 
 describe('DKGAgent.getContextGraphOnChainPolicy', () => {
+  it('parses typed durable registration-status literals through the canonical RDF helper', async () => {
+    const store = {
+      query: recorder(async () => ({
+        type: 'bindings' as const,
+        bindings: [{
+          status: '"unregistered"^^<http://www.w3.org/2001/XMLSchema#string>',
+        }],
+      })),
+    };
+
+    await expect(
+      (DKGAgent.prototype as any).readLocalContextGraphRegistrationStatus.call(
+        { store },
+        'cg-typed-registration-status',
+      ),
+    ).resolves.toBe('unregistered');
+  });
+
   it('does not resolve a name hash for an explicitly local-created durable unregistered CG', async () => {
     const getContextGraphOnChainId = recorder(async () => {
       throw new Error('CG registry RPC must not gate local-first SWM');
     });
     const readRegistrationStatus = recorder(async () => 'unregistered' as const);
     const stub = makeStub({
-      locallyCreatedContextGraphs: new Set(['cg-local-first']),
+      localContextGraphProvenance: { hasLocalCreate: (id) => id === 'cg-local-first' },
       subscribedContextGraphs: new Map([['cg-local-first', {}]]),
       readLocalContextGraphRegistrationStatus: readRegistrationStatus,
+      isLocalFirstUnregisteredContextGraph: recorder(async () => {
+        return await readRegistrationStatus('cg-local-first') === 'unregistered';
+      }),
       getContextGraphOnChainId,
     });
 
@@ -235,9 +258,10 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
   it('does not infer local-first policy when the durable registration marker is missing', async () => {
     const getContextGraphOnChainId = recorder(async () => null);
     const stub = makeStub({
-      locallyCreatedContextGraphs: new Set(['cg-local-marker-missing']),
+      localContextGraphProvenance: { hasLocalCreate: (id) => id === 'cg-local-marker-missing' },
       subscribedContextGraphs: new Map([['cg-local-marker-missing', {}]]),
       readLocalContextGraphRegistrationStatus: recorder(async () => null),
+      isLocalFirstUnregisteredContextGraph: recorder(async () => false),
       getContextGraphOnChainId,
     });
 

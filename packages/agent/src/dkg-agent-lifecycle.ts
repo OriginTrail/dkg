@@ -10000,7 +10000,77 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
+  /**
+   * Restore local-create origin independently from subscription activation.
+   *
+   * Membership rows are the primary restart hint. Older/custom membership
+   * stores may not implement loadAll, so the creator RDF fact is also read as
+   * a compatibility fallback. The fallback is accepted only when the creator
+   * is this node's persistent peer identity, the subject is a Context Graph,
+   * and the explicit unregistered marker lives in that graph's exact _meta
+   * graph.
+   */
+  async rehydrateLocalContextGraphProvenance(this: DKGAgent): Promise<Array<
+    ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
+  > | null> {
+    const ctx = createOperationContext('init');
+    const membershipStore = this.config.contextGraphMembershipStore;
+    let membershipRows: Array<
+      ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
+    > | null = null;
+    if (membershipStore?.loadAll) {
+      try {
+        membershipRows = await membershipStore.loadAll();
+        this.localContextGraphProvenance.restoreMembershipRecords(membershipRows);
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Failed to load local-create membership provenance: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    const contextGraphPrefix = 'did:dkg:context-graph:';
+    const selfCreatorDid = assertSafeIri(`did:dkg:agent:${this.peerId}`);
+    try {
+      const result = await this.store.query(`
+        SELECT DISTINCT ?contextGraph ?registrationGraph ?status WHERE {
+          GRAPH ?definitionGraph {
+            ?contextGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
+              <${DKG_ONTOLOGY.DKG_CREATOR}> <${selfCreatorDid}> .
+          }
+          GRAPH ?registrationGraph {
+            ?contextGraph <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status .
+          }
+        }
+      `, { source: 'agent.contextGraph.localCreateProvenance' });
+      if (result.type === 'bindings') {
+        for (const row of result.bindings) {
+          const contextGraphUri = strip(row['contextGraph'] ?? '');
+          if (!contextGraphUri.startsWith(contextGraphPrefix)) continue;
+          const contextGraphId = contextGraphUri.slice(contextGraphPrefix.length);
+          if (!contextGraphId) continue;
+          if (strip(row['registrationGraph'] ?? '') !== contextGraphMetaGraphUri(contextGraphId)) {
+            continue;
+          }
+          if (stripLiteral(row['status'] ?? '') !== 'unregistered') continue;
+          this.localContextGraphProvenance.recordLocalCreate(contextGraphId);
+        }
+      }
+    } catch (error) {
+      // A readable membership projection remains sufficient. Conversely, an
+      // RDF read remains sufficient when loadAll is unavailable. If both are
+      // unavailable, policy resolution keeps failing closed through chain.
+      this.log.warn(
+        ctx,
+        `Failed to restore RDF local-create provenance: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return membershipRows;
+  }
+
   async rehydrateContextGraphSubscriptions(this: DKGAgent): Promise<void> {
+    const persistedMembershipRows = await this.rehydrateLocalContextGraphProvenance();
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
     const ctx = createOperationContext('init');
@@ -10069,69 +10139,48 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
 
       // `pendingMeta` and the agent chosen for the first authenticated sync
-      // are deliberately in-memory state. Recover both from the durable
-      // join-approved membership fact before activating subscriptions. Load
-      // every persisted row (not just the rows that fit under the activation
-      // cap) so a dormant subscription still has the right signer when an
-      // operator later activates it explicitly.
-      const membershipStore = this.config.contextGraphMembershipStore;
-      if (membershipStore?.loadAll) {
-        try {
-          const persistedContextGraphIds = new Set(rows.map((row) => row.id));
-          const localAgentAddresses = new Set(
-            [...this.localAgents.keys()].map((address) => address.toLowerCase()),
-          );
-          const newestApprovalByContextGraph = new Map<string, {
-            principalId: string;
-            updatedAt: number;
-            curatorPeerId?: string;
-          }>();
-          for (const membership of await membershipStore.loadAll()) {
-            const principalId = membership.principalId.toLowerCase();
-            if (
-              membership.principalType === 'agent'
-              && membership.status === 'active'
-              && membership.source === 'local-create'
-              && persistedContextGraphIds.has(membership.contextGraphId)
-              && localAgentAddresses.has(principalId)
-            ) {
-              this.locallyCreatedContextGraphs.add(membership.contextGraphId);
-            }
-            if (
-              membership.principalType !== 'agent' ||
-              membership.status !== 'active' ||
-              membership.source !== 'join-approved' ||
-              !persistedContextGraphIds.has(membership.contextGraphId) ||
-              !localAgentAddresses.has(principalId)
-            ) {
-              continue;
-            }
-            const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
-            if (!existing || membership.updatedAt > existing.updatedAt) {
-              newestApprovalByContextGraph.set(membership.contextGraphId, {
-                principalId,
-                updatedAt: membership.updatedAt,
-                curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
-                  membership.metadata['curatorPeerId'].trim()
-                  ? membership.metadata['curatorPeerId'].trim()
-                  : undefined,
-              });
-            }
+      // are deliberately in-memory state. Recover both from the membership
+      // snapshot already read by the provenance phase. Load every persisted
+      // row (not just rows under the activation cap) so a dormant subscription
+      // still has the right signer when an operator activates it explicitly.
+      if (persistedMembershipRows !== null) {
+        const persistedContextGraphIds = new Set(rows.map((row) => row.id));
+        const localAgentAddresses = new Set(
+          [...this.localAgents.keys()].map((address) => address.toLowerCase()),
+        );
+        const newestApprovalByContextGraph = new Map<string, {
+          principalId: string;
+          updatedAt: number;
+          curatorPeerId?: string;
+        }>();
+        for (const membership of persistedMembershipRows) {
+          const principalId = membership.principalId.toLowerCase();
+          if (
+            membership.principalType !== 'agent' ||
+            membership.status !== 'active' ||
+            membership.source !== 'join-approved' ||
+            !persistedContextGraphIds.has(membership.contextGraphId) ||
+            !localAgentAddresses.has(principalId)
+          ) {
+            continue;
           }
-          for (const [contextGraphId, approval] of newestApprovalByContextGraph) {
-            this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
-            if (approval.curatorPeerId) {
-              this.preferredSyncPeers.set(contextGraphId, approval.curatorPeerId);
-            }
+          const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
+          if (!existing || membership.updatedAt > existing.updatedAt) {
+            newestApprovalByContextGraph.set(membership.contextGraphId, {
+              principalId,
+              updatedAt: membership.updatedAt,
+              curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
+                membership.metadata['curatorPeerId'].trim()
+                ? membership.metadata['curatorPeerId'].trim()
+                : undefined,
+            });
           }
-        } catch (err) {
-          // Membership recovery improves restart liveness but must never make
-          // the subscription store itself unavailable. A later explicit join
-          // or successful metadata sync still repairs the in-memory hint.
-          this.log.warn(
-            ctx,
-            `Failed to rehydrate join-approved context-graph memberships: ${err instanceof Error ? err.message : String(err)}`,
-          );
+        }
+        for (const [contextGraphId, approval] of newestApprovalByContextGraph) {
+          this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
+          if (approval.curatorPeerId) {
+            this.preferredSyncPeers.set(contextGraphId, approval.curatorPeerId);
+          }
         }
       }
 

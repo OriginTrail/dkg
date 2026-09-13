@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -192,6 +192,170 @@ describe('Context Graph discovery/subscription boundary', () => {
       await agent.stop().catch(() => {});
     }
   }, 30_000);
+
+  it.each([
+    ['membership persistence failure', true, false],
+    ['RFC-64 reconciliation failure', false, true],
+  ] as const)(
+    'keeps a durably committed local create successful after %s',
+    async (_label, failMembership, failReconciliation) => {
+      const contextGraphId = `post-commit-${failMembership ? 'membership' : 'rfc64'}-failure`;
+      const callerAgentAddress = ethers.Wallet.createRandom().address;
+      const persistedMemberships: Array<ContextGraphMembershipRecord & { updatedAt: number }> = [];
+      const chain = new MockChainAdapter();
+      const resolveContextGraphIdByNameHash = vi.fn(async () => {
+        throw new Error('chain RPC unavailable');
+      });
+      (chain as any).resolveContextGraphIdByNameHash = resolveContextGraphIdByNameHash;
+      const agent = await DKGAgent.create({
+        name: `PostCommit${failMembership ? 'Membership' : 'Rfc64'}Failure`,
+        listenHost: '127.0.0.1',
+        chainAdapter: chain,
+        contextGraphMembershipStore: {
+          loadAll: async () => persistedMemberships.map((record) => ({ ...record })),
+          upsert: async (record) => {
+            if (failMembership && record.source === 'local-create') {
+              throw new Error('membership persistence unavailable');
+            }
+            persistedMemberships.push({ ...record });
+          },
+          delete: async () => undefined,
+        },
+      });
+
+      try {
+        await agent.start();
+        const reconciliation = vi.spyOn(
+          agent as any,
+          'reconcileRfc64CatalogResponsibilityV1',
+        );
+        if (failReconciliation) {
+          reconciliation.mockRejectedValue(new Error('RFC-64 authority unavailable'));
+        }
+
+        await expect(agent.createContextGraph({
+          id: contextGraphId,
+          name: contextGraphId,
+          callerAgentAddress,
+        })).resolves.toBeUndefined();
+
+        expect(await agent.contextGraphExists(contextGraphId)).toBe(true);
+        expect(await agent.readLocalContextGraphRegistrationStatus(contextGraphId))
+          .toBe('unregistered');
+        expect((agent as any).localContextGraphProvenance.hasLocalCreate(contextGraphId))
+          .toBe(true);
+        expect(await agent.resolveContextGraphRegistrationBinding(contextGraphId))
+          .toEqual({ kind: 'unregistered' });
+        expect(resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+        expect(persistedMemberships.some((record) =>
+          record.contextGraphId === contextGraphId
+          && record.principalType === 'agent'
+          && record.source === 'local-create'
+        )).toBe(!failMembership);
+      } finally {
+        await agent.stop().catch(() => {});
+      }
+    },
+    30_000,
+  );
+
+  it.each([
+    ['disabled subscription rehydration', true, true],
+    ['membership store without loadAll', false, false],
+  ] as const)(
+    'restores local-create provenance after restart with %s',
+    async (_label, exposeMembershipLoadAll, configureSubscriptionStore) => {
+      const dataDir = await mkdtemp(join(tmpdir(), 'dkg-local-create-provenance-'));
+      const contextGraphId = `restart-local-create-${exposeMembershipLoadAll ? 'disabled' : 'rdf'}`;
+      const callerAgentAddress = ethers.Wallet.createRandom().address;
+      const persistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
+      const persistedMemberships = new Map<
+        string,
+        ContextGraphMembershipRecord & { updatedAt: number }
+      >();
+      const subscriptionStore = {
+        loadAll: async () => [...persistedSubscriptions.values()].map((record) => ({ ...record })),
+        save: async (record: ContextGraphSubscriptionRecord) => {
+          persistedSubscriptions.set(record.id, { ...record });
+        },
+        delete: async (id: string) => { persistedSubscriptions.delete(id); },
+      };
+      const membershipStore = {
+        loadAll: async () => [...persistedMemberships.values()].map((record) => ({ ...record })),
+        upsert: async (record: ContextGraphMembershipRecord & { updatedAt: number }) => {
+          persistedMemberships.set(
+            `${record.contextGraphId}\0${record.principalType}\0${record.principalId}`,
+            { ...record },
+          );
+        },
+        delete: async (id: string, type: string, principalId: string) => {
+          persistedMemberships.delete(`${id}\0${type}\0${principalId}`);
+        },
+      };
+      let first: DKGAgent | undefined;
+      let restarted: DKGAgent | undefined;
+
+      try {
+        first = await DKGAgent.create({
+          name: 'LocalCreateProvenanceFirst',
+          listenHost: '127.0.0.1',
+          chainAdapter: new MockChainAdapter(),
+          dataDir,
+          contextGraphSubscriptionStore: subscriptionStore,
+          contextGraphMembershipStore: membershipStore,
+        });
+        await first.start();
+        await first.createContextGraph({
+          id: contextGraphId,
+          name: contextGraphId,
+          callerAgentAddress,
+        });
+        await first.stop();
+        first = undefined;
+
+        const offlineChain = new MockChainAdapter();
+        const resolveContextGraphIdByNameHash = vi.fn(async () => {
+          throw new Error('chain RPC unavailable');
+        });
+        (offlineChain as any).resolveContextGraphIdByNameHash = resolveContextGraphIdByNameHash;
+        const compatibleMembershipStore = exposeMembershipLoadAll
+          ? membershipStore
+          : {
+              upsert: membershipStore.upsert,
+              delete: membershipStore.delete,
+            };
+        restarted = await DKGAgent.create({
+          name: 'LocalCreateProvenanceRestarted',
+          listenHost: '127.0.0.1',
+          chainAdapter: offlineChain,
+          dataDir,
+          contextGraphSubscriptionRehydrationEnabled: false,
+          ...(configureSubscriptionStore
+            ? { contextGraphSubscriptionStore: subscriptionStore }
+            : {}),
+          contextGraphMembershipStore: compatibleMembershipStore,
+        });
+        await restarted.start();
+
+        if (configureSubscriptionStore) {
+          expect(restarted.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+        }
+        restarted.subscribeToContextGraph(contextGraphId);
+        await expect(restarted.resolveContextGraphRegistrationBinding(contextGraphId))
+          .resolves.toEqual({ kind: 'unregistered' });
+        await expect(restarted.getContextGraphOnChainPolicy(contextGraphId))
+          .resolves.toEqual({});
+        expect((restarted as any).localContextGraphProvenance.hasLocalCreate(contextGraphId))
+          .toBe(true);
+        expect(resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+      } finally {
+        await first?.stop().catch(() => {});
+        await restarted?.stop().catch(() => {});
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );
 
   it('keeps discovery passive, activates explicit intent, and rehydrates only the explicit subscription', async () => {
     expect([...Object.values(SYSTEM_CONTEXT_GRAPHS)].sort()).toEqual(['agents', 'ontology']);
