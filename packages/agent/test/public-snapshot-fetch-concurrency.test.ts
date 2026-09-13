@@ -2,9 +2,9 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createOperationContext, OversizedRdfLiteralError } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
-import { readPublicSnapshotWalkProgress, runSharedMemorySync, syncPublicSnapshotsForMeta, type PublicSnapshotMetadata } from '../src/sync/requester/shared-memory-sync.js';
+import { runSharedMemorySync, syncPublicSnapshotsForMeta, type PublicSnapshotMetadata } from '../src/sync/requester/shared-memory-sync.js';
 import { createRecoveryExecutionAdmission } from '../src/sync/requester/recovery-execution-guard.js';
-import { readPublicSnapshotRecoveryResult, recoverPublicSnapshots } from '../src/sync/requester/public-snapshot-recovery.js';
+import { settlePublicSnapshots } from '../src/sync/requester/public-snapshot-recovery.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncDeniedError, isSyncTransportFailure, toSyncDeniedError, toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { composeSyncWorkAdmission } from '../src/sync/work-admission.js';
@@ -48,6 +48,23 @@ function fixture(count = 8) {
     fetchSyncPages,
     deleteCheckpoint: deleted, setCheckpoint: () => {}, onSnapshotReady: ready, ...overrides,
   });
+  const startSettled = () => settlePublicSnapshots({
+    entries: refs.map(ref => ({ snapshot: { ref, digest: ref, count: 1 }, reuse: false })),
+    contextGraphId: 'pool',
+    workAdmission: composeSyncWorkAdmission({
+      deadline: Date.now() + 60_000,
+      scope: { sharing: 'coalescible', key: 'pool' },
+    }),
+    store,
+    executionBoundary: createRecoveryExecutionAdmission(),
+    fetchSnapshot: async snapshot => {
+      const index = refs.indexOf(snapshot.ref);
+      started.push(index);
+      return responses[index]!.promise;
+    },
+    deleteCheckpoint: deleted,
+    onSnapshotReady: ready,
+  });
   const startSync = (
     deadline = Date.now() + 60_000,
     logWarn: Parameters<typeof runSharedMemorySync>[0]['logWarn'] = () => {},
@@ -64,7 +81,7 @@ function fixture(count = 8) {
   });
   const releaseAll = () => responses.forEach((response, i) => response.resolve(page(i)));
   const waitForStarted = (count: number) => vi.waitFor(() => expect(started).toHaveLength(count));
-  return { refs, payloads, responses, started, cacheReads, cache, store, deleted, ready, page, fetchSyncPages, start, startSync, releaseAll, waitForStarted };
+  return { refs, payloads, responses, started, cacheReads, cache, store, deleted, ready, page, fetchSyncPages, start, startSettled, startSync, releaseAll, waitForStarted };
 }
 
 it.each(['ordinary error', 'frozen error', 'primitive'] as const)('retains a timed-out sibling and round metrics after a local %s', async kind => {
@@ -89,8 +106,6 @@ it.each(['ordinary error', 'frozen error', 'primitive'] as const)('retains a tim
       backoffWorthyFailures: 1, snapshotPlaneIncomplete: 0, failedPhases: 1,
       swmCoverage: { snapshotsResolved: 0, snapshotsTotal: 4, missingCount: 4 },
     });
-    // The settled outcome is accounted directly; nothing rides on the error.
-    expect(readPublicSnapshotRecoveryResult(failure)).toBeUndefined();
   } finally { f.releaseAll(); await run; }
 });
 
@@ -138,7 +153,7 @@ it('retains deadline-yield evidence when an admitted sibling fails locally', asy
   } finally { cacheGate.resolve(null); f.releaseAll(); await run; }
 });
 
-it.each([false, true])('preserves direct-helper failure identity and complete evidence (frozen=%s)', async frozen => {
+it.each([false, true])('preserves typed failure identity and complete settled evidence (frozen=%s)', async frozen => {
   const f = fixture(4);
   const failure = new Error('local persistence failed');
   if (frozen) Object.freeze(failure);
@@ -147,33 +162,23 @@ it.each([false, true])('preserves direct-helper failure identity and complete ev
     if (input.digest === f.refs[3]) throw failure;
     return put(input);
   };
-  const run = recoverPublicSnapshots({
-    entries: f.refs.map(ref => ({ snapshot: { ref, digest: ref, count: 1 }, reuse: false })), contextGraphId: 'pool',
-    workAdmission: composeSyncWorkAdmission({ deadline: Date.now() + 60_000, scope: { sharing: 'coalescible', key: 'pool' } }),
-    store: f.store, executionBoundary: createRecoveryExecutionAdmission(),
-    fetchSnapshot: async snapshot => {
-      const index = f.refs.indexOf(snapshot.ref); f.started.push(index); return f.responses[index]!.promise;
-    },
-    deleteCheckpoint: f.deleted, onSnapshotReady: f.ready,
-  }).catch(error => error);
+  const run = f.startSettled();
   try {
     await f.waitForStarted(4);
     f.responses[0]!.resolve(f.page(0, { completed: false, timedOut: true, resumedFromOffset: 3 }));
     f.responses[1]!.resolve(f.page(1)); f.responses[2]!.resolve(f.page(2));
     await vi.waitFor(() => expect(f.cache.size).toBe(2));
     f.responses[3]!.resolve(f.page(3));
-    expect(await run).toBe(failure);
-    expect(readPublicSnapshotRecoveryResult(failure)).toEqual({
+    const outcome = await run;
+    expect(outcome.kind).toBe('failure');
+    if (outcome.kind !== 'failure') throw new Error('Expected a typed recovery failure');
+    expect(outcome.error).toBe(failure);
+    expect(outcome.result).toEqual({
       bytesReceived: 400, resumedPhases: 1, timedOutPhases: 1, completedPhases: 2,
-      checkpointAdvances: 0, readySnapshots: 2, totalSnapshots: 4, missingCount: 2,
+      readySnapshots: 2, totalSnapshots: 4, missingCount: 2,
       missingSample: [f.refs[0], f.refs[3]], completed: false,
-      phaseFailureCause: 'transport', localYieldFailedPhases: 0,
+      shortfallCauses: ['independent'],
     });
-    expect(readPublicSnapshotWalkProgress(failure)).toEqual({
-      readySnapshots: 2, totalSnapshots: 4, missingCount: 2, missingSample: [f.refs[0], f.refs[3]],
-    });
-    readPublicSnapshotRecoveryResult(failure)!.missingSample.length = 0;
-    expect(readPublicSnapshotWalkProgress(failure)?.missingSample).toEqual([f.refs[0], f.refs[3]]);
   } finally { f.releaseAll(); await run; }
 });
 
@@ -253,11 +258,11 @@ it('checks the round deadline again before dispatch after an asynchronous cache 
   } finally { cacheGate.resolve(null); f.releaseAll(); await run; }
 });
 
-it('joins active siblings after a hard failure and attaches ordered complete progress', async () => {
+it('joins active siblings after a hard failure and returns ordered complete progress', async () => {
   const f = fixture(); const failure = new Error('snapshot zero is corrupt');
   const primary = new Error('snapshot three is corrupt');
-  const run = f.start(); const outcome = run.then(value => ({ value }), error => ({ error }));
-  let settled = false; void outcome.then(() => { settled = true; });
+  const run = f.startSettled();
+  let settled = false; void run.then(() => { settled = true; });
   try {
     await f.waitForStarted(4);
     f.responses[3]!.reject(primary); f.responses[1]!.resolve(f.page(1));
@@ -266,13 +271,13 @@ it('joins active siblings after a hard failure and attaches ordered complete pro
     expect(f.started).toEqual([0, 1, 2, 3]);
     f.responses[0]!.reject(failure);
     f.responses[2]!.resolve(f.page(2)); f.responses[1]!.resolve(f.page(1));
-    const result = await outcome;
-    expect(result).toMatchObject({ error: { cause: primary, errors: [primary, failure] } });
-    if (!('error' in result)) throw new Error('Expected concurrent failures');
-    expect(readPublicSnapshotWalkProgress(result.error)).toEqual({ readySnapshots: 2, totalSnapshots: 8,
+    const result = await run;
+    expect(result).toMatchObject({ kind: 'failure', error: { cause: primary, errors: [primary, failure] } });
+    if (result.kind !== 'failure') throw new Error('Expected concurrent failures');
+    expect(result.result).toMatchObject({ readySnapshots: 2, totalSnapshots: 8,
       missingCount: 6, missingSample: [f.refs[0], ...f.refs.slice(3)] });
     expect(f.started).toEqual([0, 1, 2, 3]);
-  } finally { f.releaseAll(); await outcome; }
+  } finally { f.releaseAll(); await run; }
 });
 
 it('joins admitted snapshots and stops further dispatch when a fetch is incomplete', async () => {
@@ -334,7 +339,7 @@ it.each(['denied', 'transport'] as const)('preserves a later-index %s failure wh
     if (input.digest === f.refs[0]) throw local;
     return put(input);
   };
-  const run = f.start().then(value => ({ value }), error => ({ error }));
+  const run = f.startSettled();
   try {
     await f.waitForStarted(4);
     f.responses[3]!.reject(primary);
@@ -342,8 +347,8 @@ it.each(['denied', 'transport'] as const)('preserves a later-index %s failure wh
     await vi.waitFor(() => expect(f.ready).toHaveBeenCalledTimes(1));
     f.responses[0]!.resolve(f.page(0)); f.responses[2]!.resolve(f.page(2));
     const outcome = await run;
-    expect(outcome).toHaveProperty('error');
-    if (!('error' in outcome)) throw new Error('Expected concurrent failures');
+    expect(outcome.kind).toBe('failure');
+    if (outcome.kind !== 'failure') throw new Error('Expected concurrent failures');
     if (kind === 'denied') {
       expect(outcome.error.syncDenied).toBe(true);
       expect(isSyncDeniedError(outcome.error)).toBe(true);
@@ -354,7 +359,7 @@ it.each(['denied', 'transport'] as const)('preserves a later-index %s failure wh
     }
     expect(outcome.error.cause).toBe(primary);
     expect(outcome.error.errors).toEqual([primary, local]);
-    expect(readPublicSnapshotWalkProgress(outcome.error)).toMatchObject({ readySnapshots: 2, missingCount: 6 });
+    expect(outcome.result).toMatchObject({ readySnapshots: 2, missingCount: 6 });
     expect(f.started).toEqual([0, 1, 2, 3]);
   } finally { f.releaseAll(); await run; }
 });

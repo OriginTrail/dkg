@@ -1,8 +1,6 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
-import { mapWithConcurrency } from '../../map-with-concurrency.js';
 import { combineSyncFailures } from '../error-tags.js';
-import type { SharedMemoryPhaseFailureCause } from '../shared-memory-diagnostics.js';
 import type { SyncWorkAdmission } from '../work-admission.js';
 import type { SyncPageResult } from './page-fetch.js';
 import type { RecoveryExecutionAdmission } from './recovery-execution-guard.js';
@@ -30,7 +28,6 @@ type SnapshotAttempt =
   | { readonly kind: 'ready'; readonly metrics: SnapshotMetrics }
   | { readonly kind: 'missing'; readonly reason: SnapshotShortfall; readonly metrics: SnapshotMetrics }
   | { readonly kind: 'fatal'; readonly error: unknown; readonly metrics: SnapshotMetrics };
-type ScheduledSnapshot = SnapshotAttempt | { readonly kind: 'not-started' };
 
 /** One manifest position together with the owner's reuse decision for it. */
 export interface PublicSnapshotWalkEntry {
@@ -49,19 +46,9 @@ interface SnapshotRecoveryPorts {
 }
 
 export interface PublicSnapshotRecoveryResult extends PublicSnapshotWalkProgress, SnapshotMetrics {
-  readonly checkpointAdvances: number;
   readonly completed: boolean;
-  /**
-   * The round stopped on OUR OWN allowance with refs still unfetched — a
-   * voluntary yield, not a peer fault. Callers must surface this as a
-   * local-yield completion and must NOT fold it into `timedOutPhases`, which
-   * marks the peer backoff-worthy (`durable-progress.ts` `backoffWorthyFailure`).
-   */
-  readonly localYield?: true;
-  /** Direct cause for this helper's single incomplete snapshot phase. */
-  readonly phaseFailureCause?: SharedMemoryPhaseFailureCause;
-  /** One incomplete phase only when every unresolved ref is due to local admission. */
-  readonly localYieldFailedPhases?: number;
+  /** Distinct causes represented by the settled unresolved positions. */
+  readonly shortfallCauses?: readonly ('local-admission' | 'independent')[];
 }
 
 export type PublicSnapshotRecoveryOutcome =
@@ -145,31 +132,41 @@ async function runSnapshotPool(
   entries: readonly PublicSnapshotWalkEntry[],
   concurrency: number,
   ports: SnapshotRecoveryPorts,
-): Promise<{ outcomes: ScheduledSnapshot[]; failures: unknown[] }> {
-  let halted = false;
+): Promise<{ outcomes: Array<SnapshotAttempt | undefined>; failures: unknown[] }> {
+  const outcomes: Array<SnapshotAttempt | undefined> = Array.from({ length: entries.length });
   const failures: unknown[] = [];
-  const outcomes = await mapWithConcurrency(entries, concurrency, async (entry): Promise<ScheduledSnapshot> => {
-    if (halted) return { kind: 'not-started' };
-    const outcome = await attemptSnapshot(entry, ports);
-    if (outcome.kind === 'fatal') {
-      halted = true;
-      // Completion order owns the triggering cause; reporting remains in
-      // manifest order. At most the already-admitted siblings can add errors.
-      failures.push(outcome.error);
-    } else if (outcome.kind === 'missing' && outcome.reason !== 'short-prefix') {
-      // An incomplete stream stops new dispatches, and so does an exhausted
-      // local allowance that every later position would only re-observe.
-      // Already admitted siblings still settle, exactly as after a fatal.
-      halted = true;
+  let nextIndex = 0;
+  let halted = false;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      if (halted || nextIndex >= entries.length) return;
+      const index = nextIndex++;
+      const outcome = await attemptSnapshot(entries[index]!, ports);
+      outcomes[index] = outcome;
+      if (outcome.kind === 'fatal') {
+        halted = true;
+        // Completion order owns the triggering cause; reporting remains in
+        // manifest order. At most the already-admitted siblings can add errors.
+        failures.push(outcome.error);
+      } else if (outcome.kind === 'missing' && outcome.reason !== 'short-prefix') {
+        // Stop taking entries after an incomplete stream or exhausted local
+        // allowance. Already admitted siblings still drain through this loop.
+        halted = true;
+      }
     }
-    return outcome;
-  });
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(concurrency, entries.length) },
+    () => worker(),
+  ));
   return { outcomes, failures };
 }
 
 /** Recover one manifest with a bounded pool and one ordered progress reduction. */
 export async function recoverPublicSnapshots(params: PublicSnapshotRecoveryParams): Promise<PublicSnapshotRecoveryResult> {
-  return unwrapPublicSnapshotRecovery(await settlePublicSnapshots(params));
+  const outcome = await settlePublicSnapshots(params);
+  if (outcome.kind === 'failure') throw outcome.error;
+  return outcome.result;
 }
 
 /** Let the owning sync round account every admitted outcome before rethrowing. */
@@ -180,7 +177,7 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
     throw new RangeError(`Public snapshot fetch concurrency must be between 1 and ${PUBLIC_SNAPSHOT_FETCH_CONCURRENCY}`);
   }
   const progress = {
-    ...EMPTY_METRICS, checkpointAdvances: 0,
+    ...EMPTY_METRICS,
     readySnapshots: 0, totalSnapshots: params.entries.length,
     missingCount: 0, missingSample: [] as string[],
   };
@@ -193,13 +190,13 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
   let localYield = false;
   let hasIndependentShortfall = false;
   for (const [index, outcome] of outcomes.entries()) {
-    if (outcome.kind !== 'not-started') {
+    if (outcome) {
       progress.bytesReceived += outcome.metrics.bytesReceived;
       progress.resumedPhases += outcome.metrics.resumedPhases;
       progress.timedOutPhases += outcome.metrics.timedOutPhases;
       progress.completedPhases += outcome.metrics.completedPhases;
     }
-    if (outcome.kind === 'ready') {
+    if (outcome?.kind === 'ready') {
       progress.readySnapshots++;
       continue;
     }
@@ -209,33 +206,23 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
     }
     // Positions abandoned after a halt carry no evidence of their own; only
     // the outcomes that actually settled attribute the shortfall.
-    if (outcome.kind === 'missing' && outcome.reason === 'local-yield') localYield = true;
-    else if (outcome.kind !== 'not-started') hasIndependentShortfall = true;
+    if (outcome?.kind === 'missing' && outcome.reason === 'local-yield') localYield = true;
+    else if (outcome) hasIndependentShortfall = true;
   }
   // The single-phase attribution the owning round records: solely local
   // admission, or at least one shortfall the peer or the stream produced.
-  const localBudgetOnly = localYield && !hasIndependentShortfall;
+  const shortfallCauses = [
+    ...(localYield ? ['local-admission' as const] : []),
+    ...(hasIndependentShortfall ? ['independent' as const] : []),
+  ];
   const result: PublicSnapshotRecoveryResult = {
     ...progress,
     completed: progress.missingCount === 0,
-    ...(localYield ? { localYield: true as const } : {}),
-    ...(progress.missingCount === 0
-      ? {}
-      : { phaseFailureCause: localBudgetOnly ? 'local-budget' as const : 'transport' as const }),
-    localYieldFailedPhases: localBudgetOnly ? 1 : 0,
+    ...(shortfallCauses.length === 0 ? {} : { shortfallCauses }),
   };
   return failures.length > 0
     ? { kind: 'failure', result, error: combineSyncFailures(failures[0], failures.slice(1)) }
     : { kind: 'result', result };
-}
-
-/** Preserve the published throwing contract and the original triggering error. */
-export function unwrapPublicSnapshotRecovery(outcome: PublicSnapshotRecoveryOutcome): PublicSnapshotRecoveryResult {
-  if (outcome.kind === 'failure') {
-    attachPublicSnapshotRecoveryResult(outcome.error, outcome.result);
-    throw outcome.error;
-  }
-  return outcome.result;
 }
 
 /**
@@ -278,84 +265,12 @@ export interface PublicSnapshotMetadata {
   ualOrdinal?: bigint;
 }
 
-/**
- * Snapshot-walk progress carried OUT of a throw.
- *
- * A snapshot-phase transport failure throws, and the throw unwinds past the
- * point where the caller reads the walk's return value — so a round that
- * materialized 120 Knowledge Assets and then failed on the 121st reported
- * ZERO. That is not merely a diagnostics gap: the continuation loop's progress
- * signal is `swmCoverage.snapshotsResolved`, so the high-water mark never
- * moved, and the loop declared `coverage-stalled` and abandoned a peer that
- * was converging — the exact behaviour #2050 exists to remove.
- *
- * The counts are the walk's own, so `snapshotsResolved + missingCount ===
- * snapshotsTotal` holds on this path exactly as it does on the returned one.
- */
+/** Manifest-ordered progress from one settled snapshot walk. */
 export interface PublicSnapshotWalkProgress {
   readySnapshots: number;
   totalSnapshots: number;
   missingCount: number;
   missingSample: string[];
-}
-
-/** Non-enumerable so the payload never widens a structured-clone or log dump. */
-const PUBLIC_SNAPSHOT_PROGRESS_KEY = '__swmPublicSnapshotProgress';
-const recoveryResults = new WeakMap<object, PublicSnapshotRecoveryResult>();
-
-function attachPublicSnapshotRecoveryResult(err: unknown, result: PublicSnapshotRecoveryResult): void {
-  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return;
-  recoveryResults.set(err, { ...result, missingSample: [...result.missingSample] });
-  const progress = walkProgress(result);
-  try {
-    Object.defineProperty(err, PUBLIC_SNAPSHOT_PROGRESS_KEY, {
-      value: progress,
-      enumerable: false,
-      configurable: true,
-      writable: true,
-    });
-  } catch {
-    // Frozen and exotic errors retain their identity and evidence through the
-    // side channel. The property remains for older progress-only consumers.
-  }
-}
-
-function walkProgress(result: PublicSnapshotRecoveryResult): PublicSnapshotWalkProgress {
-  return {
-    readySnapshots: result.readySnapshots, totalSnapshots: result.totalSnapshots,
-    missingCount: result.missingCount, missingSample: [...result.missingSample],
-  };
-}
-
-/** Complete settled metrics for object/function throwables, including frozen errors. */
-export function readPublicSnapshotRecoveryResult(err: unknown): PublicSnapshotRecoveryResult | undefined {
-  if ((typeof err !== 'object' && typeof err !== 'function') || err === null) return undefined;
-  const result = recoveryResults.get(err);
-  return result && { ...result, missingSample: [...result.missingSample] };
-}
-
-/** Read progress attached by {@link recoverPublicSnapshots} before it rethrew. */
-export function readPublicSnapshotWalkProgress(err: unknown): PublicSnapshotWalkProgress | undefined {
-  const result = readPublicSnapshotRecoveryResult(err);
-  if (result) return walkProgress(result);
-  if (typeof err !== 'object' || err === null) return undefined;
-  let progress: unknown;
-  try { progress = (err as Record<string, unknown>)[PUBLIC_SNAPSHOT_PROGRESS_KEY]; }
-  catch { return undefined; }
-  if (typeof progress !== 'object' || progress === null) return undefined;
-  const candidate = progress as Partial<PublicSnapshotWalkProgress>;
-  // Validated rather than trusted: this crosses an `unknown` boundary, and a
-  // fabricated denominator would corrupt the coverage record the pass loop and
-  // the terminal message both read.
-  if (
-    !Number.isSafeInteger(candidate.readySnapshots)
-    || !Number.isSafeInteger(candidate.totalSnapshots)
-    || !Number.isSafeInteger(candidate.missingCount)
-    || !Array.isArray(candidate.missingSample)
-  ) {
-    return undefined;
-  }
-  return candidate as PublicSnapshotWalkProgress;
 }
 
 async function hasValidSnapshot(

@@ -211,8 +211,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
       const ports: SnapshotWriteCapacityPorts = {
         readFilesystemSpace: () => this.getFilesystemSpace(this.directory),
         watermarks: (totalBytes) => snapshotGarbageCollectionWatermarks(this.gcConfig, totalBytes),
-        collectGarbage: (requiredWriteBytes) => this.collectGarbage({ requiredWriteBytes }),
-        onGarbageCollected: (result) => {
+        collectGarbage: async (requiredWriteBytes) => {
+          const result = await this.collectGarbage({ requiredWriteBytes });
           if (
             result.triggered
             || result.deletedSnapshots > 0
@@ -281,6 +281,9 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     try {
       try {
         await writeFile(tempPath, payload, 'utf8');
+        // The complete temp file is now included in filesystem free-space
+        // readings, so keeping its byte reservation would charge it twice.
+        lease?.markMaterialized();
         await rename(tempPath, filePath).catch(async (err: NodeJS.ErrnoException) => {
           if (err.code === 'EEXIST') return;
           throw err;

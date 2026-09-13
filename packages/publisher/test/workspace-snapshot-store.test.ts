@@ -792,6 +792,52 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
     }
   });
 
+  it('retires byte capacity after publication while index persistence remains active', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-index-capacity-'));
+    const inputs = [940, 941].map(i => ({ digest: digestFor(i), quads: makeQuads(3, `index-capacity-${i}`) }));
+    const writeBytes = Buffer.byteLength(serializeWorkspacePublicSnapshotQuads(inputs[0]!.quads), 'utf8');
+    const hardReserveBytes = 1_000;
+    const totalCapacity = hardReserveBytes + 2 * writeBytes;
+    const committedBytes = async () => (await Promise.all(inputs.map(async input => {
+      try { return (await stat(snapshotPath(directory, input.digest))).size; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; }
+    }))).reduce((sum, size) => sum + size, 0);
+    let releaseFirstIndex!: () => void;
+    let firstIndexEntered!: () => void;
+    const firstIndexGate = new Promise<void>(resolve => { releaseFirstIndex = resolve; });
+    const firstIndexEnteredGate = new Promise<void>(resolve => { firstIndexEntered = resolve; });
+    const indexes = new MemoryPageIndexStore();
+    const upsert = indexes.upsert.bind(indexes);
+    vi.spyOn(indexes, 'upsert').mockImplementation(async record => {
+      if (record.snapshotDigest === inputs[0]!.digest) {
+        firstIndexEntered();
+        await firstIndexGate;
+      }
+      await upsert(record);
+    });
+    const store = new FileWorkspacePublicSnapshotStore(directory, indexes, {
+      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
+        targetFreeBytes: hardReserveBytes + 2, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
+      getAvailableBytes: async () => totalCapacity - await committedBytes(),
+    });
+    const firstWrite = store.putSnapshot(inputs[0]!);
+    let firstSettled = false;
+    void firstWrite.then(() => { firstSettled = true; }, () => { firstSettled = true; });
+    try {
+      await firstIndexEnteredGate;
+      expect(firstSettled).toBe(false);
+      await expect(stat(snapshotPath(directory, inputs[0]!.digest))).resolves.toBeTruthy();
+      await expect(store.putSnapshot(inputs[1]!)).resolves.toMatchObject({ ref: inputs[1]!.digest });
+      expect(firstSettled).toBe(false);
+      expect(totalCapacity - await committedBytes()).toBe(hardReserveBytes);
+    } finally {
+      releaseFirstIndex();
+      await firstWrite;
+      store.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('releases a write reservation and same-digest ownership after physical persistence fails', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-write-failure-'));
     const input = { digest: digestFor(910), quads: makeQuads(3, 'failed-write') };

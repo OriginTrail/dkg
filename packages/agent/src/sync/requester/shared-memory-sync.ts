@@ -4,7 +4,6 @@ import {
 } from '../work-admission.js';
 import {
   settlePublicSnapshots,
-  unwrapPublicSnapshotRecovery,
   PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT,
   boundSampledRef,
   type PublicSnapshotMetadata,
@@ -14,7 +13,6 @@ import {
 } from './public-snapshot-recovery.js';
 export {
   PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
-  readPublicSnapshotWalkProgress,
   type PublicSnapshotMetadata,
   type PublicSnapshotWalkProgress,
 } from './public-snapshot-recovery.js';
@@ -31,6 +29,7 @@ import {
   emptySharedMemorySyncResult,
   recordSharedMemoryPhaseFailure,
   selectSwmSnapshotCoverage,
+  type SharedMemoryPhaseFailureCause,
   type SharedMemorySyncSummary,
 } from '../shared-memory-diagnostics.js';
 export {
@@ -1450,6 +1449,18 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   return summary;
 }
 
+/** Shared-memory projection of the snapshot-native recovery result. */
+export interface PublicSnapshotSyncResult extends Omit<PublicSnapshotRecoveryResult, 'shortfallCauses'> {
+  readonly checkpointAdvances: 0;
+  readonly localYield?: true;
+  readonly phaseFailureCause?: SharedMemoryPhaseFailureCause;
+  readonly localYieldFailedPhases: number;
+}
+
+type PublicSnapshotSyncOutcome =
+  | { readonly kind: 'result'; readonly result: PublicSnapshotSyncResult }
+  | { readonly kind: 'failure'; readonly result: PublicSnapshotSyncResult; readonly error: unknown };
+
 export async function syncPublicSnapshotsForMeta(params: {
   ctx: OperationContext;
   remotePeerId: string;
@@ -1474,13 +1485,15 @@ export async function syncPublicSnapshotsForMeta(params: {
     snapshot: PublicSnapshotMetadata,
     source: 'cache' | 'network',
   ) => Promise<void>;
-} & PublicSnapshotWalkSource): Promise<PublicSnapshotRecoveryResult> {
-  return unwrapPublicSnapshotRecovery(await settlePublicSnapshotsForMeta(params));
+} & PublicSnapshotWalkSource): Promise<PublicSnapshotSyncResult> {
+  const outcome = await settlePublicSnapshotsForMeta(params);
+  if (outcome.kind === 'failure') throw outcome.error;
+  return outcome.result;
 }
 
 async function settlePublicSnapshotsForMeta(
   params: Parameters<typeof syncPublicSnapshotsForMeta>[0],
-): Promise<PublicSnapshotRecoveryOutcome> {
+): Promise<PublicSnapshotSyncOutcome> {
   const workAdmission = params.workAdmission ?? composeSyncWorkAdmission({
     deadline: params.deadline,
     scope: { sharing: 'coalescible', key: 'direct-snapshot-walk' },
@@ -1495,7 +1508,7 @@ async function settlePublicSnapshotsForMeta(
       ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
       : manifestSnapshots
   ).map(snapshot => ({ snapshot, reuse: false }));
-  return settlePublicSnapshots({
+  const outcome: PublicSnapshotRecoveryOutcome = await settlePublicSnapshots({
     entries,
     contextGraphId: params.contextGraphId,
     workAdmission,
@@ -1509,6 +1522,25 @@ async function settlePublicSnapshotsForMeta(
     deleteCheckpoint: params.deleteCheckpoint,
     onSnapshotReady: params.onSnapshotReady,
   });
+  const result = projectPublicSnapshotRecovery(outcome.result);
+  return outcome.kind === 'failure'
+    ? { kind: 'failure', result, error: outcome.error }
+    : { kind: 'result', result };
+}
+
+function projectPublicSnapshotRecovery(result: PublicSnapshotRecoveryResult): PublicSnapshotSyncResult {
+  const { shortfallCauses = [], ...snapshot } = result;
+  const localYield = shortfallCauses.includes('local-admission');
+  const localBudgetOnly = localYield && !shortfallCauses.includes('independent');
+  return {
+    ...snapshot,
+    checkpointAdvances: 0,
+    ...(localYield ? { localYield: true as const } : {}),
+    ...(result.missingCount === 0
+      ? {}
+      : { phaseFailureCause: localBudgetOnly ? 'local-budget' as const : 'transport' as const }),
+    localYieldFailedPhases: localBudgetOnly ? 1 : 0,
+  };
 }
 
 export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {

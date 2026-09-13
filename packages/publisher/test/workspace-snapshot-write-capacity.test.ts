@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { SnapshotGarbageCollectionResult } from '../src/workspace-snapshot-store.js';
 import {
   SnapshotStorageCapacityError,
   SnapshotWriteCapacityCoordinator,
@@ -9,14 +8,6 @@ import {
 const HARD_RESERVE = 1_000;
 const WRITE = 400;
 
-function collection(overrides: Partial<SnapshotGarbageCollectionResult> = {}): SnapshotGarbageCollectionResult {
-  return {
-    triggered: false, availableBytesBefore: 0, availableBytesAfter: 0, deletedSnapshots: 0,
-    deletedSnapshotBytes: 0, deletedTempFiles: 0, deletedTempBytes: 0, skippedActiveFiles: 0,
-    failedDeletions: 0, ...overrides,
-  };
-}
-
 function ports(
   available: () => number | Promise<number>,
   overrides: Partial<SnapshotWriteCapacityPorts> = {},
@@ -24,7 +15,7 @@ function ports(
   return {
     readFilesystemSpace: async () => ({ availableBytes: await available(), totalBytes: 10 * HARD_RESERVE }),
     watermarks: () => ({ triggerFreeBytes: HARD_RESERVE + 1, hardReserveBytes: HARD_RESERVE }),
-    collectGarbage: async () => collection(),
+    collectGarbage: async () => {},
     ...overrides,
   };
 }
@@ -34,7 +25,7 @@ describe('SnapshotWriteCapacityCoordinator', () => {
     // Nothing is published during the test, so only the reservations themselves
     // can stop the third and fourth writes from being admitted.
     const capacity = HARD_RESERVE + Math.floor(WRITE * 2.5);
-    const collectGarbage = vi.fn(async () => collection());
+    const collectGarbage = vi.fn(async () => {});
     const coordinator = new SnapshotWriteCapacityCoordinator(ports(() => capacity, { collectGarbage }));
     const outcomes = await Promise.allSettled([1, 2, 3, 4].map(() => coordinator.reserve(WRITE)));
     const leases = outcomes.flatMap(outcome => outcome.status === 'fulfilled' ? [outcome.value] : []);
@@ -58,11 +49,32 @@ describe('SnapshotWriteCapacityCoordinator', () => {
     const first = await coordinator.reserve(WRITE);
     const second = await coordinator.reserve(WRITE);
     expect(coordinator.reservedWriteBytes).toBe(2 * WRITE);
+    first.markMaterialized();
+    first.markMaterialized();
+    expect(coordinator.reservedWriteBytes).toBe(WRITE);
     first.release();
     first.release();
     expect(coordinator.reservedWriteBytes).toBe(WRITE);
     second.release();
     expect(coordinator.reservedWriteBytes).toBe(0);
+  });
+
+  it('does not charge a complete temporary file as an outstanding reservation', async () => {
+    let materializedBytes = 0;
+    const collectGarbage = vi.fn(async () => {});
+    const coordinator = new SnapshotWriteCapacityCoordinator(ports(
+      () => HARD_RESERVE + 2 * WRITE - materializedBytes,
+      { collectGarbage },
+    ));
+    const first = await coordinator.reserve(WRITE);
+    materializedBytes = WRITE;
+    first.markMaterialized();
+
+    const second = await coordinator.reserve(WRITE);
+    expect(coordinator.reservedWriteBytes).toBe(WRITE);
+    expect(collectGarbage).not.toHaveBeenCalled();
+    first.release();
+    second.release();
   });
 
   it('re-reads the filesystem when a reservation retires during a reading', async () => {
@@ -95,22 +107,17 @@ describe('SnapshotWriteCapacityCoordinator', () => {
     expect(coordinator.reservedWriteBytes).toBe(0);
   });
 
-  it('reports a collection only for a write it then admits', async () => {
+  it('collects before admission and re-reads the resulting capacity', async () => {
     let available = HARD_RESERVE + WRITE - 1;
     let reclaimable = WRITE;
-    const onGarbageCollected = vi.fn();
+    const collectGarbage = vi.fn(async () => { available += reclaimable; });
     const coordinator = new SnapshotWriteCapacityCoordinator(ports(() => available, {
-      collectGarbage: async () => {
-        available += reclaimable;
-        return collection({ triggered: true, deletedSnapshots: reclaimable > 0 ? 1 : 0 });
-      },
-      onGarbageCollected,
+      collectGarbage,
     }));
     await expect(coordinator.reserve(WRITE)).resolves.toBeTruthy();
-    expect(onGarbageCollected).toHaveBeenCalledTimes(1);
-    expect(onGarbageCollected).toHaveBeenCalledWith(expect.objectContaining({ deletedSnapshots: 1 }));
+    expect(collectGarbage).toHaveBeenCalledTimes(1);
     reclaimable = 0;
     await expect(coordinator.reserve(WRITE)).rejects.toBeInstanceOf(SnapshotStorageCapacityError);
-    expect(onGarbageCollected).toHaveBeenCalledTimes(1);
+    expect(collectGarbage).toHaveBeenCalledTimes(2);
   });
 });

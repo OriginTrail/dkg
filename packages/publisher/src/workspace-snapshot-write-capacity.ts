@@ -1,5 +1,3 @@
-import type { SnapshotGarbageCollectionResult } from './workspace-snapshot-store.js';
-
 /** A filesystem reading. Only `availableBytes` is corrected for reservations. */
 export interface SnapshotWriteCapacityReading {
   readonly availableBytes: number;
@@ -18,13 +16,13 @@ export interface SnapshotWriteCapacityPorts {
   /** The admission policy for a filesystem of the given size. */
   readonly watermarks: (totalBytes: number) => SnapshotWriteCapacityWatermarks;
   /** Reclaim space until `requiredWriteBytes` fit above the hard reserve. */
-  readonly collectGarbage: (requiredWriteBytes: number) => Promise<SnapshotGarbageCollectionResult>;
-  /** Observes a collection that preceded a successful admission. */
-  readonly onGarbageCollected?: (result: SnapshotGarbageCollectionResult) => void;
+  readonly collectGarbage: (requiredWriteBytes: number) => Promise<void>;
 }
 
-/** Bytes admitted for one physical write, retired once that write has settled. */
+/** Bytes admitted for one physical write, retired as the filesystem materializes them. */
 export interface SnapshotWriteCapacityLease {
+  /** The complete temporary file is now reflected in filesystem free space. */
+  markMaterialized(): void;
   /** Idempotent: nested cleanup paths may release more than once. */
   release(): void;
 }
@@ -59,25 +57,32 @@ export class SnapshotStorageCapacityError extends Error {
  */
 export class SnapshotWriteCapacityCoordinator implements SnapshotWriteCapacityAdmission {
   private tail: Promise<void> = Promise.resolve();
-  private reservedBytes = 0;
+  private unmaterializedBytes = 0;
 
   constructor(private readonly ports: SnapshotWriteCapacityPorts) {}
 
-  /** Bytes admitted but not yet released by their leases. */
+  /** Bytes admitted but not yet reflected in a complete temporary file. */
   get reservedWriteBytes(): number {
-    return this.reservedBytes;
+    return this.unmaterializedBytes;
   }
 
   reserve(requiredWriteBytes: number): Promise<SnapshotWriteCapacityLease> {
     const admission = this.tail.then(async () => {
       await this.ensureCapacity(requiredWriteBytes);
-      this.reservedBytes += requiredWriteBytes;
+      this.unmaterializedBytes += requiredWriteBytes;
+      let materialized = false;
       let released = false;
+      const retireReservation = () => {
+        if (materialized) return;
+        materialized = true;
+        this.unmaterializedBytes -= requiredWriteBytes;
+      };
       return {
+        markMaterialized: retireReservation,
         release: () => {
           if (released) return;
           released = true;
-          this.reservedBytes -= requiredWriteBytes;
+          retireReservation();
         },
       };
     });
@@ -88,12 +93,12 @@ export class SnapshotWriteCapacityCoordinator implements SnapshotWriteCapacityAd
   /** A reading is stable only if no reservation retired while it was taken. */
   private async readCapacity(): Promise<SnapshotWriteCapacityReading> {
     for (;;) {
-      const reservedBytes = this.reservedBytes;
+      const reservedBytes = this.unmaterializedBytes;
       const filesystem = await this.ports.readFilesystemSpace();
       // Admission is serialized, so reservations can only retire during this
       // read. Retry if one retires: the reading may predate its physical write,
       // and subtracting the new, smaller reservation would overstate capacity.
-      if (reservedBytes !== this.reservedBytes) continue;
+      if (reservedBytes !== this.unmaterializedBytes) continue;
       return {
         totalBytes: filesystem.totalBytes,
         availableBytes: Math.max(0, filesystem.availableBytes - reservedBytes),
@@ -107,13 +112,13 @@ export class SnapshotWriteCapacityCoordinator implements SnapshotWriteCapacityAd
     const needsCollection = filesystem.availableBytes < watermarks.triggerFreeBytes
       || filesystem.availableBytes - requiredWriteBytes < watermarks.hardReserveBytes;
     // Outstanding reservations are as real to the collector as published files.
-    const result = needsCollection
-      ? await this.ports.collectGarbage(requiredWriteBytes + this.reservedBytes)
-      : undefined;
+    if (needsCollection) {
+      await this.ports.collectGarbage(requiredWriteBytes + this.unmaterializedBytes);
+    }
     // Admission is based on a fresh filesystem reading, not projected file
     // sizes: an unlinked file held open by another process may not have
     // released its blocks yet.
-    const afterCollection = result ? await this.readCapacity() : filesystem;
+    const afterCollection = needsCollection ? await this.readCapacity() : filesystem;
     if (afterCollection.availableBytes - requiredWriteBytes < watermarks.hardReserveBytes) {
       throw new SnapshotStorageCapacityError(
         afterCollection.availableBytes,
@@ -121,6 +126,5 @@ export class SnapshotWriteCapacityCoordinator implements SnapshotWriteCapacityAd
         watermarks.hardReserveBytes,
       );
     }
-    if (result) this.ports.onGarbageCollected?.(result);
   }
 }
