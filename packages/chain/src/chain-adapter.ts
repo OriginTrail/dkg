@@ -1,3 +1,6 @@
+import type {
+  RandomSamplingAvailability,
+} from './random-sampling-availability.js';
 import type { ethers } from 'ethers';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexId } from
@@ -19,6 +22,7 @@ export interface ConvictionReader {
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
+  /** @deprecated Use requestBrowserWalletRpc for new browser-read features. */
   requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 }
 
@@ -94,13 +98,26 @@ export interface PcaContracts {
   walletRpcUrls?: string[];
 }
 
-export type PcaRpcMethod =
+/** Browser-safe read methods shared by the independently scoped wallet features. */
+export type BrowserWalletRpcMethod =
   | 'eth_chainId'
   | 'eth_call'
   | 'eth_getTransactionReceipt'
   | 'eth_getTransactionByHash'
   | 'eth_blockNumber'
   | 'eth_getBlockByNumber';
+
+export type PcaRpcMethod = BrowserWalletRpcMethod;
+
+/** All-or-none node-identity contract surface for browser-signed key rotation. */
+export interface IdentityWalletContracts {
+  profile: string;
+  identity: string;
+  storage: string;
+  chainId: string;
+  rpcUrls: string[];
+  walletRpcUrls?: string[];
+}
 
 export interface IdentityProof {
   publicKey: Uint8Array;
@@ -601,7 +618,7 @@ export type ContextGraphChainScanOptions =
   | ContextGraphLegacyIncrementalScanOptions;
 
 /** Cursor-backed daemon ContextGraphNameRegistry scan modes. */
-export type ContextGraphRegistryScanOptions =
+export type ContextGraphRegistryScanOptions = (
   | {
       mode: 'incremental';
       pageBudget?: number;
@@ -612,10 +629,42 @@ export type ContextGraphRegistryScanOptions =
   | {
       mode: 'seedFromCursor';
       pageBudget?: number;
-    };
+    }
+  | {
+      /**
+       * Establish the daemon's live cursor at the current reorg-protected tail.
+       * Historical discovery is deliberately left to the independent repair
+       * lane so a missing/corrupt live watermark cannot delay new registrations.
+       */
+      mode: 'seedLiveTail';
+      pageBudget?: number;
+    }
+  | {
+      /**
+       * Low-priority historical integrity pass. Repair scans use a cursor and
+       * captured target that are independent from the live discovery cursor,
+       * never enter its reorg window, and resume within a logical page budget.
+       * Provider retry/failover attempts are governed independently by RPC
+       * request-class policy and may exceed the number of logical pages.
+       */
+      mode: 'repair';
+      pageBudget: number;
+      minimumIntervalMs?: number;
+    }
+) & ChainReadOptions;
 
 export interface ContextGraphRegistryScanPage {
   contextGraphs: ContextGraphOnChain[];
+  /** Bounded operational progress; contains no graph identifiers. */
+  scanProgress?: Readonly<{
+    mode: ContextGraphRegistryScanOptions['mode'] | 'listAll';
+    page: number;
+    pageBudget?: number;
+    fromBlock: number;
+    toBlock: number;
+    targetBlock: number;
+    completesGeneration: boolean;
+  }>;
   ack(): Promise<void>;
 }
 
@@ -629,9 +678,16 @@ export interface ContextGraphRegistryScanCursorKey {
   registryAddress: string;
 }
 
+export interface ContextGraphRegistryRepairAuditStore {
+  load(key: ContextGraphRegistryScanCursorKey): Promise<unknown>;
+  save(key: ContextGraphRegistryScanCursorKey, checkpoint: unknown): Promise<void>;
+}
+
 export interface ContextGraphRegistryScanCursorStore {
   load(key: ContextGraphRegistryScanCursorKey): Promise<number | undefined>;
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
+  /** Optional grouped capability for opaque, atomically replaced repair state. */
+  repairAudit?: ContextGraphRegistryRepairAuditStore;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
@@ -1432,18 +1488,33 @@ export interface ChainAdapter {
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
 
   /**
+   * Independent browser bootstrap for node-identity key management. `null`
+   * means the deployment does not expose the complete Profile / Identity /
+   * IdentityStorage capability.
+   */
+  getIdentityWalletContracts?(): Promise<IdentityWalletContracts | null>;
+
+  /** Feature-neutral, read-only JSON-RPC bridge for browser-wallet routes. */
+  requestBrowserWalletRpc?(
+    method: BrowserWalletRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown>;
+
+  /**
+   * @deprecated Use {@link requestBrowserWalletRpc}. Retained as a compatibility
+   * bridge for adapters and embedders compiled against the PCA-specific API.
+   */
+  requestPublishingConvictionRpc?(
+    method: PcaRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown>;
+
+  /**
    * Browser-bootstrap contract addresses + chain params for the HW signing
    * layer. The browser needs the PCA NFT address, TRAC token address, chain id,
    * and safe RPC URLs; Hub/logic/ShardingTable stay daemon-side.
   */
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
-
-  /**
-   * Daemon-internal read-only JSON-RPC bridge used by `/api/pca/rpc`. The HTTP
-   * route owns the allowlist; adapters forward allowed reads without exposing
-   * endpoint URLs.
-   */
-  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given
@@ -1849,6 +1920,8 @@ export interface ChainAdapter {
    * check rather than only testing method presence.
    */
   isRandomSamplingReady?(): boolean;
+  /** Refresh RandomSampling bindings and read membership through one typed capability. */
+  resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
 
   /**
    * Returns the deployed address of `KnowledgeAssetsV10` on this chain.

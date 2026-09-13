@@ -20,6 +20,7 @@ type PreviousResolvedDKGAgentConfig =
     | 'syncBackoffMaxMs'
     | 'syncBackoffJitter'
     | 'rfc64CatalogActivation'
+    | 'rfc64CatalogActivations'
     | 'rfc64PublicCatalogActivation'
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'

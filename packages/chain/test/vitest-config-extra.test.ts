@@ -17,7 +17,7 @@ describe('chain lifecycle test ownership [CH-1]', () => {
 
   it('excludes archives without dropping other active lifecycle files', () => {
     expect(primary.test?.exclude).toContain('test/archive/**');
-    const excludedTestFiles = (primary.test?.exclude ?? []).filter((entry) => /test\/.*\.test\.ts$/.test(entry));
+    const excludedTestFiles = (primary.test?.exclude ?? []).filter((entry) => entry.endsWith('.test.ts'));
     expect(excludedTestFiles).toEqual([...EVM_TEST_SCOPES.chain.files]);
   });
 });

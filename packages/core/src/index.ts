@@ -15,6 +15,7 @@ export * from './trust.js';
 export * from './sparql-operation.js';
 export * from './code-point-order.js';
 export { BoundedLruCache } from './bounded-lru-cache.js';
+export * from './coalescing-recurring-task.js';
 export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
@@ -265,7 +266,12 @@ export {
   isEntityPredicate,
   isAssertionEntityPredicate,
 } from './entity-predicate.js';
-export { withRetry, type RetryOptions } from './retry.js';
+export {
+  withRetry,
+  withRetryContext,
+  type RetryAttemptContext,
+  type RetryOptions,
+} from './retry.js';
 export { resolveWithinAbort } from './abort-boundary.js';
 export {
   RetryQueue,

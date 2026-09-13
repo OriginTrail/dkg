@@ -69,7 +69,10 @@ describe('memory_graph_changed -- real daemon SSE emissions', () => {
     expect(created.status).toBe(200);
     if (register) {
       const reg = await postJson(daemon, '/api/context-graph/register', { id });
-      expect(reg.status).toBe(200);
+      expect(
+        reg.status,
+        `register response=${JSON.stringify(reg.body)}\ndaemon stderr=${daemon.owner.stderr.slice(-8_000)}`,
+      ).toBe(200);
     }
     return id;
   }

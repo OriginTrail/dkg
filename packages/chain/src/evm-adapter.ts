@@ -39,9 +39,12 @@ export {
   type PublisherWalletBalance,
 } from './evm-adapter-errors.js';
 export {
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
   resolveRpcUrls,
   isRetryableRpcError,
   isKnownTransactionError,
+  type RpcRetryDisposition,
 } from './evm-adapter-rpc.js';
 export {
   computeApprovalAction,

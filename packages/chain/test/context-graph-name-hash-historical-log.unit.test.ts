@@ -70,6 +70,29 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     expect(scenario.provider.getBlock).toHaveBeenCalledWith(101);
   });
 
+  it('preserves local queue-full while anchoring without probing a backup', async () => {
+    const scenario = historicalFixture([[42n]]);
+    const queueFull = Object.assign(new Error('local capacity exhausted'), {
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+    });
+    const firstProvider = {
+      getBlock: vi.fn(async () => { throw queueFull; }),
+    };
+    scenario.resolveContractDeployBlock.mockResolvedValue({
+      fromBlock: 100,
+      head: 101,
+      scanProviders: [
+        { provider: firstProvider, backendHead: 101 },
+        { provider: scenario.provider, backendHead: 101 },
+      ],
+    });
+
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH))
+      .rejects.toBe(queueFull);
+    expect(scenario.provider.getBlock).not.toHaveBeenCalled();
+    expect(scenario.queryEventLogsPage).not.toHaveBeenCalled();
+  });
+
   it('fails closed when same-height RPCs disagree on the historical anchor hash', async () => {
     const scenario = historicalFixture([[42n]]);
     const forkedProvider = {
@@ -261,7 +284,7 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     });
 
     await expect(fixture.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /binding changed during historical scan/i,
+      /binding changed during (?:historical scan|current-slot resolution)/i,
     );
     expect(fixture.getNameHash).not.toHaveBeenCalled();
   });
@@ -293,7 +316,9 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     });
 
     await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /registry high-water changed from 1025 to 1026 during historical scan/i,
+      `registry high-water changed from ${
+        CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n
+      } to ${CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 2n} during historical scan`,
     );
     expect(scenario.getNameHash).toHaveBeenCalledWith(42n);
   });
@@ -306,7 +331,9 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     });
 
     await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /registry high-water changed from 1025 to 1026 during historical scan/i,
+      `registry high-water changed from ${
+        CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n
+      } to ${CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 2n} during historical scan`,
     );
 
     scenario.setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n);

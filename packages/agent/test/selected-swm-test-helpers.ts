@@ -1,5 +1,6 @@
 import { resolveStartupResourcePolicy, type StartupResourcePolicy } from '../src/resource-policy.js';
 import { resolveAgentResourceEnvironment } from '../src/resource-limits.js';
+import type { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -152,6 +153,7 @@ export function graphBackedManifest(contextGraphId: string): ReturnType<typeof s
 
 export function cleanDurableResult(): SharedMemorySyncResult {
   return {
+    snapshotPlaneIncomplete: 0,
     insertedTriples: 0,
     fetchedMetaTriples: 0,
     fetchedDataTriples: 0,
@@ -169,7 +171,6 @@ export function cleanDurableResult(): SharedMemorySyncResult {
     deniedPhases: 0,
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
-    snapshotPlaneIncomplete: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
   };
@@ -218,6 +219,7 @@ export function result(
     backoffWorthyFailures: 0,
     deferredBackpressure: options.deferredBackpressure ?? 0,
     snapshotPlaneIncomplete: completed ? 0 : 1,
+    ...(completed ? {} : { localYield: true as const }),
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
     swmCoverage,
@@ -287,14 +289,10 @@ export interface SelectedProviderSelectionAgent {
       }>;
     };
   };
+  peerSyncSession: PeerSyncSession;
   networkAdmissionCoordinator: { isAcceptedPeer: (peerId: string) => boolean };
-  syncingPeers: Set<string>;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
-  skippedNoSyncPeers: Set<string>;
-  lastSuccessfulSyncAt: Map<string, number>;
-  lastSyncProgressAt: Map<string, number>;
-  syncReconcilerBackoff: Map<string, unknown>;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   rfc64SwmRecoveryCoordinatorV1: {
     admitSelectedPublic: (peerId: string, contextGraphIds: readonly string[]) => boolean;

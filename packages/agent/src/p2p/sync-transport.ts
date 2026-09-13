@@ -1,5 +1,11 @@
+import { assertSyncWorkAdmission, SyncWorkAdmissionExhaustedError, UNRESTRICTED_SYNC_WORK, type SyncWorkAdmission } from '../sync/work-admission.js';
 import { randomUUID } from 'node:crypto';
-import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
+import {
+  withRetryContext,
+  withSpan,
+  getMetrics,
+  type RetryAttemptContext,
+} from '@origintrail-official/dkg-core';
 import {
   toSyncLocalRequestFailureError,
   toSyncTransportFailureError,
@@ -48,7 +54,7 @@ export function createSingleUseSyncSender(
 }
 
 /**
- * Sync-page transport. Wraps `withRetry` around a per-attempt
+ * Sync-page transport. Wraps `withRetryContext` around a per-attempt
  * `requestFactory()` → `send()` chain, freshly minting both the
  * envelope bytes AND the substrate messageId on every attempt.
  *
@@ -90,15 +96,23 @@ export function createSingleUseSyncSender(
  * cached stale denial from replaying onto a later attempt.
  */
 interface SyncSendParams {
+  /** Legacy callers of this published helper may omit scoped work admission. */
+  readonly workAdmission?: SyncWorkAdmission;
   remotePeerId: string;
-  timeoutMs: number;
+  /**
+   * Legacy fixed/resolver timeout. New retry-aware callers should use
+   * `attemptTimeoutMs`, whose input comes directly from the retry engine.
+   */
+  timeoutMs: number | ((remainingAttempts: number) => number);
+  /** Explicit per-attempt timeout policy driven by canonical retry state. */
+  attemptTimeoutMs?: (attempt: RetryAttemptContext) => number;
   retryAttempts: number;
   signal?: AbortSignal;
   contextGraphId: string;
   offset: number;
   /**
    * Builds the envelope bytes for ONE attempt. Called once per
-   * `withRetry` attempt so each attempt carries a fresh
+   * `withRetryContext` attempt so each attempt carries a fresh
    * `issuedAtMs`/`requestId` (private CGs) — the auth gate at the
    * responder enforces freshness, so re-sending the same envelope
    * past `SYNC_AUTH_MAX_AGE_MS` would be denied.
@@ -113,7 +127,7 @@ interface SyncSendParams {
   send: SingleUseSyncSender;
   /**
    * Optional per-attempt response validator. Throwing here keeps the attempt
-   * inside `withRetry`, which lets sync-level retry sentinels share the same
+   * inside `withRetryContext`, which lets sync-level retry sentinels share the same
    * bounded backoff path as transport failures.
    */
   validateResponse?: (responseBytes: Uint8Array) => void | Promise<void>;
@@ -130,12 +144,13 @@ interface SyncSendParams {
 }
 
 export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Array> {
+  const workAdmission = params.workAdmission ?? UNRESTRICTED_SYNC_WORK;
   return withSpan(
     'sync.request',
     async () => {
       try {
-        const out = await withRetry(
-    async () => {
+        const out = await withRetryContext(
+    async (attempt) => {
       // Resolved once per attempt so all three W1 points describe the same
       // send, and so the ambient source is read once rather than three times.
       const attributes = syncAttemptAttributes({
@@ -154,6 +169,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       let outcome: SyncAttemptOutcome | undefined;
       try {
         throwIfAborted(params.signal);
+        assertSyncWorkAdmission(workAdmission);
         let requestBytes: Uint8Array;
         try {
           requestBytes = await params.requestFactory();
@@ -164,6 +180,11 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           throw toSyncLocalRequestFailureError(error);
         }
         throwIfAborted(params.signal);
+        const requestedTimeoutMs = params.attemptTimeoutMs?.(attempt)
+          ?? (typeof params.timeoutMs === 'function'
+            ? params.timeoutMs(attempt.remainingAttempts)
+            : params.timeoutMs);
+        const timeoutMs = workAdmission.admitTimeout(requestedTimeoutMs);
         const messageId = randomUUID();
         let responseBytes: Uint8Array;
         sendStarted = true;
@@ -173,7 +194,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
             params.remotePeerId,
             params.protocolId,
             requestBytes,
-            params.timeoutMs,
+            timeoutMs,
             messageId,
             params.signal,
           );
@@ -230,7 +251,9 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       maxAttempts: params.retryAttempts,
       baseDelayMs: 1000,
       signal: params.signal,
-      isRetryable: () => params.signal?.aborted !== true,
+      isRetryable: (error) => params.signal?.aborted !== true
+        && !(error instanceof SyncWorkAdmissionExhaustedError)
+        && workAdmission.canAdmitWork(),
       onRetry: params.onRetry,
     },
         );

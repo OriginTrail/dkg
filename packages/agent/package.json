@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.16",
+  "version": "10.0.17",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -20,6 +20,8 @@
     },
     "./package.json": "./package.json",
     "./dist/internal/*": null,
+    "./dist/random-sampling-runtime.js": null,
+    "./dist/random-sampling-eligibility.js": null,
     "./dist/rfc64/author-catalog-producer.js": "./dist/rfc64/author-catalog-producer.js",
     "./dist/rfc64/catalog-row-authorship.js": "./dist/rfc64/catalog-row-authorship.js",
     "./dist/rfc64/inventory-v1/candidate.js": "./dist/rfc64/inventory-v1/candidate.js",
@@ -39,7 +41,9 @@
     "./dist/rfc64/catalog-replay-recovery-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-snapshot-runtime-v1.js": null,
     "./dist/rfc64/catalog-runtime-v1.js": null,
+    "./dist/rfc64/background-work-dispatcher-v1.js": null,
     "./dist/rfc64/supervisor-status-v1.js": null,
+    "./dist/rfc64/catalog-shadow-observability-v1.js": null,
     "./dist/rfc64/serialized-scope-runtime-v1.js": null,
     "./dist/rfc64/control-envelope-signer-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,

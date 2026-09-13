@@ -46,7 +46,6 @@ vi.mock('../src/sync/requester/shared-memory-sync.js', async (importOriginal) =>
       failedPhases: 0,
       backoffWorthyFailures: 0,
       deferredBackpressure: 0,
-      snapshotPlaneIncomplete: 0,
       metadataContinuationYields: 0,
       replayPhaseBytesReceived: 0,
       snapshotPhaseBytesReceived: 0,
@@ -783,7 +782,7 @@ describe('durable sync lifecycle chain binding', () => {
             enabled: false,
             selectedContextGraphs: [],
             selectedPublicContextGraphs: [],
-            rollout: { killSwitch: false, contextGraphModes: {} },
+            rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
           },
         }),
       },
@@ -1163,7 +1162,6 @@ describe('durable sync lifecycle chain binding', () => {
         failedPhases: 0,
         backoffWorthyFailures: 0,
         deferredBackpressure: 0,
-        snapshotPlaneIncomplete: 0,
         metadataContinuationYields: 0,
         replayPhaseBytesReceived: 0,
         snapshotPhaseBytesReceived: 0,
@@ -1254,7 +1252,6 @@ describe('durable sync lifecycle chain binding', () => {
         failedPhases: 0,
         backoffWorthyFailures: 0,
         deferredBackpressure: 0,
-        snapshotPlaneIncomplete: 0,
         metadataContinuationYields: 0,
         replayPhaseBytesReceived: 0,
         snapshotPhaseBytesReceived: 0,
@@ -1348,6 +1345,8 @@ describe('durable sync lifecycle chain binding', () => {
       subscribedContextGraphs: new Map([[contextGraphId, oldSubscription]]),
       contextGraphBindingState: new ContextGraphBindingState(),
       enqueueContextGraphSubscriptionPersistWrite,
+      persistContextGraphSubscriptionProjectionStrict:
+        LifecycleSyncMethods.prototype.persistContextGraphSubscriptionProjectionStrict,
     };
 
     const capturedSubscription = oldSubscription;

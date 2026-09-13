@@ -41,7 +41,7 @@
  * offline-mode users will hit surprises on chain switch. The test stays
  * red until parity is restored or a documented exemption is added.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
@@ -73,6 +73,10 @@ const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 // shape from being chosen merely to evade the runtime parity audit.
 const EVM_INTERNAL_METHODS = new Set<string>([
   'getContextGraphNameHashResolver',
+  // Shared protected transport dispatcher behind the two public browser-wallet
+  // RPC capabilities. MockChainAdapter mirrors those public methods directly;
+  // it has no provider pool or failover plumbing to dispatch through.
+  'requestBrowserWalletRpc',
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
@@ -444,6 +448,26 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(await mock.isShardingTableMember(0n)).toBe(false);
     expect(await mock.isShardingTableMember(1n)).toBe(true);
     expect(await mock.isShardingTableMember(99999n)).toBe(true);
+  });
+
+  it('resolves the mock Random Sampling deployment and membership through the typed capability', async () => {
+    const mock = new MockChainAdapter();
+    expect(await mock.resolveRandomSamplingAvailability(0n)).toEqual({ kind: 'available', member: false });
+    expect(await mock.resolveRandomSamplingAvailability(42n)).toEqual({ kind: 'available', member: true });
+  });
+
+  it('preserves mock Random Sampling readiness and readiness failures in the typed capability', async () => {
+    const mock = new MockChainAdapter();
+    vi.spyOn(mock, 'isRandomSamplingReady').mockReturnValueOnce(false);
+    await expect(mock.resolveRandomSamplingAvailability(42n)).resolves.toEqual({
+      kind: 'unavailable', reason: 'contracts_not_deployed',
+    });
+
+    const error = new Error('readiness unavailable');
+    vi.spyOn(mock, 'isRandomSamplingReady').mockImplementationOnce(() => { throw error; });
+    await expect(mock.resolveRandomSamplingAvailability(42n)).resolves.toEqual({
+      kind: 'indeterminate', error,
+    });
   });
 
   // Codex PR #595 round-5: EVMChainAdapter.getMinimumRequiredSignatures

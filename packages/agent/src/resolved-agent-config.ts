@@ -16,7 +16,7 @@ export type RawResourceResolutionInput = Pick<
 >;
 
 type ProtocolResolutionInput = Pick<DKGAgentConfig,
-  | 'rfc64PublicCatalogActivation' | 'rfc64CatalogActivation'
+  | 'rfc64PublicCatalogActivation' | 'rfc64CatalogActivation' | 'rfc64CatalogActivations'
   | 'rfc64CatalogDeploymentProfile' | 'rfc64PublicCatalogAutoPublish'
   | 'rfc64PublicCatalogBootstrap' | 'contextGraphSubscriptionRehydrationEnabled'
 >;
@@ -29,7 +29,7 @@ const resourceResolutionFields = {
   syncAdmission: true, syncResponderSnapshotLimits: true,
 } satisfies Record<keyof RawResourceResolutionInput, true>;
 const protocolResolutionFields = {
-  rfc64PublicCatalogActivation: true, rfc64CatalogActivation: true,
+  rfc64PublicCatalogActivation: true, rfc64CatalogActivation: true, rfc64CatalogActivations: true,
   rfc64CatalogDeploymentProfile: true, rfc64PublicCatalogAutoPublish: true,
   rfc64PublicCatalogBootstrap: true, contextGraphSubscriptionRehydrationEnabled: true,
 } satisfies Record<keyof ProtocolResolutionInput, true>;
@@ -145,6 +145,7 @@ export function resolveAgentConfig(
     syncResponderSnapshotLimits: _syncResponderSnapshotLimits,
     rfc64PublicCatalogActivation: _rfc64PublicCatalogActivation,
     rfc64CatalogActivation: _rfc64CatalogActivation,
+    rfc64CatalogActivations: _rfc64CatalogActivations,
     rfc64CatalogDeploymentProfile: _rfc64CatalogDeploymentProfile,
     rfc64PublicCatalogAutoPublish: _rfc64PublicCatalogAutoPublish,
     rfc64PublicCatalogBootstrap: _rfc64PublicCatalogBootstrap,
