@@ -34,7 +34,7 @@ interface RepairAgentHarness {
     legacyTripleResolved?: boolean;
   }>;
   discovery: {
-    findAgents: (options: { signal: AbortSignal }) => Promise<RegistryAgent[]>;
+    findAgents: (options: { signal: AbortSignal; limit: number }) => Promise<RegistryAgent[]>;
   };
   vmReconcileObservedCandidatePeerIds: (contextGraphId: string) => string[];
   preferredSyncPeers: Map<string, string>;
@@ -50,10 +50,9 @@ interface RepairAgentHarness {
   ) => Promise<boolean>;
   ensurePeerConnected: (peerId: string, options: { signal: AbortSignal }) => Promise<void>;
   waitForSyncProtocol: (peerId: string, signal: AbortSignal) => Promise<boolean>;
-  isShardingTableCore: (
+  classifyShardingTableCore: (
     agentAddress: string | undefined,
-    options?: { requireProof?: boolean },
-  ) => Promise<boolean>;
+  ) => Promise<'member' | 'non-member' | 'unavailable' | 'indeterminate'>;
   syncExactKnowledgeAssetsFromPeerDetailed: (
     peerId: string,
     contextGraphId: string,
@@ -98,7 +97,7 @@ function makeRepairAgent(overrides: Partial<RepairAgentHarness> = {}): RepairAge
     ensurePeerAdmittedForRecovery: vi.fn(async () => true),
     ensurePeerConnected: vi.fn(async () => undefined),
     waitForSyncProtocol: vi.fn(async () => true),
-    isShardingTableCore: vi.fn(async () => true),
+    classifyShardingTableCore: vi.fn(async () => 'member'),
     syncExactKnowledgeAssetsFromPeerDetailed: vi.fn(async () => ({
       disposition: 'clean-absent',
       result: { insertedTriples: 0 },
@@ -265,6 +264,7 @@ describe('Random Sampling lifecycle repair adapter', () => {
     }
     expect(findAgents).toHaveBeenCalledWith({
       signal: expect.any(AbortSignal),
+      limit: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
     });
     const candidateMessage = vi.mocked(agentLike.log.info).mock.calls
       .map(([, message]) => message)
@@ -386,8 +386,10 @@ describe('Random Sampling lifecycle repair adapter', () => {
   });
 
   it('excludes self-declared Core profiles that lack current chain eligibility', async () => {
-    const isShardingTableCore = vi.fn(async (address: string | undefined) => (
+    const classifyShardingTableCore = vi.fn(async (address: string | undefined) => (
       address === '0x00000000000000000000000000000000000000aa'
+        ? 'member' as const
+        : 'non-member' as const
     ));
     const syncExactKnowledgeAssetsFromPeerDetailed = foundAt(['peer-eligible']);
     const agentLike = makeRepairAgent({
@@ -405,14 +407,13 @@ describe('Random Sampling lifecycle repair adapter', () => {
           },
         ]),
       },
-      isShardingTableCore,
+      classifyShardingTableCore,
       syncExactKnowledgeAssetsFromPeerDetailed,
     });
 
     await expect(runLifecycleRepair(agentLike)).resolves.toEqual(EMPTY_MATERIAL);
-    expect(isShardingTableCore).toHaveBeenCalledWith(
+    expect(classifyShardingTableCore).toHaveBeenCalledWith(
       '0x00000000000000000000000000000000000000bb',
-      { requireProof: true },
     );
     expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
       .toEqual(['peer-eligible']);

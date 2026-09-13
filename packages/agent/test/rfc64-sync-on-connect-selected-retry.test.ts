@@ -89,10 +89,11 @@ describe('RFC-64 selected retry lifecycle', () => {
   });
 
   it('starts RFC-64 selected SWM cold when broad sync-on-connect is disabled', async () => {
-    const agent = await createUnstartedAgent('SelectedSwmRetryIndependentSwitch');
+    const agent = await createUnstartedAgent('SelectedSwmRetryIndependentSwitch', {
+      syncOnConnectEnabled: false,
+    });
     allowAllNetworkAdmission(agent);
     agent.started = true;
-    agent.config.syncOnConnectEnabled = false;
     agent.config.syncSharedMemoryOnConnect = false;
     agent.config.syncContextGraphs = ['selected-cg'];
     agent.config.rfc64PublicCatalogBootstrap = {
@@ -162,7 +163,6 @@ describe('RFC-64 selected retry lifecycle', () => {
     const agent = await createUnstartedAgent('SelectedSwmRetryRejectedPeerCleanup');
     allowAllNetworkAdmission(agent);
     agent.started = true;
-    agent.config.syncOnConnectEnabled = true;
     agent.selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
     const runs: string[] = [];
     const runOrdinary = async (peerId: string) => {

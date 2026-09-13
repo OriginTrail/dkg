@@ -273,7 +273,11 @@ import {
   reconcileWarmCoreConnections,
   type WarmCoreAgent,
 } from './p2p/warm-core-connections.js';
-import { findCorePeerIds } from './p2p/core-peer-discovery.js';
+import {
+  acceptsCoreMembership,
+  findCorePeerIds,
+  type CoreMembershipEvidence,
+} from './p2p/core-peer-discovery.js';
 import {
   deleteSyncPageCheckpoint,
   fetchSyncPages,
@@ -429,7 +433,6 @@ import {
   resolveSyncGlobalBackpressure,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
-import { resolveSyncLifecycleSwitches } from './sync/lifecycle-switches.js';
 import {
   contextGraphPriority,
   countSyncPriorityClasses,
@@ -564,7 +567,6 @@ import {
   MESSAGE_OUTBOX_TICK_MS,
   AGENT_PROFILE_HEARTBEAT_MS,
   AGENT_PROFILE_STALE_THRESHOLD_MS,
-  WARM_CORE_CONNECTIONS_ENABLED,
   WARM_CORE_RECONCILE_INTERVAL_MS,
   WARM_CORE_MAX,
   WARM_CORE_KEEPALIVE_TAG,
@@ -617,7 +619,6 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
-  type DKGAgentConfig,
   type ResolvedDKGAgentConfig,
   type ReplicationEvent,
   type SyncReconcilerProbe,
@@ -1712,18 +1713,6 @@ async function authenticateDurableGraphScopedAsset(params: {
 
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
-  return resolveSyncLifecycleSwitches(config).syncReconcilerEnabled;
-}
-
-function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
-  return resolveSyncLifecycleSwitches(config).syncOnConnectEnabled;
-}
-
-function durableSyncEnabled(config: DKGAgentConfig): boolean {
-  return resolveSyncLifecycleSwitches(config).durableSyncEnabled;
 }
 
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
@@ -4085,7 +4074,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // the top of this file (`SYNC_RECONCILER_INTERVAL_MS`,
     // `SYNC_STALENESS_THRESHOLD_MS`) and `reconcileSyncFromConnectedPeers`
     // for the full design rationale.
-    if (syncReconcilerEnabled(this.config)) {
+    if (this.syncLifecycleSwitches.syncReconcilerEnabled) {
       const syncTiming = this.config.syncReconcilerTiming;
       this.syncReconcilerTimer = setInterval(() => {
         this.reconcileSyncFromConnectedPeers().catch((err: unknown) => {
@@ -4102,7 +4091,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // auto-redialed by libp2p) so catch-up / chain reconciliation never pays
     // a cold circuit-relay dial to reach a Core. Opt-in via
     // DKG_WARM_CORE_CONNECTIONS=1. See `p2p/warm-core-connections.ts`.
-    if (WARM_CORE_CONNECTIONS_ENABLED) {
+    if (this.syncLifecycleSwitches.warmCoreConnectionsEnabled) {
       // Serialize passes: one reconcile can run longer than the interval
       // (discovery + chain gate + up to WARM_CORE_MAX sequential dials, each
       // with a 20s timeout). Without this guard, overlapping passes race on
@@ -4320,15 +4309,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           findCorePeerIds({
             findAgents: (options) => this.discovery.findAgents(options),
             selfPeerId: this.peerId,
+            maxCandidates: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+            eligibilityConcurrency: CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
             signal,
             // The broad proof-time fallback must be chain-scoped. Profiles
             // without an operational address or a positive membership read do
             // not consume the challenge deadline merely by claiming a Core
             // role in the local Agent Registry graph.
-            isEligibleCore: (agent) => this.isShardingTableCore(
+            classifyMembership: (agent) => this.classifyShardingTableCore(
               agent.agentAddress,
-              { requireProof: true },
             ),
+            membershipPolicy: 'proof-required',
           }).catch((error) => {
             if (signal.aborted) throw signal.reason ?? error;
             this.log.info(
@@ -4786,7 +4777,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   > {
     const source = options.source ?? 'on-connect';
     const jobAdmittedByInitialProbe = options.initialProbe !== undefined;
-    const automaticSelectedContextGraphIds = syncOnConnectEnabled(this.config)
+    const automaticSelectedContextGraphIds = this.syncLifecycleSwitches.syncOnConnectEnabled
       && (this.config.syncSharedMemoryOnConnect ?? true)
       ? this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer)
       : [];
@@ -4863,7 +4854,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         options.selectedSwmRetry === true
         && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)
       );
-    if (!syncOnConnectEnabled(this.config) && !selectedSwmRetryRequired) return false;
+    if (!this.syncLifecycleSwitches.syncOnConnectEnabled && !selectedSwmRetryRequired) return false;
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return false;
     }
@@ -4938,7 +4929,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncReconcilerAttemptOutcome> {
-    if (!syncOnConnectEnabled(this.config)) return 'not-started';
+    if (!this.syncLifecycleSwitches.syncOnConnectEnabled) return 'not-started';
     const runner = this.createSyncOnConnectPeerJobRunner(remotePeer, {
       initialProbe: probe,
       source,
@@ -4983,7 +4974,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
-    if (!this.started || !syncOnConnectEnabled(this.config)) return 'not-started';
+    if (!this.started || !this.syncLifecycleSwitches.syncOnConnectEnabled) return 'not-started';
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return 'not-started';
     }
@@ -5138,7 +5129,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           });
         },
       },
-      syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config)
+      syncSharedMemoryOnConnect: this.syncLifecycleSwitches.syncOnConnectEnabled
         && (this.config.syncSharedMemoryOnConnect ?? true),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
@@ -5471,7 +5462,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.knownCorePeerIdsV2.delete(peerId);
     }
     if (!this.skippedNoSyncPeers.has(peerId)) return;
-    if (!syncOnConnectEnabled(this.config)) return;
+    if (!this.syncLifecycleSwitches.syncOnConnectEnabled) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;
     const ctx = createOperationContext('sync');
     const shortPeer = peerId.slice(-8);
@@ -5514,7 +5505,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async reconcileSyncFromConnectedPeers(this: DKGAgent): Promise<void> {
     if (!this.started) return;
-    if (!syncReconcilerEnabled(this.config) || !syncOnConnectEnabled(this.config)) return;
+    if (!this.syncLifecycleSwitches.syncReconcilerEnabled
+      || !this.syncLifecycleSwitches.syncOnConnectEnabled) return;
     const now = Date.now();
     const syncTiming = this.config.syncReconcilerTiming;
     const ctx = createOperationContext('sync');
@@ -5722,7 +5714,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           lastSeen: a.lastSeen,
         }));
       },
-      isShardingTableCore: (agentAddress) => this.isShardingTableCore(agentAddress),
+      isShardingTableCore: (agentAddress) => this.isWarmCoreCandidate(agentAddress),
       isConnected: (peerId) =>
         this.node.libp2p.getConnections().some((c) => c.remotePeer.toString() === peerId),
       pin: (peerId) => this.pinWarmCore(peerId),
@@ -5744,27 +5736,37 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * passes so the phonebook `nodeRole='core'` alone decides. A transient
    * RPC failure denies (we don't pin on an unverifiable gate).
    */
-  async isShardingTableCore(
+  async classifyShardingTableCore(
     this: DKGAgent,
     agentAddress: string | undefined,
-    options: { requireProof?: boolean } = {},
-  ): Promise<boolean> {
+  ): Promise<CoreMembershipEvidence> {
     const getIdentityIdForAddress = this.chain.getIdentityIdForAddress?.bind(this.chain);
     const isShardingTableMember = this.chain.isShardingTableMember?.bind(this.chain);
-    if (!getIdentityIdForAddress || !isShardingTableMember) return !options.requireProof;
+    if (!getIdentityIdForAddress || !isShardingTableMember) return 'unavailable';
     // A legacy/mixed-version core profile may not carry an operational wallet.
     // Discovery elsewhere supports profiles without `agentAddress`, so treat
     // its absence as "gate unavailable" (fall back to phonebook nodeRole)
     // rather than a hard denial — otherwise the warm set can collapse to zero
     // in a network with healthy but pre-agentAddress cores.
-    if (!agentAddress) return !options.requireProof;
+    if (!agentAddress) return 'unavailable';
     try {
       const identityId = await getIdentityIdForAddress(agentAddress);
-      if (identityId === 0n) return false;
-      return await isShardingTableMember(identityId);
+      if (identityId === 0n) return 'non-member';
+      return await isShardingTableMember(identityId) ? 'member' : 'non-member';
     } catch {
-      return false;
+      return 'indeterminate';
     }
+  }
+
+  /** Legacy warm-set policy: unavailable evidence is accepted; failed reads are not. */
+  async isWarmCoreCandidate(
+    this: DKGAgent,
+    agentAddress: string | undefined,
+  ): Promise<boolean> {
+    return acceptsCoreMembership(
+      await this.classifyShardingTableCore(agentAddress),
+      'warm-compatible',
+    );
   }
 
   /**
@@ -5927,7 +5929,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: DurableSyncOptions,
   ): Promise<DurableSyncResult> {
     const ctx = createOperationContext('sync');
-    if (!durableSyncEnabled(this.config)) {
+    if (!this.syncLifecycleSwitches.durableSyncEnabled) {
       this.log.warn(ctx, `Skipping durable sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return createIncompleteDurableSyncResult();
     }
@@ -7529,7 +7531,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         completedTargetKeys,
       )
       : { kind: 'ordinary-shared-memory', shared };
-    if (!durableSyncEnabled(this.config)) {
+    if (!this.syncLifecycleSwitches.durableSyncEnabled) {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return execution(emptySharedMemorySyncResult());
     }
@@ -7970,7 +7972,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
   ): Promise<RecoverContextGraphSwmResult> {
     const ctx = createOperationContext('sync');
-    if (!durableSyncEnabled(this.config)) {
+    if (!this.syncLifecycleSwitches.durableSyncEnabled) {
       this.log.warn(ctx, `Skipping SWM recovery from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
       return emptySwmRecoveryResult();
     }

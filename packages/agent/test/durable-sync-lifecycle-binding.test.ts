@@ -111,6 +111,7 @@ import {
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
+import type { SyncLifecycleSwitches } from '../src/sync/lifecycle-switches.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'agent-blackbox-vm';
@@ -118,6 +119,12 @@ const ual = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1';
 const assertionGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/asset/1`;
 const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
 const ctx = { kind: 'sync', id: 'lifecycle-binding-test', startedAt: 0 } as OperationContext;
+const ENABLED_SYNC_LIFECYCLE_SWITCHES = Object.freeze({
+  syncReconcilerEnabled: true,
+  syncOnConnectEnabled: true,
+  durableSyncEnabled: true,
+  warmCoreConnectionsEnabled: false,
+}) satisfies Readonly<SyncLifecycleSwitches>;
 
 const mockedRunDurableSync = vi.mocked(runDurableSync);
 const mockedRunDurableSyncDetailed = vi.mocked(runDurableSyncDetailed);
@@ -598,6 +605,7 @@ describe('durable sync lifecycle chain binding', () => {
     // re-statement of it.
     const runContextGraphSyncWithBackpressure = vi.fn(async () => ({}));
     const agentLike = {
+      syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
       config: {},
       log: { info: () => {}, warn: () => {}, debug: () => {} },
       runContextGraphSyncWithBackpressure,
@@ -624,6 +632,7 @@ describe('durable sync lifecycle chain binding', () => {
     'passes includeRootScope for %s authority during standalone SWM recovery',
     async (_mode, legacySyncAllowed) => {
       const agentLike: any = {
+        syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
         config: {},
         store: {},
         writeLocks: new Map(),
@@ -775,6 +784,7 @@ describe('durable sync lifecycle chain binding', () => {
       needsReconcile: false,
     };
     const agentLike: any = {
+      syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
       config: {
         nodeRole: 'core',
         rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
@@ -827,6 +837,7 @@ describe('durable sync lifecycle chain binding', () => {
       complete: true,
     }));
     const agentLike: any = {
+      syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
       config: {
         nodeRole: 'core',
         rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({
@@ -1170,6 +1181,7 @@ describe('durable sync lifecycle chain binding', () => {
       };
     });
     const agentLike: any = {
+      syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
       config: {},
       store: {},
       writeLocks: new Map(),
@@ -1262,6 +1274,7 @@ describe('durable sync lifecycle chain binding', () => {
     });
     const clearPublishedKnowledgeAssetSwm = vi.fn(async () => {});
     const agentLike: any = {
+      syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
       config: {},
       store: {},
       writeLocks: new Map(),

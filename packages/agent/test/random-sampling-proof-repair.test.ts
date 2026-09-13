@@ -46,6 +46,56 @@ function processDurableBatchWithRealVerifier(
   });
 }
 
+describe('Core ShardingTable membership evidence', () => {
+  const classify = LifecycleSyncMethods.prototype.classifyShardingTableCore as any;
+  const isWarmCandidate = LifecycleSyncMethods.prototype.isWarmCoreCandidate as any;
+
+  function target(chain: Record<string, unknown>) {
+    return { chain, classifyShardingTableCore: classify };
+  }
+
+  it('keeps unavailable legacy evidence distinct from positive membership proof', async () => {
+    await expect(classify.call(target({}), undefined)).resolves.toBe('unavailable');
+    await expect(classify.call(target({
+      getIdentityIdForAddress: vi.fn(async () => 7n),
+      isShardingTableMember: vi.fn(async () => true),
+    }), undefined)).resolves.toBe('unavailable');
+    await expect(isWarmCandidate.call(target({}), undefined)).resolves.toBe(true);
+  });
+
+  it('classifies zero identities and negative membership reads as non-members', async () => {
+    const zeroIdentity = target({
+      getIdentityIdForAddress: vi.fn(async () => 0n),
+      isShardingTableMember: vi.fn(async () => true),
+    });
+    const negativeMembership = target({
+      getIdentityIdForAddress: vi.fn(async () => 7n),
+      isShardingTableMember: vi.fn(async () => false),
+    });
+
+    await expect(classify.call(zeroIdentity, '0xzero')).resolves.toBe('non-member');
+    await expect(classify.call(negativeMembership, '0xnegative'))
+      .resolves.toBe('non-member');
+  });
+
+  it('distinguishes positive proof from an indeterminate RPC failure', async () => {
+    const member = target({
+      getIdentityIdForAddress: vi.fn(async () => 7n),
+      isShardingTableMember: vi.fn(async () => true),
+    });
+    const failedRead = target({
+      getIdentityIdForAddress: vi.fn(async () => 7n),
+      isShardingTableMember: vi.fn(async () => {
+        throw new Error('RPC unavailable');
+      }),
+    });
+
+    await expect(classify.call(member, '0xmember')).resolves.toBe('member');
+    await expect(classify.call(failedRead, '0xunknown')).resolves.toBe('indeterminate');
+    await expect(isWarmCandidate.call(failedRead, '0xunknown')).resolves.toBe(false);
+  });
+});
+
 describe('Random Sampling proof-time exact repair', () => {
   it('terminates challenge authentication when a chain read ignores cancellation', async () => {
     vi.useFakeTimers();
@@ -180,7 +230,8 @@ describe('Random Sampling proof-time exact repair', () => {
 
   it('reserves enough global deadline for a later Core after an earlier Core stalls', async () => {
     const liveSignal = new AbortController().signal;
-    let peerTimeoutCount = 0;
+    let nowMs = 0;
+    const peerBudgets: number[] = [];
     const attempted: string[] = [];
     const proofMaterial = { contents: ['recovered'], privateRoots: [] };
 
@@ -188,31 +239,36 @@ describe('Random Sampling proof-time exact repair', () => {
       chainId: 'base:8453',
       maxPeers: 'all',
       timeoutMs: 100,
-      now: () => 0,
+      now: () => nowMs,
       createTimeoutSignal: () => liveSignal,
-      createPeerTimeoutSignal: () => {
-        peerTimeoutCount += 1;
-        if (peerTimeoutCount !== 1) return liveSignal;
+      createPeerTimeoutSignal: (timeoutMs) => {
+        peerBudgets.push(timeoutMs);
+        if (peerBudgets.length !== 1) return liveSignal;
         const controller = new AbortController();
-        queueMicrotask(() => controller.abort(new DOMException('peer share elapsed', 'TimeoutError')));
+        setTimeout(() => {
+          nowMs += timeoutMs;
+          controller.abort(new DOMException('peer share elapsed', 'TimeoutError'));
+        }, 0);
         return controller.signal;
       },
       resolveStorageAddress: async () => '0x0000000000000000000000000000000000001234',
       resolveLocalContextGraphId: () => 'food-safety',
       resolveCandidatePeerIds: async () => ['peer-stalled', 'peer-holder'],
       selectPeerWindow: (peerIds) => peerIds,
-      preparePeer: async (peerId, signal) => {
+      preparePeer: async (peerId, _signal) => {
         attempted.push(peerId);
+        return { kind: 'ready' };
+      },
+      fetchExactKnowledgeAsset: async (peerId, _cgId, _commitment, signal) => {
         if (peerId === 'peer-stalled') {
           await new Promise<void>((_resolve, reject) => {
             signal.addEventListener('abort', () => reject(signal.reason), { once: true });
           });
         }
-        return { kind: 'ready' };
+        return peerId === 'peer-holder'
+          ? { kind: 'found', material: proofMaterial }
+          : { kind: 'miss', disposition: 'clean-absent' };
       },
-      fetchExactKnowledgeAsset: async (peerId) => peerId === 'peer-holder'
-        ? { kind: 'found', material: proofMaterial }
-        : { kind: 'miss', disposition: 'clean-absent' },
       logInfo: vi.fn(),
     }, {
       kaId: 7n,
@@ -223,7 +279,10 @@ describe('Random Sampling proof-time exact repair', () => {
 
     expect(repaired).toEqual(proofMaterial);
     expect(attempted).toEqual(['peer-stalled', 'peer-holder']);
-    expect(peerTimeoutCount).toBe(2);
+    // Two peers split the initial 100 ms evenly. After the stalled fetch uses
+    // its 50 ms share, the final holder retains the remaining 50 ms. Giving
+    // the first peer the whole deadline would produce [100, 1] and fail here.
+    expect(peerBudgets).toEqual([50, 50]);
   });
 
   it('reports every structured peer outcome when no provider recovers the asset', async () => {

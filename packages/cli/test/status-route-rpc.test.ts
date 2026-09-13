@@ -34,6 +34,7 @@ import {
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { DashboardDB } from '@origintrail-official/dkg-node-ui';
+import { resolveSyncLifecycleSwitches } from '@origintrail-official/dkg-agent';
 import {
   loadNetworkConfig,
   resolveRfc64PublicCatalogActivation,
@@ -97,6 +98,7 @@ async function requestStatusWithAgent(
       agent: {
         peerId: 'peer-status-test',
         multiaddrs: [],
+        syncLifecycleSwitches: Object.freeze(resolveSyncLifecycleSwitches(config)),
         node: {
           libp2p: { getConnections: () => [] },
           getRelayStats: () => null,
@@ -662,6 +664,25 @@ describe('/api/status effective sync lifecycle switches', () => {
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
       }
+    }
+  });
+
+  it('reports the startup-owned switch snapshot after the environment changes', async () => {
+    const previous = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    try {
+      process.env.DKG_SYNC_RECONCILER_ENABLED = 'false';
+      const startupSnapshot = Object.freeze(resolveSyncLifecycleSwitches({}));
+      process.env.DKG_SYNC_RECONCILER_ENABLED = 'true';
+
+      const response = await requestStatusWithAgent({
+        syncLifecycleSwitches: startupSnapshot,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body.syncLifecycle.syncReconcilerEnabled).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+      else process.env.DKG_SYNC_RECONCILER_ENABLED = previous;
     }
   });
 });

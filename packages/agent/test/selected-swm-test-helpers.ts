@@ -39,6 +39,14 @@ import {
   type SyncPageFetchOptions,
 } from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
+import type { SyncLifecycleSwitches } from '../src/sync/lifecycle-switches.js';
+
+const ENABLED_SYNC_LIFECYCLE_SWITCHES = Object.freeze({
+  syncReconcilerEnabled: true,
+  syncOnConnectEnabled: true,
+  durableSyncEnabled: true,
+  warmCoreConnectionsEnabled: false,
+}) satisfies Readonly<SyncLifecycleSwitches>;
 
 export const PEER = '12D3KooWSelectedCompleteSwmProvider';
 
@@ -347,6 +355,7 @@ export async function callTrySyncFromPeer(
   }) => void,
 ): Promise<unknown> {
   const agent = this as SelectedProviderSelectionAgent & {
+    syncLifecycleSwitches?: Readonly<SyncLifecycleSwitches>;
     trySelectedSwmRetryFromPeer:
       typeof LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
     trySyncFromPeer: typeof LifecycleSyncMethods.prototype.trySyncFromPeer;
@@ -360,6 +369,7 @@ export async function callTrySyncFromPeer(
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
   agent.trySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer;
+  agent.syncLifecycleSwitches ??= ENABLED_SYNC_LIFECYCLE_SWITCHES;
   agent.subscribedContextGraphs ??= new Map();
   agent.getSyncReconcilerProbe = async () => ({
     protocolsKey: null,
@@ -465,6 +475,7 @@ export interface SelectedSwmLifecycleHarnessOptions {
 }
 
 export interface SelectedSwmLifecycleAgentFixture {
+  syncLifecycleSwitches: Readonly<SyncLifecycleSwitches>;
   config: {
     syncContextGraphPriorities: Readonly<Record<string, number>>;
     syncResponderSnapshotLimits?: {
@@ -670,6 +681,7 @@ export function createSelectedSwmLifecycleHarness(
   let createTargetExecutorSession: (() => SwmTargetExecutorV1) | undefined;
 
   const agent: SelectedSwmLifecycleAgentFixture = {
+    syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
     config: {
       syncContextGraphPriorities: options.priorities ?? {},
       ...(options.metaContinuationLimits
