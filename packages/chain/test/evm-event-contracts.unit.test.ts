@@ -1,7 +1,10 @@
 import { Contract } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { eventContractKeysFor } from '../src/evm-event-contracts.js';
-import { EvmHubContractBindings } from '../src/evm-hub-contract-bindings.js';
+import {
+  ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings,
+  type EvmHubContractKey, type EvmHubContractSpec,
+} from '../src/evm-hub-contract-bindings.js';
 
 const first = new Contract('0x0000000000000000000000000000000000000001', []);
 const second = new Contract('0x0000000000000000000000000000000000000002', []);
@@ -95,5 +98,77 @@ describe('generation-owned Hub bindings and event selection', () => {
     expect(group.contracts.knowledgeAssetStorage).toBeUndefined();
     await expect(group.resolve(keys, load)).resolves.toEqual({ contextGraphStorage: second, knowledgeAssetStorage: second });
     expect(load).toHaveBeenCalledTimes(4);
+  });
+});
+
+/** Installed handles and decided keys must always describe the same generation. */
+function expectAgreement(group: EvmHubContractBindings, decided: ReadonlyMap<EvmHubContractKey, Contract | undefined>): void {
+  expect([...group.resolvedKeys].sort()).toEqual([...decided.keys()].sort());
+  for (const [key, handle] of decided) expect(group.contracts[key]).toBe(handle);
+  if (group.initialized) expect(group.resolvedKeys.size).toBe(ALL_EVM_HUB_CONTRACT_KEYS.length);
+}
+
+function decidedAs(handleFor: (key: EvmHubContractKey) => Contract | undefined): Map<EvmHubContractKey, Contract | undefined> {
+  return new Map(ALL_EVM_HUB_CONTRACT_KEYS.map(key => [key, handleFor(key)]));
+}
+
+describe('Hub binding generation ownership', () => {
+  it('install decides every boot key at once and runs no loader for the installed generation', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const store = { hub: first, contextGraphStorage: second };
+    group.install(store);
+    expect(group.contracts).toBe(store);
+    expect(group.initialized).toBe(true);
+    expectAgreement(group, decidedAs(key => key === 'contextGraphStorage' ? second : undefined));
+    const loader = vi.fn(async () => first);
+    await expect(group.resolve(['contextGraphStorage', 'knowledgeAssetStorage'], loader))
+      .resolves.toEqual({ contextGraphStorage: second, knowledgeAssetStorage: undefined });
+    expect(loader).not.toHaveBeenCalled();
+  });
+
+  it('invalidate retires readiness and decisions while retaining handles unless dropped', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    group.install({ hub: first, contextGraphStorage: second, knowledgeAssetStorage: first });
+    group.invalidate(['knowledgeAssetStorage']);
+    expect(group.initialized).toBe(false);
+    expectAgreement(group, new Map());
+    // Retained for operations that already passed init; dropped handles are gone.
+    expect(group.contracts.contextGraphStorage).toBe(second);
+    expect(group.contracts.knowledgeAssetStorage).toBeUndefined();
+    const loader = vi.fn(async () => first);
+    await expect(group.resolve(['contextGraphStorage', 'knowledgeAssetStorage'], loader))
+      .resolves.toEqual({ contextGraphStorage: first, knowledgeAssetStorage: first });
+    expect(loader).toHaveBeenCalledTimes(2);
+    expectAgreement(group, new Map([['contextGraphStorage', first], ['knowledgeAssetStorage', first]]));
+  });
+
+  it('publishes readiness only for a completely decided, still current generation', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const generation = group.generation;
+    await group.resolve(['contextGraphStorage'], async () => first);
+    expect(() => group.completeInitialization(generation)).toThrow('cannot publish readiness before resolving: identity');
+    expect(group.initialized).toBe(false);
+    const loader = vi.fn(async (spec: EvmHubContractSpec) => spec.optional ? undefined : second);
+    await group.resolve(ALL_EVM_HUB_CONTRACT_KEYS, loader);
+    expect(loader).toHaveBeenCalledTimes(ALL_EVM_HUB_CONTRACT_KEYS.length - 1);
+    expect(group.completeInitialization(generation)).toBe(true);
+    expect(group.initialized).toBe(true);
+    expectAgreement(group, decidedAs(key => key === 'contextGraphStorage' ? first : EVM_HUB_CONTRACT_SPECS[key].optional ? undefined : second));
+    group.invalidate();
+    expect(group.completeInitialization(generation)).toBe(false);
+    expect(group.initialized).toBe(false);
+    expectAgreement(group, new Map());
+  });
+
+  it('an install during a staged lookup wins and the stale lookup commits nothing', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const pending = deferred<Contract>();
+    const resolving = group.resolve(['contextGraphStorage'], () => pending.promise);
+    const store = { hub: first, contextGraphStorage: second };
+    group.install(store);
+    pending.resolve(first);
+    await expect(resolving).resolves.toEqual({ contextGraphStorage: second });
+    expect(store.contextGraphStorage).toBe(second);
+    expectAgreement(group, decidedAs(key => key === 'contextGraphStorage' ? second : undefined));
   });
 });

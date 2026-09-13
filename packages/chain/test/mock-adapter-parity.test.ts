@@ -74,7 +74,8 @@ const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 const EVM_INTERNAL_METHODS = new Set<string>([
   'getContextGraphNameHashResolver',
   'readHubAddress', // TS-private Hub lookup with caller-owned cancellation.
-  'resolveEventContracts', // Protected event subset of the canonical Hub registry.
+  'resolveHubContractBindings', // Protected subset resolution against the canonical Hub registry.
+  'requireChronos', // Protected optional-boot-binding accessor; the mock has no Hub registry.
   'loadHubContractBinding', // TS-private physical loader used by subset and full initialization.
   'cancellableLogs', // TS-private event iterator; not a ChainAdapter method.
 ]);

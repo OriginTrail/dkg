@@ -27,6 +27,13 @@ export type EvmHubContractKey = keyof typeof EVM_HUB_CONTRACT_SPECS;
 export type EvmHubContractSpec = (typeof EVM_HUB_CONTRACT_SPECS)[EvmHubContractKey];
 export const ALL_EVM_HUB_CONTRACT_KEYS = Object.freeze(Object.keys(EVM_HUB_CONTRACT_SPECS) as EvmHubContractKey[]);
 
+/**
+ * The handle store as readers see it. Hub-bound handles are written only by
+ * {@link EvmHubContractBindings}; lazily resolved slots stay adapter-owned.
+ */
+export type EvmHubContractStore =
+  Readonly<Pick<ContractCache, 'hub' | EvmHubContractKey>> & Omit<ContractCache, 'hub' | EvmHubContractKey>;
+
 /** Optional deployments retain their legacy fallback, but never swallow cancellation. */
 export async function optionalEvmContract<T>(load: () => Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
   signal?.throwIfAborted();
@@ -40,47 +47,67 @@ export async function optionalEvmContract<T>(load: () => Promise<T>, signal?: Ab
   }
 }
 
+/**
+ * One Hub generation: the installed handles, the boot keys this generation has
+ * decided (a handle, or absent for an optional deployment) and whether full
+ * initialization published readiness. Every generation transition replaces the
+ * record atomically and only the owner writes into it, so a key is in
+ * `resolved` exactly when its handle was committed by this generation.
+ */
+interface EvmHubContractGeneration {
+  readonly contracts: ContractCache;
+  readonly resolved: Set<EvmHubContractKey>;
+  initialized: boolean;
+}
+
 /** One canonical handle store and Hub generation for subset and full initialization. */
 export class EvmHubContractBindings {
-  private current = { resolved: new Set<EvmHubContractKey>(), initialized: false };
+  private current: EvmHubContractGeneration;
 
-  constructor(private installed: ContractCache) {}
-
-  get contracts(): ContractCache { return this.installed; }
-
-  /** Preserve the adapter's protected cache replacement contract for subclasses. */
-  set contracts(value: ContractCache) {
-    const initialized = this.initialized;
-    this.installed = value;
-    this.invalidate();
-    for (const key of ALL_EVM_HUB_CONTRACT_KEYS) {
-      if (initialized || Object.hasOwn(value, key)) this.current.resolved.add(key);
-    }
-    this.current.initialized = initialized;
+  constructor(contracts: ContractCache) {
+    this.current = { contracts, resolved: new Set(), initialized: false };
   }
+
+  get contracts(): EvmHubContractStore { return this.current.contracts; }
 
   get initialized(): boolean { return this.current.initialized; }
 
-  /** Protected adapter compatibility: an installed full cache is caller-owned. */
-  set initialized(value: boolean) {
-    if (!value) { this.invalidate(); return; }
-    for (const key of ALL_EVM_HUB_CONTRACT_KEYS) this.current.resolved.add(key);
-    this.current.initialized = true;
-  }
+  /** Boot keys the current generation has decided. */
+  get resolvedKeys(): ReadonlySet<EvmHubContractKey> { return this.current.resolved; }
 
   get generation(): object { return this.current; }
 
-  /** A full initializer may finish only the exact generation it began. */
-  completeInitialization(generation: object): boolean {
-    if (generation !== this.current) return false;
-    this.initialized = true;
-    return true;
+  /**
+   * The typed installation seam for subclasses and fixtures: a complete,
+   * caller-owned handle set. Every boot key is decided by this call — an
+   * absent optional entry means "not deployed" — so the new generation is
+   * ready and no loader runs until the generation changes.
+   */
+  install(contracts: ContractCache): void {
+    this.current = { contracts, resolved: new Set(ALL_EVM_HUB_CONTRACT_KEYS), initialized: true };
   }
 
-  invalidate(): void {
-    // Keep installed handles usable by operations that already passed init.
-    // New admissions must resolve against the new generation before use.
-    this.current = { resolved: new Set(), initialized: false };
+  /**
+   * Retire the current generation after a Hub rotation or write-side self-heal.
+   * Installed handles stay usable by operations that already passed init; new
+   * admissions must resolve against the new generation before use. Keys in
+   * `dropped` lose their handle as well, for callers that must not reuse them.
+   */
+  invalidate(dropped: Iterable<EvmHubContractKey> = []): void {
+    const { contracts } = this.current;
+    for (const key of dropped) contracts[key] = undefined;
+    this.current = { contracts, resolved: new Set(), initialized: false };
+  }
+
+  /** A full initializer may finish only the exact, completely decided generation it began. */
+  completeInitialization(generation: object): boolean {
+    if (generation !== this.current) return false;
+    const undecided = ALL_EVM_HUB_CONTRACT_KEYS.filter(key => !this.current.resolved.has(key));
+    if (undecided.length > 0) {
+      throw new Error(`Hub bindings cannot publish readiness before resolving: ${undecided.join(', ')}`);
+    }
+    this.current.initialized = true;
+    return true;
   }
 
   async resolve<K extends EvmHubContractKey>(
@@ -103,14 +130,15 @@ export class EvmHubContractBindings {
         signal?.throwIfAborted();
       }
       if (generation !== this.current) continue;
-      // The canonical store is updated atomically after the entire subset
-      // succeeds. Preserve anything another caller committed in this generation.
+      // Handles and decided keys commit together, synchronously, after the
+      // entire subset succeeds. Preserve anything another caller committed in
+      // this generation meanwhile.
       for (const [key, value] of staged) {
         if (generation.resolved.has(key)) continue;
-        this.installed[key] = value;
+        generation.contracts[key] = value;
         generation.resolved.add(key);
       }
-      return Object.freeze(Object.fromEntries(keys.map(key => [key, this.installed[key]]))) as Readonly<Pick<ContractCache, K>>;
+      return Object.freeze(Object.fromEntries(keys.map(key => [key, generation.contracts[key]]))) as Readonly<Pick<ContractCache, K>>;
     }
   }
 }

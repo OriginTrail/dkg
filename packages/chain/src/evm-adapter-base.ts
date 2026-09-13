@@ -25,8 +25,10 @@ import type {
   SignedTransactionEnvelope,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import type { EvmEventContractKey, EvmEventContracts } from './evm-event-contracts.js';
-import { ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings, optionalEvmContract, type EvmHubContractSpec } from './evm-hub-contract-bindings.js';
+import {
+  ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings, optionalEvmContract,
+  type EvmHubContractKey, type EvmHubContractSpec, type EvmHubContractStore,
+} from './evm-hub-contract-bindings.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
@@ -679,11 +681,25 @@ export class EVMChainAdapterBase {
   protected readonly approvalPolicy: ApprovalPolicy;
 
   private readonly hubContractBindings: EvmHubContractBindings;
-  protected get contracts(): ContractCache { return this.hubContractBindings.contracts; }
-  protected set contracts(value: ContractCache) { this.hubContractBindings.contracts = value; }
+  /** Hub-bound handles are written only by `hubContractBindings`; lazy slots stay adapter-owned. */
+  protected get contracts(): EvmHubContractStore { return this.hubContractBindings.contracts; }
+  /**
+   * Fixture/subclass installation seam: a caller-owned COMPLETE handle set.
+   * Absent optional entries mean "not deployed"; the generation is ready
+   * without running `init()`.
+   */
+  protected set contracts(value: ContractCache) { this.hubContractBindings.install(value); }
 
   protected get initialized(): boolean { return this.hubContractBindings.initialized; }
-  protected set initialized(value: boolean) { this.hubContractBindings.initialized = value; }
+  /**
+   * Fixture/subclass seam. `true` declares the current handle set complete
+   * and ready; `false` retires the generation so the next `init()` resolves
+   * every binding again.
+   */
+  protected set initialized(value: boolean) {
+    if (value) this.hubContractBindings.install(this.hubContractBindings.contracts);
+    else this.hubContractBindings.invalidate();
+  }
 
   /**
    * Single self-refreshing cache for the `RandomSampling` /
@@ -2810,12 +2826,19 @@ export class EVMChainAdapterBase {
     }
   }
 
-  /** Both event subsets and full initialization use one generation-owned registry. */
-  protected resolveEventContracts(
-    keys: readonly EvmEventContractKey[],
+  /** Event subsets, lazy boot bindings and full initialization use one generation-owned registry. */
+  protected resolveHubContractBindings<K extends EvmHubContractKey>(
+    keys: readonly K[],
     options: ChainReadOptions = {},
-  ): Promise<EvmEventContracts> {
+  ): Promise<Readonly<Pick<ContractCache, K>>> {
     return this.hubContractBindings.resolve(keys, spec => this.loadHubContractBinding(spec, options), options.signal);
+  }
+
+  /** Chronos is an optional boot binding decided by the registry, never re-read ad hoc. */
+  protected async requireChronos(): Promise<Contract> {
+    const { chronos } = await this.resolveHubContractBindings(['chronos']);
+    if (!chronos) throw new Error(`Contract "Chronos" not found in Hub at ${this.hubAddress}`);
+    return chronos;
   }
 
   private async loadHubContractBinding(spec: EvmHubContractSpec, options: ChainReadOptions = {}): Promise<Contract | undefined> {
@@ -4144,12 +4167,9 @@ export class EVMChainAdapterBase {
     if (policy.invalidateOnRotation) this.invalidateHubBinding(policy);
   }
 
+  /** Lazily bound slots only; Hub-bound handles are retired through `hubContractBindings`. */
   protected invalidateHubBinding(policy: HubBindingInvalidationPolicy): void {
-    if ('contractKey' in policy) {
-      this.contracts[policy.contractKey] = undefined;
-      return;
-    }
-    if (policy.special === 'identityStorage') this.invalidateIdentityStorageBinding();
+    if ('special' in policy && policy.special === 'identityStorage') this.invalidateIdentityStorageBinding();
   }
 
   protected finalizeKnownHubRotation(): void {
@@ -4183,7 +4203,9 @@ export class EVMChainAdapterBase {
    * (in-flight probe, ready flag) that `init()` alone won't reset.
    */
   protected invalidateAllBoundContracts(): void {
-    this.hubContractBindings.invalidate();
+    // One owner transition retires the generation and drops every Hub-bound
+    // handle; lazily bound slots and dependent caches follow.
+    this.hubContractBindings.invalidate(ALL_EVM_HUB_CONTRACT_KEYS);
     for (const policy of HUB_BINDING_INVALIDATORS.values()) {
       this.invalidateHubBinding(policy);
     }
