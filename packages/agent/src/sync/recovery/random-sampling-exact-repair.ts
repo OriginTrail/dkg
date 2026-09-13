@@ -8,7 +8,6 @@ import type { ExactAssetCommitment } from '../exact-assets.js';
 import {
   runBoundedPreparedPeerTraversal,
   type PreparedPeerAttemptRecord,
-  type PreparedPeerPreparation,
 } from '../prepared-peer-traversal.js';
 
 export interface RandomSamplingExactRepairInput {
@@ -27,6 +26,10 @@ export type RandomSamplingExactRepairResult =
       readonly kind: 'miss';
       readonly disposition: 'clean-absent' | 'incomplete';
     };
+
+export type RandomSamplingPeerPreparation =
+  | { readonly kind: 'ready' }
+  | { readonly kind: 'skipped'; readonly reason: string };
 
 export interface RandomSamplingExactRepairDependencies {
   readonly chainId: string;
@@ -49,7 +52,7 @@ export interface RandomSamplingExactRepairDependencies {
     peerIds: string[],
     options: { readonly maxPeers: number; readonly peerRotationKey: string },
   ): string[];
-  preparePeer(peerId: string, signal: AbortSignal): Promise<PreparedPeerPreparation>;
+  preparePeer(peerId: string, signal: AbortSignal): Promise<RandomSamplingPeerPreparation>;
   fetchExactKnowledgeAsset(
     peerId: string,
     localContextGraphId: string,
@@ -137,10 +140,7 @@ async function executeRandomSamplingExactRepair(
   const maxPeers = deps.maxPeers === 'all' ? candidatePeerIds.length : deps.maxPeers;
   const now = deps.now ?? Date.now;
   const createPeerTimeoutSignal = deps.createPeerTimeoutSignal ?? AbortSignal.timeout;
-  const traversal = await runBoundedPreparedPeerTraversal<
-    RandomSamplingExactRepairResult,
-    AbortSignal
-  >({
+  const traversal = await runBoundedPreparedPeerTraversal<RandomSamplingExactRepairResult>({
     candidatePeerIds,
     // The caller bounds this to the complete registry roster. Unlike ordinary
     // reconciliation, one proof-time repair must reach every eligible Core
@@ -169,7 +169,7 @@ async function executeRandomSamplingExactRepair(
     assertCurrent: () => {
       if (signal.aborted) throw abortReason(signal);
     },
-    preparePeer: async (peerId, { remainingPeers }) => {
+    attemptPeer: async (peerId, { remainingPeers }) => {
       // Reserve a fair share for every later Core. One stalled dial/fetch may
       // consume its share, but cannot monopolize the proof's global deadline.
       const peerBudgetMs = Math.max(
@@ -180,12 +180,16 @@ async function executeRandomSamplingExactRepair(
         signal,
         createPeerTimeoutSignal(peerBudgetMs),
       ]);
-      const preparation = await deps.preparePeer(peerId, peerSignal);
-      return preparation.kind === 'ready'
-        ? { kind: 'ready', prepared: peerSignal }
-        : preparation;
-    },
-    attemptPeer: async (peerId, peerSignal) => {
+      let preparation: RandomSamplingPeerPreparation;
+      try {
+        preparation = await deps.preparePeer(peerId, peerSignal);
+      } catch (error) {
+        if (signal.aborted) throw abortReason(signal);
+        return { kind: 'prepare-failed', error };
+      }
+      throwIfAborted(signal);
+      if (preparation.kind === 'skipped') return preparation;
+
       let result: RandomSamplingExactRepairResult;
       try {
         result = await deps.fetchExactKnowledgeAsset(

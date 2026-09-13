@@ -1,32 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   runBoundedPreparedPeerTraversal,
-  type PreparedPeerPreparation,
   type PreparedPeerWindowSelection,
 } from '../src/sync/prepared-peer-traversal.js';
 
 describe('runBoundedPreparedPeerTraversal', () => {
   it('records skipped, failed, missed and done peers and counts only real attempts', async () => {
     const log = vi.fn();
-    const preparations: Record<string, PreparedPeerPreparation> = {
-      'peer-rejected': { kind: 'skipped', reason: 'not-admitted' },
-      'peer-transport': { kind: 'ready' },
-      'peer-miss': { kind: 'ready' },
-      'peer-holder': { kind: 'ready' },
-      'peer-untouched': { kind: 'ready' },
-    };
     const transportError = new Error('stream reset');
+    const dialError = new Error('dial timed out');
 
     const traversal = await runBoundedPreparedPeerTraversal<string>({
       candidatePeerIds: ['peer-rejected', 'peer-dial', 'peer-transport', 'peer-miss', 'peer-holder', 'peer-untouched'],
       maxPeers: 6,
       operationLabel: 'Exact fetch from',
       assertCurrent: () => undefined,
-      preparePeer: async (peerId) => {
-        if (peerId === 'peer-dial') throw new Error('dial timed out');
-        return preparations[peerId]!;
-      },
       attemptPeer: async (peerId) => {
+        if (peerId === 'peer-rejected') return { kind: 'skipped', reason: 'not-admitted' };
+        if (peerId === 'peer-dial') return { kind: 'prepare-failed', error: dialError };
         if (peerId === 'peer-transport') return { kind: 'failed', error: transportError };
         if (peerId === 'peer-miss') return { kind: 'missed', reason: 'clean-absent' };
         return { kind: 'done', result: peerId };
@@ -63,7 +54,6 @@ describe('runBoundedPreparedPeerTraversal', () => {
       operationLabel: 'Exact fetch from',
       assertCurrent: () => undefined,
       onWindowSelected: (selected) => { selection = selected; },
-      preparePeer: async () => ({ kind: 'ready' }),
       attemptPeer: async () => ({ kind: 'missed', reason: 'unresolved' }),
       log: vi.fn(),
     });
@@ -84,39 +74,36 @@ describe('runBoundedPreparedPeerTraversal', () => {
     });
   });
 
-  it('carries typed preparation state and traversal position into the attempt', async () => {
+  it('passes stable traversal position into the caller-owned attempt', async () => {
     const observed: unknown[] = [];
-    const traversal = await runBoundedPreparedPeerTraversal<string, { token: string }>({
+    const traversal = await runBoundedPreparedPeerTraversal<string>({
       candidatePeerIds: ['peer-a', 'peer-b'],
       maxPeers: 2,
-      operationLabel: 'Typed fetch from',
+      operationLabel: 'Positioned fetch from',
       assertCurrent: () => undefined,
-      preparePeer: async (peerId, position) => {
-        observed.push(['prepare', peerId, position]);
-        return { kind: 'ready', prepared: { token: `prepared:${peerId}` } };
-      },
-      attemptPeer: async (peerId, prepared, position) => {
-        observed.push(['attempt', peerId, prepared, position]);
+      attemptPeer: async (peerId, position) => {
+        observed.push(['attempt', peerId, position]);
         return peerId === 'peer-a'
           ? { kind: 'missed', reason: 'not-here' }
-          : { kind: 'done', result: prepared.token };
+          : { kind: 'done', result: `found:${peerId}` };
       },
       log: vi.fn(),
     });
 
-    expect(traversal.result).toBe('prepared:peer-b');
+    expect(traversal.result).toBe('found:peer-b');
     expect(observed).toEqual([
-      ['prepare', 'peer-a', expect.objectContaining({ index: 0, remainingPeers: 2, totalPeers: 2 })],
-      ['attempt', 'peer-a', { token: 'prepared:peer-a' }, expect.objectContaining({ index: 0, remainingPeers: 2 })],
-      ['prepare', 'peer-b', expect.objectContaining({ index: 1, remainingPeers: 1, totalPeers: 2 })],
-      ['attempt', 'peer-b', { token: 'prepared:peer-b' }, expect.objectContaining({ index: 1, remainingPeers: 1 })],
+      ['attempt', 'peer-a', expect.objectContaining({ index: 0, remainingPeers: 2, totalPeers: 2 })],
+      ['attempt', 'peer-b', expect.objectContaining({ index: 1, remainingPeers: 1, totalPeers: 2 })],
     ]);
   });
 
   it('propagates cancellation observed after a failed preparation instead of continuing', async () => {
     const controller = new AbortController();
     const reason = new Error('owner stopped');
-    const attemptPeer = vi.fn(async () => ({ kind: 'done' as const }));
+    const attemptPeer = vi.fn(async () => {
+      controller.abort(reason);
+      return { kind: 'prepare-failed' as const, error: new Error('dial aborted') };
+    });
 
     await expect(runBoundedPreparedPeerTraversal({
       candidatePeerIds: ['peer-stalled', 'peer-next'],
@@ -125,29 +112,25 @@ describe('runBoundedPreparedPeerTraversal', () => {
       assertCurrent: () => {
         if (controller.signal.aborted) throw controller.signal.reason;
       },
-      preparePeer: async () => {
-        controller.abort(reason);
-        throw new Error('dial aborted');
-      },
       attemptPeer,
       log: vi.fn(),
     })).rejects.toBe(reason);
-    expect(attemptPeer).not.toHaveBeenCalled();
+    expect(attemptPeer).toHaveBeenCalledTimes(1);
+    expect(attemptPeer).toHaveBeenCalledWith('peer-stalled', expect.any(Object));
   });
 
   it('surfaces a terminal outcome and a thrown attempt without visiting later peers', async () => {
     const terminal = new Error('graph binding conflict');
-    const preparePeer = vi.fn(async () => ({ kind: 'ready' as const }));
+    const attemptPeer = vi.fn(async () => ({ kind: 'terminal' as const, error: terminal }));
     await expect(runBoundedPreparedPeerTraversal({
       candidatePeerIds: ['peer-a', 'peer-b'],
       maxPeers: 2,
       operationLabel: 'Exact fetch from',
       assertCurrent: () => undefined,
-      preparePeer,
-      attemptPeer: async () => ({ kind: 'terminal', error: terminal }),
+      attemptPeer,
       log: vi.fn(),
     })).rejects.toBe(terminal);
-    expect(preparePeer).toHaveBeenCalledTimes(1);
+    expect(attemptPeer).toHaveBeenCalledTimes(1);
 
     const thrown = new Error('unexpected');
     await expect(runBoundedPreparedPeerTraversal({
@@ -155,7 +138,6 @@ describe('runBoundedPreparedPeerTraversal', () => {
       maxPeers: 1,
       operationLabel: 'Exact fetch from',
       assertCurrent: () => undefined,
-      preparePeer: async () => ({ kind: 'ready' }),
       attemptPeer: async () => { throw thrown; },
       log: vi.fn(),
     })).rejects.toBe(thrown);
@@ -168,7 +150,6 @@ describe('runBoundedPreparedPeerTraversal', () => {
       maxPeers: 1,
       operationLabel: 'Exact fetch from',
       assertCurrent: () => undefined,
-      preparePeer: async () => ({ kind: 'ready' }),
       attemptPeer: async () => ({ kind: 'done', diagnostic: new Error('prefix persisted') }),
       log,
     });

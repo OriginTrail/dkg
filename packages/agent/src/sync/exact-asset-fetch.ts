@@ -326,12 +326,17 @@ export async function runExactAssetFetch(
     maxPeers: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
     operationLabel: 'Exact asset fetch from',
     assertCurrent: () => requireCurrent(deps),
-    // This service keeps its boolean preparation contract; a declined peer is
-    // an expected skip for the traversal, not a failure.
-    preparePeer: async (peerId) => (await deps.preparePeer(peerId)
-      ? { kind: 'ready' as const }
-      : { kind: 'skipped' as const, reason: 'unprepared' }),
     attemptPeer: async (peerId) => {
+      let prepared: boolean;
+      try {
+        prepared = await deps.preparePeer(peerId);
+      } catch (error) {
+        requireCurrent(deps);
+        return { kind: 'prepare-failed' as const, error };
+      }
+      requireCurrent(deps);
+      if (!prepared) return { kind: 'skipped' as const, reason: 'unprepared' };
+
       let failure: unknown;
       try {
         await deps.fetchFromPeer(peerId, [...remaining.keys()]);

@@ -15,6 +15,7 @@ import {
 } from '../src/p2p/network-identity-proof.js';
 
 const REMOTE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
+const OTHER_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
 const REMOTE_PEER_ID_CID = peerIdFromString(REMOTE_PEER_ID).toCID().toString();
 const REMOTE_PRIVATE_KEY_SEED = Buffer
   .from('vHxcSg3ecwP9UfJWdmlnWQeJe83jD2yKtOJlWuLpIrTRh3QiB5sL6iRhAidCZ3bHQLaE0RwBfHBNEmV7ylcjqg==', 'base64')
@@ -106,6 +107,72 @@ describe('network identity proof', () => {
       nonce,
       requesterPeerId,
     })).resolves.toEqual({ ok: true });
+  });
+
+  it('does not authenticate valid wallet signatures bound to another handshake context', async () => {
+    const nonce = 'current-nonce';
+    const requesterPeerId = 'current-requester';
+    const request = makeNetworkIdentityRequest({ nonce, requesterPeerId, identity: localIdentity });
+    const wrongBindings = [
+      {
+        label: 'nonce replay',
+        scope: networkPeerBindingScope({
+          nonce: 'prior-nonce',
+          requesterPeerId,
+          networkId: localIdentity.networkId,
+        }),
+        delegateePeerId: REMOTE_PEER_ID,
+      },
+      {
+        label: 'different requester',
+        scope: networkPeerBindingScope({
+          nonce,
+          requesterPeerId: 'other-requester',
+          networkId: localIdentity.networkId,
+        }),
+        delegateePeerId: REMOTE_PEER_ID,
+      },
+      {
+        label: 'different network',
+        scope: networkPeerBindingScope({
+          nonce,
+          requesterPeerId,
+          networkId: 'network-b',
+        }),
+        delegateePeerId: REMOTE_PEER_ID,
+      },
+      {
+        label: 'different responder peer',
+        scope: networkPeerBindingScope({ nonce, requesterPeerId, networkId: localIdentity.networkId }),
+        delegateePeerId: OTHER_PEER_ID,
+      },
+    ];
+
+    for (const wrong of wrongBindings) {
+      const peerAgentBinding = await signAgentDelegation({
+        agentPrivateKey: AGENT_PRIVATE_KEY,
+        agentAddress: AGENT_ADDRESS,
+        scope: wrong.scope,
+        issuedAtMs: Date.now(),
+        expiresAtMs: Date.now() + 60_000,
+        delegateePeerId: wrong.delegateePeerId,
+      });
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity: localIdentity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+        peerAgentBinding,
+      });
+
+      await expect(verifyNetworkIdentityResponse({
+        response,
+        remotePeerId: REMOTE_PEER_ID,
+        localIdentity,
+        nonce,
+        requesterPeerId,
+      }), wrong.label).resolves.toEqual({ ok: true });
+    }
   });
 
   it('accepts an alternate-encoded response peer id for the same peer key', async () => {
