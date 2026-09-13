@@ -130,17 +130,21 @@ describe('wallet store — bootstrap + connect lifecycle', () => {
     expect(p.calls).not.toContain('wallet_addEthereumChain');
   });
 
-  it('uses explicit wallet-public RPC URLs when asking the wallet to add the bootstrap chain', async () => {
+  it('adds an unknown chain with wallet-public RPC URLs, then explicitly switches to it', async () => {
     const addChainParams: unknown[] = [];
+    let switchAttempts = 0;
     const p = new MockEip6963Provider({
       rdns: 'io.metamask',
       accounts: [`0x${'33'.repeat(20)}`],
       chainId: 1,
       handlers: {
         wallet_switchEthereumChain: () => {
-          const err = new Error('Unknown chain') as Error & { code: number };
-          err.code = 4902;
-          throw err;
+          if (switchAttempts++ === 0) {
+            const err = new Error('Unknown chain') as Error & { code: number };
+            err.code = 4902;
+            throw err;
+          }
+          return null;
         },
         wallet_addEthereumChain: (params) => {
           addChainParams.push(params);
@@ -156,7 +160,13 @@ describe('wallet store — bootstrap + connect lifecycle', () => {
     await useWalletStore.getState().connect(p.detail());
     await useWalletStore.getState().switchToExpectedChain();
 
-    expect(p.calls).toEqual(expect.arrayContaining(['wallet_switchEthereumChain', 'wallet_addEthereumChain']));
+    expect(p.calls).toEqual([
+      'eth_requestAccounts',
+      'eth_chainId',
+      'wallet_switchEthereumChain',
+      'wallet_addEthereumChain',
+      'wallet_switchEthereumChain',
+    ]);
     const addedChain = (addChainParams[0] as [{ rpcUrls: string[] }])[0];
     expect(addedChain.rpcUrls).toEqual(['https://public-rpc.example']);
   });

@@ -22,6 +22,7 @@ export interface ConvictionReader {
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
+  /** @deprecated Use requestBrowserWalletRpc for new browser-read features. */
   requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 }
 
@@ -97,13 +98,26 @@ export interface PcaContracts {
   walletRpcUrls?: string[];
 }
 
-export type PcaRpcMethod =
+/** Browser-safe read methods shared by the independently scoped wallet features. */
+export type BrowserWalletRpcMethod =
   | 'eth_chainId'
   | 'eth_call'
   | 'eth_getTransactionReceipt'
   | 'eth_getTransactionByHash'
   | 'eth_blockNumber'
   | 'eth_getBlockByNumber';
+
+export type PcaRpcMethod = BrowserWalletRpcMethod;
+
+/** All-or-none node-identity contract surface for browser-signed key rotation. */
+export interface IdentityWalletContracts {
+  profile: string;
+  identity: string;
+  storage: string;
+  chainId: string;
+  rpcUrls: string[];
+  walletRpcUrls?: string[];
+}
 
 export interface IdentityProof {
   publicKey: Uint8Array;
@@ -1474,18 +1488,33 @@ export interface ChainAdapter {
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
 
   /**
+   * Independent browser bootstrap for node-identity key management. `null`
+   * means the deployment does not expose the complete Profile / Identity /
+   * IdentityStorage capability.
+   */
+  getIdentityWalletContracts?(): Promise<IdentityWalletContracts | null>;
+
+  /** Feature-neutral, read-only JSON-RPC bridge for browser-wallet routes. */
+  requestBrowserWalletRpc?(
+    method: BrowserWalletRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown>;
+
+  /**
+   * @deprecated Use {@link requestBrowserWalletRpc}. Retained as a compatibility
+   * bridge for adapters and embedders compiled against the PCA-specific API.
+   */
+  requestPublishingConvictionRpc?(
+    method: PcaRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown>;
+
+  /**
    * Browser-bootstrap contract addresses + chain params for the HW signing
    * layer. The browser needs the PCA NFT address, TRAC token address, chain id,
    * and safe RPC URLs; Hub/logic/ShardingTable stay daemon-side.
   */
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
-
-  /**
-   * Daemon-internal read-only JSON-RPC bridge used by `/api/pca/rpc`. The HTTP
-   * route owns the allowlist; adapters forward allowed reads without exposing
-   * endpoint URLs.
-   */
-  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given

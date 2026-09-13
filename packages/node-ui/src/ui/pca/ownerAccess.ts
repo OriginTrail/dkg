@@ -23,7 +23,7 @@
  * wallet submitter's per-prompt liveness guards (inv-16) — those stay call-time in
  * `web3/walletOwnerActionSubmitter.ts`.
  */
-import { eqAddress } from './address.js';
+import { eqAddress } from '../web3/address.js';
 
 /** Address-only owner classification. `unknown` is the display carve-out for the two
  *  "can't classify" causes below; it is NOT part of inv-17 precedence. */

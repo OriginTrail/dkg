@@ -2,9 +2,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Copy } from 'lucide-react';
 
 /**
- * Shared clipboard helper for the PCA surfaces. There is no app-wide
+ * Shared clipboard helper for wallet and contract-address surfaces. There is no app-wide
  * CopyButton (each surface inlined its own `navigator.clipboard?.writeText`),
- * so the PCA components — where a wallet/account address is copied in many
+ * so wallet-heavy components — where an address is copied in many
  * places — centralise it here. Clipboard failures (insecure context, denied
  * permission) are swallowed; the button just stays idle so the user can retry.
  */
