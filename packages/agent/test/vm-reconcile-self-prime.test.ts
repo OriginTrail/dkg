@@ -12,6 +12,7 @@
  */
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ChainEventDispatchContext } from '@origintrail-official/dkg-publisher';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -53,7 +54,7 @@ interface AgentInternals {
     onChainId: string;
     provenance: 'authoritative' | 'reverse-name-hash' | 'ontology';
   } | null>;
-  handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown, signal: AbortSignal): Promise<string | null>;
+  handleKARegisteredNudge(onChainId: string, kaId: bigint, context: ChainEventDispatchContext): Promise<string | null>;
   bindSubscriptionOnChainId(
     localCgId: string,
     sub: { subscribed: boolean; coreHosted?: boolean; onChainId?: string },
@@ -1141,7 +1142,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const { dispatcher, triggered } = targetDispatcher(internals);
 
     // The event names ON_HIT's on-chain id. None is bound yet.
-    const reconciled = await internals.handleKARegisteredNudge(ON_HIT, 99n, createOperationContext('system'), new AbortController().signal);
+    const reconciled = await internals.handleKARegisteredNudge(ON_HIT, 99n, {
+      operation: createOperationContext('system'),
+      signal: new AbortController().signal,
+    });
 
     expect(reconciled).toBeNull();
     expect(triggered).toEqual([]);
@@ -1174,7 +1178,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     }, () => undefined);
     installVmReconcileScheduling(internals, scheduling);
 
-    const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, createOperationContext('system'), new AbortController().signal);
+    const reconciled = await internals.handleKARegisteredNudge(ON_BOUND, 1n, {
+      operation: createOperationContext('system'),
+      signal: new AbortController().signal,
+    });
     await internals.vmReconcileScheduling.waitForIdle();
     expect(reconciled).toBe(CG_BOUND);
     expect(triggered).toEqual([`live:${CG_BOUND}`]);
@@ -1197,12 +1204,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(triggered).toEqual([]);
 
     internals.bindSubscriptionOnChainId(localCgId, sub, onChainId);
-    await expect(internals.handleKARegisteredNudge(
-      onChainId,
-      1n,
-      createOperationContext('system'),
-      new AbortController().signal,
-    )).resolves.toBe(localCgId);
+    await expect(internals.handleKARegisteredNudge(onChainId, 1n, {
+      operation: createOperationContext('system'),
+      signal: new AbortController().signal,
+    })).resolves.toBe(localCgId);
     await dispatcher.waitForIdle(localCgId);
 
     expect(triggered).toEqual([`live:${localCgId}`]);

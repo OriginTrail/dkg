@@ -125,6 +125,7 @@ import {
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   readMaterializedVersion, shouldApplyMaterialization, withMaterializationLock,
   type MaterializedVersion,
+  type ChainEventDispatchContext,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -3055,9 +3056,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     onChainId: string,
     kaId: bigint,
-    ctx: OperationContext,
-    pollSignal: AbortSignal,
+    context: ChainEventDispatchContext,
   ): Promise<string | null> {
+    // One admitted run: its operation and cancellation are never re-paired here.
+    const { operation: ctx, signal: pollSignal } = context;
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
     const lifecycleSignal = this.vmReconcileLifecycleController
       ? AbortSignal.any([this.vmReconcileLifecycleController.signal, pollSignal])

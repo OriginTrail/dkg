@@ -469,8 +469,10 @@ describe('cold current-state Context Graph name binding', () => {
         '42',
         NAME_HASH,
       );
-      await expect(fixture.agent.handleKARegisteredNudge('42', 99n, createOperationContext('system'), new AbortController().signal))
-        .resolves.toBe(LOCAL_ID);
+      await expect(fixture.agent.handleKARegisteredNudge('42', 99n, {
+        operation: createOperationContext('system'),
+        signal: new AbortController().signal,
+      })).resolves.toBe(LOCAL_ID);
       await runtime.waitForIdle(LOCAL_ID);
 
       expect(sources).toEqual(['live', 'live']);
@@ -618,12 +620,10 @@ describe('cold current-state Context Graph name binding', () => {
       releaseLiveHold: vi.fn(),
     };
 
-    await expect(fixture.agent.handleKARegisteredNudge(
-      '42',
-      99n,
-      createOperationContext('system'),
-      new AbortController().signal,
-    )).resolves.toBe(LOCAL_ID);
+    await expect(fixture.agent.handleKARegisteredNudge('42', 99n, {
+      operation: createOperationContext('system'),
+      signal: new AbortController().signal,
+    })).resolves.toBe(LOCAL_ID);
     expect(triggerLive).toHaveBeenCalledWith(LOCAL_ID);
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
 
