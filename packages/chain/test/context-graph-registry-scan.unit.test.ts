@@ -708,6 +708,38 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.values.get((store as any).key(key))).toBe(2_201);
   });
 
+  it.each([
+    { mode: 'seedLiveTail' as const, watermark: undefined },
+    { mode: 'incremental' as const, watermark: 2_051 },
+  ])(
+    'fails $mode before log RPC when its live budget cannot traverse the reorg prefix',
+    async ({ mode, watermark }) => {
+      const store = new MemoryRegistryScanCursorStore();
+      const key = {
+        chainId: 'evm:31337',
+        deploymentId: 'evm:31337:hub=0x0000000000000000000000000000000000000001',
+        registryAddress: REGISTRY,
+      };
+      if (watermark !== undefined) await store.save(key, watermark);
+      const registry = makeRegistry();
+      const { adapter } = makeAdapter(registry, 2_100, {
+        cgRegistryScanPageSize: 1,
+        contextGraphRegistryScanCursorStore: store,
+      });
+      registry.queryFilter.setImpl(async () => []);
+      const iterator = adapter.scanContextGraphRegistryPages({
+        mode,
+        pageBudget: 30,
+      })[Symbol.asyncIterator]();
+
+      await expect(iterator.next()).rejects.toThrow(
+        'live page budget 30 at 1 block(s)/page cannot cover the reorg overlap/current-head progression',
+      );
+      expect(registry.queryFilter.calls).toEqual([]);
+      expect(store.values.get((store as any).key(key))).toBe(watermark);
+    },
+  );
+
   it('owns live scans exclusively and rejects skipped, duplicate, concurrent, and late acknowledgements', async () => {
     const store = new MemoryRegistryScanCursorStore();
     let releaseSave: (() => void) | undefined;
