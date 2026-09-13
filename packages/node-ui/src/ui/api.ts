@@ -3242,8 +3242,26 @@ export interface IdentityWalletContracts {
   walletRpcUrls?: string[];
 }
 
-export const fetchIdentityWalletContracts = () =>
-  get<IdentityWalletContracts>('/api/identity-wallets/contracts');
+function isIdentityWalletContracts(value: unknown): value is IdentityWalletContracts {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Partial<IdentityWalletContracts>;
+  const chainIdIsUsable = (typeof item.chainId === 'number' && Number.isFinite(item.chainId))
+    || (typeof item.chainId === 'string' && /(\d+)\s*$/.test(item.chainId));
+  return typeof item.profile === 'string'
+    && typeof item.identity === 'string'
+    && typeof item.storage === 'string'
+    && chainIdIsUsable
+    && Array.isArray(item.rpcUrls)
+    && item.rpcUrls.every((url) => typeof url === 'string')
+    && (item.walletRpcUrls === undefined
+      || (Array.isArray(item.walletRpcUrls)
+        && item.walletRpcUrls.every((url) => typeof url === 'string')));
+}
+
+export const fetchIdentityWalletContracts = async (): Promise<IdentityWalletContracts | null> => {
+  const value = await get<unknown>('/api/identity-wallets/contracts');
+  return isIdentityWalletContracts(value) ? value : null;
+};
 export const fetchRpcHealth = () =>
   get<{
     ok: boolean;

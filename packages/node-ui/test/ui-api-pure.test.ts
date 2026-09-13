@@ -15,6 +15,7 @@ import {
   fetchConnections,
   fetchRetentionSettings,
   fetchTelemetrySettings,
+  fetchIdentityWalletContracts,
   markNotificationsRead,
   fetchRpcHealth,
   fetchQueryHistory,
@@ -248,6 +249,11 @@ describe('UI API tests', () => {
     it('fetchRpcHealth calls /api/rpc-health', async () => {
       await fetchRpcHealth();
       expect(requestLog.some(r => r.url.startsWith('/api/chain/rpc-health'))).toBe(true);
+    });
+
+    it('treats a malformed optional identity-wallet bootstrap as unavailable', async () => {
+      await expect(fetchIdentityWalletContracts()).resolves.toBeNull();
+      expect(requestLog.some(r => r.url.startsWith('/api/identity-wallets/contracts'))).toBe(true);
     });
 
     it('fetchEconomics calls /api/economics', async () => {
