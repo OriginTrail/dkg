@@ -168,7 +168,6 @@ import {
   CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
   createChainDiscoveryScanRunner,
-  scheduleChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
 // The scan policy lived here until GH#2323; the implementation moved to its
 // own module, but the public import path stays valid for existing consumers.
@@ -179,7 +178,6 @@ export {
   CHAIN_REPAIR_AUDIT_EVERY_TICKS,
   chainDiscoveryScanOptions,
   createChainDiscoveryScanRunner,
-  scheduleChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
@@ -2465,12 +2463,9 @@ async function runDaemonInnerWithStartupOwnership(
     agent,
     log,
     pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
-  });
-  const chainDiscoveryScanSchedule = scheduleChainDiscoveryScanRunner({
-    runner: runChainDiscoveryScan,
-    initialDelayMs: 15_000,
     intervalMs: CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   });
+  runChainDiscoveryScan.schedule(15_000);
 
   // Periodic peer health ping (every 2 minutes)
   const PING_INTERVAL_MS = 2 * 60 * 1000;
@@ -3765,7 +3760,7 @@ async function runDaemonInnerWithStartupOwnership(
         if (updateInterval) clearInterval(updateInterval);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
-        await chainDiscoveryScanSchedule.close().catch((err: unknown) => {
+        await runChainDiscoveryScan.close().catch((err: unknown) => {
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });
         logVolumePruner.stop();

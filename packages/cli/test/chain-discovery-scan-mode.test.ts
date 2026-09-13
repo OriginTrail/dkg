@@ -10,8 +10,6 @@ import {
   commitScanOutcome,
   createChainDiscoveryScanRunner,
   planScan,
-  scheduleChainDiscoveryScanRunner,
-  type ChainDiscoveryScanRunner,
   type ScanOptions,
 } from '../src/daemon/chain-discovery-scan.js';
 import {
@@ -291,31 +289,30 @@ describe('createChainDiscoveryScanRunner', () => {
   });
 });
 
-describe('scheduleChainDiscoveryScanRunner', () => {
-  it('owns both timers and drains the runner when the schedule closes', async () => {
+describe('chain discovery runner scheduling', () => {
+  it('owns its initial and recurring deadlines and drains when closed', async () => {
     vi.useFakeTimers();
     try {
-      const calls: string[] = [];
-      const runner: ChainDiscoveryScanRunner = {
-        run: vi.fn(async () => { calls.push('run'); }),
-        close: vi.fn(async () => { calls.push('drained'); }),
+      const agent = {
+        hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+        discoverContextGraphsFromChain: vi.fn(async () => 0),
       };
-      const schedule = scheduleChainDiscoveryScanRunner({
-        runner,
-        initialDelayMs: 15,
+      const runner = createChainDiscoveryScanRunner({
+        agent,
+        log: vi.fn(),
         intervalMs: 30,
       });
 
+      expect(runner.schedule(15)).toBe(true);
       await vi.advanceTimersByTimeAsync(15);
-      expect(runner.run).toHaveBeenCalledTimes(1);
+      expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(30);
-      expect(runner.run).toHaveBeenCalledTimes(2);
+      expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
 
-      await schedule.close();
-      expect(runner.close).toHaveBeenCalledTimes(1);
-      expect(calls.at(-1)).toBe('drained');
+      await runner.close();
       await vi.advanceTimersByTimeAsync(300);
-      expect(runner.run).toHaveBeenCalledTimes(2);
+      expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
+      expect(runner.schedule(0)).toBe(false);
     } finally {
       vi.useRealTimers();
     }
