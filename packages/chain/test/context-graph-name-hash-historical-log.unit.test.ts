@@ -316,7 +316,9 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     });
 
     await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /registry high-water changed from 1025 to 1026 during historical scan/i,
+      `registry high-water changed from ${
+        CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n
+      } to ${CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 2n} during historical scan`,
     );
     expect(scenario.getNameHash).toHaveBeenCalledWith(42n);
   });
@@ -329,7 +331,9 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     });
 
     await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /registry high-water changed from 1025 to 1026 during historical scan/i,
+      `registry high-water changed from ${
+        CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n
+      } to ${CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 2n} during historical scan`,
     );
 
     scenario.setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n);

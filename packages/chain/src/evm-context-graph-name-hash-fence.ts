@@ -17,11 +17,13 @@ import { isContractViewRetryable } from './rpc-failover-client.js';
 import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
 
 /**
- * Maximum current high-water id for the fast getNameHash enumeration. Above
- * this threshold the adapter switches before any per-id read to its bounded,
- * deploy-anchored exact-topic event scan.
+ * Maximum current high-water id for the fast getNameHash enumeration. Keep
+ * the complete cold-path refresh tightly bounded under the default governor:
+ * the range reads are accompanied by chain-id, high-water, and canonical-head
+ * fences. Above this deliberately small threshold an exact-topic event scan
+ * is substantially cheaper and avoids a multi-minute per-slot sweep.
  */
-export const CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS = 1_024n;
+export const CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS = 64n;
 
 /** Fixed pressure bound for the current-state getNameHash enumeration. */
 export const CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY = 4;

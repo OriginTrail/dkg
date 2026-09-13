@@ -2,6 +2,7 @@ import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY,
+  CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS,
 } from '../src/evm-context-graph-name-hash-fence.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
@@ -20,6 +21,10 @@ import {
 } from './context-graph-name-hash-reverse-resolution.fixtures.js';
 
 describe('current-slot Context Graph name-hash reverse resolution', () => {
+  it('keeps cold current-slot enumeration below the expensive large-registry range', () => {
+    expect(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS).toBeLessThanOrEqual(64n);
+  });
+
   it('enumerates every current slot and returns the one exact match', async () => {
     const {
       adapter,

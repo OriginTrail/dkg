@@ -150,6 +150,7 @@ export {
   type RpcUsageWindow,
 } from './rpc-usage.js';
 export {
+  activeRpcRequestContext,
   activeRpcRequestAbortSignal,
   boundedRetryFetchRequest,
   createRpcRequestProvider,

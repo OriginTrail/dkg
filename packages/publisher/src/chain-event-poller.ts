@@ -1,4 +1,8 @@
-import type { ChainAdapter, ChainEvent } from '@origintrail-official/dkg-chain';
+import {
+  withRpcRequestContext,
+  type ChainAdapter,
+  type ChainEvent,
+} from '@origintrail-official/dkg-chain';
 import { Logger, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
@@ -322,7 +326,10 @@ export class ChainEventPoller {
   }
 
   private async poll(): Promise<void> {
-    await this.laneRunner.poll();
+    await withRpcRequestContext(
+      { requestClass: 'background' },
+      () => this.laneRunner.poll(),
+    );
   }
 
   private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {
