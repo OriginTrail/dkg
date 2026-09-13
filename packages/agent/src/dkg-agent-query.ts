@@ -8,6 +8,8 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { listStoredContextGraphQueryCandidates } from './context-graph-query-candidates.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -892,62 +894,20 @@ export class QueryMethods extends DKGAgentBase {
       candidateContextGraphIds.add(contextGraphId);
     }
 
-    // Curated definitions live in their own _meta, not ONTOLOGY. Inventory is
-    // independent of accepted RFC-64 authority: a missing snapshot must never
-    // remove a locally known CG from read admission (#2564).
-    const graphPrefix = 'did:dkg:context-graph:';
-    const inventoryOptions = { source: 'agent.query.rfc64RuntimePrivateGraphs' };
-    const graphUris = this.store.listGraphsByPrefix
-      ? await this.store.listGraphsByPrefix(graphPrefix, inventoryOptions)
-      : (await this.store.listGraphs(inventoryOptions)).filter((uri) => uri.startsWith(graphPrefix));
-    const ownMetadataCandidates: { graph: string; subject: string }[] = [];
-    for (const graph of graphUris) {
-      if (!graph.startsWith(graphPrefix)) continue;
-      const tail = graph.slice(graphPrefix.length);
-      const suffix = ['/_meta', '/_private', '/_shared_memory_meta', '/_shared_memory', '/_catalog']
-        .find((value) => tail.endsWith(value));
-      const contextGraphId = suffix ? tail.slice(0, -suffix.length) : tail;
-      if (!contextGraphId) continue;
-      if (!contextGraphId.includes('/')) {
-        candidateContextGraphIds.add(contextGraphId);
-      } else if (suffix === '/_meta' || suffix === '/_catalog') {
-        // Slash-bearing CG IDs are valid, but ordinary subgraph metadata must
-        // not invent a CG. Require facts about the exact owning CG subject.
-        const subject = `${graphPrefix}${contextGraphId}`;
-        assertSafeIri(graph);
-        assertSafeIri(subject);
-        ownMetadataCandidates.push({ graph, subject });
-      }
-    }
-
-    for (let offset = 0; offset < ownMetadataCandidates.length; offset += 128) {
-      const chunk = ownMetadataCandidates.slice(offset, offset + 128);
-      const metadata = await this.store.query(`SELECT DISTINCT ?cg WHERE {
-        VALUES (?g ?cg) { ${chunk.map(({ graph, subject }) => `(<${graph}> <${subject}>)`).join(' ')} }
-        GRAPH ?g { ?cg ?predicate ?object }
-      }`, { source: 'agent.query.storedContextGraphCandidates' });
-      if (metadata.type !== 'bindings') {
-        throw new Error('Cannot authorize unscoped query: invalid context-graph metadata discovery result');
-      }
-      for (const row of metadata.bindings) {
-        const match = row['cg']?.match(/^<?did:dkg:context-graph:([^>]+)>?$/);
-        if (match?.[1]) candidateContextGraphIds.add(match[1]);
-      }
+    for (const contextGraphId of await listStoredContextGraphQueryCandidates(this.store)) {
+      candidateContextGraphIds.add(contextGraphId);
     }
 
     // Use the same authority boundary as scoped queries for EVERY candidate.
     // Registered-chain failures and pending metadata deny here even when no
     // RFC-64 policy has been accepted. Public graphs and authorized members
     // retain the existing resolver's precedence and access decisions.
-    const prefixes: string[] = [];
-    for (const contextGraphId of candidateContextGraphIds) {
-      if (await this.canReadContextGraph(contextGraphId, {
-        callerAgentAddress: opts.callerAgentAddress,
-      })) continue;
-      // Exclude all named graphs under this CG (data, _meta, _shared_memory, etc.)
-      prefixes.push(`did:dkg:context-graph:${contextGraphId}`);
-    }
-    return prefixes;
+    const candidates = [...candidateContextGraphIds];
+    const readAdmissionConcurrency = 4;
+    const readable = await mapWithConcurrency(candidates, readAdmissionConcurrency, (contextGraphId) => (
+      this.canReadContextGraph(contextGraphId, { callerAgentAddress: opts.callerAgentAddress })
+    ));
+    return candidates.flatMap((id, index) => readable[index] ? [] : [`did:dkg:context-graph:${id}`]);
   }
 
   sparqlReferencesPrivateGraphs(this: DKGAgent, sparql: string, disallowedPrefixes: string[]): boolean {

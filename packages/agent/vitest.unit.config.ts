@@ -40,6 +40,7 @@ export default defineConfig({
       "test/query-min-trust-alias.test.ts",
       "test/query-source-labels.test.ts",
       "test/query-private-authority-pending.test.ts",
+      "test/context-graph-query-candidates.test.ts",
       "test/query-source-coverage.test.ts",
       "test/context-graph-on-chain-id-source-labels.test.ts",
       "test/context-graph-public-meta-proof.test.ts",

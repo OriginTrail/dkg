@@ -62,6 +62,86 @@ describe('query caller-provided store labels', () => {
   });
 });
 
+describe('unscoped query authority concurrency', () => {
+  const contextGraphIds = Array.from({ length: 10 }, (_, index) => `authority-candidate-${index}`);
+
+  function authorityAgent(canReadContextGraph: (contextGraphId: string) => Promise<boolean>) {
+    return {
+      config: {},
+      subscribedContextGraphs: new Map(contextGraphIds.map((id) => [id, { synced: true }])),
+      store: {
+        query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
+        listGraphsByPrefix: vi.fn(async () => []),
+      },
+      log: { info() {} },
+      queryEngine: { query: vi.fn(async () => ({ bindings: [{ value: 'visible' }] })) },
+      canReadContextGraph,
+      getDisallowedGraphPrefixes: QueryMethods.prototype.getDisallowedGraphPrefixes,
+      sparqlReferencesPrivateGraphs: QueryMethods.prototype.sparqlReferencesPrivateGraphs,
+    };
+  }
+
+  it('checks at most four candidates together and retains denial order after out-of-order completion', async () => {
+    const gates = contextGraphIds.map(() => {
+      let resolve!: (allowed: boolean) => void;
+      const promise = new Promise<boolean>((done) => { resolve = done; });
+      return { promise, resolve };
+    });
+    let active = 0;
+    let maximumActive = 0;
+    const completed: string[] = [];
+    const canReadContextGraph = vi.fn(async (id: string) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      const allowed = await gates[contextGraphIds.indexOf(id)].promise;
+      active -= 1;
+      completed.push(id);
+      return allowed;
+    });
+    const agent = authorityAgent(canReadContextGraph);
+    const pending = QueryMethods.prototype.getDisallowedGraphPrefixes.call(agent as never);
+
+    try {
+      await vi.waitFor(() => expect(canReadContextGraph).toHaveBeenCalledTimes(4));
+      expect(active).toBe(4);
+      for (const index of [3, 2, 1, 0]) gates[index].resolve(index % 2 === 1);
+      await vi.waitFor(() => expect(canReadContextGraph).toHaveBeenCalledTimes(8));
+      expect(active).toBe(4);
+      for (const index of [7, 6, 5, 4]) gates[index].resolve(index % 2 === 1);
+      await vi.waitFor(() => expect(canReadContextGraph).toHaveBeenCalledTimes(10));
+      for (const index of [9, 8]) gates[index].resolve(index % 2 === 1);
+
+      await expect(pending).resolves.toEqual(
+        contextGraphIds.filter((_, index) => index % 2 === 0)
+          .map((id) => `did:dkg:context-graph:${id}`),
+      );
+      expect(maximumActive).toBe(4);
+      expect(active).toBe(0);
+      expect(completed).not.toEqual(contextGraphIds);
+    } finally {
+      // Also release outstanding work when an assertion rejects a regression.
+      for (const gate of gates) gate.resolve(true);
+      await pending;
+    }
+  });
+
+  it('rejects before query execution if any candidate authority check throws', async () => {
+    const authorityFailure = new Error('authority lookup failed');
+    const canReadContextGraph = vi.fn(async (id: string) => {
+      if (id === contextGraphIds[6]) throw authorityFailure;
+      return true;
+    });
+    const agent = authorityAgent(canReadContextGraph);
+
+    await expect(QueryMethods.prototype.query.call(
+      agent as never,
+      'ASK { GRAPH ?g { ?s ?p ?o } }',
+      { callerAgentAddress: '0x00000000000000000000000000000000000000ff' },
+    )).rejects.toBe(authorityFailure);
+    expect(agent.queryEngine.query).not.toHaveBeenCalled();
+  });
+});
+
 const RUNTIME_NETWORK_ID = 'otp:20430' as NetworkIdV1;
 const RUNTIME_GENESIS_NETWORK_ID = '7449c543ff04a550b2dafa999fe8ee577a00b212023bb4d4244e8d58a4792c7b';
 const RUNTIME_PRIVATE_CG = 'runtime-private-query' as ContextGraphIdV1;
