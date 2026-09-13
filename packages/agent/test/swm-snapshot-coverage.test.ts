@@ -158,7 +158,11 @@ describe('public SWM snapshot coverage (#2050)', () => {
     const descriptors = parseGraphScopedSwmRecoveryDescriptors({
       contextGraphId: source.contextGraphId, metaQuads: source.servedMeta,
     });
-    expect(descriptors.map(descriptor => descriptor.publicSnapshotRef)).toEqual([current.digest]);
+    expect(descriptors).toMatchObject([{
+      snapshotSource: {
+        locator: { kind: 'store', ref: current.digest },
+      },
+    }]);
 
     const { summary, snapshotFetches } = await runManagedSwmSyncHarness({ ctx, ...source });
     expect(snapshotFetches).toEqual([]);
