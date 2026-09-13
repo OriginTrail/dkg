@@ -47,6 +47,51 @@ export interface PriorityAdmission<Payload> {
   handoff?: (options: PriorityAdmissionHandoffOptions<Payload>) => PriorityAdmission<Payload>;
 }
 
+/** Exactly one capacity source governs a queue. Omission retains legacy inference. */
+export type PriorityAdmissionCapacityStrategy<Payload> =
+  | {
+    kind: 'fixed';
+    capacity: SchedulerPressureCapacity;
+    capacityFor?: never;
+    inflightLimit?: never;
+  }
+  | {
+    kind?: 'inferred';
+    inflightLimit?: (entry: PriorityAdmissionEntry<Payload>) => number | null;
+    capacity?: never;
+    capacityFor?: never;
+  }
+  | {
+    kind: 'per-entry';
+    capacityFor: (entry: PriorityAdmissionEntry<Payload>) => SchedulerPressureCapacity;
+    capacity?: never;
+    inflightLimit?: never;
+  };
+
+export type PriorityAdmissionObservability<Payload> = PriorityAdmissionCapacityStrategy<Payload> & {
+  scheduler: string;
+  operation: (entry: PriorityAdmissionEntry<Payload>) => string;
+  thresholds?: SchedulerPressureThresholds;
+  register?: boolean;
+};
+
+type ObservabilityCapacityState<Payload> =
+  | { kind: 'disabled' | 'fixed' | 'installed' }
+  | { kind: 'inferred'; inflightLimit?: (entry: PriorityAdmissionEntry<Payload>) => number | null }
+  | { kind: 'per-entry'; capacityFor: (entry: PriorityAdmissionEntry<Payload>) => SchedulerPressureCapacity };
+
+function observabilityCapacityState<Payload>(
+  observability: PriorityAdmissionObservability<Payload> | undefined,
+): ObservabilityCapacityState<Payload> {
+  if (!observability) return { kind: 'disabled' };
+  switch (observability.kind) {
+    case 'fixed': return { kind: 'fixed' };
+    case 'per-entry': return { kind: 'per-entry', capacityFor: observability.capacityFor };
+    case undefined:
+    case 'inferred': return { kind: 'inferred', inflightLimit: observability.inflightLimit };
+  }
+}
+
 export interface PriorityAdmissionQueueHooks<Payload> {
   canRun: (entry: PriorityAdmissionEntry<Payload>) => boolean;
   onStart: (entry: PriorityAdmissionEntry<Payload>) => PriorityAdmissionRelease;
@@ -58,17 +103,7 @@ export interface PriorityAdmissionQueueHooks<Payload> {
   onDepthChange?: (depth: number) => void;
   /** Queue-wide elapsed-time source; production defaults to a monotonic clock. */
   now?: () => number;
-  observability?: {
-    scheduler: string;
-    operation: (entry: PriorityAdmissionEntry<Payload>) => string;
-    inflightLimit?: (entry: PriorityAdmissionEntry<Payload>) => number | null;
-    /** Fixed capacity for schedulers with one process-wide policy. */
-    capacity?: SchedulerPressureCapacity;
-    /** Per-entry capacity for shared schedulers whose owners retain distinct policies. */
-    capacityFor?: (entry: PriorityAdmissionEntry<Payload>) => SchedulerPressureCapacity;
-    thresholds?: SchedulerPressureThresholds;
-    register?: boolean;
-  };
+  observability?: PriorityAdmissionObservability<Payload>;
 }
 
 export interface PriorityAdmissionAcquireOptions<Payload> extends PriorityAdmissionScheduling {
@@ -115,7 +150,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
   private readonly pressureTickets = new WeakMap<PriorityAdmissionEntry<Payload>, SchedulerPressureTicket>();
   private readonly hooks: PriorityAdmissionQueueHooks<Payload>;
   private readonly now: () => number;
-  private hasInstalledObservabilityCapacity: boolean;
+  private capacityStrategy: ObservabilityCapacityState<Payload>;
   private nextSequence = 0;
   private agedTurnOwed = false;
 
@@ -125,18 +160,23 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       scheduler: hooks.observability?.scheduler ?? 'priority-admission',
       thresholds: hooks.observability?.thresholds,
       now,
-      capacity: hooks.observability?.capacity ?? { capacityModel: 'shared' },
+      capacity: hooks.observability?.kind === 'fixed'
+        ? hooks.observability.capacity
+        : { capacityModel: 'shared' },
     });
     this.hooks = hooks;
     this.now = now;
-    this.hasInstalledObservabilityCapacity = hooks.observability?.capacity !== undefined;
+    this.capacityStrategy = observabilityCapacityState(hooks.observability);
     if (hooks.observability?.register) backpressureRegistry.register(this);
   }
 
-  /** Explicit capacity installation retained for standalone queue callers. */
+  /** Inferred standalone queues may install (and subsequently replace) their capacity. */
   configureObservabilityCapacity(capacity: SchedulerPressureCapacity): void {
-    if (!this.hooks.observability) return;
-    this.hasInstalledObservabilityCapacity = true;
+    if (this.capacityStrategy.kind === 'disabled') return;
+    if (this.capacityStrategy.kind !== 'inferred' && this.capacityStrategy.kind !== 'installed') {
+      throw new Error('Capacity installation requires inferred observability; fixed and per-entry strategies own their capacity');
+    }
+    this.capacityStrategy = { kind: 'installed' };
     this.updatePressureCapacity(capacity);
   }
 
@@ -188,17 +228,13 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       enqueuedAt: this.now(),
       agingThresholdMs: options.agingThresholdMs,
     };
-    if (
-      this.hooks.observability
-      && !this.hasInstalledObservabilityCapacity
-      && !this.hooks.observability.capacityFor
-    ) {
+    if (this.capacityStrategy.kind === 'inferred') {
       this.updatePressureCapacity({
         queueLimit: options.queueLimit,
-        inflightLimit: this.hooks.observability.inflightLimit?.(base) ?? null,
+        inflightLimit: this.capacityStrategy.inflightLimit?.(base) ?? null,
         // Lanes here normally order one pool by priority, they do not
         // partition it. A caller with private allocations must opt in through
-        // static `capacity` so diagnostics never infer partitions from labels.
+        // a fixed strategy so diagnostics never infer partitions from labels.
         capacityModel: 'shared',
       });
     }
@@ -534,7 +570,9 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
 
   private observePressureEnqueue(entry: PriorityAdmissionEntry<Payload>): void {
     if (!this.hooks.observability) return;
-    const capacity = this.hooks.observability.capacityFor?.(entry);
+    const capacity = this.capacityStrategy.kind === 'per-entry'
+      ? this.capacityStrategy.capacityFor(entry)
+      : undefined;
     this.pressureTickets.set(
       entry,
       this.pressureEnqueue(this.pressureWork(entry), capacity),

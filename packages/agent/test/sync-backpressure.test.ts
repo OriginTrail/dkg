@@ -1607,6 +1607,7 @@ describe('sync global backpressure', () => {
         };
       },
       observability: {
+        kind: 'per-entry',
         scheduler: 'test-release-cleanup',
         operation: (entry) => entry.payload,
         capacityFor: (entry) => ({
@@ -1651,6 +1652,7 @@ describe('sync global backpressure', () => {
         return () => { running -= 1; };
       },
       observability: {
+        kind: 'per-entry',
         scheduler: 'test-equivalent-capacity',
         operation: (entry) => entry.payload,
         capacityFor: (entry) => entry.payload === 'first'
@@ -1714,6 +1716,7 @@ describe('sync global backpressure', () => {
       canRun: () => false,
       onStart: () => () => {},
       observability: {
+        kind: 'fixed',
         scheduler: 'test-disabled-partitioned',
         operation: (entry) => entry.payload,
         capacity: {

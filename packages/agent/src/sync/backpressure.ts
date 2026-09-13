@@ -336,6 +336,7 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   },
   onDepthChange: (depth) => getMetrics().syncBackgroundQueueDepth.record(depth),
   observability: {
+    kind: 'per-entry',
     scheduler: 'sync-global',
     // Admission labels also carry CG/peer correlation identifiers. Collapse
     // them to a fixed operation class, paired with the bounded admission

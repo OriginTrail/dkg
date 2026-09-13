@@ -1,5 +1,4 @@
-import type { ResolvedDKGAgentConfig } from './agent-config-resolution-schema.js';
-import { omitAgentConfigResolutionInputs } from './resolved-agent-config.js';
+import { resolveAgentConfig, type ResolvedDKGAgentConfig, type StorageAckNormalizedDKGAgentConfig } from './resolved-agent-config.js';
 import { AGENT_RESOURCE_ENV } from './resource-runtime.js';
 import { resolveStartupResourcePolicy } from './resource-policy.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -680,10 +679,6 @@ function throwStorageAckTimingConflict(): never {
   );
 }
 
-type StorageAckNormalizedDKGAgentConfig = Omit<
-  DKGAgentConfig,
-  'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'
-> & Pick<ResolvedDKGAgentConfig, 'storageAckTiming'>;
 
 function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalizedDKGAgentConfig {
   const hasStorageAckTiming = config.storageAckTiming !== undefined && config.storageAckTiming !== null;
@@ -1418,8 +1413,7 @@ export class DKGAgent extends DKGAgentBase {
       networkId: computedNetworkId,
       chainId: constructedAgentChainId,
     };
-    const resolvedConfig: ResolvedDKGAgentConfig = {
-      ...omitAgentConfigResolutionInputs(config),
+    const resolvedConfig = resolveAgentConfig(config, {
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
@@ -1430,7 +1424,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
       resourcePolicy,
-    };
+    });
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';
