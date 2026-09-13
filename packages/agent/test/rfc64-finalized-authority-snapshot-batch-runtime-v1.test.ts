@@ -37,6 +37,66 @@ function snapshot(
 }
 
 describe('RFC-64 finalized authority snapshot batch runtime', () => {
+  it('chunks 4,097 targets, preserves the requested graph, and merges only chunk-owned rows', async () => {
+    const requestedId = '4097' as ContextGraphAuthorityIndexId;
+    const secondChunkId = '4096' as ContextGraphAuthorityIndexId;
+    const subscribedIds = Array.from(
+      { length: 4_097 },
+      (_, index) => String(index + 1) as ContextGraphAuthorityIndexId,
+    );
+    let markFirstChunkStarted!: () => void;
+    let releaseFirstChunk!: () => void;
+    const firstChunkStarted = new Promise<void>((resolve) => { markFirstChunkStarted = resolve; });
+    const firstChunkGate = new Promise<void>((resolve) => { releaseFirstChunk = resolve; });
+    const injectedOwner = '0xffffffffffffffffffffffffffffffffffffffff';
+    const readSnapshots = vi.fn(async (
+      targetIds: readonly ContextGraphAuthorityIndexId[],
+    ) => {
+      expect(targetIds.length).toBeLessThanOrEqual(4_096);
+      const result = new Map(targetIds.map((targetId) => [targetId, snapshot(targetId)]));
+      if (readSnapshots.mock.calls.length === 1) {
+        // A custom reader returning an unrelated row must not let one chunk
+        // inject authority into another chunk's caller.
+        result.set(secondChunkId, snapshot(secondChunkId, injectedOwner));
+        markFirstChunkStarted();
+        await firstChunkGate;
+      }
+      return result;
+    });
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
+      collectionDelayMs: 0,
+      collectAdditionalTargetIds: () => subscribedIds,
+      readSnapshots,
+    });
+
+    const requested = runtime.read(requestedId);
+    await firstChunkStarted;
+    const overflowCaller = runtime.read(secondChunkId);
+    releaseFirstChunk();
+
+    await expect(requested).resolves.toMatchObject({
+      contextGraphAuthorityIndexId: requestedId,
+      batchTargetIds: expect.arrayContaining([requestedId]),
+      snapshot: { contextGraphId: requestedId },
+    });
+    await expect(overflowCaller).resolves.toMatchObject({
+      contextGraphAuthorityIndexId: secondChunkId,
+      snapshot: {
+        contextGraphId: secondChunkId,
+        owner: '0x1111111111111111111111111111111111111111',
+      },
+    });
+    expect(readSnapshots).toHaveBeenCalledTimes(2);
+    expect(readSnapshots.mock.calls.map(([targetIds]) => targetIds.length)).toEqual([
+      4_096,
+      1,
+    ]);
+    expect(readSnapshots.mock.calls[0]?.[0][0]).toBe(requestedId);
+    expect(readSnapshots.mock.calls[0]?.[0]).not.toContain(secondChunkId);
+    expect(readSnapshots.mock.calls[1]?.[0]).toEqual([secondChunkId]);
+    await runtime.whenIdle();
+  });
+
   it('starts a follow-up batch when a late caller was omitted from the closed target set', async () => {
     let markFirstReadStarted!: () => void;
     let releaseFirstRead!: () => void;

@@ -537,8 +537,13 @@ export interface ContextGraphAuthoritySnapshot {
   readonly sourceBlockHash: string;
 }
 
+/** Maximum target IDs accepted by one materialized authority-index projection. */
+export const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS = 4_096;
+
 /** Explicit daemon-local authority-index scheduling surface. */
 export interface ContextGraphAuthorityIndexRevisionReader {
+  /** Optional custom-reader override; production readers expose the default limit. */
+  readonly maxTargetCount?: number;
   /**
    * Resolve one RFC-64 authority binding at the index's finalized anchor.
    * This intentionally differs from the public current-state name resolver.

@@ -1885,6 +1885,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     let runtime = rfc64ResponsibilityAuthorityBatchRuntimesV1.get(this);
     if (runtime === undefined) {
       runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
+        ...(indexedReader.maxTargetCount === undefined
+          ? {}
+          : { maxTargetsPerRead: indexedReader.maxTargetCount }),
         collectAdditionalTargetIds: () => {
           const targets: ContextGraphAuthorityIndexId[] = [];
           for (const subscription of this.subscribedContextGraphs.values()) {
@@ -1914,9 +1917,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
-   * Share one complete finalized-index read across registered callers that
-   * enter the same still-open collection window. Results are never retained
-   * as a time-based authority cache.
+   * Share one complete logical finalized-index batch across registered callers
+   * that enter the same still-open collection window. The batch owner chunks
+   * physical reads to the adapter's advertised limit. Results are never
+   * retained as a time-based authority cache.
    */
   async readRfc64BatchedFinalizedAuthoritySnapshotV1(
     this: DKGAgent,

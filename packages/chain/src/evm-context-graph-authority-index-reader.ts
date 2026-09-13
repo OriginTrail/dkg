@@ -6,6 +6,7 @@ import type {
   ContextGraphAuthoritySnapshot,
   ContextGraphAuthorityIndexRevisionReader,
 } from './chain-adapter.js';
+import { CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS } from './chain-adapter.js';
 import {
   ContextGraphAuthorityIndex,
   isContextGraphAuthorityIndexRetryableError,
@@ -27,8 +28,6 @@ import type { ReadOpts } from './rpc-failover-client.js';
 import {
   withRpcRequestContext,
 } from './rpc-request-transport.js';
-
-export const CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS = 4_096;
 
 interface EvmContextGraphAuthorityIndexReadV1<T> {
   readonly value: T;
@@ -149,7 +148,7 @@ function snapshotAuthorityRevisionTargetsV1(
 ): readonly ContextGraphAuthorityIndexId[] {
   if (
     !Array.isArray(contextGraphIds)
-    || contextGraphIds.length > CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS
+    || contextGraphIds.length > CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
   ) {
     throw new Error('Context Graph authority revision target set is invalid');
   }
@@ -169,7 +168,7 @@ function snapshotAuthorityNameHashTargetsV1(
 ): readonly string[] {
   if (
     !Array.isArray(nameHashes)
-    || nameHashes.length > CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS
+    || nameHashes.length > CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
   ) {
     throw new Error('Context Graph authority name-hash target set is invalid');
   }
@@ -318,6 +317,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   };
 
   return Object.freeze({
+    maxTargetCount: CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
     whenIdle(): Promise<void> {
       return lifecycle.whenIdle();
     },
