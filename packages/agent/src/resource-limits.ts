@@ -72,61 +72,95 @@ export class ResourceConfigWarnings {
   }
 }
 
-interface EnvironmentIntegerSpec extends IntegerBounds { fallback: number }
+/** The subsystem whose process-scoped snapshot captures a setting. */
+export type ResourceOwner = 'vm' | 'catchup';
+
+interface EnvironmentIntegerSpec extends IntegerBounds {
+  fallback: number;
+  owner: ResourceOwner;
+  /** Whether startup diagnostics publish the resolved value. */
+  diagnostic: boolean;
+}
+
+/**
+ * The one descriptor of every process-scoped setting. Owner slices, their
+ * resolvers and the startup diagnostics projection all derive from it, so a
+ * new setting is declared here once, with its owner and visibility.
+ */
 export const AGENT_RESOURCE_ENV_SPECS = {
-  DKG_VM_RECONCILE_INTERVAL_MS: { min: 1, max: RESOURCE_MAX.timerMs, fallback: 60_000 },
-  DKG_VM_RECONCILE_BACKOFF_MAX_MS: { min: 1, max: RESOURCE_MAX.timerMs, fallback: 600_000 },
-  DKG_VM_RECONCILE_CACHE_MAX_ENTRIES: { min: 1, max: RESOURCE_MAX.cacheEntries, fallback: 1_000 },
-  DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES: { min: 1, max: RESOURCE_MAX.cacheEntries, fallback: 1_000 },
-  DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS: { min: 1, max: RESOURCE_MAX.rows, fallback: 2_000 },
-  DKG_VM_RECONCILE_QUEUE_MAX_PENDING: { min: 1, max: RESOURCE_MAX.queue, fallback: 256 },
-  DKG_VM_RECONCILE_BATCH_SIZE: { min: 1, max: RESOURCE_MAX.batch, fallback: 10 },
-  DKG_VM_RECONCILE_ORDINAL_CONCURRENCY: { min: 1, max: RESOURCE_MAX.vmConcurrency, fallback: 5 },
-  DKG_VM_RECONCILE_CONCURRENCY: { min: 1, max: RESOURCE_MAX.vmConcurrency, fallback: 2 },
-  DKG_VM_RECONCILE_MAX_FOREGROUND_BURST: { min: 1, max: RESOURCE_MAX.batch, fallback: 8 },
-  DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS: { min: 1, max: RESOURCE_MAX.shutdownMs, fallback: 5_000 },
-  DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS: { min: 1, max: RESOURCE_MAX.shutdownMs, fallback: 5_000 },
-  DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS: { min: 1, max: RESOURCE_MAX.shutdownMs, fallback: 5_000 },
-  DKG_VM_RECONCILE_CONFIRMATION_DEPTH: { min: 1, max: RESOURCE_MAX.confirmationDepth, fallback: 5 },
-  DKG_CATCHUP_MAX_CONCURRENT_PEERS: { min: 1, max: RESOURCE_MAX.concurrency, fallback: 4 },
-  DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS: { min: 0, max: RESOURCE_MAX.retryMs, fallback: 180_000 },
+  DKG_VM_RECONCILE_INTERVAL_MS: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.timerMs, fallback: 60_000 },
+  DKG_VM_RECONCILE_BACKOFF_MAX_MS: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.timerMs, fallback: 600_000 },
+  DKG_VM_RECONCILE_CACHE_MAX_ENTRIES: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.cacheEntries, fallback: 1_000 },
+  DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.cacheEntries, fallback: 1_000 },
+  DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.rows, fallback: 2_000 },
+  DKG_VM_RECONCILE_QUEUE_MAX_PENDING: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.queue, fallback: 256 },
+  DKG_VM_RECONCILE_BATCH_SIZE: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.batch, fallback: 10 },
+  DKG_VM_RECONCILE_ORDINAL_CONCURRENCY: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.vmConcurrency, fallback: 5 },
+  DKG_VM_RECONCILE_CONCURRENCY: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.vmConcurrency, fallback: 2 },
+  DKG_VM_RECONCILE_MAX_FOREGROUND_BURST: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.batch, fallback: 8 },
+  DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.shutdownMs, fallback: 5_000 },
+  DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.shutdownMs, fallback: 5_000 },
+  DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.shutdownMs, fallback: 5_000 },
+  DKG_VM_RECONCILE_CONFIRMATION_DEPTH: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.confirmationDepth, fallback: 5 },
+  DKG_CATCHUP_MAX_CONCURRENT_PEERS: { owner: 'catchup', diagnostic: true, min: 1, max: RESOURCE_MAX.concurrency, fallback: 4 },
+  DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS: { owner: 'catchup', diagnostic: true, min: 0, max: RESOURCE_MAX.retryMs, fallback: 180_000 },
 } as const satisfies Record<string, EnvironmentIntegerSpec>;
 
-type AgentResourceEnvName = keyof typeof AGENT_RESOURCE_ENV_SPECS;
+type AgentResourceEnvSpecs = typeof AGENT_RESOURCE_ENV_SPECS;
+export type AgentResourceEnvName = keyof AgentResourceEnvSpecs;
 
-export const VM_RESOURCE_ENV_NAMES = [
-  'DKG_VM_RECONCILE_INTERVAL_MS',
-  'DKG_VM_RECONCILE_BACKOFF_MAX_MS',
-  'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
-  'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
-  'DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS',
-  'DKG_VM_RECONCILE_QUEUE_MAX_PENDING',
-  'DKG_VM_RECONCILE_BATCH_SIZE',
-  'DKG_VM_RECONCILE_ORDINAL_CONCURRENCY',
-  'DKG_VM_RECONCILE_CONCURRENCY',
-  'DKG_VM_RECONCILE_MAX_FOREGROUND_BURST',
-  'DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS',
-  'DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS',
-  'DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS',
-  'DKG_VM_RECONCILE_CONFIRMATION_DEPTH',
-] as const satisfies readonly AgentResourceEnvName[];
+/** The settings the descriptor assigns to `Owner`; `Diagnostic` narrows to published ones. */
+export type OwnedResourceEnvName<Owner extends ResourceOwner, Diagnostic extends boolean = boolean> = {
+  [Name in AgentResourceEnvName]:
+    AgentResourceEnvSpecs[Name] extends { owner: Owner; diagnostic: Diagnostic } ? Name : never;
+}[AgentResourceEnvName];
 
-export const CATCHUP_RESOURCE_ENV_NAMES = [
-  'DKG_CATCHUP_MAX_CONCURRENT_PEERS',
-  'DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS',
-] as const satisfies readonly AgentResourceEnvName[];
+/** Runtime projection of {@link OwnedResourceEnvName}, in descriptor order. */
+export function ownedResourceEnvNames<Owner extends ResourceOwner, Diagnostic extends boolean = boolean>(
+  owner: Owner,
+  diagnostic?: Diagnostic,
+): readonly OwnedResourceEnvName<Owner, Diagnostic>[] {
+  return (Object.keys(AGENT_RESOURCE_ENV_SPECS) as AgentResourceEnvName[]).filter(
+    (name): name is OwnedResourceEnvName<Owner, Diagnostic> => {
+      const spec = AGENT_RESOURCE_ENV_SPECS[name];
+      return spec.owner === owner && (diagnostic === undefined || spec.diagnostic === diagnostic);
+    },
+  );
+}
 
-type ResourceEnvironmentName =
-  | (typeof VM_RESOURCE_ENV_NAMES)[number]
-  | (typeof CATCHUP_RESOURCE_ENV_NAMES)[number];
+type OwnedResourceValues<Owner extends ResourceOwner> = Readonly<Record<OwnedResourceEnvName<Owner>, number>>;
 
-function resolveResourceEnvironment<Name extends ResourceEnvironmentName>(
-  names: readonly Name[],
+/**
+ * The VM owner's process-scoped slice. The `owner` tag is what keeps one
+ * owner's slice — or a merge of several — from standing in for another's.
+ */
+export interface VmResourceSnapshot {
+  readonly owner: 'vm';
+  readonly values: OwnedResourceValues<'vm'>;
+  readonly startupMaxDelayMs: number;
+  readonly rejected: readonly string[];
+}
+
+/** The sync catch-up owner's process-scoped slice. */
+export interface CatchupResourceSnapshot {
+  readonly owner: 'catchup';
+  readonly values: OwnedResourceValues<'catchup'>;
+  readonly rejected: readonly string[];
+}
+
+/** Every owner's slice, composed explicitly at the composition root and never merged. */
+export interface AgentResourceSnapshots {
+  readonly vm: VmResourceSnapshot;
+  readonly catchup: CatchupResourceSnapshot;
+}
+
+function resolveOwnedResourceEnvironment<Owner extends ResourceOwner>(
+  owner: Owner,
   env: Readonly<Record<string, string | undefined>>,
 ) {
   const warnings = new ResourceConfigWarnings();
-  const values = {} as Record<Name, number>;
-  for (const name of names) {
+  const values = {} as Record<OwnedResourceEnvName<Owner>, number>;
+  for (const name of ownedResourceEnvNames(owner)) {
     const spec = AGENT_RESOURCE_ENV_SPECS[name];
     values[name] = resourceIntegerEnv(env[name], spec, name, warnings.reject) ?? spec.fallback;
   }
@@ -134,13 +168,16 @@ function resolveResourceEnvironment<Name extends ResourceEnvironmentName>(
 }
 
 /** VM-owned process settings. Importing a catch-up helper never initializes this slice. */
-export function resolveVmResourceEnvironment(env: Readonly<Record<string, string | undefined>>) {
-  const resolved = resolveResourceEnvironment(VM_RESOURCE_ENV_NAMES, env);
+export function resolveVmResourceEnvironment(
+  env: Readonly<Record<string, string | undefined>>,
+): VmResourceSnapshot {
+  const resolved = resolveOwnedResourceEnvironment('vm', env);
   const startupMaxDelayMs = resourceIntegerEnv(env.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS,
     { min: 0, max: RESOURCE_MAX.timerMs }, 'DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS',
     (name) => resolved.rejected.push(name))
     ?? resolved.values.DKG_VM_RECONCILE_INTERVAL_MS;
   return Object.freeze({
+    owner: 'vm',
     values: Object.freeze(resolved.values),
     startupMaxDelayMs,
     rejected: Object.freeze(resolved.rejected),
@@ -148,21 +185,23 @@ export function resolveVmResourceEnvironment(env: Readonly<Record<string, string
 }
 
 /** Sync catch-up-owned process settings, resolved independently from VM settings. */
-export function resolveCatchupResourceEnvironment(env: Readonly<Record<string, string | undefined>>) {
-  const resolved = resolveResourceEnvironment(CATCHUP_RESOURCE_ENV_NAMES, env);
+export function resolveCatchupResourceEnvironment(
+  env: Readonly<Record<string, string | undefined>>,
+): CatchupResourceSnapshot {
+  const resolved = resolveOwnedResourceEnvironment('catchup', env);
   return Object.freeze({
+    owner: 'catchup',
     values: Object.freeze(resolved.values),
     rejected: Object.freeze(resolved.rejected),
   });
 }
 
-/** Compatibility composition for callers that still want every process setting at once. */
-export function resolveAgentResourceEnvironment(env: Readonly<Record<string, string | undefined>>) {
-  const vm = resolveVmResourceEnvironment(env);
-  const catchup = resolveCatchupResourceEnvironment(env);
+/** Both owner slices from one environment, for callers outside the process-scoped runtime modules. */
+export function resolveAgentResourceSnapshots(
+  env: Readonly<Record<string, string | undefined>>,
+): AgentResourceSnapshots {
   return Object.freeze({
-    values: Object.freeze({ ...vm.values, ...catchup.values }),
-    startupMaxDelayMs: vm.startupMaxDelayMs,
-    rejected: Object.freeze([...vm.rejected, ...catchup.rejected]),
+    vm: resolveVmResourceEnvironment(env),
+    catchup: resolveCatchupResourceEnvironment(env),
   });
 }

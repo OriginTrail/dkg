@@ -1,6 +1,6 @@
 import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
 import { resolveStartupResourcePolicy } from '../src/resource-policy.js';
-import { resolveAgentResourceEnvironment } from '../src/resource-limits.js';
+import { resolveAgentResourceSnapshots } from '../src/resource-limits.js';
 import { describe, expect, it } from 'vitest';
 import {
   backpressureRegistry,
@@ -24,7 +24,7 @@ import { resolveRfc64CatalogExecutionPlanV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
 
 function withResourcePolicy<T extends Parameters<typeof resolveStartupResourcePolicy>[0]>(config: T) {
-  return { ...config, resourcePolicy: resolveStartupResourcePolicy(config, {}, resolveAgentResourceEnvironment({})) };
+  return { ...config, resourcePolicy: resolveStartupResourcePolicy(config, {}, resolveAgentResourceSnapshots({})) };
 }
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));

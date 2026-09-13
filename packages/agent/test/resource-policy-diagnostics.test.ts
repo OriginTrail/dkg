@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAgentResourceEnvironment } from '../src/resource-limits.js';
+import { resolveAgentResourceSnapshots } from '../src/resource-limits.js';
 import { projectStartupResourceDiagnostics, resolveStartupResourcePolicy } from '../src/resource-policy.js';
 
 const env = {
@@ -21,7 +21,7 @@ function resolve(config: Parameters<typeof resolveStartupResourcePolicy>[0] = {}
     syncBackoffBaseMs: 3000, syncBackoffMaxMs: 4000, syncBackoffJitter: 0.1,
     syncResponderSnapshotLimits: { global: { rows: 100, bytesEstimate: 1000 }, local: { rows: 40, bytesEstimate: 400 } },
     ...config,
-  }, env, resolveAgentResourceEnvironment(env));
+  }, env, resolveAgentResourceSnapshots(env));
 }
 
 const expectedShared = {

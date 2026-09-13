@@ -55,10 +55,14 @@ passing only reservation booleans into admission. The legacy standalone resolver
 still accepts configured scope IDs for compatibility. Resolving policies never
 installs scheduler state; queued and running work own its reported capacity.
 
-VM/catch-up static settings live in the explicit `resource-runtime.ts` process
-snapshot; importing `resource-limits.ts` or a pure startup-jitter parser does not
-initialize it. Restart the process to change static settings, and construct a new
-agent to change its admission/snapshot/reconciler policy. SWM pass configuration
+`resource-limits.ts` declares every static setting once, with its owner and
+diagnostic visibility; the VM and catch-up slices, their process snapshots
+(`resource-runtime.ts`, `sync/catchup-runtime.ts`) and the startup diagnostics
+fields derive from that descriptor, and `DKGAgent.create` passes both slices to
+`resolveStartupResourcePolicy` as one explicit `{ vm, catchup }` bundle. Importing
+`resource-limits.ts` or a pure startup-jitter parser initializes neither snapshot.
+Restart the process to change static settings, and construct a new agent to
+change its admission/snapshot/reconciler policy. SWM pass configuration
 resolves a fresh value from the explicitly supplied environment at each job
 boundary. The published resolver remains mutable for callers that customize a
 pass; the startup policy freezes its private initial SWM values and diagnostics;

@@ -1,5 +1,5 @@
 import { resolveStartupResourcePolicy, type StartupResourcePolicy } from '../src/resource-policy.js';
-import { resolveAgentResourceEnvironment } from '../src/resource-limits.js';
+import { resolveAgentResourceSnapshots } from '../src/resource-limits.js';
 import type { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { vi } from 'vitest';
 import {
@@ -699,7 +699,7 @@ export function createSelectedSwmLifecycleHarness(
         : {}),
     };
   const agent: SelectedSwmLifecycleAgentFixture = {
-    config: { ...config, resourcePolicy: resolveStartupResourcePolicy(config, process.env, resolveAgentResourceEnvironment(process.env)) },
+    config: { ...config, resourcePolicy: resolveStartupResourcePolicy(config, process.env, resolveAgentResourceSnapshots(process.env)) },
     selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
     store,
     writeLocks: new Map(),

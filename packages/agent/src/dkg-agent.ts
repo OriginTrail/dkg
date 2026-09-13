@@ -1411,7 +1411,7 @@ export class DKGAgent extends DKGAgentBase {
     const resourcePolicy = resolveStartupResourcePolicy({
       ...config,
       selectedRecoveryContextGraphIds,
-    }, process.env, VM_RESOURCE_ENV, CATCHUP_RESOURCE_ENV);
+    }, process.env, { vm: VM_RESOURCE_ENV, catchup: CATCHUP_RESOURCE_ENV });
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {

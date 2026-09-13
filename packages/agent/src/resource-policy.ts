@@ -1,7 +1,8 @@
 import {
   ResourceConfigWarnings,
-  resolveCatchupResourceEnvironment,
-  type resolveVmResourceEnvironment,
+  ownedResourceEnvNames,
+  type AgentResourceSnapshots,
+  type OwnedResourceEnvName,
 } from './resource-limits.js';
 import { resolveSwmCatchupPassConfig } from './sync/catchup-pass-policy.js';
 import { resolveSyncGlobalBackpressure, type SyncGlobalBackpressureConfig } from './sync/backpressure.js';
@@ -12,12 +13,14 @@ interface StartupResourceConfig extends SyncGlobalBackpressureConfig, SyncReconc
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
 }
 
-/** Resolve immutable startup data and diagnostics with an explicit process-scoped VM snapshot. */
+/**
+ * Resolve immutable startup data and diagnostics from the explicit owner
+ * snapshots the composition root captured; no owner is resolved implicitly.
+ */
 export function resolveStartupResourcePolicy(
   config: StartupResourceConfig,
   env: Readonly<Record<string, string | undefined>>,
-  vm: ReturnType<typeof resolveVmResourceEnvironment>,
-  catchup = resolveCatchupResourceEnvironment(env),
+  { vm, catchup }: AgentResourceSnapshots,
 ) {
   const warnings = new ResourceConfigWarnings();
   for (const name of vm.rejected) warnings.reject(name);
@@ -35,29 +38,11 @@ export function resolveStartupResourcePolicy(
 
 export type StartupResourcePolicy = ReturnType<typeof resolveStartupResourcePolicy>;
 
-// Deliberate operator-log fields: adding runtime policy fields must not change
-// this schema or require internal state to be JSON-serializable.
-const VM_DIAGNOSTIC_FIELDS = [
-  'DKG_VM_RECONCILE_INTERVAL_MS',
-  'DKG_VM_RECONCILE_BACKOFF_MAX_MS',
-  'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
-  'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
-  'DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS',
-  'DKG_VM_RECONCILE_QUEUE_MAX_PENDING',
-  'DKG_VM_RECONCILE_BATCH_SIZE',
-  'DKG_VM_RECONCILE_ORDINAL_CONCURRENCY',
-  'DKG_VM_RECONCILE_CONCURRENCY',
-  'DKG_VM_RECONCILE_MAX_FOREGROUND_BURST',
-  'DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS',
-  'DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS',
-  'DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS',
-  'DKG_VM_RECONCILE_CONFIRMATION_DEPTH',
-] as const satisfies readonly (keyof StartupResourcePolicy['vm']['values'])[];
-
-const CATCHUP_DIAGNOSTIC_FIELDS = [
-  'DKG_CATCHUP_MAX_CONCURRENT_PEERS',
-  'DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS',
-] as const satisfies readonly (keyof StartupResourcePolicy['catchup']['values'])[];
+// Deliberate operator-log fields, chosen by each setting's diagnostic flag in
+// the resource descriptor: adding runtime policy fields must not change this
+// schema or require internal state to be JSON-serializable.
+const VM_DIAGNOSTIC_FIELDS = ownedResourceEnvNames('vm', true);
+const CATCHUP_DIAGNOSTIC_FIELDS = ownedResourceEnvNames('catchup', true);
 
 interface ConfiguredPriorityDiagnostics {
   elevated: number;
@@ -66,8 +51,8 @@ interface ConfiguredPriorityDiagnostics {
 }
 
 export interface StartupResourceDiagnostics {
-  vm: { values: Record<(typeof VM_DIAGNOSTIC_FIELDS)[number], number>; startupMaxDelayMs: number };
-  catchup: { values: Record<(typeof CATCHUP_DIAGNOSTIC_FIELDS)[number], number> };
+  vm: { values: Record<OwnedResourceEnvName<'vm', true>, number>; startupMaxDelayMs: number };
+  catchup: { values: Record<OwnedResourceEnvName<'catchup', true>, number> };
   reconcilerTiming: {
     intervalMs: number; stalenessThresholdMs: number; backoffBaseMs: number; backoffMaxMs: number; backoffJitter: number;
   };

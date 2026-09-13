@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { backpressureRegistry, createOperationContext } from '@origintrail-official/dkg-core';
 import {
-  AGENT_RESOURCE_ENV_SPECS, RESOURCE_MAX, ResourceConfigWarnings,
-  resolveAgentResourceEnvironment, resourceInteger, resourceIntegerEnv,
+  AGENT_RESOURCE_ENV_SPECS, RESOURCE_MAX, ResourceConfigWarnings, ownedResourceEnvNames,
+  resolveAgentResourceSnapshots, resolveVmResourceEnvironment, resourceInteger, resourceIntegerEnv,
 } from '../src/resource-limits.js';
 import {
   getSyncBackpressureSnapshot, resolveNonNegativeIntegerSwitch, resolvePositiveIntegerSwitch,
@@ -70,31 +70,50 @@ describe('bounded resource integers', () => {
 
 describe('restart-scoped VM and catch-up environment policy', () => {
   it.each(Object.entries(AGENT_RESOURCE_ENV_SPECS))('%s rejects out-of-range values and retains boundaries', (name, spec) => {
+    // The descriptor's owner decides which slice resolves the setting; the
+    // other owner never sees it, and both slices identify their owner.
+    const other = spec.owner === 'vm' ? 'catchup' : 'vm';
+    const resolve = (raw: string | undefined) => {
+      const snapshots = resolveAgentResourceSnapshots({ [name]: raw });
+      expect(snapshots[spec.owner].owner).toBe(spec.owner);
+      expect(snapshots[other].values).not.toHaveProperty(name);
+      expect(snapshots[other].rejected).toEqual([]);
+      const { values, rejected } = snapshots[spec.owner];
+      return { value: (values as Record<string, number>)[name], rejected };
+    };
     for (const raw of [...invalidNumbers, spec.max + 1, ...(spec.min ? [0] : [])].map(String)) {
-      const result = resolveAgentResourceEnvironment({ [name]: raw });
-      expect(result.values[name as keyof typeof result.values]).toBe(spec.fallback);
-      expect(result.rejected).toContain(name);
+      expect(resolve(raw)).toEqual({ value: spec.fallback, rejected: [name] });
     }
     for (const value of [spec.min, spec.max]) {
-      const result = resolveAgentResourceEnvironment({ [name]: String(value) });
-      expect(result.values[name as keyof typeof result.values]).toBe(value);
-      expect(result.rejected).toEqual([]);
+      expect(resolve(String(value))).toEqual({ value, rejected: [] });
     }
     for (const raw of [undefined, '', ' ']) {
-      const result = resolveAgentResourceEnvironment({ [name]: raw });
-      expect(result.values[name as keyof typeof result.values]).toBe(spec.fallback);
-      expect(result.rejected).toEqual([]);
+      expect(resolve(raw)).toEqual({ value: spec.fallback, rejected: [] });
     }
+  });
+
+  it('derives each owner slice from the descriptor', () => {
+    const vm = ownedResourceEnvNames('vm');
+    const catchup = ownedResourceEnvNames('catchup');
+    expect([...vm, ...catchup].sort()).toEqual(Object.keys(AGENT_RESOURCE_ENV_SPECS).sort());
+    expect(vm).toEqual(ownedResourceEnvNames('vm', true));
+    expect(ownedResourceEnvNames('catchup', false)).toEqual([]);
+    const snapshots = resolveAgentResourceSnapshots({});
+    expect(Object.keys(snapshots.vm.values)).toEqual(vm);
+    expect(Object.keys(snapshots.catchup.values)).toEqual(catchup);
+    expect(Object.isFrozen(snapshots)).toBe(true);
+    expect(Object.isFrozen(snapshots.vm.values)).toBe(true);
+    expect(Object.isFrozen(snapshots.catchup.values)).toBe(true);
   });
 
   it('bounds startup jitter using the effective cadence and retains immediate startup', () => {
     for (const raw of [...invalidNumbers, RESOURCE_MAX.timerMs + 1].map(String)) {
-      expect(resolveAgentResourceEnvironment({
+      expect(resolveVmResourceEnvironment({
         DKG_VM_RECONCILE_INTERVAL_MS: '75000', DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS: raw,
       })).toMatchObject({ startupMaxDelayMs: 75_000, rejected: ['DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS'] });
     }
-    expect(resolveAgentResourceEnvironment({ DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS: '0' }).startupMaxDelayMs).toBe(0);
-    expect(resolveAgentResourceEnvironment({ DKG_VM_RECONCILE_INTERVAL_MS: 'Infinity' }).startupMaxDelayMs).toBe(60_000);
+    expect(resolveVmResourceEnvironment({ DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS: '0' }).startupMaxDelayMs).toBe(0);
+    expect(resolveVmResourceEnvironment({ DKG_VM_RECONCILE_INTERVAL_MS: 'Infinity' }).startupMaxDelayMs).toBe(60_000);
   });
 });
 
@@ -179,7 +198,7 @@ it('composes bounded executable policy and immutable diagnostics using the suppl
     syncGlobalMaxInflight: 3,
     syncReconcilerIntervalMs: 12.5,
     syncResponderSnapshotLimits: { global: { rows: 100 }, local: { rows: 101 } },
-  }, env, resolveAgentResourceEnvironment({ DKG_VM_RECONCILE_BATCH_SIZE: '20' }));
+  }, env, resolveAgentResourceSnapshots({ DKG_VM_RECONCILE_BATCH_SIZE: '20' }));
   expect(policy.admission).toMatchObject({ limit: 3, queueLimit: 12 });
   expect(policy.snapshot.budget.maxRows).toBe(100);
   expect(policy.vm.values.DKG_VM_RECONCILE_BATCH_SIZE).toBe(20);
@@ -191,7 +210,7 @@ it('composes bounded executable policy and immutable diagnostics using the suppl
 
 it('keeps initial SWM diagnostics immutable while job-scoped resolution refreshes explicitly', () => {
   const env = { DKG_SWM_CATCHUP_PASS_BUDGET_MS: 'invalid', DKG_SWM_CATCHUP_MAX_PASSES: '3' };
-  const policy = resolveStartupResourcePolicy({}, env, resolveAgentResourceEnvironment({}));
+  const policy = resolveStartupResourcePolicy({}, env, resolveAgentResourceSnapshots({}));
   expect(resolveSwmCatchupPassConfig(env)).toEqual(policy.initialSwmPass);
   expect(policy.initialSwmPass).toEqual({ budgetMs: 600_000, maxPasses: 3 });
   expect(policy.diagnostics.rejected).toEqual(['DKG_SWM_CATCHUP_PASS_BUDGET_MS']);
