@@ -5,7 +5,7 @@ import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@
 import { readPublicSnapshotWalkProgress, runSharedMemorySync, syncPublicSnapshotsForMeta, type PublicSnapshotMetadata } from '../src/sync/requester/shared-memory-sync.js';
 import { createRecoveryExecutionAdmission } from '../src/sync/requester/recovery-execution-guard.js';
 import { readPublicSnapshotRecoveryResult, recoverPublicSnapshots } from '../src/sync/requester/public-snapshot-recovery.js';
-import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncTransportFailure, toSyncTransportFailureError } from '../src/sync/error-tags.js';
+import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncDeniedError, isSyncTransportFailure, toSyncDeniedError, toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
 afterEach(() => vi.restoreAllMocks());
@@ -292,7 +292,7 @@ it.each([1, 2])('permits a lower per-round concurrency of %s', async fetchConcur
 it.each(['denied', 'transport'] as const)('preserves a later-index %s failure when an earlier snapshot subsequently fails locally', async kind => {
   const f = fixture();
   const primary = kind === 'denied'
-    ? Object.assign(new Error('peer denied snapshot'), { syncDenied: true })
+    ? toSyncDeniedError(new Error('peer denied snapshot'))
     : toSyncTransportFailureError(new Error('stream reset'));
   const local = new Error('local snapshot persistence failed');
   const put = f.store.putSnapshot;
@@ -312,6 +312,7 @@ it.each(['denied', 'transport'] as const)('preserves a later-index %s failure wh
     if (!('error' in outcome)) throw new Error('Expected concurrent failures');
     if (kind === 'denied') {
       expect(outcome.error.syncDenied).toBe(true);
+      expect(isSyncDeniedError(outcome.error)).toBe(true);
       expect(didSyncPeerRespond(outcome.error)).toBe(true);
     } else {
       expect(isSyncTransportFailure(outcome.error)).toBe(true);

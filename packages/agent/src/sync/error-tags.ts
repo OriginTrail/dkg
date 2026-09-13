@@ -6,6 +6,7 @@ import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
 /** Concurrent failures retain their triggering cause and every admitted classification. */
 export class SyncFailureGroup extends AggregateError {
+  /** Compatibility projection of the canonical denial tag over the current causes. */
   declare readonly syncDenied: boolean;
 
   constructor(primary: unknown, additional: readonly unknown[]) {
@@ -16,7 +17,7 @@ export class SyncFailureGroup extends AggregateError {
     Object.defineProperty(this, 'syncDenied', {
       enumerable: true,
       configurable: true,
-      get: () => syncFailureCauseView(this).anyLeafCause(readSyncDenied),
+      get: () => hasSyncErrorTag(this, 'syncDenied'),
     });
   }
 }
@@ -46,21 +47,12 @@ function syncFailureCauseView(error: unknown) {
   }
   return {
     anyCause: (predicate: (cause: unknown) => boolean) => causes.some(predicate),
-    anyLeafCause: (predicate: (cause: unknown) => boolean) => leaves.some(predicate),
     everyCause: (predicate: (cause: unknown) => boolean) => leaves.length > 0 && leaves.every(predicate),
   };
 }
 
-function readSyncDenied(error: unknown): boolean {
-  try { return Boolean(isTaggableThrowable(error) && (error as { syncDenied?: boolean }).syncDenied); }
-  catch { return false; }
-}
-
-export function isSyncDeniedError(error: unknown): boolean {
-  return syncFailureCauseView(error).anyCause(readSyncDenied);
-}
-
 type SyncErrorTag =
+  | 'syncDenied'
   | 'syncPeerResponded'
   | 'syncTransportFailure'
   | 'syncValidationRejected'
@@ -69,6 +61,7 @@ type SyncErrorTag =
 type TaggedSyncThrowable = object;
 
 const syncErrorTagSideChannels: Record<SyncErrorTag, WeakSet<object>> = {
+  syncDenied: new WeakSet(),
   syncPeerResponded: new WeakSet(),
   syncTransportFailure: new WeakSet(),
   syncValidationRejected: new WeakSet(),
@@ -87,6 +80,9 @@ function toTaggedSyncError(error: unknown, tag: SyncErrorTag): TaggedSyncThrowab
     ? error
     : new Error(String(error), { cause: error });
   syncErrorTagSideChannels[tag].add(taggedError);
+  // A group projects its tags over its causes and its own side-channel entry;
+  // a data property would shadow that live projection.
+  if (taggedError instanceof SyncFailureGroup) return taggedError;
   try {
     Object.defineProperty(taggedError, tag, {
       configurable: true,
@@ -106,6 +102,8 @@ function toTaggedSyncError(error: unknown, tag: SyncErrorTag): TaggedSyncThrowab
 function hasOwnSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
   if (!isTaggableThrowable(error)) return false;
   if (syncErrorTagSideChannels[tag].has(error)) return true;
+  // A group's tag properties project over causes the traversal already visits.
+  if (error instanceof SyncFailureGroup) return false;
   try {
     if ((error as Record<string, unknown>)[tag]) return true;
   } catch {
@@ -116,6 +114,21 @@ function hasOwnSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
 
 function hasSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
   return syncFailureCauseView(error).anyCause(cause => hasOwnSyncErrorTag(cause, tag));
+}
+
+/**
+ * The peer answered with its denial sentinel. The peer spoke, so a denial is
+ * never a transport interruption; requesters account it as a denied phase
+ * rather than a failure worth backing off from.
+ */
+export function toSyncDeniedError<T extends object>(error: T): T;
+export function toSyncDeniedError(error: unknown): TaggedSyncThrowable;
+export function toSyncDeniedError(error: unknown): TaggedSyncThrowable {
+  return toTaggedSyncError(error, 'syncDenied');
+}
+
+export function isSyncDeniedError(error: unknown): boolean {
+  return hasSyncErrorTag(error, 'syncDenied');
 }
 
 export function toSyncPeerRespondedError<T extends object>(error: T): T;
@@ -190,7 +203,7 @@ export function isKnownRetryableSyncTransportInterruption(error: unknown): boole
   if (causes.anyCause(cause =>
     hasOwnSyncErrorTag(cause, 'syncValidationRejected')
     || hasOwnSyncErrorTag(cause, 'syncPeerResponded')
-    || readSyncDenied(cause)
+    || hasOwnSyncErrorTag(cause, 'syncDenied')
     || isChainRpcTransportError(cause)
     || hasOwnSyncErrorTag(cause, 'syncLocalRequestFailure')
   )) return false;

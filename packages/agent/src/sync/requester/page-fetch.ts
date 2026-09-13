@@ -7,8 +7,10 @@ import {
 import {
   isKnownRetryableSyncTransportInterruption,
   isSyncBackoffWorthyError,
+  isSyncDeniedError,
   isSyncTransportFailure,
   isSyncValidationRejection,
+  toSyncDeniedError,
   toSyncPeerRespondedError,
 } from '../error-tags.js';
 import { syncPlaneFor } from '../attempt-telemetry.js';
@@ -857,11 +859,9 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
         primeBody === syncDeniedResponse
         || (extraDeniedResponses && extraDeniedResponses.includes(primeBody))
       ) {
-        const error = new Error(
+        throw toSyncDeniedError(new Error(
           `Sync denied by ${remotePeerId} while priming the new responder generation for "${contextGraphId}" (${phase})`,
-        );
-        (error as Error & { syncDenied?: boolean }).syncDenied = true;
-        throw error;
+        ));
       }
       if (!primeBody) {
         throw new Error(
@@ -936,9 +936,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
           nquadsText === syncDeniedResponse ||
           (extraDeniedResponses && extraDeniedResponses.includes(nquadsText))
         ) {
-          const error = new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`);
-          (error as Error & { syncDenied?: boolean }).syncDenied = true;
-          throw error;
+          throw toSyncDeniedError(new Error(`Sync denied by ${remotePeerId} for "${contextGraphId}" (${phase})`));
         }
         if (!nquadsText) break;
 
@@ -1037,7 +1035,7 @@ async function fetchSyncPagesWithState(params: FetchSyncPagesParams): Promise<Sy
     if (err instanceof SyncPageAccumulationLimitError) {
       err.responderSessionStartedFresh = responderSessionStartedFresh;
     }
-    const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;
+    const denied = isSyncDeniedError(err);
     if (usesPageSession && err instanceof SyncPageAccumulationLimitError) {
       // The exact response proved that this responder ignored (or violated)
       // the requested narrow scope. Never resume that incompatible row list:

@@ -3,7 +3,7 @@ import { OversizedRdfLiteralError } from '@origintrail-official/dkg-core';
 import {
   combineSyncFailures, didSyncPeerRespond, isKnownRetryableSyncTransportInterruption,
   isSyncBackoffWorthyError, isSyncDeniedError, isSyncPermanentRejection, isSyncTransportFailure,
-  isSyncValidationRejection, toSyncPeerRespondedError, toSyncTransportFailureError,
+  isSyncValidationRejection, toSyncDeniedError, toSyncPeerRespondedError, toSyncTransportFailureError,
   toSyncValidationRejectionError,
 } from '../src/sync/error-tags.js';
 
@@ -45,6 +45,27 @@ it('derives denial evidence from current causes instead of a construction-time c
   expect(isSyncDeniedError(group)).toBe(true);
   expect(didSyncPeerRespond(group)).toBe(true);
   expect(isKnownRetryableSyncTransportInterruption(group)).toBe(false);
+});
+
+it('projects the canonical denial tag from frozen causes and from the group itself', () => {
+  const denial = toSyncDeniedError(Object.freeze(new Error('denied')));
+  expect(Object.keys(denial)).toEqual([]);
+  expect(isSyncDeniedError(denial)).toBe(true);
+  const group = combineSyncFailures(new Error('disk write failed'), [denial]);
+  expect(group).toMatchObject({ syncDenied: true });
+  expect(didSyncPeerRespond(group)).toBe(true);
+  expect(isKnownRetryableSyncTransportInterruption(group)).toBe(false);
+
+  const later = combineSyncFailures(
+    toSyncTransportFailureError(new Error('first reset')),
+    [toSyncTransportFailureError(new Error('second reset'))],
+  );
+  expect(later).toMatchObject({ syncDenied: false });
+  expect(toSyncDeniedError(later)).toBe(later);
+  expect(later).toMatchObject({ syncDenied: true });
+  expect(Object.assign({}, later)).toMatchObject({ syncDenied: true });
+  expect(isSyncDeniedError(combineSyncFailures(new Error('outer'), [later]))).toBe(true);
+  expect(isKnownRetryableSyncTransportInterruption(later)).toBe(false);
 });
 
 it('retains every secondary classification without replacing the triggering local failure', () => {

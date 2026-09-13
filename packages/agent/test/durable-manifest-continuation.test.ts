@@ -114,7 +114,8 @@ function processBatch(
 
 interface Round {
   readonly meta: Quad[];
-  readonly dataPage: (offset: number) => Quad[] | Error;
+  /** Quads to serve, an Error the transport throws, or a raw response body. */
+  readonly dataPage: (offset: number) => Quad[] | Error | string;
 }
 
 interface DataRequestEvidence {
@@ -189,6 +190,7 @@ function createTwoRoundHarness(
         ? currentRound.meta
         : currentRound.dataPage(pending.offset);
       if (page instanceof Error) throw page;
+      if (typeof page === 'string') return new TextEncoder().encode(page);
       const quads = page;
       if (quads.length === 0) return new Uint8Array();
       const responseId = `response-${responseSequence++}`;
@@ -204,12 +206,13 @@ function createTwoRoundHarness(
     logDebug: () => {},
   });
 
-  const run = async (round: Round) => {
+  const run = async (round: Round, options: { onAccessDenied?: (contextGraphId: string) => void } = {}) => {
     currentRound = round;
     return runDurableSync({
       ctx,
       remotePeerId,
       contextGraphIds: [contextGraphId],
+      ...(options.onAccessDenied ? { onAccessDenied: options.onAccessDenied } : {}),
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: fetch,
       exactAssetSelectionFor: exactAssetUals
@@ -362,6 +365,28 @@ describe('manifest-bound durable DATA continuation', () => {
       manifestDigest: createGraphScopedDurableManifestPlan(yMeta, contextGraphId)?.manifestDigest,
       terminal: true,
     });
+  });
+
+  it('classifies a denied generation-prime page as a denied phase', async () => {
+    const { contextGraphId, remotePeerId, x, y } = makeScenario('prime-denied', (cg) => ({
+      x: ordered([asset(cg, 1), asset(cg, 3)]),
+      y: ordered([asset(cg, 1), asset(cg, 3), asset(cg, 5)]),
+    }));
+    const harness = createTwoRoundHarness(contextGraphId, remotePeerId);
+    const firstPrefix = x[0]!.payload;
+    await harness.run({ meta: x.flatMap((entry) => entry.meta), dataPage: () => firstPrefix });
+
+    harness.dataRequests.length = 0;
+    const denied: string[] = [];
+    const second = await harness.run(
+      { meta: y.flatMap((entry) => entry.meta), dataPage: (offset) => offset === 0 ? '#DENIED' : [] },
+      { onAccessDenied: (cg) => denied.push(cg) },
+    );
+
+    // The denial arrives on the offset-zero prime page; no resumed page follows.
+    expect(harness.dataRequests.map(({ offset }) => offset)).toEqual([0]);
+    expect(denied).toEqual([contextGraphId]);
+    expect(second).toMatchObject({ deniedPhases: 1, failedPhases: 0, backoffWorthyFailures: 0, complete: false });
   });
 
   it.each([
