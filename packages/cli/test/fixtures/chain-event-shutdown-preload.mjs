@@ -84,8 +84,8 @@ if (process.argv.includes('daemon-worker')) {
     await this.chainPoller.start();
     void this.awaitInitialChainPoll().then(() => record('poll-retired'));
   };
-  const originalFence = DKGAgent.prototype.closeChainEventAdmission;
-  DKGAgent.prototype.closeChainEventAdmission = function () {
+  const originalFence = DKGAgent.prototype.closeWorkAdmission;
+  DKGAgent.prototype.closeWorkAdmission = function () {
     record('daemon-fence');
     originalFence?.call(this);
     record('daemon-fence-return', { aborted: !!pollSignal?.aborted });

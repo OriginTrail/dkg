@@ -83,9 +83,16 @@ describe('event-admitted VM recovery at existing waits', () => {
       // checkpoint even though the separately owned recovery is still active.
       await agent.awaitInitialChainPoll();
       expect(saved).toEqual([20]);
-      agent.closeChainEventAdmission();
+      agent.closeWorkAdmission();
       expect(readSignal?.aborted).toBe(true);
+      const lifecycle = (agent as unknown as { vmReconcileLifecycleController: AbortController }).vmReconcileLifecycleController;
+      expect(lifecycle.signal.aborted).toBe(true);
+      // The fence is idempotent, and stop() reuses it synchronously instead of
+      // duplicating the poller and VM-reconcile closures.
+      agent.closeWorkAdmission();
+      const fence = vi.spyOn(agent, 'closeWorkAdmission');
       const stopped = agent.stop();
+      expect(fence).toHaveBeenCalledOnce();
       await stopped;
       if (boundary === 'admission') expect(probeSignal?.aborted).toBe(true);
       release();

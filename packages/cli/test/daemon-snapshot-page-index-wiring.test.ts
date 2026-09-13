@@ -88,7 +88,7 @@ function createFakeAgent() {
     onChat: vi.fn(),
     start: vi.fn(async () => undefined),
     stop: vi.fn(async () => undefined),
-    closeChainEventAdmission: vi.fn(),
+    closeWorkAdmission: vi.fn(),
     publishProfile: vi.fn(async () => undefined),
     ensureProfilePublished: vi.fn(async () => undefined),
     publishRelayRegistry: vi.fn(async () => undefined),
@@ -239,11 +239,11 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
     expect(publisherRuntimeArg.publicSnapshotStore).toBe(publicSnapshotStore);
   });
 
-  it('fences chain events at the real daemon entry point before removing readiness or stopping the agent', async () => {
+  it('closes agent work admission at the real daemon entry point before removing readiness or stopping the agent', async () => {
     vi.useFakeTimers();
     const events: string[] = [];
     const agent = createFakeAgent();
-    agent.closeChainEventAdmission.mockImplementation(() => {
+    agent.closeWorkAdmission.mockImplementation(() => {
       events.push('fence');
       expect(existsSync(join(tempHome!, 'api.port'))).toBe(true);
     });
@@ -261,7 +261,7 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
     // delivers a real OS signal to the built CLI process.
     await expect(Promise.resolve(shutdown!.call(process, 'SIGTERM'))).rejects.toThrow('process.exit:0');
     expect(events).toEqual(['fence', 'stop']);
-    expect(agent.closeChainEventAdmission).toHaveBeenCalledOnce();
+    expect(agent.closeWorkAdmission).toHaveBeenCalledOnce();
   });
 
 });

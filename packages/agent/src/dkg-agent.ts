@@ -2240,12 +2240,17 @@ export class DKGAgent extends DKGAgentBase {
     await this.chainPoller?.waitForCurrentPoll();
   }
 
-  /** Fence chain scans and event-admitted VM recovery before daemon teardown awaits. */
-  closeChainEventAdmission(): void {
+  /**
+   * Synchronous, idempotent shutdown-admission boundary. Fences every producer
+   * whose work the daemon must retire before its first teardown await: chain
+   * event polling and the VM-reconcile lifecycle (periodic, manual and
+   * event-admitted recovery, which live nudges hand off to before their poll
+   * checkpoints). Cooperative work observes its signals at once; `stop()`
+   * reuses this fence and then physically drains what was admitted.
+   */
+  closeWorkAdmission(): void {
     this.chainPoller?.closeAdmission();
-    // Live nudges hand off to the VM scheduler before their poll checkpoints.
-    // Retire that lifecycle at the same outer shutdown boundary, even when
-    // agent.stop must wait behind another producer's drain.
+    this.vmReconcileRuntimeReady = false;
     this.closeVmReconcileRotationState();
   }
 
@@ -2257,12 +2262,13 @@ export class DKGAgent extends DKGAgentBase {
     // more work; the physical drain below completes before store teardown.
     const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()
       ?? Promise.resolve();
-    // Invalidate VM reconcile callbacks before waiting for the chain poller.
-    // A poll can be inside the KACG nudge's self-prime lookup; aborting the
-    // lifecycle first lets that lookup's bounded race release poller shutdown.
-    this.vmReconcileRuntimeReady = false;
+    // Fence every producer through the boundary the daemon closes before its
+    // first teardown await (a no-op when it already did). A poll can be inside
+    // the KACG nudge's self-prime lookup; aborting the VM lifecycle before
+    // waiting for the chain poller lets that lookup's bounded race release
+    // poller shutdown.
     this.graphScopedStoreClosed = true;
-    this.closeVmReconcileRotationState();
+    this.closeWorkAdmission();
     const chainPoller = this.chainPoller;
     // stop() fences new poll admission synchronously, but its in-flight poll
     // joins the bounded physical-retirement drain below. An adapter that

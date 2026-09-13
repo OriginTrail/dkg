@@ -572,7 +572,7 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
 
       const shutdownStarted = beginGracefulShutdown({
         state: daemonState,
-        closeChainEventAdmission: () => {},
+        agent: { closeWorkAdmission: () => {} },
         log: () => {},
         removeApiPort: async () => { enteredWindow(); await held; },
       });
@@ -617,6 +617,23 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
     } finally {
       await harness.close();
     }
+  });
+
+  it('closes catch-up and agent work admission together, before the first await', async () => {
+    // The early fence is ONE synchronous transition owned by
+    // `closeDaemonAdmissions`. Suspending inside `removeApiPort` is the only
+    // vantage point from which a late closure of either producer would differ
+    // from an early one; the asynchronous `agent.stop()` drains them later.
+    const state = { catchupAcceptingJobs: true };
+    let agentFenced = false;
+    let observed: { catchupAcceptingJobs: boolean; agentFenced: boolean } | undefined;
+    await beginGracefulShutdown({
+      state,
+      agent: { closeWorkAdmission: () => { agentFenced = true; } },
+      log: () => {},
+      removeApiPort: async () => { observed = { catchupAcceptingJobs: state.catchupAcceptingJobs, agentFenced }; },
+    });
+    expect(observed).toEqual({ catchupAcceptingJobs: false, agentFenced: true });
   });
 });
 

@@ -43,10 +43,34 @@ import {
 import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
 
 /**
- * The FIRST thing graceful shutdown does: close catch-up and chain-event
- * admission, cancel active event reads, announce, and give the supervisor's liveness watcher its signal.
+ * The daemon's synchronous shutdown-admission boundary: every producer fenced
+ * here is closed before {@link beginGracefulShutdown} reaches its first await.
  *
- * ## Why the flag write and the first await live in the SAME function
+ *   - catch-up admission (`catchupAcceptingJobs`): the subscribe route's only
+ *     view of shutdown;
+ *   - the agent's work admission: chain event polling and the VM-reconcile
+ *     lifecycle (periodic, manual and event-admitted recovery), which
+ *     `agent.stop()` later drains through that same fence.
+ *
+ * A producer that needs this ordering guarantee is added HERE, never as
+ * another callback on `beginGracefulShutdown`.
+ */
+export interface DaemonShutdownAdmissions {
+  state: { catchupAcceptingJobs: boolean };
+  agent: { closeWorkAdmission(): void };
+}
+
+export function closeDaemonAdmissions(deps: DaemonShutdownAdmissions): void {
+  deps.state.catchupAcceptingJobs = false;
+  deps.agent.closeWorkAdmission();
+}
+
+/**
+ * The FIRST thing graceful shutdown does: close every daemon admission
+ * ({@link closeDaemonAdmissions}), announce, and give the supervisor's
+ * liveness watcher its signal.
+ *
+ * ## Why the admission closure and the first await live in the SAME function
  *
  * `daemonState.catchupAcceptingJobs` is the subscribe route's only view of
  * shutdown — `shuttingDown` is a closure-local `let` inside `runDaemonInner`,
@@ -71,14 +95,11 @@ import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
  * IIFE, and it is idempotent with the later `cleanupStateFiles()` call, so a
  * failure here lands us exactly where a failed late removal would.
  */
-export async function beginGracefulShutdown(deps: {
-  state: { catchupAcceptingJobs: boolean };
-  closeChainEventAdmission: () => void;
+export async function beginGracefulShutdown(deps: DaemonShutdownAdmissions & {
   removeApiPort: () => Promise<void>;
   log: (message: string) => void;
 }): Promise<void> {
-  deps.state.catchupAcceptingJobs = false;
-  deps.closeChainEventAdmission();
+  closeDaemonAdmissions(deps);
   deps.log('Shutting down...');
   await deps.removeApiPort().catch((err: any) =>
     deps.log(`Early api.port cleanup error: ${err?.message ?? String(err)}`),

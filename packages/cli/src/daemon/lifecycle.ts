@@ -3757,7 +3757,7 @@ async function runDaemonInnerWithStartupOwnership(
     // window is already refused — which is not observable from here.
     await beginGracefulShutdown({
       state: daemonState,
-      closeChainEventAdmission: () => agent.closeChainEventAdmission(),
+      agent,
       removeApiPort,
       log,
     });
