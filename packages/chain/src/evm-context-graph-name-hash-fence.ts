@@ -261,9 +261,17 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
   async resolve(normalizedNameHash: string): Promise<bigint | null> {
     await this.initialize();
     const requestScope = await this.captureScopeToken();
+    // Admission for the first chain read must happen before this request owns
+    // the serialized slot-state lane. In particular, background authority
+    // discovery may be held by cold-start jitter; allowing that wait to own
+    // currentSlotTail would invert priority and stall a foreground register.
+    // The existing end-of-pass high-water verification makes a snapshot that
+    // ages while queued fail closed without committing stale state.
+    const highWaterSnapshot = await this.loadProviderHighWaters();
     const current = await this.enqueueCurrentSlotResolution(
       normalizedNameHash,
       requestScope,
+      highWaterSnapshot,
     );
     return current.mode === 'historical'
       ? this.resolveHistorical(normalizedNameHash)
@@ -274,10 +282,11 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
   private enqueueCurrentSlotResolution(
     normalizedNameHash: string,
     requestScope: ContextGraphNameHashScopeToken,
+    highWaterSnapshot: ContextGraphNameHashProviderHighWaters,
   ): Promise<ContextGraphNameHashCurrentResolution> {
     const run = this.currentSlotTail.then(
-      () => this.resolveCurrentSlots(normalizedNameHash, requestScope),
-      () => this.resolveCurrentSlots(normalizedNameHash, requestScope),
+      () => this.resolveCurrentSlots(normalizedNameHash, requestScope, highWaterSnapshot),
+      () => this.resolveCurrentSlots(normalizedNameHash, requestScope, highWaterSnapshot),
     );
     this.currentSlotTail = run.then(() => undefined, () => undefined);
     return run;
@@ -291,8 +300,8 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
   private async resolveCurrentSlots(
     normalizedNameHash: string,
     requestScope: ContextGraphNameHashScopeToken,
+    highWaterSnapshot: ContextGraphNameHashProviderHighWaters,
   ): Promise<ContextGraphNameHashCurrentResolution> {
-    const highWaterSnapshot = await this.loadProviderHighWaters();
     const { latestId } = highWaterSnapshot;
     if (latestId < 0n) {
       throw new Error(

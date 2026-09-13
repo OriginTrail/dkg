@@ -1,6 +1,10 @@
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  activeRpcRequestContext,
+  withRpcRequestContext,
+} from '../src/rpc-request-transport.js';
+import {
   callsForMethod,
   deferred,
   fixture,
@@ -30,6 +34,38 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     await expect(survivor).resolves.toBe(1n);
     expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(2);
     expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(2);
+  });
+
+  it('does not make a foreground lookup join same-hash background admission', async () => {
+    const { adapter, readContractWithOptions } = fixture([NAME_HASH]);
+    const backgroundRelease = deferred<void>();
+    readContractWithOptions.mockImplementation(async (
+      _contract: unknown,
+      _label: string,
+      method: string,
+    ) => {
+      if (
+        method === 'getLatestContextGraphId'
+        && activeRpcRequestContext().requestClass === 'background'
+      ) {
+        await backgroundRelease.promise;
+      }
+      return method === 'getLatestContextGraphId' ? 1n : NAME_HASH;
+    });
+
+    const background = withRpcRequestContext(
+      { requestClass: 'background' },
+      () => adapter.resolveContextGraphIdByNameHash(NAME_HASH),
+    );
+    await vi.waitFor(() => {
+      expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId'))
+        .toHaveLength(1);
+    });
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(1n);
+    backgroundRelease.resolve(undefined);
+    await expect(background).resolves.toBe(1n);
+    expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(4);
   });
 
   it('reuses an unchanged high-water snapshot across different hashes', async () => {
@@ -162,7 +198,9 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     await vi.waitFor(() => {
       expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(2);
     });
-    expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(1);
+    // Each caller obtains its initial admission/high-water snapshot before it
+    // joins the serialized state lane. Only the range scan itself is shared.
+    expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(2);
     release.resolve(undefined);
 
     await expect(first).resolves.toBe(1n);

@@ -4,6 +4,8 @@ import {
   CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY,
 } from '../src/evm-context-graph-name-hash-fence.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
+import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import {
   callsForMethod,
   deferred,
@@ -496,6 +498,47 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
     await vi.waitFor(() => expect(activeSlots).toBe(2));
     slotRelease.resolve(undefined);
     await expect(slot).resolves.toBeNull();
+  });
+
+  it('does not let background admission jitter own the serialized slot-state lane', async () => {
+    const { adapter, hashes, readContractWithOptions } = fixture([NAME_HASH, OTHER_HASH]);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 20,
+      maxQueueSize: 8,
+      startupJitterMs: 250,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    readContractWithOptions.mockImplementation(async (
+      _contract: unknown,
+      _label: string,
+      method: string,
+      args: readonly unknown[],
+    ) => {
+      if (method === 'getLatestContextGraphId') {
+        await governor.acquireActiveRequest();
+        return 2n;
+      }
+      return hashes.get(BigInt(args[0] as bigint)) ?? ethers.ZeroHash;
+    });
+
+    const background = withRpcRequestContext(
+      { requestClass: 'background' },
+      () => adapter.resolveContextGraphIdByNameHash(NAME_HASH),
+    );
+    await vi.waitFor(() => {
+      expect(governor.snapshot().backgroundQueued).toBe(1);
+    });
+
+    await expect(adapter.resolveContextGraphIdByNameHash(OTHER_HASH)).resolves.toBe(2n);
+    await expect(background).resolves.toBe(1n);
   });
 
   it('scans past the first match and fails closed on an ambiguous duplicate', async () => {

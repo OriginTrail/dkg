@@ -2,6 +2,7 @@
 
 import { ethers } from 'ethers';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import { activeRpcRequestContext } from './rpc-request-transport.js';
 
 const CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS = 30_000;
 
@@ -56,7 +57,11 @@ export class ContextGraphNameHashResolver {
     }
 
     const shared = this.cache.getOrLoad(
-      nameHash,
+      // A foreground register must never inherit a background lookup that is
+      // intentionally held by startup jitter or the background token bucket.
+      // Coalesce within each workload class; keep the short miss cache split
+      // for the same reason.
+      `${activeRpcRequestContext().requestClass}\0${nameHash}`,
       nameHash,
       () => this.dependencies.load(nameHash),
     );
