@@ -259,12 +259,9 @@ import {
 } from './vm-recovery-microbatch.js';
 import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
 import type {
-  VmRecoveryAttemptSettlement, VmRecoveryRotationPolicy,
+  VmRecoveryBatchTransaction, VmRecoveryPreparedEntry, VmRecoveryRotationPolicy,
   VmRecoveryRotationSnapshot, VmRecoverySlotHandle, VmRecoveryPreparation,
 } from './internal/vm-recovery-slot-registry.js';
-import type {
-  VmRecoveryBatchTransaction, VmRecoveryPreparedEntry,
-} from './internal/vm-recovery-batch-transaction.js';
 import {
   VmRecoveryProviderPolicy,
   type VmRecoveryProviderAttempt,
@@ -4830,17 +4827,41 @@ export class SwmHostModeMethods extends DKGAgentBase {
     };
   }
 
-  settleVmReconcileRotationAttempt(
+  recordVmReconcilePhysicalAttempt(
     this: DKGAgent,
     target: OrdinalRecoveryTarget,
-    peerId: string | undefined,
-    disposition: 'found' | 'clean-absent' | 'incomplete',
+    peerId: string,
     expectedCandidatePeerIds: readonly string[],
     slotHandle: VmRecoverySlotHandle,
     unavailablePeerIds: ReadonlySet<string> = new Set(),
   ): void {
     if (this.vmReconcileRotationClosed) return;
-    this.vmRecoverySlots.settleAttempt(target, peerId, disposition, expectedCandidatePeerIds, slotHandle,
+    this.vmRecoverySlots.recordPhysicalAttempt(target, peerId, expectedCandidatePeerIds, slotHandle,
+      this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()), unavailablePeerIds);
+  }
+
+  settleVmReconcileUnavailablePeers(
+    this: DKGAgent,
+    target: OrdinalRecoveryTarget,
+    expectedCandidatePeerIds: readonly string[],
+    slotHandle: VmRecoverySlotHandle,
+    unavailablePeerIds: ReadonlySet<string>,
+  ): void {
+    if (this.vmReconcileRotationClosed) return;
+    this.vmRecoverySlots.settleUnavailablePeers(target, expectedCandidatePeerIds, slotHandle,
+      this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()), unavailablePeerIds);
+  }
+
+  recordVmReconcileUnavailablePeer(
+    this: DKGAgent,
+    target: OrdinalRecoveryTarget,
+    peerId: string,
+    expectedCandidatePeerIds: readonly string[],
+    slotHandle: VmRecoverySlotHandle,
+    unavailablePeerIds: ReadonlySet<string>,
+  ): void {
+    if (this.vmReconcileRotationClosed) return;
+    this.vmRecoverySlots.recordUnavailablePeer(target, peerId, expectedCandidatePeerIds, slotHandle,
       this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()), unavailablePeerIds);
   }
 
@@ -4849,20 +4870,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * target. The registry owns the roster rule: an unchanged observed roster
    * settles the attempt, while growth or shrink revalidates the slot instead.
    */
-  settleVmReconcileRotationAttemptAfterFetch(
+  revalidateVmReconcileRotationAfterFetch(
     this: DKGAgent,
     target: OrdinalRecoveryTarget,
     slotHandle: VmRecoverySlotHandle,
     revalidated: OrdinalRecoveryTarget,
-    attempt: VmRecoveryAttemptSettlement,
+    cleanAbsence: {
+      readonly peerId: string;
+      readonly expectedCandidatePeerIds: readonly string[];
+      readonly unavailablePeerIds?: ReadonlySet<string>;
+    } | undefined,
   ): void {
     if (this.vmReconcileRotationClosed) return;
     const now = this.vmReconcileRotationNow();
-    this.vmRecoverySlots.settleAttemptAfterFetch(target, slotHandle, revalidated, {
+    this.vmRecoverySlots.revalidateAfterFetch(target, slotHandle, revalidated, {
       candidatePeerIds: this.vmReconcileObservedCandidatePeerIds(target.localCgId),
       curatorRosterConfirmed: true,
       collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
-    }, attempt, this.vmReconcileRotationPolicy(now));
+    }, cleanAbsence, this.vmReconcileRotationPolicy(now));
   }
 
   creditVmReconcileCleanAbsence(
@@ -4872,13 +4897,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     expectedCandidatePeerIds: readonly string[],
     slotHandle: VmRecoverySlotHandle,
   ): void {
-    this.settleVmReconcileRotationAttempt(
-      target,
-      peerId,
-      'clean-absent',
-      expectedCandidatePeerIds,
-      slotHandle,
-    );
+    if (this.vmReconcileRotationClosed) return;
+    this.vmRecoverySlots.creditCleanAbsence(target, peerId, expectedCandidatePeerIds, slotHandle,
+      this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()));
   }
 
   installVmReconcileActiveFetchCooldown(this: DKGAgent, localCgId: string, now: number): symbol {
@@ -5131,7 +5152,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
     }
     let disposition: VmRecoveryUalDisposition = 'incomplete';
-    let transferCompleted = false;
     try {
       const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
         peerId,
@@ -5139,7 +5159,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         attempts.map(({ entry }) => entry.target.ual),
         { signal, isCurrent: isRecoveryCurrent },
       );
-      transferCompleted = true;
       const { result } = detailed;
       disposition = detailed.disposition;
       this.log.info(
@@ -5154,21 +5173,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
 
-    // A completed physical transfer advances rotation independently of the
-    // chain re-read below. Reconciliation may be temporarily inconclusive; it
-    // may upgrade this credit to clean absence, but cannot erase the attempt.
-    if (transferCompleted) {
-      for (const attempt of attempts) {
-        if (!attempt.slotHandle) continue;
-        this.settleVmReconcileRotationAttempt(
-          attempt.entry.target,
-          peerId,
-          'incomplete',
-          attempt.candidatePeerIds,
-          attempt.slotHandle,
-          unavailablePeerIdSet,
-        );
-      }
+    // Entering transport advances rotation independently of whether the peer
+    // returns or rejects and independently of the chain re-read below. A later
+    // successful revalidation may add absence proof, but cannot erase the
+    // physical attempt.
+    for (const attempt of attempts) {
+      if (!attempt.slotHandle) continue;
+      this.recordVmReconcilePhysicalAttempt(
+        attempt.entry.target,
+        peerId,
+        attempt.candidatePeerIds,
+        attempt.slotHandle,
+        unavailablePeerIdSet,
+      );
     }
 
     const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
@@ -5197,12 +5214,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       perUalDispositions.set(batchTarget.ual, perTargetDisposition);
       if (outcome.status === 'pending') {
         if (outcome.recovery && attempt.slotHandle) {
-          this.settleVmReconcileRotationAttemptAfterFetch(batchTarget, attempt.slotHandle, outcome.recovery, {
-            peerId,
-            disposition: perTargetDisposition,
-            expectedCandidatePeerIds: attempt.candidatePeerIds,
-            unavailablePeerIds: unavailablePeerIdSet,
-          });
+          this.revalidateVmReconcileRotationAfterFetch(
+            batchTarget,
+            attempt.slotHandle,
+            outcome.recovery,
+            perTargetDisposition === 'clean-absent' ? {
+              peerId,
+              expectedCandidatePeerIds: attempt.candidatePeerIds,
+              unavailablePeerIds: unavailablePeerIdSet,
+            } : undefined,
+          );
         }
       } else {
         this.vmRecoverySlots.complete(batchTarget);
@@ -5575,14 +5596,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       if (!peerId) {
         if (slotHandle) {
-          this.settleVmReconcileRotationAttempt(
-            target,
-            candidatePeerId,
-            'incomplete',
-            candidatePeerIds,
-            slotHandle,
-            providerPolicy.unavailablePeerIds(),
-          );
+          const unavailablePeerIds = providerPolicy.unavailablePeerIds();
+          if (candidatePeerId) {
+            this.recordVmReconcileUnavailablePeer(
+              target, candidatePeerId, candidatePeerIds, slotHandle, unavailablePeerIds,
+            );
+          } else {
+            this.settleVmReconcileUnavailablePeers(
+              target, candidatePeerIds, slotHandle, unavailablePeerIds,
+            );
+          }
         }
         continue;
       }
@@ -5653,7 +5676,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             isCurrent: isRecoveryCurrent,
           },
         );
-        if (!isRecoveryCurrent()) return noRecovery();
+        if (!isRecoveryCurrent()) return staleRecovery();
         const plannableTargets = sizedCandidates.map(({ attempt, recoveryFootprint }) => ({
           attempt,
           recoveryFootprint,
@@ -5675,10 +5698,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
               + `ordinal=${target.ordinal} selectorCap=${VM_EXACT_MICROBATCH_LIMITS.maxSelectorBytes}`,
           );
           if (slotHandle) {
-            this.settleVmReconcileRotationAttempt(
+            this.settleVmReconcileUnavailablePeers(
               target,
-              undefined,
-              'incomplete',
               candidatePeerIds,
               slotHandle,
               providerPolicy.unavailablePeerIds(),

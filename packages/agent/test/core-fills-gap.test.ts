@@ -185,6 +185,30 @@ function vmRecoveryTarget(
   };
 }
 
+function settleVmRecoveryAttempt(
+  internals: AgentInternals,
+  target: OrdinalRecoveryTarget,
+  peerId: string | undefined,
+  disposition: 'found' | 'clean-absent' | 'incomplete',
+  expectedCandidatePeerIds: readonly string[],
+  slotHandle: symbol,
+): void {
+  if (peerId === undefined) {
+    (internals as any).settleVmReconcileUnavailablePeers(
+      target, expectedCandidatePeerIds, slotHandle, new Set(expectedCandidatePeerIds),
+    );
+    return;
+  }
+  (internals as any).recordVmReconcilePhysicalAttempt(
+    target, peerId, expectedCandidatePeerIds, slotHandle,
+  );
+  if (disposition === 'clean-absent') {
+    (internals as any).creditVmReconcileCleanAbsence(
+      target, peerId, expectedCandidatePeerIds, slotHandle,
+    );
+  }
+}
+
 function noProtocolCatchupStats() {
   return {
     ...emptyCatchupStats(),
@@ -3712,7 +3736,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           target, peers, now,
         );
         expect(prepared.kind).toBe('owned');
-        (internals as any).settleVmReconcileRotationAttempt(
+        settleVmRecoveryAttempt(internals,
           target, peerId, 'clean-absent', peers, prepared.slot.handle,
         );
       }
@@ -4275,7 +4299,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         first, [peer], now,
       ).slot;
 
-      (internals as any).settleVmReconcileRotationAttempt(
+      settleVmRecoveryAttempt(internals,
         first, peer, 'incomplete', [peer], firstRecord.handle,
       );
       expect(internals.vmRecoverySlots.snapshot().get(firstKey)).toMatchObject({
@@ -4360,8 +4384,8 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const initial = (internals as any).prepareVmReconcileRotationTarget(
       target, [peerA, peerB], 0,
     );
-    (internals as any).creditVmReconcileCleanAbsence(
-      target, peerA, [peerA, peerB], initial.slot.handle,
+    settleVmRecoveryAttempt(
+      internals, target, peerA, 'clean-absent', [peerA, peerB], initial.slot.handle,
     );
     expect([...internals.vmRecoverySlots.read(target, initial.slot.handle)!.cleanAbsentPeerIds]).toEqual([peerA]);
 
@@ -4420,7 +4444,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const initial = (internals as any).prepareVmReconcileRotationTarget(
       target, [peerA], 100,
     ).slot;
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       target, peerA, 'incomplete', [peerA], initial.handle,
     );
     expect(internals.vmRecoverySlots.read(target, initial.handle)!).toMatchObject({
@@ -4433,7 +4457,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(grownOnce.handle).toBe(initial.handle);
     expect(internals.vmRecoverySlots.read(target, grownOnce.handle)!).toMatchObject({ phase: 'collecting', failures: 0, nextRetryAt: 0 });
     expect([...internals.vmRecoverySlots.read(target, grownOnce.handle)!.attemptedPeerIds]).toEqual([peerA]);
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       target, peerB, 'clean-absent', [peerA, peerB], grownOnce.handle,
     );
     expect(internals.vmRecoverySlots.read(target, grownOnce.handle)!).toMatchObject({
@@ -4446,7 +4470,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(grownTwice.handle).toBe(initial.handle);
     expect(internals.vmRecoverySlots.read(target, grownTwice.handle)!).toMatchObject({ phase: 'collecting', failures: 0, nextRetryAt: 0 });
     expect([...internals.vmRecoverySlots.read(target, grownTwice.handle)!.attemptedPeerIds]).toEqual([peerA, peerB]);
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       target, peerC, 'clean-absent', [peerA, peerB, peerC], grownTwice.handle,
     );
     expect(internals.vmRecoverySlots.read(target, grownTwice.handle)!).toMatchObject({
@@ -4476,7 +4500,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     expect((internals as any).vmReconcileRotationClosed).toBe(true);
     expect(internals.vmRecoverySlots.snapshot().size).toBe(0);
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       target, peer, 'clean-absent', [peer], record.handle,
     );
     expect(internals.vmRecoverySlots.snapshot().size).toBe(0);
@@ -4500,7 +4524,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       target, [peerA, peerB, peerC], now,
     ).slot;
     for (const peerId of [peerA, peerB, peerC]) {
-      (internals as any).settleVmReconcileRotationAttempt(
+      settleVmRecoveryAttempt(internals,
         target, peerId, 'clean-absent', [peerA, peerB, peerC], initial.handle,
       );
     }
@@ -4516,7 +4540,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect([...internals.vmRecoverySlots.read(target, replaced.handle)!.cleanAbsentPeerIds]).toEqual([]);
     expect((internals as any).vmReconcileUncreditedCandidateOrder(internals.vmRecoverySlots.read(target, replaced.handle)!))
       .toEqual([peerA, peerC, peerD]);
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       target, peerA, 'clean-absent', [peerA, peerC, peerD], replaced.handle,
     );
     expect([...internals.vmRecoverySlots.read(target, replaced.handle)!.cleanAbsentPeerIds]).toEqual([peerA]);
@@ -4545,7 +4569,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const partial = (internals as any).prepareVmReconcileRotationTarget(
       partialTarget, [peerA, peerB], 100,
     ).slot;
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       partialTarget, peerA, 'incomplete', [peerA, peerB], partial.handle,
     );
     expect([...internals.vmRecoverySlots.read(partialTarget, partial.handle)!.attemptedPeerIds]).toEqual([peerA]);
@@ -4558,7 +4582,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect([...internals.vmRecoverySlots.read(partialTarget, shrunkPartial.slot.handle)!.attemptedPeerIds]).toEqual([]);
     expect([...internals.vmRecoverySlots.read(partialTarget, shrunkPartial.slot.handle)!.cleanAbsentPeerIds]).toEqual([]);
     // A response captured against the old roster is inert after shrink.
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       partialTarget, peerB, 'clean-absent', [peerA, peerB], partial.handle,
     );
     expect([...internals.vmRecoverySlots.read(partialTarget, shrunkPartial.slot.handle)!.cleanAbsentPeerIds]).toEqual([]);
@@ -4568,7 +4592,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       backoffTarget, [peerA, peerB], 200,
     ).slot;
     for (const peerId of [peerA, peerB]) {
-      (internals as any).settleVmReconcileRotationAttempt(
+      settleVmRecoveryAttempt(internals,
         backoffTarget, peerId, 'clean-absent', [peerA, peerB], backoff.handle,
       );
     }
@@ -4600,7 +4624,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const partial = (internals as any).prepareVmReconcileRotationTarget(
       partialTarget, [peer, otherPeer], now,
     ).slot;
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       partialTarget, peer, 'incomplete', [peer, otherPeer], partial.handle,
     );
     expect([...internals.vmRecoverySlots.read(partialTarget, partial.handle)!.attemptedPeerIds]).toEqual([peer]);
@@ -4620,7 +4644,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const backoff = (internals as any).prepareVmReconcileRotationTarget(
       backoffTarget, [peer], now,
     ).slot;
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       backoffTarget, peer, 'clean-absent', [peer], backoff.handle,
     );
     expect(internals.vmRecoverySlots.read(backoffTarget, backoff.handle)!.phase).toBe('backoff');
@@ -4654,7 +4678,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const first = (internals as any).prepareVmReconcileRotationTarget(
       target, [ordinaryPeer], 100, false,
     );
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       target, ordinaryPeer, 'clean-absent', [ordinaryPeer], first.slot.handle,
     );
     expect(internals.vmRecoverySlots.read(target, first.slot.handle)!).toMatchObject({
@@ -4672,7 +4696,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       curatorRosterConfirmed: false,
     });
 
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       target, ordinaryPeer, 'clean-absent', [ordinaryPeer], retry.slot.handle,
     );
     const confirmed = (internals as any).prepareVmReconcileRotationTarget(
@@ -4682,7 +4706,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(confirmed.slot.handle).toBe(retry.slot.handle);
     expect(internals.vmRecoverySlots.read(target, confirmed.slot.handle)!.curatorRosterConfirmed).toBe(true);
     expect([...internals.vmRecoverySlots.read(target, confirmed.slot.handle)!.attemptedPeerIds]).toEqual([]);
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       target, ordinaryPeer, 'clean-absent', [ordinaryPeer], confirmed.slot.handle,
     );
     expect((internals as any).prepareVmReconcileRotationTarget(
@@ -4701,7 +4725,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const unconfirmed = (internals as any).prepareVmReconcileRotationTarget(
       target, [ordinaryPeer], 100, false,
     );
-    (internals as any).settleVmReconcileRotationAttempt(
+    settleVmRecoveryAttempt(internals,
       target, ordinaryPeer, 'clean-absent', [ordinaryPeer], unconfirmed.slot.handle,
     );
     expect([...internals.vmRecoverySlots.read(target, unconfirmed.slot.handle)!.cleanAbsentPeerIds]).toEqual([ordinaryPeer]);

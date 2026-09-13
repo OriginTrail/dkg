@@ -101,7 +101,7 @@ describe('exact VM recovery slot cancellation', () => {
       const donor = harness.targets[0]!;
       const waiting = harness.targets[1]!;
       const original = ownedSlot(host.prepareVmReconcileRotationTarget(donor, [peer], host.vmReconcileRotationNow()));
-      host.vmRecoverySlots.settleAttempt(donor, peer, 'incomplete', [peer], original.handle, {
+      host.vmRecoverySlots.recordPhysicalAttempt(donor, peer, [peer], original.handle, {
         now: 0, getLocalPeerId: () => 'test-host', baseBackoffMs: 1, maxBackoffMs: 1,
       });
       let discoverySignal: AbortSignal | undefined;
@@ -375,22 +375,72 @@ describe('exact VM recovery slot cancellation', () => {
       await entered.promise;
       expect(harness.fetched.map(fetch => fetch.uals.length)).toEqual([1, 2]);
       const survivor = harness.targets[2]!;
-      const record = host.vmRecoverySlots.snapshot().get(vmRecoverySlotKey(survivor));
-      expect(record?.attemptedPeerIds.length).toBe(0);
+      const record = host.vmRecoverySlots.capture(survivor);
+      expect(record?.snapshot.attemptedPeerIds.length).toBe(0);
       host.prepareVmReconcileRotationTarget(
         { ...harness.targets[1]!, merkleRoot: 'replacement-root' }, [peer], host.vmReconcileRotationNow(),
       );
       expect(receivedSignal?.aborted).toBe(true);
       await recovery;
-      expect(record?.phase).toBe('collecting');
-      expect(record?.attemptedPeerIds.length).toBe(0);
-      expect(record?.cleanAbsentPeerIds.length).toBe(0);
+      const survivorAfterCancellation = host.vmRecoverySlots.capture(survivor);
+      expect(record).toBeDefined();
+      expect(survivorAfterCancellation?.handle).toBe(record?.handle);
+      expect(survivorAfterCancellation?.snapshot.phase).toBe('collecting');
+      expect(survivorAfterCancellation?.snapshot.attemptedPeerIds.length).toBe(0);
+      expect(survivorAfterCancellation?.snapshot.cleanAbsentPeerIds.length).toBe(0);
       expect(host.readVmReconcileActiveFetchCooldown(localCgId)).toBeUndefined();
       const retry = await host.recoverVmReconcileBatch(localCgId, 1n, [survivor], 100, () => true);
       expect(retry.outcomes.get(survivor.ordinal)).toEqual({ status: 'reconciled', blockNumber: 100 });
       expect(harness.fetched.at(-1)?.uals).toEqual([survivor.ual]);
     } finally {
       release.release();
+      await recovery;
+      await harness.agent.stop().catch(() => undefined);
+    }
+  });
+
+  it('clears the active-fetch cooldown when a companion slot changes during footprint sizing', async () => {
+    const localCgId = '0x0000000000000000000000000000000000000001/footprint-cancellation';
+    const peer = '12D3KooWSlotFootprintCancellation';
+    const sizingEntered = barrier();
+    const releaseSizing = barrier();
+    const harness = await createVmRecoveryHostHarness({
+      name: 'SlotFootprintCancellation', localCgId, peers: [peer], targetCount: 3,
+      targetForOrdinal: ordinal => targetFor(localCgId, ordinal),
+      onFetch: (_peer, targets, recovered) => {
+        if (targets[0]?.ordinal !== 0) throw new Error('transport started after footprint cancellation');
+        recovered.add(0);
+        return 'found';
+      },
+    });
+    const host = harness.internals as CancellationHost;
+    harness.chainAdapter.getKnowledgeAssetUpdateContext = async (_kaId, options) => {
+      sizingEntered.release();
+      options?.signal?.addEventListener('abort', releaseSizing.release, { once: true });
+      try {
+        if (!options?.signal?.aborted) await releaseSizing.promise;
+        options?.signal?.throwIfAborted();
+        return {
+          minted: 1n, endEpoch: 100n, tokenAmount: 0n, isImmutable: false,
+          merkleRootsCount: 1n, byteSize: 1_024n, merkleLeafCount: 8,
+        };
+      } finally {
+        options?.signal?.removeEventListener('abort', releaseSizing.release);
+      }
+    };
+    const recovery = harness.run();
+    try {
+      await sizingEntered.promise;
+      expect(host.readVmReconcileActiveFetchCooldown(localCgId)).toBeDefined();
+      const companion = harness.targets[2]!;
+      host.prepareVmReconcileRotationTarget(
+        { ...companion, merkleRoot: 'replacement-root' }, [peer], host.vmReconcileRotationNow(),
+      );
+      await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
+      expect(harness.fetched).toEqual([{ peerId: peer, uals: [harness.targets[0]!.ual] }]);
+      expect(host.readVmReconcileActiveFetchCooldown(localCgId)).toBeUndefined();
+    } finally {
+      releaseSizing.release();
       await recovery;
       await harness.agent.stop().catch(() => undefined);
     }
@@ -519,15 +569,14 @@ describe('exact VM recovery slot cancellation', () => {
     try {
       await entered;
       const target = harness.targets[0]!;
-      const slotKey = vmRecoverySlotKey(target);
-      const originalRecord = host.vmRecoverySlots.snapshot().get(slotKey);
+      const originalRecord = host.vmRecoverySlots.capture(target);
       expect(originalRecord).toBeDefined();
       if (stage === 'transport') expect(getSyncBackpressureSnapshot(policy).inflight).toBe(1);
       else expect(harness.fetched).toHaveLength(0);
       applyVmRecoveryInvalidation({
         invalidation, agent: harness.agent, host, localCgId, target, peerId: peer,
       });
-      expect(host.vmRecoverySlots.snapshot().get(slotKey)).not.toBe(originalRecord);
+      expect(host.vmRecoverySlots.isCurrent(target, originalRecord!.handle)).toBe(false);
       expect(boundarySignal?.aborted).toBe(true);
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });
       expect(reconcile).not.toHaveBeenCalled();

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { isRotationExpired, type VmRecoveryRotationRecord } from './vm-recovery-rotation-evidence.js';
-import type { VmRecoverySlotLease } from './vm-recovery-slot-lifetimes.js';
 
 /** The facet of a slot that capacity accounting reads. */
 export interface VmRecoveryCapacitySlot {
@@ -13,8 +12,6 @@ export interface VmRecoveryCapacitySlot {
 export interface VmRecoveryPendingAdmission {
   readonly key: string;
   readonly donor?: { readonly key: string; readonly record: VmRecoveryRotationRecord };
-  /** The requesting lease: its own successful donation detaches it instead of canceling it. */
-  readonly exempt?: VmRecoverySlotLease;
 }
 
 /**
@@ -65,14 +62,13 @@ export class VmRecoverySlotCapacity {
     requestingCgId: string,
     slots: ReadonlyMap<string, VmRecoveryCapacitySlot>,
     now: number,
-    exempt?: VmRecoverySlotLease,
   ): VmRecoveryPendingAdmission | undefined {
     if (this.pending.has(key)) return undefined;
     let occupied = 0;
     for (const [slotKey, slot] of slots) if (this.ownsCapacity(slotKey, slot)) occupied++;
     const donor = occupied < this.maxEntries ? undefined : this.findDonor(slots, requestingCgId, now);
     if (occupied >= this.maxEntries && !donor) return undefined;
-    const admission: VmRecoveryPendingAdmission = { key, donor, exempt };
+    const admission: VmRecoveryPendingAdmission = { key, donor };
     this.live.add(admission);
     this.pending.set(key, { role: 'requester', admission });
     if (donor) this.pending.set(donor.key, { role: 'donor', admission });

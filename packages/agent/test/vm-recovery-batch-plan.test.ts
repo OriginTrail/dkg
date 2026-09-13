@@ -209,9 +209,12 @@ describe('VM recovery batch transaction', () => {
     const prepared = registry.prepare(suppressed, {
       candidatePeerIds: ['old-peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
     }, 0);
-    registry.settleAttempt(suppressed, 'old-peer', 'clean-absent', ['old-peer'], ownedSlot(prepared).handle, {
+    const handle = ownedSlot(prepared).handle;
+    const policy = {
       now: 1, getLocalPeerId: () => 'local', baseBackoffMs: 100, maxBackoffMs: 100,
-    });
+    };
+    registry.recordPhysicalAttempt(suppressed, 'old-peer', ['old-peer'], handle, policy);
+    registry.creditCleanAbsence(suppressed, 'old-peer', ['old-peer'], handle, policy);
     const transaction = registry.beginBatch();
     const plan = transaction.reserveBatch({
       targets: [suppressed, waiting], admissionCursor: 0, observedCandidatePeerIds: ['old-peer'],
@@ -236,9 +239,12 @@ describe('VM recovery batch transaction', () => {
       const prepared = registry.prepare(selected, {
         candidatePeerIds: ['old-peer'], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
       }, 0);
-      registry.settleAttempt(selected, 'old-peer', 'clean-absent', ['old-peer'], ownedSlot(prepared).handle, {
+      const handle = ownedSlot(prepared).handle;
+      const policy = {
         now: 1, getLocalPeerId: () => 'local', baseBackoffMs: 10, maxBackoffMs: 100,
-      });
+      };
+      registry.recordPhysicalAttempt(selected, 'old-peer', ['old-peer'], handle, policy);
+      registry.creditCleanAbsence(selected, 'old-peer', ['old-peer'], handle, policy);
     }
     const transaction = registry.beginBatch();
     transaction.reserveBatch({
@@ -319,6 +325,36 @@ describe('VM recovery batch transaction', () => {
     expect(registry.peekSnapshot(donor)).toBeUndefined();
     expect(registry.peekSnapshot(waiting)?.candidatePeerIds).toEqual(['new-peer']);
     expect(registry.recordCount).toBe(1);
+    transaction.release();
+  });
+
+  it('orders unowned targets by cursor while recognizing a value-equivalent owned target', () => {
+    const registry = new VmRecoverySlotRegistry(2);
+    const owned = target(0);
+    const ownedClone = { ...owned };
+    const waitingFirst = target(1);
+    const waitingAtCursor = target(2);
+    registry.prepare(owned, {
+      candidatePeerIds: ['peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
+    }, 0);
+
+    const transaction = registry.beginBatch();
+    const plan = transaction.reserveBatch({
+      targets: [ownedClone, waitingFirst, waitingAtCursor],
+      admissionCursor: 2,
+      observedCandidatePeerIds: ['peer'],
+      now: 1,
+      collectionDeadlineAt: 101,
+    });
+    expect(plan.initiallyEligibleTargets).toEqual([ownedClone, waitingAtCursor]);
+
+    const committed = transaction.commit({
+      candidatePeerIds: ['peer'], curatorRosterConfirmed: true, now: 2,
+      collectionDeadlineAt: 102, isCurrent: () => !transaction.signal.aborted,
+    });
+    expect(committed.eligible.map(entry => entry.target)).toEqual([ownedClone, waitingAtCursor]);
+    expect(committed.nextAdmissionCursor).toBe(0);
+    expect(registry.recordCount).toBe(2);
     transaction.release();
   });
 });

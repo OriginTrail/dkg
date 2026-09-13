@@ -58,13 +58,21 @@ export interface VmRecoveryRotationPolicy {
   readonly maxBackoffMs: number;
 }
 
-export type VmRecoveryAttemptDisposition = 'found' | 'clean-absent' | 'incomplete';
-
 /** Mutable evidence behind one retained generation; it never leaves the registry. */
-export type VmRecoveryRotationRecord = { readonly handle: VmRecoverySlotHandle } & {
-  -readonly [K in keyof VmRecoveryRotationSnapshot]: VmRecoveryRotationSnapshot[K] extends readonly (infer V)[]
-    ? Set<V> : VmRecoveryRotationSnapshot[K];
-};
+export interface VmRecoveryRotationRecord extends VmRecoverySlotLocator {
+  readonly handle: VmRecoverySlotHandle;
+  fingerprint: string;
+  phase: 'collecting' | 'backoff';
+  backoffKind?: 'clean-absence' | 'incomplete-cycle';
+  candidatePeerIds: Set<string>;
+  attemptedPeerIds: Set<string>;
+  cleanAbsentPeerIds: Set<string>;
+  curatorRosterConfirmed: boolean;
+  collectionDeadlineAt: number;
+  lastAttemptedPeerId?: string;
+  failures: number;
+  nextRetryAt: number;
+}
 
 /** How retained evidence answers one observed roster. */
 export type VmRecoveryRosterTransition = 'backoff' | 'collecting' | 'expired';
@@ -218,28 +226,12 @@ function enterBackoff(
   record.nextRetryAt = policy.now + backoff;
 }
 
-/** Credit one physical attempt; false when it no longer describes this roster. */
-export function settleRotationAttempt(
+function updateCompletedBackoff(
   target: VmRecoverySlotLocator,
   record: VmRecoveryRotationRecord,
-  peerId: string | undefined,
-  disposition: VmRecoveryAttemptDisposition,
-  expectedCandidatePeerIds: readonly string[],
   policy: VmRecoveryRotationPolicy,
   unavailablePeerIds: ReadonlySet<string>,
-): boolean {
-  if (!membershipMatches(record.candidatePeerIds, expectedCandidatePeerIds)) return false;
-  if (peerId !== undefined && !record.candidatePeerIds.has(peerId)) return false;
-
-  if (peerId !== undefined) {
-    record.lastAttemptedPeerId = peerId;
-    record.attemptedPeerIds.add(peerId);
-    if (disposition === 'clean-absent') record.cleanAbsentPeerIds.add(peerId);
-    // Preserve fairly accumulated proof progress while other targets share
-    // the bounded peer budget. A cycle expires only after this slot itself
-    // stops making physical progress for the effective maximum.
-    record.collectionDeadlineAt = policy.now + policy.maxBackoffMs;
-  }
+): void {
   const scheduledEveryPeer = record.candidatePeerIds.size > 0 && [...record.candidatePeerIds]
     .every((candidatePeerId) => record.attemptedPeerIds.has(candidatePeerId)
       || unavailablePeerIds.has(candidatePeerId));
@@ -252,12 +244,89 @@ export function settleRotationAttempt(
       : undefined;
   if (completedBackoffKind && record.curatorRosterConfirmed) {
     if (record.phase === 'backoff') {
-      // Post-fetch reconciliation may upgrade the physical attempt already
-      // credited above. It is the same cycle, so retain one failure epoch.
+      // A later absence proof may upgrade the physical attempt already
+      // credited below. It is the same cycle, so retain one failure epoch.
       if (completedBackoffKind === 'clean-absence') record.backoffKind = 'clean-absence';
     } else {
       enterBackoff(target, record, completedBackoffKind, policy);
     }
   }
+}
+
+function recordRotationPeerVisit(
+  target: VmRecoverySlotLocator,
+  record: VmRecoveryRotationRecord,
+  peerId: string,
+  expectedCandidatePeerIds: readonly string[],
+  policy: VmRecoveryRotationPolicy,
+  unavailablePeerIds: ReadonlySet<string>,
+): boolean {
+  if (!membershipMatches(record.candidatePeerIds, expectedCandidatePeerIds)
+    || !record.candidatePeerIds.has(peerId)) return false;
+  record.lastAttemptedPeerId = peerId;
+  record.attemptedPeerIds.add(peerId);
+  // Preserve fairly accumulated proof progress while other targets share the
+  // bounded peer budget. A cycle expires only after this slot stops making
+  // physical progress for the effective maximum.
+  record.collectionDeadlineAt = policy.now + policy.maxBackoffMs;
+  updateCompletedBackoff(target, record, policy, unavailablePeerIds);
+  return true;
+}
+
+/** Record one entered transport attempt, without claiming that the asset was absent. */
+export function recordRotationPhysicalAttempt(
+  target: VmRecoverySlotLocator,
+  record: VmRecoveryRotationRecord,
+  peerId: string,
+  expectedCandidatePeerIds: readonly string[],
+  policy: VmRecoveryRotationPolicy,
+  unavailablePeerIds: ReadonlySet<string>,
+): boolean {
+  return recordRotationPeerVisit(
+    target, record, peerId, expectedCandidatePeerIds, policy, unavailablePeerIds,
+  );
+}
+
+/** Record a selected peer that could not cross readiness/admission into transport. */
+export function recordRotationUnavailablePeer(
+  target: VmRecoverySlotLocator,
+  record: VmRecoveryRotationRecord,
+  peerId: string,
+  expectedCandidatePeerIds: readonly string[],
+  policy: VmRecoveryRotationPolicy,
+  unavailablePeerIds: ReadonlySet<string>,
+): boolean {
+  return recordRotationPeerVisit(
+    target, record, peerId, expectedCandidatePeerIds, policy, unavailablePeerIds,
+  );
+}
+
+/** Credit absence only after revalidation has proved it for an already-recorded attempt. */
+export function creditRotationCleanAbsence(
+  target: VmRecoverySlotLocator,
+  record: VmRecoveryRotationRecord,
+  peerId: string,
+  expectedCandidatePeerIds: readonly string[],
+  policy: VmRecoveryRotationPolicy,
+  unavailablePeerIds: ReadonlySet<string>,
+): boolean {
+  if (!membershipMatches(record.candidatePeerIds, expectedCandidatePeerIds)
+    || !record.candidatePeerIds.has(peerId)
+    || !record.attemptedPeerIds.has(peerId)) return false;
+  record.cleanAbsentPeerIds.add(peerId);
+  updateCompletedBackoff(target, record, policy, unavailablePeerIds);
+  return true;
+}
+
+/** Finish an unavailable roster without manufacturing a physical peer attempt. */
+export function settleRotationUnavailablePeers(
+  target: VmRecoverySlotLocator,
+  record: VmRecoveryRotationRecord,
+  expectedCandidatePeerIds: readonly string[],
+  policy: VmRecoveryRotationPolicy,
+  unavailablePeerIds: ReadonlySet<string>,
+): boolean {
+  if (!membershipMatches(record.candidatePeerIds, expectedCandidatePeerIds)) return false;
+  updateCompletedBackoff(target, record, policy, unavailablePeerIds);
   return true;
 }

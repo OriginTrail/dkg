@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { VmRecoveryBatchTransaction } from './vm-recovery-batch-transaction.js';
+import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
 import {
   captureRotation,
+  creditRotationCleanAbsence,
   createRotationRecord,
   hasUnconfirmedAbsence,
   membershipMatches,
+  recordRotationPhysicalAttempt,
+  recordRotationUnavailablePeer,
   reviseRotationRoster,
   rotationSnapshot,
-  settleRotationAttempt,
+  settleRotationUnavailablePeers,
   vmRecoverySlotKey,
   vmRecoveryTargetFingerprint,
   type VmRecoveryAdmissionParams,
-  type VmRecoveryAttemptDisposition,
   type VmRecoveryRotationPolicy,
   type VmRecoveryRotationRecord,
   type VmRecoveryRotationSnapshot,
@@ -26,7 +28,6 @@ import { VmRecoverySlotGeneration, VmRecoverySlotLease } from './vm-recovery-slo
 
 export type {
   VmRecoveryAdmissionParams,
-  VmRecoveryAttemptDisposition,
   VmRecoveryRotationPolicy,
   VmRecoveryRotationSnapshot,
   VmRecoverySlotCapture,
@@ -52,14 +53,6 @@ export type VmRecoveryPreparation =
 
 /** Preparations that expose a target for transport. */
 export type VmRecoveryEligiblePreparation = Extract<VmRecoveryPreparation, { kind: 'owned' | 'evidence-free' }>;
-
-/** One completed physical attempt awaiting credit against the roster it was captured under. */
-export interface VmRecoveryAttemptSettlement {
-  readonly peerId: string | undefined;
-  readonly disposition: VmRecoveryAttemptDisposition;
-  readonly expectedCandidatePeerIds: readonly string[];
-  readonly unavailablePeerIds?: ReadonlySet<string>;
-}
 
 /** Outcome of the post-fetch transition. */
 export type VmRecoveryPostFetchTransition = 'settled' | 'revalidated' | 'stale';
@@ -94,6 +87,54 @@ export type VmRecoverySlotReservation =
   | { readonly kind: 'existing'; readonly slot: VmRecoverySlotCapture }
   | { readonly kind: 'reserved'; readonly reservation: VmRecoverySlotAdmissionReservation }
   | { readonly kind: 'deferred' };
+
+interface VmRecoveryBatchOptions {
+  readonly targets: readonly OrdinalRecoveryTarget[];
+  readonly admissionCursor: number;
+  readonly observedCandidatePeerIds: readonly string[];
+  readonly now: number;
+  readonly collectionDeadlineAt: number;
+}
+
+interface VmRecoveryBatchCommitOptions {
+  readonly candidatePeerIds: readonly string[];
+  readonly curatorRosterConfirmed: boolean;
+  readonly now: number;
+  readonly collectionDeadlineAt: number;
+  readonly isCurrent: () => boolean;
+}
+
+export interface VmRecoveryPreparedEntry {
+  readonly index: number;
+  readonly target: OrdinalRecoveryTarget;
+  readonly prepared: VmRecoveryEligiblePreparation;
+}
+
+export interface VmRecoveryBatchTransaction {
+  readonly signal: AbortSignal;
+  reserveBatch(options: VmRecoveryBatchOptions): {
+    readonly initiallyEligibleTargets: readonly OrdinalRecoveryTarget[];
+    readonly suppressedRecords: readonly VmRecoveryRotationSnapshot[];
+  };
+  commit(options: VmRecoveryBatchCommitOptions): {
+    readonly eligible: readonly VmRecoveryPreparedEntry[];
+    readonly nextAdmissionCursor?: number;
+  };
+  release(): void;
+}
+
+type VmRecoveryBatchAdmission =
+  | { readonly kind: 'owned'; readonly slot: VmRecoverySlotCapture }
+  | { readonly kind: 'backoff'; readonly slot: VmRecoverySlotCapture }
+  | { readonly kind: 'reserved'; readonly reservation: VmRecoverySlotAdmissionReservation }
+  | { readonly kind: 'deferred' }
+  | { readonly kind: 'invalidated' };
+
+interface VmRecoveryBatchEntry {
+  readonly index: number;
+  readonly target: OrdinalRecoveryTarget;
+  readonly admission: VmRecoveryBatchAdmission;
+}
 
 /**
  * Coordinates one slot aggregate per target. Evidence transitions live in the
@@ -204,7 +245,7 @@ export class VmRecoverySlotRegistry {
     const slot = this.observedSlot(target);
     if (!slot) return { kind: 'deferred' };
     if (slot.record) return { kind: 'existing', slot: captureRotation(slot.record) };
-    const pending = this.capacity.reserve(key, target.localCgId, this.slots, now, exempt);
+    const pending = this.capacity.reserve(key, target.localCgId, this.slots, now);
     if (!pending) {
       this.prune(key, slot);
       return { kind: 'deferred' };
@@ -213,7 +254,7 @@ export class VmRecoverySlotRegistry {
     return {
       kind: 'reserved',
       reservation: {
-        commit: params => this.commitAdmission(claimed, pending, params),
+        commit: params => this.commitAdmission(claimed, pending, params, exempt),
         release: () => this.releaseAdmission(pending),
       },
     };
@@ -230,6 +271,7 @@ export class VmRecoverySlotRegistry {
     target: Target,
     pending: VmRecoveryPendingAdmission,
     params: VmRecoveryAdmissionParams,
+    exempt?: VmRecoverySlotLease,
   ): VmRecoverySlotAdmission {
     const { key, donor: donation } = pending;
     const slot = this.slots.get(key);
@@ -263,7 +305,7 @@ export class VmRecoverySlotRegistry {
       // The requester is installed and capacity accounting is settled before
       // donor abort listeners run. Only the requesting lease is detached
       // without cancellation; external invalidations exempt no one.
-      if (installed && donor && donation) this.invalidateSlot(donation.key, donor, pending.exempt);
+      if (installed && donor && donation) this.invalidateSlot(donation.key, donor, exempt);
     }
   }
 
@@ -329,10 +371,9 @@ export class VmRecoverySlotRegistry {
     return { kind: this.slots.has(vmRecoverySlotKey(target)) ? 'invalidated' : 'evidence-free' };
   }
 
-  settleAttempt(
+  recordPhysicalAttempt(
     target: Target,
-    peerId: string | undefined,
-    disposition: VmRecoveryAttemptDisposition,
+    peerId: string,
     expectedCandidatePeerIds: readonly string[],
     handle: VmRecoverySlotHandle,
     policy: VmRecoveryRotationPolicy,
@@ -340,9 +381,55 @@ export class VmRecoverySlotRegistry {
   ): void {
     const record = this.currentState(target, handle);
     if (!record) return;
-    if (settleRotationAttempt(target, record, peerId, disposition, expectedCandidatePeerIds, policy, unavailablePeerIds)) {
+    if (recordRotationPhysicalAttempt(
+      target, record, peerId, expectedCandidatePeerIds, policy, unavailablePeerIds,
+    )) {
       this.touch(target, record.handle);
     }
+  }
+
+  recordUnavailablePeer(
+    target: Target,
+    peerId: string,
+    expectedCandidatePeerIds: readonly string[],
+    handle: VmRecoverySlotHandle,
+    policy: VmRecoveryRotationPolicy,
+    unavailablePeerIds: ReadonlySet<string>,
+  ): void {
+    const record = this.currentState(target, handle);
+    if (!record) return;
+    if (recordRotationUnavailablePeer(
+      target, record, peerId, expectedCandidatePeerIds, policy, unavailablePeerIds,
+    )) this.touch(target, record.handle);
+  }
+
+  settleUnavailablePeers(
+    target: Target,
+    expectedCandidatePeerIds: readonly string[],
+    handle: VmRecoverySlotHandle,
+    policy: VmRecoveryRotationPolicy,
+    unavailablePeerIds: ReadonlySet<string>,
+  ): void {
+    const record = this.currentState(target, handle);
+    if (!record) return;
+    if (settleRotationUnavailablePeers(
+      target, record, expectedCandidatePeerIds, policy, unavailablePeerIds,
+    )) this.touch(target, record.handle);
+  }
+
+  creditCleanAbsence(
+    target: Target,
+    peerId: string,
+    expectedCandidatePeerIds: readonly string[],
+    handle: VmRecoverySlotHandle,
+    policy: VmRecoveryRotationPolicy,
+    unavailablePeerIds: ReadonlySet<string> = new Set(),
+  ): void {
+    const record = this.currentState(target, handle);
+    if (!record) return;
+    if (creditRotationCleanAbsence(
+      target, record, peerId, expectedCandidatePeerIds, policy, unavailablePeerIds,
+    )) this.touch(target, record.handle);
   }
 
   /**
@@ -352,12 +439,16 @@ export class VmRecoverySlotRegistry {
    * leaves the attempt uncredited: a proof roster is a set, and a different
    * set starts a different cycle.
    */
-  settleAttemptAfterFetch(
+  revalidateAfterFetch(
     target: Target,
     handle: VmRecoverySlotHandle,
     revalidated: Target,
     observed: VmRecoveryAdmissionParams,
-    attempt: VmRecoveryAttemptSettlement,
+    cleanAbsence: {
+      readonly peerId: string;
+      readonly expectedCandidatePeerIds: readonly string[];
+      readonly unavailablePeerIds?: ReadonlySet<string>;
+    } | undefined,
     policy: VmRecoveryRotationPolicy,
   ): VmRecoveryPostFetchTransition {
     const record = this.currentState(target, handle);
@@ -370,13 +461,192 @@ export class VmRecoverySlotRegistry {
     // UAL or Merkle root earns the superseded generation no credit.
     if (vmRecoverySlotKey(revalidated) !== vmRecoverySlotKey(target)
       || vmRecoveryTargetFingerprint(revalidated) !== vmRecoveryTargetFingerprint(target)) return 'stale';
-    this.settleAttempt(target, attempt.peerId, attempt.disposition, attempt.expectedCandidatePeerIds, handle, policy,
-      attempt.unavailablePeerIds);
+    if (cleanAbsence) this.creditCleanAbsence(
+      target,
+      cleanAbsence.peerId,
+      cleanAbsence.expectedCandidatePeerIds,
+      handle,
+      policy,
+      cleanAbsence.unavailablePeerIds,
+    );
     return 'settled';
   }
 
   beginBatch(): VmRecoveryBatchTransaction {
-    return new VmRecoveryBatchTransaction(this);
+    const lease = new VmRecoverySlotLease();
+    const reservations = new Set<VmRecoverySlotAdmissionReservation>();
+    let released = false;
+    let state: { readonly kind: 'new' | 'committed' | 'released' }
+      | { readonly kind: 'reserved'; readonly entries: readonly VmRecoveryBatchEntry[]; readonly targetCount: number }
+      = { kind: 'new' };
+
+    const track = (targets: readonly Target[]): void => {
+      if (released || lease.signal.aborted) return;
+      for (const target of targets) {
+        const key = vmRecoverySlotKey(target);
+        const slot = this.observedSlot(target);
+        if (lease.signal.aborted) {
+          if (slot) this.prune(key, slot);
+          break;
+        }
+        if (!slot) { lease.cancel(); break; }
+        lease.attach(slot.generation ??= new VmRecoverySlotGeneration(key));
+      }
+    };
+
+    const reserveAdmission = (target: Target, now: number): VmRecoverySlotReservation => {
+      if (released || lease.signal.aborted) return { kind: 'deferred' };
+      const result = this.reserveAdmission(target, now, lease);
+      if (lease.signal.aborted) {
+        if (result.kind === 'reserved') result.reservation.release();
+        return { kind: 'deferred' };
+      }
+      if (result.kind !== 'reserved') return result;
+      const inner = result.reservation;
+      const reservation: VmRecoverySlotAdmissionReservation = {
+        commit: params => {
+          if (released || lease.signal.aborted) { inner.release(); return { kind: 'deferred' }; }
+          try { return inner.commit(params); } finally { reservations.delete(reservation); }
+        },
+        release: () => { inner.release(); reservations.delete(reservation); },
+      };
+      reservations.add(reservation);
+      return { kind: 'reserved', reservation };
+    };
+
+    const reserveTarget = (
+      target: OrdinalRecoveryTarget,
+      original: VmRecoverySlotCapture | undefined,
+      options: VmRecoveryBatchOptions,
+    ): VmRecoveryBatchAdmission => {
+      if (original) {
+        // A donor remains untouched until its requester's admission commits.
+        if (this.isReservedDonor(target, original.handle)) return { kind: 'owned', slot: original };
+        const prepared = this.prepare(target, {
+          candidatePeerIds: options.observedCandidatePeerIds,
+          curatorRosterConfirmed: original.snapshot.curatorRosterConfirmed,
+          collectionDeadlineAt: options.collectionDeadlineAt,
+        }, options.now);
+        // Preparation retired this owner's partial evidence and verified that
+        // no abort callback installed a replacement. Reserve a fresh generation
+        // now instead of carrying a retired handle through discovery.
+        if (prepared.kind !== 'evidence-free') return prepared;
+      }
+      const admission = reserveAdmission(target, options.now);
+      switch (admission.kind) {
+        case 'reserved': return admission;
+        case 'existing': return { kind: 'owned', slot: admission.slot };
+        case 'deferred': return { kind: 'deferred' };
+      }
+    };
+
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      state = { kind: 'released' };
+      for (const reservation of reservations) reservation.release();
+      for (const generation of lease.detachAll()) this.retireIdleGeneration(generation);
+    };
+
+    const reserveBatch: VmRecoveryBatchTransaction['reserveBatch'] = options => {
+      if (state.kind !== 'new') throw new Error('VM recovery batch has already been reserved or released');
+      try {
+        const cursor = options.targets.length === 0 ? 0 : options.admissionCursor % options.targets.length;
+        // Capture ownership as a value on each planning entry. Sorting never
+        // depends on the identity of a mutable target object.
+        const entries = options.targets.map((target, index) => ({
+          target,
+          index,
+          distance: (index - cursor + options.targets.length) % options.targets.length,
+          original: this.observeForAdmission(target),
+        })).sort((left, right) => Number(left.original !== undefined) - Number(right.original !== undefined)
+          || left.distance - right.distance)
+          .map(({ target, index, original }): VmRecoveryBatchEntry => ({
+            index,
+            target,
+            admission: reserveTarget(target, original, options),
+          }));
+        state = { kind: 'reserved', entries, targetCount: options.targets.length };
+        const initiallyEligibleTargets = entries
+          .filter(({ admission }) => admission.kind === 'owned' || admission.kind === 'reserved')
+          .sort((left, right) => left.index - right.index)
+          .map(({ target }) => target);
+        const suppressedRecords = entries.flatMap(({ admission }) => admission.kind === 'backoff'
+          ? [admission.slot.snapshot] : []);
+        track(initiallyEligibleTargets);
+        return { initiallyEligibleTargets, suppressedRecords };
+      } catch (error) {
+        release();
+        throw error;
+      }
+    };
+    const commit: VmRecoveryBatchTransaction['commit'] = options => {
+      if (state.kind !== 'reserved') throw new Error('VM recovery batch must be reserved before commit');
+      const { entries, targetCount } = state;
+      state = { kind: 'committed' };
+      try {
+        const params = {
+          candidatePeerIds: options.candidatePeerIds,
+          curatorRosterConfirmed: options.curatorRosterConfirmed,
+          collectionDeadlineAt: options.collectionDeadlineAt,
+        };
+        const prepared = entries.map(({ target, index, admission }) => {
+          const stale = lease.signal.aborted || !options.isCurrent();
+          let result: VmRecoveryPreparation;
+          switch (admission.kind) {
+            case 'invalidated': result = admission; break;
+            case 'reserved':
+              if (stale) { admission.reservation.release(); result = { kind: 'invalidated' }; }
+              else result = this.prepare(target, params, options.now, admission.reservation);
+              break;
+            case 'owned':
+            case 'backoff':
+              result = stale || !this.isCurrent(target, admission.slot.handle)
+                ? { kind: 'invalidated' }
+                : this.prepare(target, params, options.now);
+              break;
+            case 'deferred':
+              result = stale ? { kind: 'invalidated' } : this.prepare(target, params, options.now);
+              break;
+          }
+          return { index, target, prepared: result };
+        });
+        let lastAdmitted: VmRecoveryBatchEntry | undefined;
+        for (let index = 0; index < entries.length; index++) {
+          const entry = entries[index]!;
+          const wasOwner = entry.admission.kind === 'owned' || entry.admission.kind === 'backoff';
+          if (!wasOwner && prepared[index]?.prepared.kind === 'owned') lastAdmitted = entry;
+        }
+        const eligible = prepared.flatMap(({ index, target, prepared: preparation }): VmRecoveryPreparedEntry[] => {
+          switch (preparation.kind) {
+            case 'owned':
+              return this.isCurrent(target, preparation.slot.handle) ? [{ index, target, prepared: preparation }] : [];
+            case 'evidence-free': return [{ index, target, prepared: preparation }];
+            case 'backoff':
+            case 'deferred':
+            case 'invalidated': return [];
+          }
+        }).sort((left, right) => Number(right.prepared.kind === 'owned') - Number(left.prepared.kind === 'owned')
+          || left.index - right.index);
+        track(eligible.map(({ target }) => target));
+        return {
+          eligible,
+          ...(lastAdmitted && targetCount > 0
+            ? { nextAdmissionCursor: (lastAdmitted.index + 1) % targetCount }
+            : {}),
+        };
+      } catch (error) {
+        release();
+        throw error;
+      }
+    };
+    const transaction: VmRecoveryBatchTransaction = {
+      signal: lease.signal,
+      reserveBatch,
+      commit,
+      release,
+    };
+    return transaction;
   }
 
   /** Observe a selected target once before a transaction captures its admission owner. */
