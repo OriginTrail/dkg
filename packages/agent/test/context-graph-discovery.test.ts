@@ -2331,6 +2331,55 @@ describe('discoverContextGraphsFromChain', () => {
     expect(subs.get('leaked-curated')).toBeUndefined();
   }, 15000);
 
+  it('keeps the curated replay gate ahead of an existing durable on-chain binding', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const contextGraphId = '804';
+    const contextGraphName = 'durable-private-replay';
+    const revealed: ContextGraphOnChain = {
+      contextGraphId,
+      name: contextGraphName,
+      creator: '0x000000000000000000000000000000000000dEaD',
+      accessPolicy: 1,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acknowledged = 0;
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => { acknowledged += 1; },
+      };
+    };
+
+    const store = new OxigraphStore();
+    await store.insert([{
+      subject: contextGraphDataGraphUri(contextGraphName),
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: `"${contextGraphId}"`,
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+    }]);
+    const saved: ContextGraphSubscriptionRecord[] = [];
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record) => { saved.push(record); },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      store,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'core',
+    });
+    agent = result.agent;
+    await agent.start();
+
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .resolves.toBe(0);
+    expect(acknowledged).toBe(1);
+    expect(agent.getSubscribedContextGraphs().get(contextGraphName)).toBeUndefined();
+    expect(saved.filter((record) => record.id === contextGraphName)).toEqual([]);
+  }, 15000);
+
   it('skips hash-only on-chain contextGraphs without metadata', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
@@ -2810,6 +2859,58 @@ describe('discoverContextGraphsFromChain', () => {
     await expect(discovery).resolves.toBe(1);
     expect(saves).toBe(1);
     expect(acked).toBe(1);
+  }, 15000);
+
+  it('replays when cancellation lands after durable application but before page acknowledgement', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const revealed: ContextGraphOnChain = {
+      contextGraphId: '832',
+      name: 'post-application-cancellation',
+      creator: '0x1234',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    };
+    let acknowledged = 0;
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => { acknowledged += 1; },
+      };
+    };
+    const controller = new AbortController();
+    const stop = new Error('post-application stop');
+    let abortAfterSave = true;
+    let saves = 0;
+    const subscriptionStore: ContextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async (record) => {
+        if (record.id !== revealed.name) return;
+        saves += 1;
+        if (abortAfterSave) controller.abort(stop);
+      },
+      delete: async () => {},
+    };
+    const result = await createTestAgent({
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: subscriptionStore,
+      nodeRole: 'core',
+    });
+    agent = result.agent;
+    await agent.start();
+
+    await expect(agent.discoverContextGraphsFromChain({
+      mode: 'incremental',
+      signal: controller.signal,
+    })).rejects.toBe(stop);
+    expect(saves).toBe(1);
+    expect(acknowledged).toBe(0);
+
+    abortAfterSave = false;
+    await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
+      .resolves.toBe(0);
+    expect(saves).toBe(2);
+    expect(acknowledged).toBe(1);
   }, 15000);
 
   it.each(['subscription', 'binding'] as const)(

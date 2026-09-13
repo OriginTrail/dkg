@@ -1,4 +1,5 @@
 import { withRpcRequestContext } from '@origintrail-official/dkg-chain';
+import { CoalescingRecurringTask } from '@origintrail-official/dkg-core';
 
 /**
  * Bounded ContextGraphNameRegistry discovery scheduling.
@@ -31,38 +32,12 @@ export type ScanOptions =
 type CancellableScanOptions = ScanOptions & { signal: AbortSignal };
 
 export interface ChainDiscoveryScanRunner {
-  /** Run at most one live-then-repair pass; overlapping calls coalesce. */
+  /** Run at most one live-then-repair pass; overlapping calls are dropped. */
   run(): Promise<void>;
-  /** Abort and drain the current live/repair scan before agent/store teardown. */
+  /** Arm the initial pass; the runner owns every later periodic deadline. */
+  schedule(initialDelayMs?: number): boolean;
+  /** Clear the deadline, abort, and drain before agent/store teardown. */
   close(): Promise<void>;
-}
-
-export interface ChainDiscoveryScanSchedule {
-  /** Clear both startup/interval timers, then abort and drain the runner. */
-  close(): Promise<void>;
-}
-
-export function scheduleChainDiscoveryScanRunner(input: {
-  runner: ChainDiscoveryScanRunner;
-  initialDelayMs?: number;
-  intervalMs?: number;
-}): ChainDiscoveryScanSchedule {
-  let closed = false;
-  const invoke = (): void => { void input.runner.run(); };
-  const initial = setTimeout(invoke, input.initialDelayMs ?? 15_000);
-  const recurring = setInterval(invoke, input.intervalMs ?? CHAIN_DISCOVERY_SCAN_INTERVAL_MS);
-  initial.unref?.();
-  recurring.unref?.();
-  return {
-    close: async (): Promise<void> => {
-      if (!closed) {
-        closed = true;
-        clearTimeout(initial);
-        clearInterval(recurring);
-      }
-      await input.runner.close();
-    },
-  };
 }
 
 export function chainDiscoveryScanOptions(input: {
@@ -207,11 +182,10 @@ export function createChainDiscoveryScanRunner(input: {
   repairEveryTicks?: number;
   /** @deprecated Use repairEveryTicks. */
   fullScanEvery?: number;
+  /** Zero/omitted disables periodic rearming for manually driven callers. */
+  intervalMs?: number;
 }): ChainDiscoveryScanRunner {
   let state = INITIAL_SCAN_SCHEDULER_STATE;
-  let inFlight: Promise<void> | undefined;
-  let closed = false;
-  const lifecycleAbort = new AbortController();
 
   const safeLog = (msg: string): void => {
     try {
@@ -240,7 +214,7 @@ export function createChainDiscoveryScanRunner(input: {
     }
   };
 
-  const execute = async (): Promise<void> => {
+  const execute = async (signal: AbortSignal): Promise<void> => {
     const step = planScan(state, { pageBudget: input.pageBudget });
     let plan: ScanPlan;
     if (step.kind === 'ready') {
@@ -249,7 +223,7 @@ export function createChainDiscoveryScanRunner(input: {
       let watermarkSeeded: boolean;
       try {
         watermarkSeeded = await withRpcRequestContext(
-          { requestClass: 'foreground', signal: lifecycleAbort.signal },
+          { requestClass: 'foreground', signal },
           () => input.agent.hasContextGraphRegistryScanWatermark(),
         );
       } catch (error) {
@@ -268,10 +242,10 @@ export function createChainDiscoveryScanRunner(input: {
       outcome = {
         ok: true,
         found: await withRpcRequestContext(
-          { requestClass: 'foreground', signal: lifecycleAbort.signal },
+          { requestClass: 'foreground', signal },
           () => input.agent.discoverContextGraphsFromChain({
             ...plan.scan,
-            signal: lifecycleAbort.signal,
+            signal,
           }),
         ),
       };
@@ -298,11 +272,11 @@ export function createChainDiscoveryScanRunner(input: {
         : CHAIN_REPAIR_AUDIT_EVERY_TICKS;
       try {
         const found = await withRpcRequestContext(
-          { requestClass: 'background', signal: lifecycleAbort.signal },
+          { requestClass: 'background', signal },
           () => input.agent.repairContextGraphRegistry!({
             pageBudget: input.pageBudget ?? CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
             minimumIntervalMs: repairEvery * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
-            signal: lifecycleAbort.signal,
+            signal,
           }),
         );
         if (found > 0) safeLog(`Chain repair audit: discovered ${found} new context graph(s)`);
@@ -312,23 +286,25 @@ export function createChainDiscoveryScanRunner(input: {
     }
   };
 
+  const task = new CoalescingRecurringTask({
+    retryIntervalMs: input.intervalMs,
+    requestWhileRunning: 'drop',
+    runPass: async (signal) => {
+      await execute(signal);
+      return 'rearm';
+    },
+    onError: (error) => {
+      safeLog(`Chain discovery scheduler failed; retrying next tick: ${describeError(error)}`);
+    },
+    closingMessage: 'ContextGraphNameRegistry scan runner is closing',
+  });
+
   return {
     run: async (): Promise<void> => {
-      if (closed || inFlight) return;
-      const current = execute();
-      inFlight = current;
-      try {
-        await current;
-      } finally {
-        if (inFlight === current) inFlight = undefined;
-      }
+      if (!task.request()) return;
+      await task.whenIdle();
     },
-    close: async (): Promise<void> => {
-      if (!closed) {
-        closed = true;
-        lifecycleAbort.abort(new Error('ContextGraphNameRegistry scan runner is closing'));
-      }
-      await inFlight;
-    },
+    schedule: (initialDelayMs = 15_000): boolean => task.schedule(initialDelayMs),
+    close: (): Promise<void> => task.close(),
   };
 }
