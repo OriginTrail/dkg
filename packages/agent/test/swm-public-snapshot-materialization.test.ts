@@ -41,6 +41,7 @@ import {
   knowledgeAssetLayerGraphUri,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
+import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
 import {
   generateKnowledgeAssetShareMetadata,
   workspacePublicQuadsDigest,
@@ -121,6 +122,7 @@ function fixture(subGraphName?: string, publisherPeerId = 'peer-source') {
 }
 
 interface HarnessOverrides {
+  deadline?: number;
   snapshotStore?: WorkspacePublicSnapshotStore;
   storedHead?: () => StoredWorkspaceHeadState;
   contentPresent?: () => boolean;
@@ -176,7 +178,7 @@ function harness(overrides: HarnessOverrides = {}) {
       ctx,
       remotePeerId: 'peer-source',
       contextGraphIds: [CG],
-      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+      createContextGraphSyncDeadline: () => overrides.deadline ?? Number.MAX_SAFE_INTEGER,
       fetchSyncPages: async (_c, _p, _cg, _inc, phase, _g, _dl, fetchOptions): Promise<SyncPageResult> => {
         const snapshotRef = fetchOptions?.snapshotRef;
         if (phase === 'meta') return page([...fx.meta, ...(overrides.additionalVerifiedMeta ?? [])]);
@@ -273,6 +275,29 @@ function harness(overrides: HarnessOverrides = {}) {
 }
 
 describe('public SWM snapshot materialization', () => {
+  it('attributes a snapshot phase stopped solely by local admission', async () => {
+    let now = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const fx = fixture();
+    const h = harness({
+      deadline: 100,
+      metadataFetcher: {
+        fetch: async () => {
+          now = 101;
+          return { result: page(fx.meta), continuationYielded: false };
+        },
+        release: () => {},
+      },
+    });
+    try {
+      expect(await h.run()).toMatchObject({
+        localYield: true, failedPhases: 1, localYieldFailedPhases: 1, timedOutPhases: 0,
+      });
+      expect(h.replaced).toEqual([]);
+      expect(h.snapshotFetches).toEqual([]);
+    } finally { clock.mockRestore(); }
+  });
+
   it.each(['valid', 'invalid', 'throws'] as const)('uses optional validation capability (%s) with the store receiver', async (outcome) => {
     const store: WorkspacePublicSnapshotStore = new MemorySnapshotStore();
     const load = vi.spyOn(store, 'getSnapshot');
@@ -390,9 +415,7 @@ describe('public SWM snapshot materialization', () => {
     const resolved = new Set<string>();
     const suppressedByRef = new Map<string, readonly Quad[]>();
     const walk: SharedMemorySnapshotWalkContinuation = {
-      orderedManifestSnapshot: () => manifest.map((snapshot) => ({ ...snapshot })),
-      isResolved: (ref) => resolved.has(ref),
-      resolvedCount: () => resolved.size,
+      prepare: () => ({ entries: manifest.map(snapshot => ({ snapshot, reuse: resolved.has(snapshot.ref) })) }),
       resolvedRefsSnapshot: () => [...resolved],
       suppressedMetadataRows: (ref) => suppressedByRef.get(ref) ?? [],
       markResolved: (ref, suppressedRows = []) => {
@@ -598,6 +621,11 @@ describe('public SWM snapshot materialization', () => {
     const h = harness({ replaceImpl: async () => { throw new Error('store unavailable'); } });
     const summary = await h.run();
     expect(summary.failedPhases).toBe(1);
+    expect(readSharedMemoryPhaseFailureAttribution(summary)).toEqual({
+      localBudget: 0,
+      transport: 0,
+      materialization: 1,
+    });
     // No meta batch reached the store: a head marker must never certify an
     // assertion graph that was not written, or the next pass would classify
     // the asset as materialized and strand it permanently.

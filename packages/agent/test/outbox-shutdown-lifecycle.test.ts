@@ -1,3 +1,5 @@
+import { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
 import { startProverLoop, type TickOutcome } from '@origintrail-official/dkg-random-sampling';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -22,6 +24,8 @@ import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstra
 
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
+  agent.peerSyncSession = PeerSyncSession.stopped();
+  agent.lastSyncDisconnectedAt = new Map();
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   return agent;
 }
@@ -52,7 +56,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       enabled: true,
       start: () => loop.start(),
       stop: stopProver,
-      getStatus: vi.fn(),
+      getStatus: vi.fn(() => ({ enabled: true, role: 'core' as const, identityId: '52', disabledReason: null, loop: null })),
     };
     const stopNode = vi.fn(async () => {});
     const closeStore = vi.fn(async () => {});
@@ -63,20 +67,24 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: handle,
+      randomSamplingRuntime: new RandomSamplingRuntime({
+        role: 'core', resolveEligibility: async () => ({ kind: 'eligible', identityId: 52n }),
+        createHandle: async () => ({ kind: 'ready', handle }),
+        log: { info: vi.fn(), warn: vi.fn() },
+        shutdownTimeoutMs: () => DKGAgentBase.RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS,
+      }),
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn: vi.fn() },
     });
 
     try {
-      handle.start();
+      await agent.randomSamplingRuntime.start();
       await started;
       const timeout = await agent.stop().catch((error: unknown) => error);
       expect(timeout).toBeInstanceOf(RandomSamplingShutdownTimeoutError);
@@ -84,16 +92,16 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
         name: 'RandomSamplingShutdownTimeoutError',
         timeoutMs: 20,
       });
-      expect(agent.randomSamplingHandle).toBe(handle);
+      expect(agent.randomSamplingRuntime.getDiagnostics().phase).toBe('retiring');
       expect(closeProver).not.toHaveBeenCalled();
       expect(stopNode).not.toHaveBeenCalled();
       expect(closeStore).not.toHaveBeenCalled();
 
       settleTick({ kind: 'period-closed' });
       await expect(agent.stop()).resolves.toBeUndefined();
-      expect(stopProver).toHaveBeenCalledTimes(2);
+      expect(stopProver).toHaveBeenCalledOnce();
       expect(closeProver).toHaveBeenCalledOnce();
-      expect(agent.randomSamplingHandle).toBeNull();
+      expect(agent.randomSamplingRuntime.getDiagnostics().phase).toBe('stopped');
       expect(stopNode).toHaveBeenCalledOnce();
       expect(closeStore).toHaveBeenCalledOnce();
     } finally {
@@ -163,13 +171,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: vi.fn(async () => { events.push('node-stop'); }) },
+      node: { libp2p: { getPeers: () => [] }, stop: vi.fn(async () => { events.push('node-stop'); }) },
       finalizationRuntime: new FinalizationRuntime(),
       store: {
         close: vi.fn(async () => {
@@ -213,13 +219,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn: vi.fn() },
@@ -263,13 +267,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn: vi.fn() },
@@ -318,13 +320,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
         coreHostRecordingsClosed: false,
         drainCoreHostRecordings: vi.fn(async () => {}),
         messenger: { stopOutboxDrain: vi.fn(async () => {}) },
-        clearRandomSamplingBindRetry: vi.fn(),
-        clearStorageACKRegistrationRetry: vi.fn(),
+          clearStorageACKRegistrationRetry: vi.fn(),
         storageACKRegistrationRetryInFlight: false,
-        randomSamplingHandle: null,
-        inFlightSubstrateFanOutCount: () => 0,
+          inFlightSubstrateFanOutCount: () => 0,
         router: { closePooling: vi.fn(async () => {}) },
-        node: { stop: stopNode },
+        node: { libp2p: { getPeers: () => [] }, stop: stopNode },
         chain: { chainId: 'none' },
         finalizationRuntime: new FinalizationRuntime(),
         store: { close: closeStore },
@@ -380,13 +380,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
       chain: { chainId: 'none' },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
@@ -439,13 +437,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn: vi.fn() },
@@ -483,13 +479,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn: vi.fn() },
@@ -524,13 +518,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain: vi.fn(async () => {}) },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn: vi.fn() },
@@ -570,13 +562,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: vi.fn(async () => {}) },
       log: { warn: vi.fn() },
@@ -604,13 +594,11 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       coreHostRecordingsClosed: false,
       drainCoreHostRecordings: vi.fn(async () => {}),
       messenger: { stopOutboxDrain },
-      clearRandomSamplingBindRetry: vi.fn(),
       clearStorageACKRegistrationRetry: vi.fn(),
       storageACKRegistrationRetryInFlight: false,
-      randomSamplingHandle: null,
       inFlightSubstrateFanOutCount: () => 0,
       router: { closePooling: vi.fn(async () => {}) },
-      node: { stop: stopNode },
+      node: { libp2p: { getPeers: () => [] }, stop: stopNode },
       finalizationRuntime: new FinalizationRuntime(),
       store: { close: closeStore },
       log: { warn },

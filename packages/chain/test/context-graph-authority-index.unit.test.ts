@@ -3,11 +3,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { ContextGraphAuthorityIndex } from '../src/context-graph-authority-index.js';
+import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import type { ContextGraphAuthorityIndexStore } from '../src/context-graph-authority-index-checkpoint.js';
 import {
   reduceContextGraphAuthorityIndexPage,
   type ContextGraphAuthorityIndexEvent,
 } from '../src/context-graph-authority-index-reducer.js';
+import { MemoryAuthorityIndexStore } from './helpers/context-graph-authority-index.js';
 
 const OWNER = `0x${'11'.repeat(20)}`;
 const NEXT_OWNER = `0x${'22'.repeat(20)}`;
@@ -70,36 +72,6 @@ function creation(
   });
 }
 
-class MemoryAuthorityIndexStore implements ContextGraphAuthorityIndexStore {
-  record: Readonly<{ token: number; value: unknown | null }> | undefined;
-  readonly commits: number[] = [];
-  readonly invalidations: number[] = [];
-
-  async load(): Promise<Readonly<{ token: number; value: unknown | null }> | undefined> {
-    return this.record;
-  }
-
-  async compareAndSwap(
-    _scope: string,
-    expectedToken: number | undefined,
-    value: unknown,
-  ): Promise<number | undefined> {
-    if (this.record?.token !== expectedToken) return undefined;
-    const nextToken = expectedToken === undefined ? 1 : expectedToken + 1;
-    this.record = Object.freeze({ token: nextToken, value });
-    this.commits.push(nextToken);
-    return nextToken;
-  }
-
-  async invalidate(_scope: string, expectedToken: number): Promise<number | undefined> {
-    if (this.record?.token !== expectedToken) return undefined;
-    const nextToken = expectedToken + 1;
-    this.record = Object.freeze({ token: nextToken, value: null });
-    this.invalidations.push(nextToken);
-    return nextToken;
-  }
-}
-
 describe('durable contract-wide Context Graph authority scanner', () => {
   const allEvents: ContextGraphAuthorityIndexEvent[] = [
     creation(9n, 10, 1, NAME_9),
@@ -115,13 +87,21 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     finalizedNumber = 25,
   ) => ({
     scope: 'evm:84532:hub:context-graph-storage',
-    contextGraphId,
+    contextGraphId: contextGraphId.toString(10) as ContextGraphAuthorityIndexId,
     readScope,
     deploymentBlockNumber: 10,
     finalized: { number: finalizedNumber, hash: blockHash(finalizedNumber) },
     pageSize: 5,
     readBlockHash: async (blockNumber: number) => blockHash(blockNumber),
     readPage,
+  });
+
+  it('keeps raw persisted checkpoints private behind purpose-specific views', () => {
+    const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
+
+    expect((index as any).snapshot).toBeUndefined();
+    expect(typeof index.resolve).toBe('function');
+    expect(typeof index.revisions).toBe('function');
   });
 
   it('shares one page walk across concurrent graph lookups and resumes after restart', async () => {
@@ -265,6 +245,75 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     expect(state).toMatchObject({ contextGraphId: '10', policyVersion: 1 });
     expect(store.record?.token).toBe(rejectedToken + 1);
     expect(store.invalidations).toEqual([]);
+  });
+
+  it('bounds repeated invalidation losses without recursive recovery', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    store.record = { token: 1, value: { corrupt: true } };
+    let invalidationAttempts = 0;
+    store.invalidate = async (_scope, expectedToken) => {
+      invalidationAttempts += 1;
+      store.record = { token: expectedToken + 1, value: { corrupt: true } };
+      return undefined;
+    };
+    let pageReads = 0;
+
+    await expect(new ContextGraphAuthorityIndex(store).resolve(makeInput(
+      9n,
+      {},
+      async () => {
+        pageReads += 1;
+        return [];
+      },
+    ))).rejects.toThrow(
+      'Context Graph authority index changed repeatedly during checkpoint recovery',
+    );
+    expect(invalidationAttempts).toBe(3);
+    expect(pageReads).toBe(0);
+  });
+
+  it('accepts a valid checkpoint installed by the third invalidation winner', async () => {
+    const store = new MemoryAuthorityIndexStore();
+    const winner = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 25,
+      throughBlockHash: blockHash(25),
+      events: allEvents.filter((entry) => entry.blockNumber <= 25),
+    }).checkpoint;
+    const replacedAnchor = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 25,
+      throughBlockHash: blockHash(24),
+      events: allEvents.filter((entry) => entry.blockNumber <= 25),
+    }).checkpoint;
+    store.record = { token: 1, value: replacedAnchor };
+    let invalidationAttempts = 0;
+    store.invalidate = async (_scope, expectedToken) => {
+      invalidationAttempts += 1;
+      store.record = {
+        token: expectedToken + 1,
+        value: invalidationAttempts === 3 ? winner : replacedAnchor,
+      };
+      return undefined;
+    };
+    let blockReads = 0;
+    let pageReads = 0;
+    const input = makeInput(9n, {}, async () => {
+      pageReads += 1;
+      return [];
+    });
+
+    await expect(new ContextGraphAuthorityIndex(store).resolve({
+      ...input,
+      readBlockHash: async () => {
+        blockReads += 1;
+        return blockHash(25);
+      },
+    })).resolves.toMatchObject({ contextGraphId: '9' });
+    expect(invalidationAttempts).toBe(3);
+    expect(store.record).toEqual({ token: 4, value: winner });
+    expect(blockReads).toBe(0);
+    expect(pageReads).toBe(0);
   });
 
   it('reloads the CAS winner and resumes from its suffix with concurrent providers', async () => {

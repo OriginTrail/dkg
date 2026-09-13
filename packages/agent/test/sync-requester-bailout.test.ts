@@ -13,14 +13,17 @@ import {
   runOrderedContextGraphSyncs,
 } from '../src/sync/requester/ordered-sync.js';
 import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
-import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import {
+  noop,
+  pageResult,
+  sharedMemoryProcessResult,
+  transportError,
+} from './_helpers/sync-requester-fixtures.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from
   './_helpers/swm-target-executor-session-fixture.js';
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
-const noop = () => {};
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -29,28 +32,6 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
     return impl(...args);
   };
   return Object.assign(fn, { calls });
-}
-
-function pageResult(
-  contextGraphId: string,
-  phase: string,
-  overrides: Partial<SyncPageResult> = {},
-): SyncPageResult {
-  return {
-    quads: [],
-    bytesReceived: 0,
-    resumedFromOffset: 0,
-    nextOffset: 0,
-    checkpointKey: `${contextGraphId}:${phase}`,
-    completed: true,
-    timedOut: false,
-    ...overrides,
-  };
-}
-
-function transportError(message: string): Error {
-  const err = new Error(message);
-  return toSyncTransportFailureError(err);
 }
 
 function deniedError(): Error & { syncDenied: boolean } {
@@ -69,18 +50,6 @@ function durableProcessResult() {
     emptyResponses: 1,
     metaOnlyResponses: 0,
     dataRejectedMissingMeta: 0,
-  };
-}
-
-function sharedMemoryProcessResult() {
-  return {
-    verifiedData: [] as Quad[],
-    verifiedMeta: [] as Quad[],
-    totalFetchedDataQuads: 0,
-    totalFetchedMetaQuads: 0,
-    droppedDataTriples: 0,
-    emptyResponses: 1,
-    entityCreators: [],
   };
 }
 
@@ -278,7 +247,16 @@ describe('sync requester bailout', () => {
     expect(summary.failedPeers).toBe(1);
     expect(summary.backoffWorthyFailures).toBe(1);
     expect(fetchSyncPages.calls).toEqual([
-      [ctx, 'peer-a', 'pressured-swm', true, 'meta', expect.any(String), expect.any(Number)],
+      [
+        ctx,
+        'peer-a',
+        'pressured-swm',
+        true,
+        'meta',
+        expect.any(String),
+        expect.any(Number),
+        expect.objectContaining({ workAdmission: expect.any(Object) }),
+      ],
     ]);
   });
 });

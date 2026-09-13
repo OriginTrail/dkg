@@ -18,7 +18,9 @@
  */
 import { describe, it, expect } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { PROTOCOL_MESSAGE, PROTOCOL_SYNC, type ProtocolOutboxMetadata } from '@origintrail-official/dkg-core';
+import { PeerSyncSessionTestDriver } from './_helpers/peer-sync-session-driver.js';
 
 /**
  * Hand-rolled call recorder used in place of behaviour mocks. Records
@@ -131,6 +133,14 @@ function makeAgentLike({
   syncReconcilerBackoff?: Map<string, { failures: number; nextRetryAt: number }>;
   peerIds?: string[];
 }): any {
+  const peerSyncSession = PeerSyncSession.stopped();
+  const peerSync = new PeerSyncSessionTestDriver(() => peerSyncSession);
+  for (const [peer, time] of lastSuccessfulSyncAt ?? []) {
+    peerSync.recordFreshness(peer, { successfulAt: time });
+  }
+  for (const [peer, backoff] of syncReconcilerBackoff ?? []) {
+    peerSync.recordBackoff(peer, backoff);
+  }
   return {
     node: {
       libp2p: {
@@ -152,8 +162,7 @@ function makeAgentLike({
     },
     messenger: makeOutboxStub(outboxEntries ?? []),
     peerHealth: health ?? new Map(),
-    lastSuccessfulSyncAt: lastSuccessfulSyncAt ?? new Map(),
-    syncReconcilerBackoff: syncReconcilerBackoff ?? new Map(),
+    peerSyncSession,
   };
 }
 

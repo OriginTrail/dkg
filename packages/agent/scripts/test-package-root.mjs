@@ -4,12 +4,18 @@ import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = await import('@origintrail-official/dkg-agent');
+if ('createRandomSamplingRuntime' in root.DKGAgent.prototype) {
+  throw new Error('internal Random Sampling runtime factory leaked from the agent surface');
+}
 const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent.js');
 const legacyChainReconciler = await import(
   '@origintrail-official/dkg-agent/dist/chain-reconciler.js'
 );
 const legacyCatalogSync = await import(
   '@origintrail-official/dkg-agent/dist/dkg-agent-rfc64-catalog-sync.js'
+);
+const legacySharedMemorySync = await import(
+  '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js'
 );
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
@@ -53,6 +59,7 @@ if (
   || typeof root.Rfc64CatalogSynchronizationErrorV1 !== 'function'
   || typeof root.Rfc64CatalogResponsibilityRegistryV1 !== 'function'
   || typeof legacyCatalogSync.Rfc64CatalogSynchronizationErrorV1 !== 'function'
+  || typeof legacySharedMemorySync.selectSwmSnapshotCoverage !== 'function'
 ) {
   throw new Error('published agent entry points did not expose required root APIs');
 }
@@ -249,7 +256,9 @@ const blockedRfc64Modules = [
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'catalog-authority-refresh-binding-v1.js',
   'catalog-authority-refresh-loop-v1.js',
+  'catalog-authority-revision-projection-v1.js',
   'authority-rpc-circuit-breaker-v1.js',
   'public-catalog-workload-owner-v1.js',
   'catalog-responsibility-registry-v1.js',
@@ -370,6 +379,19 @@ if (packageExports['./dist/rfc64/*'] !== null) {
 }
 if (packageExports['./dist/*'] !== './dist/*') {
   throw new Error('historical non-RFC-64 ./dist/* compatibility was not preserved');
+}
+
+for (const path of ['random-sampling-runtime.js', 'random-sampling-eligibility.js']) {
+  const subpath = `./dist/${path}`;
+  if (packageExports[subpath] !== null) {
+    throw new Error(`internal Random Sampling module is not explicitly blocked: ${path}`);
+  }
+  try {
+    await import(`@origintrail-official/dkg-agent/dist/${path}`);
+    throw new Error(`internal Random Sampling module unexpectedly resolved: ${path}`);
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
 }
 
 async function listEmittedRfc64Modules() {

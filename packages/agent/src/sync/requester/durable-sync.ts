@@ -1125,14 +1125,26 @@ async function runDurableSyncWithBudget(
         }
         if (bounded) {
           dataForVerification = bounded.dataQuads;
-          effectiveDataResult = {
-            ...dataResult,
-            quads: bounded.dataQuads,
-            nextOffset: bounded.safeNextOffset,
-            rawNextOffset: bounded.safeRawNextOffset,
-            completed: dataResult.completed
-              && bounded.safeNextOffset === bounded.manifestRowCount,
-          };
+          const boundedCompleted = dataResult.completed
+            && bounded.safeNextOffset === bounded.manifestRowCount;
+          if (boundedCompleted) {
+            const { localYield: _impossibleLocalYield, ...completedResult } = dataResult;
+            effectiveDataResult = {
+              ...completedResult,
+              quads: bounded.dataQuads,
+              nextOffset: bounded.safeNextOffset,
+              rawNextOffset: bounded.safeRawNextOffset,
+              completed: true,
+            };
+          } else {
+            effectiveDataResult = {
+              ...dataResult,
+              quads: bounded.dataQuads,
+              nextOffset: bounded.safeNextOffset,
+              rawNextOffset: bounded.safeRawNextOffset,
+              completed: false,
+            };
+          }
           verificationMode = {
             kind: 'changelogPage',
             changedDataGraphs: bounded.changedDataGraphs,
