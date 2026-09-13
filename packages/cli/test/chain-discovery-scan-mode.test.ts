@@ -49,7 +49,7 @@ describe('chainDiscoveryScanOptions', () => {
 });
 
 describe('createChainDiscoveryScanRunner', () => {
-  it('always finishes live discovery before starting bounded repair', async () => {
+  it('keeps both scheduled lanes background while finishing live before repair', async () => {
     const order: string[] = [];
     const governor = new RpcRequestGovernor({
       maxRequestsPerSecond: 10,
@@ -84,13 +84,49 @@ describe('createChainDiscoveryScanRunner', () => {
 
     expect(order).toEqual(['live:incremental', `repair:${CHAIN_DISCOVERY_SCAN_PAGE_BUDGET}`]);
     expect(governor.snapshot()).toMatchObject({
-      foregroundAdmitted: 1,
-      backgroundAdmitted: 1,
+      foregroundAdmitted: 0,
+      backgroundAdmitted: 2,
     });
     expect(agent.repairContextGraphRegistry).toHaveBeenCalledWith({
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
       minimumIntervalMs: CHAIN_REPAIR_AUDIT_EVERY_TICKS * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
       signal: expect.any(AbortSignal),
+    });
+  });
+
+  it('lets an interactive foreground request preempt the next live-scan RPC', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 50,
+      foregroundReservePercent: 50,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const order: string[] = [];
+    let markSecondQueued!: () => void;
+    const secondQueued = new Promise<void>((resolve) => { markSecondQueued = resolve; });
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi.fn(async () => {
+        await governor.acquireActiveRequest();
+        const second = governor.acquireActiveRequest();
+        markSecondQueued();
+        await second;
+        order.push('live-second');
+        return 0;
+      }),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+
+    const running = runner.run();
+    await secondQueued;
+    const foreground = governor.acquire('foreground').then(() => { order.push('foreground'); });
+    await Promise.all([running, foreground]);
+
+    expect(order).toEqual(['foreground', 'live-second']);
+    expect(governor.snapshot()).toMatchObject({
+      foregroundAdmitted: 1,
+      backgroundAdmitted: 2,
     });
   });
 

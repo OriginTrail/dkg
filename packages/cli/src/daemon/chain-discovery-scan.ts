@@ -223,7 +223,7 @@ export function createChainDiscoveryScanRunner(input: {
       let watermarkSeeded: boolean;
       try {
         watermarkSeeded = await withRpcRequestContext(
-          { requestClass: 'foreground', signal },
+          { requestClass: 'background', signal },
           () => input.agent.hasContextGraphRegistryScanWatermark(),
         );
       } catch (error) {
@@ -241,8 +241,13 @@ export function createChainDiscoveryScanRunner(input: {
     try {
       outcome = {
         ok: true,
+        // Live discovery is latency-sensitive relative to historical repair,
+        // but it is still daemon-scheduled maintenance. Keeping it in the
+        // background RPC partition lets an interactive registration preempt
+        // the next scan request instead of sharing and exhausting foreground
+        // capacity during a slow page application.
         found: await withRpcRequestContext(
-          { requestClass: 'foreground', signal },
+          { requestClass: 'background', signal },
           () => input.agent.discoverContextGraphsFromChain({
             ...plan.scan,
             signal,
