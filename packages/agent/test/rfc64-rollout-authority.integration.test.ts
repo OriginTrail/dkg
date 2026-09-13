@@ -2277,6 +2277,9 @@ describe('RFC-64 rollout authority integration', () => {
     const secondNameHash = ethers.keccak256(
       ethers.toUtf8Bytes(secondContextGraphId),
     ).toLowerCase();
+    let finalizedOwner = AUTHOR;
+    let finalizedOwnershipEra = '0';
+    let finalizedSourceBlockNumber = '42';
     const readPolicies = vi.fn(async (
       contextGraphIds: readonly ContextGraphAuthorityIndexId[],
     ) => new Map(contextGraphIds.map((contextGraphId) => [
@@ -2288,9 +2291,12 @@ describe('RFC-64 rollout authority integration', () => {
           '0',
         ),
         contextGraphId,
+        owner: finalizedOwner,
         active: true,
         accessPolicy: 0,
         nameHash: contextGraphId === '9' ? firstNameHash : secondNameHash,
+        ownershipEra: finalizedOwnershipEra,
+        sourceBlockNumber: finalizedSourceBlockNumber,
       }),
     ])));
     const chainAdapter = Object.assign(new NoChainAdapter(), {
@@ -2336,6 +2342,35 @@ describe('RFC-64 rollout authority integration', () => {
       .toMatchObject({ active: true, track2Enabled: true });
     expect(edge.resolveRfc64CatalogServingAuthorityV1(secondContextGraphId))
       .toMatchObject({ active: true, track2Enabled: true });
+
+    const firstAccepted = (edge as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, firstContextGraphId);
+    expect(firstAccepted).toMatchObject({ policy: { era: '0' } });
+
+    // A later revision refresh must select a new finalized anchor. It may not
+    // reuse the responsibility bootstrap evidence merely because it remains
+    // inside a wall-clock TTL.
+    finalizedOwner = MEMBER;
+    finalizedOwnershipEra = '1';
+    finalizedSourceBlockNumber = '43';
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(firstContextGraphId))
+      .resolves.toMatchObject({ policy: { era: '1' } });
+    expect(readPolicies).toHaveBeenCalledTimes(2);
+    expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      firstContextGraphId,
+    )).toMatchObject({
+      policy: {
+        era: '1',
+        source: { blockNumber: '43' },
+      },
+    });
+    expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      firstContextGraphId,
+    )?.policy.ownershipTransitionDigest).not.toBe(
+      firstAccepted?.policy.ownershipTransitionDigest,
+    );
   });
 
   it('retains a public chain event that arrives before the cleartext subscription', async () => {
