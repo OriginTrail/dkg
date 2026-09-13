@@ -1586,13 +1586,44 @@ describe('sync global backpressure', () => {
     });
   });
 
-  it('preserves explicit capacity installation for standalone queues', () => {
+  it('preserves explicit capacity installation for standalone queues across later admissions', async () => {
+    let inferred = 0;
     const queue = new PriorityAdmissionQueue<string>({
       canRun: () => true, onStart: () => () => {},
-      observability: { scheduler: 'test-capacity-installation', operation: (entry) => entry.payload },
+      observability: {
+        scheduler: 'test-capacity-installation', operation: (entry) => entry.payload,
+        inflightLimit: () => { inferred += 1; return 1; },
+      },
     });
-    queue.configureObservabilityCapacity({ capacityModel: 'shared', inflightLimit: 3, queueLimit: 6 });
-    expect(queue.getBackpressureSnapshot()).toMatchObject({ totals: { inflightLimit: 3, queueLimit: 6 } });
+    for (const inflightLimit of [3, 5]) {
+      queue.configureObservabilityCapacity({ capacityModel: 'shared', inflightLimit, queueLimit: inflightLimit * 2 });
+      const release = await queue.acquire(queueOptions('installed', 0, { queueLimit: 1 })).release;
+      try {
+        expect(queue.getBackpressureSnapshot()).toMatchObject({
+          totals: { inflight: 1, inflightLimit, queueLimit: inflightLimit * 2 },
+        });
+        expect(inferred).toBe(0);
+      } finally { release(); }
+    }
+  });
+
+  it('keeps fixed capacity authoritative when acquire options differ', async () => {
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => true, onStart: () => () => {},
+      observability: {
+        kind: 'fixed', scheduler: 'test-fixed-capacity', operation: entry => entry.payload,
+        capacity: { capacityModel: 'shared', inflightLimit: 5, queueLimit: 10 },
+      },
+    });
+    expect(() => queue.configureObservabilityCapacity({ queueLimit: 99 })).toThrow('fixed and per-entry');
+    const release = await queue.acquire(queueOptions('fixed', 0, { queueLimit: 1 })).release;
+    try {
+      expect(queue.getBackpressureSnapshot()).toMatchObject({
+        totals: { inflight: 1, inflightLimit: 5, queueLimit: 10 },
+      });
+      expect(() => queue.configureObservabilityCapacity({ queueLimit: 99 })).toThrow('fixed and per-entry');
+      expect(queue.getBackpressureSnapshot()).toMatchObject({ totals: { inflightLimit: 5, queueLimit: 10 } });
+    } finally { release(); }
   });
 
   it('forgets dynamic capacity and pumps queued work even when a release hook throws', async () => {
@@ -1627,6 +1658,8 @@ describe('sync global backpressure', () => {
       createBusyError: () => new Error('full'),
       createDisplacedError: () => new Error('displaced'),
     });
+
+    expect(() => queue.configureObservabilityCapacity({ inflightLimit: 99, queueLimit: 99 })).toThrow('fixed and per-entry');
 
     const first = queue.acquire(options('first'));
     const releaseFirst = await first.release;

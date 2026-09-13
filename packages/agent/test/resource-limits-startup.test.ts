@@ -8,6 +8,7 @@ import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import type { DKGAgent as Agent } from '../src/dkg-agent.js';
 import type { StartupResourcePolicy } from '../src/resource-policy.js';
+import type { ResolvedDKGAgentConfig } from '../src/resolved-agent-config.js';
 
 it('starts a real local agent with bounded VM limits and emits one redacted configuration warning', async () => {
   // Importing a pure parser must not freeze the agent's later runtime snapshot.
@@ -33,6 +34,7 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
   const store = new OxigraphStore();
   const snapshotPolicy = await import('../src/sync/responder/snapshot-policy.js');
   const resolveSnapshot = vi.spyOn(snapshotPolicy, 'resolveSyncResponderSnapshotDiagnostics');
+  const onReplicationEvent = vi.fn();
   let agent: Agent | undefined;
   try {
     const { DKGAgent } = await import('../src/dkg-agent.js');
@@ -46,11 +48,21 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
       name: 'Resource bounds fixture', dataDir, listenPort: 0, listenHost: '127.0.0.1',
       nodeRole: 'edge', store, chainAdapter: new NoChainAdapter(), skills: [],
       rfc64CatalogActivation: { enabled: false },
+      ackHandlerDeadlineMs: 12_001, ackSendTimeoutMs: 17_002, onReplicationEvent,
       syncGlobalMaxInflight: 3, syncGlobalQueueLimit: 6,
       syncReconcilerIntervalMs: Infinity,
       syncResponderSnapshotLimits: { global: { rows: 1234 }, local: { rows: 0 } },
     });
     expect(resolveSnapshot).toHaveBeenCalledOnce();
+    const runtimeConfig = (agent as unknown as { config: ResolvedDKGAgentConfig }).config;
+    expect(runtimeConfig).not.toHaveProperty('rfc64CatalogActivation');
+    expect(runtimeConfig).not.toHaveProperty('ackHandlerDeadlineMs');
+    expect(runtimeConfig).not.toHaveProperty('ackSendTimeoutMs');
+    expect(runtimeConfig.storageAckTiming).toMatchObject({ handlerDeadlineMs: 12_001, sendTimeoutMs: 17_002 });
+    expect(runtimeConfig.storageAckTiming.maxConcurrentCollections).toBeGreaterThan(0);
+    expect(runtimeConfig.rfc64CatalogExecutionPlan).toBeDefined();
+    expect(runtimeConfig.onReplicationEvent).toBe(onReplicationEvent);
+    expect(runtimeConfig.store).toBe(store);
     const effective = (agent as unknown as { config: { resourcePolicy: StartupResourcePolicy } }).config.resourcePolicy;
     for (const input of RAW_RESOURCE_CONFIG_KEYS) {
       expect((agent as unknown as { config: object }).config).not.toHaveProperty(input);
