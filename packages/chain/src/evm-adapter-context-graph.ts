@@ -443,6 +443,26 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
       const pageSize = this.cgRegistryScanPageSize;
       const pages = Math.ceil((head - start + 1) / pageSize);
+      const budgetedNextBlock = scanPlan.pageBudget === undefined
+        ? undefined
+        : start + scanPlan.pageBudget * pageSize;
+      const budgetStopsBeforeHead = scanPlan.pageBudget !== undefined
+        && pages > scanPlan.pageBudget;
+      const budgetCannotAdvanceWatermark = budgetStopsBeforeHead
+        && canResumeFromWatermark
+        && budgetedNextBlock! <= persistedWatermark!;
+      if (
+        (scanPlan.mode === 'seedLiveTail' && budgetStopsBeforeHead)
+        || budgetCannotAdvanceWatermark
+      ) {
+        throw new Error(
+          `listContextGraphsFromChain: live page budget ${scanPlan.pageBudget} at `
+            + `${pageSize} block(s)/page cannot cover the reorg overlap/current-head progression `
+            + `(start ${start}, head ${head}, watermark ${persistedWatermark ?? 'none'}). `
+            + `Increase cgRegistryScanPageSize or the live page budget so one invocation can `
+            + `reach the current head or advance beyond the durable watermark.`,
+        );
+      }
       const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
       if (scanPlan.mode === 'incremental' && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
         throw new Error(
