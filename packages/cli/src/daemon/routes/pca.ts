@@ -4,9 +4,7 @@
 import { ethers } from 'ethers';
 import {
   isPcaUnavailableError,
-  PcaUnavailableError,
   type PcaContracts,
-  type PcaRpcMethod,
   type V10PublishingConvictionAccountInfo,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -20,23 +18,13 @@ import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
 import { pcaConfirmationToWire, type RegisterPcaAgentResponse } from '../../pca-confirmation-wire.js';
 import { canAdministerNode } from '../../auth.js';
-import { executeRestrictedBrowserWalletRpc } from './restricted-browser-wallet-rpc.js';
+import {
+  executeRestrictedBrowserWalletRpcBody,
+  type RestrictedEthCall,
+} from './restricted-browser-wallet-rpc.js';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const PCA_RPC_PROXY_PATH = '/api/pca/rpc';
-const PCA_RPC_ALLOWED_METHODS = new Set<PcaRpcMethod>([
-  'eth_chainId',
-  'eth_call',
-  'eth_getTransactionReceipt',
-  'eth_getTransactionByHash',
-  'eth_blockNumber',
-  'eth_getBlockByNumber',
-]);
-const PCA_RPC_NULL_RESULT_METHODS = new Set<PcaRpcMethod>([
-  'eth_getTransactionReceipt',
-  'eth_getTransactionByHash',
-  'eth_getBlockByNumber',
-]);
 const PCA_RPC_NFT_CALL_SELECTORS = new Set([
   '0x70a08231', // balanceOf(address)
   '0x2f745c59', // tokenOfOwnerByIndex(address,uint256)
@@ -47,7 +35,6 @@ const PCA_RPC_TOKEN_CALL_SELECTORS = new Set([
   '0x70a08231', // balanceOf(address)
   '0xdd62ed3e', // allowance(address,address)
 ]);
-const PCA_RPC_MAX_BATCH = 20;
 const FEATURE_UNAVAILABLE_503 = {
   error:
     'Chain adapter does not expose V10 Publishing Conviction NFT methods — ' +
@@ -66,124 +53,41 @@ function walletRpcUrlsForResponse(contracts: PcaContracts): string[] {
   return (contracts.walletRpcUrls ?? []).filter((rpcUrl) => /^https?:\/\//i.test(rpcUrl));
 }
 
-function supportsPcaRpcBridge(agent: RequestContext['agent']): boolean {
-  const candidate = agent as RequestContext['agent'] & {
-    supportsPublishingConvictionRpc?: unknown;
-    requestBrowserWalletRpc?: unknown;
-    requestPublishingConvictionRpc?: unknown;
-  };
-  if (typeof candidate.supportsPublishingConvictionRpc === 'boolean') {
-    return candidate.supportsPublishingConvictionRpc;
-  }
-  // Compatibility for older embedded agents without the correlated support
-  // getter. Current DKGAgent computes the getter from PCA bootstrap + bridge.
-  return typeof candidate.requestBrowserWalletRpc === 'function'
-    || typeof candidate.requestPublishingConvictionRpc === 'function';
-}
-
-function requestPcaRpc(
-  agent: RequestContext['agent'],
-  method: PcaRpcMethod,
-  params?: unknown[],
-): Promise<unknown> {
-  const candidate = agent as RequestContext['agent'] & {
-    requestPublishingConvictionRpc?: (rpcMethod: PcaRpcMethod, rpcParams?: unknown[]) => Promise<unknown>;
-  };
-  if (typeof candidate.requestBrowserWalletRpc === 'function') {
-    return candidate.requestBrowserWalletRpc(method, params);
-  }
-  if (typeof candidate.requestPublishingConvictionRpc === 'function') {
-    return candidate.requestPublishingConvictionRpc(method, params);
-  }
-  throw new PcaUnavailableError();
-}
-
 function pcaRpcEthCallError(
-  params: unknown[] | undefined,
+  call: RestrictedEthCall,
   contracts: Pick<PcaContracts, 'nft' | 'token'>,
 ): string | null {
-  if (!Array.isArray(params) || params.length === 0) return 'PCA RPC eth_call params must include a transaction object';
-  const tx = params[0];
-  if (!tx || typeof tx !== 'object' || Array.isArray(tx)) return 'PCA RPC eth_call params must include a transaction object';
-  const { to, data } = tx as { to?: unknown; data?: unknown };
-  if (typeof to !== 'string' || typeof data !== 'string' || !/^0x[0-9a-fA-F]+$/.test(data) || data.length < 10) {
-    return 'PCA RPC eth_call requires a target address and function selector';
-  }
   let target: string;
   let nft: string;
   let token: string;
   try {
-    target = ethers.getAddress(to).toLowerCase();
+    target = ethers.getAddress(call.to).toLowerCase();
     nft = ethers.getAddress(contracts.nft).toLowerCase();
     token = ethers.getAddress(contracts.token).toLowerCase();
   } catch {
     return 'PCA RPC eth_call target address is invalid';
   }
-  const selector = data.slice(0, 10).toLowerCase();
+  const selector = call.data.slice(0, 10).toLowerCase();
   if (target === nft && PCA_RPC_NFT_CALL_SELECTORS.has(selector)) return null;
   if (target === token && PCA_RPC_TOKEN_CALL_SELECTORS.has(selector)) return null;
   return 'PCA RPC eth_call target or selector is not allowed';
 }
 
-function isHex32(value: unknown): value is string {
-  return typeof value === 'string' && /^0x[0-9a-fA-F]{64}$/.test(value);
-}
-
-function isBlockQuantity(value: unknown): value is string {
-  return typeof value === 'string' && /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(value);
-}
-
-function pcaRpcParamsError(method: PcaRpcMethod, params: unknown[] | undefined): string | null {
-  const p = params ?? [];
-  switch (method) {
-    case 'eth_chainId':
-    case 'eth_blockNumber':
-      return p.length === 0 ? null : `PCA RPC ${method} does not accept params`;
-    case 'eth_getTransactionReceipt':
-    case 'eth_getTransactionByHash':
-      return p.length === 1 && isHex32(p[0]) ? null : `PCA RPC ${method} requires one 32-byte transaction hash`;
-    case 'eth_getBlockByNumber': {
-      if (p.length !== 2) return 'PCA RPC eth_getBlockByNumber requires block id and includeTransactions=false';
-      const block = p[0];
-      const includeTransactions = p[1];
-      const namedBlock = block === 'latest' || block === 'safe' || block === 'finalized';
-      const exactBlock = isBlockQuantity(block);
-      const allowed =
-        (namedBlock && includeTransactions === false) ||
-        (exactBlock && (includeTransactions === false || includeTransactions === true));
-      if (!allowed) {
-        return 'PCA RPC eth_getBlockByNumber only allows latest/safe/finalized with includeTransactions=false, or exact hex block ids with includeTransactions true/false';
-      }
-      return null;
-    }
-    case 'eth_call':
-      if (p.length < 1 || p.length > 2) return 'PCA RPC eth_call requires a transaction object and optional block id';
-      if (p.length === 2) {
-        const block = p[1];
-        const allowedBlock = block === 'latest' || block === 'safe' || block === 'finalized' || isBlockQuantity(block);
-        if (!allowedBlock) return 'PCA RPC eth_call only allows latest/safe/finalized or hex block ids';
-      }
-      return null;
-  }
-}
-
-async function handlePcaRpcRequest(
+async function handlePcaRpcBody(
   agent: RequestContext['agent'],
-  raw: unknown,
-): Promise<Record<string, unknown>> {
-  return executeRestrictedBrowserWalletRpc(raw, {
-    allowedMethods: PCA_RPC_ALLOWED_METHODS,
-    nullableResultMethods: PCA_RPC_NULL_RESULT_METHODS,
+  body: string,
+) {
+  return executeRestrictedBrowserWalletRpcBody(body, {
     unavailableMessage: FEATURE_UNAVAILABLE_503.error,
     methodErrorPrefix: 'PCA RPC',
-    paramsError: pcaRpcParamsError,
-    authorizeEthCall: async (params) => {
+    allowFullTransactionsForExactBlocks: true,
+    authorizeEthCall: async (call) => {
       const contracts = await agent.getPublishingConvictionContracts();
       return contracts === null
         ? { available: false }
-        : { available: true, error: pcaRpcEthCallError(params, contracts) };
+        : { available: true, error: pcaRpcEthCallError(call, contracts) };
     },
-    request: (method, params) => requestPcaRpc(agent, method, params),
+    request: (method, params) => agent.requestBrowserWalletRpc(method, params),
     isUnavailableError: (error, message) => isNoChain(message) || isPcaUnavailable(error, message),
     readErrorPrefix: 'PCA RPC read failed',
   });
@@ -872,7 +776,7 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
   // daemon-internal and never cross this HTTP boundary. Matched EXACTLY before
   // the generic GET :id below, else 'contracts' parses as an accountId and 400s.
   if (req.method === 'GET' && path === '/api/pca/contracts') {
-    if (!agent.supportsPublishingConvictionNft || !supportsPcaRpcBridge(agent)) {
+    if (!agent.supportsPublishingConvictionNft || !agent.supportsPublishingConvictionRpc) {
       return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
     }
     try {
@@ -907,23 +811,12 @@ export async function handlePcaRoutes(ctx: RequestContext): Promise<void> {
   // layer. It forwards only the read methods viem needs for PCA discovery,
   // allowance reads, and receipt polling. It never exposes upstream URLs.
   if (req.method === 'POST' && path === PCA_RPC_PROXY_PATH) {
-    if (!agent.supportsPublishingConvictionNft || !supportsPcaRpcBridge(agent)) {
+    if (!agent.supportsPublishingConvictionNft || !agent.supportsPublishingConvictionRpc) {
       return jsonResponse(res, 503, FEATURE_UNAVAILABLE_503);
     }
     const body = await readBody(req, SMALL_BODY_BYTES);
-    const parsed = safeParseJson(body);
-    if (!parsed.ok) return jsonResponse(res, 400, { error: parsed.error });
-    if (Array.isArray(parsed.value)) {
-      if (parsed.value.length === 0) {
-        return jsonResponse(res, 400, { error: 'JSON-RPC batch must contain at least one request' });
-      }
-      if (parsed.value.length > PCA_RPC_MAX_BATCH) {
-        return jsonResponse(res, 400, { error: `JSON-RPC batch must contain at most ${PCA_RPC_MAX_BATCH} requests` });
-      }
-      const responses = await Promise.all(parsed.value.map((item) => handlePcaRpcRequest(agent, item)));
-      return jsonResponse(res, 200, responses);
-    }
-    return jsonResponse(res, 200, await handlePcaRpcRequest(agent, parsed.value));
+    const result = await handlePcaRpcBody(agent, body);
+    return jsonResponse(res, result.status, result.body);
   }
 
   // GET /api/pca/:id — V10 conviction NFT snapshot. Optional ?key=0x...

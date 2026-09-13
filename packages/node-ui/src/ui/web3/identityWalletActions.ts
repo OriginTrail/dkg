@@ -8,6 +8,11 @@ import {
   type ContractFunctionName,
   type Hex,
 } from 'viem';
+import {
+  IDENTITY_STORAGE_WALLET_ABI,
+  IDENTITY_WALLET_ABI,
+  PROFILE_IDENTITY_WALLET_ABI,
+} from '@origintrail-official/dkg-core';
 import type { IdentityWalletContracts } from '../identity-wallet-api.js';
 import { eqAddress } from './address.js';
 import {
@@ -25,67 +30,11 @@ export const ADMIN_KEY_PURPOSE = 1n;
 export const OPERATIONAL_KEY_PURPOSE = 2n;
 export const ECDSA_KEY_TYPE = 1n;
 
-export const profileIdentityWalletAbi = [
-  {
-    type: 'function',
-    name: 'addOperationalWallets',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'identityId', type: 'uint72' },
-      { name: 'operationalWallets', type: 'address[]' },
-    ],
-    outputs: [],
-  },
-] as const;
-
-export const identityWalletAbi = [
-  {
-    type: 'function',
-    name: 'addKey',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'identityId', type: 'uint72' },
-      { name: 'key', type: 'bytes32' },
-      { name: 'keyPurpose', type: 'uint256' },
-      { name: 'keyType', type: 'uint256' },
-    ],
-    outputs: [],
-  },
-  {
-    type: 'function',
-    name: 'removeKey',
-    stateMutability: 'nonpayable',
-    inputs: [
-      { name: 'identityId', type: 'uint72' },
-      { name: 'key', type: 'bytes32' },
-    ],
-    outputs: [],
-  },
-] as const;
-
-export const identityStorageWalletAbi = [
-  {
-    type: 'function',
-    name: 'keyHasPurpose',
-    stateMutability: 'view',
-    inputs: [
-      { name: 'identityId', type: 'uint72' },
-      { name: 'key', type: 'bytes32' },
-      { name: 'purpose', type: 'uint256' },
-    ],
-    outputs: [{ name: '', type: 'bool' }],
-  },
-  {
-    type: 'function',
-    name: 'getKeysByPurpose',
-    stateMutability: 'view',
-    inputs: [
-      { name: 'identityId', type: 'uint72' },
-      { name: 'purpose', type: 'uint256' },
-    ],
-    outputs: [{ name: '', type: 'bytes32[]' }],
-  },
-] as const;
+// Compatibility aliases for existing node-UI callers. The definitions live in
+// dkg-core and are parity-checked against the canonical chain ABI snapshots.
+export const profileIdentityWalletAbi = PROFILE_IDENTITY_WALLET_ABI;
+export const identityWalletAbi = IDENTITY_WALLET_ABI;
+export const identityStorageWalletAbi = IDENTITY_STORAGE_WALLET_ABI;
 
 const MAX_UINT72 = (1n << 72n) - 1n;
 

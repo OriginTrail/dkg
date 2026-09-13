@@ -26,6 +26,23 @@ function runCtx(method: string, path: string, agent: any, body?: unknown) {
   return { res, done: handleIdentityWalletRoutes(ctx) };
 }
 
+function runRawCtx(method: string, path: string, agent: any, body: string) {
+  const res = fakeRes();
+  const req: any = {
+    method,
+    url: path,
+    __dkgPrebufferedBody: Buffer.from(body),
+  };
+  const ctx = {
+    req,
+    res,
+    agent,
+    path,
+    url: new URL(`http://127.0.0.1${path}`),
+  } as unknown as RequestContext;
+  return { res, done: handleIdentityWalletRoutes(ctx) };
+}
+
 const CONTRACTS = {
   profile: ethers.getAddress(`0x${'11'.repeat(20)}`),
   identity: ethers.getAddress(`0x${'22'.repeat(20)}`),
@@ -192,6 +209,77 @@ describe('daemon identity-wallet browser capability', () => {
     });
     expect(agent.getIdentityWalletContracts).not.toHaveBeenCalled();
     expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed JSON and malformed eth_call envelopes in the shared executor', async () => {
+    const rpc = vi.fn(async () => '0x');
+    const agent = {
+      supportsIdentityWalletManagement: true,
+      getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
+      requestBrowserWalletRpc: rpc,
+    };
+
+    const malformedJson = runRawCtx('POST', '/api/identity-wallets/rpc', agent, '{');
+    await malformedJson.done;
+    expect(malformedJson.res.statusCode).toBe(400);
+    expect(JSON.parse(malformedJson.res.body).error).toMatch(/^Invalid JSON:/);
+
+    const malformedCall = runCtx('POST', '/api/identity-wallets/rpc', agent, {
+      jsonrpc: '2.0', id: 11, method: 'eth_call', params: [{ to: CONTRACTS.storage }],
+    });
+    await malformedCall.done;
+    expect(JSON.parse(malformedCall.res.body).error).toMatchObject({
+      code: -32602,
+      message: expect.stringContaining('target address and function selector'),
+    });
+    expect(agent.getIdentityWalletContracts).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['empty', []],
+    ['oversized', Array.from({ length: 21 }, (_, index) => ({
+      jsonrpc: '2.0', id: index + 1, method: 'eth_chainId', params: [],
+    }))],
+  ])('rejects an %s JSON-RPC batch before adapter delegation', async (_label, body) => {
+    const rpc = vi.fn(async () => '0x14a34');
+    const agent = {
+      supportsIdentityWalletManagement: true,
+      getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
+      requestBrowserWalletRpc: rpc,
+    };
+
+    const request = runCtx('POST', '/api/identity-wallets/rpc', agent, body);
+    await request.done;
+
+    expect(request.res.statusCode).toBe(400);
+    expect(JSON.parse(request.res.body)).toEqual({
+      error: 'JSON-RPC batch must contain between 1 and 20 requests',
+    });
+    expect(agent.getIdentityWalletContracts).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it('accepts and delegates the maximum 20-request JSON-RPC batch', async () => {
+    const rpc = vi.fn(async () => '0x14a34');
+    const agent = {
+      supportsIdentityWalletManagement: true,
+      getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
+      requestBrowserWalletRpc: rpc,
+    };
+    const body = Array.from({ length: 20 }, (_, index) => ({
+      jsonrpc: '2.0', id: index + 1, method: 'eth_chainId', params: [],
+    }));
+
+    const request = runCtx('POST', '/api/identity-wallets/rpc', agent, body);
+    await request.done;
+
+    expect(request.res.statusCode).toBe(200);
+    expect(JSON.parse(request.res.body)).toEqual(body.map(({ id }) => ({
+      jsonrpc: '2.0', id, result: '0x14a34',
+    })));
+    expect(rpc).toHaveBeenCalledTimes(20);
+    expect(rpc).toHaveBeenCalledWith('eth_chainId', []);
   });
 
   it('rejects expanded block batches while preserving bounded receipt polling', async () => {

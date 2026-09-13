@@ -1395,7 +1395,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
       expect(params).toEqual([]);
       return '0x14a34';
     });
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
 
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, payload);
     await done;
@@ -1405,27 +1405,6 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     expect(rpcMock).toHaveBeenCalledTimes(1);
     expect(res.body).not.toContain('SECRETKEY');
     expect(res.body).not.toContain('https://rpc.example');
-  });
-
-  it('POST /api/pca/rpc accepts an embedded agent with only the deprecated PCA bridge', async () => {
-    const legacyRpc = vi.fn(async () => '0x14a34');
-    const agent = {
-      supportsPublishingConvictionNft: true,
-      getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE,
-      requestPublishingConvictionRpc: legacyRpc,
-    };
-
-    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
-      jsonrpc: '2.0',
-      id: 7,
-      method: 'eth_chainId',
-      params: [],
-    });
-    await done;
-
-    expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toEqual({ jsonrpc: '2.0', id: 7, result: '0x14a34' });
-    expect(legacyRpc).toHaveBeenCalledWith('eth_chainId', []);
   });
 
   it('POST /api/pca/rpc returns 503 when the daemon RPC bridge is unavailable', async () => {
@@ -1464,6 +1443,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     const rpcMock = vi.fn(async () => '0x' + '0'.repeat(63) + '1');
     const agent = {
       supportsPublishingConvictionNft: true,
+      supportsPublishingConvictionRpc: true,
       getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE,
       requestBrowserWalletRpc: rpcMock,
     };
@@ -1508,6 +1488,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     const rpcMock = vi.fn(async () => '0x');
     const agent = {
       supportsPublishingConvictionNft: true,
+      supportsPublishingConvictionRpc: true,
       getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE,
       requestBrowserWalletRpc: rpcMock,
     };
@@ -1540,6 +1521,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     const rpcMock = vi.fn();
     const agent = {
       supportsPublishingConvictionNft: true,
+      supportsPublishingConvictionRpc: true,
       getPublishingConvictionContracts: getContractsMock,
       requestBrowserWalletRpc: rpcMock,
     };
@@ -1570,7 +1552,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
       if (method === 'eth_blockNumber') return '0x10';
       return { number: '0x10' };
     });
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
 
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, payload);
     await done;
@@ -1582,19 +1564,19 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
 
   it('POST /api/pca/rpc rejects empty JSON-RPC batches before adapter delegation', async () => {
     const rpcMock = vi.fn();
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
 
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, []);
     await done;
 
     expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body)).toEqual({ error: 'JSON-RPC batch must contain at least one request' });
+    expect(JSON.parse(res.body)).toEqual({ error: 'JSON-RPC batch must contain between 1 and 20 requests' });
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
   it('POST /api/pca/rpc rejects oversized JSON-RPC batches before adapter delegation', async () => {
     const rpcMock = vi.fn();
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
     const payload = Array.from({ length: 21 }, (_, i) => ({
       jsonrpc: '2.0',
       id: i + 1,
@@ -1606,13 +1588,13 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     await done;
 
     expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body)).toEqual({ error: 'JSON-RPC batch must contain at most 20 requests' });
+    expect(JSON.parse(res.body)).toEqual({ error: 'JSON-RPC batch must contain between 1 and 20 requests' });
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
   it('POST /api/pca/rpc preserves null JSON-RPC results for pending transaction reads', async () => {
     const rpcMock = vi.fn(async () => null);
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
       jsonrpc: '2.0',
       id: 7,
@@ -1628,7 +1610,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
 
   it('POST /api/pca/rpc preserves null JSON-RPC results for missing block reads', async () => {
     const rpcMock = vi.fn(async () => null);
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
       jsonrpc: '2.0',
       id: 9,
@@ -1645,7 +1627,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
   it('POST /api/pca/rpc allows viem receipt reconciliation full-block reads for exact block ids', async () => {
     const block = { number: '0x2cc9b11', transactions: [{ hash: '0x' + '22'.repeat(32) }] };
     const rpcMock = vi.fn(async () => block);
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
       jsonrpc: '2.0',
       id: 10,
@@ -1661,7 +1643,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
 
   it('POST /api/pca/rpc rejects over-broad non-PCA read params before adapter delegation', async () => {
     const rpcMock = vi.fn();
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
     const cases = [
       { id: 1, method: 'eth_chainId', params: ['latest'] },
       { id: 2, method: 'eth_blockNumber', params: [false] },
@@ -1686,7 +1668,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
 
   it('POST /api/pca/rpc maps unsupported facade nulls to feature-unavailable errors', async () => {
     const rpcMock = vi.fn(async () => null);
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
       jsonrpc: '2.0',
       id: 1,
@@ -1704,7 +1686,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
 
   it('POST /api/pca/rpc rejects write/admin JSON-RPC methods before adapter delegation', async () => {
     const rpcMock = vi.fn();
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: rpcMock };
+    const agent = contractsAgent({ requestBrowserWalletRpc: rpcMock });
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
       jsonrpc: '2.0',
       id: 1,
@@ -1728,7 +1710,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
       'all RPC endpoints failed (https://rpc.example/v2/SECRETKEY)',
       { rpcUrls: ['https://rpc.example/v2/SECRETKEY'] },
     );
-    const agent = { supportsPublishingConvictionNft: true, requestBrowserWalletRpc: async () => { throw err; } };
+    const agent = contractsAgent({ requestBrowserWalletRpc: async () => { throw err; } });
 
     const { res, done } = runCtx('POST', '/api/pca/rpc', agent, payload);
     await done;
@@ -1744,6 +1726,7 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
   it('POST /api/pca/rpc sanitizes generic adapter errors', async () => {
     const agent = {
       supportsPublishingConvictionNft: true,
+      supportsPublishingConvictionRpc: true,
       requestBrowserWalletRpc: async () => {
         throw new Error('boom https://rpc.example/v2/SECRETKEY');
       },
