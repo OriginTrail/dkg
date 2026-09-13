@@ -205,7 +205,7 @@ export interface Rfc64CatalogNormalizedActivationStateV1 {
   readonly execution: Rfc64CatalogActivationExecutionV1;
 }
 
-export interface ResolvedRfc64CatalogActivationsV1 {
+interface ResolvedRfc64CatalogActivationFieldsV1 {
   /** Policy-neutral union used by the Release-1 runtime. */
   readonly catalog: ResolvedRfc64CatalogActivationConfigV1;
   /** Compatibility projection used by the existing public status/producer path. */
@@ -223,7 +223,7 @@ export interface ResolvedRfc64CatalogActivationsV1 {
  * does not produce a runtime-ready activation handle.
  */
 class ResolverIssuedRfc64CatalogActivationsV1
-implements ResolvedRfc64CatalogActivationsV1 {
+implements ResolvedRfc64CatalogActivationFieldsV1 {
   readonly #resolverIssued = true;
   readonly catalog: ResolvedRfc64CatalogActivationConfigV1;
   readonly publicCatalog: ResolvedRfc64PublicCatalogActivationConfigV1;
@@ -233,7 +233,7 @@ implements ResolvedRfc64CatalogActivationsV1 {
 
   constructor(
     resolverToken: typeof RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1,
-    fields: ResolvedRfc64CatalogActivationsV1,
+    fields: ResolvedRfc64CatalogActivationFieldsV1,
   ) {
     if (resolverToken !== RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1) {
       throw new TypeError(
@@ -258,6 +258,14 @@ implements ResolvedRfc64CatalogActivationsV1 {
     }
   }
 }
+
+/**
+ * Opaque process-local activation handle. Only
+ * `resolveRfc64CatalogActivationsV1` can produce this nominal type; copying or
+ * deserializing its visible fields loses the private class identity.
+ */
+export type ResolvedRfc64CatalogActivationsV1 =
+  ResolverIssuedRfc64CatalogActivationsV1;
 
 /** Reject hand-assembled normalized state at the runtime configuration boundary. */
 export function assertResolvedRfc64CatalogActivationsV1(
