@@ -265,6 +265,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     Object.assign(agent, {
       started: true,
       chainPoller: {
+        closeAdmission: vi.fn(),
         stop: vi.fn(async () => {
           expect(agent.vmReconcileRotationClosed).toBe(true);
         }),
@@ -514,7 +515,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     });
     let release!: () => void;
     const pollerDrain = new Promise<void>((resolve) => { release = resolve; });
-    const chainPoller = { stop: vi.fn(() => pollerDrain) };
+    const chainPoller = { closeAdmission: vi.fn(), stop: vi.fn(() => pollerDrain) };
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
     const agent = syntheticShutdownAgent();
