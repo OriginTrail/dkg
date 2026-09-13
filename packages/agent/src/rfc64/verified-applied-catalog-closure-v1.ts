@@ -123,15 +123,11 @@ export async function readVerifiedAppliedCatalogClosureV1(
       const bundleBinding = readVerifiedCatalogSealBindingV1(
         transferredMetadata.catalogSealBinding,
       );
-      const identity = unpackKnowledgeAssetId(BigInt(row.kaId));
-      const kaNumber = identity.kaNumber;
-      if (
-        identity.agentAddress !== input.trustedCatalogScope.authorAddress
-        || bundleBinding.seal.kaUal
-          !== `did:dkg:${input.trustedCatalogScope.networkId}/${identity.agentAddress}/${kaNumber}`
-      ) {
-        throw new Error('signed catalog row identity differs from its verified bundle binding');
-      }
+      const kaNumber = assertVerifiedAppliedCatalogRowIdentityV1(
+        row,
+        bundleBinding,
+        input.trustedCatalogScope,
+      );
       const inventoryEvidence = composeRfc64PublicCatalogInventoryEvidenceRowV1({
         activatedTripleCount: bundleBinding.seal.publicTripleCount,
         bundleDigest: row.transfer.blobDigest,
@@ -171,6 +167,29 @@ export async function readVerifiedAppliedCatalogClosureV1(
       rows: inventoryRows,
     }),
   });
+}
+
+/**
+ * Final defense-in-depth binding over already verified row and bundle outputs.
+ * Earlier catalog codecs reject a foreign row for the signed head; keeping
+ * this boundary explicit also prevents a future loader relaxation from
+ * converting a self-consistent foreign bundle into trusted catalog evidence.
+ */
+export function assertVerifiedAppliedCatalogRowIdentityV1(
+  row: Readonly<Pick<AuthorCatalogRowV1, 'kaId'>>,
+  bundleBinding: Readonly<VerifiedCatalogSealBindingSnapshotV1>,
+  trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
+): bigint {
+  const identity = unpackKnowledgeAssetId(BigInt(row.kaId));
+  const kaNumber = identity.kaNumber;
+  if (
+    identity.agentAddress !== trustedCatalogScope.authorAddress
+    || bundleBinding.seal.kaUal
+      !== `did:dkg:${trustedCatalogScope.networkId}/${identity.agentAddress}/${kaNumber}`
+  ) {
+    throw new Error('signed catalog row identity differs from its verified bundle binding');
+  }
+  return kaNumber;
 }
 
 export type Rfc64PrivateReleaseProofReaderV1 = (

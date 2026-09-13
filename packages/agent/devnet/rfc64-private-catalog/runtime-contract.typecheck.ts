@@ -6,7 +6,11 @@ import {
   type Rfc64PrivateRuntimeV1,
 } from './agent-runtime.ts';
 import type { Rfc64PrivateFinalizedAgentConfigV1 } from './agent-runtime-factory.ts';
-import type { Rfc64PrivateScenarioPhasesV1 } from './scenario-result.ts';
+import type {
+  Rfc64PrivateCatalogStateV1,
+  Rfc64PrivateProcessEvidenceMapV1,
+  Rfc64PrivateScenarioPhasesV1,
+} from './scenario-result.ts';
 import { waitForBootstrapV1 } from './catalog-evidence-handlers.mjs';
 import { publishCatalogBaselineV1 } from './catalog-publication-handlers.mjs';
 
@@ -55,3 +59,32 @@ const missingRestart: Rfc64PrivateScenarioPhasesV1 = {
   revocation: phases.revocation,
 };
 void missingRestart;
+
+// Phase fields are concrete evidence contracts: a state snapshot cannot be
+// substituted for bootstrap provenance simply because both are objects.
+const swappedBaselineEvidence: Rfc64PrivateScenarioPhasesV1 = {
+  ...phases,
+  baseline: {
+    ...phases.baseline,
+    // @ts-expect-error Bootstrap provenance is not an applied catalog state.
+    provider2Bootstrap: phases.baseline.provider2State,
+  },
+};
+void swappedBaselineEvidence;
+
+const malformedNestedState: Rfc64PrivateCatalogStateV1 = {
+  ...phases.failover.receiverState,
+  graphCounts: [
+    // @ts-expect-error Memory evidence requires both layer projections and a typed proof.
+    { kaNumber: 1 },
+  ],
+};
+void malformedNestedState;
+
+declare const processEvidence: Rfc64PrivateProcessEvidenceMapV1;
+const missingTypedProcess: Rfc64PrivateProcessEvidenceMapV1 = {
+  ...processEvidence,
+  // @ts-expect-error The fixed process map cannot omit or undefine the owner actor.
+  owner: undefined,
+};
+void missingTypedProcess;

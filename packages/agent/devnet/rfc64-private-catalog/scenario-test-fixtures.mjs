@@ -7,6 +7,7 @@ import {
   ASSET_NUMBERS,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   createPrivateCatalogScope,
+  createPrivatePolicyAndRoster,
   roleAgentAddress,
 } from './fixture.mjs';
 
@@ -112,7 +113,7 @@ export function passingScenarioEvidenceV1() {
     catalogVersion: '4',
     headObjectDigest,
     inventoryRowCount: '2',
-    policyDigest: `0x${'ef'.repeat(32)}`,
+    policyDigest: createPrivatePolicyAndRoster().policyDigest,
     scopeDigest,
   };
   const ownerRevocation = {

@@ -26,6 +26,9 @@ import {
   encodeOpaqueKaBundleV1,
   parseCanonicalGraphScopedAuthorSealV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
+  readVerifiedCatalogSealBindingV1,
+  readVerifiedTransferredCatalogBundleMetadataV1,
+  verifyTransferredCatalogBundleV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
   type AuthorCatalogHeadV1,
@@ -67,7 +70,10 @@ import {
   computeRfc64AppliedInventoryDigestV1,
   verifyRfc64PublicCatalogInventoryCompletenessV1,
 } from '../src/rfc64/public-catalog-inventory-completeness-v1.js';
-import { readVerifiedAppliedCatalogClosureV1 } from
+import {
+  assertVerifiedAppliedCatalogRowIdentityV1,
+  readVerifiedAppliedCatalogClosureV1,
+} from
   '../src/rfc64/verified-applied-catalog-closure-v1.js';
 import {
   bindRfc64PrivateReleaseProofReaderV1,
@@ -529,6 +535,78 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       SECOND_KA_NUMBER,
     ]);
   }, 30_000);
+
+  it('rejects a self-consistent foreign-author row at the trusted-author closure boundary', async () => {
+    const foreignWallet = new ethers.Wallet(`0x${'79'.repeat(32)}`);
+    const foreignAuthor = foreignWallet.address.toLowerCase() as EvmAddressV1;
+    const foreignScope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: foreignAuthor,
+      era: '0',
+      bucketCount: '1',
+    }) as AuthorCatalogScopeV1;
+    const foreignSigner = {
+      issuer: foreignAuthor,
+      signDigest: async (digest: Uint8Array) => foreignWallet.signMessage(digest),
+    };
+    const foreignRowBundle = await buildRowBundle(foreignWallet, {
+      authorAddress: foreignAuthor,
+    });
+    const foreignGenesis = await produceEmptyAuthorCatalogGenesisV1({
+      scope: foreignScope,
+      catalogIssuerDelegationDigest: MISSING_DELEGATION_DIGEST,
+      issuedAt: '1773900000000' as never,
+      signer: foreignSigner,
+    });
+    const foreignSuccessor = await produceSparseAuthorCatalogSuccessorV1({
+      previousHead: foreignGenesis.head,
+      previousDirectoryPath: foreignGenesis.directoryPath,
+      previousBucket: null,
+      selectedBucketId: '0' as never,
+      nextRows: [foreignRowBundle.row],
+      issuedAt: '1773900001011' as never,
+      signer: foreignSigner,
+    });
+    const transferred = verifyTransferredCatalogBundleV1(
+      foreignSuccessor.head,
+      foreignRowBundle.row,
+      foreignRowBundle.bundleBytes,
+      DEPLOYMENT,
+    );
+    const transferredMetadata = readVerifiedTransferredCatalogBundleMetadataV1(
+      transferred,
+      foreignSuccessor.head,
+      foreignRowBundle.row,
+      DEPLOYMENT,
+    );
+    const bundleBinding = readVerifiedCatalogSealBindingV1(
+      transferredMetadata.catalogSealBinding,
+    );
+    const trustedCatalogScope = Object.freeze({
+      ...foreignScope,
+      authorAddress: AUTHOR,
+    }) as AuthorCatalogScopeV1;
+
+    expect(foreignRowBundle.row.kaId).toBe(
+      ((BigInt(foreignAuthor) << 96n) | KA_NUMBER).toString(),
+    );
+    expect(foreignRowBundle.kaUal).toBe(
+      `did:dkg:${NETWORK_ID}/${foreignAuthor}/${KA_NUMBER}`,
+    );
+    expect(bundleBinding.seal.authorAddress).toBe(foreignAuthor);
+    expect(() => assertVerifiedAppliedCatalogRowIdentityV1(
+      foreignRowBundle.row,
+      bundleBinding,
+      trustedCatalogScope,
+    )).toThrow(
+      /signed catalog row identity differs from its verified bundle binding/u,
+    );
+  });
 
   it('binds the agent closure reader to its authoritative applied head', async () => {
     const fixture = await setupLiveReceiver();
@@ -3427,18 +3505,20 @@ function alternateRecoveryEncoding(signature: string): string {
 async function buildRowBundle(
   signingWallet: ethers.Wallet = AUTHOR_WALLET,
   options: {
+    readonly authorAddress?: EvmAddressV1;
     readonly kaNumber?: bigint;
     readonly assertionCoordinate?: string;
   } = {},
 ): Promise<{ row: AuthorCatalogRowV1; bundleBytes: Uint8Array; kaUal: string }> {
+  const authorAddress = options.authorAddress ?? AUTHOR;
   const kaNumber = options.kaNumber ?? KA_NUMBER;
-  const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
-  const kaUal = `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`;
+  const kaId = ((BigInt(authorAddress) << 96n) | kaNumber).toString();
+  const kaUal = `did:dkg:${NETWORK_ID}/${authorAddress}/${kaNumber}`;
   const typedData = buildAuthorAttestationTypedData({
     chainId: BigInt(DEPLOYMENT.assertedAtChainId),
     kav10Address: DEPLOYMENT.assertedAtKav10Address,
     merkleRoot: ethers.getBytes(ASSERTION_ROOT),
-    authorAddress: AUTHOR,
+    authorAddress,
     reservedKaId: BigInt(kaId),
   });
   const authorSignature = ethers.Signature.from(await signingWallet.signTypedData(
@@ -3448,7 +3528,7 @@ async function buildRowBundle(
   ));
   const seal = {
     assertionMerkleRoot: ASSERTION_ROOT,
-    authorAddress: AUTHOR,
+    authorAddress,
     authorAttestationR: authorSignature.r,
     authorAttestationVS: authorSignature.yParityAndS,
     authorSchemeVersion: '1',
