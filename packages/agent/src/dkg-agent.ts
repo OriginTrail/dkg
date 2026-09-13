@@ -575,9 +575,11 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 }
 
 export type DiscoverContextGraphsFromChainOptions = {
+  signal?: AbortSignal;
   throwOnChainScanFailure?: boolean;
   pageBudget?: number;
-  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor';
+  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor' | 'seedLiveTail' | 'repair';
+  minimumIntervalMs?: number;
   incremental?: boolean;
   seedIncrementalWatermark?: boolean;
   resumeFromCursor?: boolean;
@@ -587,7 +589,20 @@ type NormalizedContextGraphDiscoveryScan =
   | { mode: 'listAll' }
   | { mode: 'incremental'; pageBudget?: number }
   | { mode: 'seedFull' }
-  | { mode: 'seedFromCursor'; pageBudget?: number };
+  | { mode: 'seedFromCursor'; pageBudget?: number }
+  | { mode: 'seedLiveTail'; pageBudget?: number }
+  | { mode: 'repair'; pageBudget: number; minimumIntervalMs?: number };
+
+type ContextGraphRegistryRepairProgress = {
+  readonly pageBudget: number;
+  readonly startedAt: number;
+  observedPages: number;
+  acknowledgedPages: number;
+  fromBlock?: number;
+  toBlock?: number;
+  targetBlock?: number;
+  completed: boolean;
+};
 
 function normalizeContextGraphDiscoveryScan(
   options: DiscoverContextGraphsFromChainOptions,
@@ -604,6 +619,21 @@ function normalizeContextGraphDiscoveryScan(
       return {
         mode: 'seedFromCursor',
         ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+      };
+    }
+    if (options.mode === 'seedLiveTail') {
+      return {
+        mode: 'seedLiveTail',
+        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
+      };
+    }
+    if (options.mode === 'repair') {
+      return {
+        mode: 'repair',
+        pageBudget: options.pageBudget ?? 1,
+        ...(options.minimumIntervalMs !== undefined
+          ? { minimumIntervalMs: options.minimumIntervalMs }
+          : {}),
       };
     }
     if (options.mode === 'listAll') return { mode: 'listAll' };
@@ -1141,9 +1171,10 @@ export class DKGAgent extends DKGAgentBase {
     });
   }
 
-  private chainContextGraphScanFailure:
-    | { signature: string; count: number }
-    | undefined;
+  private readonly chainContextGraphScanFailures = new Map<
+    'live' | 'repair',
+    { signature: string; count: number }
+  >();
   /**
    * StorageACK handlers perform store verification. A wallet pool can start
    * several publishes at once, but sending every ACK round at once overloads
@@ -1867,7 +1898,7 @@ export class DKGAgent extends DKGAgentBase {
   recordDiscoveredContextGraph(
     contextGraphId: string,
     metadata: ContextGraphDiscoveryMetadata,
-    options: ContextGraphDiscoveryOptions = {},
+    options: ContextGraphDiscoveryOptions & { persist?: boolean } = {},
   ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const next: ContextGraphSub = {
@@ -1893,17 +1924,35 @@ export class DKGAgent extends DKGAgentBase {
     // Discovery-only rows stay in-memory. Metadata learned for an already
     // active member/host row is part of that durable state and must survive a
     // restart (notably a later-discovered onChainId).
-    const persistEnrichment = existing?.subscribed === true || existing?.coreHosted === true;
+    const persistEnrichment = options.persist !== false
+      && (existing?.subscribed === true || existing?.coreHosted === true);
     this.setContextGraphSubscription(contextGraphId, next, { persist: persistEnrichment });
 
     if (!existing && (this.config.nodeRole ?? 'edge') === 'core') {
       this.subscribeToContextGraph(contextGraphId, {
         trackSyncScope: options.trackSyncScope,
+        persist: options.persist,
         syncMode: 'always-on',
       });
     }
 
     return this.subscribedContextGraphs.get(contextGraphId) ?? next;
+  }
+
+  private async recordDiscoveredContextGraphStrict(
+    contextGraphId: string,
+    metadata: ContextGraphDiscoveryMetadata,
+    options: ContextGraphDiscoveryOptions = {},
+  ): Promise<ContextGraphSub> {
+    const recorded = this.recordDiscoveredContextGraph(
+      contextGraphId,
+      metadata,
+      { ...options, persist: false },
+    );
+    if (recorded.subscribed || recorded.coreHosted) {
+      await this.persistDiscoveredContextGraphSubscriptionStrict(contextGraphId, recorded);
+    }
+    return recorded;
   }
 
   async discoverContextGraphsFromStore(): Promise<number> {
@@ -2063,6 +2112,43 @@ export class DKGAgent extends DKGAgentBase {
     return await this.chain.hasContextGraphRegistryScanWatermark?.() ?? false;
   }
 
+  async repairContextGraphRegistry(options: {
+    pageBudget: number;
+    minimumIntervalMs?: number;
+    signal?: AbortSignal;
+  }): Promise<number> {
+    const progress: ContextGraphRegistryRepairProgress = {
+      pageBudget: options.pageBudget,
+      startedAt: Date.now(),
+      observedPages: 0,
+      acknowledgedPages: 0,
+      completed: false,
+    };
+    let outcome: 'succeeded' | 'failed' = 'failed';
+    try {
+      const discovered = await this.discoverContextGraphsFromChainInternal({
+        mode: 'repair',
+        throwOnChainScanFailure: true,
+        ...options,
+      }, progress);
+      outcome = 'succeeded';
+      return discovered;
+    } finally {
+      if (progress.observedPages > 0 || outcome === 'failed') {
+        const fromBlock = progress.fromBlock ?? 'none';
+        const toBlock = progress.toBlock ?? 'none';
+        const targetBlock = progress.targetBlock ?? 'none';
+        this.log.info(
+          createOperationContext('system'),
+          `Chain context graph repair audit: outcome=${outcome} `
+            + `pages=${progress.acknowledgedPages}/${progress.observedPages}/${progress.pageBudget} `
+            + `range=[${fromBlock},${toBlock}] target=${targetBlock} `
+            + `complete=${progress.completed} durationMs=${Date.now() - progress.startedAt}`,
+        );
+      }
+    }
+  }
+
   /**
    * Query the on-chain registry for all registered context graphs and
    * catalogue any not yet known locally without activating membership.
@@ -2076,8 +2162,30 @@ export class DKGAgent extends DKGAgentBase {
   async discoverContextGraphsFromChain(
     options: DiscoverContextGraphsFromChainOptions = {},
   ): Promise<number> {
+    if (options.mode === 'repair') {
+      return this.repairContextGraphRegistry({
+        pageBudget: options.pageBudget ?? 1,
+        ...(options.minimumIntervalMs !== undefined
+          ? { minimumIntervalMs: options.minimumIntervalMs }
+          : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    }
+    return this.discoverContextGraphsFromChainInternal(options);
+  }
+
+  /** Shared page application primitive; repair owns its orchestration above. */
+  private async discoverContextGraphsFromChainInternal(
+    options: DiscoverContextGraphsFromChainOptions,
+    repairProgress?: ContextGraphRegistryRepairProgress,
+  ): Promise<number> {
+    options.signal?.throwIfAborted();
     const ctx = createOperationContext('system');
     const scanMode = normalizeContextGraphDiscoveryScan(options);
+    const scanFailureLane = repairProgress ? 'repair' : 'live';
+    const scanFailureLabel = scanFailureLane === 'repair'
+      ? 'Chain context graph repair scan'
+      : 'Chain context graph scan';
     const legacyListOptions = legacyChainListScanOptions(options);
     const useLegacyListFallback =
       scanMode.mode !== 'listAll' &&
@@ -2102,11 +2210,12 @@ export class DKGAgent extends DKGAgentBase {
         .replace(/stopped after block \d+/g, 'stopped after block N')
         .replace(/\[\d+,\s*\d+\]/g, '[range]')
         .replace(/\b\d+\s+eth_getLogs calls/g, 'N eth_getLogs calls');
-      if (this.chainContextGraphScanFailure?.signature !== signature) {
-        this.log.warn(ctx, `Chain context graph scan failed: ${message}`);
-        this.chainContextGraphScanFailure = { signature, count: 1 };
+      const priorFailure = this.chainContextGraphScanFailures.get(scanFailureLane);
+      if (priorFailure?.signature !== signature) {
+        this.log.warn(ctx, `${scanFailureLabel} failed: ${message}`);
+        this.chainContextGraphScanFailures.set(scanFailureLane, { signature, count: 1 });
       } else {
-        this.chainContextGraphScanFailure.count += 1;
+        priorFailure.count += 1;
       }
       const partialError = isContextGraphChainScanPartialError(err);
       if (options.throwOnChainScanFailure && !partialError) throw err;
@@ -2160,12 +2269,6 @@ export class DKGAgent extends DKGAgentBase {
           continue;
         }
 
-        const durableOnChainId = await readDurableContextGraphOnChainId(binding.name);
-        if (durableOnChainId === binding.onChainId) {
-          if (registryNameHash) knownNameHashes.add(registryNameHash);
-          continue;
-        }
-
         // Curated CGs (accessPolicy=1) must not silently land in non-participants' lists.
         // We can't query the V10 ContextGraphs participant set from a NameRegistry event alone,
         // so apply the strict default: only catalogue when this node's wallet matches
@@ -2180,6 +2283,21 @@ export class DKGAgent extends DKGAgentBase {
             if (registryNameHash) knownNameHashes.add(registryNameHash);
             continue;
           }
+        }
+
+        const durableOnChainId = await readDurableContextGraphOnChainId(binding.name);
+        if (durableOnChainId === binding.onChainId) {
+          // A previous attempt may have committed the reconstructible RDF
+          // binding but failed the active/core subscription write before page
+          // acknowledgement. Rebuild/flush the active row on replay instead of
+          // letting the durable binding fast-path skip that write forever.
+          await this.recordDiscoveredContextGraphStrict(binding.name, {
+            name: binding.name,
+            onChainId: binding.onChainId,
+            ...(registryNameHash ? { onChainHash: registryNameHash } : {}),
+          }, { trackSyncScope: false });
+          if (registryNameHash) knownNameHashes.add(registryNameHash);
+          continue;
         }
 
         // Persist the on-chain ID to the ontology graph so the publisher's
@@ -2205,7 +2323,7 @@ export class DKGAgent extends DKGAgentBase {
           graph: ontoGraph,
         }]);
 
-        this.recordDiscoveredContextGraph(binding.name, {
+        await this.recordDiscoveredContextGraphStrict(binding.name, {
           name: binding.name,
           onChainId: binding.onChainId,
           ...(registryNameHash ? { onChainHash: registryNameHash } : {}),
@@ -2233,9 +2351,13 @@ export class DKGAgent extends DKGAgentBase {
       }
       await applyDiscoveredContextGraphs(onChainContextGraphs);
     } else {
-      const iterator = this.chain.scanContextGraphRegistryPages!(scanMode)[Symbol.asyncIterator]();
+      const iterator = this.chain.scanContextGraphRegistryPages!({
+        ...scanMode,
+        ...(options.signal ? { signal: options.signal } : {}),
+      })[Symbol.asyncIterator]();
       try {
         while (true) {
+          options.signal?.throwIfAborted();
           let next: Awaited<ReturnType<typeof iterator.next>>;
           try {
             next = await iterator.next();
@@ -2245,19 +2367,34 @@ export class DKGAgent extends DKGAgentBase {
             break;
           }
           if (next.done) break;
+          options.signal?.throwIfAborted();
+          if (repairProgress && next.value.scanProgress) {
+            repairProgress.observedPages += 1;
+            repairProgress.fromBlock ??= next.value.scanProgress.fromBlock;
+            repairProgress.toBlock = next.value.scanProgress.toBlock;
+            repairProgress.targetBlock = next.value.scanProgress.targetBlock;
+          }
           await applyDiscoveredContextGraphs(next.value.contextGraphs);
+          // Cancellation after local work deliberately leaves the page
+          // unacknowledged so the next process replays the durable boundary.
+          options.signal?.throwIfAborted();
           await next.value.ack();
+          if (repairProgress) {
+            repairProgress.acknowledgedPages += 1;
+            repairProgress.completed ||= next.value.scanProgress?.completesGeneration ?? false;
+          }
         }
       } finally {
         await iterator.return?.();
       }
     }
-    if (!partialChainScan && this.chainContextGraphScanFailure) {
+    const priorFailure = this.chainContextGraphScanFailures.get(scanFailureLane);
+    if (!partialChainScan && priorFailure) {
       this.log.info(
         ctx,
-        `Chain context graph scan recovered after ${this.chainContextGraphScanFailure.count} failed attempt(s)`,
+        `${scanFailureLabel} recovered after ${priorFailure.count} failed attempt(s)`,
       );
-      this.chainContextGraphScanFailure = undefined;
+      this.chainContextGraphScanFailures.delete(scanFailureLane);
     }
 
     if (discovered > 0) {
