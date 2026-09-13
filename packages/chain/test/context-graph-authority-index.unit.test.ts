@@ -101,7 +101,32 @@ describe('durable contract-wide Context Graph authority scanner', () => {
 
     expect((index as any).snapshot).toBeUndefined();
     expect(typeof index.resolve).toBe('function');
+    expect(typeof index.resolveNameHash).toBe('function');
     expect(typeof index.revisions).toBe('function');
+  });
+
+  it('resolves unique name commitments from the shared snapshot and fails closed on ambiguity', async () => {
+    const index = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
+    const input = makeInput(9n, {}, async (from, to) => allEvents.filter((entry) => (
+      entry.blockNumber >= from && entry.blockNumber <= to
+    )));
+
+    await expect(index.resolveNameHash({ ...input, nameHash: NAME_9 }))
+      .resolves.toBe('9');
+    await expect(index.resolveNameHash({ ...input, nameHash: `0x${'ff'.repeat(32)}` }))
+      .resolves.toBeNull();
+    await expect(index.resolveNameHash({ ...input, nameHash: 'not-a-hash' }))
+      .rejects.toThrow('name hash is invalid');
+
+    const ambiguous = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
+    await expect(ambiguous.resolveNameHash({
+      ...input,
+      nameHash: NAME_9,
+      readPage: async (from, to) => [
+        ...allEvents,
+        creation(11n, 11, 2, NAME_9),
+      ].filter((entry) => entry.blockNumber >= from && entry.blockNumber <= to),
+    })).rejects.toThrow('ambiguous across 2 finalized Context Graphs');
   });
 
   it('shares one page walk across concurrent graph lookups and resumes after restart', async () => {

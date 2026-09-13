@@ -16,6 +16,7 @@ import {
   createAuthorityScenario,
   GOVERNANCE,
   MEMBER,
+  NAME_HASH,
   OWNER,
 } from './helpers/context-graph-authority-scenario.js';
 
@@ -221,6 +222,26 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     await adapter.getContextGraphAuthoritySnapshot(9n);
     expect(evidence.indexRanges).toHaveLength(3);
     expect(evidence.staticCalls).toEqual([]);
+  });
+
+  it('shares the durable contract-wide scan with reverse name-hash resolution', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+    (adapter as any).getContextGraphNameHashResolver = () => {
+      throw new Error('legacy per-name historical resolver must not be used');
+    };
+
+    const [contextGraphId, snapshot] = await Promise.all([
+      adapter.resolveContextGraphIdByNameHash(NAME_HASH),
+      adapter.getContextGraphAuthoritySnapshot(9n),
+    ]);
+
+    expect(contextGraphId).toBe(9n);
+    expect(snapshot.contextGraphId).toBe('9');
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+    expect(evidence.filters).toEqual([]);
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(9n);
+    expect(evidence.indexRanges).toHaveLength(3);
   });
 
   it('projects stable per-CG revisions from one shared index advance', async () => {

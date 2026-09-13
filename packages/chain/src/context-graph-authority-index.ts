@@ -60,6 +60,11 @@ export interface ContextGraphAuthorityIndexRevisionInput
   extends ContextGraphAuthorityIndexScanInput {
   readonly contextGraphIds: readonly ContextGraphAuthorityIndexId[];
 }
+
+export interface ContextGraphAuthorityIndexNameHashInput
+  extends ContextGraphAuthorityIndexScanInput {
+  readonly nameHash: string;
+}
 /**
  * Process-local owner for the durable contract-wide authority index.
  *
@@ -108,6 +113,25 @@ export class ContextGraphAuthorityIndex {
       }
     }
     return revisions;
+  }
+
+  /** Resolve one unique name commitment from the shared contract-wide snapshot. */
+  async resolveNameHash(
+    input: ContextGraphAuthorityIndexNameHashInput,
+  ): Promise<ContextGraphAuthorityIndexId | null> {
+    const nameHash = normalizeHash(input.nameHash);
+    if (nameHash === undefined) {
+      throw new Error('Context Graph authority index name hash is invalid');
+    }
+    const checkpoint = await this.#snapshot(input);
+    const matches = checkpoint.states.filter((state) => state.nameHash === nameHash);
+    if (matches.length > 1) {
+      throw new Error(
+        `Context Graph name hash ${nameHash} is ambiguous across ` +
+        `${matches.length} finalized Context Graphs`,
+      );
+    }
+    return matches[0]?.contextGraphId ?? null;
   }
 
   /** Resolve the complete materialized index at one finalized chain anchor. */

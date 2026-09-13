@@ -123,6 +123,18 @@ export function readEvmContextGraphAuthorityStateV1(
   );
 }
 
+/** Resolve one unique name commitment through the same durable contract-wide scan. */
+export function readEvmContextGraphAuthorityIdByNameHashV1(
+  input: EvmContextGraphAuthorityIndexReadInputV1 & Readonly<{
+    nameHash: string;
+  }>,
+): Promise<EvmContextGraphAuthorityIndexReadV1<ContextGraphAuthorityIndexId | null>> {
+  return readEvmContextGraphAuthorityIndexProjectionV1(
+    input,
+    (scan) => input.index.resolveNameHash({ ...scan, nameHash: input.nameHash }),
+  );
+}
+
 interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
   readonly index: ContextGraphAuthorityIndex;
   readonly deploymentId: string;
