@@ -17,6 +17,11 @@ export interface ConfigFileWriter {
   close(): Promise<void>;
 }
 
+/** Publication recovery failed, so the prior file/runtime pair is not restored. */
+class ConfigRecoveryError extends AggregateError {
+  override name = 'ConfigRecoveryError';
+}
+
 /** Generic atomic publication lane. Live configuration belongs to DkgConfigStore. */
 export class ConfigFileStore {
   static readonly #stores = new Map<string, ConfigFileStore>();
@@ -47,12 +52,23 @@ export class ConfigFileStore {
     // Opening failures leave the process-local lane available for a retry.
     void lease.catch(() => { if (this.#claim === claim) this.#claim = undefined; });
     let closing: Promise<void> | undefined;
+    let unreconciled: Error | undefined;
     return {
       ready: lease.then(() => this.#latestContents),
       commit: prepare => closing ? Promise.reject(new Error('Configuration owner is closed')) : this.#serialize(async () => {
         await lease;
+        // Check inside the lane: even updates queued before the failed rollback
+        // must not prepare a candidate from the now-unreliable runtime snapshot.
+        if (unreconciled) throw unreconciled;
         const { contents, activation } = prepare();
-        return this.#publishTransaction(contents, activation);
+        try {
+          return await this.#publishTransaction(contents, activation);
+        } catch (error) {
+          if (error instanceof ConfigRecoveryError) {
+            unreconciled = new Error('Configuration owner is unreconciled after failed rollback; restart the daemon before changing settings', { cause: error });
+          }
+          throw error;
+        }
       }),
       close: () => {
         closing ??= this.#serialize(async () => {
@@ -126,7 +142,7 @@ export class ConfigFileStore {
           rollbackErrors.push(rollbackError);
         }
         if (rollbackErrors.length) {
-          throw new AggregateError([error, ...rollbackErrors],
+          throw new ConfigRecoveryError([error, ...rollbackErrors],
             `Runtime activation failed and configuration rollback failed${preserveBackup && backup ? `; previous configuration retained at ${backup}` : ''}`);
         }
         throw error;

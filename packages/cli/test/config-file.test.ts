@@ -242,7 +242,7 @@ describe('configuration file publication', () => {
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const failure = owner.update(current => ({ ...current, llm: { apiKey: 'new-key' } }), (next, previous) => ({
-      apply() { runtime = next.llm; throw new Error('activation changed runtime then failed'); },
+      apply() { runtime = next.llm; throw new AggregateError([new Error('adapter failure')], 'activation changed runtime then failed'); },
       async rollback() { await gate; runtime = previous.llm; },
     }));
     const failed = expect(failure).rejects.toThrow('activation changed runtime then failed');
@@ -272,6 +272,68 @@ describe('configuration file publication', () => {
     }))).rejects.toMatchObject({ errors: [expect.objectContaining({ message: 'activation failed' }), expect.objectContaining({ message: 'compensation failed' })] });
     expect(owner.current).toEqual(initial);
     expect(await fs.readFile(path, 'utf8')).toBe(before);
+  });
+
+  it.each(['runtime', 'file', 'both'] as const)('fences queued and later updates after failed %s recovery until owner restart', async failureKind => {
+    const files = new DkgHomeFiles(directory);
+    const initial: DkgConfig = { name: 'initial', apiPort: 9200, listenPort: 0, nodeRole: 'edge', llm: { apiKey: 'old-key' } };
+    await files.saveConfig(initial);
+    const before = await fs.readFile(path, 'utf8');
+    const owner = await DkgConfigStore.open(files, initial);
+    let runtime = initial.llm;
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const rollingBack = new Promise<void>(resolve => { entered = resolve; });
+    if (failureKind !== 'runtime') {
+      vi.mocked(rename).mockImplementationOnce(fs.rename).mockRejectedValueOnce(new Error('file recovery failed'));
+    }
+    const failing = owner.update(current => ({ ...current, llm: { apiKey: 'candidate-key' } }), (next, previous) => ({
+      apply() { runtime = next.llm; throw new Error('activation failed after mutation'); },
+      async rollback() {
+        entered();
+        await gate;
+        if (failureKind !== 'file') throw new Error('runtime recovery failed');
+        runtime = previous.llm;
+      },
+    }));
+    const failure = expect(failing).rejects.toMatchObject({ name: 'ConfigRecoveryError' });
+    const prepareQueued = vi.fn((current: typeof owner.current) => ({ ...current, name: 'must not commit' }));
+    const queued = expect(owner.update(prepareQueued, 'configuration-only')).rejects.toThrow('unreconciled');
+    try {
+      await rollingBack;
+      release();
+      await failure;
+      await queued;
+      expect(prepareQueued).not.toHaveBeenCalled();
+      expect(owner.current).toEqual(initial);
+      expect(runtime?.apiKey).toBe(failureKind === 'file' ? 'old-key' : 'candidate-key');
+      const persisted = await fs.readFile(path, 'utf8');
+      if (failureKind === 'runtime') expect(persisted).toBe(before);
+      else expect(JSON.parse(persisted).llm.apiKey).toBe('candidate-key');
+      const prepareLater = vi.fn((current: typeof owner.current) => ({ ...current, name: 'later update' }));
+      await expect(owner.update(prepareLater, 'configuration-only')).rejects.toThrow('restart the daemon');
+      expect(prepareLater).not.toHaveBeenCalled();
+      await expect(files.saveConfig(initial)).rejects.toThrow('explicit activation');
+      expect(await fs.readFile(path, 'utf8')).toBe(persisted);
+      if (failureKind !== 'runtime') {
+        const backup = (await fs.readdir(directory)).find(name => name.endsWith('.rollback'));
+        expect(backup).toBeDefined();
+        expect(await fs.readFile(join(directory, backup!), 'utf8')).toBe(before);
+      }
+      await owner.close();
+      const restarted = await DkgConfigStore.open(files, () => files.loadConfig());
+      try {
+        runtime = restarted.current.llm;
+        await restarted.update(current => ({ ...current, name: 'after restart' }), 'configuration-only');
+        expect(restarted.current.name).toBe('after restart');
+        expect(JSON.parse(await fs.readFile(path, 'utf8'))).toEqual(restarted.current);
+      } finally { await restarted.close(); }
+    } finally {
+      release();
+      await Promise.allSettled([failing, failure, queued]);
+      await owner.close();
+    }
   });
 
   it.each(['ordinary', 'transactional'] as const)(
