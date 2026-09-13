@@ -121,6 +121,26 @@ describe('findCorePeerIds', () => {
     expect(calls).toBeLessThanOrEqual(3);
   });
 
+  it('does not start registry or membership work after cancellation', async () => {
+    const reason = new Error('repair already expired');
+    const controller = new AbortController();
+    controller.abort(reason);
+    const findAgents = vi.fn(async () => [{ peerId: 'core-a', nodeRole: 'core' }]);
+    const classifyMembership = vi.fn(async () => 'member' as const);
+
+    await expect(findCorePeerIds({
+      findAgents,
+      selfPeerId: 'self',
+      maxCandidates: 20,
+      eligibilityConcurrency: 3,
+      signal: controller.signal,
+      membershipPolicy: 'proof-required',
+      classifyMembership,
+    })).rejects.toBe(reason);
+    expect(findAgents).not.toHaveBeenCalled();
+    expect(classifyMembership).not.toHaveBeenCalled();
+  });
+
   it('makes legacy warm and proof-required unknown-evidence policies explicit', () => {
     expect(acceptsCoreMembership('member', 'warm-compatible')).toBe(true);
     expect(acceptsCoreMembership('unavailable', 'warm-compatible')).toBe(true);

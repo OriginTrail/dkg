@@ -73,18 +73,34 @@ export async function findCorePeerIds(options: {
   }
   const abortReason = () => options.signal?.reason
     ?? new DOMException('Core discovery aborted', 'AbortError');
-  const awaitWithAbort = async <T>(pending: Promise<T>): Promise<T> => {
-    if (!options.signal) return pending;
-    if (options.signal.aborted) throw abortReason();
+  const awaitWithAbort = async <T>(start: () => Promise<T>): Promise<T> => {
+    const signal = options.signal;
+    if (signal?.aborted) throw abortReason();
+    const pending = start();
+    if (!signal) return pending;
     return new Promise<T>((resolve, reject) => {
-      const onAbort = () => reject(abortReason());
-      options.signal!.addEventListener('abort', onAbort, { once: true });
-      pending.then(resolve, reject).finally(() => {
-        options.signal!.removeEventListener('abort', onAbort);
-      });
+      const cleanup = () => signal.removeEventListener('abort', onAbort);
+      const onAbort = () => {
+        cleanup();
+        reject(abortReason());
+      };
+      pending.then(
+        (value) => {
+          cleanup();
+          resolve(value);
+        },
+        (error) => {
+          cleanup();
+          reject(error);
+        },
+      );
+      signal.addEventListener('abort', onAbort, { once: true });
+      // Covers an injected operation that synchronously aborts before it
+      // returns its promise and before the listener above can be installed.
+      if (signal.aborted) onAbort();
     });
   };
-  const agents = await awaitWithAbort(options.findAgents({
+  const agents = await awaitWithAbort(() => options.findAgents({
     signal: options.signal,
     limit: options.maxCandidates,
   }));
@@ -94,7 +110,7 @@ export async function findCorePeerIds(options: {
     options.eligibilityConcurrency,
     async (agent) => ({
       agent,
-      evidence: await awaitWithAbort(options.classifyMembership(agent, options.signal)),
+      evidence: await awaitWithAbort(() => options.classifyMembership(agent, options.signal)),
     }),
   );
   const eligible = classified
