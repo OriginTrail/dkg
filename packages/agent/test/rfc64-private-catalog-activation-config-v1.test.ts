@@ -410,14 +410,16 @@ describe('RFC-64 private catalog activation', () => {
   });
 
   it('preserves pre-activation Track-2 authoring while keeping ordinary sync legacy', () => {
-    const disabled = Object.freeze({
+    const disabled = resolveRfc64CatalogActivationInputV1(Object.freeze({
       enabled: false,
       selectedContextGraphs: Object.freeze([]),
+      selectedPublicContextGraphs: Object.freeze([]),
+      selectedPrivateContextGraphs: Object.freeze([]),
       rollout: undefined,
-    });
+    }) as never, chainIdentity);
     expect(rfc64CatalogRolloutModeForContextGraphV1(disabled, PUBLIC_CG)).toBe('legacy');
     expect(rfc64LegacySyncAuthorityActiveForContextGraphV1(disabled, PUBLIC_CG)).toBe(true);
-    expect(resolveRfc64CatalogAuthorityDecisionV1(disabled as never, PUBLIC_CG))
+    expect(resolveRfc64CatalogAuthorityDecisionV1(disabled, PUBLIC_CG))
       .toMatchObject({ reconciliationLane: 'catalog-apply', authoringAllowed: true });
   });
 
