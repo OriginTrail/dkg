@@ -185,7 +185,7 @@ describe('admitRequest — wiring (503/Retry-After/CORS/exempt) + release on res
     expect(admitRequest(limiter, 'POST', '/api/query', mockRes(), null).admitted).toBe(true); // recovered
   });
 
-  it('exempts OPTIONS (any path) and GET/HEAD liveness/doc/SSE paths even at capacity', () => {
+  it('exempts OPTIONS, cheap liveness/doc/SSE reads, and health HEAD at capacity', () => {
     const limiter = new InFlightLimiter(1);
     expect(limiter.tryAcquire()).toBe(true); // saturate
 
@@ -193,7 +193,7 @@ describe('admitRequest — wiring (503/Retry-After/CORS/exempt) + release on res
       ['OPTIONS', '/api/query'], // preflight, any path
       ['GET', '/api/status'],
       ['HEAD', '/api/status'],
-      ['GET', '/api/chain/rpc-health'],
+      ['HEAD', '/api/chain/rpc-health'],
       ['GET', '/api/events'], // SSE — must not hold a slot for the connection lifetime
       ['GET', '/.well-known/skill.md'],
       ['GET', '/.well-known/skill-importer.md'],
@@ -205,6 +205,16 @@ describe('admitRequest — wiring (503/Retry-After/CORS/exempt) + release on res
     }
     expect(limiter.inFlight).toBe(1); // untouched by exempt traffic
     expect(limiter.rejectedTotal).toBe(0); // exempt traffic is never counted as shed
+  });
+
+  it('admits RPC health GET through the bounded in-flight gate', () => {
+    const limiter = new InFlightLimiter(1);
+    expect(limiter.tryAcquire()).toBe(true);
+    const res = mockRes();
+
+    expect(admitRequest(limiter, 'GET', '/api/chain/rpc-health', res, null).admitted).toBe(false);
+    expect(res.statusCode).toBe(503);
+    expect(limiter.rejectedTotal).toBe(1);
   });
 
   it('is method-aware: a non-GET/HEAD to an exempt path is NOT exempt (would run work outside the cap)', () => {

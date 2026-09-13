@@ -134,6 +134,8 @@ export interface ProducerQuiescentTeardownSteps {
   closeCatchupRunner: () => Promise<void>;
   /** The only thing that ends parent-side sync work. */
   stopAgent: () => Promise<void>;
+  /** Final RPC-usage drain after every RPC-producing subsystem is quiescent. */
+  stopRpcUsageTelemetry: () => Promise<void>;
   /** Final flush + provider shutdown. Nothing after this can be measured. */
   stopTelemetry: () => Promise<void>;
 }
@@ -160,6 +162,7 @@ const TEARDOWN_ORDER = [
   'stopPromoteWorker',
   'closeCatchupRunner',
   'stopAgent',
+  'stopRpcUsageTelemetry',
   'stopTelemetry',
 ] as const satisfies readonly TeardownStepName[];
 
@@ -338,6 +341,7 @@ export interface ProducerQuiescentTeardownDeps {
   /** `close()` on the catch-up runner, i.e. `worker.terminate()`. */
   closeCatchupRunner: () => Promise<void>;
   stopAgent: () => Promise<void>;
+  stopRpcUsageTelemetry: () => void | Promise<void>;
   stopTelemetry: () => Promise<void>;
   log: (message: string) => void;
   /** Defaults to {@link CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS}. */
@@ -361,6 +365,7 @@ export function buildProducerQuiescentTeardownSteps(
     stopPromoteWorker: () => deps.stopPromoteWorker(),
     closeCatchupRunner: () => deps.closeCatchupRunner(),
     stopAgent: () => deps.stopAgent(),
+    stopRpcUsageTelemetry: async () => { await deps.stopRpcUsageTelemetry(); },
     stopTelemetry: () => deps.stopTelemetry(),
   };
 }

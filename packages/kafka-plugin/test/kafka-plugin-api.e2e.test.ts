@@ -527,7 +527,11 @@ describe('kafka-plugin live daemon E2E — extension', () => {
   }, 20_000);
   it('POST with extension fields publishes a KA carrying both core + extension keys', async () => {
     const res = await authed(daemon!, 'POST', '/api/kafka/streams/register', EXT_BODY);
-    expect(res.status).toBe(202);
+    if (res.status !== 202) {
+      const txt = await res.text();
+      const log = await readFile(join(daemon!.home, 'daemon-stdio.log'), 'utf-8').catch(() => '<no log>');
+      throw new Error(`POST extension register: ${res.status} ${txt}\n--- daemon log tail ---\n${log.split('\n').slice(-60).join('\n')}`);
+    }
     const body = await res.json();
     expect(typeof body.captureID).toBe('string');
     const final = await pollUntilFinalized(daemon!, '/api/kafka/streams', body.captureID);

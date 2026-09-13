@@ -95,7 +95,7 @@
 /* ----- S4 Approve modal (C2) ----- */
 .v10-pca-approve-checklist { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
 .v10-pca-approve-self-row { display: flex; align-items: center; gap: 8px; }
-.v10-pca-approve-self-row .v10-pca-wallet-row { flex: 1; }
+.v10-pca-approve-self-row .v10-wallet-row { flex: 1; }
 .v10-pca-approve-counts { font-size: 11px; color: var(--text-secondary); margin: 8px 0; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .v10-pca-approve-results { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
 .v10-pca-approve-summary { font-size: 12px; font-weight: 600; color: var(--text-primary); margin: 4px 0 0; }
@@ -117,7 +117,7 @@
   margin-top: 10px;
 }
 .v10-pca-agent-row { display: flex; }
-.v10-pca-agent-row .v10-pca-wallet-row { flex: 1; }
+.v10-pca-agent-row .v10-wallet-row { flex: 1; }
 .v10-pca-agent-confirm {
   display: inline-flex;
   align-items: center;
@@ -126,4 +126,3 @@
   font-size: 11px;
   color: var(--text-warning);
 }
-

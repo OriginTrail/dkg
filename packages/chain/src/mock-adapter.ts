@@ -32,11 +32,14 @@ import type {
   ShardingTableNode,
   PcaContracts,
   PcaRpcMethod,
+  BrowserWalletRpcMethod,
+  IdentityWalletContracts,
   PublishTransactionResolution,
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
 } from './chain-adapter.js';
+import type { RandomSamplingAvailability } from './random-sampling-availability.js';
 import { emptyRpcUsageWindow, type RpcUsageWindow } from './rpc-usage.js';
 import {
   NoEligibleContextGraphError,
@@ -1115,7 +1118,18 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
-  async requestPublishingConvictionRpc(method: PcaRpcMethod, _params: unknown[] = []): Promise<unknown> {
+  async getIdentityWalletContracts(): Promise<IdentityWalletContracts> {
+    return {
+      profile: ethers.getAddress('0x' + '33'.repeat(20)),
+      identity: ethers.getAddress('0x' + '44'.repeat(20)),
+      storage: ethers.getAddress('0x' + '55'.repeat(20)),
+      chainId: this.chainId,
+      rpcUrls: [],
+      walletRpcUrls: [],
+    };
+  }
+
+  async requestBrowserWalletRpc(method: BrowserWalletRpcMethod, _params: unknown[] = []): Promise<unknown> {
     switch (method) {
       case 'eth_chainId': {
         const tail = this.chainId.includes(':') ? this.chainId.split(':').pop()! : this.chainId;
@@ -1131,6 +1145,11 @@ export class MockChainAdapter implements ChainAdapter {
       case 'eth_getTransactionByHash':
         return null;
     }
+  }
+
+  /** @deprecated Use the feature-neutral browser-wallet RPC bridge. */
+  async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
+    return this.requestBrowserWalletRpc(method, params);
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK
@@ -1526,6 +1545,17 @@ export class MockChainAdapter implements ChainAdapter {
 
   isRandomSamplingReady(): boolean {
     return true;
+  }
+
+  async resolveRandomSamplingAvailability(identityId: bigint): Promise<RandomSamplingAvailability> {
+    try {
+      if (!this.isRandomSamplingReady()) {
+        return { kind: 'unavailable', reason: 'contracts_not_deployed' };
+      }
+      return { kind: 'available', member: await this.isShardingTableMember(identityId) };
+    } catch (error) {
+      return { kind: 'indeterminate', error };
+    }
   }
 
   async verify(params: VerifyParams): Promise<TxResult> {

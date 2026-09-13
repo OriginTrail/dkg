@@ -7,6 +7,7 @@ import {
   resolveContextGraphAuthorityHistory,
 } from '../src/context-graph-authority-history.js';
 import {
+  contextGraphAuthorityIndexStateRevision,
   createContextGraphAuthorityIndexCheckpoint,
   normalizeContextGraphAuthorityIndexCheckpoint,
   type ContextGraphAuthorityIndexStore,
@@ -107,6 +108,39 @@ const validState = Object.freeze({
 });
 
 describe('contract-wide Context Graph authority index reducer', () => {
+  it('changes the opaque revision for every authority and generation field', () => {
+    const baseline = contextGraphAuthorityIndexStateRevision(validState);
+    const mutations: ReadonlyArray<Readonly<[
+      string,
+      Partial<ContextGraphAuthorityIndexState>,
+    ]>> = [
+      ['context graph id', { contextGraphId: '10' }],
+      ['owner', { owner: NEXT_OWNER }],
+      ['active flag', { active: false }],
+      ['access policy', { accessPolicy: 0 }],
+      ['publish policy', { publishPolicy: 1 }],
+      ['publish authority', { publishAuthority: NEXT_OWNER }],
+      ['publish authority account', { publishAuthorityAccountId: '8' }],
+      ['participant roster', { participantAgents: [OWNER, NEXT_OWNER] }],
+      ['name hash', { nameHash: NAME_10 }],
+      ['ownership era', { ownershipEra: 1 }],
+      ['policy version', { policyVersion: 1 }],
+      ['roster version', { rosterVersion: 1 }],
+      ['source block number', { sourceBlockNumber: 11 }],
+      ['source block hash', { sourceBlockHash: blockHash(11) }],
+    ];
+    for (const [label, mutation] of mutations) {
+      expect(
+        contextGraphAuthorityIndexStateRevision({ ...validState, ...mutation }),
+        label,
+      ).not.toBe(baseline);
+    }
+    expect(contextGraphAuthorityIndexStateRevision({
+      ...validState,
+      participantAgents: [...validState.participantAgents],
+    })).toBe(baseline);
+  });
+
   it('groups unsorted logs by graph and preserves the authority generation semantics', () => {
     const result = reduceContextGraphAuthorityIndexPage({
       deploymentBlockNumber: 10,

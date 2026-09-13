@@ -21,6 +21,7 @@ import {
   type SyncCheckpointScope,
 } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { UNRESTRICTED_SYNC_WORK, createSyncWorkAdmission } from '../src/sync/work-admission.js';
 import {
   createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
@@ -53,6 +54,7 @@ type FetchArgs = {
   requesterScope?: SyncCheckpointScope;
   maxAcceptedQuads?: number;
   maxAcceptedHeapBytesEstimate?: number;
+  workAdmission?: typeof UNRESTRICTED_SYNC_WORK;
 };
 
 const EXACT_UAL_7 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
@@ -276,6 +278,7 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
       requesterScope: args.requesterScope,
       maxAcceptedQuads: args.maxAcceptedQuads,
       maxAcceptedHeapBytesEstimate: args.maxAcceptedHeapBytesEstimate,
+      workAdmission: args.workAdmission,
     },
   );
 }
@@ -342,6 +345,67 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(firstResult.quads).toEqual([]);
     } finally {
       await agent.stop().catch(() => {});
+    }
+  });
+
+  it('coalesces explicit unrestricted policies but isolates distinct budget owners', async () => {
+    const response = deferred<Uint8Array>();
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => {
+      sends += 1;
+      return response.promise;
+    });
+
+    try {
+      const first = fetchPages(agent, { workAdmission: UNRESTRICTED_SYNC_WORK });
+      await flushMicrotasks();
+      const second = fetchPages(agent, { workAdmission: UNRESTRICTED_SYNC_WORK });
+      await flushMicrotasks();
+      expect(sends).toBe(1);
+
+      const isolatedA = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000),
+      });
+      const isolatedB = fetchPages(agent, {
+        workAdmission: createSyncWorkAdmission(() => 1_000),
+      });
+      await flushMicrotasks();
+      expect(sends).toBe(3);
+
+      response.resolve(new Uint8Array());
+      await Promise.all([first, second, isolatedA, isolatedB]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it.each([
+    { name: 'different custom keys', secondKey: 'lane-b', expectedSends: 2 },
+    { name: 'separate policies with the same custom key', secondKey: 'lane-a', expectedSends: 1 },
+  ])('preserves request ownership for $name', async ({ secondKey, expectedSends }) => {
+    const responses = [deferred<Uint8Array>(), deferred<Uint8Array>()];
+    let sends = 0;
+    const agent = await createAgentWithSend(async () => responses[sends++]!.promise);
+    try {
+      const first = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: 'lane-a' }) });
+      await flushMicrotasks();
+      const second = fetchPages(agent, { workAdmission: createSyncWorkAdmission(() => 1_000, { sharing: 'coalescible', key: secondKey }) });
+      let secondSettled = false;
+      void second.then(() => { secondSettled = true; });
+      await flushMicrotasks();
+      expect(sends).toBe(expectedSends);
+      responses[0]!.resolve(new Uint8Array());
+      const firstResult = await first;
+      await flushMicrotasks();
+      expect(secondSettled).toBe(expectedSends === 1);
+      responses[1]!.resolve(new Uint8Array());
+      const secondResult = await second;
+      expect(firstResult === secondResult).toBe(expectedSends === 1);
+      expect(firstResult.quads).toEqual([]);
+      expect(secondResult.quads).toEqual([]);
+    } finally {
+      for (const response of responses) response.resolve(new Uint8Array());
+      await agent.stop();
     }
   });
 
@@ -1603,14 +1667,16 @@ describe('DKGAgent sync fetch coalescing', () => {
     // aggregate preserves the documented identity
     // `replayPhaseBytesReceived + snapshotPhaseBytesReceived === bytesReceived`.
     const peerARound = {
-      swmCoverage: peerACoverage(),
+      localYield: true as const,
       snapshotPlaneIncomplete: 1,
+      swmCoverage: peerACoverage(),
       replayPhaseBytesReceived: 4_096,
       snapshotPhaseBytesReceived: 65_536,
       bytesReceived: 69_632,
     };
     const peerBRound = {
       swmCoverage: peerBCoverage(),
+      localYield: true as const,
       snapshotPlaneIncomplete: 2,
       replayPhaseBytesReceived: 1_024,
       snapshotPhaseBytesReceived: 16_384,
@@ -1682,7 +1748,8 @@ describe('DKGAgent sync fetch coalescing', () => {
 
       // SUMMATION across both peers. Each expected value differs from both
       // operands, so neither `=` (last write) nor a dropped forward can produce it.
-      expect(swm.snapshotPlaneIncomplete).toBe(3); // 1 + 2
+      expect(swm.localYield).toBe(true);
+      expect(swm.snapshotPlaneIncomplete).toBe(3);
       expect(swm.replayPhaseBytesReceived).toBe(5_120); // 4_096 + 1_024
       expect(swm.snapshotPhaseBytesReceived).toBe(81_920); // 65_536 + 16_384
       // The documented split identity has to survive aggregation, not just hold
@@ -1774,7 +1841,13 @@ describe('DKGAgent sync fetch coalescing', () => {
         return {
           ...cleanSharedMemorySyncResult(),
           completedPhases: 1,
-          ...(resolved < 3 ? { failedPhases: 1, snapshotPlaneIncomplete: 1 } : {}),
+          ...(resolved < 3
+            ? {
+              failedPhases: 1,
+              localYield: true as const,
+              snapshotPlaneIncomplete: 1,
+            }
+            : {}),
           swmCoverage: coverage(resolved),
         };
       };

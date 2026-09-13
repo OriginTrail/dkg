@@ -22,7 +22,7 @@ import { StatStrip } from '../../components/ContextGraphPrimitives.js';
 import { FundingSection } from './FundingSection.js';
 import { PublishingWalletsSection } from './PublishingWalletsSection.js';
 import { LifecycleSection } from './LifecycleSection.js';
-import { eqAddress } from '../../pca/address.js';
+import { eqAddress } from '../../web3/address.js';
 import { resolvePrimaryWalletState, type PcaOwnerAccess } from '../../pca/ownerAccess.js';
 import { usePcaOwnerAccess } from '../../pca/usePcaOwnerAccess.js';
 
@@ -195,7 +195,7 @@ function DetailBody({
 
       <div className="v10-modal-tip" role="status">
         {walletSurfaceCopy}
-        {connectedWallet ? <WalletPill /> : <WalletConnectControl />}
+        {connectedWallet ? <WalletPill /> : <WalletConnectControl testId="pca-wallet-connect" />}
       </div>
 
       {deviceProgress.steps.length > 0 && (

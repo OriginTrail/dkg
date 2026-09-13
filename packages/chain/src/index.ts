@@ -1,4 +1,6 @@
 export * from './chain-adapter.js';
+export { assertContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
 export {
   type ContextGraphAuthorityHistoryCheckpointV1,
   type ContextGraphAuthorityHistoryState,
@@ -133,6 +135,7 @@ export {
 // daemon's rpc_usage log emission). Endpoint-slot normalization is shared with
 // downstream formatters so producer and consumer use one bounded vocabulary.
 export {
+  createRpcUsageRecorder,
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
   RPC_ENDPOINT_SLOT_LABELS,
@@ -143,8 +146,34 @@ export {
   type RpcUsageAttribution,
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
+  type RpcUsageRecorder,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+export {
+  activeRpcRequestContext,
+  activeRpcRequestAbortSignal,
+  boundedRetryFetchRequest,
+  createRpcRequestProvider,
+  withOwnedRpcRequestContext,
+  withRpcRequestContext,
+  withRpcRequestTimeout,
+  type RpcRequestClass,
+  type RpcRequestAdmission,
+  type RpcRequestContext,
+  type RpcRequestContextInput,
+  type RpcRequestProviderConfig,
+} from './rpc-request-transport.js';
+export {
+  DEFAULT_RPC_REQUEST_GOVERNOR_POLICY,
+  RpcRequestGovernor,
+  RpcRequestGovernorQueueFullError,
+  isRpcRequestGovernorQueueFullError,
+  resolveRpcRequestGovernorPolicy,
+  type RpcRequestGovernorPolicy,
+  type RpcRequestGovernorPolicyInput,
+  type RpcRequestGovernorClock,
+  type RpcRequestGovernorWindow,
+} from './rpc-request-governor.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
@@ -152,6 +181,8 @@ export {
   type EVMAdapterConfig,
   decodeEvmError,
   enrichEvmError,
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   isKnownTransactionError,
   resolveRpcUrls,
@@ -162,6 +193,7 @@ export {
   isNoFundedPublisherWalletError,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   type PublisherWalletBalance,
+  type RpcRetryDisposition,
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
@@ -204,4 +236,12 @@ export {
   waitForTransactionReceiptWithFailover,
   type TransactionReceiptEndpoint,
   type TransactionReceiptWaitOptions,
-} from './rpc-failover-client.js';
+} from './transaction-receipt-failover.js';
+
+export {
+  readRandomSamplingAvailability,
+  type RandomSamplingAvailability,
+  type RandomSamplingAvailabilityReader,
+  type RandomSamplingAvailabilityResolver,
+  type LegacyRandomSamplingAvailabilityReader,
+} from './random-sampling-availability.js';

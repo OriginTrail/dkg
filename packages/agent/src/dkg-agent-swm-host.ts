@@ -444,7 +444,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -2602,12 +2601,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // authoritative. Clone-based callers still let the canonical setter own
     // the transition and avoid an eager decision against the old row.
     if (this.subscribedContextGraphs.get(localCgId) === sub) {
-      void this.reconcileRfc64CatalogResponsibilityV1(localCgId).catch((error) => {
-        this.log.warn(
-          createOperationContext('system'),
-          `RFC-64 responsibility resolution failed after binding "${localCgId}": ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(
+        localCgId,
+      );
     }
     if (!transition.onChainIdChanged) return;
     // The bound on-chain id actually CHANGED (repair / recreate / re-register).

@@ -55,6 +55,7 @@ export default defineConfig({
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
+          'test/daemon-identity-wallet-routes.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
@@ -63,6 +64,7 @@ export default defineConfig({
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
+          'test/context-graph-readiness-swm-shortfall.test.ts',
           'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
           // rendering (in-process, mocked ApiClient). No hardhat/daemon.

@@ -1,5 +1,9 @@
 import type { ChainEventDispatchContext } from './chain-event-dispatch-context.js';
-import type { ChainAdapter, ChainEvent } from '@origintrail-official/dkg-chain';
+import {
+  withRpcRequestContext,
+  type ChainAdapter,
+  type ChainEvent,
+} from '@origintrail-official/dkg-chain';
 import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
@@ -104,6 +108,7 @@ export interface ChainEventPollerConfig {
 
 /** One admitted generation owns all work that stop/restart must retire. */
 interface ChainEventPollGeneration {
+  /** Owns every chain request issued by this generation; aborted when admission closes. */
   readonly controller: AbortController;
   timer: ReturnType<typeof setInterval> | null;
   active: Promise<void> | null;
@@ -236,7 +241,10 @@ export class ChainEventPoller {
     }
     // Publish retirement before abort listeners can synchronously restart us.
     if (generation.active) this.retirement = generation.active.then(() => {}, () => {});
-    generation.controller.abort();
+    generation.controller.abort(new DOMException(
+      'Chain event poller is stopping',
+      'AbortError',
+    ));
   }
 
   /** Cancel admission, then physically drain the current poll or startup restore. */
@@ -322,7 +330,13 @@ export class ChainEventPoller {
   }
 
   private async poll(context: ChainEventDispatchContext): Promise<void> {
-    await this.laneRunner.poll(context);
+    // Every chain request this poll issues - lane scans and the domain
+    // callbacks they dispatch - is background work under the shared RPC
+    // governor, cancelled by the admitted generation's signal.
+    await withRpcRequestContext(
+      { requestClass: 'background', signal: context.signal },
+      () => this.laneRunner.poll(context),
+    );
   }
 
   private async handleBatchCreated(event: ChainEvent, context: ChainEventDispatchContext): Promise<void> {

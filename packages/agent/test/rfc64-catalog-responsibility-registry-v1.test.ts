@@ -62,6 +62,29 @@ describe('Rfc64CatalogResponsibilityRegistryV1', () => {
     expect(registry.snapshot()).toEqual([]);
   });
 
+  it('reports lifecycle responsibility without execution-plan arbitration', () => {
+    const registry = new Rfc64CatalogResponsibilityRegistryV1();
+
+    const transition = registry.setResponsibility('manifest-cg', 'core-public');
+    registry.setResponsibility('ordinary-cg', 'core-public');
+
+    expect(transition).toMatchObject({
+      changed: true,
+      previous: { responsible: false },
+      next: { responsible: true, active: true },
+    });
+    expect(registry.snapshot()).toEqual([
+      expect.objectContaining({
+        contextGraphId: 'manifest-cg',
+        responsible: true,
+      }),
+      expect.objectContaining({
+        contextGraphId: 'ordinary-cg',
+        responsible: true,
+      }),
+    ]);
+  });
+
   it('derives responsibility only from verified role and access facts', () => {
     expect(resolveRfc64CatalogResponsibilityReasonV1({
       nodeRole: 'edge',
@@ -167,6 +190,42 @@ describe('Rfc64CatalogResponsibilityRegistryV1', () => {
       mode: 'legacy',
       selectionSource: 'operator-override',
     });
+  });
+
+  it('bounds a canary while keeping newly discovered responsibilities on legacy', () => {
+    const registry = new Rfc64CatalogResponsibilityRegistryV1({
+      defaultMode: 'legacy',
+      contextGraphModes: { canary: 'shadow' },
+    });
+
+    registry.setResponsibility('canary', 'edge-subscription');
+    registry.setResponsibility('existing-unlisted', 'edge-subscription');
+    registry.setResponsibility('later-discovered', 'core-public');
+
+    expect(registry.read('canary')).toMatchObject({
+      active: true,
+      mode: 'shadow',
+      selectionSource: 'operator-override',
+    });
+    for (const contextGraphId of ['existing-unlisted', 'later-discovered']) {
+      expect(registry.read(contextGraphId)).toMatchObject({
+        active: true,
+        mode: 'legacy',
+        selectionSource: 'operator-override',
+      });
+    }
+  });
+
+  it('projects live responsibility modes inherited from a shadow default', () => {
+    const registry = new Rfc64CatalogResponsibilityRegistryV1({ defaultMode: 'shadow' });
+
+    registry.setResponsibility('discovered', 'edge-subscription');
+    expect(registry.read('discovered')).toMatchObject({
+      responsible: true,
+      mode: 'shadow',
+    });
+    registry.setResponsibility('discovered', null);
+    expect(registry.snapshot()).toEqual([]);
   });
 
   it('makes the kill switch visible without silently changing the desired mode', () => {

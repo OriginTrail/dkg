@@ -148,7 +148,7 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
-import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
+import { createDaemonRpcRuntime } from './rpc-runtime.js';
 import {
   resolveOtlpLogEndpoint,
   type ActiveLogExporterMode,
@@ -165,14 +165,17 @@ import {
 } from './log-lifecycle.js';
 import { startDaemonLogFileWriter } from './daemon-log-file-writer.js';
 import {
+  CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
 // The scan policy lived here until GH#2323; the implementation moved to its
 // own module, but the public import path stays valid for existing consumers.
 export {
+  CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
   CHAIN_FULL_SCAN_EVERY,
+  CHAIN_REPAIR_AUDIT_EVERY_TICKS,
   chainDiscoveryScanOptions,
   createChainDiscoveryScanRunner,
 } from './chain-discovery-scan.js';
@@ -1346,32 +1349,23 @@ async function runDaemonInnerWithStartupOwnership(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
-  const unifiedRfc64Disabled = config.rfc64Catalog?.enabled === false;
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
-    unifiedRfc64Disabled
-      ? {
-          rfc64Catalog: config.rfc64Catalog,
-          // The unified rollback is authoritative at the daemon boundary too.
-          // Do not let stale deprecated controls extend sync scope, fail
-          // validation, or reach the agent while the replacement is disabled.
-          rfc64PublicCatalog: undefined,
-        }
-      : config,
+    config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
   );
   const rfc64Catalog = rfc64CatalogActivations.catalog;
   const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
+  const rfc64CatalogActivationState = rfc64CatalogActivations.activationState;
   const rfc64RollbackTimestamp = new Date().toISOString();
-  const explicitDisabled = unifiedRfc64Disabled
-    || (config.rfc64Catalog === undefined && config.rfc64PublicCatalog?.enabled === false);
-  if (explicitDisabled) {
+  if (rfc64CatalogActivationState.execution.mode === 'compatibility-rollback') {
     log(
       `[rfc64-catalog-rollback] WARNING source=operator-override reason=deprecated-enabled-false `
       + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs; `
       + 'RFC-64 default correctness is disabled for this compatibility release',
     );
   }
-  const emergencyModes = Object.entries(rfc64Catalog.rollout.contextGraphModes)
+  const effectiveRfc64Rollout = rfc64CatalogActivationState.execution.rollout;
+  const emergencyModes = Object.entries(effectiveRfc64Rollout.contextGraphModes)
     .filter(([, mode]) => mode === 'legacy' || mode === 'shadow')
     .sort(([left], [right]) => left.localeCompare(right));
   if (emergencyModes.length > 0) {
@@ -1380,7 +1374,7 @@ async function runDaemonInnerWithStartupOwnership(
       + `timestamp=${rfc64RollbackTimestamp} affected=${JSON.stringify(emergencyModes)}`,
     );
   }
-  if (rfc64Catalog.rollout.killSwitch) {
+  if (effectiveRfc64Rollout.killSwitch) {
     log(
       `[rfc64-catalog-rollback] WARNING source=kill-switch reason=global-emergency-stop `
       + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs`,
@@ -1589,7 +1583,11 @@ async function runDaemonInnerWithStartupOwnership(
   // Field-level merge of CLI config + network/<env>.json#chain.
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
-  const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
+  // The composition root creates exactly one budget plus direct-route usage
+  // tracker, and derives every adapter/route capability from that object.
+  const daemonRpcRuntime = createDaemonRpcRuntime(chainBase);
+  const rpcRequestGovernor = daemonRpcRuntime?.governor;
+  const runtimeEvmChainConfig = daemonRpcRuntime?.chainConfig;
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC
@@ -1827,19 +1825,9 @@ async function runDaemonInnerWithStartupOwnership(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
-    // The agent owns authoritative activation against the chain adapter it
-    // actually constructed. This daemon-side resolved value is only a
-    // fail-fast/status preview and must not become a second runtime contract.
-    rfc64PublicCatalogActivation: config.rfc64PublicCatalog === undefined
-      ? undefined
-      : rfc64PublicCatalog.enabled
-        ? config.rfc64PublicCatalog
-        : { enabled: false },
-    rfc64CatalogActivation: config.rfc64Catalog === undefined
-      ? undefined
-      : rfc64Catalog.enabled
-        ? config.rfc64Catalog
-        : { enabled: false },
+    // Forward the structurally validated resolved snapshot. The agent consumes exactly the
+    // same precedence/fallback decision used for sync scope and status.
+    rfc64CatalogActivations,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     contextGraphSubscriptionRehydrationEnabled,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
@@ -2471,15 +2459,13 @@ async function runDaemonInnerWithStartupOwnership(
 
   // Run an initial chain scan for context graphs we might not know about,
   // then repeat every 30 minutes as a fallback discovery mechanism.
-  const CHAIN_SCAN_INTERVAL_MS = 30 * 60 * 1000;
   const runChainDiscoveryScan = createChainDiscoveryScanRunner({
     agent,
     log,
     pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+    intervalMs: CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
   });
-  setTimeout(runChainDiscoveryScan, 15_000);
-  const chainScanTimer = setInterval(runChainDiscoveryScan, CHAIN_SCAN_INTERVAL_MS);
-  if (chainScanTimer.unref) chainScanTimer.unref();
+  runChainDiscoveryScan.schedule(15_000);
 
   // Periodic peer health ping (every 2 minutes)
   const PING_INTERVAL_MS = 2 * 60 * 1000;
@@ -2997,7 +2983,11 @@ async function runDaemonInnerWithStartupOwnership(
       drainRpcUsage: () => mergeRpcUsageWindows(
         agent.drainRpcUsage(),
         publisherState.runtime?.drainRpcUsage(),
+        daemonRpcRuntime?.drainRouteRpcUsage(),
       ),
+      ...(rpcRequestGovernor === undefined
+        ? {}
+        : { drainRpcRequestGovernor: () => rpcRequestGovernor.drainWindow() }),
     },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
     chainId: chainBase?.chainId ?? config.chain?.chainId,
@@ -3413,7 +3403,6 @@ async function runDaemonInnerWithStartupOwnership(
     config.rateLimit?.requestsPerMinute ?? 120,
     config.rateLimit?.exempt ?? [
       "/api/status",
-      "/api/chain/rpc-health",
       "/.well-known/skill.md",
     ],
   );
@@ -3643,6 +3632,7 @@ async function runDaemonInnerWithStartupOwnership(
         publisherState,
         config,
         rfc64Catalog,
+        rfc64CatalogActivationState,
         rfc64PublicCatalog,
         startedAt,
         dashDb,
@@ -3666,6 +3656,7 @@ async function runDaemonInnerWithStartupOwnership(
         routePlugins,
         admission: admissionStats,
         localLlm,
+        routeRpcTransport: daemonRpcRuntime?.routeTransport,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3772,15 +3763,13 @@ async function runDaemonInnerWithStartupOwnership(
     const cleanup = (async () => {
       try {
         if (updateInterval) clearInterval(updateInterval);
-        clearInterval(chainScanTimer);
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        await runChainDiscoveryScan.close().catch((err: unknown) => {
+          log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
+        });
         logVolumePruner.stop();
         backpressureMonitor.stop();
-        // Clears the timer AND performs the final best-effort drain (BEFORE
-        // telemetry stops), so a partial window still reaches Loki — keeps
-        // log-derived request totals exact across process lifecycles.
-        rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector?.stop();
         natStatusWatcherStop?.();
@@ -3825,6 +3814,9 @@ async function runDaemonInnerWithStartupOwnership(
                 );
             },
             stopAgent: () => agent.stop(),
+            // Clears the timer and drains only after HTTP, catch-up, publisher,
+            // and agent RPC producers have stopped, while logging is still live.
+            stopRpcUsageTelemetry: () => rpcUsageTelemetry.stop(),
             // Detaches the sink, stops its exporter, and shuts down the OTel SDK.
             stopTelemetry: stopDaemonLogging,
             log,

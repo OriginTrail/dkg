@@ -124,6 +124,7 @@ export class ChainEventLaneRunner {
       signal.throwIfAborted();
       scanResults.push(await this.scanLane(lane, head, now, context));
     }
+    signal.throwIfAborted();
     await this.persistScanResults(scanResults, activeLanes);
   }
 

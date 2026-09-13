@@ -41,7 +41,7 @@
  * offline-mode users will hit surprises on chain switch. The test stays
  * red until parity is restored or a documented exemption is added.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { NoChainAdapter } from '../src/no-chain-adapter.js';
@@ -78,6 +78,10 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   'requireChronos', // Protected optional-boot-binding accessor; the mock has no Hub registry.
   'loadHubContractBinding', // TS-private physical loader used by subset and full initialization.
   'cancellableLogs', // TS-private event iterator; not a ChainAdapter method.
+  // Shared protected transport dispatcher behind the two public browser-wallet
+  // RPC capabilities. MockChainAdapter mirrors those public methods directly;
+  // it has no provider pool or failover plumbing to dispatch through.
+  'requestBrowserWalletRpc',
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
@@ -394,6 +398,11 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
   });
 
+  it('does not leak the authority revision operation onto the adapter prototype', () => {
+    expect(EVM_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);
+    expect(EVM_INTERNAL_METHODS.has('readContextGraphAuthorityIndexRevisions')).toBe(false);
+  });
+
   it('method arity (declared parameter count) is within 1 of EVMChainAdapter for each shared method', () => {
     // Arity isn't a perfect check (optional args, rest params) but an
     // off-by-two drift almost always indicates a renamed/refactored
@@ -430,6 +439,11 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(mock.isV10Ready()).toBe(true);
   });
 
+  it('keeps authority delta refresh unsupported in offline mock mode', () => {
+    const mock = new MockChainAdapter();
+    expect('contextGraphAuthorityIndexRevisionReader' in mock).toBe(false);
+  });
+
   // Codex PR #595 round-4: isShardingTableMember gates VM ACK eligibility.
   // The mock can't model a real sharding table, so it treats every
   // registered (non-zero) identity as a member; tests needing
@@ -439,6 +453,26 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(await mock.isShardingTableMember(0n)).toBe(false);
     expect(await mock.isShardingTableMember(1n)).toBe(true);
     expect(await mock.isShardingTableMember(99999n)).toBe(true);
+  });
+
+  it('resolves the mock Random Sampling deployment and membership through the typed capability', async () => {
+    const mock = new MockChainAdapter();
+    expect(await mock.resolveRandomSamplingAvailability(0n)).toEqual({ kind: 'available', member: false });
+    expect(await mock.resolveRandomSamplingAvailability(42n)).toEqual({ kind: 'available', member: true });
+  });
+
+  it('preserves mock Random Sampling readiness and readiness failures in the typed capability', async () => {
+    const mock = new MockChainAdapter();
+    vi.spyOn(mock, 'isRandomSamplingReady').mockReturnValueOnce(false);
+    await expect(mock.resolveRandomSamplingAvailability(42n)).resolves.toEqual({
+      kind: 'unavailable', reason: 'contracts_not_deployed',
+    });
+
+    const error = new Error('readiness unavailable');
+    vi.spyOn(mock, 'isRandomSamplingReady').mockImplementationOnce(() => { throw error; });
+    await expect(mock.resolveRandomSamplingAvailability(42n)).resolves.toEqual({
+      kind: 'indeterminate', error,
+    });
   });
 
   // Codex PR #595 round-5: EVMChainAdapter.getMinimumRequiredSignatures

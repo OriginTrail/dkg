@@ -1020,6 +1020,7 @@ const TEARDOWN_ORDER = [
   'stopPromoteWorker',
   'closeCatchupRunner',
   'stopAgent',
+  'stopRpcUsageTelemetry',
   'stopTelemetry',
 ] as const;
 
@@ -1059,11 +1060,37 @@ describe('A24 — producer-quiescent teardown order', () => {
         events.push('stopAgent');
         meterLiveAtAgentStop = !events.includes('stopTelemetry');
       },
+      stopRpcUsageTelemetry: async () => { events.push('stopRpcUsageTelemetry'); },
       stopTelemetry: async () => { events.push('stopTelemetry'); },
     });
 
     expect(events).toEqual([...TEARDOWN_ORDER]);
     expect(meterLiveAtAgentStop).toBe(true);
+  });
+
+  it('captures RPCs produced during deferred shutdown before logging retires', async () => {
+    const { steps } = recordingSteps();
+    let shutdownTailRpcCount = 0;
+    let drainedRpcCount = 0;
+    const events: string[] = [];
+
+    await runProducerQuiescentTeardown({
+      ...steps,
+      stopAgent: async () => {
+        events.push('producer-stop');
+        await sleep(1);
+        shutdownTailRpcCount += 1;
+      },
+      stopRpcUsageTelemetry: async () => {
+        events.push('rpc-drain');
+        drainedRpcCount += shutdownTailRpcCount;
+        shutdownTailRpcCount = 0;
+      },
+      stopTelemetry: async () => { events.push('logging-stop'); },
+    });
+
+    expect(events).toEqual(['producer-stop', 'rpc-drain', 'logging-stop']);
+    expect(drainedRpcCount).toBe(1);
   });
 
   it('awaits each step before starting the next', async () => {
@@ -1275,6 +1302,9 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
         stopAgent: async () => {
           calls.push('stopAgent');
         },
+        stopRpcUsageTelemetry: async () => {
+          calls.push('stopRpcUsageTelemetry');
+        },
         stopTelemetry: async () => {
           calls.push('stopTelemetry');
         },
@@ -1316,6 +1346,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
       ['stopPromoteWorker', ['stopPromoteWorker']],
       ['closeCatchupRunner', ['closeCatchupRunner']],
       ['stopAgent', ['stopAgent']],
+      ['stopRpcUsageTelemetry', ['stopRpcUsageTelemetry']],
       ['stopTelemetry', ['stopTelemetry']],
     ]);
   });

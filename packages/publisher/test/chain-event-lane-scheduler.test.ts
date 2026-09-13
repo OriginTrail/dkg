@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { ChainEvent } from '@origintrail-official/dkg-chain';
+import {
+  activeRpcRequestContext,
+  type ChainEvent,
+} from '@origintrail-official/dkg-chain';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import type { ChainEventPollerLane } from '../src/chain-event-poller.js';
 import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
@@ -8,6 +11,30 @@ import type { ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js
 import { pollOnce, createLaneRunContext, makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller scheduler', () => {
+  it('classifies every poller RPC as background work', async () => {
+    const requestClasses: string[] = [];
+    const { adapter } = makeChain({
+      head: () => {
+        requestClasses.push(activeRpcRequestContext().requestClass);
+        return 100;
+      },
+      onListen: () => {
+        requestClasses.push(activeRpcRequestContext().requestClass);
+      },
+    });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      onContextGraphCreated: async () => { /* sink */ },
+    });
+
+    await pollOnce(poller);
+
+    expect(requestClasses.length).toBeGreaterThanOrEqual(2);
+    expect(requestClasses).toEqual(requestClasses.map(() => 'background'));
+  });
+
   it('live-tails context graph discovery near the current head on cold start', async () => {
     const { adapter, filters } = makeChain({ head: 10_000, events: [] });
     const poller = new ChainEventPoller({
