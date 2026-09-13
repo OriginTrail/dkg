@@ -459,9 +459,9 @@ describe('local agent integration registry helpers', () => {
     const result = commitLocalAgentConnectPlanForTest(config, 'openclaw', plan);
 
     expect(result.integration.status).toBe('connecting');
-    expect(runSetupCalls.length).toBe(1);
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
+    expect(runSetupCalls.length).toBe(1);
     expect(restartGatewayCalls.length).toBe(1);
     const integration = getLocalAgentIntegration(config, 'openclaw');
     expect(integration?.status).toBe('ready');
