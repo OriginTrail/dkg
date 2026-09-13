@@ -284,7 +284,7 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     });
 
     await expect(fixture.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /binding changed during historical scan/i,
+      /binding changed during (?:historical scan|current-slot resolution)/i,
     );
     expect(fixture.getNameHash).not.toHaveBeenCalled();
   });
