@@ -1,6 +1,11 @@
-import { Contract } from 'ethers';
+import { Contract, Interface, ZeroAddress, getAddress } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
-import { eventContractKeysFor } from '../src/evm-event-contracts.js';
+import type { ChainEvent } from '../src/chain-adapter.js';
+import { EVMChainAdapter } from '../src/evm-adapter.js';
+import {
+  EVM_EVENT_DESCRIPTORS, eventContractKeysFor, evmEventDescriptorFor,
+  type EvmEventContractKey, type EvmEventDescriptor, type EvmEventScan,
+} from '../src/evm-event-contracts.js';
 import {
   ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings,
   type EvmHubContractKey, type EvmHubContractSpec,
@@ -170,5 +175,153 @@ describe('Hub binding generation ownership', () => {
     await expect(resolving).resolves.toEqual({ contextGraphStorage: second });
     expect(store.contextGraphStorage).toBe(second);
     expectAgreement(group, decidedAs(key => key === 'contextGraphStorage' ? second : undefined));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Descriptor registry: every supported event resolves its declared binding
+// and invokes its declared scan.
+// ---------------------------------------------------------------------------
+
+const PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const address = '0x0000000000000000000000000000000000000012';
+const EVENT_ABI = [
+  'event RelayCapabilityUpdated(uint72 indexed identityId, bool oldValue, bool newValue)',
+  'event KnowledgeAssetCreated(uint256 indexed id, bytes32 merkleRoot, uint88 byteSize, address indexed author)',
+  'event KnowledgeAssetsMinted(address indexed to, uint256 startId, uint256 endId)',
+  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
+  'event KnowledgeBatchCreated(uint256 indexed batchId, address indexed publisher, bytes32 merkleRoot, uint256 startKAId, uint256 endKAId)',
+  'event NameClaimed(bytes32 indexed nameHash, address indexed creator, uint8 accessPolicy)',
+  'event ContextGraphExpanded(uint256 indexed contextGraphId, uint256 batchId)',
+  'event KnowledgeAssetRegisteredToContextGraph(uint256 indexed contextGraphId, uint256 indexed kaId)',
+  'event ContextGraphCreated(uint256 indexed contextGraphId, address indexed owner, uint8 accessPolicy, uint8 publishPolicy, bytes32 nameHash)',
+];
+const eventInterface = new Interface(EVENT_ABI);
+const ROOT = '0x' + '55'.repeat(32);
+const NAME_HASH = '0x' + 'ab'.repeat(32);
+const AUTHOR = getAddress('0x' + 'a1'.repeat(20));
+const OWNER = getAddress('0x' + 'b2'.repeat(20));
+const MINT_RECIPIENT = getAddress('0x' + 'c3'.repeat(20));
+const EVENT_BINDING_KEYS: readonly EvmEventContractKey[] = [...new Set(EVM_EVENT_DESCRIPTORS.map(descriptor => descriptor.binding))];
+const ALIASES = EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases.map(alias => [alias, descriptor] as const));
+
+type EncodedLog = ReturnType<typeof eventInterface.encodeEventLog> & { blockNumber: number; transactionHash: string; transactionIndex: number };
+function logOf(event: string, values: unknown[], blockNumber: number, transactionHash: string, transactionIndex = 0): EncodedLog {
+  return { ...eventInterface.encodeEventLog(event, values), blockNumber, transactionHash, transactionIndex };
+}
+
+async function collectAll(events: AsyncIterable<ChainEvent>): Promise<ChainEvent[]> {
+  const collected: ChainEvent[] = [];
+  for await (const event of events) collected.push(event);
+  return collected;
+}
+
+/** One parsing scenario per canonical descriptor, keyed by its first alias; logs are keyed by query label in query order. */
+const SCENARIOS: Record<string, { logs: Record<string, EncodedLog[]>; expected: ChainEvent[] }> = {
+  RelayCapabilityUpdated: {
+    logs: { 'profileStorage.queryFilter(RelayCapabilityUpdated)': [logOf('RelayCapabilityUpdated', [7n, false, true], 11, 'tx-relay')] },
+    expected: [{ type: 'RelayCapabilityUpdated', blockNumber: 11, data: { identityId: '7', oldValue: false, newValue: true, txHash: 'tx-relay' } }],
+  },
+  KCCreated: {
+    logs: {
+      'kas.queryFilter(KnowledgeAssetCreated)': [
+        logOf('KnowledgeAssetCreated', [5n, ROOT, 1024n, AUTHOR], 12, 'tx-legacy', 1),
+        logOf('KnowledgeAssetCreated', [6n, ROOT, 2048n, AUTHOR], 13, 'tx-greenfield', 2),
+        logOf('KnowledgeAssetCreated', [7n, ROOT, 4096n, AUTHOR], 14, 'tx-author', 3),
+      ],
+      'kas.queryFilter(KnowledgeAssetsMinted)': [logOf('KnowledgeAssetsMinted', [MINT_RECIPIENT, 5n, 7n], 12, 'tx-legacy', 1)],
+      'kas.queryFilter(Transfer)': [logOf('Transfer', [ZeroAddress, OWNER, 6n], 13, 'tx-greenfield', 2)],
+    },
+    expected: [
+      // Legacy mint range wins, greenfield Transfer owner next, attested author last.
+      { type: 'KCCreated', blockNumber: 12, data: { kaId: '5', merkleRoot: ROOT, merkleRootBytes: ROOT, byteSize: '1024', txHash: 'tx-legacy', txIndex: 1, publisherAddress: MINT_RECIPIENT, author: AUTHOR, startKAId: '5', endKAId: '6' } },
+      { type: 'KCCreated', blockNumber: 13, data: { kaId: '6', merkleRoot: ROOT, merkleRootBytes: ROOT, byteSize: '2048', txHash: 'tx-greenfield', txIndex: 2, publisherAddress: OWNER, author: AUTHOR, startKAId: '6', endKAId: '6' } },
+      { type: 'KCCreated', blockNumber: 14, data: { kaId: '7', merkleRoot: ROOT, merkleRootBytes: ROOT, byteSize: '4096', txHash: 'tx-author', txIndex: 3, publisherAddress: AUTHOR, author: AUTHOR, startKAId: '7', endKAId: '7' } },
+    ],
+  },
+  KnowledgeBatchCreated: {
+    logs: { 'kasV9.queryFilter(KnowledgeBatchCreated)': [logOf('KnowledgeBatchCreated', [3n, OWNER, ROOT, 1n, 2n], 15, 'tx-batch', 4)] },
+    expected: [{ type: 'KnowledgeBatchCreated', blockNumber: 15, data: { batchId: '3', publisherAddress: OWNER, merkleRoot: ROOT, startKAId: '1', endKAId: '2', txHash: 'tx-batch', txIndex: 4 } }],
+  },
+  NameClaimed: {
+    logs: { 'cgNameRegistry.queryFilter(NameClaimed)': [logOf('NameClaimed', [NAME_HASH, AUTHOR, 1], 16, 'tx-name')] },
+    expected: [{ type: 'NameClaimed', blockNumber: 16, data: { contextGraphId: NAME_HASH, creator: AUTHOR, accessPolicy: 1, txHash: 'tx-name' } }],
+  },
+  ContextGraphExpanded: {
+    logs: { 'cgStorage.queryFilter(ContextGraphExpanded)': [logOf('ContextGraphExpanded', [9n, 4n], 17, 'tx-expand')] },
+    expected: [{ type: 'ContextGraphExpanded', blockNumber: 17, data: { contextGraphId: '9', batchId: '4', txHash: 'tx-expand' } }],
+  },
+  KnowledgeAssetRegisteredToContextGraph: {
+    logs: { 'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)': [logOf('KnowledgeAssetRegisteredToContextGraph', [9n, 5n], 18, 'tx-register', 5)] },
+    expected: [{ type: 'KnowledgeAssetRegisteredToContextGraph', blockNumber: 18, data: { contextGraphId: '9', kaId: '5', txHash: 'tx-register', txIndex: 5 } }],
+  },
+  ContextGraphCreated: {
+    logs: { 'cgStorage.queryFilter(ContextGraphCreated)': [logOf('ContextGraphCreated', [9n, OWNER, 1, 2, NAME_HASH], 19, 'tx-create')] },
+    expected: [{ type: 'ContextGraphCreated', blockNumber: 19, data: { contextGraphId: '9', creator: OWNER, owner: OWNER, accessPolicy: 1, publishPolicy: 2, nameHash: NAME_HASH, txHash: 'tx-create' } }],
+  },
+};
+
+describe('EVM event descriptor registry', () => {
+  it('defines each alias once and selects bindings in declaration order regardless of request order', () => {
+    const aliases = EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases);
+    expect(new Set(aliases).size).toBe(aliases.length);
+    expect(Object.keys(SCENARIOS).sort()).toEqual(EVM_EVENT_DESCRIPTORS.map(descriptor => descriptor.aliases[0]).sort());
+    expect(eventContractKeysFor([...aliases].reverse())).toEqual(EVENT_BINDING_KEYS);
+    expect(eventContractKeysFor(['unsupported-event'])).toEqual([]);
+    expect(evmEventDescriptorFor('unsupported-event')).toBeUndefined();
+  });
+
+  it.each(ALIASES)('%s scans its declared binding and parses every log shape of its descriptor', async (alias, descriptor: EvmEventDescriptor) => {
+    const scenario = SCENARIOS[descriptor.aliases[0]];
+    expect(evmEventDescriptorFor(alias)).toBe(descriptor);
+    expect(eventContractKeysFor([alias])).toEqual([descriptor.binding]);
+    const contract = new Contract(address, EVENT_ABI);
+    const queried: string[] = [];
+    const scan: EvmEventScan = {
+      query: async (queriedContract, label) => {
+        expect(queriedContract).toBe(contract);
+        queried.push(label);
+        return scenario.logs[label] ?? [];
+      },
+      logs: logs => logs,
+    };
+    expect(await collectAll(descriptor.scan(contract, scan))).toEqual(scenario.expected);
+    expect(queried).toEqual(Object.keys(scenario.logs));
+  });
+
+  it.each(ALIASES)('listenForEvents resolves %s from the registry and scans only its declared binding', async (alias, descriptor: EvmEventDescriptor) => {
+    const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const bindings = Object.fromEntries(EVENT_BINDING_KEYS.map((key, index) =>
+      [key, new Contract(`0x${String(index + 1).padStart(40, '0')}`, EVENT_ABI, adapter.getProvider())]));
+    const reader = vi.fn(async () => []);
+    Object.assign(adapter, { initialized: true, contracts: { ...bindings }, readContractWith: reader });
+    try {
+      expect(await collectAll(adapter.listenForEvents({ eventTypes: [alias] }))).toEqual([]);
+      expect(reader).toHaveBeenCalled();
+      for (const call of reader.mock.calls as unknown as unknown[][]) expect(call[0]).toBe(bindings[descriptor.binding]);
+    } finally { adapter.destroy(); }
+  });
+
+  it('KCCreated falls back to the attested author when Transfer enumeration fails, unless the scan was cancelled', async () => {
+    const descriptor = evmEventDescriptorFor('KCCreated')!;
+    const contract = new Contract(address, EVENT_ABI);
+    const created = [logOf('KnowledgeAssetCreated', [6n, ROOT, 2048n, AUTHOR], 13, 'tx-greenfield', 2)];
+    const controller = new AbortController();
+    const reason = new Error('scan cancelled during Transfer enumeration');
+    const scanWith = (signal?: AbortSignal): EvmEventScan => ({
+      signal,
+      query: async (_contract, label) => {
+        if (label === 'kas.queryFilter(Transfer)') {
+          if (signal) controller.abort(reason);
+          throw new Error('Transfer enumeration unavailable');
+        }
+        return label === 'kas.queryFilter(KnowledgeAssetCreated)' ? created : [];
+      },
+      logs: logs => logs,
+    });
+    expect(await collectAll(descriptor.scan(contract, scanWith()))).toEqual([
+      { type: 'KCCreated', blockNumber: 13, data: { kaId: '6', merkleRoot: ROOT, merkleRootBytes: ROOT, byteSize: '2048', txHash: 'tx-greenfield', txIndex: 2, publisherAddress: AUTHOR, author: AUTHOR, startKAId: '6', endKAId: '6' } },
+    ]);
+    await expect(collectAll(descriptor.scan(contract, scanWith(controller.signal)))).rejects.toBe(reason);
   });
 });
