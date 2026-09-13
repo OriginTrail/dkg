@@ -265,6 +265,19 @@ describe('Random Sampling lifecycle repair adapter', () => {
     expect(findAgents).toHaveBeenCalledWith({
       signal: expect.any(AbortSignal),
     });
+    const candidateMessage = vi.mocked(agentLike.log.info).mock.calls
+      .map(([, message]) => message)
+      .find((message) => message.includes('[rs.tick.kc-repair-candidates]'));
+    expect(candidateMessage).toBeDefined();
+    expect(JSON.parse(candidateMessage!.split('] ')[1]!)).toEqual({
+      localContextGraphId: 'food-safety',
+      curatorPeerIds: [curatorPeer],
+      observedPeerIds: [],
+      preferredPeerId: null,
+      connectedPeerIds: [],
+      corePeerIds: corePeers,
+      candidatePeerIds: peers,
+    });
     for (const call of syncExactKnowledgeAssetsFromPeerDetailed.mock.calls) {
       expect(call[1]).toBe('food-safety');
       expect(call[2]).toEqual({

@@ -54,18 +54,25 @@ describe('runBoundedPreparedPeerTraversal', () => {
 
   it('exhausts a bounded, de-duplicated window selected from unique candidates', async () => {
     const selectPeerWindow = vi.fn((peerIds: string[]) => [...peerIds].reverse().concat('peer-unknown'));
+    const onWindowSelected = vi.fn();
     const traversal = await runBoundedPreparedPeerTraversal<never>({
       candidatePeerIds: ['peer-a', 'peer-b', 'peer-a', '', 'peer-c'],
       maxPeers: 2,
       operationLabel: 'Exact fetch from',
       assertCurrent: () => undefined,
       selectPeerWindow,
+      onWindowSelected,
       preparePeer: async () => ({ kind: 'ready' }),
       attemptPeer: async () => ({ kind: 'missed', reason: 'unresolved' }),
       log: vi.fn(),
     });
 
     expect(selectPeerWindow).toHaveBeenCalledWith(['peer-a', 'peer-b', 'peer-c'], { maxPeers: 2 });
+    expect(onWindowSelected).toHaveBeenCalledWith({
+      candidatePeerIds: ['peer-a', 'peer-b', 'peer-c'],
+      selectedPeerIds: ['peer-c', 'peer-b'],
+      maxPeers: 2,
+    });
     expect(traversal).toEqual({
       completion: 'exhausted',
       peerAttempts: 2,

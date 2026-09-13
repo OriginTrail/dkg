@@ -220,12 +220,26 @@ describe('Random Sampling proof-time exact repair', () => {
     );
     expect(attempted).toEqual(['peer-reset', 'peer-absent', 'peer-partial']);
     expect(logInfo.mock.calls.map(([message]) => message)).toEqual([
+      expect.stringContaining('[rs.tick.kc-repair-window]'),
       expect.stringContaining('peer-rejected skipped: not-admitted'),
       expect.stringContaining('peer-unreachable failed: dial  timed out'),
       expect.stringContaining(`peer-reset failed: ${verboseReset}`),
       expect.stringContaining('from r-absent: outcome=miss disposition=clean-absent'),
       expect.stringContaining('from -partial: outcome=miss disposition=incomplete'),
     ]);
+    expect(JSON.parse(logInfo.mock.calls[0]![0].split('] ')[1]!)).toEqual({
+      assetUal: 'did:dkg:base:8453/0x0000000000000000000000000000000000001234/7',
+      localContextGraphId: 'food-safety',
+      expectedRoot: `0x${'11'.repeat(32)}`,
+      expectedLeafCount: '1',
+      candidatePeerIds: [
+        'peer-rejected', 'peer-unreachable', 'peer-reset', 'peer-absent', 'peer-partial',
+      ],
+      selectedPeerIds: [
+        'peer-rejected', 'peer-unreachable', 'peer-reset', 'peer-absent', 'peer-partial',
+      ],
+      maxPeers: 5,
+    });
   });
 
   it('authenticates historical bytes cryptographically and rejects a tampered payload', async () => {

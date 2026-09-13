@@ -144,6 +144,17 @@ async function executeRandomSamplingExactRepair(
       maxPeers,
       peerRotationKey: `rs-proof:${localContextGraphId}`,
     }),
+    onWindowSelected: ({ candidatePeerIds: candidates, selectedPeerIds, maxPeers }) => {
+      deps.logInfo(`[rs.tick.kc-repair-window] ${JSON.stringify({
+        assetUal,
+        localContextGraphId,
+        expectedRoot: `0x${expectedCommitment.merkleRootHex}`,
+        expectedLeafCount: expectedCommitment.merkleLeafCount.toString(),
+        candidatePeerIds: candidates,
+        selectedPeerIds,
+        maxPeers,
+      })}`);
+    },
     preparePeer: (peerId) => deps.preparePeer(peerId, signal),
     attemptPeer: async (peerId) => {
       let result: RandomSamplingExactRepairResult;

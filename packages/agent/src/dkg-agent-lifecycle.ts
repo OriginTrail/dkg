@@ -4338,15 +4338,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         const connectedPeerIds = this.node.libp2p.getConnections()
           .map((connection) => connection.remotePeer.toString());
-        return [...new Set([
+        const preferredPeerId = this.preferredSyncPeers.get(localContextGraphId);
+        const candidatePeerIds = [...new Set([
           ...curatorResolution.peerIds,
           ...observedPeerIds,
-          this.preferredSyncPeers.get(localContextGraphId),
+          preferredPeerId,
           ...connectedPeerIds,
           ...corePeerIds,
         ].filter((peerId): peerId is string => Boolean(
           peerId && peerId !== this.peerId,
         )))];
+        // This diagnostic-only ledger lets a managed black-box fixture prove
+        // why a later Core was eligible without exposing any private content.
+        this.log.info(ctx, `[rs.tick.kc-repair-candidates] ${JSON.stringify({
+          localContextGraphId,
+          curatorPeerIds: curatorResolution.peerIds,
+          observedPeerIds,
+          preferredPeerId: preferredPeerId ?? null,
+          connectedPeerIds,
+          corePeerIds,
+          candidatePeerIds,
+        })}`);
+        return candidatePeerIds;
       },
       selectPeerWindow: (peerIds, options) => this.selectCatchupPeerWindow(
         peerIds.map((peerId) => ({ toString: () => peerId })),

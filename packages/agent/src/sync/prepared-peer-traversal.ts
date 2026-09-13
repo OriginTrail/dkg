@@ -36,6 +36,12 @@ export interface BoundedPreparedPeerTraversalOptions<T> {
     peerIds: string[],
     options: { readonly maxPeers: number },
   ): readonly string[];
+  /** Diagnostic-only projection of the exact bounded selection before I/O starts. */
+  onWindowSelected?(selection: {
+    readonly candidatePeerIds: readonly string[];
+    readonly selectedPeerIds: readonly string[];
+    readonly maxPeers: number;
+  }): void;
   preparePeer(peerId: string): Promise<PreparedPeerPreparation>;
   attemptPeer(peerId: string): Promise<PreparedPeerAttemptOutcome<T>>;
   log(message: string): void;
@@ -77,6 +83,11 @@ export async function runBoundedPreparedPeerTraversal<T>(
   const peerWindow = [...new Set(selected)]
     .filter((peerId) => candidateSet.has(peerId))
     .slice(0, maxPeers);
+  options.onWindowSelected?.({
+    candidatePeerIds: uniqueCandidates,
+    selectedPeerIds: peerWindow,
+    maxPeers,
+  });
   const attempts: PreparedPeerAttemptRecord[] = [];
 
   for (const peerId of peerWindow) {
