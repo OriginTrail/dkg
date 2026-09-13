@@ -273,6 +273,12 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     }
   });
 
+  it('requestIdentityWalletRpc delegates to the bounded mock RPC bridge', async () => {
+    const mock = new MockChainAdapter('mock:31337', SIGNER);
+
+    await expect(mock.requestIdentityWalletRpc('eth_chainId')).resolves.toBe('0x7a69');
+  });
+
   it('toShardingTableNode normalizes named object and positional tuple shapes', () => {
     expect(toShardingTableNode({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n }))
       .toEqual({ nodeId: '0xab', identityId: 7n, ask: 1n, stake: 2n });

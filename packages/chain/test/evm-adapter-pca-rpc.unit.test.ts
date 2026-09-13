@@ -232,6 +232,30 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
     }));
     await expect(adapter.getIdentityWalletContracts()).resolves.toBeNull();
   });
+
+  it('propagates unexpected identity storage discovery failures', async () => {
+    const adapter = new EVMChainAdapter(minimalConfig());
+    (adapter as unknown as { init: () => Promise<void> }).init = async () => undefined;
+    (adapter as any).contracts = {
+      profile: { getAddress: async () => '0x' + '33'.repeat(20) },
+      identity: { getAddress: async () => '0x' + '44'.repeat(20) },
+    };
+    const discoveryFailure = new Error('identity storage RPC unavailable');
+    (adapter as any).getIdentityStorage = async () => {
+      throw discoveryFailure;
+    };
+
+    await expect(adapter.getIdentityWalletContracts()).rejects.toBe(discoveryFailure);
+  });
+
+  it('routes identity-wallet RPC through the bounded browser transport', async () => {
+    const send = recorder(async (method: string, params: unknown[]) => ({ method, params }));
+    const adapter = pcaRpcAdapter([{ send }], ['https://primary.example']);
+
+    await expect(adapter.requestIdentityWalletRpc('eth_chainId'))
+      .resolves.toEqual({ method: 'eth_chainId', params: [] });
+    expect(send.calls).toEqual([['eth_chainId', []]]);
+  });
 });
 
 describe('EVMChainAdapter PCA read cache', () => {
