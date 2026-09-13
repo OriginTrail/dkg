@@ -2112,6 +2112,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       policyDigest: authority.policyDigest,
       roster: authority.rosterEnvelope.payload,
     });
+    // This scenario exercises durable private-catalog recovery, not network
+    // admission. The initial author is intentionally stopped immediately after
+    // seeding its durable store; on slower runners that can interrupt the
+    // provider's asynchronous identity probe and leave a retry backoff attached
+    // to the same persistent peer ID used after restart. Keep the independent
+    // catalog-access authority active while removing that unrelated timing race.
+    allowAllNetworkAdmissionForTest(provider);
     const providerPeerId = provider.peerId;
     const catalogActivation = selectedPrivateCatalogActivationV1(
       providerPeerId,
