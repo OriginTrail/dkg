@@ -1,4 +1,4 @@
-import { resolveAgentResourceEnvironment } from './resource-limits.js';
+import { resolveVmResourceEnvironment } from './resource-limits.js';
 
-/** Process-scoped runtime snapshot. Pure parsers never import this module. */
-export const AGENT_RESOURCE_ENV = resolveAgentResourceEnvironment(process.env);
+/** VM-owned process snapshot. Sync catch-up owns a separate runtime module. */
+export const VM_RESOURCE_ENV = resolveVmResourceEnvironment(process.env);

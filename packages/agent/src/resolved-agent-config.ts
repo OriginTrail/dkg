@@ -73,17 +73,17 @@ export type ResolvedDKGAgentConfig =
  */
 export interface LegacyResolvedConfigProjection {
   /** @deprecated Read `resourcePolicy.reconcilerTiming`. */
-  readonly syncReconcilerTiming: SyncReconcilerTiming;
+  syncReconcilerTiming: SyncReconcilerTiming;
   /** @deprecated Read `resourcePolicy.admission.limit`; this is the effective limit. */
-  readonly syncGlobalMaxInflight?: number;
+  syncGlobalMaxInflight?: number;
   /** @deprecated Read `resourcePolicy.admission.limit`; this is the effective limit. */
-  readonly syncGlobalLimit?: number;
+  syncGlobalLimit?: number;
   /** @deprecated Read `resourcePolicy.admission.queueLimit`; this is the effective limit. */
-  readonly syncGlobalQueueLimit?: number;
+  syncGlobalQueueLimit?: number;
   /** @deprecated Read `resourcePolicy.admission`; this is the effective admission policy. */
-  readonly syncAdmission?: SyncAdmissionConfig;
+  syncAdmission?: SyncAdmissionConfig;
   /** @deprecated Read `resourcePolicy.snapshot.budget`; this is the effective budget. */
-  readonly syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
 }
 
 /** The historical resolved-config contract: the canonical model plus deprecated projections. */
@@ -94,18 +94,22 @@ export function projectLegacyResolvedConfig(
   policy: StartupResourcePolicy,
 ): LegacyResolvedConfigProjection {
   const { reconcilerTiming, admission, snapshot: { budget } } = policy;
+  const effectiveLimit = admission.limit ?? 0;
+  const effectiveQueueLimit = admission.queueLimit ?? 0;
   return {
-    syncReconcilerTiming: reconcilerTiming,
-    ...(admission.limit === undefined
-      ? {}
-      : { syncGlobalMaxInflight: admission.limit, syncGlobalLimit: admission.limit }),
-    ...(admission.queueLimit === undefined ? {} : { syncGlobalQueueLimit: admission.queueLimit }),
+    syncReconcilerTiming: { ...reconcilerTiming },
+    syncGlobalMaxInflight: effectiveLimit,
+    syncGlobalLimit: effectiveLimit,
+    syncGlobalQueueLimit: effectiveQueueLimit,
     syncAdmission: {
       mode: admission.mode,
-      ...(admission.limit === undefined ? {} : { globalMaxInflight: admission.limit }),
+      globalMaxInflight: effectiveLimit,
       ...(admission.partitions === undefined
         ? {}
-        : { fast: admission.partitions.fast, slow: admission.partitions.slow }),
+        : {
+          fast: { ...admission.partitions.fast },
+          slow: { ...admission.partitions.slow },
+        }),
     },
     syncResponderSnapshotLimits: {
       global: { rows: budget.maxRows, bytesEstimate: budget.maxBytesEstimate },

@@ -1,6 +1,7 @@
 import {
   ResourceConfigWarnings,
-  type resolveAgentResourceEnvironment,
+  resolveCatchupResourceEnvironment,
+  type resolveVmResourceEnvironment,
 } from './resource-limits.js';
 import { resolveSwmCatchupPassConfig } from './sync/catchup-pass-policy.js';
 import { resolveSyncGlobalBackpressure, type SyncGlobalBackpressureConfig } from './sync/backpressure.js';
@@ -15,10 +16,12 @@ interface StartupResourceConfig extends SyncGlobalBackpressureConfig, SyncReconc
 export function resolveStartupResourcePolicy(
   config: StartupResourceConfig,
   env: Readonly<Record<string, string | undefined>>,
-  vm: ReturnType<typeof resolveAgentResourceEnvironment>,
+  vm: ReturnType<typeof resolveVmResourceEnvironment>,
+  catchup = resolveCatchupResourceEnvironment(env),
 ) {
   const warnings = new ResourceConfigWarnings();
   for (const name of vm.rejected) warnings.reject(name);
+  for (const name of catchup.rejected) warnings.reject(name);
   const reconcilerTiming = Object.freeze(resolveSyncReconcilerTiming(config, warnings.reject));
   const admission = resolveSyncGlobalBackpressure(config, warnings.reject, env);
   const snapshot = resolveSyncResponderSnapshotDiagnostics(config.syncResponderSnapshotLimits, env);
@@ -27,7 +30,7 @@ export function resolveStartupResourcePolicy(
     else warnings.clamp(diagnostic.setting);
   }
   const initialSwmPass = Object.freeze(resolveSwmCatchupPassConfig(env, warnings.reject));
-  return Object.freeze({ vm, reconcilerTiming, admission, snapshot, initialSwmPass, diagnostics: warnings.snapshot() });
+  return Object.freeze({ vm, catchup, reconcilerTiming, admission, snapshot, initialSwmPass, diagnostics: warnings.snapshot() });
 }
 
 export type StartupResourcePolicy = ReturnType<typeof resolveStartupResourcePolicy>;
@@ -49,9 +52,12 @@ const VM_DIAGNOSTIC_FIELDS = [
   'DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS',
   'DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS',
   'DKG_VM_RECONCILE_CONFIRMATION_DEPTH',
+] as const satisfies readonly (keyof StartupResourcePolicy['vm']['values'])[];
+
+const CATCHUP_DIAGNOSTIC_FIELDS = [
   'DKG_CATCHUP_MAX_CONCURRENT_PEERS',
   'DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS',
-] as const satisfies readonly (keyof StartupResourcePolicy['vm']['values'])[];
+] as const satisfies readonly (keyof StartupResourcePolicy['catchup']['values'])[];
 
 interface ConfiguredPriorityDiagnostics {
   elevated: number;
@@ -61,6 +67,7 @@ interface ConfiguredPriorityDiagnostics {
 
 export interface StartupResourceDiagnostics {
   vm: { values: Record<(typeof VM_DIAGNOSTIC_FIELDS)[number], number>; startupMaxDelayMs: number };
+  catchup: { values: Record<(typeof CATCHUP_DIAGNOSTIC_FIELDS)[number], number> };
   reconcilerTiming: {
     intervalMs: number; stalenessThresholdMs: number; backoffBaseMs: number; backoffMaxMs: number; backoffJitter: number;
   };
@@ -87,12 +94,15 @@ export function projectStartupResourceDiagnostics(
   policy: StartupResourcePolicy,
   priorities: ConfiguredPriorityDiagnostics,
 ): StartupResourceDiagnostics {
-  const { vm, reconcilerTiming, admission, snapshot, initialSwmPass } = policy;
+  const { vm, catchup, reconcilerTiming, admission, snapshot, initialSwmPass } = policy;
   const values = {} as StartupResourceDiagnostics['vm']['values'];
   for (const field of VM_DIAGNOSTIC_FIELDS) values[field] = vm.values[field];
+  const catchupValues = {} as StartupResourceDiagnostics['catchup']['values'];
+  for (const field of CATCHUP_DIAGNOSTIC_FIELDS) catchupValues[field] = catchup.values[field];
   const partitions = admission.partitions;
   return {
     vm: { values, startupMaxDelayMs: vm.startupMaxDelayMs },
+    catchup: { values: catchupValues },
     reconcilerTiming: {
       intervalMs: reconcilerTiming.intervalMs,
       stalenessThresholdMs: reconcilerTiming.stalenessThresholdMs,

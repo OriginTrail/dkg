@@ -7,9 +7,14 @@ import {
   type ReconciledPressureCapacity,
   type SchedulerLaneCapacityModel,
   type SchedulerPressureCapacity,
+  type SchedulerPressureCapacityState,
 } from './scheduler-pressure-capacity.js';
 export { schedulerPressureCapacityIdentity } from './scheduler-pressure-capacity.js';
-export type { SchedulerLaneCapacityModel, SchedulerPressureCapacity } from './scheduler-pressure-capacity.js';
+export type {
+  SchedulerLaneCapacityModel,
+  SchedulerPressureCapacity,
+  SchedulerPressureCapacityState,
+} from './scheduler-pressure-capacity.js';
 
 /**
  * Compatibility projection only: existing snapshots expose two model labels.
@@ -52,6 +57,8 @@ export interface BackpressureOperationSummary {
 export interface BackpressureLaneSnapshot {
   lane: string;
   state: BackpressureState;
+  /** Whether live work agrees on one capacity policy. Absent means `uniform`. */
+  capacityState?: SchedulerPressureCapacityState;
   /**
    * How to read `queueLimit` on this row. Under `shared` it is the
    * scheduler-wide pool this lane draws on rather than a private allocation —
@@ -107,6 +114,11 @@ export interface BackpressureLaneSnapshot {
 export interface BackpressureSnapshot {
   scheduler: string;
   state: BackpressureState;
+  /**
+   * `mixed` means live tickets carry different capacity owners. Optional for
+   * hand-built compatibility sources; absence means `uniform`.
+   */
+  capacityState?: SchedulerPressureCapacityState;
   /**
    * How this scheduler divides capacity between its lanes. It is a **scheduler**
    * invariant — every lane of one scheduler shares it — so read it here; the
@@ -375,6 +387,7 @@ export class SchedulerPressureTracker {
     return {
       scheduler: this.scheduler,
       state,
+      capacityState: capacity.kind,
       capacityModel: legacySnapshotCapacityModel(capacity.kind === 'mixed'
         ? 'mixed' : capacity.capacity.capacityModel ?? 'partitioned'),
       totals,
@@ -430,7 +443,8 @@ export class SchedulerPressureTracker {
     resolved: ReconciledPressureCapacity,
   ): {
     /** Reported ceilings, whether or not depth classification applies. */
-    capacityModel: SchedulerLaneCapacityModel | 'mixed';
+    capacityState: SchedulerPressureCapacityState;
+    capacityModel: SchedulerLaneCapacityModel;
     queueLimit: number | null;
     inflightLimit: number | null;
     /**
@@ -442,7 +456,13 @@ export class SchedulerPressureTracker {
     depthPressure: { queued: number; limit: number } | null;
   } {
     if (resolved.kind === 'mixed') {
-      return { capacityModel: 'mixed', queueLimit: null, inflightLimit: null, depthPressure: null };
+      return {
+        capacityState: 'mixed',
+        capacityModel: 'shared',
+        queueLimit: null,
+        inflightLimit: null,
+        depthPressure: null,
+      };
     }
     const capacity = resolved.capacity;
     const shared = capacity.capacityModel === 'shared';
@@ -458,6 +478,7 @@ export class SchedulerPressureTracker {
     // allocation, so it is not applied there.
     const depthApplies = queueLimit !== null && queueLimit > 0 && (!shared || laneQueued > 0);
     return {
+      capacityState: 'uniform',
       capacityModel: shared ? 'shared' : 'partitioned',
       queueLimit,
       inflightLimit: shared
@@ -481,6 +502,7 @@ export class SchedulerPressureTracker {
     const queued = [...this.queued.values()].filter((entry) => entry.lane === lane);
     const active = [...this.active.values()].filter((entry) => entry.lane === lane);
     const {
+      capacityState,
       capacityModel,
       queueLimit,
       inflightLimit,
@@ -497,7 +519,9 @@ export class SchedulerPressureTracker {
     // reported, not judged — but a row that pairs a lane-local count with a
     // pool ceiling tells an operator the pool is idle while it is the reason
     // nothing drains.
-    const pressureInflight = capacityModel === 'shared' ? this.active.size : active.length;
+    const pressureInflight = capacityState === 'uniform' && capacityModel === 'shared'
+      ? this.active.size
+      : active.length;
     const oldestQueuedAgeMs = queued.length === 0
       ? 0
       : Math.max(...queued.map((entry) => Math.max(0, Math.floor(now - entry.queuedAt))));
@@ -530,8 +554,9 @@ export class SchedulerPressureTracker {
     return {
       lane,
       state,
-      ...(capacityModel !== 'partitioned' ? { stateReasons } : {}),
-      capacityModel: legacySnapshotCapacityModel(capacityModel),
+      ...(capacityModel !== 'partitioned' || capacityState === 'mixed' ? { stateReasons } : {}),
+      capacityState,
+      capacityModel,
       queued: queued.length,
       pressureQueued,
       queueLimit,

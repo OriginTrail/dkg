@@ -50,6 +50,7 @@ describe('scheduler pressure capacity ownership', () => {
       serialize.mockRestore();
     }
     expect(tracker.snapshot()).toMatchObject({
+      capacityState: 'uniform',
       capacityModel: 'partitioned',
       totals: { queued: 1, inflight: 1, queueLimit: 4, inflightLimit: 2 },
     });
@@ -143,11 +144,11 @@ describe('scheduler pressure capacity ownership', () => {
     const snapshot = tracker.snapshot();
     // The old outward label is a compatibility projection. Mixed owners have
     // unknown ceilings and local lane counts; they never share a capacity pool.
-    expect(snapshot).toMatchObject({ capacityModel: 'shared', state: 'healthy',
+    expect(snapshot).toMatchObject({ capacityState: 'mixed', capacityModel: 'shared', state: 'healthy',
       totals: { queueLimit: null, inflightLimit: null, queued: 1, inflight: 1 } });
     expect(snapshot.lanes).toMatchObject([
-      { lane: 'fast', capacityModel: 'shared', queueLimit: null, inflightLimit: null, pressureQueued: 0, pressureInflight: 1, stateReasons: [] },
-      { lane: 'slow', capacityModel: 'shared', queueLimit: null, inflightLimit: null, pressureQueued: 1, pressureInflight: 0, stateReasons: [] },
+      { lane: 'fast', capacityState: 'mixed', capacityModel: 'shared', queueLimit: null, inflightLimit: null, pressureQueued: 0, pressureInflight: 1, stateReasons: [] },
+      { lane: 'slow', capacityState: 'mixed', capacityModel: 'shared', queueLimit: null, inflightLimit: null, pressureQueued: 1, pressureInflight: 0, stateReasons: [] },
     ]);
     now = 100;
     expect(tracker.snapshot()).toMatchObject({ state: 'degraded' });

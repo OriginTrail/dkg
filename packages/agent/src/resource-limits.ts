@@ -93,15 +93,76 @@ export const AGENT_RESOURCE_ENV_SPECS = {
 } as const satisfies Record<string, EnvironmentIntegerSpec>;
 
 type AgentResourceEnvName = keyof typeof AGENT_RESOURCE_ENV_SPECS;
-export function resolveAgentResourceEnvironment(env: Readonly<Record<string, string | undefined>>) {
+
+export const VM_RESOURCE_ENV_NAMES = [
+  'DKG_VM_RECONCILE_INTERVAL_MS',
+  'DKG_VM_RECONCILE_BACKOFF_MAX_MS',
+  'DKG_VM_RECONCILE_CACHE_MAX_ENTRIES',
+  'DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES',
+  'DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS',
+  'DKG_VM_RECONCILE_QUEUE_MAX_PENDING',
+  'DKG_VM_RECONCILE_BATCH_SIZE',
+  'DKG_VM_RECONCILE_ORDINAL_CONCURRENCY',
+  'DKG_VM_RECONCILE_CONCURRENCY',
+  'DKG_VM_RECONCILE_MAX_FOREGROUND_BURST',
+  'DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS',
+  'DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS',
+  'DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS',
+  'DKG_VM_RECONCILE_CONFIRMATION_DEPTH',
+] as const satisfies readonly AgentResourceEnvName[];
+
+export const CATCHUP_RESOURCE_ENV_NAMES = [
+  'DKG_CATCHUP_MAX_CONCURRENT_PEERS',
+  'DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS',
+] as const satisfies readonly AgentResourceEnvName[];
+
+type ResourceEnvironmentName =
+  | (typeof VM_RESOURCE_ENV_NAMES)[number]
+  | (typeof CATCHUP_RESOURCE_ENV_NAMES)[number];
+
+function resolveResourceEnvironment<Name extends ResourceEnvironmentName>(
+  names: readonly Name[],
+  env: Readonly<Record<string, string | undefined>>,
+) {
   const warnings = new ResourceConfigWarnings();
-  const values = {} as Record<AgentResourceEnvName, number>;
-  for (const name of Object.keys(AGENT_RESOURCE_ENV_SPECS) as AgentResourceEnvName[]) {
+  const values = {} as Record<Name, number>;
+  for (const name of names) {
     const spec = AGENT_RESOURCE_ENV_SPECS[name];
     values[name] = resourceIntegerEnv(env[name], spec, name, warnings.reject) ?? spec.fallback;
   }
+  return { values, rejected: [...warnings.settings] };
+}
+
+/** VM-owned process settings. Importing a catch-up helper never initializes this slice. */
+export function resolveVmResourceEnvironment(env: Readonly<Record<string, string | undefined>>) {
+  const resolved = resolveResourceEnvironment(VM_RESOURCE_ENV_NAMES, env);
   const startupMaxDelayMs = resourceIntegerEnv(env.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS,
-    { min: 0, max: RESOURCE_MAX.timerMs }, 'DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS', warnings.reject)
-    ?? values.DKG_VM_RECONCILE_INTERVAL_MS;
-  return Object.freeze({ values: Object.freeze(values), startupMaxDelayMs, rejected: Object.freeze(warnings.settings) });
+    { min: 0, max: RESOURCE_MAX.timerMs }, 'DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS',
+    (name) => resolved.rejected.push(name))
+    ?? resolved.values.DKG_VM_RECONCILE_INTERVAL_MS;
+  return Object.freeze({
+    values: Object.freeze(resolved.values),
+    startupMaxDelayMs,
+    rejected: Object.freeze(resolved.rejected),
+  });
+}
+
+/** Sync catch-up-owned process settings, resolved independently from VM settings. */
+export function resolveCatchupResourceEnvironment(env: Readonly<Record<string, string | undefined>>) {
+  const resolved = resolveResourceEnvironment(CATCHUP_RESOURCE_ENV_NAMES, env);
+  return Object.freeze({
+    values: Object.freeze(resolved.values),
+    rejected: Object.freeze(resolved.rejected),
+  });
+}
+
+/** Compatibility composition for callers that still want every process setting at once. */
+export function resolveAgentResourceEnvironment(env: Readonly<Record<string, string | undefined>>) {
+  const vm = resolveVmResourceEnvironment(env);
+  const catchup = resolveCatchupResourceEnvironment(env);
+  return Object.freeze({
+    values: Object.freeze({ ...vm.values, ...catchup.values }),
+    startupMaxDelayMs: vm.startupMaxDelayMs,
+    rejected: Object.freeze([...vm.rejected, ...catchup.rejected]),
+  });
 }

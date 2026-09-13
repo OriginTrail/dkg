@@ -117,6 +117,8 @@ export default defineConfig({
       "test/sync-policy.test.ts",
       "test/resource-limits.test.ts",
       "test/resource-limits-startup.test.ts",
+      "test/resource-config-legacy-view.test.ts",
+      "test/resource-runtime-owner-isolation.test.ts",
       "test/catchup-policy.test.ts",
       "test/catchup-concurrency.test.ts",
       // #2050 — the stop rule for the bounded repeat of the public SWM peer walk.

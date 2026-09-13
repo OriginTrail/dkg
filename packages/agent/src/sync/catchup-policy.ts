@@ -1,4 +1,4 @@
-import { AGENT_RESOURCE_ENV } from '../resource-runtime.js';
+import { CATCHUP_RESOURCE_ENV } from './catchup-runtime.js';
 import { AGENT_RESOURCE_ENV_SPECS, RESOURCE_MAX, resourceIntegerEnv } from '../resource-limits.js';
 import { normalizeSyncAdmissionSource, type SyncAdmissionSource } from './policy.js';
 
@@ -49,7 +49,7 @@ export function resolveCatchupBackpressureMaxWaitMs(raw: string | undefined): nu
 }
 
 export const CATCHUP_BACKPRESSURE_MAX_WAIT_MS: number =
-  AGENT_RESOURCE_ENV.values.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
+  CATCHUP_RESOURCE_ENV.values.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
 
 /**
  * Bounded admission origin recorded on node-wide scheduler diagnostics.

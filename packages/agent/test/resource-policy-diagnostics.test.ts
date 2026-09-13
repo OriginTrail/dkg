@@ -33,8 +33,10 @@ const expectedShared = {
     DKG_VM_RECONCILE_CONCURRENCY: 9, DKG_VM_RECONCILE_MAX_FOREGROUND_BURST: 10,
     DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS: 111, DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS: 222,
     DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS: 333, DKG_VM_RECONCILE_CONFIRMATION_DEPTH: 14,
-    DKG_CATCHUP_MAX_CONCURRENT_PEERS: 15, DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS: 444,
   }, startupMaxDelayMs: 55 },
+  catchup: { values: {
+    DKG_CATCHUP_MAX_CONCURRENT_PEERS: 15, DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS: 444,
+  } },
   reconcilerTiming: { intervalMs: 1000, stalenessThresholdMs: 2000, backoffBaseMs: 3000, backoffMaxMs: 4000, backoffJitter: 0.1 },
   admission: { mode: 'shared', limit: 3, queueLimit: 4, selectedRecoveryContextGraphCount: 0 },
   snapshot: { budget: { maxRows: 100, maxBytesEstimate: 1000, maxSnapshotRows: 40, maxSnapshotBytesEstimate: 400 } },
@@ -84,6 +86,7 @@ describe('startup resource diagnostics schema', () => {
     const policy = {
       ...original, internal,
       vm: { ...original.vm, internal, values: { ...original.vm.values, futureField: internal } },
+      catchup: { ...original.catchup, internal, values: { ...original.catchup.values, futureField: internal } },
       reconcilerTiming: { ...original.reconcilerTiming, internal },
       admission: { ...original.admission, internal },
       snapshot: { ...original.snapshot, internal, budget: { ...original.snapshot.budget, internal } },

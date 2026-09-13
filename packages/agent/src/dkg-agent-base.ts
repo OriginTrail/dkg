@@ -35,7 +35,7 @@ import { Rfc64CatalogMutationCoordinatorV1 } from './rfc64/catalog-mutation-runt
 import type { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import type { Rfc64CatalogShadowObservabilityRuntimeV1 } from
   './rfc64/catalog-shadow-observability-v1.js';
-import { AGENT_RESOURCE_ENV } from './resource-runtime.js';
+import { VM_RESOURCE_ENV } from './resource-runtime.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
@@ -964,37 +964,37 @@ export class DKGAgentBase {
    * a fetch transiently failed. Env-overridable for ops tuning.
    */
   static readonly VM_RECONCILE_SWEEP_INTERVAL_MS =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_INTERVAL_MS;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_INTERVAL_MS;
   // The periodic sweep is a missed-event safety net, not startup readiness.
   // Spread its first run across the configured cadence so a rolling fleet
   // restart does not immediately launch a full reconciliation scan on every
   // node. Live chain nudges remain available from startup.
-  static readonly VM_RECONCILE_STARTUP_MAX_DELAY_MS = AGENT_RESOURCE_ENV.startupMaxDelayMs;
+  static readonly VM_RECONCILE_STARTUP_MAX_DELAY_MS = VM_RESOURCE_ENV.startupMaxDelayMs;
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS =
     Math.max(5_000, DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS);
   static readonly VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_BACKOFF_MAX_MS;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_BACKOFF_MAX_MS;
   /** Maximum unbound subscription read-authority/binding attempts per periodic sweep. */
   static readonly VM_RECONCILE_UNBOUND_BATCH_SIZE = 8;
   static readonly VM_RECONCILE_CACHE_MAX_ENTRIES =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_CACHE_MAX_ENTRIES;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_CACHE_MAX_ENTRIES;
   static readonly VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_SWM_GEN_FINGERPRINT_MAX_ROWS;
   static readonly VM_RECONCILE_CG_STATE_MAX_ENTRIES =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES;
   /** Maximum peers connected/probed/transported by one exact-recovery pass. */
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
   /** Bounded proof universe retained across passes; transport still uses the cap above. */
   static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_QUEUE_MAX_PENDING;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_QUEUE_MAX_PENDING;
   /**
    * Maximum chain ordinals one CG may process before yielding the single VM
    * worker. Ten keeps exact missing-KA pulls useful while bounding cross-CG
    * latency and the per-request UAL filter.
    */
   static readonly VM_RECONCILE_BATCH_SIZE =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_BATCH_SIZE;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_BATCH_SIZE;
   /** Hard ceiling: RS heal is best-effort maintenance and must stay bounded. */
   static readonly RS_HEAL_BATCH_MAX = 64;
   /**
@@ -1016,18 +1016,18 @@ export class DKGAgentBase {
    * concurrency this caps chain/store pressure at ten in-flight ordinals.
    */
   static readonly VM_RECONCILE_ORDINAL_CONCURRENCY =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_ORDINAL_CONCURRENCY;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_ORDINAL_CONCURRENCY;
   /** Keep a slow peer recovery for one CG from blocking every other CG. */
   static readonly VM_RECONCILE_CONCURRENCY =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_CONCURRENCY;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_CONCURRENCY;
   static readonly VM_RECONCILE_MAX_FOREGROUND_BURST =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_MAX_FOREGROUND_BURST;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_MAX_FOREGROUND_BURST;
   static readonly VM_RECONCILE_SHUTDOWN_TIMEOUT_MS =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_SHUTDOWN_TIMEOUT_MS;
   static readonly RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS =
-    AGENT_RESOURCE_ENV.values.DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS;
+    VM_RESOURCE_ENV.values.DKG_RANDOM_SAMPLING_SHUTDOWN_TIMEOUT_MS;
   static readonly CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS =
-    AGENT_RESOURCE_ENV.values.DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS;
+    VM_RESOURCE_ENV.values.DKG_CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS;
   /**
    * Blocks a completed ordinal must be buried by before its watermark advance
    * commits (reorg gate). The data is promoted to VM eagerly; only the cursor
@@ -1036,7 +1036,7 @@ export class DKGAgentBase {
    * registration before trusting the watermark".
    */
   static readonly VM_RECONCILE_CONFIRMATION_DEPTH =
-    AGENT_RESOURCE_ENV.values.DKG_VM_RECONCILE_CONFIRMATION_DEPTH;
+    VM_RESOURCE_ENV.values.DKG_VM_RECONCILE_CONFIRMATION_DEPTH;
 
   static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
     // A full catalogue scan enriches every globally known graph and is

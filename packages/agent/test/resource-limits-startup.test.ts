@@ -74,7 +74,8 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     ]) {
       expect(runtime).not.toHaveProperty(input);
     }
-    expect(runtime.syncReconcilerTiming).toBe(effective.reconcilerTiming);
+    expect(runtime.syncReconcilerTiming).toEqual(effective.reconcilerTiming);
+    expect(runtime.syncReconcilerTiming).not.toBe(effective.reconcilerTiming);
     expect(runtime.syncGlobalMaxInflight).toBe(3);
     expect(runtime.syncGlobalLimit).toBe(3);
     expect(runtime.syncGlobalQueueLimit).toBe(6);
@@ -113,7 +114,7 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     });
     const diagnostic = JSON.parse(resolved!.message.slice('Resolved sync policy '.length));
     expect(Object.keys(diagnostic)).toEqual([
-      'vm', 'reconcilerTiming', 'admission', 'snapshot', 'initialSwmPass', 'configuredPriorities',
+      'vm', 'catchup', 'reconcilerTiming', 'admission', 'snapshot', 'initialSwmPass', 'configuredPriorities',
     ]);
     expect(diagnostic).not.toHaveProperty('diagnostics');
     expect(diagnostic).not.toHaveProperty('vm.rejected');

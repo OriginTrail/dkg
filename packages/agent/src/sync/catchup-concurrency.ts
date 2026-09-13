@@ -1,9 +1,9 @@
-import { AGENT_RESOURCE_ENV } from '../resource-runtime.js';
+import { CATCHUP_RESOURCE_ENV } from './catchup-runtime.js';
 import { RESOURCE_MAX, resourceInteger } from '../resource-limits.js';
 
 /** Sync-owned catch-up policy; generic worker-pool mechanics live separately. */
 export const CATCHUP_MAX_CONCURRENT_PEER_SYNCS: number =
-  AGENT_RESOURCE_ENV.values.DKG_CATCHUP_MAX_CONCURRENT_PEERS;
+  CATCHUP_RESOURCE_ENV.values.DKG_CATCHUP_MAX_CONCURRENT_PEERS;
 
 /** The spellings `DKG_CATCHUP_STOP_ON_PROOF` accepts as "off"; documented verbatim. */
 const CATCHUP_STOP_ON_PROOF_OFF_VALUES = ['0', 'false', 'no', 'off'] as const;

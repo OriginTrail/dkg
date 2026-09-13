@@ -1,5 +1,6 @@
 import { resolveAgentConfig, type ResolvedDKGAgentConfig, type StorageAckNormalizedDKGAgentConfig } from './resolved-agent-config.js';
-import { AGENT_RESOURCE_ENV } from './resource-runtime.js';
+import { VM_RESOURCE_ENV } from './resource-runtime.js';
+import { CATCHUP_RESOURCE_ENV } from './sync/catchup-runtime.js';
 import { resolveStartupResourcePolicy } from './resource-policy.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -1410,7 +1411,7 @@ export class DKGAgent extends DKGAgentBase {
     const resourcePolicy = resolveStartupResourcePolicy({
       ...config,
       selectedRecoveryContextGraphIds,
-    }, process.env, AGENT_RESOURCE_ENV);
+    }, process.env, VM_RESOURCE_ENV, CATCHUP_RESOURCE_ENV);
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {

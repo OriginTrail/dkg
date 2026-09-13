@@ -102,6 +102,8 @@ export function capturePressureCapacity(capacity: SchedulerPressureCapacity): Ca
   return { value: Object.freeze(value), identity: schedulerPressureCapacityIdentity(value) };
 }
 
+export type SchedulerPressureCapacityState = 'uniform' | 'mixed';
+
 export type ReconciledPressureCapacity =
   | { readonly kind: 'uniform'; readonly capacity: SchedulerPressureCapacity }
   | { readonly kind: 'mixed' };
