@@ -43,7 +43,7 @@ describe('createKafkaPlugin factory wiring', () => {
       agent: { publishAsync },
       publisherControl: { getStatus: vi.fn() },
       publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
-      config: {},
+      configStore: { current: {} },
       path: '/api/kafka/streams/register',
     } as never);
     expect(captured.statusCode).toBe(202);
@@ -64,7 +64,7 @@ describe('createKafkaPlugin factory wiring', () => {
       agent: { publishAsync },
       publisherControl: { getStatus: vi.fn() },
       publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
-      config: {},
+      configStore: { current: {} },
       path: '/api/kafka/streams/register',
     } as never);
     expect(publishAsync.mock.calls[0][2]).toEqual({ accessPolicy: 'public' });
@@ -80,7 +80,7 @@ describe('createKafkaPlugin factory wiring', () => {
       agent: { publishAsync },
       publisherControl: { getStatus: vi.fn() },
       publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
-      config: {},
+      configStore: { current: {} },
       path: '/custom/kafka/register',
     } as never);
     expect(captured.statusCode).toBe(202);

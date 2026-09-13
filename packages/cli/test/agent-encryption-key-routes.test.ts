@@ -47,6 +47,7 @@ function runCtx(
     req: fakeReq(method, rawPath, opts),
     res,
     agent,
+    configStore: { current: {} },
     path: url.pathname,
     url,
     requestAgentAddress,

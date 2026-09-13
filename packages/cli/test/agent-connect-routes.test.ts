@@ -25,6 +25,7 @@ function runConnect(agent: any, body: unknown) {
     req,
     res,
     agent,
+    configStore: { current: {} },
     path,
     url,
     validTokens: new Set<string>(),

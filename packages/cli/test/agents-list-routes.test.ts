@@ -389,6 +389,7 @@ async function getAgents(agent: any, qs = '') {
     req,
     res,
     agent,
+    configStore: { current: {} },
     path,
     url,
     validTokens: new Set<string>(),

@@ -293,7 +293,7 @@ async function createHarness(opts: HarnessOptions = {}) {
       req, res, agent,
       publisherControl: {},
       publisherRuntime: null,
-      config: { auth: { enabled: false } },
+      configStore: { current: { auth: { enabled: false } } },
       startedAt: Date.now(),
       dashDb: {
         getContextGraphReadinessProvenance: (id: string) => readiness.get(id) ?? null,

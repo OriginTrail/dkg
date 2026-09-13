@@ -34,6 +34,7 @@ function buildCatchupCtx(body: unknown, agent: Record<string, any>) {
     req: fakeReq(body),
     res,
     agent,
+    configStore: { current: {} },
     path: url.pathname,
     url,
     authentication: requestAuthentication({ kind: 'anonymous' }),

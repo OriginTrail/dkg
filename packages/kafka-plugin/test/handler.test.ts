@@ -70,7 +70,7 @@ function mockCtx(overrides: Partial<Record<string, unknown>> = {}) {
       agent: { publishAsync, query },
       publisherControl: { getStatus },
       publisherState: { runtime: { walletIds: ['0xwallet'] }, availability: { available: true } },
-      config: {},
+      configStore: { current: {} },
       requestAgentAddress: '0x0000000000000000000000000000000000000000',
       ...overrides,
     } as unknown as import('../src/handler.js').KafkaPluginCtx,
@@ -105,13 +105,26 @@ describe('handler — POST /register happy path', () => {
     });
     expect(typeof (captured.body as Record<string, unknown>).receivedAt).toBe('string');
   });
-  it('falls back to ctx.config.kafka.contextGraphId when factory option absent', async () => {
+  it('falls back to ctx.configStore.current.kafka.contextGraphId when factory option absent', async () => {
     const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
-    const { ctx, publishAsync } = mockCtx({ config: { kafka: { contextGraphId: 'urn:cg:from-config' } } });
+    const { ctx, publishAsync } = mockCtx({ configStore: { current: { kafka: { contextGraphId: 'urn:cg:from-config' } } } });
     const handler = createHandler({ basePath: '/api/kafka/streams' });
     await handler(attachRequest(ctx, req, res));
     expect(captured.statusCode).toBe(202);
     expect(publishAsync.mock.calls[0][0]).toBe('urn:cg:from-config');
+  });
+  it('reads the latest committed configuration projection on each dispatch', async () => {
+    const snapshot = (contextGraphId: string) => Object.freeze({ kafka: Object.freeze({ contextGraphId }) });
+    let current = snapshot('urn:cg:before');
+    const { ctx, publishAsync } = mockCtx({ configStore: { get current() { return current; } } });
+    const handler = createHandler({ basePath: '/api/kafka/streams' });
+    for (const contextGraphId of ['urn:cg:before', 'urn:cg:after']) {
+      current = snapshot(contextGraphId);
+      const { req, res, captured } = mockReqRes('POST', '/api/kafka/streams/register', validBody);
+      await handler(attachRequest(ctx, req, res));
+      expect(captured.statusCode).toBe(202);
+      expect(publishAsync.mock.calls.at(-1)![0]).toBe(contextGraphId);
+    }
   });
   it('stamps the AUTHENTICATED submitter and a client cannot name its own owner', async () => {
     // Ownership decides who may run the destructive by-id clear. `publishOptions` here is an

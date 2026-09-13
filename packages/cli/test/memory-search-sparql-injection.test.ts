@@ -38,6 +38,7 @@ function buildCtx(body: unknown, captureSparql: (s: string) => void) {
     req: fakeReq('POST', body),
     res,
     agent,
+    configStore: { current: {} },
     // Force the vector fan-out to be skipped so we only exercise the SPARQL path.
     embeddingProvider: null,
     vectorStore: { search: async () => [] },

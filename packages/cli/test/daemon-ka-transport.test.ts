@@ -62,6 +62,7 @@ function runMemoryCtx(method: string, rawPath: string, agent: any, body?: unknow
   const url = new URL(`http://127.0.0.1${rawPath}`);
   const ctx = {
     req, res, agent, path: url.pathname, url,
+    configStore: { current: {} },
     authentication: requestAuthentication({ kind: 'anonymous' }),
   } as unknown as RequestContext;
   return { res, done: handleMemoryRoutes(ctx) };

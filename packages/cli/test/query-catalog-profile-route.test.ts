@@ -118,6 +118,7 @@ function requestContext(
       req: request,
       res: response,
       agent,
+      configStore: { current: {} },
       url,
       path: url.pathname,
       requestAgentAddress: '',

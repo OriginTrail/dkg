@@ -24,16 +24,20 @@ import {
  * Deriving it means a daemon-side change breaks the build here instead of at runtime, and the
  * dispatcher can hand its context over with no cast at all.
  *
- * The single refinement is `config`: plugins carry their own namespaced configuration, which
- * the canonical `DkgConfig` has no member for. Intersecting adds it without widening the
- * daemon's own type.
+ * The single refinement is the store's readonly `current` projection: plugins carry
+ * namespaced settings that the canonical `DkgConfig` has no member for. The
+ * projection always reads the daemon owner; the plugin does not keep a snapshot.
  */
 export type KafkaPluginCtx = Pick<
   RequestContext,
   'req' | 'res' | 'agent' | 'publisherControl' | 'publisherState' | 'requestAgentAddress'
   | 'url' | 'path'
 > & {
-  config: RequestContext['config'] & { kafka?: { contextGraphId?: string } };
+  configStore: {
+    readonly current: RequestContext['configStore']['current'] & {
+      readonly kafka?: { readonly contextGraphId?: string };
+    };
+  };
 };
 
 interface KafkaJobScope {
@@ -93,7 +97,7 @@ async function handlePostRegister(
   mergedSchema: typeof coreSchema,
   loggedCollisionKeys: Set<string>,
 ): Promise<void> {
-  const cgId = opts.contextGraphId ?? ctx.config.kafka?.contextGraphId;
+  const cgId = opts.contextGraphId ?? ctx.configStore.current.kafka?.contextGraphId;
   if (!cgId) {
     return jsonResponse(ctx.res, 503, {
       error: 'PluginMisconfigured',
@@ -218,7 +222,7 @@ async function handleGetCapture(
   opts: CreateHandlerOptions,
   captureID: string,
 ): Promise<void> {
-  const cgId = opts.contextGraphId ?? ctx.config.kafka?.contextGraphId;
+  const cgId = opts.contextGraphId ?? ctx.configStore.current.kafka?.contextGraphId;
   if (!cgId) {
     return jsonResponse(ctx.res, 503, {
       error: 'PluginMisconfigured',
@@ -260,7 +264,7 @@ async function handleGetCapture(
 }
 
 async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): Promise<void> {
-  const cgId = opts.contextGraphId ?? ctx.config.kafka?.contextGraphId;
+  const cgId = opts.contextGraphId ?? ctx.configStore.current.kafka?.contextGraphId;
   if (!cgId) {
     return jsonResponse(ctx.res, 503, {
       error: 'PluginMisconfigured',
@@ -358,7 +362,7 @@ async function handleGetSingle(
   opts: CreateHandlerOptions,
   ual: string,
 ): Promise<void> {
-  const cgId = opts.contextGraphId ?? ctx.config.kafka?.contextGraphId;
+  const cgId = opts.contextGraphId ?? ctx.configStore.current.kafka?.contextGraphId;
   if (!cgId) {
     return jsonResponse(ctx.res, 503, {
       error: 'PluginMisconfigured',
