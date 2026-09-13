@@ -14,6 +14,18 @@ import { StringDecoder } from 'node:string_decoder';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameSnapshotSource, sameSnapshotFileIdentity, snapshotPath, SnapshotSourceChangedError, type OpenedSnapshotSource, type SnapshotFileSource, type SnapshotFileIdentity, type SnapshotFileReader } from './workspace-snapshot-source.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
+import {
+  SnapshotWriteCapacityCoordinator,
+  type SnapshotWriteCapacityAdmission,
+  type SnapshotWriteCapacityPorts,
+} from './workspace-snapshot-write-capacity.js';
+
+export {
+  SnapshotStorageCapacityError,
+  type SnapshotWriteCapacityAdmission,
+  type SnapshotWriteCapacityLease,
+  type SnapshotWriteCapacityPorts,
+} from './workspace-snapshot-write-capacity.js';
 
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
@@ -62,6 +74,13 @@ export interface FileWorkspacePublicSnapshotStoreOptions {
   }>;
   /** Test seam; production callers use Date.now(). */
   readonly now?: () => number;
+  /**
+   * Test seam over write admission. Production stores build a
+   * SnapshotWriteCapacityCoordinator over their own filesystem and GC ports.
+   */
+  readonly createWriteCapacityAdmission?: (
+    ports: SnapshotWriteCapacityPorts,
+  ) => SnapshotWriteCapacityAdmission;
 }
 
 export interface WorkspacePublicSnapshotStore {
@@ -142,22 +161,6 @@ interface SnapshotStoreFileMetadata extends SnapshotStoreFile {
   mtimeMs: number;
 }
 
-export class SnapshotStorageCapacityError extends Error {
-  readonly code = 'SNAPSHOT_STORAGE_CAPACITY';
-
-  constructor(
-    readonly availableBytes: number,
-    readonly requiredBytes: number,
-    readonly hardReserveBytes: number,
-  ) {
-    super(
-      `Insufficient shared-memory snapshot storage capacity: ${availableBytes} bytes available, `
-      + `${requiredBytes} bytes required, ${hardReserveBytes} byte hard reserve`,
-    );
-    this.name = 'SnapshotStorageCapacityError';
-  }
-}
-
 interface SnapshotPageIndexCore {
   readonly identity: SnapshotFileIdentity;
   readonly version: typeof SNAPSHOT_PAGE_INDEX_VERSION;
@@ -174,8 +177,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     string,
     Promise<{ readonly ref: string; readonly byteLength: number }>
   >();
-  private capacityTail: Promise<void> = Promise.resolve();
-  private reservedWriteBytes = 0;
+  /** Present only under the GC policy; without it nothing bounds a write. */
+  private readonly writeCapacity?: SnapshotWriteCapacityAdmission;
   private readonly activeSnapshots = new Map<string, number>();
   private readonly gcConfig: ResolvedSnapshotGarbageCollectionConfig;
   private readonly log?: (message: string) => void;
@@ -205,6 +208,24 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
         : filesystemSpace);
     this.now = options.now ?? Date.now;
     if (this.gcConfig.enabled) {
+      const ports: SnapshotWriteCapacityPorts = {
+        readFilesystemSpace: () => this.getFilesystemSpace(this.directory),
+        watermarks: (totalBytes) => snapshotGarbageCollectionWatermarks(this.gcConfig, totalBytes),
+        collectGarbage: (requiredWriteBytes) => this.collectGarbage({ requiredWriteBytes }),
+        onGarbageCollected: (result) => {
+          if (
+            result.triggered
+            || result.deletedSnapshots > 0
+            || result.deletedTempFiles > 0
+            || result.failedDeletions > 0
+          ) {
+            this.logGarbageCollection(result);
+          }
+        },
+      };
+      const createAdmission = options.createWriteCapacityAdmission
+        ?? ((capacityPorts: SnapshotWriteCapacityPorts) => new SnapshotWriteCapacityCoordinator(capacityPorts));
+      this.writeCapacity = createAdmission(ports);
       this.gcTimer = setInterval(() => {
         void this.collectGarbage().then((result) => {
           if (
@@ -255,7 +276,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const { payload, offsets, fileBytes } = serializeWorkspacePublicSnapshotWithIndex(input.quads);
 
     await mkdir(dirname(filePath), { recursive: true });
-    const releaseCapacity = await this.reserveWriteCapacity(fileBytes);
+    const lease = await this.writeCapacity?.reserve(fileBytes);
     const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
     try {
       try {
@@ -275,7 +296,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
       // Once the file is published (or the temporary write is cleaned up), a
       // fresh filesystem reading accounts for its bytes. Index work remains
       // protected by the active lease but does not retain a byte reservation.
-      releaseCapacity();
+      lease?.release();
     }
 
     const fingerprint = await readSnapshotFileIdentity(filePath);
@@ -495,76 +516,6 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
       skippedActiveFiles,
       failedDeletions,
     };
-  }
-
-  private reserveWriteCapacity(requiredWriteBytes: number): Promise<() => void> {
-    const admission = this.capacityTail.then(async () => {
-      await this.ensureWriteCapacity(requiredWriteBytes);
-      this.reservedWriteBytes += requiredWriteBytes;
-      let released = false;
-      return () => {
-        if (released) return;
-        released = true;
-        this.reservedWriteBytes -= requiredWriteBytes;
-      };
-    });
-    this.capacityTail = admission.then(() => {}, () => {});
-    return admission;
-  }
-
-  private async readWriteCapacity(): Promise<{ availableBytes: number; totalBytes: number }> {
-    for (;;) {
-      const reservedBytes = this.reservedWriteBytes;
-      const filesystem = await this.getFilesystemSpace(this.directory);
-      // Admission is serialized, so reservations can only retire during this
-      // read. Retry if one retires: the reading may predate its physical write,
-      // and subtracting the new, smaller reservation would overstate capacity.
-      if (reservedBytes !== this.reservedWriteBytes) continue;
-      return {
-        ...filesystem,
-        availableBytes: Math.max(0, filesystem.availableBytes - reservedBytes),
-      };
-    }
-  }
-
-  private async ensureWriteCapacity(requiredWriteBytes: number): Promise<void> {
-    if (!this.gcConfig.enabled) return;
-    const filesystem = await this.readWriteCapacity();
-    const availableBytes = filesystem.availableBytes;
-    const watermarks = snapshotGarbageCollectionWatermarks(
-      this.gcConfig,
-      filesystem.totalBytes,
-    );
-    const needsCollection = availableBytes < watermarks.triggerFreeBytes
-      || availableBytes - requiredWriteBytes < watermarks.hardReserveBytes;
-    const result = needsCollection
-      ? await this.collectGarbage({ requiredWriteBytes: requiredWriteBytes + this.reservedWriteBytes })
-      : undefined;
-    // Admission is based on a fresh filesystem reading, not projected file
-    // sizes: an unlinked file held open by another process may not have
-    // released its blocks yet.
-    const filesystemAfterCollection = result
-      ? await this.readWriteCapacity()
-      : filesystem;
-    const availableAfterCollection = filesystemAfterCollection.availableBytes;
-    if (availableAfterCollection - requiredWriteBytes < watermarks.hardReserveBytes) {
-      throw new SnapshotStorageCapacityError(
-        availableAfterCollection,
-        requiredWriteBytes,
-        watermarks.hardReserveBytes,
-      );
-    }
-    if (
-      result
-      && (
-        result.triggered
-        || result.deletedSnapshots > 0
-        || result.deletedTempFiles > 0
-        || result.failedDeletions > 0
-      )
-    ) {
-      this.logGarbageCollection(result);
-    }
   }
 
   /** Keep the GC lease from source selection through descriptor retirement. */

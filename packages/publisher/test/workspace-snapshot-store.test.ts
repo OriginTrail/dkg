@@ -23,6 +23,7 @@ import {
   workspacePublicQuadsDigest,
   serializeWorkspacePublicSnapshotQuads,
 } from '../src/workspace-snapshot-store.js';
+import { SnapshotWriteCapacityCoordinator, type SnapshotWriteCapacityLease } from '../src/workspace-snapshot-write-capacity.js';
 
 import { DIGEST, MemoryPageIndexStore, makeQuads, digestFor, snapshotDirectory, snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
@@ -827,25 +828,28 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
       try { return (await stat(snapshotPath(directory, digest))).size; }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; }
     }))).reduce((sum, bytes) => sum + bytes, 0);
+    // Hold publication after real capacity admission so filesystem usage is
+    // still zero when all four writes compete for only two reservations.
+    let releaseWrites!: () => void;
+    const writesBlocked = new Promise<void>(resolve => { releaseWrites = resolve; });
+    let decisions = 0; let accepted = 0;
     const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
       gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
         targetFreeBytes: hardReserveBytes + 1, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
       getAvailableBytes: async () => capacity - await committedBytes(),
-    });
-    // Hold publication after real capacity admission so filesystem usage is
-    // still zero when all four writes compete for only two reservations.
-    const admission = store as unknown as { reserveWriteCapacity(bytes: number): Promise<() => void> };
-    const reserve = admission.reserveWriteCapacity.bind(store);
-    let releaseWrites!: () => void;
-    const writesBlocked = new Promise<void>(resolve => { releaseWrites = resolve; });
-    let decisions = 0; let accepted = 0;
-    vi.spyOn(admission, 'reserveWriteCapacity').mockImplementation(async bytes => {
-      let release: () => void;
-      try { release = await reserve(bytes); }
-      catch (error) { decisions++; throw error; }
-      accepted++; decisions++;
-      await writesBlocked;
-      return release;
+      createWriteCapacityAdmission: ports => {
+        const coordinator = new SnapshotWriteCapacityCoordinator(ports);
+        return {
+          reserve: async bytes => {
+            let lease: SnapshotWriteCapacityLease;
+            try { lease = await coordinator.reserve(bytes); }
+            catch (error) { decisions++; throw error; }
+            accepted++; decisions++;
+            await writesBlocked;
+            return lease;
+          },
+        };
+      },
     });
     const writes = Promise.allSettled(inputs.map(input => store.putSnapshot(input)));
     try {
@@ -887,6 +891,7 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
     const readGate = new Promise<void>(resolve => { releaseRead = resolve; });
     const readStartedGate = new Promise<void>(resolve => { readStarted = resolve; });
     let reads = 0;
+    let first = true;
     const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
       gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
         targetFreeBytes: hardReserveBytes + 2, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
@@ -896,14 +901,16 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
         if (reading === 2) { readStarted(); await readGate; }
         return available;
       },
-    });
-    const admission = store as unknown as { reserveWriteCapacity(bytes: number): Promise<() => void> };
-    const reserve = admission.reserveWriteCapacity.bind(store);
-    let first = true;
-    vi.spyOn(admission, 'reserveWriteCapacity').mockImplementation(async requiredBytes => {
-      const release = await reserve(requiredBytes);
-      if (first) { first = false; reserved(); await writeGate; }
-      return release;
+      createWriteCapacityAdmission: ports => {
+        const coordinator = new SnapshotWriteCapacityCoordinator(ports);
+        return {
+          reserve: async requiredBytes => {
+            const lease = await coordinator.reserve(requiredBytes);
+            if (first) { first = false; reserved(); await writeGate; }
+            return lease;
+          },
+        };
+      },
     });
     const firstWrite = store.putSnapshot(inputs[0]!);
     let secondWrite: Promise<unknown> | undefined;
@@ -921,6 +928,39 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
       releaseWrite(); releaseRead();
       await Promise.allSettled([firstWrite, secondWrite]);
       store.stopGarbageCollection(); await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a collection that admitted the write behind it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-admit-'));
+    const evictable = { digest: digestFor(930), quads: makeQuads(3, 'evictable') };
+    const input = { digest: digestFor(931), quads: makeQuads(3, 'admitted-after-gc') };
+    const bytes = Buffer.byteLength(serializeWorkspacePublicSnapshotQuads(input.quads), 'utf8');
+    const hardReserveBytes = 1000;
+    const now = Date.now();
+    const committedBytes = async () => (await Promise.all([evictable, input].map(async ({ digest }) => {
+      try { return (await stat(snapshotPath(directory, digest))).size; }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0; throw error; }
+    }))).reduce((sum, size) => sum + size, 0);
+    const logs: string[] = [];
+    await new FileWorkspacePublicSnapshotStore(directory).putSnapshot(evictable);
+    await utimes(snapshotPath(directory, evictable.digest), new Date(now - 20_000), new Date(now - 20_000));
+    // Only the evictable snapshot stands between the new write and the hard reserve.
+    const capacity = hardReserveBytes + bytes + Math.floor(await committedBytes() / 2);
+    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
+        targetFreeBytes: hardReserveBytes + 2, hardReserveBytes, minAgeMs: 10_000 },
+      getAvailableBytes: async () => capacity - await committedBytes(),
+      now: () => now,
+      log: message => { logs.push(message); },
+    });
+    try {
+      await expect(store.putSnapshot(input)).resolves.toMatchObject({ ref: input.digest, byteLength: bytes });
+      await expect(stat(snapshotPath(directory, evictable.digest))).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(logs).toEqual([expect.stringMatching(/^\[SWM-SNAPSHOT-GC\] triggered=true snapshots=1 /)]);
+    } finally {
+      store.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 
