@@ -275,6 +275,29 @@ describe('UI API tests', () => {
       await expect(fetchIdentityWalletContracts()).resolves.toEqual(contracts);
     });
 
+    it('maps only the stable identity-wallet capability 503 to unavailable', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/identity-wallets/contracts'),
+        status: 503,
+        body: { error: 'Identity wallet management is not available on this deployment' },
+      });
+
+      await expect(fetchIdentityWalletContracts()).resolves.toBeNull();
+    });
+
+    it('preserves transient identity-wallet bootstrap failures for retry', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/identity-wallets/contracts'),
+        status: 503,
+        body: { error: 'RPC endpoints exhausted', code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      });
+
+      await expect(fetchIdentityWalletContracts()).rejects.toMatchObject({
+        status: 503,
+        body: { code: 'RPC_ENDPOINTS_EXHAUSTED' },
+      });
+    });
+
     it.each([
       ['missing address', { isAdmin: false, isPrimary: false, registered: true }],
       ['non-boolean admin flag', { address: '0xabc', isAdmin: 'yes', isPrimary: false, registered: true }],

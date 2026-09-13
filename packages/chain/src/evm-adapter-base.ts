@@ -1548,13 +1548,13 @@ export class EVMChainAdapterBase {
     return this.readProvider<T | null>(label, fn, { ...opts, isEmptyResult: (v) => v == null });
   }
 
-  /** Provider/failover dispatch shared by PCA and node-identity browser bridges. */
-  protected requestBrowserWalletRpc(
+  /** Provider/failover dispatch shared by all authorized browser-wallet routes. */
+  async requestBrowserWalletRpc(
     method: BrowserWalletRpcMethod,
-    params: unknown[],
-    labelPrefix: string,
+    params: unknown[] = [],
   ): Promise<unknown> {
-    const label = `${labelPrefix} ${method}`;
+    await this.init();
+    const label = `browser wallet rpc ${method}`;
     const send = (provider: JsonRpcProvider) => provider.send(method, params);
     switch (classifyBrowserWalletRead(method, params)) {
       case 'tipTransparent':

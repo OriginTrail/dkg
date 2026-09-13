@@ -17,8 +17,8 @@ const mocks = vi.hoisted(() => ({
   removeAdmin: vi.fn(),
 }));
 
-vi.mock('../src/ui/api.js', async (original) => {
-  const actual = await original<typeof import('../src/ui/api.js')>();
+vi.mock('../src/ui/identity-wallet-api.js', async (original) => {
+  const actual = await original<typeof import('../src/ui/identity-wallet-api.js')>();
   return {
     ...actual,
     fetchOperationalWallets: mocks.fetchOperationalWallets,
@@ -173,6 +173,16 @@ afterEach(() => {
 });
 
 describe('IdentityWalletsSection', () => {
+  it('renders the explicit loading query state', async () => {
+    mocks.fetchOperationalWallets.mockReturnValue(new Promise(() => {}));
+    mocks.fetchIdentityWalletContracts.mockReturnValue(new Promise(() => {}));
+
+    const { container, unmount } = await renderSection();
+
+    expect(container.textContent).toContain('Loading node identity wallets');
+    await unmount();
+  });
+
   it('loads identity management independently when PCA bootstrap is unavailable', async () => {
     useWalletStore.setState({ bootstrap: null });
     const { container, unmount } = await renderSection();
@@ -190,12 +200,44 @@ describe('IdentityWalletsSection', () => {
     await unmount();
   });
 
-  it('does not crash the PCA page when an older daemon omits the optional wallet list', async () => {
+  it('renders the explicit unavailable state when the wallet snapshot is unsupported', async () => {
     mocks.fetchOperationalWallets.mockResolvedValue({ available: false });
     const { container, unmount } = await renderSection();
     await waitFor(() => mocks.fetchOperationalWallets.mock.calls.length === 1, 'legacy capability response');
     expect(container.textContent).toContain('Node Identity Wallets');
+    expect(container.textContent).toContain('operational-wallet snapshot');
     expect(container.querySelector('[data-testid="operational-wallet-editor"]')).toBeTruthy();
+    await unmount();
+  });
+
+  it('distinguishes an unavailable identity-contract capability from a request failure', async () => {
+    mocks.fetchIdentityWalletContracts.mockResolvedValue(null);
+    const { container, unmount } = await renderSection();
+    await waitFor(
+      () => container.textContent?.includes('Profile, Identity, and IdentityStorage addresses') === true,
+      'identity contracts unavailable',
+    );
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await unmount();
+  });
+
+  it('recovers a failed bootstrap query through Retry without remounting Settings', async () => {
+    mocks.fetchIdentityWalletContracts
+      .mockRejectedValueOnce(new Error('temporary daemon failure'))
+      .mockResolvedValue(CONTRACTS);
+    const { container, unmount } = await renderSection();
+    await waitFor(
+      () => container.textContent?.includes('temporary daemon failure') === true,
+      'bootstrap query error',
+    );
+
+    await click([...container.querySelectorAll('button')].find((button) => button.textContent === 'Retry')!);
+
+    await waitFor(
+      () => container.textContent?.includes('authorized admin signer') === true,
+      'recovered identity bootstrap',
+    );
+    expect(mocks.fetchIdentityWalletContracts).toHaveBeenCalledTimes(2);
     await unmount();
   });
 
@@ -272,8 +314,9 @@ describe('IdentityWalletsSection', () => {
   });
 
   it('switches with the identity bootstrap when PCA bootstrap is unavailable', async () => {
+    let switchAttempts = 0;
     const request = vi.fn(async ({ method }: { method: string }) => {
-      if (method === 'wallet_switchEthereumChain') {
+      if (method === 'wallet_switchEthereumChain' && switchAttempts++ === 0) {
         const error = new Error('Unknown chain') as Error & { code: number };
         error.code = 4902;
         throw error;
@@ -306,6 +349,10 @@ describe('IdentityWalletsSection', () => {
         nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
         rpcUrls: ['https://wallet.example/base-sepolia'],
       }],
+    });
+    expect(request).toHaveBeenNthCalledWith(3, {
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: '0x14a34' }],
     });
     await unmount();
   });

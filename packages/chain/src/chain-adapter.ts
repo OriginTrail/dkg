@@ -22,7 +22,6 @@ export interface ConvictionReader {
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
-  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 }
 
 /** Inputs for one adapter-owned, cost-aware publisher planning decision. */
@@ -1454,8 +1453,8 @@ export interface ChainAdapter {
    */
   getIdentityWalletContracts?(): Promise<IdentityWalletContracts | null>;
 
-  /** Read-only JSON-RPC bridge used by `/api/identity-wallets/rpc`. */
-  requestIdentityWalletRpc?(
+  /** Feature-neutral, read-only JSON-RPC bridge for browser-wallet routes. */
+  requestBrowserWalletRpc?(
     method: BrowserWalletRpcMethod,
     params?: unknown[],
   ): Promise<unknown>;
@@ -1466,13 +1465,6 @@ export interface ChainAdapter {
    * and safe RPC URLs; Hub/logic/ShardingTable stay daemon-side.
   */
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
-
-  /**
-   * Daemon-internal read-only JSON-RPC bridge used by `/api/pca/rpc`. The HTTP
-   * route owns the allowlist; adapters forward allowed reads without exposing
-   * endpoint URLs.
-   */
-  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 
   /**
    * Returns the V10 NFT-backed PCA's `lockDurationEpochs` for the given

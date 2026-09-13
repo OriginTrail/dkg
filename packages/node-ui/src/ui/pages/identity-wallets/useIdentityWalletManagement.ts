@@ -3,8 +3,9 @@ import { getAddress, type Address, type Hex } from 'viem';
 import {
   fetchIdentityWalletContracts,
   fetchOperationalWallets,
+  type IdentityWalletContracts,
   type OperationalWalletSnapshot,
-} from '../../api.js';
+} from '../../identity-wallet-api.js';
 import { useFetch } from '../../hooks.js';
 import { eqAddress } from '../../web3/address.js';
 import { useWalletStore } from '../../stores/wallet.js';
@@ -33,6 +34,26 @@ export interface CompletedIdentityWalletAction {
   txHash: Hex;
   confirmed: boolean;
 }
+
+export type IdentityWalletQueryState =
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | {
+      status: 'unavailable';
+      reason: 'operational-wallets' | 'identity-contracts';
+      snapshot: OperationalWalletSnapshot | null;
+    }
+  | {
+      status: 'ready';
+      snapshot: OperationalWalletSnapshot;
+      bootstrap: IdentityWalletContracts;
+    };
+
+export type IdentityWalletSummaryState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'error'; message: string }
+  | { status: 'ready'; value: IdentityWalletSummary };
 
 export const IDENTITY_WALLET_ACTION_META = {
   'add-operational': { role: 'operational', verb: 'add', label: 'Operational wallet registered' },
@@ -141,72 +162,58 @@ async function dispatchIdentityWalletAction(
   }
 }
 
-export function useIdentityWalletManagement() {
-  const operational = useFetch(fetchOperationalWallets, [], 0);
-  const identityBootstrap = useFetch(fetchIdentityWalletContracts, [], 0);
-  const data = operational.data?.available ? operational.data.snapshot : null;
-  const { loading, error: loadError, refresh } = operational;
-  const bootstrap = identityBootstrap.data;
-  const connected = useWalletStore((state) => state.address);
-  const connectedChainId = useWalletStore((state) => state.chainId);
-  const wrongNetwork = Boolean(
-    bootstrap && connectedChainId !== numericChainId(bootstrap.chainId),
-  );
-  const [summary, setSummary] = useState<IdentityWalletSummary | null>(null);
-  const [summaryError, setSummaryError] = useState<string | null>(null);
-  const [summaryLoading, setSummaryLoading] = useState(false);
-  const [summaryRevision, reloadSummary] = useReducer((value: number) => value + 1, 0);
+type SettledIdentityWalletQueryState = Extract<
+  IdentityWalletQueryState,
+  { status: 'ready' | 'unavailable' }
+>;
+
+async function fetchIdentityWalletQuery(): Promise<SettledIdentityWalletQueryState> {
+  const [operational, bootstrap] = await Promise.all([
+    fetchOperationalWallets(),
+    fetchIdentityWalletContracts(),
+  ]);
+  if (!operational.available) {
+    return { status: 'unavailable', reason: 'operational-wallets', snapshot: null };
+  }
+  if (!bootstrap) {
+    return {
+      status: 'unavailable',
+      reason: 'identity-contracts',
+      snapshot: operational.snapshot,
+    };
+  }
+  return { status: 'ready', snapshot: operational.snapshot, bootstrap };
+}
+
+function useIdentityWalletQuery(): {
+  state: IdentityWalletQueryState;
+  refresh: () => void;
+} {
+  const request = useFetch(fetchIdentityWalletQuery, [], 0);
+  const state = useMemo<IdentityWalletQueryState>(() => {
+    if (request.error) return { status: 'error', message: request.error };
+    return request.data ?? { status: 'loading' };
+  }, [request.data, request.error]);
+  return { state, refresh: request.refresh };
+}
+
+interface IdentityWalletMutationOptions {
+  data: OperationalWalletSnapshot | null;
+  bootstrap: IdentityWalletContracts | null;
+  primaryAddress: string | null;
+  refreshQuery: () => void;
+  reloadSummary: () => void;
+}
+
+function useIdentityWalletMutations({
+  data,
+  bootstrap,
+  primaryAddress,
+  refreshQuery,
+  reloadSummary,
+}: IdentityWalletMutationOptions) {
   const [state, dispatch] = useReducer(managementReducer, initialState);
-
-  const knownAddresses = useMemo(() => {
-    // Older daemons and e2e fixtures can return an empty object while this
-    // capability is unavailable. Treat a missing list as empty instead of
-    // letting the optional feature crash the Settings page.
-    const addresses = [...(data?.wallets?.map((wallet) => wallet.address) ?? [])];
-    if (connected) addresses.push(connected);
-    return addresses;
-  }, [connected, data]);
-  const knownAddressesKey = knownAddresses.join('|').toLowerCase();
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!data?.hasProfile || !bootstrap) {
-      setSummary(null);
-      setSummaryError(null);
-      setSummaryLoading(false);
-      return;
-    }
-    setSummaryLoading(true);
-    setSummaryError(null);
-    const client = publicClientFor(bootstrap.chainId, bootstrap.rpcUrls);
-    void readIdentityWalletSummary(bootstrap, client, data.identityId, knownAddresses)
-      .then((next) => {
-        if (!cancelled) setSummary(next);
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setSummary(null);
-          setSummaryError((err as Error)?.message ?? 'Could not read identity keys from chain.');
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setSummaryLoading(false);
-      });
-    return () => { cancelled = true; };
-  }, [bootstrap, data?.hasProfile, data?.identityId, knownAddressesKey, summaryRevision]);
-
-  const connectedRoles = summary?.addresses.find((item) => eqAddress(item.address, connected));
-  const connectedIsAdmin = connectedRoles?.admin === true;
   const transactionPending = state.transaction.status === 'signing' || state.transaction.status === 'submitted';
-  const writesEnabled = Boolean(
-    data?.hasProfile &&
-    bootstrap &&
-    connected &&
-    connectedIsAdmin &&
-    !wrongNetwork &&
-    !transactionPending,
-  );
-  const primaryAddress = data?.wallets?.find((wallet) => wallet.isPrimary)?.address ?? null;
 
   const submit = useCallback(async (action: IdentityWalletAction, addressValue: string) => {
     let address: Address;
@@ -245,7 +252,7 @@ export function useIdentityWalletManagement() {
         type: 'succeeded',
         completed: { action, address: result.address, txHash: result.txHash, confirmed: true },
       });
-      refresh();
+      refreshQuery();
       reloadSummary();
     } catch (err) {
       const txHash = uncertainTransactionHash(err);
@@ -255,7 +262,7 @@ export function useIdentityWalletManagement() {
         completed: txHash ? { action, address, txHash, confirmed: false } : undefined,
       });
     }
-  }, [bootstrap, data?.hasProfile, data?.identityId, primaryAddress, refresh]);
+  }, [bootstrap, data?.hasProfile, data?.identityId, primaryAddress, refreshQuery, reloadSummary]);
 
   const requestRemoval = useCallback((role: IdentityWalletRole, value: string) => {
     try {
@@ -280,21 +287,6 @@ export function useIdentityWalletManagement() {
   }, [state.removal, submit]);
 
   return {
-    data: data as OperationalWalletSnapshot | null,
-    loading,
-    loadError,
-    refresh,
-    bootstrap,
-    connected,
-    wrongNetwork,
-    summary,
-    summaryError,
-    summaryLoading,
-    reloadSummary,
-    connectedIsAdmin,
-    identityContractsReady: Boolean(bootstrap),
-    writesEnabled,
-    primaryAddress,
     inputs: state.inputs,
     setInput: (role: IdentityWalletRole, value: string) => dispatch({ type: 'input', role, value }),
     removal: state.removal,
@@ -304,5 +296,81 @@ export function useIdentityWalletManagement() {
     submit,
     transaction: state.transaction,
     transactionPending,
+  };
+}
+
+export function useIdentityWalletManagement() {
+  const query = useIdentityWalletQuery();
+  const data = query.state.status === 'ready' || query.state.status === 'unavailable'
+    ? query.state.snapshot
+    : null;
+  const bootstrap = query.state.status === 'ready' ? query.state.bootstrap : null;
+  const connected = useWalletStore((state) => state.address);
+  const connectedChainId = useWalletStore((state) => state.chainId);
+  const wrongNetwork = Boolean(
+    bootstrap && connectedChainId !== numericChainId(bootstrap.chainId),
+  );
+  const [summaryState, setSummaryState] = useState<IdentityWalletSummaryState>({ status: 'idle' });
+  const [summaryRevision, reloadSummary] = useReducer((value: number) => value + 1, 0);
+  const knownAddresses = useMemo(() => {
+    const addresses = [...(data?.wallets.map((wallet) => wallet.address) ?? [])];
+    if (connected) addresses.push(connected);
+    return addresses;
+  }, [connected, data]);
+  const knownAddressesKey = knownAddresses.join('|').toLowerCase();
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!data?.hasProfile || !bootstrap) {
+      setSummaryState({ status: 'idle' });
+      return;
+    }
+    setSummaryState({ status: 'loading' });
+    const client = publicClientFor(bootstrap.chainId, bootstrap.rpcUrls);
+    void readIdentityWalletSummary(bootstrap, client, data.identityId, knownAddresses)
+      .then((value) => {
+        if (!cancelled) setSummaryState({ status: 'ready', value });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setSummaryState({
+            status: 'error',
+            message: (err as Error)?.message ?? 'Could not read identity keys from chain.',
+          });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [bootstrap, data?.hasProfile, data?.identityId, knownAddressesKey, summaryRevision]);
+
+  const summary = summaryState.status === 'ready' ? summaryState.value : null;
+  const connectedRoles = summary?.addresses.find((item) => eqAddress(item.address, connected));
+  const connectedIsAdmin = connectedRoles?.admin === true;
+  const primaryAddress = data?.wallets.find((wallet) => wallet.isPrimary)?.address ?? null;
+  const mutations = useIdentityWalletMutations({
+    data,
+    bootstrap,
+    primaryAddress,
+    refreshQuery: query.refresh,
+    reloadSummary,
+  });
+  const writesEnabled = Boolean(
+    query.state.status === 'ready'
+    && data?.hasProfile
+    && connected
+    && connectedIsAdmin
+    && !wrongNetwork
+    && !mutations.transactionPending,
+  );
+
+  return {
+    query: query.state,
+    refreshQuery: query.refresh,
+    connected,
+    wrongNetwork,
+    summary: summaryState,
+    reloadSummary,
+    connectedIsAdmin,
+    writesEnabled,
+    ...mutations,
   };
 }

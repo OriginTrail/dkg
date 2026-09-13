@@ -116,13 +116,13 @@ function supportsIdentityWallets(agent: RequestContext['agent']): boolean {
   const candidate = agent as RequestContext['agent'] & {
     supportsIdentityWalletManagement?: unknown;
     getIdentityWalletContracts?: unknown;
-    requestIdentityWalletRpc?: unknown;
+    requestBrowserWalletRpc?: unknown;
   };
   if (typeof candidate.supportsIdentityWalletManagement === 'boolean') {
     return candidate.supportsIdentityWalletManagement;
   }
   return typeof candidate.getIdentityWalletContracts === 'function'
-    && typeof candidate.requestIdentityWalletRpc === 'function';
+    && typeof candidate.requestBrowserWalletRpc === 'function';
 }
 
 function walletRpcUrls(contracts: IdentityWalletContracts): string[] {
@@ -142,7 +142,7 @@ async function handleRpcRequest(agent: RequestContext['agent'], raw: unknown) {
         ? { available: false }
         : { available: true, error: ethCallError(params, contracts) };
     },
-    request: (method, params) => agent.requestIdentityWalletRpc(method, params),
+    request: (method, params) => agent.requestBrowserWalletRpc(method, params),
     readErrorPrefix: 'Identity wallet RPC read failed',
   });
 }

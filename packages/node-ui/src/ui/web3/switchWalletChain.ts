@@ -41,5 +41,11 @@ export async function switchWalletToBootstrap(
         },
       ],
     });
+    // EIP-3085 only adds a chain; it does not require the wallet to select it.
+    // Confirm the operation's advertised postcondition with a second switch.
+    await provider.request({
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: hex }],
+    });
   }
 }

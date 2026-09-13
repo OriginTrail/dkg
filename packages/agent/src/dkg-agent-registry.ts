@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, PcaUnavailableError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod, type BrowserWalletRpcMethod, type IdentityWalletContracts } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type BrowserWalletRpcMethod, type IdentityWalletContracts } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1565,13 +1565,14 @@ export class AgentRegistryMethods extends DKGAgentBase {
 
   /** True when the adapter can serve the daemon's PCA browser-read RPC bridge. */
   get supportsPublishingConvictionRpc(): boolean {
-    return typeof this.chain.requestPublishingConvictionRpc === 'function';
+    return typeof this.chain.getPublishingConvictionContracts === 'function'
+      && typeof this.chain.requestBrowserWalletRpc === 'function';
   }
 
   /** True when identity bootstrap and its read bridge are independently available. */
   get supportsIdentityWalletManagement(): boolean {
     return typeof this.chain.getIdentityWalletContracts === 'function'
-      && typeof this.chain.requestIdentityWalletRpc === 'function';
+      && typeof this.chain.requestBrowserWalletRpc === 'function';
   }
 
   // OT-RFC-51: `primaryNode` (the node identityId this PCA's committed TRAC
@@ -1690,15 +1691,15 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return this.chain.getIdentityWalletContracts();
   }
 
-  async requestIdentityWalletRpc(
+  async requestBrowserWalletRpc(
     this: DKGAgent,
     method: BrowserWalletRpcMethod,
     params?: unknown[],
   ): Promise<unknown> {
-    if (typeof this.chain.requestIdentityWalletRpc !== 'function') {
-      throw new Error('Identity wallet RPC is not available on this deployment.');
+    if (typeof this.chain.requestBrowserWalletRpc !== 'function') {
+      throw new Error('Browser wallet RPC is not available on this deployment.');
     }
-    return this.chain.requestIdentityWalletRpc(method, params);
+    return this.chain.requestBrowserWalletRpc(method, params);
   }
 
   /** Enumerate registered publishing agents (operational wallets) for a PCA.
@@ -1748,18 +1749,6 @@ export class AgentRegistryMethods extends DKGAgentBase {
   async getPublishingConvictionContracts(this: DKGAgent): Promise<PcaContracts | null> {
     if (typeof this.chain.getPublishingConvictionContracts !== 'function') return null;
     return this.chain.getPublishingConvictionContracts();
-  }
-
-  /** Daemon-internal JSON-RPC read bridge for PCA browser reads. The daemon
-   *  route owns the method allowlist and response shaping; the adapter owns the
-   *  provider/failover execution. */
-  async requestPublishingConvictionRpc(
-    this: DKGAgent,
-    method: PcaRpcMethod,
-    params?: unknown[],
-  ): Promise<unknown> {
-    if (typeof this.chain.requestPublishingConvictionRpc !== 'function') throw new PcaUnavailableError();
-    return this.chain.requestPublishingConvictionRpc(method, params);
   }
 
   // ---------------------------------------------------------------------------

@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { createAllowedHttpAuthentication } from '../src/auth.js';
+import { handleRequest, type HandleRequestInput } from '../src/daemon/handle-request.js';
 import { handleIdentityWalletRoutes } from '../src/daemon/routes/identity-wallets.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
 function fakeRes() {
-  const res: any = { statusCode: 0, body: '' };
+  const res: any = { statusCode: 0, body: '', writableEnded: false, headersSent: false };
   res.writeHead = (status: number) => { res.statusCode = status; };
-  res.end = (body: string) => { res.body = body; };
+  res.end = (body: string) => { res.body = body; res.writableEnded = true; };
   return res;
 }
 
@@ -34,12 +36,38 @@ const CONTRACTS = {
 };
 
 describe('daemon identity-wallet browser capability', () => {
+  it('is reachable through the top-level daemon request dispatcher', async () => {
+    const res = fakeRes();
+    const req = {
+      method: 'GET',
+      url: '/api/identity-wallets/contracts',
+      headers: { host: '127.0.0.1' },
+    };
+    const agent = {
+      resolveAgentAddress: () => ethers.ZeroAddress,
+      supportsIdentityWalletManagement: true,
+      getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
+      requestBrowserWalletRpc: vi.fn(),
+    };
+
+    await handleRequest({
+      req,
+      res,
+      agent,
+      authentication: createAllowedHttpAuthentication({ mode: 'disabled' }),
+    } as unknown as HandleRequestInput);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).storage).toBe(CONTRACTS.storage);
+    expect(JSON.parse(res.body).error).not.toBe('Not found');
+  });
+
   it('bootstraps independently of PCA support and never exposes private RPC URLs', async () => {
     const agent = {
       supportsPublishingConvictionNft: false,
       supportsIdentityWalletManagement: true,
       getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
-      requestIdentityWalletRpc: vi.fn(),
+      requestBrowserWalletRpc: vi.fn(),
     };
     const request = runCtx('GET', '/api/identity-wallets/contracts', agent);
     await request.done;
@@ -57,7 +85,7 @@ describe('daemon identity-wallet browser capability', () => {
     const agent = {
       supportsIdentityWalletManagement: true,
       getIdentityWalletContracts: vi.fn(async () => null),
-      requestIdentityWalletRpc: vi.fn(),
+      requestBrowserWalletRpc: vi.fn(),
     };
     const request = runCtx('GET', '/api/identity-wallets/contracts', agent);
     await request.done;
@@ -82,7 +110,7 @@ describe('daemon identity-wallet browser capability', () => {
     const agent = {
       supportsIdentityWalletManagement: true,
       getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
-      requestIdentityWalletRpc: rpc,
+      requestBrowserWalletRpc: rpc,
     };
 
     for (const [index, data] of allowed.entries()) {
@@ -130,7 +158,7 @@ describe('daemon identity-wallet browser capability', () => {
     const agent = {
       supportsIdentityWalletManagement: true,
       getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
-      requestIdentityWalletRpc: rpc,
+      requestBrowserWalletRpc: rpc,
     };
     const data = new ethers.Interface([
       'function keyHasPurpose(uint72 identityId, bytes32 key, uint256 purpose) view returns (bool)',
@@ -151,7 +179,7 @@ describe('daemon identity-wallet browser capability', () => {
     const agent = {
       supportsIdentityWalletManagement: true,
       getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
-      requestIdentityWalletRpc: rpc,
+      requestBrowserWalletRpc: rpc,
     };
     const request = runCtx('POST', '/api/identity-wallets/rpc', agent, {
       jsonrpc: '2.0', id: 10, method: 'eth_sendRawTransaction', params: ['0xdeadbeef'],
@@ -170,7 +198,7 @@ describe('daemon identity-wallet browser capability', () => {
     const agent = {
       supportsIdentityWalletManagement: true,
       getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
-      requestIdentityWalletRpc: rpc,
+      requestBrowserWalletRpc: rpc,
     };
     const expandedBlocks = Array.from({ length: 20 }, (_, index) => ({
       jsonrpc: '2.0', id: index, method: 'eth_getBlockByNumber', params: ['latest', true],

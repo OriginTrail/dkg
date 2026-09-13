@@ -19,7 +19,6 @@ import type {
   PcaAccountRelation,
   ShardingTableNode,
   PcaContracts,
-  PcaRpcMethod,
 } from './chain-adapter.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { PcaUnavailableError } from './pca-errors.js';
@@ -832,8 +831,4 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     };
   }
 
-  async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
-    await this.init();
-    return this.requestBrowserWalletRpc(method, params, 'pca rpc');
-  }
 }

@@ -31,7 +31,6 @@ import type {
   PcaAccountRelation,
   ShardingTableNode,
   PcaContracts,
-  PcaRpcMethod,
   BrowserWalletRpcMethod,
   IdentityWalletContracts,
   PublishTransactionResolution,
@@ -1127,7 +1126,7 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
-  async requestPublishingConvictionRpc(method: PcaRpcMethod, _params: unknown[] = []): Promise<unknown> {
+  async requestBrowserWalletRpc(method: BrowserWalletRpcMethod, _params: unknown[] = []): Promise<unknown> {
     switch (method) {
       case 'eth_chainId': {
         const tail = this.chainId.includes(':') ? this.chainId.split(':').pop()! : this.chainId;
@@ -1143,13 +1142,6 @@ export class MockChainAdapter implements ChainAdapter {
       case 'eth_getTransactionByHash':
         return null;
     }
-  }
-
-  async requestIdentityWalletRpc(
-    method: BrowserWalletRpcMethod,
-    params: unknown[] = [],
-  ): Promise<unknown> {
-    return this.requestPublishingConvictionRpc(method, params);
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK

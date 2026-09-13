@@ -15,19 +15,13 @@ import {
 export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl: string | null }) {
   const management = useIdentityWalletManagement();
   const {
-    data,
-    loading,
-    loadError,
-    refresh,
-    bootstrap,
+    query,
+    refreshQuery,
     connected,
     wrongNetwork,
-    summary,
-    summaryError,
-    summaryLoading,
+    summary: summaryState,
     reloadSummary,
     connectedIsAdmin,
-    identityContractsReady,
     writesEnabled,
     inputs,
     setInput,
@@ -39,6 +33,11 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
     transaction,
     transactionPending,
   } = management;
+  const data = query.status === 'ready' || query.status === 'unavailable'
+    ? query.snapshot
+    : null;
+  const bootstrap = query.status === 'ready' ? query.bootstrap : null;
+  const summary = summaryState.status === 'ready' ? summaryState.value : null;
 
   const completed = transaction.status === 'succeeded'
     ? transaction.completed
@@ -82,24 +81,31 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
             testId="identity-wallet-connect"
           />
         )}
-        {connected && !summaryLoading && !summaryError && (
+        {connected && summaryState.status === 'ready' && (
           <span className={`badge ${connectedIsAdmin ? 'badge-success' : 'badge-warn'}`}>
             {connectedIsAdmin ? 'authorized admin signer' : 'not an admin for this identity'}
           </span>
         )}
       </div>
 
-      {loading && !data && <p className="v10-identity-wallet-status" role="status">Loading node identity wallets…</p>}
-      {loadError && !data && (
+      {query.status === 'loading' && (
+        <p className="v10-identity-wallet-status" role="status">Loading node identity wallets…</p>
+      )}
+      {query.status === 'error' && (
         <p className="v10-modal-warning" role="alert">
-          Couldn&apos;t load this node&apos;s wallet list.{' '}
-          <button type="button" className="v10-identity-wallet-btn compact" onClick={() => refresh()}>Retry</button>
+          Couldn&apos;t load identity wallet management: {query.message}.{' '}
+          <button type="button" className="v10-identity-wallet-btn compact" onClick={refreshQuery}>Retry</button>
         </p>
       )}
       {data && !data.hasProfile && (
         <p className="v10-modal-warning" role="status">This node does not have an on-chain identity profile yet.</p>
       )}
-      {data?.hasProfile && !identityContractsReady && (
+      {query.status === 'unavailable' && query.reason === 'operational-wallets' && (
+        <p className="v10-modal-warning" role="status">
+          Identity wallet management requires a node version that exposes the operational-wallet snapshot.
+        </p>
+      )}
+      {data?.hasProfile && query.status === 'unavailable' && query.reason === 'identity-contracts' && (
         <p className="v10-modal-warning" role="status">
           Identity wallet management requires a node version that exposes the Profile, Identity, and IdentityStorage addresses.
         </p>
@@ -107,9 +113,9 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {wrongNetwork && (
         <p className="v10-modal-warning" role="status">Switch the connected wallet to this node&apos;s network to manage identity keys.</p>
       )}
-      {summaryError && (
+      {summaryState.status === 'error' && (
         <p className="v10-modal-warning" role="alert">
-          Couldn&apos;t verify identity keys: {summaryError}{' '}
+          Couldn&apos;t verify identity keys: {summaryState.message}{' '}
           <button type="button" className="v10-identity-wallet-btn compact" onClick={reloadSummary}>Retry</button>
         </p>
       )}

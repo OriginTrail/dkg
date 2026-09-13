@@ -13,7 +13,6 @@ import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers, type Contract } from 'ethers';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 import type {
-  BrowserWalletRpcMethod,
   IdentityProof,
   IdentityWalletContracts,
   OperationalWalletRegistrationResult,
@@ -44,14 +43,6 @@ export class IdentityMethods extends EVMChainAdapterBase {
       rpcUrls: [...this.walletRpcUrls],
       walletRpcUrls: [...this.walletRpcUrls],
     };
-  }
-
-  async requestIdentityWalletRpc(
-    method: BrowserWalletRpcMethod,
-    params: unknown[] = [],
-  ): Promise<unknown> {
-    await this.init();
-    return this.requestBrowserWalletRpc(method, params, 'identity wallet rpc');
   }
 
   async ensureOperationalWalletsRegistered(options?: {

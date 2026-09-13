@@ -55,6 +55,7 @@ export default defineConfig({
           'test/daemon/plugin-loader.test.ts',
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
+          'test/daemon-identity-wallet-routes.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.

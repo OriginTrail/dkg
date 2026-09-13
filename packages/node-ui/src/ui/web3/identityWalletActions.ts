@@ -8,7 +8,7 @@ import {
   type ContractFunctionName,
   type Hex,
 } from 'viem';
-import type { IdentityWalletContracts } from '../api.js';
+import type { IdentityWalletContracts } from '../identity-wallet-api.js';
 import { eqAddress } from './address.js';
 import {
   browserWalletAddress,

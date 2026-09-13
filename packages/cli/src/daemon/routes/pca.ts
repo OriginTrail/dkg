@@ -68,12 +68,14 @@ function walletRpcUrlsForResponse(contracts: PcaContracts): string[] {
 function supportsPcaRpcBridge(agent: RequestContext['agent']): boolean {
   const candidate = agent as RequestContext['agent'] & {
     supportsPublishingConvictionRpc?: unknown;
-    requestPublishingConvictionRpc?: unknown;
+    requestBrowserWalletRpc?: unknown;
   };
   if (typeof candidate.supportsPublishingConvictionRpc === 'boolean') {
     return candidate.supportsPublishingConvictionRpc;
   }
-  return typeof candidate.requestPublishingConvictionRpc === 'function';
+  // Compatibility for older embedded agents without the correlated support
+  // getter. Current DKGAgent computes the getter from PCA bootstrap + bridge.
+  return typeof candidate.requestBrowserWalletRpc === 'function';
 }
 
 function pcaRpcEthCallError(
@@ -161,7 +163,7 @@ async function handlePcaRpcRequest(
         ? { available: false }
         : { available: true, error: pcaRpcEthCallError(params, contracts) };
     },
-    request: (method, params) => agent.requestPublishingConvictionRpc(method, params),
+    request: (method, params) => agent.requestBrowserWalletRpc(method, params),
     isUnavailableError: (error, message) => isNoChain(message) || isPcaUnavailable(error, message),
     readErrorPrefix: 'PCA RPC read failed',
   });

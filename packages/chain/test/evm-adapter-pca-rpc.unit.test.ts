@@ -128,7 +128,7 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
   beforeEach(() => { _resetRpcFailoverStatsForTest(); });
   afterEach(() => { _resetRpcFailoverStatsForTest(); });
 
-  it('requestPublishingConvictionRpc reads through the provider failover loop', async () => {
+  it('requestBrowserWalletRpc reads through the provider failover loop', async () => {
     const primary = {
       send: recorder(async () => { throw retryable429(); }),
     };
@@ -140,14 +140,14 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
       ['https://primary.example/v2/SECRETKEY', 'https://backup.example'],
     );
 
-    await expect(adapter.requestPublishingConvictionRpc('eth_chainId', []))
+    await expect(adapter.requestBrowserWalletRpc('eth_chainId', []))
       .resolves.toEqual({ method: 'eth_chainId', params: [], endpoint: 'backup' });
 
     expect(primary.send.calls).toEqual([['eth_chainId', []]]);
     expect(backup.send.calls).toEqual([['eth_chainId', []]]);
   });
 
-  it('requestPublishingConvictionRpc surfaces typed host-only exhaustion when all endpoints fail', async () => {
+  it('requestBrowserWalletRpc surfaces typed host-only exhaustion when all endpoints fail', async () => {
     const primary = {
       send: recorder(async () => { throw retryable429(); }),
     };
@@ -161,7 +161,7 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
 
     let thrown: unknown;
     try {
-      await adapter.requestPublishingConvictionRpc('eth_chainId', []);
+      await adapter.requestBrowserWalletRpc('eth_chainId', []);
     } catch (err) {
       thrown = err;
     }
@@ -248,11 +248,11 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
     await expect(adapter.getIdentityWalletContracts()).rejects.toBe(discoveryFailure);
   });
 
-  it('routes identity-wallet RPC through the bounded browser transport', async () => {
+  it('exposes one feature-neutral bounded browser-wallet transport', async () => {
     const send = recorder(async (method: string, params: unknown[]) => ({ method, params }));
     const adapter = pcaRpcAdapter([{ send }], ['https://primary.example']);
 
-    await expect(adapter.requestIdentityWalletRpc('eth_chainId'))
+    await expect(adapter.requestBrowserWalletRpc('eth_chainId'))
       .resolves.toEqual({ method: 'eth_chainId', params: [] });
     expect(send.calls).toEqual([['eth_chainId', []]]);
   });
