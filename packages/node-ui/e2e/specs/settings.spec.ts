@@ -31,9 +31,10 @@ test.describe('Settings page (rc.12 rewrite)', () => {
     expect(await centerPanel.isTabClosable('Settings')).toBe(true);
   });
 
-  test('renders exactly the six section cards in order', async ({ settingsPage }) => {
+  test('renders exactly the seven section cards in order', async ({ settingsPage }) => {
     expect(await settingsPage.getSectionTitles()).toEqual([
       'Node Identity',
+      'Node Identity Wallets',
       'Blockchain Config',
       'Publisher Conviction',
       'Network Telemetry',
