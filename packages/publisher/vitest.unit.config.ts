@@ -5,7 +5,13 @@ export default defineConfig({
     include: [
       'test/chain-event-dispatch-context.unit.test.ts',
       'test/chain-event-poller-cancellation.unit.test.ts',
-      'test/chain-event-lane-runner.unit.test.ts',
+      // The former chain-event-lane-runner suite, split by responsibility; all
+      // run on an in-memory store and a fake chain, so no Hardhat is needed.
+      'test/chain-event-lane-allocator-backfill.test.ts',
+      'test/chain-event-lane-cursor-persistence.test.ts',
+      'test/chain-event-lane-lifecycle.test.ts',
+      'test/chain-event-lane-publish.test.ts',
+      'test/chain-event-lane-scheduler.test.ts',
       'test/chain-event-poller-ka-registered.test.ts',
       'test/workspace-snapshot-source.test.ts',
       'test/workspace-snapshot-page-index.test.ts',
