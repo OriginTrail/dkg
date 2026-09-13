@@ -127,3 +127,35 @@ export function reconcilePressureCapacity(
   }
   return { kind: 'uniform', capacity: liveCapacity ?? fallback.value };
 }
+
+/** One live owner's backlog: its policy and where its queued work waits. */
+export interface OwnerQueueDepth {
+  readonly capacity: SchedulerPressureCapacity;
+  /** Queued work captured under this owner across every lane. */
+  readonly queued: number;
+  readonly queuedByLane: ReadonlyMap<string, number>;
+}
+
+/**
+ * Mixed owners publish no common ceiling, yet each owner's queue is still
+ * bounded by its own policy. Index the backlog by captured identity once per
+ * snapshot so a lane can be classified against every owner whose work waits on
+ * it, comparing the identities captured at enqueue rather than serializing.
+ */
+export function indexQueuedPressureByOwner(
+  queued: Iterable<{ readonly lane: string; readonly capacity?: CapturedPressureCapacity }>,
+  fallback: CapturedPressureCapacity,
+): ReadonlyMap<string, OwnerQueueDepth> {
+  const owners = new Map<string, { capacity: SchedulerPressureCapacity; queued: number; queuedByLane: Map<string, number> }>();
+  for (const record of queued) {
+    const { value, identity } = record.capacity ?? fallback;
+    let owner = owners.get(identity);
+    if (!owner) {
+      owner = { capacity: value, queued: 0, queuedByLane: new Map() };
+      owners.set(identity, owner);
+    }
+    owner.queued += 1;
+    owner.queuedByLane.set(record.lane, (owner.queuedByLane.get(record.lane) ?? 0) + 1);
+  }
+  return owners;
+}

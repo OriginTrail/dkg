@@ -1,9 +1,11 @@
 import { getMetrics } from './telemetry-api.js';
 import {
   capturePressureCapacity,
+  indexQueuedPressureByOwner,
   reconcilePressureCapacity,
   normalizePressureLimit as normalizeLimit,
   type CapturedPressureCapacity,
+  type OwnerQueueDepth,
   type ReconciledPressureCapacity,
   type SchedulerLaneCapacityModel,
   type SchedulerPressureCapacity,
@@ -76,6 +78,9 @@ export interface BackpressureLaneSnapshot {
    * goes with `queueLimit` — equal to `queued` for a private allocation, and
    * the pool's whole depth for a shared one. Read this, not `queued`, to
    * compute utilization, so a consumer never has to special-case the model.
+   * On a `mixed` row no single ceiling applies: `queueLimit` is `null`, this
+   * is the lane's own backlog, and `state` is the worst that any live owner's
+   * own queue depth reaches on this lane.
    *
    * Optional for the same backward-compatibility reason as `capacityModel`;
    * absent means `queued`.
@@ -168,6 +173,14 @@ interface LaneRuntime {
   rejectedByReason: Map<string, number>;
   lastRejectedAt: number | null;
 }
+
+/** A depth and the ceiling a lane's state is classified against. */
+interface DepthPressure { queued: number; limit: number }
+
+/** What a snapshot classifies lanes against: one live policy, or each owner's own backlog. */
+type LaneClassificationCapacity =
+  | Extract<ReconciledPressureCapacity, { kind: 'uniform' }>
+  | { readonly kind: 'mixed'; readonly owners: ReadonlyMap<string, OwnerQueueDepth> };
 
 const DEFAULT_DEGRADED_QUEUE_AGE_MS = 5_000;
 const DEFAULT_STALLED_ACTIVE_AGE_MS = 30_000;
@@ -340,7 +353,10 @@ export class SchedulerPressureTracker {
 
   snapshot(): BackpressureSnapshot {
     const now = this.now();
-    const capacity = reconcilePressureCapacity([this.queued.values(), this.active.values()], this.capacity);
+    const reconciled = reconcilePressureCapacity([this.queued.values(), this.active.values()], this.capacity);
+    const capacity: LaneClassificationCapacity = reconciled.kind === 'mixed'
+      ? { kind: 'mixed', owners: indexQueuedPressureByOwner(this.queued.values(), this.capacity) }
+      : reconciled;
     const laneNames = new Set<string>([
       ...this.lanes.keys(),
       ...Object.keys(capacity.kind === 'uniform' ? capacity.capacity.lanes ?? {} : {}),
@@ -440,7 +456,7 @@ export class SchedulerPressureTracker {
   private laneCapacityFor(
     lane: string,
     laneQueued: number,
-    resolved: ReconciledPressureCapacity,
+    resolved: LaneClassificationCapacity,
   ): {
     /** Reported ceilings, whether or not depth classification applies. */
     capacityState: SchedulerPressureCapacityState;
@@ -448,12 +464,21 @@ export class SchedulerPressureTracker {
     queueLimit: number | null;
     inflightLimit: number | null;
     /**
-     * The depth and the ceiling the lane's state is classified against, or
-     * `null` when no depth applies to it at all — an unbounded queue, or a lane
-     * with an empty backlog. Carrying the pair together is what keeps "does
-     * depth apply" from being inferred from a nullable ceiling.
+     * Exactly the depth the classifier measured against `queueLimit`, so
+     * `pressureQueued / queueLimit` is always the utilization behind this
+     * lane's own state. A lane no single depth applies to reports its own
+     * backlog rather than a pool it is not being held back by — publishing the
+     * pool there would read as full utilization on a lane waiting for nothing.
      */
-    depthPressure: { queued: number; limit: number } | null;
+    pressureQueued: number;
+    /**
+     * Every depth/ceiling pair the lane's state is classified against — at
+     * most one under a uniform policy, one per mixed owner with work waiting
+     * here — and empty when no depth applies at all: an unbounded queue, or an
+     * empty backlog. Carrying the pairs together is what keeps "does depth
+     * apply" from being inferred from a nullable ceiling.
+     */
+    depthPressures: readonly DepthPressure[];
   } {
     if (resolved.kind === 'mixed') {
       return {
@@ -461,7 +486,8 @@ export class SchedulerPressureTracker {
         capacityModel: 'shared',
         queueLimit: null,
         inflightLimit: null,
-        depthPressure: null,
+        pressureQueued: laneQueued,
+        depthPressures: this.ownerDepthPressures(lane, resolved.owners),
       };
     }
     const capacity = resolved.capacity;
@@ -477,6 +503,12 @@ export class SchedulerPressureTracker {
     // guard there would have been a real behaviour change for a private
     // allocation, so it is not applied there.
     const depthApplies = queueLimit !== null && queueLimit > 0 && (!shared || laneQueued > 0);
+    // Depth is measured against whatever the lane's ceiling bounds: its own
+    // backlog when the allocation is private, the whole pool when the ceiling
+    // is shared.
+    const depthPressure = depthApplies && queueLimit !== null
+      ? { queued: shared ? this.queued.size : laneQueued, limit: queueLimit }
+      : null;
     return {
       capacityState: 'uniform',
       capacityModel: shared ? 'shared' : 'partitioned',
@@ -484,19 +516,41 @@ export class SchedulerPressureTracker {
       inflightLimit: shared
         ? normalizeLimit(capacity.inflightLimit)
         : normalizeLimit(capacity.lanes?.[lane]?.inflightLimit),
-      // Depth is measured against whatever the lane's ceiling bounds: its own
-      // backlog when the allocation is private, the whole pool when the ceiling
-      // is shared.
-      depthPressure: depthApplies && queueLimit !== null
-        ? { queued: shared ? this.queued.size : laneQueued, limit: queueLimit }
-        : null,
+      pressureQueued: depthPressure?.queued ?? laneQueued,
+      depthPressures: depthPressure ? [depthPressure] : [],
     };
+  }
+
+  /**
+   * Mixed owners have no common ceiling, but each owner's queue is still
+   * bounded by its own policy: measure this lane against every owner whose
+   * work waits on it — its whole backlog under a shared policy, its backlog on
+   * this lane under a private allocation — so a stricter owner's full queue
+   * cannot hide behind a looser neighbour's. An owner with nothing waiting
+   * here, or without a positive ceiling, does not hold this lane back.
+   */
+  private ownerDepthPressures(
+    lane: string,
+    owners: ReadonlyMap<string, OwnerQueueDepth>,
+  ): DepthPressure[] {
+    const pressures: DepthPressure[] = [];
+    for (const owner of owners.values()) {
+      const ownerLaneQueued = owner.queuedByLane.get(lane) ?? 0;
+      if (ownerLaneQueued === 0) continue;
+      const shared = owner.capacity.capacityModel === 'shared';
+      const limit = shared
+        ? normalizeLimit(owner.capacity.queueLimit)
+        : normalizeLimit(owner.capacity.lanes?.[lane]?.queueLimit);
+      if (limit === null || limit <= 0) continue;
+      pressures.push({ queued: shared ? owner.queued : ownerLaneQueued, limit });
+    }
+    return pressures;
   }
 
   private laneSnapshot(
     lane: string,
     now: number,
-    capacity: ReconciledPressureCapacity,
+    capacity: LaneClassificationCapacity,
   ): BackpressureLaneSnapshot {
     const runtime = this.runtimeFor(lane);
     const queued = [...this.queued.values()].filter((entry) => entry.lane === lane);
@@ -506,14 +560,9 @@ export class SchedulerPressureTracker {
       capacityModel,
       queueLimit,
       inflightLimit,
-      depthPressure,
+      pressureQueued,
+      depthPressures,
     } = this.laneCapacityFor(lane, queued.length, capacity);
-    // Exactly the depth the classifier used, so `pressureQueued / queueLimit`
-    // is always the utilization behind this lane's own state. A lane no depth
-    // applies to reports its own backlog rather than a pool it is not being
-    // held back by — publishing the pool there would read as full utilization
-    // on a lane that is `healthy` and waiting for nothing.
-    const pressureQueued = depthPressure?.queued ?? queued.length;
     // The concurrency ceiling on a shared row is the pool's, so the count
     // beside it must be too. The classifier reads neither — this pair is
     // reported, not judged — but a row that pairs a lane-local count with a
@@ -535,9 +584,12 @@ export class SchedulerPressureTracker {
     const recentlyRejected = runtime.lastRejectedAt !== null
       && now - runtime.lastRejectedAt <= this.thresholds.rejectionStateWindowMs;
     const queueAgeDegraded = oldestQueuedAgeMs >= this.thresholds.degradedQueueAgeMs;
-    const depthSaturated = depthPressure !== null && depthPressure.queued >= depthPressure.limit;
-    const depthDegraded = depthPressure !== null
-      && depthPressure.queued / depthPressure.limit >= this.thresholds.degradedQueueUtilization;
+    // The worst of every applicable depth: one pair under a uniform policy,
+    // one per live owner with work waiting here when owners disagree.
+    const depthSaturated = depthPressures.some((depth) => depth.queued >= depth.limit);
+    const depthDegraded = depthPressures.some(
+      (depth) => depth.queued / depth.limit >= this.thresholds.degradedQueueUtilization,
+    );
     const stateReasons: NonNullable<BackpressureLaneSnapshot['stateReasons']> = [];
     if (activeAgeStalled) stateReasons.push('active_age');
     if (recentlyRejected) stateReasons.push('rejection');

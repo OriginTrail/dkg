@@ -37,8 +37,11 @@ partition timeout `0` preserves the existing no-timeout setting, VM startup dela
 passes. A disabled sync-global limiter is represented as `null` in the legacy
 pressure snapshot. W1 describes the process-wide queue's live admissions. It
 reports exact capacity when live entries agree, and `null` ceilings when the queue
-is idle or contains work governed by different policies. Disabled admission
-bypasses the queue and does not overwrite another agent's reported capacity.
+is idle or contains work governed by different policies. Pressure is still
+classified per policy under mixed owners, so one agent's full queue reports
+saturation even while another agent's looser policy keeps the aggregate ceilings
+unknown. Disabled admission bypasses the queue and does not overwrite another
+agent's reported capacity.
 
 `resolveStartupResourcePolicy` resolves executable admission, snapshot and
 reconciler settings when the agent is constructed and owns their immutable

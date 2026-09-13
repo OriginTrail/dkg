@@ -137,13 +137,15 @@ describe('scheduler pressure capacity ownership', () => {
 
     let now = 0;
     const tracker = new SchedulerPressureTracker({ scheduler: 'explicit-mixed', now: () => now,
-      thresholds: { degradedQueueAgeMs: 100, stalledActiveAgeMs: 200, degradedQueueUtilization: 0 } });
+      thresholds: { degradedQueueAgeMs: 100, stalledActiveAgeMs: 200 } });
     const active = tracker.enqueue({ lane: 'fast', operation: 'active' }, first);
     tracker.start(active);
     tracker.enqueue({ lane: 'slow', operation: 'queued' }, second);
     const snapshot = tracker.snapshot();
     // The old outward label is a compatibility projection. Mixed owners have
-    // unknown ceilings and local lane counts; they never share a capacity pool.
+    // unknown ceilings and local lane counts; they never share a capacity pool:
+    // the queued ticket is half of its own owner's ceiling, and the other
+    // owner's full inflight allocation is not charged against it.
     expect(snapshot).toMatchObject({ capacityState: 'mixed', capacityModel: 'shared', state: 'healthy',
       totals: { queueLimit: null, inflightLimit: null, queued: 1, inflight: 1 } });
     expect(snapshot.lanes).toMatchObject([
@@ -154,6 +156,49 @@ describe('scheduler pressure capacity ownership', () => {
     expect(tracker.snapshot()).toMatchObject({ state: 'degraded' });
     now = 200;
     expect(tracker.snapshot()).toMatchObject({ state: 'stalled' });
+  });
+
+  it.each(['shared', 'partitioned'] as const)('classifies mixed %s owners against their own queues and reports the worst', (model) => {
+    const policy = (queueLimit: number, lanes: string[]): SchedulerPressureCapacity => model === 'shared'
+      ? { capacityModel: 'shared', queueLimit, inflightLimit: queueLimit }
+      : {
+        capacityModel: 'partitioned', queueLimit, inflightLimit: queueLimit,
+        lanes: Object.fromEntries(lanes.map((lane) => [lane, { queueLimit, inflightLimit: queueLimit }])),
+      };
+    const strict = policy(1, ['durable']);
+    const loose = policy(4, ['changelog', 'durable']);
+    const tracker = new SchedulerPressureTracker({ scheduler: 'mixed-owner-depth' });
+    tracker.start(tracker.enqueue({ lane: 'durable', operation: 'strict' }, strict));
+    tracker.start(tracker.enqueue({ lane: 'changelog', operation: 'loose' }, loose));
+    expect(tracker.snapshot()).toMatchObject({ capacityState: 'mixed', state: 'healthy',
+      totals: { queued: 0, inflight: 2, queueLimit: null, inflightLimit: null } });
+
+    // The strict owner's queue is full even though the looser owner keeps the
+    // aggregate ceilings unknown; only the lane its work waits on saturates.
+    const strictQueued = tracker.enqueue({ lane: 'durable', operation: 'strict' }, strict);
+    const saturated = tracker.snapshot();
+    expect(saturated).toMatchObject({ capacityState: 'mixed', state: 'saturated',
+      totals: { queued: 1, inflight: 2, queueLimit: null, inflightLimit: null } });
+    expect(saturated.lanes).toMatchObject([
+      { lane: 'changelog', state: 'healthy', queueLimit: null, pressureQueued: 0, stateReasons: [] },
+      { lane: 'durable', state: 'saturated', queueLimit: null, pressureQueued: 1, stateReasons: ['depth'] },
+    ]);
+    tracker.enqueue({ lane: 'durable', operation: 'loose' }, loose);
+    expect(tracker.snapshot()).toMatchObject({ state: 'saturated', totals: { queued: 2, queueLimit: null } });
+
+    // Once the strict owner drains, the loose owner is measured on its own:
+    // one of four waiting is healthy, an unbounded owner adds no depth, three
+    // of four is the degraded band, and a full queue saturates again.
+    tracker.cancelQueued(strictQueued);
+    tracker.enqueue({ lane: 'durable', operation: 'unbounded' }, { capacityModel: 'shared' });
+    expect(tracker.snapshot()).toMatchObject({ capacityState: 'mixed', state: 'healthy',
+      lanes: [{ lane: 'changelog', state: 'healthy' }, { lane: 'durable', state: 'healthy', pressureQueued: 2, stateReasons: [] }] });
+    tracker.enqueue({ lane: 'durable', operation: 'loose' }, loose);
+    tracker.enqueue({ lane: 'durable', operation: 'loose' }, loose);
+    expect(tracker.snapshot()).toMatchObject({ state: 'degraded',
+      lanes: [{ lane: 'changelog', state: 'healthy' }, { lane: 'durable', state: 'degraded', pressureQueued: 4, stateReasons: ['depth'] }] });
+    tracker.enqueue({ lane: 'durable', operation: 'loose' }, loose);
+    expect(tracker.snapshot()).toMatchObject({ state: 'saturated', totals: { queued: 5, queueLimit: null } });
   });
 
   it('owns enqueued capacity values independently of later caller mutation', () => {
