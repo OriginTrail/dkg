@@ -125,7 +125,7 @@ describe('RPC request admission and cancellation', () => {
     const adapter = new EVMChainAdapter(minimalConfig({
       rpcUrl: primary.url,
       rpcUrls: [backup.url],
-      rpcRequestGovernor: governor,
+      rpcRequestAdmission: governor,
     }));
     adapters.push(adapter);
 
@@ -157,7 +157,7 @@ describe('RPC request admission and cancellation', () => {
     const adapter = new EVMChainAdapter(minimalConfig({
       rpcUrl: primary.url,
       rpcUrls: [backup.url],
-      rpcRequestGovernor: governor,
+      rpcRequestAdmission: governor,
     }));
     adapters.push(adapter);
     try {
@@ -172,4 +172,3 @@ describe('RPC request admission and cancellation', () => {
     }
   });
 });
-

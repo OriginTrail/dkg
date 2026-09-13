@@ -47,7 +47,7 @@ describe('registry scan RPC admission', () => {
     const adapter = new EVMChainAdapter(minimalConfig({
       rpcUrl: primary.url,
       rpcUrls: [backup.url],
-      rpcRequestGovernor: governor,
+      rpcRequestAdmission: governor,
     }));
     adapters.push(adapter);
 
