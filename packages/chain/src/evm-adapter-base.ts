@@ -40,6 +40,7 @@ import {
 } from './evm-adapter-rpc.js';
 import {
   createRpcRequestProvider,
+  activeRpcRequestAbortSignal,
   withRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
@@ -861,7 +862,7 @@ export class EVMChainAdapterBase {
   >();
 
   protected readonly configuredStaticChainIdValidationsByProvider =
-    new AbortableKeyedSingleFlight<JsonRpcProvider>();
+    new AbortableKeyedSingleFlight<JsonRpcProvider, bigint>();
 
   protected cachedKav10Address: { value: string; cachedAt: number } | undefined;
 
@@ -1157,7 +1158,7 @@ export class EVMChainAdapterBase {
         },
         network: staticNetwork,
         endpointSlot,
-        admission: config.rpcRequestGovernor,
+        admission: config.rpcRequestAdmission,
         onRequest: (method, slot) => this.rpcUsage.record(method, slot),
       }),
     );
@@ -3627,6 +3628,7 @@ export class EVMChainAdapterBase {
           },
         ),
       ),
+      activeRpcRequestAbortSignal(),
       (live) => {
         this.configuredStaticChainIdsByProvider.set(provider, {
           value: live,

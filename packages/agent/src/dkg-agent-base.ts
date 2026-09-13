@@ -1228,9 +1228,16 @@ export class DKGAgentBase {
   /** One agent-owned scope and terminal-evidence boundary for shadow rollout. */
   protected rfc64CatalogShadowObservabilityV1!:
     Rfc64CatalogShadowObservabilityRuntimeV1;
-  /** Caller-priority-preserving owner for every detached RFC-64 chain workload. */
+  /** Caller-priority-preserving owner for RFC-64 responsibility reconciliation. */
   protected readonly rfc64BackgroundWorkDispatcherV1 =
-    new Rfc64BackgroundWorkDispatcherV1();
+    new Rfc64BackgroundWorkDispatcherV1((key, error) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `RFC-64 background responsibility work failed for ${JSON.stringify(key)}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
   /** Exact process-local post-verification evidence, keyed by applied head. */
   protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
     new Map<string, Rfc64CatalogSynchronizationEvidenceV1>();

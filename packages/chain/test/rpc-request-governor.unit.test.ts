@@ -340,6 +340,50 @@ describe('RpcRequestGovernor', () => {
     });
   });
 
+  it('drains delta counters once while retaining live policy and queue state', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 50,
+      burstRequests: 1,
+      maxQueueSize: 2,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('foreground');
+    const controller = new AbortController();
+    const deferred = governor.acquire('background', controller.signal);
+    await expect(governor.acquire('background')).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+    controller.abort(new Error('window cleanup'));
+    await expect(deferred).rejects.toThrow('window cleanup');
+
+    const first = governor.drainWindow();
+    expect(first).toMatchObject({
+      maxRequestsPerSecond: 1,
+      foregroundQueued: 0,
+      backgroundQueued: 0,
+      foregroundAdmitted: 1,
+      backgroundDeferred: 1,
+      rejected: 1,
+      cancelled: 1,
+    });
+    const second = governor.drainWindow();
+    expect(second).toMatchObject({
+      maxRequestsPerSecond: first.maxRequestsPerSecond,
+      availableTokens: first.availableTokens,
+      foregroundQueued: 0,
+      backgroundQueued: 0,
+      foregroundAdmitted: 0,
+      backgroundAdmitted: 0,
+      foregroundDeferred: 0,
+      backgroundDeferred: 0,
+      rejected: 0,
+      cancelled: 0,
+    });
+  });
+
   it('validates every operator-facing limit', () => {
     expect(() => resolveRpcRequestGovernorPolicy({ maxRequestsPerSecond: 0 }))
       .toThrow(/maxRequestsPerSecond/);

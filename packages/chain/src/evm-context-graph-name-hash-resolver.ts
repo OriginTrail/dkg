@@ -9,6 +9,7 @@
  */
 
 import { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
+import { activeRpcRequestContext } from './rpc-request-transport.js';
 import {
   type EvmContextGraphNameHashSource,
 } from './evm-context-graph-name-hash-fence.js';
@@ -31,7 +32,10 @@ export class EvmContextGraphNameHashResolver {
   }
 
   resolve(nameHash: string, signal?: AbortSignal): Promise<bigint | null> {
-    return this.resolutionCache.resolve(nameHash, signal);
+    return this.resolutionCache.resolve(nameHash, {
+      signal,
+      partition: activeRpcRequestContext().requestClass,
+    });
   }
 
   invalidateAll(): void {

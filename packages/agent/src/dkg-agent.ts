@@ -745,7 +745,7 @@ function constructConfiguredChainAdapter(
     const evmConfigBase = {
       rpcUrl: config.chainConfig.rpcUrl,
       rpcUrls: config.chainConfig.rpcUrls,
-      rpcRequestGovernor: config.chainConfig.rpcRequestGovernor,
+      rpcRequestAdmission: config.chainConfig.rpcRequestAdmission,
       walletRpcUrls: config.chainConfig.walletRpcUrls,
       privateKey: operationalKeys[0],
       additionalKeys: operationalKeys.slice(1),

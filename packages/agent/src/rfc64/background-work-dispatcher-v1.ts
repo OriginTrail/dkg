@@ -8,7 +8,13 @@ import {
 interface KeyedBackgroundPassV1 {
   requested: boolean;
   run: Promise<void>;
+  readonly work: (signal: AbortSignal) => Promise<void>;
 }
+
+export type Rfc64BackgroundWorkErrorHandlerV1 = (
+  key: string,
+  error: unknown,
+) => void;
 
 function abortError(reason: unknown): Error {
   if (reason instanceof Error && reason.name === 'AbortError') return reason;
@@ -24,17 +30,21 @@ function abortError(reason: unknown): Error {
 }
 
 /**
- * One agent-lifecycle owner for detached RFC-64 work that may reach chain RPC.
+ * One agent-lifecycle owner for RFC-64 responsibility work that may reach chain RPC.
  *
- * Awaited operations keep their caller's request class; scheduled operations
- * establish the background class here, rather than at scattered call sites.
- * Both receive the same lifecycle signal and are physically drained on close.
+ * Awaited reconciliation keeps its caller's request class; detached keyed
+ * reconciliation establishes the background class here. Both receive the same
+ * lifecycle signal and are physically drained on close.
  */
 export class Rfc64BackgroundWorkDispatcherV1 {
   readonly #inFlight = new Set<Promise<unknown>>();
   readonly #keyed = new Map<string, KeyedBackgroundPassV1>();
   #lifecycle = new AbortController();
   #closed = false;
+
+  constructor(
+    private readonly onError: Rfc64BackgroundWorkErrorHandlerV1 = () => undefined,
+  ) {}
 
   get shutdownSignal(): AbortSignal {
     return this.#lifecycle.signal;
@@ -47,18 +57,10 @@ export class Rfc64BackgroundWorkDispatcherV1 {
     return this.#run(false, work, ownerSignal);
   }
 
-  runBackground<T>(
-    work: (signal: AbortSignal) => Promise<T>,
-    ownerSignal?: AbortSignal,
-  ): Promise<T> {
-    return this.#run(true, work, ownerSignal);
-  }
-
   /** Coalesce repeated state notifications into at most one follow-up pass. */
   scheduleKeyed(
     key: string,
     work: (signal: AbortSignal) => Promise<void>,
-    onError: (error: unknown) => void,
   ): boolean {
     if (this.#closed) return false;
     const existing = this.#keyed.get(key);
@@ -69,24 +71,37 @@ export class Rfc64BackgroundWorkDispatcherV1 {
     const state: KeyedBackgroundPassV1 = {
       requested: true,
       run: Promise.resolve(),
+      work,
     };
     this.#keyed.set(key, state);
-    const run = this.runBackground(async (signal) => {
+    this.#launchKeyed(key, state);
+    return true;
+  }
+
+  #launchKeyed(key: string, state: KeyedBackgroundPassV1): void {
+    const run = this.#run(true, async (signal) => {
       while (!signal.aborted && state.requested) {
         state.requested = false;
         try {
-          await work(signal);
+          await state.work(signal);
         } catch (error) {
           if (signal.aborted) return;
-          onError(error);
+          this.onError(key, error);
         }
       }
-    }).finally(() => {
-      if (this.#keyed.get(key) === state) this.#keyed.delete(key);
+    }, undefined).finally(() => {
+      if (this.#keyed.get(key) !== state) return;
+      // A notification can arrive after the runner observes requested=false
+      // but before this settlement callback owns the keyed state. Hand that
+      // accepted notification to a successor before releasing the key.
+      if (!this.#closed && state.requested) {
+        this.#launchKeyed(key, state);
+        return;
+      }
+      this.#keyed.delete(key);
     });
     state.run = run;
     void run.catch(() => undefined);
-    return true;
   }
 
   async whenIdle(): Promise<void> {

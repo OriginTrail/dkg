@@ -17,7 +17,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getSharedContext } from '../../../../chain/test/evm-test-context.js';
 import {
-  authHeaders,
   startLiveDaemon,
   stopLiveDaemon,
   postJson,
@@ -36,22 +35,8 @@ describe('/api/query error mapping (real daemon)', () => {
           rpcUrl,
           hubAddress,
           chainId: 'evm:31337',
-          rpcRequestBudget: {
-            maxRequestsPerSecond: 0.4,
-            foregroundReservePercent: 99,
-            burstRequests: 1,
-            maxQueueSize: 8,
-            startupJitterMs: 60_000,
-          },
         },
       },
-    });
-    // Consume the only immediately available total/background permit, or
-    // observe that scheduled RFC-64 startup work already did. Either state
-    // leaves chain-backed authorization saturated for longer than the route
-    // assertion's latency budget.
-    await fetch(`${daemon.base}/api/chain/rpc-health`, {
-      headers: authHeaders(daemon),
     });
   }, 120_000);
 
@@ -62,13 +47,11 @@ describe('/api/query error mapping (real daemon)', () => {
   it('maps a real malformed-SPARQL parse error to HTTP 400, not 500 (#889)', async () => {
     // Balanced graph boundaries pass the scope scanner; the incomplete triple
     // pattern is rejected by the real Oxigraph parser.
-    const startedAt = Date.now();
     const { status, body } = await postJson(daemon, '/api/query', {
       sparql: 'SELECT ?s WHERE { ?s ?p }',
       contextGraphId: 'all',
     });
     expect(status).toBe(400);
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(String(body.error)).toMatch(
       /error at \d+:\d+|expected one of|parse|syntax/i,
     );

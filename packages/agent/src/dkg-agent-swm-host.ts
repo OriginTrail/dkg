@@ -2599,12 +2599,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (this.subscribedContextGraphs.get(localCgId) === sub) {
       this.scheduleRfc64CatalogResponsibilityReconciliationV1(
         localCgId,
-        (error) => {
-          this.log.warn(
-            createOperationContext('system'),
-            `RFC-64 responsibility resolution failed after binding "${localCgId}": ${error instanceof Error ? error.message : String(error)}`,
-          );
-        },
       );
     }
     if (!transition.onChainIdChanged) return;

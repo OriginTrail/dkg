@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { waitForActiveRpcRequest } from './rpc-request-transport.js';
-
 export interface TtlValueCacheOptions<V> {
   ttlMs: number | ((value: CacheValue<V>) => number);
   now?: () => number;
@@ -164,18 +162,19 @@ interface AbortableSingleFlightState<V> {
  * request and advances an epoch, preventing an implementation that ignores
  * cancellation from publishing a stale success through `onSuccess`.
  */
-export class AbortableKeyedSingleFlight<K> {
-  private readonly inflight = new Map<K, AbortableSingleFlightState<unknown>>();
+export class AbortableKeyedSingleFlight<K, V> {
+  private readonly inflight = new Map<K, AbortableSingleFlightState<V>>();
 
   private readonly epochs = new Map<K, number>();
 
-  async run<V>(
+  async run(
     key: K,
     load: (signal: AbortSignal) => Promise<V>,
+    waiterSignal?: AbortSignal,
     onSuccess?: (value: V) => void,
     abandonmentMessage = 'Shared request has no active waiters',
   ): Promise<V> {
-    let state = this.inflight.get(key) as AbortableSingleFlightState<V> | undefined;
+    let state = this.inflight.get(key);
     if (state === undefined) {
       const epoch = this.epoch(key);
       const controller = new AbortController();
@@ -197,12 +196,12 @@ export class AbortableKeyedSingleFlight<K> {
           shared.settled = true;
           if (this.inflight.get(key) === shared) this.inflight.delete(key);
         });
-      this.inflight.set(key, shared as AbortableSingleFlightState<unknown>);
+      this.inflight.set(key, shared);
     }
 
     state.waiters += 1;
     try {
-      return await waitForActiveRpcRequest(state.promise);
+      return await waitForSignal(state.promise, waiterSignal);
     } finally {
       state.waiters -= 1;
       if (state.waiters === 0 && !state.settled) {
@@ -237,6 +236,28 @@ export class AbortableKeyedSingleFlight<K> {
 
   private bumpEpoch(key: K): void {
     this.epochs.set(key, this.epoch(key) + 1);
+  }
+}
+
+/** Waiter-local cancellation for a generic shared operation. */
+async function waitForSignal<T>(
+  shared: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (signal === undefined) return shared;
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason instanceof Error
+      ? signal.reason
+      : Object.assign(new Error('Shared request waiter aborted'), { name: 'AbortError' }));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    return await Promise.race([shared, aborted]);
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort);
   }
 }
 

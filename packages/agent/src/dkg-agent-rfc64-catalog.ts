@@ -479,8 +479,6 @@ const rfc64CatalogResponsibilityRegistriesV1 =
   new WeakMap<DKGAgent, Rfc64CatalogResponsibilityRegistryV1>();
 const rfc64CatalogResponsibilityRevisionsV1 =
   new WeakMap<DKGAgent, Map<string, number>>();
-const rfc64CatalogResponsibilityPendingV1 =
-  new WeakMap<DKGAgent, Map<string, Promise<Rfc64CatalogResponsibilitySelectionV1>>>();
 const rfc64CatalogAuthorityProgressV1 =
   new WeakMap<DKGAgent, Map<string, Rfc64CatalogAuthorityProgressV1>>();
 const rfc64CatalogAuthorityRevisionsV1 =
@@ -1856,106 +1854,106 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<Rfc64CatalogResponsibilitySelectionV1> {
-    return this.rfc64BackgroundWorkDispatcherV1.runAwaited(async (ownerSignal) => {
-      const registry = rfc64CatalogResponsibilityRegistryForV1(
-        this,
+    return this.rfc64BackgroundWorkDispatcherV1.runAwaited(
+      (ownerSignal) => this.reconcileRfc64CatalogResponsibilityCoreV1(
+        contextGraphId,
+        ownerSignal,
+      ),
+    );
+  }
+
+  /** One unregistered reconciliation body shared by awaited and keyed owners. */
+  async reconcileRfc64CatalogResponsibilityCoreV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    ownerSignal: AbortSignal,
+  ): Promise<Rfc64CatalogResponsibilitySelectionV1> {
+    const registry = rfc64CatalogResponsibilityRegistryForV1(
+      this,
+      this.config.rfc64CatalogExecutionPlan,
+    );
+    const responsibilityOwnsAuthorityWorkload =
+      rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1(
         this.config.rfc64CatalogExecutionPlan,
+        contextGraphId,
       );
-      const responsibilityOwnsAuthorityWorkload =
-        rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1(
-          this.config.rfc64CatalogExecutionPlan,
+    const commit = (
+      reason: Parameters<Rfc64CatalogResponsibilityRegistryV1['setResponsibility']>[1],
+    ): Rfc64CatalogResponsibilitySelectionV1 => {
+      const transition = registry.setResponsibility(contextGraphId, reason);
+      if (transition.changed && responsibilityOwnsAuthorityWorkload) {
+        this.handleRfc64CatalogReceiverSelectionTransitionV1(
           contextGraphId,
+          {
+            kind: 'responsibility',
+            previousReceiverActive:
+              transition.previous.active && transition.previous.mode !== 'legacy',
+            nextReceiverActive:
+              transition.next.active && transition.next.mode !== 'legacy',
+          },
         );
-      const commit = (
-        reason: Parameters<Rfc64CatalogResponsibilityRegistryV1['setResponsibility']>[1],
-      ): Rfc64CatalogResponsibilitySelectionV1 => {
-        const transition = registry.setResponsibility(contextGraphId, reason);
-        if (transition.changed && responsibilityOwnsAuthorityWorkload) {
-          this.handleRfc64CatalogReceiverSelectionTransitionV1(
-            contextGraphId,
-            {
-              kind: 'responsibility',
-              previousReceiverActive:
-                transition.previous.active && transition.previous.mode !== 'legacy',
-              nextReceiverActive:
-                transition.next.active && transition.next.mode !== 'legacy',
-            },
-          );
-        }
-        return transition.next;
-      };
-      const revision = nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
-      const subscription = this.subscribedContextGraphs.get(contextGraphId);
-      if (
-        rfc64SystemContextGraphIdsV1.has(contextGraphId)
-        || subscription === undefined
-      ) {
-        const inactive = commit(null);
-        return Promise.resolve(inactive);
       }
+      return transition.next;
+    };
+    const revision = nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    if (
+      rfc64SystemContextGraphIdsV1.has(contextGraphId)
+      || subscription === undefined
+    ) {
+      return commit(null);
+    }
 
-      const run = (async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
-        let accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
-        if (accessPolicy === null && subscription.onChainId !== undefined) {
-          const onChainPolicy = await this.getContextGraphOnChainPolicy(contextGraphId);
-          accessPolicy = onChainPolicy.accessPolicy === 0
-            ? 'public'
-            : onChainPolicy.accessPolicy === 1
-              ? 'private'
-              : null;
-        }
-        const privateMembershipVerified = accessPolicy === 'private'
-          && await this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId);
-        const reason = resolveRfc64CatalogResponsibilityReasonV1({
-          nodeRole: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
-          subscribed: subscription.subscribed === true,
-          coreHosted: subscription.coreHosted === true,
-          accessPolicy,
-          privateMembershipVerified,
-        });
-        if (!isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
-          return registry.read(contextGraphId);
-        }
-        const next = commit(reason);
-        if (
-          responsibilityOwnsAuthorityWorkload
-          && next.active
-          && next.mode !== 'legacy'
-          && this.resolveRfc64AcceptedCompatibilityAuthorityV1(contextGraphId) === null
-        ) {
-          await this.reconcileRfc64CatalogAccessAuthorityV1(
-            contextGraphId,
-            ownerSignal,
-          ).catch((error) => {
-            // Observer and dispatcher shutdown are normal lifecycle fences.
-            // Preserve their cancellation so the feature owner can drain
-            // silently instead of reporting a false authority failure.
-            if (ownerSignal.aborted) throw ownerSignal.reason;
-            this.log.warn(
-              createOperationContext('system'),
-              `RFC-64 authority bootstrap incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
-            );
-            return null;
-          });
-        }
-        return next;
-      })().catch((error) => {
-        if (isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
-          commit(null);
-        }
-        throw error;
+    return (async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
+      let accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
+      if (accessPolicy === null && subscription.onChainId !== undefined) {
+        const onChainPolicy = await this.getContextGraphOnChainPolicy(contextGraphId);
+        accessPolicy = onChainPolicy.accessPolicy === 0
+          ? 'public'
+          : onChainPolicy.accessPolicy === 1
+            ? 'private'
+            : null;
+      }
+      const privateMembershipVerified = accessPolicy === 'private'
+        && await this.hasRfc64VerifiedPrivateMembershipV1(contextGraphId);
+      const reason = resolveRfc64CatalogResponsibilityReasonV1({
+        nodeRole: (this.config.nodeRole ?? 'edge') === 'core' ? 'core' : 'edge',
+        subscribed: subscription.subscribed === true,
+        coreHosted: subscription.coreHosted === true,
+        accessPolicy,
+        privateMembershipVerified,
       });
-
-      let pending = rfc64CatalogResponsibilityPendingV1.get(this);
-      if (pending === undefined) {
-        pending = new Map<string, Promise<Rfc64CatalogResponsibilitySelectionV1>>();
-        rfc64CatalogResponsibilityPendingV1.set(this, pending);
+      if (!isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
+        return registry.read(contextGraphId);
       }
-      pending.set(contextGraphId, run);
-      void run.finally(() => {
-        if (pending!.get(contextGraphId) === run) pending!.delete(contextGraphId);
-      }).catch(() => undefined);
-      return run;
+      const next = commit(reason);
+      if (
+        responsibilityOwnsAuthorityWorkload
+        && next.active
+        && next.mode !== 'legacy'
+        && this.resolveRfc64AcceptedCompatibilityAuthorityV1(contextGraphId) === null
+      ) {
+        await this.reconcileRfc64CatalogAccessAuthorityV1(
+          contextGraphId,
+          ownerSignal,
+        ).catch((error) => {
+          // Observer and dispatcher shutdown are normal lifecycle fences.
+          // Preserve their cancellation so the feature owner can drain
+          // silently instead of reporting a false authority failure.
+          if (ownerSignal.aborted) throw ownerSignal.reason;
+          this.log.warn(
+            createOperationContext('system'),
+            `RFC-64 authority bootstrap incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        });
+      }
+      return next;
+    })().catch((error) => {
+      if (isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
+        commit(null);
+      }
+      throw error;
     });
   }
 
@@ -1967,29 +1965,21 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   scheduleRfc64CatalogResponsibilityReconciliationV1(
     this: DKGAgent,
     contextGraphId: string,
-    onError?: (error: unknown) => void,
   ): boolean {
     return this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
       `responsibility\0${contextGraphId}`,
-      async () => {
-        await this.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
-      },
-      onError ?? ((error) => {
-        this.log.warn(
-          createOperationContext('system'),
-          `RFC-64 responsibility resolution failed for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+      async (ownerSignal) => {
+        await this.reconcileRfc64CatalogResponsibilityCoreV1(
+          contextGraphId,
+          ownerSignal,
         );
-      }),
+      },
     );
   }
 
   /** Test/operator fence for asynchronous access-policy responsibility reads. */
   async whenRfc64CatalogResponsibilitiesIdleV1(this: DKGAgent): Promise<void> {
     await this.rfc64BackgroundWorkDispatcherV1.whenIdle();
-    const pending = rfc64CatalogResponsibilityPendingV1.get(this);
-    while (pending !== undefined && pending.size > 0) {
-      await Promise.allSettled(pending.values());
-    }
   }
 
   /**

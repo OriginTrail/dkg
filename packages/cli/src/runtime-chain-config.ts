@@ -26,13 +26,13 @@ export type RuntimeEvmChainConfig = Pick<
   | 'finalityConfirmations'
   | 'maxFeePerGasWei'
   | 'minPublisherNativeWei' | 'minPublisherTracWei'
-  | 'rpcRequestGovernor'
+  | 'rpcRequestAdmission'
 >;
 
 /** Pure resolved values before the composition root attaches process state. */
 export type RuntimeEvmChainConfigProjection = Omit<
   RuntimeEvmChainConfig,
-  'rpcRequestGovernor'
+  'rpcRequestAdmission'
 >;
 
 export interface DaemonRpcEndpointProbe {
@@ -183,7 +183,7 @@ export function bindRuntimeRpcRequestGovernor(
   projected: RuntimeEvmChainConfigProjection,
   rpcRequestGovernor: RpcRequestGovernor,
 ): RuntimeEvmChainConfig {
-  return { ...projected, rpcRequestGovernor };
+  return { ...projected, rpcRequestAdmission: rpcRequestGovernor };
 }
 
 /** Neutral projection shared by the agent and every publisher adapter. */

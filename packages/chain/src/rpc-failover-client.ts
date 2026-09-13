@@ -629,6 +629,22 @@ export class RpcFailoverClient {
                 noteRpcServed(`${label} broadcast`, endpoint.rpcUrl, { mode: 'write' });
                 return;
               }
+              if (classifyRpcRetryDisposition(err) === 'retry-later') {
+                this.recordRpcOutcome('eth_sendRawTransaction', this.rpcOutcome(err), { retryable: true });
+                if (errorCode(err) === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL') {
+                  // A signed write is already in progress at this boundary. The
+                  // current raw attempt did not start, but an earlier endpoint
+                  // may have accepted the same transaction before its response
+                  // failed. Preserve the hash and an indeterminate operation
+                  // outcome at the HTTP boundary.
+                  throw new ChainRpcTransportError(
+                    'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+                    errorMessage(err),
+                    { cause: err, txHash },
+                  );
+                }
+                throw err;
+              }
               if (!isRpcEndpointFailoverEligible(err)) {
                 this.recordRpcOutcome('eth_sendRawTransaction', this.rpcOutcome(err), { retryable: false });
                 throw err;

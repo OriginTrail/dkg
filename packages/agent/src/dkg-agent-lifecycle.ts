@@ -135,6 +135,7 @@ import {
   createRpcTimeoutError,
   enrichEvmError,
   isChainRpcTransportError,
+  withRpcRequestContext,
   type ChainAdapter,
   type CreateContextGraphParams,
   type CreateOnChainContextGraphParams,
@@ -4176,15 +4177,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         retryIntervalMs: 30_000,
         requestWhileRunning: 'drop',
         runPass: async (signal) => {
-          await this.rfc64BackgroundWorkDispatcherV1.runBackground(
-            (backgroundSignal) => (
-              this.retryUnavailableContextGraphSubscriptionAuthorities(
-                backgroundSignal,
-                signal,
-              )
-            ),
+          await withRpcRequestContext({
+            requestClass: 'background',
             signal,
-          );
+            inheritSignal: false,
+          }, () => this.retryUnavailableContextGraphSubscriptionAuthorities(signal));
           return this.getContextGraphSubscriptionRehydrationStatus()
             ?.dormantReasons.authorityUnavailable.length
             ? 'rearm'
@@ -9313,7 +9310,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           },
         );
       }
-      this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId, () => undefined);
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
     }
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
@@ -9716,7 +9713,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       this.scheduleRfc64CatalogResponsibilityReconciliationV1(
         record.contextGraphId,
-        () => undefined,
       );
       return Promise.resolve();
     }
@@ -9739,12 +9735,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return write.then(() => {
       this.scheduleRfc64CatalogResponsibilityReconciliationV1(
         normalizedRecord.contextGraphId,
-        (err) => {
-          this.log.warn(
-            createOperationContext('system'),
-            `RFC-64 responsibility resolution failed after membership update for "${normalizedRecord.contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
-          );
-        },
       );
     }).catch((err) => {
       this.log.warn(
@@ -9763,7 +9753,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!store) {
       this.scheduleRfc64CatalogResponsibilityReconciliationV1(
         contextGraphId,
-        () => undefined,
       );
       return;
     }
@@ -9775,12 +9764,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ).then(() => {
       this.scheduleRfc64CatalogResponsibilityReconciliationV1(
         contextGraphId,
-        (err) => {
-          this.log.warn(
-            createOperationContext('system'),
-            `RFC-64 responsibility resolution failed after membership deletion for "${contextGraphId}": ${err instanceof Error ? err.message : String(err)}`,
-          );
-        },
       );
     })
       .catch((err) => {
@@ -9873,12 +9856,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async retryUnavailableContextGraphSubscriptionAuthorities(
     this: DKGAgent,
     signal: AbortSignal,
-    ownerSignal: AbortSignal = signal,
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     const isCurrentRetry = (): boolean => (
       this.started
-      && Boolean(this.contextGraphSubscriptionAuthorityRecoveryRuntime?.owns(ownerSignal))
+      && Boolean(this.contextGraphSubscriptionAuthorityRecoveryRuntime?.owns(signal))
     );
     if (!store || !isCurrentRetry()) return;
     const ctx = createOperationContext('init');

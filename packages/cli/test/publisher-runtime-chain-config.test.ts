@@ -47,7 +47,7 @@ describe('publisher runtime chain config projection', () => {
       minPublisherNativeWei: 123n,
       minPublisherTracWei: 456n,
     });
-    expect(projected).not.toHaveProperty('rpcRequestGovernor');
+    expect(projected).not.toHaveProperty('rpcRequestAdmission');
   });
 
   it('requires both adapter endpoint and Hub address', () => {
@@ -73,8 +73,8 @@ describe('publisher runtime chain config projection', () => {
     const agentConfig = bindRuntimeRpcRequestGovernor(projected!, governor);
     const publisherConfig = bindRuntimeRpcRequestGovernor(projected!, governor);
 
-    expect(agentConfig.rpcRequestGovernor).toBe(governor);
-    expect(publisherConfig.rpcRequestGovernor).toBe(governor);
+    expect(agentConfig.rpcRequestAdmission).toBe(governor);
+    expect(publisherConfig.rpcRequestAdmission).toBe(governor);
     expect(governor.snapshot()).toMatchObject({
       maxRequestsPerSecond: 7,
       availableTokens: 11,
@@ -97,7 +97,7 @@ describe('publisher runtime chain config projection', () => {
       },
     })!;
 
-    expect(runtime.chainConfig?.rpcRequestGovernor).toBe(runtime.governor);
+    expect(runtime.chainConfig?.rpcRequestAdmission).toBe(runtime.governor);
     const probe = await runtime.routeTransport.probeEndpoint('http://127.0.0.1:1', 0);
     expect(probe).toMatchObject({ ok: false, status: 'unhealthy' });
     expect(runtime.drainRouteRpcUsage()).toMatchObject({

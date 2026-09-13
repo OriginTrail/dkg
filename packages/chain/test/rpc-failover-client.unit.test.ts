@@ -256,9 +256,28 @@ describe('RpcFailoverClient.broadcast — idempotent short-circuit + typed exhau
     const backup = { broadcastTransaction: recorder(async () => undefined) };
     const client = makeClient([primary, backup], URLS);
 
-    await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).rejects.toBe(queueFull);
+    await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).rejects.toMatchObject({
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+      txHash: '0xhash',
+      cause: queueFull,
+    });
     expect(primary.broadcastTransaction.calls).toHaveLength(1);
     expect(backup.broadcastTransaction.calls).toEqual([]);
+  });
+
+  it('preserves the signed hash when fallback admission fills after an indeterminate submit', async () => {
+    const queueFull = new RpcRequestGovernorQueueFullError(1);
+    const primary = { broadcastTransaction: recorder(async () => { throw retryable429(); }) };
+    const backup = { broadcastTransaction: recorder(async () => { throw queueFull; }) };
+    const client = makeClient([primary, backup], URLS);
+
+    await expect(client.broadcast('0xsigned', '0xhash', 'unit write')).rejects.toMatchObject({
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+      txHash: '0xhash',
+      cause: queueFull,
+    });
+    expect(primary.broadcastTransaction.calls).toHaveLength(1);
+    expect(backup.broadcastTransaction.calls).toHaveLength(1);
   });
 
   it('successful broadcast records the broadcast endpoint host', async () => {

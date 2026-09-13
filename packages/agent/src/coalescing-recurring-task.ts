@@ -26,6 +26,7 @@ export class CoalescingRecurringTask {
   #timer: ReturnType<typeof setTimeout> | null = null;
   #abortController: AbortController | null = null;
   #run: Promise<void> | null = null;
+  #closeAbortReason: Error | null = null;
 
   constructor(options: CoalescingRecurringTaskOptions) {
     this.#options = options;
@@ -97,7 +98,10 @@ export class CoalescingRecurringTask {
       clearTimeout(this.#timer);
       this.#timer = null;
     }
-    this.#abortController?.abort(new Error(this.#options.closingMessage));
+    const closeAbortReason = new Error(this.#options.closingMessage);
+    closeAbortReason.name = 'AbortError';
+    this.#closeAbortReason = closeAbortReason;
+    this.#abortController?.abort(closeAbortReason);
     await this.#run?.catch(() => undefined);
   }
 
@@ -114,7 +118,7 @@ export class CoalescingRecurringTask {
       // resulting rejection as a workload failure would create a misleading
       // warning during ordinary shutdown.
       .catch((error) => {
-        if (!this.#closed) this.#options.onError(error);
+        if (error !== this.#closeAbortReason) this.#options.onError(error);
       })
       .finally(() => {
         if (this.#run === run) this.#run = null;

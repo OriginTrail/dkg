@@ -22,7 +22,7 @@ describe('Rfc64BackgroundWorkDispatcherV1', () => {
     });
     dispatcher.scheduleKeyed('responsibility\0cg', async () => {
       await governor.acquireActiveRequest();
-    }, () => undefined);
+    });
     await dispatcher.whenIdle();
 
     expect(governor.snapshot()).toMatchObject({
@@ -37,17 +37,54 @@ describe('Rfc64BackgroundWorkDispatcherV1', () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const work = vi.fn(async () => gate);
 
-    expect(dispatcher.scheduleKeyed('responsibility\0cg', work, () => undefined)).toBe(true);
+    expect(dispatcher.scheduleKeyed('responsibility\0cg', work)).toBe(true);
     await vi.waitFor(() => expect(work).toHaveBeenCalledOnce());
-    dispatcher.scheduleKeyed('responsibility\0cg', work, () => undefined);
-    dispatcher.scheduleKeyed('responsibility\0cg', work, () => undefined);
+    dispatcher.scheduleKeyed('responsibility\0cg', work);
+    dispatcher.scheduleKeyed('responsibility\0cg', work);
     release();
     await dispatcher.whenIdle();
 
     expect(work).toHaveBeenCalledTimes(2);
   });
 
-  it('composes caller cancellation for awaited work without attaching it to detached work', async () => {
+  it('starts a successor for a notification accepted at runner settlement', async () => {
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const work = vi.fn(async () => {
+      if (work.mock.calls.length === 1) await gate;
+    });
+
+    expect(dispatcher.scheduleKeyed('responsibility\0cg', work)).toBe(true);
+    await vi.waitFor(() => expect(work).toHaveBeenCalledOnce());
+    gate.then(() => {
+      expect(dispatcher.scheduleKeyed('responsibility\0cg', work)).toBe(true);
+    });
+    release();
+    await dispatcher.whenIdle();
+
+    expect(work).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports an ordinary keyed failure once and remains schedulable', async () => {
+    const onError = vi.fn();
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
+    const failure = new Error('responsibility failed');
+
+    dispatcher.scheduleKeyed('responsibility\0cg', async () => {
+      throw failure;
+    });
+    await dispatcher.whenIdle();
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith('responsibility\0cg', failure);
+
+    const recovered = vi.fn(async () => undefined);
+    dispatcher.scheduleKeyed('responsibility\0cg', recovered);
+    await dispatcher.whenIdle();
+    expect(recovered).toHaveBeenCalledOnce();
+  });
+
+  it('composes caller cancellation for awaited work without attaching it to keyed detached work', async () => {
     const dispatcher = new Rfc64BackgroundWorkDispatcherV1();
     const caller = new AbortController();
     let awaitedSignal: AbortSignal | undefined;
@@ -57,9 +94,10 @@ describe('Rfc64BackgroundWorkDispatcherV1', () => {
       await dispatcher.runAwaited(async (signal) => {
         awaitedSignal = signal;
       });
-      await dispatcher.runBackground(async (signal) => {
+      dispatcher.scheduleKeyed('responsibility\0detached', async (signal) => {
         detachedSignal = signal;
       });
+      await vi.waitFor(() => expect(detachedSignal).toBeDefined());
     });
     const reason = new Error('caller retired');
     caller.abort(reason);
@@ -71,9 +109,9 @@ describe('Rfc64BackgroundWorkDispatcherV1', () => {
   });
 
   it('aborts queued owner work and drains without reporting cancellation as failure', async () => {
-    const dispatcher = new Rfc64BackgroundWorkDispatcherV1();
+    const onError = vi.fn();
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);
     let observedSignal: AbortSignal | undefined;
-    let rejected = 0;
     dispatcher.scheduleKeyed('responsibility\0cg', async (signal) => {
       observedSignal = signal;
       await new Promise<void>((_resolve, reject) => {
@@ -81,11 +119,11 @@ describe('Rfc64BackgroundWorkDispatcherV1', () => {
         signal.addEventListener('abort', onAbort, { once: true });
         if (signal.aborted) onAbort();
       });
-    }, () => { rejected += 1; });
+    });
     await vi.waitFor(() => expect(observedSignal).toBeDefined());
 
     await expect(dispatcher.closeAndDrain()).resolves.toBeUndefined();
     expect(observedSignal?.aborted).toBe(true);
-    expect(rejected).toBe(0);
+    expect(onError).not.toHaveBeenCalled();
   });
 });

@@ -35,7 +35,7 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
     expect(r?.body).toMatchObject({ code: 'RPC_RECEIPT_LOOKUP_FAILED', txHash: '0xabc' });
   });
 
-  it('maps local RPC governor saturation to retryable 503/not-started', () => {
+  it('maps local RPC governor saturation to retryable 503/indeterminate', () => {
     expect(classifyChainRpcTransportStatus({
       code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
       message: 'local queue is full',
@@ -45,7 +45,7 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
         error: 'local queue is full',
         code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
         retryable: true,
-        outcome: 'not_started',
+        outcome: 'indeterminate',
       },
     });
   });
@@ -67,7 +67,7 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
     );
   });
 
-  it('preserves queue-full/not-started through an uninitialized real adapter operation', async () => {
+  it('keeps an uninitialized adapter queue-full response conservatively indeterminate', async () => {
     const governor = new RpcRequestGovernor({
       maxRequestsPerSecond: 0.1,
       foregroundReservePercent: 0,
@@ -84,7 +84,7 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
       hubAddress: '0x0000000000000000000000000000000000000001',
       chainId: 'evm:31337',
       allowNoAdminSigner: true,
-      rpcRequestGovernor: governor,
+      rpcRequestAdmission: governor,
     });
     try {
       const error = await adapter.getIdentityId().catch((cause) => cause);
@@ -94,7 +94,7 @@ describe('classifyChainRpcTransportStatus (W2 shared transport-status helper)', 
         body: {
           code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
           retryable: true,
-          outcome: 'not_started',
+          outcome: 'indeterminate',
         },
       });
     } finally {

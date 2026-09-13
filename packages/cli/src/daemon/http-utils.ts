@@ -341,7 +341,7 @@ export function sanitizeRpcMessage(msg: string): string {
  * keyed STRICTLY on `err.code` (never message text):
  *   - `RPC_ENDPOINTS_EXHAUSTED`   → 503 (all configured endpoints failed over)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` → 503 (receipt lookup failed on every endpoint)
- *   - `RPC_REQUEST_GOVERNOR_QUEUE_FULL` → 503 (local request did not start)
+ *   - `RPC_REQUEST_GOVERNOR_QUEUE_FULL` → 503 (operation outcome is conservative)
  *   - `TIMEOUT`                   → 504 (receipt wait / RPC request timed out)
  *
  * Returns `undefined` for anything else. On-chain reverts (`CALL_EXCEPTION`),
@@ -393,7 +393,9 @@ export function classifyChainRpcTransportStatus(
         body: {
           ...transportBody(msg || "Chain RPC request capacity is temporarily full.", code),
           retryable: true,
-          outcome: "not_started",
+          // Admission failed for this raw attempt, but the containing operation
+          // may already have reached another endpoint (especially writes).
+          outcome: "indeterminate",
         },
       };
     case "RPC_TIMEOUT":

@@ -74,6 +74,16 @@ it('rejects an explicitly invalid receipt deadline at the adapter boundary', () 
     .toThrow(/receiptTimeoutMs must be a finite number >= 1000/);
 });
 
+it('accepts a narrow RPC admission capability without a concrete governor', () => {
+  const acquireActiveRequest = vi.fn(async () => undefined);
+  const adapter = new EVMChainAdapter(minimalConfig({
+    rpcRequestAdmission: { acquireActiveRequest },
+  }));
+
+  expect(adapter).toBeInstanceOf(EVMChainAdapter);
+  adapter.destroy();
+});
+
 it('derives the signer-lane no-progress threshold from the receipt deadline', () => {
   const a = new EVMChainAdapter(minimalConfig({
     receiptTimeoutMs: 1_000,

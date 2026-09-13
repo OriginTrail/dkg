@@ -2,7 +2,6 @@
 
 import { ethers } from 'ethers';
 import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
-import { activeRpcRequestContext } from './rpc-request-transport.js';
 
 const CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS = 30_000;
 
@@ -11,6 +10,12 @@ export interface ContextGraphNameHashResolverDependencies {
   readonly load: (nameHash: string) => Promise<bigint | null>;
   /** Optional source generation that invalidates misses from older snapshots. */
   readonly generation?: () => number;
+}
+
+export interface ContextGraphNameHashResolveOptions {
+  readonly signal?: AbortSignal;
+  /** Explicit caller partition used to prevent priority inversion. */
+  readonly partition?: string;
 }
 
 /**
@@ -26,11 +31,10 @@ export interface ContextGraphNameHashResolverDependencies {
  * independent lookup.
  */
 export class ContextGraphNameHashResolver {
-  private readonly cache = new ReadThroughTtlCache<string, bigint | null>({
-    ttlMs: (value) => value === null
-      ? CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS
-      : 0,
-  });
+  private readonly caches = new Map<
+    string,
+    ReadThroughTtlCache<string, bigint | null>
+  >();
 
   private cacheGeneration: number | undefined;
 
@@ -40,9 +44,9 @@ export class ContextGraphNameHashResolver {
 
   async resolve(
     rawNameHash: string,
-    signal?: AbortSignal,
+    options: ContextGraphNameHashResolveOptions = {},
   ): Promise<bigint | null> {
-    signal?.throwIfAborted();
+    options.signal?.throwIfAborted();
     const nameHash = normalizeContextGraphNameHash(rawNameHash);
     if (nameHash === ethers.ZeroHash) return null;
 
@@ -51,26 +55,39 @@ export class ContextGraphNameHashResolver {
       if (this.cacheGeneration === undefined) {
         this.cacheGeneration = generation;
       } else if (generation !== this.cacheGeneration) {
-        this.cache.invalidateAll();
+        this.invalidateCaches();
         this.cacheGeneration = generation;
       }
     }
 
-    const shared = this.cache.getOrLoad(
-      // A foreground register must never inherit a background lookup that is
-      // intentionally held by startup jitter or the background token bucket.
-      // Coalesce within each workload class; keep the short miss cache split
-      // for the same reason.
-      `${activeRpcRequestContext().requestClass}\0${nameHash}`,
+    const shared = this.cacheFor(options.partition ?? 'default').getOrLoad(
+      nameHash,
       nameHash,
       () => this.dependencies.load(nameHash),
     );
-    return waitForResolution(shared, signal);
+    return waitForResolution(shared, options.signal);
   }
 
   invalidateAll(): void {
-    this.cache.invalidateAll();
+    this.invalidateCaches();
     this.cacheGeneration = this.dependencies.generation?.();
+  }
+
+  private cacheFor(partition: string): ReadThroughTtlCache<string, bigint | null> {
+    let cache = this.caches.get(partition);
+    if (cache === undefined) {
+      cache = new ReadThroughTtlCache<string, bigint | null>({
+        ttlMs: (value) => value === null
+          ? CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS
+          : 0,
+      });
+      this.caches.set(partition, cache);
+    }
+    return cache;
+  }
+
+  private invalidateCaches(): void {
+    for (const cache of this.caches.values()) cache.invalidateAll();
   }
 }
 
