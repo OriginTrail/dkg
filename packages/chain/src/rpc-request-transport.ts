@@ -9,8 +9,6 @@ import type {
   FetchCancelSignal,
   FetchGetUrlFunc,
   JsonRpcApiProviderOptions,
-  JsonRpcPayload,
-  JsonRpcResult,
   Networkish,
 } from 'ethers';
 import { errorMessage } from './evm-adapter-errors.js';
@@ -303,47 +301,25 @@ async function admitAndObserveRpcAttempt(
   }
 }
 
-/** JsonRpcProvider whose initial dispatch and every retry share one policy path. */
-export class RpcRequestJsonRpcProvider extends JsonRpcProvider {
-  constructor(
-    url: string | FetchRequest,
-    network: Networkish | undefined,
-    options: JsonRpcApiProviderOptions | undefined,
-    private readonly transport: Pick<RpcRequestProviderConfig, 'admission' | 'onRequest' | 'endpointSlot'>,
-  ) {
-    super(url, network, options);
-  }
-
-  override async _send(
-    payload: JsonRpcPayload | Array<JsonRpcPayload>,
-  ): Promise<Array<JsonRpcResult>> {
-    const entries = Array.isArray(payload) ? payload : [payload];
-    if (this.transport.admission !== undefined && entries.length > 1) {
-      throw new TypeError(
-        'Governed RPC transports require single-entry JSON-RPC dispatch',
-      );
-    }
-    await admitAndObserveRpcAttempt(
-      entries.map((entry) => String(entry?.method ?? 'other')),
-      this.transport,
-    );
-    return super._send(payload);
-  }
-}
-
 /** The canonical provider factory for tracked adapters and untracked probes. */
 export function createRpcRequestProvider(
   url: string,
   config: RpcRequestProviderConfig,
-): RpcRequestJsonRpcProvider {
+): JsonRpcProvider {
   const request = boundedRetryFetchRequest(url, config.maxRetries);
-  const retry = request.retryFunc!;
-  request.retryFunc = async (attemptRequest, response, attempt) => {
-    const shouldRetry = await retry(attemptRequest, response, attempt);
-    if (shouldRetry) {
-      await admitAndObserveRpcAttempt(methodsFromRequestBody(attemptRequest?.body), config);
+  // FetchRequest invokes getUrlFunc once for every physical HTTP attempt:
+  // initial dispatch, ethers retry, redirect, and process retry alike. Owning
+  // admission and accounting at this boundary keeps them exact without
+  // duplicating ethers' dispatch lifecycle across provider and retry hooks.
+  request.getUrlFunc = async (attemptRequest, signal) => {
+    const methods = methodsFromRequestBody(attemptRequest.body);
+    if (config.admission !== undefined && methods.length > 1) {
+      throw new TypeError(
+        'Governed RPC transports require single-entry JSON-RPC dispatch',
+      );
     }
-    return shouldRetry;
+    await admitAndObserveRpcAttempt(methods, config);
+    return cancellableRpcGetUrl(attemptRequest, signal);
   };
   if (
     config.admission !== undefined
@@ -366,5 +342,5 @@ export function createRpcRequestProvider(
         ...normalizedProviderOptions,
         staticNetwork: config.network as JsonRpcApiProviderOptions['staticNetwork'],
       };
-  return new RpcRequestJsonRpcProvider(request, config.network, providerOptions, config);
+  return new JsonRpcProvider(request, config.network, providerOptions);
 }

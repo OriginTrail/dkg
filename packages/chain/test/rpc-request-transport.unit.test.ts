@@ -373,4 +373,26 @@ describe('RPC request transport', () => {
     }
   });
 
+  it('accounts every entry in an ungoverned batched payload at the HTTP-attempt boundary', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const observed: string[] = [];
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 2 },
+      onRequest: (method) => { observed.push(method); },
+    });
+    try {
+      await expect(provider._send([
+        { id: 1, jsonrpc: '2.0', method: 'eth_blockNumber', params: [] },
+        { id: 2, jsonrpc: '2.0', method: 'eth_chainId', params: [] },
+      ])).resolves.toHaveLength(2);
+      expect(observed).toEqual(['eth_blockNumber', 'eth_chainId']);
+      expect(rpc.hits('eth_blockNumber')).toBe(1);
+      expect(rpc.hits('eth_chainId')).toBe(1);
+    } finally {
+      provider.destroy();
+    }
+  });
+
 });
