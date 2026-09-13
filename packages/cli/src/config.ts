@@ -15,6 +15,7 @@ import type {
 } from '@origintrail-official/dkg-agent';
 import {
   resolveRfc64CatalogActivationsV1,
+  type Rfc64CatalogNormalizedActivationStateV1,
   type ResolvedRfc64CatalogActivationConfigV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
@@ -41,9 +42,11 @@ import {
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
 import {
+  resolveRpcRequestGovernorPolicy,
   resolveFinalityConfirmations,
   resolveReceiptTimeoutMs,
   type ApprovalPolicy,
+  type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
 
@@ -235,6 +238,8 @@ export interface NetworkConfig {
      * Defaults to the EVM adapter's 2,000-block common provider cap.
      */
     cgRegistryScanPageSize?: number;
+    /** Node-process RPC transport budget; operator values override per field. */
+    rpcRequestBudget?: RpcRequestGovernorPolicyInput;
     /**
      * Network-level per-chain funding floors (wei). See
      * `ChainConfig.minPublisher*Wei`. Overlay JSON can only carry
@@ -343,6 +348,8 @@ export interface ChainConfig {
    * Defaults to the EVM adapter's 2,000-block common provider cap.
    */
   cgRegistryScanPageSize?: number;
+  /** Node-process RPC transport budget and foreground reservation. */
+  rpcRequestBudget?: RpcRequestGovernorPolicyInput;
   /**
    * Funding floors for funding-aware operational-wallet selection (wei of the
    * native gas token / TRAC). A wallet is preferred for a publish only when its
@@ -539,6 +546,8 @@ export type Rfc64PublicCatalogActivationChainIdentity =
 export type Rfc64CatalogActivationConfig = Rfc64CatalogActivationConfigV1;
 export type ResolvedRfc64CatalogActivationConfig =
   ResolvedRfc64CatalogActivationConfigV1;
+export type Rfc64CatalogNormalizedActivationState =
+  Rfc64CatalogNormalizedActivationStateV1;
 
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
@@ -1701,6 +1710,21 @@ export function resolveChainConfig(
   if (approvalPolicy !== undefined) merged.approvalPolicy = approvalPolicy;
   const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
+  if (cfg?.rpcRequestBudget !== undefined || net?.rpcRequestBudget !== undefined) {
+    // Validate each persisted source before object spread. A malformed block
+    // (notably JSON null) must not disappear during merge and silently restore
+    // the process defaults.
+    if (net?.rpcRequestBudget !== undefined) {
+      resolveRpcRequestGovernorPolicy(net.rpcRequestBudget);
+    }
+    if (cfg?.rpcRequestBudget !== undefined) {
+      resolveRpcRequestGovernorPolicy(cfg.rpcRequestBudget);
+    }
+    merged.rpcRequestBudget = resolveRpcRequestGovernorPolicy({
+      ...net?.rpcRequestBudget,
+      ...cfg?.rpcRequestBudget,
+    });
+  }
   // Presence matters here: persisted `null` is an explicit invalid operator
   // value and must not silently fall through to the network/default timeout.
   const operatorHasReceiptTimeout = cfg !== undefined && cfg !== null

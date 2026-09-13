@@ -74,6 +74,13 @@ export class Rfc64ReceiverTaskLifecycleV1<
   readonly #activeScopeKeys = new Set<string>();
   readonly #deferredTimers = new Map<TTask, ReturnType<typeof setTimeout>>();
 
+  constructor(
+    private readonly onSettled: (
+      task: TTask,
+      result: Rfc64PublicCatalogReceiverCompletionV1,
+    ) => void,
+  ) {}
+
   get queuedCount(): number {
     return this.#queue.length;
   }
@@ -161,7 +168,6 @@ export class Rfc64ReceiverTaskLifecycleV1<
     contextGraphId: string,
     reason: Error,
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): void {
     const tasks = new Set(
@@ -172,7 +178,7 @@ export class Rfc64ReceiverTaskLifecycleV1<
     for (const task of tasks) {
       task.cancellation.abort(reason);
       if (task.running === true) continue;
-      this.finalize(task, completion(task), beforeSettle, notify);
+      this.finalize(task, completion(task), notify);
     }
   }
 
@@ -189,25 +195,23 @@ export class Rfc64ReceiverTaskLifecycleV1<
 
   finalizeNonRunning(
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): void {
     for (const task of new Set(this.#pendingByKey.values())) {
       if (task.running === true) continue;
-      this.finalize(task, completion(task), beforeSettle, notify);
+      this.finalize(task, completion(task), notify);
     }
   }
 
   finalizeNonRunningWhere(
     predicate: (task: TTask) => boolean,
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): number {
     let finalized = 0;
     for (const task of new Set(this.#pendingByKey.values())) {
       if (task.running === true || !predicate(task)) continue;
-      if (this.finalize(task, completion(task), beforeSettle, notify)) finalized += 1;
+      if (this.finalize(task, completion(task), notify)) finalized += 1;
     }
     return finalized;
   }
@@ -216,7 +220,6 @@ export class Rfc64ReceiverTaskLifecycleV1<
   finalizeOneNonRunningWhere(
     predicate: (task: TTask) => boolean,
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): boolean {
     const task = [...this.#pendingByKey.values()].find(
@@ -224,26 +227,24 @@ export class Rfc64ReceiverTaskLifecycleV1<
     );
     return task === undefined
       ? false
-      : this.finalize(task, completion(task), beforeSettle, notify);
+      : this.finalize(task, completion(task), notify);
   }
 
   /** Finalize at most one queued, but never deferred or active, task. */
   finalizeOneQueuedWhere(
     predicate: (task: TTask) => boolean,
     completion: (task: TTask) => Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): boolean {
     const task = this.#queue.find(predicate);
     return task === undefined
       ? false
-      : this.finalize(task, completion(task), beforeSettle, notify);
+      : this.finalize(task, completion(task), notify);
   }
 
   finalize(
     task: TTask,
     result: Rfc64PublicCatalogReceiverCompletionV1,
-    beforeSettle: (task: TTask) => void,
     notify: (waiter: () => void) => void,
   ): boolean {
     if (task.settled === true) return false;
@@ -252,7 +253,7 @@ export class Rfc64ReceiverTaskLifecycleV1<
     if (queueIndex >= 0) this.#queue.splice(queueIndex, 1);
     this.removeDeferred(task);
     if (this.#pendingByKey.get(task.key) === task) this.#pendingByKey.delete(task.key);
-    beforeSettle(task);
+    this.onSettled(task, result);
     const waiters = task.completionWaiters?.splice(0) ?? [];
     for (const resolve of waiters) notify(() => resolve(result));
     return true;

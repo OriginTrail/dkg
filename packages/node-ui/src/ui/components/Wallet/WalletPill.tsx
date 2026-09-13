@@ -1,7 +1,12 @@
 import React, { useState } from 'react';
 import { Power, RefreshCw } from 'lucide-react';
-import { useWalletStore, isWrongNetwork } from '../../stores/wallet.js';
-import { truncateAddress } from './format.js';
+import { useWalletStore } from '../../stores/wallet.js';
+import { numericChainId } from '../../web3/chainId.js';
+import {
+  switchWalletToBootstrap,
+  type WalletChainBootstrap,
+} from '../../web3/switchWalletChain.js';
+import { truncateAddress } from './truncateAddress.js';
 
 function providerLabel(name?: string | null): string {
   const trimmed = name?.trim();
@@ -9,21 +14,31 @@ function providerLabel(name?: string | null): string {
 }
 
 /**
- * Persistent connected-wallet chip for the PCA tab. Provider metadata is
+ * Persistent connected-wallet chip shared by browser-wallet features. Provider metadata is
  * display-only; the chain guard is the actionable state.
  */
-export function WalletPill({ className = '' }: { className?: string }) {
+export function WalletPill({
+  bootstrap,
+  className = '',
+  testId = 'wallet-pill',
+}: {
+  bootstrap?: WalletChainBootstrap;
+  className?: string;
+  testId?: string;
+}) {
   const address = useWalletStore((s) => s.address);
   const providerInfo = useWalletStore((s) => s.providerInfo);
+  const walletProvider = useWalletStore((s) => s.provider);
   const chainId = useWalletStore((s) => s.chainId);
-  const expectedChainId = useWalletStore((s) => s.expectedChainId);
-  const wrongNetwork = useWalletStore((s) => isWrongNetwork(s));
+  const storeExpectedChainId = useWalletStore((s) => s.expectedChainId);
   const disconnect = useWalletStore((s) => s.disconnect);
   const switchToExpectedChain = useWalletStore((s) => s.switchToExpectedChain);
   const [switching, setSwitching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   if (!address) return null;
+  const expectedChainId = bootstrap ? numericChainId(bootstrap.chainId) : storeExpectedChainId;
+  const wrongNetwork = expectedChainId != null && chainId !== expectedChainId;
   const provider = providerLabel(providerInfo?.name);
   const stateLabel = wrongNetwork ? 'wrong network' : 'connected';
   const ariaLabel = `Connected wallet ${address} via ${provider}; ${stateLabel}`;
@@ -32,7 +47,12 @@ export function WalletPill({ className = '' }: { className?: string }) {
     setSwitching(true);
     setError(null);
     try {
-      await switchToExpectedChain();
+      if (bootstrap) {
+        if (!walletProvider) throw new Error('Wallet not connected.');
+        await switchWalletToBootstrap(walletProvider, bootstrap);
+      } else {
+        await switchToExpectedChain();
+      }
     } catch (err) {
       setError((err as Error)?.message ?? 'Could not switch wallet network.');
     } finally {
@@ -41,21 +61,24 @@ export function WalletPill({ className = '' }: { className?: string }) {
   };
 
   return (
-    <div className={['v10-pca-wallet-pill-wrap', className].filter(Boolean).join(' ')}>
+    <div
+      className={['v10-wallet-pill-wrap', className].filter(Boolean).join(' ')}
+      data-testid={testId}
+    >
       <div
-        className="v10-pca-wallet-pill"
+        className="v10-wallet-pill"
         data-state={wrongNetwork ? 'wrong-network' : 'connected'}
         role="group"
         aria-label={ariaLabel}
       >
-        <span className="v10-pca-wallet-pill-main" title={address}>
+        <span className="v10-wallet-pill-main" title={address}>
           {truncateAddress(address)}
         </span>
-        <span className="v10-pca-wallet-pill-provider">
+        <span className="v10-wallet-pill-provider">
           via {provider}
         </span>
         {wrongNetwork ? (
-          <span className="badge badge-warn v10-pca-wallet-pill-network" role="alert">
+          <span className="badge badge-warn v10-wallet-pill-network" role="alert">
             wrong network
           </span>
         ) : (
@@ -63,7 +86,7 @@ export function WalletPill({ className = '' }: { className?: string }) {
         )}
         <button
           type="button"
-          className="v10-pca-wallet-pill-btn"
+          className="v10-wallet-pill-btn"
           onClick={disconnect}
           title="Disconnect this wallet before switching to another wallet"
         >
@@ -72,13 +95,13 @@ export function WalletPill({ className = '' }: { className?: string }) {
         </button>
       </div>
       {wrongNetwork && (
-        <div className="v10-pca-wallet-pill-sub">
+        <div className="v10-wallet-pill-sub">
           <span>
             Connected chain {chainId ?? '-'}; node expects {expectedChainId ?? '-'}.
           </span>
           <button
             type="button"
-            className="v10-pca-wallet-pill-link"
+            className="v10-wallet-pill-link"
             onClick={onSwitch}
             disabled={switching}
           >
@@ -88,7 +111,7 @@ export function WalletPill({ className = '' }: { className?: string }) {
         </div>
       )}
       {error && (
-        <p className="v10-pca-wallet-error" role="alert">
+        <p className="v10-wallet-error" role="alert">
           {error}
         </p>
       )}

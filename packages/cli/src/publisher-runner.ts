@@ -4,6 +4,7 @@ import { DKGAgentWallet } from '@origintrail-official/dkg-agent';
 import {
   EVMChainAdapter,
   NoChainAdapter,
+  RpcRequestGovernor,
   buildKnowledgeAssetUal,
   mergeRpcUsageWindows,
   type CanonicalFinalizationReceipt,
@@ -55,6 +56,7 @@ import {
   type PublisherRetryTuning,
 } from './config.js';
 import {
+  bindRuntimeRpcRequestGovernor,
   projectRuntimeEvmChainConfig,
   type RuntimeEvmChainConfig,
 } from './runtime-chain-config.js';
@@ -416,7 +418,13 @@ export async function createPublisherRuntime(args: {
   // the runtime fall back to NoChainAdapter (publisher won't have on-chain
   // finality but still functions).
   const merged = resolveReadyChainConfig(args.config, network);
-  const chainBase = projectRuntimeEvmChainConfig(merged);
+  const projectedChainBase = projectRuntimeEvmChainConfig(merged);
+  const chainBase = projectedChainBase === undefined
+    ? undefined
+    : bindRuntimeRpcRequestGovernor(
+        projectedChainBase,
+        new RpcRequestGovernor(merged?.rpcRequestBudget),
+      );
   return createPublisherRuntimeFromBase({
     dataDir: args.dataDir,
     keypair: keypair.keypair,
@@ -726,7 +734,9 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     publisher: asyncPublisher,
     walletIds: validWalletIds,
     wallets: wallets.map(({ address, identityId }) => ({ address, identityId })),
-    drainRpcUsage: () => mergeRpcUsageWindows(...wallets.map((w) => w.chain.drainRpcUsage?.())),
+    drainRpcUsage: () => mergeRpcUsageWindows(
+      ...wallets.map((w) => w.chain.drainRpcUsage?.()),
+    ),
     // The SAME question the runtime's own publisher answers, from the same adapter map, so the
     // daemon's admission instance and the lane that would do the work cannot disagree.
     canSettleHeldJob,

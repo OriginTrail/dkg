@@ -3,6 +3,8 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { Rfc64SwmRecoveryRuntimeV1 } from
   '../src/dkg-agent-rfc64-swm-recovery-runtime.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from
+  '../src/rfc64/background-work-dispatcher-v1.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 export const LOCAL_ID = 'selected-public-cg';
 export const NAME_HASH = `0x${'ab'.repeat(32)}`;
@@ -107,6 +109,7 @@ export function selectedFixture(resolved: bigint | null = 42n) {
   const agent = createBindingAgentHarness({
     store: { query } as unknown as TripleStore,
     chain,
+    rfc64BackgroundWorkDispatcherV1: new Rfc64BackgroundWorkDispatcherV1(),
     rfc64SwmRecoveryRuntimeV1,
     subscribedContextGraphs: new Map([[LOCAL_ID, subscription]]),
     wireIdToLocalCgId: new Map([[NAME_HASH, LOCAL_ID]]),

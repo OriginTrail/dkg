@@ -21,12 +21,18 @@ import {
 import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from
+  '../src/rfc64/background-work-dispatcher-v1.js';
 
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.lastSyncDisconnectedAt = new Map();
   agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
+  // Object.create deliberately bypasses DKGAgentBase field initializers. Keep
+  // the synthetic shutdown fixture aligned with the production lifecycle
+  // owners that stop() fences before dependency teardown.
+  agent.rfc64BackgroundWorkDispatcherV1 = new Rfc64BackgroundWorkDispatcherV1();
   return agent;
 }
 

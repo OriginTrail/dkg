@@ -134,6 +134,7 @@ import {
   createRpcTimeoutError,
   enrichEvmError,
   isChainRpcTransportError,
+  withOwnedRpcRequestContext,
   type ChainAdapter,
   type CreateContextGraphParams,
   type CreateOnChainContextGraphParams,
@@ -2026,6 +2027,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       new InMemoryProtocolOutboxStore();
     assertBoundedProtocolOutboxStore(outboxStore);
     await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
+    this.rfc64BackgroundWorkDispatcherV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
@@ -4162,7 +4164,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         retryIntervalMs: 30_000,
         requestWhileRunning: 'drop',
         runPass: async (signal) => {
-          await this.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+          await withOwnedRpcRequestContext({
+            requestClass: 'background',
+            signal,
+          }, () => this.retryUnavailableContextGraphSubscriptionAuthorities(signal));
           return this.getContextGraphSubscriptionRehydrationStatus()
             ?.dormantReasons.authorityUnavailable.length
             ? 'rearm'
@@ -9015,12 +9020,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       || previous.onChainId !== canonicalNext.onChainId
       || previous.metaSynced !== canonicalNext.metaSynced
     ) {
-      void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId).catch((error) => {
-        this.log.warn(
-          createOperationContext('system'),
-          `RFC-64 responsibility resolution failed for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
     }
     // VM cleanup policy belongs to the lifecycle consumer, not to the binding
     // registry. Invalidating a reverse candidate must also invalidate any work
@@ -9296,7 +9296,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           },
         );
       }
-      void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId).catch(() => undefined);
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
     }
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
@@ -9435,11 +9435,39 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
   }
 
-  async persistContextGraphSubscriptionStrict(this: DKGAgent,
+  async persistContextGraphSubscriptionStrict(
+    this: DKGAgent,
     contextGraphId: string,
     subscription?: ContextGraphSub,
     syncScoped?: boolean,
     isCurrent: () => boolean = () => true,
+  ): Promise<void> {
+    await this.persistContextGraphSubscriptionProjectionStrict({
+      contextGraphId,
+      subscription,
+      syncScoped,
+      isCurrent,
+      requireDurableMemberIntent: true,
+      operation: 'join approval',
+    });
+  }
+
+  /**
+   * One strict subscription persistence protocol shared by joins and registry
+   * discovery. It owns snapshot capture, generation validation, per-graph
+   * serialization, and the store-first write. Callers select only whether an
+   * intentionally process-local on-demand member projection is acceptable.
+   */
+  async persistContextGraphSubscriptionProjectionStrict(
+    this: DKGAgent,
+    input: {
+      contextGraphId: string;
+      subscription?: ContextGraphSub;
+      syncScoped?: boolean;
+      isCurrent?: () => boolean;
+      requireDurableMemberIntent: boolean;
+      operation: 'join approval' | 'chain discovery';
+    },
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) {
@@ -9448,44 +9476,69 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // retains the backward-compatible in-memory approval path.
       return;
     }
-    const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
-    const expectedBindingGeneration = this.contextGraphBindingState.capture(contextGraphId);
-    const sub = subscription ?? expectedLiveSub;
+    const expectedLiveSub = this.subscribedContextGraphs.get(input.contextGraphId);
+    const expectedBindingGeneration = this.contextGraphBindingState.capture(input.contextGraphId);
+    const sub = input.subscription ?? expectedLiveSub;
     if (!sub?.subscribed && !sub?.coreHosted) {
       throw new Error(
-        `Cannot persist context graph "${contextGraphId}": active subscription or host state is missing`,
+        `Cannot persist context graph "${input.contextGraphId}": active subscription or host state is missing`,
       );
     }
     const persistence = projectContextGraphSubscriptionPersistence({
-      contextGraphId,
+      contextGraphId: input.contextGraphId,
       subscription: sub,
-      syncScoped: syncScoped ?? (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+      syncScoped: input.syncScoped
+        ?? (this.config.syncContextGraphs ?? []).includes(input.contextGraphId),
     });
-    if (persistence.action !== 'save' || !persistence.persistMemberIntent) {
+    if (persistence.action === 'skip' && !input.requireDurableMemberIntent) return;
+    if (
+      persistence.action !== 'save'
+      || (input.requireDurableMemberIntent && !persistence.persistMemberIntent)
+    ) {
       throw new Error(
-        `Cannot acknowledge join approval for "${contextGraphId}": durable subscription intent is missing`,
+        `Cannot acknowledge ${input.operation} for "${input.contextGraphId}": `
+        + 'durable subscription intent or host state is missing',
       );
     }
     const record = persistence.record;
     // Queue behind any fire-and-forget writes scheduled by subscribe/mark so
     // this final authoritative snapshot is the last write before the ACK.
-    await this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
-      const current = this.subscribedContextGraphs.get(contextGraphId);
+    await this.enqueueContextGraphSubscriptionPersistWrite(input.contextGraphId, async () => {
+      const current = this.subscribedContextGraphs.get(input.contextGraphId);
       if (
-        !isCurrent()
-        ||
-        current !== expectedLiveSub
+        !(input.isCurrent?.() ?? true)
+        || current !== expectedLiveSub
         || (!current?.subscribed && !current?.coreHosted)
         || !this.contextGraphBindingState.isGenerationCurrent(
-          contextGraphId,
+          input.contextGraphId,
           expectedBindingGeneration,
         )
       ) {
         throw asSyncFetchAbortError(new Error(
-          `Context graph "${contextGraphId}" changed before its strict subscription snapshot was persisted`,
+          `Context graph "${input.contextGraphId}" changed before its strict subscription snapshot was persisted`,
         ));
       }
       await store.save(record);
+    });
+  }
+
+  /**
+   * Scanner-owned durability boundary for metadata enrichment. Unlike join
+   * approval, discovery must preserve the canonical projection: on-demand
+   * member intent stays process-local, while an independent Core hosting row
+   * is still flushed before the registry page can be acknowledged.
+   */
+  async persistDiscoveredContextGraphSubscriptionStrict(
+    this: DKGAgent,
+    contextGraphId: string,
+    subscription: ContextGraphSub,
+  ): Promise<void> {
+    await this.persistContextGraphSubscriptionProjectionStrict({
+      contextGraphId,
+      subscription,
+      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+      requireDurableMemberIntent: false,
+      operation: 'chain discovery',
     });
   }
 
@@ -9692,9 +9745,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<void> {
     const store = this.config.contextGraphMembershipStore;
     if (!store) {
-      void this.reconcileRfc64CatalogResponsibilityV1(
+      if (options?.strict === true) {
+        return this.reconcileRfc64CatalogResponsibilityV1(
+          record.contextGraphId,
+        ).then(() => undefined);
+      }
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(
         record.contextGraphId,
-      ).catch(() => undefined);
+      );
       return Promise.resolve();
     }
     const normalizedRecord = {
@@ -9707,15 +9765,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       () => store.upsert({ ...normalizedRecord, updatedAt: Date.now() }),
       { strict: options?.strict === true },
     );
-    const refreshAuthority = () => {
-      void this.reconcileRfc64CatalogResponsibilityV1(
-        normalizedRecord.contextGraphId,
-      ).catch(() => undefined);
-    };
+    const refreshAuthority = () => this.reconcileRfc64CatalogResponsibilityV1(
+      normalizedRecord.contextGraphId,
+    ).then(() => undefined);
     if (options?.strict === true) return write.then(refreshAuthority);
     // Background callers stay log-and-continue; durability-sensitive callers
     // opt into the strict path above and receive the original rejection.
-    return write.then(refreshAuthority).catch((err) => {
+    return write.then(() => {
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(
+        normalizedRecord.contextGraphId,
+      );
+    }).catch((err) => {
       this.log.warn(
         createOperationContext('system'),
         `Failed to persist context-graph membership for "${normalizedRecord.contextGraphId}" (${normalizedRecord.principalType}:${normalizedRecord.principalId}): ${err instanceof Error ? err.message : String(err)}`,
@@ -9730,8 +9790,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): void {
     const store = this.config.contextGraphMembershipStore;
     if (!store) {
-      void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId)
-        .catch(() => undefined);
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(
+        contextGraphId,
+      );
       return;
     }
     const normalizedPrincipalId = this.normalizeMembershipPrincipal(principalType, principalId);
@@ -9739,13 +9800,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     void this.enqueueContextGraphMembershipPersistWrite(
       key,
       () => store.delete(contextGraphId, principalType, normalizedPrincipalId),
-    ).then(() => this.reconcileRfc64CatalogResponsibilityV1(contextGraphId))
-      .catch((err) => {
-      this.log.warn(
-        createOperationContext('system'),
-        `Failed to delete context-graph membership for "${contextGraphId}" (${principalType}:${normalizedPrincipalId}): ${err instanceof Error ? err.message : String(err)}`,
+    ).then(() => {
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(
+        contextGraphId,
       );
-    });
+    })
+      .catch((err) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `Failed to delete context-graph membership for "${contextGraphId}" (${principalType}:${normalizedPrincipalId}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   persistLocalNodeMembership(this: DKGAgent, contextGraphId: string, source = 'subscription'): void {

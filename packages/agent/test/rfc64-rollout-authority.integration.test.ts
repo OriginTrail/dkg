@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { join } from 'node:path';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 import { multiaddr } from '@multiformats/multiaddr';
 import {
@@ -24,7 +26,11 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
   NoChainAdapter,
+  activeRpcRequestAbortSignal,
+  createRpcRequestProvider,
+  RpcRequestGovernor,
   RpcEndpointsExhaustedError,
+  withRpcRequestContext,
   type ChainAdapter,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -207,6 +213,297 @@ afterEach(async () => {
 });
 
 describe('RFC-64 rollout authority integration', () => {
+  it('preserves the caller lane for authority reads and lets foreground bypass cold-start jitter', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        if (hits === 1) {
+          res.writeHead(429, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            error: { code: -32005, message: 'rate limited' },
+          }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 100,
+      maxQueueSize: 8,
+      startupJitterMs: 60_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    const provider = createRpcRequestProvider(
+      `http://127.0.0.1:${address.port}`,
+      {
+        maxRetries: 1,
+        providerOptions: { batchMaxCount: 1 },
+        admission: governor,
+      },
+    );
+    const edge = await startAgent({ name: 'authority-transport-background-lane' });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockImplementation(async () => {
+      await provider._send({
+        id: 1,
+        jsonrpc: '2.0',
+        method: 'eth_blockNumber',
+        params: [],
+      });
+      return null;
+    });
+    vi.spyOn(edge, 'getContextGraphOwner').mockResolvedValue(`did:dkg:agent:${AUTHOR}`);
+    try {
+      await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID))
+        .resolves.toMatchObject({ agentAddress: AUTHOR });
+      expect(hits).toBe(2);
+      expect(governor.snapshot()).toMatchObject({
+        backgroundAdmitted: 0,
+        foregroundAdmitted: 2,
+        backgroundQueued: 0,
+      });
+    } finally {
+      provider.destroy();
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+
+  it('runs the production scheduled authority revision read in the background lane with its owner signal', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 100,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    let observedSignal: AbortSignal | undefined;
+    const readRevisions = vi.fn(async (
+      _contextGraphIds: readonly string[],
+      options?: { signal?: AbortSignal },
+    ) => {
+      observedSignal = options?.signal;
+      await governor.acquireActiveRequest();
+      return new Map([['9', `0x${'ab'.repeat(32)}`]]);
+    });
+    const { edge, runtime } = await prepareAuthorityRefreshLifecycle(readRevisions);
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
+    try {
+      runtime.start(createOperationContext('system'));
+      await runtime.whenIdle();
+      expect(readRevisions).toHaveBeenCalledWith(['9'], {
+        signal: expect.any(AbortSignal),
+      });
+      expect(observedSignal?.aborted).toBe(false);
+      expect(governor.snapshot()).toMatchObject({
+        backgroundAdmitted: 1,
+        foregroundAdmitted: 0,
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('cancels a queued auto-publish authority read at the observer boundary without HTTP or warnings', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 50,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 60_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    const provider = createRpcRequestProvider(
+      `http://127.0.0.1:${address.port}`,
+      {
+        maxRetries: 0,
+        providerOptions: { batchMaxCount: 1 },
+        admission: governor,
+      },
+    );
+    const edge = await startAgent({
+      name: 'auto-publish-observer-local-cancellation',
+    });
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Auto-publish observer local cancellation',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    const warn = vi.spyOn((edge as any).log, 'warn');
+    vi.spyOn(edge, 'recordRfc64SwmAuthorInventoryShadowV1').mockResolvedValue({
+      status: 'dormant',
+      action: 'upsert',
+      attempts: 0,
+      headObjectDigest: null,
+      error: null,
+      dormantReason: 'inactive-lane',
+    });
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    vi.spyOn(edge, 'resolveRfc64AcceptedCompatibilityAuthorityV1').mockReturnValue(null);
+    let observedSignal: AbortSignal | undefined;
+    vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
+      .mockImplementation(async (_contextGraphId, signal) => {
+        observedSignal = signal;
+        await provider._send({
+          id: 1,
+          jsonrpc: '2.0',
+          method: 'eth_blockNumber',
+          params: [],
+        });
+        return null;
+      });
+
+    try {
+      const observer = edge.observeRfc64DurableSwmPromotionV1({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        assertionCoordinate: 'observer-local-cancellation',
+        lifecycleAgentAddress: AUTHOR,
+        shareOperationId: 'observer-local-cancellation-operation',
+        ctx: createOperationContext('share'),
+      });
+      await vi.waitFor(() => {
+        expect(governor.snapshot()).toMatchObject({
+          backgroundQueued: 1,
+          foregroundQueued: 0,
+          foregroundAdmitted: 0,
+          backgroundAdmitted: 0,
+        });
+      });
+      expect(observedSignal?.aborted).toBe(false);
+
+      await edge.closeRfc64SwmInventoryObserversV1();
+      await expect(observer).resolves.toBeUndefined();
+
+      expect(observedSignal?.aborted).toBe(true);
+      expect(governor.snapshot()).toMatchObject({
+        backgroundQueued: 0,
+        cancelled: 1,
+        foregroundAdmitted: 0,
+        backgroundAdmitted: 0,
+      });
+      expect(hits).toBe(0);
+      expect(warn).not.toHaveBeenCalled();
+      expect((edge as any).rfc64BackgroundWorkDispatcherV1.shutdownSignal.aborted)
+        .toBe(false);
+      await expect((edge as any).rfc64BackgroundWorkDispatcherV1.runAwaited(
+        async () => 'still-open',
+      )).resolves.toBe('still-open');
+    } finally {
+      provider.destroy();
+      await edge.stop();
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+
+  it('cancels and drains queued scheduled responsibility RPC admission on agent shutdown', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 50,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 60_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-shutdown-drain',
+      activation: activation('catalog'),
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockImplementation(async () => {
+      await governor.acquireActiveRequest();
+      return 'public';
+    });
+
+    expect(edge.scheduleRfc64CatalogResponsibilityReconciliationV1(CONTEXT_GRAPH_ID))
+      .toBe(true);
+    await vi.waitFor(() => {
+      expect(governor.snapshot().backgroundQueued).toBe(1);
+    });
+    await expect(edge.stop()).resolves.toBeUndefined();
+    expect(governor.snapshot()).toMatchObject({
+      backgroundQueued: 0,
+      cancelled: 1,
+      backgroundAdmitted: 0,
+    });
+  });
+
+  it('keeps awaited responsibility reconciliation in the foreground lane at cold start', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 100,
+      maxQueueSize: 8,
+      startupJitterMs: 60_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    const edge = await startAgent({
+      name: 'foreground-responsibility-reconcile',
+      activation: activation('catalog'),
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockImplementation(async () => {
+      await governor.acquireActiveRequest();
+      return 'public';
+    });
+
+    await expect(edge.reconcileRfc64CatalogResponsibilityV1(CONTEXT_GRAPH_ID))
+      .resolves.toMatchObject({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(governor.snapshot()).toMatchObject({
+      foregroundAdmitted: 1,
+      backgroundAdmitted: 0,
+      backgroundQueued: 0,
+    });
+  });
+
   it('coalesces duplicate inbound catalog replay requests behind a bounded queue', async () => {
     const edge = await startAgent({ name: 'bounded-replay-queue' });
     let release!: () => void;
@@ -1293,6 +1590,50 @@ describe('RFC-64 rollout authority integration', () => {
     expect(readSignal).toMatchObject({ aborted: true, reason });
   });
 
+  it('propagates caller cancellation into the initial registered authority binding lookup', async () => {
+    const readAuthority = vi.fn();
+    const edge = await startAgent({
+      name: 'registered-authority-binding-signal-propagation',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    let lookupSignal: AbortSignal | undefined;
+    let markLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      markLookupStarted = resolve;
+    });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockImplementation(async (
+      _contextGraphId,
+      options,
+    ) => {
+      lookupSignal = options?.signal;
+      markLookupStarted();
+      await new Promise<never>((_resolve, reject) => {
+        if (lookupSignal?.aborted) {
+          reject(lookupSignal.reason);
+          return;
+        }
+        lookupSignal?.addEventListener('abort', () => reject(lookupSignal!.reason), { once: true });
+      });
+      return null;
+    });
+    const controller = new AbortController();
+    const operation = edge.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      controller.signal,
+    );
+    await lookupStarted;
+    const reason = new Error('caller stopped during authority binding lookup');
+    controller.abort(reason);
+
+    await expect(operation).rejects.toBe(reason);
+    expect(lookupSignal).toMatchObject({ aborted: true, reason });
+    expect(readAuthority).not.toHaveBeenCalled();
+  });
+
   it('opens the shared circuit when cold numeric binding discovery exhausts providers', async () => {
     const readAuthority = vi.fn();
     const edge = await startAgent({
@@ -1380,6 +1721,96 @@ describe('RFC-64 rollout authority integration', () => {
       track2Enabled: false,
       reconciliationLane: 'disabled',
     });
+  });
+
+  it('keeps an unlisted lifecycle responsibility legacy while one canary runs Track-2', async () => {
+    const unlistedContextGraphId = `${AUTHOR}/bounded-default-unlisted` as ContextGraphIdV1;
+    const edge = await startAgent({
+      name: 'bounded-default-responsibility',
+      config: {
+        rfc64CatalogActivation: {
+          rollout: {
+            defaultMode: 'legacy',
+            contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+          },
+        },
+      },
+    });
+
+    expect((edge as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+      track2ContextGraphs: [CONTEXT_GRAPH_ID],
+    });
+    expect(edge.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
+
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Bounded RFC-64 canary',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.createContextGraph({
+      id: unlistedContextGraphId,
+      name: 'Bounded RFC-64 unlisted control',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        active: true,
+        mode: 'shadow',
+        selectionSource: 'operator-override',
+      }),
+      expect.objectContaining({
+        contextGraphId: unlistedContextGraphId,
+        active: true,
+        mode: 'legacy',
+        selectionSource: 'operator-override',
+      }),
+    ]);
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)).toMatchObject({
+      mode: 'shadow',
+      legacySyncAllowed: true,
+      track2Enabled: true,
+      reconciliationLane: 'shadow-stage',
+    });
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(unlistedContextGraphId)).toMatchObject({
+      mode: 'legacy',
+      legacySyncAllowed: true,
+      track2Enabled: false,
+      reconciliationLane: 'legacy',
+    });
+    const shadowStatus = edge.readRfc64CatalogShadowExecutionStatusV1();
+    expect(shadowStatus).toMatchObject({ contextGraphCount: 1 });
+    expect(JSON.stringify(shadowStatus)).not.toContain(CONTEXT_GRAPH_ID);
+    expect(JSON.stringify(shadowStatus)).not.toContain(unlistedContextGraphId);
+  });
+
+  it('reports a lifecycle responsibility inherited from a shadow default', async () => {
+    const contextGraphId = `${AUTHOR}/default-shadow-responsibility` as ContextGraphIdV1;
+    const edge = await startAgent({
+      name: 'default-shadow-responsibility',
+      config: {
+        rfc64CatalogActivation: { rollout: { defaultMode: 'shadow' } },
+      },
+    });
+    expect((edge as any).config.rfc64CatalogExecutionPlan.selectedAuthority).toEqual({});
+
+    await edge.createContextGraph({
+      id: contextGraphId,
+      name: 'Default shadow responsibility',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({ contextGraphId, mode: 'shadow' }),
+    );
+    const status = edge.readRfc64CatalogShadowExecutionStatusV1();
+    expect(status).toMatchObject({ contextGraphCount: 1 });
+    expect(JSON.stringify(status)).not.toContain(contextGraphId);
   });
 
   async function prepareAuthorityRefreshLifecycle(
@@ -1846,6 +2277,42 @@ describe('RFC-64 rollout authority integration', () => {
         selectionSource: 'default',
       }),
     ]);
+  });
+
+  it('preserves active responsibility when a refresh owner is cancelled', async () => {
+    const contextGraphId = `${AUTHOR}/cancelled-responsibility-refresh`;
+    const edge = await startAgent({ name: 'cancelled-responsibility-refresh' });
+    const accessPolicy = vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    edge.subscribeToContextGraph(contextGraphId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({ contextGraphId, active: true, mode: 'catalog' }),
+    );
+
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    accessPolicy.mockImplementation(async () => {
+      const signal = activeRpcRequestAbortSignal();
+      if (signal === undefined) throw new Error('refresh did not bind its owner signal');
+      notifyStarted();
+      await new Promise<never>((_resolve, reject) => {
+        const rejectAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', rejectAbort, { once: true });
+        if (signal.aborted) rejectAbort();
+      });
+      return 'public';
+    });
+    const owner = new AbortController();
+    const refresh = withRpcRequestContext({ signal: owner.signal }, () => (
+      edge.reconcileRfc64CatalogResponsibilityV1(contextGraphId)
+    ));
+    await started;
+    const reason = new Error('superseded responsibility refresh');
+    owner.abort(reason);
+    await expect(refresh).rejects.toBe(reason);
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({ contextGraphId, active: true, mode: 'catalog' }),
+    );
   });
 
   it('derives private responsibility from authenticated DKG ACL state, not a stale RFC-64 roster', async () => {
@@ -2375,6 +2842,52 @@ describe('RFC-64 rollout authority integration', () => {
       standaloneTrack2Enabled: false,
     });
     expect((edge as any).config.rfc64CatalogBootstrap).toBeUndefined();
+    expect((edge as any).config.rfc64CatalogAuthoringPolicy).toBeUndefined();
+    expect((edge as any).rfc64PublicCatalogServiceV1).toBeUndefined();
+  });
+
+  it('keeps the deprecated disabled rollback out of standalone Track-2 mode', async () => {
+    const edge = await startAgent({
+      name: 'deprecated-disabled-rollback',
+      config: {
+        rfc64PublicCatalogActivation: { enabled: false },
+        // A rollback must remain usable while an operator removes stale
+        // pre-activation controls in a later configuration change.
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async () => AUTHOR,
+        },
+        rfc64PublicCatalogAutoPublish: {
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      },
+    });
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Deprecated disabled rollback',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        active: true,
+        mode: 'legacy',
+        selectionSource: 'operator-override',
+      }),
+    );
+    expect((edge as any).config.rfc64CatalogExecutionPlan).toMatchObject({
+      responsibilityDefaultMode: 'legacy',
+      selectedAuthority: {},
+      track2ContextGraphs: [],
+      standaloneTrack2Enabled: false,
+    });
+    expect((edge as any).config.rfc64CatalogDeploymentProfile).toBeUndefined();
+    expect((edge as any).config.rfc64CatalogAccessPolicyAuthority).toBeUndefined();
     expect((edge as any).config.rfc64CatalogAuthoringPolicy).toBeUndefined();
     expect((edge as any).rfc64PublicCatalogServiceV1).toBeUndefined();
   });
@@ -3184,6 +3697,75 @@ describe('RFC-64 rollout authority integration', () => {
         stagedHeadDigest: published?.currentCatalogHeadDigest,
         appliedHeadDigest: null,
       });
+    }, { timeout: 20_000, interval: 100 });
+    const shadowExecution = shadow.readRfc64CatalogShadowExecutionStatusV1();
+    expect(shadowExecution).toMatchObject({
+      receiverStaging: {
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+      },
+    });
+    expect(shadowExecution!.receiverStaging.trackedTargets).toBeGreaterThanOrEqual(1);
+    expect(shadowExecution!.receiverStaging.staged).toBeGreaterThanOrEqual(1);
+    expect(shadow.readRfc64AppliedCatalogHeadV1({
+      catalogScopeDigest: catalogScopeDigest(),
+      authorAddress: AUTHOR,
+    })).toBeNull();
+  }, 30_000);
+
+  it('records staging from normal announcements for a rollout-only lifecycle canary', async () => {
+    const shadow = await startAgent({
+      name: 'lifecycle-shadow-receiver',
+      config: {
+        rfc64CatalogActivation: {
+          deploymentProfile: DEPLOYMENT,
+          rollout: {
+            defaultMode: 'legacy',
+            contextGraphModes: { [CONTEXT_GRAPH_ID]: 'shadow' },
+          },
+        },
+      },
+    });
+    await shadow.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Lifecycle shadow receiver',
+      callerAgentAddress: AUTHOR,
+    });
+    await shadow.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    const author = await startAgent({
+      name: 'lifecycle-shadow-author',
+      activation: {
+        ...activation('catalog'),
+        autoPublish: {
+          peers: [shadow.peerId],
+          catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
+        },
+      },
+    });
+    vi.spyOn(author, 'getCustodialAgentPrivateKey').mockReturnValue(AUTHOR_WALLET.privateKey);
+    await connectBothWays(author, shadow);
+    const published = await author.recordRfc64PublicCatalogAssetV1({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: 'rollout-lifecycle-shadow-announcement' as never,
+      publicQuads: PROJECTION_QUADS,
+      seal: assertionSealFromCanonical(await authorSeal(85n)),
+    });
+    expect(published).not.toBeNull();
+
+    await vi.waitFor(() => {
+      const shadowExecution = shadow.readRfc64CatalogShadowExecutionStatusV1();
+      expect(shadowExecution).toMatchObject({
+        contextGraphCount: 1,
+        receiverStaging: {
+          authoritativeApplyCount: 0,
+          stagingObserved: true,
+          stageOnlyInvariantSatisfied: true,
+        },
+      });
+      expect(shadowExecution!.receiverStaging.trackedTargets).toBeGreaterThanOrEqual(1);
+      expect(shadowExecution!.receiverStaging.staged).toBeGreaterThanOrEqual(1);
     }, { timeout: 20_000, interval: 100 });
     expect(shadow.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),

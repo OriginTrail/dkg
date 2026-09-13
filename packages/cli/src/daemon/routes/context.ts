@@ -21,6 +21,7 @@ import type {
 } from '@origintrail-official/dkg-node-ui';
 import type {
   DkgConfig,
+  Rfc64CatalogNormalizedActivationState,
   ResolvedRfc64CatalogActivationConfig,
   ResolvedRfc64PublicCatalogActivationConfig,
   loadNetworkConfig,
@@ -38,6 +39,7 @@ import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
 import type { DaemonLocalLlmService } from '../local-llm-service.js';
+import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -124,6 +126,8 @@ export interface RequestContext {
   configStore: DkgConfigStore;
   /** Immutable RFC-64 activation resolved once during daemon startup. */
   rfc64Catalog?: ResolvedRfc64CatalogActivationConfig;
+  /** Canonical activation precedence and execution fallback for this boot. */
+  rfc64CatalogActivationState: Rfc64CatalogNormalizedActivationState;
   /** Compatibility projection for the selected-public operator surface. */
   rfc64PublicCatalog: ResolvedRfc64PublicCatalogActivationConfig;
   startedAt: number;
@@ -156,6 +160,8 @@ export interface RequestContext {
   admission: AdmissionStatsView;
   /** Daemon-owned, read-only local LLM session used by the Node UI. */
   localLlm?: DaemonLocalLlmService;
+  /** Daemon-owned admission + accounting shared by every direct route provider. */
+  routeRpcTransport?: DaemonRouteRpcTransport;
   // Derived per-request. The correlated authentication decision is carried unchanged; identity
   // and capabilities are pure projections from it rather than separately mutable context fields.
   url: URL;

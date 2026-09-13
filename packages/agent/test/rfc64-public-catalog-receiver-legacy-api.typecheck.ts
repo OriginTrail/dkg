@@ -19,7 +19,16 @@ const legacyReconciler: Rfc64PublicCatalogReceiverReconcilerV1 = {
   reconcileHead,
 };
 
-const receiver = new Rfc64PublicCatalogReceiverV1(legacyReconciler);
+const receiver = new Rfc64PublicCatalogReceiverV1(legacyReconciler, {
+  onVerifiedCurrentHeadTargetAccepted: (_announcement, _targetToken) => undefined,
+  onVerifiedCurrentHeadTargetRejected: (_announcement, _outcome) => undefined,
+  onVerifiedCurrentHeadTargetSettled: (
+    _announcement,
+    _targetToken,
+    _attemptToken,
+    _outcome,
+  ) => undefined,
+});
 void receiver;
 
 declare const nativeReconciler: Rfc64BoundedPublicRootCatalogNativeReconcilerV1;

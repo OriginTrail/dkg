@@ -95,12 +95,14 @@ export class ChainEventLaneRunner {
     await this.restoreLaneCursors(this.activeLaneSpecs(), ctx);
   }
 
-  async poll(): Promise<void> {
+  async poll(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     const ctx = createOperationContext('publish');
     const activeLanes = this.activeLaneSpecs();
     if (activeLanes.length === 0) return;
 
     await this.restoreLaneCursors(activeLanes, ctx);
+    signal?.throwIfAborted();
 
     const now = this.clock();
     const dueLanes = activeLanes.filter((lane) => this.laneDue(lane, now));
@@ -108,13 +110,20 @@ export class ChainEventLaneRunner {
 
     let head: number | undefined;
     if (this.chain.getBlockNumber) {
-      try { head = await this.chain.getBlockNumber(); } catch { /* unavailable */ }
+      try {
+        head = await this.chain.getBlockNumber();
+      } catch {
+        if (signal?.aborted) signal.throwIfAborted();
+        // Head is optional; lanes can still scan their next bounded range.
+      }
     }
 
     const scanResults: ChainEventPollerLaneScanResult[] = [];
     for (const lane of dueLanes) {
-      scanResults.push(await this.scanLane(lane, head, now, ctx));
+      signal?.throwIfAborted();
+      scanResults.push(await this.scanLane(lane, head, now, ctx, signal));
     }
+    signal?.throwIfAborted();
     await this.persistScanResults(scanResults, activeLanes);
   }
 
@@ -235,6 +244,7 @@ export class ChainEventLaneRunner {
     head: number | undefined,
     now: number,
     ctx: OperationContext,
+    signal?: AbortSignal,
   ): Promise<ChainEventPollerLaneScanResult> {
     const state = lane.state;
 
@@ -277,6 +287,7 @@ export class ChainEventLaneRunner {
       advanced = true;
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
+      if (signal?.aborted) signal.throwIfAborted();
       this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
       this.applyLaneSchedule(lane, { kind: 'failure', now });
     }

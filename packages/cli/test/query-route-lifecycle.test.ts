@@ -364,6 +364,38 @@ describe('/api/query request lifecycle', () => {
     expect(tracker.fail).not.toHaveBeenCalled();
   });
 
+  it('normalizes the legacy all sentinel before the agent query boundary', async () => {
+    const req = new RequestStub({
+      sparql: 'SELECT ?s WHERE { ?s ?p ?o }',
+      contextGraphId: 'all',
+    });
+    const res = new ResponseStub();
+    let receivedOptions: Record<string, unknown> | undefined;
+    const agent = {
+      query: vi.fn(async (_sparql: string, options: Record<string, unknown>) => {
+        receivedOptions = options;
+        if (options.contextGraphId !== undefined) {
+          throw new Error('scoped authorization must not run for all');
+        }
+        return { type: 'bindings', bindings: [] };
+      }),
+    };
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    await handleQueryRoutes(queryRouteContext(req, res, agent, tracker));
+
+    expect(agent.query).toHaveBeenCalledOnce();
+    expect(receivedOptions).toHaveProperty('contextGraphId', undefined);
+    expect(res.statusCode).toBe(200);
+  });
+
   it('tracks not-started store failures as cancellation and indeterminate failures as failure', async () => {
     for (const outcome of ['not_started', 'indeterminate'] as const) {
       const req = new RequestStub();

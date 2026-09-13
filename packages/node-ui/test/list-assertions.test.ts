@@ -72,6 +72,20 @@ describe('listAssertions (WM) — URI parse + cg-scoped filter', () => {
     });
   });
 
+  it('normalizes raw RDF string bindings for graph and typed triple count', async () => {
+    const graph = 'did:dkg:context-graph:cg-A/assertion/0xabc/spec.md';
+    setBindings([{
+      g: graph,
+      cnt: '"21"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    }]);
+    await expect(listAssertions('cg-A', 'wm')).resolves.toEqual([{
+      name: 'spec.md',
+      graphUri: graph,
+      tripleCount: 21,
+      subGraph: undefined,
+    }]);
+  });
+
   it('parses sub-graph-scoped + root in the same response (#706 regression guard)', async () => {
     // Both shapes must surface. Pre-fix, the `startsWith(…/assertion/)`
     // filter silently dropped sub-graph rows entirely; this test

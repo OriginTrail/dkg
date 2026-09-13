@@ -73,6 +73,10 @@ const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 // shape from being chosen merely to evade the runtime parity audit.
 const EVM_INTERNAL_METHODS = new Set<string>([
   'getContextGraphNameHashResolver',
+  // Shared protected transport dispatcher behind the two public browser-wallet
+  // RPC capabilities. MockChainAdapter mirrors those public methods directly;
+  // it has no provider pool or failover plumbing to dispatch through.
+  'requestBrowserWalletRpc',
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.

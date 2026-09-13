@@ -10,6 +10,67 @@ import {
 } from './context-graph-registration-binding.fixture.js';
 
 describe('Context Graph registration resolution deadlines', () => {
+  it('uses the cold deadline by default for a local graph with no binding candidate', async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = selectedFixture();
+      const resolveDirect = vi.spyOn(fixture.agent, 'resolveContextGraphOnChainIdBinding')
+        .mockImplementation((_contextGraphId, options) => new Promise((_, reject) => {
+          options?.signal?.addEventListener(
+            'abort',
+            () => reject(options.signal?.reason),
+            { once: true },
+          );
+        }));
+
+      const binding = fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID);
+      await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS);
+      const operationSignal = resolveDirect.mock.calls[0]?.[1]?.signal;
+      expect(operationSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(
+        CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS - CHAIN_POLICY_READ_TIMEOUT_MS,
+      );
+
+      expect(operationSignal?.aborted).toBe(true);
+      await expect(binding).resolves.toMatchObject({
+        kind: 'unavailable',
+        reason: 'local-chain-binding-unavailable',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the hot deadline for an existing authoritative binding candidate', async () => {
+    vi.useFakeTimers();
+    try {
+      const fixture = selectedFixture();
+      fixture.subscription.onChainId = '42';
+      const resolveDirect = vi.spyOn(fixture.agent, 'resolveContextGraphOnChainIdBinding')
+        .mockImplementation((_contextGraphId, options) => new Promise((_, reject) => {
+          options?.signal?.addEventListener(
+            'abort',
+            () => reject(options.signal?.reason),
+            { once: true },
+          );
+        }));
+
+      const binding = fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID);
+      await vi.advanceTimersByTimeAsync(CHAIN_POLICY_READ_TIMEOUT_MS - 1);
+      const operationSignal = resolveDirect.mock.calls[0]?.[1]?.signal;
+      expect(operationSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(operationSignal?.aborted).toBe(true);
+      await expect(binding).resolves.toMatchObject({
+        kind: 'unavailable',
+        reason: 'local-chain-binding-unavailable',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not apply the hot-path policy deadline to a cold reverse-index build', async () => {
     vi.useFakeTimers();
     try {

@@ -17,8 +17,16 @@ import { join } from 'node:path';
 import { describe, it, expect, afterEach } from 'vitest';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { rpcUsageWindowTotal } from '@origintrail-official/dkg-chain';
+import {
+  RpcRequestGovernor,
+  rpcUsageWindowTotal,
+} from '@origintrail-official/dkg-chain';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { createPublisherRuntimeFromAgent, type PublisherRuntime } from '../src/publisher-runner.js';
+import {
+  bindRuntimeRpcRequestGovernor,
+  projectRuntimeEvmChainConfig,
+} from '../src/runtime-chain-config.js';
 
 // Hardhat dev keys #0 and #1 — loopback only, never touch a real network.
 // TWO wallets so the merge across ALL per-wallet adapters is what's proven:
@@ -72,16 +80,18 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
   let store: TripleStore | null = null;
   let loopback: Awaited<ReturnType<typeof startLoopback>> | null = null;
   let dataDir: string | null = null;
+  let agent: DKGAgent | null = null;
 
   afterEach(async () => {
     await runtime?.stop().catch(() => {});
+    await agent?.stop().catch(() => {});
     await store?.close().catch(() => {});
     await loopback?.close().catch(() => {});
     if (dataDir) await rm(dataDir, { recursive: true, force: true });
-    runtime = null; store = null; loopback = null; dataDir = null;
+    runtime = null; agent = null; store = null; loopback = null; dataDir = null;
   });
 
-  it('merges BOTH per-wallet adapters’ raw request counts (== loopback hits); drain resets', async () => {
+  it('shares one daemon-style governor across REAL agent and publisher adapters', async () => {
     loopback = await startLoopback();
     dataDir = await mkdtemp(join(tmpdir(), 'pub-rpc-usage-'));
     await writeFile(
@@ -89,12 +99,28 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
       JSON.stringify({ wallets: WALLETS }),
     );
     store = await createTripleStore({ backend: 'oxigraph' });
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1_000,
+      foregroundReservePercent: 80,
+      burstRequests: 1_000,
+      maxQueueSize: 32,
+      startupJitterMs: 0,
+    });
+    const projected = projectRuntimeEvmChainConfig({
+      rpcUrl: loopback.url,
+      hubAddress: HUB,
+      chainId: 'evm:31337',
+    });
+    expect(projected).toBeDefined();
+    // This is the same projection + process-state binding performed by the
+    // daemon composition root before it constructs both consumers.
+    const sharedChainConfig = bindRuntimeRpcRequestGovernor(projected!, governor);
 
     runtime = await createPublisherRuntimeFromAgent({
       dataDir,
       store,
       keypair: await generateEd25519Keypair(),
-      chainBase: { rpcUrl: loopback.url, hubAddress: HUB, chainId: 'evm:31337' },
+      chainBase: sharedChainConfig,
     });
 
     // Constructing the runtime performed real RPC through BOTH per-wallet
@@ -114,5 +140,31 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     // Delta semantics survive the runtime boundary: second drain is empty.
     const drained = runtime.drainRpcUsage();
     expect(rpcUsageWindowTotal(drained)).toBe(0);
+
+    const publisherHits = loopback.totalHits();
+    agent = await DKGAgent.create({
+      name: 'shared-rpc-governor-agent',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      nodeRole: 'edge',
+      rfc64CatalogActivation: { enabled: false },
+      chainConfig: {
+        ...sharedChainConfig,
+        operationalKeys: [WALLETS[0]!.privateKey],
+      },
+    });
+    await expect(agent.getNodeIdentityId()).resolves.toBeGreaterThan(0n);
+    const agentUsage = agent.drainRpcUsage();
+    expect(rpcUsageWindowTotal(agentUsage)).toBeGreaterThan(0);
+    expect(rpcUsageWindowTotal(agentUsage)).toBe(loopback.totalHits() - publisherHits);
+
+    // Each loopback JSON-RPC entry passed through the canonical provider and
+    // therefore consumed the exact same governor instance. This assertion
+    // fails if either DKGAgent or publisher construction drops the binding.
+    expect(governor.snapshot()).toMatchObject({
+      foregroundAdmitted: loopback.totalHits(),
+      backgroundAdmitted: 0,
+    });
   }, 30_000);
 });
