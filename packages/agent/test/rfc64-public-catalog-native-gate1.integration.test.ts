@@ -72,6 +72,7 @@ import { readVerifiedAppliedCatalogClosureV1 } from
 import {
   bindRfc64PrivateReleaseProofReaderV1,
   registerRfc64PrivateReleaseProofReaderV1,
+  unregisterRfc64PrivateReleaseProofReaderV1,
 } from
   '../src/rfc64/verified-applied-catalog-closure-v1.js';
 import {
@@ -450,7 +451,17 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       kaBundles: {
         readKaBundleByDigest: async () => fixture.secondRowBundle.bundleBytes,
       },
-    })).rejects.toThrow(/differs from its signed catalog row/u);
+    })).rejects.toThrow(/transferred-bundle-/u);
+    const sharedBundle = new Uint8Array(
+      new SharedArrayBuffer(fixture.rowBundle.bundleBytes.byteLength),
+    );
+    sharedBundle.set(fixture.rowBundle.bundleBytes);
+    await expect(readVerifiedAppliedCatalogClosureV1({
+      ...closureInput,
+      kaBundles: { readKaBundleByDigest: async () => sharedBundle },
+    })).rejects.toMatchObject({
+      code: 'transferred-bundle-input',
+    });
     await expect(readVerifiedAppliedCatalogClosureV1({
       ...closureInput,
       trustedCatalogScope: { ...fixture.scope, authorAddress: GOVERNANCE_CONTRACT },
@@ -548,6 +559,13 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       resolveDeployment,
       verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
     });
+    expect(() => registerRfc64PrivateReleaseProofReaderV1({
+      owner: agentLike,
+      persistence: agentLike.rfc64PersistenceV1,
+      assertTrustedNetwork,
+      resolveDeployment,
+      verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
+    })).toThrow(/already registered/u);
     const readClosure = () => bindRfc64PrivateReleaseProofReaderV1(
       agentLike as never,
     )({
@@ -586,7 +604,11 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       });
     await expect(readClosure()).rejects.toThrow(/changed during verified closure read/u);
 
-    expect(() => bindRfc64PrivateReleaseProofReaderV1({})).toThrow(/unavailable/u);
+    const unrelatedOwner = {};
+    expect(() => bindRfc64PrivateReleaseProofReaderV1(unrelatedOwner)).toThrow(/unavailable/u);
+    unregisterRfc64PrivateReleaseProofReaderV1(agentLike);
+    expect(() => bindRfc64PrivateReleaseProofReaderV1(agentLike)).toThrow(/unavailable/u);
+    expect(() => bindRfc64PrivateReleaseProofReaderV1(unrelatedOwner)).toThrow(/unavailable/u);
   }, 30_000);
 
   it('accepts an exact projection when the store post-read returns a different row order', async () => {

@@ -21,8 +21,11 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 
+// DKGAgent is loaded from the built package root above. Import its exact built
+// internal capability module as well so both sides share one module-local
+// registry without ambient global state or a public package export.
 import { bindRfc64PrivateReleaseProofReaderV1 } from
-  '../../src/rfc64/verified-applied-catalog-closure-v1.ts';
+  '../../dist/rfc64/verified-applied-catalog-closure-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -428,12 +431,7 @@ function decorateCatalogClosureReaderV1(
       });
     };
   }
-  const message = fault === 'inventory-digest'
-    ? 'signed catalog closure differs from the durable applied inventory digest'
-    : fault === 'missing-bundle'
-      ? 'signed catalog row has no durable KA bundle'
-      : 'durable KA bundle differs from its signed catalog row';
-  return async () => { throw new Error(message); };
+  throw new TypeError(`unsupported RFC-64 private catalog proof fault: ${String(fault)}`);
 }
 
 function createBaseAgentConfigV1({

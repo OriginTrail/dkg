@@ -19,10 +19,14 @@ export function passingScenarioEvidenceV1() {
     outsider: 'outsider-peer',
   });
   const headObjectDigest = `0x${'cd'.repeat(32)}`;
+  const baselineHeadObjectDigest = `0x${'bc'.repeat(32)}`;
   const scopeDigest = computeAuthorCatalogScopeDigestV1(createPrivateCatalogScope());
   const catalogState = scenarioMemoryStateV1(headObjectDigest, scopeDigest, 'catalog-row');
-  const baselineState = scenarioFinalizedVmBaselineStateV1(headObjectDigest, scopeDigest);
-  const sourceState = scenarioMemoryStateV1(headObjectDigest, scopeDigest, 'workspace-head');
+  const baselineState = scenarioFinalizedVmBaselineStateV1(
+    baselineHeadObjectDigest,
+    scopeDigest,
+  );
+  const sourceState = scenarioSourceStateV1(headObjectDigest, scopeDigest);
   const emptyState = Object.freeze({
     appliedHeadDigest: null,
     catalogScopeDigest: scopeDigest,
@@ -59,8 +63,7 @@ export function passingScenarioEvidenceV1() {
     ready: ready(role),
     role,
     spawnSequence: 1,
-    spawnedAt: '2026-09-11T00:00:00.000Z',
-    observations: {},
+    spawnedAt: '2026-08-26T00:00:00.100Z',
     ...fields,
   });
   const processes = {
@@ -70,89 +73,91 @@ export function passingScenarioEvidenceV1() {
     'probe-outsider': process('probe-outsider', 'outsider', { shutdown: quietShutdown }),
     owner: process('owner', 'owner', {
       exitSequence: 2,
-      observations: {
-        listenerClosed: true,
-        published: {
-          catalogVersion: '4',
-          headObjectDigest,
-          inventoryRowCount: '2',
-          policyDigest: `0x${'ef'.repeat(32)}`,
-          scopeDigest,
-        },
-        sourceState,
-      },
       shutdown: quietShutdown,
     }),
     provider2: process('provider2', 'provider2', {
-      observations: {
-        accessState: { ...catalogState, outsiderVisibleVmBindings: 0 },
-        bootstrap: {
-          appliedHeadDigest: headObjectDigest,
-          outcome: 'applied',
-          providerPeerId: peerIds.owner,
-          appliedTransferProviderPeerId: peerIds.owner,
-        },
-        listenerDialableAfterOwnerExit: true,
-        revocationObservation: {
-          policyDigest: `0x${'ef'.repeat(32)}`,
-          curatorMetadataRefreshed: true,
-          providerMutationDenied: true,
-          revokedAgentAddress: roleAgentAddress('receiver'),
-          rosterVersion: '1',
-        },
-        state: catalogState,
-        stateAfterOwnerExit: catalogState,
-        stateAfterRevocation: catalogState,
-      },
       shutdown: finalizedShutdown,
     }),
     'receiver-seed': process('receiver-seed', 'receiver', {
-      observations: {
-        bootstrap: {
-          appliedHeadDigest: headObjectDigest,
-          outcome: 'applied',
-          providerPeerId: peerIds.provider2,
-          appliedTransferProviderPeerId: peerIds.provider2,
-        },
-        state: baselineState,
-      },
       shutdown: finalizedShutdown,
     }),
     receiver: process('receiver', 'receiver', {
       spawnSequence: 3,
-      observations: {
-        bootstrap: {
-          appliedHeadDigest: headObjectDigest,
-          outcome: 'applied',
-          providerPeerId: peerIds.provider2,
-          appliedTransferProviderPeerId: peerIds.provider2,
-        },
-        revokedDenial: denial,
-        state: catalogState,
-        stateAfterRevocation: catalogState,
-      },
+      spawnedAt: '2026-08-26T00:00:00.500Z',
       shutdown: finalizedShutdown,
     }),
-    'owner-revoker': process('owner-revoker', 'owner', {
-      observations: {
-        revocation: {
-          policyDigest: `0x${'ef'.repeat(32)}`,
-          revokedAgentAddress: roleAgentAddress('receiver'),
-          rosterVersion: '1',
-        },
-      },
-      shutdown: quietShutdown,
-    }),
-    outsider: process('outsider', 'outsider', {
-      observations: { denial, state: emptyState },
-      shutdown: quietShutdown,
-    }),
-    'receiver-restart': process('receiver-restart', 'receiver', {
-      observations: { state: catalogState },
-      shutdown: quietShutdown,
-    }),
+    'owner-revoker': process('owner-revoker', 'owner', { shutdown: quietShutdown }),
+    outsider: process('outsider', 'outsider', { shutdown: quietShutdown }),
+    'receiver-restart': process('receiver-restart', 'receiver', { shutdown: quietShutdown }),
   };
-  return { peerIds, processes, runtimeProvenance: {} };
+  const provider2Bootstrap = {
+    appliedHeadDigest: headObjectDigest,
+    attempts: 1,
+    outcome: 'applied',
+    providerPeerId: peerIds.owner,
+    appliedTransferProviderPeerId: peerIds.owner,
+  };
+  const receiverSeedBootstrap = {
+    appliedHeadDigest: baselineHeadObjectDigest,
+    attempts: 1,
+    outcome: 'applied',
+    providerPeerId: peerIds.provider2,
+    appliedTransferProviderPeerId: peerIds.provider2,
+  };
+  const receiverBootstrap = {
+    ...receiverSeedBootstrap,
+    appliedHeadDigest: headObjectDigest,
+  };
+  const published = {
+    catalogVersion: '4',
+    headObjectDigest,
+    inventoryRowCount: '2',
+    policyDigest: `0x${'ef'.repeat(32)}`,
+    scopeDigest,
+  };
+  const ownerRevocation = {
+    chainRosterVersion: '1',
+    policyDigest: published.policyDigest,
+    previousChainRosterVersion: '0',
+    revokedAgentAddress: roleAgentAddress('receiver'),
+  };
+  const receiverRevocation = {
+    ...ownerRevocation,
+    curatorMetadataRefreshed: true,
+    effectiveRosterVersion: '10000000000007',
+    localRosterVersion: '7',
+    providerMutationDenied: true,
+  };
+  const phases = {
+    baseline: {
+      baseline: published,
+      ownerSourceState: sourceState,
+      provider2Bootstrap,
+      provider2State: catalogState,
+      published,
+      receiverSeedBootstrap,
+      receiverSeedState: baselineState,
+    },
+    failover: {
+      ownerListenerClosed: true,
+      provider2ListenerDialable: true,
+      provider2StateAfterOwnerExit: catalogState,
+      receiverBootstrap,
+      receiverState: catalogState,
+    },
+    restart: { restartState: catalogState },
+    revocation: {
+      outsiderDenial: denial,
+      outsiderState: emptyState,
+      ownerRevocation,
+      provider2StateAfterRevocation: catalogState,
+      providerAccessState: { ...catalogState, outsiderVisibleVmBindings: 0 },
+      receiverRevocation,
+      receiverStateAfterRevocation: catalogState,
+      revokedReceiverDenial: denial,
+    },
+  };
+  return { peerIds, phases, processes, runtimeProvenance: {} };
 }
 
 export function corruptBaselineRowV1(state, fields) {
@@ -225,6 +230,7 @@ function scenarioMemoryStateV1(headObjectDigest, catalogScopeDigest, proofKind) 
           };
       return Object.freeze({
         kaNumber,
+        kaUal: `did:dkg:otp:20430/${authorAddress}/${kaNumber}`,
         swm: expectation.swm.projection.count,
         swmDigest: expectation.swm.projection.digest,
         swmGraph,
@@ -244,12 +250,26 @@ function scenarioMemoryStateV1(headObjectDigest, catalogScopeDigest, proofKind) 
   });
 }
 
+function scenarioSourceStateV1(headObjectDigest, catalogScopeDigest) {
+  const state = scenarioMemoryStateV1(headObjectDigest, catalogScopeDigest, 'workspace-head');
+  const emptyVm = PRIVATE_CATALOG_MEMORY_EXPECTATION.finalizedVmBaseline.projection;
+  return Object.freeze({
+    ...state,
+    graphCounts: Object.freeze(state.graphCounts.map((evidence) => Object.freeze({
+      ...evidence,
+      vm: emptyVm.count,
+      vmDigest: emptyVm.digest,
+      vmHead: null,
+    }))),
+  });
+}
+
 function scenarioShutdownV1(rpcCallCounts) {
   return Object.freeze({
     exit: Object.freeze({
       code: 0,
       error: null,
-      exitedAt: '2026-09-11T00:00:01.000Z',
+      exitedAt: '2026-08-26T00:00:00.250Z',
       signal: null,
     }),
     rpcCallCounts: Object.freeze(rpcCallCounts),

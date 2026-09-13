@@ -31,14 +31,24 @@ test('artifact fails when receiver startup precedes owner exit', () => {
 });
 
 test('artifact does not certify already-applied heads as provider transfers', () => {
-  for (const [processId, observationKey, check] of [
-    ['provider2', 'bootstrap', 'provider2ReceivedExactHead'],
-    ['receiver-seed', 'bootstrap', 'receiverBaselineSeededThroughProvider2'],
-    ['receiver', 'bootstrap', 'receiverUsedProvider2AfterOwnerStopped'],
+  for (const [processId, check] of [
+    ['provider2', 'provider2ReceivedExactHead'],
+    ['receiver-seed', 'receiverBaselineSeededThroughProvider2'],
+    ['receiver', 'receiverUsedProvider2AfterOwnerStopped'],
   ]) {
     const evidence = passingScenarioEvidenceV1();
-    const bootstrap = evidence.processes[processId].observations[observationKey];
-    evidence.processes[processId].observations[observationKey] = {
+    const phasePath = processId === 'provider2'
+      ? evidence.phases.baseline
+      : processId === 'receiver-seed'
+        ? evidence.phases.baseline
+        : evidence.phases.failover;
+    const phaseKey = processId === 'provider2'
+      ? 'provider2Bootstrap'
+      : processId === 'receiver-seed'
+        ? 'receiverSeedBootstrap'
+        : 'receiverBootstrap';
+    const bootstrap = phasePath[phaseKey];
+    phasePath[phaseKey] = {
       ...bootstrap,
       outcome: 'already-applied',
       providerPeerId: null,
@@ -52,8 +62,8 @@ test('artifact does not certify already-applied heads as provider transfers', ()
 
 test('artifact fails without exact finalized-VM receiver baseline evidence', () => {
   const evidence = passingScenarioEvidenceV1();
-  evidence.processes['receiver-seed'].observations.state = Object.freeze({
-    ...evidence.processes['receiver-seed'].observations.state,
+  evidence.phases.baseline.receiverSeedState = Object.freeze({
+    ...evidence.phases.baseline.receiverSeedState,
     graphCounts: Object.freeze([]),
   });
   const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
@@ -69,8 +79,8 @@ test('artifact fails without exact finalized-VM receiver baseline evidence', () 
 
 test('artifact fails when the finalized-VM receiver baseline retains an SWM head', () => {
   const evidence = passingScenarioEvidenceV1();
-  const state = evidence.processes['receiver-seed'].observations.state;
-  evidence.processes['receiver-seed'].observations.state = Object.freeze({
+  const state = evidence.phases.baseline.receiverSeedState;
+  evidence.phases.baseline.receiverSeedState = Object.freeze({
     ...state,
     graphCounts: Object.freeze(state.graphCounts.map((entry, index) => Object.freeze(
       index === 0
@@ -111,8 +121,8 @@ test('artifact requires the exact finalized-VM baseline catalog-row closure', ()
   ];
   for (const [label, corrupt] of corruptions) {
     const evidence = passingScenarioEvidenceV1();
-    const state = evidence.processes['receiver-seed'].observations.state;
-    evidence.processes['receiver-seed'].observations.state = Object.freeze(corrupt(state));
+    const state = evidence.phases.baseline.receiverSeedState;
+    evidence.phases.baseline.receiverSeedState = Object.freeze(corrupt(state));
     const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
     assert.equal(artifact.checks.receiverBaselineSeededThroughProvider2, false, label);
     assert.equal(artifact.status, 'FAIL', label);

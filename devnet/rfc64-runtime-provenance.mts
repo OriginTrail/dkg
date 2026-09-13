@@ -126,6 +126,19 @@ export interface RuntimeProcessEvidenceV1<ProcessId extends string> {
   readonly loaded: ExecutedRuntimeManifestV1;
 }
 
+export interface NormalizedRuntimeProcessManifestV1 {
+  readonly manifestDigest: string;
+  /** Sorted indexes into the one canonical sourceBuild.runtimeFiles table. */
+  readonly runtimeFileIndexes: readonly number[];
+  readonly schemaVersion: string;
+  readonly sourceCommit: string;
+}
+
+export interface NormalizedRuntimeProcessEvidenceV1<ProcessId extends string> {
+  readonly id: ProcessId;
+  readonly loaded: Readonly<NormalizedRuntimeProcessManifestV1>;
+}
+
 export type RuntimeManifestForProfileV1<Profile extends RuntimeEvidenceProfileV1> =
   RuntimeManifestV1<Profile['manifestSchemaVersion']>;
 
@@ -187,7 +200,7 @@ export interface RuntimeProcessProvenanceV1<
   ProcessId extends string,
   Schema extends string,
 > {
-  readonly processes: readonly RuntimeProcessEvidenceV1<ProcessId>[];
+  readonly processes: readonly NormalizedRuntimeProcessEvidenceV1<ProcessId>[];
   readonly schema: Schema;
   readonly sourceBuild: RuntimeManifestV1;
 }
@@ -437,13 +450,31 @@ export function buildRuntimeProcessProvenanceV1<
     profile,
   );
   assertRuntimeManifestEqualV1(input.sourceBuild, canonicalSourceBuild);
-  const processes = validateFixedRuntimeProcessEvidenceV1({
+  const executedProcesses = validateFixedRuntimeProcessEvidenceV1({
     expectedProcessIds: input.expectedProcessIds,
     processes: input.processes,
     validateLoaded: (loaded) => {
       assertExecutedRuntimeMatchesBuildForProfileV1(loaded, canonicalSourceBuild, profile);
     },
   });
+  const sourceIndexByPath = new Map(
+    canonicalSourceBuild.runtimeFiles.map((entry, index) => [entry.path, index]),
+  );
+  const processes = Object.freeze(executedProcesses.map((process) => Object.freeze({
+    id: process.id,
+    loaded: Object.freeze({
+      manifestDigest: process.loaded.manifestDigest,
+      runtimeFileIndexes: Object.freeze(process.loaded.runtimeFiles.map((entry) => {
+        const index = sourceIndexByPath.get(entry.path);
+        if (index === undefined) {
+          throw new Error(`runtime child loaded bytes outside the clean-build snapshot: ${entry.path}`);
+        }
+        return index;
+      })),
+      schemaVersion: process.loaded.schemaVersion,
+      sourceCommit: process.loaded.sourceCommit,
+    }),
+  })));
   return Object.freeze({
     schema: input.schema,
     sourceBuild: canonicalSourceBuild,
@@ -463,10 +494,55 @@ export function assertRuntimeProcessProvenanceV1<
     readonly schema: Schema;
   },
 ): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
+  const profile = expected.profile ?? RFC64_RUNTIME_EVIDENCE_PROFILE_V1;
+  const canonicalSourceBuild = buildRuntimeManifestFromEntriesForProfileV1(
+    actual.sourceBuild.sourceCommit,
+    actual.sourceBuild.runtimeFiles,
+    profile,
+  );
+  assertRuntimeManifestEqualV1(actual.sourceBuild, canonicalSourceBuild);
+  if (actual.schema !== expected.schema || actual.processes.length !== expected.processIds.length) {
+    throw new TypeError('runtime process provenance has an invalid fixed topology');
+  }
+  const executedProcesses = actual.processes.map((process, processIndex) => {
+    if (process.id !== expected.processIds[processIndex]) {
+      throw new TypeError(`runtime process ${processIndex} has an invalid id`);
+    }
+    const indexes = process.loaded.runtimeFileIndexes;
+    if (indexes.length < 1 || indexes.length > MAX_RUNTIME_FILES) {
+      throw new RangeError(`runtime process ${processIndex} file index count is outside the closed bound`);
+    }
+    let previous = -1;
+    const entries = indexes.map((index) => {
+      if (!Number.isSafeInteger(index) || index <= previous) {
+        throw new TypeError(`runtime process ${processIndex} file indexes are not strictly increasing`);
+      }
+      previous = index;
+      const entry = canonicalSourceBuild.runtimeFiles[index];
+      if (entry === undefined) {
+        throw new RangeError(`runtime process ${processIndex} file index is outside the source build`);
+      }
+      return entry;
+    });
+    const loaded = buildExecutedRuntimeManifestForProfileV1(
+      process.loaded.sourceCommit,
+      entries,
+      profile,
+    );
+    if (
+      loaded.manifestDigest !== process.loaded.manifestDigest
+      || loaded.schemaVersion !== process.loaded.schemaVersion
+      || loaded.sourceCommit !== process.loaded.sourceCommit
+    ) {
+      throw new Error(`runtime process ${processIndex} normalized manifest binding is invalid`);
+    }
+    assertExecutedRuntimeMatchesBuildForProfileV1(loaded, canonicalSourceBuild, profile);
+    return Object.freeze({ id: process.id, loaded });
+  });
   const rebuilt = buildRuntimeProcessProvenanceV1({
     expectedProcessIds: expected.processIds,
-    processes: actual.processes,
-    profile: expected.profile,
+    processes: executedProcesses,
+    profile,
     schema: expected.schema,
     sourceBuild: actual.sourceBuild,
   });
@@ -510,7 +586,7 @@ export function assertPersistedRuntimeProcessProvenanceV1<
     }
     return Object.freeze({
       id: expectedId,
-      loaded: parseExecutedRuntimeManifestV1(
+      loaded: parseNormalizedRuntimeProcessManifestV1(
         readDataField(processRecord, 'loaded', `runtime process ${index}`),
         `runtime process ${index} loaded manifest`,
       ),
@@ -532,6 +608,26 @@ export function assertPersistedRuntimeProcessProvenanceV1<
     throw new TypeError('persisted runtime process provenance is not canonical');
   }
   return rebuilt;
+}
+
+function parseNormalizedRuntimeProcessManifestV1(
+  value: unknown,
+  label: string,
+): Readonly<NormalizedRuntimeProcessManifestV1> {
+  const record = parsePlainRecord(value, label);
+  return Object.freeze({
+    manifestDigest: parseStringField(record, 'manifestDigest', label),
+    runtimeFileIndexes: Object.freeze(parseArrayField(record, 'runtimeFileIndexes', label).map(
+      (entry, index) => {
+        if (!Number.isSafeInteger(entry) || (entry as number) < 0) {
+          throw new TypeError(`${label}.runtimeFileIndexes[${index}] must be a nonnegative safe integer`);
+        }
+        return entry as number;
+      },
+    )),
+    schemaVersion: parseStringField(record, 'schemaVersion', label),
+    sourceCommit: parseStringField(record, 'sourceCommit', label),
+  });
 }
 
 export function parseRuntimeManifestV1(

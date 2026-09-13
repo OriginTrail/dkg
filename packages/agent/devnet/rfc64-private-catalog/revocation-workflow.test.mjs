@@ -5,6 +5,7 @@ import test from 'node:test';
 import { resolve } from 'node:path';
 
 import { buildRuntimeManifestV1 } from '../../../../devnet/rfc64-runtime-provenance.mts';
+import { decodeRfc64PrivateGatePassArtifactV1 } from './gate-artifact.mjs';
 import { executeRfc64PrivateReleaseGateV1 } from './run.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../../../..');
@@ -13,6 +14,7 @@ const SOURCE_REVISION = 'c'.repeat(40);
 test('real agents preserve receiver memory when canonical revocation denies resync', {
   timeout: 180_000,
 }, async () => {
+  const startedAt = new Date().toISOString();
   const runtimeManifest = buildRuntimeManifestV1(REPO_ROOT, SOURCE_REVISION);
   const artifact = await executeRfc64PrivateReleaseGateV1({
     runtimeManifest,
@@ -28,6 +30,13 @@ test('real agents preserve receiver memory when canonical revocation denies resy
     artifact.revokedReceiver.state.graphCounts,
     artifact.failoverReceiver.graphCounts,
   );
+  const persistedPass = {
+    ...artifact,
+    finishedAt: new Date().toISOString(),
+    sourceRevision: SOURCE_REVISION,
+    startedAt,
+  };
+  assert.equal(decodeRfc64PrivateGatePassArtifactV1(persistedPass), persistedPass);
 });
 
 test('a finalized roster mismatch aborts before publish or synchronization', {
@@ -83,11 +92,8 @@ test('over-removing another member cannot certify receiver revocation', {
 });
 
 for (const [fault, expected] of [
-  ['inventory-digest', /differs from the durable applied inventory digest/u],
   ['expected-assets', /differs from the expected asset identities/u],
   ['duplicate-expected-assets', /differs from the expected asset identities/u],
-  ['missing-bundle', /has no durable KA bundle/u],
-  ['mismatched-bundle', /durable KA bundle differs from its signed catalog row/u],
   ['trusted-scope', /has no durable applied head/u],
 ]) {
   test(`a ${fault} catalog closure fault fails before exact SWM certification`, {

@@ -6,6 +6,7 @@ import {
   type Rfc64PrivateRuntimeV1,
 } from './agent-runtime.ts';
 import type { Rfc64PrivateFinalizedAgentConfigV1 } from './agent-runtime-factory.ts';
+import type { Rfc64PrivateScenarioPhasesV1 } from './scenario-result.ts';
 import { waitForBootstrapV1 } from './catalog-evidence-handlers.mjs';
 import { publishCatalogBaselineV1 } from './catalog-publication-handlers.mjs';
 
@@ -43,3 +44,14 @@ void waitForBootstrapV1({ kind: 'run', role: 'receiver' }, { timeoutMs: 1_000 })
 
 // @ts-expect-error Publication handlers reject structurally incomplete owner contexts.
 void publishCatalogBaselineV1({ kind: 'run', role: 'owner', publication: null });
+
+declare const phases: Rfc64PrivateScenarioPhasesV1;
+const exactPhases: Rfc64PrivateScenarioPhasesV1 = phases;
+void exactPhases;
+// @ts-expect-error A named phase cannot be omitted from the closed scenario result.
+const missingRestart: Rfc64PrivateScenarioPhasesV1 = {
+  baseline: phases.baseline,
+  failover: phases.failover,
+  revocation: phases.revocation,
+};
+void missingRestart;

@@ -2,7 +2,7 @@
 // @ts-check
 
 /** @typedef {'omit-receiver' | 'revocation-chain-noop' | 'revocation-over-removal'} Rfc64PrivateAuthorityFaultV1 */
-/** @typedef {'inventory-digest' | 'expected-assets' | 'duplicate-expected-assets' | 'missing-bundle' | 'mismatched-bundle' | 'trusted-scope'} Rfc64PrivateCatalogProofFaultV1 */
+/** @typedef {'expected-assets' | 'duplicate-expected-assets' | 'trusted-scope'} Rfc64PrivateCatalogProofFaultV1 */
 /** @typedef {{ readonly authority: Rfc64PrivateAuthorityFaultV1 | null, readonly catalogProof: Rfc64PrivateCatalogProofFaultV1 | null }} Rfc64PrivateFaultSelectionV1 */
 
 /** @type {ReadonlySet<Rfc64PrivateAuthorityFaultV1>} */
@@ -13,11 +13,8 @@ const AUTHORITY_FAULTS = new Set([
 ]);
 /** @type {ReadonlySet<Rfc64PrivateCatalogProofFaultV1>} */
 const CATALOG_PROOF_FAULTS = new Set([
-  'inventory-digest',
   'expected-assets',
   'duplicate-expected-assets',
-  'missing-bundle',
-  'mismatched-bundle',
   'trusted-scope',
 ]);
 

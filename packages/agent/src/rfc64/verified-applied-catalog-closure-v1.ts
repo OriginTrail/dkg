@@ -2,10 +2,10 @@
 
 import {
   computeAuthorCatalogScopeDigestV1,
-  decodeOpaqueKaBundleV1,
   deriveAuthorCatalogScopeFromHeadV1,
   readVerifiedCatalogSealBindingV1,
-  verifyCatalogSealBindingV1,
+  readVerifiedTransferredCatalogBundleMetadataV1,
+  verifyTransferredCatalogBundleV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
   type CatalogSealDeploymentProfileV1,
@@ -108,20 +108,21 @@ export async function readVerifiedAppliedCatalogClosureV1(
     async (row): Promise<Readonly<VerifiedAppliedCatalogClosureRowV1>> => {
       const bundleBytes = await input.kaBundles.readKaBundleByDigest(row.transfer.blobDigest);
       if (bundleBytes === null) throw new Error('signed catalog row has no durable KA bundle');
-      const bundle = decodeOpaqueKaBundleV1(bundleBytes);
-      if (
-        bundle.blobDigest !== row.transfer.blobDigest
-        || bundle.projectionDigest !== row.projectionDigest
-        || bundleBytes.byteLength.toString() !== row.transfer.byteLength
-      ) {
-        throw new Error('durable KA bundle differs from its signed catalog row');
-      }
-      const bundleBinding = readVerifiedCatalogSealBindingV1(verifyCatalogSealBindingV1(
-        input.trustedCatalogScope,
+      const transferred = verifyTransferredCatalogBundleV1(
+        head,
         row,
-        bundle.sealBytes,
+        bundleBytes,
         input.deployment,
-      ));
+      );
+      const transferredMetadata = readVerifiedTransferredCatalogBundleMetadataV1(
+        transferred,
+        head,
+        row,
+        input.deployment,
+      );
+      const bundleBinding = readVerifiedCatalogSealBindingV1(
+        transferredMetadata.catalogSealBinding,
+      );
       const identity = unpackKnowledgeAssetId(BigInt(row.kaId));
       const kaNumber = identity.kaNumber;
       if (
@@ -194,13 +195,10 @@ export interface RegisterRfc64PrivateReleaseProofReaderOptionsV1 {
   ) => Promise<VerifiedControlEnvelopeIssuerSignatureV1>;
 }
 
-// `node --import tsx` can load the source gate beside the package build used by
-// its daemon children. Share only the private WeakMap across those two module
-// instances; no proof capability is attached to DKGAgent or its public types.
-const PROOF_READER_REGISTRY = Symbol.for(
-  '@origintrail-official/dkg-agent/internal/rfc64-private-release-proof-reader-registry-v1',
-);
-const proofReaders = resolveSharedProofReaderRegistryV1();
+// The gate imports this exact built internal module used by DKGAgent. Keeping
+// the registry module-local makes it an actual capability boundary: unrelated
+// same-realm code cannot discover or replace readers through globalThis.
+const proofReaders = new WeakMap<object, Rfc64PrivateReleaseProofReaderV1>();
 
 /** Inject one internal, owner-bound proof capability for the source gate. */
 export function registerRfc64PrivateReleaseProofReaderV1(
@@ -213,6 +211,9 @@ export function registerRfc64PrivateReleaseProofReaderV1(
     resolveDeployment,
     verifyIssuerSignature,
   } = options;
+  if (proofReaders.has(owner)) {
+    throw new TypeError('RFC-64 private release proof reader is already registered');
+  }
   const reader: Rfc64PrivateReleaseProofReaderV1 = async ({ trustedCatalogScope }) => {
     assertTrustedNetwork(trustedCatalogScope.networkId);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(trustedCatalogScope);
@@ -261,24 +262,6 @@ export function bindRfc64PrivateReleaseProofReaderV1(
 /** Revoke the gate-only capability as part of catalog-runtime teardown. */
 export function unregisterRfc64PrivateReleaseProofReaderV1(owner: object): void {
   proofReaders.delete(owner);
-}
-
-function resolveSharedProofReaderRegistryV1(): WeakMap<
-  object,
-  Rfc64PrivateReleaseProofReaderV1
-> {
-  const existing = Reflect.get(globalThis, PROOF_READER_REGISTRY) as unknown;
-  if (existing instanceof WeakMap) {
-    return existing as WeakMap<object, Rfc64PrivateReleaseProofReaderV1>;
-  }
-  const created = new WeakMap<object, Rfc64PrivateReleaseProofReaderV1>();
-  Object.defineProperty(globalThis, PROOF_READER_REGISTRY, {
-    configurable: false,
-    enumerable: false,
-    value: created,
-    writable: false,
-  });
-  return created;
 }
 
 function equalAppliedCatalogHeadSnapshotV1(

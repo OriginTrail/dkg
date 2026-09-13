@@ -3,6 +3,7 @@
 
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
+  composeRfc64RegisteredRosterVersionV1,
   parseRfc64AuthoritySnapshotV1,
 } from '../../src/rfc64/release-native-catalog-authority-v1.ts';
 import {
@@ -26,6 +27,8 @@ export async function revokeReceiverV1(context) {
   const { role } = context;
   if (role !== 'owner') throw new Error('only the owner can advance the gate roster');
   if (context.chainAdapter === undefined) throw new Error('owner has no finalized chain adapter');
+  const previousRoster = context.initialFinalizedAuthority.roster;
+  if (previousRoster === null) throw new Error('owner has no initial finalized roster');
   await context.agent.removeAgentFromContextGraph(
     CONTEXT_GRAPH_ID,
     roleAgentAddress('receiver'),
@@ -33,8 +36,9 @@ export async function revokeReceiverV1(context) {
   );
   const finalizedAuthority = await readExactReceiverRevokedFinalizedAuthorityV1(context, role);
   return {
+    chainRosterVersion: finalizedAuthority.roster.version,
     policyDigest: finalizedAuthority.policyDigest,
-    rosterVersion: finalizedAuthority.roster.version,
+    previousChainRosterVersion: previousRoster.version,
     revokedAgentAddress: roleAgentAddress('receiver'),
   };
 }
@@ -44,6 +48,8 @@ export async function observeReceiverRevocationV1(context) {
   assertFinalizedRuntimeV1(context);
   const { role } = context;
   if (role !== 'provider2') throw new Error('only provider2 can observe the gate revocation');
+  const previousRoster = context.initialFinalizedAuthority.roster;
+  if (previousRoster === null) throw new Error('provider2 has no initial finalized roster');
   let providerMutationDenied = false;
   try {
     await context.agent.removeAgentFromContextGraph(
@@ -91,11 +97,24 @@ export async function observeReceiverRevocationV1(context) {
     expectedRosterVersion: authority.roster.version,
     message: 'provider2 reconciliation differs from the finalized receiver revocation',
   });
+  const localRosterVersion = await context.agent.readRfc64PrivateRosterVersionV1(
+    CONTEXT_GRAPH_ID,
+  );
+  const effectiveRosterVersion = composeRfc64RegisteredRosterVersionV1(
+    finalizedAuthority.roster.version,
+    localRosterVersion,
+  );
+  if (authority.roster.version !== effectiveRosterVersion) {
+    throw new Error('provider2 effective roster generation is not chain/local bound');
+  }
   return {
+    chainRosterVersion: finalizedAuthority.roster.version,
     policyDigest: authority.policyDigest,
     curatorMetadataRefreshed,
+    effectiveRosterVersion,
+    localRosterVersion,
+    previousChainRosterVersion: previousRoster.version,
     providerMutationDenied,
-    rosterVersion: authority.roster.version,
     revokedAgentAddress: roleAgentAddress('receiver'),
   };
 }

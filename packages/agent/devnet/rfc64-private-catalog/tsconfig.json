@@ -22,6 +22,7 @@
     "memory-evidence.mjs",
     "runtime-contract.typecheck.ts",
     "scenario-actors.ts",
+    "scenario-result.ts",
     "verified-catalog-swm-proof.mjs",
     "../../src/jsonld.d.ts"
   ]

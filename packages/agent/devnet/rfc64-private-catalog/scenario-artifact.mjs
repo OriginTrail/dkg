@@ -11,6 +11,9 @@ import {
   hasExactPrivateCatalogSwmContents,
 } from './memory-evidence.mjs';
 import {
+  RFC64_PRIVATE_RELEASE_LIMITATION_V1,
+} from './gate-artifact.mjs';
+import {
   RFC64_PRIVATE_RUNTIME_RPC_PROCESS_IDS_V1,
   finalizedRuntimeRpcVerdictV1,
   rpcEvidenceV1,
@@ -46,11 +49,11 @@ export function buildRfc64PrivateReleaseArtifactV1(evidence, runtimeManifestDige
   const provider2 = actor(evidence, 'provider2');
   const receiverSeed = actor(evidence, 'receiver-seed');
   const receiver = actor(evidence, 'receiver');
-  const ownerRevoker = actor(evidence, 'owner-revoker');
   const outsider = actor(evidence, 'outsider');
   const receiverRestart = actor(evidence, 'receiver-restart');
-  const published = observation(owner, 'published');
-  const receiverRevocation = observation(provider2, 'revocationObservation');
+  const { baseline, failover, restart, revocation } = evidence.phases;
+  const published = baseline.published;
+  const receiverRevocation = revocation.receiverRevocation;
   const rpcActors = Object.fromEntries(RFC64_PRIVATE_RUNTIME_RPC_PROCESS_IDS_V1.map((id) => [
     id,
     rpcEvidenceV1(actor(evidence, id).shutdown),
@@ -59,8 +62,7 @@ export function buildRfc64PrivateReleaseArtifactV1(evidence, runtimeManifestDige
   return {
     schema: 'dkg-rfc64-private-release-gate-v1',
     status,
-    limitation:
-      'Uses a deterministic finalized-chain adapter and loopback RPC, not scripts/devnet.sh Hardhat or the CLI daemon.',
+    limitation: RFC64_PRIVATE_RELEASE_LIMITATION_V1,
     topology: {
       ownerProvider: safeRole(actor(evidence, 'probe-owner').ready),
       authorizedProviderReceiver: safeRole(actor(evidence, 'probe-provider2').ready),
@@ -79,77 +81,86 @@ export function buildRfc64PrivateReleaseArtifactV1(evidence, runtimeManifestDige
       scopeDigest: published.scopeDigest,
     },
     sourceProvider: safeState(
-      observation(owner, 'sourceState'),
+      baseline.ownerSourceState,
       null,
       owner.shutdown,
     ),
     provider2: safeState(
-      observation(provider2, 'stateAfterRevocation'),
-      observation(provider2, 'bootstrap'),
+      revocation.provider2StateAfterRevocation,
+      baseline.provider2Bootstrap,
       provider2.shutdown,
     ),
     failoverBarrier: {
       ownerExitCode: owner.shutdown.exit.code,
       ownerExitedAt: owner.shutdown.exit.exitedAt,
       ownerExitedBeforeReceiverSpawn: exitedBeforeSpawnV1(owner, receiver),
-      ownerListenerClosed: observation(owner, 'listenerClosed'),
+      ownerListenerClosed: failover.ownerListenerClosed,
       provider2ExactHeadAfterOwnerExit:
-        observation(provider2, 'stateAfterOwnerExit').exactExpectedHead === true,
-      provider2ListenerDialable: observation(provider2, 'listenerDialableAfterOwnerExit'),
+        failover.provider2StateAfterOwnerExit.exactExpectedHead === true,
+      provider2ListenerDialable: failover.provider2ListenerDialable,
       receiverSpawnedAt: receiver.spawnedAt,
     },
     failoverReceiver: safeState(
-      observation(receiver, 'state'),
-      observation(receiver, 'bootstrap'),
+      failover.receiverState,
+      failover.receiverBootstrap,
       receiver.shutdown,
     ),
     receiverBaseline: safeState(
-      observation(receiverSeed, 'state'),
-      observation(receiverSeed, 'bootstrap'),
+      baseline.receiverSeedState,
+      baseline.receiverSeedBootstrap,
       receiverSeed.shutdown,
     ),
     outsider: {
-      denied: observation(outsider, 'denial').denied,
-      failureClass: observation(outsider, 'denial').failureClass,
-      failureCode: observation(outsider, 'denial').failureCode,
-      appliedHeadDigest: observation(outsider, 'state').appliedHeadDigest,
-      graphCounts: observation(outsider, 'state').graphCounts.map(({ kaNumber, swm, vm }) => ({
+      agentAddress: roleAgentAddress('outsider'),
+      catalogScopeDigest: published.scopeDigest,
+      denied: revocation.outsiderDenial.denied,
+      failureClass: revocation.outsiderDenial.failureClass,
+      failureCode: revocation.outsiderDenial.failureCode,
+      appliedHeadDigest: revocation.outsiderState.appliedHeadDigest,
+      graphCounts: revocation.outsiderState.graphCounts.map(({ kaNumber, swm, vm }) => ({
         kaNumber,
         swm,
         vm,
       })),
+      providerVisibleVmBindings: revocation.providerAccessState.outsiderVisibleVmBindings,
       rpc: rpcEvidenceV1(outsider.shutdown),
     },
     revokedReceiver: {
       authority: {
+        schema: 'dkg-rfc64-private-authorization-transition-v1',
         ownerMutation: {
-          policyDigest: observation(ownerRevoker, 'revocation').policyDigest,
-          revokedAgentAddress: observation(ownerRevoker, 'revocation').revokedAgentAddress,
-          rosterVersion: observation(ownerRevoker, 'revocation').rosterVersion,
+          chainRosterVersion: revocation.ownerRevocation.chainRosterVersion,
+          policyDigest: revocation.ownerRevocation.policyDigest,
+          previousChainRosterVersion:
+            revocation.ownerRevocation.previousChainRosterVersion,
+          revokedAgentAddress: revocation.ownerRevocation.revokedAgentAddress,
         },
         providerObservation: {
+          chainRosterVersion: receiverRevocation.chainRosterVersion,
           curatorMetadataRefreshed: receiverRevocation.curatorMetadataRefreshed,
+          effectiveRosterVersion: receiverRevocation.effectiveRosterVersion,
+          localRosterVersion: receiverRevocation.localRosterVersion,
           policyDigest: receiverRevocation.policyDigest,
+          previousChainRosterVersion: receiverRevocation.previousChainRosterVersion,
           providerMutationDenied: receiverRevocation.providerMutationDenied,
           revokedAgentAddress: receiverRevocation.revokedAgentAddress,
-          rosterVersion: receiverRevocation.rosterVersion,
         },
       },
       denial: {
-        denied: observation(receiver, 'revokedDenial').denied,
-        failureClass: observation(receiver, 'revokedDenial').failureClass,
-        failureCode: observation(receiver, 'revokedDenial').failureCode,
+        denied: revocation.revokedReceiverDenial.denied,
+        failureClass: revocation.revokedReceiverDenial.failureClass,
+        failureCode: revocation.revokedReceiverDenial.failureCode,
       },
       revokedAgentAddress: receiverRevocation.revokedAgentAddress,
-      rosterVersion: receiverRevocation.rosterVersion,
+      rosterVersion: receiverRevocation.effectiveRosterVersion,
       state: safeState(
-        observation(receiver, 'stateAfterRevocation'),
-        observation(receiver, 'bootstrap'),
+        revocation.receiverStateAfterRevocation,
+        failover.receiverBootstrap,
         receiver.shutdown,
       ),
     },
     restartedReceiver: safeState(
-      observation(receiverRestart, 'state'),
+      restart.restartState,
       null,
       receiverRestart.shutdown,
     ),
@@ -158,20 +169,17 @@ export function buildRfc64PrivateReleaseArtifactV1(evidence, runtimeManifestDige
 
 function buildRfc64PrivateReleaseChecksV1(evidence) {
   const owner = actor(evidence, 'owner');
-  const provider2 = actor(evidence, 'provider2');
-  const receiverSeed = actor(evidence, 'receiver-seed');
   const receiver = actor(evidence, 'receiver');
-  const ownerRevoker = actor(evidence, 'owner-revoker');
-  const outsider = actor(evidence, 'outsider');
   const receiverRestart = actor(evidence, 'receiver-restart');
   const peerIds = evidence.peerIds;
-  const published = observation(owner, 'published');
-  const provider2Bootstrap = observation(provider2, 'bootstrap');
-  const provider2State = observation(provider2, 'state');
-  const receiverSeedBootstrap = observation(receiverSeed, 'bootstrap');
-  const receiverState = observation(receiver, 'state');
-  const receiverRevocation = observation(provider2, 'revocationObservation');
-  const ownerRevocation = observation(ownerRevoker, 'revocation');
+  const { baseline, failover, restart, revocation } = evidence.phases;
+  const published = baseline.published;
+  const provider2Bootstrap = baseline.provider2Bootstrap;
+  const provider2State = baseline.provider2State;
+  const receiverSeedBootstrap = baseline.receiverSeedBootstrap;
+  const receiverState = failover.receiverState;
+  const receiverRevocation = revocation.receiverRevocation;
+  const ownerRevocation = revocation.ownerRevocation;
   const rpcReceipts = Object.fromEntries(RFC64_PRIVATE_RUNTIME_RPC_PROCESS_IDS_V1.map((id) => [
     id,
     actor(evidence, id).shutdown,
@@ -190,12 +198,12 @@ function buildRfc64PrivateReleaseChecksV1(evidence) {
       published.inventoryRowCount === '2'
       && published.catalogVersion === '4'
       && [
-        observation(owner, 'sourceState'),
+        baseline.ownerSourceState,
         provider2State,
-        observation(receiverSeed, 'state'),
+        baseline.receiverSeedState,
         receiverState,
-        observation(receiver, 'stateAfterRevocation'),
-        observation(receiverRestart, 'state'),
+        revocation.receiverStateAfterRevocation,
+        restart.restartState,
       ].every(({ catalogScopeDigest }) => catalogScopeDigest === published.scopeDigest),
     provider2ReceivedExactHead:
       hasExactAppliedTransferV1(
@@ -210,50 +218,56 @@ function buildRfc64PrivateReleaseChecksV1(evidence) {
       hasExactAppliedTransferV1(
         receiverSeedBootstrap,
         peerIds.provider2,
-        observation(receiverSeed, 'state').appliedHeadDigest,
+        baseline.receiverSeedState.appliedHeadDigest,
       )
-      && observation(receiverSeed, 'state').exactExpectedHead === true
+      && baseline.receiverSeedState.exactExpectedHead === true
       && hasExactPrivateCatalogFinalizedVmBaselineContents(
-        observation(receiverSeed, 'state'),
+        baseline.receiverSeedState,
         EXPECTED_MEMORY_CONTENTS,
       ),
     receiverUsedProvider2AfterOwnerStopped:
       hasExactAppliedTransferV1(
-        observation(receiver, 'bootstrap'),
+        failover.receiverBootstrap,
         peerIds.provider2,
         published.headObjectDigest,
       ),
     ownerExitedBeforeReceiverRuntimeStarted:
       owner.shutdown.exit.error === null
-      && observation(owner, 'listenerClosed')
-      && observation(provider2, 'listenerDialableAfterOwnerExit')
+      && failover.ownerListenerClosed
+      && failover.provider2ListenerDialable
       && exitedBeforeSpawnV1(owner, receiver),
     receiverCaughtUpSwmV2AndVmV1: hasExactMemoryContents(receiverState),
     ...rpcVerdict,
     outsiderDeniedBeforeApplication:
-      isExpectedPrivateCatalogDenialResultV1(observation(outsider, 'denial'))
-      && observation(outsider, 'state').appliedHeadDigest === null,
+      isExpectedPrivateCatalogDenialResultV1(revocation.outsiderDenial)
+      && revocation.outsiderState.appliedHeadDigest === null,
     outsiderReceivedNoPrivateGraphs:
-      observation(outsider, 'state').graphCounts
+      revocation.outsiderState.graphCounts
         .every(({ swm, vm }) => swm === 0 && vm === 0),
     nonmemberQueryIsEmpty:
-      observation(provider2, 'accessState').outsiderVisibleVmBindings === 0,
+      revocation.providerAccessState.outsiderVisibleVmBindings === 0,
     revokedReceiverDeniedAfterFinalizedRosterAdvance:
-      BigInt(receiverRevocation.rosterVersion) > 0n
+      BigInt(ownerRevocation.chainRosterVersion)
+        > BigInt(ownerRevocation.previousChainRosterVersion)
+      && receiverRevocation.chainRosterVersion === ownerRevocation.chainRosterVersion
+      && receiverRevocation.previousChainRosterVersion
+        === ownerRevocation.previousChainRosterVersion
+      && BigInt(receiverRevocation.effectiveRosterVersion)
+        > BigInt(receiverRevocation.chainRosterVersion)
       && receiverRevocation.curatorMetadataRefreshed === true
       && receiverRevocation.providerMutationDenied === true
       && ownerRevocation.revokedAgentAddress === roleAgentAddress('receiver')
       && receiverRevocation.revokedAgentAddress === roleAgentAddress('receiver')
-      && isExpectedPrivateCatalogDenialResultV1(observation(receiver, 'revokedDenial')),
+      && isExpectedPrivateCatalogDenialResultV1(revocation.revokedReceiverDenial),
     revocationDoesNotCorruptPreviouslyCommittedMemory:
-      observation(receiver, 'stateAfterRevocation').exactExpectedHead === true
-      && hasExactMemoryContents(observation(receiver, 'stateAfterRevocation')),
+      revocation.receiverStateAfterRevocation.exactExpectedHead === true
+      && hasExactMemoryContents(revocation.receiverStateAfterRevocation),
     restartPreservedIdentityAndExactHead:
       receiverRestart.ready.peerId === peerIds.receiver
-      && observation(receiverRestart, 'state').exactExpectedHead === true
-      && observation(receiverRestart, 'state').inventoryRowCount === '2',
+      && restart.restartState.exactExpectedHead === true
+      && restart.restartState.inventoryRowCount === '2',
     restartPreservedSwmV2AndVmV1:
-      hasExactMemoryContents(observation(receiverRestart, 'state')),
+      hasExactMemoryContents(restart.restartState),
   });
 }
 
@@ -269,13 +283,6 @@ function exitedBeforeSpawnV1(exitedProcess, spawnedProcess) {
   return Number.isSafeInteger(exitedProcess.exitSequence)
     && Number.isSafeInteger(spawnedProcess.spawnSequence)
     && exitedProcess.exitSequence < spawnedProcess.spawnSequence;
-}
-
-function observation(process, key) {
-  if (!Object.hasOwn(process.observations, key)) {
-    throw new Error(`RFC-64 private scenario is missing observation: ${process.processId}.${key}`);
-  }
-  return process.observations[key];
 }
 
 function safeRole(ready) {

@@ -32,6 +32,7 @@ import {
   RFC64_PRIVATE_PROBE_ACTORS_V1,
   RFC64_PRIVATE_RUNTIME_ROLES_V1,
 } from './scenario-actors.ts';
+import { composeRfc64PrivateScenarioResultV1 } from './scenario-result.ts';
 
 export {
   RFC64_PRIVATE_GATE_RPC_BUDGET_V1,
@@ -306,9 +307,14 @@ export async function executeRfc64PrivateReleaseGateV1({
     const baseline = await establishBaselineV1(scenario);
     const failover = await exerciseFailoverV1(scenario, baseline);
     const revocation = await exerciseRevocationV1(scenario, baseline, failover);
-    await inspectRestartV1(scenario, baseline, failover, revocation);
+    const restart = await inspectRestartV1(scenario, baseline, failover, revocation);
     artifact = buildRfc64PrivateReleaseArtifactV1(
-      scenario.sealEvidence(),
+      scenario.sealEvidence(scenarioEvidencePhasesV1({
+        baseline,
+        failover,
+        restart,
+        revocation,
+      })),
       runtimeManifest.manifestDigest,
     );
     const { status } = artifact;
@@ -413,20 +419,11 @@ class PrivateReleaseScenarioContext {
     )));
   }
 
-  observe(processId, key, value) {
-    const process = this.requireProcess(processId);
-    if (Object.hasOwn(process.observations, key)) {
-      throw new Error(`private release observation already recorded: ${processId}.${key}`);
-    }
-    process.observations[key] = value;
-  }
-
   recordReady(processId, role, child, ready) {
     if (this.processes.has(processId)) {
       throw new Error(`private release process already recorded: ${processId}`);
     }
     this.processes.set(processId, {
-      observations: {},
       processId,
       ready,
       role,
@@ -443,19 +440,17 @@ class PrivateReleaseScenarioContext {
     return process;
   }
 
-  sealEvidence() {
+  sealEvidence(phases) {
     if (this.sealed) throw new Error('private release scenario evidence already sealed');
     if (this.peerIds === null) throw new Error('private release peer identities are not bound');
     this.sealed = true;
     const processes = Object.fromEntries([...this.processes.entries()].map(([id, process]) => [
       id,
-      Object.freeze({
-        ...process,
-        observations: Object.freeze({ ...process.observations }),
-      }),
+      Object.freeze({ ...process }),
     ]));
-    return Object.freeze({
+    return composeRfc64PrivateScenarioResultV1({
       peerIds: this.peerIds,
+      phases,
       processes: Object.freeze(processes),
       runtimeProvenance: this.runtimeEvidence.seal(),
     });
@@ -465,7 +460,6 @@ class PrivateReleaseScenarioContext {
 async function establishBaselineV1(scenario) {
   const owner = await scenario.start('owner', 'owner');
   const baseline = await owner.request({ cmd: 'publish' });
-  scenario.observe('owner', 'baseline', baseline);
   const provider2 = await scenario.start('provider2', 'provider2');
   await connectBothWays(owner, provider2);
   await provider2.request({
@@ -490,12 +484,9 @@ async function establishBaselineV1(scenario) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.headObjectDigest,
   });
-  scenario.observe('receiver-seed', 'bootstrap', receiverSeedBootstrap);
-  scenario.observe('receiver-seed', 'state', receiverSeedState);
   const receiverSeedShutdown = await scenario.stop(receiverSeed, 'receiver-seed');
 
   const published = await owner.request({ cmd: 'publish-update' });
-  scenario.observe('owner', 'published', published);
   const provider2Bootstrap = await provider2.request({
     cmd: 'wait-bootstrap',
     expectedHeadDigest: published.headObjectDigest,
@@ -509,9 +500,6 @@ async function establishBaselineV1(scenario) {
     cmd: 'inspect',
     expectedHeadDigest: published.headObjectDigest,
   });
-  scenario.observe('provider2', 'bootstrap', provider2Bootstrap);
-  scenario.observe('provider2', 'state', provider2State);
-  scenario.observe('owner', 'sourceState', ownerSourceState);
   if (!hasExactSourceSwmContents(ownerSourceState)) {
     throw new Error(
       `owner: fixture source is missing the exact version-2 SWM head; `
@@ -546,9 +534,6 @@ async function exerciseFailoverV1(scenario, baseline) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
-  scenario.observe('owner', 'listenerClosed', ownerListenerClosed);
-  scenario.observe('provider2', 'listenerDialableAfterOwnerExit', provider2ListenerDialable);
-  scenario.observe('provider2', 'stateAfterOwnerExit', provider2StateAfterOwnerExit);
   if (
     provider2StateAfterOwnerExit.exactExpectedHead !== true
     || !hasExactMemoryContents(provider2StateAfterOwnerExit)
@@ -571,8 +556,6 @@ async function exerciseFailoverV1(scenario, baseline) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
-  scenario.observe('receiver', 'bootstrap', receiverBootstrap);
-  scenario.observe('receiver', 'state', receiverState);
   return Object.freeze({
     ownerExit,
     ownerListenerClosed,
@@ -600,9 +583,6 @@ async function exerciseRevocationV1(scenario, baseline, failover) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
-  scenario.observe('outsider', 'denial', outsiderDenial);
-  scenario.observe('outsider', 'state', outsiderState);
-  scenario.observe('provider2', 'accessState', providerAccessState);
 
   // Advance the provider's finalized authority high-water after the receiver
   // has proved it was previously authorized. The receiver deliberately keeps
@@ -625,11 +605,6 @@ async function exerciseRevocationV1(scenario, baseline, failover) {
     cmd: 'inspect',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
-  scenario.observe('owner-revoker', 'revocation', ownerRevocation);
-  scenario.observe('provider2', 'revocationObservation', receiverRevocation);
-  scenario.observe('provider2', 'stateAfterRevocation', provider2StateAfterRevocation);
-  scenario.observe('receiver', 'revokedDenial', revokedReceiverDenial);
-  scenario.observe('receiver', 'stateAfterRevocation', receiverStateAfterRevocation);
   const ownerRevokerShutdown = await scenario.stop(ownerRevoker, 'owner-revoker');
   return Object.freeze({
     outsider,
@@ -654,7 +629,6 @@ async function inspectRestartV1(scenario, baseline, failover, revocation) {
     cmd: 'inspect-persisted',
     expectedHeadDigest: baseline.published.headObjectDigest,
   });
-  scenario.observe('receiver-restart', 'state', restartState);
   const outsiderShutdown = await scenario.stop(revocation.outsider, 'outsider');
   const restartedReceiverShutdown = await scenario.stop(
     restartedReceiver,
@@ -667,6 +641,38 @@ async function inspectRestartV1(scenario, baseline, failover, revocation) {
     restartState,
     restartedReceiverReady: restartedReceiver.ready,
     restartedReceiverShutdown,
+  });
+}
+
+function scenarioEvidencePhasesV1({ baseline, failover, restart, revocation }) {
+  return Object.freeze({
+    baseline: Object.freeze({
+      baseline: baseline.baseline,
+      ownerSourceState: baseline.ownerSourceState,
+      provider2Bootstrap: baseline.provider2Bootstrap,
+      provider2State: baseline.provider2State,
+      published: baseline.published,
+      receiverSeedBootstrap: baseline.receiverSeedBootstrap,
+      receiverSeedState: baseline.receiverSeedState,
+    }),
+    failover: Object.freeze({
+      ownerListenerClosed: failover.ownerListenerClosed,
+      provider2ListenerDialable: failover.provider2ListenerDialable,
+      provider2StateAfterOwnerExit: failover.provider2StateAfterOwnerExit,
+      receiverBootstrap: failover.receiverBootstrap,
+      receiverState: failover.receiverState,
+    }),
+    restart: Object.freeze({ restartState: restart.restartState }),
+    revocation: Object.freeze({
+      outsiderDenial: revocation.outsiderDenial,
+      outsiderState: revocation.outsiderState,
+      ownerRevocation: revocation.ownerRevocation,
+      provider2StateAfterRevocation: revocation.provider2StateAfterRevocation,
+      providerAccessState: revocation.providerAccessState,
+      receiverRevocation: revocation.receiverRevocation,
+      receiverStateAfterRevocation: revocation.receiverStateAfterRevocation,
+      revokedReceiverDenial: revocation.revokedReceiverDenial,
+    }),
   });
 }
 

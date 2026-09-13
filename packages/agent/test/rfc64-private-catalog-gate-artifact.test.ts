@@ -239,13 +239,23 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       .toThrow(/authority evidence is inconsistent/u);
 
     const advancedProviderRoster = structuredClone(artifact);
-    advancedProviderRoster.revokedReceiver.rosterVersion = '2';
-    advancedProviderRoster.revokedReceiver.authority.providerObservation.rosterVersion = '2';
-    expect(decodeRfc64PrivateGatePassArtifactV1(advancedProviderRoster))
-      .toBe(advancedProviderRoster);
+    advancedProviderRoster.revokedReceiver.rosterVersion = '10000000000008';
+    advancedProviderRoster.revokedReceiver.authority.providerObservation
+      .effectiveRosterVersion = '10000000000008';
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(advancedProviderRoster))
+      .toThrow(/authority evidence is inconsistent/u);
     const rolledBackProviderRoster = structuredClone(advancedProviderRoster);
-    rolledBackProviderRoster.revokedReceiver.authority.ownerMutation.rosterVersion = '3';
+    rolledBackProviderRoster.revokedReceiver.authority.ownerMutation.chainRosterVersion = '3';
     expect(() => decodeRfc64PrivateGatePassArtifactV1(rolledBackProviderRoster))
+      .toThrow(/authority evidence is inconsistent/u);
+
+    const crossBoundToAnotherChainGeneration = structuredClone(artifact);
+    crossBoundToAnotherChainGeneration.revokedReceiver.rosterVersion = '20000000000007';
+    crossBoundToAnotherChainGeneration.revokedReceiver.authority.providerObservation
+      .chainRosterVersion = '2';
+    crossBoundToAnotherChainGeneration.revokedReceiver.authority.providerObservation
+      .effectiveRosterVersion = '20000000000007';
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(crossBoundToAnotherChainGeneration))
       .toThrow(/authority evidence is inconsistent/u);
 
     const unprojectedAuthority = structuredClone(artifact) as typeof artifact & {
@@ -260,6 +270,104 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     unprojectedAuthority.revokedReceiver.authority.ownerMutation.event = 'receiver-revoked';
     expect(() => decodeRfc64PrivateGatePassArtifactV1(unprojectedAuthority))
       .toThrow(/unknown or missing fields/u);
+
+    const droppedOutsiderInventory = structuredClone(artifact);
+    droppedOutsiderInventory.outsider.graphCounts.pop();
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(droppedOutsiderInventory))
+      .toThrow(/inventory is not catalog-bound/u);
+    const missingCatalog = structuredClone(artifact);
+    missingCatalog.catalog = null as never;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(missingCatalog))
+      .toThrow(/catalog evidence must be an object/u);
+    const missingRevokedInventory = structuredClone(artifact);
+    missingRevokedInventory.revokedReceiver.state.graphCounts = [];
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(missingRevokedInventory))
+      .toThrow(/bounded row count/u);
+    const nonAdvancingRoster = structuredClone(artifact);
+    nonAdvancingRoster.revokedReceiver.authority.ownerMutation
+      .previousChainRosterVersion = '1';
+    nonAdvancingRoster.revokedReceiver.authority.providerObservation
+      .previousChainRosterVersion = '1';
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(nonAdvancingRoster))
+      .toThrow(/authority evidence is inconsistent/u);
+    const consistentlyReboundReceiver = structuredClone(artifact);
+    const unrelatedAddress = `0x${'ab'.repeat(20)}`;
+    consistentlyReboundReceiver.topology.authorizedReceiver.agentAddress = unrelatedAddress;
+    consistentlyReboundReceiver.revokedReceiver.revokedAgentAddress = unrelatedAddress;
+    consistentlyReboundReceiver.revokedReceiver.authority.ownerMutation.revokedAgentAddress =
+      unrelatedAddress;
+    consistentlyReboundReceiver.revokedReceiver.authority.providerObservation.revokedAgentAddress =
+      unrelatedAddress;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(consistentlyReboundReceiver))
+      .toThrow(/not fixture-bound/u);
+    const missingSourceProof = structuredClone(artifact);
+    missingSourceProof.sourceProvider = null as never;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(missingSourceProof))
+      .toThrow(/source provider state must be an object/u);
+    const crossCatalogState = structuredClone(artifact);
+    crossCatalogState.revokedReceiver.state.catalogScopeDigest = `0x${'aa'.repeat(32)}`;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(crossCatalogState))
+      .toThrow(/not bound to the catalog/u);
+    const extraNestedState = structuredClone(artifact) as typeof artifact & {
+      failoverReceiver: typeof artifact.failoverReceiver & { invented?: boolean };
+    };
+    extraNestedState.failoverReceiver.invented = true;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(extraNestedState))
+      .toThrow(/unknown or missing fields/u);
+    const reboundBootstrap = structuredClone(artifact);
+    reboundBootstrap.provider2.bootstrap.providerPeerId =
+      artifact.topology.unauthorizedNode.peerId;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(reboundBootstrap))
+      .toThrow(/not bound to the expected provider/u);
+    const extraBootstrapField = structuredClone(artifact) as typeof artifact;
+    Object.assign(extraBootstrapField.failoverReceiver.bootstrap, { invented: true });
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(extraBootstrapField))
+      .toThrow(/unknown or missing fields/u);
+    const reorderedFailover = structuredClone(artifact);
+    reorderedFailover.failoverBarrier.ownerExitedAt =
+      reorderedFailover.failoverBarrier.receiverSpawnedAt;
+    reorderedFailover.failoverBarrier.receiverSpawnedAt = '2026-08-26T00:00:00.250Z';
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(reorderedFailover))
+      .toThrow(/failover barrier is inconsistent/u);
+    const reboundRpc = structuredClone(artifact);
+    reboundRpc.rpcActors.provider2.byMethod.eth_call += 1;
+    reboundRpc.rpcActors.provider2.total += 1;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(reboundRpc))
+      .toThrow(/RPC evidence is not actor-bound/u);
+    const unknownRpcMethod = structuredClone(artifact);
+    unknownRpcMethod.rpcActors.owner.byMethod.eth_sendTransaction = 1;
+    unknownRpcMethod.rpcActors.owner.total = 1;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(unknownRpcMethod))
+      .toThrow(/outside its fixed contract/u);
+    const rewrittenMemory = structuredClone(artifact);
+    rewrittenMemory.provider2.graphCounts[0].swmDigest = '0'.repeat(64);
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(rewrittenMemory))
+      .toThrow(/differs from the fixed memory fixture/u);
+    const finalizedSourceVm = structuredClone(artifact);
+    finalizedSourceVm.sourceProvider.graphCounts[0].vmHead = {
+      assertionGraph: finalizedSourceVm.sourceProvider.graphCounts[0].vmGraph,
+      assertionVersion: PRIVATE_CATALOG_MEMORY_EXPECTATION.vm.assertionVersion,
+    };
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(finalizedSourceVm))
+      .toThrow(/unexpected finalized VM evidence/u);
+    const materializedSourceVm = structuredClone(artifact);
+    materializedSourceVm.sourceProvider.graphCounts[0].vm =
+      PRIVATE_CATALOG_MEMORY_EXPECTATION.vm.projection.count;
+    materializedSourceVm.sourceProvider.graphCounts[0].vmDigest =
+      PRIVATE_CATALOG_MEMORY_EXPECTATION.vm.projection.digest;
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(materializedSourceVm))
+      .toThrow(/differs from the fixed memory fixture/u);
+    const reboundBaseline = structuredClone(artifact);
+    reboundBaseline.receiverBaseline.appliedHeadDigest = artifact.catalog.headObjectDigest;
+    reboundBaseline.receiverBaseline.graphCounts.forEach((row) => {
+      row.swmProof.catalogHeadDigest = artifact.catalog.headObjectDigest;
+    });
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(reboundBaseline))
+      .toThrow(/not bound to the catalog/u);
+    const changedLimitation = structuredClone(artifact);
+    changedLimitation.limitation = 'unbounded external RPC';
+    expect(() => decodeRfc64PrivateGatePassArtifactV1(changedLimitation))
+      .toThrow(/fixed limitation metadata/u);
   });
 
   it('rejects a non-Git revision or future PASS interval', () => {
