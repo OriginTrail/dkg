@@ -1554,18 +1554,22 @@ describe('RFC-64 rollout authority integration', () => {
       },
     });
 
-    await expect(edge.getContextGraphOnChainId(CONTEXT_GRAPH_ID, {
-      consistency: 'finalized-authority-index',
-    })).resolves.toBe('9');
+    await expect(edge.resolveFinalizedContextGraphAuthorityTargetV1(CONTEXT_GRAPH_ID))
+      .resolves.toMatchObject({
+        expectedNameHash: snapshot.nameHash,
+        expectedOnChainId: 9n,
+        finalizedSnapshot: snapshot,
+      });
+    await expect(edge.getContextGraphOnChainId(CONTEXT_GRAPH_ID))
+      .resolves.toBeNull();
 
     await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID))
       .resolves.toEqual({ agentAddress: AUTHOR, authorityEra: '0' });
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
       .resolves.toMatchObject({ policy: { contextGraphId: CONTEXT_GRAPH_ID } });
 
-    expect(resolveFinalized).toHaveBeenCalledOnce();
-    expect(resolveFinalized).toHaveBeenCalledWith(snapshot.nameHash, expect.any(Object));
-    expect(resolveFinalizedSnapshot).toHaveBeenCalledTimes(2);
+    expect(resolveFinalized).not.toHaveBeenCalled();
+    expect(resolveFinalizedSnapshot).toHaveBeenCalledTimes(3);
     expect(resolveFinalizedSnapshot).toHaveBeenCalledWith(
       snapshot.nameHash,
       expect.any(Object),

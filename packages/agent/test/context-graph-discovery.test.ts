@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 
 function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
@@ -610,6 +610,91 @@ describe('listContextGraphs merge', () => {
     expect(entry!.subscribed).toBe(false);
     expect(entry!.synced).toBe(false);
     expect(entry!.callerInvolved).toBeUndefined();
+  }, 15000);
+
+  it('batch-enriches mixed listing sources and uses current state for a finalized miss', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const ontologyId = 'listing-batch-ontology';
+    const metaId = 'listing-batch-meta';
+    const storageId = 'listing-batch-storage';
+    const justRegisteredId = 'listing-batch-just-registered';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    await store.insert([
+      {
+        subject: contextGraphDataGraphUri(ontologyId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri(justRegisteredId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri(metaId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphMetaGraphUri(metaId),
+      },
+      {
+        subject: 'urn:listing-batch-storage:root',
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Storage row"',
+        graph: contextGraphSharedMemoryUri(storageId),
+      },
+    ]);
+    (agent as any).subscribedContextGraphs.set(metaId, {
+      name: 'Meta row',
+      subscribed: true,
+      synced: true,
+    } satisfies ContextGraphSub);
+
+    const finalizedBatch = vi.fn(async (nameHashes: readonly string[]) => new Map([
+      [agent!.contextGraphNameCommitment(ontologyId), 901n],
+      [agent!.contextGraphNameCommitment(metaId), 902n],
+      [agent!.contextGraphNameCommitment(storageId), 903n],
+    ].filter(([nameHash]) => nameHashes.includes(nameHash as string)) as Array<[
+      string,
+      bigint,
+    ]>));
+    Object.defineProperty(agent.chain, 'contextGraphAuthorityIndexRevisionReader', {
+      configurable: true,
+      value: {
+        resolveFinalizedContextGraphIdsByNameHashes: finalizedBatch,
+        readContextGraphAuthorityIndexRevisions: async () => new Map(),
+        whenIdle: async () => undefined,
+      },
+    });
+    const currentResolver = vi.spyOn(agent, 'getContextGraphOnChainId')
+      .mockImplementation(async (contextGraphId) => (
+        contextGraphId === justRegisteredId ? '904' : null
+      ));
+
+    const rows = await agent.listContextGraphs();
+    expect(rows.find((row) => row.id === ontologyId)?.onChainId).toBe('901');
+    expect(rows.find((row) => row.id === metaId)?.onChainId).toBe('902');
+    expect(rows.find((row) => row.id === storageId)?.onChainId).toBe('903');
+    expect(rows.find((row) => row.id === justRegisteredId)?.onChainId).toBe('904');
+    expect(finalizedBatch).toHaveBeenCalledOnce();
+    expect(finalizedBatch.mock.calls[0]?.[0]).toEqual(expect.arrayContaining([
+      agent.contextGraphNameCommitment(ontologyId),
+      agent.contextGraphNameCommitment(metaId),
+      agent.contextGraphNameCommitment(storageId),
+      agent.contextGraphNameCommitment(justRegisteredId),
+    ]));
+    expect(currentResolver).toHaveBeenCalledWith(
+      justRegisteredId,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(currentResolver.mock.calls.some(([id]) => (
+      id === ontologyId || id === metaId || id === storageId
+    ))).toBe(false);
   }, 15000);
 
   it('listContextGraphs sets callerInvolved from curator wallet match', async () => {

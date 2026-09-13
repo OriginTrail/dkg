@@ -343,6 +343,8 @@ import { isTransientBootChainError } from './dkg-agent-boot.js';
 import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 import type { RegisteredContextGraphAuthority } from
   './registered-context-graph-authority.js';
+import type { FinalizedContextGraphAuthorityTargetV1 } from
+  './dkg-agent-cg-registry.js';
 import type { LiveOnChainAccessPolicyState } from
   './internal/context-graph-authority/context-graph-access-policy.js';
 // Keep the historical dist/dkg-agent-cg-resolve.js type entry point backed by
@@ -2511,13 +2513,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         if (seen.has(uri)) return;
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
         const sub = this.subscribedContextGraphs.get(id);
-        const onChainId = sub?.onChainId ?? (await optional(
-          (signal) => this.getContextGraphOnChainId(id, {
-            signal,
-            consistency: 'finalized-authority-index',
-          }),
-          `on-chain id lookup for ${id}`,
-        )) ?? undefined;
         const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
         rememberRow({
           id,
@@ -2540,7 +2535,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           // subscription state set by the catchup runner (see
           // `markContextGraphSubscriptionState` at routes/context-graph.ts:1301).
           synced: sub?.synced ?? false,
-          ...(onChainId ? { onChainId } : {}),
+          ...(sub?.onChainId ? { onChainId: sub.onChainId } : {}),
         }, policyPrivacy(row['access']));
       });
       for (const entry of definitionSettled) {
@@ -2578,13 +2573,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
       if (metaResult?.type === 'bindings' && metaResult.bindings.length > 0) {
         const row = metaResult.bindings[0] as Record<string, string>;
-        const onChainId = sub.onChainId ?? (await optional(
-          (signal) => this.getContextGraphOnChainId(id, {
-            signal,
-            consistency: 'finalized-authority-index',
-          }),
-          `on-chain id lookup for ${id}`,
-        )) ?? undefined;
         const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
         rememberRow({
           id,
@@ -2598,7 +2586,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           isSystem: false,
           subscribed: sub.subscribed,
           synced: sub.synced,
-          ...(onChainId ? { onChainId } : {}),
+          ...(sub.onChainId ? { onChainId: sub.onChainId } : {}),
         }, policyPrivacy(row['access']));
         continue;
       }
@@ -2701,13 +2689,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       if (contentRead.ok && !contentRead.value) continue;
 
       const sub = this.subscribedContextGraphs.get(id);
-      const onChainId = sub?.onChainId ?? (await optional(
-        (signal) => this.getContextGraphOnChainId(id, {
-          signal,
-          consistency: 'finalized-authority-index',
-        }),
-        `on-chain id lookup for ${id}`,
-      )) ?? undefined;
       const policyRead = await withBudget(
         (signal) => this.getExplicitAccessPolicy(id, { signal }),
         `access policy lookup for storage row ${id}`,
@@ -2722,7 +2703,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         subscribed: sub?.subscribed ?? false,
         synced: sub?.synced ?? false,
         ...(accessPolicy ? { accessPolicy } : {}),
-        ...(onChainId ? { onChainId } : {}),
+        ...(sub?.onChainId ? { onChainId: sub.onChainId } : {}),
       }, accessPolicy ?? 'unknown');
     }
 
@@ -2768,6 +2749,54 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       };
     });
     rows = projectedRows.map((entry) => {
+      if (entry.status === 'fulfilled') return entry.value;
+      throw entry.reason;
+    });
+
+    // Discovery only establishes row identity and source precedence. Resolve
+    // missing chain IDs once, after deduplication and metadata projection, so
+    // ontology, _meta, and storage-only rows all share one consistency policy.
+    // Production indexed adapters project every name commitment from one
+    // finalized checkpoint; a current-state pass then fills finalized misses
+    // so a newly mined registration is visible immediately to the CLI/UI.
+    const rowsMissingOnChainId = rows.filter((row) => !row.onChainId);
+    let finalizedTargets: ReadonlyMap<string, FinalizedContextGraphAuthorityTargetV1> =
+      new Map();
+    if (rowsMissingOnChainId.length > 0) {
+      try {
+        const finalizedRead = await withBudget(
+          (signal) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+            rowsMissingOnChainId.map((row) => row.id),
+            { signal },
+          ),
+          'batched finalized on-chain id enrichment',
+          scanBudgetMs,
+        );
+        if (!finalizedRead.ok) {
+          cacheable = false;
+        } else if (finalizedRead.value.kind === 'finalized-index') {
+          finalizedTargets = new Map(finalizedRead.value.targets);
+        }
+      } catch {
+        // Listing enrichment is advisory. If the finalized collaborator is
+        // temporarily unavailable, the bounded current-state compatibility
+        // pass below retains the established user-facing behavior.
+        cacheable = false;
+      }
+    }
+
+    const onChainIdEnrichment = await mapContextGraphListRowsSettled(rows, async (row) => {
+      if (row.onChainId) return row;
+      const onChainId = await optional(
+        (signal) => this.resolveContextGraphOnChainIdForListing(row.id, {
+          signal,
+          finalizedTarget: finalizedTargets.get(row.id) ?? null,
+        }),
+        `on-chain id lookup for ${row.id}`,
+      );
+      return onChainId ? { ...row, onChainId } : row;
+    });
+    rows = onChainIdEnrichment.map((entry) => {
       if (entry.status === 'fulfilled') return entry.value;
       throw entry.reason;
     });

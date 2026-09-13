@@ -21,9 +21,26 @@ describe('Context Graph registration resolution deadlines', () => {
       },
     });
 
-    await expect(fixture.agent.getContextGraphOnChainId(LOCAL_ID, {
-      consistency: 'finalized-authority-index',
-    })).resolves.toBe('17');
+    await expect(fixture.agent.resolveContextGraphOnChainIdForListing(LOCAL_ID))
+      .resolves.toBe('17');
+
+    expect(resolveFinalized).toHaveBeenCalledWith(NAME_HASH, {
+      signal: undefined,
+    });
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledOnce();
+  });
+
+  it('falls back to the current resolver when a new registration is not finalized yet', async () => {
+    const fixture = selectedFixture(19n);
+    const resolveFinalized = vi.fn(async () => null);
+    Object.assign(fixture.agent.chain, {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
+      },
+    });
+
+    await expect(fixture.agent.resolveContextGraphOnChainIdForListing(LOCAL_ID))
+      .resolves.toBe('19');
 
     expect(resolveFinalized).toHaveBeenCalledWith(NAME_HASH, {
       signal: undefined,
@@ -45,8 +62,7 @@ describe('Context Graph registration resolution deadlines', () => {
     });
     controller.abort(abortReason);
 
-    await expect(fixture.agent.getContextGraphOnChainId(LOCAL_ID, {
-      consistency: 'finalized-authority-index',
+    await expect(fixture.agent.resolveContextGraphOnChainIdForListing(LOCAL_ID, {
       signal: controller.signal,
     })).rejects.toBe(abortReason);
 

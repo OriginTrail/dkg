@@ -1680,62 +1680,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return matching.length === 1 ? matching[0]! : null;
   }
 
-  /**
-   * Resolve the numeric authority target at the same finalized chain horizon
-   * used by RFC-64 snapshots. Older adapters retain their public binding path;
-   * indexed adapters avoid one historical scan per Context Graph.
-   */
-  private async resolveRfc64FinalizedAuthorityTargetV1(
-    this: DKGAgent,
-    contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
-  ): Promise<Readonly<{
-    expectedNameHash: string;
-    expectedOnChainId: bigint;
-    finalizedSnapshot?: ContextGraphAuthoritySnapshot;
-  }> | null> {
-    // Local-first CG creation deliberately commits an explicit unregistered
-    // state. RFC-64 derives that graph's authority from authenticated local
-    // metadata and must not start a contract-wide index scan merely to prove
-    // the absence of a registration that this node has not requested.
-    if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) return null;
-
-    const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
-    const expectedNameHash = explicitNameHash === undefined
-      ? this.contextGraphNameCommitment(contextGraphId)
-      : this.contextGraphWireId(explicitNameHash);
-    const indexedReader = this.chain.contextGraphAuthorityIndexRevisionReader;
-    const resolveFinalizedSnapshot = indexedReader
-      ?.resolveFinalizedContextGraphAuthoritySnapshotByNameHash;
-    if (resolveFinalizedSnapshot !== undefined) {
-      const finalizedSnapshot = await resolveFinalizedSnapshot.call(
-        indexedReader,
-        expectedNameHash,
-        options,
-      );
-      if (finalizedSnapshot === null) return null;
-      return Object.freeze({
-        expectedNameHash,
-        expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
-        finalizedSnapshot,
-      });
-    }
-
-    const finalizedResolver = indexedReader?.resolveFinalizedContextGraphIdByNameHash;
-    const resolved = finalizedResolver === undefined
-      ? await this.getContextGraphOnChainId(contextGraphId, options)
-      : await finalizedResolver.call(
-          indexedReader,
-          expectedNameHash,
-          options,
-        );
-    if (resolved === null) return null;
-    return Object.freeze({
-      expectedNameHash,
-      expectedOnChainId: BigInt(resolved),
-    });
-  }
-
   /** Read the exact current owner generation used to bind a curator peer. */
   async readRfc64CurrentCuratorAuthorityBindingV1(
     this: DKGAgent,
@@ -1744,7 +1688,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     agentAddress: EvmAddressV1;
     authorityEra: DecimalU64V1;
   }> | null> {
-    const target = await this.resolveRfc64FinalizedAuthorityTargetV1(contextGraphId);
+    const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(contextGraphId);
     if (target !== null) {
       const { expectedNameHash, expectedOnChainId, finalizedSnapshot } = target;
       const snapshot = parseRfc64AuthoritySnapshotV1(
@@ -2258,7 +2202,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : await this.rfc64AuthorityReadCoordinatorV1.run(
           signal,
           async (readSignal) => {
-            const target = await this.resolveRfc64FinalizedAuthorityTargetV1(
+            const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(
               contextGraphId,
               { signal: readSignal },
             );

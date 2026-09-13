@@ -96,7 +96,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -400,6 +400,20 @@ export type ContextGraphRegistrationBinding =
       detail?: string;
     };
 
+export type FinalizedContextGraphAuthorityTargetV1 = Readonly<{
+  expectedNameHash: string;
+  expectedOnChainId: bigint;
+  finalizedSnapshot?: ContextGraphAuthoritySnapshot;
+}>;
+
+export type FinalizedContextGraphAuthorityTargetsResolutionV1 = Readonly<
+  | {
+      kind: 'finalized-index';
+      targets: ReadonlyMap<string, FinalizedContextGraphAuthorityTargetV1>;
+    }
+  | { kind: 'legacy-current' }
+>;
+
 function contextGraphBindingAbortReason(signal: AbortSignal): Error {
   if (signal.reason instanceof Error) return signal.reason;
   const error = new Error(String(signal.reason ?? 'Context Graph binding resolution aborted'));
@@ -635,33 +649,170 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       source?: string;
-      consistency?: 'current' | 'finalized-authority-index';
     } = {},
   ): Promise<string | null> {
-    if (options.consistency === 'finalized-authority-index') {
-      const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
-      const resolveFinalized = indexReader?.resolveFinalizedContextGraphIdByNameHash;
-      if (resolveFinalized !== undefined) {
-        const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
-        const expectedNameHash = explicitNameHash === undefined
-          ? this.contextGraphNameCommitment(contextGraphId)
-          : this.contextGraphWireId(explicitNameHash);
-        try {
-          const resolved = await resolveFinalized.call(indexReader, expectedNameHash, {
-            signal: options.signal,
-          });
-          return resolved?.toString(10) ?? null;
-        } catch (error) {
-          if (options.signal?.aborted) throw options.signal.reason ?? error;
-          // Listing enrichment is a preference, not a semantic downgrade: an
-          // embedded/test adapter may expose a local index before its finalized
-          // RPC reader is usable. Preserve the pre-existing current resolver as
-          // the compatibility path in that case.
-        }
-      }
-    }
     const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
     return binding?.onChainId ?? null;
+  }
+
+  /**
+   * Resolve Context Graph authority targets at one explicit finalized horizon.
+   *
+   * Indexed adapters project every requested name commitment together. A
+   * single target additionally prefers the atomic name-to-authority snapshot
+   * capability so RFC-64 cannot compose identity and policy from different
+   * finalized heads. Older adapters are identified explicitly; callers then
+   * decide whether their operation permits a current-state compatibility path.
+   */
+  async resolveFinalizedContextGraphAuthorityTargetsV1(
+    this: DKGAgent,
+    contextGraphIds: readonly string[],
+    options: { signal?: AbortSignal } = {},
+  ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
+    const uniqueContextGraphIds = [...new Set(contextGraphIds)];
+    const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
+      const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+      const localId = canonicalTarget?.localId ?? contextGraphId;
+      const subscription = canonicalTarget?.subscription
+        ?? this.subscribedContextGraphs.get(localId);
+      const expectedNameHash = canonicalTarget?.nameHash
+        ?? (subscription?.onChainHash === undefined
+          ? this.contextGraphNameCommitment(localId)
+          : this.contextGraphWireId(subscription.onChainHash));
+      return { contextGraphId, expectedNameHash } as const;
+    });
+
+    const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
+    if (indexReader === undefined) return { kind: 'legacy-current' };
+
+    if (bindingTargets.length === 1) {
+      const resolveSnapshot = indexReader
+        .resolveFinalizedContextGraphAuthoritySnapshotByNameHash;
+      if (resolveSnapshot !== undefined) {
+        const [{ contextGraphId, expectedNameHash }] = bindingTargets;
+        const finalizedSnapshot = await resolveSnapshot.call(
+          indexReader,
+          expectedNameHash,
+          options,
+        );
+        const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
+        if (finalizedSnapshot !== null) {
+          targets.set(contextGraphId, Object.freeze({
+            expectedNameHash,
+            expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
+            finalizedSnapshot,
+          }));
+        }
+        return { kind: 'finalized-index', targets };
+      }
+    }
+
+    const resolveMany = indexReader.resolveFinalizedContextGraphIdsByNameHashes;
+    if (resolveMany !== undefined) {
+      const resolvedByNameHash = await resolveMany.call(
+        indexReader,
+        bindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+        options,
+      );
+      const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
+      for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+        const expectedOnChainId = resolvedByNameHash.get(expectedNameHash);
+        if (expectedOnChainId !== undefined) {
+          targets.set(contextGraphId, Object.freeze({
+            expectedNameHash,
+            expectedOnChainId,
+          }));
+        }
+      }
+      return { kind: 'finalized-index', targets };
+    }
+
+    const resolveOne = indexReader.resolveFinalizedContextGraphIdByNameHash;
+    if (resolveOne === undefined) return { kind: 'legacy-current' };
+    const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
+    for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+      const expectedOnChainId = await resolveOne.call(
+        indexReader,
+        expectedNameHash,
+        options,
+      );
+      if (expectedOnChainId !== null) {
+        targets.set(contextGraphId, Object.freeze({
+          expectedNameHash,
+          expectedOnChainId,
+        }));
+      }
+    }
+    return { kind: 'finalized-index', targets };
+  }
+
+  /**
+   * Single-target authority boundary used by RFC-64. Indexed absence remains
+   * finalized absence; only adapters with no finalized capability use the
+   * explicit legacy current-state resolver.
+   */
+  async resolveFinalizedContextGraphAuthorityTargetV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<FinalizedContextGraphAuthorityTargetV1 | null> {
+    // A durable local-first graph deliberately has no chain target. RFC-64
+    // authenticates that lane from its local owner metadata instead.
+    if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) return null;
+
+    const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
+      [contextGraphId],
+      options,
+    );
+    if (resolution.kind === 'finalized-index') {
+      return resolution.targets.get(contextGraphId) ?? null;
+    }
+
+    const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
+    const expectedNameHash = explicitNameHash
+      ? this.contextGraphWireId(explicitNameHash)
+      : this.contextGraphNameCommitment(contextGraphId);
+    const resolved = await this.getContextGraphOnChainId(contextGraphId, options);
+    return resolved === null
+      ? null
+      : Object.freeze({
+          expectedNameHash,
+          expectedOnChainId: BigInt(resolved),
+        });
+  }
+
+  /**
+   * Listing is advisory and must reflect a just-mined registration before it
+   * reaches the finalized index. Prefer finalized evidence, then explicitly
+   * fall back to the current resolver for an indexed miss or ordinary reader
+   * failure. Caller cancellation never degrades into another RPC path.
+   */
+  async resolveContextGraphOnChainIdForListing(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: {
+      signal?: AbortSignal;
+      finalizedTarget?: FinalizedContextGraphAuthorityTargetV1 | null;
+    } = {},
+  ): Promise<string | null> {
+    let finalizedTarget = options.finalizedTarget;
+    if (!Object.hasOwn(options, 'finalizedTarget')) {
+      try {
+        const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
+          [contextGraphId],
+          options,
+        );
+        if (resolution.kind === 'finalized-index') {
+          finalizedTarget = resolution.targets.get(contextGraphId) ?? null;
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw options.signal.reason ?? error;
+      }
+    }
+    if (finalizedTarget !== undefined && finalizedTarget !== null) {
+      return finalizedTarget.expectedOnChainId.toString(10);
+    }
+    return this.getContextGraphOnChainId(contextGraphId, options);
   }
 
   /**
