@@ -19,6 +19,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
     loading,
     loadError,
     refresh,
+    bootstrap,
     connected,
     wrongNetwork,
     summary,
@@ -69,7 +70,18 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       <div className="card-body">
 
       <div className="v10-identity-wallet-signer">
-        {connected ? <WalletPill /> : <WalletConnectControl className="compact" />}
+        {connected ? (
+          <WalletPill
+            bootstrap={bootstrap ?? undefined}
+            className="v10-identity-wallet-pill"
+            testId="identity-wallet-pill"
+          />
+        ) : (
+          <WalletConnectControl
+            className="compact v10-identity-wallet-connect"
+            testId="identity-wallet-connect"
+          />
+        )}
         {connected && !summaryLoading && !summaryError && (
           <span className={`badge ${connectedIsAdmin ? 'badge-success' : 'badge-warn'}`}>
             {connectedIsAdmin ? 'authorized admin signer' : 'not an admin for this identity'}

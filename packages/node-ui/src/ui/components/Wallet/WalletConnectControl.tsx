@@ -17,7 +17,13 @@ function providerKey(detail: Eip6963ProviderDetail): string {
  * browser-wallet UI is mounted, keeps provider metadata display-only, and uses conditional
  * hardware copy per inv-14.
  */
-export function WalletConnectControl({ className = '' }: { className?: string }) {
+export function WalletConnectControl({
+  className = '',
+  testId = 'wallet-connect',
+}: {
+  className?: string;
+  testId?: string;
+}) {
   const discovered = useWalletStore((s) => s.discovered);
   const unsupported = useWalletStore((s) => s.unsupported);
   const address = useWalletStore((s) => s.address);
@@ -38,9 +44,9 @@ export function WalletConnectControl({ className = '' }: { className?: string })
 
   if (address) {
     return (
-      <div className={['v10-pca-wallet-connect', className].filter(Boolean).join(' ')}>
+      <div className={['v10-wallet-connect', className].filter(Boolean).join(' ')}>
         <WalletPill />
-        <p className="v10-pca-wallet-note">
+        <p className="v10-wallet-note">
           One active wallet in v1. Disconnect to switch accounts or providers.
         </p>
       </div>
@@ -70,11 +76,11 @@ export function WalletConnectControl({ className = '' }: { className?: string })
   };
 
   return (
-    <div className={['v10-pca-wallet-connect', className].filter(Boolean).join(' ')}>
+    <div className={['v10-wallet-connect', className].filter(Boolean).join(' ')}>
       <button
         type="button"
-        className="v10-pca-wallet-connect-btn"
-        data-testid="pca-wallet-connect"
+        className="v10-wallet-connect-btn"
+        data-testid={testId}
         onClick={onMainClick}
         aria-expanded={pickerOpen}
       >
@@ -82,16 +88,16 @@ export function WalletConnectControl({ className = '' }: { className?: string })
         <span>{busyKey ? 'Connecting...' : 'Connect wallet'}</span>
         {discovered.length !== 1 && <ChevronDown size={14} aria-hidden="true" />}
       </button>
-      <p className="v10-pca-wallet-note">
+      <p className="v10-wallet-note">
         Hardware wallet recommended. If your provider uses a device, verify the amount and contract on
         the device. Hot publishing wallets can publish without prompts; their spend is bounded by the
         per-epoch allowance, not the committed TRAC.
       </p>
-      <p className="v10-pca-wallet-note">
+      <p className="v10-wallet-note">
         Provider names are self-reported and display-only.
       </p>
       {pickerOpen && (
-        <div className="v10-pca-wallet-picker" role="menu" aria-label="Wallet providers">
+        <div className="v10-wallet-picker" role="menu" aria-label="Wallet providers">
           {discovered.length > 0 ? (
             discovered.map((detail) => {
               const key = providerKey(detail);
@@ -99,13 +105,13 @@ export function WalletConnectControl({ className = '' }: { className?: string })
                 <button
                   key={key}
                   type="button"
-                  className="v10-pca-wallet-provider"
+                  className="v10-wallet-provider"
                   role="menuitem"
                   onClick={() => void connectDetail(detail)}
                   disabled={busyKey != null}
                 >
                   {detail.info.icon && (
-                    <img src={detail.info.icon} alt="" aria-hidden="true" className="v10-pca-wallet-provider-icon" />
+                    <img src={detail.info.icon} alt="" aria-hidden="true" className="v10-wallet-provider-icon" />
                   )}
                   <span>{providerName(detail)}</span>
                   {busyKey === key && <Loader2 size={13} aria-hidden="true" />}
@@ -113,19 +119,19 @@ export function WalletConnectControl({ className = '' }: { className?: string })
               );
             })
           ) : (
-            <p className="v10-pca-wallet-picker-empty">
+            <p className="v10-wallet-picker-empty">
               No supported injected wallet detected. Use a browser wallet that can connect to your hardware wallet.
             </p>
           )}
         </div>
       )}
       {unsupportedNames && (
-        <p className="v10-pca-wallet-note" role="status">
+        <p className="v10-wallet-note" role="status">
           Unsupported provider detected: {unsupportedNames}.
         </p>
       )}
       {error && (
-        <p className="v10-pca-wallet-error" role="alert">
+        <p className="v10-wallet-error" role="alert">
           {error}
         </p>
       )}

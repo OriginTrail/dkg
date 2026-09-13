@@ -40,12 +40,17 @@ vi.mock('../src/ui/web3/identityWalletActions.js', async (original) => {
   };
 });
 
-vi.mock('../src/ui/components/Wallet/index.js', () => ({
-  WalletConnectControl: () => React.createElement('button', null, 'Connect wallet'),
-  WalletPill: () => React.createElement('span', null, 'Connected wallet'),
-  WalletRow: ({ address, status, trailing }: { address: string; status?: React.ReactNode; trailing?: React.ReactNode }) =>
-    React.createElement('div', { 'data-wallet': address }, status, trailing),
-}));
+vi.mock('../src/ui/components/Wallet/index.js', async (original) => {
+  const actual = await original<typeof import('../src/ui/components/Wallet/index.js')>();
+  return {
+    ...actual,
+    WalletConnectControl: ({ testId }: { testId?: string }) => (
+      React.createElement('button', { 'data-testid': testId }, 'Connect wallet')
+    ),
+    WalletRow: ({ address, status, trailing }: { address: string; status?: React.ReactNode; trailing?: React.ReactNode }) =>
+      React.createElement('div', { 'data-wallet': address }, status, trailing),
+  };
+});
 
 const { IdentityWalletsSection } = await import('../src/ui/pages/identity-wallets/IdentityWalletsSection.js');
 const { useWalletStore } = await import('../src/ui/stores/wallet.js');
@@ -62,6 +67,7 @@ const CONTRACTS = {
   storage: `0x${'99'.repeat(20)}`,
   chainId: 'base:84532',
   rpcUrls: ['/api/identity-wallets/rpc'],
+  walletRpcUrls: ['https://wallet.example/base-sepolia'],
 };
 const PCA_CONTRACTS = {
   nft: `0x${'55'.repeat(20)}`,
@@ -262,6 +268,45 @@ describe('IdentityWalletsSection', () => {
     await waitFor(() => container.textContent?.includes("Switch the connected wallet to this node's network") === true, 'network warning');
     await act(async () => setInputValue(container.querySelector('#identity-operational-address')!, TARGET));
     expect((container.querySelector('[data-testid="add-operational"]') as HTMLButtonElement).disabled).toBe(true);
+    await unmount();
+  });
+
+  it('switches with the identity bootstrap when PCA bootstrap is unavailable', async () => {
+    const request = vi.fn(async ({ method }: { method: string }) => {
+      if (method === 'wallet_switchEthereumChain') {
+        const error = new Error('Unknown chain') as Error & { code: number };
+        error.code = 4902;
+        throw error;
+      }
+      return null;
+    });
+    useWalletStore.setState({
+      provider: { request },
+      chainId: 1,
+      expectedChainId: null,
+      bootstrap: null,
+    });
+
+    const { container, unmount } = await renderSection();
+    await waitFor(
+      () => [...container.querySelectorAll('button')].some((button) => button.textContent === 'Switch'),
+      'identity-owned network switch',
+    );
+    await click([...container.querySelectorAll('button')].find((button) => button.textContent === 'Switch')!);
+
+    expect(request).toHaveBeenNthCalledWith(1, {
+      method: 'wallet_switchEthereumChain',
+      params: [{ chainId: '0x14a34' }],
+    });
+    expect(request).toHaveBeenNthCalledWith(2, {
+      method: 'wallet_addEthereumChain',
+      params: [{
+        chainId: '0x14a34',
+        chainName: 'chain-84532',
+        nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+        rpcUrls: ['https://wallet.example/base-sepolia'],
+      }],
+    });
     await unmount();
   });
 });

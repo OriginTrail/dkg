@@ -237,6 +237,14 @@ async function keysForPurpose(
   })) as readonly Hex[];
 }
 
+function identityKeySet(keys: readonly Hex[]): ReadonlySet<string> {
+  return new Set(keys.map((key) => key.toLowerCase()));
+}
+
+function keySetHasAddress(keys: ReadonlySet<string>, address: Address): boolean {
+  return keys.has(identityWalletKey(address).toLowerCase());
+}
+
 export async function readIdentityWalletSummary(
   contracts: IdentityWalletContracts,
   client: IdentityWalletPublicClient,
@@ -249,26 +257,37 @@ export async function readIdentityWalletSummary(
     const item = normalizedAddress(address, 'Wallet address');
     return [item.toLowerCase(), item] as const;
   })).values()];
-  const [adminKeys, operationalKeys, states] = await Promise.all([
+  const [adminKeys, operationalKeys] = await Promise.all([
     keysForPurpose(client, identityStorage, identityId, ADMIN_KEY_PURPOSE),
     keysForPurpose(client, identityStorage, identityId, OPERATIONAL_KEY_PURPOSE),
-    Promise.all(normalized.map(async (address) => {
-      const [admin, operational] = await Promise.all([
-        hasPurpose(client, identityStorage, identityId, address, ADMIN_KEY_PURPOSE),
-        hasPurpose(client, identityStorage, identityId, address, OPERATIONAL_KEY_PURPOSE),
-      ]);
-      return { address, admin, operational };
-    })),
   ]);
+  const admins = identityKeySet(adminKeys);
+  const operational = identityKeySet(operationalKeys);
   return {
     adminCount: adminKeys.length,
     operationalCount: operationalKeys.length,
-    addresses: states,
+    addresses: normalized.map((address) => ({
+      address,
+      admin: keySetHasAddress(admins, address),
+      operational: keySetHasAddress(operational, address),
+    })),
   };
 }
 
 async function assertAdmin(ctx: IdentityWalletContext, identityId: bigint): Promise<void> {
   if (!(await hasPurpose(ctx.publicClient, ctx.identityStorage, identityId, ctx.signer, ADMIN_KEY_PURPOSE))) {
+    throw new IdentityWalletActionError(
+      `Connected wallet ${ctx.signer} is not an admin key for identity ${identityId}. Connect an existing admin wallet.`,
+    );
+  }
+}
+
+function assertAdminInKeys(
+  ctx: IdentityWalletContext,
+  identityId: bigint,
+  adminKeys: ReadonlySet<string>,
+): void {
+  if (!keySetHasAddress(adminKeys, ctx.signer)) {
     throw new IdentityWalletActionError(
       `Connected wallet ${ctx.signer} is not an admin key for identity ${identityId}. Connect an existing admin wallet.`,
     );
@@ -348,12 +367,14 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
         );
       }
       const ctx = loadContext(deps);
-      await assertAdmin(ctx, identityId);
-      const [attached, operationalKeys] = await Promise.all([
-        hasPurpose(ctx.publicClient, ctx.identityStorage, identityId, address, OPERATIONAL_KEY_PURPOSE),
+      const [adminKeys, operationalKeys] = await Promise.all([
+        keysForPurpose(ctx.publicClient, ctx.identityStorage, identityId, ADMIN_KEY_PURPOSE),
         keysForPurpose(ctx.publicClient, ctx.identityStorage, identityId, OPERATIONAL_KEY_PURPOSE),
       ]);
-      if (!attached) throw new IdentityWalletActionError(`${address} is not an operational key for identity ${identityId}.`);
+      assertAdminInKeys(ctx, identityId, identityKeySet(adminKeys));
+      if (!keySetHasAddress(identityKeySet(operationalKeys), address)) {
+        throw new IdentityWalletActionError(`${address} is not an operational key for identity ${identityId}.`);
+      }
       if (operationalKeys.length <= 1) {
         throw new IdentityWalletActionError('The final operational key cannot be removed.');
       }
@@ -391,12 +412,12 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
       const identityId = parsedIdentityId(identityIdValue);
       const address = normalizedAddress(addressValue, 'Admin wallet');
       const ctx = loadContext(deps);
-      await assertAdmin(ctx, identityId);
-      const [attached, adminKeys] = await Promise.all([
-        hasPurpose(ctx.publicClient, ctx.identityStorage, identityId, address, ADMIN_KEY_PURPOSE),
-        keysForPurpose(ctx.publicClient, ctx.identityStorage, identityId, ADMIN_KEY_PURPOSE),
-      ]);
-      if (!attached) throw new IdentityWalletActionError(`${address} is not an admin key for identity ${identityId}.`);
+      const adminKeys = await keysForPurpose(ctx.publicClient, ctx.identityStorage, identityId, ADMIN_KEY_PURPOSE);
+      const admins = identityKeySet(adminKeys);
+      assertAdminInKeys(ctx, identityId, admins);
+      if (!keySetHasAddress(admins, address)) {
+        throw new IdentityWalletActionError(`${address} is not an admin key for identity ${identityId}.`);
+      }
       if (adminKeys.length <= 1) {
         throw new IdentityWalletActionError('The final admin key cannot be removed. Add its replacement first.');
       }

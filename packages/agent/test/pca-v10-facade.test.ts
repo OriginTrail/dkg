@@ -52,6 +52,52 @@ describe('DKGAgent V10 PCA facade', () => {
     expect(noChainAgent.supportsPublishingConvictionRpc).toBe(false);
   });
 
+  it('supportsIdentityWalletManagement requires the complete bootstrap and RPC surface', async () => {
+    const supported = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    expect((await makeAgent(supported)).supportsIdentityWalletManagement).toBe(true);
+    expect((await makeAgent(new NoChainAdapter())).supportsIdentityWalletManagement).toBe(false);
+
+    const missingBootstrap = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    Reflect.defineProperty(missingBootstrap, 'getIdentityWalletContracts', { value: undefined });
+    expect((await makeAgent(missingBootstrap)).supportsIdentityWalletManagement).toBe(false);
+
+    const missingRpc = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    Reflect.defineProperty(missingRpc, 'requestIdentityWalletRpc', { value: undefined });
+    expect((await makeAgent(missingRpc)).supportsIdentityWalletManagement).toBe(false);
+  });
+
+  it('getIdentityWalletContracts delegates to the adapter and falls back to null', async () => {
+    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const contracts = {
+      profile: ethers.Wallet.createRandom().address,
+      identity: ethers.Wallet.createRandom().address,
+      storage: ethers.Wallet.createRandom().address,
+      chainId: 'mock:31337',
+      rpcUrls: ['/api/identity-wallets/rpc'],
+      walletRpcUrls: ['https://wallet.example/mock'],
+    };
+    const getContracts = vi.spyOn(chain, 'getIdentityWalletContracts').mockResolvedValue(contracts);
+    const agent = await makeAgent(chain);
+
+    await expect(agent.getIdentityWalletContracts()).resolves.toEqual(contracts);
+    expect(getContracts).toHaveBeenCalledOnce();
+    await expect((await makeAgent(new NoChainAdapter())).getIdentityWalletContracts()).resolves.toBeNull();
+  });
+
+  it('requestIdentityWalletRpc preserves params and fails explicitly when unsupported', async () => {
+    const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const rpc = vi.spyOn(chain, 'requestIdentityWalletRpc').mockResolvedValue('0x01');
+    const agent = await makeAgent(chain);
+    const params = [{ to: ethers.Wallet.createRandom().address, data: '0x1234' }, 'latest'];
+
+    await expect(agent.requestIdentityWalletRpc('eth_call', params)).resolves.toBe('0x01');
+    expect(rpc).toHaveBeenCalledWith('eth_call', params);
+
+    const unsupported = await makeAgent(new NoChainAdapter());
+    await expect(unsupported.requestIdentityWalletRpc('eth_chainId', []))
+      .rejects.toThrow('Identity wallet RPC is not available on this deployment.');
+  });
+
   it('getPublishingConvictionAgents delegates to the adapter (checksummed list)', async () => {
     const owner = ethers.Wallet.createRandom();
     const chain = new MockChainAdapter('mock:31337', owner.address);

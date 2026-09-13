@@ -69,7 +69,9 @@ function paramsError(method: BrowserWalletRpcMethod, params: unknown[] | undefin
       if (!(isBlockQuantity(values[0]) || ['latest', 'safe', 'finalized'].includes(String(values[0])))) {
         return `${method} requires latest/safe/finalized or a hex block id`;
       }
-      return typeof values[1] === 'boolean' ? null : `${method} transaction-detail flag must be boolean`;
+      return values[1] === false
+        ? null
+        : `${method} permits only includeTransactions=false`;
     case 'eth_call':
       if (values.length < 1 || values.length > 2) return 'Identity wallet RPC eth_call accepts one transaction and an optional block id';
       if (values.length === 2 && !(

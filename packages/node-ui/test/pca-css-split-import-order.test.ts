@@ -48,8 +48,9 @@ describe('PCA CSS split — styles.css import order (#1354)', () => {
 
   it('loads node identity-wallet styles as an independent feature layer', () => {
     const identityIdx = imports.indexOf('./styles/26-identity-wallets.css');
-    const primitivesIdx = imports.indexOf('./styles/26-pca-primitives.css');
-    expect(identityIdx).toBeGreaterThan(primitivesIdx);
+    const walletIdx = imports.indexOf('./styles/26-wallet-primitives.css');
+    expect(walletIdx).toBeGreaterThanOrEqual(0);
+    expect(identityIdx).toBeGreaterThan(walletIdx);
   });
 
   it('no longer imports (or ships) the pre-split monolithic 26-pca.css', () => {

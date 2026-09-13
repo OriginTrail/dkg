@@ -257,6 +257,24 @@ describe('UI API tests', () => {
       expect(requestLog.some(r => r.url.startsWith('/api/identity-wallets/contracts'))).toBe(true);
     });
 
+    it('accepts the daemon identity-wallet bootstrap wire payload', async () => {
+      const contracts = {
+        profile: `0x${'11'.repeat(20)}`,
+        identity: `0x${'22'.repeat(20)}`,
+        storage: `0x${'33'.repeat(20)}`,
+        chainId: 'base:84532',
+        rpcUrls: ['/api/identity-wallets/rpc'],
+        walletRpcUrls: ['https://wallet.example/base-sepolia'],
+      };
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/identity-wallets/contracts'),
+        status: 200,
+        body: contracts,
+      });
+
+      await expect(fetchIdentityWalletContracts()).resolves.toEqual(contracts);
+    });
+
     it.each([
       ['missing address', { isAdmin: false, isPrimary: false, registered: true }],
       ['non-boolean admin flag', { address: '0xabc', isAdmin: 'yes', isPrimary: false, registered: true }],

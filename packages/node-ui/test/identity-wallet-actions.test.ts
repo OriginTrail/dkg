@@ -142,6 +142,8 @@ describe('identity wallet key reads', () => {
       { address: ADMIN, admin: true, operational: false },
       { address: PRIMARY, admin: false, operational: true },
     ]);
+    expect(h.readContract).toHaveBeenCalledTimes(2);
+    expect(h.readContract.mock.calls.every(([request]) => request.functionName === 'getKeysByPurpose')).toBe(true);
   });
 
   it('fails if the bootstrap routes identity reads to any other contract', async () => {
@@ -218,6 +220,8 @@ describe('identity wallet hardware-signed writes', () => {
   it('removes a non-primary operational wallet through Identity.removeKey', async () => {
     const h = makeHarness();
     await h.submitter.removeOperational('61', TARGET, PRIMARY);
+    expect(h.readContract).toHaveBeenCalledTimes(2);
+    expect(h.readContract.mock.calls.every(([request]) => request.functionName === 'getKeysByPurpose')).toBe(true);
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({
       account: ADMIN,
       address: IDENTITY,
@@ -259,6 +263,8 @@ describe('identity wallet hardware-signed writes', () => {
   it('removes an old admin by its hashed address when another admin remains', async () => {
     const h = makeHarness({ adminAddresses: [ADMIN, TARGET] });
     await h.submitter.removeAdmin('61', TARGET);
+    expect(h.readContract).toHaveBeenCalledOnce();
+    expect(h.readContract.mock.calls[0]![0].functionName).toBe('getKeysByPurpose');
     expect(h.writeContract.mock.calls[0]![0]).toMatchObject({
       account: ADMIN,
       address: IDENTITY,

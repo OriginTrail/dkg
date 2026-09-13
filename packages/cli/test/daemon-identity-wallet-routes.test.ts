@@ -164,4 +164,32 @@ describe('daemon identity-wallet browser capability', () => {
     expect(agent.getIdentityWalletContracts).not.toHaveBeenCalled();
     expect(rpc).not.toHaveBeenCalled();
   });
+
+  it('rejects expanded block batches while preserving bounded receipt polling', async () => {
+    const rpc = vi.fn(async (method: string) => method === 'eth_getTransactionReceipt' ? null : {});
+    const agent = {
+      supportsIdentityWalletManagement: true,
+      getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
+      requestIdentityWalletRpc: rpc,
+    };
+    const expandedBlocks = Array.from({ length: 20 }, (_, index) => ({
+      jsonrpc: '2.0', id: index, method: 'eth_getBlockByNumber', params: ['latest', true],
+    }));
+    const rejected = runCtx('POST', '/api/identity-wallets/rpc', agent, expandedBlocks);
+    await rejected.done;
+    expect(JSON.parse(rejected.res.body)).toHaveLength(20);
+    expect(JSON.parse(rejected.res.body).every(
+      (item: { error?: { code?: number } }) => item.error?.code === -32602,
+    )).toBe(true);
+    expect(rpc).not.toHaveBeenCalled();
+
+    const hash = `0x${'ab'.repeat(32)}`;
+    const receipt = runCtx('POST', '/api/identity-wallets/rpc', agent, {
+      jsonrpc: '2.0', id: 21, method: 'eth_getTransactionReceipt', params: [hash],
+    });
+    await receipt.done;
+    expect(JSON.parse(receipt.res.body)).toEqual({ jsonrpc: '2.0', id: 21, result: null });
+    expect(rpc).toHaveBeenCalledOnce();
+    expect(rpc).toHaveBeenCalledWith('eth_getTransactionReceipt', [hash]);
+  });
 });

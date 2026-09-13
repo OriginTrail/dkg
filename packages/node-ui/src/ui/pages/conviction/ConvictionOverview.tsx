@@ -317,7 +317,7 @@ export function ConvictionOverview() {
               </div>
             </div>
             <div className="v10-pca-overview-wallet">
-              <WalletConnectControl className="compact" />
+              <WalletConnectControl className="compact" testId="pca-wallet-connect" />
             </div>
             {ownedAccounts.length > 0 ? (
               <div className="v10-pca-owned-groups">

@@ -37,24 +37,24 @@ export function WalletRow({
 
   return (
     <div
-      className={['v10-pca-wallet-row', className].filter(Boolean).join(' ')}
+      className={['v10-wallet-row', className].filter(Boolean).join(' ')}
       role="group"
       aria-label={ariaLabel}
     >
-      <span className="v10-pca-wallet-addr" title={address}>
+      <span className="v10-wallet-addr" title={address}>
         {truncateAddress(address)}
       </span>
       <CopyButton value={address} label={`Copy address ${address}`} />
       {status != null && (
         <span
-          className="v10-pca-wallet-status"
+          className="v10-wallet-status"
           data-tone={statusTone}
         >
           {status}
         </span>
       )}
-      {gas != null && <span className="v10-pca-wallet-gas">{gas}</span>}
-      {trailing != null && <span className="v10-pca-wallet-trailing">{trailing}</span>}
+      {gas != null && <span className="v10-wallet-gas">{gas}</span>}
+      {trailing != null && <span className="v10-wallet-trailing">{trailing}</span>}
     </div>
   );
 }

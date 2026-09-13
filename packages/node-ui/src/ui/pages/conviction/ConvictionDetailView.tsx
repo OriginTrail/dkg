@@ -195,7 +195,7 @@ function DetailBody({
 
       <div className="v10-modal-tip" role="status">
         {walletSurfaceCopy}
-        {connectedWallet ? <WalletPill /> : <WalletConnectControl />}
+        {connectedWallet ? <WalletPill /> : <WalletConnectControl testId="pca-wallet-connect" />}
       </div>
 
       {deviceProgress.steps.length > 0 && (

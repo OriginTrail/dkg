@@ -80,8 +80,8 @@
   background: var(--bg-surface);
 }
 
-.v10-identity-wallet-signer .v10-pca-wallet-connect,
-.v10-identity-wallet-signer .v10-pca-wallet-pill-wrap {
+.v10-identity-wallet-signer .v10-wallet-connect,
+.v10-identity-wallet-signer .v10-wallet-pill-wrap {
   min-width: 0;
   max-width: 100%;
 }
@@ -172,7 +172,7 @@
     flex-direction: column;
   }
 
-  .v10-identity-wallet-known .v10-pca-wallet-trailing {
+  .v10-identity-wallet-known .v10-wallet-trailing {
     width: 100%;
     margin-left: 0;
   }
