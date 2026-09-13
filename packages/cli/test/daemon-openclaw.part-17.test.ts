@@ -372,7 +372,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     }) as typeof fetch;
 
     try {
-      const integration = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
       expect(fetchCalls).toBeGreaterThan(0);
       expect(integration.status).toBe('ready');
       expect(integration.runtime.ready).toBe(true);
@@ -406,7 +406,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     })) as typeof fetch;
 
     try {
-      const integration = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
       expect(integration.status).toBe('error');
       expect(integration.runtime.ready).toBe(false);
       expect(integration.runtime.lastError).toBeTruthy();
@@ -426,7 +426,7 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     }) as typeof fetch;
 
     try {
-      const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+      const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
       expect(integration).toBeTruthy();
       expect(integration.id).toBe('hermes');
       expect(fetchCalls).toBe(1);

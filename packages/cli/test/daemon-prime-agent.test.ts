@@ -617,7 +617,7 @@ describe('connect from the Node UI', () => {
       activeSessionId: 'stale',
     };
 
-    const live = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { integration: live } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
     expect(live.metadata).toMatchObject({
       sessionCount: 1,
       activeSessionId: 'current',
@@ -625,7 +625,7 @@ describe('connect from the Node UI', () => {
     });
 
     rmSync(join(sessionsDir, 'current.json'));
-    const idle = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { integration: idle } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
     expect(idle.metadata).toMatchObject({
       sessionCount: 0,
       activeSessionId: null,
@@ -672,7 +672,7 @@ describe('refresh from the Node UI', () => {
       },
     } as Partial<DkgConfig>);
 
-    const result = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { integration: result } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
 
     expect(result.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
     expect(result.transport).toMatchObject({ kind: 'prime-agent-channel', bridgeUrl: bridge.url });
@@ -686,7 +686,7 @@ describe('refresh from the Node UI', () => {
     writeDescriptor('survivor', survivor.url, process.pid, '2026-08-07T11:00:00.000Z');
     const config = enabledConfig();
 
-    const result = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { integration: result } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
 
     expect(result.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
     expect(result.transport).toMatchObject({
@@ -712,7 +712,7 @@ describe('refresh from the Node UI', () => {
       },
     } as Partial<DkgConfig>);
 
-    const result = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { integration: result } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
 
     expect(result.runtime).toMatchObject({
       status: 'degraded',

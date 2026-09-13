@@ -19,6 +19,8 @@ import {
 } from '../src/daemon/hermes.js';
 import {
   type LocalAgentUiAttachDeps,
+  LocalAgentUiConnectError,
+  extractLocalAgentIntegrationPatch,
   connectLocalAgentIntegrationFromUi,
   connectLocalAgentIntegration,
   getLocalAgentIntegration,
@@ -892,8 +894,9 @@ describe('Hermes local-agent registry lifecycle', () => {
       localAgentIntegrations: {
         hermes: {
           enabled: true,
-          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
-          metadata: { profileName: 'research', hermesHome: 'C:\\Hermes\\research' },
+          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642', healthUrl: 'http://127.0.0.1:8642/stale-health' },
+          capabilities: { chatAttachments: false },
+          metadata: { profileName: 'research', hermesHome: 'C:\\Hermes\\research', operatorLabel: 'initial' },
           runtime: { status: 'degraded', ready: false },
         },
       },
@@ -931,7 +934,12 @@ describe('Hermes local-agent registry lifecycle', () => {
       } as any);
       await entered;
       let connectEditCommitted = false;
-      edits.push(configStore.update(current => ({ ...current, name: 'committed during blocked probe' }), 'configuration-only')
+      edits.push(configStore.update(current => {
+        const next = structuredClone(current) as DkgConfig;
+        next.name = 'committed during blocked probe';
+        updateLocalAgentIntegration(next, 'hermes', { capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during connect' } });
+        return next;
+      }, 'configuration-only')
         .then(() => { connectEditCommitted = true; }));
       await vi.waitFor(() => expect(connectEditCommitted).toBe(true));
       expect(configStore.current.name).toBe('committed during blocked probe');
@@ -941,6 +949,10 @@ describe('Hermes local-agent registry lifecycle', () => {
       expect(configStore.current.name).toBe('committed during blocked probe');
       expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')).name).toBe('committed during blocked probe');
       expect(connectRes.statusCode).toBe(200);
+      expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
+        capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during connect' },
+      });
+      expect(configStore.current.localAgentIntegrations?.hermes?.transport).not.toHaveProperty('healthUrl');
       const connectBody = JSON.parse(connectRes.body);
       expect(connectBody.integration).toEqual(getLocalAgentIntegration(configStore.current, 'hermes'));
       expect(configStore.current.localAgentIntegrations?.hermes?.runtime)
@@ -960,14 +972,20 @@ describe('Hermes local-agent registry lifecycle', () => {
         refreshFromUi: async candidate => {
           refreshEntered();
           await refreshBlocked;
-          return updateLocalAgentIntegration(candidate, 'hermes', {
-            runtime: { status: 'ready', ready: true, lastError: null },
-          });
+          const patch = { runtime: { status: 'ready' as const, ready: true, lastError: null } };
+          // Scratch state is not a persistence contract: only the explicit patch commits.
+          candidate.name = 'uncommitted scratch state';
+          return { integration: updateLocalAgentIntegration(candidate, 'hermes', patch), patch };
         },
       });
       await refreshStarted;
       let refreshEditCommitted = false;
-      edits.push(configStore.update(current => ({ ...current, name: 'committed during blocked refresh' }), 'configuration-only')
+      edits.push(configStore.update(current => {
+        const next = structuredClone(current) as DkgConfig;
+        next.name = 'committed during blocked refresh';
+        updateLocalAgentIntegration(next, 'hermes', { runtime: { status: 'degraded', ready: false }, metadata: { operatorLabel: 'edited during refresh' } });
+        return next;
+      }, 'configuration-only')
         .then(() => { refreshEditCommitted = true; }));
       await vi.waitFor(() => expect(refreshEditCommitted).toBe(true));
       expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')).name).toBe('committed during blocked refresh');
@@ -976,6 +994,10 @@ describe('Hermes local-agent registry lifecycle', () => {
       expect(configStore.current.name).toBe('committed during blocked refresh');
 
       expect(refreshRes.statusCode).toBe(200);
+      expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
+        runtime: { status: 'ready', ready: true },
+        capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during refresh' },
+      });
       expect(JSON.parse(refreshRes.body).integration)
         .toEqual(getLocalAgentIntegration(configStore.current, 'hermes'));
       expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')))
@@ -1003,7 +1025,12 @@ describe('Hermes local-agent registry lifecycle', () => {
         updateLocalAgentIntegration(candidate, integration.id, patch);
         await savePreparedConfig(candidate, patch);
       };
-      return { integration, notice: 'attach scheduled' };
+      return {
+        integration,
+        registration: extractLocalAgentIntegrationPatch({ ...body, capabilities: { localChat: true } }),
+        patch: { runtime: { status: 'connecting', ready: false, lastError: null } },
+        notice: 'attach scheduled',
+      };
     };
     const connect = async () => {
       const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
@@ -1073,7 +1100,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
     const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
     const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
-      id: 'custom-agent',
+      id: 'hermes',
       metadata: { source: 'node-ui' },
     });
     const res = makeJsonResponse();
@@ -1084,22 +1111,71 @@ describe('Hermes local-agent registry lifecycle', () => {
         configStore,
         path: '/api/local-agent-integrations/connect',
       } as any, {
-        connectFromUi: async (candidate, body) => {
-          connectLocalAgentIntegration(candidate, {
-            ...body,
-            runtime: { status: 'connecting', ready: false },
-          });
-          throw new Error('setup probe failed');
-        },
+        connectFromUi: (candidate, body, token, deps) => connectLocalAgentIntegrationFromUi(candidate, body, token, {
+          ...deps,
+          probeHermesHealth: async () => { throw new Error('setup probe failed'); },
+        }),
       });
 
       expect(res.statusCode).toBe(400);
       expect(JSON.parse(res.body)).toEqual({ error: 'setup probe failed' });
-      expect(configStore.current.localAgentIntegrations?.['custom-agent']?.runtime)
+      expect(configStore.current.localAgentIntegrations?.hermes?.runtime)
         .toMatchObject({ status: 'error', ready: false, lastError: 'setup probe failed' });
       expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')))
         .toEqual(configStore.current);
     } finally {
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['connect', 'refresh', 'failed-connect'] as const)('keeps a newer explicit disconnect after blocked %s preparation', async operation => {
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig({
+      localAgentIntegrations: { hermes: { enabled: true, runtime: { status: 'ready', ready: true } } },
+    }));
+    const entered = deferred();
+    const released = deferred();
+    const patch = { runtime: { status: 'ready' as const, ready: true, lastError: null } };
+    const path = operation === 'refresh'
+      ? '/api/local-agent-integrations/hermes/refresh' : '/api/local-agent-integrations/connect';
+    const req = makeJsonRequest('POST', path, { id: 'hermes', metadata: { source: 'node-ui' } });
+    const res = makeJsonResponse();
+    const running = handleLocalAgentsRoutes({ req, res, configStore, path } as any, {
+      connectFromUi: async (candidate, body) => {
+        entered.resolve();
+        await released.promise;
+        const registration = extractLocalAgentIntegrationPatch(body);
+        if (operation === 'failed-connect') throw new LocalAgentUiConnectError(
+          registration,
+          { runtime: { status: 'error', ready: false, lastError: 'probe failed' } },
+          new Error('probe failed'),
+        );
+        return { integration: getLocalAgentIntegration(candidate, 'hermes')!, registration, patch };
+      },
+      refreshFromUi: async candidate => {
+        entered.resolve();
+        await released.promise;
+        return { integration: getLocalAgentIntegration(candidate, 'hermes')!, patch };
+      },
+    });
+    try {
+      await entered.promise;
+      await configStore.update(current => {
+        const next = structuredClone(current) as DkgConfig;
+        updateLocalAgentIntegration(next, 'hermes', { enabled: false, runtime: { status: 'disconnected' } });
+        return next;
+      }, 'configuration-only');
+      released.resolve();
+      await running;
+      expect(res.statusCode).toBe(operation === 'failed-connect' ? 400 : 200);
+      expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
+        enabled: false, metadata: { userDisabled: true }, runtime: { status: 'disconnected', ready: false },
+      });
+      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8'))).toEqual(configStore.current);
+    } finally {
+      released.resolve();
+      await running;
+      await configStore.close();
       rmSync(dkgHome, { recursive: true, force: true });
     }
   });
@@ -1289,7 +1365,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     });
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 })));
 
-    const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+    const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
 
     expect(integration.runtime.status).toBe('ready');
     expect(integration.runtime.ready).toBe(true);
@@ -1318,7 +1394,7 @@ describe('Hermes local-agent registry lifecycle', () => {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }));
 
-    const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+    const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
 
     expect(integration.runtime.status).toBe('ready');
     expect(integration.transport.bridgeUrl).toBe('http://127.0.0.1:9444');
@@ -1346,7 +1422,7 @@ describe('Hermes local-agent registry lifecycle', () => {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     }));
 
-    const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+    const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
 
     expect(urls).toEqual(['https://hermes.example.com/api/hermes-channel/health']);
     expect(integration.runtime.status).toBe('ready');
@@ -1369,7 +1445,7 @@ describe('Hermes local-agent registry lifecycle', () => {
       error: 'warming up',
     }), { status: 200 })));
 
-    const integration = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+    const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
 
     expect(integration.runtime.status).toBe('degraded');
     expect(integration.runtime.ready).toBe(false);

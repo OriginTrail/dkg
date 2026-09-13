@@ -555,6 +555,26 @@ async function addHermesProfileMetadataForUiConnect(
   };
 }
 
+export interface LocalAgentUiConnectResult {
+  integration: LocalAgentIntegrationRecord;
+  /** Normalized connect intent, including resolved profile metadata. */
+  registration: LocalAgentIntegrationConfig;
+  /** State produced by the probe/setup layer, ready to rebase at commit time. */
+  patch: LocalAgentAttachStatePatch;
+  notice?: string;
+}
+
+/** A failed probe still carries the registration and explicit error-state patch. */
+export class LocalAgentUiConnectError extends Error {
+  constructor(
+    readonly registration: LocalAgentIntegrationConfig,
+    readonly patch: LocalAgentAttachStatePatch,
+    cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : 'Local agent attach failed', { cause });
+  }
+}
+
 /**
  * CONTRACT (issue #198): This handler MUST leave ~/.openclaw/openclaw.json in a state
  * where the OpenClaw gateway, on next restart, will load the adapter from the
@@ -566,14 +586,14 @@ export async function connectLocalAgentIntegrationFromUi(
   body: Record<string, unknown>,
   bridgeAuthToken: string | undefined,
   deps: LocalAgentUiAttachDeps = {},
-): Promise<{ integration: LocalAgentIntegrationRecord; notice?: string }> {
+): Promise<LocalAgentUiConnectResult> {
   const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
   const hadStoredTransportBeforeConnect = hasStoredLocalAgentTransportConfig(existingBeforeConnect);
   const connectBody = requestedId === 'hermes'
     ? await addHermesProfileMetadataForUiConnect(config, body, deps)
     : body;
-  const requested = connectLocalAgentIntegration(config, {
+  const registration = extractLocalAgentIntegrationPatch({
     ...connectBody,
     runtime: {
       status: 'connecting',
@@ -581,103 +601,249 @@ export async function connectLocalAgentIntegrationFromUi(
       lastError: null,
     },
   });
-  if (requested.id === 'prime-agent') {
-    // Prime Agent differs from Hermes in one way that matters here: there is no
-    // durable endpoint to connect to. Bridges exist only while a session is
-    // live, and each live session publishes its own. So "connect" resolves the
-    // discovery directory rather than dialling a configured URL, and "installed
-    // but no session running" is a first-class NON-error state — reporting it as
-    // an error would train operators to ignore a red badge that is usually
-    // nothing more than "you have not opened a session yet".
-    // Install first, exactly as the Hermes branch does. Without this, "Connect"
-    // would only look for bridges that the agent has no extension to publish,
-    // and the panel would sit at "start a session" forever. The setup verb is
-    // idempotent — a second run finds our entry already in settings.json and
-    // makes no write.
-    const setup = await runPrimeAgentUiSetup(deps);
-    if (!setup.ok) {
-      const integration = updateLocalAgentIntegration(config, requested.id, {
+  const requested = connectLocalAgentIntegration(config, { id: requestedId, ...registration });
+  try {
+    if (requested.id === 'prime-agent') {
+      // Prime Agent differs from Hermes in one way that matters here: there is no
+      // durable endpoint to connect to. Bridges exist only while a session is
+      // live, and each live session publishes its own. So "connect" resolves the
+      // discovery directory rather than dialling a configured URL, and "installed
+      // but no session running" is a first-class NON-error state — reporting it as
+      // an error would train operators to ignore a red badge that is usually
+      // nothing more than "you have not opened a session yet".
+      // Install first, exactly as the Hermes branch does. Without this, "Connect"
+      // would only look for bridges that the agent has no extension to publish,
+      // and the panel would sit at "start a session" forever. The setup verb is
+      // idempotent — a second run finds our entry already in settings.json and
+      // makes no write.
+      const setup = await runPrimeAgentUiSetup(deps);
+      if (!setup.ok) {
+        const patch: LocalAgentAttachStatePatch = {
+          runtime: {
+            status: 'error',
+            ready: false,
+            lastError: setup.errors.join('; ') || 'Prime Agent setup failed',
+          },
+        };
+        const integration = updateLocalAgentIntegration(config, requested.id, patch);
+        return {
+          integration,
+          registration,
+          patch,
+          notice: `${integration.name} setup failed: ${setup.errors.join('; ') || 'unknown error'}`,
+        };
+      }
+
+      const health = await probePrimeAgentChannelHealth(bridgeAuthToken, { timeoutMs: 3_000 });
+      const live = health.sessions.find((s) => s.sessionId === health.target) ?? health.sessions[0];
+      // Routing always elects the descriptor-order head. The health probe may
+      // fall through to an older survivor, which is suitable for the transport
+      // readiness check but must never become the UI's conversation pin.
+      const activeSessionId = health.sessions[0]?.sessionId ?? null;
+      const activeMemorySessionId = health.sessions[0]?.memorySessionId ?? null;
+
+      if (health.ok && live) {
+        const patch: LocalAgentAttachStatePatch = {
+          transport: transportPatchFromPrimeAgentTarget(targetFromDescriptor(live)),
+          runtime: { status: 'ready', ready: true, lastError: null },
+          metadata: { sessionCount: health.sessionCount, activeSessionId, activeMemorySessionId },
+        };
+        const integration = updateLocalAgentIntegration(config, requested.id, patch);
+        return {
+          integration,
+          registration,
+          patch,
+          notice:
+            health.sessionCount > 1
+              // Do not name a routed session here: `live` is the health-probe
+              // survivor (probe falls through on failure), while routing takes
+              // the election head unconditionally — the two can differ.
+              ? `${integration.name} is connected — ${health.sessionCount} sessions live; unaddressed chat routes to the most recently active one.`
+              : `${integration.name} is connected and chat-ready.`,
+        };
+      }
+
+      const patch: LocalAgentAttachStatePatch = {
         runtime: {
-          status: 'error',
+          status: 'degraded',
           ready: false,
-          lastError: setup.errors.join('; ') || 'Prime Agent setup failed',
+          lastError: health.error ?? 'no live Prime Agent session',
         },
-      });
-      return {
-        integration,
-        notice: `${integration.name} setup failed: ${setup.errors.join('; ') || 'unknown error'}`,
-      };
-    }
-
-    const health = await probePrimeAgentChannelHealth(bridgeAuthToken, { timeoutMs: 3_000 });
-    const live = health.sessions.find((s) => s.sessionId === health.target) ?? health.sessions[0];
-    // Routing always elects the descriptor-order head. The health probe may
-    // fall through to an older survivor, which is suitable for the transport
-    // readiness check but must never become the UI's conversation pin.
-    const activeSessionId = health.sessions[0]?.sessionId ?? null;
-    const activeMemorySessionId = health.sessions[0]?.memorySessionId ?? null;
-
-    if (health.ok && live) {
-      const integration = updateLocalAgentIntegration(config, requested.id, {
-        transport: transportPatchFromPrimeAgentTarget(targetFromDescriptor(live)),
-        runtime: { status: 'ready', ready: true, lastError: null },
         metadata: { sessionCount: health.sessionCount, activeSessionId, activeMemorySessionId },
-      });
+      };
+      const integration = updateLocalAgentIntegration(config, requested.id, patch);
       return {
         integration,
+        registration,
+        patch,
         notice:
-          health.sessionCount > 1
-            // Do not name a routed session here: `live` is the health-probe
-            // survivor (probe falls through on failure), while routing takes
-            // the election head unconditionally — the two can differ.
-            ? `${integration.name} is connected — ${health.sessionCount} sessions live; unaddressed chat routes to the most recently active one.`
-            : `${integration.name} is connected and chat-ready.`,
+          health.sessionCount === 0
+            ? `${integration.name} is registered. Start a Prime Agent session and refresh — the extension publishes its bridge on session start.`
+            : `${integration.name} has ${health.sessionCount} session(s) but none answered a health probe: ${health.error ?? 'unknown error'}`,
       };
     }
 
-    const integration = updateLocalAgentIntegration(config, requested.id, {
-      runtime: {
-        status: 'degraded',
-        ready: false,
-        lastError: health.error ?? 'no live Prime Agent session',
-      },
-      metadata: { sessionCount: health.sessionCount, activeSessionId, activeMemorySessionId },
-    });
-    return {
-      integration,
-      notice:
-        health.sessionCount === 0
-          ? `${integration.name} is registered. Start a Prime Agent session and refresh — the extension publishes its bridge on session start.`
-          : `${integration.name} has ${health.sessionCount} session(s) but none answered a health probe: ${health.error ?? 'unknown error'}`,
-    };
-  }
+    if (requested.id === 'hermes') {
+      const probeHermesHealth = deps.probeHermesHealth ?? probeHermesChannelHealth;
+      const runSetup = deps.runHermesSetup ?? runHermesUiSetup;
+      const saveConfigState = deps.saveConfig;
 
-  if (requested.id === 'hermes') {
-    const probeHermesHealth = deps.probeHermesHealth ?? probeHermesChannelHealth;
-    const runSetup = deps.runHermesSetup ?? runHermesUiSetup;
+      const health = await probeHermesHealth(config, bridgeAuthToken, { timeoutMs: 3_000 });
+      if (health.ok && hadStoredTransportBeforeConnect) {
+        const transport = transportPatchFromHermesTarget(config, health.target)
+          ?? (health.target === 'gateway'
+            ? { kind: 'hermes-openai', gatewayUrl: DEFAULT_HERMES_API_SERVER_URL }
+            : undefined);
+        const patch: LocalAgentAttachStatePatch = {
+          transport,
+          runtime: {
+            status: 'ready',
+            ready: true,
+            lastError: null,
+          },
+        };
+        const integration = updateLocalAgentIntegration(config, requested.id, patch);
+        return {
+          integration,
+          registration,
+          patch,
+          notice: `${integration.name} is connected and chat-ready.`,
+        };
+      }
+
+      const persistHermesIntegrationState = async (patch: LocalAgentAttachStatePatch): Promise<LocalAgentIntegrationRecord | null> => {
+        const current = getLocalAgentIntegration(config, requested.id);
+        if (current?.enabled === false && patch.enabled !== false) {
+          return null;
+        }
+        const integration = updateLocalAgentIntegration(config, requested.id, patch);
+        if (saveConfigState) {
+          await saveConfigState(config, patch);
+        }
+        return integration;
+      };
+
+      const { started } = scheduleAttachJob(requested.id, async (attachJob: PendingAttachJob) => {
+        try {
+          const result = await runSetup(attachJob.controller.signal);
+          if (isAttachJobCancelled(attachJob)) return;
+
+          // setup-entrypoint-contract.md §3: result.transport is non-optional and
+          // already matches the LocalAgentIntegrationTransport patch shape, so we
+          // lift it straight rather than calling transportPatchFromHermesTarget.
+          // Provider-swap audit (§3) goes onto record.metadata so disconnect/restore
+          // and the UI's hermesDetail formatter can both reach it.
+          const metadataPatch = result.providerSwap
+            ? {
+                priorProvider: result.providerSwap.previousProvider,
+                backupPath: result.providerSwap.backupPath,
+              }
+            : undefined;
+
+          if (!result.ok || result.status === 'error') {
+            await persistHermesIntegrationState({
+              ...(metadataPatch ? { metadata: metadataPatch } : {}),
+              runtime: {
+                status: 'error',
+                ready: false,
+                lastError: result.errors[0] ?? 'Hermes setup failed',
+              },
+            });
+            return;
+          }
+
+          if (result.status === 'degraded') {
+            await persistHermesIntegrationState({
+              transport: result.transport,
+              ...(metadataPatch ? { metadata: metadataPatch } : {}),
+              runtime: {
+                status: 'degraded',
+                ready: false,
+                lastError: result.warnings[0] ?? null,
+              },
+            });
+            return;
+          }
+
+          await persistHermesIntegrationState({
+            transport: result.transport,
+            ...(metadataPatch ? { metadata: metadataPatch } : {}),
+            runtime: {
+              status: 'ready',
+              ready: true,
+              lastError: null,
+            },
+          });
+        } catch (err: any) {
+          if (isAttachJobCancelled(attachJob)) return;
+          await persistHermesIntegrationState({
+            enabled: hadStoredTransportBeforeConnect ? true : false,
+            ...(hadStoredTransportBeforeConnect && existingBeforeConnect?.transport
+              ? { transport: existingBeforeConnect.transport }
+              : {}),
+            runtime: {
+              status: 'error',
+              ready: false,
+              lastError: err?.message ?? 'Hermes attach failed',
+            },
+          });
+        }
+      }, deps.onAttachScheduled);
+
+      const patch: LocalAgentAttachStatePatch = {
+        runtime: {
+          status: 'connecting',
+          ready: false,
+          lastError: null,
+        },
+      };
+      const integration = updateLocalAgentIntegration(config, requested.id, patch);
+      return {
+        integration,
+        registration,
+        patch,
+        notice: started
+          ? 'Hermes setup started. This chat tab will come online automatically once Hermes finishes setting up.'
+          : 'Hermes setup is already in progress. This chat tab will come online automatically once Hermes finishes setting up.',
+      };
+    }
+
+    if (requested.id !== 'openclaw') {
+      return {
+        integration: requested,
+        registration,
+        patch: {},
+        notice: `${requested.name} was registered. Chat will appear here once its framework bridge is available.`,
+      };
+    }
+
+    const probeHealth = deps.probeHealth ?? probeOpenClawChannelHealth;
+    const waitForReady = deps.waitForReady ?? waitForOpenClawChatReady;
+    const runSetup = deps.runSetup ?? runOpenClawUiSetup;
+    const restartGateway = deps.restartGateway ?? restartOpenClawGateway;
+    const verifyMemorySlot = deps.verifyMemorySlot ?? isOpenClawMemorySlotElected;
     const saveConfigState = deps.saveConfig;
 
-    const health = await probeHermesHealth(config, bridgeAuthToken, { timeoutMs: 3_000 });
+    let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
     if (health.ok && hadStoredTransportBeforeConnect) {
-      const transport = transportPatchFromHermesTarget(config, health.target)
-        ?? (health.target === 'gateway'
-          ? { kind: 'hermes-openai', gatewayUrl: DEFAULT_HERMES_API_SERVER_URL }
-          : undefined);
-      const integration = updateLocalAgentIntegration(config, requested.id, {
-        transport,
+      const patch: LocalAgentAttachStatePatch = {
+        transport: transportPatchFromOpenClawTarget(config, health.target),
         runtime: {
           status: 'ready',
           ready: true,
           lastError: null,
         },
-      });
+      };
+      const integration = updateLocalAgentIntegration(config, requested.id, patch);
       return {
         integration,
+        registration,
+        patch,
         notice: `${integration.name} is connected and chat-ready.`,
       };
     }
 
-    const persistHermesIntegrationState = async (patch: LocalAgentAttachStatePatch): Promise<LocalAgentIntegrationRecord | null> => {
+    const persistIntegrationState = async (patch: LocalAgentAttachStatePatch): Promise<LocalAgentIntegrationRecord | null> => {
       const current = getLocalAgentIntegration(config, requested.id);
       if (current?.enabled === false && patch.enabled !== false) {
         return null;
@@ -689,60 +855,62 @@ export async function connectLocalAgentIntegrationFromUi(
       return integration;
     };
 
-    const { started } = scheduleAttachJob(requested.id, async (attachJob: PendingAttachJob) => {
+    const { started } = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
       try {
-        const result = await runSetup(attachJob.controller.signal);
-        if (isAttachJobCancelled(attachJob)) return;
+        daemonState.openClawBridgeHealth = null;
+        await runSetup(attachJob.controller.signal);
+        if (isOpenClawUiAttachCancelled(attachJob)) return;
+        daemonState.openClawBridgeHealth = null;
 
-        // setup-entrypoint-contract.md §3: result.transport is non-optional and
-        // already matches the LocalAgentIntegrationTransport patch shape, so we
-        // lift it straight rather than calling transportPatchFromHermesTarget.
-        // Provider-swap audit (§3) goes onto record.metadata so disconnect/restore
-        // and the UI's hermesDetail formatter can both reach it.
-        const metadataPatch = result.providerSwap
-          ? {
-              priorProvider: result.providerSwap.previousProvider,
-              backupPath: result.providerSwap.backupPath,
-            }
-          : undefined;
-
-        if (!result.ok || result.status === 'error') {
-          await persistHermesIntegrationState({
-            ...(metadataPatch ? { metadata: metadataPatch } : {}),
+        if (!verifyMemorySlot()) {
+          await persistIntegrationState({
             runtime: {
               status: 'error',
               ready: false,
-              lastError: result.errors[0] ?? 'Hermes setup failed',
+              lastError: 'OpenClaw memory slot election failed after setup — adapter-openclaw not elected to plugins.slots.memory',
             },
           });
           return;
         }
 
-        if (result.status === 'degraded') {
-          await persistHermesIntegrationState({
-            transport: result.transport,
-            ...(metadataPatch ? { metadata: metadataPatch } : {}),
+        let latest = await probeHealth(config, bridgeAuthToken, {
+          ignoreBridgeCache: true,
+          timeoutMs: 3_000,
+        });
+        if (isOpenClawUiAttachCancelled(attachJob)) return;
+        if (!latest.ok) {
+          await restartGateway(attachJob.controller.signal);
+          if (isOpenClawUiAttachCancelled(attachJob)) return;
+          daemonState.openClawBridgeHealth = null;
+          latest = await waitForReady(config, bridgeAuthToken, attachJob.controller.signal);
+        }
+        if (isOpenClawUiAttachCancelled(attachJob)) return;
+
+        if (latest.ok) {
+          await persistIntegrationState({
+            transport: transportPatchFromOpenClawTarget(config, latest.target),
             runtime: {
-              status: 'degraded',
-              ready: false,
-              lastError: result.warnings[0] ?? null,
+              status: 'ready',
+              ready: true,
+              lastError: null,
             },
           });
           return;
         }
 
-        await persistHermesIntegrationState({
-          transport: result.transport,
-          ...(metadataPatch ? { metadata: metadataPatch } : {}),
+        await persistIntegrationState({
+          transport: transportPatchFromOpenClawTarget(config, latest.target),
           runtime: {
-            status: 'ready',
-            ready: true,
-            lastError: null,
+            status: 'connecting',
+            ready: false,
+            lastError: latest.error ?? null,
           },
         });
       } catch (err: any) {
-        if (isAttachJobCancelled(attachJob)) return;
-        await persistHermesIntegrationState({
+        if (isOpenClawUiAttachCancelled(attachJob)) {
+          return;
+        }
+        await persistIntegrationState({
           enabled: hadStoredTransportBeforeConnect ? true : false,
           ...(hadStoredTransportBeforeConnect && existingBeforeConnect?.transport
             ? { transport: existingBeforeConnect.transport }
@@ -750,153 +918,40 @@ export async function connectLocalAgentIntegrationFromUi(
           runtime: {
             status: 'error',
             ready: false,
-            lastError: err?.message ?? 'Hermes attach failed',
+            lastError: formatOpenClawUiAttachFailure(err),
           },
         });
+      } finally {
+        daemonState.openClawBridgeHealth = null;
       }
     }, deps.onAttachScheduled);
 
-    const integration = updateLocalAgentIntegration(config, requested.id, {
+    const patch: LocalAgentAttachStatePatch = {
       runtime: {
         status: 'connecting',
         ready: false,
         lastError: null,
       },
-    });
-    return {
-      integration,
-      notice: started
-        ? 'Hermes setup started. This chat tab will come online automatically once Hermes finishes setting up.'
-        : 'Hermes setup is already in progress. This chat tab will come online automatically once Hermes finishes setting up.',
     };
-  }
-
-  if (requested.id !== 'openclaw') {
-    return {
-      integration: requested,
-      notice: `${requested.name} was registered. Chat will appear here once its framework bridge is available.`,
-    };
-  }
-
-  const probeHealth = deps.probeHealth ?? probeOpenClawChannelHealth;
-  const waitForReady = deps.waitForReady ?? waitForOpenClawChatReady;
-  const runSetup = deps.runSetup ?? runOpenClawUiSetup;
-  const restartGateway = deps.restartGateway ?? restartOpenClawGateway;
-  const verifyMemorySlot = deps.verifyMemorySlot ?? isOpenClawMemorySlotElected;
-  const saveConfigState = deps.saveConfig;
-
-  let health = await probeHealth(config, bridgeAuthToken, { ignoreBridgeCache: true });
-  if (health.ok && hadStoredTransportBeforeConnect) {
-    const integration = updateLocalAgentIntegration(config, requested.id, {
-      transport: transportPatchFromOpenClawTarget(config, health.target),
-      runtime: {
-        status: 'ready',
-        ready: true,
-        lastError: null,
-      },
-    });
-    return {
-      integration,
-      notice: `${integration.name} is connected and chat-ready.`,
-    };
-  }
-
-  const persistIntegrationState = async (patch: LocalAgentAttachStatePatch): Promise<LocalAgentIntegrationRecord | null> => {
-    const current = getLocalAgentIntegration(config, requested.id);
-    if (current?.enabled === false && patch.enabled !== false) {
-      return null;
-    }
     const integration = updateLocalAgentIntegration(config, requested.id, patch);
-    if (saveConfigState) {
-      await saveConfigState(config, patch);
-    }
-    return integration;
-  };
-
-  const { started } = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
-    try {
-      daemonState.openClawBridgeHealth = null;
-      await runSetup(attachJob.controller.signal);
-      if (isOpenClawUiAttachCancelled(attachJob)) return;
-      daemonState.openClawBridgeHealth = null;
-
-      if (!verifyMemorySlot()) {
-        await persistIntegrationState({
-          runtime: {
-            status: 'error',
-            ready: false,
-            lastError: 'OpenClaw memory slot election failed after setup — adapter-openclaw not elected to plugins.slots.memory',
-          },
-        });
-        return;
-      }
-
-      let latest = await probeHealth(config, bridgeAuthToken, {
-        ignoreBridgeCache: true,
-        timeoutMs: 3_000,
-      });
-      if (isOpenClawUiAttachCancelled(attachJob)) return;
-      if (!latest.ok) {
-        await restartGateway(attachJob.controller.signal);
-        if (isOpenClawUiAttachCancelled(attachJob)) return;
-        daemonState.openClawBridgeHealth = null;
-        latest = await waitForReady(config, bridgeAuthToken, attachJob.controller.signal);
-      }
-      if (isOpenClawUiAttachCancelled(attachJob)) return;
-
-      if (latest.ok) {
-        await persistIntegrationState({
-          transport: transportPatchFromOpenClawTarget(config, latest.target),
-          runtime: {
-            status: 'ready',
-            ready: true,
-            lastError: null,
-          },
-        });
-        return;
-      }
-
-      await persistIntegrationState({
-        transport: transportPatchFromOpenClawTarget(config, latest.target),
-        runtime: {
-          status: 'connecting',
-          ready: false,
-          lastError: latest.error ?? null,
-        },
-      });
-    } catch (err: any) {
-      if (isOpenClawUiAttachCancelled(attachJob)) {
-        return;
-      }
-      await persistIntegrationState({
-        enabled: hadStoredTransportBeforeConnect ? true : false,
-        ...(hadStoredTransportBeforeConnect && existingBeforeConnect?.transport
-          ? { transport: existingBeforeConnect.transport }
-          : {}),
-        runtime: {
-          status: 'error',
-          ready: false,
-          lastError: formatOpenClawUiAttachFailure(err),
-        },
-      });
-    } finally {
-      daemonState.openClawBridgeHealth = null;
-    }
-  }, deps.onAttachScheduled);
-
-  const integration = updateLocalAgentIntegration(config, requested.id, {
-    runtime: {
-      status: 'connecting',
-      ready: false,
-      lastError: null,
-    },
-  });
-  return {
-    integration,
-    notice: started
-      ? 'OpenClaw attach started. This chat tab will come online automatically once OpenClaw finishes reloading.'
-      : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.',
-  };
+    return {
+      integration,
+      registration,
+      patch,
+      notice: started
+        ? 'OpenClaw attach started. This chat tab will come online automatically once OpenClaw finishes reloading.'
+        : 'OpenClaw attach is already in progress. This chat tab will come online automatically once OpenClaw finishes reloading.',
+    };
+  } catch (cause) {
+    const patch: LocalAgentAttachStatePatch = {
+      runtime: {
+        status: 'error', ready: false,
+        lastError: cause instanceof Error ? cause.message : 'Local agent attach failed',
+      },
+    };
+    updateLocalAgentIntegration(config, requested.id, patch);
+    throw new LocalAgentUiConnectError(registration, patch, cause);
+  }
 }
 
 /**
@@ -1089,12 +1144,16 @@ export async function refreshLocalAgentIntegrationFromUi(
   config: DkgConfig,
   id: string,
   bridgeAuthToken: string | undefined,
-): Promise<LocalAgentIntegrationRecord> {
+): Promise<{ integration: LocalAgentIntegrationRecord; patch: LocalAgentAttachStatePatch }> {
   const normalizedId = normalizeIntegrationId(id);
   const existing = getLocalAgentIntegration(config, normalizedId);
   if (!existing) {
     throw new Error(`Unknown integration: ${id}`);
   }
+  const applyPatch = (patch: LocalAgentAttachStatePatch) => ({
+    integration: updateLocalAgentIntegration(config, normalizedId, patch),
+    patch,
+  });
   if (normalizedId === 'prime-agent') {
     const health = await probePrimeAgentChannelHealth(bridgeAuthToken, { timeoutMs: 3_000 });
     const live = health.sessions.find((session) => session.sessionId === health.target)
@@ -1108,13 +1167,13 @@ export async function refreshLocalAgentIntegrationFromUi(
       activeMemorySessionId: health.sessions[0]?.memorySessionId ?? null,
     };
     if (health.ok && live) {
-      return updateLocalAgentIntegration(config, normalizedId, {
+      return applyPatch({
         transport: transportPatchFromPrimeAgentTarget(targetFromDescriptor(live)),
         runtime: { status: 'ready', ready: true, lastError: null },
         metadata,
       });
     }
-    return updateLocalAgentIntegration(config, normalizedId, {
+    return applyPatch({
       runtime: {
         status: 'degraded',
         ready: false,
@@ -1134,7 +1193,7 @@ export async function refreshLocalAgentIntegrationFromUi(
           ?? (health.target === 'gateway'
             ? { kind: 'hermes-openai', gatewayUrl: DEFAULT_HERMES_API_SERVER_URL }
             : undefined);
-        return updateLocalAgentIntegration(config, normalizedId, {
+        return applyPatch({
           transport,
           runtime: {
             status: 'ready',
@@ -1144,7 +1203,7 @@ export async function refreshLocalAgentIntegrationFromUi(
         });
       }
 
-      return updateLocalAgentIntegration(config, normalizedId, {
+      return applyPatch({
         runtime: {
           status: 'degraded',
           ready: false,
@@ -1153,7 +1212,7 @@ export async function refreshLocalAgentIntegrationFromUi(
       });
     }
 
-    return existing;
+    return { integration: existing, patch: {} };
   }
 
   daemonState.openClawBridgeHealth = null;
@@ -1163,7 +1222,7 @@ export async function refreshLocalAgentIntegrationFromUi(
   });
 
   if (health.ok) {
-    return updateLocalAgentIntegration(config, normalizedId, {
+    return applyPatch({
       transport: transportPatchFromOpenClawTarget(config, health.target),
       runtime: {
         status: 'ready',
@@ -1173,7 +1232,7 @@ export async function refreshLocalAgentIntegrationFromUi(
     });
   }
 
-  return updateLocalAgentIntegration(config, normalizedId, {
+  return applyPatch({
     runtime: {
       status: 'error',
       ready: false,
