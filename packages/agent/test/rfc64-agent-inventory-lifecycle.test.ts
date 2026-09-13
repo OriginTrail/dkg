@@ -1,3 +1,4 @@
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -49,6 +50,8 @@ function temporaryDataDirectory(): string {
 
 function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
+  agent.peerSyncSession = PeerSyncSession.stopped();
+  agent.lastSyncDisconnectedAt = new Map();
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
@@ -167,7 +170,7 @@ function minimalStartedAgent(
     randomSamplingHandle: null,
     inFlightSubstrateFanOutCount: () => 0,
     router: { closePooling: vi.fn(async () => {}) },
-    node: { stop: vi.fn(async () => { order.push('node'); }) },
+    node: { libp2p: { getPeers: () => [] }, stop: vi.fn(async () => { order.push('node'); }) },
     syncVerifyWorker: { close: vi.fn(async () => { order.push('sync-worker'); }) },
     rfc64PersistenceV1: {
       close: () => {

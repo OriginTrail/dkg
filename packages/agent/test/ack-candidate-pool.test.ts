@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 
 type AgentInternals = {
   node: {
@@ -19,6 +20,7 @@ type AgentInternals = {
   };
   peerId: string;
   config: { ackCandidatePeerIds?: string[]; preferredACKPeerIds?: string[] };
+  peerSyncSession: PeerSyncSession;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
   networkAdmission: NetworkAdmissionService;
@@ -66,6 +68,11 @@ async function buildAgent(opts: {
     preferredACKPeerIds: opts.preferredACKPeerIds,
   });
   const internals = agent as unknown as AgentInternals;
+  // The fixture represents a running node whose identify events may update ACK capabilities.
+  internals.peerSyncSession = new PeerSyncSession({
+    createJob: () => { throw new Error('scheduler is outside this fixture'); },
+    onInternalError: () => undefined,
+  });
   internals.node = {
     libp2p: {
       peerId: { toString: () => internals.peerId },

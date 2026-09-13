@@ -10,6 +10,7 @@ import {
 } from '../src/sync/on-connect/sync-on-connect.js';
 
 const PROBE = Object.freeze({ id: 'peer-probe' });
+const ACTIVE_SYNC_LIFETIME = new AbortController().signal;
 
 function completed(accounting: SyncOnConnectPeerOutcome): SyncOnConnectAttemptResult {
   return { outcome: 'synced', accounting };
@@ -36,7 +37,7 @@ function createRunner(input: Readonly<{
     resetBackoffBeforeRetry,
     commitAccounting,
     logBackpressure: () => undefined,
-  });
+  }, { signal: ACTIVE_SYNC_LIFETIME });
   return { runner, commitAccounting, resetBackoffBeforeRetry };
 }
 
@@ -49,6 +50,31 @@ function nonBackoffOrdinaryFailure(): SyncOnConnectPostSyncError {
 }
 
 describe('sync-on-connect peer-job phase accounting', () => {
+  it('cancels an active selected phase without launching ordinary probes or committing late accounting', async () => {
+    const lifecycle = new AbortController();
+    let resolveSelected!: (result: SyncOnConnectAttemptResult) => void;
+    const selected = new Promise<SyncOnConnectAttemptResult>((resolve) => { resolveSelected = resolve; });
+    const acquireProbe = vi.fn(async () => PROBE);
+    const runSelected = vi.fn(() => selected);
+    const runOrdinary = vi.fn(async () => completed({ reconcilerDisposition: 'clear', fresh: true, progress: true }));
+    const commitAccounting = vi.fn();
+    const resetBackoffBeforeRetry = vi.fn();
+    const runner = new ReconciledSyncOnConnectPeerJobRunner({
+      acquireProbe, runSelected, runAutomaticSelected: runSelected, runOrdinary,
+      selectedRetryStillRequired: () => false, commitAccounting, resetBackoffBeforeRetry, logBackpressure: vi.fn(),
+    }, { signal: lifecycle.signal });
+    const running = runner.runAutomaticSelectedThenOrdinary();
+    await vi.waitFor(() => expect(runSelected).toHaveBeenCalledOnce());
+    lifecycle.abort();
+    resolveSelected(completed({ reconcilerDisposition: 'retry', fresh: true, progress: true }));
+    await running;
+    runner.finish();
+    expect(acquireProbe).toHaveBeenCalledOnce();
+    expect(runOrdinary).not.toHaveBeenCalled();
+    expect(commitAccounting).not.toHaveBeenCalled();
+    expect(resetBackoffBeforeRetry).not.toHaveBeenCalled();
+  });
+
   it('continues ordinary after automatic selected rejection and commits retry', async () => {
     const selectedFailure = new Error('automatic selected failed');
     const { runner, commitAccounting } = createRunner({

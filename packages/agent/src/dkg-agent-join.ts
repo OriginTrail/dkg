@@ -1,3 +1,4 @@
+import type { PeerSyncConnection } from './p2p/peer-connection.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -2930,11 +2931,7 @@ export class JoinRequestMethods extends DKGAgentBase {
    * already uses — so the worst case is the CM redundantly dialing
    * out through R, which is exactly what we want.
    */
-  async enrichPeerStoreFromInboundCircuit(this: DKGAgent, connection: {
-    direction: 'inbound' | 'outbound';
-    remoteAddr?: { toString(): string };
-    remotePeer: { toString(): string };
-  }): Promise<void> {
+  async enrichPeerStoreFromInboundCircuit(this: DKGAgent, connection: PeerSyncConnection): Promise<void> {
     if (connection.direction !== 'inbound') return;
     const remoteStr = connection.remoteAddr?.toString();
     if (!remoteStr) return;

@@ -1,3 +1,4 @@
+import type { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -285,14 +286,10 @@ export interface SelectedProviderSelectionAgent {
       }>;
     };
   };
+  peerSyncSession: PeerSyncSession;
   networkAdmissionCoordinator: { isAcceptedPeer: (peerId: string) => boolean };
-  syncingPeers: Set<string>;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
-  skippedNoSyncPeers: Set<string>;
-  lastSuccessfulSyncAt: Map<string, number>;
-  lastSyncProgressAt: Map<string, number>;
-  syncReconcilerBackoff: Map<string, unknown>;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   rfc64SwmRecoveryCoordinatorV1: {
     admitSelectedPublic: (peerId: string, contextGraphIds: readonly string[]) => boolean;
