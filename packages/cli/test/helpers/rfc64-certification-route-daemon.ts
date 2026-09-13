@@ -125,6 +125,7 @@ export async function startCertificationRouteServer(
       selectedCatalogAuthoringControls: [],
       rollout: {
         killSwitch: false,
+        defaultMode: 'catalog',
         contextGraphModes: { [options.contextGraphId]: 'catalog' },
       },
     } satisfies NonNullable<RequestContext['rfc64Catalog']>;
@@ -133,6 +134,7 @@ export async function startCertificationRouteServer(
       selectedContextGraphs: [options.contextGraphId],
       rollout: {
         killSwitch: false,
+        defaultMode: 'catalog',
         contextGraphModes: { [options.contextGraphId]: 'catalog' },
       },
     } satisfies RequestContext['rfc64PublicCatalog'];

@@ -907,6 +907,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           peers: [],
           catalogIssuerDelegationExpiresAt: '1893456000000',
         },
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {},
+        },
       } as never,
     );
 
