@@ -20,6 +20,7 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  parseContextGraphUri,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   computeACKDigest,
@@ -879,8 +880,8 @@ export class QueryMethods extends DKGAgentBase {
     for (const row of result.bindings) {
       const cgUri = row['cg'];
       if (!cgUri) continue;
-      const match = cgUri.match(/^<?did:dkg:context-graph:([^>]+)>?$/);
-      if (match?.[1]) candidateContextGraphIds.add(match[1]);
+      const id = parseContextGraphUri(strip(cgUri));
+      if (id !== undefined) candidateContextGraphIds.add(id);
     }
     for (const { policyEnvelope } of this.config?.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
       if (policyEnvelope.payload.accessPolicy === 1) {

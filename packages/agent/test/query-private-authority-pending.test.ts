@@ -342,6 +342,61 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     expect(queryExecution).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { id: 'tenant/_meta', suffix: '', layout: 'legacy _meta root data' },
+    { id: 'tenant/_catalog', suffix: '', layout: 'legacy _catalog root data' },
+    { id: 'tenant/_old/private', suffix: '', layout: 'legacy reserved-segment root data' },
+    { id: 'tenant/namespaced-private', suffix: '/_meta', layout: 'root metadata without a self-declaration' },
+  ])('denies private $layout even with a known public ancestor', async ({ id, suffix }) => {
+    const { agent, runtime, registrations, queryExecution } = await fixture({
+      privateGraph: false,
+      publicGraph: false,
+    });
+    const rootPrefix = contextGraphDataGraphUri(id);
+    const dataGraph = `${rootPrefix}${suffix}`;
+    const publicAncestor = 'tenant';
+    const publicPrefix = contextGraphDataGraphUri(publicAncestor);
+    registrations.set(id, { onChainId: 7n, accessPolicy: 1, participantAgents: [OWNER] });
+    registrations.set(publicAncestor, { onChainId: 8n, accessPolicy: 0, participantAgents: [] });
+    // These are persisted legacy layouts. New-root validation intentionally
+    // forbids reserved segments, but stored data remains available to readers.
+    await agent.store.insert([
+      {
+        subject: PRIVATE_MARKER,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: MARKER_CLASS,
+        graph: dataGraph,
+      },
+      {
+        subject: PUBLIC_MARKER,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: MARKER_CLASS,
+        graph: publicPrefix,
+      },
+    ]);
+    expect(runtime.subscribedContextGraphs.has(id)).toBe(false);
+    expect(runtime.config.syncContextGraphs ?? []).not.toContain(id);
+    const publicRead = await agent.query(
+      `SELECT ?s WHERE { GRAPH <${publicPrefix}> { ?s a <${MARKER_CLASS}> } }`,
+      { contextGraphId: publicAncestor, callerAgentAddress: OUTSIDER },
+    );
+    expect(publicRead.bindings).toEqual([{ s: PUBLIC_MARKER }]);
+    queryExecution.mockClear();
+
+    await expect(agent.query(markerQuery(rootPrefix), {
+      contextGraphId: id,
+      callerAgentAddress: OUTSIDER,
+    })).resolves.toEqual({ bindings: [] });
+    expect(queryExecution).not.toHaveBeenCalled();
+    const owner = await agent.query(markerQuery(rootPrefix), { callerAgentAddress: OWNER });
+    expect(owner.bindings).toEqual([{ g: dataGraph, s: PRIVATE_MARKER }]);
+    queryExecution.mockClear();
+
+    await expect(agent.query(markerQuery(rootPrefix), { callerAgentAddress: OUTSIDER }))
+      .resolves.toEqual({ bindings: [] });
+    expect(queryExecution).not.toHaveBeenCalled();
+  });
+
   it('denies a runtime graph whose authenticated metadata is pending', async () => {
     const { agent, queryExecution } = await fixture({ privateGraph: false, publicGraph: false });
     agent.setContextGraphSubscription(PRIVATE_CG, {
@@ -371,7 +426,7 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     expect(queryExecution).toHaveBeenCalledOnce();
   });
 
-  it('does not invent a context graph from a public subgraph metadata partition', async () => {
+  it('denies unscoped reads when another possible metadata owner is unavailable but preserves scoped public reads', async () => {
     const { agent, chain, queryExecution } = await fixture({ privateGraph: false });
     vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
       .mockRejectedValue(new Error('unknown graph registration unavailable'));
@@ -381,8 +436,14 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
       object: '"complete"',
       graph: `${contextGraphDataGraphUri(PUBLIC_CG)}/tasks/_meta`,
     }]);
-    const result = await agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER });
-    expect(result.bindings).toEqual([expect.objectContaining({ s: PUBLIC_MARKER })]);
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
+      .resolves.toEqual({ bindings: [] });
+    expect(queryExecution).not.toHaveBeenCalled();
+    const publicRead = await agent.query(markerQuery(contextGraphDataGraphUri(PUBLIC_CG)), {
+      contextGraphId: PUBLIC_CG,
+      callerAgentAddress: OUTSIDER,
+    });
+    expect(publicRead.bindings).toEqual([expect.objectContaining({ s: PUBLIC_MARKER })]);
     expect(queryExecution).toHaveBeenCalledOnce();
   });
 
@@ -411,7 +472,7 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     expect(queryExecution).not.toHaveBeenCalled();
   });
 
-  it('checks a private graph after the first 128 stored metadata candidates', async () => {
+  it('checks a private graph after the first 128 stored graphs', async () => {
     const { agent, runtime, queryExecution } = await fixture({ privateGraph: false, publicGraph: false });
     const lastPrivateId = `${OWNER}/batch-zzz-private`;
     const lastPrivatePrefix = contextGraphDataGraphUri(lastPrivateId);
@@ -440,35 +501,29 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     ]);
     expect(runtime.subscribedContextGraphs.has(lastPrivateId)).toBe(false);
     // Store enumeration order is unspecified. Sort its real results so this
-    // fixture reliably puts the private graph beyond the first metadata batch.
+    // fixture reliably puts the private graph after the 128 public graphs.
     const listGraphsByPrefix = agent.store.listGraphsByPrefix!.bind(agent.store);
     vi.spyOn(agent.store, 'listGraphsByPrefix').mockImplementation(async (prefix, options) => (
       (await listGraphsByPrefix(prefix, options)).sort()
     ));
-    const storeQuery = vi.spyOn(agent.store, 'query');
+    const readAuthority = vi.spyOn(agent, 'canReadContextGraph');
 
     await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
       .resolves.toEqual({ bindings: [] });
     expect(queryExecution).not.toHaveBeenCalled();
-    const metadataQueries = storeQuery.mock.calls.filter(([, options]) => (
-      options?.source === 'agent.query.storedContextGraphCandidates'
-    ));
-    expect(metadataQueries.length).toBeGreaterThan(1);
-    expect(metadataQueries[0][0]).not.toContain(`<${lastPrivatePrefix}>`);
-    expect(metadataQueries.at(-1)![0]).toContain(`<${lastPrivatePrefix}>`);
+    expect(readAuthority).toHaveBeenCalledWith(lastPrivateId, { callerAgentAddress: OUTSIDER });
+    const checkedIds = readAuthority.mock.calls.map(([id]) => id);
+    expect(checkedIds.indexOf(lastPrivateId)).toBeGreaterThanOrEqual(128);
 
     const owner = await agent.query(markerQuery(lastPrivatePrefix), { callerAgentAddress: OWNER });
     expect(owner.bindings).toEqual([{ g: contextGraphMetaGraphUri(lastPrivateId), s: PRIVATE_MARKER }]);
   });
 
-  it.each([
-    'agent.query.privateGraphAccessPolicy',
-    'agent.query.storedContextGraphCandidates',
-  ])('does not execute SPARQL if %s discovery returns a non-bindings result', async (source) => {
+  it('does not execute SPARQL if access-policy discovery returns a non-bindings result', async () => {
     const { agent, queryExecution } = await fixture();
     const query = agent.store.query.bind(agent.store);
     vi.spyOn(agent.store, 'query').mockImplementation(async (sparql, options) => {
-      if (options?.source === source) return { type: 'boolean' as const, value: true };
+      if (options?.source === 'agent.query.privateGraphAccessPolicy') return { type: 'boolean' as const, value: true };
       return query(sparql, options);
     });
     await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
