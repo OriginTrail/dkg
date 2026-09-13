@@ -58,6 +58,19 @@ export interface VmRecoveryRotationPolicy {
   readonly maxBackoffMs: number;
 }
 
+export type VmRecoveryAttemptDisposition = 'found' | 'clean-absent' | 'incomplete';
+
+/** One completed physical attempt awaiting credit against the roster it was captured under. */
+export interface VmRecoveryAttemptSettlement {
+  readonly peerId: string | undefined;
+  readonly disposition: VmRecoveryAttemptDisposition;
+  readonly expectedCandidatePeerIds: readonly string[];
+  readonly unavailablePeerIds?: ReadonlySet<string>;
+}
+
+/** Outcome of the post-fetch transition. */
+export type VmRecoveryPostFetchTransition = 'settled' | 'revalidated' | 'stale';
+
 
 function membershipMatches(left: ReadonlySet<string>, right: readonly string[]): boolean {
   return left.size === right.length && right.every(peer => left.has(peer));
@@ -175,14 +188,18 @@ export class VmRecoverySlotRegistry {
     return state ? this.rotationSnapshot(state) : undefined;
   }
 
-  read(target: Target, handle: VmRecoverySlotHandle): VmRecoveryRotationSnapshot | undefined {
+  private currentState(target: Target, handle: VmRecoverySlotHandle): MutableRotationRecord | undefined {
     const state = this.peekState(target);
-    return state && state.handle === handle ? this.rotationSnapshot(state) : undefined;
+    return state && state.handle === handle ? state : undefined;
+  }
+
+  read(target: Target, handle: VmRecoverySlotHandle): VmRecoveryRotationSnapshot | undefined {
+    const state = this.currentState(target, handle);
+    return state ? this.rotationSnapshot(state) : undefined;
   }
 
   isCurrent(target: Target, handle: VmRecoverySlotHandle): boolean {
-    const state = this.peekState(target);
-    return state !== undefined && state.handle === handle;
+    return this.currentState(target, handle) !== undefined;
   }
 
   private prune(key: string, slot: SlotState): void {
@@ -516,14 +533,14 @@ export class VmRecoverySlotRegistry {
   settleAttempt(
     target: Target,
     peerId: string | undefined,
-    disposition: 'found' | 'clean-absent' | 'incomplete',
+    disposition: VmRecoveryAttemptDisposition,
     expectedCandidatePeerIds: readonly string[],
     handle: VmRecoverySlotHandle,
     policy: VmRecoveryRotationPolicy,
     unavailablePeerIds: ReadonlySet<string> = new Set(),
   ): void {
-    if (!this.isCurrent(target, handle)) return;
-    const record = this.peekState(target)!;
+    const record = this.currentState(target, handle);
+    if (!record) return;
     if (!membershipMatches(
       record.candidatePeerIds,
       expectedCandidatePeerIds,
@@ -562,6 +579,36 @@ export class VmRecoverySlotRegistry {
       }
     }
     this.touch(target, record.handle);
+  }
+
+  /**
+   * Post-fetch transition for one captured attempt. An unchanged observed
+   * roster credits the attempt to the target the chain re-read confirmed. Any
+   * growth or shrink instead revalidates the slot against the new roster and
+   * leaves the attempt uncredited: a proof roster is a set, and a different
+   * set starts a different cycle.
+   */
+  settleAttemptAfterFetch(
+    target: Target,
+    handle: VmRecoverySlotHandle,
+    revalidated: Target,
+    observed: VmRecoveryAdmissionParams,
+    attempt: VmRecoveryAttemptSettlement,
+    policy: VmRecoveryRotationPolicy,
+  ): VmRecoveryPostFetchTransition {
+    const record = this.currentState(target, handle);
+    if (!record) return 'stale';
+    if (!membershipMatches(record.candidatePeerIds, observed.candidatePeerIds)) {
+      this.prepare(revalidated, observed, policy.now);
+      return 'revalidated';
+    }
+    // The chain re-read must still describe the captured target: a replaced
+    // UAL or Merkle root earns the superseded generation no credit.
+    if (vmRecoverySlotKey(revalidated) !== vmRecoverySlotKey(target)
+      || vmRecoveryTargetFingerprint(revalidated) !== vmRecoveryTargetFingerprint(target)) return 'stale';
+    this.settleAttempt(target, attempt.peerId, attempt.disposition, attempt.expectedCandidatePeerIds, handle, policy,
+      attempt.unavailablePeerIds);
+    return 'settled';
   }
 
   /** Retire only this preparation's owner; never adopt a replacement created by an abort callback. */

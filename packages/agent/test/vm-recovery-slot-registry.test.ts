@@ -454,3 +454,78 @@ describe('active VM recovery slot ownership', () => {
     expect(finished.signal.aborted).toBe(false);
   });
 });
+
+describe('post-fetch roster revalidation', () => {
+  const peers = ['peer-a', 'peer-b'];
+  const policy = { now: 10, getLocalPeerId: () => 'local', baseBackoffMs: 10, maxBackoffMs: 100 };
+  const observed = (candidatePeerIds: readonly string[]) => ({
+    candidatePeerIds, curatorRosterConfirmed: true, collectionDeadlineAt: 200,
+  });
+  const attempt = (peerId: string, disposition: 'found' | 'clean-absent' | 'incomplete' = 'clean-absent') => ({
+    peerId, disposition, expectedCandidatePeerIds: peers,
+  });
+  const admitPeers = (registry: VmRecoverySlotRegistry): VmRecoverySlotCapture => {
+    const admission = registry.admit(target, {
+      candidatePeerIds: peers, curatorRosterConfirmed: true, collectionDeadlineAt: 100,
+    }, 0);
+    if (admission.kind === 'deferred') throw new Error('expected slot admission');
+    return admission.slot;
+  };
+
+  it('credits the captured attempt when the observed roster is unchanged', () => {
+    const registry = new VmRecoverySlotRegistry(1);
+    const { handle } = admitPeers(registry);
+    expect(registry.settleAttemptAfterFetch(target, handle, target, observed(peers), attempt('peer-a'), policy))
+      .toBe('settled');
+    expect(registry.read(target, handle)).toMatchObject({
+      phase: 'collecting', lastAttemptedPeerId: 'peer-a', attemptedPeerIds: ['peer-a'], cleanAbsentPeerIds: ['peer-a'],
+    });
+  });
+
+  it.each(['grown', 'shrunk'] as const)('revalidates a %s roster instead of crediting the attempt', kind => {
+    const registry = new VmRecoverySlotRegistry(1);
+    const { handle } = admitPeers(registry);
+    registry.settleAttempt(target, 'peer-a', 'incomplete', peers, handle, policy);
+    const roster = kind === 'grown' ? [...peers, 'peer-c'] : ['peer-a'];
+    expect(registry.settleAttemptAfterFetch(target, handle, target, observed(roster), attempt('peer-b'), policy))
+      .toBe('revalidated');
+    expect(registry.read(target, handle)).toMatchObject({
+      phase: 'collecting', candidatePeerIds: roster, cleanAbsentPeerIds: [],
+      // Pure growth keeps retained credits; any removal resets the whole cycle.
+      attemptedPeerIds: kind === 'grown' ? ['peer-a'] : [],
+    });
+  });
+
+  it('withholds credit from a revalidated target with a replaced fingerprint', () => {
+    const registry = new VmRecoverySlotRegistry(1);
+    const { handle } = admitPeers(registry);
+    const replaced = { ...target, merkleRoot: 'replacement-root' };
+    expect(registry.settleAttemptAfterFetch(target, handle, replaced, observed(peers), attempt('peer-a'), policy))
+      .toBe('stale');
+    expect(registry.read(target, handle)).toMatchObject({ attemptedPeerIds: [], cleanAbsentPeerIds: [] });
+    expect(registry.capture(replaced)).toBeUndefined();
+  });
+
+  it('ignores a handle that no longer owns the slot', () => {
+    const registry = new VmRecoverySlotRegistry(1);
+    const { handle } = admitPeers(registry);
+    registry.invalidate(target);
+    expect(registry.settleAttemptAfterFetch(target, handle, target, observed(['peer-c']), attempt('peer-a'), policy))
+      .toBe('stale');
+    expect(registry.recordCount).toBe(0);
+  });
+
+  it('upgrades a credited incomplete attempt to clean absence within the same cycle', () => {
+    const registry = new VmRecoverySlotRegistry(1);
+    const { handle } = admitPeers(registry);
+    for (const peerId of peers) registry.settleAttempt(target, peerId, 'incomplete', peers, handle, policy);
+    expect(registry.read(target, handle)).toMatchObject({ phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1 });
+    for (const peerId of peers) {
+      expect(registry.settleAttemptAfterFetch(target, handle, target, observed(peers), attempt(peerId), policy))
+        .toBe('settled');
+    }
+    expect(registry.read(target, handle)).toMatchObject({
+      phase: 'backoff', backoffKind: 'clean-absence', failures: 1, cleanAbsentPeerIds: peers,
+    });
+  });
+});

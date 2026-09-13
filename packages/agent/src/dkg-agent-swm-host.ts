@@ -259,6 +259,7 @@ import {
 } from './vm-recovery-microbatch.js';
 import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
 import type {
+  VmRecoveryAttemptSettlement, VmRecoveryRotationPolicy,
   VmRecoveryRotationSnapshot, VmRecoverySlotHandle, VmRecoveryPreparation,
 } from './internal/vm-recovery-slot-registry.js';
 import type {
@@ -4732,14 +4733,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return [...boundedCurators, ...boundedOrdinary];
   }
 
-  vmReconcilePeerMembershipMatches(
-    this: DKGAgent,
-    left: ReadonlySet<string>,
-    right: readonly string[],
-  ): boolean {
-    return left.size === right.length && right.every((peerId) => left.has(peerId));
-  }
-
   prepareVmReconcileRotationTarget(
     this: DKGAgent,
     target: OrdinalRecoveryTarget,
@@ -4833,6 +4826,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && expected.merkleRoot.toLowerCase() === actual.merkleRoot.toLowerCase();
   }
 
+  vmReconcileRotationPolicy(this: DKGAgent, now: number): VmRecoveryRotationPolicy {
+    return {
+      now, getLocalPeerId: () => this.peerId,
+      baseBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS,
+      maxBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+    };
+  }
+
   settleVmReconcileRotationAttempt(
     this: DKGAgent,
     target: OrdinalRecoveryTarget,
@@ -4843,11 +4844,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
     unavailablePeerIds: ReadonlySet<string> = new Set(),
   ): void {
     if (this.vmReconcileRotationClosed) return;
-    this.vmRecoverySlots.settleAttempt(target, peerId, disposition, expectedCandidatePeerIds, slotHandle, {
-      now: this.vmReconcileRotationNow(), getLocalPeerId: () => this.peerId,
-      baseBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS,
-      maxBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
-    }, unavailablePeerIds);
+    this.vmRecoverySlots.settleAttempt(target, peerId, disposition, expectedCandidatePeerIds, slotHandle,
+      this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()), unavailablePeerIds);
+  }
+
+  /**
+   * Credit one completed transfer once the chain re-read has confirmed its
+   * target. The registry owns the roster rule: an unchanged observed roster
+   * settles the attempt, while growth or shrink revalidates the slot instead.
+   */
+  settleVmReconcileRotationAttemptAfterFetch(
+    this: DKGAgent,
+    target: OrdinalRecoveryTarget,
+    slotHandle: VmRecoverySlotHandle,
+    revalidated: OrdinalRecoveryTarget,
+    attempt: VmRecoveryAttemptSettlement,
+  ): void {
+    if (this.vmReconcileRotationClosed) return;
+    const now = this.vmReconcileRotationNow();
+    this.vmRecoverySlots.settleAttemptAfterFetch(target, slotHandle, revalidated, {
+      candidatePeerIds: this.vmReconcileObservedCandidatePeerIds(target.localCgId),
+      curatorRosterConfirmed: true,
+      collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+    }, attempt, this.vmReconcileRotationPolicy(now));
   }
 
   creditVmReconcileCleanAbsence(
@@ -5181,31 +5200,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           : 'incomplete';
       perUalDispositions.set(batchTarget.ual, perTargetDisposition);
       if (outcome.status === 'pending') {
-        if (outcome.recovery) {
-          const slotHandle = attempt.slotHandle;
-          if (!slotHandle || this.vmReconcileRotationClosed) continue;
-          const snapshot = this.vmRecoverySlots.read(batchTarget, slotHandle);
-          if (!snapshot) continue;
-          const candidateMembershipAfter = this.vmReconcileObservedCandidatePeerIds(localCgId);
-          if (!this.vmReconcilePeerMembershipMatches(
-            new Set(snapshot.candidatePeerIds),
-            candidateMembershipAfter,
-          )) {
-            this.prepareVmReconcileRotationTarget(
-              outcome.recovery,
-              candidateMembershipAfter,
-              this.vmReconcileRotationNow(),
-            );
-          } else if (this.vmReconcileRecoveryTargetMatches(batchTarget, outcome.recovery)) {
-            this.settleVmReconcileRotationAttempt(
-              batchTarget,
-              peerId,
-              perTargetDisposition,
-              attempt.candidatePeerIds,
-              slotHandle,
-              unavailablePeerIdSet,
-            );
-          }
+        if (outcome.recovery && attempt.slotHandle) {
+          this.settleVmReconcileRotationAttemptAfterFetch(batchTarget, attempt.slotHandle, outcome.recovery, {
+            peerId,
+            disposition: perTargetDisposition,
+            expectedCandidatePeerIds: attempt.candidatePeerIds,
+            unavailablePeerIds: unavailablePeerIdSet,
+          });
         }
       } else {
         this.vmRecoverySlots.complete(batchTarget);

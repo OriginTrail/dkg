@@ -90,6 +90,30 @@ describe('completed exact-VM physical attempt accounting', () => {
     } finally { await harness.agent.stop().catch(() => undefined); }
   });
 
+  it('revalidates a roster that grew during the fetch instead of crediting clean absence', async () => {
+    const harness = await createHarness('clean-absent');
+    const host = harness.internals;
+    const target = harness.targets[0]!;
+    const joined = '12D3KooWPhysicalAttemptC';
+    const reconcile = host.reconcileChainOrdinal;
+    host.reconcileChainOrdinal = async (...args) => {
+      // A peer connects between the transfer and the chain re-read.
+      host.node.libp2p.getConnections = () => [...peers, joined]
+        .map(peerId => ({ remotePeer: { toString: () => peerId } }));
+      return reconcile(...args);
+    };
+    try {
+      await harness.run();
+      expect(harness.fetched.map(fetch => fetch.peerId)).toEqual([peers[0]]);
+      const record = host.vmRecoverySlots.snapshot().get(vmRecoverySlotKey(target));
+      expect(record?.candidatePeerIds).toEqual([...peers, joined]);
+      // The transfer itself stays credited; the post-fetch absence proof does not.
+      expect(record?.attemptedPeerIds).toEqual([peers[0]]);
+      expect(record?.cleanAbsentPeerIds).toEqual([]);
+      expect(record?.phase).toBe('collecting');
+    } finally { await harness.agent.stop().catch(() => undefined); }
+  });
+
   it('credits clean absence only to the peer whose target was revalidated', async () => {
     const harness = await createHarness('clean-absent');
     const host = harness.internals;
