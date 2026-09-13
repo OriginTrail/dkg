@@ -5,8 +5,8 @@ import test from 'node:test';
 import { resolve } from 'node:path';
 
 import { buildRuntimeManifestV1 } from '../../../../devnet/rfc64-runtime-provenance.mts';
-import { decodeRfc64PrivateGatePassArtifactV1 } from './gate-artifact.mjs';
-import { executeRfc64PrivateReleaseGateV1 } from './run.mjs';
+import { decodeRfc64PrivateGatePassArtifactV2 } from './gate-artifact.mjs';
+import { executeRfc64PrivateReleaseGateV2 } from './run.mjs';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../../../..');
 const SOURCE_REVISION = 'c'.repeat(40);
@@ -16,7 +16,7 @@ test('real agents preserve receiver memory when canonical revocation denies resy
 }, async () => {
   const startedAt = new Date().toISOString();
   const runtimeManifest = buildRuntimeManifestV1(REPO_ROOT, SOURCE_REVISION);
-  const artifact = await executeRfc64PrivateReleaseGateV1({
+  const artifact = await executeRfc64PrivateReleaseGateV2({
     runtimeManifest,
     sourceRevision: SOURCE_REVISION,
   });
@@ -36,7 +36,7 @@ test('real agents preserve receiver memory when canonical revocation denies resy
     sourceRevision: SOURCE_REVISION,
     startedAt,
   };
-  assert.equal(decodeRfc64PrivateGatePassArtifactV1(persistedPass), persistedPass);
+  assert.equal(decodeRfc64PrivateGatePassArtifactV2(persistedPass), persistedPass);
 });
 
 test('a finalized roster mismatch aborts before publish or synchronization', {
@@ -44,7 +44,7 @@ test('a finalized roster mismatch aborts before publish or synchronization', {
 }, async () => {
   const runtimeManifest = buildRuntimeManifestV1(REPO_ROOT, SOURCE_REVISION);
   await assert.rejects(
-    executeRfc64PrivateReleaseGateV1({
+    executeRfc64PrivateReleaseGateV2({
       childEnvironment: {
         DKG_RFC64_PRIVATE_AUTHORITY_FAULT: 'omit-receiver',
       },
@@ -60,7 +60,7 @@ test('a successful no-op chain mutation cannot certify receiver revocation', {
 }, async () => {
   const runtimeManifest = buildRuntimeManifestV1(REPO_ROOT, SOURCE_REVISION);
   await assert.rejects(
-    executeRfc64PrivateReleaseGateV1({
+    executeRfc64PrivateReleaseGateV2({
       childEnvironment: {
         DKG_RFC64_PRIVATE_AUTHORITY_FAULT: 'revocation-chain-noop',
       },
@@ -78,7 +78,7 @@ test('over-removing another member cannot certify receiver revocation', {
 }, async () => {
   const runtimeManifest = buildRuntimeManifestV1(REPO_ROOT, SOURCE_REVISION);
   await assert.rejects(
-    executeRfc64PrivateReleaseGateV1({
+    executeRfc64PrivateReleaseGateV2({
       childEnvironment: {
         DKG_RFC64_PRIVATE_AUTHORITY_FAULT: 'revocation-over-removal',
       },
@@ -101,7 +101,7 @@ for (const [fault, expected] of [
   }, async () => {
     const runtimeManifest = buildRuntimeManifestV1(REPO_ROOT, SOURCE_REVISION);
     await assert.rejects(
-      executeRfc64PrivateReleaseGateV1({
+      executeRfc64PrivateReleaseGateV2({
         childEnvironment: {
           DKG_RFC64_PRIVATE_CATALOG_PROOF_FAULT: fault,
         },

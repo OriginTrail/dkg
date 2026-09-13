@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { RuntimeProcessProvenanceV1 } from
+import type { ExecutedRuntimeManifestV1, RuntimeProcessProvenanceV2 } from
   '../../../../devnet/rfc64-runtime-provenance.mts';
+import type { Digest32V1, EvmAddressV1 } from '@origintrail-official/dkg-core';
 import {
   RFC64_PRIVATE_RUNTIME_ROLES_V1,
   RFC64_PRIVATE_SCENARIO_PROCESS_IDS_V1,
@@ -9,8 +10,8 @@ import {
   type Rfc64PrivateScenarioProcessIdV1,
 } from './scenario-actors.ts';
 
-export type Rfc64PrivateDigestV1 = `0x${string}`;
-export type Rfc64PrivateAddressV1 = `0x${string}`;
+export type Rfc64PrivateDigestV1 = Digest32V1;
+export type Rfc64PrivateAddressV1 = EvmAddressV1;
 
 export interface Rfc64PrivatePublishedCatalogV1 {
   readonly catalogVersion: string;
@@ -76,12 +77,18 @@ export type Rfc64PrivateRpcCallCountsV1 = Readonly<
   Partial<Record<Rfc64PrivateRpcMethodV1, number>>
 >;
 
-export interface Rfc64PrivateCatalogStateV1 {
+export interface Rfc64PrivateGraphCountEvidenceV1 {
+  readonly kaNumber: number;
+  readonly swm: number;
+  readonly vm: number;
+}
+
+export interface Rfc64PrivateCatalogInspectionStateV1 {
   readonly appliedHeadDigest: Rfc64PrivateDigestV1 | null;
   readonly catalogScopeDigest: Rfc64PrivateDigestV1;
   readonly catalogVersion: string | null;
   readonly exactExpectedHead: boolean | null;
-  readonly graphCounts: readonly Readonly<Rfc64PrivateMemoryRowEvidenceV1>[];
+  readonly graphCounts: readonly Readonly<Rfc64PrivateGraphCountEvidenceV1>[];
   readonly inventoryRowCount: string | null;
   readonly outsiderVisibleVmBindings: number | null;
   readonly receiverStats: Readonly<{ readonly applied: number; readonly failed: number }> | null;
@@ -89,23 +96,9 @@ export interface Rfc64PrivateCatalogStateV1 {
   readonly rpcCalls: number;
 }
 
-export interface Rfc64PrivateEmptyMemoryRowV1 {
-  readonly kaNumber: number;
-  readonly swm: 0;
-  readonly vm: 0;
-}
-
-export interface Rfc64PrivateEmptyCatalogStateV1 {
-  readonly appliedHeadDigest: null;
-  readonly catalogScopeDigest: Rfc64PrivateDigestV1;
-  readonly catalogVersion: null;
-  readonly exactExpectedHead: false;
-  readonly graphCounts: readonly Readonly<Rfc64PrivateEmptyMemoryRowV1>[];
-  readonly inventoryRowCount: null;
-  readonly outsiderVisibleVmBindings: null;
-  readonly receiverStats: null;
-  readonly rpcCallCounts: Rfc64PrivateRpcCallCountsV1;
-  readonly rpcCalls: number;
+export interface Rfc64PrivateCatalogStateV1
+  extends Rfc64PrivateCatalogInspectionStateV1 {
+  readonly graphCounts: readonly Readonly<Rfc64PrivateMemoryRowEvidenceV1>[];
 }
 
 export interface Rfc64PrivateDenialEvidenceV1 {
@@ -157,16 +150,7 @@ export interface Rfc64PrivateProcessExitEvidenceV1 {
 }
 
 export interface Rfc64PrivateShutdownEvidenceV1 {
-  readonly executedRuntimeManifest: Readonly<{
-    readonly manifestDigest: Rfc64PrivateDigestV1;
-    readonly runtimeFiles: readonly Readonly<{
-      readonly byteLength: number;
-      readonly path: string;
-      readonly sha256: Rfc64PrivateDigestV1;
-    }>[];
-    readonly schemaVersion: string;
-    readonly sourceCommit: string;
-  }>;
+  readonly executedRuntimeManifest: Readonly<ExecutedRuntimeManifestV1>;
   readonly exit: Readonly<Rfc64PrivateProcessExitEvidenceV1>;
   readonly rpcCallCounts: Rfc64PrivateRpcCallCountsV1;
 }
@@ -189,10 +173,10 @@ export type Rfc64PrivateProcessEvidenceMapV1 = Readonly<{
   [ProcessId in Rfc64PrivateScenarioProcessIdV1]: Readonly<Rfc64PrivateProcessEvidenceV1>;
 }>;
 
-export type Rfc64PrivateRuntimeProvenanceEvidenceV1 = Readonly<
-  RuntimeProcessProvenanceV1<
+export type Rfc64PrivateRuntimeProvenanceEvidenceV2 = Readonly<
+  RuntimeProcessProvenanceV2<
     Rfc64PrivateScenarioProcessIdV1,
-    'dkg-rfc64-private-runtime-provenance-v1'
+    'dkg-rfc64-private-runtime-provenance-v2'
   >
 >;
 
@@ -216,7 +200,7 @@ export interface Rfc64PrivateFailoverResultV1 {
 
 export interface Rfc64PrivateRevocationResultV1 {
   readonly outsiderDenial: Readonly<Rfc64PrivateDenialEvidenceV1>;
-  readonly outsiderState: Readonly<Rfc64PrivateEmptyCatalogStateV1>;
+  readonly outsiderState: Readonly<Rfc64PrivateCatalogInspectionStateV1>;
   readonly ownerRevocation: Readonly<Rfc64PrivateOwnerRevocationEvidenceV1>;
   readonly provider2StateAfterRevocation: Readonly<Rfc64PrivateCatalogStateV1>;
   readonly providerAccessState: Readonly<Rfc64PrivateCatalogStateV1>;
@@ -235,6 +219,56 @@ export interface Rfc64PrivateScenarioPhasesV1 {
   readonly restart: Readonly<Rfc64PrivateRestartResultV1>;
   readonly revocation: Readonly<Rfc64PrivateRevocationResultV1>;
 }
+
+export interface Rfc64PrivateScenarioResultV1 {
+  readonly peerIds: Rfc64PrivatePeerIdMapV1;
+  readonly phases: Readonly<Rfc64PrivateScenarioPhasesV1>;
+  readonly processes: Rfc64PrivateProcessEvidenceMapV1;
+  readonly runtimeProvenance: Rfc64PrivateRuntimeProvenanceEvidenceV2;
+}
+
+/** Parent commands and their typed child results form the live scenario producer boundary. */
+export type Rfc64PrivateChildCommandV1 = Readonly<
+  | { readonly cmd: 'dial'; readonly multiaddr: string; readonly peerId: string }
+  | { readonly cmd: 'publish' | 'publish-update' }
+  | {
+    readonly cmd: 'wait-bootstrap';
+    readonly expectedHeadDigest: Rfc64PrivateDigestV1;
+    readonly expectedMemory?: 'finalized-vm-v1';
+    readonly timeoutMs: number;
+  }
+  | {
+    readonly cmd: 'inspect' | 'inspect-persisted';
+    readonly expectedHeadDigest?: Rfc64PrivateDigestV1;
+  }
+  | { readonly cmd: 'sync-denied'; readonly providerPeerIds: readonly string[] }
+  | { readonly cmd: 'revoke-receiver' | 'observe-receiver-revocation' | 'stop' }
+>;
+
+export interface Rfc64PrivateStoppingEventV1 {
+  readonly event: 'stopping';
+  readonly executedRuntimeManifest: Readonly<ExecutedRuntimeManifestV1>;
+  readonly requestId: string;
+  readonly rpcCallCounts: Rfc64PrivateRpcCallCountsV1;
+}
+
+export type Rfc64PrivateChildResultV1<
+  Command extends Rfc64PrivateChildCommandV1['cmd'],
+> = Command extends 'publish' | 'publish-update'
+  ? Readonly<Rfc64PrivatePublishedCatalogV1>
+  : Command extends 'wait-bootstrap'
+    ? Readonly<Rfc64PrivateBootstrapEvidenceV1>
+    : Command extends 'inspect' | 'inspect-persisted'
+      ? Readonly<Rfc64PrivateCatalogStateV1>
+      : Command extends 'sync-denied'
+        ? Readonly<Rfc64PrivateDenialEvidenceV1>
+        : Command extends 'revoke-receiver'
+          ? Readonly<Rfc64PrivateOwnerRevocationEvidenceV1>
+          : Command extends 'observe-receiver-revocation'
+            ? Readonly<Rfc64PrivateProviderRevocationEvidenceV1>
+            : Command extends 'stop'
+              ? Readonly<Rfc64PrivateStoppingEventV1>
+              : Readonly<Record<string, unknown>>;
 
 const PHASE_FIELDS = Object.freeze({
   baseline: Object.freeze([
@@ -267,12 +301,9 @@ const PHASE_FIELDS = Object.freeze({
 } as const);
 
 /** Seal the scenario's one typed, named result instead of an open string-key bag. */
-export function composeRfc64PrivateScenarioResultV1(input: Readonly<{
-  peerIds: Rfc64PrivatePeerIdMapV1;
-  phases: Readonly<Rfc64PrivateScenarioPhasesV1>;
-  processes: Rfc64PrivateProcessEvidenceMapV1;
-  runtimeProvenance: Rfc64PrivateRuntimeProvenanceEvidenceV1;
-}>): Readonly<typeof input> {
+export function composeRfc64PrivateScenarioResultV1(
+  input: Readonly<Rfc64PrivateScenarioResultV1>,
+): Readonly<Rfc64PrivateScenarioResultV1> {
   assertExactKeys(
     input.peerIds,
     RFC64_PRIVATE_RUNTIME_ROLES_V1,

@@ -22,12 +22,12 @@ const DEFAULT_MAX_NQUADS_BYTES = 64 * 1024;
 /** @typedef {import('@origintrail-official/dkg-storage').Quad} Quad */
 /** @typedef {import('@origintrail-official/dkg-storage').TripleStore} TripleStore */
 /** @typedef {{ readonly count: number, readonly digest: string }} Rfc64PrivateGraphProjectionEvidenceV1 */
-/** @typedef {{ readonly assertionVersion: string, readonly assertionGraph: string, readonly shareOperationId?: string }} Rfc64PrivateLayerHeadEvidenceV1 */
-/** @typedef {{ readonly kind: 'absent' }} Rfc64PrivateAbsentSwmProofV1 */
-/** @typedef {{ readonly kind: 'workspace-head', readonly assertionVersion: string, readonly assertionGraph: string, readonly shareOperationId: string }} Rfc64PrivateWorkspaceHeadSwmProofV1 */
-/** @typedef {{ readonly kind: 'catalog-row', readonly assertionVersion: string, readonly catalogHeadDigest: string, readonly kaId: string, readonly projectionDigest: string }} Rfc64PrivateCatalogRowSwmProofV1 */
-/** @typedef {Rfc64PrivateAbsentSwmProofV1 | Rfc64PrivateWorkspaceHeadSwmProofV1 | Rfc64PrivateCatalogRowSwmProofV1} Rfc64PrivateSwmProofV1 */
-/** @typedef {{ readonly kaNumber: number, readonly kaUal: string, readonly swmGraph: string, readonly swm: number, readonly swmDigest: string, readonly swmProof: Rfc64PrivateSwmProofV1, readonly vmGraph: string, readonly vm: number, readonly vmDigest: string, readonly vmHead: Rfc64PrivateLayerHeadEvidenceV1 | null }} Rfc64PrivateCatalogMemoryEvidenceRowV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateLayerHeadEvidenceV1} Rfc64PrivateLayerHeadEvidenceV1 */
+/** @typedef {Rfc64PrivateLayerHeadEvidenceV1 & { readonly shareOperationId?: string }} Rfc64PrivateReadLayerHeadEvidenceV1 */
+/** @typedef {Extract<import('./scenario-result.ts').Rfc64PrivateSwmProofV1, { readonly kind: 'absent' }>} Rfc64PrivateAbsentSwmProofV1 */
+/** @typedef {Extract<import('./scenario-result.ts').Rfc64PrivateSwmProofV1, { readonly kind: 'workspace-head' }>} Rfc64PrivateWorkspaceHeadSwmProofV1 */
+/** @typedef {Extract<import('./scenario-result.ts').Rfc64PrivateSwmProofV1, { readonly kind: 'catalog-row' }>} Rfc64PrivateCatalogRowSwmProofV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateMemoryRowEvidenceV1} Rfc64PrivateCatalogMemoryEvidenceRowV1 */
 /** @typedef {{ readonly kaNumber: number, readonly kaUal: string, readonly swmGraph: string, readonly swm: number, readonly swmDigest: string, readonly vmGraph: string, readonly vm: number, readonly vmDigest: string, readonly vmHead: Rfc64PrivateLayerHeadEvidenceV1 | null }} Rfc64PrivateCatalogAppliedProjectionEvidenceRowV1 */
 /** @typedef {{ readonly assetNumbers: readonly number[], readonly networkId: string, readonly contextGraphId: string, readonly authorAddress: string }} Rfc64PrivateCatalogEvidenceInputV1 */
 /** @typedef {{ readonly projection: Rfc64PrivateGraphProjectionEvidenceV1, readonly assertionVersion: string }} Rfc64PrivateVmExpectationV1 */
@@ -37,6 +37,11 @@ const DEFAULT_MAX_NQUADS_BYTES = 64 * 1024;
 /** @typedef {Rfc64PrivateSwmExpectationDefinitionV1 & { readonly assetNumbers: readonly number[] }} Rfc64PrivateSwmExpectationV1 */
 /** @typedef {{ readonly graphCounts: readonly Rfc64PrivateCatalogMemoryEvidenceRowV1[], readonly appliedHeadDigest?: string | null, readonly exactExpectedHead?: boolean | null, readonly catalogVersion?: string | null }} Rfc64PrivateCatalogMemoryStateV1 */
 /** @typedef {{ readonly assetNumbers: readonly number[], readonly swm: Rfc64PrivateSwmExpectationDefinitionV1, readonly vm: Rfc64PrivateVmExpectationV1, readonly finalizedVmBaseline: Rfc64PrivateVmExpectationV1 & { readonly authorAddress: string, readonly catalogProjectionDigest: string, readonly catalogVersion: string } }} Rfc64PrivateCatalogMemoryExpectationV1 */
+/** @typedef {{ readonly networkId: string, readonly authorAddress: string }} Rfc64PrivateMemoryIdentityV1 */
+/** @typedef {{ readonly proofKind: 'absent', readonly projection: Rfc64PrivateGraphProjectionEvidenceV1 } | Rfc64PrivateSwmExpectationDefinitionV1} Rfc64PrivateStrictSwmProfileV1 */
+/** @typedef {Rfc64PrivateVmExpectationV1 & { readonly headKind: 'present' | 'absent' }} Rfc64PrivateStrictVmProfileV1 */
+/** @typedef {{ readonly appliedHeadDigest: unknown, readonly catalogVersion: unknown, readonly exactExpectedHead: unknown }} Rfc64PrivateCatalogProofBindingV1 */
+/** @typedef {{ readonly assetNumbers: readonly number[], readonly catalogProofBinding?: Rfc64PrivateCatalogProofBindingV1, readonly identity?: Rfc64PrivateMemoryIdentityV1, readonly swm?: Rfc64PrivateStrictSwmProfileV1, readonly vm?: Rfc64PrivateStrictVmProfileV1 }} Rfc64PrivateMemoryEvidenceProfileV1 */
 
 /** Canonical graph-name-independent serialization for one projection model. */
 /** @param {readonly Quad[]} quads */
@@ -174,7 +179,7 @@ async function readPrivateCatalogBaseProjectionEvidenceRowV1(store, input, kaNum
 }
 
 /**
- * @param {Rfc64PrivateLayerHeadEvidenceV1 | null | undefined} head
+ * @param {Rfc64PrivateReadLayerHeadEvidenceV1 | null | undefined} head
  * @returns {Readonly<Rfc64PrivateAbsentSwmProofV1 | Rfc64PrivateWorkspaceHeadSwmProofV1>}
  */
 function workspaceHeadProofV1(head) {
@@ -191,7 +196,7 @@ function workspaceHeadProofV1(head) {
 /**
  * @param {TripleStore} store
  * @param {{ graph: string, subject: string, includeShareOperationId: boolean }} input
- * @returns {Promise<Readonly<Rfc64PrivateLayerHeadEvidenceV1> | null>}
+ * @returns {Promise<Readonly<Rfc64PrivateReadLayerHeadEvidenceV1> | null>}
  */
 async function readLayerHeadEvidence(store, input) {
   const shareOperationSelection = input.includeShareOperationId
@@ -283,12 +288,10 @@ function assertPrivateCatalogEvidenceInput(input) {
  * @param {Rfc64PrivateCatalogMemoryExpectationV1} expected
  */
 export function hasExactPrivateCatalogMemoryContents(state, expected) {
-  return hasExactPrivateCatalogSwmContents(state, {
+  return decodesExactMemoryV1(state, {
     assetNumbers: expected?.assetNumbers,
-    ...expected?.swm,
-  }) && hasExactPrivateCatalogVmContents(state, {
-    assetNumbers: expected?.assetNumbers,
-    ...expected?.vm,
+    swm: expected?.swm,
+    vm: { ...expected?.vm, headKind: 'present' },
   });
 }
 
@@ -304,24 +307,13 @@ export function hasExactPrivateCatalogFinalizedVmBaselineContents(
   { swmProofKind = 'catalog-row' } = {},
 ) {
   const baseline = expected?.finalizedVmBaseline;
-  return hasExactPrivateCatalogVmContents(state, {
+  return decodesExactMemoryV1(state, {
     assetNumbers: expected?.assetNumbers,
-    ...expected?.vm,
-  })
-    && state.graphCounts.every((evidence) => (
-      evidence.swm === baseline?.projection?.count
-      && evidence.swmDigest === baseline?.projection?.digest
-      && (
-        swmProofKind === 'absent'
-          ? hasExactKeysV1(evidence.swmProof, ['kind'])
-            && evidence.swmProof.kind === 'absent'
-          : swmProofKind === 'catalog-row'
-            && hasExactSwmProofV1(state, evidence, {
-              ...baseline,
-              proofKind: 'catalog-row',
-            })
-      )
-    ));
+    swm: swmProofKind === 'absent'
+      ? { projection: baseline?.projection, proofKind: 'absent' }
+      : { ...baseline, proofKind: 'catalog-row' },
+    vm: { ...expected?.vm, headKind: 'present' },
+  });
 }
 
 /**
@@ -329,12 +321,10 @@ export function hasExactPrivateCatalogFinalizedVmBaselineContents(
  * @param {Rfc64PrivateSwmExpectationV1} expected
  */
 export function hasExactPrivateCatalogSwmContents(state, expected) {
-  if (!hasExactPrivateCatalogAssetSetV1(state, expected.assetNumbers)) return false;
-  return state.graphCounts.every((evidence) => (
-    evidence.swm === expected.projection?.count
-    && evidence.swmDigest === expected.projection?.digest
-    && hasExactSwmProofV1(state, evidence, expected)
-  ));
+  return decodesExactMemoryV1(state, {
+    assetNumbers: expected?.assetNumbers,
+    swm: expected,
+  });
 }
 
 /**
@@ -342,76 +332,206 @@ export function hasExactPrivateCatalogSwmContents(state, expected) {
  * @param {Rfc64PrivateVmExpectationV1 & { readonly assetNumbers: readonly number[] }} expected
  */
 export function hasExactPrivateCatalogVmContents(state, expected) {
-  if (!hasExactPrivateCatalogAssetSetV1(state, expected.assetNumbers)) return false;
-  return state.graphCounts.every((evidence) => (
-    evidence.vm === expected.projection?.count
-    && evidence.vmDigest === expected.projection?.digest
-    && hasExactKeysV1(evidence.vmHead, ['assertionGraph', 'assertionVersion'])
-    && evidence.vmHead?.assertionVersion === expected.assertionVersion
-    && evidence.vmHead?.assertionGraph === evidence.vmGraph
-  ));
+  return decodesExactMemoryV1(state, {
+    assetNumbers: expected?.assetNumbers,
+    vm: { ...expected, headKind: 'present' },
+  });
 }
 
 /**
- * @param {Rfc64PrivateCatalogMemoryStateV1} state
- * @param {readonly number[]} expectedAssetNumbers
+ * One strict row/proof decoder shared by live checks and persisted gate codecs.
+ * The profile names which layers are required and whether identity is bound.
+ * @param {unknown} stateInput
+ * @param {Rfc64PrivateMemoryEvidenceProfileV1} profile
+ * @param {string} [label]
+ * @returns {readonly Readonly<Rfc64PrivateCatalogMemoryEvidenceRowV1>[]}
  */
-function hasExactPrivateCatalogAssetSetV1(state, expectedAssetNumbers) {
-  if (!Array.isArray(state?.graphCounts) || !Array.isArray(expectedAssetNumbers)) return false;
-  const expectedAssets = new Set(expectedAssetNumbers);
-  const actualAssets = new Set(state.graphCounts.map(({ kaNumber }) => kaNumber));
-  return !(
-    state.graphCounts.length !== expectedAssets.size
-    || actualAssets.size !== expectedAssets.size
-    || [...expectedAssets].some((kaNumber) => !actualAssets.has(kaNumber))
-  );
+export function decodePrivateCatalogMemoryEvidenceV1(
+  stateInput,
+  profile,
+  label = 'private catalog memory evidence',
+) {
+  const state = plainMemoryRecordV1(stateInput, `${label} state`);
+  if (!Array.isArray(state.graphCounts) || !Array.isArray(profile?.assetNumbers)) {
+    throw new TypeError(`${label} graph inventory must be an array`);
+  }
+  if (profile.swm === undefined && profile.vm === undefined) {
+    throw new TypeError(`${label} profile must require at least one memory layer`);
+  }
+  if (
+    state.graphCounts.length !== profile.assetNumbers.length
+    || new Set(profile.assetNumbers).size !== profile.assetNumbers.length
+  ) {
+    throw new TypeError(`${label} graph inventory differs from its profile`);
+  }
+  const memory = state.graphCounts.map((entry, index) => {
+    const row = plainMemoryRecordV1(entry, `${label} graph ${index}`);
+    assertExactMemoryKeysV1(row, [
+      'kaNumber', 'kaUal', 'swm', 'swmDigest', 'swmGraph', 'swmProof',
+      'vm', 'vmDigest', 'vmGraph', 'vmHead',
+    ], `${label} graph ${index}`);
+    if (
+      !Number.isSafeInteger(row.kaNumber)
+      || row.kaNumber !== profile.assetNumbers[index]
+      || typeof row.kaUal !== 'string'
+      || !validProjectionCountV1(row.swm)
+      || !validProjectionCountV1(row.vm)
+      || !validProjectionDigestV1(row.swmDigest)
+      || !validProjectionDigestV1(row.vmDigest)
+      || !validGraphNameV1(row.swmGraph)
+      || !validGraphNameV1(row.vmGraph)
+      || row.swmGraph === row.vmGraph
+    ) throw new TypeError(`${label} graph ${index} is malformed`);
+    if (
+      profile.identity !== undefined
+      && row.kaUal !== `did:dkg:${profile.identity.networkId}/`
+        + `${profile.identity.authorAddress}/${row.kaNumber}`
+    ) throw new TypeError(`${label} graph ${index} has a noncanonical KA UAL`);
+    if (profile.swm !== undefined) {
+      decodePrivateCatalogSwmProofV1(
+        profile.catalogProofBinding ?? state,
+        row,
+        profile.swm,
+        `${label} graph ${index}`,
+      );
+    }
+    if (profile.vm !== undefined) {
+      decodePrivateCatalogVmHeadV1(row, profile.vm, `${label} graph ${index}`);
+    }
+    return Object.freeze(/** @type {Rfc64PrivateCatalogMemoryEvidenceRowV1} */ ({
+      kaNumber: row.kaNumber,
+      kaUal: row.kaUal,
+      swm: row.swm,
+      swmDigest: row.swmDigest,
+      swmGraph: row.swmGraph,
+      swmProof: row.swmProof,
+      vm: row.vm,
+      vmDigest: row.vmDigest,
+      vmGraph: row.vmGraph,
+      vmHead: row.vmHead,
+    }));
+  });
+  return Object.freeze(memory);
 }
 
 /**
- * @param {Rfc64PrivateCatalogMemoryStateV1} state
- * @param {Rfc64PrivateCatalogMemoryEvidenceRowV1} evidence
- * @param {Rfc64PrivateSwmExpectationDefinitionV1} expected
+ * @param {Readonly<Record<string, unknown>>} state
+ * @param {Readonly<Record<string, unknown>>} row
+ * @param {Rfc64PrivateStrictSwmProfileV1} expected
+ * @param {string} label
  */
-function hasExactSwmProofV1(state, evidence, expected) {
-  const proof = evidence.swmProof;
+function decodePrivateCatalogSwmProofV1(state, row, expected, label) {
+  if (
+    row.swm !== expected.projection?.count
+    || row.swmDigest !== expected.projection?.digest
+  ) throw new TypeError(`${label} SWM projection differs from its profile`);
+  const proof = plainMemoryRecordV1(row.swmProof, `${label} SWM proof`);
+  if (expected.proofKind === 'absent') {
+    assertExactMemoryKeysV1(proof, ['kind'], `${label} SWM proof`);
+    if (proof.kind !== 'absent') throw new TypeError(`${label} has unexpected SWM proof`);
+    return;
+  }
   if (expected.proofKind === 'workspace-head') {
-    return hasExactKeysV1(
+    assertExactMemoryKeysV1(
       proof,
       ['assertionGraph', 'assertionVersion', 'kind', 'shareOperationId'],
-    )
-      && proof.kind === 'workspace-head'
-      && proof.assertionVersion === expected.assertionVersion
-      && proof.assertionGraph === evidence.swmGraph
-      && proof.shareOperationId
-        === `${expected.shareOperationIdPrefix ?? ''}${evidence.kaNumber}`;
+      `${label} SWM proof`,
+    );
+    if (
+      proof.kind !== 'workspace-head'
+      || proof.assertionVersion !== expected.assertionVersion
+      || proof.assertionGraph !== row.swmGraph
+      || proof.shareOperationId
+        !== `${expected.shareOperationIdPrefix ?? ''}${row.kaNumber}`
+    ) throw new TypeError(`${label} has a malformed workspace proof`);
+    return;
   }
-  if (expected.proofKind === 'catalog-row') {
-    const expectedKaId = packKnowledgeAssetIdFromIdentity({
-      agentAddress: expected.authorAddress,
-      kaNumber: evidence.kaNumber,
-    }).toString();
-    return hasExactKeysV1(
-      proof,
-      ['assertionVersion', 'catalogHeadDigest', 'kaId', 'kind', 'projectionDigest'],
-    )
-      && proof.kind === 'catalog-row'
-      && proof.assertionVersion === expected.assertionVersion
-      && proof.catalogHeadDigest === state.appliedHeadDigest
-      && proof.kaId === expectedKaId
-      && proof.projectionDigest === expected.catalogProjectionDigest
-      && state.exactExpectedHead === true
-      && state.catalogVersion === expected.catalogVersion;
-  }
-  return false;
+  assertExactMemoryKeysV1(
+    proof,
+    ['assertionVersion', 'catalogHeadDigest', 'kaId', 'kind', 'projectionDigest'],
+    `${label} SWM proof`,
+  );
+  const expectedKaId = packKnowledgeAssetIdFromIdentity({
+    agentAddress: expected.authorAddress,
+    kaNumber: /** @type {number} */ (row.kaNumber),
+  }).toString();
+  if (
+    proof.kind !== 'catalog-row'
+    || proof.assertionVersion !== expected.assertionVersion
+    || proof.catalogHeadDigest !== state.appliedHeadDigest
+    || proof.kaId !== expectedKaId
+    || proof.projectionDigest !== expected.catalogProjectionDigest
+    || state.exactExpectedHead !== true
+    || state.catalogVersion !== expected.catalogVersion
+  ) throw new TypeError(`${label} has a noncanonical KA identity proof`);
 }
 
 /**
- * @param {unknown} value
- * @param {readonly string[]} expected
+ * @param {Readonly<Record<string, unknown>>} row
+ * @param {Rfc64PrivateStrictVmProfileV1} expected
+ * @param {string} label
  */
-function hasExactKeysV1(value, expected) {
-  return value !== null
-    && typeof value === 'object'
-    && !Array.isArray(value)
-    && Object.keys(value).sort().join('\n') === [...expected].sort().join('\n');
+function decodePrivateCatalogVmHeadV1(row, expected, label) {
+  if (
+    row.vm !== expected.projection?.count
+    || row.vmDigest !== expected.projection?.digest
+  ) throw new TypeError(`${label} VM projection differs from its profile`);
+  if (expected.headKind === 'absent') {
+    if (row.vmHead !== null) throw new TypeError(`${label} has unexpected VM head evidence`);
+    return;
+  }
+  const vmHead = plainMemoryRecordV1(row.vmHead, `${label} VM head`);
+  assertExactMemoryKeysV1(
+    vmHead,
+    ['assertionGraph', 'assertionVersion'],
+    `${label} VM head`,
+  );
+  if (
+    vmHead.assertionGraph !== row.vmGraph
+    || vmHead.assertionVersion !== expected.assertionVersion
+  ) throw new TypeError(`${label} VM head is malformed`);
+}
+
+/** @param {unknown} value @param {Rfc64PrivateMemoryEvidenceProfileV1} profile */
+function decodesExactMemoryV1(value, profile) {
+  try {
+    decodePrivateCatalogMemoryEvidenceV1(value, profile);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** @param {unknown} value @param {string} label */
+function plainMemoryRecordV1(value, label) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${label} must be an object`);
+  }
+  return /** @type {Readonly<Record<string, unknown>>} */ (value);
+}
+
+/**
+ * @param {Readonly<Record<string, unknown>>} value
+ * @param {readonly string[]} expected
+ * @param {string} label
+ */
+function assertExactMemoryKeysV1(value, expected, label) {
+  if (Object.keys(value).sort().join('\n') !== [...expected].sort().join('\n')) {
+    throw new TypeError(`${label} has unknown or missing fields`);
+  }
+}
+
+/** @param {unknown} value */
+function validProjectionCountV1(value) {
+  return Number.isSafeInteger(value) && /** @type {number} */ (value) >= 0;
+}
+
+/** @param {unknown} value */
+function validProjectionDigestV1(value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value);
+}
+
+/** @param {unknown} value */
+function validGraphNameV1(value) {
+  return typeof value === 'string' && value.length >= 1 && value.length <= 1_024;
 }

@@ -15,8 +15,8 @@ import {
   buildRuntimeManifestV1,
 } from '../../../../devnet/rfc64-runtime-provenance.mts';
 import {
-  assertRfc64PrivateRuntimeProvenanceV1,
-  buildRfc64PrivateRuntimeProvenanceV1,
+  assertRfc64PrivateRuntimeProvenanceV2,
+  buildRfc64PrivateRuntimeProvenanceV2,
   RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
 } from './runtime-provenance.mjs';
 
@@ -34,14 +34,14 @@ test('private process provenance normalizes loaded files into one bounded source
   assert.equal(provenance.processes.length, RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.length);
   assert.deepEqual(provenance.processes[0].loaded.runtimeFileIndexes, [0, 1, 2, 3]);
   assert.equal(Object.hasOwn(provenance.processes[0].loaded, 'runtimeFiles'), false);
-  assert.deepEqual(assertRfc64PrivateRuntimeProvenanceV1(provenance), provenance);
+  assert.deepEqual(assertRfc64PrivateRuntimeProvenanceV2(provenance), provenance);
   assert.doesNotThrow(() => canonicalize(provenance));
 });
 
 test('eleven-process live-build provenance fits the original canonical boundaries', () => {
   const sourceBuild = buildRuntimeManifestV1(REPO_ROOT, SOURCE_COMMIT);
   const loaded = buildExecutedRuntimeManifestV1(SOURCE_COMMIT, sourceBuild.runtimeFiles);
-  const provenance = buildRfc64PrivateRuntimeProvenanceV1(
+  const provenance = buildRfc64PrivateRuntimeProvenanceV2(
     sourceBuild,
     RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({ id, loaded })),
   );
@@ -56,17 +56,33 @@ test('private process provenance rejects normalized index and manifest tampering
   for (const indexes of [[0, 1, 1, 3], [1, 0, 2, 3], [0, 1, 2, 99]]) {
     const tampered = structuredClone(provenance);
     tampered.processes[0].loaded.runtimeFileIndexes = indexes;
-    assert.throws(() => assertRfc64PrivateRuntimeProvenanceV1(tampered));
+    assert.throws(() => assertRfc64PrivateRuntimeProvenanceV2(tampered));
   }
   const tamperedDigest = structuredClone(provenance);
   tamperedDigest.processes[0].loaded.manifestDigest = `0x${'ff'.repeat(32)}`;
   assert.throws(
-    () => assertRfc64PrivateRuntimeProvenanceV1(tamperedDigest),
+    () => assertRfc64PrivateRuntimeProvenanceV2(tamperedDigest),
     /normalized manifest binding/u,
   );
   const extraField = structuredClone(provenance);
   extraField.processes[0].loaded.runtimeFiles = [];
-  assert.throws(() => assertRfc64PrivateRuntimeProvenanceV1(extraField), /not canonical/u);
+  assert.throws(() => assertRfc64PrivateRuntimeProvenanceV2(extraField), /not canonical/u);
+});
+
+test('V2 rejects a persisted V1 runtime-file representation at the schema boundary', () => {
+  const provenance = fixtureProvenance();
+  const legacy = {
+    schema: 'dkg-rfc64-private-runtime-provenance-v1',
+    sourceBuild: provenance.sourceBuild,
+    processes: RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({
+      id,
+      loaded: buildExecutedRuntimeManifestV1(SOURCE_COMMIT, RUNTIME_FILES),
+    })),
+  };
+  assert.throws(
+    () => assertRfc64PrivateRuntimeProvenanceV2(legacy),
+    /schema/u,
+  );
 });
 
 test('canonical evidence retains the original exact node and byte ceilings', () => {
@@ -88,7 +104,7 @@ test('canonical evidence retains the original exact node and byte ceilings', () 
 function fixtureProvenance() {
   const sourceBuild = buildRuntimeManifestFromEntriesV1(SOURCE_COMMIT, RUNTIME_FILES);
   const loaded = buildExecutedRuntimeManifestV1(SOURCE_COMMIT, RUNTIME_FILES);
-  return buildRfc64PrivateRuntimeProvenanceV1(
+  return buildRfc64PrivateRuntimeProvenanceV2(
     sourceBuild,
     RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({ id, loaded })),
   );

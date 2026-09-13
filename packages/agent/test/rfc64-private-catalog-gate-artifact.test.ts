@@ -31,23 +31,23 @@ import {
   isExpectedPrivateCatalogDenialResultV1,
 } from '../devnet/rfc64-private-catalog/denial-evidence.mjs';
 import {
-  assertRfc64PrivateGatePassProvenanceV1,
-  decodeRfc64PrivateGatePassArtifactV1,
+  assertRfc64PrivateGatePassProvenanceV2,
+  decodeRfc64PrivateGatePassArtifactV2,
   runRfc64PrivateGateArtifactLifecycleV1,
 } from '../devnet/rfc64-private-catalog/gate-artifact.mjs';
 import { runRfc64PrivateGateFromCleanBuildV1 } from '../devnet/rfc64-private-catalog/clean-launch.js';
 import {
   RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
-  assertRfc64PrivateRuntimeProvenanceV1,
-  buildRfc64PrivateRuntimeProvenanceV1,
-  createRfc64PrivateRuntimeEvidenceCollectorV1,
+  assertRfc64PrivateRuntimeProvenanceV2,
+  buildRfc64PrivateRuntimeProvenanceV2,
+  createRfc64PrivateRuntimeEvidenceCollectorV2,
 } from '../devnet/rfc64-private-catalog/runtime-provenance.mjs';
 import {
   AgentChild,
-  executeRfc64PrivateReleaseGateV1,
+  executeRfc64PrivateReleaseGateV2,
   hasExactMemoryContents,
 } from '../devnet/rfc64-private-catalog/run.mjs';
-import { buildRfc64PrivateReleaseArtifactV1 } from
+import { buildRfc64PrivateReleaseArtifactV2 } from
   '../devnet/rfc64-private-catalog/scenario-artifact.mjs';
 import { passingScenarioEvidenceV1 } from
   '../devnet/rfc64-private-catalog/scenario-test-fixtures.mjs';
@@ -58,6 +58,7 @@ import {
   PROJECTION_NQUADS,
   PROJECTION_QUADS,
   privateCatalogSwmShareOperationId,
+  roleAgentAddress,
 } from '../devnet/rfc64-private-catalog/fixture.mjs';
 import {
   bindGraphlessProjectionToGraph,
@@ -86,7 +87,7 @@ const RUNTIME_FILES = Object.freeze([
 function runtimeProvenance(sourceRevision: string) {
   const sourceBuild = buildRuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
   const loaded = buildExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
-  return buildRfc64PrivateRuntimeProvenanceV1(
+  return buildRfc64PrivateRuntimeProvenanceV2(
     sourceBuild,
     RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({ id, loaded })),
   );
@@ -101,7 +102,7 @@ function runtimeManifest(sourceRevision: string, marker: string) {
 
 function completeScenarioPass(sourceRevision: string) {
   const provenance = runtimeProvenance(sourceRevision);
-  return buildRfc64PrivateReleaseArtifactV1({
+  return buildRfc64PrivateReleaseArtifactV2({
     ...passingScenarioEvidenceV1(),
     runtimeProvenance: provenance,
   }, provenance.sourceBuild.manifestDigest);
@@ -127,26 +128,26 @@ afterEach(async () => {
 
 describe('RFC-64 private release gate artifact lifecycle', () => {
   it('rejects persisted runtime provenance before admitting the typed model', () => {
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1(null))
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2(null))
       .toThrow(/must be an object/u);
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1([]))
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2([]))
       .toThrow(/must be an object/u);
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
-      schema: 'dkg-rfc64-private-runtime-provenance-v1',
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2({
+      schema: 'dkg-rfc64-private-runtime-provenance-v2',
       processes: [],
       sourceBuild: null,
     })).toThrow(/source manifest must be an object/u);
 
     const valid = runtimeProvenance('1'.repeat(40));
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2({
       ...valid,
       sourceBuild: {},
     })).toThrow(/source manifest is missing data field build/u);
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2({
       ...valid,
       processes: [{}],
     })).toThrow(/runtime process 0 is missing data field id/u);
-    expect(() => assertRfc64PrivateRuntimeProvenanceV1({
+    expect(() => assertRfc64PrivateRuntimeProvenanceV2({
       ...valid,
       processes: valid.processes.map((entry, index) => index === 0
         ? { ...entry, loaded: {} }
@@ -179,15 +180,15 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       runtimeManifestDigest: provenance.sourceBuild.manifestDigest,
     });
     expect(JSON.parse(await readFile(artifactPath, 'utf8'))).toEqual(artifact);
-    expect(() => assertRfc64PrivateGatePassProvenanceV1(artifact)).not.toThrow();
-    expect(decodeRfc64PrivateGatePassArtifactV1(artifact)).toBe(artifact);
+    expect(() => assertRfc64PrivateGatePassProvenanceV2(artifact)).not.toThrow();
+    expect(decodeRfc64PrivateGatePassArtifactV2(artifact)).toBe(artifact);
   });
 
   it('assembles all nine shutdown receipts in canonical process order and rejects omissions', () => {
     const sourceRevision = 'f'.repeat(40);
     const sourceBuild = buildRuntimeManifestFromEntriesV1(sourceRevision, RUNTIME_FILES);
     const loaded = buildExecutedRuntimeManifestV1(sourceRevision, RUNTIME_FILES);
-    const collector = createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild);
+    const collector = createRfc64PrivateRuntimeEvidenceCollectorV2(sourceBuild);
     for (const id of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1) {
       collector.record(id, {
         exit: { code: 0, signal: null, error: null },
@@ -199,7 +200,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
     );
 
-    const incomplete = createRfc64PrivateRuntimeEvidenceCollectorV1(sourceBuild);
+    const incomplete = createRfc64PrivateRuntimeEvidenceCollectorV2(sourceBuild);
     for (const id of RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.slice(0, -1)) {
       incomplete.record(id, { executedRuntimeManifest: structuredClone(loaded) });
     }
@@ -212,7 +213,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     const artifactPath = join(root, 'artifacts', 'latest.json');
     await mkdir(join(root, 'artifacts'), { recursive: true });
     await writeFile(artifactPath, JSON.stringify({
-      schema: 'dkg-rfc64-private-release-gate-v1',
+      schema: 'dkg-rfc64-private-release-gate-v2',
       status: 'PASS',
       secretMarker: 'prior-pass-must-not-survive',
     }));
@@ -244,7 +245,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
     expect(rawFailureArtifact).not.toContain(sensitiveMessage);
     expect(rawFailureArtifact).not.toContain('owner-start-failed');
     expect(JSON.parse(rawFailureArtifact)).toMatchObject({
-      schema: 'dkg-rfc64-private-release-gate-v1',
+      schema: 'dkg-rfc64-private-release-gate-v2',
       status: 'FAIL',
       phase: 'failed',
       failure: {
@@ -355,7 +356,7 @@ describe('RFC-64 private release gate artifact lifecycle', () => {
       artifactPath,
       repoRoot: root,
       execute: async ({ runtimeManifest: cleanBuild }) => ({
-        schema: 'dkg-rfc64-private-release-gate-v1',
+        schema: 'dkg-rfc64-private-release-gate-v2',
         status: 'PASS',
         runtimeManifestDigest: cleanBuild.manifestDigest,
         runtimeProvenance: runtimeProvenance(sourceRevision),
@@ -581,6 +582,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
 
       const exactGraphCounts = ASSET_NUMBERS.map((kaNumber) => ({
         kaNumber,
+        kaUal: `did:dkg:otp:20430/${roleAgentAddress('owner')}/${kaNumber}`,
         swmGraph: `urn:rfc64:test:swm:${kaNumber}`,
         swm: exact.count,
         swmDigest: exact.digest,
@@ -695,7 +697,7 @@ describe('RFC-64 private release gate process and denial evidence', () => {
     const sourceRevision = 'b'.repeat(40);
     const startedAt = Date.now();
 
-    await expect(executeRfc64PrivateReleaseGateV1({
+    await expect(executeRfc64PrivateReleaseGateV2({
       sourceRevision,
       runtimeManifest: {
         manifestDigest: `0x${'1'.repeat(64)}`,

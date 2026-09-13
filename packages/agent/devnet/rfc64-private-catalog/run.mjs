@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
 
 import { spawn } from 'node:child_process';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -17,9 +18,9 @@ import {
   sanitizeGateFailureV1,
 } from './gate-artifact.mjs';
 import {
-  createRfc64PrivateRuntimeEvidenceCollectorV1,
+  createRfc64PrivateRuntimeEvidenceCollectorV2,
 } from './runtime-provenance.mjs';
-import { buildRfc64PrivateReleaseArtifactV1 } from './scenario-artifact.mjs';
+import { buildRfc64PrivateReleaseArtifactV2 } from './scenario-artifact.mjs';
 import {
   hasExactMemoryContents,
   hasExactSourceSwmContents,
@@ -31,8 +32,43 @@ import {
 import {
   RFC64_PRIVATE_PROBE_ACTORS_V1,
   RFC64_PRIVATE_RUNTIME_ROLES_V1,
+  RFC64_PRIVATE_SCENARIO_PROCESS_IDS_V1,
 } from './scenario-actors.ts';
 import { composeRfc64PrivateScenarioResultV1 } from './scenario-result.ts';
+
+/** @typedef {import('../../../../devnet/rfc64-runtime-provenance.mts').RuntimeManifestV1} RuntimeManifestV1 */
+/** @typedef {import('./scenario-actors.ts').Rfc64PrivateRuntimeRoleV1} Rfc64PrivateRuntimeRoleV1 */
+/** @typedef {import('./scenario-actors.ts').Rfc64PrivateScenarioProcessIdV1} Rfc64PrivateScenarioProcessIdV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateBaselineResultV1} Rfc64PrivateBaselineResultV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateCatalogStateV1} Rfc64PrivateCatalogStateV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateChildCommandV1} Rfc64PrivateChildCommandV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateChildResultV1<Rfc64PrivateChildCommandV1['cmd']>} Rfc64PrivateChildResultUnionV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateFailoverResultV1} Rfc64PrivateFailoverResultV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateProcessEvidenceV1} Rfc64PrivateProcessEvidenceV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateReadyEvidenceV1 & { readonly multiaddr: string; readonly runtimeBuildManifestDigest: import('@origintrail-official/dkg-core').Digest32V1 }} Rfc64PrivateChildReadyEventV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateRevocationResultV1} Rfc64PrivateRevocationResultV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateRpcCallCountsV1} Rfc64PrivateRpcCallCountsV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateScenarioPhasesV1} Rfc64PrivateScenarioPhasesV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateScenarioResultV1} Rfc64PrivateScenarioResultV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateShutdownEvidenceV1} Rfc64PrivateShutdownEvidenceV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateStoppingEventV1} Rfc64PrivateStoppingEventV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateRuntimeProvenanceEvidenceV2} Rfc64PrivateRuntimeProvenanceEvidenceV2 */
+
+/** @typedef {Readonly<{ runtimeManifestDigest: string; sourceRevision: string }>} RuntimeProvenanceInputV1 */
+/** @typedef {Readonly<Record<string, string>>} ChildEnvironmentV1 */
+/** @typedef {Readonly<{ agentProcess?: string; agentRoot?: string; childEnvironment?: ChildEnvironmentV1; gracefulExitTimeoutMs?: number; runtimeProvenance?: RuntimeProvenanceInputV1; sigkillExitTimeoutMs?: number; sigtermExitTimeoutMs?: number; stopHandshakeTimeoutMs?: number }>} AgentChildOptionsV1 */
+/** @typedef {Readonly<{ code: number | null; error: Error | null; exitedAt: string; signal: NodeJS.Signals | null }>} ChildExitV1 */
+/** @typedef {Readonly<{ event: string; message?: string; requestId?: string }> & Record<string, unknown>} ChildEventV1 */
+/** @typedef {{ event: string; requestId?: string; resolve: (value: ChildEventV1) => void; reject: (error: unknown) => void }} ChildWaiterV1 */
+/** @typedef {Readonly<{ record: (id: Rfc64PrivateScenarioProcessIdV1, shutdown: Readonly<Rfc64PrivateShutdownEvidenceV1>) => void; seal: () => Rfc64PrivateRuntimeProvenanceEvidenceV2 }>} Rfc64PrivateRuntimeEvidenceCollectorV2 */
+/** @typedef {AgentChild & { ready: Rfc64PrivateChildReadyEventV1 }} StartedAgentChildV1 */
+/** @typedef {{ exitSequence?: number; processId: Rfc64PrivateScenarioProcessIdV1; ready: Rfc64PrivateChildReadyEventV1; role: Rfc64PrivateRuntimeRoleV1; shutdown?: Readonly<Rfc64PrivateShutdownEvidenceV1>; spawnedAt: string; spawnSequence: number }} MutableProcessEvidenceV1 */
+/** @typedef {Readonly<{ childEnvironment?: ChildEnvironmentV1; createProbeChild: (...args: ConstructorParameters<typeof AgentChild>) => AgentChild; dataDirs: Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>>; manifestPath: string; probeReadyTimeoutMs: number; runtimeEvidence: Rfc64PrivateRuntimeEvidenceCollectorV2; runtimeProvenance: RuntimeProvenanceInputV1 }>} PrivateReleaseScenarioOptionsV1 */
+/** @typedef {Readonly<{ childEnvironment?: ChildEnvironmentV1; createProbeChild?: (...args: ConstructorParameters<typeof AgentChild>) => AgentChild; probeReadyTimeoutMs?: number; runtimeManifest: Readonly<RuntimeManifestV1>; sourceRevision: string }>} ExecutePrivateReleaseGateOptionsV1 */
+/** @typedef {Readonly<Rfc64PrivateBaselineResultV1 & { owner: StartedAgentChildV1; provider2: StartedAgentChildV1; receiverSeedReady: Rfc64PrivateChildReadyEventV1; receiverSeedShutdown: Readonly<Rfc64PrivateShutdownEvidenceV1> }>} BaselineRunEvidenceV1 */
+/** @typedef {Readonly<Rfc64PrivateFailoverResultV1 & { ownerExit: ChildExitV1; ownerShutdown: Readonly<Rfc64PrivateShutdownEvidenceV1>; receiver: StartedAgentChildV1 }>} FailoverRunEvidenceV1 */
+/** @typedef {Readonly<Rfc64PrivateRevocationResultV1 & { outsider: StartedAgentChildV1; ownerRevokerReady: Rfc64PrivateChildReadyEventV1; ownerRevokerShutdown: Readonly<Rfc64PrivateShutdownEvidenceV1> }>} RevocationRunEvidenceV1 */
+/** @typedef {Readonly<{ restartState: Readonly<Rfc64PrivateCatalogStateV1>; outsiderShutdown: Readonly<Rfc64PrivateShutdownEvidenceV1>; provider2Shutdown: Readonly<Rfc64PrivateShutdownEvidenceV1>; receiverShutdown: Readonly<Rfc64PrivateShutdownEvidenceV1>; restartedReceiverReady: Rfc64PrivateChildReadyEventV1; restartedReceiverShutdown: Readonly<Rfc64PrivateShutdownEvidenceV1> }>} RestartRunEvidenceV1 */
 
 export {
   RFC64_PRIVATE_GATE_RPC_BUDGET_V1,
@@ -59,13 +95,30 @@ let requestSequence = 0;
 let lifecycleSequence = 0;
 
 export class AgentChild {
+  /**
+   * @param {Rfc64PrivateRuntimeRoleV1} role
+   * @param {string} dataDir
+   * @param {string | undefined} manifestPath
+   * @param {'run' | 'probe'} [mode]
+   * @param {AgentChildOptionsV1} [options]
+   */
   constructor(role, dataDir, manifestPath, mode = 'run', options = {}) {
     this.role = role;
     this.spawnSequence = ++lifecycleSequence;
     this.spawnedAt = new Date().toISOString();
+    /** @type {ChildEventV1[]} */
     this.events = [];
+    /** @type {ChildWaiterV1[]} */
     this.waiters = [];
     this.exited = false;
+    /** @type {number | undefined} */
+    this.exitSequence = undefined;
+    /** @type {string | undefined} */
+    this.exitedAt = undefined;
+    /** @type {Rfc64PrivateChildReadyEventV1 | undefined} */
+    this.ready = undefined;
+    /** @type {Readonly<Rfc64PrivateShutdownEvidenceV1> | undefined} */
+    this.shutdownReceipt = undefined;
     this.stopTimeouts = Object.freeze({
       // The provenance-bearing acknowledgement is emitted only after the
       // real agent and its bootstrap workers stop, which can include a
@@ -109,7 +162,7 @@ export class AgentChild {
     createInterface({ input: this.proc.stdout }).on('line', (line) => {
       const marker = 'RFC64_PRIVATE_EVENT ';
       if (!line.startsWith(marker)) return;
-      const event = JSON.parse(line.slice(marker.length));
+      const event = /** @type {ChildEventV1} */ (JSON.parse(line.slice(marker.length)));
       this.events.push(event);
       for (const waiter of this.waiters.slice()) {
         if (
@@ -134,8 +187,10 @@ export class AgentChild {
         }
       }
     });
+    /** @type {Promise<ChildExitV1>} */
     this.exit = new Promise((resolve) => {
       let settled = false;
+      /** @param {{ code: number | null; signal: NodeJS.Signals | null; error: Error | null }} result */
       const finish = (result) => {
         if (settled) return;
         settled = true;
@@ -160,6 +215,11 @@ export class AgentChild {
     });
   }
 
+  /**
+   * @param {string} event
+   * @param {{ requestId?: string; timeoutMs?: number }} [options]
+   * @returns {Promise<ChildEventV1>}
+   */
   waitFor(event, { requestId, timeoutMs = RUN_TIMEOUT_MS } = {}) {
     const existing = this.events.find((item) => (
       item.event === event && (requestId === undefined || item.requestId === requestId)
@@ -171,24 +231,40 @@ export class AgentChild {
         if (index >= 0) this.waiters.splice(index, 1);
         reject(new Error(`${this.role}: timed out waiting for ${event}`));
       }, timeoutMs);
+      /** @type {ChildWaiterV1} */
       const waiter = {
         event,
         requestId,
-        resolve: (value) => { clearTimeout(timer); resolve(value); },
-        reject: (error) => { clearTimeout(timer); reject(error); },
+        resolve: (/** @type {ChildEventV1} */ value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        reject: (/** @type {unknown} */ error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
       };
       this.waiters.push(waiter);
     });
   }
 
+  /**
+   * @template {Rfc64PrivateChildCommandV1} Command
+   * @param {Command} cmd
+   * @param {{ timeoutMs?: number }} [options]
+   * @returns {Promise<import('./scenario-result.ts').Rfc64PrivateChildResultV1<Command['cmd']>>}
+   */
   async request(cmd, options = {}) {
     const descriptor = childCommandDescriptorV1(cmd);
     const timeoutMs = options.timeoutMs ?? RUN_TIMEOUT_MS;
     const requestId = `${this.role}-${++requestSequence}`;
     this.proc.stdin.write(`${JSON.stringify({ ...cmd, requestId })}\n`);
-    return this.waitFor(descriptor.responseEvent, { requestId, timeoutMs });
+    return /** @type {Promise<import('./scenario-result.ts').Rfc64PrivateChildResultV1<Command['cmd']>>} */ (
+      this.waitFor(descriptor.responseEvent, { requestId, timeoutMs })
+    );
   }
 
+  /** @returns {Promise<Readonly<Rfc64PrivateShutdownEvidenceV1>>} */
   async stop() {
     if (this.shutdownReceipt !== undefined) return this.shutdownReceipt;
     if (this.exited) {
@@ -197,7 +273,9 @@ export class AgentChild {
       throw new Error(`${this.role}: process exited without a runtime-evidence shutdown receipt`);
     }
     let handshakeFailure = null;
+    /** @type {Rfc64PrivateStoppingEventV1['executedRuntimeManifest'] | undefined} */
     let executedRuntimeManifest;
+    /** @type {Readonly<Rfc64PrivateStoppingEventV1> | undefined} */
     let stoppedEvent;
     try {
       stoppedEvent = await this.request(
@@ -228,17 +306,26 @@ export class AgentChild {
           `${this.role}: stop handshake failed; forced process exit completed`,
         );
     }
+    if (stoppedEvent === undefined || executedRuntimeManifest === undefined) {
+      throw new Error(`${this.role}: successful stop handshake omitted its evidence`);
+    }
     let result = this.exited
       ? await this.exit
       : await waitForExit(this.exit, this.stopTimeouts.gracefulExit);
     if (result === null) result = await this.forceStop();
     if (result.error !== null) throw result.error;
-    this.shutdownReceipt = Object.freeze({
-      exit: Object.freeze(result),
+    const shutdownReceipt = Object.freeze({
+      exit: Object.freeze({
+        code: result.code,
+        error: null,
+        exitedAt: result.exitedAt,
+        signal: result.signal,
+      }),
       executedRuntimeManifest,
       rpcCallCounts: requiredRpcCallCounts(stoppedEvent, this.role),
     });
-    return this.shutdownReceipt;
+    this.shutdownReceipt = shutdownReceipt;
+    return shutdownReceipt;
   }
 
   /** Bounded process reaping for failures that cannot produce provenance. */
@@ -257,7 +344,8 @@ export class AgentChild {
   }
 }
 
-export async function executeRfc64PrivateReleaseGateV1({
+/** @param {ExecutePrivateReleaseGateOptionsV1} options */
+export async function executeRfc64PrivateReleaseGateV2({
   childEnvironment,
   createProbeChild = (...args) => new AgentChild(...args),
   probeReadyTimeoutMs = RUN_TIMEOUT_MS,
@@ -271,12 +359,16 @@ export async function executeRfc64PrivateReleaseGateV1({
     runtimeManifestDigest: runtimeManifest.manifestDigest,
     sourceRevision,
   });
-  const runtimeEvidence = createRfc64PrivateRuntimeEvidenceCollectorV1(runtimeManifest);
+  const runtimeEvidence = /** @type {Rfc64PrivateRuntimeEvidenceCollectorV2} */ (
+    createRfc64PrivateRuntimeEvidenceCollectorV2(runtimeManifest)
+  );
   const runRoot = await mkdtemp(join(tmpdir(), 'dkg-rfc64-private-release-gate-'));
   const authorityStatePath = join(runRoot, 'authority.json');
   const manifestPath = join(runRoot, 'manifest.json');
-  const dataDirs = Object.fromEntries(
-    RFC64_PRIVATE_RUNTIME_ROLES_V1.map((role) => [role, join(runRoot, role)]),
+  const dataDirs = /** @type {Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>>} */ (
+    Object.fromEntries(
+      RFC64_PRIVATE_RUNTIME_ROLES_V1.map((role) => [role, join(runRoot, role)]),
+    )
   );
   const scenario = new PrivateReleaseScenarioContext({
     childEnvironment,
@@ -295,9 +387,11 @@ export async function executeRfc64PrivateReleaseGateV1({
       createFinalizedChainFixture(),
     );
     const probed = await scenario.probeRoles();
-    const peerIds = Object.fromEntries(RFC64_PRIVATE_RUNTIME_ROLES_V1.map(
-      (role) => [role, probed[role].ready.peerId],
-    ));
+    const peerIds = /** @type {Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>>} */ (
+      Object.fromEntries(RFC64_PRIVATE_RUNTIME_ROLES_V1.map(
+        (role) => [role, probed[role].ready.peerId],
+      ))
+    );
     scenario.bindPeerIds(peerIds);
     await writeFile(
       manifestPath,
@@ -308,7 +402,7 @@ export async function executeRfc64PrivateReleaseGateV1({
     const failover = await exerciseFailoverV1(scenario, baseline);
     const revocation = await exerciseRevocationV1(scenario, baseline, failover);
     const restart = await inspectRestartV1(scenario, baseline, failover, revocation);
-    artifact = buildRfc64PrivateReleaseArtifactV1(
+    artifact = buildRfc64PrivateReleaseArtifactV2(
       scenario.sealEvidence(scenarioEvidencePhasesV1({
         baseline,
         failover,
@@ -334,19 +428,31 @@ export async function executeRfc64PrivateReleaseGateV1({
 }
 
 class PrivateReleaseScenarioContext {
+  /** @param {PrivateReleaseScenarioOptionsV1} options */
   constructor(options) {
-    Object.assign(this, options);
+    this.childEnvironment = options.childEnvironment;
+    this.createProbeChild = options.createProbeChild;
+    this.dataDirs = options.dataDirs;
+    this.manifestPath = options.manifestPath;
+    this.probeReadyTimeoutMs = options.probeReadyTimeoutMs;
+    this.runtimeEvidence = options.runtimeEvidence;
+    this.runtimeProvenance = options.runtimeProvenance;
+    /** @type {Set<AgentChild>} */
     this.active = new Set();
+    /** @type {Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>> | null} */
     this.peerIds = null;
+    /** @type {Map<Rfc64PrivateScenarioProcessIdV1, MutableProcessEvidenceV1>} */
     this.processes = new Map();
     this.sealed = false;
   }
 
+  /** @param {Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>>} peerIds */
   bindPeerIds(peerIds) {
     if (this.peerIds !== null) throw new Error('private release peer identities already bound');
     this.peerIds = Object.freeze({ ...peerIds });
   }
 
+  /** @returns {Promise<Readonly<Record<Rfc64PrivateRuntimeRoleV1, Readonly<{ ready: Rfc64PrivateChildReadyEventV1 }>>>>} */
   async probeRoles() {
     const entries = await Promise.all(RFC64_PRIVATE_PROBE_ACTORS_V1.map(async ({
       processId,
@@ -362,10 +468,10 @@ class PrivateReleaseScenarioContext {
       this.active.add(child);
       let shutdownRecorded = false;
       try {
-        const ready = await child.waitFor(
+        const ready = /** @type {Rfc64PrivateChildReadyEventV1} */ (/** @type {unknown} */ (await child.waitFor(
           RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready,
           { timeoutMs: this.probeReadyTimeoutMs },
-        );
+        )));
         assertReadyRuntimeManifest(ready, this.runtimeProvenance.runtimeManifestDigest);
         this.recordReady(processId, role, child, ready);
         await this.stop(child, processId);
@@ -378,9 +484,16 @@ class PrivateReleaseScenarioContext {
         }
       }
     }));
-    return Object.freeze(Object.fromEntries(entries));
+    return /** @type {Readonly<Record<Rfc64PrivateRuntimeRoleV1, Readonly<{ ready: Rfc64PrivateChildReadyEventV1 }>>>} */ (
+      Object.freeze(Object.fromEntries(entries))
+    );
   }
 
+  /**
+   * @param {Rfc64PrivateRuntimeRoleV1} role
+   * @param {Rfc64PrivateScenarioProcessIdV1} [processId]
+   * @returns {Promise<StartedAgentChildV1>}
+   */
   async start(role, processId = role) {
     if (this.peerIds === null) throw new Error('private release peer identities are not bound');
     const child = new AgentChild(role, this.dataDirs[role], this.manifestPath, 'run', {
@@ -388,25 +501,33 @@ class PrivateReleaseScenarioContext {
       childEnvironment: this.childEnvironment,
     });
     this.active.add(child);
-    child.ready = await child.waitFor(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready);
+    child.ready = /** @type {Rfc64PrivateChildReadyEventV1} */ (/** @type {unknown} */ (
+      await child.waitFor(RFC64_PRIVATE_CHILD_LIFECYCLE_EVENTS_V1.ready)
+    ));
     assertReadyRuntimeManifest(child.ready, this.runtimeProvenance.runtimeManifestDigest);
     if (child.ready.peerId !== this.peerIds[role]) {
       throw new Error(`${role}: persisted peer identity changed after probe`);
     }
     this.recordReady(processId, role, child, child.ready);
-    return child;
+    return /** @type {StartedAgentChildV1} */ (child);
   }
 
+  /**
+   * @param {AgentChild} child
+   * @param {Rfc64PrivateScenarioProcessIdV1} processId
+   * @returns {Promise<Readonly<Rfc64PrivateShutdownEvidenceV1>>}
+   */
   async stop(child, processId) {
     const shutdown = await child.stop();
     const process = this.requireProcess(processId);
     if (process.shutdown !== undefined) {
       throw new Error(`private release process already stopped: ${processId}`);
     }
-    if (!Number.isSafeInteger(child.exitSequence) || child.exitSequence < 1) {
+    const exitSequence = child.exitSequence;
+    if (typeof exitSequence !== 'number' || !Number.isSafeInteger(exitSequence) || exitSequence < 1) {
       throw new Error(`private release process has no valid exit sequence: ${processId}`);
     }
-    process.exitSequence = child.exitSequence;
+    process.exitSequence = exitSequence;
     process.shutdown = shutdown;
     this.runtimeEvidence.record(processId, shutdown);
     this.active.delete(child);
@@ -419,6 +540,12 @@ class PrivateReleaseScenarioContext {
     )));
   }
 
+  /**
+   * @param {Rfc64PrivateScenarioProcessIdV1} processId
+   * @param {Rfc64PrivateRuntimeRoleV1} role
+   * @param {AgentChild} child
+   * @param {Rfc64PrivateChildReadyEventV1} ready
+   */
   recordReady(processId, role, child, ready) {
     if (this.processes.has(processId)) {
       throw new Error(`private release process already recorded: ${processId}`);
@@ -432,6 +559,10 @@ class PrivateReleaseScenarioContext {
     });
   }
 
+  /**
+   * @param {Rfc64PrivateScenarioProcessIdV1} processId
+   * @returns {MutableProcessEvidenceV1}
+   */
   requireProcess(processId) {
     const process = this.processes.get(processId);
     if (process === undefined) {
@@ -440,14 +571,35 @@ class PrivateReleaseScenarioContext {
     return process;
   }
 
+  /** @returns {Readonly<Record<Rfc64PrivateRuntimeRoleV1, string>>} */
+  requirePeerIds() {
+    if (this.peerIds === null) {
+      throw new Error('private release peer identities are not bound');
+    }
+    return this.peerIds;
+  }
+
+  /**
+   * @param {Readonly<Rfc64PrivateScenarioPhasesV1>} phases
+   * @returns {Readonly<Rfc64PrivateScenarioResultV1>}
+   */
   sealEvidence(phases) {
     if (this.sealed) throw new Error('private release scenario evidence already sealed');
     if (this.peerIds === null) throw new Error('private release peer identities are not bound');
     this.sealed = true;
-    const processes = Object.fromEntries([...this.processes.entries()].map(([id, process]) => [
-      id,
-      Object.freeze({ ...process }),
-    ]));
+    const processes = /** @type {Rfc64PrivateScenarioResultV1['processes']} */ (
+      Object.fromEntries(RFC64_PRIVATE_SCENARIO_PROCESS_IDS_V1.map((id) => {
+        const process = this.requireProcess(id);
+        if (process.exitSequence === undefined || process.shutdown === undefined) {
+          throw new Error(`private release process evidence is incomplete: ${id}`);
+        }
+        return [id, Object.freeze({
+          ...process,
+          exitSequence: process.exitSequence,
+          shutdown: process.shutdown,
+        })];
+      }))
+    );
     return composeRfc64PrivateScenarioResultV1({
       peerIds: this.peerIds,
       phases,
@@ -457,6 +609,10 @@ class PrivateReleaseScenarioContext {
   }
 }
 
+/**
+ * @param {PrivateReleaseScenarioContext} scenario
+ * @returns {Promise<BaselineRunEvidenceV1>}
+ */
 async function establishBaselineV1(scenario) {
   const owner = await scenario.start('owner', 'owner');
   const baseline = await owner.request({ cmd: 'publish' });
@@ -521,6 +677,11 @@ async function establishBaselineV1(scenario) {
   });
 }
 
+/**
+ * @param {PrivateReleaseScenarioContext} scenario
+ * @param {BaselineRunEvidenceV1} baseline
+ * @returns {Promise<FailoverRunEvidenceV1>}
+ */
 async function exerciseFailoverV1(scenario, baseline) {
   const ownerShutdown = await scenario.stop(baseline.owner, 'owner');
   const ownerExit = ownerShutdown.exit;
@@ -568,12 +729,19 @@ async function exerciseFailoverV1(scenario, baseline) {
   });
 }
 
+/**
+ * @param {PrivateReleaseScenarioContext} scenario
+ * @param {BaselineRunEvidenceV1} baseline
+ * @param {FailoverRunEvidenceV1} failover
+ * @returns {Promise<RevocationRunEvidenceV1>}
+ */
 async function exerciseRevocationV1(scenario, baseline, failover) {
+  const peerIds = scenario.requirePeerIds();
   const outsider = await scenario.start('outsider', 'outsider');
   await dial(outsider, baseline.provider2);
   const outsiderDenial = await outsider.request({
     cmd: 'sync-denied',
-    providerPeerIds: [scenario.peerIds.provider2],
+    providerPeerIds: [peerIds.provider2],
   });
   const outsiderState = await outsider.request({
     cmd: 'inspect',
@@ -595,7 +763,7 @@ async function exerciseRevocationV1(scenario, baseline, failover) {
   });
   const revokedReceiverDenial = await failover.receiver.request({
     cmd: 'sync-denied',
-    providerPeerIds: [scenario.peerIds.provider2],
+    providerPeerIds: [peerIds.provider2],
   });
   const provider2StateAfterRevocation = await baseline.provider2.request({
     cmd: 'inspect',
@@ -621,6 +789,13 @@ async function exerciseRevocationV1(scenario, baseline, failover) {
   });
 }
 
+/**
+ * @param {PrivateReleaseScenarioContext} scenario
+ * @param {BaselineRunEvidenceV1} baseline
+ * @param {FailoverRunEvidenceV1} failover
+ * @param {RevocationRunEvidenceV1} revocation
+ * @returns {Promise<RestartRunEvidenceV1>}
+ */
 async function inspectRestartV1(scenario, baseline, failover, revocation) {
   const provider2Shutdown = await scenario.stop(baseline.provider2, 'provider2');
   const receiverShutdown = await scenario.stop(failover.receiver, 'receiver');
@@ -644,6 +819,10 @@ async function inspectRestartV1(scenario, baseline, failover, revocation) {
   });
 }
 
+/**
+ * @param {Readonly<{ baseline: BaselineRunEvidenceV1; failover: FailoverRunEvidenceV1; restart: RestartRunEvidenceV1; revocation: RevocationRunEvidenceV1 }>} input
+ * @returns {Readonly<Rfc64PrivateScenarioPhasesV1>}
+ */
 function scenarioEvidencePhasesV1({ baseline, failover, restart, revocation }) {
   return Object.freeze({
     baseline: Object.freeze({
@@ -676,6 +855,7 @@ function scenarioEvidencePhasesV1({ baseline, failover, restart, revocation }) {
   });
 }
 
+/** @param {ChildEnvironmentV1 | undefined} value */
 function boundedChildEnvironmentV1(value) {
   if (value === undefined) return {};
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -697,12 +877,18 @@ function boundedChildEnvironmentV1(value) {
   return Object.fromEntries(entries);
 }
 
+/** @param {Rfc64PrivateChildReadyEventV1} ready @param {string} expectedDigest */
 function assertReadyRuntimeManifest(ready, expectedDigest) {
   if (ready.runtimeBuildManifestDigest !== expectedDigest) {
     throw new Error(`${ready.role}: runtime build manifest differs from the clean build`);
   }
 }
 
+/**
+ * @param {Readonly<Rfc64PrivateStoppingEventV1>} event
+ * @param {string} label
+ * @returns {Rfc64PrivateStoppingEventV1['executedRuntimeManifest']}
+ */
 function requiredExecutedRuntimeManifest(event, label) {
   const manifest = event?.executedRuntimeManifest;
   if (manifest === null || typeof manifest !== 'object' || Array.isArray(manifest)) {
@@ -711,6 +897,11 @@ function requiredExecutedRuntimeManifest(event, label) {
   return manifest;
 }
 
+/**
+ * @param {Readonly<Rfc64PrivateStoppingEventV1>} event
+ * @param {string} label
+ * @returns {Rfc64PrivateRpcCallCountsV1}
+ */
 function requiredRpcCallCounts(event, label) {
   const counts = event?.rpcCallCounts;
   if (counts === null || typeof counts !== 'object' || Array.isArray(counts)) {
@@ -728,10 +919,12 @@ function requiredRpcCallCounts(event, label) {
   return Object.freeze(Object.fromEntries(entries));
 }
 
+/** @param {StartedAgentChildV1} left @param {StartedAgentChildV1} right */
 async function connectBothWays(left, right) {
   await Promise.all([dial(left, right), dial(right, left)]);
 }
 
+/** @param {StartedAgentChildV1} from @param {StartedAgentChildV1} to */
 async function dial(from, to) {
   await from.request({
     cmd: 'dial',
@@ -740,6 +933,7 @@ async function dial(from, to) {
   }, { timeoutMs: 30_000 });
 }
 
+/** @param {Readonly<Rfc64PrivateCatalogStateV1>} state */
 function safeMemorySummary(state) {
   return Object.freeze({
     appliedHeadDigest: state.appliedHeadDigest,
@@ -750,14 +944,21 @@ function safeMemorySummary(state) {
   });
 }
 
+/** @param {number} ms @returns {Promise<void>} */
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * @param {Promise<ChildExitV1>} exit
+ * @param {number} timeoutMs
+ * @returns {Promise<ChildExitV1 | null>}
+ */
 async function waitForExit(exit, timeoutMs) {
   return Promise.race([exit, delay(timeoutMs).then(() => null)]);
 }
 
+/** @param {string} multiaddr @param {number} [timeoutMs] */
 async function waitForTcpListenerClosed(multiaddr, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -767,10 +968,12 @@ async function waitForTcpListenerClosed(multiaddr, timeoutMs = 5_000) {
   return false;
 }
 
+/** @param {string} multiaddr @returns {Promise<boolean>} */
 async function tcpListenerIsDialable(multiaddr) {
   const endpoint = parseTcpMultiaddr(multiaddr);
   return new Promise((resolve) => {
     const socket = createConnection(endpoint);
+    /** @param {boolean} dialable */
     const finish = (dialable) => {
       socket.removeAllListeners();
       socket.destroy();
@@ -782,6 +985,7 @@ async function tcpListenerIsDialable(multiaddr) {
   });
 }
 
+/** @param {string} value */
 function parseTcpMultiaddr(value) {
   const match = /^\/ip4\/([^/]+)\/tcp\/(\d+)(?:\/|$)/u.exec(value);
   if (match === null) throw new Error(`unsupported local TCP multiaddr: ${value}`);

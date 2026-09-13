@@ -6,21 +6,21 @@ import { basename, dirname, join } from 'node:path';
 
 import { isSafeChildDiagnosticPhaseV1 } from './child-protocol.mjs';
 import {
-  RFC64_PRIVATE_GATE_SCHEMA_V1 as SCHEMA,
+  RFC64_PRIVATE_GATE_SCHEMA_V2 as SCHEMA,
   RFC64_PRIVATE_RELEASE_CHECK_KEYS_V1,
   RFC64_PRIVATE_RELEASE_LIMITATION_V1,
 } from './gate-artifact-contract.mjs';
 import {
-  assertRfc64PrivateGatePassProvenanceV1,
-  decodeRfc64PrivateGatePassArtifactV1,
+  assertRfc64PrivateGatePassProvenanceV2,
+  decodeRfc64PrivateGatePassArtifactV2,
 } from './gate-artifact-pass-codec.mjs';
 import { stableJsonV1 } from './gate-artifact-codec-primitives.mjs';
 
 export {
   RFC64_PRIVATE_RELEASE_CHECK_KEYS_V1,
   RFC64_PRIVATE_RELEASE_LIMITATION_V1,
-  assertRfc64PrivateGatePassProvenanceV1,
-  decodeRfc64PrivateGatePassArtifactV1,
+  assertRfc64PrivateGatePassProvenanceV2,
+  decodeRfc64PrivateGatePassArtifactV2,
 };
 
 /** Tag a child-command failure with fixed diagnostics safe for gate artifacts. */
@@ -70,7 +70,7 @@ export async function runRfc64PrivateGateArtifactLifecycleV1({
       sourceRevision: canonicalSourceRevision,
     };
     if (completed.status === 'PASS') {
-      decodeRfc64PrivateGatePassArtifactV1(completed);
+      decodeRfc64PrivateGatePassArtifactV2(completed);
     }
     await writeGateArtifactAtomicV1(artifactPath, completed);
     return completed;

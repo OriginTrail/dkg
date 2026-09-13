@@ -9,6 +9,7 @@ import {
   ASSET_NUMBERS,
   CONTEXT_GRAPH_ID,
   EMPTY_PROJECTION_EVIDENCE,
+  NETWORK_ID,
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   PROJECTION_EVIDENCE,
   UPDATED_PROJECTION_EVIDENCE,
@@ -73,6 +74,7 @@ test('workspace augmentation preserves parallel graph reads and stable row order
 test('memory evidence distinguishes finalized VM v1 from newer SWM v2', async () => {
   const workspaceGraphCounts = ASSET_NUMBERS.map((kaNumber) => ({
     kaNumber,
+    kaUal: `did:dkg:${NETWORK_ID}/${roleAgentAddress('owner')}/${kaNumber}`,
     swm: UPDATED_PROJECTION_EVIDENCE.count,
     swmDigest: UPDATED_PROJECTION_EVIDENCE.digest,
     swmGraph: `swm:${kaNumber}`,

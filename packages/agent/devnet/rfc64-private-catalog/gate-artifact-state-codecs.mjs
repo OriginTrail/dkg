@@ -7,14 +7,12 @@ import {
 } from './fixture.mjs';
 import {
   assertExactKeysV1,
-  boundedArrayV1,
   canonicalIsoInstantV1,
   isDigestV1,
-  parseCanonicalDecimalV1,
   plainRecordV1,
-  stableJsonV1,
 } from './gate-artifact-codec-primitives.mjs';
 import { decodePrivateGateRpcEvidenceV1 } from './gate-artifact-rpc-codec.mjs';
+import { decodePrivateCatalogMemoryEvidenceV1 } from './memory-evidence.mjs';
 
 /** Source-provider state has no bootstrap and proves workspace ownership. */
 export function decodePrivateGateSourceProviderStateV1(value, catalog, topology) {
@@ -200,129 +198,41 @@ function decodeAppliedCatalogStateV1(
   if (![receiver.applied, receiver.failed].every((count) => (
     Number.isSafeInteger(count) && count >= 0
   ))) throw new TypeError(`${label} receiver counters are malformed`);
-  const graphCounts = boundedArrayV1(state.graphCounts, `${label} graph evidence`);
-  const kaNumbers = [];
-  const memory = graphCounts.map((entry, index) => {
-    const row = plainRecordV1(entry, `${label} graph ${index}`);
-    assertExactKeysV1(row, [
-      'kaNumber', 'kaUal', 'swm', 'swmDigest', 'swmGraph', 'swmProof',
-      'vm', 'vmDigest', 'vmGraph', 'vmHead',
-    ], `${label} graph ${index}`);
-    if (
-      !Number.isSafeInteger(row.kaNumber)
-      || row.kaNumber < 0
-      || (index > 0 && row.kaNumber <= kaNumbers[index - 1])
-      || typeof row.kaUal !== 'string'
-      || !Number.isSafeInteger(row.swm)
-      || row.swm < 0
-      || !Number.isSafeInteger(row.vm)
-      || row.vm < 0
-      || typeof row.swmDigest !== 'string'
-      || !/^[0-9a-f]{64}$/u.test(row.swmDigest)
-      || typeof row.vmDigest !== 'string'
-      || !/^[0-9a-f]{64}$/u.test(row.vmDigest)
-    ) throw new TypeError(`${label} graph ${index} is malformed`);
-    const proof = plainRecordV1(row.swmProof, `${label} graph ${index} SWM proof`);
-    const swmExpectation = contract.memoryKind === 'baseline'
-      ? PRIVATE_CATALOG_MEMORY_EXPECTATION.finalizedVmBaseline
-      : PRIVATE_CATALOG_MEMORY_EXPECTATION.swm;
-    if (contract.proofKind === 'catalog-row') {
-      assertExactKeysV1(proof, [
-        'assertionVersion', 'catalogHeadDigest', 'kaId', 'kind', 'projectionDigest',
-      ], `${label} graph ${index} SWM proof`);
-      const packedKaId = parseCanonicalDecimalV1(proof.kaId, true, 256);
-      const expectedAuthor = BigInt(authorAddress);
-      if (
-        proof.kind !== contract.proofKind
-        || proof.catalogHeadDigest !== state.appliedHeadDigest
-        || proof.projectionDigest !== swmExpectation.catalogProjectionDigest
-        || proof.assertionVersion !== swmExpectation.assertionVersion
-        || packedKaId === null
-        || (packedKaId >> 96n) !== expectedAuthor
-        || (packedKaId & ((1n << 96n) - 1n)) !== BigInt(row.kaNumber)
-      ) throw new TypeError(`${label} graph ${index} has a noncanonical KA identity proof`);
-    } else {
-      assertExactKeysV1(proof, [
-        'assertionGraph', 'assertionVersion', 'kind', 'shareOperationId',
-      ], `${label} graph ${index} SWM proof`);
-      if (
-        proof.kind !== contract.proofKind
-        || proof.assertionGraph !== row.swmGraph
-        || proof.assertionVersion !== swmExpectation.assertionVersion
-        || proof.shareOperationId
-          !== `${PRIVATE_CATALOG_MEMORY_EXPECTATION.swm.shareOperationIdPrefix}${row.kaNumber}`
-      ) throw new TypeError(`${label} graph ${index} has a malformed workspace proof`);
-    }
-    if (row.kaUal !== `did:dkg:${NETWORK_ID}/${authorAddress}/${row.kaNumber}`) {
-      throw new TypeError(`${label} graph ${index} has a noncanonical KA UAL`);
-    }
-    const vmExpectation = contract.memoryKind === 'source'
-      ? PRIVATE_CATALOG_MEMORY_EXPECTATION.finalizedVmBaseline
-      : PRIVATE_CATALOG_MEMORY_EXPECTATION.vm;
-    if (
-      row.swm !== swmExpectation.projection.count
-      || row.swmDigest !== swmExpectation.projection.digest
-      || row.vm !== vmExpectation.projection.count
-      || row.vmDigest !== vmExpectation.projection.digest
-      || typeof row.swmGraph !== 'string'
-      || row.swmGraph.length < 1
-      || row.swmGraph.length > 1_024
-      || typeof row.vmGraph !== 'string'
-      || row.vmGraph.length < 1
-      || row.vmGraph.length > 1_024
-      || row.vmGraph === row.swmGraph
-    ) throw new TypeError(`${label} graph ${index} differs from the fixed memory fixture`);
-    if (contract.memoryKind === 'source') {
-      if (row.vmHead !== null) {
-        throw new TypeError(`${label} graph ${index} has unexpected finalized VM evidence`);
-      }
-      kaNumbers.push(row.kaNumber);
-      return Object.freeze({
-        kaNumber: row.kaNumber,
-        kaUal: row.kaUal,
-        swm: row.swm,
-        swmDigest: row.swmDigest,
-        swmGraph: row.swmGraph,
-        swmProof: proof,
-        vm: row.vm,
-        vmDigest: row.vmDigest,
-        vmGraph: row.vmGraph,
-        vmHead: null,
+  const swm = contract.memoryKind === 'baseline'
+    ? Object.freeze({
+        ...PRIVATE_CATALOG_MEMORY_EXPECTATION.finalizedVmBaseline,
+        proofKind: 'catalog-row',
+      })
+    : Object.freeze({
+        ...PRIVATE_CATALOG_MEMORY_EXPECTATION.swm,
+        proofKind: contract.proofKind,
       });
-    }
-    const vmHead = plainRecordV1(row.vmHead, `${label} graph ${index} VM head`);
-    assertExactKeysV1(
-      vmHead,
-      ['assertionGraph', 'assertionVersion'],
-      `${label} graph ${index} VM head`,
-    );
-    if (
-      vmHead.assertionGraph !== row.vmGraph
-      || vmHead.assertionVersion !== vmExpectation.assertionVersion
-    ) throw new TypeError(`${label} graph ${index} VM head is malformed`);
-    kaNumbers.push(row.kaNumber);
-    return Object.freeze({
-      kaNumber: row.kaNumber,
-      kaUal: row.kaUal,
-      swm: row.swm,
-      swmDigest: row.swmDigest,
-      swmGraph: row.swmGraph,
-      swmProof: proof,
-      vm: row.vm,
-      vmDigest: row.vmDigest,
-      vmGraph: row.vmGraph,
-      vmHead,
-    });
-  });
-  if (
-    graphCounts.length !== Number(BigInt(catalog.inventoryRowCount))
-    || stableJsonV1(kaNumbers) !== stableJsonV1(ASSET_NUMBERS)
-  ) {
+  const vm = contract.memoryKind === 'source'
+    ? Object.freeze({
+        ...PRIVATE_CATALOG_MEMORY_EXPECTATION.finalizedVmBaseline,
+        headKind: 'absent',
+      })
+    : Object.freeze({
+        ...PRIVATE_CATALOG_MEMORY_EXPECTATION.vm,
+        headKind: 'present',
+      });
+  const memory = decodePrivateCatalogMemoryEvidenceV1(state, {
+    assetNumbers: ASSET_NUMBERS,
+    catalogProofBinding: {
+      appliedHeadDigest: state.appliedHeadDigest,
+      catalogVersion: state.catalogVersion,
+      exactExpectedHead: true,
+    },
+    identity: { authorAddress, networkId: NETWORK_ID },
+    swm,
+    vm,
+  }, `${label} graph evidence`);
+  if (memory.length !== Number(BigInt(catalog.inventoryRowCount))) {
     throw new TypeError(`${label} graph inventory is not catalog-bound`);
   }
   return Object.freeze({
-    kaNumbers: Object.freeze(kaNumbers),
-    memory: Object.freeze(memory),
+    kaNumbers: Object.freeze(memory.map(({ kaNumber }) => kaNumber)),
+    memory,
     rpc,
   });
 }

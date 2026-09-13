@@ -126,7 +126,7 @@ export interface RuntimeProcessEvidenceV1<ProcessId extends string> {
   readonly loaded: ExecutedRuntimeManifestV1;
 }
 
-export interface NormalizedRuntimeProcessManifestV1 {
+export interface NormalizedRuntimeProcessManifestV2 {
   readonly manifestDigest: string;
   /** Sorted indexes into the one canonical sourceBuild.runtimeFiles table. */
   readonly runtimeFileIndexes: readonly number[];
@@ -134,9 +134,9 @@ export interface NormalizedRuntimeProcessManifestV1 {
   readonly sourceCommit: string;
 }
 
-export interface NormalizedRuntimeProcessEvidenceV1<ProcessId extends string> {
+export interface NormalizedRuntimeProcessEvidenceV2<ProcessId extends string> {
   readonly id: ProcessId;
-  readonly loaded: Readonly<NormalizedRuntimeProcessManifestV1>;
+  readonly loaded: Readonly<NormalizedRuntimeProcessManifestV2>;
 }
 
 export type RuntimeManifestForProfileV1<Profile extends RuntimeEvidenceProfileV1> =
@@ -196,11 +196,11 @@ export const RFC64_RUNTIME_EVIDENCE_V1 = createRuntimeEvidenceV1(
   RFC64_RUNTIME_EVIDENCE_PROFILE_V1,
 );
 
-export interface RuntimeProcessProvenanceV1<
+export interface RuntimeProcessProvenanceV2<
   ProcessId extends string,
   Schema extends string,
 > {
-  readonly processes: readonly NormalizedRuntimeProcessEvidenceV1<ProcessId>[];
+  readonly processes: readonly NormalizedRuntimeProcessEvidenceV2<ProcessId>[];
   readonly schema: Schema;
   readonly sourceBuild: RuntimeManifestV1;
 }
@@ -433,7 +433,7 @@ function assertExecutedRuntimeMatchesBuildForProfileV1<
  * Build provenance for an arbitrary fixed process topology using the same
  * canonical clean-build and executed-runtime contracts.
  */
-export function buildRuntimeProcessProvenanceV1<
+export function buildRuntimeProcessProvenanceV2<
   ProcessId extends string,
   Schema extends string,
 >(input: {
@@ -442,7 +442,7 @@ export function buildRuntimeProcessProvenanceV1<
   readonly profile?: RuntimeEvidenceProfileV1;
   readonly schema: Schema;
   readonly sourceBuild: RuntimeManifestV1;
-}): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
+}): Readonly<RuntimeProcessProvenanceV2<ProcessId, Schema>> {
   const profile = input.profile ?? RFC64_RUNTIME_EVIDENCE_PROFILE_V1;
   const canonicalSourceBuild = buildRuntimeManifestFromEntriesForProfileV1(
     input.sourceBuild.sourceCommit,
@@ -483,17 +483,17 @@ export function buildRuntimeProcessProvenanceV1<
 }
 
 /** Rebuild and byte-compare a persisted process-provenance object. */
-export function assertRuntimeProcessProvenanceV1<
+export function assertRuntimeProcessProvenanceV2<
   ProcessId extends string,
   Schema extends string,
 >(
-  actual: RuntimeProcessProvenanceV1<ProcessId, Schema>,
+  actual: RuntimeProcessProvenanceV2<ProcessId, Schema>,
   expected: {
     readonly processIds: readonly ProcessId[];
     readonly profile?: RuntimeEvidenceProfileV1;
     readonly schema: Schema;
   },
-): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
+): Readonly<RuntimeProcessProvenanceV2<ProcessId, Schema>> {
   const profile = expected.profile ?? RFC64_RUNTIME_EVIDENCE_PROFILE_V1;
   const canonicalSourceBuild = buildRuntimeManifestFromEntriesForProfileV1(
     actual.sourceBuild.sourceCommit,
@@ -539,7 +539,7 @@ export function assertRuntimeProcessProvenanceV1<
     assertExecutedRuntimeMatchesBuildForProfileV1(loaded, canonicalSourceBuild, profile);
     return Object.freeze({ id: process.id, loaded });
   });
-  const rebuilt = buildRuntimeProcessProvenanceV1({
+  const rebuilt = buildRuntimeProcessProvenanceV2({
     expectedProcessIds: expected.processIds,
     processes: executedProcesses,
     profile,
@@ -556,7 +556,7 @@ export function assertRuntimeProcessProvenanceV1<
 }
 
 /** Validate parsed/persisted JSON before admitting it to the typed provenance model. */
-export function assertPersistedRuntimeProcessProvenanceV1<
+export function assertPersistedRuntimeProcessProvenanceV2<
   ProcessId extends string,
   Schema extends string,
 >(
@@ -566,7 +566,7 @@ export function assertPersistedRuntimeProcessProvenanceV1<
     readonly profile?: RuntimeEvidenceProfileV1;
     readonly schema: Schema;
   },
-): Readonly<RuntimeProcessProvenanceV1<ProcessId, Schema>> {
+): Readonly<RuntimeProcessProvenanceV2<ProcessId, Schema>> {
   const record = parsePlainRecord(actual, 'persisted runtime process provenance');
   const schema = parseStringField(record, 'schema', 'persisted runtime process provenance');
   if (schema !== expected.schema) {
@@ -586,7 +586,7 @@ export function assertPersistedRuntimeProcessProvenanceV1<
     }
     return Object.freeze({
       id: expectedId,
-      loaded: parseNormalizedRuntimeProcessManifestV1(
+      loaded: parseNormalizedRuntimeProcessManifestV2(
         readDataField(processRecord, 'loaded', `runtime process ${index}`),
         `runtime process ${index} loaded manifest`,
       ),
@@ -600,7 +600,7 @@ export function assertPersistedRuntimeProcessProvenanceV1<
       'runtime source manifest',
     ),
   });
-  const rebuilt = assertRuntimeProcessProvenanceV1(parsed, expected);
+  const rebuilt = assertRuntimeProcessProvenanceV2(parsed, expected);
   if (
     canonicalize(actual as CanonicalValue)
     !== canonicalize(rebuilt as unknown as CanonicalValue)
@@ -610,10 +610,10 @@ export function assertPersistedRuntimeProcessProvenanceV1<
   return rebuilt;
 }
 
-function parseNormalizedRuntimeProcessManifestV1(
+function parseNormalizedRuntimeProcessManifestV2(
   value: unknown,
   label: string,
-): Readonly<NormalizedRuntimeProcessManifestV1> {
+): Readonly<NormalizedRuntimeProcessManifestV2> {
   const record = parsePlainRecord(value, label);
   return Object.freeze({
     manifestDigest: parseStringField(record, 'manifestDigest', label),

@@ -21,6 +21,7 @@ import {
   isWithinRpcCeilingV1,
   rpcEvidenceV1,
 } from './rpc-evidence.mjs';
+import { decodePrivateGateRpcEvidenceV1 } from './gate-artifact-rpc-codec.mjs';
 import { emitAuthoritativeRuntimeShutdownReceiptV1 } from './runtime-shutdown.mjs';
 
 test('shutdown receipt is emitted only after a successful agent drain', async () => {
@@ -133,7 +134,15 @@ test('RPC evidence is method-attributed and rejects unknown or over-budget work'
     rpcCallCounts: { eth_call: RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods.eth_call + 1 },
   }), false);
   assert.equal(isWithinRpcCeilingV1({ rpcCallCounts: { eth_unexpected: 1 } }), false);
+  assert.throws(() => decodePrivateGateRpcEvidenceV1({
+    byMethod: { eth_unexpected: 1 },
+    total: 1,
+  }, 'parity RPC evidence', 'ceiling'), /malformed method accounting/u);
   assert.equal(isWithinRpcCeilingV1({ rpcCallCounts: { eth_call: '1' } }), false);
+  assert.throws(() => decodePrivateGateRpcEvidenceV1({
+    byMethod: { eth_call: '1' },
+    total: 1,
+  }, 'parity RPC evidence', 'ceiling'), /malformed method accounting/u);
   assert.equal(isWithinRpcCeilingV1({
     rpcCallCounts: {
       eth_call: Number.MAX_SAFE_INTEGER,

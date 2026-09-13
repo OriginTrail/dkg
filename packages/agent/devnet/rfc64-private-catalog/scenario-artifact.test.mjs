@@ -7,7 +7,7 @@ import {
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
   privateCatalogSwmShareOperationId,
 } from './fixture.mjs';
-import { buildRfc64PrivateReleaseArtifactV1 } from './scenario-artifact.mjs';
+import { buildRfc64PrivateReleaseArtifactV2 } from './scenario-artifact.mjs';
 import {
   corruptBaselineProofV1,
   corruptBaselineRowV1,
@@ -16,9 +16,14 @@ import {
 
 test('artifact fails when receiver startup precedes owner exit', () => {
   const evidence = passingScenarioEvidenceV1();
-  evidence.processes.owner.exitSequence = 5;
-  evidence.processes.receiver.spawnSequence = 4;
-  const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+  const artifact = buildRfc64PrivateReleaseArtifactV2({
+    ...evidence,
+    processes: {
+      ...evidence.processes,
+      owner: { ...evidence.processes.owner, exitSequence: 5 },
+      receiver: { ...evidence.processes.receiver, spawnSequence: 4 },
+    },
+  }, 'sha256:fixture');
   assert.equal(artifact.failoverBarrier.ownerExitedBeforeReceiverSpawn, false);
   assert.equal(artifact.checks.ownerExitedBeforeReceiverRuntimeStarted, false);
   assert.deepEqual(
@@ -54,7 +59,7 @@ test('artifact does not certify already-applied heads as provider transfers', ()
       providerPeerId: null,
       appliedTransferProviderPeerId: null,
     };
-    const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+    const artifact = buildRfc64PrivateReleaseArtifactV2(evidence, 'sha256:fixture');
     assert.equal(artifact.checks[check], false, check);
     assert.equal(artifact.status, 'FAIL', check);
   }
@@ -66,7 +71,7 @@ test('artifact fails without exact finalized-VM receiver baseline evidence', () 
     ...evidence.phases.baseline.receiverSeedState,
     graphCounts: Object.freeze([]),
   });
-  const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+  const artifact = buildRfc64PrivateReleaseArtifactV2(evidence, 'sha256:fixture');
   assert.equal(artifact.checks.receiverBaselineSeededThroughProvider2, false);
   assert.deepEqual(
     Object.entries(artifact.checks)
@@ -97,7 +102,7 @@ test('artifact fails when the finalized-VM receiver baseline retains an SWM head
         : entry,
     ))),
   });
-  const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+  const artifact = buildRfc64PrivateReleaseArtifactV2(evidence, 'sha256:fixture');
   assert.equal(artifact.checks.receiverBaselineSeededThroughProvider2, false);
   assert.equal(artifact.status, 'FAIL');
 });
@@ -123,7 +128,7 @@ test('artifact requires the exact finalized-VM baseline catalog-row closure', ()
     const evidence = passingScenarioEvidenceV1();
     const state = evidence.phases.baseline.receiverSeedState;
     evidence.phases.baseline.receiverSeedState = Object.freeze(corrupt(state));
-    const artifact = buildRfc64PrivateReleaseArtifactV1(evidence, 'sha256:fixture');
+    const artifact = buildRfc64PrivateReleaseArtifactV2(evidence, 'sha256:fixture');
     assert.equal(artifact.checks.receiverBaselineSeededThroughProvider2, false, label);
     assert.equal(artifact.status, 'FAIL', label);
   }

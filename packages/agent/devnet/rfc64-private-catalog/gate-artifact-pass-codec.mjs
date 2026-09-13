@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { assertRfc64PrivateRuntimeProvenanceV1 } from './runtime-provenance.mjs';
+import { assertRfc64PrivateRuntimeProvenanceV2 } from './runtime-provenance.mjs';
 import {
-  RFC64_PRIVATE_GATE_SCHEMA_V1,
+  RFC64_PRIVATE_GATE_SCHEMA_V2,
   RFC64_PRIVATE_PASS_TOP_LEVEL_KEYS_V1,
   RFC64_PRIVATE_RELEASE_CHECK_KEYS_V1,
   RFC64_PRIVATE_RELEASE_LIMITATION_V1,
@@ -35,11 +35,11 @@ import {
 } from './gate-artifact-access-codecs.mjs';
 
 /** A committed PASS must name one exact source revision, runtime build, and bounded run. */
-export function assertRfc64PrivateGatePassProvenanceV1(artifact) {
+export function assertRfc64PrivateGatePassProvenanceV2(artifact) {
   if (artifact === null || typeof artifact !== 'object') {
     throw new TypeError('RFC-64 private gate PASS artifact must be an object');
   }
-  if (artifact.schema !== RFC64_PRIVATE_GATE_SCHEMA_V1 || artifact.status !== 'PASS') {
+  if (artifact.schema !== RFC64_PRIVATE_GATE_SCHEMA_V2 || artifact.status !== 'PASS') {
     throw new TypeError('RFC-64 private gate PASS artifact has an invalid schema or status');
   }
   const startedAt = canonicalIsoInstantV1(artifact.startedAt, 'startedAt');
@@ -61,7 +61,7 @@ export function assertRfc64PrivateGatePassProvenanceV1(artifact) {
   }
   let provenance;
   try {
-    provenance = assertRfc64PrivateRuntimeProvenanceV1(artifact.runtimeProvenance);
+    provenance = assertRfc64PrivateRuntimeProvenanceV2(artifact.runtimeProvenance);
   } catch {
     throw new TypeError('RFC-64 private gate PASS runtime provenance is incomplete');
   }
@@ -79,7 +79,7 @@ export function assertRfc64PrivateGatePassProvenanceV1(artifact) {
  * Each state variant uses a fixed codec so callers cannot weaken bootstrap,
  * memory, or proof requirements with option flags.
  */
-export function decodeRfc64PrivateGatePassArtifactV1(input) {
+export function decodeRfc64PrivateGatePassArtifactV2(input) {
   const artifact = plainRecordV1(input, 'RFC-64 private gate PASS artifact');
   assertExactKeysV1(
     artifact,
@@ -95,7 +95,7 @@ export function decodeRfc64PrivateGatePassArtifactV1(input) {
   if (artifact.limitation !== RFC64_PRIVATE_RELEASE_LIMITATION_V1) {
     throw new TypeError('RFC-64 private gate PASS has invalid fixed limitation metadata');
   }
-  assertRfc64PrivateGatePassProvenanceV1(artifact);
+  assertRfc64PrivateGatePassProvenanceV2(artifact);
   const startedAt = canonicalIsoInstantV1(artifact.startedAt, 'startedAt');
   const finishedAt = canonicalIsoInstantV1(artifact.finishedAt, 'finishedAt');
   if (startedAt > Date.now() || finishedAt > Date.now()) {

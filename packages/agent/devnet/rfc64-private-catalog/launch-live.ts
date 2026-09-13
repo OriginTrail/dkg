@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { runRfc64PrivateGateFromCleanBuildV1 } from './clean-launch.ts';
 import { sanitizeGateFailureV1 } from './gate-artifact.mjs';
 import {
-  executeRfc64PrivateReleaseGateV1,
+  executeRfc64PrivateReleaseGateV2,
   RFC64_PRIVATE_GATE_ARTIFACT_PATH,
 } from './run.mjs';
 
@@ -12,7 +12,7 @@ const repoRoot = resolve(import.meta.dirname, '../../../..');
 try {
   const artifact = await runRfc64PrivateGateFromCleanBuildV1({
     artifactPath: RFC64_PRIVATE_GATE_ARTIFACT_PATH,
-    execute: executeRfc64PrivateReleaseGateV1,
+    execute: executeRfc64PrivateReleaseGateV2,
     repoRoot,
   });
   process.stdout.write(`${JSON.stringify(artifact, null, 2)}\n`);

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+// @ts-check
 
 import {
   PRIVATE_CATALOG_MEMORY_EXPECTATION,
@@ -25,6 +26,15 @@ import {
 
 export const EXPECTED_MEMORY_CONTENTS = PRIVATE_CATALOG_MEMORY_EXPECTATION;
 
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateScenarioResultV1} Rfc64PrivateScenarioResultV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateCatalogStateV1} Rfc64PrivateCatalogStateV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateBootstrapEvidenceV1} Rfc64PrivateBootstrapEvidenceV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateProcessEvidenceV1} Rfc64PrivateProcessEvidenceV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateReadyEvidenceV1} Rfc64PrivateReadyEvidenceV1 */
+/** @typedef {import('./scenario-result.ts').Rfc64PrivateShutdownEvidenceV1} Rfc64PrivateShutdownEvidenceV1 */
+/** @typedef {import('./scenario-actors.ts').Rfc64PrivateScenarioProcessIdV1} Rfc64PrivateScenarioProcessIdV1 */
+
+/** @type {(state: Rfc64PrivateCatalogStateV1, options?: { swmProofKind?: 'workspace-head' | 'catalog-row' }) => boolean} */
 export const hasExactMemoryContents = (state, { swmProofKind = 'catalog-row' } = {}) =>
   hasExactPrivateCatalogMemoryContents(state, {
     ...EXPECTED_MEMORY_CONTENTS,
@@ -34,6 +44,7 @@ export const hasExactMemoryContents = (state, { swmProofKind = 'catalog-row' } =
     },
   });
 
+/** @type {(state: Rfc64PrivateCatalogStateV1) => boolean} */
 export const hasExactSourceSwmContents = (state) =>
   hasExactPrivateCatalogSwmContents(state, {
     assetNumbers: EXPECTED_MEMORY_CONTENTS.assetNumbers,
@@ -42,7 +53,11 @@ export const hasExactSourceSwmContents = (state) =>
   });
 
 /** Project normalized actor evidence into the stable release-gate artifact. */
-export function buildRfc64PrivateReleaseArtifactV1(evidence, runtimeManifestDigest) {
+/**
+ * @param {Readonly<Rfc64PrivateScenarioResultV1>} evidence
+ * @param {string} runtimeManifestDigest
+ */
+export function buildRfc64PrivateReleaseArtifactV2(evidence, runtimeManifestDigest) {
   const checks = buildRfc64PrivateReleaseChecksV1(evidence);
   const status = Object.values(checks).every(Boolean) ? 'PASS' : 'FAIL';
   const owner = actor(evidence, 'owner');
@@ -60,7 +75,7 @@ export function buildRfc64PrivateReleaseArtifactV1(evidence, runtimeManifestDige
   ]));
 
   return {
-    schema: 'dkg-rfc64-private-release-gate-v1',
+    schema: 'dkg-rfc64-private-release-gate-v2',
     status,
     limitation: RFC64_PRIVATE_RELEASE_LIMITATION_V1,
     topology: {
@@ -167,6 +182,7 @@ export function buildRfc64PrivateReleaseArtifactV1(evidence, runtimeManifestDige
   };
 }
 
+/** @param {Readonly<Rfc64PrivateScenarioResultV1>} evidence */
 function buildRfc64PrivateReleaseChecksV1(evidence) {
   const owner = actor(evidence, 'owner');
   const receiver = actor(evidence, 'receiver');
@@ -271,6 +287,11 @@ function buildRfc64PrivateReleaseChecksV1(evidence) {
   });
 }
 
+/**
+ * @param {Readonly<Rfc64PrivateScenarioResultV1>} evidence
+ * @param {Rfc64PrivateScenarioProcessIdV1} processId
+ * @returns {Readonly<Rfc64PrivateProcessEvidenceV1>}
+ */
 function actor(evidence, processId) {
   const process = evidence?.processes?.[processId];
   if (process === null || typeof process !== 'object' || Array.isArray(process)) {
@@ -279,12 +300,17 @@ function actor(evidence, processId) {
   return process;
 }
 
+/**
+ * @param {Readonly<Rfc64PrivateProcessEvidenceV1>} exitedProcess
+ * @param {Readonly<Rfc64PrivateProcessEvidenceV1>} spawnedProcess
+ */
 function exitedBeforeSpawnV1(exitedProcess, spawnedProcess) {
   return Number.isSafeInteger(exitedProcess.exitSequence)
     && Number.isSafeInteger(spawnedProcess.spawnSequence)
     && exitedProcess.exitSequence < spawnedProcess.spawnSequence;
 }
 
+/** @param {Readonly<Rfc64PrivateReadyEvidenceV1>} ready */
 function safeRole(ready) {
   return {
     agentClass: ready.agentClass,
@@ -293,6 +319,11 @@ function safeRole(ready) {
   };
 }
 
+/**
+ * @param {Readonly<Rfc64PrivateCatalogStateV1>} state
+ * @param {Readonly<Rfc64PrivateBootstrapEvidenceV1> | null} bootstrap
+ * @param {Readonly<Rfc64PrivateShutdownEvidenceV1>} shutdownReceipt
+ */
 function safeState(state, bootstrap, shutdownReceipt) {
   const rpc = rpcEvidenceV1(shutdownReceipt);
   return {
@@ -318,6 +349,11 @@ function safeState(state, bootstrap, shutdownReceipt) {
   };
 }
 
+/**
+ * @param {Readonly<Rfc64PrivateBootstrapEvidenceV1>} bootstrap
+ * @param {string} providerPeerId
+ * @param {string | null} headObjectDigest
+ */
 function hasExactAppliedTransferV1(bootstrap, providerPeerId, headObjectDigest) {
   return bootstrap.appliedHeadDigest === headObjectDigest
     && bootstrap.appliedTransferProviderPeerId === providerPeerId

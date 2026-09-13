@@ -5,6 +5,7 @@ import { readPrivateCatalogAppliedProjectionEvidenceV1 } from './memory-evidence
 
 /** @typedef {{ readonly expectedAssetNumbers: readonly number[], readonly readVerifiedAppliedCatalogClosure: import('./agent-runtime.ts').Rfc64PrivateCatalogClosureReaderV1, readonly store: import('@origintrail-official/dkg-storage').TripleStore, readonly trustedCatalogScope: Readonly<import('@origintrail-official/dkg-core').AuthorCatalogScopeV1> }} ReadVerifiedAppliedCatalogMemoryEvidenceInputV1 */
 /** @typedef {import('./memory-evidence.mjs').Rfc64PrivateCatalogRowSwmProofV1} Rfc64PrivateCatalogRowSwmProofV1 */
+/** @typedef {import('@origintrail-official/dkg-core').Digest32V1} Digest32V1 */
 
 /** Project the canonical verified closure into the fixture's per-asset evidence. */
 /**
@@ -36,7 +37,7 @@ export async function readVerifiedAppliedCatalogMemoryEvidenceV1({
     }
     byKaNumber.set(kaNumber, Object.freeze({
       assertionVersion: row.assertionVersion,
-      catalogHeadDigest: closure.head.objectDigest,
+      catalogHeadDigest: /** @type {Digest32V1} */ (closure.head.objectDigest),
       kaId: row.kaId,
       kind: 'catalog-row',
       projectionDigest: row.projectionDigest,
