@@ -617,10 +617,18 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         const expectedNameHash = explicitNameHash === undefined
           ? this.contextGraphNameCommitment(contextGraphId)
           : this.contextGraphWireId(explicitNameHash);
-        const resolved = await resolveFinalized.call(indexReader, expectedNameHash, {
-          signal: options.signal,
-        });
-        return resolved?.toString(10) ?? null;
+        try {
+          const resolved = await resolveFinalized.call(indexReader, expectedNameHash, {
+            signal: options.signal,
+          });
+          return resolved?.toString(10) ?? null;
+        } catch (error) {
+          if (options.signal?.aborted) throw options.signal.reason ?? error;
+          // Listing enrichment is a preference, not a semantic downgrade: an
+          // embedded/test adapter may expose a local index before its finalized
+          // RPC reader is usable. Preserve the pre-existing current resolver as
+          // the compatibility path in that case.
+        }
       }
     }
     const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
