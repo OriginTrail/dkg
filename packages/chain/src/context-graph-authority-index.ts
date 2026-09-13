@@ -25,6 +25,8 @@ import { ContextGraphAuthorityIndexRepository } from
   './context-graph-authority-index-repository.js';
 import { KeyedSingleFlight } from './keyed-ttl-single-flight-cache.js';
 
+const ZERO_HASH = `0x${'00'.repeat(32)}`;
+
 export {
   ContextGraphAuthorityIndexRetryableError,
   isContextGraphAuthorityIndexRetryableError,
@@ -123,6 +125,9 @@ export class ContextGraphAuthorityIndex {
     if (nameHash === undefined) {
       throw new Error('Context Graph authority index name hash is invalid');
     }
+    // ContextGraphStorage permits an explicit zero commitment as an opt-out.
+    // It never participates in reverse name binding, even if several slots use it.
+    if (nameHash === ZERO_HASH) return null;
     const checkpoint = await this.#snapshot(input);
     const matches = checkpoint.states.filter((state) => state.nameHash === nameHash);
     if (matches.length > 1) {

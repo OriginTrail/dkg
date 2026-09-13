@@ -539,6 +539,14 @@ export interface ContextGraphAuthoritySnapshot {
 
 /** Explicit daemon-local authority-index scheduling surface. */
 export interface ContextGraphAuthorityIndexRevisionReader {
+  /**
+   * Resolve one RFC-64 authority binding at the index's finalized anchor.
+   * This intentionally differs from the public current-state name resolver.
+   */
+  resolveFinalizedContextGraphIdByNameHash?(
+    nameHash: string,
+    options?: ChainReadOptions,
+  ): Promise<bigint | null>;
   readContextGraphAuthorityIndexRevisions(
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
     options?: ChainReadOptions,

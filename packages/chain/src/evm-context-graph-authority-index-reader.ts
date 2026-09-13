@@ -17,13 +17,18 @@ import {
   type ContextGraphAuthorityIndexId,
 } from './context-graph-authority-index-id.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
+import { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
 import {
   contextGraphAuthorityEventTopics,
   normalizeContextGraphAuthorityIndexLog,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import type { ReadOpts } from './rpc-failover-client.js';
-import { withRpcRequestContext } from './rpc-request-transport.js';
+import {
+  activeRpcRequestContext,
+  withOwnedRpcRequestContext,
+  withRpcRequestContext,
+} from './rpc-request-transport.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS = 4_096;
 
@@ -206,9 +211,68 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   dependencies: EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1,
 ): ContextGraphAuthorityIndexRevisionReader {
   const lifecycle = new EvmContextGraphAuthorityIndexRevisionReadLifecycleV1();
+  const finalizedNameHashResolver = new ContextGraphNameHashResolver({
+    load: async (nameHash, signal) => {
+      await dependencies.initialize();
+      const base = dependencies.requireContextGraphStorage();
+      return dependencies.readTipProvider(
+        'resolveFinalizedContextGraphIdByNameHash',
+        (provider) => lifecycle.run(() => withOwnedRpcRequestContext(
+          { signal },
+          async () => {
+            const finalized = await provider.getBlock('finalized');
+            if (finalized === null || finalized.hash === null) {
+              throw new Error('finalized Context Graph authority block is unavailable');
+            }
+            const contract = base.connect(provider) as Contract;
+            const contractAddress = (await contract.getAddress()).toLowerCase();
+            const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
+              contractAddress,
+              'resolveFinalizedContextGraphIdByNameHash',
+              'ContextGraphStorage',
+            )).fromBlock;
+            const indexed = await readEvmContextGraphAuthorityIdByNameHashV1({
+              index: dependencies.index,
+              deploymentId: dependencies.deploymentId,
+              contract,
+              contractAddress,
+              provider,
+              deploymentBlockNumber,
+              finalized: { number: finalized.number, hash: finalized.hash },
+              pageSize: dependencies.pageSize(),
+              stabilizationOperation: 'resolution',
+              nameHash,
+              signal,
+            });
+            await indexed.stabilize();
+            return indexed.value === null ? null : BigInt(indexed.value);
+          },
+        )),
+        {
+          signal,
+          isRetryable: (error: unknown) => (
+            !signal.aborted && (
+              isContextGraphAuthorityIndexRetryableError(error)
+              || isRpcEndpointFailoverEligible(error)
+            )
+          ),
+          policy: 'wideLogScan',
+        },
+      );
+    },
+  });
   return Object.freeze({
     whenIdle(): Promise<void> {
       return lifecycle.whenIdle();
+    },
+    resolveFinalizedContextGraphIdByNameHash(
+      nameHash: string,
+      options: ChainReadOptions = {},
+    ): Promise<bigint | null> {
+      return finalizedNameHashResolver.resolve(nameHash, {
+        signal: options.signal,
+        requestClass: activeRpcRequestContext().requestClass,
+      });
     },
     async readContextGraphAuthorityIndexRevisions(
       contextGraphIds: readonly ContextGraphAuthorityIndexId[],

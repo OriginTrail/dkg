@@ -170,6 +170,7 @@ export interface AuthorityScenarioOptions {
   readonly deactivated?: boolean;
   readonly reorg?: boolean;
   readonly secondContextGraph?: boolean;
+  readonly zeroHashContextGraphs?: number;
 }
 
 export interface AuthorityScenarioGate {
@@ -311,6 +312,20 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
         index: 0,
         contextGraphId: 9n,
       }] : []),
+      ...Array.from({ length: options.zeroHashContextGraphs ?? 0 }, (_, index) => ({
+        name: 'ContextGraphCreated' as const,
+        blockNumber: 25,
+        blockHash: `0x${'bd'.repeat(32)}`,
+        index,
+        contextGraphId: 20n + BigInt(index),
+        owner: MEMBER,
+        nameHash: ethers.ZeroHash,
+        participantAgents: [MEMBER],
+        accessPolicy: 1n,
+        publishPolicy: 0n,
+        publishAuthority: SECOND_AUTHORITY,
+        publishAuthorityAccountId: 0n,
+      })),
       {
         name: 'PublishPolicyUpdated',
         blockNumber: 33,

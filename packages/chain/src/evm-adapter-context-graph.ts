@@ -36,10 +36,7 @@ import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import { isContextGraphAuthorityIndexRetryableError } from './context-graph-authority-index.js';
 import { contextGraphAuthorityIndexIdFromBigInt } from
   './context-graph-authority-index-id.js';
-import {
-  readEvmContextGraphAuthorityIdByNameHashV1,
-  readEvmContextGraphAuthorityStateV1,
-} from
+import { readEvmContextGraphAuthorityStateV1 } from
   './evm-context-graph-authority-index-reader.js';
 
 type ContextGraphRegistryLiveScanPlan =
@@ -1380,52 +1377,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     nameHash: string,
     options: ChainReadOptions = {},
   ): Promise<bigint | null> {
-    if (this.contextGraphAuthorityIndex !== undefined) {
-      await this.init();
-      options.signal?.throwIfAborted();
-      const base = this.requireContextGraphStorage();
-      return this.readTipProvider(
-        'resolveContextGraphIdByNameHash',
-        async (provider) => {
-          const finalized = await provider.getBlock('finalized');
-          if (finalized === null || finalized.hash === null) {
-            throw new Error('finalized Context Graph authority block is unavailable');
-          }
-          const contract = base.connect(provider) as Contract;
-          const contractAddress = (await contract.getAddress()).toLowerCase();
-          const deploymentBlockNumber = (await this.resolveContractDeployBlock(
-            contractAddress,
-            'resolveContextGraphIdByNameHash',
-            'ContextGraphStorage',
-          )).fromBlock;
-          const indexed = await readEvmContextGraphAuthorityIdByNameHashV1({
-            index: this.contextGraphAuthorityIndex!,
-            deploymentId: this.deploymentId,
-            contract,
-            contractAddress,
-            provider,
-            deploymentBlockNumber,
-            finalized: { number: finalized.number, hash: finalized.hash },
-            pageSize: this.cgRegistryScanPageSize,
-            stabilizationOperation: 'resolution',
-            nameHash,
-            signal: options.signal,
-          });
-          await indexed.stabilize();
-          return indexed.value === null ? null : BigInt(indexed.value);
-        },
-        {
-          signal: options.signal,
-          isRetryable: (error: unknown) => (
-            !options.signal?.aborted && (
-              isContextGraphAuthorityIndexRetryableError(error)
-              || isRpcEndpointFailoverEligible(error)
-            )
-          ),
-          policy: 'wideLogScan',
-        },
-      );
-    }
     return this.getContextGraphNameHashResolver().resolve(nameHash, options.signal);
   }
 }

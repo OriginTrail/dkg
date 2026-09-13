@@ -118,6 +118,20 @@ describe('durable contract-wide Context Graph authority scanner', () => {
     await expect(index.resolveNameHash({ ...input, nameHash: 'not-a-hash' }))
       .rejects.toThrow('name hash is invalid');
 
+    const zeroHashReads: Array<readonly [number, number]> = [];
+    await expect(index.resolveNameHash({
+      ...input,
+      nameHash: `0x${'00'.repeat(32)}`,
+      readPage: async (from, to) => {
+        zeroHashReads.push([from, to]);
+        return [
+          creation(11n, 11, 1, `0x${'00'.repeat(32)}`),
+          creation(12n, 12, 1, `0x${'00'.repeat(32)}`),
+        ];
+      },
+    })).resolves.toBeNull();
+    expect(zeroHashReads).toEqual([]);
+
     const ambiguous = new ContextGraphAuthorityIndex(new MemoryAuthorityIndexStore());
     await expect(ambiguous.resolveNameHash({
       ...input,
