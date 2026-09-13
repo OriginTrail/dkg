@@ -91,7 +91,10 @@ export class ContextGraphRegistryScanCursor {
       console.warn(
         `[chain] ContextGraphNameRegistry scan cursor load failed: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return undefined;
+      // A failed durable read is not evidence that the cursor is absent. Let
+      // the caller retry instead of selecting an empty-cursor seed mode that
+      // could advance the watermark past an unobserved historical gap.
+      throw err;
     }
   }
 
