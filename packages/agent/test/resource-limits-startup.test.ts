@@ -125,6 +125,51 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
   }
 });
 
+it.each([
+  { timing: 'configured', intervalMs: 25 },
+  { timing: 'invalid', intervalMs: Infinity },
+])('runs and stops the sync reconciler at its resolved $timing interval', async ({ intervalMs }) => {
+  const { DKGAgent } = await import('../src/dkg-agent.js');
+  const { SYNC_RECONCILER_INTERVAL_MS } = await import('../src/dkg-agent-constants.js');
+  const expectedIntervalMs = Number.isFinite(intervalMs) ? intervalMs : SYNC_RECONCILER_INTERVAL_MS;
+  const dataDir = await mkdtemp(join(tmpdir(), 'dkg-reconciler-timing-'));
+  const store = new OxigraphStore();
+  let agent: Agent | undefined;
+  try {
+    agent = await DKGAgent.create({
+      name: 'Reconciler timer fixture', dataDir, listenPort: 0, listenHost: '127.0.0.1',
+      nodeRole: 'edge', store, chainAdapter: new NoChainAdapter(), skills: [],
+      rfc64CatalogActivation: { enabled: false },
+      syncReconcilerEnabled: true, syncReconcilerIntervalMs: intervalMs,
+    });
+    const reconcile = vi.spyOn(agent, 'reconcileSyncFromConnectedPeers').mockResolvedValue(undefined);
+    // Leave network startup and shutdown timeouts on the real clock while
+    // driving the intervals installed by the real agent lifecycle.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    await agent.start();
+    expect(reconcile).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(expectedIntervalMs - 1);
+    expect(reconcile).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(expectedIntervalMs - 1);
+    expect(reconcile).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(reconcile).toHaveBeenCalledTimes(2);
+
+    await agent.stop();
+    await vi.advanceTimersByTimeAsync(expectedIntervalMs * 2);
+    expect(reconcile).toHaveBeenCalledTimes(2);
+  } finally {
+    try { await agent?.stop(); } finally {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      await store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }
+});
+
 it('rejects invalid admission before allocating a wallet or internally owned store', async () => {
   const storage = await import('@origintrail-official/dkg-storage');
   const createStore = vi.spyOn(storage, 'createTripleStore')
