@@ -77,9 +77,30 @@ const RFC64_CATALOG_ACTIVATION_FIELDS_V1 = new Set([
   'rollout',
 ]);
 const ZERO_ADDRESS_V1 = `0x${'0'.repeat(40)}`;
-const RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1 = Symbol(
-  'RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1',
-);
+
+function isPlainObjectV1(input: unknown): input is Record<string, unknown> {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return false;
+  const prototype = Object.getPrototypeOf(input);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function sameStructuredValueV1(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => sameStructuredValueV1(value, right[index]));
+  }
+  if (!isPlainObjectV1(left) || !isPlainObjectV1(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => (
+      key === rightKeys[index]
+      && sameStructuredValueV1(left[key], right[key])
+    ));
+}
 
 function assertRfc64PublicCatalogActivationConfigV1(
   input: unknown,
@@ -205,7 +226,7 @@ export interface Rfc64CatalogNormalizedActivationStateV1 {
   readonly execution: Rfc64CatalogActivationExecutionV1;
 }
 
-interface ResolvedRfc64CatalogActivationFieldsV1 {
+export interface ResolvedRfc64CatalogActivationsV1 {
   /** Policy-neutral union used by the Release-1 runtime. */
   readonly catalog: ResolvedRfc64CatalogActivationConfigV1;
   /** Compatibility projection used by the existing public status/producer path. */
@@ -217,75 +238,91 @@ interface ResolvedRfc64CatalogActivationFieldsV1 {
   readonly activationState: Rfc64CatalogNormalizedActivationStateV1;
 }
 
-/**
- * Explicit process-local capability issued only by the activation resolver.
- * The class boundary makes it clear that spreading or deserializing this value
- * does not produce a runtime-ready activation handle.
- */
-class ResolverIssuedRfc64CatalogActivationsV1
-implements ResolvedRfc64CatalogActivationFieldsV1 {
-  readonly #resolverIssued = true;
-  readonly catalog: ResolvedRfc64CatalogActivationConfigV1;
-  readonly publicCatalog: ResolvedRfc64PublicCatalogActivationConfigV1;
-  readonly selectedCatalogAuthoringControls:
-    readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[];
-  readonly activationState: Rfc64CatalogNormalizedActivationStateV1;
-
-  constructor(
-    resolverToken: typeof RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1,
-    fields: ResolvedRfc64CatalogActivationFieldsV1,
-  ) {
-    if (resolverToken !== RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1) {
-      throw new TypeError(
-        'RFC-64 activation handles can only be created by the activation resolver',
-      );
-    }
-    this.catalog = fields.catalog;
-    this.publicCatalog = fields.publicCatalog;
-    this.selectedCatalogAuthoringControls = fields.selectedCatalogAuthoringControls;
-    this.activationState = fields.activationState;
-    Object.freeze(this);
-  }
-
-  static isResolverIssued(
-    input: unknown,
-  ): input is ResolverIssuedRfc64CatalogActivationsV1 {
-    if (typeof input !== 'object' || input === null) return false;
-    try {
-      return (input as ResolverIssuedRfc64CatalogActivationsV1).#resolverIssued;
-    } catch {
-      return false;
-    }
-  }
-}
-
-/**
- * Opaque process-local activation handle. Only
- * `resolveRfc64CatalogActivationsV1` can produce this nominal type; copying or
- * deserializing its visible fields loses the private class identity.
- */
-export type ResolvedRfc64CatalogActivationsV1 =
-  ResolverIssuedRfc64CatalogActivationsV1;
-
-/** Reject hand-assembled normalized state at the runtime configuration boundary. */
+/** Validate a plain resolved activation snapshot at the runtime boundary. */
 export function assertResolvedRfc64CatalogActivationsV1(
   input: unknown,
   chainIdentity?: Rfc64PublicCatalogActivationChainIdentityV1,
 ): asserts input is ResolvedRfc64CatalogActivationsV1 {
-  if (
-    !ResolverIssuedRfc64CatalogActivationsV1.isResolverIssued(input)
-  ) {
-    throw new TypeError(
-      'rfc64CatalogActivations must be an opaque handle from '
-      + 'resolveRfc64CatalogActivationsV1',
-    );
+  if (!isPlainObjectV1(input)) {
+    throw new TypeError('rfc64CatalogActivations must be a plain object');
   }
-  if (chainIdentity !== undefined) {
-    const resolved = input as ResolvedRfc64CatalogActivationsV1;
-    // Preserve the resolver's provenance decision while rechecking every
-    // manifest/deployment identity against the adapter this agent constructed.
-    resolveRfc64CatalogActivationInputV1(resolved.catalog, chainIdentity);
-    resolveRfc64PublicCatalogActivationInputV1(resolved.publicCatalog, chainIdentity);
+  const fields = ['activationState', 'catalog', 'publicCatalog', 'selectedCatalogAuthoringControls'];
+  const keys = Object.keys(input).sort();
+  if (!sameStrings(keys, fields)) {
+    throw new TypeError('rfc64CatalogActivations must contain exactly the resolved fields');
+  }
+  const resolved = input as unknown as ResolvedRfc64CatalogActivationsV1;
+  const identity = chainIdentity
+    ?? resolveRfc64PublicCatalogActivationChainIdentityV1(undefined);
+  const canonicalCatalog = resolveRfc64CatalogActivationInputV1(resolved.catalog, identity);
+  const canonicalPublic = resolveRfc64PublicCatalogActivationInputV1(
+    resolved.publicCatalog,
+    identity,
+  );
+  if (!sameStructuredValueV1(resolved.catalog, canonicalCatalog)) {
+    throw new TypeError('rfc64CatalogActivations.catalog is not a canonical resolved snapshot');
+  }
+  if (!sameStructuredValueV1(resolved.publicCatalog, canonicalPublic)) {
+    throw new TypeError('rfc64CatalogActivations.publicCatalog is not a canonical resolved snapshot');
+  }
+  if (!sameStructuredValueV1(
+    resolved.selectedCatalogAuthoringControls,
+    resolved.catalog.selectedCatalogAuthoringControls,
+  )) {
+    throw new TypeError('rfc64CatalogActivations authoring controls differ from catalog');
+  }
+  const state = resolved.activationState;
+  if (!isPlainObjectV1(state) || !isPlainObjectV1(state.configuration)
+    || !isPlainObjectV1(state.execution)) {
+    throw new TypeError('rfc64CatalogActivations.activationState must be a resolved object');
+  }
+  const configuration = state.configuration;
+  const configurationKeys: Readonly<Record<
+    Rfc64CatalogActivationConfigurationV1['source'], readonly string[]
+  >> = {
+    omitted: ['source'],
+    'legacy-standalone': ['source'],
+    unified: [
+      'activationManifestPresent',
+      'deprecatedPublicControlPresent',
+      'legacyStandaloneControlsPresent',
+      'source',
+    ],
+    'deprecated-public': [
+      'activationManifestPresent',
+      'legacyStandaloneControlsPresent',
+      'source',
+    ],
+  };
+  const expectedConfigurationKeys = configurationKeys[configuration.source];
+  if (expectedConfigurationKeys === undefined
+    || !sameStrings(Object.keys(configuration).sort(), expectedConfigurationKeys)) {
+    throw new TypeError('rfc64CatalogActivations has invalid configuration provenance');
+  }
+  for (const [key, value] of Object.entries(configuration)) {
+    if (key !== 'source' && typeof value !== 'boolean') {
+      throw new TypeError('rfc64CatalogActivations configuration flags must be boolean');
+    }
+  }
+  const execution = state.execution;
+  if (!sameStrings(Object.keys(execution).sort(), ['mode', 'rollout'])
+    || !['catalog', 'compatibility-rollback', 'ephemeral-legacy'].includes(execution.mode)) {
+    throw new TypeError('rfc64CatalogActivations has invalid execution state');
+  }
+  if (execution.mode === 'compatibility-rollback' && resolved.catalog.enabled) {
+    throw new TypeError('rfc64CatalogActivations rollback conflicts with enabled catalog');
+  }
+  if (!resolved.catalog.enabled && execution.mode !== 'compatibility-rollback') {
+    throw new TypeError('rfc64CatalogActivations disabled catalog requires rollback execution');
+  }
+  if (execution.mode === 'ephemeral-legacy' && configuration.source !== 'omitted') {
+    throw new TypeError('rfc64CatalogActivations ephemeral execution requires omitted configuration');
+  }
+  const expectedExecutionRollout = execution.mode === 'catalog'
+    ? resolved.catalog.rollout
+    : Object.freeze({ ...resolved.catalog.rollout, defaultMode: 'legacy' as const });
+  if (!sameStructuredValueV1(execution.rollout, expectedExecutionRollout)) {
+    throw new TypeError('rfc64CatalogActivations execution rollout is inconsistent');
   }
 }
 
@@ -720,8 +757,11 @@ export function resolveRfc64CatalogActivationInputV1(
   ) {
     const resolvedInput = input as ResolvedRfc64CatalogActivationConfigV1;
     if (resolvedInput.enabled === false) {
-      const rollout = resolvedInput.rollout
-        ?? resolveRfc64CatalogRolloutConfigV1(undefined, [], 'rfc64Catalog');
+      const rollout = resolveRfc64CatalogRolloutConfigV1(
+        resolvedInput.rollout,
+        resolvedInput.selectedContextGraphs,
+        'rfc64Catalog',
+      );
       if (
         resolvedInput.selectedContextGraphs.length !== 0
         || resolvedInput.selectedPublicContextGraphs.length !== 0
@@ -733,7 +773,7 @@ export function resolveRfc64CatalogActivationInputV1(
         || (resolvedInput.selectedCatalogAuthoringControls?.length ?? 0) !== 0
         || Object.keys(resolvedInput.selectedContextGraphModes ?? {}).length !== 0
         || rollout.killSwitch
-        || (rollout.defaultMode ?? 'catalog') !== 'catalog'
+        || rollout.defaultMode !== 'catalog'
         || Object.keys(rollout.contextGraphModes).length !== 0
       ) {
         throw new TypeError('disabled rfc64Catalog activation must not carry controls');
@@ -829,15 +869,12 @@ export function resolveRfc64CatalogActivationsV1(
         },
       ),
     } satisfies Rfc64CatalogNormalizedActivationStateV1);
-    return new ResolverIssuedRfc64CatalogActivationsV1(
-      RFC64_CATALOG_ACTIVATIONS_RESOLVER_TOKEN_V1,
-      {
-        catalog,
-        publicCatalog,
-        selectedCatalogAuthoringControls,
-        activationState,
-      },
-    );
+    return Object.freeze({
+      catalog,
+      publicCatalog,
+      selectedCatalogAuthoringControls,
+      activationState,
+    });
   };
   const catalog = resolveRfc64CatalogActivationInputV1(input.catalog, chainIdentity);
   // The unified block is authoritative. Its explicit compatibility rollback
@@ -1325,8 +1362,11 @@ export function snapshotResolvedRfc64PublicCatalogActivationConfigV1(
   const deploymentProfileInput = input.deploymentProfile;
   const autoPublishInput = input.autoPublish;
   const bootstrapInput = input.bootstrap;
-  const rolloutInput = input.rollout
-    ?? resolveRfc64CatalogRolloutConfigV1(undefined, [], 'rfc64PublicCatalog');
+  const rolloutInput = resolveRfc64CatalogRolloutConfigV1(
+    input.rollout,
+    input.selectedContextGraphs,
+    'rfc64PublicCatalog',
+  );
   if (
     !Array.isArray(selectedContextGraphsInput)
     || selectedContextGraphsInput.length > MAX_SELECTED_PUBLIC_CONTEXT_GRAPHS_V1
@@ -1343,7 +1383,7 @@ export function snapshotResolvedRfc64PublicCatalogActivationConfigV1(
       || autoPublishInput !== undefined
       || bootstrapInput !== undefined
       || rolloutInput.killSwitch
-      || (rolloutInput.defaultMode ?? 'catalog') !== 'catalog'
+      || rolloutInput.defaultMode !== 'catalog'
       || Object.keys(rolloutInput.contextGraphModes).length !== 0
     ) {
       throw new TypeError('disabled rfc64PublicCatalogActivation must not carry controls');

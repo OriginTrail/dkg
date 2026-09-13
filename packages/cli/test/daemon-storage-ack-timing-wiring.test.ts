@@ -922,6 +922,10 @@ describe('runDaemonInner StorageACK timing wiring', () => {
 
     const startupArg = mocks.startPublisherRuntimeWithOutcome.mock.calls[0]?.[0] as any;
     expect(startupArg.chainBase).toMatchObject({ receiptTimeoutMs: 1_200_000 });
+    const agentCreateArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
+    expect(agentCreateArg.chainConfig.rpcRequestAdmission).toBe(
+      startupArg.chainBase.rpcRequestAdmission,
+    );
     const transport = startupArg.ackTransportFactory();
 
     await expect(transport.sendP2P('peer-a', '/dkg/test/storage-ack', payload)).resolves.toEqual(response);

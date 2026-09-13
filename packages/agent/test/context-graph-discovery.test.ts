@@ -648,7 +648,7 @@ describe('listContextGraphs merge', () => {
     expect(unauthenticated.find(p => p.id === 'my-curated')).toBeUndefined();
   }, 15000);
 
-  it('does not reject the whole list when one row enrichment fails', async () => {
+  it('does not reject the whole list when one row chain enrichment is abandoned', async () => {
     const store = sparqlHttpStoreBackedBy(new OxigraphStore());
     const result = await createTestAgent({ store });
     agent = result.agent;
@@ -695,7 +695,12 @@ describe('listContextGraphs merge', () => {
     ]);
 
     (agent as any).getContextGraphOnChainId = recorder(async (id: string) => {
-      if (id === 'broken-enrichment-row') return new Promise<undefined>(() => {});
+      if (id === 'broken-enrichment-row') {
+        throw Object.assign(
+          new Error('Context Graph name-hash resolution has no active waiters'),
+          { name: 'AbortError' },
+        );
+      }
       return undefined;
     });
 
@@ -1751,7 +1756,7 @@ describe('listContextGraphs merge', () => {
     }
   }, 15000);
 
-  it('still applies auth budget to async membership work on pre-dispatch stores', async () => {
+  it('still applies auth budget when cancelled async membership work rejects with an abandonment error', async () => {
     const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
     const originalAuthBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_AUTH_BUDGET_MS;
     Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
@@ -1783,7 +1788,14 @@ describe('listContextGraphs merge', () => {
         if (contextGraphId === id && ethers.getAddress(caller) === ethers.getAddress(member)) {
           targetCalls += 1;
           signalSeen = options?.signal;
-          return new Promise<boolean>(() => {});
+          return new Promise<boolean>((_resolve, reject) => {
+            const rejectAbandoned = () => reject(new Error('membership lookup has no active waiters'));
+            if (options?.signal?.aborted) {
+              rejectAbandoned();
+              return;
+            }
+            options?.signal?.addEventListener('abort', rejectAbandoned, { once: true });
+          });
         }
         return originalAllowlist(contextGraphId, caller, options);
       });

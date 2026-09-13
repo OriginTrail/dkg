@@ -148,7 +148,7 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
-import { projectRuntimeEvmChainConfig } from '../runtime-chain-config.js';
+import { createDaemonRpcRuntime } from './rpc-runtime.js';
 import {
   resolveOtlpLogEndpoint,
   type ActiveLogExporterMode,
@@ -1580,7 +1580,11 @@ async function runDaemonInnerWithStartupOwnership(
   // Field-level merge of CLI config + network/<env>.json#chain.
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
-  const runtimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
+  // The composition root creates exactly one budget plus direct-route usage
+  // tracker, and derives every adapter/route capability from that object.
+  const daemonRpcRuntime = createDaemonRpcRuntime(chainBase);
+  const rpcRequestGovernor = daemonRpcRuntime?.governor;
+  const runtimeEvmChainConfig = daemonRpcRuntime?.chainConfig;
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC
@@ -1818,7 +1822,7 @@ async function runDaemonInnerWithStartupOwnership(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
-    // Forward the resolver-issued snapshot. The agent consumes exactly the
+    // Forward the structurally validated resolved snapshot. The agent consumes exactly the
     // same precedence/fallback decision used for sync scope and status.
     rfc64CatalogActivations,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
@@ -2978,7 +2982,11 @@ async function runDaemonInnerWithStartupOwnership(
       drainRpcUsage: () => mergeRpcUsageWindows(
         agent.drainRpcUsage(),
         publisherState.runtime?.drainRpcUsage(),
+        daemonRpcRuntime?.drainRouteRpcUsage(),
       ),
+      ...(rpcRequestGovernor === undefined
+        ? {}
+        : { drainRpcRequestGovernor: () => rpcRequestGovernor.drainWindow() }),
     },
     emit: (line) => rpcUsageLogger.info(createOperationContext("system"), line),
     chainId: chainBase?.chainId ?? config.chain?.chainId,
@@ -3394,7 +3402,6 @@ async function runDaemonInnerWithStartupOwnership(
     config.rateLimit?.requestsPerMinute ?? 120,
     config.rateLimit?.exempt ?? [
       "/api/status",
-      "/api/chain/rpc-health",
       "/.well-known/skill.md",
     ],
   );
@@ -3648,6 +3655,7 @@ async function runDaemonInnerWithStartupOwnership(
         routePlugins,
         admission: admissionStats,
         localLlm,
+        routeRpcTransport: daemonRpcRuntime?.routeTransport,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3754,10 +3762,6 @@ async function runDaemonInnerWithStartupOwnership(
         clearInterval(pruneTimer);
         logVolumePruner.stop();
         backpressureMonitor.stop();
-        // Clears the timer AND performs the final best-effort drain (BEFORE
-        // telemetry stops), so a partial window still reaches Loki — keeps
-        // log-derived request totals exact across process lifecycles.
-        rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector?.stop();
         natStatusWatcherStop?.();
@@ -3802,6 +3806,9 @@ async function runDaemonInnerWithStartupOwnership(
                 );
             },
             stopAgent: () => agent.stop(),
+            // Clears the timer and drains only after HTTP, catch-up, publisher,
+            // and agent RPC producers have stopped, while logging is still live.
+            stopRpcUsageTelemetry: () => rpcUsageTelemetry.stop(),
             // Detaches the sink, stops its exporter, and shuts down the OTel SDK.
             stopTelemetry: stopDaemonLogging,
             log,

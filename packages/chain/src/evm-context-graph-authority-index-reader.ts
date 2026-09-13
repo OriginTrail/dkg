@@ -16,14 +16,14 @@ import {
   assertContextGraphAuthorityIndexId,
   type ContextGraphAuthorityIndexId,
 } from './context-graph-authority-index-id.js';
-import { isRetryableRpcError } from './evm-adapter-rpc.js';
+import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
 import {
   contextGraphAuthorityEventTopics,
   normalizeContextGraphAuthorityIndexLog,
 } from './evm-context-graph-authority-source.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import type { ReadOpts } from './rpc-failover-client.js';
-import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
+import { withRpcRequestContext } from './rpc-request-transport.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS = 4_096;
 
@@ -58,15 +58,15 @@ function authorityIndexScanInputV1(
     pageSize: input.pageSize,
     signal: input.signal,
     readBlockHash: async (blockNumber, lifecycleSignal) => (
-      (await withRpcRequestAbortSignal(
-        lifecycleSignal,
+      (await withRpcRequestContext(
+        { signal: lifecycleSignal },
         () => input.provider.getBlock(blockNumber),
       ))?.hash ?? null
     ),
     readPage: async (fromBlock, toBlock, lifecycleSignal) => {
       const logs = await readAdaptiveEvmLogRange({
-        read: (rangeFrom, rangeTo) => withRpcRequestAbortSignal(
-          lifecycleSignal,
+        read: (rangeFrom, rangeTo) => withRpcRequestContext(
+          { signal: lifecycleSignal },
           () => input.provider.getLogs({
             address: input.contractAddress,
             topics: [[...authorityTopics]],
@@ -98,8 +98,8 @@ async function readEvmContextGraphAuthorityIndexProjectionV1<T>(
       input.signal?.throwIfAborted();
       const stable = input.signal === undefined
         ? await input.provider.getBlock(input.finalized.number)
-        : await withRpcRequestAbortSignal(
-            input.signal,
+        : await withRpcRequestContext(
+            { signal: input.signal },
             () => input.provider.getBlock(input.finalized.number),
           );
       if (stable?.hash?.toLowerCase() !== input.finalized.hash.toLowerCase()) {
@@ -246,7 +246,7 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           isRetryable: (error: unknown) => (
             !options.signal?.aborted && (
               isContextGraphAuthorityIndexRetryableError(error)
-              || isRetryableRpcError(error)
+              || isRpcEndpointFailoverEligible(error)
             )
           ),
           policy: 'wideLogScan',

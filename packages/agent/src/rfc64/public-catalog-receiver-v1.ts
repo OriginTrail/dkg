@@ -350,6 +350,42 @@ const DEFAULTS = Object.freeze({
  */
 const DEFAULT_DEFERRABLE_ERROR = isFinalizedChainAdmissionContention;
 
+function normalizeVerifiedCurrentHeadTargetLifecycleObserverV1(
+  options: Rfc64PublicCatalogReceiverOptionsV1,
+): Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetLifecycleEvent'] {
+  const typed = options.onVerifiedCurrentHeadTargetLifecycleEvent;
+  const accepted = options.onVerifiedCurrentHeadTargetAccepted;
+  const rejected = options.onVerifiedCurrentHeadTargetRejected;
+  const settled = options.onVerifiedCurrentHeadTargetSettled;
+  if (typed === undefined && accepted === undefined && rejected === undefined
+    && settled === undefined) return undefined;
+  const notify = (observer: (() => void) | undefined): void => {
+    if (observer === undefined) return;
+    try { observer(); } catch { /* observer failures never own receiver work */ }
+  };
+  return (event) => {
+    notify(typed === undefined ? undefined : () => typed(event));
+    if (event.kind === 'settled') {
+      notify(settled === undefined ? undefined : () => settled(
+        event.announcement,
+        event.targetToken,
+        event.attemptToken,
+        event.outcome,
+      ));
+    } else if (event.result === 'accepted') {
+      notify(accepted === undefined ? undefined : () => accepted(
+        event.announcement,
+        event.targetToken,
+      ));
+    } else {
+      notify(rejected === undefined ? undefined : () => rejected(
+        event.announcement,
+        event.outcome,
+      ));
+    }
+  };
+}
+
 export class Rfc64PublicCatalogReceiverV1 {
   readonly #reconciler: Rfc64PublicCatalogReceiverReconcilerBaseV1;
   readonly #isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
@@ -369,12 +405,6 @@ export class Rfc64PublicCatalogReceiverV1 {
     Rfc64PublicCatalogReceiverOptionsV1['onReconciliationAttemptEnd'];
   readonly #onVerifiedCurrentHeadTargetLifecycleEvent?:
     Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetLifecycleEvent'];
-  readonly #onVerifiedCurrentHeadTargetAccepted?:
-    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetAccepted'];
-  readonly #onVerifiedCurrentHeadTargetRejected?:
-    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetRejected'];
-  readonly #onVerifiedCurrentHeadTargetSettled?:
-    Rfc64PublicCatalogReceiverOptionsV1['onVerifiedCurrentHeadTargetSettled'];
   readonly #onError?: Rfc64PublicCatalogReceiverOptionsV1['onError'];
 
   /** Every exact head and its queued/deferred/terminal task lifecycle. */
@@ -449,10 +479,7 @@ export class Rfc64PublicCatalogReceiverV1 {
     this.#onReconciliationAttemptSuccess = options.onReconciliationAttemptSuccess;
     this.#onReconciliationAttemptEnd = options.onReconciliationAttemptEnd;
     this.#onVerifiedCurrentHeadTargetLifecycleEvent =
-      options.onVerifiedCurrentHeadTargetLifecycleEvent;
-    this.#onVerifiedCurrentHeadTargetAccepted = options.onVerifiedCurrentHeadTargetAccepted;
-    this.#onVerifiedCurrentHeadTargetRejected = options.onVerifiedCurrentHeadTargetRejected;
-    this.#onVerifiedCurrentHeadTargetSettled = options.onVerifiedCurrentHeadTargetSettled;
+      normalizeVerifiedCurrentHeadTargetLifecycleObserverV1(options);
     this.#onError = options.onError;
   }
 
@@ -1221,26 +1248,6 @@ export class Rfc64PublicCatalogReceiverV1 {
     event: Rfc64VerifiedCurrentHeadTargetLifecycleEventV1,
   ): void {
     this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetLifecycleEvent?.(event));
-    if (event.kind === 'settled') {
-      this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetSettled?.(
-        event.announcement,
-        event.targetToken,
-        event.attemptToken,
-        event.outcome,
-      ));
-      return;
-    }
-    if (event.result === 'accepted') {
-      this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetAccepted?.(
-        event.announcement,
-        event.targetToken,
-      ));
-      return;
-    }
-    this.#safeNotify(() => this.#onVerifiedCurrentHeadTargetRejected?.(
-      event.announcement,
-      event.outcome,
-    ));
   }
 
   #finishReconciliationAttempt(task: ReceiverTaskV1): void {

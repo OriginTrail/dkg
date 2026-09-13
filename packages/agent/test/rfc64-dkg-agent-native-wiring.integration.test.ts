@@ -1558,6 +1558,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         callerAgentAddress: AUTHOR,
         ...create,
       });
+      // Context-graph mutations notify the centralized background dispatcher;
+      // use its production drain fence before asserting the resulting default
+      // responsibility projection.
+      await author.whenRfc64CatalogResponsibilitiesIdleV1();
       expect(author.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
         expect.objectContaining({
           contextGraphId: CONTEXT_GRAPH_ID,
@@ -4153,7 +4157,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
   });
 
-  it('consumes a resolver-issued rollback handle without reinterpreting enabled', async () => {
+  it('consumes a resolved rollback snapshot without reinterpreting enabled', async () => {
     const activations = resolveRfc64CatalogActivationsV1({
       catalog: { enabled: false },
       publicCatalog: { enabled: true } as never,
@@ -4185,21 +4189,22 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).rejects.toThrow(/deployment network differs from the daemon effective chain id/u);
   });
 
-  it('rejects forged or mixed normalized activation state', async () => {
+  it('accepts structurally valid activation snapshots and rejects inconsistent state', async () => {
     const activations = resolveRfc64CatalogActivationsV1({
       catalog: { enabled: false },
     }, resolveRfc64PublicCatalogActivationChainIdentityV1(undefined));
-    await expect(DKGAgent.create({
-      name: 'forged-normalized-activation',
+    const copiedAgent = await DKGAgent.create({
+      name: 'copied-normalized-activation',
       rfc64CatalogActivations: {
         catalog: activations.catalog,
         publicCatalog: activations.publicCatalog,
         selectedCatalogAuthoringControls: activations.selectedCatalogAuthoringControls,
         activationState: activations.activationState,
-      } as never,
-    })).rejects.toThrow(/must be an opaque handle from resolveRfc64CatalogActivationsV1/u);
+      },
+    });
+    agents.push(copiedAgent);
     await expect(DKGAgent.create({
-      name: 'copied-normalized-activation',
+      name: 'inconsistent-normalized-activation',
       rfc64CatalogActivations: {
         ...activations,
         activationState: {
@@ -4213,7 +4218,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           },
         },
       } as never,
-    })).rejects.toThrow(/must be an opaque handle from resolveRfc64CatalogActivationsV1/u);
+    })).rejects.toThrow(/execution rollout is inconsistent/u);
     const prototypeForgedActivations = Object.setPrototypeOf({
       catalog: activations.catalog,
       publicCatalog: activations.publicCatalog,
@@ -4228,15 +4233,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
           },
         },
       },
-    }, Object.getPrototypeOf(activations));
+    }, { forged: true });
     await expect(DKGAgent.create({
       name: 'prototype-forged-normalized-activation',
       rfc64CatalogActivations: prototypeForgedActivations,
-    })).rejects.toThrow(/must be an opaque handle from resolveRfc64CatalogActivationsV1/u);
-    expect(() => Reflect.construct(
-      Object.getPrototypeOf(activations).constructor,
-      [Symbol('forged-resolver-token'), prototypeForgedActivations],
-    )).toThrow(/can only be created by the activation resolver/u);
+    })).rejects.toThrow(/must be a plain object/u);
     await expect(DKGAgent.create({
       name: 'mixed-normalized-activation',
       rfc64CatalogActivations: activations,

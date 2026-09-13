@@ -17,8 +17,7 @@ export interface Rfc64CatalogRolloutConfigV1 {
 /** Immutable rollout controls; selected effective modes live on the activation plan. */
 export interface ResolvedRfc64CatalogRolloutConfigV1 {
   readonly killSwitch: boolean;
-  /** Omitted only by pre-defaultMode resolved snapshots accepted for compatibility. */
-  readonly defaultMode?: Rfc64CatalogRolloutModeV1;
+  readonly defaultMode: Rfc64CatalogRolloutModeV1;
   readonly contextGraphModes: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
 }
 
@@ -348,7 +347,7 @@ export function mergeRfc64CatalogRolloutConfigsV1(
     killSwitch: catalog.killSwitch || publicCatalog.killSwitch,
     // Only the unified block accepts this lifecycle-wide control. The public
     // compatibility block remains scoped to its explicit manifest.
-    defaultMode: catalog.defaultMode ?? 'catalog',
+    defaultMode: catalog.defaultMode,
     contextGraphModes: Object.freeze(contextGraphModes),
   });
 }
@@ -364,13 +363,9 @@ export function rfc64CatalogRolloutModeForContextGraphV1(
   ) {
     return 'legacy';
   }
-  // Resolved activations produced by this release always carry a total plan.
-  // Retain the pre-D18 catalog default for older direct JS callers that pass a
-  // previously resolved activation shape across the package boundary.
   const mode = activation.selectedContextGraphModes?.[contextGraphId]
-    ?? activation.rollout?.contextGraphModes[contextGraphId]
-    ?? activation.rollout?.defaultMode
-    ?? 'catalog';
+    ?? activation.rollout.contextGraphModes[contextGraphId]
+    ?? activation.rollout.defaultMode;
   if (mode === undefined) {
     throw new Error(`resolved RFC-64 rollout plan is missing selected graph ${contextGraphId}`);
   }
@@ -413,7 +408,7 @@ export function resolveRfc64CatalogConfiguredAuthorityDecisionV1(
 ): Rfc64CatalogAuthorityPolicyV1 {
   const eligible = activation?.selectedContextGraphs.includes(contextGraphId) ?? false;
   const mode = rfc64CatalogRolloutModeForContextGraphV1(activation, contextGraphId);
-  const killSwitchActive = activation?.rollout?.killSwitch ?? false;
+  const killSwitchActive = activation?.rollout.killSwitch ?? false;
   // The disabled activation preserves the pre-activation direct catalog API
   // for unselected callers. Selected CGs always have exactly one authority.
   const compatibilityTrack2 = activation?.enabled === false && !eligible;

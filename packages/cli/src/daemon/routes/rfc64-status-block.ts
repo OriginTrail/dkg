@@ -72,7 +72,7 @@ export function buildRfc64CatalogConfigurationEvidenceV1(
   const deprecatedDisabledOverride = execution.mode === 'compatibility-rollback';
   const modes = Object.entries(execution.rollout.contextGraphModes)
     .sort(([left], [right]) => left.localeCompare(right));
-  const defaultMode = execution.rollout.defaultMode ?? 'catalog';
+  const defaultMode = execution.rollout.defaultMode;
   const source = deprecatedDisabledOverride
     ? 'explicit-disabled'
     : configuration.source === 'omitted'

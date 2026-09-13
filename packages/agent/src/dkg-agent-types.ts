@@ -65,6 +65,7 @@ import type {
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
+  RpcRequestAdmission,
 } from '@origintrail-official/dkg-chain';
 import type { QueryAccessConfig } from '@origintrail-official/dkg-query';
 import type { SkillHandler } from './messaging.js';
@@ -1616,6 +1617,8 @@ export interface DKGAgentConfig {
   chainConfig?: {
     rpcUrl: string;
     rpcUrls?: string[];
+    /** Shared transport budget injected by the daemon composition root. */
+    rpcRequestAdmission?: RpcRequestAdmission;
     /** Public RPC URLs safe for wallet_addEthereumChain. Never use private operator RPC URLs here. */
     walletRpcUrls?: string[];
     hubAddress: string;

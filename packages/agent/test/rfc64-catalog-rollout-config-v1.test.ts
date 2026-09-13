@@ -10,7 +10,8 @@ import {
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
 import {
   mergeRfc64CatalogRolloutConfigsV1,
-  type ResolvedRfc64CatalogRolloutConfigV1,
+  resolveRfc64CatalogRolloutConfigV1,
+  type Rfc64CatalogRolloutConfigV1,
 } from '../src/rfc64/catalog-rollout-authority-v1.js';
 import {
   snapshotRfc64CatalogBootstrapConfigV1,
@@ -28,13 +29,18 @@ import {
 } from './rfc64-catalog-activation-fixtures.js';
 
 describe('RFC-64 catalog rollout and compatibility merging', () => {
-  it('keeps pre-defaultMode resolved snapshots source-compatible', () => {
-    const legacySnapshot: ResolvedRfc64CatalogRolloutConfigV1 = {
+  it('normalizes pre-defaultMode raw snapshots at the input boundary', () => {
+    const legacySnapshot: Rfc64CatalogRolloutConfigV1 = {
       killSwitch: false,
       contextGraphModes: {},
     };
+    const normalized = resolveRfc64CatalogRolloutConfigV1(
+      legacySnapshot,
+      [],
+      'rfc64Catalog',
+    );
 
-    expect(mergeRfc64CatalogRolloutConfigsV1(legacySnapshot, legacySnapshot))
+    expect(mergeRfc64CatalogRolloutConfigsV1(normalized, normalized))
       .toEqual({ killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} });
   });
 

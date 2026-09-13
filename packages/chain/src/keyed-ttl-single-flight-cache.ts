@@ -146,6 +146,121 @@ export class KeyedSingleFlight<K, I = K> {
   }
 }
 
+interface AbortableSingleFlightState<V> {
+  readonly controller: AbortController;
+  promise: Promise<V>;
+  waiters: number;
+  settled: boolean;
+}
+
+/**
+ * Per-key shared physical work with waiter-local cancellation.
+ *
+ * A caller abandoning its wait never poisons peers. When the final waiter
+ * leaves, the physical operation is aborted and detached from the key so a
+ * later caller can start fresh. Invalidation also aborts the current physical
+ * request and advances an epoch, preventing an implementation that ignores
+ * cancellation from publishing a stale success through `onSuccess`.
+ */
+export class AbortableKeyedSingleFlight<K, V> {
+  private readonly inflight = new Map<K, AbortableSingleFlightState<V>>();
+
+  private readonly epochs = new Map<K, number>();
+
+  async run(
+    key: K,
+    load: (signal: AbortSignal) => Promise<V>,
+    waiterSignal?: AbortSignal,
+    onSuccess?: (value: V) => void,
+    abandonmentMessage = 'Shared request has no active waiters',
+  ): Promise<V> {
+    let state = this.inflight.get(key);
+    if (state === undefined) {
+      const epoch = this.epoch(key);
+      const controller = new AbortController();
+      state = {
+        controller,
+        promise: Promise.resolve(undefined as V),
+        waiters: 0,
+        settled: false,
+      };
+      const shared = state;
+      // Enrol the initiating waiter before physical work can settle.
+      shared.promise = Promise.resolve()
+        .then(() => load(controller.signal))
+        .then((value) => {
+          if (onSuccess !== undefined && this.epoch(key) === epoch) onSuccess(value);
+          return value;
+        })
+        .finally(() => {
+          shared.settled = true;
+          if (this.inflight.get(key) === shared) this.inflight.delete(key);
+        });
+      this.inflight.set(key, shared);
+    }
+
+    state.waiters += 1;
+    try {
+      return await waitForSignal(state.promise, waiterSignal);
+    } finally {
+      state.waiters -= 1;
+      if (state.waiters === 0 && !state.settled) {
+        if (this.inflight.get(key) === state) this.inflight.delete(key);
+        this.bumpEpoch(key);
+        const abandoned = new Error(abandonmentMessage);
+        abandoned.name = 'AbortError';
+        state.controller.abort(abandoned);
+      }
+    }
+  }
+
+  invalidate(key: K, reason = 'Shared request was invalidated'): void {
+    const state = this.inflight.get(key);
+    this.inflight.delete(key);
+    this.bumpEpoch(key);
+    if (state !== undefined && !state.settled) {
+      const invalidated = new Error(reason);
+      invalidated.name = 'AbortError';
+      state.controller.abort(invalidated);
+    }
+  }
+
+  invalidateAll(reason = 'Shared requests were invalidated'): void {
+    const keys = [...this.inflight.keys()];
+    for (const key of keys) this.invalidate(key, reason);
+  }
+
+  private epoch(key: K): number {
+    return this.epochs.get(key) ?? 0;
+  }
+
+  private bumpEpoch(key: K): void {
+    this.epochs.set(key, this.epoch(key) + 1);
+  }
+}
+
+/** Waiter-local cancellation for a generic shared operation. */
+async function waitForSignal<T>(
+  shared: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (signal === undefined) return shared;
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject(signal.reason instanceof Error
+      ? signal.reason
+      : Object.assign(new Error('Shared request waiter aborted'), { name: 'AbortError' }));
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
+  try {
+    return await Promise.race([shared, aborted]);
+  } finally {
+    if (onAbort !== undefined) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 /**
  * Read-through TTL cache that owns the cache/single-flight/invalidation
  * protocol for callers.

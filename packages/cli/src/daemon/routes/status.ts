@@ -55,7 +55,13 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
-import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats } from '@origintrail-official/dkg-chain';
+import {
+  enrichEvmError,
+  MockChainAdapter,
+  resolveRpcUrls,
+  getRpcFailoverStats,
+} from '@origintrail-official/dkg-chain';
+import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 import {
   DKGAgent,
   loadOpWallets,
@@ -350,47 +356,31 @@ interface RegistryCacheSnapshot {
 let registryCache: RegistryCacheSnapshot | null = null;
 let registryCacheInflight: Promise<RegistryCacheSnapshot> | null = null;
 
-function routeWithTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer);
-  }) as Promise<T>;
-}
-
-async function probeRpcEndpoint(rpcUrl: string, index: number): Promise<{
+export async function probeRpcEndpoint(
+  rpcUrl: string,
+  index: number,
+  routeTransport?: DaemonRouteRpcTransport,
+): Promise<{
   index: number;
   role: 'primary' | 'backup';
   ok: boolean;
+  status: 'healthy' | 'unhealthy' | 'skipped-local-capacity';
   latencyMs: number | null;
   blockNumber: number | null;
   error?: string;
 }> {
-  const provider = new ethers.JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 });
-  const start = Date.now();
-  try {
-    const blockNumber = await routeWithTimeout(provider.getBlockNumber(), 3_000, 'RPC health probe');
-    return {
-      index,
-      role: index === 0 ? 'primary' : 'backup',
-      ok: true,
-      latencyMs: Date.now() - start,
-      blockNumber,
-    };
-  } catch (err) {
+  if (routeTransport === undefined) {
     return {
       index,
       role: index === 0 ? 'primary' : 'backup',
       ok: false,
+      status: 'skipped-local-capacity',
       latencyMs: null,
       blockNumber: null,
-      error: err instanceof Error && err.message.includes('timed out')
-        ? 'RPC health probe timed out'
-        : 'RPC health probe failed',
+      error: 'RPC health probe skipped: daemon RPC transport unavailable',
     };
   }
+  return routeTransport.probeEndpoint(rpcUrl, index);
 }
 
 interface PublicChainSummary {
@@ -451,20 +441,15 @@ function buildPublicInfoChainSummary(
   };
 }
 
-function createRouteEvmProvider(rpcUrl: string, rpcUrls?: string[]): ethers.JsonRpcProvider | ethers.FallbackProvider {
-  const providers = resolveRpcUrls(rpcUrl, rpcUrls)
-    .map((url) => new ethers.JsonRpcProvider(url, undefined, { cacheTimeout: -1 }));
-  if (providers.length === 1) return providers[0];
-  return new ethers.FallbackProvider(
-    providers.map((provider, index) => ({
-      provider,
-      priority: index + 1,
-      stallTimeout: 4_000,
-      weight: 1,
-    })),
-    undefined,
-    { quorum: 1 },
-  );
+function createRouteEvmProvider(
+  rpcUrl: string,
+  rpcUrls: string[] | undefined,
+  routeTransport?: DaemonRouteRpcTransport,
+): ethers.JsonRpcProvider | ethers.FallbackProvider {
+  if (routeTransport === undefined) {
+    throw new Error('Daemon RPC transport unavailable');
+  }
+  return routeTransport.createProvider(rpcUrl, rpcUrls);
 }
 
 // Quad-count cache for external SPARQL backends. A full-store COUNT is not a
@@ -629,6 +614,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     apiHost,
     apiPortRef,
     admission,
+    routeRpcTransport,
     url,
     path,
     requestAgentAddress,
@@ -1118,7 +1104,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     }
     try {
-      const provider = createRouteEvmProvider(rpcUrl, chain?.rpcUrls);
+      const provider = createRouteEvmProvider(rpcUrl, chain?.rpcUrls, routeRpcTransport);
       const tokenAddr = chain?.tokenAddress
         ?? (await new ethers.Contract(
           hubAddress,
@@ -1193,7 +1179,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     }
     const rpcUrls = resolveRpcUrls(rpcUrl, chain?.rpcUrls);
-    const rpcs = await Promise.all(rpcUrls.map((url, index) => probeRpcEndpoint(url, index)));
+    const rpcs = await Promise.all(
+      rpcUrls.map((rpc, index) => probeRpcEndpoint(rpc, index, routeRpcTransport)),
+    );
     const primary = rpcs[0];
     const healthy = rpcs.find((rpc) => rpc.ok);
     return jsonResponse(res, 200, {

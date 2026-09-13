@@ -135,6 +135,7 @@ import {
   createRpcTimeoutError,
   enrichEvmError,
   isChainRpcTransportError,
+  withOwnedRpcRequestContext,
   type ChainAdapter,
   type CreateContextGraphParams,
   type CreateOnChainContextGraphParams,
@@ -2032,6 +2033,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       new InMemoryProtocolOutboxStore();
     assertBoundedProtocolOutboxStore(outboxStore);
     await this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close();
+    this.rfc64BackgroundWorkDispatcherV1.reopen();
     this.contextGraphMembershipPersistence.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
@@ -4175,7 +4177,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         retryIntervalMs: 30_000,
         requestWhileRunning: 'drop',
         runPass: async (signal) => {
-          await this.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+          await withOwnedRpcRequestContext({
+            requestClass: 'background',
+            signal,
+          }, () => this.retryUnavailableContextGraphSubscriptionAuthorities(signal));
           return this.getContextGraphSubscriptionRehydrationStatus()
             ?.dormantReasons.authorityUnavailable.length
             ? 'rearm'
@@ -9028,12 +9033,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       || previous.onChainId !== canonicalNext.onChainId
       || previous.metaSynced !== canonicalNext.metaSynced
     ) {
-      void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId).catch((error) => {
-        this.log.warn(
-          createOperationContext('system'),
-          `RFC-64 responsibility resolution failed for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
     }
     // VM cleanup policy belongs to the lifecycle consumer, not to the binding
     // registry. Invalidating a reverse candidate must also invalidate any work
@@ -9309,7 +9309,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           },
         );
       }
-      void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId).catch(() => undefined);
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
     }
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
@@ -9705,9 +9705,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<void> {
     const store = this.config.contextGraphMembershipStore;
     if (!store) {
-      void this.reconcileRfc64CatalogResponsibilityV1(
+      if (options?.strict === true) {
+        return this.reconcileRfc64CatalogResponsibilityV1(
+          record.contextGraphId,
+        ).then(() => undefined);
+      }
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(
         record.contextGraphId,
-      ).catch(() => undefined);
+      );
       return Promise.resolve();
     }
     const normalizedRecord = {
@@ -9720,15 +9725,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       () => store.upsert({ ...normalizedRecord, updatedAt: Date.now() }),
       { strict: options?.strict === true },
     );
-    const refreshAuthority = () => {
-      void this.reconcileRfc64CatalogResponsibilityV1(
-        normalizedRecord.contextGraphId,
-      ).catch(() => undefined);
-    };
+    const refreshAuthority = () => this.reconcileRfc64CatalogResponsibilityV1(
+      normalizedRecord.contextGraphId,
+    ).then(() => undefined);
     if (options?.strict === true) return write.then(refreshAuthority);
     // Background callers stay log-and-continue; durability-sensitive callers
     // opt into the strict path above and receive the original rejection.
-    return write.then(refreshAuthority).catch((err) => {
+    return write.then(() => {
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(
+        normalizedRecord.contextGraphId,
+      );
+    }).catch((err) => {
       this.log.warn(
         createOperationContext('system'),
         `Failed to persist context-graph membership for "${normalizedRecord.contextGraphId}" (${normalizedRecord.principalType}:${normalizedRecord.principalId}): ${err instanceof Error ? err.message : String(err)}`,
@@ -9743,8 +9750,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): void {
     const store = this.config.contextGraphMembershipStore;
     if (!store) {
-      void this.reconcileRfc64CatalogResponsibilityV1(contextGraphId)
-        .catch(() => undefined);
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(
+        contextGraphId,
+      );
       return;
     }
     const normalizedPrincipalId = this.normalizeMembershipPrincipal(principalType, principalId);
@@ -9752,13 +9760,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     void this.enqueueContextGraphMembershipPersistWrite(
       key,
       () => store.delete(contextGraphId, principalType, normalizedPrincipalId),
-    ).then(() => this.reconcileRfc64CatalogResponsibilityV1(contextGraphId))
-      .catch((err) => {
-      this.log.warn(
-        createOperationContext('system'),
-        `Failed to delete context-graph membership for "${contextGraphId}" (${principalType}:${normalizedPrincipalId}): ${err instanceof Error ? err.message : String(err)}`,
+    ).then(() => {
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(
+        contextGraphId,
       );
-    });
+    })
+      .catch((err) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `Failed to delete context-graph membership for "${contextGraphId}" (${principalType}:${normalizedPrincipalId}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
   persistLocalNodeMembership(this: DKGAgent, contextGraphId: string, source = 'subscription'): void {

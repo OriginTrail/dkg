@@ -30,7 +30,20 @@ import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializ
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
-import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
+import {
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
+  isRetryableRpcError,
+  resolveRpcUrls,
+  assertSuccessfulReceipt,
+  sleep,
+} from './evm-adapter-rpc.js';
+import {
+  createRpcRequestProvider,
+  activeRpcRequestAbortSignal,
+  withOwnedRpcRequestContext,
+  withRpcRequestTimeout,
+} from './rpc-request-transport.js';
 import { rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
@@ -39,13 +52,15 @@ import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './r
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import {
   RpcUsageTracker,
-  createCountingJsonRpcProvider,
   withRpcUsageConsumer,
   type RpcUsageWindow,
 } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
-import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import {
+  AbortableKeyedSingleFlight,
+  ReadThroughTtlCache,
+} from './keyed-ttl-single-flight-cache.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
@@ -846,10 +861,8 @@ export class EVMChainAdapterBase {
     { value: bigint; cachedAt: number }
   >();
 
-  protected readonly configuredStaticChainIdValidationsByProvider = new Map<
-    JsonRpcProvider,
-    Promise<bigint>
-  >();
+  protected readonly configuredStaticChainIdValidationsByProvider =
+    new AbortableKeyedSingleFlight<JsonRpcProvider, bigint>();
 
   protected cachedKav10Address: { value: string; cachedAt: number } | undefined;
 
@@ -952,7 +965,9 @@ export class EVMChainAdapterBase {
   invalidatePublishPreflightCache(): void {
     this.cachedChainId = undefined;
     this.configuredStaticChainIdsByProvider.clear();
-    this.configuredStaticChainIdValidationsByProvider.clear();
+    this.configuredStaticChainIdValidationsByProvider.invalidateAll(
+      'Configured chainId validation was invalidated',
+    );
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
@@ -1128,13 +1143,13 @@ export class EVMChainAdapterBase {
     this.rpcUsage = new RpcUsageTracker(() => this.chainId);
     // One transport factory wires BOTH billing-exact accounting hooks (first
     // attempt at `_send` + every ethers-internal retry attempt) to the tracker —
-    // see createCountingJsonRpcProvider for the invariant.
+    // see createRpcRequestProvider for the invariant.
     this.configuredStaticChainId = configuredStaticChainId(config);
     const staticNetwork = this.configuredStaticChainId == null
       ? undefined
       : ethers.Network.from(this.configuredStaticChainId);
     this.providers = this.rpcUrls.map(
-      (url, endpointSlot) => createCountingJsonRpcProvider(url, this.rpcUsage, {
+      (url, endpointSlot) => createRpcRequestProvider(url, {
         maxRetries: perEndpointRetries,
         providerOptions: {
           cacheTimeout: -1,
@@ -1143,6 +1158,8 @@ export class EVMChainAdapterBase {
         },
         network: staticNetwork,
         endpointSlot,
+        admission: config.rpcRequestAdmission,
+        onRequest: (method, slot) => this.rpcUsage.record(method, slot),
       }),
     );
     this.primaryProvider = this.providers[0];
@@ -1669,7 +1686,9 @@ export class EVMChainAdapterBase {
             );
           } catch (err) {
             enrichEvmError(err);
-            if (!isRetryableRpcError(err)
+            const retryDisposition = classifyRpcRetryDisposition(err);
+            if ((errorCode(err) !== 'RPC_ENDPOINTS_EXHAUSTED'
+                && retryDisposition !== 'failover')
               || preparationPass >= RPC_PREPARATION_ENDPOINT_SET_RETRIES) {
               throw err;
             }
@@ -1734,7 +1753,7 @@ export class EVMChainAdapterBase {
         await this.broadcastSignedTransactionWithFailover(signedTx, txHash, label);
         return;
       } catch (err) {
-        if (isRetryableRpcError(err) && pass < RPC_ENDPOINT_SET_RETRIES) {
+        if (errorCode(err) === 'RPC_ENDPOINTS_EXHAUSTED' && pass < RPC_ENDPOINT_SET_RETRIES) {
           await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
           continue;
         }
@@ -2832,7 +2851,7 @@ export class EVMChainAdapterBase {
       // of a generic 500 — and never hang waiting on it (#894 follow-up). A
       // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
       // its original shape.
-      if (isRetryableRpcError(err)) {
+      if (classifyRpcRetryDisposition(err) === 'failover') {
         throw new RpcEndpointsExhaustedError(
           `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
           { cause: err, rpcUrls: this.rpcUrls },
@@ -3089,7 +3108,7 @@ export class EVMChainAdapterBase {
           (p) => this.rebindContract(storage, p).getMaxKaNumberForAuthor.staticCall(normalized),
           {
             isRetryable: (err) =>
-              isRetryableRpcError(err)
+              isRpcEndpointFailoverEligible(err)
               && !isKaHighWaterViewUnavailable(err)
               && !isKaHighWaterBareRevert(err),
           },
@@ -3239,10 +3258,10 @@ export class EVMChainAdapterBase {
         let pageError: unknown;
         for (const { provider } of ordered) {
           try {
-            await withTimeout(
-              this.ensureConfiguredStaticChainIdValidated(provider),
+            await withRpcRequestTimeout(
               RPC_READ_STALL_TIMEOUT_MS,
               `${label} chainId validation`,
+              () => this.ensureConfiguredStaticChainIdValidated(provider),
             );
             let contract = connected.get(provider);
             if (!contract) {
@@ -3254,10 +3273,10 @@ export class EVMChainAdapterBase {
             // bounded consumer scope explicitly so a large historical crawl
             // (notably the pre-10.0.4 KA high-water fallback) cannot collapse
             // into `consumer=unattributed` in raw eth_getLogs telemetry.
-            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withTimeout(
-              contract.queryFilter(filter as any, lo, hi),
+            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withRpcRequestTimeout(
               KA_HIGH_WATER_PAGE_TIMEOUT_MS,
               `${label} getLogs [${lo}, ${hi}]`,
+              () => contract!.queryFilter(filter as any, lo, hi),
             ));
             metrics.chainRpcTotal.add(1, {
               rpc_method: 'eth_getLogs', outcome: 'ok', retryable: false, chain_id: this.chainId,
@@ -3267,6 +3286,7 @@ export class EVMChainAdapterBase {
             });
             return { logs, provider };
           } catch (err) {
+            if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
             pageError = err; // hung or errored — fail over to the next eligible backend
           }
         }
@@ -3344,18 +3364,19 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
-        await withTimeout(
-          this.ensureConfiguredStaticChainIdValidated(provider),
+        await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
+          () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
-        const backendHead = await withTimeout(
-          provider.getBlockNumber(),
+        const backendHead = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} backend head probe`,
+          () => provider.getBlockNumber(),
         );
         reachable.push({ provider, backendHead });
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         if (!isHistoricalStateUnavailable(err)) probeError = err;
       }
     }
@@ -3385,22 +3406,23 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
-        await withTimeout(
-          this.ensureConfiguredStaticChainIdValidated(provider),
+        await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
+          () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
         // Bound the probe: these are direct per-backend reads (not via the
         // FallbackProvider), so without a timeout a hung `getBlockNumber()` would
         // stall the whole resolution instead of failing over. A stall rejects and
         // is treated like any other unreachable-backend error below.
-        const backendHead = await withTimeout(
-          provider.getBlockNumber(),
+        const backendHead = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} backend head probe`,
+          () => provider.getBlockNumber(),
         );
         reachable.push({ provider, backendHead });
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         if (!isHistoricalStateUnavailable(err)) probeError = err;
       }
     }
@@ -3458,6 +3480,7 @@ export class EVMChainAdapterBase {
         // block isn't throttled, so this is always non-empty.
         return { fromBlock: lo, head, scanProviders: reachable.filter((r) => !throttledProviders.has(r.provider)) };
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         // Always fail over to the next backend FIRST (a healthy archive can still
         // pin the deploy block even if this one is denied/pruned/flaky). Track a
         // transient throttle per-backend: re-querying that endpoint in the scan
@@ -3518,13 +3541,14 @@ export class EVMChainAdapterBase {
         // fits (the heavier getLogs scan page gets the larger
         // `KA_HIGH_WATER_PAGE_TIMEOUT_MS`); the 3 attempts also absorb a transient
         // blip before failing over.
-        const code = await withTimeout(
-          provider.getCode(address, block),
+        const code = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} eth_getCode at block ${block}`,
+          () => provider.getCode(address, block),
         );
         return code && code !== '0x' ? code : '0x';
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         lastErr = err;
       }
     }
@@ -3581,30 +3605,38 @@ export class EVMChainAdapterBase {
       return cached!.value;
     }
 
-    let validation = this.configuredStaticChainIdValidationsByProvider.get(provider);
-    if (!validation) {
-      validation = withTimeout(
-        (async () => {
-          const raw = await provider.send('eth_chainId', []);
-          const live = BigInt(raw);
-          if (live !== this.configuredStaticChainId) {
-            throw new Error(
-              `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
-            );
-          }
-          this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
-          this.cachedChainId = { value: live, cachedAt: Date.now() };
-          return live;
-        })(),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'configured chainId validation',
-      ).finally(() => {
-        this.configuredStaticChainIdValidationsByProvider.delete(provider);
-      });
-      this.configuredStaticChainIdValidationsByProvider.set(provider, validation);
-    }
-
-    return validation;
+    return this.configuredStaticChainIdValidationsByProvider.run(
+      provider,
+      (sharedSignal) => withOwnedRpcRequestContext(
+        {
+          requestClass: 'foreground',
+          signal: sharedSignal,
+        },
+        () => withRpcRequestTimeout(
+          RPC_READ_STALL_TIMEOUT_MS,
+          'configured chainId validation',
+          async () => {
+            const raw = await provider.send('eth_chainId', []);
+            const live = BigInt(raw);
+            if (live !== this.configuredStaticChainId) {
+              throw new Error(
+                `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
+              );
+            }
+            return live;
+          },
+        ),
+      ),
+      activeRpcRequestAbortSignal(),
+      (live) => {
+        this.configuredStaticChainIdsByProvider.set(provider, {
+          value: live,
+          cachedAt: Date.now(),
+        });
+        this.cachedChainId = { value: live, cachedAt: Date.now() };
+      },
+      'Configured chainId validation has no active waiters',
+    );
   }
 
   /**

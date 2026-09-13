@@ -8,23 +8,34 @@
 
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 
-import {
-  CG_REGISTRY_MAX_SCAN_PAGES,
-  RPC_READ_STALL_TIMEOUT_MS,
-} from './evm-adapter-constants.js';
-import { withTimeout } from './evm-adapter-rpc.js';
+import { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
+import { withRpcRequestContext, withRpcRequestTimeout } from './rpc-request-transport.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
-import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
+import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
 
 /**
- * Maximum current high-water id for the fast getNameHash enumeration. Above
- * this threshold the adapter switches before any per-id read to its bounded,
- * deploy-anchored exact-topic event scan.
+ * Maximum current high-water id for the fast getNameHash enumeration. Keep
+ * the complete cold-path refresh tightly bounded under the default governor:
+ * the range reads are accompanied by chain-id, high-water, and canonical-head
+ * fences. Above this deliberately small threshold an exact-topic event scan
+ * is substantially cheaper and avoids a multi-minute per-slot sweep.
  */
-export const CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS = 1_024n;
+export const CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS = 64n;
 
 /** Fixed pressure bound for the current-state getNameHash enumeration. */
 export const CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY = 4;
+
+/**
+ * Queue-aware deadline for the fail-closed reverse-name lookup.
+ *
+ * The generic 4s point-read deadline is intentionally shorter than the RPC
+ * governor's 30s background startup jitter. Using it here made a healthy,
+ * admitted-later catalog bootstrap abort locally before its request could be
+ * dispatched, then retry the same fenced lookup. The complete cold lookup is
+ * already bounded by its caller; this per-read ceiling lets one request remain
+ * queued through startup without weakening the resolver's chain fences.
+ */
+export const CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS = 60_000;
 
 interface ContextGraphNameHashSlotScope {
   readonly storageAddress: string;
@@ -261,9 +272,17 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
   async resolve(normalizedNameHash: string): Promise<bigint | null> {
     await this.initialize();
     const requestScope = await this.captureScopeToken();
+    // Admission for the first chain read must happen before this request owns
+    // the serialized slot-state lane. In particular, background authority
+    // discovery may be held by cold-start jitter; allowing that wait to own
+    // currentSlotTail would invert priority and stall a foreground register.
+    // The existing end-of-pass high-water verification makes a snapshot that
+    // ages while queued fail closed without committing stale state.
+    const highWaterSnapshot = await this.loadProviderHighWaters();
     const current = await this.enqueueCurrentSlotResolution(
       normalizedNameHash,
       requestScope,
+      highWaterSnapshot,
     );
     return current.mode === 'historical'
       ? this.resolveHistorical(normalizedNameHash)
@@ -274,10 +293,11 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
   private enqueueCurrentSlotResolution(
     normalizedNameHash: string,
     requestScope: ContextGraphNameHashScopeToken,
+    highWaterSnapshot: ContextGraphNameHashProviderHighWaters,
   ): Promise<ContextGraphNameHashCurrentResolution> {
     const run = this.currentSlotTail.then(
-      () => this.resolveCurrentSlots(normalizedNameHash, requestScope),
-      () => this.resolveCurrentSlots(normalizedNameHash, requestScope),
+      () => this.resolveCurrentSlots(normalizedNameHash, requestScope, highWaterSnapshot),
+      () => this.resolveCurrentSlots(normalizedNameHash, requestScope, highWaterSnapshot),
     );
     this.currentSlotTail = run.then(() => undefined, () => undefined);
     return run;
@@ -291,8 +311,8 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
   private async resolveCurrentSlots(
     normalizedNameHash: string,
     requestScope: ContextGraphNameHashScopeToken,
+    highWaterSnapshot: ContextGraphNameHashProviderHighWaters,
   ): Promise<ContextGraphNameHashCurrentResolution> {
-    const highWaterSnapshot = await this.loadProviderHighWaters();
     const { latestId } = highWaterSnapshot;
     if (latestId < 0n) {
       throw new Error(
@@ -501,6 +521,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const failures = reads.filter(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
+    const retryLater = failures.find(
+      (failure) => classifyRpcRetryDisposition(failure.reason) === 'retry-later',
+    );
+    if (retryLater) throw retryLater.reason;
     const nonRetryableFailures = failures.filter(
       (failure) => !isContractViewRetryable(failure.reason),
     );
@@ -825,17 +849,18 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const scanProviders: T[] = [];
     for (const candidate of headProviders) {
       try {
-        const block = await withTimeout(
-          candidate.provider.getBlock(head),
-          RPC_READ_STALL_TIMEOUT_MS,
+        const block = await withRpcRequestTimeout(
+          CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
           'resolveContextGraphIdByNameHash historical head anchor',
+          () => candidate.provider.getBlock(head),
         );
         const candidateHash = block?.hash?.toLowerCase() ?? null;
         if (candidateHash === null) continue;
         observedHeadHashes.add(candidateHash);
         if (headHash === null) headHash = candidateHash;
         if (candidateHash === headHash) scanProviders.push(candidate);
-      } catch {
+      } catch (error) {
+        if (classifyRpcRetryDisposition(error) === 'retry-later') throw error;
         // Keep collecting same-head providers; fail only when none can anchor.
       }
     }
@@ -858,10 +883,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     usedProviders: ReadonlySet<JsonRpcProvider>,
   ): Promise<void> {
     for (const provider of usedProviders) {
-      const block = await withTimeout(
-        provider.getBlock(anchor.head),
-        RPC_READ_STALL_TIMEOUT_MS,
+      const block = await withRpcRequestTimeout(
+        CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
         'resolveContextGraphIdByNameHash historical head revalidation',
+        () => provider.getBlock(anchor.head),
       );
       if (block?.hash?.toLowerCase() !== anchor.headHash) {
         throw new Error(
@@ -878,18 +903,18 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     lane: 'current' | 'historical',
     blockTag?: number,
   ): Promise<bigint> {
-    await withTimeout(
-      this.dependencies.ensureConfiguredStaticChainIdValidated(provider),
-      RPC_READ_STALL_TIMEOUT_MS,
+    await withRpcRequestTimeout(
+      CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
       `resolveContextGraphIdByNameHash ${lane} high-water chainId validation`,
+      () => this.dependencies.ensureConfiguredStaticChainIdValidated(provider),
     );
     const connected = this.dependencies.rebindContract(contextGraphStorage, provider);
-    const raw = await withTimeout(
-      blockTag === undefined
+    const raw = await withRpcRequestTimeout(
+      CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
+      `resolveContextGraphIdByNameHash ${lane} high-water read`,
+      () => blockTag === undefined
         ? connected.getLatestContextGraphId()
         : connected.getLatestContextGraphId({ blockTag }),
-      RPC_READ_STALL_TIMEOUT_MS,
-      `resolveContextGraphIdByNameHash ${lane} high-water read`,
     );
     const highWater = BigInt(raw);
     if (highWater < 0n) {
@@ -915,13 +940,15 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
         provider,
       ).getNameHash(contextGraphId) as Promise<string>,
     );
-    const physicalRead = signal
-      ? withRpcRequestAbortSignal(signal, startRead)
-      : startRead();
-    const raw: string = await withTimeout(
-      waitForContextGraphSlotRead(physicalRead, signal),
-      RPC_READ_STALL_TIMEOUT_MS,
+    const raw: string = await withRpcRequestTimeout(
+      CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
       `resolveContextGraphIdByNameHash current-slot getNameHash(${contextGraphId.toString()})`,
+      () => {
+        const physicalRead = signal
+          ? withRpcRequestContext({ signal }, startRead)
+          : startRead();
+        return waitForContextGraphSlotRead(physicalRead, signal);
+      },
     );
     return !raw || raw === ethers.ZeroHash ? null : raw.toLowerCase();
   }

@@ -1720,6 +1720,46 @@ describe('resolveChainConfig (field-level merge)', () => {
     expect(overridden?.cgRegistryScanPageSize).toBe(4_000);
   });
 
+  it('merges and validates the RPC request budget per field', () => {
+    const merged = resolveChainConfig(
+      { chain: { rpcRequestBudget: { maxRequestsPerSecond: 7, maxQueueSize: 32 } } },
+      {
+        chain: {
+          ...fullNetworkChain,
+          rpcRequestBudget: {
+            maxRequestsPerSecond: 12,
+            foregroundReservePercent: 75,
+            burstRequests: 24,
+            startupJitterMs: 45_000,
+          },
+        },
+      },
+    );
+    expect(merged?.rpcRequestBudget).toEqual({
+      maxRequestsPerSecond: 7,
+      foregroundReservePercent: 75,
+      burstRequests: 24,
+      maxQueueSize: 32,
+      startupJitterMs: 45_000,
+    });
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: { foregroundReservePercent: 100 } } },
+      { chain: fullNetworkChain },
+    )).toThrow(/foregroundReservePercent/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: null as never } },
+      { chain: fullNetworkChain },
+    )).toThrow(/plain object/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: { maxRequestsPerSecond: null as never } } },
+      { chain: fullNetworkChain },
+    )).toThrow(/maxRequestsPerSecond/);
+    expect(() => resolveChainConfig(
+      {},
+      { chain: { ...fullNetworkChain, rpcRequestBudget: null as never } },
+    )).toThrow(/plain object/);
+  });
+
   it('merges publisher funding floors with operator precedence', () => {
     const inherited = resolveChainConfig(
       {},

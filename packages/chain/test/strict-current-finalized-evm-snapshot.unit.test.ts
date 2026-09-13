@@ -783,6 +783,7 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
   });
 
   it('preserves a terminal batch failure that precedes a sibling RPC deadline', async () => {
+    const terminalResponseSent = deferred<void>();
     const siblingStarted = deferred<void>();
     const siblingClosed = deferred<void>();
     const baseHandler = successfulHandler();
@@ -792,8 +793,15 @@ describe('RFC-64 scoped current-finalized EVM snapshot', () => {
       }
       if (rpcCall.params[0] === TO) {
         sendJsonRpcResult(response, rpcCall, '0x');
+        terminalResponseSent.resolve(undefined);
         return;
       }
+      // Do not let the test advance the fake attempt deadline until the
+      // terminal sibling's response has reached the client event loop. Under
+      // package-wide load the hanging request can otherwise arrive first and
+      // the test itself manufactures the opposite ordering from its title.
+      await terminalResponseSent.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
       response.on('close', () => siblingClosed.resolve(undefined));
       siblingStarted.resolve(undefined);
     });

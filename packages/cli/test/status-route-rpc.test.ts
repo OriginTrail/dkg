@@ -30,7 +30,12 @@ import {
   noteRpcServed,
   getRpcFailoverStats,
   _resetRpcFailoverStatsForTest,
+  withRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
+import {
+  createDaemonRpcRuntime,
+  type DaemonRouteRpcTransport,
+} from '../src/daemon/rpc-runtime.js';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { DashboardDB } from '@origintrail-official/dkg-node-ui';
@@ -43,6 +48,7 @@ import {
 import {
   buildRfc64CatalogConfigurationEvidenceV1,
   handleStatusRoutes,
+  probeRpcEndpoint,
 } from '../src/daemon/routes/status.js';
 import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from
   '../src/daemon/routes/rfc64-status-contract.js';
@@ -73,6 +79,109 @@ function resolveStatusActivationState(config: Record<string, unknown>) {
   ).activationState;
 }
 
+describe('daemon direct RPC probe admission', () => {
+  it('bounds a diagnostic flood without queueing or displacing foreground work', async () => {
+    let hits = 0;
+    const rpc = createServer((_req, res) => {
+      hits += 1;
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl: `http://127.0.0.1:${address.port}`,
+      hubAddress: '0x1111111111111111111111111111111111111111',
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 80,
+      burstRequests: 5,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+      },
+    })!;
+    try {
+      const results = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+        probeRpcEndpoint(
+          `http://127.0.0.1:${address.port}`,
+          index,
+          runtime.routeTransport,
+        )));
+      expect(results.filter((result) => result.ok)).toHaveLength(1);
+      expect(results.filter((result) => !result.ok)).toHaveLength(19);
+      expect(results.filter((result) => result.status === 'skipped-local-capacity'))
+        .toHaveLength(19);
+      expect(hits).toBeGreaterThan(0);
+      await expect(runtime.governor.acquire('foreground')).resolves.toBeUndefined();
+      expect(runtime.governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundQueued: 0,
+        foregroundQueued: 0,
+        rejected: 19,
+      });
+      expect(runtime.drainRouteRpcUsage().byMethod.eth_blockNumber).toBe(hits);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+
+  it('cannot let sustained public diagnostics jump queued RFC-64-class work', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl,
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 20,
+        foregroundReservePercent: 80,
+        burstRequests: 5,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    })!;
+    try {
+      await withRpcRequestContext(
+        { requestClass: 'background' },
+        () => runtime.governor.acquireActiveRequest(),
+      );
+      const scheduledRfc64Admission = withRpcRequestContext(
+        { requestClass: 'background' },
+        () => runtime.governor.acquireActiveRequest(),
+      );
+      await vi.waitFor(() => expect(runtime.governor.snapshot().backgroundQueued).toBe(1));
+
+      const flood = await Promise.all(Array.from({ length: 50 }, (_, index) => (
+        probeRpcEndpoint(rpcUrl, index, runtime.routeTransport)
+      )));
+      expect(flood.every((result) => result.status === 'skipped-local-capacity')).toBe(true);
+      expect(hits).toBe(0);
+      await expect(runtime.governor.acquire('foreground')).resolves.toBeUndefined();
+      await expect(scheduledRfc64Admission).resolves.toBeUndefined();
+      expect(runtime.governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundAdmitted: 2,
+        backgroundQueued: 0,
+        rejected: 50,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+});
+
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
   configOverrides: Record<string, unknown> = {},
@@ -80,6 +189,7 @@ async function requestStatusWithAgent(
   networkOverride: RequestContext['network'] = null,
   rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
   rfc64PublicCatalogOverride?: RequestContext['rfc64PublicCatalog'],
+  routeRpcTransport?: DaemonRouteRpcTransport,
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -121,6 +231,7 @@ async function requestStatusWithAgent(
       nodeVersion: '0.0.0-test',
       nodeCommit: '',
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+      routeRpcTransport,
     } as unknown as RequestContext);
   });
 
@@ -135,6 +246,62 @@ async function requestStatusWithAgent(
     });
   }
 }
+
+describe('/api/chain/rpc-health partial adapter configuration', () => {
+  it('uses the governed daemon transport when rpcUrl exists without a Hub address', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl,
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 100,
+        foregroundReservePercent: 0,
+        burstRequests: 5,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    })!;
+    try {
+      expect(runtime.chainConfig).toBeUndefined();
+      const response = await requestStatusWithAgent(
+        {},
+        { chain: { type: 'evm', rpcUrl, chainId: 'evm:31337' } },
+        '/api/chain/rpc-health',
+        null,
+        undefined,
+        undefined,
+        runtime.routeTransport,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        ok: true,
+        configured: true,
+        rpcEndpointCount: 1,
+        blockNumber: 16,
+      });
+      expect(hits).toBe(1);
+      expect(runtime.governor.snapshot().backgroundAdmitted).toBe(1);
+      expect(runtime.drainRouteRpcUsage()).toMatchObject({
+        byMethod: { eth_blockNumber: 1 },
+        lifetimeTotal: 1,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+});
 
 describe('/api/status RFC-64 private recovery privacy', () => {
   it('surfaces only the privacy-safe RFC-64 authority RPC circuit snapshot', async () => {
@@ -445,6 +612,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           authorityState: 'accepted',
           policySource: 'owner-signed-unregistered',
         }],
+        readRfc64AuthorityRpcCircuitSnapshotV1: () => ({
+          state: 'open',
+          consecutiveExhaustions: 2,
+          retryAtMs: 1_725_987_654_321,
+        }),
       },
       {
         rfc64PublicCatalog: {
@@ -494,6 +666,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       phase: 'bootstrapping',
       authorityState: 'accepted',
     })]);
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 2,
+      retryAtMs: 1_725_987_654_321,
+    });
     expect(response.body.rfc64Catalog.configuration).toMatchObject({
       schemaVersion: 1,
       source: 'compatibility-seed',
@@ -718,6 +895,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           peers: [],
           catalogIssuerDelegationExpiresAt: '1893456000000',
         },
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {},
+        },
       } as never,
     );
 
@@ -921,6 +1103,17 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
           rpcUrls: [rpcUrl, DEAD_RPC],
           hubAddress,
           chainId: 'evm:31337',
+          // This case validates the real provider result shape, not local
+          // saturation (covered by the bounded flood case above). Give the
+          // daemon enough hermetic diagnostic capacity that unrelated startup
+          // work cannot consume the permits before this assertion runs.
+          rpcRequestBudget: {
+            maxRequestsPerSecond: 100,
+            foregroundReservePercent: 0,
+            burstRequests: 100,
+            maxQueueSize: 100,
+            startupJitterMs: 0,
+          },
         },
       },
     });
@@ -971,13 +1164,15 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
 
     // Primary = the real Hardhat node: ok with a REAL block number.
     const primary = body.rpcs.find((p: any) => p.role === 'primary');
-    expect(primary.ok).toBe(true);
+    expect(primary.ok, JSON.stringify(body)).toBe(true);
+    expect(primary.status).toBe('healthy');
     expect(typeof primary.blockNumber).toBe('number');
     expect(primary.blockNumber).toBeGreaterThanOrEqual(0);
 
     // Backup = the dead endpoint: a REAL connection failure, sanitized.
     const backup = body.rpcs.find((p: any) => p.role === 'backup');
     expect(backup.ok).toBe(false);
+    expect(backup.status).toBe('unhealthy');
     expect(backup.blockNumber).toBeNull();
     expect(backup.error).toBe('RPC health probe failed');
 

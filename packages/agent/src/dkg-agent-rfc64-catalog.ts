@@ -54,6 +54,7 @@ import {
 import {
   resolveRpcUrls,
   verifyControlEnvelopeIssuerSignatureV1,
+  withRpcRequestContext,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
 } from '@origintrail-official/dkg-chain';
@@ -478,8 +479,6 @@ const rfc64CatalogResponsibilityRegistriesV1 =
   new WeakMap<DKGAgent, Rfc64CatalogResponsibilityRegistryV1>();
 const rfc64CatalogResponsibilityRevisionsV1 =
   new WeakMap<DKGAgent, Map<string, number>>();
-const rfc64CatalogResponsibilityPendingV1 =
-  new WeakMap<DKGAgent, Map<string, Promise<Rfc64CatalogResponsibilitySelectionV1>>>();
 const rfc64CatalogAuthorityProgressV1 =
   new WeakMap<DKGAgent, Map<string, Rfc64CatalogAuthorityProgressV1>>();
 const rfc64CatalogAuthorityRevisionsV1 =
@@ -1694,10 +1693,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const expectedNameHash = explicitNameHash === undefined
         ? this.contextGraphNameCommitment(contextGraphId)
         : this.contextGraphWireId(explicitNameHash);
-      if (
-        !snapshot.active
-        || snapshot.nameHash !== expectedNameHash
-      ) return null;
+      if (!snapshot.active || snapshot.nameHash !== expectedNameHash) return null;
       return Object.freeze({
         agentAddress: snapshot.owner,
         authorityEra: snapshot.ownershipEra,
@@ -1858,6 +1854,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<Rfc64CatalogResponsibilitySelectionV1> {
+    return this.rfc64BackgroundWorkDispatcherV1.runAwaited(
+      (ownerSignal) => this.reconcileRfc64CatalogResponsibilityCoreV1(
+        contextGraphId,
+        ownerSignal,
+      ),
+    );
+  }
+
+  /** One unregistered reconciliation body shared by awaited and keyed owners. */
+  async reconcileRfc64CatalogResponsibilityCoreV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    ownerSignal: AbortSignal,
+  ): Promise<Rfc64CatalogResponsibilitySelectionV1> {
     const registry = rfc64CatalogResponsibilityRegistryForV1(
       this,
       this.config.rfc64CatalogExecutionPlan,
@@ -1891,11 +1901,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       rfc64SystemContextGraphIdsV1.has(contextGraphId)
       || subscription === undefined
     ) {
-      const inactive = commit(null);
-      return Promise.resolve(inactive);
+      return commit(null);
     }
 
-    const run = (async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
+    return (async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
       let accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
       if (accessPolicy === null && subscription.onChainId !== undefined) {
         const onChainPolicy = await this.getContextGraphOnChainPolicy(contextGraphId);
@@ -1924,7 +1933,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         && next.mode !== 'legacy'
         && this.resolveRfc64AcceptedCompatibilityAuthorityV1(contextGraphId) === null
       ) {
-        await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId).catch((error) => {
+        await this.reconcileRfc64CatalogAccessAuthorityV1(
+          contextGraphId,
+          ownerSignal,
+        ).catch((error) => {
+          // Observer and dispatcher shutdown are normal lifecycle fences.
+          // Preserve their cancellation so the feature owner can drain
+          // silently instead of reporting a false authority failure.
+          if (ownerSignal.aborted) throw ownerSignal.reason;
           this.log.warn(
             createOperationContext('system'),
             `RFC-64 authority bootstrap incomplete for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
@@ -1934,30 +1950,43 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       return next;
     })().catch((error) => {
+      // A superseding lifecycle pass owns the last committed authority. Its
+      // cancellation is not evidence that the graph is no longer a valid
+      // responsibility, so preserve the prior value until a complete refresh
+      // proves otherwise.
+      if (ownerSignal.aborted) {
+        throw ownerSignal.reason instanceof Error ? ownerSignal.reason : error;
+      }
       if (isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
         commit(null);
       }
       throw error;
     });
+  }
 
-    let pending = rfc64CatalogResponsibilityPendingV1.get(this);
-    if (pending === undefined) {
-      pending = new Map<string, Promise<Rfc64CatalogResponsibilitySelectionV1>>();
-      rfc64CatalogResponsibilityPendingV1.set(this, pending);
-    }
-    pending.set(contextGraphId, run);
-    void run.finally(() => {
-      if (pending!.get(contextGraphId) === run) pending!.delete(contextGraphId);
-    }).catch(() => undefined);
-    return run;
+  /**
+   * Lifecycle notification boundary for responsibility reconciliation.
+   * Priority, cancellation, coalescing, and failure containment live here so
+   * callers express only that committed state should be re-projected.
+   */
+  scheduleRfc64CatalogResponsibilityReconciliationV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+      `responsibility\0${contextGraphId}`,
+      async (ownerSignal) => {
+        await this.reconcileRfc64CatalogResponsibilityCoreV1(
+          contextGraphId,
+          ownerSignal,
+        );
+      },
+    );
   }
 
   /** Test/operator fence for asynchronous access-policy responsibility reads. */
   async whenRfc64CatalogResponsibilitiesIdleV1(this: DKGAgent): Promise<void> {
-    const pending = rfc64CatalogResponsibilityPendingV1.get(this);
-    while (pending !== undefined && pending.size > 0) {
-      await Promise.allSettled(pending.values());
-    }
+    await this.rfc64BackgroundWorkDispatcherV1.whenIdle();
   }
 
   /**
@@ -2001,7 +2030,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       const registeredAuthorityRead = await this.rfc64AuthorityReadCoordinatorV1.run(
         signal,
         async (readSignal) => {
-          const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+          const onChainId = await this.getContextGraphOnChainId(
+            contextGraphId,
+            { signal: readSignal },
+          );
           if (readSignal?.aborted) throw readSignal.reason;
           if (onChainId === null) return null;
           const reader = requireRfc64ContextGraphAuthorityReaderV1(
@@ -3443,12 +3475,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           },
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogCurrentReceiverReconcilerV1 = {
-          isHeadSatisfied: (announcement) => {
+          isHeadSatisfied: (announcement) => withRpcRequestContext({ requestClass: 'background' }, () => {
             this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
             return reconciler.isHeadSatisfied(announcement);
-          },
+          }),
           reconcileHead: (remotePeerId, announcement, signal) =>
-            reconciler.reconcileHead(remotePeerId, announcement, signal),
+            withRpcRequestContext(
+              { requestClass: 'background', signal },
+              () => reconciler.reconcileHead(remotePeerId, announcement, signal),
+            ),
         };
         return Object.freeze(deploymentAwareReconciler);
       },
