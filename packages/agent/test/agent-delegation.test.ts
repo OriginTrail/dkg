@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import {
   signAgentDelegation,
   verifyAgentDelegation,
+  parseSignedAgentDelegation,
   computeDelegationDigest,
   computeWorkspaceEncryptionKeysAttestationDigest,
   type SignedAgentDelegation,
@@ -22,6 +23,168 @@ const baseParams = {
 };
 
 describe('agent-delegation primitive', () => {
+  it('parses valid minimal and full delegation wire shapes', () => {
+    const minimal = {
+      agentAddress: wallet.address,
+      scope: 'network-peer-binding:v1',
+      issuedAtMs: 0,
+      delegateePeerId: '12D3KooWFakePeerForParserTest',
+      signature: '0xminimal-signature',
+    };
+    const full = {
+      ...minimal,
+      expiresAtMs: 1_700_000_060_000,
+      delegateeOpKey: '0x1111111111111111111111111111111111111111',
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: 'X25519',
+        publicEncryptionKey: 'public-key',
+        encryptionKeyProof: 'wallet-proof',
+      }],
+      workspaceEncryptionKeysSignature: '0xworkspace-signature',
+    };
+
+    expect(parseSignedAgentDelegation(minimal)).toEqual(minimal);
+    expect(parseSignedAgentDelegation(full)).toEqual(full);
+  });
+
+  it.each([
+    ['a non-object', null],
+    ['an array', []],
+    ['an invalid agent address', {
+      agentAddress: 'not-an-address',
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+    }],
+    ['an empty scope', {
+      agentAddress: wallet.address,
+      scope: ' ',
+      issuedAtMs: 0,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+    }],
+    ['a negative issuance timestamp', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: -1,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+    }],
+    ['a non-finite issuance timestamp', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: Number.POSITIVE_INFINITY,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+    }],
+    ['a negative expiration timestamp', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      expiresAtMs: -1,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+    }],
+    ['a non-finite expiration timestamp', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      expiresAtMs: Number.NaN,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+    }],
+    ['both delegatees absent', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      signature: 'signature',
+    }],
+    ['a non-string peer delegatee', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateePeerId: 42,
+      signature: 'signature',
+    }],
+    ['an empty operational-key delegatee', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateeOpKey: ' ',
+      signature: 'signature',
+    }],
+    ['an empty signature', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateePeerId: 'peer',
+      signature: '',
+    }],
+    ['a non-array workspace-key bundle', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+      workspaceEncryptionKeys: {},
+    }],
+    ['a non-object workspace-key entry', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+      workspaceEncryptionKeys: [null],
+    }],
+    ['a non-X25519 workspace-key algorithm', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: 'RSA',
+        publicEncryptionKey: 'public-key',
+        encryptionKeyProof: 'wallet-proof',
+      }],
+    }],
+    ['an empty workspace public key', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: 'X25519',
+        publicEncryptionKey: '',
+        encryptionKeyProof: 'wallet-proof',
+      }],
+    }],
+    ['an empty workspace key proof', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+      workspaceEncryptionKeys: [{
+        encryptionKeyAlgorithm: 'X25519',
+        publicEncryptionKey: 'public-key',
+        encryptionKeyProof: ' ',
+      }],
+    }],
+    ['an empty workspace-key attestation signature', {
+      agentAddress: wallet.address,
+      scope: 'scope',
+      issuedAtMs: 0,
+      delegateePeerId: 'peer',
+      signature: 'signature',
+      workspaceEncryptionKeysSignature: '',
+    }],
+  ])('rejects %s at the wire parser boundary', (_label, value) => {
+    expect(parseSignedAgentDelegation(value)).toBeUndefined();
+  });
+
   it('signs and verifies a delegation roundtrip', async () => {
     const signed = await signAgentDelegation(baseParams);
     expect(signed.signature).toMatch(/^0x[0-9a-fA-F]+$/);
