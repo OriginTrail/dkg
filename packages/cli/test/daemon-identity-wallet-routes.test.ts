@@ -71,6 +71,9 @@ describe('daemon identity-wallet browser capability', () => {
       req,
       res,
       agent,
+      // The dispatcher reaches the status routes, which read the live config
+      // snapshot before matching a path.
+      configStore: { current: {} },
       authentication: createAllowedHttpAuthentication({ mode: 'disabled' }),
     } as unknown as HandleRequestInput);
 
