@@ -289,6 +289,9 @@ async function bindRfc64PrivateFinalizedRuntimeV1({
   const runtimeIsMember = finalizedAuthority.roster?.members.some(
     ({ agentAddress }) => agentAddress === roleAgentAddress(role),
   ) === true;
+  // Settle lifecycle-triggered authority work before requesting the gate's
+  // foreground responsibility proof, avoiding a superseded null snapshot.
+  await created.agent.whenRfc64CatalogResponsibilitiesIdleV1();
   const responsibility = await created.agent.reconcileRfc64CatalogResponsibilityV1(
     CONTEXT_GRAPH_ID,
   );
