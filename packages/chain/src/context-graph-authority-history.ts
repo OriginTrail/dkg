@@ -2,6 +2,15 @@
 
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import {
+  applyContextGraphAuthorityGenerationEvent,
+  encodeContextGraphAuthorityGenerationV1,
+  normalizeContextGraphAuthorityGenerationState,
+  normalizeContextGraphAuthorityHash,
+  normalizeContextGraphAuthorityNonNegativeSafeInteger,
+  type ContextGraphAuthorityGenerationEvent,
+  type ContextGraphAuthorityGenerationState,
+} from './context-graph-authority-generation.js';
 import { KeyedSerializer } from './keyed-mutex.js';
 
 export const CONTEXT_GRAPH_AUTHORITY_HISTORY_MAX_ENTRIES = 1_024;
@@ -18,15 +27,10 @@ export interface ContextGraphAuthorityHistoryCreationEvent
   readonly nameHash: string;
 }
 
-export interface ContextGraphAuthorityHistoryState {
+export interface ContextGraphAuthorityHistoryState
+  extends ContextGraphAuthorityGenerationState {
   readonly throughBlockNumber: number;
   readonly throughBlockHash: string;
-  readonly nameHash: string;
-  readonly ownershipEra: number;
-  readonly policyVersion: number;
-  readonly rosterVersion: number;
-  readonly sourceBlockNumber: number;
-  readonly sourceBlockHash: string;
 }
 
 export const CONTEXT_GRAPH_AUTHORITY_HISTORY_CHECKPOINT_VERSION = 1 as const;
@@ -414,50 +418,27 @@ function formatError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function normalizeHash(value: unknown): string | undefined {
-  return typeof value === 'string' && /^0x[0-9a-f]{64}$/i.test(value)
-    ? value.toLowerCase()
-    : undefined;
-}
-
-function normalizeNonNegativeSafeInteger(value: unknown): number | undefined {
-  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
-}
-
 /** Reject malformed/corrupt durable input before it can influence scan bounds. */
 export function normalizeContextGraphAuthorityHistoryState(
   value: unknown,
 ): ContextGraphAuthorityHistoryState | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const candidate = value as Partial<Record<keyof ContextGraphAuthorityHistoryState, unknown>>;
-  const throughBlockNumber = normalizeNonNegativeSafeInteger(candidate.throughBlockNumber);
-  const throughBlockHash = normalizeHash(candidate.throughBlockHash);
-  const nameHash = normalizeHash(candidate.nameHash);
-  const ownershipEra = normalizeNonNegativeSafeInteger(candidate.ownershipEra);
-  const policyVersion = normalizeNonNegativeSafeInteger(candidate.policyVersion);
-  const rosterVersion = normalizeNonNegativeSafeInteger(candidate.rosterVersion);
-  const sourceBlockNumber = normalizeNonNegativeSafeInteger(candidate.sourceBlockNumber);
-  const sourceBlockHash = normalizeHash(candidate.sourceBlockHash);
+  const throughBlockNumber = normalizeContextGraphAuthorityNonNegativeSafeInteger(
+    candidate.throughBlockNumber,
+  );
+  const throughBlockHash = normalizeContextGraphAuthorityHash(candidate.throughBlockHash);
+  const generation = normalizeContextGraphAuthorityGenerationState(candidate);
   if (
     throughBlockNumber === undefined
     || throughBlockHash === undefined
-    || nameHash === undefined
-    || ownershipEra === undefined
-    || policyVersion === undefined
-    || rosterVersion === undefined
-    || sourceBlockNumber === undefined
-    || sourceBlockHash === undefined
-    || sourceBlockNumber > throughBlockNumber
+    || generation === undefined
+    || generation.sourceBlockNumber > throughBlockNumber
   ) return undefined;
   return Object.freeze({
     throughBlockNumber,
     throughBlockHash,
-    nameHash,
-    ownershipEra,
-    policyVersion,
-    rosterVersion,
-    sourceBlockNumber,
-    sourceBlockHash,
+    ...generation,
   });
 }
 
@@ -468,12 +449,7 @@ function contextGraphAuthorityHistoryStateIntegrity(
     'dkg-context-graph-authority-history-checkpoint-v1',
     state.throughBlockNumber,
     state.throughBlockHash,
-    state.nameHash,
-    state.ownershipEra,
-    state.policyVersion,
-    state.rosterVersion,
-    state.sourceBlockNumber,
-    state.sourceBlockHash,
+    ...encodeContextGraphAuthorityGenerationV1(state),
   ]);
   return ethers.keccak256(ethers.toUtf8Bytes(canonical)).toLowerCase();
 }
@@ -501,7 +477,7 @@ export function decodeContextGraphAuthorityHistoryCheckpoint(
   const candidate = value as Partial<Record<keyof ContextGraphAuthorityHistoryCheckpointV1, unknown>>;
   if (candidate.version !== CONTEXT_GRAPH_AUTHORITY_HISTORY_CHECKPOINT_VERSION) return undefined;
   const state = normalizeContextGraphAuthorityHistoryState(candidate.state);
-  const integrity = normalizeHash(candidate.integrity);
+  const integrity = normalizeContextGraphAuthorityHash(candidate.integrity);
   if (
     state === undefined
     || integrity === undefined
@@ -513,14 +489,6 @@ export function decodeContextGraphAuthorityHistoryCheckpoint(
 export interface ResolveContextGraphAuthorityHistoryInput
   extends ContextGraphAuthorityHistoryLoadInput {
   readonly cache: ContextGraphAuthorityHistoryCache;
-}
-
-function latestEvent(
-  events: readonly ContextGraphAuthorityHistoryEvent[],
-): ContextGraphAuthorityHistoryEvent | undefined {
-  return [...events].sort((left, right) => (
-    left.blockNumber - right.blockNumber || left.index - right.index
-  )).at(-1);
 }
 
 /** Resolve one cold or suffix history scan into a complete generation state. */
@@ -586,62 +554,60 @@ async function loadContextGraphAuthorityHistory(
         read('AgentParticipantAdded'),
         read('AgentParticipantRemoved'),
       ]);
-  const baseline: Readonly<{
-    nameHash: string;
-    ownershipEra: number;
-    policyVersion: number;
-    rosterVersion: number;
-    sourceBlockNumber: number;
-    sourceBlockHash: string;
-  }> = previous === undefined
-    ? (() => {
-        const creation = created[0];
-        if (created.length !== 1 || creation === undefined) {
-          throw new Error(
-            `Context Graph ${input.contextGraphId.toString()} has ${created.length} finalized creation events`,
-          );
-        }
-        if (!creation.nameHash) {
-          throw new Error(
-            `Context Graph ${input.contextGraphId.toString()} creation event has no name hash`,
-          );
-        }
-        return {
-          nameHash: creation.nameHash,
-          ownershipEra: 0,
-          policyVersion: 0,
-          rosterVersion: 0,
-          sourceBlockNumber: creation.blockNumber,
-          sourceBlockHash: creation.blockHash,
-        };
-      })()
-    : {
-        nameHash: previous.nameHash,
-        ownershipEra: previous.ownershipEra,
-        policyVersion: previous.policyVersion,
-        rosterVersion: previous.rosterVersion,
-        sourceBlockNumber: previous.sourceBlockNumber,
-        sourceBlockHash: previous.sourceBlockHash,
-      };
-  const policySource = latestEvent([
-    ...created,
-    ...transfers,
-    ...publishPolicy,
-    ...publishAuthority,
-  ]);
-  const sourceBlockNumber = policySource?.blockNumber ?? baseline.sourceBlockNumber;
-  const sourceBlockHash = policySource?.blockHash ?? baseline.sourceBlockHash;
-  const ownershipDelta = transfers.length;
+  if (previous === undefined) {
+    const creation = created[0];
+    if (created.length !== 1 || creation === undefined) {
+      throw new Error(
+        `Context Graph ${input.contextGraphId.toString()} has ${created.length} finalized creation events`,
+      );
+    }
+    if (!creation.nameHash) {
+      throw new Error(
+        `Context Graph ${input.contextGraphId.toString()} creation event has no name hash`,
+      );
+    }
+  }
+  type OrderedGenerationEvent = ContextGraphAuthorityGenerationEvent & { readonly index: number };
+  const events: OrderedGenerationEvent[] = [
+    ...created.map((event): OrderedGenerationEvent => ({
+      name: 'ContextGraphCreated',
+      blockNumber: event.blockNumber,
+      blockHash: event.blockHash,
+      index: event.index,
+      nameHash: event.nameHash,
+    })),
+    ...transfers.map((event): OrderedGenerationEvent => ({
+      name: 'Transfer', ...event,
+    })),
+    ...publishPolicy.map((event): OrderedGenerationEvent => ({
+      name: 'PublishPolicyUpdated', ...event,
+    })),
+    ...publishAuthority.map((event): OrderedGenerationEvent => ({
+      name: 'PublishAuthorityUpdated', ...event,
+    })),
+    ...participantAdds.map((event): OrderedGenerationEvent => ({
+      name: 'AgentParticipantAdded', ...event,
+    })),
+    ...participantRemoves.map((event): OrderedGenerationEvent => ({
+      name: 'AgentParticipantRemoved', ...event,
+    })),
+  ].sort((left, right) => (
+    left.blockNumber - right.blockNumber || left.index - right.index
+  ));
+  let generation: ContextGraphAuthorityGenerationState | undefined = previous;
+  for (const event of events) {
+    generation = applyContextGraphAuthorityGenerationEvent(
+      generation,
+      event,
+      `Context Graph ${input.contextGraphId.toString()}`,
+    );
+  }
+  if (generation === undefined) {
+    throw new Error(`Context Graph ${input.contextGraphId.toString()} has no authority generation`);
+  }
   return Object.freeze({
+    ...generation,
     throughBlockNumber: input.finalized.number,
     throughBlockHash: input.finalized.hash,
-    nameHash: baseline.nameHash,
-    ownershipEra: baseline.ownershipEra + ownershipDelta,
-    policyVersion: baseline.policyVersion
-      + ownershipDelta + publishPolicy.length + publishAuthority.length,
-    rosterVersion: baseline.rosterVersion
-      + ownershipDelta + participantAdds.length + participantRemoves.length,
-    sourceBlockNumber,
-    sourceBlockHash: sourceBlockHash.toLowerCase(),
   });
 }

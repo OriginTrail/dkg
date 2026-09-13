@@ -452,7 +452,16 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
     const body = await readBody(req);
     const parsed = JSON.parse(body);
     const sparql = parsed.sparql;
-    const contextGraphId = parsed.contextGraphId;
+    // `all` is the legacy CLI/UI spelling for an unscoped query. Treating it
+    // as a real Context Graph id sends the request through the chain-backed
+    // private-graph authorizer before the SPARQL parser runs. Besides being
+    // semantically wrong, that made malformed-query HTTP status depend on an
+    // unrelated authority RPC finishing first. The existing unscoped agent
+    // path owns dataset privacy (including private-CG exclusion), so normalize
+    // only this exact compatibility sentinel at the route boundary.
+    const contextGraphId = parsed.contextGraphId === 'all'
+      ? undefined
+      : parsed.contextGraphId;
     const graphSuffix = parsed.graphSuffix;
     const includeSharedMemory =
       parsed.includeSharedMemory ?? parsed.includeWorkspace;

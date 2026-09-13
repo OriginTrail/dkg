@@ -442,6 +442,8 @@ function decodeReservedKaId(val: unknown): bigint | undefined {
 const swmCatchupPeerSelector = createSwmCatchupPeerSelector();
 
 type SwmCatchupDetailedResult = {
+  localYield?: true;
+  localYieldFailedPhases?: number;
   insertedTriples: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
@@ -458,16 +460,23 @@ function swmCatchupResultFromInserted(insertedTriples: number): SwmCatchupDetail
 
 function swmCatchupOutcomeInput(result: SwmCatchupDetailedResult, errorMessage?: string) {
   return {
-    insertedTriples: result.insertedTriples,
-    fetchedDataTriples: result.fetchedDataTriples,
-    fetchedMetaTriples: result.fetchedMetaTriples,
-    deniedPhases: result.deniedPhases,
-    failedPeers: result.failedPeers,
-    failedPhases: result.failedPhases,
-    timedOutPhases: result.timedOutPhases,
-    backoffWorthyFailures: result.backoffWorthyFailures,
+    // Preserve the agent's symbol-keyed internal cause model through this
+    // in-process edge. JSON responses still expose only the legacy fields.
+    ...result,
     errorMessage,
   };
+}
+
+function recordSwmCatchupPeerOutcome(
+  contextGraphId: string,
+  peerId: string,
+  result: SwmCatchupDetailedResult,
+  errorMessage?: string,
+): void {
+  const outcome = classifySwmCatchupPeerOutcome(
+    swmCatchupOutcomeInput(result, errorMessage),
+  );
+  if (outcome) swmCatchupPeerSelector.record(contextGraphId, peerId, outcome);
 }
 
 function uniquePeerIds(peerIds: readonly string[]): string[] {
@@ -795,17 +804,18 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
                 `SWM catchup from ${candidate} for ${cgId}`,
               ) as SwmCatchupDetailedResult;
               swm = Number(syncResult.insertedTriples ?? 0);
-              swmCatchupPeerSelector.record(
+              recordSwmCatchupPeerOutcome(
                 cgId,
                 candidate,
-                classifySwmCatchupPeerOutcome(swmCatchupOutcomeInput({ ...syncResult, insertedTriples: swm })),
+                { ...syncResult, insertedTriples: swm },
               );
             } catch (err: any) {
               swmError = err?.message ?? String(err);
-              swmCatchupPeerSelector.record(
+              recordSwmCatchupPeerOutcome(
                 cgId,
                 candidate,
-                classifySwmCatchupPeerOutcome(swmCatchupOutcomeInput({ insertedTriples: 0 }, swmError)),
+                { insertedTriples: 0 },
+                swmError,
               );
             }
           }

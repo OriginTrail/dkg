@@ -2,12 +2,14 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Contract, ethers, Wallet } from 'ethers';
+import { EVMChainAdapter } from '../src/evm-adapter.js';
+import type { ContextGraphAuthorityIndexStore } from '../src/context-graph-authority-index-checkpoint.js';
 
 import {
-  createEVMAdapter,
   createProvider,
   getSharedContext,
   HARDHAT_KEYS,
+  makeAdapterConfig,
   revertSnapshot,
   takeSnapshot,
 } from './evm-test-context.js';
@@ -23,9 +25,29 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
     await revertSnapshot(fileSnapshotId);
   });
 
-  it('reads current tuple and all authority event generations at finalized anchors', async () => {
-    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+  it('materializes current authority and every generation from finalized events', async () => {
     const provider = createProvider();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    let checkpoint: Readonly<{ token: number; value: unknown | null }> | undefined;
+    const store: ContextGraphAuthorityIndexStore = {
+      load: async () => checkpoint,
+      compareAndSwap: async (_scope, expectedToken, value) => {
+        if (checkpoint?.token !== expectedToken) return undefined;
+        const nextToken = expectedToken === undefined ? 1 : expectedToken + 1;
+        checkpoint = Object.freeze({ token: nextToken, value });
+        return nextToken;
+      },
+      invalidate: async (_scope, expectedToken) => {
+        if (checkpoint?.token !== expectedToken) return undefined;
+        const nextToken = expectedToken + 1;
+        checkpoint = Object.freeze({ token: nextToken, value: null });
+        return nextToken;
+      },
+    };
+    const adapter = new EVMChainAdapter({
+      ...makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.CORE_OP),
+      localContextGraphAuthorityIndexStore: store,
+    });
     const owner = adapter.getSignerAddress();
     const retainedAgent = new Wallet(HARDHAT_KEYS.EXTRA1).address;
     const removedAgent = new Wallet(HARDHAT_KEYS.EXTRA2).address;
@@ -208,5 +230,24 @@ describe('EVM Context Graph authority snapshot ABI integration', () => {
     expect(finalized?.hash).toBe(transferReceipt.blockHash);
     expect(BigInt(afterTransfer.sourceBlockNumber))
       .toBeLessThanOrEqual(BigInt(finalized!.number));
+
+    const deactivator = new Contract(
+      await hub.getAssetStorageAddress('ContextGraphStorage'),
+      ['function deactivateContextGraph(uint256 contextGraphId) external'],
+      new Wallet(HARDHAT_KEYS.DEPLOYER, provider),
+    );
+    await (await deactivator.deactivateContextGraph(created.contextGraphId)).wait();
+    const afterDeactivation = await adapter.getContextGraphAuthoritySnapshot(
+      created.contextGraphId,
+    );
+    expect(afterDeactivation).toMatchObject({
+      active: false,
+      owner: newOwner.toLowerCase(),
+      ownershipEra: afterTransfer.ownershipEra,
+      policyVersion: afterTransfer.policyVersion,
+      rosterVersion: afterTransfer.rosterVersion,
+      sourceBlockNumber: afterTransfer.sourceBlockNumber,
+      sourceBlockHash: afterTransfer.sourceBlockHash,
+    });
   }, 120_000);
 });

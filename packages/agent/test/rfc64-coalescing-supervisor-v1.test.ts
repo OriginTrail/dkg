@@ -30,11 +30,15 @@ describe('coalescing recurring task', () => {
 
     expect(runner.request()).toBe(true);
     await started;
+    expect(runner.running).toBe(true);
+    expect(runner.scheduled).toBe(false);
     expect(runner.request()).toBe(false);
     release();
     await runner.whenIdle();
     expect(passes).toBe(1);
     await runner.close();
+    expect(runner.running).toBe(false);
+    expect(runner.scheduled).toBe(false);
   });
 
   it('does not let frequent live work postpone a failed scope periodic retry', async () => {
@@ -60,6 +64,7 @@ describe('coalescing recurring task', () => {
     runner.request();
     await runner.whenIdle();
     expect(attempts.get('failed-scope')).toBe(1);
+    expect(runner.scheduled).toBe(true);
 
     for (let index = 0; index < 3; index += 1) {
       await vi.advanceTimersByTimeAsync(250);
@@ -90,8 +95,10 @@ describe('coalescing recurring task', () => {
     });
 
     expect(runner.schedule()).toBe(true);
+    expect(runner.scheduled).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
     await runner.whenIdle();
+    expect(runner.scheduled).toBe(false);
     expect(passes).toBe(1);
 
     await vi.advanceTimersByTimeAsync(1_000);
@@ -103,6 +110,81 @@ describe('coalescing recurring task', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(passes).toBe(2);
     await runner.close();
+  });
+
+  it('clears an armed periodic deadline when an explicit pass becomes idle', async () => {
+    vi.useFakeTimers();
+    let passes = 0;
+    const runner = new CoalescingRecurringTask({
+      retryIntervalMs: 1_000,
+      runPass: async () => {
+        passes += 1;
+        return passes === 1 ? 'rearm' : 'idle';
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await runner.whenIdle();
+    expect(runner.scheduled).toBe(true);
+
+    runner.request();
+    await runner.whenIdle();
+    expect(passes).toBe(2);
+    expect(runner.scheduled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes).toBe(2);
+    await runner.close();
+  });
+
+  it('drains close-triggered cancellation without reporting a workload failure', async () => {
+    const onError = vi.fn();
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const runner = new CoalescingRecurringTask({
+      runPass: async (signal) => {
+        markStarted();
+        await new Promise<void>((_resolve, reject) => {
+          const onAbort = () => reject(signal.reason);
+          signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        });
+      },
+      onError,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await started;
+    await expect(runner.close()).resolves.toBeUndefined();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('reports a genuine workload rejection that settles while close starts', async () => {
+    const onError = vi.fn();
+    const failure = new Error('persistence failed');
+    let rejectPass!: (reason: unknown) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const pass = new Promise<void>((_resolve, reject) => { rejectPass = reject; });
+    const runner = new CoalescingRecurringTask({
+      runPass: async () => {
+        markStarted();
+        await pass;
+      },
+      onError,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await started;
+    rejectPass(failure);
+    await runner.close();
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(failure);
   });
 
   it('normalizes current and legacy bootstrap fields through one boundary', () => {

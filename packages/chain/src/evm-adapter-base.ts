@@ -18,18 +18,33 @@ import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.j
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  ContextGraphAuthorityIndexRevisionReader,
   KnowledgeAssetUpdateContext,
   V10PublishParams,
   OnChainPublishResult,
   PreBroadcastSignal,
   SignedTransactionEnvelope,
+  BrowserWalletRpcMethod,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
 import { collectEvmErrorText, errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
-import { resolveRpcUrls, boundedRetryFetchRequest, withTimeout, isRetryableRpcError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
+import {
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
+  isRetryableRpcError,
+  resolveRpcUrls,
+  assertSuccessfulReceipt,
+  sleep,
+} from './evm-adapter-rpc.js';
+import {
+  createRpcRequestProvider,
+  activeRpcRequestAbortSignal,
+  withOwnedRpcRequestContext,
+  withRpcRequestTimeout,
+} from './rpc-request-transport.js';
 import { rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
@@ -38,19 +53,25 @@ import { RpcFailoverClient, type ReadOpts, type ReceiptLookupOptions } from './r
 import { waitForReceiptWithDeadline } from './receipt-wait.js';
 import {
   RpcUsageTracker,
-  createCountingJsonRpcProvider,
   withRpcUsageConsumer,
   type RpcUsageWindow,
 } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
-import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import {
+  AbortableKeyedSingleFlight,
+  ReadThroughTtlCache,
+} from './keyed-ttl-single-flight-cache.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
+import { ContextGraphRegistryRepairCoordinator } from
+  './context-graph-registry-repair-coordinator.js';
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
@@ -60,6 +81,10 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, reso
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
+import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
+import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
+  './evm-context-graph-authority-index-reader.js';
+import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -256,7 +281,7 @@ const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
  */
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
 
-type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
+export type ScanProvider = { provider: JsonRpcProvider; backendHead: number };
 
 /**
  * B8 — decode the `CostCovered` event from a publish receipt's logs via the
@@ -840,10 +865,8 @@ export class EVMChainAdapterBase {
     { value: bigint; cachedAt: number }
   >();
 
-  protected readonly configuredStaticChainIdValidationsByProvider = new Map<
-    JsonRpcProvider,
-    Promise<bigint>
-  >();
+  protected readonly configuredStaticChainIdValidationsByProvider =
+    new AbortableKeyedSingleFlight<JsonRpcProvider, bigint>();
 
   protected cachedKav10Address: { value: string; cachedAt: number } | undefined;
 
@@ -916,9 +939,17 @@ export class EVMChainAdapterBase {
   }
 
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
+  protected readonly contextGraphRegistryRepairCoordinator: ContextGraphRegistryRepairCoordinator;
 
   /** Finalized authority scan watermarks owned by this adapter lifecycle. */
   protected readonly contextGraphAuthorityHistory: ContextGraphAuthorityHistoryCache;
+
+  /** Shared contract-wide authority history, enabled by daemon-local persistence. */
+  protected readonly contextGraphAuthorityIndex: ContextGraphAuthorityIndex | undefined;
+
+  /** Sole public scheduling capability backed by the private materialized index. */
+  readonly contextGraphAuthorityIndexRevisionReader:
+    ContextGraphAuthorityIndexRevisionReader | undefined;
 
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
@@ -939,13 +970,16 @@ export class EVMChainAdapterBase {
   invalidatePublishPreflightCache(): void {
     this.cachedChainId = undefined;
     this.configuredStaticChainIdsByProvider.clear();
-    this.configuredStaticChainIdValidationsByProvider.clear();
+    this.configuredStaticChainIdValidationsByProvider.invalidateAll(
+      'Configured chainId validation was invalidated',
+    );
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
     this.contextGraphAuthorityHistory.clear();
+    this.contextGraphAuthorityIndex?.clear();
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -1114,13 +1148,13 @@ export class EVMChainAdapterBase {
     this.rpcUsage = new RpcUsageTracker(() => this.chainId);
     // One transport factory wires BOTH billing-exact accounting hooks (first
     // attempt at `_send` + every ethers-internal retry attempt) to the tracker —
-    // see createCountingJsonRpcProvider for the invariant.
+    // see createRpcRequestProvider for the invariant.
     this.configuredStaticChainId = configuredStaticChainId(config);
     const staticNetwork = this.configuredStaticChainId == null
       ? undefined
       : ethers.Network.from(this.configuredStaticChainId);
     this.providers = this.rpcUrls.map(
-      (url, endpointSlot) => createCountingJsonRpcProvider(url, this.rpcUsage, {
+      (url, endpointSlot) => createRpcRequestProvider(url, {
         maxRetries: perEndpointRetries,
         providerOptions: {
           cacheTimeout: -1,
@@ -1129,6 +1163,8 @@ export class EVMChainAdapterBase {
         },
         network: staticNetwork,
         endpointSlot,
+        admission: config.rpcRequestAdmission,
+        onRequest: (method, slot) => this.rpcUsage.record(method, slot),
       }),
     );
     this.primaryProvider = this.providers[0];
@@ -1257,10 +1293,34 @@ export class EVMChainAdapterBase {
       deploymentId: this.deploymentId,
       store: config.contextGraphRegistryScanCursorStore,
     });
+    this.contextGraphRegistryRepairCoordinator = new ContextGraphRegistryRepairCoordinator(
+      this.contextGraphRegistryScanCursor,
+      CG_REGISTRY_REORG_BUFFER_BLOCKS,
+    );
     this.contextGraphAuthorityHistory = new ContextGraphAuthorityHistoryCache(
       undefined,
       config.localContextGraphAuthorityHistoryStore,
     );
+    this.contextGraphAuthorityIndex = config.localContextGraphAuthorityIndexStore === undefined
+      ? undefined
+      : new ContextGraphAuthorityIndex(config.localContextGraphAuthorityIndexStore);
+    this.contextGraphAuthorityIndexRevisionReader = this.contextGraphAuthorityIndex === undefined
+      ? undefined
+      : createEvmContextGraphAuthorityIndexRevisionReaderV1({
+          index: this.contextGraphAuthorityIndex,
+          deploymentId: this.deploymentId,
+          initialize: () => this.init(),
+          requireContextGraphStorage: () => this.requireContextGraphStorage(),
+          readTipProvider: (label, read, options) => this.readTipProvider(
+            label,
+            read,
+            options,
+          ),
+          resolveContractDeployBlock: (address, operationLabel, contractLabel) => (
+            this.resolveContractDeployBlock(address, operationLabel, contractLabel)
+          ),
+          pageSize: () => this.cgRegistryScanPageSize,
+        });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;
@@ -1512,6 +1572,26 @@ export class EVMChainAdapterBase {
     return this.readProvider<T | null>(label, fn, { ...opts, isEmptyResult: (v) => v == null });
   }
 
+  /** Provider/failover dispatch shared by all authorized browser-wallet routes. */
+  async requestBrowserWalletRpc(
+    method: BrowserWalletRpcMethod,
+    params: unknown[] = [],
+  ): Promise<unknown> {
+    await this.init();
+    const label = `browser wallet rpc ${method}`;
+    const send = (provider: JsonRpcProvider) => provider.send(method, params);
+    switch (classifyBrowserWalletRead(method, params)) {
+      case 'tipTransparent':
+        return this.readTipProvider(label, send);
+      case 'tipNullableTransparent':
+        return this.readProviderRetryingNull(label, send, { skipPreferred: true });
+      case 'stickyNullable':
+        return this.readProviderRetryingNull(label, send);
+      case 'sticky':
+        return this.readProvider(label, send);
+    }
+  }
+
   /**
    * Rebind a CONTRACT to a `provider` for one per-endpoint VIEW read, leaving the
    * boot-bound `this.contracts.*` handle untouched. The sole remaining base caller
@@ -1635,7 +1715,9 @@ export class EVMChainAdapterBase {
             );
           } catch (err) {
             enrichEvmError(err);
-            if (!isRetryableRpcError(err)
+            const retryDisposition = classifyRpcRetryDisposition(err);
+            if ((errorCode(err) !== 'RPC_ENDPOINTS_EXHAUSTED'
+                && retryDisposition !== 'failover')
               || preparationPass >= RPC_PREPARATION_ENDPOINT_SET_RETRIES) {
               throw err;
             }
@@ -1700,7 +1782,7 @@ export class EVMChainAdapterBase {
         await this.broadcastSignedTransactionWithFailover(signedTx, txHash, label);
         return;
       } catch (err) {
-        if (isRetryableRpcError(err) && pass < RPC_ENDPOINT_SET_RETRIES) {
+        if (errorCode(err) === 'RPC_ENDPOINTS_EXHAUSTED' && pass < RPC_ENDPOINT_SET_RETRIES) {
           await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
           continue;
         }
@@ -2738,12 +2820,12 @@ export class EVMChainAdapterBase {
       );
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
-        throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+        throw new HubContractNotFoundError(name, this.hubAddress, { cause: err });
       }
       throw err;
     }
     if (address === ethers.ZeroAddress) {
-      throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`);
+      throw new HubContractNotFoundError(name, this.hubAddress);
     }
     return address;
   }
@@ -2798,7 +2880,7 @@ export class EVMChainAdapterBase {
       // of a generic 500 — and never hang waiting on it (#894 follow-up). A
       // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
       // its original shape.
-      if (isRetryableRpcError(err)) {
+      if (classifyRpcRetryDisposition(err) === 'failover') {
         throw new RpcEndpointsExhaustedError(
           `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${errorMessage(err)}`,
           { cause: err, rpcUrls: this.rpcUrls },
@@ -3055,7 +3137,7 @@ export class EVMChainAdapterBase {
           (p) => this.rebindContract(storage, p).getMaxKaNumberForAuthor.staticCall(normalized),
           {
             isRetryable: (err) =>
-              isRetryableRpcError(err)
+              isRpcEndpointFailoverEligible(err)
               && !isKaHighWaterViewUnavailable(err)
               && !isKaHighWaterBareRevert(err),
           },
@@ -3205,10 +3287,10 @@ export class EVMChainAdapterBase {
         let pageError: unknown;
         for (const { provider } of ordered) {
           try {
-            await withTimeout(
-              this.ensureConfiguredStaticChainIdValidated(provider),
+            await withRpcRequestTimeout(
               RPC_READ_STALL_TIMEOUT_MS,
               `${label} chainId validation`,
+              () => this.ensureConfiguredStaticChainIdValidated(provider),
             );
             let contract = connected.get(provider);
             if (!contract) {
@@ -3220,10 +3302,10 @@ export class EVMChainAdapterBase {
             // bounded consumer scope explicitly so a large historical crawl
             // (notably the pre-10.0.4 KA high-water fallback) cannot collapse
             // into `consumer=unattributed` in raw eth_getLogs telemetry.
-            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withTimeout(
-              contract.queryFilter(filter as any, lo, hi),
+            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withRpcRequestTimeout(
               KA_HIGH_WATER_PAGE_TIMEOUT_MS,
               `${label} getLogs [${lo}, ${hi}]`,
+              () => contract!.queryFilter(filter as any, lo, hi),
             ));
             metrics.chainRpcTotal.add(1, {
               rpc_method: 'eth_getLogs', outcome: 'ok', retryable: false, chain_id: this.chainId,
@@ -3233,6 +3315,9 @@ export class EVMChainAdapterBase {
             });
             return { logs, provider };
           } catch (err) {
+            // Local governor saturation is process-wide; trying another URL
+            // cannot create capacity and would violate the retry-later contract.
+            if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
             pageError = err; // hung or errored — fail over to the next eligible backend
           }
         }
@@ -3310,18 +3395,19 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
-        await withTimeout(
-          this.ensureConfiguredStaticChainIdValidated(provider),
+        await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
+          () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
-        const backendHead = await withTimeout(
-          provider.getBlockNumber(),
+        const backendHead = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} backend head probe`,
+          () => provider.getBlockNumber(),
         );
         reachable.push({ provider, backendHead });
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         if (!isHistoricalStateUnavailable(err)) probeError = err;
       }
     }
@@ -3351,22 +3437,23 @@ export class EVMChainAdapterBase {
     const reachable: ScanProvider[] = [];
     for (const provider of this.providers) {
       try {
-        await withTimeout(
-          this.ensureConfiguredStaticChainIdValidated(provider),
+        await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} chainId validation`,
+          () => this.ensureConfiguredStaticChainIdValidated(provider),
         );
         // Bound the probe: these are direct per-backend reads (not via the
         // FallbackProvider), so without a timeout a hung `getBlockNumber()` would
         // stall the whole resolution instead of failing over. A stall rejects and
         // is treated like any other unreachable-backend error below.
-        const backendHead = await withTimeout(
-          provider.getBlockNumber(),
+        const backendHead = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} backend head probe`,
+          () => provider.getBlockNumber(),
         );
         reachable.push({ provider, backendHead });
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         if (!isHistoricalStateUnavailable(err)) probeError = err;
       }
     }
@@ -3424,6 +3511,7 @@ export class EVMChainAdapterBase {
         // block isn't throttled, so this is always non-empty.
         return { fromBlock: lo, head, scanProviders: reachable.filter((r) => !throttledProviders.has(r.provider)) };
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         // Always fail over to the next backend FIRST (a healthy archive can still
         // pin the deploy block even if this one is denied/pruned/flaky). Track a
         // transient throttle per-backend: re-querying that endpoint in the scan
@@ -3484,13 +3572,14 @@ export class EVMChainAdapterBase {
         // fits (the heavier getLogs scan page gets the larger
         // `KA_HIGH_WATER_PAGE_TIMEOUT_MS`); the 3 attempts also absorb a transient
         // blip before failing over.
-        const code = await withTimeout(
-          provider.getCode(address, block),
+        const code = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           `${operationLabel} eth_getCode at block ${block}`,
+          () => provider.getCode(address, block),
         );
         return code && code !== '0x' ? code : '0x';
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         lastErr = err;
       }
     }
@@ -3547,30 +3636,38 @@ export class EVMChainAdapterBase {
       return cached!.value;
     }
 
-    let validation = this.configuredStaticChainIdValidationsByProvider.get(provider);
-    if (!validation) {
-      validation = withTimeout(
-        (async () => {
-          const raw = await provider.send('eth_chainId', []);
-          const live = BigInt(raw);
-          if (live !== this.configuredStaticChainId) {
-            throw new Error(
-              `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
-            );
-          }
-          this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
-          this.cachedChainId = { value: live, cachedAt: Date.now() };
-          return live;
-        })(),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'configured chainId validation',
-      ).finally(() => {
-        this.configuredStaticChainIdValidationsByProvider.delete(provider);
-      });
-      this.configuredStaticChainIdValidationsByProvider.set(provider, validation);
-    }
-
-    return validation;
+    return this.configuredStaticChainIdValidationsByProvider.run(
+      provider,
+      (sharedSignal) => withOwnedRpcRequestContext(
+        {
+          requestClass: 'foreground',
+          signal: sharedSignal,
+        },
+        () => withRpcRequestTimeout(
+          RPC_READ_STALL_TIMEOUT_MS,
+          'configured chainId validation',
+          async () => {
+            const raw = await provider.send('eth_chainId', []);
+            const live = BigInt(raw);
+            if (live !== this.configuredStaticChainId) {
+              throw new Error(
+                `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
+              );
+            }
+            return live;
+          },
+        ),
+      ),
+      activeRpcRequestAbortSignal(),
+      (live) => {
+        this.configuredStaticChainIdsByProvider.set(provider, {
+          value: live,
+          cachedAt: Date.now(),
+        });
+        this.cachedChainId = { value: live, cachedAt: Date.now() };
+      },
+      'Configured chainId validation has no active waiters',
+    );
   }
 
   /**
@@ -4000,13 +4097,8 @@ export class EVMChainAdapterBase {
     try {
       return await this.resolveAndAssignRandomSamplingPair();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('not found in Hub at')) {
-        throw new Error(
-          'RandomSampling / RandomSamplingStorage not deployed in this Hub. ' +
-          'The deployer is responsible for shipping these alongside V10 publish.',
-          { cause: err },
-        );
+      if (err instanceof HubContractNotFoundError) {
+        throw new RandomSamplingContractsUnavailableError({ cause: err });
       }
       throw err;
     }
@@ -4297,6 +4389,7 @@ export class EVMChainAdapterBase {
   destroy(): void {
     this.hubRotationPoller.stop();
     this.contextGraphAuthorityHistory.clear();
+    this.contextGraphAuthorityIndex?.clear();
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }

@@ -256,7 +256,8 @@ export const listDesignatableNodes = (opts?: { fresh?: boolean }) =>
   );
 
 /**
- * Resolved PCA contract addresses + chain — the bootstrap the in-browser wallet (web3) layer needs.
+ * Resolved PCA contract addresses and chain — the bootstrap the in-browser wallet
+ * (web3) layer needs.
  * The daemon resolves these via its Hub config (the browser does NOT re-resolve the Hub). Minimal
  * set: the NFT wrapper (every wallet-signed write + the ERC721Enumerable owned-PCA walk + the mint
  * `Transfer` accountId decode all target it), the TRAC token (approve/allowance), the chain id, and

@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
-import type { DurableSyncResult } from '@origintrail-official/dkg-agent';
+import {
+  type DurableSyncResult,
+} from '@origintrail-official/dkg-agent';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 function fakeRes() {
@@ -1185,5 +1187,51 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
         ]),
       },
     ]);
+  });
+
+  it.each([1, 2])('preserves local-yield attribution through route selection with %i failed phases', async (failedPhases) => {
+    const cgId = `typed-local-yield-route-cg-${failedPhases}`;
+    const peerId = 'peer-local-yield';
+    const unknownPeer = 'peer-unknown-competitor';
+    let connectedPeers = [peerId];
+    let yieldingPeerCalls = 0;
+    const syncSharedMemoryFromPeerDetailed = vi.fn(async (selectedPeerId: string) => {
+      if (selectedPeerId === peerId && yieldingPeerCalls++ === 0) return {
+        insertedTriples: 0,
+        localYield: true as const,
+        localYieldFailedPhases: 1,
+        failedPhases,
+        backoffWorthyFailures: 0,
+      };
+      return { insertedTriples: 0 };
+    });
+    const agent = {
+      peerId: 'self-peer',
+      node: {
+        libp2p: {
+          getConnections: () => connectedPeers.map((connectedPeerId) => ({
+            remotePeer: { toString: () => connectedPeerId },
+          })),
+        },
+      },
+      canUseSharedMemoryForContextGraph: vi.fn(async () => true),
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncSharedMemoryFromPeerDetailed,
+      syncFromPeer: vi.fn(),
+    };
+
+    const first = buildCatchupCtx({ contextGraphId: cgId, hostCatchupFallback: false }, agent);
+    await handleMemoryRoutes(first.ctx);
+    expect(first.res.statusCode).toBe(200);
+
+    // A pure local yield preserves eligibility; an independent failed phase
+    // makes the selector prefer the unknown competitor on the next request.
+    connectedPeers = [peerId, unknownPeer];
+    const second = buildCatchupCtx({ contextGraphId: cgId, hostCatchupFallback: false }, agent);
+    await handleMemoryRoutes(second.ctx);
+    expect(second.res.statusCode).toBe(200);
+    expect(syncSharedMemoryFromPeerDetailed.mock.calls
+      .filter(([selectedPeerId]) => selectedPeerId === peerId)).toHaveLength(failedPhases === 1 ? 2 : 1);
   });
 });
