@@ -4291,7 +4291,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     const dependencies = {
       chainId: this.chain.chainId,
-      maxPeers: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
+      // Proof-time repair gets one challenge deadline. Deferring a later Core
+      // to another bounded window would lose this proof, so traverse the full
+      // already-bounded discovered candidate set in this operation.
+      maxPeers: 'all' as const,
       stopSignal: this.node.stopSignal,
       resolveStorageAddress: (_signal) => this.chain.getDKGKnowledgeAssetsAddress
         ? this.chain.getDKGKnowledgeAssetsAddress()

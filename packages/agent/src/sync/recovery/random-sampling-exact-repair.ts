@@ -30,7 +30,7 @@ export type RandomSamplingExactRepairResult =
 
 export interface RandomSamplingExactRepairDependencies {
   readonly chainId: string;
-  readonly maxPeers: number;
+  readonly maxPeers: number | 'all';
   readonly stopSignal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly createTimeoutSignal?: (timeoutMs: number) => AbortSignal;
@@ -131,11 +131,14 @@ async function executeRandomSamplingExactRepair(
   if (candidatePeerIds.length === 0) {
     throw new Error(`Random Sampling repair found no providers for ${localContextGraphId}`);
   }
+  const maxPeers = deps.maxPeers === 'all' ? candidatePeerIds.length : deps.maxPeers;
   const traversal = await runBoundedPreparedPeerTraversal<RandomSamplingExactRepairResult>({
     candidatePeerIds,
-    // Keep each proof repair bounded while the keyed peer window advances
-    // through the complete discovered roster across subsequent repairs.
-    maxPeers: deps.maxPeers,
+    // The caller bounds this to the complete registry roster. Unlike ordinary
+    // reconciliation, one proof-time repair must reach every eligible Core
+    // before its deadline; deferring a later Core to another challenge loses
+    // the current proof.
+    maxPeers,
     operationLabel: `RS exact repair for ${assetUal} from`,
     assertCurrent: () => {
       if (signal.aborted) throw abortReason(signal);

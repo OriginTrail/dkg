@@ -246,19 +246,15 @@ describe('Random Sampling lifecycle repair adapter', () => {
       expectedRoot,
       expectedLeafCount: 12n,
     });
-    const repairCount = Math.ceil(peers.length / DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX);
-    for (let index = 1; index < repairCount; index += 1) {
-      await expect(repair()).rejects.toThrow('did not recover');
-    }
     await expect(repair()).resolves.toEqual(proofMaterial);
 
     expect(syncExactKnowledgeAssetsFromPeerDetailed).toHaveBeenCalledTimes(peers.length);
     expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
       .toEqual(peers);
-    expect(selectCatchupPeerWindow).toHaveBeenCalledTimes(repairCount);
+    expect(selectCatchupPeerWindow).toHaveBeenCalledOnce();
     for (const [, options] of selectCatchupPeerWindow.mock.calls) {
       expect(options).toEqual(expect.objectContaining({
-        maxPeers: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
+        maxPeers: peers.length,
         peerRotationKey: 'rs-proof:food-safety',
       }));
     }
@@ -301,7 +297,7 @@ describe('Random Sampling lifecycle repair adapter', () => {
     expect(vi.mocked(agentLike.waitForSyncProtocol).mock.calls[0]?.[0]).toBe(peers[0]);
   });
 
-  it('reaches every Core across repairs when the registry shuffles its order', async () => {
+  it('reaches a later Core in the same repair even when registry order is shuffled', async () => {
     const corePeers = ['core-a', 'core-b', 'core-c', 'core-d', 'core-e', 'core-f'];
     const registryOrders = [
       ['core-c', 'core-f', 'core-a', 'core-e', 'core-b', 'core-d'],
@@ -316,11 +312,10 @@ describe('Random Sampling lifecycle repair adapter', () => {
       syncExactKnowledgeAssetsFromPeerDetailed,
     }));
 
-    expect(DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX).toBe(3);
-    await expect(runLifecycleRepair(agentLike)).rejects.toThrow('did not recover');
     await expect(runLifecycleRepair(agentLike)).resolves.toEqual(EMPTY_MATERIAL);
 
-    expect(findAgents).toHaveBeenCalledTimes(2);
+    expect(DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX).toBe(3);
+    expect(findAgents).toHaveBeenCalledOnce();
     expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
       .toEqual(corePeers);
   });
