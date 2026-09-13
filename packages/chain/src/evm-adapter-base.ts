@@ -3293,6 +3293,8 @@ export class EVMChainAdapterBase {
             });
             return { logs, provider };
           } catch (err) {
+            // Local governor saturation is process-wide; trying another URL
+            // cannot create capacity and would violate the retry-later contract.
             if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
             pageError = err; // hung or errored — fail over to the next eligible backend
           }

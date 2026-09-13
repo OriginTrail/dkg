@@ -82,7 +82,7 @@ describe('createChainDiscoveryScanRunner', () => {
       repairEveryTicks: CHAIN_REPAIR_AUDIT_EVERY_TICKS,
     });
 
-    await runner();
+    await runner.run();
 
     expect(order).toEqual(['live:incremental', `repair:${CHAIN_DISCOVERY_SCAN_PAGE_BUDGET}`]);
     expect(governor.snapshot()).toMatchObject({
@@ -107,9 +107,9 @@ describe('createChainDiscoveryScanRunner', () => {
     };
     const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
 
-    await runner();
+    await runner.run();
     expect(agent.repairContextGraphRegistry).not.toHaveBeenCalled();
-    await runner();
+    await runner.run();
     expect(agent.discoverContextGraphsFromChain.mock.calls.map(([scan]) => scan.mode)).toEqual([
       'incremental',
       'incremental',
@@ -130,9 +130,9 @@ describe('createChainDiscoveryScanRunner', () => {
         .mockResolvedValueOnce(0),
     };
     const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
-    await runner();
-    await runner();
-    await runner();
+    await runner.run();
+    await runner.run();
+    await runner.run();
 
     expect(agent.discoverContextGraphsFromChain.mock.calls.map(([scan]) => scan.mode)).toEqual([
       'seedLiveTail',
@@ -154,9 +154,9 @@ describe('createChainDiscoveryScanRunner', () => {
     };
     const log = vi.fn();
     const runner = createChainDiscoveryScanRunner({ agent, log });
-    for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner();
+    for (let i = 0; i <= MAX_CONSECUTIVE_SAME_SCAN_RETRIES; i++) await runner.run();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('releasing the slot'));
-    await runner();
+    await runner.run();
     expect(agent.hasContextGraphRegistryScanWatermark).toHaveBeenCalledTimes(2);
   });
 
@@ -169,9 +169,9 @@ describe('createChainDiscoveryScanRunner', () => {
       repairContextGraphRegistry: vi.fn(async () => 0),
     };
     const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
-    const first = runner();
+    const first = runner.run();
     await Promise.resolve();
-    await runner();
+    await runner.run();
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
     expect(agent.repairContextGraphRegistry).not.toHaveBeenCalled();
     resolveLive?.(0);
@@ -190,9 +190,9 @@ describe('createChainDiscoveryScanRunner', () => {
     };
     const log = vi.fn();
     const runner = createChainDiscoveryScanRunner({ agent, log });
-    await expect(runner()).resolves.toBeUndefined();
+    await expect(runner.run()).resolves.toBeUndefined();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('Chain repair audit failed'));
-    await runner();
+    await runner.run();
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(2);
     expect(agent.repairContextGraphRegistry).toHaveBeenCalledTimes(2);
   });
@@ -208,10 +208,10 @@ describe('createChainDiscoveryScanRunner', () => {
     };
     const log = vi.fn();
     const runner = createChainDiscoveryScanRunner({ agent, log });
-    await runner();
+    await runner.run();
     expect(agent.discoverContextGraphsFromChain).not.toHaveBeenCalled();
     expect(agent.repairContextGraphRegistry).not.toHaveBeenCalled();
-    await runner();
+    await runner.run();
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledWith({
       mode: 'incremental',
       throwOnChainScanFailure: true,
@@ -231,7 +231,7 @@ describe('createChainDiscoveryScanRunner', () => {
     };
     const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
 
-    await runner();
+    await runner.run();
 
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledWith({
       mode: 'incremental',
@@ -261,7 +261,7 @@ describe('createChainDiscoveryScanRunner', () => {
       repairContextGraphRegistry: vi.fn(async () => 0),
     };
     const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
-    const running = runner();
+    const running = runner.run();
     while (!entered) await Promise.resolve();
 
     await runner.close();
@@ -269,7 +269,7 @@ describe('createChainDiscoveryScanRunner', () => {
 
     expect(drained).toBe(true);
     expect(agent.repairContextGraphRegistry).not.toHaveBeenCalled();
-    await runner();
+    await runner.run();
     expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
   });
 
@@ -286,8 +286,8 @@ describe('createChainDiscoveryScanRunner', () => {
       agent,
       log: () => { throw new Error('broken sink'); },
     });
-    await expect(runner()).resolves.toBeUndefined();
-    await expect(runner()).resolves.toBeUndefined();
+    await expect(runner.run()).resolves.toBeUndefined();
+    await expect(runner.run()).resolves.toBeUndefined();
   });
 });
 
@@ -296,10 +296,10 @@ describe('scheduleChainDiscoveryScanRunner', () => {
     vi.useFakeTimers();
     try {
       const calls: string[] = [];
-      const runner = Object.assign(
-        vi.fn(async () => { calls.push('run'); }),
-        { close: vi.fn(async () => { calls.push('drained'); }) },
-      ) as unknown as ChainDiscoveryScanRunner;
+      const runner: ChainDiscoveryScanRunner = {
+        run: vi.fn(async () => { calls.push('run'); }),
+        close: vi.fn(async () => { calls.push('drained'); }),
+      };
       const schedule = scheduleChainDiscoveryScanRunner({
         runner,
         initialDelayMs: 15,
@@ -307,15 +307,15 @@ describe('scheduleChainDiscoveryScanRunner', () => {
       });
 
       await vi.advanceTimersByTimeAsync(15);
-      expect(runner).toHaveBeenCalledTimes(1);
+      expect(runner.run).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(30);
-      expect(runner).toHaveBeenCalledTimes(2);
+      expect(runner.run).toHaveBeenCalledTimes(2);
 
       await schedule.close();
       expect(runner.close).toHaveBeenCalledTimes(1);
       expect(calls.at(-1)).toBe('drained');
       await vi.advanceTimersByTimeAsync(300);
-      expect(runner).toHaveBeenCalledTimes(2);
+      expect(runner.run).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

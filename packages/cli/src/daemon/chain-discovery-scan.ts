@@ -31,7 +31,8 @@ export type ScanOptions =
 type CancellableScanOptions = ScanOptions & { signal: AbortSignal };
 
 export interface ChainDiscoveryScanRunner {
-  (): Promise<void>;
+  /** Run at most one live-then-repair pass; overlapping calls coalesce. */
+  run(): Promise<void>;
   /** Abort and drain the current live/repair scan before agent/store teardown. */
   close(): Promise<void>;
 }
@@ -47,7 +48,7 @@ export function scheduleChainDiscoveryScanRunner(input: {
   intervalMs?: number;
 }): ChainDiscoveryScanSchedule {
   let closed = false;
-  const invoke = (): void => { void input.runner(); };
+  const invoke = (): void => { void input.runner.run(); };
   const initial = setTimeout(invoke, input.initialDelayMs ?? 15_000);
   const recurring = setInterval(invoke, input.intervalMs ?? CHAIN_DISCOVERY_SCAN_INTERVAL_MS);
   initial.unref?.();
@@ -311,22 +312,23 @@ export function createChainDiscoveryScanRunner(input: {
     }
   };
 
-  const runner = (async (): Promise<void> => {
-    if (closed || inFlight) return;
-    const current = execute();
-    inFlight = current;
-    try {
-      await current;
-    } finally {
-      if (inFlight === current) inFlight = undefined;
-    }
-  }) as ChainDiscoveryScanRunner;
-  runner.close = async (): Promise<void> => {
-    if (!closed) {
-      closed = true;
-      lifecycleAbort.abort(new Error('ContextGraphNameRegistry scan runner is closing'));
-    }
-    await inFlight;
+  return {
+    run: async (): Promise<void> => {
+      if (closed || inFlight) return;
+      const current = execute();
+      inFlight = current;
+      try {
+        await current;
+      } finally {
+        if (inFlight === current) inFlight = undefined;
+      }
+    },
+    close: async (): Promise<void> => {
+      if (!closed) {
+        closed = true;
+        lifecycleAbort.abort(new Error('ContextGraphNameRegistry scan runner is closing'));
+      }
+      await inFlight;
+    },
   };
-  return runner;
 }
