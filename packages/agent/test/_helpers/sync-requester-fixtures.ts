@@ -12,7 +12,7 @@ export function pageResult(
   phase: string,
   overrides: Partial<SyncPageResult> = {},
 ): SyncPageResult {
-  return {
+  const result = {
     quads: [],
     bytesReceived: 0,
     resumedFromOffset: 0,
@@ -23,6 +23,20 @@ export function pageResult(
     timedOut: false,
     ...overrides,
   };
+  if (result.localYield === true) {
+    if (result.completed || result.timedOut) {
+      throw new Error('A locally yielded fixture page cannot be completed or timed out');
+    }
+    return { ...result, completed: false, timedOut: false, localYield: true };
+  }
+  if (result.timedOut === true) {
+    if (result.completed) throw new Error('A timed-out fixture page cannot be completed');
+    return { ...result, completed: false, timedOut: true, localYield: undefined };
+  }
+  if (result.completed === true) {
+    return { ...result, completed: true, timedOut: false, localYield: undefined };
+  }
+  return { ...result, completed: false, timedOut: false, localYield: undefined };
 }
 
 export function transportError(message: string): Error {

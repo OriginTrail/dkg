@@ -6,6 +6,9 @@ import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { runSharedMemorySync, syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
 import { SyncPageAccumulationLimitError, type SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
+import type { SyncPhase } from '../src/sync/auth/request-build.js';
+import { UNRESTRICTED_SYNC_WORK } from '../src/sync/work-admission.js';
 
 import {
   ctx,
@@ -51,6 +54,36 @@ function durableProcessResult() {
 }
 
 describe('selected snapshot walk continuation', () => {
+  it('does not attribute a short snapshot prefix to a later local yield', async () => {
+    let canAdmit = true;
+    const fetched: string[] = [];
+    const result = await syncPublicSnapshotsForMeta({
+      ctx,
+      remotePeerId: 'peer-short-prefix',
+      contextGraphId: 'cg-short-prefix',
+      deadline: Number.MAX_SAFE_INTEGER,
+      workAdmission: { ...UNRESTRICTED_SYNC_WORK, canAdmitWork: () => canAdmit },
+      snapshotWalk: {
+        entries: ['short', 'later'].map(ref => ({ snapshot: { ref, digest: ref, count: 1 }, reuse: false })),
+      },
+      publicSnapshotStore: {
+        getSnapshot: async () => null,
+        putSnapshot: async () => { throw new Error('Incomplete snapshots must not be stored'); },
+      },
+      fetchSyncPages: async (_ctx, _peer, cg, _swm, phase, _graph, _deadline, options) => {
+        fetched.push(options!.snapshotRef!);
+        canAdmit = false;
+        return pageResult(cg, phase, { quads: [] });
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+    });
+    expect(fetched).toEqual(['short']);
+    expect(result).toMatchObject({
+      completed: false, localYield: true, localYieldFailedPhases: 0, missingCount: 2,
+    });
+  });
+
   it('skips an exact resolved prefix and spends the next slice on unresolved snapshots', async () => {
     const first = [quad('resolved-prefix')].map((row) => ({ ...row, graph: '' }));
     const second = [quad('next-unresolved')].map((row) => ({ ...row, graph: '' }));
@@ -69,13 +102,9 @@ describe('selected snapshot walk continuation', () => {
       remotePeerId: 'peer-resume-prefix',
       contextGraphId: 'cg-resume-prefix',
       deadline: Date.now() + 60_000,
+      workAdmission: UNRESTRICTED_SYNC_WORK,
       snapshotWalk: {
-        orderedManifestSnapshot: () => snapshots.map((snapshot) => ({ ...snapshot })),
-        isResolved: (ref) => ref === firstDigest,
-        resolvedCount: () => 1,
-        resolvedRefsSnapshot: () => [firstDigest],
-        suppressedMetadataRows: () => [],
-        markResolved: () => {},
+        entries: snapshots.map(snapshot => ({ snapshot, reuse: snapshot.ref === firstDigest })),
       },
       publicSnapshotStore: {
         getSnapshot: async (ref) => {
@@ -130,13 +159,9 @@ describe('selected snapshot walk continuation', () => {
       remotePeerId: 'peer-changed-manifest',
       contextGraphId: 'cg-changed-manifest',
       deadline: Date.now() + 60_000,
+      workAdmission: UNRESTRICTED_SYNC_WORK,
       snapshotWalk: {
-        orderedManifestSnapshot: () => snapshots.map((snapshot) => ({ ...snapshot })),
-        isResolved: () => false,
-        resolvedCount: () => 0,
-        resolvedRefsSnapshot: () => [],
-        suppressedMetadataRows: () => [],
-        markResolved: () => {},
+        entries: snapshots.map(snapshot => ({ snapshot, reuse: false })),
       },
       publicSnapshotStore: {
         getSnapshot: async () => null,
@@ -941,7 +966,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
+      phase: SyncPhase,
     ) => {
       if (contextGraphId === 'denied-swm') throw deniedError();
       return pageResult(contextGraphId, phase);
@@ -968,7 +993,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.deniedPhases).toBe(1);
     expect(summary.failedPeers).toBe(0);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'open-swm',
+      true,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      expect.objectContaining({ workAdmission: expect.any(Object) }),
+    ]);
   });
 
   it('counts multiple shared-memory context-graph failures as one failed peer', async () => {
@@ -977,7 +1011,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
+      phase: SyncPhase,
     ) => {
       if (contextGraphId.startsWith('fail-')) throw transportError(`sync responder busy for ${contextGraphId}`);
       return pageResult(contextGraphId, phase);
@@ -1005,7 +1039,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPhases).toBe(0);
     expect(summary.deniedPhases).toBe(0);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'open-swm',
+      true,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      expect.objectContaining({ workAdmission: expect.any(Object) }),
+    ]);
   });
 
   it('continues shared-memory sync after a post-response verifier failure without marking the peer unreachable', async () => {
@@ -1014,7 +1057,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
+      phase: SyncPhase,
     ) => pageResult(contextGraphId, phase, {
       quads: phase === 'data' ? [quad(contextGraphId)] : [],
     }));
@@ -1045,7 +1088,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPeers).toBe(0);
     expect(summary.failedPhases).toBe(1);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'open-swm',
+      true,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      expect.objectContaining({ workAdmission: expect.any(Object) }),
+    ]);
   });
 
   it('counts shared-memory snapshot validation failures as phase failures after the peer responded', async () => {
@@ -1074,7 +1126,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta' | 'snapshot',
+      phase: SyncPhase,
     ) => pageResult(contextGraphId, phase, {
       checkpointKey: phase === 'snapshot' ? `${contextGraphId}:snapshot:bad-ref` : `${contextGraphId}:${phase}`,
       quads: phase === 'snapshot'
@@ -1112,7 +1164,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.failedPeers).toBe(0);
     expect(summary.failedPhases).toBe(1);
     expect(summary.completedPhases).toBe(2);
-    expect(fetchSyncPages.calls).toContainEqual([ctx, 'peer-a', 'open-swm', true, 'data', expect.any(String), expect.any(Number)]);
+    expect(fetchSyncPages.calls).toContainEqual([
+      ctx,
+      'peer-a',
+      'open-swm',
+      true,
+      'data',
+      expect.any(String),
+      expect.any(Number),
+      expect.objectContaining({ workAdmission: expect.any(Object) }),
+    ]);
   });
 
   it('counts both clean zero-offset empty shared-memory phases as complete', async () => {
@@ -1127,7 +1188,7 @@ describe('sync requester progress accounting', () => {
         _peer: string,
         contextGraphId: string,
         _includeSharedMemory: boolean,
-        phase: 'data' | 'meta',
+        phase: SyncPhase,
       ) => pageResult(contextGraphId, phase),
       processSharedMemoryBatch: async () => sharedMemoryProcessResult(),
       ensureContextGraph: async () => {},
@@ -1140,6 +1201,8 @@ describe('sync requester progress accounting', () => {
       logDebug: noop,
     });
 
+    expect(summary.snapshotPlaneIncomplete).toBe(0);
+    expect(summary.localYield).toBeUndefined();
     expect(summary.completedPhases).toBe(2);
     expect(summary.checkpointAdvances).toBe(0);
   });
@@ -1156,7 +1219,7 @@ describe('sync requester progress accounting', () => {
         _peer: string,
         contextGraphId: string,
         _includeSharedMemory: boolean,
-        phase: 'data' | 'meta',
+        phase: SyncPhase,
       ) => phase === 'data'
         ? pageResult(contextGraphId, phase, {
             completed: false,
@@ -1210,7 +1273,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta' | 'snapshot',
+      phase: SyncPhase,
     ) => phase === 'snapshot'
       ? pageResult(contextGraphId, phase, {
         checkpointKey: `${contextGraphId}:snapshot:snapshot-ref`,
@@ -1288,7 +1351,7 @@ describe('sync requester progress accounting', () => {
       _peer: string,
       contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta' | 'snapshot',
+      phase: SyncPhase,
     ) => {
       if (phase === 'snapshot') {
         return pageResult(contextGraphId, phase, {
@@ -1373,7 +1436,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages: async ({ phase }) => {
         if (options.fetchError) throw options.fetchError;
         const page = pageResult('exact-cg', phase, {
@@ -1412,7 +1475,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer-public',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages: async ({ phase }) => pageResult('exact-cg', phase),
       processDurableBatchInWorker: async () => durableProcessResult(),
       storeInsert: async () => {},
@@ -1496,7 +1559,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'legacy-exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages,
       processDurableBatchInWorker,
       storeInsert,
@@ -1523,7 +1586,7 @@ describe('exact durable fetch disposition', () => {
       contextGraphIds: [SYSTEM_CONTEXT_GRAPHS.AGENTS],
       syncAgentsMeta: false,
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages: async ({ contextGraphId, phase }) => {
         fetchedPhases.push(phase);
         return pageResult(contextGraphId, phase);
@@ -1547,7 +1610,7 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-multi-cg-peer',
       contextGraphIds: ['exact-incomplete-cg', 'exact-clean-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => ({ kind: 'ual-only', assetUals: [EXACT_UAL] }),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
       fetchSyncPages: async ({ contextGraphId, phase }) => pageResult(contextGraphId, phase, {
         ...(contextGraphId === 'exact-incomplete-cg' && phase === 'data'
           ? { completed: false }

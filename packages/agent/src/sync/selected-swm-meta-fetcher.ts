@@ -12,20 +12,15 @@ import {
   type SyncPageResult,
 } from './requester/page-fetch.js';
 import type {
-  PublicSnapshotMetadata,
   SharedMemoryMetadataFetchRequest,
   SharedMemoryMetadataFetcher,
 } from './requester/shared-memory-sync.js';
 import type { SelectedSwmMetaRetentionLease } from './selected-swm-meta-budget.js';
+import type { SyncWorkAdmission } from './work-admission.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from './durable-session.js';
-
-/** Post-metadata continuation bound to one exact ordered manifest. */
-interface SelectedSwmSnapshotWalkState {
-  readonly orderedManifest: readonly PublicSnapshotMetadata[];
-  readonly resolvedRefs: Set<string>;
-  readonly suppressedMetadataRowsByRef: Map<string, readonly Quad[]>;
-  expiresAtMs: number;
-}
+import {
+  SelectedManifestBoundSnapshotWalk,
+} from './requester/manifest-bound-snapshot-walk.js';
 
 /** Exact metadata prefix retained only by one selected-provider transfer owner. */
 interface SelectedSwmMetaContinuationState {
@@ -40,7 +35,7 @@ interface SelectedSwmMetaContinuationState {
   /** Prefix expiry; terminal metadata has no prefix retention clock. */
   metadataExpiresAtMs: number;
   /** Independent continuation created only after metadata is complete. */
-  snapshotWalk?: SelectedSwmSnapshotWalkState;
+  snapshotWalk?: SelectedManifestBoundSnapshotWalk;
   retentionLease: SelectedSwmMetaRetentionLease;
 }
 
@@ -230,6 +225,7 @@ interface SelectedMetaPageFetchRequest {
   readonly contextGraphId: string;
   readonly graphUri: string;
   readonly deadline: number;
+  readonly workAdmission: SyncWorkAdmission;
   readonly returnAcceptedPrefixOnRetryableTransportFailure: true;
   readonly requesterScope: SelectedSwmMetaRetentionScope;
   readonly maxAcceptedQuads: number;
@@ -312,10 +308,7 @@ export function createSelectedSwmMetaFetcher(options: {
 
   const hasIncompleteSnapshotWalk = (state: SelectedSwmMetaContinuationState): boolean => {
     const walk = state.snapshotWalk;
-    return state.completed
-      && walk !== undefined
-      && walk.orderedManifest.length > 0
-      && walk.resolvedRefs.size < walk.orderedManifest.length;
+    return state.completed && walk?.incomplete === true;
   };
 
   const hasRetainedContinuation = (state: SelectedSwmMetaContinuationState): boolean => (
@@ -493,70 +486,24 @@ export function createSelectedSwmMetaFetcher(options: {
     snapshotWalk(contextGraphId, orderedManifest) {
       const state = states.get(contextGraphId);
       if (!state?.completed) {
-        return {
-          orderedManifestSnapshot: () => immutableManifestSnapshot(orderedManifest),
-          isResolved: () => false,
-          resolvedCount: () => 0,
-          resolvedRefsSnapshot: () => [],
-          suppressedMetadataRows: () => [],
-          markResolved: () => {},
-        };
+        return new SelectedManifestBoundSnapshotWalk(orderedManifest, {
+          now,
+          retentionTtlMs,
+          canMutate: () => false,
+        });
       }
       const retainedWalk = state.snapshotWalk;
-      const walk = retainedWalk && manifestsEqual(retainedWalk.orderedManifest, orderedManifest)
+      let walk: SelectedManifestBoundSnapshotWalk;
+      walk = retainedWalk?.matches(orderedManifest)
         ? retainedWalk
-        : {
-          orderedManifest: immutableManifestSnapshot(orderedManifest),
-          resolvedRefs: new Set<string>(),
-          suppressedMetadataRowsByRef: new Map<string, readonly Quad[]>(),
-          expiresAtMs: 0,
-        };
+        : new SelectedManifestBoundSnapshotWalk(orderedManifest, {
+          now,
+          retentionTtlMs,
+          canMutate: () => states.get(contextGraphId) === state
+            && state.snapshotWalk === walk,
+        });
       state.snapshotWalk = walk;
-      const allowedRefs = new Set(walk.orderedManifest.map((snapshot) => snapshot.ref));
-      // Opening an unchanged walk is not progress. Sliding this deadline on
-      // every retry could retain stale completed metadata forever and prevent
-      // a corrected remote manifest from ever being observed. Creation starts
-      // the window; markResolved is the only operation allowed to extend it.
-      if (
-        walk.expiresAtMs === 0
-        && walk.orderedManifest.length > 0
-        && walk.resolvedRefs.size < walk.orderedManifest.length
-      ) {
-        walk.expiresAtMs = now() + retentionTtlMs;
-      }
-      return {
-        orderedManifestSnapshot() {
-          return immutableManifestSnapshot(walk.orderedManifest);
-        },
-        isResolved(ref: string) {
-          return walk.resolvedRefs.has(ref);
-        },
-        resolvedCount() {
-          return walk.resolvedRefs.size;
-        },
-        resolvedRefsSnapshot() {
-          return Object.freeze([...walk.resolvedRefs]);
-        },
-        suppressedMetadataRows(ref: string) {
-          return immutableQuadSnapshot(walk.suppressedMetadataRowsByRef.get(ref) ?? []);
-        },
-        markResolved(ref: string, suppressedMetadataRows: readonly Quad[] = []) {
-          if (
-            states.get(contextGraphId) !== state
-            || state.snapshotWalk !== walk
-            || !allowedRefs.has(ref)
-            || walk.resolvedRefs.has(ref)
-          ) return;
-          walk.suppressedMetadataRowsByRef.set(
-            ref,
-            immutableQuadSnapshot(suppressedMetadataRows),
-          );
-          walk.resolvedRefs.add(ref);
-          if (walk.resolvedRefs.size < walk.orderedManifest.length) {
-            walk.expiresAtMs = now() + retentionTtlMs;
-          }
-        },
-      };
+      return walk;
     },
   };
 
@@ -597,27 +544,4 @@ export function createSelectedSwmMetaFetcher(options: {
     },
   });
   return fetcher;
-}
-
-function manifestsEqual(
-  left: readonly PublicSnapshotMetadata[],
-  right: readonly PublicSnapshotMetadata[],
-): boolean {
-  return left.length === right.length
-    && left.every((snapshot, index) => {
-      const candidate = right[index];
-      return snapshot.ref === candidate.ref
-        && snapshot.digest === candidate.digest
-        && snapshot.count === candidate.count;
-    });
-}
-
-function immutableManifestSnapshot(
-  manifest: readonly PublicSnapshotMetadata[],
-): readonly PublicSnapshotMetadata[] {
-  return Object.freeze(manifest.map((snapshot) => Object.freeze({ ...snapshot })));
-}
-
-function immutableQuadSnapshot(quads: readonly Quad[]): readonly Quad[] {
-  return Object.freeze(quads.map((quad) => Object.freeze({ ...quad })));
 }
