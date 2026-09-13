@@ -853,6 +853,27 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(internals.subscribedContextGraphs.size).toBe(0);
   });
 
+  it('keeps the construction-time reconcile switch after the environment changes', async () => {
+    const previous = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+    try {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({
+        name: 'FrozenVmReconcileSwitch',
+        chainAdapter: chain,
+        syncReconcilerEnabled: false,
+      });
+      stubNode(agent);
+
+      process.env.DKG_SYNC_RECONCILER_ENABLED = '1';
+      expect((agent as any).syncLifecycleSwitches.syncReconcilerEnabled).toBe(false);
+      expect((agent as any).vmReconcileEnabled()).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+      else process.env.DKG_SYNC_RECONCILER_ENABLED = previous;
+    }
+  });
+
   it('invalidates a selected-only target when operator scope is removed during binding resolution', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'Rfc64SelectedVmScopeFence', chainAdapter: chain });

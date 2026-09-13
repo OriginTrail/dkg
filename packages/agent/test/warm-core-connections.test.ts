@@ -11,6 +11,8 @@ import {
 } from '../src/p2p/core-peer-discovery.js';
 
 describe('findCorePeerIds', () => {
+  const authenticatePeerAddress = async () => true;
+
   it('returns a deterministic recovery order for an unordered registry result', async () => {
     const signal = new AbortController().signal;
     const findAgents = async () => [
@@ -27,6 +29,7 @@ describe('findCorePeerIds', () => {
       signal,
       maxCandidates: 10,
       eligibilityConcurrency: 2,
+      authenticatePeerAddress,
       classifyMembership: async () => 'member',
       membershipPolicy: 'proof-required',
     }))
@@ -42,6 +45,7 @@ describe('findCorePeerIds', () => {
       selfPeerId: 'self',
       maxCandidates: 10,
       eligibilityConcurrency: 2,
+      authenticatePeerAddress,
       classifyMembership: async (agent) => (
         agent.agentAddress === '0xeligible' ? 'member' : 'non-member'
       ),
@@ -57,6 +61,7 @@ describe('findCorePeerIds', () => {
       findAgents: async () => [],
       selfPeerId: 'self',
       ...bounds,
+      authenticatePeerAddress,
       classifyMembership: async () => 'member',
       membershipPolicy: 'proof-required',
     })).rejects.toThrow(/positive integer/);
@@ -80,6 +85,7 @@ describe('findCorePeerIds', () => {
       maxCandidates: 40,
       eligibilityConcurrency: 4,
       membershipPolicy: 'proof-required',
+      authenticatePeerAddress,
       classifyMembership: async () => {
         calls += 1;
         active += 1;
@@ -108,6 +114,7 @@ describe('findCorePeerIds', () => {
       eligibilityConcurrency: 3,
       signal: controller.signal,
       membershipPolicy: 'proof-required',
+      authenticatePeerAddress,
       classifyMembership: async () => {
         calls += 1;
         return new Promise(() => {});
@@ -127,6 +134,7 @@ describe('findCorePeerIds', () => {
     controller.abort(reason);
     const findAgents = vi.fn(async () => [{ peerId: 'core-a', nodeRole: 'core' }]);
     const classifyMembership = vi.fn(async () => 'member' as const);
+    const authenticate = vi.fn(async () => true);
 
     await expect(findCorePeerIds({
       findAgents,
@@ -135,10 +143,74 @@ describe('findCorePeerIds', () => {
       eligibilityConcurrency: 3,
       signal: controller.signal,
       membershipPolicy: 'proof-required',
+      authenticatePeerAddress: authenticate,
       classifyMembership,
     })).rejects.toBe(reason);
     expect(findAgents).not.toHaveBeenCalled();
+    expect(authenticate).not.toHaveBeenCalled();
     expect(classifyMembership).not.toHaveBeenCalled();
+  });
+
+  it('removes every caller-abort listener after successful discovery', async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+
+    await expect(findCorePeerIds({
+      findAgents: async () => [{ peerId: 'core-a', nodeRole: 'core' }],
+      selfPeerId: 'self',
+      maxCandidates: 2,
+      eligibilityConcurrency: 1,
+      signal: controller.signal,
+      membershipPolicy: 'proof-required',
+      authenticatePeerAddress,
+      classifyMembership: async () => 'member',
+    })).resolves.toEqual(['core-a']);
+
+    expect(add).toHaveBeenCalledTimes(3);
+    expect(remove).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects a peer that borrows a staked address without its wallet binding', async () => {
+    const classifyMembership = vi.fn(async () => 'member' as const);
+    await expect(findCorePeerIds({
+      findAgents: async () => [{
+        peerId: 'attacker-peer',
+        nodeRole: 'core',
+        agentAddress: '0x00000000000000000000000000000000000000aa',
+      }],
+      selfPeerId: 'self',
+      maxCandidates: 10,
+      eligibilityConcurrency: 2,
+      membershipPolicy: 'proof-required',
+      authenticatePeerAddress: async () => false,
+      classifyMembership,
+    })).resolves.toEqual([]);
+    expect(classifyMembership).not.toHaveBeenCalled();
+  });
+
+  it('filters role before applying the Core candidate cap', async () => {
+    const findAgents = vi.fn(async (options: { nodeRole: 'core'; limit: number }) => {
+      expect(options).toMatchObject({ nodeRole: 'core', limit: 2 });
+      // Defensive local filtering still protects callers backed by an older or
+      // non-conforming directory implementation.
+      return [
+        { peerId: 'edge-a', nodeRole: 'edge' },
+        { peerId: 'edge-b', nodeRole: 'edge' },
+        { peerId: 'edge-c', nodeRole: 'edge' },
+        { peerId: 'core-a', nodeRole: 'core' },
+        { peerId: 'core-b', nodeRole: 'core' },
+      ];
+    });
+    await expect(findCorePeerIds({
+      findAgents,
+      selfPeerId: 'self',
+      maxCandidates: 2,
+      eligibilityConcurrency: 2,
+      membershipPolicy: 'proof-required',
+      authenticatePeerAddress,
+      classifyMembership: async () => 'member',
+    })).resolves.toEqual(['core-a', 'core-b']);
   });
 
   it('makes legacy warm and proof-required unknown-evidence policies explicit', () => {

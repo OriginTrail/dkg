@@ -210,6 +210,7 @@ import {
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
+import { networkPeerBindingScope } from './p2p/network-identity-proof.js';
 import { createNetworkAdmissionRouterPolicy } from './p2p/network-admission-protocol-adapter.js';
 import {
   createCGMemberEnumerator,
@@ -276,6 +277,7 @@ import {
 import {
   acceptsCoreMembership,
   findCorePeerIds,
+  type CorePeerDirectoryEntry,
   type CoreMembershipEvidence,
 } from './p2p/core-peer-discovery.js';
 import {
@@ -2203,6 +2205,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       identity: this.config.networkIdentity,
       selfPeerId: this.node.peerId.toString(),
       sign: (payload) => this.wallet.sign(payload),
+      createPeerAgentBinding: async ({ request, responderPeerId }) => {
+        const defaultAddress = this.defaultAgentAddress;
+        if (!defaultAddress) return undefined;
+        const record = this.localAgents.get(defaultAddress)
+          ?? [...this.localAgents.values()].find(({ agentAddress }) =>
+            agentAddress.toLowerCase() === defaultAddress.toLowerCase());
+        if (!record?.privateKey) return undefined;
+        return signAgentDelegation({
+          agentPrivateKey: record.privateKey,
+          agentAddress: record.agentAddress,
+          scope: networkPeerBindingScope({
+            nonce: request.nonce,
+            requesterPeerId: request.requesterPeerId,
+            networkId: request.networkId,
+          }),
+          // The request nonce supplies freshness and is part of the signed
+          // scope. A zero timestamp avoids making peer authentication depend
+          // on cross-node wall-clock synchronization.
+          issuedAtMs: 0,
+          delegateePeerId: responderPeerId,
+        });
+      },
       sendIdentityProbe: (peerId, data, options) =>
         this.router.send(peerId, PROTOCOL_NETWORK_IDENTITY, data, options),
       getConnections: () => this.node.libp2p.getConnections() as any,
@@ -4312,6 +4336,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             maxCandidates: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
             eligibilityConcurrency: CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
             signal,
+            authenticatePeerAddress: (agent, candidateSignal) =>
+              this.authenticateCorePeerAddress(agent, candidateSignal),
             // The broad proof-time fallback must be chain-scoped. Profiles
             // without an operational address or a positive membership read do
             // not consume the challenge deadline merely by claiming a Core
@@ -5755,6 +5781,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return await isShardingTableMember(identityId) ? 'member' : 'non-member';
     } catch {
       return 'indeterminate';
+    }
+  }
+
+  /**
+   * Require the candidate's live network-identity handshake to contain a
+   * wallet signature binding the advertised address to this exact peer ID.
+   * A staked address copied into another peer's registry row therefore cannot
+   * enter the proof-time repair roster.
+   */
+  async authenticateCorePeerAddress(
+    this: DKGAgent,
+    agent: CorePeerDirectoryEntry,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (!agent.agentAddress) return false;
+    try {
+      return await this.networkAdmissionCoordinator.ensurePeerAgentBinding(
+        agent.peerId,
+        agent.agentAddress,
+        createOperationContext('sync'),
+        { signal },
+      );
+    } catch {
+      return false;
     }
   }
 

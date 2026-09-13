@@ -34,7 +34,11 @@ interface RepairAgentHarness {
     legacyTripleResolved?: boolean;
   }>;
   discovery: {
-    findAgents: (options: { signal: AbortSignal; limit: number }) => Promise<RegistryAgent[]>;
+    findAgents: (options: {
+      signal: AbortSignal;
+      limit: number;
+      nodeRole: 'core';
+    }) => Promise<RegistryAgent[]>;
   };
   vmReconcileObservedCandidatePeerIds: (contextGraphId: string) => string[];
   preferredSyncPeers: Map<string, string>;
@@ -53,6 +57,10 @@ interface RepairAgentHarness {
   classifyShardingTableCore: (
     agentAddress: string | undefined,
   ) => Promise<'member' | 'non-member' | 'unavailable' | 'indeterminate'>;
+  authenticateCorePeerAddress: (
+    agent: RegistryAgent,
+    signal?: AbortSignal,
+  ) => Promise<boolean>;
   syncExactKnowledgeAssetsFromPeerDetailed: (
     peerId: string,
     contextGraphId: string,
@@ -97,6 +105,7 @@ function makeRepairAgent(overrides: Partial<RepairAgentHarness> = {}): RepairAge
     ensurePeerAdmittedForRecovery: vi.fn(async () => true),
     ensurePeerConnected: vi.fn(async () => undefined),
     waitForSyncProtocol: vi.fn(async () => true),
+    authenticateCorePeerAddress: vi.fn(async () => true),
     classifyShardingTableCore: vi.fn(async () => 'member'),
     syncExactKnowledgeAssetsFromPeerDetailed: vi.fn(async () => ({
       disposition: 'clean-absent',
@@ -265,6 +274,7 @@ describe('Random Sampling lifecycle repair adapter', () => {
     expect(findAgents).toHaveBeenCalledWith({
       signal: expect.any(AbortSignal),
       limit: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+      nodeRole: 'core',
     });
     const candidateMessage = vi.mocked(agentLike.log.info).mock.calls
       .map(([, message]) => message)
@@ -417,6 +427,38 @@ describe('Random Sampling lifecycle repair adapter', () => {
     );
     expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
       .toEqual(['peer-eligible']);
+  });
+
+  it('excludes a staked address when the live peer cannot authenticate the binding', async () => {
+    const classifyShardingTableCore = vi.fn(async () => 'member' as const);
+    const authenticateCorePeerAddress = vi.fn(async (agent: RegistryAgent) =>
+      agent.peerId === 'peer-authenticated');
+    const agentLike = makeRepairAgent({
+      discovery: {
+        findAgents: vi.fn(async () => [
+          {
+            peerId: 'peer-borrowed-address',
+            nodeRole: 'core',
+            agentAddress: '0x00000000000000000000000000000000000000aa',
+          },
+          {
+            peerId: 'peer-authenticated',
+            nodeRole: 'core',
+            agentAddress: '0x00000000000000000000000000000000000000bb',
+          },
+        ]),
+      },
+      authenticateCorePeerAddress,
+      classifyShardingTableCore,
+      syncExactKnowledgeAssetsFromPeerDetailed: foundAt(['peer-authenticated']),
+    });
+
+    await expect(runLifecycleRepair(agentLike)).resolves.toEqual(EMPTY_MATERIAL);
+    expect(authenticateCorePeerAddress).toHaveBeenCalledTimes(2);
+    expect(classifyShardingTableCore).toHaveBeenCalledOnce();
+    expect(classifyShardingTableCore).toHaveBeenCalledWith(
+      '0x00000000000000000000000000000000000000bb',
+    );
   });
 
   it('falls back to the Core roster when curator discovery fails', async () => {

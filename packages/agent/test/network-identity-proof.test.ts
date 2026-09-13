@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { ed25519Sign } from '@origintrail-official/dkg-core';
+import { ethers } from 'ethers';
+import { signAgentDelegation } from '../src/auth/agent-delegation.js';
 import {
   makeNetworkIdentityRequest,
+  networkPeerBindingScope,
   parseNetworkIdentityResponse,
   signNetworkIdentityResponse,
   verifyNetworkIdentityResponse,
@@ -19,6 +22,8 @@ const localIdentity = {
   genesisId: 'base-testnet',
   chainId: 'base:84532',
 };
+const AGENT_PRIVATE_KEY = `0x${'11'.repeat(32)}`;
+const AGENT_ADDRESS = new ethers.Wallet(AGENT_PRIVATE_KEY).address;
 
 async function signedResponse(identity = localIdentity, nonce = 'nonce-1') {
   const request = makeNetworkIdentityRequest({
@@ -56,6 +61,47 @@ describe('network identity proof', () => {
       localIdentity,
       nonce: 'nonce-1',
       requesterPeerId: 'requester-peer',
+    })).resolves.toEqual({ ok: true });
+  });
+
+  it('returns an authenticated wallet address only for a fresh binding to this peer', async () => {
+    const nonce = 'binding-nonce';
+    const requesterPeerId = 'requester-peer';
+    const request = makeNetworkIdentityRequest({ nonce, requesterPeerId, identity: localIdentity });
+    const peerAgentBinding = await signAgentDelegation({
+      agentPrivateKey: AGENT_PRIVATE_KEY,
+      agentAddress: AGENT_ADDRESS,
+      scope: networkPeerBindingScope({ nonce, requesterPeerId, networkId: localIdentity.networkId }),
+      issuedAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+      delegateePeerId: REMOTE_PEER_ID,
+    });
+    const response = await signNetworkIdentityResponse({
+      request,
+      identity: localIdentity,
+      responderPeerId: REMOTE_PEER_ID,
+      sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      peerAgentBinding,
+    });
+
+    await expect(verifyNetworkIdentityResponse({
+      response,
+      remotePeerId: REMOTE_PEER_ID,
+      localIdentity,
+      nonce,
+      requesterPeerId,
+    })).resolves.toEqual({ ok: true, authenticatedAgentAddress: AGENT_ADDRESS });
+
+    const borrowed = {
+      ...response,
+      peerAgentBinding: { ...peerAgentBinding, agentAddress: ethers.Wallet.createRandom().address },
+    };
+    await expect(verifyNetworkIdentityResponse({
+      response: borrowed,
+      remotePeerId: REMOTE_PEER_ID,
+      localIdentity,
+      nonce,
+      requesterPeerId,
     })).resolves.toEqual({ ok: true });
   });
 

@@ -4,6 +4,10 @@ import {
   PROTOCOL_NETWORK_IDENTITY,
   type DkgNetworkIdentity,
 } from '@origintrail-official/dkg-core';
+import {
+  verifyAgentDelegation,
+  type SignedAgentDelegation,
+} from '../auth/agent-delegation.js';
 import { canonicalPeerIdString } from './peer-id.js';
 
 export const NETWORK_IDENTITY_PROOF_VERSION = 1;
@@ -27,6 +31,8 @@ export interface NetworkIdentityResponse {
   networkConfigName?: string;
   proofKind: typeof NETWORK_IDENTITY_PROOF_KIND;
   signature: string;
+  /** Optional EVM-wallet proof binding the responder's libp2p peer to its agent address. */
+  peerAgentBinding?: SignedAgentDelegation;
 }
 
 export interface VerifyNetworkIdentityResponseInput {
@@ -40,6 +46,21 @@ export interface VerifyNetworkIdentityResponseInput {
 export interface VerifyNetworkIdentityResponseResult {
   ok: boolean;
   reason?: string;
+  authenticatedAgentAddress?: string;
+}
+
+/** Fresh, network-scoped delegation scope used by the optional wallet binding. */
+export function networkPeerBindingScope(input: {
+  nonce: string;
+  requesterPeerId: string;
+  networkId: string;
+}): string {
+  return JSON.stringify({
+    purpose: 'dkg.network-peer-binding.v1',
+    networkId: input.networkId,
+    nonce: input.nonce,
+    requesterPeerId: input.requesterPeerId,
+  });
 }
 
 export function makeNetworkIdentityRequest(input: {
@@ -82,6 +103,7 @@ export async function signNetworkIdentityResponse(input: {
   identity: DkgNetworkIdentity;
   responderPeerId: string;
   sign: (payload: Uint8Array) => Promise<Uint8Array>;
+  peerAgentBinding?: SignedAgentDelegation;
 }): Promise<NetworkIdentityResponse> {
   const payload = networkIdentityProofPayload({
     nonce: input.request.nonce,
@@ -101,6 +123,9 @@ export async function signNetworkIdentityResponse(input: {
     networkConfigName: input.identity.networkConfigName,
     proofKind: NETWORK_IDENTITY_PROOF_KIND,
     signature: Buffer.from(signature).toString('base64'),
+    ...(input.peerAgentBinding === undefined
+      ? {}
+      : { peerAgentBinding: input.peerAgentBinding }),
   };
 }
 
@@ -138,6 +163,9 @@ export function parseNetworkIdentityResponse(value: unknown): NetworkIdentityRes
     networkConfigName: isNonEmptyString(response.networkConfigName) ? response.networkConfigName : undefined,
     proofKind: NETWORK_IDENTITY_PROOF_KIND,
     signature: response.signature,
+    ...(isRecord(response.peerAgentBinding)
+      ? { peerAgentBinding: response.peerAgentBinding as unknown as SignedAgentDelegation }
+      : {}),
   };
 }
 
@@ -185,9 +213,36 @@ export async function verifyNetworkIdentityResponse(
   });
   const signature = Buffer.from(response.signature, 'base64');
   const valid = await ed25519Verify(signature, payload, publicKey);
-  return valid ? { ok: true } : { ok: false, reason: 'invalid signature' };
+  if (!valid) return { ok: false, reason: 'invalid signature' };
+
+  // This extension is deliberately optional so upgraded nodes continue to
+  // admit legacy peers. Security-sensitive callers (such as proof-time Core
+  // discovery) require authenticatedAgentAddress and therefore fail closed
+  // for a legacy or malformed binding without breaking the base overlay.
+  if (response.peerAgentBinding) {
+    try {
+      const binding = verifyAgentDelegation(response.peerAgentBinding, {
+        expectedScope: networkPeerBindingScope({
+          nonce: input.nonce,
+          requesterPeerId: input.requesterPeerId,
+          networkId: response.networkId,
+        }),
+      });
+      if (!binding.delegateePeerId) return { ok: true };
+      const boundPeerId = canonicalPeerIdString(binding.delegateePeerId);
+      if (boundPeerId !== remotePeerId) return { ok: true };
+      return { ok: true, authenticatedAgentAddress: binding.agentAddress };
+    } catch {
+      return { ok: true };
+    }
+  }
+  return { ok: true };
 }
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

@@ -7,10 +7,12 @@ import {
 import { NetworkAdmissionService } from './network-admission.js';
 import {
   makeNetworkIdentityRequest,
+  type NetworkIdentityRequest,
   parseNetworkIdentityRequest,
   signNetworkIdentityResponse,
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
+import type { SignedAgentDelegation } from '../auth/agent-delegation.js';
 import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 
 export interface NetworkAdmissionConnection {
@@ -24,6 +26,10 @@ export interface NetworkAdmissionCoordinatorOptions {
   identity?: DkgNetworkIdentity;
   selfPeerId: string;
   sign: (payload: Uint8Array) => Promise<Uint8Array>;
+  createPeerAgentBinding?: (input: {
+    request: NetworkIdentityRequest;
+    responderPeerId: string;
+  }) => Promise<SignedAgentDelegation | undefined>;
   sendIdentityProbe: (
     peerId: string,
     data: Uint8Array,
@@ -46,14 +52,22 @@ export interface NetworkAdmissionAttemptOptions {
 
 interface NetworkAdmissionAttemptPolicy {
   probeRetrySuppression: 'respect' | 'bypass';
+  requirePeerAgentBinding: boolean;
 }
 
 const AUTOMATIC_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'respect',
+  requirePeerAgentBinding: false,
 };
 
 const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
+  requirePeerAgentBinding: false,
+};
+
+const AUTHENTICATED_BINDING_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
+  probeRetrySuppression: 'respect',
+  requirePeerAgentBinding: true,
 };
 
 export interface NetworkIdentityProtocolRegistrar {
@@ -153,6 +167,7 @@ export class NetworkAdmissionCoordinator {
   private readonly identity?: DkgNetworkIdentity;
   private readonly selfPeerId: string;
   private readonly sign: (payload: Uint8Array) => Promise<Uint8Array>;
+  private readonly createPeerAgentBinding?: NetworkAdmissionCoordinatorOptions['createPeerAgentBinding'];
   private readonly sendIdentityProbe: NetworkAdmissionCoordinatorOptions['sendIdentityProbe'];
   private readonly getConnections: () => Iterable<NetworkAdmissionConnection>;
   private readonly deletePeerFromPeerStore: (peerId: string) => Promise<void>;
@@ -160,6 +175,7 @@ export class NetworkAdmissionCoordinator {
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
   private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
+  private readonly authenticatedAgentAddresses = new Map<CanonicalPeerId, string>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
@@ -168,6 +184,7 @@ export class NetworkAdmissionCoordinator {
       ? canonicalAdmissionPeerId(options.selfPeerId)
       : options.selfPeerId.trim();
     this.sign = options.sign;
+    this.createPeerAgentBinding = options.createPeerAgentBinding;
     this.sendIdentityProbe = options.sendIdentityProbe;
     this.getConnections = options.getConnections;
     this.deletePeerFromPeerStore = options.deletePeerFromPeerStore;
@@ -203,17 +220,55 @@ export class NetworkAdmissionCoordinator {
     return [...peers].filter((peer) => this.isAcceptedPeer(peer.toString()));
   }
 
+  /** Exact wallet address proven by this peer during its latest identity handshake. */
+  authenticatedAgentAddress(peerId: string): string | undefined {
+    if (!this.enabled) return undefined;
+    const canonical = canonicalAdmissionPeerId(peerId);
+    if (!this.admission.isAcceptedPeer(canonical)) return undefined;
+    return this.authenticatedAgentAddresses.get(canonical);
+  }
+
+  /** Admit the peer and require its wallet-signed binding to match the directory row. */
+  async ensurePeerAgentBinding(
+    remotePeer: string,
+    expectedAgentAddress: string,
+    ctx: OperationContext,
+    options: NetworkAdmissionAttemptOptions = {},
+  ): Promise<boolean> {
+    if (!this.enabled || !expectedAgentAddress.trim()) return false;
+    const admitted = await this.ensureAdmittedWithPolicy(
+      remotePeer,
+      ctx,
+      AUTHENTICATED_BINDING_ADMISSION_POLICY,
+      options,
+    );
+    if (!admitted) return false;
+    const authenticated = this.authenticatedAgentAddress(remotePeer);
+    return authenticated?.toLowerCase() === expectedAgentAddress.trim().toLowerCase();
+  }
+
   registerIdentityProtocol(router: NetworkIdentityProtocolRegistrar): void {
     router.register(PROTOCOL_NETWORK_IDENTITY, async (data) => {
       if (!this.enabled || !this.identity?.networkId) {
         throw new Error('network identity is not configured');
       }
       const request = parseNetworkIdentityRequest(data);
+      let peerAgentBinding: SignedAgentDelegation | undefined;
+      try {
+        peerAgentBinding = await this.createPeerAgentBinding?.({
+          request,
+          responderPeerId: this.selfPeerId,
+        });
+      } catch {
+        // The wallet extension must not make the base network-identity
+        // handshake unavailable. Callers that require it still fail closed.
+      }
       const response = await signNetworkIdentityResponse({
         request,
         identity: this.identity,
         responderPeerId: this.selfPeerId,
         sign: this.sign,
+        ...(peerAgentBinding === undefined ? {} : { peerAgentBinding }),
       });
       return new TextEncoder().encode(JSON.stringify(response));
     });
@@ -253,7 +308,13 @@ export class NetworkAdmissionCoordinator {
   ): Promise<boolean> {
     if (!this.enabled) return true;
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
-    if (this.admission.isAcceptedPeer(remotePeerId)) return true;
+    if (
+      this.admission.isAcceptedPeer(remotePeerId)
+      && (
+        !policy.requirePeerAgentBinding
+        || this.authenticatedAgentAddresses.has(remotePeerId)
+      )
+    ) return true;
     if (this.admission.isRejectedPeer(remotePeerId)) return false;
     if (options.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal.reason));
 
@@ -364,6 +425,11 @@ export class NetworkAdmissionCoordinator {
     });
     if (verdict.ok) {
       this.admission.markVerifiedSameNetwork(remotePeer);
+      if (verdict.authenticatedAgentAddress) {
+        this.authenticatedAgentAddresses.set(remotePeer, verdict.authenticatedAgentAddress);
+      } else {
+        this.authenticatedAgentAddresses.delete(remotePeer);
+      }
       return true;
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
@@ -376,6 +442,7 @@ export class NetworkAdmissionCoordinator {
     // networkId and restarts the peer re-admits without every observer node
     // restarting.
     this.admission.quarantinePeerForCooldown(remotePeer);
+    this.authenticatedAgentAddresses.delete(remotePeer);
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
     this.log?.warn(ctx, `Rejected peer ${remotePeer.slice(-8)}: ${reason}`);

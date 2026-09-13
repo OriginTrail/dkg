@@ -1,3 +1,4 @@
+import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 
 /** Minimal Agent Registry profile needed to discover a dialable Core. */
@@ -52,7 +53,7 @@ export function selectCoreAgents(
  */
 export async function findCorePeerIds(options: {
   findAgents: (
-    options: { signal?: AbortSignal; limit: number },
+    options: { signal?: AbortSignal; limit: number; nodeRole: 'core' },
   ) => Promise<readonly CorePeerDirectoryEntry[]>;
   selfPeerId: string;
   maxCandidates: number;
@@ -62,6 +63,11 @@ export async function findCorePeerIds(options: {
     agent: CorePeerDirectoryEntry,
     signal?: AbortSignal,
   ) => Promise<CoreMembershipEvidence>;
+  /** Proves the directory wallet signed a binding to this exact libp2p peer. */
+  authenticatePeerAddress: (
+    agent: CorePeerDirectoryEntry,
+    signal?: AbortSignal,
+  ) => Promise<boolean>;
   membershipPolicy: CoreMembershipPolicy;
 }): Promise<string[]> {
   if (!Number.isInteger(options.maxCandidates) || options.maxCandidates <= 0) {
@@ -73,45 +79,30 @@ export async function findCorePeerIds(options: {
   }
   const abortReason = () => options.signal?.reason
     ?? new DOMException('Core discovery aborted', 'AbortError');
-  const awaitWithAbort = async <T>(start: () => Promise<T>): Promise<T> => {
-    const signal = options.signal;
-    if (signal?.aborted) throw abortReason();
-    const pending = start();
-    if (!signal) return pending;
-    return new Promise<T>((resolve, reject) => {
-      const cleanup = () => signal.removeEventListener('abort', onAbort);
-      const onAbort = () => {
-        cleanup();
-        reject(abortReason());
-      };
-      pending.then(
-        (value) => {
-          cleanup();
-          resolve(value);
-        },
-        (error) => {
-          cleanup();
-          reject(error);
-        },
-      );
-      signal.addEventListener('abort', onAbort, { once: true });
-      // Covers an injected operation that synchronously aborts before it
-      // returns its promise and before the listener above can be installed.
-      if (signal.aborted) onAbort();
-    });
+  const awaitWithAbort = async <T>(start: (signal?: AbortSignal) => Promise<T>): Promise<T> => {
+    const value = await resolveWithinAbort(start, options.signal);
+    if (value === null) throw abortReason();
+    return value;
   };
-  const agents = await awaitWithAbort(() => options.findAgents({
-    signal: options.signal,
+  const agents = await awaitWithAbort((signal) => options.findAgents({
+    nodeRole: 'core',
+    signal,
     limit: options.maxCandidates,
   }));
   const cores = selectCoreAgents(agents, options.selfPeerId);
   const classified = await mapWithConcurrency(
     cores.slice(0, options.maxCandidates),
     options.eligibilityConcurrency,
-    async (agent) => ({
-      agent,
-      evidence: await awaitWithAbort(() => options.classifyMembership(agent, options.signal)),
-    }),
+    async (agent) => {
+      const authenticated = await awaitWithAbort((signal) =>
+        options.authenticatePeerAddress(agent, signal));
+      return {
+        agent,
+        evidence: authenticated
+          ? await awaitWithAbort((signal) => options.classifyMembership(agent, signal))
+          : 'non-member' as const,
+      };
+    },
   );
   const eligible = classified
     .filter(({ evidence }) => acceptsCoreMembership(evidence, options.membershipPolicy))

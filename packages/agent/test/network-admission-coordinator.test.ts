@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
+import { ethers } from 'ethers';
 import {
   createOperationContext,
   ed25519Sign,
@@ -16,7 +17,11 @@ import {
   translateNetworkAdmissionErrorAtProtocolBoundary,
 } from '../src/p2p/network-admission-protocol-adapter.js';
 import { NetworkAdmissionService, type NetworkAdmissionOptions } from '../src/p2p/network-admission.js';
-import { signNetworkIdentityResponse } from '../src/p2p/network-identity-proof.js';
+import { signAgentDelegation } from '../src/auth/agent-delegation.js';
+import {
+  networkPeerBindingScope,
+  signNetworkIdentityResponse,
+} from '../src/p2p/network-identity-proof.js';
 
 const REMOTE_PEER_ID = '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh';
 const REMOTE_PEER_ID_CID = peerIdFromString(REMOTE_PEER_ID).toCID().toString();
@@ -28,6 +33,8 @@ const identity = {
   networkId: 'network-a',
   genesisId: 'base-testnet',
 };
+const AGENT_PRIVATE_KEY = `0x${'11'.repeat(32)}`;
+const AGENT_ADDRESS = new ethers.Wallet(AGENT_PRIVATE_KEY).address;
 
 describe('protocol admission error boundary', () => {
   it('translates only inbound probe backoff into the core quiet-retryable type', () => {
@@ -141,6 +148,46 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.coordinator.enabled).toBe(false);
     expect(fixture.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
     expect(fixture.coordinator.filterAcceptedPeerIds([REMOTE_PEER_ID])).toEqual([REMOTE_PEER_ID]);
+  });
+
+  it('requires the live wallet binding to match the directory address', async () => {
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const peerAgentBinding = await signAgentDelegation({
+        agentPrivateKey: AGENT_PRIVATE_KEY,
+        agentAddress: AGENT_ADDRESS,
+        scope: networkPeerBindingScope({
+          nonce: request.nonce,
+          requesterPeerId: request.requesterPeerId,
+          networkId: request.networkId,
+        }),
+        issuedAtMs: Date.now(),
+        expiresAtMs: Date.now() + 60_000,
+        delegateePeerId: REMOTE_PEER_ID,
+      });
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+        peerAgentBinding,
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({ identity, sendIdentityProbe });
+
+    await expect(fixture.coordinator.ensurePeerAgentBinding(
+      REMOTE_PEER_ID,
+      AGENT_ADDRESS,
+      createOperationContext('connect'),
+    )).resolves.toBe(true);
+    expect(fixture.coordinator.authenticatedAgentAddress(REMOTE_PEER_ID)).toBe(AGENT_ADDRESS);
+    await expect(fixture.coordinator.ensurePeerAgentBinding(
+      REMOTE_PEER_ID,
+      ethers.Wallet.createRandom().address,
+      createOperationContext('connect'),
+    )).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledOnce();
   });
 
   it('keeps transport probe failures retryable instead of quarantining the peer', async () => {
