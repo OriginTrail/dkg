@@ -7,6 +7,7 @@ import { createRecoveryExecutionAdmission } from '../src/sync/requester/recovery
 import { readPublicSnapshotRecoveryResult, recoverPublicSnapshots } from '../src/sync/requester/public-snapshot-recovery.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncDeniedError, isSyncTransportFailure, toSyncDeniedError, toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { composeSyncWorkAdmission } from '../src/sync/work-admission.js';
 
 afterEach(() => vi.restoreAllMocks());
 function deferred<T>() {
@@ -63,7 +64,7 @@ function fixture(count = 8) {
   });
   const releaseAll = () => responses.forEach((response, i) => response.resolve(page(i)));
   const waitForStarted = (count: number) => vi.waitFor(() => expect(started).toHaveLength(count));
-  return { refs, payloads, responses, started, cacheReads, cache, store, deleted, ready, page, start, startSync, releaseAll, waitForStarted };
+  return { refs, payloads, responses, started, cacheReads, cache, store, deleted, ready, page, fetchSyncPages, start, startSync, releaseAll, waitForStarted };
 }
 
 it.each(['ordinary error', 'frozen error', 'primitive'] as const)('retains a timed-out sibling and round metrics after a local %s', async kind => {
@@ -147,8 +148,9 @@ it.each([false, true])('preserves direct-helper failure identity and complete ev
     return put(input);
   };
   const run = recoverPublicSnapshots({
-    snapshots: f.refs.map(ref => ({ ref, digest: ref, count: 1 })), contextGraphId: 'pool',
-    deadline: Date.now() + 60_000, store: f.store, executionBoundary: createRecoveryExecutionAdmission(),
+    entries: f.refs.map(ref => ({ snapshot: { ref, digest: ref, count: 1 }, reuse: false })), contextGraphId: 'pool',
+    workAdmission: composeSyncWorkAdmission({ deadline: Date.now() + 60_000, scope: { sharing: 'coalescible', key: 'pool' } }),
+    store: f.store, executionBoundary: createRecoveryExecutionAdmission(),
     fetchSnapshot: async snapshot => {
       const index = f.refs.indexOf(snapshot.ref); f.started.push(index); return f.responses[index]!.promise;
     },
@@ -164,7 +166,8 @@ it.each([false, true])('preserves direct-helper failure identity and complete ev
     expect(readPublicSnapshotRecoveryResult(failure)).toEqual({
       bytesReceived: 400, resumedPhases: 1, timedOutPhases: 1, completedPhases: 2,
       checkpointAdvances: 0, readySnapshots: 2, totalSnapshots: 4, missingCount: 2,
-      missingSample: [f.refs[0], f.refs[3]], completed: false, yieldedAtDeadline: false,
+      missingSample: [f.refs[0], f.refs[3]], completed: false,
+      phaseFailureCause: 'transport', localYieldFailedPhases: 0,
     });
     expect(readPublicSnapshotWalkProgress(failure)).toEqual({
       readySnapshots: 2, totalSnapshots: 4, missingCount: 2, missingSample: [f.refs[0], f.refs[3]],
@@ -226,7 +229,7 @@ it('reports missing refs in manifest order when short prefixes finish out of ord
     f.responses[0]!.resolve(f.page(0));
     f.responses[1]!.resolve(f.page(1));
     f.responses.forEach((response, i) => response.resolve(f.page(i, { quads: [] })));
-    expect(await run).toMatchObject({ readySnapshots: 2, missingCount: 14, missingSample: f.refs.slice(2, 12), completed: false, yieldedAtDeadline: false });
+    expect(await run).toMatchObject({ readySnapshots: 2, missingCount: 14, missingSample: f.refs.slice(2, 12), completed: false, phaseFailureCause: 'transport', localYieldFailedPhases: 0 });
     expect(f.cache.size).toBe(2);
     expect(f.started).toHaveLength(16);
   } finally { f.releaseAll(); await run; }
@@ -242,7 +245,10 @@ it('checks the round deadline again before dispatch after an asynchronous cache 
   try {
     await vi.waitFor(() => expect(cacheReads).toBe(4));
     now = 200; cacheGate.resolve(null);
-    expect(await run).toMatchObject({ readySnapshots: 0, missingCount: 8, yieldedAtDeadline: true, timedOutPhases: 0 });
+    expect(await run).toMatchObject({
+      readySnapshots: 0, missingCount: 8, timedOutPhases: 0,
+      localYield: true, phaseFailureCause: 'local-budget', localYieldFailedPhases: 1,
+    });
     expect(f.started).toEqual([]);
   } finally { cacheGate.resolve(null); f.releaseAll(); await run; }
 });
@@ -278,7 +284,7 @@ it('joins admitted snapshots and stops further dispatch when a fetch is incomple
     await vi.waitFor(() => expect(f.ready).toHaveBeenCalledTimes(1));
     f.releaseAll();
     expect(await run).toMatchObject({ readySnapshots: 3, missingCount: 5, timedOutPhases: 1,
-      yieldedAtDeadline: false, missingSample: [f.refs[0], ...f.refs.slice(4)] });
+      phaseFailureCause: 'transport', localYieldFailedPhases: 0, missingSample: [f.refs[0], ...f.refs.slice(4)] });
     expect(f.started).toEqual([0, 1, 2, 3]);
     expect(f.deleted).toHaveBeenCalledWith(f.refs[0]);
   } finally { f.releaseAll(); await run; }
@@ -351,4 +357,36 @@ it.each(['denied', 'transport'] as const)('preserves a later-index %s failure wh
     expect(readPublicSnapshotWalkProgress(outcome.error)).toMatchObject({ readySnapshots: 2, missingCount: 6 });
     expect(f.started).toEqual([0, 1, 2, 3]);
   } finally { f.releaseAll(); await run; }
+});
+
+it('treats a page-level local yield as its own budget decision and stops further dispatch', async () => {
+  const f = fixture(); const run = f.start();
+  try {
+    await f.waitForStarted(4);
+    f.responses[1]!.resolve(f.page(1, { completed: false, timedOut: false, localYield: true }));
+    await vi.waitFor(() => expect(f.deleted).toHaveBeenCalledWith(f.refs[1]));
+    f.responses[0]!.resolve(f.page(0)); f.responses[2]!.resolve(f.page(2)); f.responses[3]!.resolve(f.page(3));
+    expect(await run).toMatchObject({
+      readySnapshots: 3, missingCount: 5, timedOutPhases: 0, completed: false,
+      localYield: true, phaseFailureCause: 'local-budget', localYieldFailedPhases: 1,
+      missingSample: [f.refs[1], ...f.refs.slice(4)],
+    });
+    expect(f.started).toEqual([0, 1, 2, 3]);
+  } finally { f.releaseAll(); await run; }
+});
+
+it('counts prepared reuse entries as ready without cache reads, dispatch or callbacks', async () => {
+  const f = fixture(4); f.releaseAll();
+  const result = await syncPublicSnapshotsForMeta({
+    ctx: createOperationContext('sync'), remotePeerId: 'peer', contextGraphId: 'pool',
+    snapshotWalk: { entries: f.refs.map((ref, i) => ({ snapshot: { ref, digest: ref, count: 1 }, reuse: i % 2 === 0 })) },
+    deadline: Date.now() + 60_000, publicSnapshotStore: f.store, fetchSyncPages: f.fetchSyncPages,
+    deleteCheckpoint: f.deleted, setCheckpoint: () => {}, onSnapshotReady: f.ready,
+  });
+  expect(result).toMatchObject({ readySnapshots: 4, totalSnapshots: 4, completed: true, completedPhases: 2, bytesReceived: 200 });
+  expect(result).not.toHaveProperty('localYield');
+  expect(result).not.toHaveProperty('phaseFailureCause');
+  expect(f.cacheReads).toEqual([1, 3]);
+  expect(f.started).toEqual([1, 3]);
+  expect(f.ready.mock.calls.map(([snapshot, source]) => [f.refs.indexOf(snapshot.ref), source])).toEqual([[1, 'network'], [3, 'network']]);
 });

@@ -30,19 +30,28 @@ import {
   noteRpcServed,
   getRpcFailoverStats,
   _resetRpcFailoverStatsForTest,
+  withRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
+import {
+  createDaemonRpcRuntime,
+  type DaemonRouteRpcTransport,
+} from '../src/daemon/rpc-runtime.js';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import {
   loadNetworkConfig,
+  resolveRfc64CatalogActivations,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
 } from '../src/config.js';
 import {
   buildRfc64CatalogConfigurationEvidenceV1,
   handleStatusRoutes,
+  probeRpcEndpoint,
 } from '../src/daemon/routes/status.js';
+import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from
+  '../src/daemon/routes/rfc64-status-contract.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
@@ -63,12 +72,124 @@ const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
   selectedContextGraphs: [],
 };
 
+function resolveStatusActivationState(config: Record<string, unknown>) {
+  return resolveRfc64CatalogActivations(
+    config as never,
+    resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+  ).activationState;
+}
+
+describe('daemon direct RPC probe admission', () => {
+  it('bounds a diagnostic flood without queueing or displacing foreground work', async () => {
+    let hits = 0;
+    const rpc = createServer((_req, res) => {
+      hits += 1;
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl: `http://127.0.0.1:${address.port}`,
+      hubAddress: '0x1111111111111111111111111111111111111111',
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 80,
+      burstRequests: 5,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+      },
+    })!;
+    try {
+      const results = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+        probeRpcEndpoint(
+          `http://127.0.0.1:${address.port}`,
+          index,
+          runtime.routeTransport,
+        )));
+      expect(results.filter((result) => result.ok)).toHaveLength(1);
+      expect(results.filter((result) => !result.ok)).toHaveLength(19);
+      expect(results.filter((result) => result.status === 'skipped-local-capacity'))
+        .toHaveLength(19);
+      expect(hits).toBeGreaterThan(0);
+      await expect(runtime.governor.acquire('foreground')).resolves.toBeUndefined();
+      expect(runtime.governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundQueued: 0,
+        foregroundQueued: 0,
+        rejected: 19,
+      });
+      expect(runtime.drainRouteRpcUsage().byMethod.eth_blockNumber).toBe(hits);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+
+  it('cannot let sustained public diagnostics jump queued RFC-64-class work', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl,
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 20,
+        foregroundReservePercent: 80,
+        burstRequests: 5,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    })!;
+    try {
+      await withRpcRequestContext(
+        { requestClass: 'background' },
+        () => runtime.governor.acquireActiveRequest(),
+      );
+      const scheduledRfc64Admission = withRpcRequestContext(
+        { requestClass: 'background' },
+        () => runtime.governor.acquireActiveRequest(),
+      );
+      await vi.waitFor(() => expect(runtime.governor.snapshot().backgroundQueued).toBe(1));
+
+      const flood = await Promise.all(Array.from({ length: 50 }, (_, index) => (
+        probeRpcEndpoint(rpcUrl, index, runtime.routeTransport)
+      )));
+      expect(flood.every((result) => result.status === 'skipped-local-capacity')).toBe(true);
+      expect(hits).toBe(0);
+      await expect(runtime.governor.acquire('foreground')).resolves.toBeUndefined();
+      await expect(scheduledRfc64Admission).resolves.toBeUndefined();
+      expect(runtime.governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundAdmitted: 2,
+        backgroundQueued: 0,
+        rejected: 50,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
+});
+
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
   configOverrides: Record<string, unknown> = {},
   requestPath = '/api/status',
   networkOverride: RequestContext['network'] = null,
   rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
+  rfc64PublicCatalogOverride?: RequestContext['rfc64PublicCatalog'],
+  routeRpcTransport?: DaemonRouteRpcTransport,
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -86,10 +207,12 @@ async function requestStatusWithAgent(
       url,
       network: networkOverride,
       config,
-      rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
-        config as never,
-        resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
-      ),
+      rfc64CatalogActivationState: resolveStatusActivationState(config),
+      rfc64PublicCatalog: rfc64PublicCatalogOverride
+        ?? resolveRfc64PublicCatalogActivation(
+          config as never,
+          resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+        ),
       ...(rfc64CatalogOverride === undefined
         ? {}
         : { rfc64Catalog: rfc64CatalogOverride }),
@@ -108,6 +231,7 @@ async function requestStatusWithAgent(
       nodeVersion: '0.0.0-test',
       nodeCommit: '',
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+      routeRpcTransport,
     } as unknown as RequestContext);
   });
 
@@ -123,7 +247,343 @@ async function requestStatusWithAgent(
   }
 }
 
+describe('/api/chain/rpc-health partial adapter configuration', () => {
+  it('uses the governed daemon transport when rpcUrl exists without a Hub address', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl,
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 100,
+        foregroundReservePercent: 0,
+        burstRequests: 5,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    })!;
+    try {
+      expect(runtime.chainConfig).toBeUndefined();
+      const response = await requestStatusWithAgent(
+        {},
+        { chain: { type: 'evm', rpcUrl, chainId: 'evm:31337' } },
+        '/api/chain/rpc-health',
+        null,
+        undefined,
+        undefined,
+        runtime.routeTransport,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        ok: true,
+        configured: true,
+        rpcEndpointCount: 1,
+        blockNumber: 16,
+      });
+      expect(hits).toBe(1);
+      expect(runtime.governor.snapshot().backgroundAdmitted).toBe(1);
+      expect(runtime.drainRouteRpcUsage()).toMatchObject({
+        byMethod: { eth_blockNumber: 1 },
+        lifetimeTotal: 1,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+});
+
 describe('/api/status RFC-64 private recovery privacy', () => {
+  it('surfaces only the privacy-safe RFC-64 authority RPC circuit snapshot', async () => {
+    const readCircuit = vi.fn(() => ({
+      state: 'open' as const,
+      consecutiveExhaustions: 3,
+      retryAtMs: 1_893_456_000_000,
+      endpointUrl: 'https://user:pass@rpc.example',
+      requestPayload: { method: 'eth_call', params: ['private'] },
+      contextGraphId: 'private-context-graph',
+    }));
+    const response = await requestStatusWithAgent({
+      readRfc64AuthorityRpcCircuitSnapshotV1: readCircuit,
+    });
+
+    expect(response.status).toBe(200);
+    expect(readCircuit).toHaveBeenCalledOnce();
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 3,
+      retryAtMs: 1_893_456_000_000,
+    });
+    expect(Object.keys(response.body.rfc64Catalog.authorityRpcCircuit).sort()).toEqual([
+      'consecutiveExhaustions',
+      'retryAtMs',
+      'state',
+    ]);
+    expect(JSON.stringify(response.body.rfc64Catalog.authorityRpcCircuit))
+      .not.toContain('rpc.example');
+    expect(JSON.stringify(response.body.rfc64Catalog.authorityRpcCircuit))
+      .not.toContain('private-context-graph');
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'default-omitted',
+      defaultMode: 'catalog',
+    });
+  });
+
+  it.each([
+    ['unknown state', { state: 'tripped', consecutiveExhaustions: 1, retryAtMs: null }],
+    ['negative count', { state: 'open', consecutiveExhaustions: -1, retryAtMs: null }],
+    ['unsafe retry', {
+      state: 'open',
+      consecutiveExhaustions: 1,
+      retryAtMs: Number.MAX_SAFE_INTEGER + 1,
+    }],
+  ])('degrades malformed authority RPC circuit input to null: %s', async (
+    _label,
+    circuit,
+  ) => {
+    const response = await requestStatusWithAgent({
+      readRfc64AuthorityRpcCircuitSnapshotV1: () => circuit,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toBeNull();
+  });
+
+  it('exposes bounded shadow execution evidence without raw supervisor identities', async () => {
+    const shadowContextGraph =
+      '0x1111111111111111111111111111111111111111/private-shadow-status';
+    const privateProvider = '12D3KooPrivateShadowProviderMustNotLeak';
+    const privateAuthor = '0x2222222222222222222222222222222222222222';
+    const privateDigest = `0x${'33'.repeat(32)}`;
+    const readShadowExecution = vi.fn(() => ({
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 4,
+        attemptedRemovals: 1,
+        committedMutations: 3,
+        noOpMutations: 1,
+        failedMutations: 1,
+        casRetries: 2,
+        authorAddress: privateAuthor,
+        lastHeadDigest: privateDigest,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 2,
+        trackedAuthorScopes: 1,
+        pending: 0,
+        reconciled: 1,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+        repairs: [{ authorAddress: privateAuthor }],
+      },
+      receiverStaging: {
+        running: false,
+        passes: 3,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: 30,
+        lastPassCompletedAtMs: 40,
+        providers: [privateProvider],
+        lastHeadDigest: privateDigest,
+      },
+      // A route boundary must not forward unknown fields introduced by a
+      // mismatched package or unsafe test double.
+      repairs: [{ authorAddress: privateAuthor }],
+      providers: [privateProvider],
+      lastHeadDigest: privateDigest,
+    }));
+    const response = await requestStatusWithAgent(
+      { readRfc64CatalogShadowExecutionStatusV1: readShadowExecution },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [shadowContextGraph],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [shadowContextGraph],
+        rollout: {
+          killSwitch: false,
+          contextGraphModes: { [shadowContextGraph]: 'shadow' },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(readShadowExecution).toHaveBeenCalledOnce();
+    expect(response.body.rfc64Catalog.shadowExecution).toEqual({
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 4,
+        attemptedRemovals: 1,
+        committedMutations: 3,
+        noOpMutations: 1,
+        failedMutations: 1,
+        casRetries: 2,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 2,
+        trackedAuthorScopes: 1,
+        pending: 0,
+        reconciled: 1,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: 10,
+        lastPassCompletedAtMs: 20,
+      },
+      receiverStaging: {
+        running: false,
+        passes: 3,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: 30,
+        lastPassCompletedAtMs: 40,
+      },
+    });
+    const serialized = JSON.stringify(response.body.rfc64Catalog.shadowExecution);
+    expect(serialized).not.toContain(privateProvider);
+    expect(serialized).not.toContain(privateAuthor);
+    expect(serialized).not.toContain(privateDigest);
+    expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('repairs');
+    expect(response.body.rfc64Catalog.shadowExecution).not.toHaveProperty('providers');
+    expect(response.body.rfc64Catalog.shadowExecution.inventoryObserver)
+      .not.toHaveProperty('authorAddress');
+    expect(response.body.rfc64Catalog.shadowExecution.inventoryObserver)
+      .not.toHaveProperty('lastHeadDigest');
+    expect(response.body.rfc64Catalog.shadowExecution.projectionSupervisor)
+      .not.toHaveProperty('repairs');
+    expect(response.body.rfc64Catalog.shadowExecution.receiverStaging)
+      .not.toHaveProperty('providers');
+    expect(response.body.rfc64Catalog.shadowExecution.receiverStaging)
+      .not.toHaveProperty('lastHeadDigest');
+  });
+
+  it('keeps status available when a shadow provider is structurally version-skewed', async () => {
+    const response = await requestStatusWithAgent(
+      {
+        readRfc64CatalogShadowExecutionStatusV1: () => ({
+          schemaVersion: 0,
+          unknownPrivateField: 'must-not-leak',
+        }),
+      },
+      {},
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: ['shadow-version-skew'],
+        selectedPublicContextGraphs: ['shadow-version-skew'],
+        selectedPrivateContextGraphs: [],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'shadow',
+          contextGraphModes: {},
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.shadowExecution).toBeNull();
+    expect(JSON.stringify(response.body)).not.toContain('must-not-leak');
+  });
+
+  it('rejects contradictory derived shadow-safety evidence at the HTTP boundary', () => {
+    const valid = {
+      schemaVersion: 1,
+      contextGraphCount: 1,
+      legacyAuthorityRetained: true,
+      authoritativeApplyAllowed: false,
+      inventoryObserver: {
+        scope: 'process',
+        inFlight: 0,
+        attemptedUpserts: 0,
+        attemptedRemovals: 0,
+        committedMutations: 0,
+        noOpMutations: 0,
+        failedMutations: 0,
+        casRetries: 0,
+      },
+      projectionSupervisor: {
+        running: false,
+        passes: 0,
+        trackedAuthorScopes: 0,
+        pending: 0,
+        reconciled: 0,
+        noInventory: 0,
+        failed: 0,
+        lastPassStartedAtMs: null,
+        lastPassCompletedAtMs: null,
+      },
+      receiverStaging: {
+        running: false,
+        passes: 0,
+        trackedTargets: 1,
+        pending: 0,
+        staged: 1,
+        notFound: 0,
+        knownIncomplete: 0,
+        failed: 0,
+        authoritativeApplyCount: 0,
+        stagingObserved: true,
+        stageOnlyInvariantSatisfied: true,
+        lastPassStartedAtMs: null,
+        lastPassCompletedAtMs: null,
+      },
+    } as const;
+
+    expect(sanitizeRfc64CatalogShadowExecutionStatusV1({
+      ...valid,
+      receiverStaging: {
+        ...valid.receiverStaging,
+        authoritativeApplyCount: 1,
+      },
+    })).toBeNull();
+    expect(sanitizeRfc64CatalogShadowExecutionStatusV1({
+      ...valid,
+      receiverStaging: {
+        ...valid.receiverStaging,
+        stagingObserved: false,
+      },
+    })).toBeNull();
+  });
+
   it('projects live mixed edge selection without leaking private ids into public status', async () => {
     const publicContextGraph = 'runtime-selected-public';
     const privateContextGraph =
@@ -152,6 +612,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           authorityState: 'accepted',
           policySource: 'owner-signed-unregistered',
         }],
+        readRfc64AuthorityRpcCircuitSnapshotV1: () => ({
+          state: 'open',
+          consecutiveExhaustions: 2,
+          retryAtMs: 1_725_987_654_321,
+        }),
       },
       {
         rfc64PublicCatalog: {
@@ -170,6 +635,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         selectedPrivateContextGraphs: [privateContextGraph],
         rollout: {
           killSwitch: false,
+          defaultMode: 'catalog',
           contextGraphModes: {
             [publicContextGraph]: 'catalog',
             [privateContextGraph]: 'catalog',
@@ -200,6 +666,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       phase: 'bootstrapping',
       authorityState: 'accepted',
     })]);
+    expect(response.body.rfc64Catalog.authorityRpcCircuit).toEqual({
+      state: 'open',
+      consecutiveExhaustions: 2,
+      retryAtMs: 1_725_987_654_321,
+    });
     expect(response.body.rfc64Catalog.configuration).toMatchObject({
       schemaVersion: 1,
       source: 'compatibility-seed',
@@ -208,6 +679,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       activationManifestPresent: true,
       deprecatedDisabledOverride: false,
       killSwitch: false,
+      defaultMode: 'catalog',
     });
     expect(response.body.rfc64Catalog.configuration.digest)
       .toMatch(/^sha256:[0-9a-f]{64}$/u);
@@ -221,14 +693,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
   it('attests rollback configuration without exposing private CG identifiers', () => {
     const privateContextGraph =
       '0x1111111111111111111111111111111111111111/private-config-evidence';
-    const evidence = buildRfc64CatalogConfigurationEvidenceV1({
+    const evidence = buildRfc64CatalogConfigurationEvidenceV1(resolveStatusActivationState({
       rfc64Catalog: {
         rollout: { contextGraphModes: { [privateContextGraph]: 'legacy' } },
       },
-    }, {
-      killSwitch: false,
-      contextGraphModes: { [privateContextGraph]: 'legacy' },
-    });
+    }));
 
     expect(evidence).toMatchObject({
       source: 'operator-override',
@@ -239,10 +708,18 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     });
     expect(JSON.stringify(evidence)).not.toContain(privateContextGraph);
 
-    expect(buildRfc64CatalogConfigurationEvidenceV1({}, {
-      killSwitch: false,
-      contextGraphModes: {},
-    })).toMatchObject({
+    const catalogDefault = buildRfc64CatalogConfigurationEvidenceV1(resolveStatusActivationState({
+      rfc64Catalog: { rollout: { defaultMode: 'catalog' } },
+    }));
+    const legacyDefault = buildRfc64CatalogConfigurationEvidenceV1(resolveStatusActivationState({
+      rfc64Catalog: { rollout: { defaultMode: 'legacy' } },
+    }));
+    expect(catalogDefault.digest).not.toBe(legacyDefault.digest);
+    expect(JSON.stringify([catalogDefault, legacyDefault])).not.toContain(privateContextGraph);
+
+    expect(buildRfc64CatalogConfigurationEvidenceV1(
+      resolveStatusActivationState({}),
+    )).toMatchObject({
       source: 'default-omitted',
       catalogControlPresent: false,
       deprecatedPublicControlPresent: false,
@@ -250,6 +727,131 @@ describe('/api/status RFC-64 private recovery privacy', () => {
       deprecatedDisabledOverride: false,
       legacyOverrideCount: 0,
       shadowOverrideCount: 0,
+    });
+  });
+
+  it.each([
+    ['unified', { rfc64Catalog: { enabled: false } }],
+    ['deprecated', { rfc64PublicCatalog: { enabled: false } }],
+  ])('reports the effective legacy lane for an explicitly disabled %s activation', async (
+    _label,
+    configOverrides,
+  ) => {
+    const activations = resolveRfc64CatalogActivations(
+      configOverrides,
+      resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430'),
+    );
+    const response = await requestStatusWithAgent(
+      {},
+      configOverrides,
+      '/api/status',
+      null,
+      activations.catalog,
+      activations.publicCatalog,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog).toMatchObject({
+      enabled: false,
+      rollout: {
+        killSwitch: false,
+        defaultMode: 'legacy',
+        contextGraphModes: {},
+      },
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'explicit-disabled',
+      deprecatedDisabledOverride: true,
+      defaultMode: 'legacy',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
+    });
+  });
+
+  it('reports a bounded lifecycle default and its explicit canary override', async () => {
+    const canary = 'bounded-status-canary';
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        rfc64Catalog: {
+          rollout: {
+            defaultMode: 'legacy',
+            contextGraphModes: { [canary]: 'shadow' },
+          },
+        },
+      },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [],
+        selectedPublicContextGraphs: [],
+        selectedPrivateContextGraphs: [],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'legacy',
+          contextGraphModes: { [canary]: 'shadow' },
+        },
+      } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [canary]: 'shadow' },
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      source: 'operator-override',
+      defaultMode: 'legacy',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 1,
+    });
+  });
+
+  it('does not report a selected inherited mode as a per-CG override', async () => {
+    const selected = 'selected-inherited-shadow';
+    const response = await requestStatusWithAgent(
+      {},
+      { rfc64Catalog: { rollout: { defaultMode: 'shadow' } } },
+      '/api/status',
+      null,
+      {
+        enabled: true,
+        selectedContextGraphs: [selected],
+        selectedPublicContextGraphs: [selected],
+        selectedPrivateContextGraphs: [],
+        selectedContextGraphModes: { [selected]: 'shadow' },
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'shadow',
+          contextGraphModes: {},
+        },
+      } as never,
+      {
+        enabled: true,
+        selectedContextGraphs: [selected],
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {},
+        },
+      },
+    );
+
+    expect(response.body.rfc64Catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'shadow',
+      contextGraphModes: {},
+    });
+    expect(response.body.rfc64Catalog.configuration).toMatchObject({
+      defaultMode: 'shadow',
+      legacyOverrideCount: 0,
+      shadowOverrideCount: 0,
+    });
+    expect(response.body.rfc64PublicCatalog.rollout).toEqual({
+      killSwitch: false,
+      contextGraphModes: { [selected]: 'shadow' },
     });
   });
 
@@ -292,6 +894,11 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         autoPublish: {
           peers: [],
           catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        rollout: {
+          killSwitch: false,
+          defaultMode: 'catalog',
+          contextGraphModes: {},
         },
       } as never,
     );
@@ -386,8 +993,22 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         }),
       },
       {
+        rfc64Catalog: {
+          rollout: {
+            killSwitch: true,
+            contextGraphModes: {
+              [publicContextGraph]: 'shadow',
+              [privateContextGraph]: 'legacy',
+            },
+          },
+        },
         rfc64PublicCatalog: {
           enabled: true,
+          rollout: {
+            contextGraphModes: {
+              [publicContextGraph]: 'shadow',
+            },
+          },
           bootstrap: {
             acceptedPublicPolicies: [rfc64PublicCatalogPolicy(publicContextGraph)],
           },
@@ -406,6 +1027,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
         },
         rollout: {
           killSwitch: true,
+          defaultMode: 'catalog',
           contextGraphModes: {
             [publicContextGraph]: 'shadow',
             [privateContextGraph]: 'legacy',
@@ -457,6 +1079,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
     });
     expect(response.body.rfc64Catalog.rollout).toEqual({
       killSwitch: true,
+      defaultMode: 'catalog',
       contextGraphModes: {
         [publicContextGraph]: 'shadow',
         [privateContextGraph]: 'legacy',
@@ -480,6 +1103,17 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
           rpcUrls: [rpcUrl, DEAD_RPC],
           hubAddress,
           chainId: 'evm:31337',
+          // This case validates the real provider result shape, not local
+          // saturation (covered by the bounded flood case above). Give the
+          // daemon enough hermetic diagnostic capacity that unrelated startup
+          // work cannot consume the permits before this assertion runs.
+          rpcRequestBudget: {
+            maxRequestsPerSecond: 100,
+            foregroundReservePercent: 0,
+            burstRequests: 100,
+            maxQueueSize: 100,
+            startupJitterMs: 0,
+          },
         },
       },
     });
@@ -530,13 +1164,15 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
 
     // Primary = the real Hardhat node: ok with a REAL block number.
     const primary = body.rpcs.find((p: any) => p.role === 'primary');
-    expect(primary.ok).toBe(true);
+    expect(primary.ok, JSON.stringify(body)).toBe(true);
+    expect(primary.status).toBe('healthy');
     expect(typeof primary.blockNumber).toBe('number');
     expect(primary.blockNumber).toBeGreaterThanOrEqual(0);
 
     // Backup = the dead endpoint: a REAL connection failure, sanitized.
     const backup = body.rpcs.find((p: any) => p.role === 'backup');
     expect(backup.ok).toBe(false);
+    expect(backup.status).toBe('unhealthy');
     expect(backup.blockNumber).toBeNull();
     expect(backup.error).toBe('RPC health probe failed');
 
@@ -946,6 +1582,7 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'mock' },
         },
+        rfc64CatalogActivationState: resolveStatusActivationState({}),
         rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: {
@@ -1019,6 +1656,7 @@ describe('/api/status selected overlay details', () => {
               chainId: 'evm:31337',
             },
           },
+          rfc64CatalogActivationState: resolveStatusActivationState({}),
           rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
           startedAt: Date.now(),
           agent: {
@@ -1081,6 +1719,7 @@ describe('/api/status selected overlay details', () => {
           nodeRole: 'edge',
           chain: { type: 'evm', rpcUrl: 'http://127.0.0.1:9', hubAddress: `0x${'ab'.repeat(20)}`, chainId: 'evm:31337' },
         },
+        rfc64CatalogActivationState: resolveStatusActivationState({}),
         rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
         startedAt: Date.now(),
         agent: { ensureIdentity: async () => { throw err; } },

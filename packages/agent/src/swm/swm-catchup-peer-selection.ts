@@ -1,3 +1,5 @@
+import { readSharedMemoryPhaseFailureAttribution } from '../sync/shared-memory-diagnostics.js';
+
 export type SwmCatchupPeerOutcome = 'good' | 'empty' | 'denied' | 'unsupported' | 'transportFailed';
 
 export const SWM_CATCHUP_PEER_GOOD_TTL_MS = 10 * 60_000;
@@ -141,32 +143,61 @@ export function createSwmCatchupPeerSelector(options?: SwmCatchupPeerSelectorOpt
   return new SwmCatchupPeerSelector(options);
 }
 
-export function classifySwmCatchupPeerOutcome(input: {
+interface SwmCatchupPeerTelemetry {
   insertedTriples?: number;
   fetchedDataTriples?: number;
   fetchedMetaTriples?: number;
   deniedPhases?: number;
   failedPeers?: number;
   failedPhases?: number;
+  localYieldFailedPhases?: number;
   timedOutPhases?: number;
   backoffWorthyFailures?: number;
   errorMessage?: string;
-}): SwmCatchupPeerOutcome {
+}
+
+export type SwmCatchupPeerOutcomeInput = SwmCatchupPeerTelemetry & {
+  /** A local scheduler decision is not itself peer-health evidence. */
+  localYield?: true;
+};
+
+export function classifySwmCatchupPeerOutcome(
+  input: SwmCatchupPeerTelemetry & { localYield?: never },
+): SwmCatchupPeerOutcome;
+export function classifySwmCatchupPeerOutcome(
+  input: SwmCatchupPeerOutcomeInput,
+): SwmCatchupPeerOutcome | undefined;
+export function classifySwmCatchupPeerOutcome(
+  input: SwmCatchupPeerOutcomeInput,
+): SwmCatchupPeerOutcome | undefined {
   if ((input.insertedTriples ?? 0) > 0 || (input.fetchedDataTriples ?? 0) > 0 || (input.fetchedMetaTriples ?? 0) > 0) {
     return 'good';
   }
   if ((input.deniedPhases ?? 0) > 0 || isDeniedMessage(input.errorMessage)) {
     return 'denied';
   }
+  const failedPhases = input.failedPhases ?? 0;
   if (
     input.errorMessage ||
     (input.failedPeers ?? 0) > 0 ||
-    (input.failedPhases ?? 0) > 0 ||
     (input.timedOutPhases ?? 0) > 0 ||
     (input.backoffWorthyFailures ?? 0) > 0
   ) {
     return 'transportFailed';
   }
+  const attribution = readSharedMemoryPhaseFailureAttribution(input);
+  if (attribution) {
+    if (attribution.transport > 0 || attribution.materialization > 0) {
+      return 'transportFailed';
+    }
+    if (attribution.localBudget > 0 || input.localYield) return undefined;
+    return 'empty';
+  }
+  // Compatibility edge for older producers that expose only the public
+  // counters. Canonical in-process results take the typed branch above.
+  const localYieldFailedPhases = input.localYield ? input.localYieldFailedPhases ?? 0 : 0;
+  if (failedPhases > localYieldFailedPhases) return 'transportFailed';
+  if (input.localYield) return undefined;
   return 'empty';
 }
 

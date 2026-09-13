@@ -56,5 +56,5 @@ for (const fetchConcurrency of limits) {
   if (active !== 0 || peak > fetchConcurrency || snapshots.size !== result.readySnapshots) throw new Error('Pool ownership/accounting mismatch');
   console.log(JSON.stringify({ fetchConcurrency, elapsedMs: Math.round(performance.now() - started), requests, peakRequests: peak,
     ready: result.readySnapshots, missing: result.missingCount, completed: result.completed,
-    yieldedAtDeadline: result.yieldedAtDeadline, peerTimeouts: result.timedOutPhases }));
+    localYield: result.localYield === true, peerTimeouts: result.timedOutPhases }));
 }

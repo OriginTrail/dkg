@@ -360,7 +360,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -2415,6 +2414,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         ]);
         return { ok: true, value };
       } catch (error) {
+        // Aborting the caller can make a downstream keyed single-flight reject
+        // first with its own abandonment error. Once this budget controller has
+        // fired, the observable outcome of the operation is still the timeout
+        // that caused the cancellation, regardless of which rejection wins the
+        // Promise.race microtask ordering.
+        if (controller.signal.aborted && controller.signal.reason === timeoutError) {
+          return { ok: false, error: timeoutError };
+        }
+        // Internal cancellation from an abandoned shared enrichment is a
+        // degraded optional answer, not an RPC failure for the whole listing.
+        // Required scans still rethrow this result at their call sites.
+        if (error instanceof Error && error.name === 'AbortError') {
+          return { ok: false, error };
+        }
         if (!(error instanceof ListContextGraphsBudgetExceeded)) {
           throw error;
         }

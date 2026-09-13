@@ -15,13 +15,29 @@
  * 200. Runs in the standard cli lane against the shared Hardhat node.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startLiveDaemon, stopLiveDaemon, postJson, type LiveDaemon } from '../../helpers/live-daemon.js';
+import { getSharedContext } from '../../../../chain/test/evm-test-context.js';
+import {
+  startLiveDaemon,
+  stopLiveDaemon,
+  postJson,
+  type LiveDaemon,
+} from '../../helpers/live-daemon.js';
 
 describe('/api/query error mapping (real daemon)', () => {
   let daemon: LiveDaemon;
 
   beforeAll(async () => {
-    daemon = await startLiveDaemon();
+    const { rpcUrl, hubAddress } = getSharedContext();
+    daemon = await startLiveDaemon({
+      extraConfig: {
+        chain: {
+          type: 'evm',
+          rpcUrl,
+          hubAddress,
+          chainId: 'evm:31337',
+        },
+      },
+    });
   }, 120_000);
 
   afterAll(async () => {

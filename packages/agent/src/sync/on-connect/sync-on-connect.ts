@@ -55,9 +55,65 @@ export type SyncOnConnectPeerOutcome =
       progress: boolean;
     };
 
-export interface SyncOnConnectContext {
+export type ReleasePeerSyncLease = () => void;
+
+/** Atomic ownership of one peer's sync lane. */
+export interface PeerSyncLease {
+  tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null;
+}
+
+/** Standalone lease owner for focused workflow tests. */
+export class InMemoryPeerSyncLease implements PeerSyncLease {
+  readonly #activePeers = new Set<string>();
+
+  constructor(initialPeers: Iterable<string> = []) {
+    for (const peerId of initialPeers) this.#activePeers.add(peerId);
+  }
+
+  tryAcquirePeer(peerId: string): ReleasePeerSyncLease | null {
+    return acquireSetPeerSyncLease(this.#activePeers, peerId);
+  }
+
+  isHeld(peerId: string): boolean { return this.#activePeers.has(peerId); }
+  get activeCount(): number { return this.#activePeers.size; }
+  clear(): void { this.#activePeers.clear(); }
+}
+
+function acquireSetPeerSyncLease(peers: Set<string>, peerId: string): ReleasePeerSyncLease | null {
+  if (peers.has(peerId)) return null;
+  peers.add(peerId);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    peers.delete(peerId);
+  };
+}
+
+interface CompatiblePeerSyncContext {
+  /** Omitted by legacy callers whose invocation runs until it settles. */
+  signal?: AbortSignal;
+  syncingPeers: PeerSyncLease | Set<string>;
+}
+
+interface SessionPeerSyncContext {
+  signal: AbortSignal;
+  syncingPeers: PeerSyncLease;
+}
+
+/** Normalize ownership once at the published helper boundary. */
+function admitPeerSyncContext(context: CompatiblePeerSyncContext): SessionPeerSyncContext {
+  const peers = context.syncingPeers;
+  return {
+    signal: context.signal ?? new AbortController().signal,
+    syncingPeers: 'tryAcquirePeer' in peers
+      ? peers
+      : { tryAcquirePeer: peerId => acquireSetPeerSyncLease(peers, peerId) },
+  };
+}
+
+export interface SyncOnConnectContext extends CompatiblePeerSyncContext {
   remotePeer: string;
-  syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2?: Set<string>;
@@ -94,15 +150,17 @@ export interface SyncOnConnectContext {
   onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
+/** Every continuation inside an admitted session has an explicit lifetime and lease owner. */
+export type SessionSyncOnConnectContext = SyncOnConnectContext & SessionPeerSyncContext;
+
 /**
  * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectContext}, this
  * shape cannot express durable, discovery, or ordinary shared-memory work, so
  * a selected retry cannot fall through when the broad on-connect workflow is
  * changed later.
  */
-interface SelectedSharedMemoryRetryContext {
+interface SelectedSharedMemoryRetryContext extends CompatiblePeerSyncContext {
   remotePeer: string;
-  syncingPeers: Set<string>;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   selectedSharedMemoryLane: SelectedSharedMemorySyncLane;
   logInfo: (ctx: OperationContext, message: string) => void;
@@ -199,9 +257,15 @@ function classifySyncResult(
 export async function runSelectedSharedMemoryRetry(
   context: SelectedSharedMemoryRetryContext,
 ): Promise<SyncOnConnectOutcome> {
+  return runSessionSelectedSharedMemoryRetry(context, admitPeerSyncContext(context));
+}
+
+async function runSessionSelectedSharedMemoryRetry(
+  context: SelectedSharedMemoryRetryContext,
+  { signal, syncingPeers }: SessionPeerSyncContext,
+): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
-    syncingPeers,
     getPeerProtocols,
     selectedSharedMemoryLane,
     logInfo,
@@ -209,12 +273,16 @@ export async function runSelectedSharedMemoryRetry(
   const ctx = createOperationContext('sync');
   const shortPeer = remotePeer.slice(-8);
 
-  if (syncingPeers.has(remotePeer)) return 'already-syncing';
-  syncingPeers.add(remotePeer);
+  signal.throwIfAborted();
+  const releasePeerLease = syncingPeers.tryAcquirePeer(remotePeer);
+  if (releasePeerLease === null) return 'already-syncing';
 
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
-      return await step();
+      signal.throwIfAborted();
+      const result = await step();
+      signal.throwIfAborted();
+      return result;
     } catch (err) {
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
@@ -222,6 +290,7 @@ export async function runSelectedSharedMemoryRetry(
 
   try {
     const protocols = await getPeerProtocols(remotePeer);
+    signal.throwIfAborted();
     if (!protocols.includes(PROTOCOL_SYNC)) {
       logInfo(
         ctx,
@@ -241,6 +310,7 @@ export async function runSelectedSharedMemoryRetry(
       `Retrying ${admittedWork.contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
     );
     const selected = await admittedWork.syncFromPeer();
+    signal.throwIfAborted();
     const accounting = classifySyncResult(
       selected.shared,
       'shared',
@@ -279,16 +349,22 @@ export async function runSelectedSharedMemoryRetry(
     }
     return 'synced';
   } finally {
-    syncingPeers.delete(remotePeer);
+    releasePeerLease();
   }
 }
 
 export async function runSyncOnConnect(
   context: SyncOnConnectContext,
 ): Promise<SyncOnConnectOutcome> {
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context));
+}
+
+async function runSessionSyncOnConnect(
+  context: SyncOnConnectContext,
+  { signal, syncingPeers }: SessionPeerSyncContext,
+): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
-    syncingPeers,
     getPeerProtocols,
     knownCorePeerIds,
     knownCorePeerIdsV2 = new Set<string>(),
@@ -305,8 +381,9 @@ export async function runSyncOnConnect(
   const ctx = createOperationContext('sync');
   const shortPeer = remotePeer.slice(-8);
 
-  if (syncingPeers.has(remotePeer)) return 'already-syncing';
-  syncingPeers.add(remotePeer);
+  signal.throwIfAborted();
+  const releasePeerLease = syncingPeers.tryAcquirePeer(remotePeer);
+  if (releasePeerLease === null) return 'already-syncing';
 
   let durableSyncCompleted = false;
   let madeProgress = false;
@@ -384,7 +461,10 @@ export async function runSyncOnConnect(
   };
   const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
     try {
-      return await step();
+      signal.throwIfAborted();
+      const result = await step();
+      signal.throwIfAborted();
+      return result;
     } catch (err) {
       throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
     }
@@ -392,6 +472,7 @@ export async function runSyncOnConnect(
 
   try {
     const protocols = await getPeerProtocols(remotePeer);
+    signal.throwIfAborted();
 
     if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
       knownCorePeerIds.add(remotePeer);
@@ -427,6 +508,7 @@ export async function runSyncOnConnect(
       const synced = getDurableSyncContextGraphs
         ? await syncFromPeer(remotePeer, durableContextGraphIds)
         : await syncFromPeer(remotePeer);
+      signal.throwIfAborted();
       const syncedAccounting = recordSyncAccounting(synced, 'durable');
       logInfo(ctx, `Synced ${syncedAccounting.insertedTriples} data triples from peer ${shortPeer}`);
       if (syncedAccounting.deferredByBackpressure) {
@@ -466,6 +548,7 @@ export async function runSyncOnConnect(
     if (newlyDiscovered.length > 0) {
       logInfo(ctx, `Discovered ${newlyDiscovered.length} new CG(s) — syncing durable data from ${shortPeer}`);
       const discoverSynced = await syncFromPeer(remotePeer, newlyDiscovered);
+      signal.throwIfAborted();
       const discoverAccounting = recordSyncAccounting(discoverSynced, 'durable');
       logInfo(ctx, `Synced ${discoverAccounting.insertedTriples} durable triples for newly discovered CG(s) from ${shortPeer}`);
       if (discoverAccounting.deferredByBackpressure) {
@@ -489,6 +572,7 @@ export async function runSyncOnConnect(
       const wsContextGraphIds = ordinarySharedMemoryWork.contextGraphIds;
       if (wsContextGraphIds.length === 0) return finishSyncAccounting();
       const wsSynced = await ordinarySharedMemoryWork.syncFromPeer();
+      signal.throwIfAborted();
       const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');
       logInfo(ctx, `Synced ${sharedAccounting.insertedTriples} shared memory triples from peer ${shortPeer}`);
       if (sharedAccounting.deferredByBackpressure) {
@@ -506,6 +590,6 @@ export async function runSyncOnConnect(
     }
     throw err;
   } finally {
-    syncingPeers.delete(remotePeer);
+    releasePeerLease();
   }
 }

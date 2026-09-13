@@ -2,6 +2,8 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { mapWithConcurrency } from '../../map-with-concurrency.js';
 import { combineSyncFailures } from '../error-tags.js';
+import type { SharedMemoryPhaseFailureCause } from '../shared-memory-diagnostics.js';
+import type { SyncWorkAdmission } from '../work-admission.js';
 import type { SyncPageResult } from './page-fetch.js';
 import type { RecoveryExecutionAdmission } from './recovery-execution-guard.js';
 
@@ -16,17 +18,31 @@ const EMPTY_METRICS: SnapshotMetrics = Object.freeze({
   bytesReceived: 0, resumedPhases: 0, timedOutPhases: 0, completedPhases: 0,
 });
 
+/**
+ * Why one ref stayed unresolved. `local-yield` is OUR admission decision — the
+ * shared allowance ran out before this ref's cache check or dispatch, or the
+ * page fetch itself yielded on it — and is never peer evidence. The other two
+ * are independent shortfalls produced by the peer or the stream.
+ */
+type SnapshotShortfall = 'local-yield' | 'incomplete' | 'short-prefix';
+
 type SnapshotAttempt =
   | { readonly kind: 'ready'; readonly metrics: SnapshotMetrics }
-  | { readonly kind: 'missing'; readonly reason: 'deadline' | 'incomplete' | 'short-prefix'; readonly metrics: SnapshotMetrics }
+  | { readonly kind: 'missing'; readonly reason: SnapshotShortfall; readonly metrics: SnapshotMetrics }
   | { readonly kind: 'fatal'; readonly error: unknown; readonly metrics: SnapshotMetrics };
 type ScheduledSnapshot = SnapshotAttempt | { readonly kind: 'not-started' };
 
+/** One manifest position together with the owner's reuse decision for it. */
+export interface PublicSnapshotWalkEntry {
+  readonly snapshot: PublicSnapshotMetadata;
+  readonly reuse: boolean;
+}
+
 interface SnapshotRecoveryPorts {
-  readonly deadline: number;
+  /** Shared job-window and round-deadline capability, consulted before every cache read and dispatch. */
+  readonly workAdmission: SyncWorkAdmission;
   readonly store: WorkspacePublicSnapshotStore;
   readonly executionBoundary: RecoveryExecutionAdmission;
-  readonly isResolved?: (ref: string) => boolean;
   readonly fetchSnapshot: (snapshot: PublicSnapshotMetadata, signal?: AbortSignal) => Promise<SyncPageResult>;
   readonly deleteCheckpoint: (key: string) => void;
   readonly onSnapshotReady?: (snapshot: PublicSnapshotMetadata, source: 'cache' | 'network') => Promise<void>;
@@ -35,7 +51,17 @@ interface SnapshotRecoveryPorts {
 export interface PublicSnapshotRecoveryResult extends PublicSnapshotWalkProgress, SnapshotMetrics {
   readonly checkpointAdvances: number;
   readonly completed: boolean;
-  readonly yieldedAtDeadline: boolean;
+  /**
+   * The round stopped on OUR OWN allowance with refs still unfetched — a
+   * voluntary yield, not a peer fault. Callers must surface this as a
+   * local-yield completion and must NOT fold it into `timedOutPhases`, which
+   * marks the peer backoff-worthy (`durable-progress.ts` `backoffWorthyFailure`).
+   */
+  readonly localYield?: true;
+  /** Direct cause for this helper's single incomplete snapshot phase. */
+  readonly phaseFailureCause?: SharedMemoryPhaseFailureCause;
+  /** One incomplete phase only when every unresolved ref is due to local admission. */
+  readonly localYieldFailedPhases?: number;
 }
 
 export type PublicSnapshotRecoveryOutcome =
@@ -43,20 +69,28 @@ export type PublicSnapshotRecoveryOutcome =
   | { readonly kind: 'failure'; readonly result: PublicSnapshotRecoveryResult; readonly error: unknown };
 
 interface PublicSnapshotRecoveryParams extends Omit<SnapshotRecoveryPorts, 'store'> {
-  readonly snapshots: readonly PublicSnapshotMetadata[];
+  /** Immutable manifest order; the owner has already decided each position's reuse. */
+  readonly entries: readonly PublicSnapshotWalkEntry[];
   readonly contextGraphId: string;
   readonly concurrency?: number;
   readonly store?: WorkspacePublicSnapshotStore;
 }
 
 /** One operation owns its metrics and always settles into a discriminated result. */
-async function attemptSnapshot(snapshot: PublicSnapshotMetadata, ports: SnapshotRecoveryPorts): Promise<SnapshotAttempt> {
+async function attemptSnapshot({ snapshot, reuse }: PublicSnapshotWalkEntry, ports: SnapshotRecoveryPorts): Promise<SnapshotAttempt> {
   const boundary = ports.executionBoundary;
   let metrics = EMPTY_METRICS;
   try {
     boundary.assertCurrent();
-    if (ports.isResolved?.(snapshot.ref)) return { kind: 'ready', metrics };
-    if (Date.now() >= ports.deadline) return { kind: 'missing', reason: 'deadline', metrics };
+    // The owner decides which manifest-bound evidence this pass can reuse.
+    // Skipping the blob and assertion validation it already established
+    // leaves the allowance for unresolved refs to advance.
+    if (reuse) return { kind: 'ready', metrics };
+    // Admission BEFORE any work for this ref: cache validation can require a
+    // full read and digest, and a miss is a network round trip. No
+    // `SyncPageResult` exists yet, so `timedOutPhases` structurally cannot
+    // move here — a local budget decision never reads as a peer timeout.
+    if (!ports.workAdmission.canAdmitWork()) return { kind: 'missing', reason: 'local-yield', metrics };
     if (await boundary.read(() => hasValidSnapshot(ports.store, snapshot))) {
       if (ports.onSnapshotReady) {
         boundary.assertCurrent();
@@ -66,9 +100,9 @@ async function attemptSnapshot(snapshot: PublicSnapshotMetadata, ports: Snapshot
       return { kind: 'ready', metrics };
     }
 
-    // A cache miss may have consumed the round allowance. Do not start a wire
-    // request after that deadline or classify a local yield as a peer timeout.
-    if (Date.now() >= ports.deadline) return { kind: 'missing', reason: 'deadline', metrics };
+    // Cache validation can consume the allowance without producing a hit.
+    // Admit no new transport after that local work exhausts the budget.
+    if (!ports.workAdmission.canAdmitWork()) return { kind: 'missing', reason: 'local-yield', metrics };
     const result = await boundary.read(() => ports.fetchSnapshot(snapshot, boundary.signal));
     metrics = {
       bytesReceived: result.bytesReceived,
@@ -78,7 +112,11 @@ async function attemptSnapshot(snapshot: PublicSnapshotMetadata, ports: Snapshot
     };
     // Unverified prefixes cannot be resumed against the whole signed digest.
     boundary.admitSyncMutation(() => ports.deleteCheckpoint(result.checkpointKey));
-    if (!result.completed) return { kind: 'missing', reason: 'incomplete', metrics };
+    // A page that yielded on the shared allowance is our decision as well,
+    // not an independent shortfall; any other incomplete stream is one.
+    if (!result.completed) {
+      return { kind: 'missing', reason: result.localYield ? 'local-yield' : 'incomplete', metrics };
+    }
     const quads = result.quads.map(quad => ({ ...quad, graph: '' }));
     if (quads.length < snapshot.count) {
       // A cleanly terminated short prefix is missing, not corrupt. Other refs
@@ -104,21 +142,24 @@ async function attemptSnapshot(snapshot: PublicSnapshotMetadata, ports: Snapshot
 
 /** Own admission, halt, and drain separately from per-snapshot effects. */
 async function runSnapshotPool(
-  snapshots: readonly PublicSnapshotMetadata[],
+  entries: readonly PublicSnapshotWalkEntry[],
   concurrency: number,
   ports: SnapshotRecoveryPorts,
 ): Promise<{ outcomes: ScheduledSnapshot[]; failures: unknown[] }> {
   let halted = false;
   const failures: unknown[] = [];
-  const outcomes = await mapWithConcurrency(snapshots, concurrency, async (snapshot): Promise<ScheduledSnapshot> => {
+  const outcomes = await mapWithConcurrency(entries, concurrency, async (entry): Promise<ScheduledSnapshot> => {
     if (halted) return { kind: 'not-started' };
-    const outcome = await attemptSnapshot(snapshot, ports);
+    const outcome = await attemptSnapshot(entry, ports);
     if (outcome.kind === 'fatal') {
       halted = true;
       // Completion order owns the triggering cause; reporting remains in
       // manifest order. At most the already-admitted siblings can add errors.
       failures.push(outcome.error);
-    } else if (outcome.kind === 'missing' && outcome.reason === 'incomplete') {
+    } else if (outcome.kind === 'missing' && outcome.reason !== 'short-prefix') {
+      // An incomplete stream stops new dispatches, and so does an exhausted
+      // local allowance that every later position would only re-observe.
+      // Already admitted siblings still settle, exactly as after a fatal.
       halted = true;
     }
     return outcome;
@@ -140,15 +181,17 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
   }
   const progress = {
     ...EMPTY_METRICS, checkpointAdvances: 0,
-    readySnapshots: 0, totalSnapshots: params.snapshots.length,
-    missingCount: 0, missingSample: [] as string[], yieldedAtDeadline: false,
+    readySnapshots: 0, totalSnapshots: params.entries.length,
+    missingCount: 0, missingSample: [] as string[],
   };
-  if (params.snapshots.length === 0) return { kind: 'result', result: { ...progress, completed: true } };
+  if (params.entries.length === 0) return { kind: 'result', result: { ...progress, completed: true } };
   if (!params.store) {
     throw new Error(`Cannot sync shared-memory public snapshot refs for "${params.contextGraphId}" without a public snapshot store`);
   }
-  const { outcomes, failures } = await runSnapshotPool(params.snapshots, concurrency, { ...params, store: params.store });
+  const { outcomes, failures } = await runSnapshotPool(params.entries, concurrency, { ...params, store: params.store });
   params.executionBoundary.assertCurrent();
+  let localYield = false;
+  let hasIndependentShortfall = false;
   for (const [index, outcome] of outcomes.entries()) {
     if (outcome.kind !== 'not-started') {
       progress.bytesReceived += outcome.metrics.bytesReceived;
@@ -156,16 +199,31 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
       progress.timedOutPhases += outcome.metrics.timedOutPhases;
       progress.completedPhases += outcome.metrics.completedPhases;
     }
-    if (outcome.kind === 'ready') progress.readySnapshots++;
-    else {
-      progress.missingCount++;
-      if (progress.missingSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) {
-        progress.missingSample.push(boundSampledRef(params.snapshots[index]!.ref));
-      }
-      if (outcome.kind === 'missing' && outcome.reason === 'deadline') progress.yieldedAtDeadline = true;
+    if (outcome.kind === 'ready') {
+      progress.readySnapshots++;
+      continue;
     }
+    progress.missingCount++;
+    if (progress.missingSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) {
+      progress.missingSample.push(boundSampledRef(params.entries[index]!.snapshot.ref));
+    }
+    // Positions abandoned after a halt carry no evidence of their own; only
+    // the outcomes that actually settled attribute the shortfall.
+    if (outcome.kind === 'missing' && outcome.reason === 'local-yield') localYield = true;
+    else if (outcome.kind !== 'not-started') hasIndependentShortfall = true;
   }
-  const result = { ...progress, completed: progress.missingCount === 0 };
+  // The single-phase attribution the owning round records: solely local
+  // admission, or at least one shortfall the peer or the stream produced.
+  const localBudgetOnly = localYield && !hasIndependentShortfall;
+  const result: PublicSnapshotRecoveryResult = {
+    ...progress,
+    completed: progress.missingCount === 0,
+    ...(localYield ? { localYield: true as const } : {}),
+    ...(progress.missingCount === 0
+      ? {}
+      : { phaseFailureCause: localBudgetOnly ? 'local-budget' as const : 'transport' as const }),
+    localYieldFailedPhases: localBudgetOnly ? 1 : 0,
+  };
   return failures.length > 0
     ? { kind: 'failure', result, error: combineSyncFailures(failures[0], failures.slice(1)) }
     : { kind: 'result', result };
