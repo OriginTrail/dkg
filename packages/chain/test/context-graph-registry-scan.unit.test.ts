@@ -415,11 +415,14 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.saves.map((s) => s.nextBlock)).toEqual([1_000]);
   });
 
-  it('falls back to deploy-block scanning when durable cursor load fails', async () => {
+  it('fails closed on a transient cursor read and resumes from the last durable watermark', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let loadAttempt = 0;
     const store = {
       load: vi.fn(async () => {
-        throw new Error('cursor load failed');
+        loadAttempt += 1;
+        if (loadAttempt === 1) throw new Error('cursor load failed');
+        return 1_000;
       }),
       save: vi.fn(async () => {}),
     };
@@ -430,16 +433,25 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
       });
       registry.queryFilter.setImpl(async () => []);
 
+      await expect(collectRegistryScan(adapter, {
+        mode: 'seedLiveTail',
+        pageBudget: 1,
+      })).rejects.toThrow('cursor load failed');
+
+      expect(store.load).toHaveBeenCalledTimes(1);
+      expect(registry.queryFilter.calls).toEqual([]);
+      expect(store.save).not.toHaveBeenCalled();
+
       await collectRegistryScan(adapter, {
-        mode: 'seedFromCursor',
+        mode: 'incremental',
         pageBudget: 1,
       });
 
-      expect(store.load).toHaveBeenCalledTimes(1);
+      expect(store.load).toHaveBeenCalledTimes(2);
       expect(registry.queryFilter.calls.map(([, lo, hi]: [unknown, number, number]) => [lo, hi])).toEqual([
-        [0, 1_999],
+        [1_000 - CG_REGISTRY_REORG_BUFFER_BLOCKS, 2_100],
       ]);
-      expect(store.save).toHaveBeenCalledWith(expect.any(Object), 2_000);
+      expect(store.save).toHaveBeenCalledWith(expect.any(Object), 2_101);
     } finally {
       warnSpy.mockRestore();
     }
