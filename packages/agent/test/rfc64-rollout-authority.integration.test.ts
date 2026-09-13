@@ -1540,23 +1540,28 @@ describe('RFC-64 rollout authority integration', () => {
     });
     const resolveFinalized = vi.fn(async () => 9n);
     Object.assign(chainAdapter, {
+      resolveContextGraphIdByNameHash: vi.fn(async () => {
+        throw new Error('public current-state resolver must not be used');
+      }),
       contextGraphAuthorityIndexRevisionReader: {
         resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
         readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
         whenIdle: vi.fn(async () => undefined),
       },
     });
-    const publicResolver = vi.spyOn(edge, 'getContextGraphOnChainId')
-      .mockRejectedValue(new Error('public current-state resolver must not be used'));
+
+    await expect(edge.getContextGraphOnChainId(CONTEXT_GRAPH_ID, {
+      consistency: 'finalized-authority-index',
+    })).resolves.toBe('9');
 
     await expect(edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID))
       .resolves.toEqual({ agentAddress: AUTHOR, authorityEra: '0' });
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(CONTEXT_GRAPH_ID))
       .resolves.toMatchObject({ policy: { contextGraphId: CONTEXT_GRAPH_ID } });
 
-    expect(resolveFinalized).toHaveBeenCalledTimes(2);
+    expect(resolveFinalized).toHaveBeenCalledTimes(3);
     expect(resolveFinalized).toHaveBeenCalledWith(snapshot.nameHash, expect.any(Object));
-    expect(publicResolver).not.toHaveBeenCalled();
+    expect(chainAdapter.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
   it('shares provider-pool exhaustion across registered authority reconciliations', async () => {

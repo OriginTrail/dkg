@@ -2512,7 +2512,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         const id = uri.startsWith(prefix) ? uri.slice(prefix.length) : uri;
         const sub = this.subscribedContextGraphs.get(id);
         const onChainId = sub?.onChainId ?? (await optional(
-          (signal) => this.getContextGraphOnChainId(id, { signal }),
+          (signal) => this.getContextGraphOnChainId(id, {
+            signal,
+            consistency: 'finalized-authority-index',
+          }),
           `on-chain id lookup for ${id}`,
         )) ?? undefined;
         const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
@@ -2576,7 +2579,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       if (metaResult?.type === 'bindings' && metaResult.bindings.length > 0) {
         const row = metaResult.bindings[0] as Record<string, string>;
         const onChainId = sub.onChainId ?? (await optional(
-          (signal) => this.getContextGraphOnChainId(id, { signal }),
+          (signal) => this.getContextGraphOnChainId(id, {
+            signal,
+            consistency: 'finalized-authority-index',
+          }),
           `on-chain id lookup for ${id}`,
         )) ?? undefined;
         const accessPolicy = row['access'] ? stripLiteral(row['access']) : undefined;
@@ -2696,7 +2702,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
 
       const sub = this.subscribedContextGraphs.get(id);
       const onChainId = sub?.onChainId ?? (await optional(
-        (signal) => this.getContextGraphOnChainId(id, { signal }),
+        (signal) => this.getContextGraphOnChainId(id, {
+          signal,
+          consistency: 'finalized-authority-index',
+        }),
         `on-chain id lookup for ${id}`,
       )) ?? undefined;
       const policyRead = await withBudget(

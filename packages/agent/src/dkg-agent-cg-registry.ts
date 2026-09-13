@@ -603,8 +603,26 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async getContextGraphOnChainId(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal; source?: string } = {},
+    options: {
+      signal?: AbortSignal;
+      source?: string;
+      consistency?: 'current' | 'finalized-authority-index';
+    } = {},
   ): Promise<string | null> {
+    if (options.consistency === 'finalized-authority-index') {
+      const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
+      const resolveFinalized = indexReader?.resolveFinalizedContextGraphIdByNameHash;
+      if (resolveFinalized !== undefined) {
+        const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
+        const expectedNameHash = explicitNameHash === undefined
+          ? this.contextGraphNameCommitment(contextGraphId)
+          : this.contextGraphWireId(explicitNameHash);
+        const resolved = await resolveFinalized.call(indexReader, expectedNameHash, {
+          signal: options.signal,
+        });
+        return resolved?.toString(10) ?? null;
+      }
+    }
     const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
     return binding?.onChainId ?? null;
   }
