@@ -23,9 +23,12 @@ export interface ContextGraphRegistryRepairAuditCheckpoint {
 
 const REPAIR_COMPLETION_MAX_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 
+export type ContextGraphRegistryWatermarkScanOwner = symbol;
+
 export class ContextGraphRegistryScanCursor {
   private readonly watermarks: Map<string, number> = new Map();
   private readonly repairAudits: Map<string, ContextGraphRegistryRepairAuditCheckpoint> = new Map();
+  private readonly activeWatermarkOwners: Map<string, ContextGraphRegistryWatermarkScanOwner> = new Map();
 
   constructor(
     private readonly input: {
@@ -38,6 +41,27 @@ export class ContextGraphRegistryScanCursor {
   clearMemoryCache(): void {
     this.watermarks.clear();
     this.repairAudits.clear();
+    // Closing the adapter invalidates every outstanding page acknowledgement.
+    // A late ACK must never mutate a cursor after its owning scan was drained.
+    this.activeWatermarkOwners.clear();
+  }
+
+  beginWatermarkScan(registryAddress: string): ContextGraphRegistryWatermarkScanOwner | undefined {
+    const cacheKey = this.cacheKey(registryAddress);
+    if (this.activeWatermarkOwners.has(cacheKey)) return undefined;
+    const owner = Symbol(`context-graph-registry-watermark:${cacheKey}`);
+    this.activeWatermarkOwners.set(cacheKey, owner);
+    return owner;
+  }
+
+  closeWatermarkScan(
+    registryAddress: string,
+    owner: ContextGraphRegistryWatermarkScanOwner,
+  ): void {
+    const cacheKey = this.cacheKey(registryAddress);
+    if (this.activeWatermarkOwners.get(cacheKey) === owner) {
+      this.activeWatermarkOwners.delete(cacheKey);
+    }
   }
 
   getCachedWatermark(registryAddress: string): number | undefined {
@@ -71,13 +95,27 @@ export class ContextGraphRegistryScanCursor {
     }
   }
 
-  async saveWatermark(registryAddress: string, nextBlock: number): Promise<void> {
+  async saveWatermark(
+    registryAddress: string,
+    nextBlock: number,
+    options: {
+      owner?: ContextGraphRegistryWatermarkScanOwner;
+      /** Authoritative rollback recovery; ordinary cursor saves stay monotonic. */
+      replace?: boolean;
+    } = {},
+  ): Promise<void> {
     const normalized = this.normalize(nextBlock);
     if (normalized == null) return;
 
     const cacheKey = this.cacheKey(registryAddress);
+    if (
+      options.owner !== undefined
+      && this.activeWatermarkOwners.get(cacheKey) !== options.owner
+    ) {
+      throw new Error('ContextGraphNameRegistry scan acknowledgement is stale or no longer owned');
+    }
     const existing = this.normalize(this.watermarks.get(cacheKey));
-    if (existing != null && existing >= normalized) return;
+    if (!options.replace && existing != null && existing >= normalized) return;
 
     if (this.input.store) {
       await this.input.store.save(this.cursorKey(cacheKey), normalized);
@@ -152,6 +190,13 @@ export class ContextGraphRegistryScanCursor {
       || targetBlock === undefined
       || startedAt === undefined
       || (candidate.completedAt !== undefined && completedAt === undefined)
+    ) return undefined;
+    // Both timestamps share one bounded clock-skew policy. Accepting a
+    // far-future incomplete start would make every legal completion precede
+    // it and permanently strand that repair generation.
+    if (
+      startedAt > now + REPAIR_COMPLETION_MAX_CLOCK_SKEW_MS
+      || (completedAt === undefined && startedAt > now)
     ) return undefined;
     const completedNextBlock = targetBlock + 1;
     if (!Number.isSafeInteger(completedNextBlock)) return undefined;

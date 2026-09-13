@@ -349,10 +349,21 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!registry) return;
     const registryAddress = (await registry.getAddress()).toLowerCase();
     if (scanPlan.mode === 'repair') {
-      yield* this._iterateContextGraphRegistryRepairPages(registry, registryAddress, scanPlan);
+      yield* this._iterateContextGraphRegistryRepairPages(
+        registry,
+        registryAddress,
+        scanPlan,
+        options.signal,
+      );
       return;
     }
-    yield* this._iterateContextGraphRegistryScanPages(registry, registryAddress, undefined, scanPlan);
+    yield* this._iterateContextGraphRegistryScanPages(
+      registry,
+      registryAddress,
+      undefined,
+      scanPlan,
+      options.signal,
+    );
   }
 
   private async _collectContextGraphRegistryScan(
@@ -379,78 +390,114 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     registryAddress: string,
     fromBlock: number | undefined,
     scanPlan: ContextGraphRegistryLiveScanPlan,
+    signal?: AbortSignal,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
-    const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
-      ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
+    const watermarkOwner = scanPlan.persistProgress
+      ? this.contextGraphRegistryScanCursor.beginWatermarkScan(registryAddress)
       : undefined;
-    const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
-    const scan = fromBlock === undefined
-      ? scanPlan.mode === 'seedLiveTail'
-        ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
-        : canResumeFromWatermark
+    if (scanPlan.persistProgress && watermarkOwner === undefined) {
+      throw new Error('ContextGraphNameRegistry live scan already has an active cursor owner');
+    }
+    try {
+      signal?.throwIfAborted();
+      const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
+        ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
+        : undefined;
+      const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
+      const scan = fromBlock === undefined
+        ? scanPlan.mode === 'seedLiveTail'
           ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
-          : await this.resolveContractDeployBlock(
-              registryAddress,
-              'listContextGraphsFromChain',
-              'ContextGraphNameRegistry',
-            )
-      : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
-    const start = fromBlock ?? (
-      scanPlan.mode === 'seedLiveTail'
-        ? Math.max(0, scan.head + 1 - CG_REGISTRY_REORG_BUFFER_BLOCKS)
-        : canResumeFromWatermark
-        ? Math.max(0, persistedWatermark - CG_REGISTRY_REORG_BUFFER_BLOCKS)
-        : scan.fromBlock
-    );
-
-    const { head, scanProviders, degradedFromGenesis = false } = scan;
-    if (start > head) {
-      if (scanPlan.seedAtEnd) {
-        await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1);
-      }
-      return;
-    }
-
-    const pageSize = this.cgRegistryScanPageSize;
-    const pages = Math.ceil((head - start + 1) / pageSize);
-    const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
-    if (scanPlan.mode === 'incremental' && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
-      throw new Error(
-        `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
-          `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
-          `${pageSize}-block window (budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages / ` +
-          `${blockBudget} blocks). ` +
-          `Use an RPC that can anchor the registry deploy block and serve the ` +
-          `requested log range, or increase cgRegistryScanPageSize for an RPC ` +
-          `known to support larger ranges.`,
+          : canResumeFromWatermark
+            ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
+            : await this.resolveContractDeployBlock(
+                registryAddress,
+                'listContextGraphsFromChain',
+                'ContextGraphNameRegistry',
+              )
+        : { fromBlock, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) };
+      const { head, scanProviders, degradedFromGenesis = false } = scan;
+      // A cursor beyond the current head by more than the normal reorg overlap
+      // cannot make progress: every incremental tick would otherwise return
+      // before emitting an ACK. Treat it as an authoritative rollback/corruption
+      // and replace it store-first while replaying the current protected tail.
+      const replaceAheadWatermark = canResumeFromWatermark
+        && persistedWatermark! - CG_REGISTRY_REORG_BUFFER_BLOCKS > head;
+      const resumeWatermark = replaceAheadWatermark ? head + 1 : persistedWatermark;
+      const start = fromBlock ?? (
+        scanPlan.mode === 'seedLiveTail'
+          ? Math.max(0, scan.head + 1 - CG_REGISTRY_REORG_BUFFER_BLOCKS)
+          : canResumeFromWatermark
+          ? Math.max(0, resumeWatermark! - CG_REGISTRY_REORG_BUFFER_BLOCKS)
+          : scan.fromBlock
       );
-    }
 
-    yield* this._iterateContextGraphRegistryRangePages({
-      registry,
-      start,
-      head,
-      scanProviders,
-      mode: scanPlan.mode === 'explicitFromBlock' ? 'listAll' : scanPlan.mode,
-      pageBudget: scanPlan.pageBudget,
-      allowPartialFailure: scanPlan.allowPartialFailure,
-      rpcUsageConsumer: 'listContextGraphsFromChain',
-      targetBlock: head,
-      completesGeneration: () => false,
-      acknowledge: scanPlan.persistProgress
-        ? async (toBlock) => this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, toBlock + 1)
-        : async () => {},
-    });
+      if (start > head) {
+        if (scanPlan.seedAtEnd) {
+          await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1, {
+            owner: watermarkOwner,
+            replace: replaceAheadWatermark,
+          });
+        }
+        return;
+      }
+
+      const pageSize = this.cgRegistryScanPageSize;
+      const pages = Math.ceil((head - start + 1) / pageSize);
+      const blockBudget = CG_REGISTRY_MAX_SCAN_PAGES * pageSize;
+      if (scanPlan.mode === 'incremental' && scanPlan.pageBudget === undefined && !degradedFromGenesis && pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+        throw new Error(
+          `listContextGraphsFromChain: incremental ContextGraphNameRegistry scan would need ` +
+            `${pages} eth_getLogs calls over blocks [${start}, ${head}] at a ` +
+            `${pageSize}-block window (budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages / ` +
+            `${blockBudget} blocks). ` +
+            `Use an RPC that can anchor the registry deploy block and serve the ` +
+            `requested log range, or increase cgRegistryScanPageSize for an RPC ` +
+            `known to support larger ranges.`,
+        );
+      }
+
+      yield* this._iterateContextGraphRegistryRangePages({
+        registry,
+        start,
+        head,
+        scanProviders,
+        mode: scanPlan.mode === 'explicitFromBlock' ? 'listAll' : scanPlan.mode,
+        pageBudget: scanPlan.pageBudget,
+        allowPartialFailure: scanPlan.allowPartialFailure,
+        rpcUsageConsumer: 'listContextGraphsFromChain',
+        targetBlock: head,
+        completesGeneration: () => false,
+        signal,
+        acknowledge: scanPlan.persistProgress
+          ? (() => {
+              let replace = replaceAheadWatermark;
+              return async (_fromBlock: number, toBlock: number) => {
+                await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, toBlock + 1, {
+                  owner: watermarkOwner,
+                  replace,
+                });
+                replace = false;
+              };
+            })()
+          : async () => {},
+      });
+    } finally {
+      if (watermarkOwner !== undefined) {
+        this.contextGraphRegistryScanCursor.closeWatermarkScan(registryAddress, watermarkOwner);
+      }
+    }
   }
 
   private async *_iterateContextGraphRegistryRepairPages(
     registry: Contract,
     registryAddress: string,
     scanPlan: ContextGraphRegistryRepairScanPlan,
+    signal?: AbortSignal,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
     const session = await this.contextGraphRegistryRepairCoordinator.begin({
       registryAddress,
       minimumIntervalMs: scanPlan.minimumIntervalMs,
+      signal,
       resolveHead: () => this.resolveLogScanHead('repairContextGraphRegistry'),
       resolveDeployment: () => this.resolveContractDeployBlock(
         registryAddress,
@@ -471,7 +518,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         rpcUsageConsumer: 'repairContextGraphRegistry',
         targetBlock: session.targetBlock,
         completesGeneration: (toBlock) => toBlock >= session.targetBlock,
-        acknowledge: (toBlock) => session.acknowledge(toBlock),
+        signal,
+        acknowledge: (fromBlock, toBlock) => session.acknowledge(fromBlock, toBlock),
       });
     } finally {
       session.close();
@@ -489,7 +537,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     rpcUsageConsumer: 'listContextGraphsFromChain' | 'repairContextGraphRegistry';
     targetBlock: number;
     completesGeneration(toBlock: number): boolean;
-    acknowledge(toBlock: number): Promise<void>;
+    signal?: AbortSignal;
+    acknowledge(fromBlock: number, toBlock: number): Promise<void>;
   }): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
     const eventFilter = input.registry.filters.NameClaimed();
     const { registry, start, head, scanProviders } = input;
@@ -503,6 +552,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // Daemon scans can resume from the scanned prefix after a later page
     // failure. Public list-all calls should remain all-or-error.
     for (let lo = start; lo <= head; lo += pageSize) {
+      input.signal?.throwIfAborted();
       const hi = Math.min(lo + pageSize - 1, head);
       let pageResults: ContextGraphOnChain[];
       try {
@@ -531,6 +581,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           });
         }
       } catch (err) {
+        input.signal?.throwIfAborted();
         if (input.allowPartialFailure && scannedAnyPage) {
           const message = err instanceof Error ? err.message : String(err);
           throw new ContextGraphChainScanPartialError(
@@ -550,6 +601,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       results.push(...pageResults);
       scannedAnyPage = true;
       const scannedPages = Math.floor((hi - start) / pageSize) + 1;
+      const acknowledgement = {
+        state: 'pending' as 'pending' | 'saving' | 'saved' | 'failed',
+      };
       yield {
         contextGraphs: pageResults,
         scanProgress: Object.freeze({
@@ -561,8 +615,29 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           targetBlock: input.targetBlock,
           completesGeneration: input.completesGeneration(hi),
         }),
-        ack: () => input.acknowledge(hi),
+        ack: async () => {
+          if (acknowledgement.state !== 'pending') {
+            throw new Error(
+              `ContextGraphNameRegistry page [${lo}, ${hi}] acknowledgement is `
+              + `${acknowledgement.state}; each page may be acknowledged exactly once`,
+            );
+          }
+          acknowledgement.state = 'saving';
+          try {
+            input.signal?.throwIfAborted();
+            await input.acknowledge(lo, hi);
+            acknowledgement.state = 'saved';
+          } catch (error) {
+            acknowledgement.state = 'failed';
+            throw error;
+          }
+        },
       };
+      if (acknowledgement.state !== 'saved') {
+        throw new Error(
+          `ContextGraphNameRegistry page [${lo}, ${hi}] must be acknowledged before scanning continues`,
+        );
+      }
       if (input.pageBudget !== undefined && scannedPages >= input.pageBudget && hi < head) return;
     }
 
