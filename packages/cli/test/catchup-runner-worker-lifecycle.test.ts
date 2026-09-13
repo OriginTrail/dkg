@@ -11,6 +11,7 @@
 // handler wiring, not Node's (documented) 'exit'-on-terminate behaviour.
 import { describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 
 type Listener = (...args: unknown[]) => void;
 
@@ -255,6 +256,24 @@ describe('WorkerCatchupRunner agent bridge', () => {
 
     expect(posted.result.preferredPeerId).toBe('peer-legacy');
     expect(posted.result.authoritativePeerId).toBeUndefined();
+  });
+
+  it('checks sync capability through the canonical peer-id string bridge', async () => {
+    const getPeerProtocols = vi.fn(async (peerId: string) => (
+      peerId === 'peer-modern' ? [PROTOCOL_SYNC] : []
+    ));
+    const waitForSyncProtocol = vi.fn(async () => false);
+    const { agent } = bridgeAgent({ getPeerProtocols, waitForSyncProtocol });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'waitForSyncProtocol',
+      ['peer-modern'],
+    );
+
+    expect(posted).toMatchObject({ result: true });
+    expect(getPeerProtocols).toHaveBeenCalledWith('peer-modern');
+    expect(waitForSyncProtocol).not.toHaveBeenCalled();
   });
 
   it('clamps an unbounded RPC source at the untrusted edge', async () => {
