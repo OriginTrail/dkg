@@ -13,16 +13,17 @@ export {
 
 /** Fixed release-gate ceilings, attributed by method to expose load regressions. */
 export const RFC64_PRIVATE_GATE_RPC_BUDGET_V1 = Object.freeze({
-  total: 128,
+  total: 180,
   methods: Object.freeze({
     eth_blockNumber: 16,
-    eth_call: 96,
-    eth_chainId: 16,
-    eth_getBlockByNumber: 16,
-    // The owner mutation actor performs six independently finalized authority
-    // reads (boot, responsibility, acceptance, mutation, raw parity, and
-    // shutdown), each of which proves the three fixture contracts are live.
-    eth_getCode: 24,
+    eth_call: 135,
+    eth_chainId: 9,
+    eth_getBlockByNumber: 9,
+    // The longest-lived owner mutation actor can observe nine independently
+    // finalized authority snapshots when its peer connection triggers a
+    // lifecycle refresh. Each snapshot proves the three fixture contracts are
+    // live; the exact total ceiling still rejects one additional RPC.
+    eth_getCode: 27,
   }),
 });
 

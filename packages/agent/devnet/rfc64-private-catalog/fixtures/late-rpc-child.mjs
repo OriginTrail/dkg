@@ -23,7 +23,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
   if (command.cmd === 'stop') {
     emit('stopping', command.requestId, {
       executedRuntimeManifest: {},
-      rpcCallCounts: { eth_call: 97 },
+      rpcCallCounts: { eth_call: 136 },
     }, () => process.exit(0));
   }
 });

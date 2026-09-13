@@ -289,12 +289,18 @@ async function bindRfc64PrivateFinalizedRuntimeV1({
   const runtimeIsMember = finalizedAuthority.roster?.members.some(
     ({ agentAddress }) => agentAddress === roleAgentAddress(role),
   ) === true;
-  // Settle lifecycle-triggered authority work before requesting the gate's
-  // foreground responsibility proof, avoiding a superseded null snapshot.
+  // Settle lifecycle-triggered authority work before inspecting its committed
+  // result. Re-running an already-completed pass here would duplicate the
+  // same finalized roster reads and make the RPC certificate scheduler-racy.
   await created.agent.whenRfc64CatalogResponsibilitiesIdleV1();
-  const responsibility = await created.agent.reconcileRfc64CatalogResponsibilityV1(
+  let responsibility = created.agent.readRfc64CatalogResponsibilityV1(
     CONTEXT_GRAPH_ID,
   );
+  if (runtimeIsMember && !responsibility.active) {
+    responsibility = await created.agent.reconcileRfc64CatalogResponsibilityV1(
+      CONTEXT_GRAPH_ID,
+    );
+  }
   if (runtimeIsMember && (!responsibility.active || responsibility.mode === 'legacy')) {
     throw new Error('real graph did not enter release-native RFC-64 responsibility');
   }

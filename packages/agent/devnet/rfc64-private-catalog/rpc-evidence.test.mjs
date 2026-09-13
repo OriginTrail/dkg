@@ -130,6 +130,20 @@ test('RPC evidence is method-attributed and rejects unknown or over-budget work'
   assert.equal(isWithinRpcBudgetV1({ rpcCallCounts: { eth_unexpected: 1 } }), false);
   assert.equal(isWithinRpcBudgetV1({ rpcCallCounts: {} }), false);
   assert.equal(isWithinRpcCeilingV1({ rpcCallCounts: {} }), true);
+  const exactCeiling = {
+    rpcCallCounts: {
+      eth_call: RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods.eth_call,
+      eth_chainId: RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods.eth_chainId,
+      eth_getBlockByNumber:
+        RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods.eth_getBlockByNumber,
+      eth_getCode: RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods.eth_getCode,
+    },
+  };
+  assert.equal(rpcEvidenceV1(exactCeiling).total, RFC64_PRIVATE_GATE_RPC_BUDGET_V1.total);
+  assert.equal(isWithinRpcCeilingV1(exactCeiling), true);
+  assert.equal(isWithinRpcCeilingV1({
+    rpcCallCounts: { ...exactCeiling.rpcCallCounts, eth_blockNumber: 1 },
+  }), false);
   assert.equal(isWithinRpcCeilingV1({
     rpcCallCounts: { eth_call: RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods.eth_call + 1 },
   }), false);
@@ -175,7 +189,12 @@ test('RPC evidence is method-attributed and rejects unknown or over-budget work'
   }).finalizedChainPathExecuted, false);
   assert.equal(finalizedRuntimeRpcVerdictV1({
     ...receipts,
-    'receiver-seed': { rpcCallCounts: { eth_call: 97, eth_getBlockByNumber: 1 } },
+    'receiver-seed': {
+      rpcCallCounts: {
+        eth_call: RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods.eth_call + 1,
+        eth_getBlockByNumber: 1,
+      },
+    },
   }).finalizedChainRpcWithinBudget, false);
   const { owner: _missingOwner, ...missingOwner } = receipts;
   assert.equal(
@@ -192,7 +211,9 @@ test('RPC evidence is method-attributed and rejects unknown or over-budget work'
     const inspection = await child.request({ cmd: 'inspect' });
     assert.equal(isWithinRpcCeilingV1(inspection), true);
     const shutdown = await child.stop();
-    assert.deepEqual(shutdown.rpcCallCounts, { eth_call: 97 });
+    assert.deepEqual(shutdown.rpcCallCounts, {
+      eth_call: RFC64_PRIVATE_GATE_RPC_BUDGET_V1.methods.eth_call + 1,
+    });
     assert.equal(isWithinRpcBudgetV1(shutdown), false);
   } finally {
     await child.forceStop().catch(() => undefined);
