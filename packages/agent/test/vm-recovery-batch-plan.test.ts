@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { VmRecoverySlotRegistry } from '../src/internal/vm-recovery-slot-registry.js';
+import {
+  VmRecoverySlotRegistry,
+  type VmRecoveryPreparation,
+  type VmRecoverySlotCapture,
+} from '../src/internal/vm-recovery-slot-registry.js';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 
 const target = (ordinal: number): OrdinalRecoveryTarget => ({
@@ -11,6 +15,11 @@ const target = (ordinal: number): OrdinalRecoveryTarget => ({
   ual: `ka-${ordinal}`,
   merkleRoot: `root-${ordinal}`,
 });
+
+function ownedSlot(prepared: VmRecoveryPreparation): VmRecoverySlotCapture {
+  if (prepared.kind !== 'owned') throw new Error(`expected an owned preparation, got ${prepared.kind}`);
+  return prepared.slot;
+}
 
 describe('VM recovery batch transaction', () => {
   it.each(['expired', 'empty-observation'] as const)('cancels a freshly reserved %s target during discovery', reason => {
@@ -63,9 +72,9 @@ describe('VM recovery batch transaction', () => {
   it.each(['expired', 'empty-observation'] as const)('readmits its own %s evidence before same-pass discovery', reason => {
     const registry = new VmRecoverySlotRegistry(1);
     const selected = target(0);
-    const original = registry.prepare(selected, {
+    const original = ownedSlot(registry.prepare(selected, {
       candidatePeerIds: ['peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 10,
-    }, 0).slot!;
+    }, 0));
     const transaction = registry.beginBatch();
     const plan = transaction.reserveBatch({
       targets: [selected], admissionCursor: 0,
@@ -80,8 +89,9 @@ describe('VM recovery batch transaction', () => {
         now: 12, collectionDeadlineAt: 100, isCurrent: () => !transaction.signal.aborted,
       });
       expect(committed.eligible.map(entry => entry.target)).toEqual([selected]);
-      expect(committed.eligible[0]!.prepared.slot!.snapshot.candidatePeerIds).toEqual(['peer']);
-      expect(committed.eligible[0]!.prepared.slot!.handle).not.toBe(original.handle);
+      const readmitted = ownedSlot(committed.eligible[0]!.prepared);
+      expect(readmitted.snapshot.candidatePeerIds).toEqual(['peer']);
+      expect(readmitted.handle).not.toBe(original.handle);
       expect(registry.recordCount).toBe(1);
       expect(transaction.signal.aborted).toBe(false);
     } finally { transaction.release(); }
@@ -152,6 +162,46 @@ describe('VM recovery batch transaction', () => {
     }
   });
 
+  it('adopts a target that an invalidation listener admitted while the batch observed its owners', () => {
+    const registry = new VmRecoverySlotRegistry(2);
+    const late = target(0);
+    const replaced = target(1);
+    registry.prepare(replaced, {
+      candidatePeerIds: ['peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
+    }, 0);
+    const observer = registry.begin();
+    observer.track([replaced]);
+    observer.signal.addEventListener('abort', () => {
+      registry.prepare(late, {
+        candidatePeerIds: ['listener-peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
+      }, 1);
+    }, { once: true });
+    const transaction = registry.beginBatch();
+    try {
+      const replacement = { ...replaced, merkleRoot: 'replacement-root' };
+      const plan = transaction.reserveBatch({
+        targets: [late, replacement], admissionCursor: 0, observedCandidatePeerIds: ['peer'],
+        now: 1, collectionDeadlineAt: 101,
+      });
+      expect(observer.signal.aborted).toBe(true);
+      expect(plan.initiallyEligibleTargets).toEqual([late, replacement]);
+      expect(registry.peekSnapshot(late)?.candidatePeerIds).toEqual(['listener-peer']);
+      const committed = transaction.commit({
+        candidatePeerIds: ['peer'], curatorRosterConfirmed: true, now: 2,
+        collectionDeadlineAt: 102, isCurrent: () => true,
+      });
+      expect(committed.eligible.map(entry => entry.target)).toEqual([late, replacement]);
+      // The listener's owner is adopted as existing, so only the reserved
+      // replacement advances the admission cursor.
+      expect(committed.nextAdmissionCursor).toBe(0);
+      expect(registry.peekSnapshot(late)?.candidatePeerIds).toEqual(['peer']);
+      expect(registry.recordCount).toBe(2);
+    } finally {
+      transaction.release();
+      observer.release();
+    }
+  });
+
   it('binds an owner newly released from backoff before exposing it for transport', () => {
     const registry = new VmRecoverySlotRegistry(2);
     const suppressed = target(0);
@@ -159,7 +209,7 @@ describe('VM recovery batch transaction', () => {
     const prepared = registry.prepare(suppressed, {
       candidatePeerIds: ['old-peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
     }, 0);
-    registry.settleAttempt(suppressed, 'old-peer', 'clean-absent', ['old-peer'], prepared.slot!.handle, {
+    registry.settleAttempt(suppressed, 'old-peer', 'clean-absent', ['old-peer'], ownedSlot(prepared).handle, {
       now: 1, getLocalPeerId: () => 'local', baseBackoffMs: 100, maxBackoffMs: 100,
     });
     const transaction = registry.beginBatch();
@@ -186,8 +236,7 @@ describe('VM recovery batch transaction', () => {
       const prepared = registry.prepare(selected, {
         candidatePeerIds: ['old-peer'], curatorRosterConfirmed: false, collectionDeadlineAt: 100,
       }, 0);
-      expect(prepared.slot).toBeDefined();
-      registry.settleAttempt(selected, 'old-peer', 'clean-absent', ['old-peer'], prepared.slot!.handle, {
+      registry.settleAttempt(selected, 'old-peer', 'clean-absent', ['old-peer'], ownedSlot(prepared).handle, {
         now: 1, getLocalPeerId: () => 'local', baseBackoffMs: 10, maxBackoffMs: 100,
       });
     }
@@ -206,7 +255,7 @@ describe('VM recovery batch transaction', () => {
       now: 3, collectionDeadlineAt: 103, isCurrent: () => !transaction.signal.aborted,
     });
     expect(committed.eligible).toHaveLength(1);
-    const snapshot = committed.eligible[0]!.prepared.slot!.snapshot;
+    const snapshot = ownedSlot(committed.eligible[0]!.prepared).snapshot;
     expect(snapshot.candidatePeerIds).toEqual(['new-peer']);
     expect(snapshot.attemptedPeerIds).toEqual([]);
     expect(snapshot.cleanAbsentPeerIds).toEqual([]);
@@ -232,7 +281,7 @@ describe('VM recovery batch transaction', () => {
       candidatePeerIds: [], curatorRosterConfirmed: true, now: 2,
       collectionDeadlineAt: 102, isCurrent: () => !transaction.signal.aborted,
     });
-    expect(committed.eligible).toEqual([{ index: 0, target: selected, prepared: { suppressed: false } }]);
+    expect(committed.eligible).toEqual([{ index: 0, target: selected, prepared: { kind: 'evidence-free' } }]);
     expect(registry.recordCount).toBe(0);
     expect(registry.peekSnapshot(selected)).toBeUndefined();
     transaction.release();

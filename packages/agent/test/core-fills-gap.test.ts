@@ -3711,8 +3711,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         const prepared = (internals as any).prepareVmReconcileRotationTarget(
           target, peers, now,
         );
-        expect(prepared.suppressed).toBe(false);
-        expect(prepared.slot).toBeDefined();
+        expect(prepared.kind).toBe('owned');
         (internals as any).settleVmReconcileRotationAttempt(
           target, peerId, 'clean-absent', peers, prepared.slot.handle,
         );
@@ -4167,7 +4166,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           target,
           [peer],
           100,
-        ).suppressed).toBe(false);
+        ).kind).toBe('owned');
       }
       const rotationSnapshot = () => internals.vmRecoverySlots.snapshot();
       expect(rotationSnapshot().size).toBe(3);
@@ -4180,7 +4179,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         100,
       );
 
-      expect(admitted.suppressed).toBe(false);
+      expect(admitted.kind).toBe('owned');
       expect(admitted.slot?.snapshot.localCgId).toBe(waitingCg);
       expect(rotationSnapshot().size).toBe(3);
       expect([...rotationSnapshot().values()].filter((record) => record.localCgId === dominantCg)).toHaveLength(2);
@@ -4554,7 +4553,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const shrunkPartial = (internals as any).prepareVmReconcileRotationTarget(
       partialTarget, [peerA], 101,
     );
-    expect(shrunkPartial.suppressed).toBe(false);
+    expect(shrunkPartial.kind).toBe('owned');
     expect(internals.vmRecoverySlots.read(partialTarget, shrunkPartial.slot.handle)!).toMatchObject({ phase: 'collecting', failures: 0 });
     expect([...internals.vmRecoverySlots.read(partialTarget, shrunkPartial.slot.handle)!.attemptedPeerIds]).toEqual([]);
     expect([...internals.vmRecoverySlots.read(partialTarget, shrunkPartial.slot.handle)!.cleanAbsentPeerIds]).toEqual([]);
@@ -4577,7 +4576,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const shrunkBackoff = (internals as any).prepareVmReconcileRotationTarget(
       backoffTarget, [peerA], 201,
     );
-    expect(shrunkBackoff.suppressed).toBe(false);
+    expect(shrunkBackoff.kind).toBe('owned');
     expect(internals.vmRecoverySlots.read(backoffTarget, shrunkBackoff.slot.handle)!).toMatchObject({ phase: 'collecting', failures: 1 });
     expect([...internals.vmRecoverySlots.read(backoffTarget, shrunkBackoff.slot.handle)!.attemptedPeerIds]).toEqual([]);
     expect([...internals.vmRecoverySlots.read(backoffTarget, shrunkBackoff.slot.handle)!.cleanAbsentPeerIds]).toEqual([]);
@@ -4609,7 +4608,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const emptyPartial = (internals as any).prepareVmReconcileRotationTarget(
       partialTarget, [], now + 1,
     );
-    expect(emptyPartial.suppressed).toBe(false);
+    expect(emptyPartial.kind).toBe('evidence-free');
     expect(internals.vmRecoverySlots.snapshot().has(partialKey)).toBe(false);
     const rejoinedPartial = (internals as any).prepareVmReconcileRotationTarget(
       partialTarget, [peer], now + 2,
@@ -4666,7 +4665,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const retry = (internals as any).prepareVmReconcileRotationTarget(
       target, [ordinaryPeer], 101, false,
     );
-    expect(retry.suppressed).toBe(false);
+    expect(retry.kind).toBe('owned');
     expect(retry.slot.handle).toBe(first.slot.handle);
     expect(internals.vmRecoverySlots.read(target, retry.slot.handle)!).toMatchObject({
       phase: 'collecting',
@@ -4679,7 +4678,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const confirmed = (internals as any).prepareVmReconcileRotationTarget(
       target, [ordinaryPeer], 102, true,
     );
-    expect(confirmed.suppressed).toBe(false);
+    expect(confirmed.kind).toBe('owned');
     expect(confirmed.slot.handle).toBe(retry.slot.handle);
     expect(internals.vmRecoverySlots.read(target, confirmed.slot.handle)!.curatorRosterConfirmed).toBe(true);
     expect([...internals.vmRecoverySlots.read(target, confirmed.slot.handle)!.attemptedPeerIds]).toEqual([]);
@@ -4688,7 +4687,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
     expect((internals as any).prepareVmReconcileRotationTarget(
       target, [ordinaryPeer], 103, true,
-    ).suppressed).toBe(true);
+    ).kind).toBe('backoff');
   });
 
   it('reprobes retained peers when curator proof arrives with roster growth', async () => {
@@ -4710,7 +4709,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const confirmed = (internals as any).prepareVmReconcileRotationTarget(
       target, [ordinaryPeer, curatorPeer], 101, true,
     );
-    expect(confirmed.suppressed).toBe(false);
+    expect(confirmed.kind).toBe('owned');
     expect(confirmed.slot.handle).toBe(unconfirmed.slot.handle);
     expect(internals.vmRecoverySlots.read(target, confirmed.slot.handle)!.curatorRosterConfirmed).toBe(true);
     expect([...internals.vmRecoverySlots.read(target, confirmed.slot.handle)!.candidatePeerIds]).toEqual([ordinaryPeer, curatorPeer]);

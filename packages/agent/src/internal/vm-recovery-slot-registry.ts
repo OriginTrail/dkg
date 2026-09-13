@@ -30,10 +30,21 @@ export interface VmRecoverySlotCapture {
   readonly snapshot: VmRecoveryRotationSnapshot;
 }
 
-export interface VmRecoveryPreparation {
-  readonly slot?: VmRecoverySlotCapture;
-  readonly suppressed: boolean;
-}
+/** Explicit outcome of one preparation; a slot travels only with the states that retain one. */
+export type VmRecoveryPreparation =
+  /** Retained evidence is current and runnable under this handle. */
+  | { readonly kind: 'owned'; readonly slot: VmRecoverySlotCapture }
+  /** Retained evidence suppresses transport until its retry deadline. */
+  | { readonly kind: 'backoff'; readonly slot: VmRecoverySlotCapture }
+  /** Bounded capacity is exhausted: process-local scheduling, never absence evidence. */
+  | { readonly kind: 'deferred' }
+  /** Another lifecycle now owns this slot, so this preparation must not touch it. */
+  | { readonly kind: 'invalidated' }
+  /** Nothing is retained: an empty roster, or fail-open retirement of partial evidence. */
+  | { readonly kind: 'evidence-free' };
+
+/** Preparations that expose a target for transport. */
+export type VmRecoveryEligiblePreparation = Extract<VmRecoveryPreparation, { kind: 'owned' | 'evidence-free' }>;
 
 type MutableRotationRecord = { readonly handle: VmRecoverySlotHandle } & {
   -readonly [K in keyof VmRecoveryRotationSnapshot]: VmRecoveryRotationSnapshot[K] extends readonly (infer V)[]
@@ -352,7 +363,7 @@ export class VmRecoverySlotRegistry {
       // Invalidation listeners may install a replacement synchronously. This
       // command cannot observe the old target again and retire that new owner.
       reservation?.release();
-      return { suppressed: true };
+      return { kind: 'invalidated' };
     }
     let record = this.peekState(target);
     if (
@@ -367,13 +378,13 @@ export class VmRecoverySlotRegistry {
         // Abort callbacks may already have installed a new owner, including
         // one with the same fingerprint. Do not re-observe or adopt it here.
         reservation?.release();
-        return { suppressed: true };
+        return { kind: 'invalidated' };
       }
       record = undefined;
     }
     if (candidatePeerIds.length === 0 && !record) {
       reservation?.release();
-      return { suppressed: false };
+      return { kind: 'evidence-free' };
     }
     if (candidatePeerIds.length === 0 && record) {
       // A transient empty socket view cannot invalidate a completed proof: doing
@@ -382,7 +393,7 @@ export class VmRecoverySlotRegistry {
       // non-empty roster starts a genuinely fresh cycle.
       if (record?.phase === 'backoff' && now < record.nextRetryAt) {
         this.touch(target, record.handle);
-        return { slot: this.captureState(record), suppressed: true };
+        return { kind: 'backoff', slot: this.captureState(record) };
       }
       return this.retireForPreparation(target);
     }
@@ -396,12 +407,9 @@ export class VmRecoverySlotRegistry {
         // exponential retry state, so running elevated exact transport here
         // would replay it every sweep. Defer until an expired/resolved slot is
         // available; this is process-local scheduling, never absence evidence.
-        return { suppressed: true };
+        return { kind: 'deferred' };
       }
-      return {
-        slot: admission.slot,
-        suppressed: false,
-      };
+      return { kind: 'owned', slot: admission.slot };
     }
 
     const membershipUnchanged = membershipMatches(
@@ -462,7 +470,7 @@ export class VmRecoverySlotRegistry {
     if (record.phase === 'backoff') {
       if (now < record.nextRetryAt) {
         this.touch(target, record.handle);
-        return { slot: this.captureState(record), suppressed: true };
+        return { kind: 'backoff', slot: this.captureState(record) };
       }
       // A deadline only opens a new collection cycle. It never earns another
       // failure/backoff without fresh clean-absence evidence from every peer.
@@ -480,7 +488,7 @@ export class VmRecoverySlotRegistry {
     }
 
     this.touch(target, record.handle);
-    return { slot: this.captureState(record), suppressed: false };
+    return { kind: 'owned', slot: this.captureState(record) };
   }
 
   private enterBackoff(target: Target, record: MutableRotationRecord,
@@ -559,7 +567,7 @@ export class VmRecoverySlotRegistry {
   /** Retire only this preparation's owner; never adopt a replacement created by an abort callback. */
   private retireForPreparation(target: Target): VmRecoveryPreparation {
     this.invalidate(target);
-    return { suppressed: this.slots.has(vmRecoverySlotKey(target)) };
+    return { kind: this.slots.has(vmRecoverySlotKey(target)) ? 'invalidated' : 'evidence-free' };
   }
 
   beginBatch(): VmRecoveryBatchTransaction {

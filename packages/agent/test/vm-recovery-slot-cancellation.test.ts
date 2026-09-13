@@ -1,4 +1,4 @@
-import type { VmRecoverySlotCapture } from '../src/internal/vm-recovery-slot-registry.js';
+import type { VmRecoveryPreparation, VmRecoverySlotCapture } from '../src/internal/vm-recovery-slot-registry.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
@@ -29,7 +29,7 @@ interface CancellationHost extends VmRecoveryHostInternals {
     target: OrdinalRecoveryTarget,
     peers: readonly string[],
     now: number,
-  ): { slot?: VmRecoverySlotCapture; suppressed: boolean };
+  ): VmRecoveryPreparation;
   closeVmReconcileRotationState(): void;
   clearVmReconcileRotationStateForSlot(localCgId: string, onChainCgId: bigint, ordinal: number): void;
 }
@@ -46,6 +46,11 @@ function barrier() {
   let release!: () => void;
   const promise = new Promise<void>(resolve => { release = resolve; });
   return { promise, release };
+}
+
+function ownedSlot(prepared: VmRecoveryPreparation): VmRecoverySlotCapture {
+  if (prepared.kind !== 'owned') throw new Error(`expected an owned preparation, got ${prepared.kind}`);
+  return prepared.slot;
 }
 
 const cases = (['discovery', 'legacy-meta', 'legacy-registry', 'dial', 'protocol', 'admission', 'transport'] as const).flatMap(stage =>
@@ -95,7 +100,7 @@ describe('exact VM recovery slot cancellation', () => {
       const host = harness.internals as CancellationHost;
       const donor = harness.targets[0]!;
       const waiting = harness.targets[1]!;
-      const original = host.prepareVmReconcileRotationTarget(donor, [peer], host.vmReconcileRotationNow()).slot!;
+      const original = ownedSlot(host.prepareVmReconcileRotationTarget(donor, [peer], host.vmReconcileRotationNow()));
       host.vmRecoverySlots.settleAttempt(donor, peer, 'incomplete', [peer], original.handle, {
         now: 0, getLocalPeerId: () => 'test-host', baseBackoffMs: 1, maxBackoffMs: 1,
       });
@@ -123,9 +128,8 @@ describe('exact VM recovery slot cancellation', () => {
         if (invalidation === 'fingerprint' || invalidation === 'context') {
           if (invalidation === 'context') host.vmRecoverySlots.invalidateContextGraph(localCgId);
           const current = { ...donor, merkleRoot: 'replacement-root' };
-          replacement = host.prepareVmReconcileRotationTarget(current, [peer], host.vmReconcileRotationNow()).slot;
+          replacement = ownedSlot(host.prepareVmReconcileRotationTarget(current, [peer], host.vmReconcileRotationNow()));
           replacementScope.track([current]);
-          expect(replacement).toBeDefined();
           expect(discoverySignal?.aborted).toBe(true);
         }
         release.release();
@@ -326,10 +330,9 @@ describe('exact VM recovery slot cancellation', () => {
     try {
       await entered.promise;
       expect(current?.()).toBe(true);
-      const replacement = host.prepareVmReconcileRotationTarget(
+      const replacement = ownedSlot(host.prepareVmReconcileRotationTarget(
         { ...harness.targets[0]!, merkleRoot: 'new-root' }, [peer], host.vmReconcileRotationNow(),
-      ).slot;
-      expect(replacement).toBeDefined();
+      ));
       expect(current?.()).toBe(false);
       release.release();
       await expect(recovery).resolves.toMatchObject({ outcomes: new Map(), attemptedOrdinals: [] });

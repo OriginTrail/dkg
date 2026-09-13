@@ -1,4 +1,4 @@
-import type { VmRecoverySlotCapture } from '../src/internal/vm-recovery-slot-registry.js';
+import type { VmRecoveryPreparation } from '../src/internal/vm-recovery-slot-registry.js';
 import { describe, expect, it, vi } from 'vitest';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, quadsToNQuads, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -24,9 +24,7 @@ interface PhysicalHost extends VmRecoveryHostInternals {
   graphScopedStorePhysicalRuns: Set<Promise<unknown>>;
   subscribedContextGraphs: Map<string, ContextGraphSub>;
   bindSubscriptionOnChainId(localCgId: string, subscription: ContextGraphSub, onChainId: string): void;
-  prepareVmReconcileRotationTarget(target: OrdinalRecoveryTarget, peers: readonly string[], now: number): {
-    slot?: VmRecoverySlotCapture; suppressed: boolean;
-  };
+  prepareVmReconcileRotationTarget(target: OrdinalRecoveryTarget, peers: readonly string[], now: number): VmRecoveryPreparation;
   closeVmReconcileRotationState(): void;
 }
 

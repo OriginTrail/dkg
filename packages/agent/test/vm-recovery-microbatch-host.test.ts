@@ -681,7 +681,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
         entry: {
           index: 0,
           target,
-          prepared: { suppressed: false },
+          prepared: { kind: 'evidence-free' },
         },
         slotHandle: undefined,
         candidatePeerIds: [peerId],

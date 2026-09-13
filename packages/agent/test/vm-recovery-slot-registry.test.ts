@@ -28,14 +28,14 @@ describe('active VM recovery slot ownership', () => {
     if (kind === 'reserved') expect(reservation?.kind).toBe('reserved');
     expect(registry.prepare(waiting, {
       candidatePeerIds: [], curatorRosterConfirmed: true, collectionDeadlineAt: 201,
-    }, 101, reservation?.kind === 'reserved' ? reservation.reservation : undefined)).toEqual({ suppressed: false });
+    }, 101, reservation?.kind === 'reserved' ? reservation.reservation : undefined)).toEqual({ kind: 'evidence-free' });
     expect(registry.recordCount).toBe(1);
     expect(registry.capture(waiting)).toBeUndefined();
     expect(registry.capture(target)?.handle).toBe(original?.handle);
     expect(donorScope.signal.aborted).toBe(false);
     expect(registry.prepare(waiting, {
       candidatePeerIds: ['new-peer'], curatorRosterConfirmed: true, collectionDeadlineAt: 201,
-    }, 101).slot).toBeDefined();
+    }, 101).kind).toBe('owned');
     scope.release();
     donorScope.release();
   });
@@ -94,7 +94,7 @@ describe('active VM recovery slot ownership', () => {
     }, { once: true });
     expect(registry.prepare({ ...target, merkleRoot: 'requested-replacement' }, {
       candidatePeerIds: ['peer-a'], curatorRosterConfirmed: true, collectionDeadlineAt: 100,
-    }, 0)).toEqual({ suppressed: true });
+    }, 0)).toEqual({ kind: 'invalidated' });
     expect(registry.capture(replacement)?.handle).toBe(replacementRecord?.handle);
     expect(replacementScope?.signal.aborted).toBe(false);
     originalScope.release();
@@ -119,7 +119,7 @@ describe('active VM recovery slot ownership', () => {
     }, { once: true });
     expect.soft(registry.prepare(target, {
       candidatePeerIds: ['peer-b'], curatorRosterConfirmed: false, collectionDeadlineAt: 101,
-    }, 1)).toEqual({ suppressed: true });
+    }, 1)).toEqual({ kind: 'invalidated' });
     expect(registry.capture(replacement)?.handle).toBe(replacementRecord?.handle);
     expect(replacementRecord?.snapshot.candidatePeerIds).toEqual(['peer-a']);
     expect(replacementScope?.signal.aborted).toBe(false);

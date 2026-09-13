@@ -3,6 +3,7 @@
 import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
 import { planVmRecoveryAdmission } from './vm-recovery-batch-plan.js';
 import type {
+  VmRecoveryEligiblePreparation,
   VmRecoveryPreparation,
   VmRecoverySlotAdmissionReservation,
   VmRecoverySlotCapture,
@@ -18,10 +19,17 @@ interface BatchOptions {
   readonly collectionDeadlineAt: number;
 }
 
+/** What one target holds between reservation and commit. */
 type Admission =
-  | { readonly kind: 'owner'; readonly slot: VmRecoverySlotCapture; readonly suppressed: boolean }
+  /** An existing owner that is runnable before discovery. */
+  | { readonly kind: 'owned'; readonly slot: VmRecoverySlotCapture }
+  /** An existing owner in active backoff; the authoritative roster may release it. */
+  | { readonly kind: 'backoff'; readonly slot: VmRecoverySlotCapture }
+  /** Reserved capacity waiting for the authoritative roster. */
   | { readonly kind: 'reserved'; readonly reservation: VmRecoverySlotAdmissionReservation }
-  | { readonly kind: 'unreserved'; readonly suppressed: boolean }
+  /** No capacity before discovery; commit retries immediate admission. */
+  | { readonly kind: 'deferred' }
+  /** Superseded before discovery; commit never touches it. */
   | { readonly kind: 'invalidated' };
 
 interface BatchEntry {
@@ -33,7 +41,7 @@ interface BatchEntry {
 export interface VmRecoveryPreparedEntry {
   readonly index: number;
   readonly target: OrdinalRecoveryTarget;
-  readonly prepared: VmRecoveryPreparation;
+  readonly prepared: VmRecoveryEligiblePreparation;
 }
 
 interface CommitOptions {
@@ -70,10 +78,10 @@ export class VmRecoveryBatchTransaction {
           index, target, admission: this.reserveTarget(target, originals.get(target), options),
         }));
       this.state = { kind: 'reserved', entries, targetCount: options.targets.length };
-      const initiallyEligibleTargets = entries.filter(({ admission }) => admission.kind === 'reserved'
-        || (admission.kind !== 'invalidated' && !admission.suppressed))
+      const initiallyEligibleTargets = entries
+        .filter(({ admission }) => admission.kind === 'owned' || admission.kind === 'reserved')
         .sort((left, right) => left.index - right.index).map(({ target }) => target);
-      const suppressedRecords = entries.flatMap(({ admission }) => admission.kind === 'owner'
+      const suppressedRecords = entries.flatMap(({ admission }) => admission.kind === 'backoff'
         ? [admission.slot.snapshot] : []);
       this.scope.track(initiallyEligibleTargets);
       return { initiallyEligibleTargets, suppressedRecords };
@@ -87,24 +95,23 @@ export class VmRecoveryBatchTransaction {
     options: BatchOptions): Admission {
     if (original) {
       // A donor remains untouched until its requester's admission commits.
-      if (this.slots.isReservedDonor(target, original.handle)) {
-        return { kind: 'owner', slot: original, suppressed: false };
-      }
+      if (this.slots.isReservedDonor(target, original.handle)) return { kind: 'owned', slot: original };
       const prepared = this.slots.prepare(target, {
         candidatePeerIds: options.observedCandidatePeerIds,
         curatorRosterConfirmed: original.snapshot.curatorRosterConfirmed,
         collectionDeadlineAt: options.collectionDeadlineAt,
       }, options.now);
-      if (prepared.slot) return { kind: 'owner', slot: prepared.slot, suppressed: prepared.suppressed };
-      if (prepared.suppressed) return { kind: 'invalidated' };
       // Preparation retired this owner's partial evidence and verified that no
       // abort callback installed a replacement. Reserve a fresh generation now;
       // carrying the retired handle through discovery would suppress this pass.
+      if (prepared.kind !== 'evidence-free') return prepared;
     }
     const admission = this.scope.reserveAdmission(target, options.now);
-    if (admission.kind === 'reserved') return admission;
-    if (admission.kind === 'existing') return { kind: 'owner', slot: admission.slot, suppressed: false };
-    return { kind: 'unreserved', suppressed: true };
+    switch (admission.kind) {
+      case 'reserved': return admission;
+      case 'existing': return { kind: 'owned', slot: admission.slot };
+      case 'deferred': return { kind: 'deferred' };
+    }
   }
 
   commit(options: CommitOptions): {
@@ -115,32 +122,56 @@ export class VmRecoveryBatchTransaction {
     const { entries, targetCount } = this.state;
     this.state = { kind: 'committed' };
     try {
-      const prepared = entries.map(({ target, index, admission }): VmRecoveryPreparedEntry => {
-        if (this.signal.aborted || !options.isCurrent() || admission.kind === 'invalidated'
-          || (admission.kind === 'owner' && !this.slots.isCurrent(target, admission.slot.handle))) {
-          if (admission.kind === 'reserved') admission.reservation.release();
-          return { index, target, prepared: { suppressed: true } };
-        }
-        return { index, target, prepared: this.slots.prepare(target, {
-          candidatePeerIds: options.candidatePeerIds,
-          curatorRosterConfirmed: options.curatorRosterConfirmed,
-          collectionDeadlineAt: options.collectionDeadlineAt,
-        }, options.now, admission.kind === 'reserved' ? admission.reservation : undefined) };
-      });
+      const prepared = entries.map(({ target, index, admission }) =>
+        ({ index, target, prepared: this.commitEntry(target, admission, options) }));
       let lastAdmitted: BatchEntry | undefined;
       for (let index = 0; index < entries.length; index++) {
         const entry = entries[index]!;
-        if (entry.admission.kind !== 'owner' && prepared[index]?.prepared.slot) lastAdmitted = entry;
+        const wasOwner = entry.admission.kind === 'owned' || entry.admission.kind === 'backoff';
+        if (!wasOwner && prepared[index]?.prepared.kind === 'owned') lastAdmitted = entry;
       }
-      const eligible = prepared.filter(entry => !entry.prepared.suppressed
-        && (!entry.prepared.slot || this.slots.isCurrent(entry.target, entry.prepared.slot.handle)))
-        .sort((left, right) => Number(Boolean(right.prepared.slot)) - Number(Boolean(left.prepared.slot))
-          || left.index - right.index);
+      const eligible = prepared.flatMap(({ index, target, prepared: preparation }): VmRecoveryPreparedEntry[] => {
+        switch (preparation.kind) {
+          case 'owned':
+            return this.slots.isCurrent(target, preparation.slot.handle) ? [{ index, target, prepared: preparation }] : [];
+          case 'evidence-free':
+            return [{ index, target, prepared: preparation }];
+          case 'backoff':
+          case 'deferred':
+          case 'invalidated':
+            return [];
+        }
+      }).sort((left, right) => Number(right.prepared.kind === 'owned') - Number(left.prepared.kind === 'owned')
+        || left.index - right.index);
       this.scope.track(eligible.map(({ target }) => target));
       return { eligible, ...(lastAdmitted ? { nextAdmissionCursor: (lastAdmitted.index + 1) % targetCount } : {}) };
     } catch (error) {
       this.release();
       throw error;
+    }
+  }
+
+  /** Apply the authoritative roster to one admission; a stale batch invalidates every remaining claim. */
+  private commitEntry(target: OrdinalRecoveryTarget, admission: Admission, options: CommitOptions): VmRecoveryPreparation {
+    const stale = this.signal.aborted || !options.isCurrent();
+    const params = {
+      candidatePeerIds: options.candidatePeerIds,
+      curatorRosterConfirmed: options.curatorRosterConfirmed,
+      collectionDeadlineAt: options.collectionDeadlineAt,
+    };
+    switch (admission.kind) {
+      case 'invalidated':
+        return admission;
+      case 'reserved':
+        if (stale) { admission.reservation.release(); return { kind: 'invalidated' }; }
+        return this.slots.prepare(target, params, options.now, admission.reservation);
+      case 'owned':
+      case 'backoff':
+        if (stale || !this.slots.isCurrent(target, admission.slot.handle)) return { kind: 'invalidated' };
+        return this.slots.prepare(target, params, options.now);
+      case 'deferred':
+        if (stale) return { kind: 'invalidated' };
+        return this.slots.prepare(target, params, options.now);
     }
   }
 

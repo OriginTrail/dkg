@@ -1,4 +1,4 @@
-import type { VmRecoverySlotCapture, VmRecoverySlotHandle } from '../../src/internal/vm-recovery-slot-registry.js';
+import type { VmRecoveryEligiblePreparation, VmRecoverySlotHandle } from '../../src/internal/vm-recovery-slot-registry.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
@@ -101,7 +101,7 @@ export interface VmRecoveryHostInternals {
       entry: {
         index: number;
         target: OrdinalRecoveryTarget;
-        prepared: { slot?: VmRecoverySlotCapture; suppressed: boolean };
+        prepared: VmRecoveryEligiblePreparation;
       };
       slotHandle: VmRecoverySlotHandle | undefined;
       candidatePeerIds: readonly string[];

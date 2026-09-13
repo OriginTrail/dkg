@@ -4747,7 +4747,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     now: number,
     curatorRosterConfirmed = true,
   ): VmRecoveryPreparation {
-    if (this.vmReconcileRotationClosed) return { suppressed: true };
+    if (this.vmReconcileRotationClosed) return { kind: 'invalidated' };
     return this.vmRecoverySlots.prepare(target, {
       candidatePeerIds, curatorRosterConfirmed,
       collectionDeadlineAt: now + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
@@ -5515,7 +5515,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const entry = eligible[eligibleIndex]!;
       const { target } = entry;
       if (handledBatchOrdinals.has(target.ordinal)) continue;
-      const slot = entry.prepared.slot;
+      const slot = entry.prepared.kind === 'owned' ? entry.prepared.slot : undefined;
       const snapshot = slot ? this.vmRecoverySlots.read(target, slot.handle) : undefined;
       const slotHandle = snapshot ? slot?.handle : undefined;
       const candidatePeerIds = snapshot ? snapshot.candidatePeerIds : orderedPeerIds;
@@ -5608,7 +5608,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const candidateEntry = eligible[candidateIndex]!;
           const candidateTarget = candidateEntry.target;
           if (handledBatchOrdinals.has(candidateTarget.ordinal)) continue;
-          const candidateSlot = candidateEntry.prepared.slot;
+          const candidateSlot = candidateEntry.prepared.kind === 'owned' ? candidateEntry.prepared.slot : undefined;
           const candidateSnapshot = candidateSlot
             ? this.vmRecoverySlots.read(candidateTarget, candidateSlot.handle) : undefined;
           const candidateHandle = candidateSnapshot ? candidateSlot?.handle : undefined;
