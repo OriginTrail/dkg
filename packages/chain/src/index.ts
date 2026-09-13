@@ -1,4 +1,6 @@
 export * from './chain-adapter.js';
+export { assertContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
 export {
   type ContextGraphAuthorityHistoryCheckpointV1,
   type ContextGraphAuthorityHistoryState,

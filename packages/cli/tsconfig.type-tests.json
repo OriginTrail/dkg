@@ -8,5 +8,8 @@
     "rootDir": ".",
     "sourceMap": false
   },
-  "include": ["test/**/*.typecheck.ts"]
+  "include": [
+    "test/**/*.typecheck.ts",
+    "test/_helpers/catchup-readiness-fixtures.ts"
+  ]
 }
