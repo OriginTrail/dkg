@@ -559,6 +559,9 @@ describe('/api/status effective sync lifecycle switches', () => {
     expect(response.status).toBe(200);
     expect(response.body.syncLifecycle).toEqual({
       syncReconcilerEnabled: false,
+      syncOnConnectEnabled: true,
+      durableSyncEnabled: true,
+      warmCoreConnectionsEnabled: false,
     });
   });
 
@@ -574,12 +577,49 @@ describe('/api/status effective sync lifecycle switches', () => {
       expect(response.status).toBe(200);
       expect(response.body.syncLifecycle).toEqual({
         syncReconcilerEnabled: true,
+        syncOnConnectEnabled: true,
+        durableSyncEnabled: true,
+        warmCoreConnectionsEnabled: false,
       });
     } finally {
       if (previous === undefined) {
         delete process.env.DKG_SYNC_RECONCILER_ENABLED;
       } else {
         process.env.DKG_SYNC_RECONCILER_ENABLED = previous;
+      }
+    }
+  });
+
+  it('surfaces every effective isolation switch used by managed repair', async () => {
+    const previous = {
+      syncOnConnect: process.env.DKG_SYNC_ON_CONNECT_ENABLED,
+      durableSync: process.env.DKG_DURABLE_SYNC_ENABLED,
+      warmCores: process.env.DKG_WARM_CORE_CONNECTIONS,
+    };
+    process.env.DKG_SYNC_ON_CONNECT_ENABLED = 'false';
+    process.env.DKG_DURABLE_SYNC_ENABLED = 'true';
+    process.env.DKG_WARM_CORE_CONNECTIONS = '0';
+    try {
+      const response = await requestStatusWithAgent({}, {
+        syncOnConnectEnabled: true,
+        durableSyncEnabled: false,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body.syncLifecycle).toEqual({
+        syncReconcilerEnabled: true,
+        syncOnConnectEnabled: false,
+        durableSyncEnabled: true,
+        warmCoreConnectionsEnabled: false,
+      });
+    } finally {
+      for (const [name, value] of [
+        ['DKG_SYNC_ON_CONNECT_ENABLED', previous.syncOnConnect],
+        ['DKG_DURABLE_SYNC_ENABLED', previous.durableSync],
+        ['DKG_WARM_CORE_CONNECTIONS', previous.warmCores],
+      ]) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
       }
     }
   });

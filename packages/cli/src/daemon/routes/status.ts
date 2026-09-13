@@ -59,6 +59,7 @@ import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats }
 import {
   DKGAgent,
   loadOpWallets,
+  resolveBooleanSwitch,
   resolveSyncReconcilerEnabled,
 } from '@origintrail-official/dkg-agent';
 import {
@@ -1063,6 +1064,17 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         syncReconcilerEnabled: resolveSyncReconcilerEnabled(
           config.syncReconcilerEnabled,
         ),
+        syncOnConnectEnabled: resolveBooleanSwitch(
+          config.syncOnConnectEnabled,
+          'DKG_SYNC_ON_CONNECT_ENABLED',
+          true,
+        ),
+        durableSyncEnabled: resolveBooleanSwitch(
+          config.durableSyncEnabled,
+          'DKG_DURABLE_SYNC_ENABLED',
+          true,
+        ),
+        warmCoreConnectionsEnabled: process.env.DKG_WARM_CORE_CONNECTIONS === '1',
       },
       connectedPeers: uniquePeers.size,
       connections: {
