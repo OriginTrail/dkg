@@ -265,7 +265,12 @@ export {
   isEntityPredicate,
   isAssertionEntityPredicate,
 } from './entity-predicate.js';
-export { withRetry, type RetryOptions } from './retry.js';
+export {
+  withRetry,
+  withRetryContext,
+  type RetryAttemptContext,
+  type RetryOptions,
+} from './retry.js';
 export { resolveWithinAbort } from './abort-boundary.js';
 export {
   RetryQueue,
@@ -281,15 +286,29 @@ export {
   type LegacyProtocolOutboxStore,
   type CompatibleProtocolOutboxStore,
   type ProtocolOutboxEntry,
+  type ProtocolOutboxMetadata,
+  type ProtocolOutboxPageBudget,
+  type ProtocolOutboxPage,
+  type ProtocolOutboxQueueStats,
+  type ProtocolOutboxPolicyConfiguration,
+  type ProtocolOutboxStorePolicy,
+  type BoundedProtocolOutboxStore,
+  type ProtocolOutboxPersistence,
+  type ProtocolOutboxInspection,
+  type ProtocolOutboxPayloadInspection,
   type KaNumberStore,
   RESPONSE_CACHE_BYTES,
   RESPONSE_GONE_MARKER,
 } from './messenger-types.js';
 export {
   ProtocolOutbox,
+  BoundedProtocolOutbox,
+  assertBoundedProtocolOutboxStore,
+  protocolOutboxPayloadInspection,
   type ProtocolOutboxOptions,
   DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS,
   DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
+  validateProtocolOutboxPageBudget,
   InMemoryProtocolOutboxStore,
   InMemoryMessageIdempotencyStore,
 } from './protocol-outbox.js';

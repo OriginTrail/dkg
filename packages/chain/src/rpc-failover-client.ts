@@ -43,10 +43,15 @@ import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactionError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
-import { errorCode, errorMessage } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorRetryAfterMs } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
-import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import {
+  ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
+  createRpcTimeoutError,
+  type RpcEndpointExhaustionKind,
+} from './chain-rpc-transport-error.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 import {
@@ -94,8 +99,9 @@ export type ReadPolicy =
   | 'failOpenFundingRead';
 
 /** Per-read options: timeout/failover behavior plus an explicit low-cardinality
- *  telemetry consumer key for `eth_call` attribution. `label` remains a human
- *  failover/span label and is not implicitly part of the daemon log contract. */
+ *  telemetry consumer key for raw-read attribution (`eth_call` and
+ *  `eth_getLogs`). `label` remains a human failover/span label and is not
+ *  implicitly part of the daemon log contract. */
 export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
@@ -156,16 +162,14 @@ interface ProviderPassOptions<T> {
   onServed: (endpoint: RpcEndpoint, value: T) => void;
 }
 
-type ProviderSetExhaustionKind = 'all-throttled' | 'mixed';
-
 /** Internal exhaustion detail used only while deciding whether to retry a pass. */
-class ProviderSetExhaustedError extends ChainRpcTransportError {
+class ProviderSetExhaustedError extends RpcEndpointsExhaustedError {
   constructor(
     message: string,
-    readonly exhaustionKind: ProviderSetExhaustionKind,
-    opts: { cause: unknown; rpcUrls: readonly string[] },
+    exhaustionKind: RpcEndpointExhaustionKind,
+    opts: { cause: unknown; rpcUrls: readonly string[]; retryAfterMs?: number },
   ) {
-    super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
+    super(message, { ...opts, exhaustionKind });
   }
 }
 
@@ -554,7 +558,7 @@ export class RpcFailoverClient {
     getMetrics().chainRpcFailoverTotal.add(1, {
       rpc_method: 'eth_estimateGas', chain_id: this.chainId(), reason: 'exhausted',
     });
-    throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
+    throw new RpcEndpointsExhaustedError(message, {
       cause: lastRetryable,
       rpcUrls: canonical.map((e) => e.rpcUrl),
     });
@@ -628,8 +632,7 @@ export class RpcFailoverClient {
           // broadcast-time all-endpoints-exhausted failure maps to a retryable 503 at
           // the HTTP boundary, not a generic 500 — an exhaustion after a provider
           // populated/signed would otherwise surface code-less.
-          throw new ChainRpcTransportError(
-            'RPC_ENDPOINTS_EXHAUSTED',
+          throw new RpcEndpointsExhaustedError(
             `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
             { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl), txHash },
           );
@@ -750,6 +753,7 @@ export class RpcFailoverClient {
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let lastRetryable: unknown;
     let allEndpointsThrottled = true;
+    let retryAfterMs: number | undefined;
     let sawEmpty = false;
     let lastEmpty: T | undefined;
     let deadlineExpiredBeforeAttempt = false;
@@ -804,7 +808,12 @@ export class RpcFailoverClient {
       } catch (err) {
         if (!options.isRetryable(err)) throw err;
         lastRetryable = err;
-        if (!isThrottleRpcError(err)) allEndpointsThrottled = false;
+        if (!isThrottleRpcError(err)) {
+          allEndpointsThrottled = false;
+        } else {
+          const hint = errorRetryAfterMs(err);
+          if (hint !== undefined) retryAfterMs = Math.max(retryAfterMs ?? 0, hint);
+        }
         attempt.recordFailure(); // de-prefer a failed backend
         const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
         if (!isLast && canTryNext) {
@@ -833,6 +842,7 @@ export class RpcFailoverClient {
       throw new ProviderSetExhaustedError(message, allEndpointsThrottled ? 'all-throttled' : 'mixed', {
         cause: lastRetryable,
         rpcUrls: canonical.map((e) => e.rpcUrl),
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       });
     }
     // Either every endpoint returned empty with no errors, or the caller's
@@ -843,8 +853,7 @@ export class RpcFailoverClient {
     }
     // Unreachable when >=1 endpoint is configured (each iteration returns,
     // continues on empty, or throws / sets lastRetryable). Guard the 0-endpoint case.
-    throw new ChainRpcTransportError(
-      'RPC_ENDPOINTS_EXHAUSTED',
+    throw new RpcEndpointsExhaustedError(
       `${label} read failed: no configured RPC endpoints`,
       { rpcUrls: [] },
     );

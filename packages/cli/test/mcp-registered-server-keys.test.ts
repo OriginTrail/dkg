@@ -1,8 +1,9 @@
-import type { McpClientConfigShape, ClientTarget } from '../src/mcp-client-registry.js';
+import { selectMcpClientTargets, type McpClientConfigShape, type ClientTarget } from '../src/mcp-client-registry.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { McpPhysicalConfig } from '../src/mcp-physical-config.js';
 
 import {
   readRegisteredServerKeys,
@@ -29,13 +30,10 @@ async function target(
   filename: string,
   body: string,
   shape: McpClientConfigShape = { format: 'json', serverContainer: 'mcpServers' },
-): Promise<ClientTarget> {
+): Promise<McpPhysicalConfig> {
   const configPath = join(dir, filename);
   await writeFile(configPath, body, 'utf8');
-  const paths = { location: 'native' as const, name: 'Test', configPath, displayPath: configPath };
-  if (shape.format === 'toml') return { ...paths, id: 'codex-cli', ...shape };
-  if (shape.serverContainer === 'servers') return { ...paths, id: 'vscode', format: 'jsonc', serverContainer: 'servers' };
-  return { ...paths, id: 'cursor', format: 'json', serverContainer: 'mcpServers' };
+  return McpPhysicalConfig.create([{ configPath, displayPath: configPath, ...shape }]);
 }
 
 /** Fails loudly with the probe's own reason instead of a bare undefined. */
@@ -114,7 +112,7 @@ describe('readRegisteredServerKeys', () => {
       configPath: join(dir, 'nope.json'),
       displayPath: 'nope.json',
     };
-    expect(readRegisteredServerKeys(t)).toEqual({ ok: true, servers: {} });
+    expect(readRegisteredServerKeys(selectMcpClientTargets([t])[0]!.file)).toEqual({ ok: true, servers: {} });
   });
 
   it('treats a missing container as a SUCCESSFUL probe with no servers', async () => {

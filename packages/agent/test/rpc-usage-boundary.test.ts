@@ -29,12 +29,22 @@ describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', ()
   it('returns the real MockChainAdapter empty window (capability present, no transport)', () => {
     const chain = new MockChainAdapter();
     const out = drain.call({ chain } as never);
-    expect(out).toEqual({ byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 });
+    expect(out).toEqual({
+      byMethod: {},
+      ethCallByConsumer: {},
+      attributions: [],
+      lifetimeTotal: 0,
+    });
   });
 
   it('collapses a missing adapter capability to a concrete EMPTY window (consumers never see undefined)', () => {
     const out = drain.call({ chain: {} } as never);
-    expect(out).toEqual({ byMethod: {}, ethCallByConsumer: {}, lifetimeTotal: 0 });
+    expect(out).toEqual({
+      byMethod: {},
+      ethCallByConsumer: {},
+      attributions: [],
+      lifetimeTotal: 0,
+    });
   });
 
   it('is inherited by the composed DKGAgent class (the daemon consumes agent, not the base)', () => {

@@ -15,6 +15,7 @@ import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapsho
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
+import { createSyncWorkAdmission } from '../src/sync/work-admission.js';
 
 function createMetricsHarness() {
   const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
@@ -263,6 +264,79 @@ describe('sync memory attribution metrics', () => {
     expect(pageCount.every((point) => point.attributes.phase === 'durable_data')).toBe(true);
     expect(metricPoints(harness.exporter, 'dkg.sync.requester.accumulated_quads').some((point) =>
       point.attributes.outcome === 'timed_out'
+    )).toBe(true);
+  });
+
+  it('attributes admitted requester progress to local_yield when work admission expires', async () => {
+    const harness = createMetricsHarness();
+    provider = harness.provider;
+    let sends = 0;
+    let admitted = true;
+    const encoder = new TextEncoder();
+
+    const result = await fetchSyncPages({
+      ctx: { operationId: 'test', operationName: 'sync' },
+      remotePeerId: 'peer-not-a-label',
+      contextGraphId: 'graph-not-a-label',
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: 'urn:data',
+      deadline: Date.now() + 10_000,
+      syncPageTimeoutMs: 1_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 1,
+      syncPageSize: 2,
+      syncDeniedResponse: 'denied',
+      debugSyncProgress: false,
+      protocolSync: '/dkg/test/sync',
+      checkpointStore: new MemorySyncCheckpointStore(),
+      workAdmission: createSyncWorkAdmission(
+        () => admitted ? 1_000 : 0,
+        { sharing: 'exclusive', owner: 'memory-metrics-test' },
+      ),
+      buildSyncRequest: async () => encoder.encode('request'),
+      parseAndFilter: async () => ({
+        quads: [
+          { subject: 'urn:s:1', predicate: 'urn:p', object: '"one"', graph: 'urn:data' },
+          { subject: 'urn:s:2', predicate: 'urn:p', object: '"two"', graph: 'urn:data' },
+        ],
+        totalQuads: 2,
+      }),
+      send: async () => {
+        sends += 1;
+        admitted = false;
+        return encoder.encode('<urn:s> <urn:p> "o" <urn:data> .');
+      },
+      logWarn: () => {},
+      logInfo: () => {},
+      logDebug: () => {},
+    });
+    await provider.forceFlush();
+
+    expect(result).toMatchObject({
+      completed: false,
+      timedOut: false,
+      localYield: true as const,
+    });
+    expect(result.quads).toHaveLength(2);
+    expect(sends).toBe(1);
+
+    const localYieldValue = (name: string): { sum: number; count: number } => {
+      const point = metricPoints(harness.exporter, name).find((candidate) =>
+        candidate.attributes.phase === 'durable_data'
+          && candidate.attributes.outcome === 'local_yield',
+      );
+      return point!.value as { sum: number; count: number };
+    };
+    expect(localYieldValue('dkg.sync.requester.accumulated_quads').sum).toBe(2);
+    expect(localYieldValue('dkg.sync.requester.page_count').sum).toBe(1);
+    expect(localYieldValue('dkg.sync.requester.accumulated_bytes').sum).toBeGreaterThan(0);
+    expect(metricPoints(harness.exporter, 'dkg.sync.requester.page_count').some((point) =>
+      point.attributes.outcome === 'timed_out'
+    )).toBe(false);
+    expect(metricPoints(harness.exporter, 'process.heap_used_bytes').some((point) =>
+      point.attributes.phase === 'durable_data'
+        && point.attributes.boundary === 'requester_phase_completed'
     )).toBe(true);
   });
 

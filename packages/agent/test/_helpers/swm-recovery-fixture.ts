@@ -6,6 +6,7 @@ import {
 import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 
+import type { SyncPhase } from '../../src/sync/auth/request-build.js';
 import type { SyncPageResult } from '../../src/sync/requester/page-fetch.js';
 import { createSharedMemorySnapshotMaterializer } from
   '../../src/sync/requester/swm-snapshot-materializer.js';
@@ -41,6 +42,7 @@ export function recoveryPage(quads: Quad[], completed = true): SyncPageResult {
   return {
     quads,
     bytesReceived: 0,
+    timedOut: false,
     resumedFromOffset: 0,
     nextOffset: quads.length,
     checkpointKey: 'k',
@@ -100,7 +102,7 @@ export function makeRecoveryDeps(
       _peerId: string,
       _contextGraphId: string,
       _includeSharedMemory: boolean,
-      phase: 'data' | 'meta',
+      phase: SyncPhase,
     ): Promise<SyncPageResult> => recoveryPage(
       phase === 'data' ? sourceData : sourceMeta,
     ),

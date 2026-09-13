@@ -1,53 +1,52 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest';
-import { ethers } from 'ethers';
 
 import type { ContextGraphAuthoritySnapshot } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
-
-const OWNER = '0x1111111111111111111111111111111111111111';
-const MEMBER = '0x2222222222222222222222222222222222222222';
-const AUTHORITY = '0x3333333333333333333333333333333333333333';
-const GOVERNANCE = '0x4444444444444444444444444444444444444444';
-const SECOND_MEMBER = '0x5555555555555555555555555555555555555555';
-const SECOND_AUTHORITY = '0x6666666666666666666666666666666666666666';
-const FINALIZED_HASH = `0x${'55'.repeat(32)}`;
-const NEXT_FINALIZED_HASH = `0x${'56'.repeat(32)}`;
-const CREATION_HASH = `0x${'66'.repeat(32)}`;
-const POLICY_HASH = `0x${'77'.repeat(32)}`;
-const NEXT_POLICY_HASH = `0x${'78'.repeat(32)}`;
-const NAME_HASH = `0x${'88'.repeat(32)}`;
-
-function event(
-  blockNumber: number,
-  index: number,
-  blockHash: string,
-  args: readonly unknown[] = [],
-) {
-  return { blockNumber, index, blockHash, args };
-}
+import {
+  AUTHORITY,
+  createAuthorityScenario,
+  FINALIZED_HASH,
+  GOVERNANCE,
+  MEMBER,
+  NAME_HASH,
+  NEXT_POLICY_HASH,
+  OWNER,
+  POLICY_HASH,
+  SECOND_AUTHORITY,
+  SECOND_MEMBER,
+} from './helpers/context-graph-authority-scenario.js';
 
 interface AuthorityEvidence {
   readonly filters: Array<readonly [string, ...unknown[]]>;
   readonly ranges: Array<readonly [number, number]>;
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly deploymentReads: Array<readonly [string, string, string]>;
+  readonly readOptions: Array<Readonly<{ policy?: string; signal?: AbortSignal }>>;
 }
 
 interface EvmAuthorityHarness {
   readonly adapter: EVMChainAdapter;
   readonly evidence: AuthorityEvidence;
+  readonly provider: Readonly<Record<string, unknown>>;
   advanceAuthorityHead(): void;
   replaceCachedAnchor(): void;
   replaceFinalizedHead(): void;
   holdCurrentStateRead(): Readonly<{ entered: Promise<void>; release(): void }>;
+  holdBlockRead(tag: string | number): Readonly<{ entered: Promise<void>; release(): void }>;
   setPublishAuthorityAccountId(value: unknown): void;
   rotateContextGraphStorage(): void;
 }
 
-function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorityHarness {
+function makeEvmAuthorityAdapter(
+  options: {
+    reorg?: boolean;
+    providerRangeLimit?: number;
+  } = {},
+): EvmAuthorityHarness {
+  const scenario = createAuthorityScenario({ reorg: options.reorg });
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'http://127.0.0.1:1',
     hubAddress: GOVERNANCE,
@@ -63,37 +62,22 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
     ranges: [] as Array<readonly [number, number]>,
     staticCalls: [] as Array<readonly [bigint, { blockTag: number }]>,
     deploymentReads: [] as Array<readonly [string, string, string]>,
+    readOptions: [],
   };
 
-  let finalizedNumber = 30;
-  let finalizedHash = FINALIZED_HASH;
-  let cachedAnchorReplaced = false;
-  let currentReadGate: PromiseWithResolvers<void> | undefined;
-  const logs: Record<string, ReturnType<typeof event>[]> = {
-    ContextGraphCreated: [event(10, 1, CREATION_HASH, [9n, OWNER, NAME_HASH])],
-    Transfer: [
-      event(10, 0, CREATION_HASH, [ethers.ZeroAddress, OWNER, 9n]),
-      event(15, 0, `0x${'99'.repeat(32)}`, [SECOND_MEMBER, OWNER, 9n]),
-    ],
-    PublishPolicyUpdated: [event(20, 0, POLICY_HASH)],
-    PublishAuthorityUpdated: [event(21, 0, POLICY_HASH)],
-    AgentParticipantAdded: [event(22, 0, `0x${'aa'.repeat(32)}`)],
-    AgentParticipantRemoved: [event(23, 0, `0x${'bb'.repeat(32)}`)],
-  };
-  const current = Object.assign(
-    [OWNER, [MEMBER, OWNER], 0n, true, 0n, 1n, 0n, AUTHORITY, 7n],
-    {
-      owner: OWNER,
-      participantAgents: [MEMBER, OWNER],
-      active: true,
-      accessPolicy: 1n,
-      publishPolicy: 0n,
-      publishAuthority: AUTHORITY,
-      publishAuthorityAccountId: 7n,
-    },
-  );
   const contract = {
-    filters: Object.fromEntries(Object.keys(logs).map((name) => [
+    interface: {
+      getEvent: (name: string) => ({ topicHash: `topic:${name}` }),
+      parseLog: (log: { parsed: unknown }) => log.parsed,
+    },
+    filters: Object.fromEntries([
+      'ContextGraphCreated',
+      'Transfer',
+      'PublishPolicyUpdated',
+      'PublishAuthorityUpdated',
+      'AgentParticipantAdded',
+      'AgentParticipantRemoved',
+    ].map((name) => [
       name,
       (...args: readonly unknown[]) => {
         evidence.filters.push([name, ...args]);
@@ -106,42 +90,34 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
     ])),
     queryFilter: async (filter: { name: string }, fromBlock: number, toBlock: number) => {
       evidence.ranges.push([fromBlock, toBlock]);
-      if (toBlock - fromBlock + 1 > 10) throw new Error('oversized log range');
-      return (logs[filter.name] ?? []).filter(
-        (entry) => entry.blockNumber >= fromBlock && entry.blockNumber <= toBlock,
-      );
+      if (
+        options.providerRangeLimit !== undefined
+        && toBlock - fromBlock + 1 > options.providerRangeLimit
+      ) {
+        throw {
+          cause: {
+            info: {
+              error: {
+                message: `eth_getLogs is limited to ${options.providerRangeLimit} blocks`,
+              },
+            },
+          },
+        };
+      }
+      return scenario.renderQueryFilter(filter.name, fromBlock, toBlock);
     },
     getContextGraph: {
       staticCall: async (contextGraphId: bigint, readOptions: { blockTag: number }) => {
         evidence.staticCalls.push([contextGraphId, readOptions]);
         expect(contextGraphId).toBe(9n);
-        expect(readOptions).toEqual({ blockTag: finalizedNumber });
-        const gate = currentReadGate;
-        if (gate !== undefined) {
-          currentReadGate = undefined;
-          gate.resolve();
-          await gate.promise;
-        }
-        return current;
+        expect(readOptions).toEqual({ blockTag: scenario.finalizedNumber });
+        return scenario.readCurrentState();
       },
     },
     getAddress: async () => GOVERNANCE,
   };
   const provider = {
-    getBlock: async (tag: string | number) => {
-      if (tag === 'finalized') return { number: finalizedNumber, hash: finalizedHash };
-      const historicalHash = tag === 30 && cachedAnchorReplaced
-        ? `0x${'cc'.repeat(32)}`
-        : tag === 30
-          ? FINALIZED_HASH
-          : finalizedHash;
-      return {
-        number: Number(tag),
-        hash: options.reorg && tag === finalizedNumber
-          ? `0x${'cc'.repeat(32)}`
-          : historicalHash,
-      };
-    },
+    getBlock: (tag: string | number) => scenario.getBlock(tag),
     getNetwork: async () => ({ chainId: 31337n }),
   };
   adapter.contracts = {
@@ -150,7 +126,11 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
   adapter.readTipProvider = async (
     _label: string,
     read: (selectedProvider: typeof provider) => Promise<unknown>,
-  ) => read(provider);
+    readOptions: Readonly<{ policy?: string }>,
+  ) => {
+    evidence.readOptions.push(readOptions);
+    return read(provider);
+  };
   adapter.resolveContractDeployBlock = async (
     address: string,
     operation: string,
@@ -159,39 +139,16 @@ function makeEvmAuthorityAdapter(options: { reorg?: boolean } = {}): EvmAuthorit
     evidence.deploymentReads.push([address, operation, label]);
     return { fromBlock: 7, head: 30, scanProviders: [] };
   };
-  const advanceAuthorityHead = () => {
-    finalizedNumber = 35;
-    finalizedHash = NEXT_FINALIZED_HASH;
-    logs.PublishPolicyUpdated.push(event(33, 0, NEXT_POLICY_HASH));
-    current.publishPolicy = 1n;
-    current[6] = 1n;
-  };
-  const replaceCachedAnchor = () => {
-    cachedAnchorReplaced = true;
-  };
   return {
     adapter: adapter as EVMChainAdapter,
     evidence,
-    advanceAuthorityHead,
-    replaceCachedAnchor,
-    replaceFinalizedHead: () => {
-      finalizedHash = `0x${'cc'.repeat(32)}`;
-      cachedAnchorReplaced = true;
-    },
-    holdCurrentStateRead: () => {
-      const entered = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
-      currentReadGate = {
-        promise: release.promise,
-        resolve: entered.resolve,
-        reject: release.reject,
-      };
-      return { entered: entered.promise, release: release.resolve };
-    },
-    setPublishAuthorityAccountId: (value) => {
-      current.publishAuthorityAccountId = value;
-      current[8] = value;
-    },
+    provider,
+    advanceAuthorityHead: scenario.advanceAuthorityHead,
+    replaceCachedAnchor: scenario.replaceCachedAnchor,
+    replaceFinalizedHead: scenario.replaceFinalizedHead,
+    holdCurrentStateRead: scenario.holdCurrentStateRead,
+    holdBlockRead: scenario.holdBlockRead,
+    setPublishAuthorityAccountId: scenario.setPublishAuthorityAccountId,
     rotateContextGraphStorage: () => adapter.applyHubRotationEventName('ContextGraphStorage'),
   };
 }
@@ -227,6 +184,7 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       'getContextGraphAuthoritySnapshot',
       'ContextGraphStorage',
     ]]);
+    expect(evidence.readOptions[0]).toMatchObject({ policy: 'wideLogScan' });
     expect(evidence.filters).toEqual([
       ['ContextGraphCreated', 9n],
       ['Transfer', null, null, 9n],
@@ -266,6 +224,31 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     // immutable and is never scanned again.
     expect(evidence.ranges.slice(18)).toEqual(Array(5).fill([31, 35]));
     expect(evidence.deploymentReads).toHaveLength(1);
+  });
+
+  it('splits provider-capped ranges through the real adapter queryFilter boundary', async () => {
+    const { adapter, evidence } = makeEvmAuthorityAdapter({ providerRangeLimit: 10 });
+    (adapter as any).cgRegistryScanPageSize = 30;
+
+    const snapshot = await adapter.getContextGraphAuthoritySnapshot(9n);
+
+    expect(snapshot).toMatchObject({
+      contextGraphId: '9',
+      owner: OWNER,
+      publishPolicy: 0,
+      ownershipEra: '1',
+      policyVersion: '3',
+      rosterVersion: '3',
+    });
+    expect(evidence.ranges).toEqual(expect.arrayContaining([
+      [7, 30],
+      [7, 18],
+      [7, 12],
+      [13, 18],
+      [19, 30],
+      [19, 24],
+      [25, 30],
+    ]));
   });
 
   it('rejects a finalized anchor that changes while the generation is read', async () => {
@@ -360,11 +343,9 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       policyVersion: '4',
     });
     expect(evidence.deploymentReads).toHaveLength(2);
-    expect(evidence.ranges.slice(18)).toEqual([
-      ...Array(6).fill([7, 16]),
-      ...Array(6).fill([17, 26]),
-      ...Array(6).fill([27, 35]),
-    ]);
+    expect(evidence.ranges.slice(18)).toEqual(
+      Array.from({ length: 6 }, () => [[7, 16], [17, 26], [27, 35]]).flat(),
+    );
   });
 
   it('clears cached generations when ContextGraphStorage rotates', async () => {
@@ -382,10 +363,10 @@ describe('RFC-64 Context Graph authority snapshots', () => {
     harness.advanceAuthorityHead();
     harness.setPublishAuthorityAccountId('not-a-uint256');
     await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).rejects.toThrow();
-    harness.setPublishAuthorityAccountId(7n);
+    harness.setPublishAuthorityAccountId(0n);
 
     await expect(harness.adapter.getContextGraphAuthoritySnapshot(9n)).resolves.toMatchObject({
-      publishAuthorityAccountId: '7',
+      publishAuthorityAccountId: '0',
       policyVersion: '4',
     });
     expect(harness.evidence.ranges.slice(18)).toEqual(Array(10).fill([31, 35]));

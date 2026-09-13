@@ -1079,6 +1079,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
  */
 export function buildSloPayload(agent: {
   getMessengerSloStats: () => Record<string, unknown>;
+  getMessengerOutboxStats?: DKGAgent['getMessengerOutboxStats'];
   getSwmGossipStats: () => {
     publishFailures: Record<string, number>;
     publishFailuresOverflow: number;
@@ -1133,6 +1134,7 @@ export function buildSloPayload(agent: {
   };
 }): {
   protocols: Record<string, unknown>;
+  outbox?: ReturnType<DKGAgent['getMessengerOutboxStats']>;
   gossip: {
     publishFailures: Record<string, number>;
     publishFailuresOverflow: number;
@@ -1182,8 +1184,10 @@ export function buildSloPayload(agent: {
   const swmHandler = agent.getSwmHandlerStats();
   const substrateFanout = agent.getSwmSubstrateFanoutStats?.();
   const shareAckQuorum = agent.getSwmAckQuorumStats?.();
+  const outbox = agent.getMessengerOutboxStats?.();
   return {
     protocols: agent.getMessengerSloStats(),
+    ...(outbox !== undefined ? { outbox } : {}),
     gossip: agent.getSwmGossipStats(),
     swm: {
       ...swmHandler,

@@ -25,7 +25,7 @@ import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
 } from './public-catalog-native-receiver-v1.js';
 import type {
-  Rfc64PublicCatalogReceiverReconcilerV1,
+  Rfc64PublicCatalogCurrentReceiverReconcilerV1,
   Rfc64PublicCatalogReconcileResultV1,
 } from './public-catalog-receiver-v1.js';
 import type { Rfc64PublicCatalogHeadAnnouncementV1 } from './public-catalog-transport-v1.js';
@@ -83,7 +83,7 @@ export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1 {
 }
 
 export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
-  implements Rfc64PublicCatalogReceiverReconcilerV1 {
+  implements Rfc64PublicCatalogCurrentReceiverReconcilerV1 {
   constructor(
     private readonly options: Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1,
   ) {
@@ -105,12 +105,9 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
     }
   }
 
-  async isHeadApplied(
+  async isHeadSatisfied(
     announcement: Rfc64PublicCatalogHeadAnnouncementV1,
   ): Promise<boolean> {
-    if (this.options.requiresAppliedHeadPrecommit?.(announcement) === true) {
-      return false;
-    }
     const trustedCatalogScope = this.options.resolveTrustedCatalogScope(announcement);
     const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(
       trustedCatalogScope,
@@ -120,17 +117,38 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
       announcement.authorAddress,
     );
     if (current === null) return false;
+    if (
+      current.catalogScopeDigest !== catalogScopeDigest
+      || current.authorAddress !== announcement.authorAddress
+    ) {
+      return false;
+    }
+    // A previously queued announcement can begin after a newer same-scope
+    // head has already committed. It is then durably dominated, not a history
+    // failure. Equal-version/different-digest announcements still proceed to
+    // the native receiver and fail the strict fork/history checks.
+    if (BigInt(current.catalogVersion) > BigInt(announcement.catalogVersion)) {
+      return true;
+    }
+    if (this.options.requiresAppliedHeadPrecommit?.(announcement) === true) {
+      return false;
+    }
     const expectedInventoryRowCount = await this.readExpectedInventoryRowCount(
       announcement,
       trustedCatalogScope,
       current.inventoryRowCount,
     );
     if (expectedInventoryRowCount === null) return false;
-    return current.catalogScopeDigest === catalogScopeDigest
-      && current.authorAddress === announcement.authorAddress
-      && current.currentCatalogHeadDigest === announcement.catalogHeadObjectDigest
+    return current.currentCatalogHeadDigest === announcement.catalogHeadObjectDigest
       && current.catalogVersion === announcement.catalogVersion
       && current.inventoryRowCount === expectedInventoryRowCount;
+  }
+
+  /** @deprecated Use isHeadSatisfied for its explicit supersession semantics. */
+  isHeadApplied(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): Promise<boolean> {
+    return this.isHeadSatisfied(announcement);
   }
 
   private async readExpectedInventoryRowCount(
@@ -206,7 +224,7 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
 /** Construct the production scheduler adapter around one native receiver. */
 export function createRfc64BoundedPublicRootCatalogNativeReconcilerV1(
   options: Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1,
-): Rfc64PublicCatalogReceiverReconcilerV1 {
+): Rfc64PublicCatalogCurrentReceiverReconcilerV1 {
   return new Rfc64BoundedPublicRootCatalogNativeReconcilerV1(options);
 }
 

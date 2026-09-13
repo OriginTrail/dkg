@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import { resolveRpcUrls } from '../src/evm-adapter-rpc.js';
 import { snapshotStrictCurrentFinalizedEvmConfigV1 } from '../src/strict-current-finalized-evm-config.js';
-import { selectStrictFinalizedEndpointSessionV1 } from '../src/strict-finalized-endpoint-session.js';
+import { snapshotStrictFinalizedEndpointSessionV1 } from '../src/strict-finalized-endpoint-session.js';
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..', '..');
 
@@ -24,18 +24,7 @@ function numericChainId(network: string): ChainIdV1 {
 const EVM_NETWORKS = ['testnet', 'mainnet-base', 'mainnet-gnosis'] as const;
 
 
-/**
- * The selector is policy over an already-validated model, so these drive it with
- * explicit `{ href, origin }` records. Origin DERIVATION is deliberately not
- * tested here — it belongs to the config boundary that owns it, and asserting it
- * from a hand-built record would only restate the rule. The config-level suite
- * below proves derivation end-to-end through the real pipeline.
- */
 const CHAIN = '8453' as ChainIdV1;
-
-function ep(href: string, origin: string) {
-  return { href, origin };
-}
 
 describe('the shipped-pool ceiling defect', () => {
   /**
@@ -89,14 +78,14 @@ describe('the shipped-pool ceiling defect', () => {
   });
 });
 
-describe('selectStrictFinalizedEndpointSessionV1 — two-slot policy', () => {
-  const A1 = ep('https://lb.provider.io/v2/KEY_A', 'https://lb.provider.io');
-  const A2 = ep('https://lb.provider.io/v2/KEY_B', 'https://lb.provider.io');
-  const B = ep('https://backup.example.com/', 'https://backup.example.com');
-  const C = ep('https://third.example.com/', 'https://third.example.com');
+describe('snapshotStrictFinalizedEndpointSessionV1 — validated two-slot boundary', () => {
+  const A1 = 'https://lb.provider.io/v2/KEY_A';
+  const A2 = 'https://lb.provider.io/v2/KEY_B';
+  const B = 'https://backup.example.com/';
+  const C = 'https://third.example.com/';
 
   it('takes the first endpoint and the first later DISTINCT origin', () => {
-    expect(selectStrictFinalizedEndpointSessionV1([A1, A2, B])).toEqual([A1.href, B.href]);
+    expect(snapshotStrictFinalizedEndpointSessionV1([A1, A2, B])).toEqual([A1, B]);
   });
 
   it('SKIPS an earlier same-origin URL to reach a distinct provider — stated trade', () => {
@@ -106,32 +95,32 @@ describe('selectStrictFinalizedEndpointSessionV1 — two-slot policy', () => {
     // account-level rate limit takes both out together and the distinct origin
     // is the only slot that survives it. With two slots and three endpoints,
     // every possible policy skips someone.
-    expect(selectStrictFinalizedEndpointSessionV1([A1, A2, B])).not.toContain(A2.href);
+    expect(snapshotStrictFinalizedEndpointSessionV1([A1, A2, B])).not.toContain(A2);
   });
 
   it('BACKFILLS with a same-origin sibling rather than reducing failover', () => {
     // Base constructed a two-URL same-origin pool as TWO dialable endpoints.
     // Collapsing to one would halve failover for a deliberate operator config.
-    expect(selectStrictFinalizedEndpointSessionV1([A1, A2])).toEqual([A1.href, A2.href]);
+    expect(snapshotStrictFinalizedEndpointSessionV1([A1, A2])).toEqual([A1, A2]);
   });
 
   it('yields one endpoint for a single-endpoint pool', () => {
-    expect(selectStrictFinalizedEndpointSessionV1([A1])).toEqual([A1.href]);
+    expect(snapshotStrictFinalizedEndpointSessionV1([A1])).toEqual([A1]);
   });
 
   it('preserves configuration order rather than sorting', () => {
-    expect(selectStrictFinalizedEndpointSessionV1([C, B])).toEqual([C.href, B.href]);
+    expect(snapshotStrictFinalizedEndpointSessionV1([C, B])).toEqual([C, B]);
   });
 
   it('fails CLOSED on an empty pool rather than returning an empty session', () => {
-    expect(() => selectStrictFinalizedEndpointSessionV1([]))
-      .toThrow(/requires at least one endpoint/);
+    expect(() => snapshotStrictFinalizedEndpointSessionV1([]))
+      .toThrow(TypeError);
   });
 
   it('is pure: same input, same output, no observable side effects', () => {
     const input = Object.freeze([A1, B]);
-    expect(selectStrictFinalizedEndpointSessionV1(input))
-      .toEqual(selectStrictFinalizedEndpointSessionV1(input));
+    expect(snapshotStrictFinalizedEndpointSessionV1(input))
+      .toEqual(snapshotStrictFinalizedEndpointSessionV1(input));
     expect(input).toEqual([A1, B]);
   });
 });

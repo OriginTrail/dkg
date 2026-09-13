@@ -1,7 +1,46 @@
-import { describe, it, expect } from 'vitest';
-import { withRetry } from '../src/retry.js';
+import { describe, it, expect, vi } from 'vitest';
+import { withRetry, withRetryContext } from '../src/retry.js';
 
 describe('withRetry', () => {
+  it('supplies one canonical attempt context to every invocation', async () => {
+    const attempts: unknown[] = [];
+    await withRetryContext(async (attempt) => {
+      attempts.push(attempt);
+      if (attempt.attempt < attempt.maxAttempts) throw new Error('retry');
+      return 'ok';
+    }, {
+      maxAttempts: 3,
+      baseDelayMs: 0,
+      jitter: 0,
+    });
+
+    expect(attempts).toEqual([
+      { attempt: 1, maxAttempts: 3, remainingAttempts: 3 },
+      { attempt: 2, maxAttempts: 3, remainingAttempts: 2 },
+      { attempt: 3, maxAttempts: 3, remainingAttempts: 1 },
+    ]);
+    expect(attempts.every(Object.isFrozen)).toBe(true);
+  });
+
+  it('preserves the zero-argument callback contract for optional parameters', async () => {
+    const invocations: Array<{ force: boolean | undefined; argumentCount: number }> = [];
+    async function legacyCallback(force?: boolean): Promise<boolean> {
+      invocations.push({ force, argumentCount: arguments.length });
+      if (invocations.length === 1) throw new Error('retry');
+      return force ?? false;
+    }
+
+    await expect(withRetry(legacyCallback, {
+      maxAttempts: 2,
+      baseDelayMs: 0,
+      jitter: 0,
+    })).resolves.toBe(false);
+    expect(invocations).toEqual([
+      { force: undefined, argumentCount: 0 },
+      { force: undefined, argumentCount: 0 },
+    ]);
+  });
+
   it('returns on first success', async () => {
     let calls = 0;
     const fn = async () => { calls++; return 'ok'; };
@@ -160,6 +199,43 @@ describe('withRetry', () => {
     });
 
     expect(errors[0]).toBe(specificError);
+  });
+
+  it('re-evaluates retry policy after backoff and preserves the admitted failure', async () => {
+    vi.useFakeTimers();
+    const admittedFailure = new Error('first attempt failed');
+    let calls = 0;
+    let retryAllowed = true;
+    let policyCalls = 0;
+    let signalBackoffStarted: () => void = () => {};
+    const backoffStarted = new Promise<void>((resolve) => {
+      signalBackoffStarted = resolve;
+    });
+    const isRetryable = () => {
+      policyCalls += 1;
+      return retryAllowed;
+    };
+
+    const pending = withRetry(async () => {
+      calls += 1;
+      throw admittedFailure;
+    }, {
+      maxAttempts: 3,
+      baseDelayMs: 100,
+      jitter: 0,
+      isRetryable,
+      onRetry: signalBackoffStarted,
+    }).then(() => null, error => error);
+    try {
+      await backoffStarted;
+      retryAllowed = false;
+      await vi.advanceTimersByTimeAsync(100);
+      expect(await pending).toBe(admittedFailure);
+      expect(calls).toBe(1);
+      expect(policyCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not mutate default AbortController reasons while aborting backoff', async () => {

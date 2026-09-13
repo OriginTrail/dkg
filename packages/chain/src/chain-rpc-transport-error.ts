@@ -52,6 +52,15 @@ export interface ChainRpcTransportErrorLike {
   txHash?: string;
 }
 
+export type RpcEndpointExhaustionKind = 'all-throttled' | 'mixed';
+
+/** Narrow transport variant whose metadata is meaningful only for pool exhaustion. */
+export interface RpcEndpointsExhaustedErrorLike extends ChainRpcTransportErrorLike {
+  code: 'RPC_ENDPOINTS_EXHAUSTED';
+  exhaustionKind?: RpcEndpointExhaustionKind;
+  retryAfterMs?: number;
+}
+
 export class ChainRpcTransportError extends Error {
   readonly code: ChainRpcTransportCode;
 
@@ -61,10 +70,15 @@ export class ChainRpcTransportError extends Error {
   readonly rpcUrls?: readonly string[];
 
   readonly txHash?: string;
+
   constructor(
     code: ChainRpcTransportCode,
     message: string,
-    opts?: { cause?: unknown; rpcUrls?: readonly string[]; txHash?: string },
+    opts?: {
+      cause?: unknown;
+      rpcUrls?: readonly string[];
+      txHash?: string;
+    },
   ) {
     super(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
     this.name = 'ChainRpcTransportError';
@@ -72,6 +86,35 @@ export class ChainRpcTransportError extends Error {
     if (opts?.rpcUrls) this.rpcUrls = Object.freeze([...opts.rpcUrls]);
     if (opts?.txHash) this.txHash = opts.txHash;
   }
+}
+
+export class RpcEndpointsExhaustedError
+  extends ChainRpcTransportError
+  implements RpcEndpointsExhaustedErrorLike {
+  declare readonly code: 'RPC_ENDPOINTS_EXHAUSTED';
+  readonly exhaustionKind?: RpcEndpointExhaustionKind;
+  readonly retryAfterMs?: number;
+
+  constructor(
+    message: string,
+    opts?: {
+      cause?: unknown;
+      rpcUrls?: readonly string[];
+      txHash?: string;
+      exhaustionKind?: RpcEndpointExhaustionKind;
+      retryAfterMs?: number;
+    },
+  ) {
+    super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
+    if (opts?.exhaustionKind) this.exhaustionKind = opts.exhaustionKind;
+    if (opts?.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
+  }
+}
+
+export function isRpcEndpointsExhaustedError(
+  err: unknown,
+): err is RpcEndpointsExhaustedErrorLike {
+  return isChainRpcTransportError(err) && err.code === 'RPC_ENDPOINTS_EXHAUSTED';
 }
 
 /**

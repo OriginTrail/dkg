@@ -25,6 +25,13 @@ export {
 } from './profile.js';
 export { ProfileManager } from './profile-manager.js';
 export {
+  MAX_AGENT_PEER_PAGE_SIZE,
+  type AgentPeerDiscovery,
+  type AgentPeerPage,
+  type AgentPeerPageRequest,
+} from './agent-peer-discovery.js';
+export type { CuratorPeerIdsResolution } from './dkg-agent-lifecycle.js';
+export {
   DiscoveryClient,
   discoveredAgentIdentityKey,
   discoveredAgentRowKey,
@@ -308,6 +315,8 @@ export {
   type Rfc64CatalogBootstrapConfigV1,
   type Rfc64CatalogBootstrapPolicyV1,
   type DKGAgentACKTransportOptions,
+  type MessengerOutboxDrainOptions,
+  type MessengerOutboxStats,
   type ContextGraphSub,
   type ContextGraphSyncMode,
   type ContextGraphDiscoveryMetadata,
@@ -523,7 +532,12 @@ export {
 // walk reduces across peers with the same rule the agent uses across Context
 // Graphs — two implementations is how a numerator and a denominator end up
 // coming from different peers.
-export { selectSwmSnapshotCoverage } from './sync/requester/shared-memory-sync.js';
+export {
+  emptySharedMemorySyncResult,
+  mergeFleetSharedMemoryDiagnostics,
+  mergeSamePeerSharedMemoryDiagnostics,
+  selectSwmSnapshotCoverage,
+} from './sync/shared-memory-diagnostics.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
 // it identically to the in-agent lifecycle, without deep-importing `dist/`.

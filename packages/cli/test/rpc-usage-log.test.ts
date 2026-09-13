@@ -52,11 +52,12 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
     const lines = formatRpcUsageLines(
       {
         byMethod: { eth_call: 42, eth_getLogs: 7 },
-        ethCallByConsumer: {
-          'pcaNFT.getAccountInfo': 30,
-          'Hub.getContractAddress_Token': 12,
-          unsafe_consumer: 0,
-        },
+        ethCallByConsumer: {},
+        attributions: [
+          { method: 'eth_call', consumer: 'pcaNFT.getAccountInfo', count: 30 },
+          { method: 'eth_call', consumer: 'Hub.getContractAddress_Token', count: 12 },
+          { method: 'eth_call', consumer: 'unsafe_consumer', count: 0 },
+        ],
         lifetimeTotal: 49,
       },
       60,
@@ -88,6 +89,81 @@ describe('formatRpcUsageLines — the Grafana-facing rpc_usage contract', () => 
       'rpc_usage method=eth_call count=2 window_s=60',
       'rpc_usage_by_consumer method=eth_call consumer=other count=2 window_s=60',
     ]);
+  });
+
+  it('drops unsupported attribution methods before log formatting', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_call: 1 },
+        attributions: [{
+          method: 'eth_call\nlevel=error',
+          consumer: 'malicious',
+          count: 1,
+        } as never],
+        lifetimeTotal: 1,
+      },
+      60,
+    );
+
+    expect(lines).toEqual(['rpc_usage method=eth_call count=1 window_s=60']);
+    expect(lines.join('\n')).not.toContain('level=error');
+  });
+
+  it('emits bounded eth_getLogs consumer and endpoint-slot attribution', () => {
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_getLogs: 7 },
+        attributions: [
+          { method: 'eth_getLogs', consumer: 'getContextGraphAuthoritySnapshot', endpointSlot: 'primary', count: 2 },
+          { method: 'eth_getLogs', consumer: 'getContextGraphAuthoritySnapshot', endpointSlot: 'fallback_1', count: 3 },
+          { method: 'eth_getLogs', consumer: 'unattributed', endpointSlot: 'fallback_2', count: 2 },
+        ],
+        lifetimeTotal: 7,
+      },
+      60,
+      'base:84532',
+    );
+
+    expect(lines).toContain(
+      'rpc_usage method=eth_getLogs count=7 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=primary count=2 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=fallback_1 count=3 window_s=60 chain=base:84532',
+    );
+    expect(lines).toContain(
+      'rpc_usage_by_consumer method=eth_getLogs consumer=unattributed endpoint_slot=fallback_2 count=2 window_s=60 chain=base:84532',
+    );
+    expect(lines).toHaveLength(4);
+    for (const line of lines) {
+      expect(line).toMatch(/^rpc_usage(_by_consumer)?( [a-z_]+=[A-Za-z0-9_.:-]+)+$/);
+    }
+  });
+
+  it('never emits endpoint URLs and aggregates invalid external slots under other', () => {
+    const endpointUrl = 'https://secret-token.example/rpc';
+    const lines = formatRpcUsageLines(
+      {
+        byMethod: { eth_getLogs: 3 },
+        ethGetLogsByConsumerAndEndpointSlot: {
+          authority: {
+            [endpointUrl]: 2,
+            'attacker.example': 1,
+          },
+        },
+        lifetimeTotal: 3,
+      },
+      60,
+    );
+
+    expect(lines).toEqual([
+      'rpc_usage method=eth_getLogs count=3 window_s=60',
+      'rpc_usage_by_consumer method=eth_getLogs consumer=authority endpoint_slot=other count=3 window_s=60',
+    ]);
+    expect(lines.join('\n')).not.toContain(endpointUrl);
+    expect(lines.join('\n')).not.toContain('attacker.example');
   });
 });
 

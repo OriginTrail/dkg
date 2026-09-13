@@ -1,5 +1,12 @@
+import type {
+  RandomSamplingAvailability,
+} from './random-sampling-availability.js';
 import type { ethers } from 'ethers';
 import type { RpcUsageWindow } from './rpc-usage.js';
+import type { ContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
+export type { ContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
 
 /**
  * The Publishing-Conviction-Account read methods the funded-wallet selector
@@ -523,6 +530,16 @@ export interface ContextGraphAuthoritySnapshot {
   readonly rosterVersion: string;
   readonly sourceBlockNumber: string;
   readonly sourceBlockHash: string;
+}
+
+/** Explicit daemon-local authority-index scheduling surface. */
+export interface ContextGraphAuthorityIndexRevisionReader {
+  readContextGraphAuthorityIndexRevisions(
+    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+    options?: ChainReadOptions,
+  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
+  /** Await the physical shared-index scans underlying detached/cancelled waiters. */
+  whenIdle(): Promise<void>;
 }
 
 export class ContextGraphChainScanPartialError extends Error {
@@ -1204,6 +1221,14 @@ export interface ChainAdapter {
   deploymentId: string;
 
   /**
+   * Optional explicit capability for daemon-local authority-index revisions.
+   * Presence means a local index is bound; every read either returns revisions
+   * or rejects, while absence selects the caller's unsupported path.
+   */
+  readonly contextGraphAuthorityIndexRevisionReader?:
+    ContextGraphAuthorityIndexRevisionReader;
+
+  /**
    * OPTIONAL RPC-usage capability: drain the raw JSON-RPC request counts
    * accumulated since the previous drain (a DELTA window — summing drains over
    * time yields exact request totals, the provider-billing unit). The EVM
@@ -1376,7 +1401,6 @@ export interface ChainAdapter {
       contextGraphId: bigint,
       options?: ChainReadOptions,
     ): Promise<ContextGraphAuthoritySnapshot>;
-
   /**
    * Live owner lookup for a PCA NFT — wraps `DKGPublishingConvictionNFT.ownerOf(accountId)`.
    * Used by the daemon's curated-CG registration preflight to populate the
@@ -1837,6 +1861,8 @@ export interface ChainAdapter {
    * check rather than only testing method presence.
    */
   isRandomSamplingReady?(): boolean;
+  /** Refresh RandomSampling bindings and read membership through one typed capability. */
+  resolveRandomSamplingAvailability?(identityId: bigint): Promise<RandomSamplingAvailability>;
 
   /**
    * Returns the deployed address of `KnowledgeAssetsV10` on this chain.

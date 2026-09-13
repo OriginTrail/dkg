@@ -10,9 +10,13 @@
  *
  * Companion diagnostic line shape for `eth_call` attribution:
  *   rpc_usage_by_consumer method=eth_call consumer=pcaNFT.getAccountInfo count=7 window_s=60 chain=base:8453
+ *
+ * `eth_getLogs` additionally identifies the non-secret configured endpoint slot:
+ *   rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=fallback_1 count=7 window_s=60 chain=base:8453
  */
 
 import {
+  normalizeRpcEndpointSlotLabel,
   normalizeRpcUsageWindow,
   rpcUsageWindowTotal,
   type RpcUsageDrainable,
@@ -43,11 +47,35 @@ export function formatRpcUsageLines(
     if (!Number.isFinite(count) || count <= 0) continue;
     lines.push(`rpc_usage method=${safeToken(method, 'other')} count=${Math.floor(count)} window_s=${windowSeconds}${chain}`);
   }
-  for (const [consumer, count] of Object.entries(normalized.ethCallByConsumer)) {
-    if (!Number.isFinite(count) || count <= 0) continue;
+  const attributionLines = new Map<string, {
+    method: 'eth_call' | 'eth_getLogs';
+    consumer: string;
+    endpointSlot?: string;
+    count: number;
+  }>();
+  for (const attribution of normalized.attributions) {
+    if (!Number.isFinite(attribution.count) || attribution.count <= 0) continue;
+    const consumer = safeToken(attribution.consumer, 'other');
+    const endpointSlot = attribution.method === 'eth_getLogs'
+      ? normalizeRpcEndpointSlotLabel(attribution.endpointSlot)
+      : undefined;
+    const key = `${attribution.method}\0${consumer}\0${endpointSlot ?? ''}`;
+    const existing = attributionLines.get(key);
+    if (existing) existing.count += Math.floor(attribution.count);
+    else {
+      attributionLines.set(key, {
+        method: attribution.method,
+        consumer,
+        ...(endpointSlot ? { endpointSlot } : {}),
+        count: Math.floor(attribution.count),
+      });
+    }
+  }
+  for (const { method, consumer, endpointSlot, count } of attributionLines.values()) {
     lines.push(
-      `rpc_usage_by_consumer method=eth_call consumer=${safeToken(consumer, 'other')} ` +
-      `count=${Math.floor(count)} window_s=${windowSeconds}${chain}`,
+      `rpc_usage_by_consumer method=${method} consumer=${consumer} ` +
+      `${endpointSlot ? `endpoint_slot=${endpointSlot} ` : ''}` +
+      `count=${count} window_s=${windowSeconds}${chain}`,
     );
   }
   return lines;

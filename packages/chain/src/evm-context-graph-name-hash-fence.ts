@@ -90,6 +90,7 @@ export interface EvmContextGraphNameHashFenceDependencies {
     connected: Map<JsonRpcProvider, Contract>,
     label: string,
     preferred?: JsonRpcProvider,
+    rpcUsageConsumer?: string,
   ) => Promise<{
     readonly logs: ReadonlyArray<ethers.EventLog | ethers.Log>;
     readonly provider: JsonRpcProvider;
@@ -756,6 +757,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
               connected,
               'resolveContextGraphIdByNameHash ContextGraphCreated',
               preferred,
+              'resolveContextGraphIdByNameHash',
             );
             const ids: bigint[] = [];
             for (const log of page.logs) {

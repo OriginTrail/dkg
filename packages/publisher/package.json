@@ -31,6 +31,7 @@
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-query": "workspace:*",
+    "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "ethers": "^6.16.0"
   },
