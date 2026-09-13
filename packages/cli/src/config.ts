@@ -28,6 +28,7 @@ import {
   isDkgMonorepoRoot,
   hasErrorCode,
   resolveDkgConfigHome,
+  dkgAuthTokenPath,
   SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
 import {
@@ -2126,29 +2127,69 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
   await writeFile(join(rDir, 'active'), target);
 }
 
-export function configPath(): string {
-  return join(dkgDir(), 'config.json');
+/** Immutable filesystem context for one selected local daemon home. */
+export class DkgHomeFiles {
+  constructor(readonly home: string = dkgDir()) { Object.freeze(this); }
+
+  get configPath(): string { return join(this.home, 'config.json'); }
+  get configYamlPath(): string { return join(this.home, 'config.yaml'); }
+  get pidPath(): string { return join(this.home, 'daemon.pid'); }
+  get apiPortPath(): string { return join(this.home, 'api.port'); }
+  get tokenPath(): string { return dkgAuthTokenPath(this.home); }
+
+  configExists(): boolean { return existsSync(this.configPath) || existsSync(this.configYamlPath); }
+
+  readConfigSync(): unknown {
+    if (existsSync(this.configPath)) return JSON.parse(readFileSync(this.configPath, 'utf-8'));
+    if (existsSync(this.configYamlPath)) return yaml.load(readFileSync(this.configYamlPath, 'utf-8'));
+    return null;
+  }
+
+  async loadConfig(): Promise<DkgConfig> {
+    try {
+      return mergePersistedConfig(JSON.parse(await readFile(this.configPath, 'utf-8')));
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    try {
+      return mergePersistedConfig(yaml.load(await readFile(this.configYamlPath, 'utf-8')));
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    return { ...DEFAULT_CONFIG };
+  }
+
+  async saveConfig(config: DkgConfig): Promise<void> {
+    await mkdir(this.home, { recursive: true });
+    await writeFile(this.configPath, JSON.stringify(config, null, 2) + '\n');
+  }
+
+  readPid(): Promise<number | null> { return this.readControlNumber(this.pidPath); }
+  readApiPort(): Promise<number | null> { return this.readControlNumber(this.apiPortPath); }
+  async writePid(pid: number): Promise<void> { await writeFile(this.pidPath, String(pid)); }
+  async writeApiPort(port: number): Promise<void> { await writeFile(this.apiPortPath, String(port)); }
+  removePid(): Promise<void> { return this.removeControlFile(this.pidPath); }
+  removeApiPort(): Promise<void> { return this.removeControlFile(this.apiPortPath); }
+
+  private async readControlNumber(path: string): Promise<number | null> {
+    try { return parseInt((await readFile(path, 'utf-8')).trim(), 10); }
+    catch { return null; }
+  }
+
+  private async removeControlFile(path: string): Promise<void> {
+    try { await unlink(path); }
+    catch (err) { if (!isEnoent(err)) throw err; }
+  }
 }
 
-export function configYamlPath(): string {
-  return join(dkgDir(), 'config.yaml');
-}
-
-export function pidPath(): string {
-  return join(dkgDir(), 'daemon.pid');
-}
-
-export function logPath(): string {
-  return join(dkgDir(), 'daemon.log');
-}
-
-export function apiPortPath(): string {
-  return join(dkgDir(), 'api.port');
-}
-
-export async function ensureDkgDir(): Promise<void> {
-  await mkdir(dkgDir(), { recursive: true });
-}
+// Compatibility helpers resolve a fresh home at their call boundary. Work that
+// spans multiple reads or writes retains a DkgHomeFiles instance instead.
+export function configPath(): string { return new DkgHomeFiles().configPath; }
+export function configYamlPath(): string { return new DkgHomeFiles().configYamlPath; }
+export function pidPath(): string { return new DkgHomeFiles().pidPath; }
+export function apiPortPath(): string { return new DkgHomeFiles().apiPortPath; }
+export function logPath(): string { return join(dkgDir(), 'daemon.log'); }
+export async function ensureDkgDir(): Promise<void> { await mkdir(dkgDir(), { recursive: true }); }
 
 function mergePersistedConfig(raw: unknown): DkgConfig {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...DEFAULT_CONFIG };
@@ -2159,43 +2200,15 @@ function isEnoent(err: unknown): boolean {
   return !!err && typeof err === 'object' && (err as { code?: unknown }).code === 'ENOENT';
 }
 
-function readPersistedConfigSync(): unknown {
-  if (existsSync(configPath())) {
-    return JSON.parse(readFileSync(configPath(), 'utf-8'));
-  }
-  if (existsSync(configYamlPath())) {
-    return yaml.load(readFileSync(configYamlPath(), 'utf-8'));
-  }
-  return null;
-}
-
 export function readNodeRoleFromConfigSync(): 'edge' | 'core' {
   try {
-    const parsed = readPersistedConfigSync();
+    const parsed = new DkgHomeFiles().readConfigSync();
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 'edge';
     return (parsed as { nodeRole?: unknown }).nodeRole === 'core' ? 'core' : 'edge';
-  } catch {
-    return 'edge';
-  }
+  } catch { return 'edge'; }
 }
 
-export async function loadConfig(): Promise<DkgConfig> {
-  try {
-    const raw = await readFile(configPath(), 'utf-8');
-    return mergePersistedConfig(JSON.parse(raw));
-  } catch (err) {
-    if (!isEnoent(err)) throw err;
-  }
-
-  try {
-    const raw = await readFile(configYamlPath(), 'utf-8');
-    return mergePersistedConfig(yaml.load(raw));
-  } catch (err) {
-    if (!isEnoent(err)) throw err;
-  }
-
-  return { ...DEFAULT_CONFIG };
-}
+export async function loadConfig(): Promise<DkgConfig> { return new DkgHomeFiles().loadConfig(); }
 
 // =====================================================================
 // External-backend config validation (RFC 120, plan PR 1 item 6)
@@ -2328,60 +2341,14 @@ export function exitOnStoreConfigErrors(
   process.exit(1);
 }
 
-export async function saveConfig(config: DkgConfig): Promise<void> {
-  await ensureDkgDir();
-  await writeFile(configPath(), JSON.stringify(config, null, 2) + '\n');
-}
-
-export function configExists(): boolean {
-  return existsSync(configPath()) || existsSync(configYamlPath());
-}
-
-export async function readPid(): Promise<number | null> {
-  try {
-    const raw = await readFile(pidPath(), 'utf-8');
-    return parseInt(raw.trim(), 10);
-  } catch {
-    return null;
-  }
-}
-
-export async function writePid(pid: number): Promise<void> {
-  await writeFile(pidPath(), String(pid));
-}
-
-export async function removePid(): Promise<void> {
-  const { unlink } = await import('node:fs/promises');
-  try {
-    await unlink(pidPath());
-  } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
-    if (code !== 'ENOENT') throw err;
-  }
-}
-
-export async function readApiPort(): Promise<number | null> {
-  try {
-    const raw = await readFile(apiPortPath(), 'utf-8');
-    return parseInt(raw.trim(), 10);
-  } catch {
-    return null;
-  }
-}
-
-export async function writeApiPort(port: number): Promise<void> {
-  await writeFile(apiPortPath(), String(port));
-}
-
-export async function removeApiPort(): Promise<void> {
-  const { unlink } = await import('node:fs/promises');
-  try {
-    await unlink(apiPortPath());
-  } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined;
-    if (code !== 'ENOENT') throw err;
-  }
-}
+export async function saveConfig(config: DkgConfig): Promise<void> { await new DkgHomeFiles().saveConfig(config); }
+export function configExists(): boolean { return new DkgHomeFiles().configExists(); }
+export async function readPid(): Promise<number | null> { return new DkgHomeFiles().readPid(); }
+export async function writePid(pid: number): Promise<void> { await new DkgHomeFiles().writePid(pid); }
+export async function removePid(): Promise<void> { await new DkgHomeFiles().removePid(); }
+export async function readApiPort(): Promise<number | null> { return new DkgHomeFiles().readApiPort(); }
+export async function writeApiPort(port: number): Promise<void> { await new DkgHomeFiles().writeApiPort(port); }
+export async function removeApiPort(): Promise<void> { await new DkgHomeFiles().removeApiPort(); }
 
 export function isProcessRunning(pid: number): boolean {
   try {

@@ -8,6 +8,7 @@
 import { Contract } from 'ethers';
 import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chain-adapter.js';
 import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
+import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
 
 export interface EVMAdapterBaseConfig {
   rpcUrl: string;
@@ -105,6 +106,13 @@ export interface EVMAdapterBaseConfig {
    * structural interface itself does not pretend to enforce locality.
    */
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
+  /**
+   * Optional process-owned durable contract-wide authority index. When present,
+   * authority snapshots use one shared resumable contract scan instead of one
+   * historical scan per Context Graph. Direct SDK consumers can omit it and
+   * retain the legacy per-graph reader.
+   */
+  localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
   /**
    * Funding-aware publish wallet selection: minimum NATIVE gas balance (wei) an
    * operational wallet must hold to be PREFERRED when selecting the publish

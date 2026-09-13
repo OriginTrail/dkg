@@ -66,6 +66,7 @@ import {
 import {
   Rfc64PublicCatalogReceiverV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
+  normalizeRfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverOptionsV1,
   type Rfc64PublicCatalogReceiverStatsV1,
 } from './public-catalog-receiver-v1.js';
@@ -119,7 +120,7 @@ import {
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
   snapshotRfc64RemoteCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
-import { Rfc64CoalescingSupervisorV1 } from './coalescing-supervisor-v1.js';
+import { CoalescingRecurringTask } from '../coalescing-recurring-task.js';
 import { mapWithConcurrency } from '../map-with-concurrency.js';
 
 export {
@@ -352,7 +353,7 @@ export class Rfc64PublicCatalogServiceV1 {
   ) => Rfc64CatalogAuthorityPolicyV1;
   readonly #localPeerId: string | undefined;
   readonly #announcedCurrentHeadTargets = new Map<string, AnnouncedCurrentHeadTargetV1>();
-  readonly #announcedCurrentHeadSupervisor: Rfc64CoalescingSupervisorV1 | undefined;
+  readonly #announcedCurrentHeadSupervisor: CoalescingRecurringTask | undefined;
   #started = false;
   #closed = false;
 
@@ -428,40 +429,42 @@ export class Rfc64PublicCatalogServiceV1 {
         verifyIssuerSignature: this.#verifyIssuerSignature,
       });
     const stagingReconciler = {
-      isHeadApplied: async () => false,
+      isHeadSatisfied: async () => false,
       reconcileHead: (remotePeerId, announcement, signal) =>
         this.#stageHeadOnly(remotePeerId, announcement, signal, options.onHeadStaged),
     } satisfies Rfc64PublicCatalogReceiverReconcilerV1;
     const nativeReconciler = options.native === undefined
       ? undefined
-      : options.native.createReconciler(Object.freeze({
-        // Pass explicit capability objects rather than the owned transport
-        // instances. The reconciler may fetch, but cannot start/stop protocols
-        // or retain the router through a runtime-private implementation field.
-        headTransport: Object.freeze({
-          fetchCatalogHead: this.#transport.fetchCatalogHead.bind(this.#transport),
-        }),
-        contentTransport: Object.freeze({
-          fetchCatalogObject: this.#nativeTransport!.fetchCatalogObject.bind(
-            this.#nativeTransport!,
-          ),
-          fetchKaBundle: this.#nativeTransport!.fetchKaBundle.bind(this.#nativeTransport!),
-        }),
-        resolveTrustedCatalogScope: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
-          this.#resolveTrustedCatalogScope(announcement),
-        verifyIssuerSignature: this.#verifyIssuerSignature,
-        transportTimeoutMs: this.#transportTimeoutMs,
-      }));
+      : normalizeRfc64PublicCatalogReceiverReconcilerV1(
+        options.native.createReconciler(Object.freeze({
+          // Pass explicit capability objects rather than the owned transport
+          // instances. The reconciler may fetch, but cannot start/stop protocols
+          // or retain the router through a runtime-private implementation field.
+          headTransport: Object.freeze({
+            fetchCatalogHead: this.#transport.fetchCatalogHead.bind(this.#transport),
+          }),
+          contentTransport: Object.freeze({
+            fetchCatalogObject: this.#nativeTransport!.fetchCatalogObject.bind(
+              this.#nativeTransport!,
+            ),
+            fetchKaBundle: this.#nativeTransport!.fetchKaBundle.bind(this.#nativeTransport!),
+          }),
+          resolveTrustedCatalogScope: (announcement: Rfc64PublicCatalogHeadAnnouncementV1) =>
+            this.#resolveTrustedCatalogScope(announcement),
+          verifyIssuerSignature: this.#verifyIssuerSignature,
+          transportTimeoutMs: this.#transportTimeoutMs,
+        })),
+      );
     const reconciler: Rfc64PublicCatalogReceiverReconcilerV1 = nativeReconciler === undefined
       ? stagingReconciler
       : {
-        isHeadApplied: (announcement) => (
+        isHeadSatisfied: (announcement) => (
           this.#resolveContextGraphAuthority(
             announcement.contextGraphId,
             'receiving',
           ).reconciliationLane
             === 'catalog-apply'
-            ? nativeReconciler.isHeadApplied(announcement)
+            ? nativeReconciler.isHeadSatisfied(announcement)
             : Promise.resolve(false)
         ),
         reconcileHead: (remotePeerId, announcement, signal) => {
@@ -480,7 +483,7 @@ export class Rfc64PublicCatalogServiceV1 {
             // enters the semantic mutation lane. Re-check while holding that
             // lane so an ambient hint and an awaited bootstrap cannot both
             // run post-commit lifecycle work for the same durable head.
-            if (await nativeReconciler.isHeadApplied(announcement)) {
+            if (await nativeReconciler.isHeadSatisfied(announcement)) {
               return 'applied' as const;
             }
             return nativeReconciler.reconcileHead(
@@ -503,7 +506,7 @@ export class Rfc64PublicCatalogServiceV1 {
       this.#currentHeadDiscoveryTransport === undefined || nativeReconciler === undefined
     )
       ? undefined
-      : new Rfc64CoalescingSupervisorV1({
+      : new CoalescingRecurringTask({
         runPass: (signal) => this.#synchronizeAnnouncedCurrentHeads(signal),
         onError: () => undefined,
         closingMessage: 'RFC-64 announced current-head synchronization closing',

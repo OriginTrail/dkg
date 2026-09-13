@@ -1,3 +1,4 @@
+import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -11,6 +12,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
+import { PeerSyncSession } from './sync/peer-sync-session.js';
 import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
@@ -32,15 +34,14 @@ import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
-import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
 import {
   SwmTargetExecutorSessionFactoryV1,
   type SwmTargetExecutorPortsV1,
   type SwmTargetExecutorV1,
 } from './sync/requester/swm-target-executor.js';
 import type {
-  Rfc64AuthorizedSwmRecoveryPlanV1,
   Rfc64SwmRecoveryCoordinatorV1,
 } from
   './rfc64/swm-recovery-coordinator-v1.js';
@@ -182,7 +183,6 @@ import {
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { SelectedSwmMetaTransferCoordinator } from './sync/selected-swm-meta-transfer-coordinator.js';
-import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
@@ -336,7 +336,6 @@ import {
   CATCHUP_ON_CONNECT_COOLDOWN_MS,
   SYNC_RECONCILER_INTERVAL_MS,
   SYNC_STALENESS_THRESHOLD_MS,
-  RANDOM_SAMPLING_BIND_RETRY_MS,
   STORAGE_ACK_REGISTRATION_RETRY_MS,
   JOIN_APPROVAL_RETRY_TICK_MS,
   MESSAGE_OUTBOX_TICK_MS,
@@ -367,7 +366,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -399,7 +397,6 @@ import {
   type SharedMemorySyncResult,
   type ResolvedDKGAgentConfig,
   type ReplicationEvent,
-  type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
 import type { SyncCheckpointStore, ChangelogCursorStore } from './sync/checkpoint/state.js';
 import {
@@ -1076,6 +1073,8 @@ export class DKGAgentBase {
 
   protected messageHandler: MessageHandler | null = null;
   protected chainPoller: ChainEventPoller | null = null;
+  /** Owns peer-event admission for the current node lifetime. */
+  protected peerSyncSession = PeerSyncSession.stopped();
   protected swmCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** Phase B — periodic chain-driven VM reconciliation sweep timer. */
   protected vmReconcileTimer: ReturnType<typeof setInterval> | null = null;
@@ -1189,11 +1188,7 @@ export class DKGAgentBase {
    * onto `/dkg/10.0.x` with x ≥ 1.
    */
   protected messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
-  protected randomSamplingHandle: RandomSamplingHandle | null = null;
-  protected randomSamplingIdentityId = 0n;
-  protected randomSamplingDisabledReason: RandomSamplingDisabledReason = 'not_started';
-  protected randomSamplingBindRetryTimer: ReturnType<typeof setInterval> | null = null;
-  protected randomSamplingBindRetryInFlight = false;
+  protected randomSamplingRuntime: RandomSamplingRuntime | null = null;
   protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   protected storageACKRegistrationRetryInFlight = false;
   // #894 / Codex PR #901 round-3 :1685: `ensureProfile()` is a mutating
@@ -1239,6 +1234,9 @@ export class DKGAgentBase {
   /** Canonical dormant classification; public status arrays are projections. */
   protected readonly contextGraphSubscriptionDormancyById =
     new Map<string, ContextGraphDormancyReason>();
+  /** Detached owner for post-readiness persisted-subscription authority recovery. */
+  protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
+    CoalescingRecurringTask;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
@@ -1543,7 +1541,6 @@ export class DKGAgentBase {
    * default (Codex review on PR #1107).
    */
   protected lastKnownRequiredACKs?: number;
-  protected readonly syncingPeers = new Set<string>();
   protected readonly seenPrivateSyncRequestIds = new Map<string, number>();
   protected readonly metaRefreshTimestamps = new Map<string, number>();
   protected readonly preferredSyncPeers = new Map<string, string>();
@@ -1661,28 +1658,6 @@ export class DKGAgentBase {
    * already tried recently. See DOC: p2p-resilience.md.
    */
   protected readonly gossipDialAttemptedAt = new Map<string, number>();
-  /**
-   * Per-peer timestamp of the last catchup-on-connect we queued, to dedupe
-   * connection:open events when the same peer briefly churns between
-   * direct + relayed connections within a short window.
-   */
-  protected readonly catchupOnConnectAt = new Map<string, number>();
-  /**
-   * Per-peer admission timestamp for exact RFC-64 recovery plans. Kept
-   * separate from ordinary connection catch-up so one post-catalog upgrade
-   * can bypass an ordinary owner's cooldown without letting every periodic
-   * catalog pass bypass the same cooldown.
-   */
-  protected readonly rfc64ExactCatchupOnConnectAt = new Map<string, number>();
-  /**
-   * One owner per peer with explicit pending lanes. Exact RFC-64 work is
-   * always drained before ordinary work that has not started yet; an upgrade
-   * arriving during either lane remains on the same job and is consumed by
-   * the next drain iteration.
-   */
-  protected syncOnConnectPeerScheduler:
-    | SyncOnConnectPeerScheduler<Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>>
-    | null = null;
   /** Typed RFC-64 admission and current-configuration validation boundary. */
   protected rfc64SwmRecoveryCoordinatorV1!: Rfc64SwmRecoveryCoordinatorV1;
   /** Cohesive owner of RFC-64 recovery authority, leases and selection invalidation. */
@@ -1693,48 +1668,8 @@ export class DKGAgentBase {
    * `lastSuccessfulSyncAt` value from before an offline gap.
    */
   protected readonly lastSyncDisconnectedAt = new Map<string, number>();
-  /**
-   * Peers whose most recent sync attempt found that their advertised
-   * protocol list did NOT include `PROTOCOL_SYNC` — almost always a
-   * libp2p identify race on the inbound side of `connection:open`,
-   * not a real "this peer doesn't speak sync" answer. The `peer:update`
-   * listener drains entries from this set the moment libp2p reports
-   * an updated protocol list that contains `PROTOCOL_SYNC`, and the
-   * periodic reconciler treats membership as a strong hint to retry.
-   *
-   * Entries are cleared on `connection:close` and after sync progress or a
-   * clean denial-only response.
-   */
-  protected readonly skippedNoSyncPeers = new Set<string>();
-  /**
-   * Per-peer timestamp of the most recent successful run of sync-on-connect.
-   * Driven by `runSyncOnConnect.onSyncAccounting`. Used by the periodic
-   * reconciler to skip peers that have already synced recently — the
-   * staleness threshold is intentionally larger than the reconciler
-   * interval so a single missed tick doesn't immediately retry every
-   * connected peer.
-   */
-  protected readonly lastSuccessfulSyncAt = new Map<string, number>();
-  /**
-   * Per-peer timestamp of the most recent sync-on-connect attempt that made
-   * useful progress. This is split from `lastSuccessfulSyncAt` so partial
-   * progress with a timeout clears peer-level backoff without marking the
-   * peer fresh for reconnect suppression. Denial-only rounds intentionally do
-   * not write this long-lived marker; ACL approval has no peer-update event,
-   * so denied peers must remain eligible on the next reconciler cadence.
-   */
-  protected readonly lastSyncProgressAt = new Map<string, number>();
   /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
   protected readonly selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
-  /**
-   * Per-peer sync-reconciler backoff. `failures` is the count of
-   * consecutive reconciler attempts that did NOT produce a successful
-   * sync; `nextRetryAt` is the epoch-ms before which the reconciler
-   * skips this peer. Reset on useful progress or a clean denial-only response
-   * (`onSyncAccounting`) and pruned after stale disconnects. See
-   * `SYNC_BACKOFF_BASE_MS`.
-   */
-  protected readonly syncReconcilerBackoff = new Map<string, SyncReconcilerBackoff>();
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
   /** A.4-lite+: periodic warm/pinned Core-connection reconcile (opt-in). */
   protected warmCoreTimer: ReturnType<typeof setInterval> | null = null;

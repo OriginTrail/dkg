@@ -49,7 +49,8 @@
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "@origintrail-official/dkg-storage": "workspace:*"
   },
   "publishConfig": {
     "access": "public"

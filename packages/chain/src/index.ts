@@ -1,9 +1,14 @@
 export * from './chain-adapter.js';
+export { assertContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
 export {
   type ContextGraphAuthorityHistoryCheckpointV1,
   type ContextGraphAuthorityHistoryState,
   type ContextGraphAuthorityHistoryStore,
 } from './context-graph-authority-history.js';
+export {
+  type ContextGraphAuthorityIndexStore,
+} from './context-graph-authority-index-checkpoint.js';
 export {
   bindContextGraphAuthorityReader,
   type ContextGraphAuthorityReader,
@@ -202,3 +207,11 @@ export {
   type TransactionReceiptEndpoint,
   type TransactionReceiptWaitOptions,
 } from './rpc-failover-client.js';
+
+export {
+  readRandomSamplingAvailability,
+  type RandomSamplingAvailability,
+  type RandomSamplingAvailabilityReader,
+  type RandomSamplingAvailabilityResolver,
+  type LegacyRandomSamplingAvailabilityReader,
+} from './random-sampling-availability.js';

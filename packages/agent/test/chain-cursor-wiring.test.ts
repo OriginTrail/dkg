@@ -25,6 +25,11 @@ describe('DKGAgent chain cursor wiring', () => {
       save: vi.fn(async () => {}),
       delete: vi.fn(async () => {}),
     };
+    const authorityIndexStore = {
+      load: vi.fn(async () => undefined),
+      compareAndSwap: vi.fn(async () => 1),
+      invalidate: vi.fn(async () => 2),
+    };
 
     agent = await DKGAgent.create({
       name: 'RegistryCursorWiring',
@@ -40,10 +45,12 @@ describe('DKGAgent chain cursor wiring', () => {
       },
       contextGraphRegistryScanCursorStore: registryCursorStore,
       localContextGraphAuthorityHistoryStore: authorityHistoryStore,
+      localContextGraphAuthorityIndexStore: authorityIndexStore,
     });
 
     expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
     expect((agent as any).chain.contextGraphAuthorityHistory?.localStore).toBe(authorityHistoryStore);
+    expect((agent as any).chain.contextGraphAuthorityIndex?.localStore).toBe(authorityIndexStore);
     expect((agent as any).chain.minPublisherNativeWei).toBe(123n);
     expect((agent as any).chain.minPublisherTracWei).toBe(456n);
     expect((agent as any).chain.receiptTimeoutMs).toBe(1_200_000);

@@ -1,7 +1,7 @@
 /** Mandatory native WSL fixture; runs the built CLI modules with Linux Node. */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, lstatSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, symlinkSync, lstatSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import TOML from '@iarna/toml';
 import { windowsPowerShellExecutable } from '../../dist/mcp-config-metadata.js';
@@ -76,7 +76,7 @@ async function main(): Promise<void> {
       ...setupDeps,
       confirmPlan: async (planned) => {
         assert.equal(planned.length, 1, 'one physical leaf must produce one registration write');
-        assert.equal(planned[0]!.s.target.endpoint.location, 'windows-wsl');
+        assert.equal(planned[0]!.s.target.file.destination, realpathSync(path));
         assert.equal(planned[0]!.action, 'refresh');
         registrationPlans += planned.length;
         return [...planned];

@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   Rfc64PublicCatalogReceiverV1,
+  type Rfc64PublicCatalogLegacyReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
+  type Rfc64PublicCatalogHeadSatisfactionCheckV1,
   type Rfc64PublicCatalogReconcileResultV1,
 } from '../src/rfc64/public-catalog-receiver-v1.js';
 import {
@@ -48,9 +50,10 @@ function deferred<T>(): {
 
 function reconciler(
   reconcileHead: Rfc64PublicCatalogReceiverReconcilerV1['reconcileHead'],
-  isHeadApplied: Rfc64PublicCatalogReceiverReconcilerV1['isHeadApplied'] = async () => false,
+  isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1
+    = async () => false,
 ): Rfc64PublicCatalogReceiverReconcilerV1 {
-  return { isHeadApplied, reconcileHead };
+  return { isHeadSatisfied, reconcileHead };
 }
 
 /** Small deterministic script for multi-provider scheduler scenarios. */
@@ -84,6 +87,30 @@ function scriptedReconciler(peerIds: readonly string[]) {
 }
 
 describe('RFC-64 public catalog receiver scheduler v1', () => {
+  it('accepts and executes the legacy V1 isHeadApplied reconciler contract', async () => {
+    const isHeadApplied = vi.fn(async () => false);
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    const legacyReconciler: Rfc64PublicCatalogLegacyReceiverReconcilerV1 = {
+      isHeadApplied,
+      reconcileHead,
+    };
+    const receiver = new Rfc64PublicCatalogReceiverV1(legacyReconciler, {
+      retryBackoffMs: 0,
+    });
+    const head = announcement();
+
+    receiver.schedule(head, 'legacy-peer');
+    await receiver.whenIdle();
+
+    expect(isHeadApplied).toHaveBeenCalledWith(head);
+    expect(reconcileHead).toHaveBeenCalledWith(
+      'legacy-peer',
+      head,
+      expect.any(AbortSignal),
+    );
+    expect(receiver.stats().applied).toBe(1);
+  });
+
   it('reconciles and reports one durably applied inventory head', async () => {
     const appliedPeers: string[] = [];
     const onHeadApplied = vi.fn();

@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { Rfc64CoalescingSupervisorV1 } from
-  '../src/rfc64/coalescing-supervisor-v1.js';
+import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
 import { resolveRfc64RuntimeCatalogBootstrapConfigV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
 import { boundedRfc64SupervisorErrorV1 } from
@@ -11,14 +10,14 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('RFC-64 coalescing supervisor', () => {
+describe('coalescing recurring task', () => {
   it('drops overlapping requests when the workload selects fixed-cadence semantics', async () => {
     let release!: () => void;
     let markStarted!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
     let passes = 0;
-    const runner = new Rfc64CoalescingSupervisorV1({
+    const runner = new CoalescingRecurringTask({
       requestWhileRunning: 'drop',
       runPass: async () => {
         passes += 1;
@@ -31,18 +30,22 @@ describe('RFC-64 coalescing supervisor', () => {
 
     expect(runner.request()).toBe(true);
     await started;
+    expect(runner.running).toBe(true);
+    expect(runner.scheduled).toBe(false);
     expect(runner.request()).toBe(false);
     release();
     await runner.whenIdle();
     expect(passes).toBe(1);
     await runner.close();
+    expect(runner.running).toBe(false);
+    expect(runner.scheduled).toBe(false);
   });
 
   it('does not let frequent live work postpone a failed scope periodic retry', async () => {
     vi.useFakeTimers();
     const dirty = new Set(['failed-scope', 'live-scope']);
     const attempts = new Map<string, number>();
-    const runner = new Rfc64CoalescingSupervisorV1({
+    const runner = new CoalescingRecurringTask({
       retryIntervalMs: 1_000,
       runPass: async () => {
         for (const scope of dirty) {
@@ -61,6 +64,7 @@ describe('RFC-64 coalescing supervisor', () => {
     runner.request();
     await runner.whenIdle();
     expect(attempts.get('failed-scope')).toBe(1);
+    expect(runner.scheduled).toBe(true);
 
     for (let index = 0; index < 3; index += 1) {
       await vi.advanceTimersByTimeAsync(250);
@@ -74,6 +78,64 @@ describe('RFC-64 coalescing supervisor', () => {
     await runner.whenIdle();
     expect(attempts.get('failed-scope')).toBe(2);
     expect(attempts.get('live-scope')).toBeGreaterThanOrEqual(4);
+    await runner.close();
+  });
+
+  it('lets a pass retire periodic rearming until a new explicit request', async () => {
+    vi.useFakeTimers();
+    let passes = 0;
+    const runner = new CoalescingRecurringTask({
+      retryIntervalMs: 1_000,
+      runPass: async () => {
+        passes += 1;
+        return 'idle';
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    expect(runner.schedule()).toBe(true);
+    expect(runner.scheduled).toBe(true);
+    await vi.advanceTimersByTimeAsync(0);
+    await runner.whenIdle();
+    expect(runner.scheduled).toBe(false);
+    expect(passes).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes).toBe(1);
+
+    expect(runner.request()).toBe(true);
+    await runner.whenIdle();
+    expect(passes).toBe(2);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes).toBe(2);
+    await runner.close();
+  });
+
+  it('clears an armed periodic deadline when an explicit pass becomes idle', async () => {
+    vi.useFakeTimers();
+    let passes = 0;
+    const runner = new CoalescingRecurringTask({
+      retryIntervalMs: 1_000,
+      runPass: async () => {
+        passes += 1;
+        return passes === 1 ? 'rearm' : 'idle';
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await runner.whenIdle();
+    expect(runner.scheduled).toBe(true);
+
+    runner.request();
+    await runner.whenIdle();
+    expect(passes).toBe(2);
+    expect(runner.scheduled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes).toBe(2);
     await runner.close();
   });
 

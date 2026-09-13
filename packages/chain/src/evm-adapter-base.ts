@@ -18,6 +18,7 @@ import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.j
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  ContextGraphAuthorityIndexRevisionReader,
   KnowledgeAssetUpdateContext,
   V10PublishParams,
   OnChainPublishResult,
@@ -51,6 +52,8 @@ import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE, requiredHeadBlockForReceipt,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
@@ -60,6 +63,9 @@ import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, reso
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
+import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
+import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
+  './evm-context-graph-authority-index-reader.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -920,6 +926,13 @@ export class EVMChainAdapterBase {
   /** Finalized authority scan watermarks owned by this adapter lifecycle. */
   protected readonly contextGraphAuthorityHistory: ContextGraphAuthorityHistoryCache;
 
+  /** Shared contract-wide authority history, enabled by daemon-local persistence. */
+  protected readonly contextGraphAuthorityIndex: ContextGraphAuthorityIndex | undefined;
+
+  /** Sole public scheduling capability backed by the private materialized index. */
+  readonly contextGraphAuthorityIndexRevisionReader:
+    ContextGraphAuthorityIndexRevisionReader | undefined;
+
   /**
    * eth_getLogs block-window for the pre-10.0.4 getMaxKaNumberForAuthor fallback
    * scan (adapter-level config `kaHighWaterScanPageSize`; non-integer / `< 1`
@@ -946,6 +959,7 @@ export class EVMChainAdapterBase {
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
     this.contextGraphAuthorityHistory.clear();
+    this.contextGraphAuthorityIndex?.clear();
   }
 
   protected clearIdentityIdForAddress(address: string): void {
@@ -1261,6 +1275,26 @@ export class EVMChainAdapterBase {
       undefined,
       config.localContextGraphAuthorityHistoryStore,
     );
+    this.contextGraphAuthorityIndex = config.localContextGraphAuthorityIndexStore === undefined
+      ? undefined
+      : new ContextGraphAuthorityIndex(config.localContextGraphAuthorityIndexStore);
+    this.contextGraphAuthorityIndexRevisionReader = this.contextGraphAuthorityIndex === undefined
+      ? undefined
+      : createEvmContextGraphAuthorityIndexRevisionReaderV1({
+          index: this.contextGraphAuthorityIndex,
+          deploymentId: this.deploymentId,
+          initialize: () => this.init(),
+          requireContextGraphStorage: () => this.requireContextGraphStorage(),
+          readTipProvider: (label, read, options) => this.readTipProvider(
+            label,
+            read,
+            options,
+          ),
+          resolveContractDeployBlock: (address, operationLabel, contractLabel) => (
+            this.resolveContractDeployBlock(address, operationLabel, contractLabel)
+          ),
+          pageSize: () => this.cgRegistryScanPageSize,
+        });
     this.approvalPolicy = config.approvalPolicy ?? DEFAULT_APPROVAL_POLICY;
     this.minPublisherNativeWei = config.minPublisherNativeWei ?? 0n;
     this.minPublisherTracWei = config.minPublisherTracWei ?? 0n;
@@ -2738,12 +2772,12 @@ export class EVMChainAdapterBase {
       );
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
-        throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+        throw new HubContractNotFoundError(name, this.hubAddress, { cause: err });
       }
       throw err;
     }
     if (address === ethers.ZeroAddress) {
-      throw new Error(`Contract "${name}" not found in Hub at ${this.hubAddress}`);
+      throw new HubContractNotFoundError(name, this.hubAddress);
     }
     return address;
   }
@@ -4000,13 +4034,8 @@ export class EVMChainAdapterBase {
     try {
       return await this.resolveAndAssignRandomSamplingPair();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes('not found in Hub at')) {
-        throw new Error(
-          'RandomSampling / RandomSamplingStorage not deployed in this Hub. ' +
-          'The deployer is responsible for shipping these alongside V10 publish.',
-          { cause: err },
-        );
+      if (err instanceof HubContractNotFoundError) {
+        throw new RandomSamplingContractsUnavailableError({ cause: err });
       }
       throw err;
     }
@@ -4297,6 +4326,7 @@ export class EVMChainAdapterBase {
   destroy(): void {
     this.hubRotationPoller.stop();
     this.contextGraphAuthorityHistory.clear();
+    this.contextGraphAuthorityIndex?.clear();
     for (const provider of this.providers) {
       try { provider.destroy(); } catch { /* already destroyed / not destroyable */ }
     }
