@@ -31,6 +31,7 @@ import type {
   PcaAccountRelation,
   ShardingTableNode,
   PcaContracts,
+  PcaRpcMethod,
   BrowserWalletRpcMethod,
   IdentityWalletContracts,
   PublishTransactionResolution,
@@ -1142,6 +1143,11 @@ export class MockChainAdapter implements ChainAdapter {
       case 'eth_getTransactionByHash':
         return null;
     }
+  }
+
+  /** @deprecated Use the feature-neutral browser-wallet RPC bridge. */
+  async requestPublishingConvictionRpc(method: PcaRpcMethod, params: unknown[] = []): Promise<unknown> {
+    return this.requestBrowserWalletRpc(method, params);
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK

@@ -4,6 +4,7 @@
 import { ethers } from 'ethers';
 import {
   isPcaUnavailableError,
+  PcaUnavailableError,
   type PcaContracts,
   type PcaRpcMethod,
   type V10PublishingConvictionAccountInfo,
@@ -69,13 +70,32 @@ function supportsPcaRpcBridge(agent: RequestContext['agent']): boolean {
   const candidate = agent as RequestContext['agent'] & {
     supportsPublishingConvictionRpc?: unknown;
     requestBrowserWalletRpc?: unknown;
+    requestPublishingConvictionRpc?: unknown;
   };
   if (typeof candidate.supportsPublishingConvictionRpc === 'boolean') {
     return candidate.supportsPublishingConvictionRpc;
   }
   // Compatibility for older embedded agents without the correlated support
   // getter. Current DKGAgent computes the getter from PCA bootstrap + bridge.
-  return typeof candidate.requestBrowserWalletRpc === 'function';
+  return typeof candidate.requestBrowserWalletRpc === 'function'
+    || typeof candidate.requestPublishingConvictionRpc === 'function';
+}
+
+function requestPcaRpc(
+  agent: RequestContext['agent'],
+  method: PcaRpcMethod,
+  params?: unknown[],
+): Promise<unknown> {
+  const candidate = agent as RequestContext['agent'] & {
+    requestPublishingConvictionRpc?: (rpcMethod: PcaRpcMethod, rpcParams?: unknown[]) => Promise<unknown>;
+  };
+  if (typeof candidate.requestBrowserWalletRpc === 'function') {
+    return candidate.requestBrowserWalletRpc(method, params);
+  }
+  if (typeof candidate.requestPublishingConvictionRpc === 'function') {
+    return candidate.requestPublishingConvictionRpc(method, params);
+  }
+  throw new PcaUnavailableError();
 }
 
 function pcaRpcEthCallError(
@@ -163,7 +183,7 @@ async function handlePcaRpcRequest(
         ? { available: false }
         : { available: true, error: pcaRpcEthCallError(params, contracts) };
     },
-    request: (method, params) => agent.requestBrowserWalletRpc(method, params),
+    request: (method, params) => requestPcaRpc(agent, method, params),
     isUnavailableError: (error, message) => isNoChain(message) || isPcaUnavailable(error, message),
     readErrorPrefix: 'PCA RPC read failed',
   });

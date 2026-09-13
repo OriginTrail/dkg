@@ -4,6 +4,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Address, Hex } from 'viem';
+import { IdentityWalletApiDecodeError } from '../src/ui/identity-wallet-api.js';
 
 const mocks = vi.hoisted(() => ({
   fetchOperationalWallets: vi.fn(),
@@ -223,11 +224,14 @@ describe('IdentityWalletsSection', () => {
 
   it('recovers a failed bootstrap query through Retry without remounting Settings', async () => {
     mocks.fetchIdentityWalletContracts
-      .mockRejectedValueOnce(new Error('temporary daemon failure'))
+      .mockRejectedValueOnce(new IdentityWalletApiDecodeError(
+        '/api/identity-wallets/contracts',
+        'Invalid identity-wallet contracts response',
+      ))
       .mockResolvedValue(CONTRACTS);
     const { container, unmount } = await renderSection();
     await waitFor(
-      () => container.textContent?.includes('temporary daemon failure') === true,
+      () => container.textContent?.includes('Invalid identity-wallet contracts response') === true,
       'bootstrap query error',
     );
 

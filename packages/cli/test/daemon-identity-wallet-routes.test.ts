@@ -91,6 +91,7 @@ describe('daemon identity-wallet browser capability', () => {
     await request.done;
     expect(request.res.statusCode).toBe(503);
     expect(JSON.parse(request.res.body).error).toMatch(/not available/);
+    expect(JSON.parse(request.res.body).code).toBe('IDENTITY_WALLET_MANAGEMENT_UNAVAILABLE');
   });
 
   it('allows only the two IdentityStorage reads and delegates through the identity bridge', async () => {

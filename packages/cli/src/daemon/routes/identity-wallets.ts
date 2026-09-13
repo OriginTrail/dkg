@@ -34,6 +34,7 @@ const IDENTITY_STORAGE_SELECTORS = new Set([
 ]);
 const FEATURE_UNAVAILABLE = {
   error: 'Identity wallet management is not available on this deployment',
+  code: 'IDENTITY_WALLET_MANAGEMENT_UNAVAILABLE',
 };
 
 function parseJson(body: string): { ok: true; value: unknown } | { ok: false; error: string } {

@@ -147,6 +147,15 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
     expect(backup.send.calls).toEqual([['eth_chainId', []]]);
   });
 
+  it('keeps the deprecated PCA RPC name as an exact shared-bridge alias', async () => {
+    const send = recorder(async (method: string, params: unknown[]) => ({ method, params }));
+    const adapter = pcaRpcAdapter([{ send }], ['https://primary.example']);
+
+    await expect(adapter.requestPublishingConvictionRpc('eth_blockNumber', []))
+      .resolves.toEqual({ method: 'eth_blockNumber', params: [] });
+    expect(send.calls).toEqual([['eth_blockNumber', []]]);
+  });
+
   it('requestBrowserWalletRpc surfaces typed host-only exhaustion when all endpoints fail', async () => {
     const primary = {
       send: recorder(async () => { throw retryable429(); }),
@@ -231,6 +240,30 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
       token: '0x' + '22'.repeat(20),
     }));
     await expect(adapter.getIdentityWalletContracts()).resolves.toBeNull();
+  });
+
+  it.each([
+    ['Profile', 'profile'],
+    ['Identity', 'identity'],
+  ] as const)('returns no identity bootstrap when %s is missing without probing storage', async (
+    _contractName,
+    missingContract,
+  ) => {
+    const adapter = new EVMChainAdapter(minimalConfig());
+    (adapter as unknown as { init: () => Promise<void> }).init = async () => undefined;
+    const contracts: Partial<Record<'profile' | 'identity', { getAddress: () => Promise<string> }>> = {
+      profile: { getAddress: async () => '0x' + '33'.repeat(20) },
+      identity: { getAddress: async () => '0x' + '44'.repeat(20) },
+    };
+    delete contracts[missingContract];
+    (adapter as any).contracts = contracts;
+    const getIdentityStorage = vi.fn(async () => ({
+      getAddress: async () => '0x' + '55'.repeat(20),
+    }));
+    (adapter as any).getIdentityStorage = getIdentityStorage;
+
+    await expect(adapter.getIdentityWalletContracts()).resolves.toBeNull();
+    expect(getIdentityStorage).not.toHaveBeenCalled();
   });
 
   it('propagates unexpected identity storage discovery failures', async () => {

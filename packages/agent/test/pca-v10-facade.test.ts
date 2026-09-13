@@ -43,7 +43,7 @@ describe('DKGAgent V10 PCA facade', () => {
     expect(agent.supportsPublishingConvictionNft).toBe(false);
   });
 
-  it('supportsPublishingConvictionRpc requires PCA bootstrap plus the shared bridge', async () => {
+  it('supportsPublishingConvictionRpc accepts either the shared or deprecated PCA bridge', async () => {
     const chain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
     const agent = await makeAgent(chain);
     expect(agent.supportsPublishingConvictionRpc).toBe(true);
@@ -54,6 +54,16 @@ describe('DKGAgent V10 PCA facade', () => {
     const missingBootstrap = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
     Reflect.defineProperty(missingBootstrap, 'getPublishingConvictionContracts', { value: undefined });
     expect((await makeAgent(missingBootstrap)).supportsPublishingConvictionRpc).toBe(false);
+
+    const legacyOnly = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    Reflect.defineProperty(legacyOnly, 'requestBrowserWalletRpc', { value: undefined });
+    Reflect.defineProperty(legacyOnly, 'requestPublishingConvictionRpc', { value: vi.fn(async () => '0xlegacy') });
+    expect((await makeAgent(legacyOnly)).supportsPublishingConvictionRpc).toBe(true);
+
+    const missingBoth = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    Reflect.defineProperty(missingBoth, 'requestBrowserWalletRpc', { value: undefined });
+    Reflect.defineProperty(missingBoth, 'requestPublishingConvictionRpc', { value: undefined });
+    expect((await makeAgent(missingBoth)).supportsPublishingConvictionRpc).toBe(false);
   });
 
   it('supportsIdentityWalletManagement requires the complete bootstrap and RPC surface', async () => {
@@ -100,6 +110,22 @@ describe('DKGAgent V10 PCA facade', () => {
     const unsupported = await makeAgent(new NoChainAdapter());
     await expect(unsupported.requestBrowserWalletRpc('eth_chainId', []))
       .rejects.toThrow('Browser wallet RPC is not available on this deployment.');
+  });
+
+  it('preserves both directions of the deprecated PCA RPC compatibility bridge', async () => {
+    const sharedChain = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const sharedRpc = vi.spyOn(sharedChain, 'requestBrowserWalletRpc').mockResolvedValue('0xshared');
+    const sharedAgent = await makeAgent(sharedChain);
+    await expect(sharedAgent.requestPublishingConvictionRpc('eth_chainId', [])).resolves.toBe('0xshared');
+    expect(sharedRpc).toHaveBeenCalledWith('eth_chainId', []);
+
+    const legacyOnly = new MockChainAdapter('mock:31337', ethers.Wallet.createRandom().address);
+    const legacyRpc = vi.fn(async () => '0xlegacy');
+    Reflect.defineProperty(legacyOnly, 'requestBrowserWalletRpc', { value: undefined });
+    Reflect.defineProperty(legacyOnly, 'requestPublishingConvictionRpc', { value: legacyRpc });
+    const legacyAgent = await makeAgent(legacyOnly);
+    await expect(legacyAgent.requestBrowserWalletRpc('eth_blockNumber', [])).resolves.toBe('0xlegacy');
+    expect(legacyRpc).toHaveBeenCalledWith('eth_blockNumber', []);
   });
 
   it('getPublishingConvictionAgents delegates to the adapter (checksummed list)', async () => {

@@ -185,7 +185,7 @@ describe('identity wallet hardware-signed writes', () => {
       },
       {
         name: 'remove operational',
-        run: (h: ReturnType<typeof makeHarness>) => h.submitter.removeOperational('61', TARGET),
+        run: (h: ReturnType<typeof makeHarness>) => h.submitter.removeOperational('61', TARGET, PRIMARY),
         adminAddresses: [PRIMARY],
       },
       {
@@ -214,6 +214,20 @@ describe('identity wallet hardware-signed writes', () => {
   it('refuses removal of the node primary before prompting the wallet', async () => {
     const h = makeHarness();
     await expect(h.submitter.removeOperational('61', PRIMARY, PRIMARY)).rejects.toThrow(/primary operational wallet/);
+    expect(h.readContract).not.toHaveBeenCalled();
+    expect(h.writeContract).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when trusted primary-wallet metadata is unavailable', async () => {
+    const h = makeHarness({ operationalAddresses: [PRIMARY, TARGET] });
+    const removeWithoutPrimary = () => Reflect.apply(
+      h.submitter.removeOperational,
+      h.submitter,
+      ['61', PRIMARY],
+    );
+
+    await expect(removeWithoutPrimary()).rejects.toThrow(/primary operational wallet metadata is required/i);
+    expect(h.readContract).not.toHaveBeenCalled();
     expect(h.writeContract).not.toHaveBeenCalled();
   });
 
@@ -250,7 +264,7 @@ describe('identity wallet hardware-signed writes', () => {
 
   it('requires a replacement before removing the final operational key', async () => {
     const h = makeHarness({ operationalAddresses: [TARGET] });
-    await expect(h.submitter.removeOperational('61', TARGET)).rejects.toThrow(/final operational key/);
+    await expect(h.submitter.removeOperational('61', TARGET, PRIMARY)).rejects.toThrow(/final operational key/);
     expect(h.writeContract).not.toHaveBeenCalled();
   });
 

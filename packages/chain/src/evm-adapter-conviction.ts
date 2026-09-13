@@ -19,6 +19,7 @@ import type {
   PcaAccountRelation,
   ShardingTableNode,
   PcaContracts,
+  PcaRpcMethod,
 } from './chain-adapter.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { PcaUnavailableError } from './pca-errors.js';
@@ -44,6 +45,14 @@ export function toShardingTableNode(raw: RawShardingTableNode): ShardingTableNod
 }
 
 export class ConvictionMethods extends EVMChainAdapterBase implements ConvictionReader {
+  /** @deprecated Use the feature-neutral browser-wallet RPC bridge. */
+  async requestPublishingConvictionRpc(
+    method: PcaRpcMethod,
+    params: unknown[] = [],
+  ): Promise<unknown> {
+    return this.requestBrowserWalletRpc(method, params);
+  }
+
   protected publisherConvictionPlanReader(): PublisherConvictionPlanReader {
     return {
       getAccountId: (publisherAddress) => withTimeout(

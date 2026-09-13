@@ -1407,6 +1407,27 @@ describe('daemon /api/pca/:id — owned flag is primary-signer-scoped (#1370 HIG
     expect(res.body).not.toContain('https://rpc.example');
   });
 
+  it('POST /api/pca/rpc accepts an embedded agent with only the deprecated PCA bridge', async () => {
+    const legacyRpc = vi.fn(async () => '0x14a34');
+    const agent = {
+      supportsPublishingConvictionNft: true,
+      getPublishingConvictionContracts: async () => CONTRACTS_FIXTURE,
+      requestPublishingConvictionRpc: legacyRpc,
+    };
+
+    const { res, done } = runCtx('POST', '/api/pca/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'eth_chainId',
+      params: [],
+    });
+    await done;
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({ jsonrpc: '2.0', id: 7, result: '0x14a34' });
+    expect(legacyRpc).toHaveBeenCalledWith('eth_chainId', []);
+  });
+
   it('POST /api/pca/rpc returns 503 when the daemon RPC bridge is unavailable', async () => {
     const rpcMock = vi.fn();
     const agent = {

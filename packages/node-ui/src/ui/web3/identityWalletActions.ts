@@ -357,11 +357,17 @@ export function identityWalletActionSubmitter(deps: IdentityWalletActionDeps = {
     async removeOperational(
       identityIdValue: string | bigint,
       addressValue: string,
-      primaryAddress?: string | null,
+      primaryAddress: string | null,
     ): Promise<IdentityWalletTxResult> {
       const identityId = parsedIdentityId(identityIdValue);
       const address = normalizedAddress(addressValue, 'Operational wallet');
-      if (primaryAddress && eqAddress(address, primaryAddress)) {
+      if (!primaryAddress) {
+        throw new IdentityWalletActionError(
+          'Primary operational wallet metadata is required before removing an operational key.',
+        );
+      }
+      const primary = normalizedAddress(primaryAddress, 'Primary operational wallet');
+      if (eqAddress(address, primary)) {
         throw new IdentityWalletActionError(
           'The primary operational wallet cannot be removed because it anchors this node\'s on-chain identity.',
         );

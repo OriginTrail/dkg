@@ -271,6 +271,7 @@ describe('MockChainAdapter — V10 conviction agent register/deregister', () => 
     for (const method of methods) {
       await expect(mock.requestBrowserWalletRpc(method, [])).resolves.not.toBeUndefined();
     }
+    await expect(mock.requestPublishingConvictionRpc('eth_chainId', [])).resolves.toBe('0x7a69');
   });
 
   it('toShardingTableNode normalizes named object and positional tuple shapes', () => {

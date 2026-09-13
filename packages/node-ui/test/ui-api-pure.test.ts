@@ -17,6 +17,7 @@ import {
   fetchTelemetrySettings,
   fetchIdentityWalletContracts,
   fetchOperationalWallets,
+  IdentityWalletApiDecodeError,
   markNotificationsRead,
   fetchRpcHealth,
   fetchQueryHistory,
@@ -252,8 +253,8 @@ describe('UI API tests', () => {
       expect(requestLog.some(r => r.url.startsWith('/api/chain/rpc-health'))).toBe(true);
     });
 
-    it('treats a malformed optional identity-wallet bootstrap as unavailable', async () => {
-      await expect(fetchIdentityWalletContracts()).resolves.toBeNull();
+    it('surfaces a malformed identity-wallet bootstrap as a typed decode error', async () => {
+      await expect(fetchIdentityWalletContracts()).rejects.toBeInstanceOf(IdentityWalletApiDecodeError);
       expect(requestLog.some(r => r.url.startsWith('/api/identity-wallets/contracts'))).toBe(true);
     });
 
@@ -279,7 +280,10 @@ describe('UI API tests', () => {
       responseOverrides.push({
         match: (url) => url.startsWith('/api/identity-wallets/contracts'),
         status: 503,
-        body: { error: 'Identity wallet management is not available on this deployment' },
+        body: {
+          error: 'Identity wallet management is not available on this deployment',
+          code: 'IDENTITY_WALLET_MANAGEMENT_UNAVAILABLE',
+        },
       });
 
       await expect(fetchIdentityWalletContracts()).resolves.toBeNull();
@@ -303,7 +307,7 @@ describe('UI API tests', () => {
       ['non-boolean admin flag', { address: '0xabc', isAdmin: 'yes', isPrimary: false, registered: true }],
       ['non-boolean primary flag', { address: '0xabc', isAdmin: false, isPrimary: 0, registered: true }],
       ['invalid registration state', { address: '0xabc', isAdmin: false, isPrimary: false, registered: 'unknown' }],
-    ])('rejects an operational-wallet entry with %s', async (_label, wallet) => {
+    ])('surfaces an operational-wallet entry with %s as a typed decode error', async (_label, wallet) => {
       responseOverrides.push({
         match: (url) => url.startsWith('/api/operational-wallets'),
         status: 200,
@@ -315,6 +319,19 @@ describe('UI API tests', () => {
           wallets: [wallet],
         },
       });
+      await expect(fetchOperationalWallets()).rejects.toBeInstanceOf(IdentityWalletApiDecodeError);
+    });
+
+    it('maps only the stable operational-wallet capability 503 to unavailable', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/operational-wallets'),
+        status: 503,
+        body: {
+          error: 'Operational wallet management is unavailable',
+          code: 'OPERATIONAL_WALLET_MANAGEMENT_UNAVAILABLE',
+        },
+      });
+
       await expect(fetchOperationalWallets()).resolves.toEqual({ available: false });
     });
 

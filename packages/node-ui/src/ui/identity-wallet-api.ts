@@ -4,6 +4,21 @@
 // one discoverable wire boundary. api.ts re-exports the module for compatibility.
 import { get, HttpError } from './http.js';
 
+const IDENTITY_WALLET_UNAVAILABLE_CODE = 'IDENTITY_WALLET_MANAGEMENT_UNAVAILABLE';
+const OPERATIONAL_WALLET_UNAVAILABLE_CODE = 'OPERATIONAL_WALLET_MANAGEMENT_UNAVAILABLE';
+
+export class IdentityWalletApiDecodeError extends Error {
+  readonly code = 'IDENTITY_WALLET_API_DECODE_ERROR';
+  readonly endpoint: string;
+
+  constructor(endpoint: string, detail: string) {
+    super(`${detail} from ${endpoint}`);
+    this.name = 'IdentityWalletApiDecodeError';
+    this.endpoint = endpoint;
+    Object.setPrototypeOf(this, IdentityWalletApiDecodeError.prototype);
+  }
+}
+
 export interface OperationalWalletSnapshot {
   identityId: string;
   hasProfile: boolean;
@@ -45,10 +60,21 @@ function isOperationalWalletSnapshot(value: unknown): value is OperationalWallet
 
 /** Local wallets annotated with their on-chain operational-key state. */
 export const fetchOperationalWallets = async (): Promise<OperationalWalletCapability> => {
-  const value = await get<unknown>('/api/operational-wallets');
-  return isOperationalWalletSnapshot(value)
-    ? { available: true, snapshot: value }
-    : { available: false };
+  const endpoint = '/api/operational-wallets';
+  try {
+    const value = await get<unknown>(endpoint);
+    if (!isOperationalWalletSnapshot(value)) {
+      throw new IdentityWalletApiDecodeError(endpoint, 'Invalid operational-wallet snapshot');
+    }
+    return { available: true, snapshot: value };
+  } catch (error) {
+    if (
+      error instanceof HttpError
+      && error.status === 503
+      && (error.body as { code?: unknown } | undefined)?.code === OPERATIONAL_WALLET_UNAVAILABLE_CODE
+    ) return { available: false };
+    throw error;
+  }
 };
 
 export interface IdentityWalletContracts {
@@ -77,17 +103,18 @@ function isIdentityWalletContracts(value: unknown): value is IdentityWalletContr
 }
 
 export const fetchIdentityWalletContracts = async (): Promise<IdentityWalletContracts | null> => {
+  const endpoint = '/api/identity-wallets/contracts';
   try {
-    const value = await get<unknown>('/api/identity-wallets/contracts');
-    return isIdentityWalletContracts(value) ? value : null;
+    const value = await get<unknown>(endpoint);
+    if (!isIdentityWalletContracts(value)) {
+      throw new IdentityWalletApiDecodeError(endpoint, 'Invalid identity-wallet contracts response');
+    }
+    return value;
   } catch (error) {
-    // A capability 503 is stable deployment state; transport 503/504 responses
-    // carry an RPC code and remain retryable errors for the query controller.
     if (
       error instanceof HttpError
       && error.status === 503
-      && (error.body as { code?: unknown } | undefined)?.code === undefined
-      && /identity wallet management is not available/i.test(error.message)
+      && (error.body as { code?: unknown } | undefined)?.code === IDENTITY_WALLET_UNAVAILABLE_CODE
     ) return null;
     throw error;
   }

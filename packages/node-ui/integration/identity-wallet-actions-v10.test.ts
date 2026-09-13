@@ -5,7 +5,7 @@
  * signer, waits for real receipts, and verifies IdentityStorage after every
  * add/remove operation. Unit mocks cannot catch ABI/address integration drift.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   createPublicClient,
   createWalletClient,
@@ -22,28 +22,26 @@ import {
   identityWalletActionSubmitter,
   identityWalletKey,
   type IdentityWalletActionDeps,
-} from '../../node-ui/src/ui/web3/identityWalletActions.js';
-import type { Eip1193Provider } from '../../node-ui/src/ui/web3/eip6963.js';
+} from '../src/ui/web3/identityWalletActions.js';
+import type { Eip1193Provider } from '../src/ui/web3/eip6963.js';
+import { EVMChainAdapter } from '../../chain/src/evm-adapter.js';
 import {
-  createEVMAdapter,
-  getSharedContext,
   HARDHAT_KEYS,
-  revertSnapshot,
-  takeSnapshot,
-} from './evm-test-context.js';
+  killHardhat,
+  makeAdapterConfig,
+  spawnHardhatEnv,
+  type HardhatContext,
+} from '../../chain/test/hardhat-harness.js';
 
-let fileSnapshotId: string;
-let testSnapshotId: string;
+let hardhat: HardhatContext;
 
 describe('V10 identity-wallet browser transaction integration', () => {
-  beforeAll(async () => { fileSnapshotId = await takeSnapshot(); }, 120_000);
-  afterAll(async () => { await revertSnapshot(fileSnapshotId); });
-  beforeEach(async () => { testSnapshotId = await takeSnapshot(); });
-  afterEach(async () => { await revertSnapshot(testSnapshotId); });
+  beforeAll(async () => { hardhat = await spawnHardhatEnv(); }, 120_000);
+  afterAll(async () => { await killHardhat(hardhat); });
 
   it('adds and removes operational and admin keys through real viem clients', async () => {
-    const { rpcUrl, coreProfileId } = getSharedContext();
-    const adapter = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const { rpcUrl, hubAddress, coreProfileId } = hardhat;
+    const adapter = new EVMChainAdapter(makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.CORE_OP));
     const discovered = await adapter.getIdentityWalletContracts();
     expect(discovered).not.toBeNull();
     const bootstrap = { ...discovered!, rpcUrls: [rpcUrl] };

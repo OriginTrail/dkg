@@ -22,6 +22,8 @@ export interface ConvictionReader {
   listPublishingConvictionAccountsForWallets?(wallets: string[]): Promise<PcaAccountRelation[]>;
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
   getPublishingConvictionContracts?(): Promise<PcaContracts>;
+  /** @deprecated Use requestBrowserWalletRpc for new browser-read features. */
+  requestPublishingConvictionRpc?(method: PcaRpcMethod, params?: unknown[]): Promise<unknown>;
 }
 
 /** Inputs for one adapter-owned, cost-aware publisher planning decision. */
@@ -1456,6 +1458,15 @@ export interface ChainAdapter {
   /** Feature-neutral, read-only JSON-RPC bridge for browser-wallet routes. */
   requestBrowserWalletRpc?(
     method: BrowserWalletRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown>;
+
+  /**
+   * @deprecated Use {@link requestBrowserWalletRpc}. Retained as a compatibility
+   * bridge for adapters and embedders compiled against the PCA-specific API.
+   */
+  requestPublishingConvictionRpc?(
+    method: PcaRpcMethod,
     params?: unknown[],
   ): Promise<unknown>;
 

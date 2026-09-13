@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type BrowserWalletRpcMethod, type IdentityWalletContracts } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, PcaUnavailableError, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod, type BrowserWalletRpcMethod, type IdentityWalletContracts } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1566,7 +1566,10 @@ export class AgentRegistryMethods extends DKGAgentBase {
   /** True when the adapter can serve the daemon's PCA browser-read RPC bridge. */
   get supportsPublishingConvictionRpc(): boolean {
     return typeof this.chain.getPublishingConvictionContracts === 'function'
-      && typeof this.chain.requestBrowserWalletRpc === 'function';
+      && (
+        typeof this.chain.requestBrowserWalletRpc === 'function'
+        || typeof this.chain.requestPublishingConvictionRpc === 'function'
+      );
   }
 
   /** True when identity bootstrap and its read bridge are independently available. */
@@ -1696,10 +1699,26 @@ export class AgentRegistryMethods extends DKGAgentBase {
     method: BrowserWalletRpcMethod,
     params?: unknown[],
   ): Promise<unknown> {
-    if (typeof this.chain.requestBrowserWalletRpc !== 'function') {
-      throw new Error('Browser wallet RPC is not available on this deployment.');
+    if (typeof this.chain.requestBrowserWalletRpc === 'function') {
+      return this.chain.requestBrowserWalletRpc(method, params);
     }
-    return this.chain.requestBrowserWalletRpc(method, params);
+    if (typeof this.chain.requestPublishingConvictionRpc === 'function') {
+      return this.chain.requestPublishingConvictionRpc(method, params);
+    }
+    throw new Error('Browser wallet RPC is not available on this deployment.');
+  }
+
+  /** @deprecated Use requestBrowserWalletRpc for browser-read features. */
+  async requestPublishingConvictionRpc(
+    this: DKGAgent,
+    method: PcaRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown> {
+    if (
+      typeof this.chain.requestBrowserWalletRpc !== 'function'
+      && typeof this.chain.requestPublishingConvictionRpc !== 'function'
+    ) throw new PcaUnavailableError();
+    return this.requestBrowserWalletRpc(method, params);
   }
 
   /** Enumerate registered publishing agents (operational wallets) for a PCA.
