@@ -704,8 +704,11 @@ async function recoverContextGraphSwmUnlocked(
   const graphAssets: VerifiedSwmRecoveryGraphApply[] = [];
   for (const descriptor of graphScopedDescriptors) {
     const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
-    const retainedReady = descriptor.publicSnapshotRef !== undefined
-      && snapshotWalkProgress?.isResolved(descriptor.publicSnapshotRef) === true;
+    const retainedSnapshotRef = descriptor.snapshotSource.locator.kind === 'store'
+      ? descriptor.snapshotSource.locator.ref
+      : undefined;
+    const retainedReady = retainedSnapshotRef !== undefined
+      && snapshotWalkProgress?.isResolved(retainedSnapshotRef) === true;
     if (incrementallyReadyGraphs.has(graphKey) || retainedReady) {
       graphAssets.push(Object.freeze({
         descriptor,

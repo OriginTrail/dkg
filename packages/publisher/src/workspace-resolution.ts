@@ -1085,6 +1085,12 @@ export async function resolveKnowledgeAssetOperationPublicQuads(params: {
       throw new Error(`Snapshot store is required for share operation ${params.shareOperationId}`);
     }
     quads = await params.publicSnapshotStore.getSnapshot(snapshotRef);
+    // Successful recovery persists verified legacy aliases under the content
+    // digest. A missing advertised ref may use that canonical copy; present
+    // but invalid advertised bytes still reach the integrity failure below.
+    if (!quads && snapshotRef !== expectedDigest) {
+      quads = await params.publicSnapshotStore.getSnapshot(expectedDigest);
+    }
   } else if (snapshotGraph) {
     if (!isSafeIri(snapshotGraph)) {
       throw new Error(

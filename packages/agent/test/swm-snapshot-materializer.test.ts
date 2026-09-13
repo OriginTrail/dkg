@@ -22,6 +22,9 @@
  *     digest survives the store round-trip (no churn).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -32,6 +35,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   generateKnowledgeAssetShareMetadata,
+  FileWorkspacePublicSnapshotStore,
   resolveKnowledgeAssetWorkspaceHead,
   workspacePublicQuadsDigest,
   type WorkspacePublicSnapshotStore,
@@ -262,9 +266,10 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       options: Readonly<{
         preloadSnapshot?: boolean;
         onSnapshotRequest?: (ref: string) => void;
+        snapshotStore?: WorkspacePublicSnapshotStore;
       }> = {},
     ) {
-      const snapshotStore = new MemorySnapshotStore();
+      const snapshotStore = options.snapshotStore ?? new MemorySnapshotStore();
       const { materializer } = materializerFor(store);
       let replaceCalls = 0;
       const run = async () => {
@@ -563,6 +568,79 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       })).resolves.toMatchObject({ quads: inGraph(v1.payload, v1.assertionGraph) });
     });
 
+    it('carries the complete three-locator alias class into manifest selection', () => {
+      const display = share(1, 'alias-display', 'version-one');
+      const graphAlias = share(1, 'alias-graph', 'version-one');
+      const persistedAlias = share(1, 'alias-persisted', 'version-one');
+      const snapshotGraph = `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${graphAlias.operationId}/ka`;
+      const withTimestamp = (rows: readonly Quad[], subject: string, timestamp: string) => rows.map(
+        (row) => row.subject === subject && row.predicate === `${DKG}publishedAt`
+          ? { ...row, object: `"${timestamp}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` }
+          : row,
+      );
+      const displayRows = withTimestamp(
+        display.meta.filter((row) => !(row.subject === display.operationSubject
+          && row.predicate === `${DKG}publicSnapshotRef`)),
+        display.operationSubject,
+        '1970-01-01T00:00:02.000Z',
+      );
+      const graphRows = withTimestamp([
+        ...graphAlias.meta.filter((row) => !(row.subject === graphAlias.operationSubject
+          && row.predicate === `${DKG}publicSnapshotRef`)),
+        {
+          subject: graphAlias.operationSubject,
+          predicate: `${DKG}publicSnapshotGraph`,
+          object: snapshotGraph,
+          graph: WS_META,
+        },
+      ], graphAlias.operationSubject, '1970-01-01T00:00:01.000Z');
+      const persistedRows = persistedAlias.meta.map((row) => (
+        row.subject === persistedAlias.operationSubject
+          && row.predicate === `${DKG}publicSnapshotRef`
+          ? { ...row, object: `"sha256:${'8'.repeat(64)}"` }
+          : row
+      ));
+      const servedMeta = [
+        ...displayRows,
+        ...graphRows.filter((row) => row.subject === graphAlias.operationSubject),
+        ...graphRows.filter((row) => row.subject === graphAlias.headSubject
+          && row.predicate === `${DKG}shareOperationId`),
+        ...persistedRows.filter((row) => row.subject === persistedAlias.operationSubject),
+        ...persistedRows.filter((row) => row.subject === persistedAlias.headSubject
+          && row.predicate === `${DKG}shareOperationId`),
+      ];
+
+      const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      });
+      expect(descriptor).toMatchObject({
+        shareOperationId: display.operationId,
+        snapshotSource: {
+          shareOperationId: graphAlias.operationId,
+          locator: { kind: 'graph', graph: snapshotGraph },
+        },
+      });
+      expect(new Set(descriptor?.equivalentOperationSubjects)).toEqual(new Set([
+        display.operationSubject,
+        graphAlias.operationSubject,
+        persistedAlias.operationSubject,
+      ]));
+      const manifestQuads = canonicalGraphScopedSnapshotManifestQuads(
+        servedMeta,
+        [descriptor!],
+      );
+      expect(new Set(manifestQuads
+        .filter((row) => row.predicate === `${DKG}publicQuadsDigest`)
+        .map((row) => row.subject))).toEqual(new Set([graphAlias.operationSubject]));
+      expect(collectPublicSnapshotMetadata(manifestQuads)).toEqual([]);
+      expect(descriptor?.metadataQuads).toContainEqual(expect.objectContaining({
+        subject: display.headSubject,
+        predicate: `${DKG}shareOperationId`,
+        object: `"${display.operationId}"`,
+      }));
+    });
+
     it('requests and materializes the persisted ref from an older equivalent alias', async () => {
       const selected = share(1, 'storage-ack-digest-fallback', 'version-one');
       const persistedRef = `sha256:${'9'.repeat(64)}`;
@@ -603,25 +681,47 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
         canonicalGraphScopedSnapshotManifestQuads(servedMeta, [descriptor!]),
       ).map((snapshot) => snapshot.ref)).toEqual([persistedRef]);
 
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-swm-alias-snapshot-'));
+      const snapshotStore = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: { enabled: false },
+      });
       const requestedRefs: string[] = [];
+      let networkAvailable = true;
       const store = new OxigraphStore();
       const h = realHarness(store, selected, servedMeta, {
         preloadSnapshot: false,
-        onSnapshotRequest: (ref) => requestedRefs.push(ref),
+        snapshotStore,
+        onSnapshotRequest: (ref) => {
+          if (!networkAvailable) throw new Error('snapshot source unavailable');
+          requestedRefs.push(ref);
+        },
       });
-      const summary = await h.run();
-      expect(summary).toMatchObject({
-        failedPhases: 0,
-        swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 1 },
-      });
-      expect(requestedRefs).toEqual([persistedRef]);
-      expect(await store.countQuads(v1.assertionGraph)).toBe(v1.payload.length);
-      await expect(resolveKnowledgeAssetWorkspaceHead({
-        store,
-        graphManager: new GraphManager(store),
-        contextGraphId: CG,
-        kaUal: UAL,
-      })).resolves.toMatchObject({ shareOperationId: selected.operationId });
+      try {
+        const summary = await h.run();
+        expect(summary).toMatchObject({
+          failedPhases: 0,
+          swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 1 },
+        });
+        expect(requestedRefs).toEqual([persistedRef]);
+        expect(await store.countQuads(v1.assertionGraph)).toBe(v1.payload.length);
+
+        networkAvailable = false;
+        await expect(h.run()).resolves.toMatchObject({
+          failedPhases: 0,
+          swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 1 },
+        });
+        expect(requestedRefs).toEqual([persistedRef]);
+        await expect(resolveKnowledgeAssetWorkspaceHead({
+          store,
+          graphManager: new GraphManager(store),
+          contextGraphId: CG,
+          kaUal: UAL,
+        })).resolves.toMatchObject({ shareOperationId: selected.operationId });
+      } finally {
+        snapshotStore.stopGarbageCollection();
+        await store.close();
+        await rm(directory, { recursive: true, force: true });
+      }
     });
 
     it('still fails closed when two head operations disagree on content', () => {

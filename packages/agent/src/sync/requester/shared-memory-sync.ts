@@ -1981,7 +1981,21 @@ async function hasValidSnapshot(
   let quads: Quad[] | null;
   try {
     if (publicSnapshotStore.validateSnapshot) {
-      return await publicSnapshotStore.validateSnapshot(snapshot.ref, snapshot.digest, snapshot.count);
+      if (await publicSnapshotStore.validateSnapshot(
+        snapshot.ref,
+        snapshot.digest,
+        snapshot.count,
+      )) return true;
+      if (snapshot.ref === snapshot.digest) return false;
+      // A present advertised ref that failed validation is corrupt, not an
+      // alias miss. Only an absent legacy ref may fall back to the canonical
+      // digest copy written by successful recovery.
+      if (await publicSnapshotStore.getSnapshot(snapshot.ref)) return false;
+      return publicSnapshotStore.validateSnapshot(
+        snapshot.digest,
+        snapshot.digest,
+        snapshot.count,
+      );
     }
     quads = await publicSnapshotStore.getSnapshot(snapshot.ref);
     if (!quads && snapshot.ref !== snapshot.digest) {

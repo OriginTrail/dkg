@@ -116,6 +116,8 @@ export interface GraphScopedSwmRecoveryDescriptor {
     operationSubject: string;
     locator: RecoverySnapshotLocator;
   }>;
+  /** Complete validated same-payload alias class, in deterministic order. */
+  readonly equivalentOperationSubjects: readonly string[];
   readonly publicQuadsDigest: string;
   readonly publicQuadsCount: number;
   /** Authenticated private-content commitment carried by the active operation. */
@@ -223,7 +225,14 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       assertionVersion: scope.assertionVersion,
       subGraphName,
     });
-    const { shareOperationId, operationSubject, operationRows, semantics, snapshotSource } = operation;
+    const {
+      shareOperationId,
+      operationSubject,
+      operationRows,
+      semantics,
+      snapshotSource,
+      equivalentOperationSubjects,
+    } = operation;
     const publicQuadsDigest = semantics.publicQuadsDigest;
     const publicQuadsCount = semantics.publicTripleCount;
     const privateTripleCount = semantics.privateTripleCount;
@@ -241,6 +250,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
         operationSubject: snapshotSource.operationSubject,
         locator: snapshotSource.locator,
       },
+      equivalentOperationSubjects,
       publicQuadsDigest,
       publicQuadsCount,
       privateTripleCount,
@@ -289,10 +299,8 @@ export function canonicalGraphScopedSnapshotManifestQuads(
   const selectedSnapshotSubjects = new Set<string>();
   for (const descriptor of descriptors) {
     selectedSnapshotSubjects.add(descriptor.snapshotSource.operationSubject);
-    for (const row of descriptor.metadataQuads) {
-      if (row.predicate === PUBLIC_QUADS_DIGEST && row.subject !== descriptor.headSubject) {
-        equivalentOperationSubjects.add(row.subject);
-      }
+    for (const subject of descriptor.equivalentOperationSubjects) {
+      equivalentOperationSubjects.add(subject);
     }
   }
   return metaQuads.filter((row) => (
@@ -513,6 +521,7 @@ interface ResolvedHeadOperation {
     operationRows: readonly Quad[];
     locator: RecoverySnapshotLocator;
   }>;
+  readonly equivalentOperationSubjects: readonly string[];
 }
 
 function recoverySnapshotLocator(params: {
@@ -666,6 +675,9 @@ function resolveEquivalentHeadOperation(params: {
       operationRows: snapshotSource.operationRows,
       locator: snapshotSource.snapshotLocator,
     },
+    equivalentOperationSubjects: Object.freeze(
+      orderedCandidates.map((candidate) => candidate.operationSubject),
+    ),
   };
 }
 
