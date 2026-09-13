@@ -7,6 +7,7 @@ import { ownProcess, type OwnedProcess } from '../../../scripts/testing/owned-pr
 import { writeConfigFile } from '../src/config-file.js';
 import { DkgHomeFiles } from '../src/config.js';
 import { DkgConfigStore } from '../src/daemon-config-store.js';
+import * as publication from '../src/fs-utils.js';
 
 const fileModule = new URL('../src/config-file.ts', import.meta.url).href;
 let directory: string;
@@ -20,6 +21,7 @@ beforeEach(async () => {
   await writeFile(files.configPath, JSON.stringify({ name: 'before', apiPort: 0, listenPort: 0, nodeRole: 'edge' }));
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(children.splice(0).map(child => child.stop()));
   await Promise.all(stores.splice(0).map(store => store.close()));
   await rm(directory, { recursive: true, force: true });
@@ -107,4 +109,67 @@ it('releases a failed startup claim and makes stale handle closure idempotent', 
   await expect(files.saveConfig(await files.loadConfig())).rejects.toThrow('explicit activation');
   await second.close();
   await files.saveConfig({ ...await files.loadConfig(), name: 'standalone again' });
+});
+
+it.each(['publication', 'activation'] as const)('drains blocked %s before transferring the process lease', async phase => {
+  const store = await DkgConfigStore.open(files, () => files.loadConfig());
+  stores.push(store);
+  let release!: () => void;
+  let entered!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const blocked = new Promise<void>(resolve => { entered = resolve; });
+  if (phase === 'publication') {
+    const write = publication.writeFileAtomic;
+    vi.spyOn(publication, 'writeFileAtomic').mockImplementationOnce(async (...args) => {
+      entered();
+      await gate;
+      return write(...args);
+    });
+  }
+  const updating = store.update(current => ({ ...current, name: 'admitted update' }), () => ({
+    async apply() { if (phase === 'activation') { entered(); await gate; } },
+    rollback() {},
+  }));
+  let closing: Promise<void> | undefined;
+  try {
+    await blocked;
+    let closed = false;
+    closing = store.close().then(() => { closed = true; });
+    await expect(store.update(current => current, 'configuration-only')).rejects.toThrow('owner is closed');
+    const contender = startWriter(`
+      try {
+        await configFileStore(path).write('must not publish');
+        throw new Error('writer acquired during shutdown');
+      } catch (error) {
+        if (!error.message.includes('owned by another process')) throw error;
+        console.log('FENCED');
+      }
+      process.stdin.destroy();
+    `);
+    expect((await contender.waitForExit(10_000)).stdout).toContain('FENCED');
+    expect(closed).toBe(false);
+    await expect(writeConfigFile(files.configPath, 'must not publish')).rejects.toThrow('explicit activation');
+    expect(store.current.name).toBe('before');
+    expect(JSON.parse(await readFile(files.configPath, 'utf8')).name)
+      .toBe(phase === 'publication' ? 'before' : 'admitted update');
+    release();
+    expect((await updating).name).toBe('admitted update');
+    await closing;
+    expect(closed).toBe(true);
+    expect(JSON.parse(await readFile(files.configPath, 'utf8')).name).toBe('admitted update');
+    const successor = startWriter(`
+      const { readFile } = await import('node:fs/promises');
+      const previous = JSON.parse(await readFile(path, 'utf8'));
+      if (previous.name !== 'admitted update') throw new Error('admitted update lost');
+      await configFileStore(path).write(JSON.stringify({ ...previous, name: 'successor' }));
+      console.log('TRANSFERRED');
+      process.stdin.destroy();
+    `);
+    expect((await successor.waitForExit(10_000)).stdout).toContain('TRANSFERRED');
+    expect(JSON.parse(await readFile(files.configPath, 'utf8')).name).toBe('successor');
+  } finally {
+    release();
+    await updating;
+    await closing;
+  }
 });

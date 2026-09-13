@@ -71,10 +71,10 @@ describe('knowledge subscribe CLI sync lifetime', () => {
       syncMode: 'always-on',
       forceCatchup: false,
     });
-    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
-      contextGraphs: ['selected-cg'],
-    }));
+    // The daemon owns durable subscriptions; a second file writer would race it.
+    expect(configMocks.saveConfig).not.toHaveBeenCalled();
     expect(logLines.join('\n')).toContain('Synchronization mode: always on');
+    expect(logLines.join('\n')).toContain('Saved subscription (will auto-subscribe on restart).');
   });
 
   it('reports the server-normalized mode when an on-demand request stays always-on', async () => {

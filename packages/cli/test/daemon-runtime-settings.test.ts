@@ -90,6 +90,7 @@ describe('daemon runtime settings HTTP transactions', () => {
     vi.restoreAllMocks();
     if (server) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     await telemetry?.shutdown();
+    await store?.close();
     db?.close();
     if (directory) await rm(directory, { recursive: true, force: true });
   });
@@ -168,6 +169,42 @@ describe('daemon runtime settings HTTP transactions', () => {
 
   it('rejects an ordinary save that would bypass both running settings adapters', async () => {
     await expect(files.saveConfig({ ...initial, llm: changes.llm, telemetry: { enabled: true } })).rejects.toThrow('explicit activation');
+    await assertViews('llm', false);
+  });
+
+  it.each([{ clear: true }, { apiKey: '' }])('clears the LLM secret across all views with %j', async payload => {
+    const update = vi.spyOn(memory, 'updateConfig');
+    const response = await fetch(base + '/api/settings/llm', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, configured: false });
+    expect(store.current).not.toHaveProperty('llm');
+    const persisted = await readFile(files.configPath, 'utf8');
+    expect(JSON.parse(persisted)).toEqual(store.current);
+    expect(persisted).not.toContain(initial.llm!.apiKey);
+    expect(update).toHaveBeenCalledExactlyOnceWith({ apiKey: '' });
+    expect(memoryConfig()).toEqual({ apiKey: '' });
+    const read = await fetch(base + '/api/settings/llm');
+    expect(read.status).toBe(200);
+    expect(await read.json()).toEqual({ configured: false });
+  });
+
+  it('restores the LLM secret and all views if clearing mutates runtime then fails', async () => {
+    const before = await readFile(files.configPath, 'utf8');
+    const apply = memory.updateConfig.bind(memory);
+    const update = vi.spyOn(memory, 'updateConfig').mockImplementationOnce(config => {
+      apply(config);
+      throw new Error('LLM clear failed after mutation');
+    });
+    const response = await fetch(base + '/api/settings/llm', {
+      method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clear: true }),
+    });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: 'LLM clear failed after mutation' });
+    expect(update).toHaveBeenNthCalledWith(1, { apiKey: '' });
+    expect(update).toHaveBeenNthCalledWith(2, initial.llm);
+    expect(await readFile(files.configPath, 'utf8')).toBe(before);
     await assertViews('llm', false);
   });
 });
