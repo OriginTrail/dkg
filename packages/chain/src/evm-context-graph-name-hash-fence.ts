@@ -14,6 +14,7 @@ import {
 } from './evm-adapter-constants.js';
 import { withRpcRequestContext, withRpcRequestTimeout } from './rpc-request-transport.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
+import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
 
 /**
  * Maximum current high-water id for the fast getNameHash enumeration. Above
@@ -500,6 +501,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const failures = reads.filter(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
+    const retryLater = failures.find(
+      (failure) => classifyRpcRetryDisposition(failure.reason) === 'retry-later',
+    );
+    if (retryLater) throw retryLater.reason;
     const nonRetryableFailures = failures.filter(
       (failure) => !isContractViewRetryable(failure.reason),
     );
@@ -834,7 +839,8 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
         observedHeadHashes.add(candidateHash);
         if (headHash === null) headHash = candidateHash;
         if (candidateHash === headHash) scanProviders.push(candidate);
-      } catch {
+      } catch (error) {
+        if (classifyRpcRetryDisposition(error) === 'retry-later') throw error;
         // Keep collecting same-head providers; fail only when none can anchor.
       }
     }

@@ -48,7 +48,6 @@ import {
   isRetryableRpcError,
   isThrottleRpcError,
   isKnownTransactionError,
-  assertSuccessfulReceipt,
   sleep,
 } from './evm-adapter-rpc.js';
 import { errorCode, errorMessage, errorRetryAfterMs } from './evm-adapter-errors.js';
@@ -71,11 +70,8 @@ import {
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  RPC_RECEIPT_POLL_INTERVAL_MS,
   STICKY_PREFERRED_TTL_MS,
-  resolveReceiptTimeoutMs,
 } from './evm-adapter-constants.js';
-import { waitForReceiptWithDeadline } from './receipt-wait.js';
 
 /**
  * One RPC endpoint as a SINGLE boundary: the bare per-endpoint provider paired
@@ -958,58 +954,4 @@ export class RpcFailoverClient {
   private rebindSigner(signer: Wallet, provider: JsonRpcProvider): Wallet {
     return signer.connect(provider);
   }
-}
-
-export interface TransactionReceiptWaitOptions {
-  /** Overall submitted-transaction receipt deadline (default 10 minutes). */
-  receiptTimeoutMs?: number;
-  /** Low-cardinality transport label. Defaults to `direct transaction`. */
-  logLabel?: string;
-}
-
-/** One direct receipt endpoint with optional telemetry metadata kept in-band. */
-export interface TransactionReceiptEndpoint {
-  provider: JsonRpcProvider;
-  rpcUrl?: string;
-}
-
-/**
- * Stable direct-write receipt boundary used by CLI commands after broadcast.
- * It constructs the same concrete `RpcFailoverClient` the adapter uses, leaving
- * `receipt-wait.ts` responsible only for operation-level polling/deadline logic.
- */
-export async function waitForTransactionReceiptWithFailover(
-  endpoints: readonly TransactionReceiptEndpoint[],
-  txHash: string,
-  options: TransactionReceiptWaitOptions = {},
-): Promise<ethers.TransactionReceipt> {
-  const receiptTimeoutMs = resolveReceiptTimeoutMs(options.receiptTimeoutMs);
-  const logLabel = options.logLabel ?? 'direct transaction';
-  const rpcEndpoints: RpcEndpoint[] = endpoints.map((endpoint, index) => ({
-    provider: endpoint.provider,
-    // URL is telemetry/stickiness metadata only. Keep URL-less endpoints in the
-    // pass with a non-secret stable label rather than filtering them out.
-    rpcUrl: endpoint.rpcUrl ?? `dkg-direct-rpc://endpoint-${index + 1}`,
-  }));
-  const receiptTransport = new RpcFailoverClient(
-    () => rpcEndpoints,
-    async () => { throw new Error('receipt-only RPC transport cannot sign'); },
-    () => 'direct',
-    // This helper owns one transaction wait, so cross-operation preference has
-    // no value; disabling it preserves the configured endpoint order per poll.
-    { stickiness: { enabled: false } },
-  );
-
-  return waitForReceiptWithDeadline({
-    txHash,
-    receiptTimeoutMs,
-    pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
-    getReceipt: (hash, { deadlineMs }) => receiptTransport.getReceipt(hash, {
-      deadlineMs,
-      logLabel: `${logLabel} receipt lookup`,
-    }),
-    assertSuccessfulReceipt: receipt => assertSuccessfulReceipt(receipt, logLabel),
-    formatTimeoutMessage: () =>
-      `Transaction ${txHash} was broadcast but no receipt was found within ${receiptTimeoutMs}ms`,
-  });
 }

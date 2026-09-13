@@ -36,6 +36,7 @@ import {
 import {
   createRpcRequestProvider,
   withRpcRequestContext,
+  withRpcRequestTimeout,
 } from '../src/rpc-request-transport.js';
 import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
@@ -150,6 +151,61 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       expect(rpc.aborted('eth_blockNumber')).toBe(1);
     } finally {
       if (!controller.signal.aborted) controller.abort(timeoutError);
+      await pending.catch(() => {});
+      provider.destroy();
+    }
+  });
+
+  it('owns the active socket deadline and aborts a hanging provider request', async () => {
+    const rpc = await startLoopbackRpc({ hang: ['eth_blockNumber'] });
+    servers.push(rpc);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 5,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const pending = withRpcRequestTimeout(
+      50,
+      'unit hanging request',
+      () => provider._send({
+        id: 1,
+        jsonrpc: '2.0',
+        method: 'eth_blockNumber',
+        params: [],
+      }),
+    );
+    try {
+      await expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
+      await expect.poll(() => rpc.aborted('eth_blockNumber')).toBe(1);
+      expect(rpc.hits('eth_blockNumber')).toBe(1);
+    } finally {
+      await pending.catch(() => {});
+      provider.destroy();
+    }
+  });
+
+  it('cancels retry backoff at the helper-owned deadline without a delayed retry', async () => {
+    const rpc = await startLoopbackRpc({ throttle: ['eth_blockNumber'] });
+    servers.push(rpc);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 5,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const pending = withRpcRequestTimeout(
+      100,
+      'unit retry backoff',
+      () => provider._send({
+        id: 1,
+        jsonrpc: '2.0',
+        method: 'eth_blockNumber',
+        params: [],
+      }),
+    );
+    try {
+      await expect(pending).rejects.toMatchObject({ code: 'RPC_TIMEOUT' });
+      expect(rpc.hits('eth_blockNumber')).toBe(1);
+      await new Promise<void>((resolve) => setTimeout(resolve, 550));
+      expect(rpc.hits('eth_blockNumber')).toBe(1);
+    } finally {
       await pending.catch(() => {});
       provider.destroy();
     }
@@ -298,6 +354,47 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     await expect(second).resolves.toBe(31337n);
     await expect(adapter.ensureConfiguredStaticChainIdValidated(provider)).resolves.toBe(31337n);
     expect(provider.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('STATIC NETWORK: shared chain-id validation is foreground-classed even when background starts it', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 80,
+      burstRequests: 10,
+      maxQueueSize: 8,
+      startupJitterMs: 60_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+      admission: governor,
+    });
+    const adapter: any = new EVMChainAdapter(minimalConfig());
+    adapters.push(adapter);
+
+    try {
+      await expect(withRpcRequestContext(
+        { requestClass: 'background' },
+        () => adapter.ensureConfiguredStaticChainIdValidated(provider),
+      )).resolves.toBe(31337n);
+      expect(governor.snapshot()).toMatchObject({
+        backgroundAdmitted: 0,
+        backgroundQueued: 0,
+      });
+      expect(governor.snapshot().foregroundAdmitted).toBe(rpc.totalHits());
+      expect(governor.snapshot().foregroundAdmitted).toBeGreaterThan(0);
+    } finally {
+      provider.destroy();
+    }
   });
 
   it('STATIC NETWORK: ordinary reads validate configured chain id once, then avoid steady eth_chainId calls', async () => {
@@ -491,6 +588,42 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(admission.foregroundAdmitted + admission.backgroundAdmitted)
       .toBe(rpc.totalHits());
   }, 30_000);
+
+  it('admits and records every JSON-RPC entry in a retried batch', async () => {
+    const rpc = await startLoopbackRpc({
+      throttle: ['eth_blockNumber', 'eth_chainId'],
+    });
+    servers.push(rpc);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 10_000,
+      foregroundReservePercent: 0,
+      burstRequests: 100,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const observed: string[] = [];
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 1,
+      admission: governor,
+      onRequest: (method) => observed.push(method),
+    });
+    try {
+      await expect(provider._send([
+        { id: 1, jsonrpc: '2.0', method: 'eth_blockNumber', params: [] },
+        { id: 2, jsonrpc: '2.0', method: 'eth_chainId', params: [] },
+      ])).rejects.toBeTruthy();
+      expect(rpc.totalHits()).toBe(4);
+      expect(observed.sort()).toEqual([
+        'eth_blockNumber',
+        'eth_blockNumber',
+        'eth_chainId',
+        'eth_chainId',
+      ]);
+      expect(governor.snapshot().foregroundAdmitted).toBe(rpc.totalHits());
+    } finally {
+      provider.destroy();
+    }
+  });
 
   it('bounds unknown methods to "other" for the metric label', () => {
     expect(boundedRpcMethodLabel('eth_getLogs')).toBe('eth_getLogs');

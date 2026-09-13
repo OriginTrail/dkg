@@ -66,7 +66,6 @@ import {
   buildEvmDeploymentId,
   MockChainAdapter,
   mergeRpcUsageWindows,
-  RpcRequestGovernor,
 } from '@origintrail-official/dkg-chain';
 import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -149,10 +148,7 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
-import {
-  bindRuntimeRpcRequestGovernor,
-  projectRuntimeEvmChainConfig,
-} from '../runtime-chain-config.js';
+import { createDaemonRpcRuntime } from '../runtime-chain-config.js';
 import {
   resolveOtlpLogEndpoint,
   type ActiveLogExporterMode,
@@ -1584,16 +1580,11 @@ async function runDaemonInnerWithStartupOwnership(
   // Field-level merge of CLI config + network/<env>.json#chain.
   // Operators can override individual fields (e.g. just rpcUrl) without
   // restating the rest; missing fields fall back to the network defaults.
-  const projectedRuntimeEvmChainConfig = projectRuntimeEvmChainConfig(chainBase);
-  // Process-owned runtime service: every daemon RPC consumer receives this
-  // exact instance. Keep it out of the value-only config projection so call
-  // ordering can never silently create independent budgets.
-  const rpcRequestGovernor = projectedRuntimeEvmChainConfig === undefined
-    ? undefined
-    : new RpcRequestGovernor(chainBase?.rpcRequestBudget);
-  const runtimeEvmChainConfig = projectedRuntimeEvmChainConfig === undefined
-    ? undefined
-    : bindRuntimeRpcRequestGovernor(projectedRuntimeEvmChainConfig, rpcRequestGovernor!);
+  // The composition root creates exactly one budget plus direct-route usage
+  // tracker, and derives every adapter/route capability from that object.
+  const daemonRpcRuntime = createDaemonRpcRuntime(chainBase);
+  const rpcRequestGovernor = daemonRpcRuntime?.governor;
+  const runtimeEvmChainConfig = daemonRpcRuntime?.chainConfig;
 
   // PR3 / RC11 — operator-visible WARN when the node is going to talk
   // to the chain through a known-public, rate-limited JSON-RPC
@@ -2991,6 +2982,7 @@ async function runDaemonInnerWithStartupOwnership(
       drainRpcUsage: () => mergeRpcUsageWindows(
         agent.drainRpcUsage(),
         publisherState.runtime?.drainRpcUsage(),
+        daemonRpcRuntime?.drainRouteRpcUsage(),
       ),
       ...(rpcRequestGovernor === undefined
         ? {}
@@ -3410,7 +3402,6 @@ async function runDaemonInnerWithStartupOwnership(
     config.rateLimit?.requestsPerMinute ?? 120,
     config.rateLimit?.exempt ?? [
       "/api/status",
-      "/api/chain/rpc-health",
       "/.well-known/skill.md",
     ],
   );
@@ -3664,7 +3655,7 @@ async function runDaemonInnerWithStartupOwnership(
         routePlugins,
         admission: admissionStats,
         localLlm,
-        rpcRequestGovernor,
+        routeRpcTransport: daemonRpcRuntime?.routeTransport,
         emitMemoryGraphChanged,
         emitNotification,
       });
@@ -3771,10 +3762,6 @@ async function runDaemonInnerWithStartupOwnership(
         clearInterval(pruneTimer);
         logVolumePruner.stop();
         backpressureMonitor.stop();
-        // Clears the timer AND performs the final best-effort drain (BEFORE
-        // telemetry stops), so a partial window still reaches Loki — keeps
-        // log-derived request totals exact across process lifecycles.
-        rpcUsageTelemetry.stop();
         rateLimiter.destroy();
         metricsCollector?.stop();
         natStatusWatcherStop?.();
@@ -3819,6 +3806,9 @@ async function runDaemonInnerWithStartupOwnership(
                 );
             },
             stopAgent: () => agent.stop(),
+            // Clears the timer and drains only after HTTP, catch-up, publisher,
+            // and agent RPC producers have stopped, while logging is still live.
+            stopRpcUsageTelemetry: () => rpcUsageTelemetry.stop(),
             // Detaches the sink, stops its exporter, and shuts down the OTel SDK.
             stopTelemetry: stopDaemonLogging,
             log,

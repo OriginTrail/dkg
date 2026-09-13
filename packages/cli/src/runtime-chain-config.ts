@@ -1,6 +1,12 @@
 import type {
   EVMAdapterConfig,
+  RpcRequestAdmission,
   RpcRequestGovernor,
+  RpcUsageWindow,
+} from '@origintrail-official/dkg-chain';
+import {
+  createRpcUsageRecorder,
+  RpcRequestGovernor as ProcessRpcRequestGovernor,
 } from '@origintrail-official/dkg-chain';
 import {
   resolveApprovalPolicy,
@@ -23,6 +29,43 @@ export type RuntimeEvmChainConfigProjection = Omit<
   RuntimeEvmChainConfig,
   'rpcRequestGovernor'
 >;
+
+/** One explicit transport policy shared by every daemon-owned route provider. */
+export interface DaemonRouteRpcTransport {
+  readonly admission: RpcRequestAdmission;
+  readonly diagnosticAdmission: RpcRequestAdmission;
+  readonly onRequest: (method: string, endpointSlot?: number) => void;
+}
+
+/** Process-owned RPC state assembled once at the daemon composition root. */
+export interface DaemonRpcRuntime {
+  readonly governor: RpcRequestGovernor;
+  readonly chainConfig: RuntimeEvmChainConfig;
+  readonly routeTransport: DaemonRouteRpcTransport;
+  readonly drainRouteRpcUsage: () => RpcUsageWindow;
+}
+
+export function createDaemonRpcRuntime(
+  chain: ResolvedChainConfig | undefined,
+): DaemonRpcRuntime | undefined {
+  const projected = projectRuntimeEvmChainConfig(chain);
+  if (projected === undefined) return undefined;
+  const governor = new ProcessRpcRequestGovernor(chain?.rpcRequestBudget);
+  const usage = createRpcUsageRecorder(() => chain?.chainId ?? 'unknown');
+  return Object.freeze({
+    governor,
+    chainConfig: bindRuntimeRpcRequestGovernor(projected, governor),
+    routeTransport: Object.freeze({
+      admission: governor,
+      diagnosticAdmission: Object.freeze({
+        acquireActiveRequest: (signal?: AbortSignal) =>
+          governor.acquireDiagnosticRequestImmediately(signal),
+      }),
+      onRequest: (method: string, endpointSlot?: number) => usage.record(method, endpointSlot),
+    }),
+    drainRouteRpcUsage: () => usage.drainRpcUsage(),
+  });
+}
 
 /** Bind an explicitly process-owned governor to a pure resolved projection. */
 export function bindRuntimeRpcRequestGovernor(

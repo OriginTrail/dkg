@@ -3293,6 +3293,7 @@ export class EVMChainAdapterBase {
             });
             return { logs, provider };
           } catch (err) {
+            if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
             pageError = err; // hung or errored — fail over to the next eligible backend
           }
         }
@@ -3382,6 +3383,7 @@ export class EVMChainAdapterBase {
         );
         reachable.push({ provider, backendHead });
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         if (!isHistoricalStateUnavailable(err)) probeError = err;
       }
     }
@@ -3427,6 +3429,7 @@ export class EVMChainAdapterBase {
         );
         reachable.push({ provider, backendHead });
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         if (!isHistoricalStateUnavailable(err)) probeError = err;
       }
     }
@@ -3484,6 +3487,7 @@ export class EVMChainAdapterBase {
         // block isn't throttled, so this is always non-empty.
         return { fromBlock: lo, head, scanProviders: reachable.filter((r) => !throttledProviders.has(r.provider)) };
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         // Always fail over to the next backend FIRST (a healthy archive can still
         // pin the deploy block even if this one is denied/pruned/flaky). Track a
         // transient throttle per-backend: re-querying that endpoint in the scan
@@ -3551,6 +3555,7 @@ export class EVMChainAdapterBase {
         );
         return code && code !== '0x' ? code : '0x';
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         lastErr = err;
       }
     }
@@ -3622,7 +3627,11 @@ export class EVMChainAdapterBase {
       // single cancelled waiter cannot poison peers, while the last departed
       // waiter cancels admission/HTTP instead of leaving orphan RPC load.
       shared.promise = Promise.resolve().then(() => withRpcRequestContext(
-        { signal: controller.signal, inheritSignal: false },
+        {
+          requestClass: 'foreground',
+          signal: controller.signal,
+          inheritSignal: false,
+        },
         () => withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           'configured chainId validation',

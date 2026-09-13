@@ -1681,43 +1681,38 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     agentAddress: EvmAddressV1;
     authorityEra: DecimalU64V1;
   }> | null> {
-    return withRpcRequestContext({ requestClass: 'background' }, async () => {
-      const onChainId = await this.getContextGraphOnChainId(contextGraphId);
-      if (onChainId !== null) {
-        const reader = requireRfc64ContextGraphAuthorityReaderV1(
-          this.contextGraphAuthorityReaderCapability,
-        );
-        const expectedOnChainId = BigInt(onChainId);
-        const snapshot = parseRfc64AuthoritySnapshotV1(
-          await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
-          expectedOnChainId,
-        );
-        const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
-        const expectedNameHash = explicitNameHash === undefined
-          ? this.contextGraphNameCommitment(contextGraphId)
-          : this.contextGraphWireId(explicitNameHash);
-        if (
-          !snapshot.active
-          || snapshot.nameHash !== expectedNameHash
-        ) return null;
-        return Object.freeze({
-          agentAddress: snapshot.owner,
-          authorityEra: snapshot.ownershipEra,
-        });
-      }
-      const ownerDid = await this.getContextGraphOwner(contextGraphId);
-      const owner = ownerDid
-        ?.trim()
-        .replace(/^<|>$/gu, '')
-        .replace(/^did:dkg:agent:/u, '')
-        .toLowerCase();
-      return owner !== undefined && ethers.isAddress(owner) && owner !== ethers.ZeroAddress
-        ? Object.freeze({
-          agentAddress: owner as EvmAddressV1,
-          authorityEra: '0' as DecimalU64V1,
-        })
-        : null;
-    });
+    const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+    if (onChainId !== null) {
+      const reader = requireRfc64ContextGraphAuthorityReaderV1(
+        this.contextGraphAuthorityReaderCapability,
+      );
+      const expectedOnChainId = BigInt(onChainId);
+      const snapshot = parseRfc64AuthoritySnapshotV1(
+        await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
+        expectedOnChainId,
+      );
+      const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
+      const expectedNameHash = explicitNameHash === undefined
+        ? this.contextGraphNameCommitment(contextGraphId)
+        : this.contextGraphWireId(explicitNameHash);
+      if (!snapshot.active || snapshot.nameHash !== expectedNameHash) return null;
+      return Object.freeze({
+        agentAddress: snapshot.owner,
+        authorityEra: snapshot.ownershipEra,
+      });
+    }
+    const ownerDid = await this.getContextGraphOwner(contextGraphId);
+    const owner = ownerDid
+      ?.trim()
+      .replace(/^<|>$/gu, '')
+      .replace(/^did:dkg:agent:/u, '')
+      .toLowerCase();
+    return owner !== undefined && ethers.isAddress(owner) && owner !== ethers.ZeroAddress
+      ? Object.freeze({
+        agentAddress: owner as EvmAddressV1,
+        authorityEra: '0' as DecimalU64V1,
+      })
+      : null;
   }
 
   /**
@@ -1898,7 +1893,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       return Promise.resolve(inactive);
     }
 
-    const run = withRpcRequestContext({ requestClass: 'background' }, async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
+    const run = (async (): Promise<Rfc64CatalogResponsibilitySelectionV1> => {
       let accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
       if (accessPolicy === null && subscription.onChainId !== undefined) {
         const onChainPolicy = await this.getContextGraphOnChainPolicy(contextGraphId);
@@ -1936,7 +1931,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         });
       }
       return next;
-    }).catch((error) => {
+    })().catch((error) => {
       if (isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
         commit(null);
       }
@@ -1973,7 +1968,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphId: string,
     signal?: AbortSignal,
   ): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | null> {
-    return withRpcRequestContext({ requestClass: 'background' }, async () => {
+    return (async () => {
       const service = this.rfc64PublicCatalogServiceV1;
       if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
         return null;
@@ -2005,7 +2000,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         const registeredAuthorityRead = await this.rfc64AuthorityReadCoordinatorV1.run(
           signal,
           async (readSignal) => {
-            const onChainId = await this.getContextGraphOnChainId(contextGraphId);
+            const onChainId = await this.getContextGraphOnChainId(
+              contextGraphId,
+              { signal: readSignal },
+            );
             if (readSignal?.aborted) throw readSignal.reason;
             if (onChainId === null) return null;
             const reader = requireRfc64ContextGraphAuthorityReaderV1(
@@ -2170,7 +2168,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         }
         throw error;
       }
-    });
+    })();
   }
 
   /**

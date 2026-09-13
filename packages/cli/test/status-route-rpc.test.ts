@@ -24,7 +24,6 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
   ChainRpcTransportError,
-  RpcRequestGovernor,
   noteRpcFailover,
   noteRpcExhaustion,
   notePreferredEndpoint,
@@ -32,6 +31,7 @@ import {
   getRpcFailoverStats,
   _resetRpcFailoverStatsForTest,
 } from '@origintrail-official/dkg-chain';
+import { createDaemonRpcRuntime } from '../src/runtime-chain-config.js';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { DashboardDB } from '@origintrail-official/dkg-node-ui';
@@ -76,7 +76,7 @@ function resolveStatusActivationState(config: Record<string, unknown>) {
 }
 
 describe('daemon direct RPC probe admission', () => {
-  it('uses the shared governor and cancels before transport when capacity is unavailable', async () => {
+  it('bounds a diagnostic flood without queueing or displacing foreground work', async () => {
     let hits = 0;
     const rpc = createServer((_req, res) => {
       hits += 1;
@@ -84,24 +84,38 @@ describe('daemon direct RPC probe admission', () => {
     });
     await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
     const address = rpc.address() as AddressInfo;
-    const governor = new RpcRequestGovernor({
-      maxRequestsPerSecond: 0.1,
-      foregroundReservePercent: 0,
-      burstRequests: 1,
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl: `http://127.0.0.1:${address.port}`,
+      hubAddress: '0x1111111111111111111111111111111111111111',
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 80,
+      burstRequests: 5,
       maxQueueSize: 8,
       startupJitterMs: 0,
-    });
-    await governor.acquire('foreground');
+      },
+    })!;
     try {
-      const result = await probeRpcEndpoint(
-        `http://127.0.0.1:${address.port}`,
-        0,
-        governor,
-      );
-      expect(result).toMatchObject({ ok: false, error: 'RPC health probe timed out' });
-      expect(hits).toBe(0);
-      expect(governor.snapshot().foregroundQueued).toBe(0);
-      expect(governor.snapshot().cancelled).toBeGreaterThan(0);
+      const results = await Promise.all(Array.from({ length: 20 }, (_, index) =>
+        probeRpcEndpoint(
+          `http://127.0.0.1:${address.port}`,
+          index,
+          runtime.routeTransport,
+        )));
+      expect(results.filter((result) => result.ok)).toHaveLength(1);
+      expect(results.filter((result) => !result.ok)).toHaveLength(19);
+      expect(results.filter((result) => result.status === 'skipped-local-capacity'))
+        .toHaveLength(19);
+      expect(hits).toBeGreaterThan(0);
+      await expect(runtime.governor.acquire('foreground')).resolves.toBeUndefined();
+      expect(runtime.governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundQueued: 0,
+        foregroundQueued: 0,
+        rejected: 19,
+      });
+      expect(runtime.drainRouteRpcUsage().byMethod.eth_blockNumber).toBe(hits);
     } finally {
       await new Promise<void>((resolve, reject) => {
         rpc.close((error) => error ? reject(error) : resolve());
@@ -968,6 +982,17 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
           rpcUrls: [rpcUrl, DEAD_RPC],
           hubAddress,
           chainId: 'evm:31337',
+          // This case validates the real provider result shape, not local
+          // saturation (covered by the bounded flood case above). Give the
+          // daemon enough hermetic diagnostic capacity that unrelated startup
+          // work cannot consume the permits before this assertion runs.
+          rpcRequestBudget: {
+            maxRequestsPerSecond: 100,
+            foregroundReservePercent: 0,
+            burstRequests: 100,
+            maxQueueSize: 100,
+            startupJitterMs: 0,
+          },
         },
       },
     });
@@ -1018,13 +1043,15 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
 
     // Primary = the real Hardhat node: ok with a REAL block number.
     const primary = body.rpcs.find((p: any) => p.role === 'primary');
-    expect(primary.ok).toBe(true);
+    expect(primary.ok, JSON.stringify(body)).toBe(true);
+    expect(primary.status).toBe('healthy');
     expect(typeof primary.blockNumber).toBe('number');
     expect(primary.blockNumber).toBeGreaterThanOrEqual(0);
 
     // Backup = the dead endpoint: a REAL connection failure, sanitized.
     const backup = body.rpcs.find((p: any) => p.role === 'backup');
     expect(backup.ok).toBe(false);
+    expect(backup.status).toBe('unhealthy');
     expect(backup.blockNumber).toBeNull();
     expect(backup.error).toBe('RPC health probe failed');
 

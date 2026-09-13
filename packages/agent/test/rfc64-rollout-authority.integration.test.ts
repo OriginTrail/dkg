@@ -29,6 +29,7 @@ import {
   createRpcRequestProvider,
   RpcRequestGovernor,
   RpcEndpointsExhaustedError,
+  withRpcRequestContext,
   type ChainAdapter,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -211,7 +212,7 @@ afterEach(async () => {
 });
 
 describe('RFC-64 rollout authority integration', () => {
-  it('keeps authority-task transport attempts and retries in the background lane', async () => {
+  it('preserves the caller lane for authority reads and lets foreground bypass cold-start jitter', async () => {
     let hits = 0;
     const rpc = createServer((req, res) => {
       req.resume();
@@ -237,7 +238,14 @@ describe('RFC-64 rollout authority integration', () => {
       foregroundReservePercent: 50,
       burstRequests: 100,
       maxQueueSize: 8,
-      startupJitterMs: 0,
+      startupJitterMs: 60_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
     });
     const provider = createRpcRequestProvider(
       `http://127.0.0.1:${address.port}`,
@@ -263,8 +271,9 @@ describe('RFC-64 rollout authority integration', () => {
         .resolves.toMatchObject({ agentAddress: AUTHOR });
       expect(hits).toBe(2);
       expect(governor.snapshot()).toMatchObject({
-        backgroundAdmitted: 2,
-        foregroundAdmitted: 0,
+        backgroundAdmitted: 0,
+        foregroundAdmitted: 2,
+        backgroundQueued: 0,
       });
     } finally {
       provider.destroy();
@@ -272,6 +281,77 @@ describe('RFC-64 rollout authority integration', () => {
         rpc.close((error) => error ? reject(error) : resolve());
       });
     }
+  });
+
+  it('keeps explicitly scheduled authority reads in the background lane', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 100,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const provider = createRpcRequestProvider('http://127.0.0.1:1', {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+      admission: governor,
+    });
+    const edge = await startAgent({ name: 'scheduled-authority-background-lane' });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockImplementation(async () => {
+      await provider._send({
+        id: 1,
+        jsonrpc: '2.0',
+        method: 'eth_blockNumber',
+        params: [],
+      }).catch(() => undefined);
+      return null;
+    });
+    vi.spyOn(edge, 'getContextGraphOwner').mockResolvedValue(`did:dkg:agent:${AUTHOR}`);
+    try {
+      await withRpcRequestContext(
+        { requestClass: 'background' },
+        () => edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID),
+      );
+      expect(governor.snapshot()).toMatchObject({
+        backgroundAdmitted: 1,
+        foregroundAdmitted: 0,
+      });
+    } finally {
+      provider.destroy();
+    }
+  });
+
+  it('keeps awaited responsibility reconciliation in the foreground lane at cold start', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 100,
+      maxQueueSize: 8,
+      startupJitterMs: 60_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    const edge = await startAgent({
+      name: 'foreground-responsibility-reconcile',
+      activation: activation('catalog'),
+    });
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockImplementation(async () => {
+      await governor.acquireActiveRequest();
+      return 'public';
+    });
+
+    await expect(edge.reconcileRfc64CatalogResponsibilityV1(CONTEXT_GRAPH_ID))
+      .resolves.toMatchObject({ contextGraphId: CONTEXT_GRAPH_ID });
+    expect(governor.snapshot()).toMatchObject({
+      foregroundAdmitted: 1,
+      backgroundAdmitted: 0,
+      backgroundQueued: 0,
+    });
   });
 
   it('coalesces duplicate inbound catalog replay requests behind a bounded queue', async () => {
@@ -1358,6 +1438,50 @@ describe('RFC-64 rollout authority integration', () => {
     const reason = new Error('caller stopped');
     controller.abort(reason);
     expect(readSignal).toMatchObject({ aborted: true, reason });
+  });
+
+  it('propagates caller cancellation into the initial registered authority binding lookup', async () => {
+    const readAuthority = vi.fn();
+    const edge = await startAgent({
+      name: 'registered-authority-binding-signal-propagation',
+      config: {
+        chainAdapter: Object.assign(new NoChainAdapter(), {
+          getContextGraphAuthoritySnapshot: readAuthority,
+        }),
+      },
+    });
+    let lookupSignal: AbortSignal | undefined;
+    let markLookupStarted!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => {
+      markLookupStarted = resolve;
+    });
+    vi.spyOn(edge, 'getContextGraphOnChainId').mockImplementation(async (
+      _contextGraphId,
+      options,
+    ) => {
+      lookupSignal = options?.signal;
+      markLookupStarted();
+      await new Promise<never>((_resolve, reject) => {
+        if (lookupSignal?.aborted) {
+          reject(lookupSignal.reason);
+          return;
+        }
+        lookupSignal?.addEventListener('abort', () => reject(lookupSignal!.reason), { once: true });
+      });
+      return null;
+    });
+    const controller = new AbortController();
+    const operation = edge.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      controller.signal,
+    );
+    await lookupStarted;
+    const reason = new Error('caller stopped during authority binding lookup');
+    controller.abort(reason);
+
+    await expect(operation).rejects.toBe(reason);
+    expect(lookupSignal).toMatchObject({ aborted: true, reason });
+    expect(readAuthority).not.toHaveBeenCalled();
   });
 
   it('opens the shared circuit when cold numeric binding discovery exhausts providers', async () => {

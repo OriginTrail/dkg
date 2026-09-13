@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { RpcRequestGovernor } from '@origintrail-official/dkg-chain';
 import {
   bindRuntimeRpcRequestGovernor,
+  createDaemonRpcRuntime,
   projectRuntimeEvmChainConfig,
 } from '../src/runtime-chain-config.js';
 
@@ -80,5 +81,30 @@ describe('publisher runtime chain config projection', () => {
       startupDelayRemainingMs: 0,
     });
     expect(governor.snapshot().backgroundMaxRequestsPerSecond).toBeCloseTo(2.8);
+  });
+
+  it('assembles adapter, route admission, and telemetry from one process runtime', async () => {
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl: 'http://127.0.0.1:8545',
+      hubAddress: '0x1111111111111111111111111111111111111111',
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 7,
+        foregroundReservePercent: 60,
+        burstRequests: 11,
+        maxQueueSize: 13,
+        startupJitterMs: 0,
+      },
+    })!;
+
+    expect(runtime.chainConfig.rpcRequestGovernor).toBe(runtime.governor);
+    expect(runtime.routeTransport.admission).toBe(runtime.governor);
+    runtime.routeTransport.onRequest('eth_blockNumber', 0);
+    expect(runtime.drainRouteRpcUsage()).toMatchObject({
+      byMethod: { eth_blockNumber: 1 },
+      lifetimeTotal: 1,
+    });
+    await runtime.routeTransport.admission.acquireActiveRequest();
+    expect(runtime.governor.snapshot().foregroundAdmitted).toBe(1);
   });
 });

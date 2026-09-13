@@ -155,6 +155,7 @@ const systemGovernorClock: RpcRequestGovernorClock = {
 
 interface RpcRequestWaiter {
   readonly requestClass: RpcRequestClass;
+  readonly enqueuedAtMs: number;
   readonly resolve: () => void;
   readonly reject: (error: unknown) => void;
   readonly signal?: AbortSignal;
@@ -189,6 +190,14 @@ function zeroGovernorCounters(): MutableGovernorCounters {
  * capacity. The same instance is injected into every adapter in one daemon.
  */
 export class RpcRequestGovernor {
+  /**
+   * Once a background waiter has capacity, sustained foreground traffic may
+   * postpone it for at most this scheduling grace period. The separate
+   * background token bucket still enforces the operator's foreground reserve;
+   * this only prevents a permanently non-empty foreground queue from turning
+   * that reserved background share into zero progress.
+   */
+  static readonly BACKGROUND_FAIRNESS_GRACE_MS = 1_000;
   readonly #policy: RpcRequestGovernorPolicy;
   readonly #clock: RpcRequestGovernorClock;
   readonly #backgroundRate: number;
@@ -208,11 +217,11 @@ export class RpcRequestGovernor {
   ) {
     this.#policy = resolveRpcRequestGovernorPolicy(input);
     this.#clock = testing?.clock ?? systemGovernorClock;
-    this.#backgroundRate = this.#policy.maxRequestsPerSecond
-      * (1 - (this.#policy.foregroundReservePercent / 100));
+    const backgroundFraction = (100 - this.#policy.foregroundReservePercent) / 100;
+    this.#backgroundRate = this.#policy.maxRequestsPerSecond * backgroundFraction;
     this.#backgroundBurst = Math.max(
       1,
-      this.#policy.burstRequests * (1 - (this.#policy.foregroundReservePercent / 100)),
+      Math.floor((this.#policy.burstRequests * backgroundFraction) + 1e-9),
     );
     this.#availableTokens = this.#policy.burstRequests;
     this.#backgroundAvailableTokens = this.#backgroundBurst;
@@ -223,6 +232,51 @@ export class RpcRequestGovernor {
 
   async acquireActiveRequest(signal = activeRpcRequestContext().signal): Promise<void> {
     return this.acquire(activeRpcRequestContext().requestClass, signal);
+  }
+
+  /**
+   * Admit from currently available capacity or fail locally without queueing.
+   * Intended for optional diagnostic traffic whose callers must never occupy
+   * the queue or displace foreground work.
+   */
+  async acquireActiveRequestImmediately(
+    signal = activeRpcRequestContext().signal,
+  ): Promise<void> {
+    return this.acquireImmediately(activeRpcRequestContext().requestClass, signal);
+  }
+
+  /**
+   * Optional health/diagnostic admission: never queues, always uses the
+   * background bucket, and may probe during startup without waiting for the
+   * workload-jitter window. It still yields to queued foreground work and
+   * cannot consume capacity reserved for foreground operations.
+   */
+  async acquireDiagnosticRequestImmediately(
+    signal = activeRpcRequestContext().signal,
+  ): Promise<void> {
+    return this.#acquireImmediately('background', signal, true);
+  }
+
+  async acquireImmediately(
+    requestClass: RpcRequestClass,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return this.#acquireImmediately(requestClass, signal, false);
+  }
+
+  async #acquireImmediately(
+    requestClass: RpcRequestClass,
+    signal: AbortSignal | undefined,
+    ignoreBackgroundStartupJitter: boolean,
+  ): Promise<void> {
+    if (signal?.aborted) throwRpcRequestAbortReason(signal);
+    this.#refill();
+    if (this.#canAdmitImmediately(requestClass, ignoreBackgroundStartupJitter)) {
+      this.#admit(requestClass);
+      return;
+    }
+    this.#window.rejected += 1;
+    throw new RpcRequestGovernorQueueFullError(this.#policy.maxQueueSize);
   }
 
   async acquire(
@@ -248,6 +302,7 @@ export class RpcRequestGovernor {
     await new Promise<void>((resolve, reject) => {
       const waiter: RpcRequestWaiter = {
         requestClass,
+        enqueuedAtMs: this.#clock.now(),
         resolve,
         reject,
         signal,
@@ -310,12 +365,15 @@ export class RpcRequestGovernor {
     );
   }
 
-  #canAdmitImmediately(requestClass: RpcRequestClass): boolean {
+  #canAdmitImmediately(
+    requestClass: RpcRequestClass,
+    allowDiagnosticBypass = false,
+  ): boolean {
     if (this.#availableTokens < 1) return false;
     if (requestClass === 'foreground') return this.#foregroundQueue.length === 0;
     return this.#foregroundQueue.length === 0
-      && this.#backgroundQueue.length === 0
-      && this.#clock.now() >= this.#backgroundNotBeforeMs
+      && (allowDiagnosticBypass || this.#backgroundQueue.length === 0)
+      && (allowDiagnosticBypass || this.#clock.now() >= this.#backgroundNotBeforeMs)
       && this.#backgroundAvailableTokens >= 1;
   }
 
@@ -344,6 +402,19 @@ export class RpcRequestGovernor {
   #processQueues = (): void => {
     this.#timer = null;
     this.#refill();
+    const backgroundHead = this.#backgroundQueue[0];
+    const agedBackgroundHasCapacity = backgroundHead !== undefined
+      && this.#availableTokens >= 1
+      && this.#backgroundAvailableTokens >= 1
+      && this.#clock.now() >= this.#backgroundNotBeforeMs
+      && this.#clock.now() - backgroundHead.enqueuedAtMs
+        >= RpcRequestGovernor.BACKGROUND_FAIRNESS_GRACE_MS;
+    // At most one aged background request jumps the foreground queue per
+    // scheduling turn. Its own bucket keeps this within the background share;
+    // the single admission keeps foreground latency bounded.
+    if (this.#foregroundQueue.length > 0 && agedBackgroundHasCapacity) {
+      this.#resolveHead(this.#backgroundQueue);
+    }
     while (this.#foregroundQueue.length > 0 && this.#availableTokens >= 1) {
       this.#resolveHead(this.#foregroundQueue);
     }

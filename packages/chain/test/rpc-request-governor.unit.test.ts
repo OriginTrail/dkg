@@ -13,6 +13,20 @@ afterEach(() => {
 });
 
 describe('RpcRequestGovernor', () => {
+  it('resolves the default 20-request burst to exactly four background admissions', async () => {
+    const governor = new RpcRequestGovernor({ startupJitterMs: 0 });
+    for (let index = 0; index < 4; index += 1) {
+      await expect(governor.acquireImmediately('background')).resolves.toBeUndefined();
+    }
+    await expect(governor.acquireImmediately('background')).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+    expect(governor.snapshot()).toMatchObject({
+      backgroundAdmitted: 4,
+    });
+    expect(governor.snapshot().backgroundAvailableTokens).toBeLessThan(1);
+  });
+
   it('paces background requests with the reserved-capacity bucket', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
@@ -67,6 +81,110 @@ describe('RpcRequestGovernor', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await background;
     expect(order).toEqual(['foreground', 'background']);
+  });
+
+  it('eventually admits aged background work during sustained foreground demand', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 2,
+      foregroundReservePercent: 50,
+      burstRequests: 2,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+
+    await governor.acquire('background');
+    await governor.acquire('foreground');
+    const order: string[] = [];
+    const background = governor.acquire('background').then(() => { order.push('background'); });
+    const foregroundA = governor.acquire('foreground').then(() => { order.push('foreground-a'); });
+    const foregroundB = governor.acquire('foreground').then(() => { order.push('foreground-b'); });
+
+    await vi.advanceTimersByTimeAsync(500);
+    await foregroundA;
+    expect(order).toEqual(['foreground-a']);
+    expect(governor.snapshot()).toMatchObject({
+      foregroundQueued: 1,
+      backgroundQueued: 1,
+    });
+
+    await vi.advanceTimersByTimeAsync(500);
+    await background;
+    expect(order).toEqual(['foreground-a', 'background']);
+    expect(governor.snapshot()).toMatchObject({
+      foregroundQueued: 1,
+      backgroundQueued: 0,
+    });
+
+    await vi.advanceTimersByTimeAsync(500);
+    await foregroundB;
+    expect(order).toEqual(['foreground-a', 'background', 'foreground-b']);
+  });
+
+  it('rejects optional immediate background work without consuming the foreground reserve', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 80,
+      burstRequests: 5,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+
+    await governor.acquireImmediately('background');
+    await expect(governor.acquireImmediately('background')).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+    await expect(governor.acquireImmediately('foreground')).resolves.toBeUndefined();
+    expect(governor.snapshot()).toMatchObject({
+      foregroundAdmitted: 1,
+      backgroundAdmitted: 1,
+      foregroundQueued: 0,
+      backgroundQueued: 0,
+      rejected: 1,
+    });
+  });
+
+  it('admits non-queuing diagnostics during startup jitter from background capacity only', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 80,
+      burstRequests: 5,
+      maxQueueSize: 8,
+      startupJitterMs: 30_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+
+    const controller = new AbortController();
+    const queued = governor.acquire('background', controller.signal);
+    await expect(governor.acquireImmediately('background')).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+    // Diagnostics may jump delayed background work, but remain within the same
+    // background token bucket and never consume foreground-reserved capacity.
+    await expect(governor.acquireDiagnosticRequestImmediately()).resolves.toBeUndefined();
+    await expect(governor.acquireDiagnosticRequestImmediately()).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+    await expect(governor.acquireImmediately('foreground')).resolves.toBeUndefined();
+    controller.abort(new Error('test cleanup'));
+    await expect(queued).rejects.toThrow('test cleanup');
+    expect(governor.snapshot()).toMatchObject({
+      backgroundAdmitted: 1,
+      foregroundAdmitted: 1,
+      backgroundQueued: 0,
+      startupDelayRemainingMs: 30_000,
+      cancelled: 1,
+      rejected: 2,
+    });
   });
 
   it('bounds the queue and removes a cancelled waiter', async () => {

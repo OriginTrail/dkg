@@ -1848,10 +1848,12 @@ export function applyServerLimits(
 
 /**
  * Cheap GET/HEAD paths exempt from concurrency admission control — liveness /
- * health / manifest handlers that must stay answerable under load (monitoring,
+ * manifest handlers that must stay answerable under load (monitoring,
  * `dkg status`, doctor, MCP setup probes), plus the long-lived `/api/events`
  * SSE stream (which must NOT hold an in-flight slot for the connection's whole
- * lifetime, or a few open dashboard tabs would exhaust the pool).
+ * lifetime, or a few open dashboard tabs would exhaust the pool). RPC health
+ * GET is intentionally absent because it performs outbound work; only its
+ * cheap HEAD form is exempt.
  *
  * NOTE: this is one of several HTTP path-category tables in the daemon (see
  * `auth.ts` public paths, `isLoopbackRateLimitExemptPath`, and the default
@@ -1860,7 +1862,6 @@ export function applyServerLimits(
  */
 const ADMISSION_EXEMPT_GET_PATHS: ReadonlySet<string> = new Set([
   '/api/status',
-  '/api/chain/rpc-health',
   '/api/events',
   '/.well-known/skill.md',
   '/.well-known/skill-importer.md',
@@ -1876,6 +1877,7 @@ const ADMISSION_EXEMPT_GET_PATHS: ReadonlySet<string> = new Set([
  */
 export function isAdmissionExempt(method: string | undefined, pathname: string): boolean {
   if (method === 'OPTIONS') return true;
+  if (method === 'HEAD' && pathname === '/api/chain/rpc-health') return true;
   if ((method === 'GET' || method === 'HEAD') && ADMISSION_EXEMPT_GET_PATHS.has(pathname)) return true;
   return false;
 }

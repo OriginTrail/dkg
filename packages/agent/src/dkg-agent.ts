@@ -94,7 +94,7 @@ import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWi
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1094,9 +1094,11 @@ export class DKGAgent extends DKGAgentBase {
         );
       },
       refreshContextGraph: async (contextGraphId, signal) => (
-        await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal) === null
-          ? 'superseded'
-          : 'committed'
+        withRpcRequestContext({ requestClass: 'background' }, async () => (
+          await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal) === null
+            ? 'superseded'
+            : 'committed'
+        ))
       ),
       onRefreshFailure: (contextGraphId, error) => {
         this.log.warn(

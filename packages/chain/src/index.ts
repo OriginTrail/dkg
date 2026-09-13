@@ -135,6 +135,7 @@ export {
 // daemon's rpc_usage log emission). Endpoint-slot normalization is shared with
 // downstream formatters so producer and consumer use one bounded vocabulary.
 export {
+  createRpcUsageRecorder,
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
   RPC_ENDPOINT_SLOT_LABELS,
@@ -145,6 +146,7 @@ export {
   type RpcUsageAttribution,
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
+  type RpcUsageRecorder,
   type RpcUsageWindow,
 } from './rpc-usage.js';
 export {
@@ -153,6 +155,7 @@ export {
   withRpcRequestContext,
   withRpcRequestTimeout,
   type RpcRequestClass,
+  type RpcRequestAdmission,
   type RpcRequestContext,
   type RpcRequestContextInput,
   type RpcRequestProviderConfig,
@@ -230,7 +233,7 @@ export {
   waitForTransactionReceiptWithFailover,
   type TransactionReceiptEndpoint,
   type TransactionReceiptWaitOptions,
-} from './rpc-failover-client.js';
+} from './transaction-receipt-failover.js';
 
 export {
   readRandomSamplingAvailability,

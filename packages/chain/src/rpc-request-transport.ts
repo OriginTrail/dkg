@@ -222,6 +222,27 @@ export const cancellableRpcGetUrl: FetchGetUrlFunc = async (
 const RPC_REQUEST_MAX_RETRIES = 5;
 const RPC_REQUEST_RETRY_BACKOFF_CAP_MS = 1_500;
 
+async function waitForRetryBackoff(delayMs: number): Promise<void> {
+  const signal = activeRpcRequestAbortSignal();
+  if (signal?.aborted) throwRpcRequestAbortReason(signal);
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      try {
+        throwRpcRequestAbortReason(signal!);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
 /** Bounded ethers retry transport shared by every provider construction path. */
 export function boundedRetryFetchRequest(
   url: string,
@@ -231,8 +252,9 @@ export function boundedRetryFetchRequest(
   request.getUrlFunc = cancellableRpcGetUrl;
   request.retryFunc = async (_attemptRequest, _response, attempt) => {
     if (attempt >= maxRetries) return false;
-    await new Promise<void>((resolve) => setTimeout(resolve,
-      Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS)));
+    await waitForRetryBackoff(
+      Math.min(500 * (attempt + 1), RPC_REQUEST_RETRY_BACKOFF_CAP_MS),
+    );
     return true;
   };
   return request;
@@ -267,6 +289,20 @@ function methodsFromRequestBody(body: Uint8Array | null | undefined): string[] {
   }
 }
 
+async function admitAndObserveRpcAttempt(
+  methods: readonly string[],
+  transport: Pick<RpcRequestProviderConfig, 'admission' | 'onRequest' | 'endpointSlot'>,
+): Promise<void> {
+  for (const _method of methods) await transport.admission?.acquireActiveRequest();
+  try {
+    for (const method of methods) {
+      transport.onRequest?.(method, transport.endpointSlot);
+    }
+  } catch {
+    /* optional instrumentation must never break transport */
+  }
+}
+
 /** JsonRpcProvider whose initial dispatch and every retry share one policy path. */
 export class RpcRequestJsonRpcProvider extends JsonRpcProvider {
   constructor(
@@ -282,14 +318,10 @@ export class RpcRequestJsonRpcProvider extends JsonRpcProvider {
     payload: JsonRpcPayload | Array<JsonRpcPayload>,
   ): Promise<Array<JsonRpcResult>> {
     const entries = Array.isArray(payload) ? payload : [payload];
-    for (const _entry of entries) await this.transport.admission?.acquireActiveRequest();
-    try {
-      for (const entry of entries) {
-        this.transport.onRequest?.(String(entry?.method ?? 'other'), this.transport.endpointSlot);
-      }
-    } catch {
-      /* optional instrumentation must never break transport */
-    }
+    await admitAndObserveRpcAttempt(
+      entries.map((entry) => String(entry?.method ?? 'other')),
+      this.transport,
+    );
     return super._send(payload);
   }
 }
@@ -304,14 +336,7 @@ export function createRpcRequestProvider(
   request.retryFunc = async (attemptRequest, response, attempt) => {
     const shouldRetry = await retry(attemptRequest, response, attempt);
     if (shouldRetry) {
-      await config.admission?.acquireActiveRequest();
-      try {
-        for (const method of methodsFromRequestBody(attemptRequest?.body)) {
-          config.onRequest?.(method, config.endpointSlot);
-        }
-      } catch {
-        /* optional instrumentation must never break transport */
-      }
+      await admitAndObserveRpcAttempt(methodsFromRequestBody(attemptRequest?.body), config);
     }
     return shouldRetry;
   };

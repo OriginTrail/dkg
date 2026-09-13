@@ -70,6 +70,29 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     expect(scenario.provider.getBlock).toHaveBeenCalledWith(101);
   });
 
+  it('preserves local queue-full while anchoring without probing a backup', async () => {
+    const scenario = historicalFixture([[42n]]);
+    const queueFull = Object.assign(new Error('local capacity exhausted'), {
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+    });
+    const firstProvider = {
+      getBlock: vi.fn(async () => { throw queueFull; }),
+    };
+    scenario.resolveContractDeployBlock.mockResolvedValue({
+      fromBlock: 100,
+      head: 101,
+      scanProviders: [
+        { provider: firstProvider, backendHead: 101 },
+        { provider: scenario.provider, backendHead: 101 },
+      ],
+    });
+
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH))
+      .rejects.toBe(queueFull);
+    expect(scenario.provider.getBlock).not.toHaveBeenCalled();
+    expect(scenario.queryEventLogsPage).not.toHaveBeenCalled();
+  });
+
   it('fails closed when same-height RPCs disagree on the historical anchor hash', async () => {
     const scenario = historicalFixture([[42n]]);
     const forkedProvider = {

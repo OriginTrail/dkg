@@ -464,3 +464,21 @@ export class RpcUsageTracker {
     };
   }
 }
+
+/**
+ * Narrow process-owned accounting capability for RPC callers that are not a
+ * ChainAdapter (for example daemon diagnostics). The accumulator implementation
+ * stays private to this package boundary while direct transports participate in
+ * the same canonical usage-window contract.
+ */
+export interface RpcUsageRecorder extends RpcUsageDrainable {
+  record(method: string, endpointSlot?: number): void;
+}
+
+export function createRpcUsageRecorder(chainId: () => string): RpcUsageRecorder {
+  const tracker = new RpcUsageTracker(chainId);
+  return Object.freeze({
+    record: (method: string, endpointSlot?: number) => tracker.record(method, endpointSlot),
+    drainRpcUsage: () => tracker.drainWindow(),
+  });
+}
