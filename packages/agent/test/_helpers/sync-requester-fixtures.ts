@@ -1,7 +1,7 @@
 import { type OperationContext } from '@origintrail-official/dkg-core';
 import { type Quad } from '@origintrail-official/dkg-storage';
-import { type SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
+import { toSyncTransportFailureError } from '../../src/sync/error-tags.js';
+import { type SyncPageResult } from '../../src/sync/requester/page-fetch.js';
 
 export const ctx = { operationId: 'test', operationName: 'sync' } satisfies OperationContext;
 

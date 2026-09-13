@@ -6,10 +6,10 @@ import { swmFixtures, type SwmShare } from './swm-descriptor-fixtures.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { collectPublicSnapshotMetadata } from '../src/sync/requester/shared-memory-sync.js';
 import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
-import { ctx, quad } from './sync-requester-fixtures.js';
+import { ctx, quad } from './_helpers/sync-requester-fixtures.js';
 import {
   makeEntitySharePublisherFixture,
-  type EntitySharePublisherFixture,
+  type EntitySharePublisherSlice,
 } from './_helpers/swm-entity-share-publisher-fixture.js';
 import { runManagedSwmSyncHarness } from './_helpers/swm-sync-harness.js';
 
@@ -49,7 +49,7 @@ function mixedManifestScenario(): SnapshotCoverageScenario & { readonly current:
 }
 
 async function entityShareManifestScenario(): Promise<SnapshotCoverageScenario & {
-  readonly published: EntitySharePublisherFixture;
+  readonly publishedSlice: EntitySharePublisherSlice;
   readonly expectedSlice: readonly Quad[];
 }> {
   const root = 'https://example.org/thing/1';
@@ -60,7 +60,7 @@ async function entityShareManifestScenario(): Promise<SnapshotCoverageScenario &
   const published = await makeEntitySharePublisherFixture({
     contextGraphId: COVERAGE_CG,
     shareOperationId: 'op-entity-share-1',
-    rootEntity: root,
+    rootEntities: [root],
     publisherPeerId: 'peer-source',
     payload: [
       ...expectedSlice,
@@ -68,12 +68,14 @@ async function entityShareManifestScenario(): Promise<SnapshotCoverageScenario &
         object: '"Not part of this root slice"', graph: '' },
     ],
   });
+  const publishedSlice = published.slices[0];
+  if (!publishedSlice) throw new Error('Entity-share scenario did not publish its root slice');
   return {
     contextGraphId: COVERAGE_CG,
     remotePeerId: 'peer-entity-share-1a2b3c4d',
     servedMeta: published.meta,
-    cachedSnapshots: new Map([[published.digest, published.payload]]),
-    published,
+    cachedSnapshots: published.snapshots,
+    publishedSlice,
     expectedSlice,
     expectedCoverage: {
       contextGraphId: COVERAGE_CG, peerIdSuffix: '1a2b3c4d',
@@ -166,11 +168,13 @@ describe('public SWM snapshot coverage (#2050)', () => {
   });
 
   it('resolves a cached entity share with no graph-scoped descriptor and no graph write', async () => {
-    const { expectedCoverage, published, expectedSlice, ...source } = await entityShareManifestScenario();
-    expect(published.payload).toEqual(expectedSlice);
-    expect(source.servedMeta.some(row => row.subject === published.sliceSubject)).toBe(true);
+    const { expectedCoverage, publishedSlice, expectedSlice, ...source } =
+      await entityShareManifestScenario();
+    expect(publishedSlice.payload).toEqual(expectedSlice);
+    expect(source.servedMeta.some(row => row.subject === publishedSlice.sliceSubject)).toBe(true);
     expect(collectPublicSnapshotMetadata(source.servedMeta)).toEqual([{
-      ref: published.digest, digest: published.digest, count: published.payload.length, publishedAtMs: 0,
+      ref: publishedSlice.digest, digest: publishedSlice.digest,
+      count: publishedSlice.payload.length, publishedAtMs: 0,
     }]);
     expect(parseGraphScopedSwmRecoveryDescriptors({
       contextGraphId: source.contextGraphId, metaQuads: source.servedMeta,

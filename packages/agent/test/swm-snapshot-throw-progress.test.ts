@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { type Quad } from '@origintrail-official/dkg-storage';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
-import { ctx, transportError } from './sync-requester-fixtures.js';
+import { ctx, transportError } from './_helpers/sync-requester-fixtures.js';
 import { runManagedSwmSyncHarness } from './_helpers/swm-sync-harness.js';
 
 /**

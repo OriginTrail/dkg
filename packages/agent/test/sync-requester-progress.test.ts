@@ -7,7 +7,14 @@ import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher'
 import { runSharedMemorySync, syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
 import { SyncPageAccumulationLimitError, type SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
-import { ctx, noop, pageResult, quad, transportError, sharedMemoryProcessResult } from './sync-requester-fixtures.js';
+import {
+  ctx,
+  noop,
+  pageResult,
+  quad,
+  sharedMemoryProcessResult,
+  transportError,
+} from './_helpers/sync-requester-fixtures.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];

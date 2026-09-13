@@ -4,12 +4,10 @@ import {
   makeSwmSyncHarness,
   type SwmSyncHarnessShare,
 } from './_helpers/swm-sync-harness.js';
-import type { EntitySharePublisherFixture } from './_helpers/swm-entity-share-publisher-fixture.js';
 
 declare const store: TripleStore;
 declare const served: SwmSyncHarnessShare;
 declare const servedMeta: readonly Quad[];
-declare const published: EntitySharePublisherFixture;
 const base = {
   ctx: createOperationContext('sync'),
   contextGraphId: 'cg-harness-contract',
@@ -19,7 +17,6 @@ const base = {
 makeSwmSyncHarness({ ...base, served });
 makeSwmSyncHarness({ ...base, servedMeta });
 makeSwmSyncHarness({ ...base, servedMeta: [] });
-makeSwmSyncHarness({ ...base, served: published });
 
 // @ts-expect-error A harness must name its source explicitly, even when empty.
 makeSwmSyncHarness(base);

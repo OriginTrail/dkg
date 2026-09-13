@@ -11,6 +11,6 @@
   "include": [
     "test/**/*.typecheck.ts",
     "src/jsonld.d.ts",
-    "test/sync-requester-fixtures.ts"
+    "test/_helpers/sync-requester-fixtures.ts"
   ]
 }
