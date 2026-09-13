@@ -1,4 +1,5 @@
-import type { DkgHomeFiles } from '../src/config.js';
+import type { DkgConfig, DkgHomeFiles } from '../src/config.js';
+import { resolveMetricsCollectorConfig } from '../src/metrics-collector-config.js';
 import { DkgConfigStore, mutableConfigSnapshot } from '../src/daemon-config-store.js';
 import { getStoredLocalAgentIntegrations, getLocalAgentIntegration } from '../src/daemon/local-agents.js';
 import { resolveContextGraphs, resolveSharedMemoryTtlMs, resolveChainConfig, resolveNetworkConfigName } from '../src/config.js';
@@ -37,6 +38,16 @@ resolveChainConfig(draft, null);
 resolveNetworkConfigName(draft);
 resolveNetworkConfigName(current);
 resolveNetworkConfigName({ chain: { rpcUrl: 'http://localhost:8545', rpcUrls: ['http://localhost:8546'] as const } });
+
+// Metrics readers narrow the input before applying recursive readonly mapping.
+// A section-only caller such as doctor must not expand unrelated RFC-64 types.
+declare const telemetryOnly: Pick<DkgConfig, 'telemetry'>;
+resolveMetricsCollectorConfig(telemetryOnly, {});
+resolveMetricsCollectorConfig(current, {});
+resolveMetricsCollectorConfig(draft, {});
+resolveMetricsCollectorConfig({ telemetry: { logs: { redact: ['secret'] as const } } }, {});
+// @ts-expect-error The narrower reader still rejects non-boolean collection toggles.
+resolveMetricsCollectorConfig({ telemetry: { metrics: { collectionEnabled: 'false' } } }, {});
 
 // @ts-expect-error A live commit must declare its activation semantics.
 void store.update(latest => latest);
