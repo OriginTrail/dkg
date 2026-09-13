@@ -7,6 +7,7 @@ import type { Address, Hex } from 'viem';
 
 const mocks = vi.hoisted(() => ({
   fetchOperationalWallets: vi.fn(),
+  fetchIdentityWalletContracts: vi.fn(),
   readIdentityWalletSummary: vi.fn(),
   identityWalletActionSubmitter: vi.fn(),
   publicClientFor: vi.fn(() => ({})),
@@ -18,7 +19,11 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('../src/ui/api.js', async (original) => {
   const actual = await original<typeof import('../src/ui/api.js')>();
-  return { ...actual, fetchOperationalWallets: mocks.fetchOperationalWallets };
+  return {
+    ...actual,
+    fetchOperationalWallets: mocks.fetchOperationalWallets,
+    fetchIdentityWalletContracts: mocks.fetchIdentityWalletContracts,
+  };
 });
 
 vi.mock('../src/ui/web3/clients.js', async (original) => {
@@ -52,13 +57,15 @@ const OLD_OPERATIONAL = `0x${'33'.repeat(20)}` as Address;
 const TARGET = `0x${'44'.repeat(20)}` as Address;
 const TX_HASH = `0x${'ab'.repeat(32)}` as Hex;
 const CONTRACTS = {
+  profile: `0x${'77'.repeat(20)}`,
+  identity: `0x${'88'.repeat(20)}`,
+  storage: `0x${'99'.repeat(20)}`,
+  chainId: 'base:84532',
+  rpcUrls: ['/api/identity-wallets/rpc'],
+};
+const PCA_CONTRACTS = {
   nft: `0x${'55'.repeat(20)}`,
   token: `0x${'66'.repeat(20)}`,
-  identityWallets: {
-    profile: `0x${'77'.repeat(20)}`,
-    identity: `0x${'88'.repeat(20)}`,
-    storage: `0x${'99'.repeat(20)}`,
-  },
   chainId: 'base:84532',
   rpcUrls: ['/api/pca/rpc'],
 };
@@ -123,7 +130,11 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   document.body.innerHTML = '';
   vi.clearAllMocks();
-  mocks.fetchOperationalWallets.mockResolvedValue(operationalSnapshot);
+  mocks.fetchOperationalWallets.mockResolvedValue({
+    available: true,
+    snapshot: operationalSnapshot,
+  });
+  mocks.fetchIdentityWalletContracts.mockResolvedValue(CONTRACTS);
   mocks.readIdentityWalletSummary.mockResolvedValue(summary());
   const success = (action: string) => async (_identityId: string, address: Address) => ({
     action,
@@ -147,7 +158,7 @@ beforeEach(() => {
     address: ADMIN,
     chainId: 84532,
     expectedChainId: 84532,
-    bootstrap: CONTRACTS,
+    bootstrap: PCA_CONTRACTS,
   });
 });
 
@@ -156,8 +167,25 @@ afterEach(() => {
 });
 
 describe('IdentityWalletsSection', () => {
+  it('loads identity management independently when PCA bootstrap is unavailable', async () => {
+    useWalletStore.setState({ bootstrap: null });
+    const { container, unmount } = await renderSection();
+    await waitFor(
+      () => container.textContent?.includes('authorized admin signer') === true,
+      'independent identity bootstrap',
+    );
+    expect(mocks.fetchIdentityWalletContracts).toHaveBeenCalledOnce();
+    expect(mocks.readIdentityWalletSummary).toHaveBeenCalledWith(
+      CONTRACTS,
+      expect.anything(),
+      '61',
+      expect.any(Array),
+    );
+    await unmount();
+  });
+
   it('does not crash the PCA page when an older daemon omits the optional wallet list', async () => {
-    mocks.fetchOperationalWallets.mockResolvedValue({});
+    mocks.fetchOperationalWallets.mockResolvedValue({ available: false });
     const { container, unmount } = await renderSection();
     await waitFor(() => mocks.fetchOperationalWallets.mock.calls.length === 1, 'legacy capability response');
     expect(container.textContent).toContain('Node identity wallets');

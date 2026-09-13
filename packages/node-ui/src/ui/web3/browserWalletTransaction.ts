@@ -27,6 +27,8 @@ export type BrowserWalletRuntimeState = Pick<
   'provider' | 'address' | 'chainId' | 'expectedChainId' | 'bootstrap'
 >;
 
+export type BrowserWalletBootstrap = Pick<PcaContracts, 'chainId' | 'rpcUrls'>;
+
 export type BrowserWalletPublicClient = Pick<PublicClient, 'readContract' | 'waitForTransactionReceipt'>;
 export interface BrowserWalletClient {
   writeContract<
@@ -39,6 +41,8 @@ export interface BrowserWalletClient {
 }
 
 export interface BrowserWalletRuntimeDeps {
+  /** Feature-owned bootstrap; defaults to the PCA wallet store for legacy callers. */
+  bootstrap?: BrowserWalletBootstrap;
   getWalletState?: () => BrowserWalletRuntimeState;
   publicClientFor?: (chainId: string | number, rpcUrls: string[]) => BrowserWalletPublicClient;
   walletClientFromProvider?: (chain: Chain, provider: Eip1193Provider) => BrowserWalletClient;
@@ -51,7 +55,7 @@ export interface BrowserWalletRuntimeContext {
   chain: Chain;
   publicClient: BrowserWalletPublicClient;
   walletClient: BrowserWalletClient;
-  bootstrap: PcaContracts;
+  bootstrap: BrowserWalletBootstrap;
 }
 
 export interface BrowserWalletConnectionPolicy {
@@ -93,26 +97,27 @@ export function loadBrowserWalletRuntime(
   if (!state.provider || !state.address) {
     throw policy.unavailableError(policy.messages.disconnected);
   }
-  if (!state.bootstrap) {
+  const bootstrap = deps.bootstrap ?? state.bootstrap;
+  if (!bootstrap) {
     throw policy.unavailableError(policy.messages.bootstrapUnavailable);
   }
-  const expectedChainId = numericChainId(state.bootstrap.chainId);
+  const expectedChainId = numericChainId(bootstrap.chainId);
   if (state.chainId !== expectedChainId) {
     throw policy.unavailableError(policy.messages.wrongNetwork);
   }
-  const chain = synthesizeChain(state.bootstrap.chainId, state.bootstrap.rpcUrls);
+  const chain = synthesizeChain(bootstrap.chainId, bootstrap.rpcUrls);
   return {
     provider: state.provider,
     account: browserWalletAddress(state.address, 'Connected wallet', policy.error),
     expectedChainId,
     chain,
     publicClient:
-      deps.publicClientFor?.(state.bootstrap.chainId, state.bootstrap.rpcUrls) ??
-      defaultPublicClientFor(state.bootstrap.chainId, state.bootstrap.rpcUrls),
+      deps.publicClientFor?.(bootstrap.chainId, bootstrap.rpcUrls) ??
+      defaultPublicClientFor(bootstrap.chainId, bootstrap.rpcUrls),
     walletClient:
       deps.walletClientFromProvider?.(chain, state.provider) ??
       defaultWalletClientFromProvider(chain, state.provider) as BrowserWalletClient,
-    bootstrap: state.bootstrap,
+    bootstrap,
   };
 }
 

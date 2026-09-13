@@ -3,6 +3,7 @@ import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { getPcaLogicInterface } from '../src/evm-adapter-errors.js';
+import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
 
 const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
@@ -198,16 +199,38 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
     (adapter as any).getIdentityStorage = async () => (adapter as any).contracts.identityStorage;
 
     const contracts = await adapter.getPublishingConvictionContracts();
+    const identityContracts = await adapter.getIdentityWalletContracts();
 
     expect(contracts.rpcUrls).toEqual(['https://wallet-rpc.example/base-sepolia']);
     expect(contracts.walletRpcUrls).toEqual(['https://wallet-rpc.example/base-sepolia']);
-    expect(contracts.identityWallets).toEqual({
+    expect(identityContracts).toEqual(expect.objectContaining({
       profile: '0x' + '33'.repeat(20),
       identity: '0x' + '44'.repeat(20),
       storage: '0x' + '55'.repeat(20),
-    });
+    }));
+    expect('identityWallets' in contracts).toBe(false);
     expect(JSON.stringify(contracts)).not.toContain('SECRETKEY');
     expect(JSON.stringify(contracts)).not.toContain('private-rpc.example');
+  });
+
+  it('keeps PCA bootstrap available when identity contracts are unavailable', async () => {
+    const adapter = new EVMChainAdapter(minimalConfig());
+    (adapter as unknown as { init: () => Promise<void> }).init = async () => undefined;
+    (adapter as any).contracts = {
+      dkgPublishingConvictionNFT: { getAddress: async () => '0x' + '11'.repeat(20) },
+      token: { getAddress: async () => '0x' + '22'.repeat(20) },
+      profile: { getAddress: async () => '0x' + '33'.repeat(20) },
+      identity: { getAddress: async () => '0x' + '44'.repeat(20) },
+    };
+    (adapter as any).getIdentityStorage = async () => {
+      throw new HubContractNotFoundError('IdentityStorage', HUB);
+    };
+
+    await expect(adapter.getPublishingConvictionContracts()).resolves.toEqual(expect.objectContaining({
+      nft: '0x' + '11'.repeat(20),
+      token: '0x' + '22'.repeat(20),
+    }));
+    await expect(adapter.getIdentityWalletContracts()).resolves.toBeNull();
   });
 });
 

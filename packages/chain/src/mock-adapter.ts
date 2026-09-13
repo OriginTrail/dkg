@@ -32,6 +32,8 @@ import type {
   ShardingTableNode,
   PcaContracts,
   PcaRpcMethod,
+  BrowserWalletRpcMethod,
+  IdentityWalletContracts,
   PublishTransactionResolution,
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
@@ -1108,11 +1110,17 @@ export class MockChainAdapter implements ChainAdapter {
     return {
       nft: ethers.getAddress('0x' + '11'.repeat(20)),
       token: ethers.getAddress('0x' + '22'.repeat(20)),
-      identityWallets: {
-        profile: ethers.getAddress('0x' + '33'.repeat(20)),
-        identity: ethers.getAddress('0x' + '44'.repeat(20)),
-        storage: ethers.getAddress('0x' + '55'.repeat(20)),
-      },
+      chainId: this.chainId,
+      rpcUrls: [],
+      walletRpcUrls: [],
+    };
+  }
+
+  async getIdentityWalletContracts(): Promise<IdentityWalletContracts> {
+    return {
+      profile: ethers.getAddress('0x' + '33'.repeat(20)),
+      identity: ethers.getAddress('0x' + '44'.repeat(20)),
+      storage: ethers.getAddress('0x' + '55'.repeat(20)),
       chainId: this.chainId,
       rpcUrls: [],
       walletRpcUrls: [],
@@ -1135,6 +1143,13 @@ export class MockChainAdapter implements ChainAdapter {
       case 'eth_getTransactionByHash':
         return null;
     }
+  }
+
+  async requestIdentityWalletRpc(
+    method: BrowserWalletRpcMethod,
+    params: unknown[] = [],
+  ): Promise<unknown> {
+    return this.requestPublishingConvictionRpc(method, params);
   }
 
   /** Mirrors `agentToAccountId`; `0n` for unregistered → publisher SDK

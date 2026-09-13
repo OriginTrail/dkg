@@ -19,7 +19,6 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
     loading,
     loadError,
     refresh,
-    bootstrap,
     connected,
     wrongNetwork,
     summary,
@@ -86,7 +85,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {data && !data.hasProfile && (
         <p className="v10-modal-warning" role="status">This node does not have an on-chain identity profile yet.</p>
       )}
-      {data?.hasProfile && bootstrap && !identityContractsReady && (
+      {data?.hasProfile && !identityContractsReady && (
         <p className="v10-modal-warning" role="status">
           Identity wallet management requires a node version that exposes the Profile, Identity, and IdentityStorage addresses.
         </p>

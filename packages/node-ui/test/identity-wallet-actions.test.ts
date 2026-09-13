@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { getAddress, zeroAddress, type Address, type Hex, type TransactionReceipt } from 'viem';
-import type { PcaContracts } from '../src/ui/api.js';
+import type { IdentityWalletContracts, PcaContracts } from '../src/ui/api.js';
 import type { Eip1193Provider } from '../src/ui/web3/eip6963.js';
 import {
   ADMIN_KEY_PURPOSE,
@@ -26,14 +26,16 @@ const NFT = getAddress(`0x${'77'.repeat(20)}`) as Address;
 const TOKEN = getAddress(`0x${'88'.repeat(20)}`) as Address;
 const TX_HASH = `0x${'ab'.repeat(32)}` as Hex;
 
-const CONTRACTS: PcaContracts = {
+const IDENTITY_CONTRACTS: IdentityWalletContracts = {
+  profile: PROFILE,
+  identity: IDENTITY,
+  storage: IDENTITY_STORAGE,
+  chainId: 'base:84532',
+  rpcUrls: ['/api/identity-wallets/rpc'],
+};
+const PCA_CONTRACTS: PcaContracts = {
   nft: NFT,
   token: TOKEN,
-  identityWallets: {
-    profile: PROFILE,
-    identity: IDENTITY,
-    storage: IDENTITY_STORAGE,
-  },
   chainId: 'base:84532',
   rpcUrls: ['/api/pca/rpc'],
 };
@@ -108,10 +110,11 @@ function makeHarness(options: {
     address: options.stateAddress ?? ADMIN,
     chainId: options.stateChainId ?? 84532,
     expectedChainId: 84532,
-    bootstrap: CONTRACTS,
+    bootstrap: PCA_CONTRACTS,
   };
   const progress: IdentityWalletProgressEvent[] = [];
   const submitter = identityWalletActionSubmitter({
+    bootstrap: IDENTITY_CONTRACTS,
     getWalletState: () => state,
     publicClientFor: () => publicClient,
     walletClientFromProvider: () => walletClient,
@@ -128,7 +131,7 @@ describe('identity wallet key reads', () => {
   it('returns counts and roles for unique known addresses', async () => {
     const h = makeHarness();
     const summary = await readIdentityWalletSummary(
-      CONTRACTS,
+      IDENTITY_CONTRACTS,
       h.publicClient,
       '61',
       [ADMIN, PRIMARY, ADMIN.toLowerCase()],
@@ -143,9 +146,9 @@ describe('identity wallet key reads', () => {
 
   it('fails if the bootstrap routes identity reads to any other contract', async () => {
     const h = makeHarness();
-    const wrongContracts: PcaContracts = {
-      ...CONTRACTS,
-      identityWallets: { ...CONTRACTS.identityWallets!, storage: PROFILE },
+    const wrongContracts: IdentityWalletContracts = {
+      ...IDENTITY_CONTRACTS,
+      storage: PROFILE,
     };
     await expect(readIdentityWalletSummary(wrongContracts, h.publicClient, '61', [ADMIN]))
       .rejects.toThrow(/Unexpected read target/);
@@ -172,9 +175,38 @@ describe('identity wallet hardware-signed writes', () => {
   });
 
   it('refuses every write when the connected wallet is not an admin key', async () => {
-    const h = makeHarness({ adminAddresses: [] });
-    await expect(h.submitter.addOperational('61', TARGET)).rejects.toThrow(/not an admin key/);
-    expect(h.writeContract).not.toHaveBeenCalled();
+    const cases = [
+      {
+        name: 'add operational',
+        run: (h: ReturnType<typeof makeHarness>) => h.submitter.addOperational('61', ADMIN),
+        adminAddresses: [PRIMARY],
+      },
+      {
+        name: 'remove operational',
+        run: (h: ReturnType<typeof makeHarness>) => h.submitter.removeOperational('61', TARGET),
+        adminAddresses: [PRIMARY],
+      },
+      {
+        name: 'add admin',
+        run: (h: ReturnType<typeof makeHarness>) => h.submitter.addAdmin('61', ADMIN),
+        adminAddresses: [PRIMARY],
+      },
+      {
+        name: 'remove admin',
+        run: (h: ReturnType<typeof makeHarness>) => h.submitter.removeAdmin('61', PRIMARY),
+        adminAddresses: [PRIMARY, ADMIN],
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      const h = makeHarness({
+        adminAddresses: [...testCase.adminAddresses],
+        operationalAddresses: [PRIMARY, TARGET],
+        stateAddress: TARGET,
+      });
+      await expect(testCase.run(h), testCase.name).rejects.toThrow(/not an admin key/);
+      expect(h.writeContract, testCase.name).not.toHaveBeenCalled();
+    }
   });
 
   it('refuses removal of the node primary before prompting the wallet', async () => {

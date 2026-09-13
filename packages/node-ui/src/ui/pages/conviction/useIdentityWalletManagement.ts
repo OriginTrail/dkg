@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import { getAddress, type Address, type Hex } from 'viem';
-import { fetchOperationalWallets, type OperationalWalletSnapshot } from '../../api.js';
+import {
+  fetchIdentityWalletContracts,
+  fetchOperationalWallets,
+  type OperationalWalletSnapshot,
+} from '../../api.js';
 import { useFetch } from '../../hooks.js';
 import { eqAddress } from '../../pca/address.js';
-import { isWrongNetwork, useWalletStore } from '../../stores/wallet.js';
+import { useWalletStore } from '../../stores/wallet.js';
+import { numericChainId } from '../../web3/chainId.js';
 import { publicClientFor } from '../../web3/clients.js';
 import {
   IdentityWalletActionError,
@@ -137,10 +142,16 @@ async function dispatchIdentityWalletAction(
 }
 
 export function useIdentityWalletManagement() {
-  const { data, loading, error: loadError, refresh } = useFetch(fetchOperationalWallets, [], 0);
-  const bootstrap = useWalletStore((state) => state.bootstrap);
+  const operational = useFetch(fetchOperationalWallets, [], 0);
+  const identityBootstrap = useFetch(fetchIdentityWalletContracts, [], 0);
+  const data = operational.data?.available ? operational.data.snapshot : null;
+  const { loading, error: loadError, refresh } = operational;
+  const bootstrap = identityBootstrap.data;
   const connected = useWalletStore((state) => state.address);
-  const wrongNetwork = useWalletStore((state) => isWrongNetwork(state));
+  const connectedChainId = useWalletStore((state) => state.chainId);
+  const wrongNetwork = Boolean(
+    bootstrap && connectedChainId !== numericChainId(bootstrap.chainId),
+  );
   const [summary, setSummary] = useState<IdentityWalletSummary | null>(null);
   const [summaryError, setSummaryError] = useState<string | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -159,7 +170,7 @@ export function useIdentityWalletManagement() {
 
   useEffect(() => {
     let cancelled = false;
-    if (!data?.hasProfile || !bootstrap?.identityWallets) {
+    if (!data?.hasProfile || !bootstrap) {
       setSummary(null);
       setSummaryError(null);
       setSummaryLoading(false);
@@ -189,7 +200,7 @@ export function useIdentityWalletManagement() {
   const transactionPending = state.transaction.status === 'signing' || state.transaction.status === 'submitted';
   const writesEnabled = Boolean(
     data?.hasProfile &&
-    bootstrap?.identityWallets &&
+    bootstrap &&
     connected &&
     connectedIsAdmin &&
     !wrongNetwork &&
@@ -216,6 +227,7 @@ export function useIdentityWalletManagement() {
     try {
       const result = await dispatchIdentityWalletAction(
         {
+          bootstrap: bootstrap ?? undefined,
           onProgress: (event) => {
             if (event.state === 'submitted' && event.txHash) {
               dispatch({ type: 'submitted', action, address, txHash: event.txHash });
@@ -243,7 +255,7 @@ export function useIdentityWalletManagement() {
         completed: txHash ? { action, address, txHash, confirmed: false } : undefined,
       });
     }
-  }, [data?.hasProfile, data?.identityId, primaryAddress, refresh]);
+  }, [bootstrap, data?.hasProfile, data?.identityId, primaryAddress, refresh]);
 
   const requestRemoval = useCallback((role: IdentityWalletRole, value: string) => {
     try {
@@ -280,7 +292,7 @@ export function useIdentityWalletManagement() {
     summaryLoading,
     reloadSummary,
     connectedIsAdmin,
-    identityContractsReady: Boolean(bootstrap?.identityWallets),
+    identityContractsReady: Boolean(bootstrap),
     writesEnabled,
     primaryAddress,
     inputs: state.inputs,

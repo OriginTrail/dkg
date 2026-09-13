@@ -88,31 +88,35 @@ export interface ShardingTableNode {
   stake: bigint;
 }
 
-/** Browser-bootstrap contract addresses + chain params for wallet-signed PCA and identity-key actions. */
+/** Browser-bootstrap contract addresses + chain params for wallet-signed PCA actions. */
 export interface PcaContracts {
   nft: string;
   token: string;
-  /** Identity-key management capability. Omitted as a unit on older deployments. */
-  identityWallets?: {
-    /** Profile entrypoint used by an admin wallet to register operational keys. */
-    profile: string;
-    /** Identity entrypoint used by an admin wallet to add/remove hashed keys. */
-    identity: string;
-    /** Read-only key-purpose store used to verify the connected admin wallet. */
-    storage: string;
-  };
   chainId: string;
   rpcUrls: string[];
   walletRpcUrls?: string[];
 }
 
-export type PcaRpcMethod =
+/** Browser-safe read methods shared by the independently scoped wallet features. */
+export type BrowserWalletRpcMethod =
   | 'eth_chainId'
   | 'eth_call'
   | 'eth_getTransactionReceipt'
   | 'eth_getTransactionByHash'
   | 'eth_blockNumber'
   | 'eth_getBlockByNumber';
+
+export type PcaRpcMethod = BrowserWalletRpcMethod;
+
+/** All-or-none node-identity contract surface for browser-signed key rotation. */
+export interface IdentityWalletContracts {
+  profile: string;
+  identity: string;
+  storage: string;
+  chainId: string;
+  rpcUrls: string[];
+  walletRpcUrls?: string[];
+}
 
 export interface IdentityProof {
   publicKey: Uint8Array;
@@ -1442,6 +1446,19 @@ export interface ChainAdapter {
    * PCA `primaryNode`. `opts.fresh` bypasses adapter-side cache.
    */
   listDesignatableNodes?(opts?: { fresh?: boolean }): Promise<ShardingTableNode[]>;
+
+  /**
+   * Independent browser bootstrap for node-identity key management. `null`
+   * means the deployment does not expose the complete Profile / Identity /
+   * IdentityStorage capability.
+   */
+  getIdentityWalletContracts?(): Promise<IdentityWalletContracts | null>;
+
+  /** Read-only JSON-RPC bridge used by `/api/identity-wallets/rpc`. */
+  requestIdentityWalletRpc?(
+    method: BrowserWalletRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown>;
 
   /**
    * Browser-bootstrap contract addresses + chain params for the HW signing

@@ -8,7 +8,7 @@ import {
   type ContractFunctionName,
   type Hex,
 } from 'viem';
-import type { PcaContracts } from '../api.js';
+import type { IdentityWalletContracts } from '../api.js';
 import { eqAddress } from '../pca/address.js';
 import {
   browserWalletAddress,
@@ -93,6 +93,7 @@ export type IdentityWalletPublicClient = BrowserWalletPublicClient;
 export type IdentityWalletClient = BrowserWalletClient;
 
 export interface IdentityWalletActionDeps extends BrowserWalletRuntimeDeps {
+  bootstrap?: IdentityWalletContracts;
   onProgress?: (event: IdentityWalletProgressEvent) => void;
 }
 
@@ -163,20 +164,15 @@ export function identityWalletKey(address: string): Hex {
   return keccak256(encodePacked(['address'], [normalized]));
 }
 
-function requiredIdentityContracts(contracts: PcaContracts): {
+function requiredIdentityContracts(contracts: IdentityWalletContracts): {
   profile: Address;
   identity: Address;
   storage: Address;
 } {
-  if (!contracts.identityWallets) {
-    throw new IdentityWalletActionError(
-      'This node does not expose identity-wallet contracts yet. Upgrade the daemon and reload the page.',
-    );
-  }
   return {
-    profile: normalizedAddress(contracts.identityWallets.profile, 'profile contract'),
-    identity: normalizedAddress(contracts.identityWallets.identity, 'identity contract'),
-    storage: normalizedAddress(contracts.identityWallets.storage, 'identityStorage contract'),
+    profile: normalizedAddress(contracts.profile, 'profile contract'),
+    identity: normalizedAddress(contracts.identity, 'identity contract'),
+    storage: normalizedAddress(contracts.storage, 'identityStorage contract'),
   };
 }
 
@@ -196,8 +192,13 @@ const connectionPolicy: BrowserWalletConnectionPolicy = {
 };
 
 function loadContext(deps: IdentityWalletActionDeps): IdentityWalletContext {
+  if (!deps.bootstrap) {
+    throw new IdentityWalletActionError(
+      'This node does not expose identity-wallet contracts yet. Upgrade the daemon and reload the page.',
+    );
+  }
   const runtime = loadBrowserWalletRuntime(deps, connectionPolicy);
-  const contracts = requiredIdentityContracts(runtime.bootstrap);
+  const contracts = requiredIdentityContracts(deps.bootstrap);
   return {
     ...runtime,
     signer: runtime.account,
@@ -237,7 +238,7 @@ async function keysForPurpose(
 }
 
 export async function readIdentityWalletSummary(
-  contracts: PcaContracts,
+  contracts: IdentityWalletContracts,
   client: IdentityWalletPublicClient,
   identityIdValue: string | bigint,
   addresses: string[],

@@ -775,6 +775,16 @@ describe('UI API tests', () => {
       expect(map['demo.md']).toBe('did:dkg:evm:31337/0xabc/8');
     });
 
+    it('fetchAssertionUals normalizes raw N-Triples string bindings', async () => {
+      queryBindings = [{
+        name: '"spec.md"',
+        ual: '"did:dkg:evm:31337/0xabc/7"',
+      }];
+      await expect(fetchAssertionUals('cg-1')).resolves.toEqual({
+        'spec.md': 'did:dkg:evm:31337/0xabc/7',
+      });
+    });
+
     it('ensureContextGraphOnChain auto-registers an off-chain CG before publishing', async () => {
       // mock /api/context-graph/list returns cg1 with no onChainId → the helper
       // must POST /api/context-graph/register so VM publish (on-chain) can proceed.

@@ -24,6 +24,7 @@ import type {
   OnChainPublishResult,
   PreBroadcastSignal,
   SignedTransactionEnvelope,
+  BrowserWalletRpcMethod,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
@@ -66,6 +67,7 @@ import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-his
 import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
 import { createEvmContextGraphAuthorityIndexRevisionReaderV1 } from
   './evm-context-graph-authority-index-reader.js';
+import { classifyBrowserWalletRead } from './browser-wallet-rpc-policy.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -1544,6 +1546,26 @@ export class EVMChainAdapterBase {
     opts?: ReadOpts,
   ): Promise<T | null> {
     return this.readProvider<T | null>(label, fn, { ...opts, isEmptyResult: (v) => v == null });
+  }
+
+  /** Provider/failover dispatch shared by PCA and node-identity browser bridges. */
+  protected requestBrowserWalletRpc(
+    method: BrowserWalletRpcMethod,
+    params: unknown[],
+    labelPrefix: string,
+  ): Promise<unknown> {
+    const label = `${labelPrefix} ${method}`;
+    const send = (provider: JsonRpcProvider) => provider.send(method, params);
+    switch (classifyBrowserWalletRead(method, params)) {
+      case 'tipTransparent':
+        return this.readTipProvider(label, send);
+      case 'tipNullableTransparent':
+        return this.readProviderRetryingNull(label, send, { skipPreferred: true });
+      case 'stickyNullable':
+        return this.readProviderRetryingNull(label, send);
+      case 'sticky':
+        return this.readProvider(label, send);
+    }
   }
 
   /**

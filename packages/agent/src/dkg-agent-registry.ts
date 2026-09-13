@@ -96,7 +96,7 @@ import {
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, PcaUnavailableError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, PcaUnavailableError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type NodePublishingConvictionAccount, type PcaAccountRelation, type ShardingTableNode, type PcaContracts, type PcaRpcMethod, type BrowserWalletRpcMethod, type IdentityWalletContracts } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -1568,6 +1568,12 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return typeof this.chain.requestPublishingConvictionRpc === 'function';
   }
 
+  /** True when identity bootstrap and its read bridge are independently available. */
+  get supportsIdentityWalletManagement(): boolean {
+    return typeof this.chain.getIdentityWalletContracts === 'function'
+      && typeof this.chain.requestIdentityWalletRpc === 'function';
+  }
+
   // OT-RFC-51: `primaryNode` (the node identityId this PCA's committed TRAC
   // funds via the publishing factor) is REQUIRED — no silent `0n` default. A
   // PCA created with node 0 seeds no allocation to anyone, and the SDK exposes
@@ -1677,6 +1683,22 @@ export class AgentRegistryMethods extends DKGAgentBase {
   async removeOperationalWallet(this: DKGAgent, address: string, options?: { identityId?: bigint }): Promise<TxResult | null> {
     if (typeof this.chain.removeOperationalWallet !== 'function') return null;
     return this.chain.removeOperationalWallet(address, options);
+  }
+
+  async getIdentityWalletContracts(this: DKGAgent): Promise<IdentityWalletContracts | null> {
+    if (typeof this.chain.getIdentityWalletContracts !== 'function') return null;
+    return this.chain.getIdentityWalletContracts();
+  }
+
+  async requestIdentityWalletRpc(
+    this: DKGAgent,
+    method: BrowserWalletRpcMethod,
+    params?: unknown[],
+  ): Promise<unknown> {
+    if (typeof this.chain.requestIdentityWalletRpc !== 'function') {
+      throw new Error('Identity wallet RPC is not available on this deployment.');
+    }
+    return this.chain.requestIdentityWalletRpc(method, params);
   }
 
   /** Enumerate registered publishing agents (operational wallets) for a PCA.

@@ -3206,14 +3206,44 @@ export interface OperationalWalletSnapshot {
   }>;
 }
 
+export type OperationalWalletCapability =
+  | { available: false }
+  | { available: true; snapshot: OperationalWalletSnapshot };
+
+function isOperationalWalletSnapshot(value: unknown): value is OperationalWalletSnapshot {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Partial<OperationalWalletSnapshot>;
+  return typeof item.identityId === 'string'
+    && typeof item.hasProfile === 'boolean'
+    && typeof item.adminKeyConfigured === 'boolean'
+    && typeof item.canManage === 'boolean'
+    && Array.isArray(item.wallets);
+}
+
 /**
  * Local wallet addresses annotated with their on-chain operational-key state.
  * This endpoint never returns private keys. Browser-signed identity management
  * deliberately uses only this read endpoint; writes go straight through the
  * connected hardware/browser wallet.
  */
-export const fetchOperationalWallets = () =>
-  get<OperationalWalletSnapshot>('/api/operational-wallets');
+export const fetchOperationalWallets = async (): Promise<OperationalWalletCapability> => {
+  const value = await get<unknown>('/api/operational-wallets');
+  return isOperationalWalletSnapshot(value)
+    ? { available: true, snapshot: value }
+    : { available: false };
+};
+
+export interface IdentityWalletContracts {
+  profile: string;
+  identity: string;
+  storage: string;
+  chainId: string | number;
+  rpcUrls: string[];
+  walletRpcUrls?: string[];
+}
+
+export const fetchIdentityWalletContracts = () =>
+  get<IdentityWalletContracts>('/api/identity-wallets/contracts');
 export const fetchRpcHealth = () =>
   get<{
     ok: boolean;
