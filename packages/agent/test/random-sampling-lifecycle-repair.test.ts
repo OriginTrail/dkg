@@ -21,6 +21,14 @@ interface RepairAgentHarness {
     };
   };
   log: { info: (ctx: OperationContext, message: string) => void };
+  networkAdmissionCoordinator: {
+    ensurePeerAgentBinding: (
+      peerId: string,
+      agentAddress: string,
+      ctx: OperationContext,
+      options?: { signal?: AbortSignal },
+    ) => Promise<boolean>;
+  };
   resolveRandomSamplingLocalContextGraphId: (
     cgId: bigint,
     signal: AbortSignal,
@@ -96,6 +104,9 @@ function makeRepairAgent(overrides: Partial<RepairAgentHarness> = {}): RepairAge
     },
     node: { stopSignal: undefined, libp2p: { getConnections: () => [] } },
     log: { info: vi.fn() },
+    networkAdmissionCoordinator: {
+      ensurePeerAgentBinding: vi.fn(async () => true),
+    },
     resolveRandomSamplingLocalContextGraphId: vi.fn(async () => 'food-safety'),
     resolveCuratorPeerIdsForCg: vi.fn(async () => ({ peerIds: [] })),
     discovery: { findAgents: vi.fn(async () => []) },
@@ -112,6 +123,19 @@ function makeRepairAgent(overrides: Partial<RepairAgentHarness> = {}): RepairAge
       result: { insertedTriples: 0 },
     })),
     ...overrides,
+  };
+}
+
+/** Bind the production peer/address authentication adapter into the lifecycle harness. */
+function withProductionCorePeerAuthentication(agent: RepairAgentHarness): RepairAgentHarness {
+  const authenticateCorePeerAddress = LifecycleSyncMethods.prototype.authenticateCorePeerAddress;
+  return {
+    ...agent,
+    authenticateCorePeerAddress: (candidate, signal) => authenticateCorePeerAddress.call(
+      agent as unknown as ThisParameterType<typeof authenticateCorePeerAddress>,
+      candidate,
+      signal,
+    ),
   };
 }
 
@@ -162,6 +186,46 @@ function runLifecycleRepair(
 }
 
 describe('Random Sampling lifecycle repair adapter', () => {
+  it('forwards the exact peer binding and signal, and fails closed without proof', async () => {
+    const ensurePeerAgentBinding = vi.fn(async () => true);
+    const agentLike = makeRepairAgent({
+      networkAdmissionCoordinator: { ensurePeerAgentBinding },
+    });
+    const authenticate = LifecycleSyncMethods.prototype.authenticateCorePeerAddress;
+    const candidate = {
+      peerId: 'peer-authenticated',
+      nodeRole: 'core',
+      agentAddress: '0x00000000000000000000000000000000000000bb',
+    };
+    const signal = new AbortController().signal;
+
+    await expect(authenticate.call(
+      agentLike as unknown as ThisParameterType<typeof authenticate>,
+      candidate,
+      signal,
+    )).resolves.toBe(true);
+    expect(ensurePeerAgentBinding).toHaveBeenCalledWith(
+      candidate.peerId,
+      candidate.agentAddress,
+      expect.anything(),
+      { signal },
+    );
+
+    await expect(authenticate.call(
+      agentLike as unknown as ThisParameterType<typeof authenticate>,
+      { peerId: 'peer-without-address', nodeRole: 'core' },
+      signal,
+    )).resolves.toBe(false);
+    expect(ensurePeerAgentBinding).toHaveBeenCalledOnce();
+
+    ensurePeerAgentBinding.mockRejectedValueOnce(new Error('identity protocol unavailable'));
+    await expect(authenticate.call(
+      agentLike as unknown as ThisParameterType<typeof authenticate>,
+      candidate,
+      signal,
+    )).resolves.toBe(false);
+  });
+
   it('canonicalizes string peer IDs before the libp2p protocol lookup', async () => {
     const peerId = '12D3KooWLwPkoiastt27S2SRPtdx6t8KuFXwcbHovgCkAMfkJcXx';
     const get = vi.fn(async (peer: {
@@ -431,9 +495,10 @@ describe('Random Sampling lifecycle repair adapter', () => {
 
   it('excludes a staked address when the live peer cannot authenticate the binding', async () => {
     const classifyShardingTableCore = vi.fn(async () => 'member' as const);
-    const authenticateCorePeerAddress = vi.fn(async (agent: RegistryAgent) =>
-      agent.peerId === 'peer-authenticated');
-    const agentLike = makeRepairAgent({
+    const ensurePeerAgentBinding = vi.fn(async (peerId: string) =>
+      peerId === 'peer-authenticated');
+    const agentLike = withProductionCorePeerAuthentication(makeRepairAgent({
+      networkAdmissionCoordinator: { ensurePeerAgentBinding },
       discovery: {
         findAgents: vi.fn(async () => [
           {
@@ -448,13 +513,12 @@ describe('Random Sampling lifecycle repair adapter', () => {
           },
         ]),
       },
-      authenticateCorePeerAddress,
       classifyShardingTableCore,
       syncExactKnowledgeAssetsFromPeerDetailed: foundAt(['peer-authenticated']),
-    });
+    }));
 
     await expect(runLifecycleRepair(agentLike)).resolves.toEqual(EMPTY_MATERIAL);
-    expect(authenticateCorePeerAddress).toHaveBeenCalledTimes(2);
+    expect(ensurePeerAgentBinding).toHaveBeenCalledTimes(2);
     expect(classifyShardingTableCore).toHaveBeenCalledOnce();
     expect(classifyShardingTableCore).toHaveBeenCalledWith(
       '0x00000000000000000000000000000000000000bb',

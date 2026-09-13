@@ -96,16 +96,17 @@ export async function findCorePeerIds(options: {
     async (agent) => {
       const authenticated = await awaitWithAbort((signal) =>
         options.authenticatePeerAddress(agent, signal));
+      if (!authenticated) return { agent, authenticated: false as const };
       return {
         agent,
-        evidence: authenticated
-          ? await awaitWithAbort((signal) => options.classifyMembership(agent, signal))
-          : 'non-member' as const,
+        authenticated: true as const,
+        evidence: await awaitWithAbort((signal) => options.classifyMembership(agent, signal)),
       };
     },
   );
   const eligible = classified
-    .filter(({ evidence }) => acceptsCoreMembership(evidence, options.membershipPolicy))
+    .filter((candidate) => candidate.authenticated
+      && acceptsCoreMembership(candidate.evidence, options.membershipPolicy))
     .map(({ agent }) => agent);
   if (options.signal?.aborted) {
     throw abortReason();
