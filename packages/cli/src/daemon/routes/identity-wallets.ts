@@ -3,7 +3,7 @@ import type { IdentityWalletContracts } from '@origintrail-official/dkg-chain';
 import {
   IDENTITY_STORAGE_WALLET_ABI,
   identityWalletFunctionSignature,
-} from '@origintrail-official/dkg-core';
+} from '@origintrail-official/dkg-core/identity-wallet-contract-interface';
 import {
   classifyChainRpcTransportStatus,
   jsonResponse,

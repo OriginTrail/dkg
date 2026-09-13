@@ -12,7 +12,7 @@ import {
   IDENTITY_STORAGE_WALLET_ABI,
   IDENTITY_WALLET_ABI,
   PROFILE_IDENTITY_WALLET_ABI,
-} from '@origintrail-official/dkg-core';
+} from '@origintrail-official/dkg-core/identity-wallet-contract-interface';
 import type { IdentityWalletContracts } from '../identity-wallet-api.js';
 import { eqAddress } from './address.js';
 import {

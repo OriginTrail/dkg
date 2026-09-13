@@ -471,14 +471,5 @@ export {
 } from './node-timer.js';
 export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
-export {
-  IDENTITY_STORAGE_WALLET_ABI,
-  IDENTITY_WALLET_ABI,
-  IDENTITY_WALLET_CONTRACT_INTERFACE,
-  PROFILE_IDENTITY_WALLET_ABI,
-  identityWalletFunctionSignature,
-  type IdentityWalletAbiFunction,
-  type IdentityWalletAbiParameter,
-} from './identity-wallet-contract-interface.js';
 
 export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';

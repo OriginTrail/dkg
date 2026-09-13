@@ -6,7 +6,7 @@ import {
   PROFILE_IDENTITY_WALLET_ABI,
   identityWalletFunctionSignature,
   type IdentityWalletAbiFunction,
-} from '@origintrail-official/dkg-core';
+} from '@origintrail-official/dkg-core/identity-wallet-contract-interface';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 
 function canonicalFunction(contract: string, name: string): IdentityWalletAbiFunction {

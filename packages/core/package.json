@@ -15,6 +15,11 @@
       "import": "./dist/project-ontology.js",
       "default": "./dist/project-ontology.js"
     },
+    "./identity-wallet-contract-interface": {
+      "types": "./dist/identity-wallet-contract-interface.d.ts",
+      "import": "./dist/identity-wallet-contract-interface.js",
+      "default": "./dist/identity-wallet-contract-interface.js"
+    },
     "./query-catalog-parameters": {
       "types": "./dist/query-catalog-parameters.d.ts",
       "import": "./dist/query-catalog-parameters.js",
