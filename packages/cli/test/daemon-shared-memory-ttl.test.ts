@@ -96,7 +96,7 @@ describe('daemon shared-memory TTL route wiring', () => {
     for (const alias of routes) {
       const read = await fetch(daemon!.base + alias, { headers: authHeaders(daemon!) });
       expect(read.status).toBe(200);
-      expect(await read.json()).toMatchObject({ ttlMs: ttlDays * DAY });
+      expect(await read.json()).toEqual({ ttlMs: ttlDays * DAY, ttlDays });
     }
   });
 

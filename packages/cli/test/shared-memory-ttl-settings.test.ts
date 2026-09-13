@@ -247,7 +247,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
       expect(await response.json()).toEqual({ ok: true, ttlMs, ttlDays });
       expect(runtimeTtl()).toBe(ttlMs);
       expect(JSON.parse(await readFile(configPath(), 'utf8'))).toMatchObject({ sharedMemoryTtlMs: ttlMs, workspaceTtlMs: ttlMs });
-      expect(await (await fetch(baseUrl + route)).json()).toMatchObject({ ttlMs });
+      expect(await (await fetch(baseUrl + route)).json()).toEqual({ ttlMs, ttlDays });
     },
   );
 });
