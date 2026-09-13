@@ -1309,28 +1309,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return Object.freeze([...new Set([...responsibilityIds, ...configuredIds])].sort());
   }
 
-  /** Canonical configured-and-live scope for privacy-safe shadow evidence. */
-  readRfc64CatalogShadowContextGraphIdsV1(this: DKGAgent): readonly string[] {
-    return rfc64CatalogResponsibilityRegistryForV1(
-      this,
-      this.config.rfc64CatalogExecutionPlan,
-    ).shadowContextGraphIds();
-  }
-
-  /** Canonical construction-time facts used by operator status projections. */
-  readRfc64CatalogExecutionSelectionV1(
-    this: DKGAgent,
-  ): Readonly<Pick<
-    Rfc64CatalogExecutionPlanV1,
-    'activationSource' | 'responsibilityDefaultMode'
-  >> {
-    const plan = this.config.rfc64CatalogExecutionPlan;
-    return Object.freeze({
-      activationSource: plan.activationSource,
-      responsibilityDefaultMode: plan.responsibilityDefaultMode,
-    });
-  }
-
   /** Constant-time point lookup for rollout-owned hot-path classification. */
   readRfc64CatalogResponsibilityV1(
     this: DKGAgent,

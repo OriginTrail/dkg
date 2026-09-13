@@ -166,7 +166,6 @@ export class Rfc64CatalogResponsibilityRegistryV1 {
         .map((contextGraphId) => this.read(contextGraphId)),
     );
   }
-
 }
 
 function snapshotContextGraphModesV1(
