@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { waitForActiveRpcRequest } from './rpc-request-transport.js';
+
 export interface TtlValueCacheOptions<V> {
   ttlMs: number | ((value: CacheValue<V>) => number);
   now?: () => number;
@@ -143,6 +145,98 @@ export class KeyedSingleFlight<K, I = K> {
 
   private epochUnchanged(key: K, epoch: { global: number; key: number }): boolean {
     return this.globalEpoch === epoch.global && (this.keyEpochs.get(key) ?? 0) === epoch.key;
+  }
+}
+
+interface AbortableSingleFlightState<V> {
+  readonly controller: AbortController;
+  promise: Promise<V>;
+  waiters: number;
+  settled: boolean;
+}
+
+/**
+ * Per-key shared physical work with waiter-local cancellation.
+ *
+ * A caller abandoning its wait never poisons peers. When the final waiter
+ * leaves, the physical operation is aborted and detached from the key so a
+ * later caller can start fresh. Invalidation also aborts the current physical
+ * request and advances an epoch, preventing an implementation that ignores
+ * cancellation from publishing a stale success through `onSuccess`.
+ */
+export class AbortableKeyedSingleFlight<K> {
+  private readonly inflight = new Map<K, AbortableSingleFlightState<unknown>>();
+
+  private readonly epochs = new Map<K, number>();
+
+  async run<V>(
+    key: K,
+    load: (signal: AbortSignal) => Promise<V>,
+    onSuccess?: (value: V) => void,
+    abandonmentMessage = 'Shared request has no active waiters',
+  ): Promise<V> {
+    let state = this.inflight.get(key) as AbortableSingleFlightState<V> | undefined;
+    if (state === undefined) {
+      const epoch = this.epoch(key);
+      const controller = new AbortController();
+      state = {
+        controller,
+        promise: Promise.resolve(undefined as V),
+        waiters: 0,
+        settled: false,
+      };
+      const shared = state;
+      // Enrol the initiating waiter before physical work can settle.
+      shared.promise = Promise.resolve()
+        .then(() => load(controller.signal))
+        .then((value) => {
+          if (onSuccess !== undefined && this.epoch(key) === epoch) onSuccess(value);
+          return value;
+        })
+        .finally(() => {
+          shared.settled = true;
+          if (this.inflight.get(key) === shared) this.inflight.delete(key);
+        });
+      this.inflight.set(key, shared as AbortableSingleFlightState<unknown>);
+    }
+
+    state.waiters += 1;
+    try {
+      return await waitForActiveRpcRequest(state.promise);
+    } finally {
+      state.waiters -= 1;
+      if (state.waiters === 0 && !state.settled) {
+        if (this.inflight.get(key) === state) this.inflight.delete(key);
+        this.bumpEpoch(key);
+        const abandoned = new Error(abandonmentMessage);
+        abandoned.name = 'AbortError';
+        state.controller.abort(abandoned);
+      }
+    }
+  }
+
+  invalidate(key: K, reason = 'Shared request was invalidated'): void {
+    const state = this.inflight.get(key);
+    this.inflight.delete(key);
+    this.bumpEpoch(key);
+    if (state !== undefined && !state.settled) {
+      const invalidated = new Error(reason);
+      invalidated.name = 'AbortError';
+      state.controller.abort(invalidated);
+    }
+  }
+
+  invalidateAll(reason = 'Shared requests were invalidated'): void {
+    const keys = [...this.inflight.keys()];
+    for (const key of keys) this.invalidate(key, reason);
+  }
+
+  private epoch(key: K): number {
+    return this.epochs.get(key) ?? 0;
+  }
+
+  private bumpEpoch(key: K): void {
+    this.epochs.set(key, this.epoch(key) + 1);
   }
 }
 

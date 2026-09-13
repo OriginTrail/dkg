@@ -56,14 +56,10 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import {
-  createRpcRequestProvider,
   enrichEvmError,
   MockChainAdapter,
   resolveRpcUrls,
   getRpcFailoverStats,
-  isRpcRequestGovernorQueueFullError,
-  withRpcRequestContext,
-  withRpcRequestTimeout,
 } from '@origintrail-official/dkg-chain';
 import type { DaemonRouteRpcTransport } from '../../runtime-chain-config.js';
 import {
@@ -373,66 +369,18 @@ export async function probeRpcEndpoint(
   blockNumber: number | null;
   error?: string;
 }> {
-  const provider = routeTransport === undefined
-    ? new ethers.JsonRpcProvider(rpcUrl, undefined, { cacheTimeout: -1 })
-    : createRpcRequestProvider(rpcUrl, {
-        maxRetries: 0,
-        providerOptions: { cacheTimeout: -1, batchMaxCount: 1 },
-        endpointSlot: index,
-        admission: routeTransport.diagnosticAdmission,
-        onRequest: routeTransport.onRequest,
-      });
-  const start = Date.now();
-  try {
-    const response = await withRpcRequestContext(
-      { requestClass: 'background' },
-      () => withRpcRequestTimeout(
-        3_000,
-        'RPC health probe',
-        () => provider._send({
-          id: index + 1,
-          jsonrpc: '2.0',
-          method: 'eth_blockNumber',
-          params: [],
-        }),
-      ),
-    );
-    const first = response[0];
-    if (first === undefined || 'error' in first) {
-      throw new Error('RPC health probe returned an error');
-    }
-    const rawBlockNumber = BigInt(String(first.result));
-    if (rawBlockNumber > BigInt(Number.MAX_SAFE_INTEGER)) {
-      throw new Error('RPC health probe block number exceeds the safe integer range');
-    }
-    const blockNumber = Number(rawBlockNumber);
-    return {
-      index,
-      role: index === 0 ? 'primary' : 'backup',
-      ok: true,
-      status: 'healthy',
-      latencyMs: Date.now() - start,
-      blockNumber,
-    };
-  } catch (err) {
+  if (routeTransport === undefined) {
     return {
       index,
       role: index === 0 ? 'primary' : 'backup',
       ok: false,
-      status: isRpcRequestGovernorQueueFullError(err)
-        ? 'skipped-local-capacity'
-        : 'unhealthy',
+      status: 'skipped-local-capacity',
       latencyMs: null,
       blockNumber: null,
-      error: isRpcRequestGovernorQueueFullError(err)
-        ? 'RPC health probe skipped: local diagnostic capacity unavailable'
-        : err instanceof Error && err.message.includes('timed out')
-          ? 'RPC health probe timed out'
-          : 'RPC health probe failed',
+      error: 'RPC health probe skipped: daemon RPC transport unavailable',
     };
-  } finally {
-    provider.destroy();
   }
+  return routeTransport.probeEndpoint(rpcUrl, index);
 }
 
 interface PublicChainSummary {
@@ -498,27 +446,10 @@ function createRouteEvmProvider(
   rpcUrls: string[] | undefined,
   routeTransport?: DaemonRouteRpcTransport,
 ): ethers.JsonRpcProvider | ethers.FallbackProvider {
-  const urls = resolveRpcUrls(rpcUrl, rpcUrls);
-  const providers = urls.map((url, index) => routeTransport === undefined
-    ? new ethers.JsonRpcProvider(url, undefined, { cacheTimeout: -1 })
-    : createRpcRequestProvider(url, {
-        maxRetries: urls.length > 1 ? 0 : undefined,
-        providerOptions: { cacheTimeout: -1, batchMaxCount: 1 },
-        endpointSlot: index,
-        admission: routeTransport.admission,
-        onRequest: routeTransport.onRequest,
-      }));
-  if (providers.length === 1) return providers[0];
-  return new ethers.FallbackProvider(
-    providers.map((provider, index) => ({
-      provider,
-      priority: index + 1,
-      stallTimeout: 4_000,
-      weight: 1,
-    })),
-    undefined,
-    { quorum: 1 },
-  );
+  if (routeTransport === undefined) {
+    throw new Error('Daemon RPC transport unavailable');
+  }
+  return routeTransport.createProvider(rpcUrl, rpcUrls);
 }
 
 // Quad-count cache for external SPARQL backends. A full-store COUNT is not a
@@ -1248,11 +1179,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       });
     }
     const rpcUrls = resolveRpcUrls(rpcUrl, chain?.rpcUrls);
-    const rpcs = await withRpcRequestContext(
-      { requestClass: 'background' },
-      () => Promise.all(
-        rpcUrls.map((rpc, index) => probeRpcEndpoint(rpc, index, routeRpcTransport)),
-      ),
+    const rpcs = await Promise.all(
+      rpcUrls.map((rpc, index) => probeRpcEndpoint(rpc, index, routeRpcTransport)),
     );
     const primary = rpcs[0];
     const healthy = rpcs.find((rpc) => rpc.ok);

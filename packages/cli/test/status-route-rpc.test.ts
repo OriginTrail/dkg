@@ -30,8 +30,12 @@ import {
   noteRpcServed,
   getRpcFailoverStats,
   _resetRpcFailoverStatsForTest,
+  withRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
-import { createDaemonRpcRuntime } from '../src/runtime-chain-config.js';
+import {
+  createDaemonRpcRuntime,
+  type DaemonRouteRpcTransport,
+} from '../src/runtime-chain-config.js';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { DashboardDB } from '@origintrail-official/dkg-node-ui';
@@ -122,6 +126,60 @@ describe('daemon direct RPC probe admission', () => {
       });
     }
   }, 10_000);
+
+  it('cannot let sustained public diagnostics jump queued RFC-64-class work', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl,
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 20,
+        foregroundReservePercent: 80,
+        burstRequests: 5,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    })!;
+    try {
+      await withRpcRequestContext(
+        { requestClass: 'background' },
+        () => runtime.governor.acquireActiveRequest(),
+      );
+      const scheduledRfc64Admission = withRpcRequestContext(
+        { requestClass: 'background' },
+        () => runtime.governor.acquireActiveRequest(),
+      );
+      await vi.waitFor(() => expect(runtime.governor.snapshot().backgroundQueued).toBe(1));
+
+      const flood = await Promise.all(Array.from({ length: 50 }, (_, index) => (
+        probeRpcEndpoint(rpcUrl, index, runtime.routeTransport)
+      )));
+      expect(flood.every((result) => result.status === 'skipped-local-capacity')).toBe(true);
+      expect(hits).toBe(0);
+      await expect(runtime.governor.acquire('foreground')).resolves.toBeUndefined();
+      await expect(scheduledRfc64Admission).resolves.toBeUndefined();
+      expect(runtime.governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundAdmitted: 2,
+        backgroundQueued: 0,
+        rejected: 50,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }, 10_000);
 });
 
 async function requestStatusWithAgent(
@@ -131,6 +189,7 @@ async function requestStatusWithAgent(
   networkOverride: RequestContext['network'] = null,
   rfc64CatalogOverride?: RequestContext['rfc64Catalog'],
   rfc64PublicCatalogOverride?: RequestContext['rfc64PublicCatalog'],
+  routeRpcTransport?: DaemonRouteRpcTransport,
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -172,6 +231,7 @@ async function requestStatusWithAgent(
       nodeVersion: '0.0.0-test',
       nodeCommit: '',
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+      routeRpcTransport,
     } as unknown as RequestContext);
   });
 
@@ -186,6 +246,61 @@ async function requestStatusWithAgent(
     });
   }
 }
+
+describe('/api/chain/rpc-health partial adapter configuration', () => {
+  it('uses the governed daemon transport when rpcUrl exists without a Hub address', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const rpcUrl = `http://127.0.0.1:${address.port}`;
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl,
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 100,
+        foregroundReservePercent: 0,
+        burstRequests: 5,
+        maxQueueSize: 8,
+        startupJitterMs: 0,
+      },
+    })!;
+    try {
+      expect(runtime.chainConfig).toBeUndefined();
+      const response = await requestStatusWithAgent(
+        {},
+        { chain: { type: 'evm', rpcUrl, chainId: 'evm:31337' } },
+        '/api/chain/rpc-health',
+        null,
+        undefined,
+        runtime.routeTransport,
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        ok: true,
+        configured: true,
+        rpcEndpointCount: 1,
+        blockNumber: 16,
+      });
+      expect(hits).toBe(1);
+      expect(runtime.governor.snapshot().backgroundAdmitted).toBe(1);
+      expect(runtime.drainRouteRpcUsage()).toMatchObject({
+        byMethod: { eth_blockNumber: 1 },
+        lifetimeTotal: 1,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+});
 
 describe('/api/status RFC-64 private recovery privacy', () => {
   it('surfaces only the privacy-safe RFC-64 authority RPC circuit snapshot', async () => {

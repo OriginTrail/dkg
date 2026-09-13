@@ -510,6 +510,14 @@ export class RpcFailoverClient {
             ));
             populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
           } catch (estErr) {
+            // Local governor pressure is caller-level backpressure, not an
+            // endpoint defect and not permission to drop the requested OOG
+            // headroom. Preserve the original retry-later error unchanged:
+            // the caller may retry later, while this transport must neither
+            // switch providers nor sign an unbuffered transaction.
+            if (classifyRpcRetryDisposition(estErr) === 'retry-later') {
+              throw estErr;
+            }
             // A RETRYABLE estimate failure must not silently drop the OOG
             // headroom: if another RPC is left, re-throw so the loop fails over
             // to it (it may estimate fine and apply the buffer). Only on the LAST

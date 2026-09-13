@@ -29,7 +29,6 @@ import {
   createRpcRequestProvider,
   RpcRequestGovernor,
   RpcEndpointsExhaustedError,
-  withRpcRequestContext,
   type ChainAdapter,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -283,7 +282,7 @@ describe('RFC-64 rollout authority integration', () => {
     }
   });
 
-  it('keeps explicitly scheduled authority reads in the background lane', async () => {
+  it('runs the production scheduled authority revision read in the background lane with its owner signal', async () => {
     const governor = new RpcRequestGovernor({
       maxRequestsPerSecond: 100,
       foregroundReservePercent: 50,
@@ -291,34 +290,182 @@ describe('RFC-64 rollout authority integration', () => {
       maxQueueSize: 8,
       startupJitterMs: 0,
     });
-    const provider = createRpcRequestProvider('http://127.0.0.1:1', {
-      maxRetries: 0,
-      providerOptions: { batchMaxCount: 1 },
-      admission: governor,
+    let observedSignal: AbortSignal | undefined;
+    const readRevisions = vi.fn(async (
+      _contextGraphIds: readonly string[],
+      options?: { signal?: AbortSignal },
+    ) => {
+      observedSignal = options?.signal;
+      await governor.acquireActiveRequest();
+      return new Map([['9', `0x${'ab'.repeat(32)}`]]);
     });
-    const edge = await startAgent({ name: 'scheduled-authority-background-lane' });
-    vi.spyOn(edge, 'getContextGraphOnChainId').mockImplementation(async () => {
-      await provider._send({
-        id: 1,
-        jsonrpc: '2.0',
-        method: 'eth_blockNumber',
-        params: [],
-      }).catch(() => undefined);
-      return null;
-    });
-    vi.spyOn(edge, 'getContextGraphOwner').mockResolvedValue(`did:dkg:agent:${AUTHOR}`);
+    const { edge, runtime } = await prepareAuthorityRefreshLifecycle(readRevisions);
+    const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
     try {
-      await withRpcRequestContext(
-        { requestClass: 'background' },
-        () => edge.readRfc64CurrentCuratorAuthorityBindingV1(CONTEXT_GRAPH_ID),
-      );
+      runtime.start(createOperationContext('system'));
+      await runtime.whenIdle();
+      expect(readRevisions).toHaveBeenCalledWith(['9'], {
+        signal: expect.any(AbortSignal),
+      });
+      expect(observedSignal?.aborted).toBe(false);
       expect(governor.snapshot()).toMatchObject({
         backgroundAdmitted: 1,
         foregroundAdmitted: 0,
       });
     } finally {
-      provider.destroy();
+      await runtime.close();
     }
+  });
+
+  it('cancels a queued auto-publish authority read at the observer boundary without HTTP or warnings', async () => {
+    let hits = 0;
+    const rpc = createServer((req, res) => {
+      req.resume();
+      req.on('end', () => {
+        hits += 1;
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: '0x10' }));
+      });
+    });
+    await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+    const address = rpc.address() as AddressInfo;
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 50,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 60_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    const provider = createRpcRequestProvider(
+      `http://127.0.0.1:${address.port}`,
+      {
+        maxRetries: 0,
+        providerOptions: { batchMaxCount: 1 },
+        admission: governor,
+      },
+    );
+    const edge = await startAgent({
+      name: 'auto-publish-observer-local-cancellation',
+    });
+    await edge.createContextGraph({
+      id: CONTEXT_GRAPH_ID,
+      name: 'Auto-publish observer local cancellation',
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    const warn = vi.spyOn((edge as any).log, 'warn');
+    vi.spyOn(edge, 'recordRfc64SwmAuthorInventoryShadowV1').mockResolvedValue({
+      status: 'dormant',
+      action: 'upsert',
+      attempts: 0,
+      headObjectDigest: null,
+      error: null,
+      dormantReason: 'inactive-lane',
+    });
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    vi.spyOn(edge, 'resolveRfc64AcceptedCompatibilityAuthorityV1').mockReturnValue(null);
+    let observedSignal: AbortSignal | undefined;
+    vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
+      .mockImplementation(async (_contextGraphId, signal) => {
+        observedSignal = signal;
+        await provider._send({
+          id: 1,
+          jsonrpc: '2.0',
+          method: 'eth_blockNumber',
+          params: [],
+        });
+        return null;
+      });
+
+    try {
+      const observer = edge.observeRfc64DurableSwmPromotionV1({
+        contextGraphId: CONTEXT_GRAPH_ID,
+        assertionCoordinate: 'observer-local-cancellation',
+        lifecycleAgentAddress: AUTHOR,
+        shareOperationId: 'observer-local-cancellation-operation',
+        ctx: createOperationContext('share'),
+      });
+      await vi.waitFor(() => {
+        expect(governor.snapshot()).toMatchObject({
+          backgroundQueued: 1,
+          foregroundQueued: 0,
+          foregroundAdmitted: 0,
+          backgroundAdmitted: 0,
+        });
+      });
+      expect(observedSignal?.aborted).toBe(false);
+
+      await edge.closeRfc64SwmInventoryObserversV1();
+      await expect(observer).resolves.toBeUndefined();
+
+      expect(observedSignal?.aborted).toBe(true);
+      expect(governor.snapshot()).toMatchObject({
+        backgroundQueued: 0,
+        cancelled: 1,
+        foregroundAdmitted: 0,
+        backgroundAdmitted: 0,
+      });
+      expect(hits).toBe(0);
+      expect(warn).not.toHaveBeenCalled();
+      expect((edge as any).rfc64BackgroundWorkDispatcherV1.shutdownSignal.aborted)
+        .toBe(false);
+      await expect((edge as any).rfc64BackgroundWorkDispatcherV1.runAwaited(
+        async () => 'still-open',
+      )).resolves.toBe('still-open');
+    } finally {
+      provider.destroy();
+      await edge.stop();
+      await new Promise<void>((resolve, reject) => {
+        rpc.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  });
+
+  it('cancels and drains queued scheduled responsibility RPC admission on agent shutdown', async () => {
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 50,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 60_000,
+    }, {
+      clock: {
+        now: () => Date.now(),
+        random: () => 1,
+        setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-shutdown-drain',
+      activation: activation('catalog'),
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockImplementation(async () => {
+      await governor.acquireActiveRequest();
+      return 'public';
+    });
+
+    expect(edge.scheduleRfc64CatalogResponsibilityReconciliationV1(CONTEXT_GRAPH_ID))
+      .toBe(true);
+    await vi.waitFor(() => {
+      expect(governor.snapshot().backgroundQueued).toBe(1);
+    });
+    await expect(edge.stop()).resolves.toBeUndefined();
+    expect(governor.snapshot()).toMatchObject({
+      backgroundQueued: 0,
+      cancelled: 1,
+      backgroundAdmitted: 0,
+    });
   });
 
   it('keeps awaited responsibility reconciliation in the foreground lane at cold start', async () => {
@@ -340,6 +487,7 @@ describe('RFC-64 rollout authority integration', () => {
       name: 'foreground-responsibility-reconcile',
       activation: activation('catalog'),
     });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockImplementation(async () => {
       await governor.acquireActiveRequest();
       return 'public';

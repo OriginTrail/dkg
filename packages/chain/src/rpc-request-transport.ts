@@ -318,6 +318,11 @@ export class RpcRequestJsonRpcProvider extends JsonRpcProvider {
     payload: JsonRpcPayload | Array<JsonRpcPayload>,
   ): Promise<Array<JsonRpcResult>> {
     const entries = Array.isArray(payload) ? payload : [payload];
+    if (this.transport.admission !== undefined && entries.length > 1) {
+      throw new TypeError(
+        'Governed RPC transports require single-entry JSON-RPC dispatch',
+      );
+    }
     await admitAndObserveRpcAttempt(
       entries.map((entry) => String(entry?.method ?? 'other')),
       this.transport,
@@ -340,10 +345,25 @@ export function createRpcRequestProvider(
     }
     return shouldRetry;
   };
-  const providerOptions = config.network == null
+  if (
+    config.admission !== undefined
+    && (config.providerOptions?.batchMaxCount ?? 1) > 1
+  ) {
+    throw new TypeError(
+      'Governed RPC transports require providerOptions.batchMaxCount <= 1',
+    );
+  }
+  // Ethers batches by default when the option is omitted. A governor accounts
+  // and paces billable JSON-RPC entries, so governed providers must disable
+  // coalescing at construction rather than acquiring N permits and releasing
+  // one N-entry HTTP burst later.
+  const normalizedProviderOptions = config.admission === undefined
     ? config.providerOptions
+    : { ...config.providerOptions, batchMaxCount: 1 };
+  const providerOptions = config.network == null
+    ? normalizedProviderOptions
     : {
-        ...config.providerOptions,
+        ...normalizedProviderOptions,
         staticNetwork: config.network as JsonRpcApiProviderOptions['staticNetwork'],
       };
   return new RpcRequestJsonRpcProvider(request, config.network, providerOptions, config);

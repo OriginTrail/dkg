@@ -35,6 +35,10 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
         catalogIssuerDelegationExpiresAt: '1893456000000' as TimestampMsV1,
       },
     });
+    // Startup is allowed to enqueue responsibility projections. Fence those
+    // lifecycle-owned passes before measuring the promotion observer's bounded
+    // settlement loop so the assertion counts only work caused by this share.
+    await agent.whenRfc64CatalogResponsibilitiesIdleV1();
     const inventoryDigest = `0x${'a0'.repeat(32)}` as Digest32V1;
     const record = vi.spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
       .mockResolvedValueOnce({

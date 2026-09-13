@@ -432,6 +432,40 @@ describe('RpcFailoverClient.populateAndSign — #870 signer propagation + estima
     expect(signPopulated.calls).toEqual([]);
   });
 
+  it('propagates local queue saturation during buffered estimation without signing or failing over', async () => {
+    const queueFull = new RpcRequestGovernorQueueFullError(1);
+    const primary = {};
+    const backup = {};
+    const primaryEstimate = recorder(async () => { throw queueFull; });
+    const backupEstimate = recorder(async () => 21_000n);
+    const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
+    const contract = {
+      connect: (rpcSigner: unknown) => ({
+        doWrite: {
+          populateTransaction,
+          estimateGas: (rpcSigner as { boundTo?: unknown }).boundTo === primary
+            ? primaryEstimate
+            : backupEstimate,
+        },
+      }),
+    } as any;
+    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
+    const client = makeClient([primary, backup], URLS, signPopulated as SignPopulatedFn);
+
+    await expect(client.populateAndSign(
+      contract,
+      'doWrite',
+      [],
+      makeSigner(),
+      'V10 publish',
+      { gasLimitBufferBps: 1_000 },
+    )).rejects.toBe(queueFull);
+    expect(populateTransaction.calls).toHaveLength(1);
+    expect(primaryEstimate.calls).toHaveLength(1);
+    expect(backupEstimate.calls).toEqual([]);
+    expect(signPopulated.calls).toEqual([]);
+  });
+
   it('#870: the per-provider-reconnected signer (same address, bound to the active provider) is what signs', async () => {
     const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
     const contract = { connect: () => ({ doWrite: { populateTransaction } }) } as any;

@@ -145,7 +145,7 @@ describe('RpcRequestGovernor', () => {
     });
   });
 
-  it('admits non-queuing diagnostics during startup jitter from background capacity only', async () => {
+  it('lets diagnostics bypass startup jitter but never jump queued background work', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000);
     const governor = new RpcRequestGovernor({
@@ -168,15 +168,15 @@ describe('RpcRequestGovernor', () => {
     await expect(governor.acquireImmediately('background')).rejects.toBeInstanceOf(
       RpcRequestGovernorQueueFullError,
     );
-    // Diagnostics may jump delayed background work, but remain within the same
-    // background token bucket and never consume foreground-reserved capacity.
-    await expect(governor.acquireDiagnosticRequestImmediately()).resolves.toBeUndefined();
+    // Health traffic is optional: even though it may skip startup jitter, it
+    // cannot consume the token ahead of an already-queued workload.
     await expect(governor.acquireDiagnosticRequestImmediately()).rejects.toBeInstanceOf(
       RpcRequestGovernorQueueFullError,
     );
     await expect(governor.acquireImmediately('foreground')).resolves.toBeUndefined();
     controller.abort(new Error('test cleanup'));
     await expect(queued).rejects.toThrow('test cleanup');
+    await expect(governor.acquireDiagnosticRequestImmediately()).resolves.toBeUndefined();
     expect(governor.snapshot()).toMatchObject({
       backgroundAdmitted: 1,
       foregroundAdmitted: 1,

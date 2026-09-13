@@ -35,7 +35,6 @@ import {
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
-import { withRpcRequestContext } from '@origintrail-official/dkg-chain';
 import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
@@ -318,9 +317,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
-    return withRpcRequestContext({ requestClass: 'background' }, async () => {
+    const observerSignal = rfc64SwmInventoryShadowRuntimeV1(this).shutdownSignal;
+    return this.rfc64BackgroundWorkDispatcherV1.runBackground(async (shutdownSignal) => {
       try {
-        const shutdownSignal = rfc64SwmInventoryShadowRuntimeV1(this).shutdownSignal;
         if (shutdownSignal.aborted) return;
         let result = await this.recordRfc64SwmAuthorInventoryShadowV1(params);
         let lastResponsibilityFailure: unknown = null;
@@ -388,12 +387,13 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
           }
         }
       } catch (cause) {
+        if (shutdownSignal.aborted) return;
         this.log.warn(
           params.ctx,
           `RFC-64 SWM inventory/catalog lifecycle escaped its failure boundary: ${cause instanceof Error ? cause.message : String(cause)}`,
         );
       }
-    });
+    }, observerSignal);
   }
 
   /** Await a point-in-time observer snapshot for tests and controlled drains. */

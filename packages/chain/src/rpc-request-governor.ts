@@ -367,13 +367,15 @@ export class RpcRequestGovernor {
 
   #canAdmitImmediately(
     requestClass: RpcRequestClass,
-    allowDiagnosticBypass = false,
+    ignoreBackgroundStartupJitter = false,
   ): boolean {
     if (this.#availableTokens < 1) return false;
     if (requestClass === 'foreground') return this.#foregroundQueue.length === 0;
     return this.#foregroundQueue.length === 0
-      && (allowDiagnosticBypass || this.#backgroundQueue.length === 0)
-      && (allowDiagnosticBypass || this.#clock.now() >= this.#backgroundNotBeforeMs)
+      // Diagnostics may skip only the cold-start delay. They remain optional
+      // work and must never jump an already-queued background workload.
+      && this.#backgroundQueue.length === 0
+      && (ignoreBackgroundStartupJitter || this.#clock.now() >= this.#backgroundNotBeforeMs)
       && this.#backgroundAvailableTokens >= 1;
   }
 

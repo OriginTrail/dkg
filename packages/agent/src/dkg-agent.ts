@@ -1078,7 +1078,13 @@ export class DKGAgent extends DKGAgentBase {
           )
         ),
         runAuthorityRead: (signal, read) => (
-          this.rfc64AuthorityReadCoordinatorV1.run(signal, read)
+          // This binding is invoked only by the scheduled revision scan. The
+          // coordinator itself remains caller-neutral so direct public
+          // authority reads inherit foreground priority and cancellation.
+          withRpcRequestContext(
+            { requestClass: 'background', signal },
+            () => this.rfc64AuthorityReadCoordinatorV1.run(signal, read),
+          )
         ),
       },
       onActiveContextGraphIdsReadFailure: (error) => {
@@ -1094,7 +1100,7 @@ export class DKGAgent extends DKGAgentBase {
         );
       },
       refreshContextGraph: async (contextGraphId, signal) => (
-        withRpcRequestContext({ requestClass: 'background' }, async () => (
+        withRpcRequestContext({ requestClass: 'background', signal }, async () => (
           await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal) === null
             ? 'superseded'
             : 'committed'
@@ -2292,6 +2298,10 @@ export class DKGAgent extends DKGAgentBase {
     this.randomSamplingRuntime?.cancel();
     const authorityRetryDrain =
       this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
+    // Fence every detached RFC-64 responsibility, observer, and recovery RPC
+    // before sampling the physical drain. This owner signal reaches governor
+    // admission and active HTTP through the shared request context.
+    const rfc64BackgroundDrain = this.rfc64BackgroundWorkDispatcherV1.closeAndDrain();
     // Fence membership persistence before any network callback can enqueue
     // more work; the physical drain below completes before store teardown.
     const membershipPersistDrain = this.contextGraphMembershipPersistence?.closeAndDrain()
@@ -2370,7 +2380,7 @@ export class DKGAgent extends DKGAgentBase {
         for (const settled of snapshot) this.graphScopedStorePhysicalRuns?.delete(settled);
       }
     };
-    const drains: Promise<unknown>[] = [drainPhysicalRuns()];
+    const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));

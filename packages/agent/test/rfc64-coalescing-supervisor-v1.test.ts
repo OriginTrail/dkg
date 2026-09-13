@@ -139,6 +139,29 @@ describe('coalescing recurring task', () => {
     await runner.close();
   });
 
+  it('drains close-triggered cancellation without reporting a workload failure', async () => {
+    const onError = vi.fn();
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const runner = new CoalescingRecurringTask({
+      runPass: async (signal) => {
+        markStarted();
+        await new Promise<void>((_resolve, reject) => {
+          const onAbort = () => reject(signal.reason);
+          signal.addEventListener('abort', onAbort, { once: true });
+          if (signal.aborted) onAbort();
+        });
+      },
+      onError,
+      closingMessage: 'test closing',
+    });
+
+    runner.request();
+    await started;
+    await expect(runner.close()).resolves.toBeUndefined();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it('normalizes current and legacy bootstrap fields through one boundary', () => {
     const current = Object.freeze({
       acceptedPolicies: Object.freeze([]),

@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { KeyedSingleFlight, ReadThroughTtlCache, TtlValueCache } from '../src/keyed-ttl-single-flight-cache.js';
+import {
+  AbortableKeyedSingleFlight,
+  KeyedSingleFlight,
+  ReadThroughTtlCache,
+  TtlValueCache,
+} from '../src/keyed-ttl-single-flight-cache.js';
+import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -119,6 +125,65 @@ describe('KeyedSingleFlight', () => {
 
     expect(results).toEqual([1, 2]);
     expect(calls).toBe(2);
+  });
+});
+
+describe('AbortableKeyedSingleFlight', () => {
+  it('keeps shared work alive when one of two waiters cancels', async () => {
+    const flight = new AbortableKeyedSingleFlight<string>();
+    const loaded = deferred<number>();
+    let physicalSignal: AbortSignal | undefined;
+    const load = (signal: AbortSignal) => {
+      physicalSignal = signal;
+      return loaded.promise;
+    };
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    const first = withRpcRequestContext(
+      { signal: firstController.signal },
+      () => flight.run('chain', load),
+    );
+    const second = withRpcRequestContext(
+      { signal: secondController.signal },
+      () => flight.run('chain', load),
+    );
+    firstController.abort(new Error('first left'));
+    await expect(first).rejects.toThrow('first left');
+    expect(physicalSignal?.aborted).toBe(false);
+    loaded.resolve(31337);
+    await expect(second).resolves.toBe(31337);
+  });
+
+  it('aborts physical work when the final waiter leaves and admits a fresh run', async () => {
+    const flight = new AbortableKeyedSingleFlight<string>();
+    const controller = new AbortController();
+    let firstPhysicalSignal: AbortSignal | undefined;
+    const first = withRpcRequestContext(
+      { signal: controller.signal },
+      () => flight.run('chain', async (signal) => {
+        firstPhysicalSignal = signal;
+        return new Promise<number>(() => undefined);
+      }),
+    );
+    controller.abort(new Error('deadline'));
+    await expect(first).rejects.toThrow('deadline');
+    expect(firstPhysicalSignal?.aborted).toBe(true);
+    await expect(flight.run('chain', async () => 84532)).resolves.toBe(84532);
+  });
+
+  it('suppresses stale success after invalidation without removing the newer run', async () => {
+    const flight = new AbortableKeyedSingleFlight<string>();
+    const stale = deferred<number>();
+    const fresh = deferred<number>();
+    const successes: number[] = [];
+    const oldRun = flight.run('chain', async () => stale.promise, (value) => successes.push(value));
+    flight.invalidate('chain');
+    const newRun = flight.run('chain', async () => fresh.promise, (value) => successes.push(value));
+    stale.resolve(1);
+    fresh.resolve(2);
+    await expect(oldRun).resolves.toBe(1);
+    await expect(newRun).resolves.toBe(2);
+    expect(successes).toEqual([2]);
   });
 });
 

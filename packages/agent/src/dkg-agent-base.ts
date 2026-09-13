@@ -23,6 +23,8 @@ import {
 import type { FinalizationRecoveryHealth } from './finalization-recovery-store.js';
 import { FinalizationRuntime } from './finalization-runtime.js';
 import type { Rfc64PublicCatalogServiceV1 } from './rfc64/public-catalog-service-v1.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from
+  './rfc64/background-work-dispatcher-v1.js';
 import type { Rfc64PublicCatalogWorkloadOwnerV1 } from
   './rfc64/public-catalog-workload-owner-v1.js';
 import type { Rfc64CatalogSynchronizationEvidenceV1 } from
@@ -1226,6 +1228,9 @@ export class DKGAgentBase {
   /** One agent-owned scope and terminal-evidence boundary for shadow rollout. */
   protected rfc64CatalogShadowObservabilityV1!:
     Rfc64CatalogShadowObservabilityRuntimeV1;
+  /** Caller-priority-preserving owner for every detached RFC-64 chain workload. */
+  protected readonly rfc64BackgroundWorkDispatcherV1 =
+    new Rfc64BackgroundWorkDispatcherV1();
   /** Exact process-local post-verification evidence, keyed by applied head. */
   protected readonly rfc64PublicCatalogSynchronizationEvidenceV1 =
     new Map<string, Rfc64CatalogSynchronizationEvidenceV1>();

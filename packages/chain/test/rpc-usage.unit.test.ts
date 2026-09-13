@@ -589,37 +589,90 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       .toBe(rpc.totalHits());
   }, 30_000);
 
-  it('admits and records every JSON-RPC entry in a retried batch', async () => {
-    const rpc = await startLoopbackRpc({
-      throttle: ['eth_blockNumber', 'eth_chainId'],
-    });
-    servers.push(rpc);
+  it('forces single-entry batching when governed even if provider options are omitted', () => {
     const governor = new RpcRequestGovernor({
-      maxRequestsPerSecond: 10_000,
-      foregroundReservePercent: 0,
-      burstRequests: 100,
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 2,
       maxQueueSize: 8,
       startupJitterMs: 0,
     });
-    const observed: string[] = [];
-    const provider = createRpcRequestProvider(rpc.url, {
-      maxRetries: 1,
+    const provider = createRpcRequestProvider('http://127.0.0.1:1', {
       admission: governor,
-      onRequest: (method) => observed.push(method),
+    });
+    try {
+      expect((provider as any)._getOption('batchMaxCount')).toBe(1);
+    } finally {
+      provider.destroy();
+    }
+  });
+
+  it('rejects a governed batchMaxCount override above one at construction', () => {
+    const governor = new RpcRequestGovernor({ startupJitterMs: 0 });
+    expect(() => createRpcRequestProvider('http://127.0.0.1:1', {
+      admission: governor,
+      providerOptions: { batchMaxCount: 2 },
+    })).toThrow(/batchMaxCount <= 1/u);
+  });
+
+  it('paces concurrent governed sends as independent single-entry HTTP requests', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 20,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      admission: governor,
+    });
+    try {
+      const first = provider._send({
+        id: 1, jsonrpc: '2.0', method: 'eth_blockNumber', params: [],
+      });
+      const second = provider._send({
+        id: 2, jsonrpc: '2.0', method: 'eth_chainId', params: [],
+      });
+      await expect.poll(() => governor.snapshot().foregroundQueued).toBe(1);
+      await expect.poll(() => rpc.totalHits()).toBe(1);
+      await Promise.all([first, second]);
+      expect(rpc.totalHits()).toBe(2);
+      expect(governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 2,
+        foregroundQueued: 0,
+      });
+    } finally {
+      provider.destroy();
+    }
+  });
+
+  it('rejects a direct multi-entry dispatch before mid-admission cancellation can burn permits', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      admission: governor,
     });
     try {
       await expect(provider._send([
         { id: 1, jsonrpc: '2.0', method: 'eth_blockNumber', params: [] },
         { id: 2, jsonrpc: '2.0', method: 'eth_chainId', params: [] },
-      ])).rejects.toBeTruthy();
-      expect(rpc.totalHits()).toBe(4);
-      expect(observed.sort()).toEqual([
-        'eth_blockNumber',
-        'eth_blockNumber',
-        'eth_chainId',
-        'eth_chainId',
-      ]);
-      expect(governor.snapshot().foregroundAdmitted).toBe(rpc.totalHits());
+      ])).rejects.toThrow(/single-entry JSON-RPC dispatch/u);
+      expect(rpc.totalHits()).toBe(0);
+      expect(governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 0,
+        foregroundQueued: 0,
+      });
     } finally {
       provider.destroy();
     }

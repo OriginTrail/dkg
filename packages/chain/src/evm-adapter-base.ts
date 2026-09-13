@@ -40,7 +40,6 @@ import {
 } from './evm-adapter-rpc.js';
 import {
   createRpcRequestProvider,
-  waitForActiveRpcRequest,
   withRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
@@ -57,7 +56,10 @@ import {
 } from './rpc-usage.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
 import { formatProviderContext } from './evm-adapter-types.js';
-import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
+import {
+  AbortableKeyedSingleFlight,
+  ReadThroughTtlCache,
+} from './keyed-ttl-single-flight-cache.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
@@ -858,15 +860,8 @@ export class EVMChainAdapterBase {
     { value: bigint; cachedAt: number }
   >();
 
-  protected readonly configuredStaticChainIdValidationsByProvider = new Map<
-    JsonRpcProvider,
-    {
-      readonly controller: AbortController;
-      promise: Promise<bigint>;
-      waiters: number;
-      settled: boolean;
-    }
-  >();
+  protected readonly configuredStaticChainIdValidationsByProvider =
+    new AbortableKeyedSingleFlight<JsonRpcProvider>();
 
   protected cachedKav10Address: { value: string; cachedAt: number } | undefined;
 
@@ -969,12 +964,9 @@ export class EVMChainAdapterBase {
   invalidatePublishPreflightCache(): void {
     this.cachedChainId = undefined;
     this.configuredStaticChainIdsByProvider.clear();
-    for (const validation of this.configuredStaticChainIdValidationsByProvider.values()) {
-      const invalidated = new Error('Configured chainId validation was invalidated');
-      invalidated.name = 'AbortError';
-      validation.controller.abort(invalidated);
-    }
-    this.configuredStaticChainIdValidationsByProvider.clear();
+    this.configuredStaticChainIdValidationsByProvider.invalidateAll(
+      'Configured chainId validation was invalidated',
+    );
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
@@ -3612,24 +3604,12 @@ export class EVMChainAdapterBase {
       return cached!.value;
     }
 
-    let validation = this.configuredStaticChainIdValidationsByProvider.get(provider);
-    if (!validation) {
-      const controller = new AbortController();
-      validation = {
-        controller,
-        promise: Promise.resolve(0n),
-        waiters: 0,
-        settled: false,
-      };
-      const shared = validation;
-      // Defer invocation by one microtask so the initiating caller is enrolled
-      // before shared physical work can settle. The work has its own signal: a
-      // single cancelled waiter cannot poison peers, while the last departed
-      // waiter cancels admission/HTTP instead of leaving orphan RPC load.
-      shared.promise = Promise.resolve().then(() => withRpcRequestContext(
+    return this.configuredStaticChainIdValidationsByProvider.run(
+      provider,
+      (sharedSignal) => withRpcRequestContext(
         {
           requestClass: 'foreground',
-          signal: controller.signal,
+          signal: sharedSignal,
           inheritSignal: false,
         },
         () => withRpcRequestTimeout(
@@ -3643,34 +3623,19 @@ export class EVMChainAdapterBase {
                 `Configured chainId ${this.configuredStaticChainId} does not match RPC chainId ${live}`,
               );
             }
-            this.configuredStaticChainIdsByProvider.set(provider, { value: live, cachedAt: Date.now() });
-            this.cachedChainId = { value: live, cachedAt: Date.now() };
             return live;
           },
         ),
-      )).finally(() => {
-        shared.settled = true;
-        if (this.configuredStaticChainIdValidationsByProvider.get(provider) === shared) {
-          this.configuredStaticChainIdValidationsByProvider.delete(provider);
-        }
-      });
-      this.configuredStaticChainIdValidationsByProvider.set(provider, shared);
-    }
-
-    validation.waiters += 1;
-    try {
-      return await waitForActiveRpcRequest(validation.promise);
-    } finally {
-      validation.waiters -= 1;
-      if (validation.waiters === 0 && !validation.settled) {
-        if (this.configuredStaticChainIdValidationsByProvider.get(provider) === validation) {
-          this.configuredStaticChainIdValidationsByProvider.delete(provider);
-        }
-        const abandoned = new Error('Configured chainId validation has no active waiters');
-        abandoned.name = 'AbortError';
-        validation.controller.abort(abandoned);
-      }
-    }
+      ),
+      (live) => {
+        this.configuredStaticChainIdsByProvider.set(provider, {
+          value: live,
+          cachedAt: Date.now(),
+        });
+        this.cachedChainId = { value: live, cachedAt: Date.now() };
+      },
+      'Configured chainId validation has no active waiters',
+    );
   }
 
   /**

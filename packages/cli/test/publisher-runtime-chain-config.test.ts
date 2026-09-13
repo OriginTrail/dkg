@@ -97,14 +97,37 @@ describe('publisher runtime chain config projection', () => {
       },
     })!;
 
-    expect(runtime.chainConfig.rpcRequestGovernor).toBe(runtime.governor);
-    expect(runtime.routeTransport.admission).toBe(runtime.governor);
-    runtime.routeTransport.onRequest('eth_blockNumber', 0);
+    expect(runtime.chainConfig?.rpcRequestGovernor).toBe(runtime.governor);
+    const probe = await runtime.routeTransport.probeEndpoint('http://127.0.0.1:1', 0);
+    expect(probe).toMatchObject({ ok: false, status: 'unhealthy' });
     expect(runtime.drainRouteRpcUsage()).toMatchObject({
       byMethod: { eth_blockNumber: 1 },
       lifetimeTotal: 1,
     });
-    await runtime.routeTransport.admission.acquireActiveRequest();
+    await runtime.governor.acquireActiveRequest();
     expect(runtime.governor.snapshot().foregroundAdmitted).toBe(1);
+  });
+
+  it('assembles governed route RPC and telemetry from a partial adapter config', async () => {
+    const runtime = createDaemonRpcRuntime({
+      rpcUrl: 'http://127.0.0.1:1',
+      chainId: 'evm:31337',
+      rpcRequestBudget: {
+        maxRequestsPerSecond: 7,
+        foregroundReservePercent: 60,
+        burstRequests: 11,
+        maxQueueSize: 13,
+        startupJitterMs: 0,
+      },
+    })!;
+
+    expect(runtime.chainConfig).toBeUndefined();
+    await expect(runtime.routeTransport.probeEndpoint('http://127.0.0.1:1', 0))
+      .resolves.toMatchObject({ ok: false, status: 'unhealthy' });
+    expect(runtime.governor.snapshot().backgroundAdmitted).toBe(1);
+    expect(runtime.drainRouteRpcUsage()).toMatchObject({
+      byMethod: { eth_blockNumber: 1 },
+      lifetimeTotal: 1,
+    });
   });
 });

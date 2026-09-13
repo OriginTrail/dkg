@@ -1558,6 +1558,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         callerAgentAddress: AUTHOR,
         ...create,
       });
+      // Context-graph mutations notify the centralized background dispatcher;
+      // use its production drain fence before asserting the resulting default
+      // responsibility projection.
+      await author.whenRfc64CatalogResponsibilitiesIdleV1();
       expect(author.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
         expect.objectContaining({
           contextGraphId: CONTEXT_GRAPH_ID,

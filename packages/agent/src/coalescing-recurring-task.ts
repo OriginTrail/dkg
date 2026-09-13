@@ -110,7 +110,12 @@ export class CoalescingRecurringTask {
     let passResult: CoalescingRecurringTaskPassResult = 'rearm';
     const run = this.#drainRequestedPasses()
       .then((result) => { passResult = result; })
-      .catch(this.#options.onError)
+      // close() owns cancellation and drains the physical pass. Reporting the
+      // resulting rejection as a workload failure would create a misleading
+      // warning during ordinary shutdown.
+      .catch((error) => {
+        if (!this.#closed) this.#options.onError(error);
+      })
       .finally(() => {
         if (this.#run === run) this.#run = null;
         if (this.#closed) return;
