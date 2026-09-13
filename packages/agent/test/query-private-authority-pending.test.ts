@@ -296,6 +296,7 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
 
   it.each([
     'context/7',
+    'tasks/_meta',
     `assertion/${OWNER}/legacy-working-memory`,
     `_verifiable_memory/${OWNER}/3384`,
     `_shared_memory/${OWNER}/3384`,

@@ -30,13 +30,16 @@ export async function listStoredContextGraphQueryCandidates(store: TripleStore):
   const add = (id: string) => {
     if (validateContextGraphId(id).valid) candidates.add(id);
   };
-  const addScope = (scope: string) => {
+  const addParent = (scope: string) => {
     if (!validateContextGraphId(scope).valid) return;
-    add(scope);
     const slash = scope.lastIndexOf('/');
     if (slash > 0 && validateSubGraphName(scope.slice(slash + 1)).valid) {
       add(scope.slice(0, slash));
     }
+  };
+  const addScope = (scope: string) => {
+    add(scope);
+    addParent(scope);
   };
 
   for (const graph of graphUris) {
@@ -72,6 +75,9 @@ export async function listStoredContextGraphQueryCandidates(store: TripleStore):
     const metadataSuffix = ['/_meta', '/_catalog'].find((suffix) => tail.endsWith(suffix));
     if (metadataSuffix) {
       const id = tail.slice(0, -metadataSuffix.length);
+      // A named subgraph's bookkeeping may outlive the root's definition.
+      // Its parent remains an owner even without an exact self-declaration.
+      if (metadataSuffix === '/_meta') addParent(id);
       if (!id.includes('/')) add(id);
       else {
         // Ordinary subgraph bookkeeping must not invent a root. Only facts

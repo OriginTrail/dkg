@@ -89,6 +89,19 @@ describe('stored context graph candidates for query admission', () => {
       .toEqual(expect.arrayContaining(['team/private/tasks', 'team/private']));
   });
 
+  it('recovers a parent from orphaned named-subgraph metadata without inventing the subgraph as a CG', async () => {
+    realStore = new OxigraphStore();
+    await realStore.insert([{
+      subject: 'urn:task:1',
+      predicate: 'urn:task:state',
+      object: '"complete"',
+      graph: `${PREFIX}team/private/tasks/_meta`,
+    }]);
+    const result = await listStoredContextGraphQueryCandidates(realStore);
+    expect(result).toContain('team/private');
+    expect(result).not.toContain('team/private/tasks');
+  });
+
   it.each(['_rules', '_sync/applied-cg'])('recovers the owner of the reserved /%s graph', async (suffix) => {
     const { store } = indexedStore([`${PREFIX}team/repo/private/${suffix}`]);
     expect(await listStoredContextGraphQueryCandidates(store)).toContain('team/repo/private');
@@ -213,7 +226,7 @@ describe('stored context graph candidates for query admission', () => {
       active -= 1;
       return { type: 'bindings', bindings: expected.map((id) => ({ cg: `${PREFIX}${id}` })) };
     });
-    expect(await listStoredContextGraphQueryCandidates(store)).toEqual(ids);
+    expect(await listStoredContextGraphQueryCandidates(store)).toEqual(['namespace', ...ids]);
     expect(query).toHaveBeenCalledTimes(6);
     expect(peak).toBeGreaterThan(1);
     expect(peak).toBeLessThanOrEqual(4);
