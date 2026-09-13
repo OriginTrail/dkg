@@ -399,8 +399,8 @@ describe('operation identity preservation (GH#2273)', () => {
       ctx,
       contextGraphId: CG,
       store,
-      served: remoteEquivalent,
       servedMeta: [...remoteEquivalent.meta, typedVariant],
+      cachedSnapshots: new Map([[remoteEquivalent.digest, remoteEquivalent.payload]]),
     }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);

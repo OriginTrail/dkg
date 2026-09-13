@@ -149,6 +149,8 @@ import {
   resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
+import { rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1 } from
+  './rfc64/catalog-rollout-authority-v1.js';
 import {
   composeRfc64FinalizedCatalogAuthorityV1,
   composeRfc64RegisteredRosterVersionV1,
@@ -1221,16 +1223,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     let runtime = rfc64CatalogReplayConnectionRuntimesV1.get(this);
     if (runtime === undefined) {
       runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
-        selectContextGraphIds: () => [
-          ...this.readRfc64CatalogResponsibilitiesV1()
-            .filter((responsibility) => responsibility.active && responsibility.mode !== 'legacy')
-            .map((responsibility) => responsibility.contextGraphId),
-          ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)
-            .filter((contextGraphId) => {
-              const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-              return authority.active && authority.mode !== 'legacy';
-            }),
-        ],
+        selectContextGraphIds: () => this.listActiveRfc64CatalogReplayContextGraphIdsV1(),
         acquireFence: (contextGraphId, replayPeerId) =>
           this.markRfc64CatalogReplayPeerPendingV1(contextGraphId, replayPeerId),
         reannounce: (replayPeerId) =>
@@ -1296,6 +1289,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this,
       this.config.rfc64CatalogExecutionPlan,
     ).snapshot();
+  }
+
+  /** Canonical connection-replay targets after responsibility and authority policy. */
+  listActiveRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
+    const responsibilityIds = this.readRfc64CatalogResponsibilitiesV1()
+      .filter((selection) => selection.active && selection.mode !== 'legacy')
+      .map((selection) => selection.contextGraphId);
+    const configuredIds = Object.keys(
+      this.config.rfc64CatalogExecutionPlan.selectedAuthority,
+    ).filter((contextGraphId) => {
+      const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+      return authority.active && authority.mode !== 'legacy';
+    });
+    return Object.freeze([...new Set([...responsibilityIds, ...configuredIds])].sort());
   }
 
   /** Local, privacy-safe per-CG release evidence used by status and harnesses. */
@@ -1818,22 +1825,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this,
       this.config.rfc64CatalogExecutionPlan,
     );
-    // Explicit activation/compatibility manifests already own this CG's
-    // authority and receiver lifecycle. The release-native responsibility
-    // registry is only for CGs discovered from ordinary daemon state; letting
-    // it also claim a configured CG creates duplicate bootstrap invalidations
-    // and can silently replace a shadow/legacy override with the default mode.
-    if (
-      this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId]
-      !== undefined
-    ) {
-      return Promise.resolve(registry.read(contextGraphId));
-    }
+    const responsibilityOwnsAuthorityWorkload =
+      rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1(
+        this.config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      );
     const commit = (
       reason: Parameters<Rfc64CatalogResponsibilityRegistryV1['setResponsibility']>[1],
     ): Rfc64CatalogResponsibilitySelectionV1 => {
       const transition = registry.setResponsibility(contextGraphId, reason);
-      if (transition.changed) {
+      if (transition.changed && responsibilityOwnsAuthorityWorkload) {
         this.handleRfc64CatalogReceiverSelectionTransitionV1(
           contextGraphId,
           {
@@ -1881,7 +1882,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       const next = commit(reason);
       if (
-        next.active
+        responsibilityOwnsAuthorityWorkload
+        && next.active
         && next.mode !== 'legacy'
         && this.resolveRfc64AcceptedCompatibilityAuthorityV1(contextGraphId) === null
       ) {

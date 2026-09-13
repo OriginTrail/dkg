@@ -1,65 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { contextGraphWorkspaceGraphUri, createOperationContext } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import {
-  workspaceOperationPublicSliceSubject,
-  workspacePublicQuadsDigest,
-} from '@origintrail-official/dkg-publisher';
-import {
-  resolveWorkspaceOperation,
-  storeWorkspaceOperationPublicQuads,
-} from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
+import { resolveWorkspaceOperation } from '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 
 import { type SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { createSelectedSwmMetaFetcher } from '../src/sync/selected-swm-meta-fetcher.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
-import { type SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
   runSharedMemorySync,
   type SharedMemorySnapshotWalkContinuation,
   type SharedMemorySyncMode,
 } from '../src/sync/requester/shared-memory-sync.js';
+import { makeEntitySharePublisherFixture } from './_helpers/swm-entity-share-publisher-fixture.js';
+import { noop, pageResult, sharedMemoryProcessResult } from './_helpers/sync-requester-fixtures.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 
 const COVERAGE_CG = 'coverage-swm';
 const ctx = createOperationContext('sync');
-const noop = () => {};
-
-function pageResult(
-  contextGraphId: string,
-  phase: string,
-  overrides: Partial<SyncPageResult> = {},
-): SyncPageResult {
-  return {
-    quads: [],
-    bytesReceived: 0,
-    resumedFromOffset: 0,
-    responderSessionStartedFresh: true,
-    nextOffset: 0,
-    checkpointKey: `${contextGraphId}:${phase}`,
-    completed: true,
-    timedOut: false,
-    ...overrides,
-  };
-}
-
-function sharedMemoryProcessResult() {
-  return {
-    verifiedData: [] as Quad[],
-    verifiedMeta: [] as Quad[],
-    totalFetchedDataQuads: 0,
-    totalFetchedMetaQuads: 0,
-    droppedDataTriples: 0,
-    emptyResponses: 1,
-    entityCreators: [],
-  };
-}
 
 describe('entity-share recovery beside malformed KA heads', () => {
   async function entityShareFixture() {
-    const { metaGraph } = swmFixtures(COVERAGE_CG);
     const shareOperationId = 'op-entity-share-1';
     const root = 'https://example.org/thing/1';
     const siblingRoot = 'https://example.org/thing/2';
@@ -68,47 +30,42 @@ describe('entity-share recovery beside malformed KA heads', () => {
       { subject: root, predicate: 'https://schema.org/color', object: '"blue"', graph: '' },
     ];
     const siblingPayload: Quad[] = [{ subject: siblingRoot, predicate: 'https://schema.org/name', object: '"Sibling"', graph: '' }];
-    const digest = workspacePublicQuadsDigest(payload);
-    const siblingDigest = workspacePublicQuadsDigest(siblingPayload);
-    const cached = new Map<string, Quad[]>();
-    const source = new OxigraphStore();
-    const graphManager = new GraphManager(source);
-    const createMetadata = async (roots: string[], data: Quad[], subGraphName?: string) => {
-      const targetMetaGraph = graphManager.sharedMemoryMetaUri(COVERAGE_CG, subGraphName);
-      // The real publisher owns both subject identity and the complete metadata model.
-      await storeWorkspaceOperationPublicQuads({
-        store: source, graphManager, contextGraphId: COVERAGE_CG,
-        shareOperationId, rootEntities: roots, quads: data,
-        publisherPeerId: 'peer-source', timestamp: new Date(0), subGraphName,
-        publicSnapshotStore: {
-          getSnapshot: async ref => cached.get(ref) ?? null,
-          putSnapshot: async ({ digest: ref, quads }) => {
-            cached.set(ref, quads.map(quad => ({ ...quad, graph: '' })));
-            return { ref, byteLength: 0 };
-          },
-        },
+    const publish = (rootEntities: readonly string[], quads: readonly Quad[], subGraphName?: string) =>
+      makeEntitySharePublisherFixture({
+        contextGraphId: COVERAGE_CG,
+        shareOperationId,
+        rootEntities,
+        payload: quads,
+        publisherPeerId: 'peer-source',
+        subGraphName,
       });
-      const result = await source.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${targetMetaGraph}> { ?s ?p ?o } }`);
-      if (result.type !== 'quads') throw new Error('Fixture metadata query did not return quads');
-      // The manifest visits refs in transport order. Keep the ready root before
-      // the missing sibling, independently of the store's CONSTRUCT ordering.
-      const slices = roots.map(root => workspaceOperationPublicSliceSubject(COVERAGE_CG, shareOperationId, root, subGraphName));
-      return result.quads.map(quad => ({ ...quad, graph: targetMetaGraph }))
-        .sort((a, b) => slices.indexOf(a.subject) - slices.indexOf(b.subject));
+    const [entityPublished, twoRootPublished, namedPublished] = await Promise.all([
+      publish([root], payload),
+      publish([root, siblingRoot], [...payload, ...siblingPayload]),
+      publish([root], payload, 'research'),
+    ]);
+    const sliceFor = (fixture: Awaited<ReturnType<typeof publish>>, rootEntity: string) => {
+      const slice = fixture.slices.find(candidate => candidate.rootEntity === rootEntity);
+      if (!slice) throw new Error(`Entity-share recovery fixture did not publish ${rootEntity}`);
+      return slice;
     };
-    let entityMeta: Quad[];
-    let twoRootMeta: Quad[];
-    let namedMeta: Quad[];
-    const namedMetaGraph = graphManager.sharedMemoryMetaUri(COVERAGE_CG, 'research');
-    try {
-      entityMeta = await createMetadata([root], payload);
-      twoRootMeta = await createMetadata([root, siblingRoot], [...payload, ...siblingPayload]);
-      namedMeta = await createMetadata([root], payload, 'research');
-    } finally {
-      await source.close();
+    const entitySlice = sliceFor(entityPublished, root);
+    const siblingSlice = sliceFor(twoRootPublished, siblingRoot);
+    const digest = entitySlice.digest;
+    const siblingDigest = siblingSlice.digest;
+    const cached = new Map<string, Quad[]>();
+    for (const published of [entityPublished, twoRootPublished, namedPublished]) {
+      for (const [snapshotDigest, snapshotPayload] of published.snapshots) {
+        cached.set(snapshotDigest, snapshotPayload.map(quad => ({ ...quad })));
+      }
     }
-    const sliceSubject = workspaceOperationPublicSliceSubject(COVERAGE_CG, shareOperationId, root);
-    const siblingSubject = workspaceOperationPublicSliceSubject(COVERAGE_CG, shareOperationId, siblingRoot);
+    const metaGraph = entityPublished.metaGraph;
+    const namedMetaGraph = namedPublished.metaGraph;
+    const entityMeta = entityPublished.meta;
+    const twoRootMeta = twoRootPublished.meta;
+    const namedMeta = namedPublished.meta;
+    const sliceSubject = entitySlice.sliceSubject;
+    const siblingSubject = siblingSlice.sliceSubject;
     const ka = swmFixtures(COVERAGE_CG).manifest(1)[0]!;
     cached.set(ka.digest, ka.payload);
     const duplicateHead: Quad[] = [...ka.meta, {

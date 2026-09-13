@@ -460,8 +460,8 @@ import {
 } from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
-import { Rfc64CatalogAuthorityRefreshLoopV1 } from
-  './rfc64/catalog-authority-refresh-loop-v1.js';
+import { createRfc64CatalogAuthorityRefreshOwnerV1 } from
+  './rfc64/catalog-authority-refresh-binding-v1.js';
 import { Rfc64PublicCatalogWorkloadOwnerV1 } from
   './rfc64/public-catalog-workload-owner-v1.js';
 import {
@@ -968,9 +968,7 @@ export class DKGAgent extends DKGAgentBase {
         ),
       },
       cooldown: {
-        deleteProvider: (providerPeerId) => {
-          this.rfc64ExactCatchupOnConnectAt.delete(providerPeerId);
-        },
+        deleteProvider: (providerPeerId) => this.peerSyncSession.clearExactCatchupCooldown(providerPeerId),
       },
     });
     this.rfc64SwmRecoveryCoordinatorV1 = new Rfc64SwmRecoveryCoordinatorV1({
@@ -1069,18 +1067,37 @@ export class DKGAgent extends DKGAgentBase {
         warn: (ctx, message) => this.log.warn(ctx, message),
       }),
     );
-    const authorityRefreshOwner = new Rfc64CatalogAuthorityRefreshLoopV1({
-      readActiveContextGraphIds: () => this.readRfc64CatalogResponsibilitiesV1()
-        .filter(({ active, mode }) => active && mode !== 'legacy')
-        .map(({ contextGraphId }) => contextGraphId),
+    const authorityRefreshOwner = createRfc64CatalogAuthorityRefreshOwnerV1({
+      executionPlan: this.config.rfc64CatalogExecutionPlan,
+      readResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
+      revisionSource: {
+        revisionReader: this.chain.contextGraphAuthorityIndexRevisionReader,
+        resolveBinding: (contextGraphId) => (
+          this.contextGraphBindingState.authorityIndexOnChainIdFor(
+            contextGraphId,
+            this.subscribedContextGraphs.get(contextGraphId),
+          )
+        ),
+        runAuthorityRead: (signal, read) => (
+          this.rfc64AuthorityReadCoordinatorV1.run(signal, read)
+        ),
+      },
       onActiveContextGraphIdsReadFailure: (error) => {
         this.log.warn(
           createOperationContext('system'),
           `RFC-64 authority refresh could not enumerate active context graphs: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
-      refreshContextGraph: (contextGraphId, signal) => (
-        this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal)
+      onAuthorityRevisionsReadFailure: (error) => {
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 authority revision scan incomplete: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+      refreshContextGraph: async (contextGraphId, signal) => (
+        await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal) === null
+          ? 'superseded'
+          : 'committed'
       ),
       onRefreshFailure: (contextGraphId, error) => {
         this.log.warn(
@@ -1783,13 +1800,14 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   async getPeerDiagnostics(peerId: string): Promise<PeerDiagnostics> {
+    const peerSync = this.peerSyncSession.diagnosticsState();
     return diagnostics.getPeerDiagnostics(
       {
         node: this.node,
         messenger: this.messenger,
         peerHealth: this.peerHealth,
-        lastSuccessfulSyncAt: this.lastSuccessfulSyncAt,
-        syncReconcilerBackoff: this.syncReconcilerBackoff,
+        lastSuccessfulSyncAt: peerSync.lastSuccessfulSyncAt,
+        syncReconcilerBackoff: peerSync.syncReconcilerBackoff,
       },
       peerId,
     );
@@ -2244,6 +2262,12 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    this.peerSyncSession.close();
+    // Disconnect history survives sessions; transient freshness and cooldowns do not.
+    const disconnectedAt = Date.now();
+    for (const peer of this.node.libp2p.getPeers()) {
+      this.lastSyncDisconnectedAt.set(peer.toString(), disconnectedAt);
+    }
     const authorityRetryDrain =
       this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
     // Fence membership persistence before any network callback can enqueue
