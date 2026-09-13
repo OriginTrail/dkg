@@ -7,14 +7,13 @@ import {
   updateLocalAgentIntegration,
 } from '../../src/daemon/local-agents.js';
 
-/** Apply the same prepare → commit → afterCommit sequence as the daemon route. */
+/** Apply the same commit → afterCommit sequence as the daemon route. */
 export function commitLocalAgentConnectPlanForTest(
   config: DkgConfig,
   id: string,
   plan: LocalAgentConnectPlan,
 ): { integration: LocalAgentIntegrationRecord; notice?: string } {
-  connectLocalAgentIntegration(config, { ...plan.registration, id });
-  updateLocalAgentIntegration(config, id, plan.initialPatch);
+  connectLocalAgentIntegration(config, { ...plan.state, id });
   const afterCommitNotice = plan.ok ? plan.afterCommit?.({
     current: () => config,
     persist: async (patch) => { updateLocalAgentIntegration(config, id, patch); },

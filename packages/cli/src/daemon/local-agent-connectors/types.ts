@@ -28,9 +28,15 @@ export interface LocalAgentAttachStateSink {
 }
 
 interface LocalAgentConnectPlanBase {
-  registration: LocalAgentIntegrationConfig;
-  initialPatch: LocalAgentAttachStatePatch;
+  /**
+   * Desired initial integration state for this connect. Connectors return only
+   * the attach-owned fields they decided (transport/runtime); the connect
+   * planner layers them over the normalized registration so the route commits
+   * one patch through one reducer against the latest configuration snapshot.
+   */
+  state: LocalAgentIntegrationConfig;
   notice?: string;
+  /** Deferred setup work that runs only after `state` is committed. */
   afterCommit?: (sink: LocalAgentAttachStateSink) => string | undefined;
 }
 
@@ -44,7 +50,6 @@ export interface LocalAgentConnectorContext {
   bridgeAuthToken: string | undefined;
   deps: LocalAgentUiAttachDeps;
   requested: { id: string; name: string };
-  registration: LocalAgentIntegrationConfig;
   existingBeforeConnect: LocalAgentIntegrationConfig | null;
   hadStoredTransportBeforeConnect: boolean;
 }

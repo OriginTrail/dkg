@@ -70,7 +70,6 @@ export const hermesConnector: LocalAgentConnectorStrategy = {
     const {
       config,
       requested,
-      registration,
       bridgeAuthToken,
       deps,
       existingBeforeConnect,
@@ -87,8 +86,7 @@ export const hermesConnector: LocalAgentConnectorStrategy = {
           : undefined);
       return {
         ok: true,
-        registration,
-        initialPatch: {
+        state: {
           transport,
           runtime: { status: 'ready', ready: true, lastError: null },
         },
@@ -96,12 +94,11 @@ export const hermesConnector: LocalAgentConnectorStrategy = {
       };
     }
 
+    // Setup is deferred: the registration's `connecting` runtime stands until
+    // the attach job persists its result.
     return {
       ok: true,
-      registration,
-      initialPatch: {
-        runtime: { status: 'connecting', ready: false, lastError: null },
-      },
+      state: {},
       afterCommit: (sink) => {
         const { started } = scheduleAttachJob(requested.id, async (attachJob) => {
           try {

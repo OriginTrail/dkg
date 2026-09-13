@@ -17,7 +17,6 @@ export const openClawConnector: LocalAgentConnectorStrategy = {
     const {
       config,
       requested,
-      registration,
       bridgeAuthToken,
       deps,
       existingBeforeConnect,
@@ -33,8 +32,7 @@ export const openClawConnector: LocalAgentConnectorStrategy = {
     if (health.ok && hadStoredTransportBeforeConnect) {
       return {
         ok: true,
-        registration,
-        initialPatch: {
+        state: {
           transport: transportPatchFromOpenClawTarget(config, health.target),
           runtime: { status: 'ready', ready: true, lastError: null },
         },
@@ -42,12 +40,11 @@ export const openClawConnector: LocalAgentConnectorStrategy = {
       };
     }
 
+    // Setup is deferred: the registration's `connecting` runtime stands until
+    // the attach job persists its result.
     return {
       ok: true,
-      registration,
-      initialPatch: {
-        runtime: { status: 'connecting', ready: false, lastError: null },
-      },
+      state: {},
       afterCommit: (sink) => {
         const { started } = scheduleOpenClawUiAttachJob(requested.id, async (attachJob) => {
           try {

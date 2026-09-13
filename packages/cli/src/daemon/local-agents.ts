@@ -479,7 +479,14 @@ export function hasStoredLocalAgentTransportConfig(
   );
 }
 
-/** Normalize a UI request and dispatch adapter-owned setup planning. */
+/**
+ * Normalize a UI request and dispatch adapter-owned setup planning.
+ *
+ * Every node-UI connect starts from the normalized registration in the
+ * `connecting` runtime. The connector layers the attach state it decided over
+ * that registration, so the plan carries one initial state that the route
+ * commits through `connectLocalAgentIntegration` against the latest snapshot.
+ */
 export async function connectLocalAgentIntegrationFromUi(
   config: ImmutableDkgConfig,
   body: Record<string, unknown>,
@@ -505,37 +512,32 @@ export async function connectLocalAgentIntegrationFromUi(
     config,
     { id: requestedId, ...registration },
   ).record;
+  const withRegistration = (state: LocalAgentIntegrationConfig): LocalAgentIntegrationConfig =>
+    mergeLocalAgentIntegrationConfig(registration, state, { mergeTransport: requestedId === 'hermes' });
   try {
     if (!connector) {
       return {
         ok: true,
-        registration,
-        initialPatch: {},
+        state: registration,
         notice: `${requested.name} was registered. Chat will appear here once its framework bridge is available.`,
       };
     }
-    return await connector.createPlan({
+    const plan = await connector.createPlan({
       config,
       body: connectBody,
       bridgeAuthToken,
       deps,
       requested,
-      registration,
       existingBeforeConnect,
       hadStoredTransportBeforeConnect,
     });
+    return { ...plan, state: withRegistration(plan.state) };
   } catch (cause) {
-    const patch: LocalAgentAttachStatePatch = {
-      runtime: {
-        status: 'error', ready: false,
-        lastError: cause instanceof Error ? cause.message : 'Local agent attach failed',
-      },
-    };
+    const error = cause instanceof Error ? cause.message : 'Local agent attach failed';
     return {
       ok: false,
-      registration,
-      initialPatch: patch,
-      error: cause instanceof Error ? cause.message : 'Local agent attach failed',
+      state: withRegistration({ runtime: { status: 'error', ready: false, lastError: error } }),
+      error,
     };
   }
 }

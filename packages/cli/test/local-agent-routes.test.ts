@@ -98,8 +98,11 @@ describe('generic local-agent routes', () => {
     const connectFromUi: typeof connectLocalAgentIntegrationFromUi = async (_config, body) => {
       return {
         ok: true,
-        registration: extractLocalAgentIntegrationPatch({ ...body, capabilities: { localChat: true } }),
-        initialPatch: { runtime: { status: 'connecting', ready: false, lastError: null } },
+        state: extractLocalAgentIntegrationPatch({
+          ...body,
+          capabilities: { localChat: true },
+          runtime: { status: 'connecting', ready: false, lastError: null },
+        }),
         notice: 'attach scheduled',
         afterCommit: (sink) => {
           finishAttach = sink.persist;
@@ -202,6 +205,42 @@ describe('generic local-agent routes', () => {
     }
   });
 
+  it('commits the registration and connector state as one patch through one reducer', async () => {
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
+    const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
+      id: 'custom-agent',
+      name: 'Custom Agent',
+      transport: { kind: 'custom-bridge', bridgeUrl: 'http://127.0.0.1:9444/' },
+      capabilities: { localChat: true },
+      metadata: { source: 'node-ui', operatorLabel: 'initial' },
+    });
+    const res = makeJsonResponse();
+    try {
+      await handleLocalAgentsRoutes({ req, res, configStore, path: '/api/local-agent-integrations/connect' } as any);
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.notice)
+        .toBe('Custom Agent was registered. Chat will appear here once its framework bridge is available.');
+      expect(body.integration).toEqual(getLocalAgentIntegration(configStore.current, 'custom-agent'));
+      // The registration's own transport is part of the single committed state;
+      // no second, transport-less patch replays over it.
+      expect(configStore.current.localAgentIntegrations?.['custom-agent']).toMatchObject({
+        enabled: true,
+        name: 'Custom Agent',
+        transport: { kind: 'custom-bridge', bridgeUrl: 'http://127.0.0.1:9444' },
+        capabilities: { localChat: true },
+        metadata: { source: 'node-ui', operatorLabel: 'initial' },
+        runtime: { status: 'connecting', ready: false, lastError: null },
+      });
+      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8'))).toEqual(configStore.current);
+    } finally {
+      await configStore.close();
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
   it.each(['connect', 'refresh', 'failed-connect'] as const)('keeps a newer explicit disconnect after blocked %s preparation', async operation => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
     const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig({
@@ -221,11 +260,10 @@ describe('generic local-agent routes', () => {
         const registration = extractLocalAgentIntegrationPatch(body);
         if (operation === 'failed-connect') return {
           ok: false,
-          registration,
-          initialPatch: { runtime: { status: 'error', ready: false, lastError: 'probe failed' } },
+          state: { ...registration, runtime: { status: 'error', ready: false, lastError: 'probe failed' } },
           error: 'probe failed',
         };
-        return { ok: true, registration, initialPatch: patch };
+        return { ok: true, state: { ...registration, ...patch } };
       },
       refreshFromUi: async () => {
         entered.resolve();

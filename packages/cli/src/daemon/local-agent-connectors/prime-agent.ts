@@ -27,13 +27,12 @@ async function runPrimeAgentUiSetup(
 }
 
 export const primeAgentConnector: LocalAgentConnectorStrategy = {
-  async createPlan({ requested, registration, bridgeAuthToken, deps }) {
+  async createPlan({ requested, bridgeAuthToken, deps }) {
+    // Setup is deferred: the registration's `connecting` runtime stands until
+    // the attach job persists its result.
     return {
       ok: true,
-      registration,
-      initialPatch: {
-        runtime: { status: 'connecting', ready: false, lastError: null },
-      },
+      state: {},
       afterCommit: (sink) => {
         const { started } = scheduleAttachJob(requested.id, async (attachJob) => {
           try {

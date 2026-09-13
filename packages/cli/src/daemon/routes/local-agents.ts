@@ -84,7 +84,6 @@ import {
   type DkgConfig,
   type AutoUpdateConfig,
   type LocalAgentIntegrationCapabilities,
-  type LocalAgentIntegrationConfig,
   type LocalAgentIntegrationManifest,
   type LocalAgentIntegrationStatus,
   resolveContextGraphs,
@@ -401,12 +400,16 @@ export async function persistLocalAgentAttachPatch(
   }, 'configuration-only');
 }
 
+/**
+ * Commit prepared connect/refresh state against the latest snapshot through a
+ * single reducer, unless a newer operator disconnect landed while the slow
+ * preparation ran outside the commit queue.
+ */
 async function commitPreparedLocalAgentPatch(
   ctx: Pick<RequestContext, 'configStore'>,
   id: string,
   wasExplicitlyDisabled: boolean,
-  patch: LocalAgentAttachStatePatch,
-  registration?: LocalAgentIntegrationConfig,
+  reduce: (draft: DkgConfig, normalizedId: string) => void,
 ): Promise<LocalAgentIntegrationRecord> {
   const normalizedId = normalizeIntegrationId(id);
   if (!normalizedId) throw new Error(`Unknown integration: ${id}`);
@@ -415,8 +418,7 @@ async function commitPreparedLocalAgentPatch(
     if (!wasExplicitlyDisabled && currentEntry?.enabled === false
       && isLocalAgentExplicitlyUserDisabled(currentEntry)) return current;
     const next = mutableConfigSnapshot(current);
-    if (registration) connectLocalAgentIntegration(next, { ...registration, id: normalizedId });
-    updateLocalAgentIntegration(next, normalizedId, patch);
+    reduce(next, normalizedId);
     return next;
   }, 'configuration-only');
   return getLocalAgentIntegration(ctx.configStore.current, normalizedId)!;
@@ -515,8 +517,7 @@ export async function handleLocalAgentsRoutes(
         ctx,
         id,
         wasExplicitlyDisabled,
-        plan.initialPatch,
-        plan.registration,
+        (draft, normalizedId) => connectLocalAgentIntegration(draft, { ...plan.state, id: normalizedId }),
       );
       if (!plan.ok) {
         return jsonResponse(res, 400, { error: plan.error });
@@ -559,7 +560,8 @@ export async function handleLocalAgentsRoutes(
         config, normalizedId, bridgeAuthToken,
       );
       const integration = await commitPreparedLocalAgentPatch(
-        ctx, normalizedId, wasExplicitlyDisabled, prepared.patch,
+        ctx, normalizedId, wasExplicitlyDisabled,
+        draft => updateLocalAgentIntegration(draft, normalizedId, prepared.patch),
       );
       return jsonResponse(res, 200, { ok: true, integration: withPrimeAgentSessionCount(integration) });
     } catch (err: any) {
