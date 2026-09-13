@@ -721,14 +721,27 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     const curatorAgentAddress = opts.callerAgentAddress ?? this.defaultAgentAddress;
     if (curatorAgentAddress) {
-      this.upsertContextGraphMember({
-        contextGraphId: opts.id,
-        principalType: 'agent',
-        principalId: curatorAgentAddress,
-        role: 'curator',
-        status: 'active',
-        source: 'local-create',
-      });
+      // This record is the restart-safe provenance for the local-first SWM
+      // path. Publish the process-local projection before reconciliation, but
+      // roll it back if the durable write fails.
+      this.locallyCreatedContextGraphs.add(opts.id);
+      try {
+        await this.upsertContextGraphMember({
+          contextGraphId: opts.id,
+          principalType: 'agent',
+          principalId: curatorAgentAddress,
+          role: 'curator',
+          status: 'active',
+          source: 'local-create',
+        }, { strict: true });
+      } catch (error) {
+        this.locallyCreatedContextGraphs.delete(opts.id);
+        throw error;
+      }
+    } else {
+      // A graph without a configured agent cannot author SWM yet, but it still
+      // keeps local-first semantics for the lifetime of this process.
+      this.locallyCreatedContextGraphs.add(opts.id);
     }
 
     for (const peer of opts.allowedPeers ?? []) {

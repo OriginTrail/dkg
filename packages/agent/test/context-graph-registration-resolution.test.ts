@@ -10,6 +10,35 @@ import {
 } from './context-graph-registration-binding.fixture.js';
 
 describe('Context Graph registration resolution deadlines', () => {
+  it('keeps an explicitly local-created unregistered graph independent of chain RPC', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.locallyCreatedContextGraphs.add(LOCAL_ID);
+    fixture.query.mockResolvedValueOnce({
+      type: 'bindings',
+      bindings: [{ status: '"unregistered"' }],
+    });
+    fixture.resolveContextGraphIdByNameHash.mockRejectedValueOnce(
+      new Error('chain RPC is unavailable'),
+    );
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({ kind: 'unregistered' });
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('does not infer unregistered when the durable local marker is missing', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.locallyCreatedContextGraphs.add(LOCAL_ID);
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({
+        kind: 'registered',
+        onChainId: 42n,
+        provenance: 'reverse-name-hash',
+      });
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledOnce();
+  });
+
   it('uses the cold deadline by default for a local graph with no binding candidate', async () => {
     vi.useFakeTimers();
     try {

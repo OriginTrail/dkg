@@ -2006,7 +2006,9 @@ describe('RFC-64 rollout authority integration', () => {
     let releaseAuthorityRead = () => undefined;
     let stopping: Promise<void> | undefined;
     try {
-      vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
+      const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
+      expect(subscription).toBeDefined();
+      (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
       let markAuthorityReadStarted!: () => void;
       const authorityReadStarted = new Promise<void>((resolve) => {
         markAuthorityReadStarted = resolve;

@@ -112,6 +112,7 @@ export function selectedFixture(resolved: bigint | null = 42n) {
     rfc64BackgroundWorkDispatcherV1: new Rfc64BackgroundWorkDispatcherV1(),
     rfc64SwmRecoveryRuntimeV1,
     subscribedContextGraphs: new Map([[LOCAL_ID, subscription]]),
+    locallyCreatedContextGraphs: new Set<string>(),
     wireIdToLocalCgId: new Map([[NAME_HASH, LOCAL_ID]]),
     config: {
       syncContextGraphs: [],

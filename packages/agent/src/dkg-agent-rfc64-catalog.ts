@@ -1684,6 +1684,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     expectedNameHash: string;
     expectedOnChainId: bigint;
   }> | null> {
+    // Local-first CG creation deliberately commits an explicit unregistered
+    // state. RFC-64 derives that graph's authority from authenticated local
+    // metadata and must not start a contract-wide index scan merely to prove
+    // the absence of a registration that this node has not requested.
+    if (
+      this.locallyCreatedContextGraphs?.has(contextGraphId) === true
+      && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
+      && await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered'
+    ) return null;
+
     const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
     const expectedNameHash = explicitNameHash === undefined
       ? this.contextGraphNameCommitment(contextGraphId)

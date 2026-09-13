@@ -443,16 +443,30 @@ function localContextGraphIdFromTerm(raw: unknown): string | undefined {
 
 export class ContextGraphRegistryMethods extends DKGAgentBase {
   /**
-   * Check whether a context graph has been registered on-chain.
+   * Read the durable local registration marker without collapsing a missing
+   * or malformed value into "unregistered". Callers that skip chain discovery
+   * must require the explicit local-first marker.
    */
-  async isContextGraphRegistered(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+  async readLocalContextGraphRegistrationStatus(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<'registered' | 'unregistered' | null> {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
       { source: 'agent.contextGraph.registrationStatus' },
     );
-    return result.type === 'bindings' && result.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered';
+    if (result.type !== 'bindings') return null;
+    const status = result.bindings[0]?.['status']?.replace(/^"|"$/g, '');
+    return status === 'registered' || status === 'unregistered' ? status : null;
+  }
+
+  /**
+   * Check whether a context graph has been registered on-chain.
+   */
+  async isContextGraphRegistered(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    return await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'registered';
   }
 
   /**
@@ -655,6 +669,29 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   ): Promise<ContextGraphRegistrationBinding> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return { kind: 'unregistered' };
+    }
+
+    // A graph created by this node is explicitly local-first until its own
+    // registration transaction commits. Do not turn SWM signing/gossip into a
+    // chain availability dependency during that phase. The provenance set is
+    // populated only by the local create boundary (and its durable membership
+    // record), while the RDF status is the transactionally updated register
+    // boundary; neither fact is inferred from remote discovery.
+    if (
+      this.locallyCreatedContextGraphs?.has(contextGraphId) === true
+      && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
+    ) {
+      try {
+        if (await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered') {
+          return { kind: 'unregistered' };
+        }
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-existence-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
     }
 
     const localTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);

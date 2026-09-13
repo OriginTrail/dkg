@@ -1245,6 +1245,12 @@ export class DKGAgentBase {
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  /**
+   * Durable-provenance projection for graphs created by this node. Local-first
+   * SWM must not acquire a chain-read dependency before explicit registration.
+   * Rehydration restores this set from `local-create` membership records.
+   */
+  protected readonly locallyCreatedContextGraphs = new Set<string>();
   /** Process-local reverse candidates plus the monotonic binding fence. */
   protected readonly contextGraphBindingState = new ContextGraphBindingState();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationInternalStatus | null = null;

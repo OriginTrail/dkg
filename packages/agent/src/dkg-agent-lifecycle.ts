@@ -10089,6 +10089,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           for (const membership of await membershipStore.loadAll()) {
             const principalId = membership.principalId.toLowerCase();
             if (
+              membership.principalType === 'agent'
+              && membership.status === 'active'
+              && membership.source === 'local-create'
+              && persistedContextGraphIds.has(membership.contextGraphId)
+              && localAgentAddresses.has(principalId)
+            ) {
+              this.locallyCreatedContextGraphs.add(membership.contextGraphId);
+            }
+            if (
               membership.principalType !== 'agent' ||
               membership.status !== 'active' ||
               membership.source !== 'join-approved' ||
