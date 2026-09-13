@@ -22,6 +22,7 @@ import { handlePrimeAgentRoutes } from '../src/daemon/routes/prime-agent.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import {
   connectLocalAgentIntegrationFromUi,
+  getLocalAgentIntegration,
   refreshLocalAgentIntegrationFromUi,
 } from '../src/daemon/local-agents.js';
 
@@ -563,13 +564,19 @@ describe('connect from the Node UI', () => {
       'bridge-token',
       { runPrimeAgentSetup } as any,
     );
+    expect(runPrimeAgentSetup).not.toHaveBeenCalled();
     const result = commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
 
-    expect(runPrimeAgentSetup).toHaveBeenCalledOnce();
+    expect(result.integration.runtime?.status).toBe('connecting');
+    expect(result.notice).toContain('setup started');
+    await vi.waitFor(() => expect(runPrimeAgentSetup).toHaveBeenCalledOnce());
+    await vi.waitFor(() => {
+      expect(getLocalAgentIntegration(config, 'prime-agent')?.runtime?.status).toBe('degraded');
+    });
     // No session yet is expected right after install, so this must not read as
     // a failure to the operator.
-    expect(result.integration.runtime?.status).toBe('degraded');
-    expect(result.notice).toContain('Start a Prime Agent session');
+    expect(getLocalAgentIntegration(config, 'prime-agent')?.runtime?.lastError)
+      .toBe('no live Prime Agent session');
   });
 
   it('reports ready and records the routed session once a bridge answers', async () => {
@@ -586,13 +593,17 @@ describe('connect from the Node UI', () => {
     );
     const result = commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
 
-    expect(result.integration.runtime?.status).toBe('ready');
-    expect(result.integration.metadata).toMatchObject({
+    expect(result.integration.runtime?.status).toBe('connecting');
+    await vi.waitFor(() => {
+      expect(getLocalAgentIntegration(config, 'prime-agent')?.runtime?.status).toBe('ready');
+    });
+    const integration = getLocalAgentIntegration(config, 'prime-agent')!;
+    expect(integration.metadata).toMatchObject({
       sessionCount: 1,
       activeSessionId: 's1',
       activeMemorySessionId: 'prime-agent:dkg-ui:s1',
     });
-    expect(result.integration.transport).toMatchObject({ kind: 'prime-agent-channel', bridgeUrl: bridge.url });
+    expect(integration.transport).toMatchObject({ kind: 'prime-agent-channel', bridgeUrl: bridge.url });
   });
 
   it('pins the routing head even when the health probe falls through to an older survivor', async () => {
@@ -608,13 +619,17 @@ describe('connect from the Node UI', () => {
       'bridge-token',
       { runPrimeAgentSetup: vi.fn(async () => ({ ok: true, errors: [], warnings: [] })) } as any,
     );
-    const result = commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
+    commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
 
-    expect(result.integration.metadata).toMatchObject({
+    await vi.waitFor(() => {
+      expect(getLocalAgentIntegration(config, 'prime-agent')?.runtime?.status).toBe('ready');
+    });
+    const integration = getLocalAgentIntegration(config, 'prime-agent')!;
+    expect(integration.metadata).toMatchObject({
       sessionCount: 2,
       activeSessionId: 'head',
     });
-    expect(result.integration.transport?.bridgeUrl).toBe(survivor.url);
+    expect(integration.transport?.bridgeUrl).toBe(survivor.url);
   });
 
   it('refreshes the Prime session pin and clears it after the last session exits', async () => {
@@ -658,10 +673,47 @@ describe('connect from the Node UI', () => {
       'bridge-token',
       { runPrimeAgentSetup } as any,
     );
-    const result = commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
+    commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
 
-    expect(result.integration.runtime?.status).toBe('error');
-    expect(result.integration.runtime?.lastError).toContain('not writable');
+    await vi.waitFor(() => {
+      expect(getLocalAgentIntegration(config, 'prime-agent')?.runtime?.status).toBe('error');
+    });
+    expect(getLocalAgentIntegration(config, 'prime-agent')?.runtime?.lastError)
+      .toContain('not writable');
+  });
+
+  it('does not run external setup when config publication fails', async () => {
+    const runPrimeAgentSetup = vi.fn(async () => ({ ok: true, errors: [], warnings: [] }));
+    const config = makeConfig();
+    const configStore = {
+      current: config,
+      update: vi.fn(async () => { throw new Error('config publication failed'); }),
+    };
+    const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
+      id: 'prime-agent',
+      metadata: { source: 'node-ui' },
+    });
+    const res = makeJsonResponse();
+
+    await handleLocalAgentsRoutes({
+      req,
+      res,
+      configStore,
+      path: '/api/local-agent-integrations/connect',
+      bridgeAuthToken: 'bridge-token',
+    } as any, {
+      connectFromUi: (candidate, body, token) => connectLocalAgentIntegrationFromUi(
+        candidate,
+        body,
+        token,
+        { runPrimeAgentSetup },
+      ),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body)).toEqual({ error: 'config publication failed' });
+    expect(configStore.update).toHaveBeenCalledOnce();
+    expect(runPrimeAgentSetup).not.toHaveBeenCalled();
   });
 });
 

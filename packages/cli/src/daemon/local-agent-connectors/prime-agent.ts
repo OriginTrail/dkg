@@ -1,0 +1,94 @@
+import {
+  probePrimeAgentChannelHealth,
+  targetFromDescriptor,
+  transportPatchFromPrimeAgentTarget,
+} from '../prime-agent.js';
+import {
+  isCancelled,
+  scheduleAttachJob,
+} from '../local-agent-attach-jobs.js';
+import type {
+  LocalAgentConnectorStrategy,
+  LocalAgentUiAttachDeps,
+} from './types.js';
+
+async function runPrimeAgentUiSetup(
+  deps: LocalAgentUiAttachDeps,
+): Promise<{ ok: boolean; errors: string[]; warnings: string[] }> {
+  if (deps.runPrimeAgentSetup) return deps.runPrimeAgentSetup();
+  try {
+    const { runPrimeAgentSetup } = await import('@origintrail-official/dkg-adapter-prime-agent');
+    const result = await runPrimeAgentSetup({ verify: false });
+    return { ok: result.ok, errors: result.errors ?? [], warnings: result.warnings ?? [] };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, errors: [`Prime Agent setup unavailable: ${message}`], warnings: [] };
+  }
+}
+
+export const primeAgentConnector: LocalAgentConnectorStrategy = {
+  async createPlan({ requested, registration, bridgeAuthToken, deps }) {
+    return {
+      ok: true,
+      registration,
+      initialPatch: {
+        runtime: { status: 'connecting', ready: false, lastError: null },
+      },
+      afterCommit: (sink) => {
+        const { started } = scheduleAttachJob(requested.id, async (attachJob) => {
+          try {
+            const setup = await runPrimeAgentUiSetup(deps);
+            if (isCancelled(attachJob)) return;
+            if (!setup.ok) {
+              await sink.persist({
+                runtime: {
+                  status: 'error',
+                  ready: false,
+                  lastError: setup.errors.join('; ') || 'Prime Agent setup failed',
+                },
+              });
+              return;
+            }
+
+            const health = await probePrimeAgentChannelHealth(bridgeAuthToken, { timeoutMs: 3_000 });
+            if (isCancelled(attachJob)) return;
+            const live = health.sessions.find((session) => session.sessionId === health.target)
+              ?? health.sessions[0];
+            const activeSessionId = health.sessions[0]?.sessionId ?? null;
+            const activeMemorySessionId = health.sessions[0]?.memorySessionId ?? null;
+
+            if (health.ok && live) {
+              await sink.persist({
+                transport: transportPatchFromPrimeAgentTarget(targetFromDescriptor(live)),
+                runtime: { status: 'ready', ready: true, lastError: null },
+                metadata: { sessionCount: health.sessionCount, activeSessionId, activeMemorySessionId },
+              });
+              return;
+            }
+
+            await sink.persist({
+              runtime: {
+                status: 'degraded',
+                ready: false,
+                lastError: health.error ?? 'no live Prime Agent session',
+              },
+              metadata: { sessionCount: health.sessionCount, activeSessionId, activeMemorySessionId },
+            });
+          } catch (err: unknown) {
+            if (isCancelled(attachJob)) return;
+            await sink.persist({
+              runtime: {
+                status: 'error',
+                ready: false,
+                lastError: err instanceof Error ? err.message : 'Prime Agent attach failed',
+              },
+            });
+          }
+        }, deps.onAttachScheduled);
+        return started
+          ? 'Prime Agent setup started. This chat tab will come online automatically once Prime Agent finishes setting up.'
+          : 'Prime Agent setup is already in progress. This chat tab will come online automatically once Prime Agent finishes setting up.';
+      },
+    };
+  },
+};
