@@ -495,7 +495,7 @@ export const REMOTE_CANARY_CERTIFICATE_SCHEMA_V1 = /** @type {const} */ ({
         'runtimeProvenanceRef', 'startedAt', 'finishedAt',
       ],
       properties: {
-        schema: { const: 'dkg-rfc64-private-release-gate-v1' },
+        schema: { const: 'dkg-rfc64-private-release-gate-v2' },
         artifactRef: { $ref: '#/$defs/opaqueRef' },
         sourceRevision: { $ref: '#/$defs/shaCommit' },
         runtimeManifestDigest: { type: 'string', pattern: '^0x[0-9a-f]{64}$' },

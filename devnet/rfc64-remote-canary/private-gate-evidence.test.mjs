@@ -9,9 +9,9 @@ import {
 } from '../rfc64-runtime-provenance.mts';
 import {
   RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1,
-  buildRfc64PrivateRuntimeProvenanceV1,
+  buildRfc64PrivateRuntimeProvenanceV2,
 } from '../../packages/agent/devnet/rfc64-private-catalog/runtime-provenance.mjs';
-import { buildRfc64PrivateReleaseArtifactV1 } from
+import { buildRfc64PrivateReleaseArtifactV2 } from
   '../../packages/agent/devnet/rfc64-private-catalog/scenario-artifact.mjs';
 import { passingScenarioEvidenceV1 } from
   '../../packages/agent/devnet/rfc64-private-catalog/scenario-test-fixtures.mjs';
@@ -66,13 +66,15 @@ function privateGateArtifact(overrides = {}) {
   } = overrides;
   const sourceBuild = buildRuntimeManifestFromEntriesV1(COMMIT, RUNTIME_FILES);
   const loaded = buildExecutedRuntimeManifestV1(COMMIT, RUNTIME_FILES);
-  const runtimeProvenance = buildRfc64PrivateRuntimeProvenanceV1(
+  const runtimeProvenance = buildRfc64PrivateRuntimeProvenanceV2(
     sourceBuild,
     RFC64_PRIVATE_RUNTIME_PROCESS_IDS_V1.map((id) => ({ id, loaded })),
   );
-  const scenarioEvidence = passingScenarioEvidenceV1();
-  scenarioEvidence.runtimeProvenance = runtimeProvenance;
-  const artifact = buildRfc64PrivateReleaseArtifactV1(
+  const scenarioEvidence = {
+    ...passingScenarioEvidenceV1(),
+    runtimeProvenance,
+  };
+  const artifact = buildRfc64PrivateReleaseArtifactV2(
     scenarioEvidence,
     sourceBuild.manifestDigest,
   );
@@ -113,7 +115,7 @@ test('private-gate companion reuses the public provenance validator and emits on
   const privatePeerId = artifact.topology.ownerProvider.peerId;
   const evidence = await collect(artifact);
   assert.deepEqual(evidence, {
-    schema: 'dkg-rfc64-private-release-gate-v1',
+    schema: 'dkg-rfc64-private-release-gate-v2',
     artifactRef: evidence.artifactRef,
     sourceRevision: COMMIT,
     runtimeManifestDigest: artifact.runtimeManifestDigest,
@@ -189,7 +191,7 @@ test('private-gate companion rejects every non-PASS status and invalid source pr
   for (const mutate of [
     (artifact) => { artifact.status = 'INCOMPLETE'; },
     (artifact) => { artifact.status = 'FAIL'; },
-    (artifact) => { artifact.schema = 'dkg-rfc64-private-release-gate-v2'; },
+    (artifact) => { artifact.schema = 'dkg-rfc64-private-release-gate-v1'; },
     (artifact) => { artifact.runtimeManifestDigest = `0x${'f'.repeat(64)}`; },
     (artifact) => { artifact.runtimeProvenance = null; },
   ]) {

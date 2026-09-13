@@ -211,7 +211,7 @@ revocation is expected to block subsequent network reads, not erase history.
 
 `companionEvidence` is optional and is used only when at least one configured
 authorization probe is `not-exposed`. Its input must be an absolute path to a
-`dkg-rfc64-private-release-gate-v1` PASS artifact produced from the exact same
+`dkg-rfc64-private-release-gate-v2` PASS artifact produced from the exact same
 40-character Git commit as this remote run. The producer's public provenance
 decoder must accept the schema, status, canonical run interval, runtime
 manifest, and per-process source binding. The consumer additionally requires
