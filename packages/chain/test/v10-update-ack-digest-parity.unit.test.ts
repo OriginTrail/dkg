@@ -46,7 +46,7 @@ function makeStubbedAdapter(opts: {
   currentByteSize: bigint;
 }) {
   const a = new EVMChainAdapter(minimalConfig());
-  (a as any).initialized = true;
+  (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts });
   // R1/#1336: getEvmChainId reads chainId via readProvider (this.rpcFailover.read)
   // over this.providers[0] (=== this.provider in prod). Set the mock on BOTH so the
   // digest's chainId read resolves to the stub instead of dialling the placeholder RPC.
@@ -61,25 +61,27 @@ function makeStubbedAdapter(opts: {
   (a as any).providers = [provider];
   // The contract view reads go through readContract (this.rpcFailover.readContract)
   // → rebindContract (contract.connect(p)), so the contract stubs must be .connect-able.
-  (a as any).contracts.knowledgeAssetsLifecycle = connectable({
-    getAddress: async () => KAV10_ADDRESS,
-  });
-  (a as any).contracts.contextGraphStorage = connectable({
-    kaToContextGraph: async () => opts.contextGraphId,
-  });
-  (a as any).contracts.knowledgeAssetStorage = connectable({
-    getMerkleRoots: async () => new Array(Number(opts.preUpdateMerkleRootCount)).fill('0x00'),
-    getTokenAmount: async () => opts.currentTokenAmount,
-    // (preUpdateMerkleRootCount, minted, byteSize, endEpoch, tokenAmount, isImmutable, preUpdateMerkleLeafCount)
-    getKnowledgeAssetUpdateContext: async () => [
-      opts.preUpdateMerkleRootCount,
-      0n,
-      opts.currentByteSize,
-      0n,
-      opts.currentTokenAmount,
-      false,
-      0n,
-    ],
+  (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts,
+    knowledgeAssetsLifecycle: connectable({
+      getAddress: async () => KAV10_ADDRESS,
+    }),
+    contextGraphStorage: connectable({
+      kaToContextGraph: async () => opts.contextGraphId,
+    }),
+    knowledgeAssetStorage: connectable({
+      getMerkleRoots: async () => new Array(Number(opts.preUpdateMerkleRootCount)).fill('0x00'),
+      getTokenAmount: async () => opts.currentTokenAmount,
+      // (preUpdateMerkleRootCount, minted, byteSize, endEpoch, tokenAmount, isImmutable, preUpdateMerkleLeafCount)
+      getKnowledgeAssetUpdateContext: async () => [
+        opts.preUpdateMerkleRootCount,
+        0n,
+        opts.currentByteSize,
+        0n,
+        opts.currentTokenAmount,
+        false,
+        0n,
+      ],
+    }),
   });
   return a;
 }

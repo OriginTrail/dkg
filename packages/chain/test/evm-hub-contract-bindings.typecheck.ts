@@ -23,7 +23,9 @@ class Probe extends EVMChainAdapter {
     // @ts-expect-error subclasses read Hub-bound handles; they install complete sets instead
     this.contracts.chronos = handle;
     this.contracts.randomSampling = handle;
+    // @ts-expect-error subclasses replace the store through an explicit installation transition
     this.contracts = { hub: handle };
+    // @ts-expect-error subclasses retire bindings through an explicit invalidation transition
     this.initialized = false;
   }
 }

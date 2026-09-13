@@ -328,12 +328,11 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
 
   it('aborts an in-flight provider slot read instead of waiting for its stall timeout', async () => {
     const adapter: any = new EVMChainAdapter(minimalConfig());
-    adapter.initialized = true;
     adapter.init = vi.fn(async () => {});
     const provider = { id: 'hung' };
     const storage = { getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6') };
     const started = deferred<void>();
-    adapter.contracts = { contextGraphStorage: storage };
+    adapter.installHubContractBindingsForTesting({ ...adapter.contracts, contextGraphStorage: storage });
     adapter.rebindContract = vi.fn(() => ({
       getNameHash: vi.fn(() => {
         started.resolve(undefined);
@@ -473,18 +472,17 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
 
   it('fans out provider high-water and covering-slot reads concurrently', async () => {
     const adapter: any = new EVMChainAdapter(minimalConfig());
-    adapter.initialized = true;
     adapter.init = vi.fn(async () => {});
     const first = { id: 'first' };
     const second = { id: 'second' };
     adapter.providers = [first, second];
     adapter.rpcUrls = ['http://first.invalid', 'http://second.invalid'];
     adapter.ensureConfiguredStaticChainIdValidated = vi.fn(async () => 31337n);
-    adapter.contracts = {
+    adapter.installHubContractBindingsForTesting({ ...adapter.contracts,
       contextGraphStorage: {
         getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6'),
       },
-    };
+    });
     const highWaterRelease = deferred<void>();
     const slotRelease = deferred<void>();
     let activeHighWaters = 0;
@@ -571,18 +569,17 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
 
   it('uses the maximum reachable high-water so a lagging primary cannot hide an appended duplicate', async () => {
     const adapter: any = new EVMChainAdapter(minimalConfig());
-    adapter.initialized = true;
     adapter.init = vi.fn(async () => {});
     const lagging = { id: 'lagging' };
     const current = { id: 'current' };
     adapter.providers = [lagging, current];
     adapter.rpcUrls = ['http://lagging.invalid', 'http://current.invalid'];
     adapter.ensureConfiguredStaticChainIdValidated = vi.fn(async () => 31337n);
-    adapter.contracts = {
+    adapter.installHubContractBindingsForTesting({ ...adapter.contracts,
       contextGraphStorage: {
         getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6'),
       },
-    };
+    });
     const getLatestContextGraphId = vi.fn(async (provider: unknown) =>
       provider === lagging ? 1n : 2n);
     const getNameHash = vi.fn(async (provider: unknown, id: bigint) => {

@@ -59,8 +59,8 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
 // Bare adapter with `init()` short-circuited — no live RPC.
 function makeAdapter(): any {
   const a: any = new EVMChainAdapter(minimalConfig());
-  a.initialized = true;
-  a.init = async () => { a.initialized = true; };
+  a.installHubContractBindingsForTesting({ ...a.contracts });
+  a.init = async () => {};
   return a;
 }
 

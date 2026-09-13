@@ -27,6 +27,7 @@ import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
 import type { PcaMutationInvalidation } from './pca-read-cache.js';
 import { withRpcRequestTimeout } from './rpc-request-transport.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
@@ -222,11 +223,18 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    */
   async convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean> {
     await this.init();
-    if (!this.contracts.dkgPublishingConvictionNFT) return false;
+    const snapshot = await this.resolveHubContractBindingSnapshot([
+      'dkgPublishingConvictionNFT', 'chronos',
+    ]);
+    const convictionNft = snapshot.contracts.dkgPublishingConvictionNFT;
+    const chronos = snapshot.contracts.chronos;
+    if (!convictionNft) return false;
     if (accountId <= 0n) return false;
     if (baseCost <= 0n) return true;
     try {
-      const info = await this.getPublishingConvictionAccountInfo(accountId);
+      const info = await this.readPublishingConvictionAccountInfo(
+        accountId, false, convictionNft, chronos, snapshot.generationId,
+      );
       if (!info) return false;
 
       // Expiry is TIMESTAMP-based on-chain: `coverPublishingCost` reverts
@@ -251,16 +259,18 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       let discountedCost = (baseCost * (BPS_DENOMINATOR - discountBps)) / BPS_DENOMINATOR;
       if (discountedCost === 0n && baseCost > 0n) discountedCost = 1n;
 
+      if (!chronos) throw new HubContractNotFoundError('Chronos', this.hubAddress);
       const currentEpoch: bigint = BigInt(await this.readContract(
-        await this.requireChronos(), 'chronos.getCurrentEpoch', 'getCurrentEpoch',
+        chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
       ));
       const remaining: bigint = await this.readContract(
-        this.contracts.dkgPublishingConvictionNFT, 'pcaNFT.getRemainingAllowance',
+        convictionNft, 'pcaNFT.getRemainingAllowance',
         'getRemainingAllowance', accountId, currentEpoch,
       );
       return BigInt(remaining) >= discountedCost;
     } catch (err: any) {
       if (err?.code === 'CALL_EXCEPTION') return false;
+      if (err instanceof HubContractNotFoundError) return false;
       throw err;
     }
   }
@@ -391,11 +401,30 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     opts?: { extended?: boolean },
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     await this.init();
+    const snapshot = await this.resolveHubContractBindingSnapshot(
+      opts?.extended
+        ? ['dkgPublishingConvictionNFT', 'chronos'] as const
+        : ['dkgPublishingConvictionNFT'] as const,
+    );
     // Undeployed NFT → capability error (503). null is reserved below
     // for a genuine account-missing revert so the route can disambiguate.
-    const convictionNft = this.contracts.dkgPublishingConvictionNFT;
+    const convictionNft = snapshot.contracts.dkgPublishingConvictionNFT;
     if (!convictionNft) throw new PcaUnavailableError();
-    return this.pcaReadCache.getAccountInfo(accountId, !!opts?.extended, async () => {
+    return this.readPublishingConvictionAccountInfo(
+      accountId, !!opts?.extended, convictionNft,
+      'chronos' in snapshot.contracts ? snapshot.contracts.chronos : undefined,
+      snapshot.generationId,
+    );
+  }
+
+  private readPublishingConvictionAccountInfo(
+    accountId: bigint,
+    extended: boolean,
+    convictionNft: Contract,
+    chronos: Contract | undefined,
+    generationId: number,
+  ): Promise<V10PublishingConvictionAccountInfo | null> {
+    return this.pcaReadCache.getAccountInfo(accountId, extended, async () => {
       try {
         const t = await this.readContract(
           convictionNft, 'pcaNFT.getAccountInfo', 'getAccountInfo', accountId,
@@ -422,15 +451,16 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
         // (distinct from primaryNode '0' = "no designated node"). primaryNode /
         // lastPrimaryNodeChangeEpoch are `accounts()` [9]/[10] (RFC-51, not in
         // getAccountInfo); remainingAllowance is the current epoch's headroom.
-        if (opts?.extended) {
+        if (extended) {
           try {
             const acct = await this.readContract(
               convictionNft, 'pcaNFT.accounts', 'accounts', accountId,
             );
             info.primaryNode = BigInt(acct[9]);
             info.lastPrimaryNodeChangeEpoch = Number(acct[10]);
+            if (!chronos) throw new HubContractNotFoundError('Chronos', this.hubAddress);
             const currentEpoch: bigint = BigInt(await this.readContract(
-              await this.requireChronos(), 'chronos.getCurrentEpoch', 'getCurrentEpoch',
+              chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
             ));
             info.currentEpoch = Number(currentEpoch);
             info.remainingAllowance = BigInt(await this.readContract(
@@ -446,7 +476,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
         }
         throw err;
       }
-    });
+    }, generationId);
   }
 
   async topUpPublishingConvictionAccount(accountId: bigint, amount: bigint): Promise<TxResult> {

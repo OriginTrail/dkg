@@ -500,7 +500,7 @@ describe('listenForEvents — wide getLogs honours the 30s LOG_SCAN cap (B-6)', 
   it('a queryFilter that resolves at >4s but <30s COMPLETES (not aborted at the 4s point-read cap)', async () => {
     vi.useFakeTimers();
     const a = freshAdapter(minimalConfig({ rpcUrl: 'https://primary.example', rpcUrls: ['https://backup.example'] }));
-    (a as any).initialized = true; // listenForEvents awaits init() first
+    (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts }); // listenForEvents awaits init() first
     (a as any).providers = [{}, {}]; // MULTI-RPC → the per-attempt cap applies
     const log = {
       topics: ['0x' + '00'.repeat(32)], data: '0x', blockNumber: 1,
@@ -515,7 +515,10 @@ describe('listenForEvents — wide getLogs honours the 30s LOG_SCAN cap (B-6)', 
       interface: { parseLog: () => parsed },
       queryFilter,
     };
-    (a as any).contracts.knowledgeAssetsStorage = storage;
+    (a as any).installHubContractBindingsForTesting({
+      ...(a as any).contracts,
+      knowledgeAssetsStorage: storage,
+    });
 
     const collected: Array<{ type: string }> = [];
     const done = (async () => {

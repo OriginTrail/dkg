@@ -139,7 +139,10 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
     // answer 503 — never a 0n a UI would read as "registered nowhere". init() is
     // idempotent (`if (this.initialized) return`), so clearing the cached
     // binding after init holds for the next call.
-    (owner as any).contracts.dkgPublishingConvictionNFT = undefined;
+    (owner as any).installHubContractBindingsForTesting({
+      ...(owner as any).contracts,
+      dkgPublishingConvictionNFT: undefined,
+    });
     await expect(owner.getConvictionAgentAccountId(wallet, { strict: true }))
       .rejects.toMatchObject({ code: 'PCA_UNAVAILABLE' });
     // The funded-wallet-selector fail-safe path still returns 0n for the same state.

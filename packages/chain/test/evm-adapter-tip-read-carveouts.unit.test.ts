@@ -34,8 +34,8 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
 
 function makeAdapter() {
   const a: any = new EVMChainAdapter(minimalConfig());
-  a.initialized = true;
-  a.init = async () => { a.initialized = true; };
+  a.installHubContractBindingsForTesting({ ...a.contracts });
+  a.init = async () => {};
   return a;
 }
 
@@ -52,8 +52,20 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
 
   it("conviction getBlock('latest') reads canonical + preference-transparent", async () => {
     const a = makeAdapter();
-    a.contracts = { dkgPublishingConvictionNFT: {} };
-    a.getPublishingConvictionAccountInfo = async () => ({ expiresAtTimestamp: 9_999_999_999 });
+    a.installHubContractBindingsForTesting({
+      ...a.contracts,
+      dkgPublishingConvictionNFT: {},
+      chronos: {},
+    });
+    a.readContract = async (_contract: unknown, _label: string, method: string) => {
+      if (method === 'getAccountInfo') {
+        return ['0x0000000000000000000000000000000000000001', 100n, 10n, 1n, 24n,
+          1000n, 9_999_999_999n, 0n, 0n, 0n, 0n, false];
+      }
+      if (method === 'getCurrentEpoch') return 1n;
+      if (method === 'getRemainingAllowance') return 100n;
+      throw new Error(`unexpected read ${method}`);
+    };
     const readProvider = recorder(async () => ({ timestamp: 0 })); // nowTs 0 < expiry → continues past the gate
     a.readProvider = readProvider;
     // convictionAccountCanCover reaches the `latest` read inside the expiry gate.
@@ -115,12 +127,12 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
 
   it('the event-lane wide-log scan (listenForEvents → queryFilter) reads canonical + preference-transparent', async () => {
     const a = makeAdapter();
-    a.contracts = {
+    a.installHubContractBindingsForTesting({ ...a.contracts,
       knowledgeAssetsStorage: {
         filters: { KnowledgeBatchCreated: () => ({}) },
         interface: { parseLog: () => null },
       },
-    };
+    });
     const readContractWith = recorder(async () => []); // intercept the scan, return no logs
     a.readContractWith = readContractWith;
     // Drain the async generator; the KnowledgeBatchCreated branch runs the scan.
@@ -137,8 +149,8 @@ describe('endpoint-stickiness carve-outs: tip-sensitive reads pass skipPreferred
 describe('getBlockTimestamp: a null (unimported) receipt block fails over instead of returning 0', () => {
   function makeTwoEndpointAdapter(p0: any, p1: any) {
     const a: any = new EVMChainAdapter(minimalConfig());
-    a.initialized = true;
-    a.init = async () => { a.initialized = true; };
+    a.installHubContractBindingsForTesting({ ...a.contracts });
+    a.init = async () => {};
     a.ensureConfiguredStaticChainIdValidated = async () => {};
     a.providers = [p0, p1];
     a.rpcUrls = ['https://primary.example', 'https://backup.example'];
@@ -243,8 +255,8 @@ describe('getBlockTimestamp: a null (unimported) receipt block fails over instea
 describe('PCA proxy nullable lookups fail over on null instead of returning a lagging stale null', () => {
   function makePca(p0: any, p1: any) {
     const a: any = new EVMChainAdapter(minimalConfig());
-    a.initialized = true;
-    a.init = async () => { a.initialized = true; };
+    a.installHubContractBindingsForTesting({ ...a.contracts });
+    a.init = async () => {};
     a.ensureConfiguredStaticChainIdValidated = async () => {};
     a.providers = [p0, p1];
     a.rpcUrls = ['https://primary.example', 'https://backup.example'];

@@ -275,7 +275,7 @@ describe('EVMChainAdapter historical KA update verification', () => {
     priorRoots: unknown[] = [],
   ): { adapter: EVMChainAdapter; latestRead: ReturnType<typeof recorder> } {
     const adapter: any = new EVMChainAdapter(minimalConfig());
-    adapter.initialized = true;
+    adapter.installHubContractBindingsForTesting({ ...adapter.contracts });
     adapter.init = async () => {};
     const encoded = iface.encodeEventLog(
       iface.getEvent('KnowledgeAssetUpdated')!,
@@ -288,10 +288,10 @@ describe('EVMChainAdapter historical KA update verification', () => {
       index: 2,
       logs: [{ address: storageAddress, topics: encoded.topics, data: encoded.data }],
     });
-    adapter.contracts.knowledgeAssetStorage = {
+    installHubBindings(adapter, { knowledgeAssetStorage: {
       getAddress: async () => storageAddress,
       interface: iface,
-    };
+    } });
     const latestRead = recorder(async () => publisher);
     adapter.readContractWithOptions = async (
       _contract: unknown, label: string, _method: string, args: readonly unknown[],
@@ -455,8 +455,8 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
 
   function makeIdentityLookupAdapter(values: bigint[]) {
     const a: any = new EVMChainAdapter(minimalConfig());
-    a.initialized = true;
-    a.init = async () => { a.initialized = true; };
+    a.installHubContractBindingsForTesting({ ...a.contracts });
+    a.init = async () => {};
     a.resolveContract = recorder(async () => ({}));
     let i = 0;
     const readContract = recorder(async () => {
@@ -596,8 +596,8 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
   it('identity id reads populate the canonical IdentityStorage lazy binding', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const identityStorage = { identityStorage: true };
-    a.initialized = true;
-    a.init = async () => { a.initialized = true; };
+    a.installHubContractBindingsForTesting({ ...a.contracts });
+    a.init = async () => {};
     a.resolveContract = recorder(async () => identityStorage);
     a.readContract = recorder(async (_contract: unknown, _label: string, method: string) => (
       method === 'getIdentityId' ? 42n : true
@@ -627,8 +627,8 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     const oldIdentityStorage = { target: '0x0000000000000000000000000000000000000101' };
     const newIdentityStorage = { target: '0x0000000000000000000000000000000000000102' };
     let current = oldIdentityStorage;
-    a.initialized = true;
-    a.init = async () => { a.initialized = true; };
+    a.installHubContractBindingsForTesting({ ...a.contracts });
+    a.init = async () => {};
     a.resolveContract = recorder(async () => current);
     // VALUE read keys off the WALLET address (not the contract), so each distinct
     // wallet is a fresh/uncached read even though the binding is shared.
@@ -664,7 +664,9 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     expect(readContract.calls).toHaveLength(1);
 
     (a as any).contracts.identityStorage = { stale: true };
-    const init = recorder(async () => { (a as any).initialized = true; });
+    const init = recorder(async () => {
+      (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts });
+    });
     (a as any).init = init;
     (a as any).applyHubRotationEventName('IdentityStorage');
 
@@ -693,8 +695,10 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
 
   it('ensureProfile seeds the signer identity cache after IdentityCreated', async () => {
     const { a, readContract } = makeIdentityLookupAdapter([0n, 0n]);
-    a.contracts.identity = { interface: identityInterface };
-    a.contracts.profile = { interface: profileInterface };
+    installHubBindings(a, {
+      identity: { interface: identityInterface },
+      profile: { interface: profileInterface },
+    });
     a.sendContractTransaction = recorder(async () => ({
       logs: [identityCreatedLog(77n)],
       hash: '0x' + '12'.repeat(32),
@@ -725,8 +729,10 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     const a: any = new EVMChainAdapter(minimalConfig());
     const readContract = recorder(async () => 99n);
     a.init = async () => undefined;
-    a.contracts.identity = { interface: identityInterface };
-    a.contracts.profile = { interface: profileInterface };
+    installHubBindings(a, {
+      identity: { interface: identityInterface },
+      profile: { interface: profileInterface },
+    });
     a.readContract = readContract;
     a.sendContractTransaction = recorder(async () => ({
       logs: [identityCreatedLog(88n)],
@@ -743,8 +749,10 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
 
   it('registerIdentity seeds the signer identity cache after ProfileCreated fallback', async () => {
     const { a, readContract } = makeIdentityLookupAdapter([0n, 99n]);
-    a.contracts.identity = { interface: identityInterface };
-    a.contracts.profile = { interface: profileInterface };
+    installHubBindings(a, {
+      identity: { interface: identityInterface },
+      profile: { interface: profileInterface },
+    });
     a.sendContractTransaction = recorder(async () => ({
       logs: [profileCreatedLog(89n)],
       hash: '0x' + '56'.repeat(32),
@@ -937,6 +945,11 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
   const fn = (...args: A): R => { calls.push(args); return impl(...args); };
   return Object.assign(fn, { calls });
+}
+
+function installHubBindings(adapter: EVMChainAdapter, bindings: Record<string, unknown>): void {
+  const internal = adapter as any;
+  internal.installHubContractBindingsForTesting({ ...internal.contracts, ...bindings });
 }
 
 async function flushAsyncWork(turns = 8): Promise<void> {
@@ -1160,10 +1173,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       publishAuthorityAccountId: 0n,
     }));
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = connectable({
+    installHubBindings(a, { contextGraphStorage: connectable({
       getAccessPolicy,
       getContextGraph,
-    });
+    }) });
 
     await expect(a.getContextGraphAccessPolicy(6n)).resolves.toBe(1);
     expect(getAccessPolicy.calls.at(-1)).toEqual([6n]);
@@ -1173,7 +1186,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
   it('parses accessPolicy from tuple fallback results', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = connectable({
+    installHubBindings(a, { contextGraphStorage: connectable({
       getAccessPolicy: recorder(async () => {
         throw new Error('selector unavailable');
       }),
@@ -1188,7 +1201,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         ethers.ZeroAddress,
         0n,
       ]),
-    });
+    }) });
 
     await expect(a.getContextGraphAccessPolicy(7n)).resolves.toBe(0);
   });
@@ -1197,11 +1210,11 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const rpcError = new Error('rpc unavailable');
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = connectable({
+    installHubBindings(a, { contextGraphStorage: connectable({
       isContextGraphActive: recorder(async () => {
         throw rpcError;
       }),
-    });
+    }) });
 
     await expect(a.isContextGraphActiveOnChain(8n)).rejects.toThrow('rpc unavailable');
   });
@@ -1210,7 +1223,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const isContextGraphActive = recorder(async (_id: bigint) => false);
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = connectable({ isContextGraphActive });
+    installHubBindings(a, { contextGraphStorage: connectable({ isContextGraphActive }) });
 
     await expect(a.isContextGraphActiveOnChain(9n)).resolves.toBe(false);
     expect(isContextGraphActive.calls.at(-1)).toEqual([9n]);
@@ -1219,7 +1232,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
   it('surfaces missing ContextGraphStorage as unknown instead of reporting inactive', async () => {
     const a = new EVMChainAdapter(minimalConfig());
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphStorage = undefined;
+    installHubBindings(a, { contextGraphStorage: undefined });
 
     await expect(a.isContextGraphActiveOnChain(10n)).rejects.toThrow('ContextGraphStorage not deployed');
   });
@@ -1233,11 +1246,14 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
       if (name === 'Token') throw new Error('Hub.Token should not be resolved when tokenAddress is configured');
       return contractAddress;
     });
-    (a as any).contracts.hub = connectable({
+    installHubBindings(a, { hub: connectable({
       getContractAddress,
       getAssetStorageAddress: recorder(async () => assetStorageAddress),
       on: recorder(async () => undefined),
-    });
+    }) });
+    // Keep the seeded Hub handle, but exercise the production initialization
+    // path that must construct Token from the configured address.
+    (a as any).invalidateHubContractBindings();
 
     await (a as any).init();
 
@@ -2017,12 +2033,12 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     const a = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
     const [firstAddress, secondAddress] = a.getSignerAddresses();
     (a as any).init = async () => undefined;
-    (a as any).contracts.contextGraphs = connectable({
+    installHubBindings(a, { contextGraphs: connectable({
       isAuthorizedPublisher: recorder(async () => {
         await Promise.resolve();
         return true;
       }),
-    });
+    }) });
 
     const [firstReserved, secondReserved] = await Promise.all([
       a.getAuthorizedPublisherAddress(1n),
@@ -2056,10 +2072,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.rpcUrls = ['https://primary.example'];
     a.primaryProvider = provider;
     a.provider = provider;
-    a.contracts.hub = {
+    installHubBindings(a, { hub: {
       interface: iface,
       getAddress: async () => '0x0000000000000000000000000000000000000001',
-    };
+    } });
     await expect(a.startHubRotationListener()).resolves.toBeUndefined();
 
     expect(provider.getBlockNumber.calls).toEqual([[]]);
@@ -2082,10 +2098,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.rpcUrls = ['https://primary.example'];
     a.primaryProvider = provider;
     a.provider = provider;
-    a.contracts.hub = {
+    installHubBindings(a, { hub: {
       interface: iface,
       getAddress: async () => '0x0000000000000000000000000000000000000001',
-    };
+    } });
 
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     try {
@@ -2127,7 +2143,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.provider = primaryProvider;
     a.providers = [primaryProvider, backupProvider];
     a.rpcUrls = ['https://primary.example', 'https://backup.example'];
-    a.contracts.hub = {
+    installHubBindings(a, { hub: {
       interface: new ethers.Interface([
         'event NewContract(string contractName, address newContractAddress)',
         'event ContractChanged(string contractName, address newContractAddress)',
@@ -2135,7 +2151,7 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
         'event AssetStorageChanged(string contractName, address newContractAddress)',
       ]),
       getAddress: async () => '0x0000000000000000000000000000000000000001',
-    };
+    } });
 
     await expect(a.startHubRotationListener()).resolves.toBeUndefined();
     await flushAsyncWork();
@@ -2181,14 +2197,12 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.rpcUrls = ['https://primary.example'];
     a.primaryProvider = provider;
     a.provider = provider;
-    a.contracts.hub = {
+    a.installHubContractBindingsForTesting({ ...a.contracts, hub: {
       interface: iface,
       getAddress: async () => '0x0000000000000000000000000000000000000001',
       on,
-    };
-    a.contracts.contextGraphs = { stale: true };
+    }, contextGraphs: { stale: true } });
     a.cachedKav10Address = { value: '0x00000000000000000000000000000000000000aa', cachedAt: 1 };
-    a.initialized = true;
 
     try {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
@@ -2239,10 +2253,10 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     a.rpcUrls = ['https://primary.example'];
     a.primaryProvider = provider;
     a.provider = provider;
-    a.contracts.hub = {
+    installHubBindings(a, { hub: {
       interface: iface,
       getAddress: async () => '0x0000000000000000000000000000000000000001',
-    };
+    } });
 
     try {
       await expect(a.startHubRotationListener()).resolves.toBeUndefined();
@@ -2801,9 +2815,9 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const getAddress = recorder(async () => '0xCONTRACT');
     (a as unknown as { init: () => Promise<void> }).init = async () => undefined;
-    (a as unknown as { contracts: { knowledgeAssetsLifecycle: { getAddress: () => Promise<string> } } }).contracts = {
+    (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts,
       knowledgeAssetsLifecycle: { getAddress: getAddress as unknown as () => Promise<string> },
-    };
+    });
 
     expect(await a.getKnowledgeAssetsLifecycleAddress()).toBe('0xCONTRACT');
     expect(await a.getKnowledgeAssetsLifecycleAddress()).toBe('0xCONTRACT');
@@ -2814,11 +2828,11 @@ describe('PR3 / RC11 — publish-preflight TTL cache', () => {
     const a = new EVMChainAdapter(minimalConfig());
     const minimumRequiredSignatures = recorder(async () => 3n);
     (a as unknown as { init: () => Promise<void> }).init = async () => undefined;
-    (a as unknown as { contracts: { parametersStorage: { minimumRequiredSignatures: () => Promise<bigint> } } }).contracts = {
+    (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts,
       parametersStorage: connectable({
         minimumRequiredSignatures: minimumRequiredSignatures as unknown as () => Promise<bigint>,
       }),
-    };
+    });
 
     expect(await a.getMinimumRequiredSignatures()).toBe(3);
     expect(await a.getMinimumRequiredSignatures()).toBe(3);
@@ -3230,7 +3244,7 @@ function makeStubToken(allowance: bigint) {
 function makeV10Adapter(approvalPolicy?: ApprovalPolicy, allowance: bigint = 0n) {
   const a = new EVMChainAdapter(minimalConfig({ approvalPolicy }));
   const { tokenRoot, tokenWithSigner } = makeStubToken(allowance);
-  (a as any).contracts.token = tokenRoot;
+  installHubBindings(a, { token: tokenRoot });
   const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
   (a as any).sendContractTransaction = sendSpy;
   // In-lock publish/update approvals receive the scoped unlocked sender;
@@ -3387,7 +3401,7 @@ describe('ensureV10ApproveTrac — per-publish (default) approval gate', () => {
     const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
     (a as any).sendContractTransaction = sendSpy;
     (a as any).sendContractTransactionUnlocked = sendSpy;
-    (a as any).contracts.token = undefined;
+    installHubBindings(a, { token: undefined });
     const signer = new ethers.Wallet(DEPLOYER_PK);
 
     await expect((a as any).ensureV10ApproveTrac(
@@ -3682,7 +3696,7 @@ describe('ensureV10ApproveTrac — call-site invariants (publish vs update)', ()
     // contract's `transferFrom`.
     const a = new EVMChainAdapter(minimalConfig());
     const { tokenRoot } = makeStubToken(0n);
-    (a as any).contracts.token = tokenRoot;
+    installHubBindings(a, { token: tokenRoot });
     // Standalone approval calls use the serialized public sender; make that
     // path throw so propagation is exercised.
     (a as any).sendContractTransaction = recorder(async () => {
@@ -3763,7 +3777,7 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     const signerPool = (a as any).signerPool as ethers.Wallet[];
     const [walletA, walletB] = signerPool;
 
-    (a as any).initialized = true;
+    (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts });
 
     // Funding-aware selection reads native (provider.getBalance) + TRAC
     // (token.balanceOf) for each candidate. Stub both deterministically —
@@ -3794,10 +3808,10 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
       approve: recorder(() => undefined),
       balanceOf,
     });
-    (a as any).contracts.token = {
+    installHubBindings(a, { token: {
       connect: recorder(() => tokenWithSigner),
       balanceOf, // kept for any direct (non-connected) top-level reader
-    };
+    } });
 
     const populateSpy = recorder(async () => ({
       to: PARITY_KA_ADDRESS,
@@ -3808,14 +3822,14 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
       publish: { populateTransaction: populateSpy },
       update: { populateTransaction: populateSpy },
     });
-    (a as any).contracts.knowledgeAssetsLifecycle = {
+    installHubBindings(a, { knowledgeAssetsLifecycle: {
       connect: recorder(() => kavContract),
       getAddress: recorder(async () => PARITY_KA_ADDRESS),
-    };
+    } });
 
-    (a as any).contracts.contextGraphs = connectable({
+    installHubBindings(a, { contextGraphs: connectable({
       isAuthorizedPublisher: recorder(async () => true),
-    });
+    }) });
 
     const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
     (a as any).sendContractTransaction = sendSpy;
@@ -3956,13 +3970,12 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
 
     // Injected DI seams the update path needs in addition to the publish ones.
     const kaId = 42n;
-    (a as any).contracts.knowledgeAssetStorage = connectable({
+    installHubBindings(a, { knowledgeAssetStorage: connectable({
       getLatestMerkleRootPublisher: recorder(async () => walletB.address),
       getMerkleRoots: recorder(async () => []),
-    });
-    (a as any).contracts.contextGraphStorage = connectable({
+    }), contextGraphStorage: connectable({
       kaToContextGraph: recorder(async () => 0n),
-    });
+    }) });
     (a as any).resolveCurrentTokenAmount = recorder(async () => 0n);
     (a as any).computeUpdateNewTokenAmount = recorder(async () => 0n);
     (a as any).getIdentityId = recorder(async () => 0n);
@@ -4027,10 +4040,10 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
       makeMultiWalletV10Adapter(allowanceByOwner, undefined, [], { staticNetwork: true });
 
     const kaId = 42n;
-    (a as any).contracts.knowledgeAssetStorage = connectable({
+    installHubBindings(a, { knowledgeAssetStorage: connectable({
       getLatestMerkleRootPublisher: recorder(async () => walletB.address),
       getMerkleRoots: recorder(async () => []),
-    });
+    }) });
     (a as any).provider.getNetwork = recorder(async () => ({ chainId: 31337n }));
     (a as any).provider.send = recorder(async (method: string) => {
       if (method === 'eth_chainId') return '0x14a34';
@@ -4114,7 +4127,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
   it('no token contract: only native gas gates selection', async () => {
     const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
-    (a as any).contracts.token = undefined; // read-only / no-token adapter
+    installHubBindings(a, { token: undefined }); // read-only / no-token adapter
     const chosen = await (a as any).nextAuthorizedSigner(CG);
     // walletA has 0 gas → skipped; walletB has gas → chosen (TRAC not gating).
     expect(chosen.address).toBe(walletB.address);
@@ -4127,7 +4140,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     // publish is paid from the conviction account, so it IS fundable.
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
-    (a as any).contracts.dkgPublishingConvictionNFT = {}; // PCA NFT deployed
+    installHubBindings(a, { dkgPublishingConvictionNFT: {} }); // PCA NFT deployed
     (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
       addr.toLowerCase() === lc(walletB.address) ? 7n : 0n);
     (a as any).convictionAccountCanCover = recorder(async () => true);
@@ -4141,7 +4154,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     // walletB: gas + own-TRAC → genuinely fundable.
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
-    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    installHubBindings(a, { dkgPublishingConvictionNFT: {} });
     (a as any).getConvictionAgentAccountId = recorder(async () => 9n); // registered
     (a as any).convictionAccountCanCover = recorder(async () => false); // but can't cover
     const chosen = await (a as any).nextAuthorizedSigner(CG);
@@ -4150,7 +4163,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
   it('still throws "no authorized publisher" when no wallet is authorized (unchanged)', async () => {
     const { a } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
-    (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
+    installHubBindings(a, { contextGraphs: connectable({ isAuthorizedPublisher: recorder(async () => false) }) });
     await expect((a as any).nextAuthorizedSigner(CG)).rejects.toThrow(/No authorized publisher wallet/);
   });
 
@@ -4207,7 +4220,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
 
   it('no-contextGraphs adapter: funding-aware selection over the whole pool', async () => {
     const { a, walletA, walletB, nativeByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
-    (a as any).contracts.contextGraphs = undefined; // no on-chain publish-authority surface
+    installHubBindings(a, { contextGraphs: undefined }); // no on-chain publish-authority surface
     nativeByAddr.set(lc(walletA.address), 0n); nativeByAddr.set(lc(walletB.address), ONE);
     const chosen = await (a as any).nextAuthorizedSigner(CG);
     expect(chosen.address).toBe(walletB.address); // skips the unfunded round-robin head
@@ -4548,7 +4561,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     params.tokenAmount = 1000n;
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
-    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    installHubBindings(a, { dkgPublishingConvictionNFT: {} });
     (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
       addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
     (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => params.epochs);
@@ -4569,7 +4582,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
-    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    installHubBindings(a, { dkgPublishingConvictionNFT: {} });
     (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
       addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
     (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 24);
@@ -4589,7 +4602,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), ONE);
-    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    installHubBindings(a, { dkgPublishingConvictionNFT: {} });
     (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
       addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
     (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 24);
@@ -4615,7 +4628,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n);
     tracByAddr.set(lc(walletB.address), 0n);
-    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    installHubBindings(a, { dkgPublishingConvictionNFT: {} });
     (a as any).getConvictionAgentAccountId = recorder(async (address: string) =>
       address.toLowerCase() === lc(walletA.address) ? 42n : 0n);
     (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 6);
@@ -4649,7 +4662,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 0n);
-    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    installHubBindings(a, { dkgPublishingConvictionNFT: {} });
     (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
       addr.toLowerCase() === lc(walletA.address) ? 41n : 42n);
     (a as any).getConvictionAccountLockDurationEpochs = recorder(async (accountId: bigint) =>
@@ -4676,7 +4689,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
     tracByAddr.set(lc(walletA.address), 2_000n); tracByAddr.set(lc(walletB.address), 2_000n);
-    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    installHubBindings(a, { dkgPublishingConvictionNFT: {} });
     (a as any).getConvictionAgentAccountId = recorder(async (addr: string) =>
       addr.toLowerCase() === lc(walletA.address) ? 42n : 0n);
     (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 12);
@@ -4746,7 +4759,7 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
       const { a, walletA } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
       registerPool(a);
       // No wallet is an authorized publisher → publish (rotatable-policy) throws…
-      (a as any).contracts.contextGraphs = connectable({ isAuthorizedPublisher: recorder(async () => false) });
+      installHubBindings(a, { contextGraphs: connectable({ isAuthorizedPublisher: recorder(async () => false) }) });
       await expect((a as any).selectSigner({ txClass: 'rotatable-policy', contextGraphId: CG, funding: nativeAndTrac }))
         .rejects.toThrow(/No authorized publisher wallet/);
       // …but rotatable-free never consults that surface — it picks from the
@@ -5004,7 +5017,7 @@ function makeV10AdapterWithAllowanceSequence(values: bigint[]) {
     approve: recorder(() => undefined),
   });
   const tokenRoot = { connect: recorder(() => tokenWithSigner) };
-  (a as any).contracts.token = tokenRoot;
+  installHubBindings(a, { token: tokenRoot });
   const sendSpy = recorder(async (..._a: unknown[]) => ({} as unknown));
   (a as any).sendContractTransaction = sendSpy;
   // In-lock publish/update approvals receive the scoped unlocked sender;
@@ -5027,7 +5040,7 @@ describe('ensureV10ApproveTrac — forced re-approve + visibility poll (#888)', 
         })),
         approve: recorder(() => undefined),
       });
-      (a as any).contracts.token = { connect: () => tokenWithSigner };
+      installHubBindings(a, { token: { connect: () => tokenWithSigner } });
 
       const approval = (a as any).ensureV10ApproveTrac(
         signer,
@@ -5470,7 +5483,7 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
 
   it('delivers the signed tx hash AND its nonce, extracted by production code', async () => {
     const a: any = new EVMChainAdapter(minimalConfig());
-    a.initialized = true;
+    a.installHubContractBindingsForTesting({ ...a.contracts });
     a.init = async () => {};
     const wallet = new ethers.Wallet(SIGNER_PK);
 
@@ -5530,7 +5543,7 @@ describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () 
     // Fail-closed: a caller that could not persist the signal must not end up with a transaction
     // on the wire it does not know about.
     const a: any = new EVMChainAdapter(minimalConfig());
-    a.initialized = true;
+    a.installHubContractBindingsForTesting({ ...a.contracts });
     a.init = async () => {};
     const wallet = new ethers.Wallet(SIGNER_PK);
     const signedTx = await wallet.signTransaction({

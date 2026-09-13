@@ -35,9 +35,15 @@ export class PcaReadCache {
     accountId: bigint,
     extended: boolean,
     load: () => Promise<V10PublishingConvictionAccountInfo | null>,
+    generationId = 0,
   ): Promise<V10PublishingConvictionAccountInfo | null> {
-    const key = this.accountInfoCacheKey(accountId, extended);
+    const key = this.accountInfoCacheKey(accountId, extended, generationId);
     return this.accountInfoCache.getOrLoad(key, key, load);
+  }
+
+  invalidateAll(): void {
+    this.accountInfoCache.invalidateAll();
+    this.agentAccountIdLookups.invalidateAll();
   }
 
   invalidateMutation<T>(invalidation: PcaMutationInvalidation<T>, result: T): void {
@@ -61,12 +67,9 @@ export class PcaReadCache {
 
   private invalidatePcaAccountInfo(accountId?: bigint): void {
     if (accountId == null || accountId <= 0n) return;
-    for (const key of [
-      this.accountInfoCacheKey(accountId, false),
-      this.accountInfoCacheKey(accountId, true),
-    ]) {
-      this.accountInfoCache.invalidate(key);
-    }
+    // Generation-scoped cache keys deliberately hide retired data. A write may
+    // race any generation, so clear all short-lived account snapshots here.
+    this.accountInfoCache.invalidateAll();
   }
 
   private invalidatePcaAgent(agent: string): void {
@@ -86,8 +89,8 @@ export class PcaReadCache {
     this.invalidateAllPcaAgents();
   }
 
-  private accountInfoCacheKey(accountId: bigint, extended: boolean): string {
-    return `${accountId.toString()}:${extended ? 'extended' : 'base'}`;
+  private accountInfoCacheKey(accountId: bigint, extended: boolean, generationId = 0): string {
+    return `${generationId}:${accountId.toString()}:${extended ? 'extended' : 'base'}`;
   }
 
   private normalizeAgent(agent: string): { address: string; cacheKey: string } | undefined {

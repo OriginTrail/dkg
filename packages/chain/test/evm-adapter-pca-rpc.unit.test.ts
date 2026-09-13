@@ -59,6 +59,11 @@ function pcaRpcAdapter(providers: SendProvider[], rpcUrls: string[]): EVMChainAd
   return adapter;
 }
 
+function installBindings(adapter: EVMChainAdapter, bindings: Record<string, unknown>): void {
+  const internal = adapter as any;
+  internal.installHubContractBindingsForTesting({ ...internal.contracts, ...bindings });
+}
+
 function pcaReadCacheAdapter(values: unknown[]): EVMChainAdapter {
   const adapter = new EVMChainAdapter(minimalConfig());
   const a = adapter as unknown as {
@@ -68,7 +73,9 @@ function pcaReadCacheAdapter(values: unknown[]): EVMChainAdapter {
   };
   let i = 0;
   a.init = async () => undefined;
-  a.contracts.dkgPublishingConvictionNFT = { getAddress: async () => '0x' + '33'.repeat(20) };
+  installBindings(adapter, {
+    dkgPublishingConvictionNFT: { getAddress: async () => '0x' + '33'.repeat(20) },
+  });
   a.readContract = recorder(async () => {
     const value = values[Math.min(i, values.length - 1)];
     i++;
@@ -190,21 +197,13 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
       walletRpcUrls: [' https://wallet-rpc.example/base-sepolia ', 'https://wallet-rpc.example/base-sepolia'],
     }));
     (adapter as unknown as { init: () => Promise<void> }).init = async () => undefined;
-    (adapter as unknown as {
-      contracts: {
-        dkgPublishingConvictionNFT: { getAddress: () => Promise<string> };
-        token: { getAddress: () => Promise<string> };
-        profile: { getAddress: () => Promise<string> };
-        identity: { getAddress: () => Promise<string> };
-        identityStorage: { getAddress: () => Promise<string> };
-      };
-    }).contracts = {
+    installBindings(adapter, {
       dkgPublishingConvictionNFT: { getAddress: async () => '0x' + '11'.repeat(20) },
       token: { getAddress: async () => '0x' + '22'.repeat(20) },
       profile: { getAddress: async () => '0x' + '33'.repeat(20) },
       identity: { getAddress: async () => '0x' + '44'.repeat(20) },
       identityStorage: { getAddress: async () => '0x' + '55'.repeat(20) },
-    };
+    });
     (adapter as any).getIdentityStorage = async () => (adapter as any).contracts.identityStorage;
 
     const contracts = await adapter.getPublishingConvictionContracts();
@@ -225,12 +224,12 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
   it('keeps PCA bootstrap available when identity contracts are unavailable', async () => {
     const adapter = new EVMChainAdapter(minimalConfig());
     (adapter as unknown as { init: () => Promise<void> }).init = async () => undefined;
-    (adapter as any).contracts = {
+    installBindings(adapter, {
       dkgPublishingConvictionNFT: { getAddress: async () => '0x' + '11'.repeat(20) },
       token: { getAddress: async () => '0x' + '22'.repeat(20) },
       profile: { getAddress: async () => '0x' + '33'.repeat(20) },
       identity: { getAddress: async () => '0x' + '44'.repeat(20) },
-    };
+    });
     (adapter as any).getIdentityStorage = async () => {
       throw new HubContractNotFoundError('IdentityStorage', HUB);
     };
@@ -256,7 +255,7 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
       identity: { getAddress: async () => '0x' + '44'.repeat(20) },
     };
     delete contracts[missingContract];
-    (adapter as any).contracts = contracts;
+    installBindings(adapter, contracts);
     const getIdentityStorage = vi.fn(async () => ({
       getAddress: async () => '0x' + '55'.repeat(20),
     }));
@@ -269,10 +268,10 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
   it('propagates unexpected identity storage discovery failures', async () => {
     const adapter = new EVMChainAdapter(minimalConfig());
     (adapter as unknown as { init: () => Promise<void> }).init = async () => undefined;
-    (adapter as any).contracts = {
+    installBindings(adapter, {
       profile: { getAddress: async () => '0x' + '33'.repeat(20) },
       identity: { getAddress: async () => '0x' + '44'.repeat(20) },
-    };
+    });
     const discoveryFailure = new Error('identity storage RPC unavailable');
     (adapter as any).getIdentityStorage = async () => {
       throw discoveryFailure;
@@ -485,6 +484,87 @@ describe('EVMChainAdapter PCA read cache', () => {
     expect(adapter.readContract.calls).toHaveLength(1);
   });
 
+  it('retries transient Chronos discovery and later completes PCA coverage', async () => {
+    const adapter = new EVMChainAdapter(minimalConfig()) as any;
+    const nft = { id: 'nft' };
+    const chronos = { id: 'chronos' };
+    let chronosAttempts = 0;
+    adapter.init = async () => undefined;
+    adapter.loadHubContractBinding = async (spec: { name: string }) => {
+      if (spec.name === 'DKGPublishingConvictionNFT') return nft;
+      if (spec.name === 'Chronos') {
+        chronosAttempts++;
+        if (chronosAttempts === 1) throw new Error('temporary Chronos RPC failure');
+        return chronos;
+      }
+      throw new Error(`unexpected binding ${spec.name}`);
+    };
+    adapter.readTipProvider = async (_label: string, read: (provider: unknown) => Promise<unknown>) =>
+      read({ getBlock: async () => ({ timestamp: 1000 }) });
+    adapter.readContract = recorder(async (contract: unknown, _label: string, method: string) => {
+      if (method === 'getAccountInfo') {
+        expect(contract).toBe(nft);
+        return accountInfoTuple(OWNER);
+      }
+      if (method === 'getCurrentEpoch') {
+        expect(contract).toBe(chronos);
+        return 5n;
+      }
+      if (method === 'getRemainingAllowance') {
+        expect(contract).toBe(nft);
+        return 100n;
+      }
+      throw new Error(`unexpected read ${method}`);
+    });
+
+    await expect(adapter.convictionAccountCanCover(9n, 10n)).resolves.toBe(false);
+    await expect(adapter.convictionAccountCanCover(9n, 10n)).resolves.toBe(true);
+    expect(chronosAttempts).toBe(2);
+    expect(adapter.readContract.calls.map((call: unknown[]) => call[2]))
+      .toEqual(['getAccountInfo', 'getCurrentEpoch', 'getRemainingAllowance']);
+  });
+
+  it('uses one Hub generation for every contract read in a PCA coverage operation', async () => {
+    const adapter = new EVMChainAdapter(minimalConfig()) as any;
+    const nftA = { id: 'nft-a' };
+    const chronosA = { id: 'chronos-a' };
+    const nftB = { id: 'nft-b' };
+    const chronosB = { id: 'chronos-b' };
+    let current = {
+      generationId: 1,
+      contracts: { dkgPublishingConvictionNFT: nftA, chronos: chronosA },
+    };
+    const replacement = {
+      generationId: 2,
+      contracts: { dkgPublishingConvictionNFT: nftB, chronos: chronosB },
+    };
+    adapter.init = async () => undefined;
+    adapter.resolveHubContractBindingSnapshot = vi.fn(async () => current);
+    adapter.readTipProvider = async (_label: string, read: (provider: unknown) => Promise<unknown>) =>
+      read({ getBlock: async () => ({ timestamp: 1000 }) });
+    adapter.readContract = recorder(async (contract: unknown, _label: string, method: string) => {
+      if (method === 'getAccountInfo') {
+        expect(contract).toBe(nftA);
+        current = replacement;
+        return accountInfoTuple(OWNER);
+      }
+      if (method === 'getCurrentEpoch') {
+        expect(contract).toBe(chronosA);
+        return 5n;
+      }
+      if (method === 'getRemainingAllowance') {
+        expect(contract).toBe(nftA);
+        return 100n;
+      }
+      throw new Error(`unexpected read ${method}`);
+    });
+
+    await expect(adapter.convictionAccountCanCover(9n, 10n)).resolves.toBe(true);
+    expect(adapter.resolveHubContractBindingSnapshot).toHaveBeenCalledOnce();
+    expect(adapter.readContract.calls.map((call: unknown[]) => call[0]))
+      .toEqual([nftA, chronosA, nftA]);
+  });
+
   it('public top-up refreshes warmed account-info cache immediately', async () => {
     const adapter = pcaReadCacheAdapter([
       accountInfoTuple(OWNER, 100n, 0n),
@@ -513,14 +593,12 @@ describe('EVMChainAdapter PCA read cache', () => {
     adapter.readContract = recorder(async () => reads.shift()!);
 
     const staleLookup = adapter.getPublishingConvictionAccountInfo(9n);
-    await Promise.resolve();
-    expect(adapter.readContract.calls).toHaveLength(1);
+    await vi.waitFor(() => expect(adapter.readContract.calls).toHaveLength(1));
 
     await adapter.topUpPublishingConvictionAccount(9n, 50n);
 
     const freshLookup = adapter.getPublishingConvictionAccountInfo(9n);
-    await Promise.resolve();
-    expect(adapter.readContract.calls).toHaveLength(2);
+    await vi.waitFor(() => expect(adapter.readContract.calls).toHaveLength(2));
 
     second.resolve(accountInfoTuple(OWNER, 100n, 50n));
     await expect(freshLookup).resolves.toMatchObject({ topUpBuffer: 50n });
@@ -625,7 +703,7 @@ describe('EVMChainAdapter PCA read cache', () => {
       600n,
     ]) as any;
     installPcaWriteStubs(adapter);
-    adapter.contracts.chronos = {};
+    installBindings(adapter, { chronos: {} });
 
     await expect(adapter.getPublishingConvictionAccountInfo(9n, { extended: true }))
       .resolves.toMatchObject({ primaryNode: 11n, lastPrimaryNodeChangeEpoch: 1 });

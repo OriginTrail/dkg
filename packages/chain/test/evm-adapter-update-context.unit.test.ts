@@ -31,7 +31,10 @@ function adapterWithUpdateContext(response: unknown): {
   const storage = {};
   const calls: unknown[][] = [];
   mutable.init = async () => undefined;
-  mutable.contracts.knowledgeAssetStorage = storage;
+  (mutable as any).installHubContractBindingsForTesting({
+    ...mutable.contracts,
+    knowledgeAssetStorage: storage,
+  });
   mutable.readContractWithOptions = async (...args: unknown[]) => {
     calls.push(args);
     return response;
@@ -130,9 +133,12 @@ describe('EVMChainAdapter KA scalar update context', () => {
         options?: unknown,
       ) => Promise<unknown>;
     };
-    mutable.contracts.knowledgeAssetStorage = storage;
-    mutable.contracts.chronos = chronos;
-    mutable.contracts.askStorage = askStorage;
+    (mutable as any).installHubContractBindingsForTesting({
+      ...mutable.contracts,
+      knowledgeAssetStorage: storage,
+      chronos,
+      askStorage,
+    });
     mutable.readContractWithOptions = async (_contract, label) => {
       calls.push(label);
       if (label === 'kas.getKnowledgeAssetUpdateContext') return response;

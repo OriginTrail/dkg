@@ -2,30 +2,41 @@
 
 import type { Contract } from 'ethers';
 import type { ContractCache } from './evm-adapter-types.js';
+import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 
 /** Boot bindings shared by full initialization and event-only capability reads. */
 export const EVM_HUB_CONTRACT_SPECS = {
-  identity: { registry: 'contract', name: 'Identity', optional: false },
-  profile: { registry: 'contract', name: 'Profile', optional: false },
-  parametersStorage: { registry: 'contract', name: 'ParametersStorage', optional: false },
-  profileStorage: { registry: 'contract', name: 'ProfileStorage', optional: true },
-  knowledgeAssetStorage: { registry: 'assetStorage', name: 'DKGKnowledgeAssets', optional: false },
-  knowledgeAssetsStorage: { registry: 'assetStorage', name: 'KnowledgeAssetsStorage', optional: true },
-  contextGraphNameRegistry: { registry: 'contract', name: 'ContextGraphNameRegistry', optional: true },
-  contextGraphStorage: { registry: 'assetStorage', name: 'ContextGraphStorage', optional: true },
-  staking: { registry: 'contract', name: 'Staking', optional: true },
-  knowledgeAssets: { registry: 'contract', name: 'KnowledgeAssets', optional: true },
-  askStorage: { registry: 'contract', name: 'AskStorage', optional: true },
-  contextGraphs: { registry: 'contract', name: 'ContextGraphs', optional: true },
-  knowledgeAssetsLifecycle: { registry: 'contract', name: 'KnowledgeAssetsLifecycle', optional: true },
-  dkgPublishingConvictionNFT: { registry: 'contract', name: 'DKGPublishingConvictionNFT', optional: true },
-  chronos: { registry: 'contract', name: 'Chronos', optional: true },
-  token: { registry: 'token', name: 'Token', optional: false },
+  identity: { registry: 'contract', name: 'Identity', resolution: 'required' },
+  profile: { registry: 'contract', name: 'Profile', resolution: 'required' },
+  parametersStorage: { registry: 'contract', name: 'ParametersStorage', resolution: 'required' },
+  profileStorage: { registry: 'contract', name: 'ProfileStorage', resolution: 'optional-deployment' },
+  knowledgeAssetStorage: { registry: 'assetStorage', name: 'DKGKnowledgeAssets', resolution: 'required' },
+  knowledgeAssetsStorage: { registry: 'assetStorage', name: 'KnowledgeAssetsStorage', resolution: 'optional-deployment' },
+  contextGraphNameRegistry: { registry: 'contract', name: 'ContextGraphNameRegistry', resolution: 'optional-deployment' },
+  contextGraphStorage: { registry: 'assetStorage', name: 'ContextGraphStorage', resolution: 'optional-deployment' },
+  staking: { registry: 'contract', name: 'Staking', resolution: 'optional-deployment' },
+  knowledgeAssets: { registry: 'contract', name: 'KnowledgeAssets', resolution: 'optional-deployment' },
+  askStorage: { registry: 'contract', name: 'AskStorage', resolution: 'optional-deployment' },
+  contextGraphs: { registry: 'contract', name: 'ContextGraphs', resolution: 'optional-deployment' },
+  knowledgeAssetsLifecycle: { registry: 'contract', name: 'KnowledgeAssetsLifecycle', resolution: 'optional-deployment' },
+  dkgPublishingConvictionNFT: { registry: 'contract', name: 'DKGPublishingConvictionNFT', resolution: 'optional-deployment' },
+  chronos: { registry: 'contract', name: 'Chronos', resolution: 'optional-deployment' },
+  token: { registry: 'token', name: 'Token', resolution: 'zero-address-allowed' },
 } as const;
 
 export type EvmHubContractKey = keyof typeof EVM_HUB_CONTRACT_SPECS;
 export type EvmHubContractSpec = (typeof EVM_HUB_CONTRACT_SPECS)[EvmHubContractKey];
+export type RequiredEvmHubContractKey = {
+  [K in EvmHubContractKey]: (typeof EVM_HUB_CONTRACT_SPECS)[K]['resolution'] extends 'required' ? K : never;
+}[EvmHubContractKey];
 export const ALL_EVM_HUB_CONTRACT_KEYS = Object.freeze(Object.keys(EVM_HUB_CONTRACT_SPECS) as EvmHubContractKey[]);
+export const REQUIRED_EVM_HUB_CONTRACT_KEYS = Object.freeze(ALL_EVM_HUB_CONTRACT_KEYS.filter(
+  (key): key is RequiredEvmHubContractKey => EVM_HUB_CONTRACT_SPECS[key].resolution === 'required',
+));
+export const EVM_HUB_INITIALIZATION_DECISION_KEYS = Object.freeze(ALL_EVM_HUB_CONTRACT_KEYS.filter(
+  key => EVM_HUB_CONTRACT_SPECS[key].resolution !== 'optional-deployment',
+));
+export type EvmHubContractInstallation = ContractCache & Required<Pick<ContractCache, RequiredEvmHubContractKey>>;
 
 /**
  * The handle store as readers see it. Hub-bound handles are written only by
@@ -55,17 +66,24 @@ export async function optionalEvmContract<T>(load: () => Promise<T>, signal?: Ab
  * `resolved` exactly when its handle was committed by this generation.
  */
 interface EvmHubContractGeneration {
+  readonly id: number;
   readonly contracts: ContractCache;
   readonly resolved: Set<EvmHubContractKey>;
   initialized: boolean;
 }
 
+export interface EvmHubContractSnapshot<K extends EvmHubContractKey> {
+  readonly generationId: number;
+  readonly contracts: Readonly<Pick<ContractCache, K>>;
+}
+
 /** One canonical handle store and Hub generation for subset and full initialization. */
 export class EvmHubContractBindings {
+  private nextGenerationId = 1;
   private current: EvmHubContractGeneration;
 
   constructor(contracts: ContractCache) {
-    this.current = { contracts, resolved: new Set(), initialized: false };
+    this.current = { id: this.nextGenerationId++, contracts, resolved: new Set(), initialized: false };
   }
 
   get contracts(): EvmHubContractStore { return this.current.contracts; }
@@ -83,8 +101,23 @@ export class EvmHubContractBindings {
    * absent optional entry means "not deployed" — so the new generation is
    * ready and no loader runs until the generation changes.
    */
-  install(contracts: ContractCache): void {
-    this.current = { contracts, resolved: new Set(ALL_EVM_HUB_CONTRACT_KEYS), initialized: true };
+  install(contracts: EvmHubContractInstallation): void {
+    const missing = REQUIRED_EVM_HUB_CONTRACT_KEYS.filter(key => !contracts[key]);
+    if (missing.length > 0) {
+      throw new Error(`Hub binding installation is missing required handles: ${missing.join(', ')}`);
+    }
+    this.current = {
+      id: this.nextGenerationId++, contracts,
+      resolved: new Set(ALL_EVM_HUB_CONTRACT_KEYS), initialized: true,
+    };
+  }
+
+  /** Deliberate partial fixture seam; production installation must use {@link install}. */
+  installTestFixture(contracts: ContractCache): void {
+    this.current = {
+      id: this.nextGenerationId++, contracts,
+      resolved: new Set(ALL_EVM_HUB_CONTRACT_KEYS), initialized: true,
+    };
   }
 
   /**
@@ -96,13 +129,15 @@ export class EvmHubContractBindings {
   invalidate(dropped: Iterable<EvmHubContractKey> = []): void {
     const { contracts } = this.current;
     for (const key of dropped) contracts[key] = undefined;
-    this.current = { contracts, resolved: new Set(), initialized: false };
+    this.current = {
+      id: this.nextGenerationId++, contracts, resolved: new Set(), initialized: false,
+    };
   }
 
   /** A full initializer may finish only the exact, completely decided generation it began. */
   completeInitialization(generation: object): boolean {
     if (generation !== this.current) return false;
-    const undecided = ALL_EVM_HUB_CONTRACT_KEYS.filter(key => !this.current.resolved.has(key));
+    const undecided = EVM_HUB_INITIALIZATION_DECISION_KEYS.filter(key => !this.current.resolved.has(key));
     if (undecided.length > 0) {
       throw new Error(`Hub bindings cannot publish readiness before resolving: ${undecided.join(', ')}`);
     }
@@ -115,6 +150,14 @@ export class EvmHubContractBindings {
     load: (spec: EvmHubContractSpec) => Promise<Contract | undefined>,
     signal?: AbortSignal,
   ): Promise<Readonly<Pick<ContractCache, K>>> {
+    return (await this.resolveSnapshot(keys, load, signal)).contracts;
+  }
+
+  async resolveSnapshot<K extends EvmHubContractKey>(
+    keys: readonly K[],
+    load: (spec: EvmHubContractSpec) => Promise<Contract | undefined>,
+    signal?: AbortSignal,
+  ): Promise<EvmHubContractSnapshot<K>> {
     for (;;) {
       signal?.throwIfAborted();
       const generation = this.current;
@@ -124,9 +167,15 @@ export class EvmHubContractBindings {
         if (generation.resolved.has(key)) continue;
         const spec = EVM_HUB_CONTRACT_SPECS[key];
         // Sequential staging leaves no sibling physical request to abandon.
-        staged.set(key, spec.optional
-          ? await optionalEvmContract(() => load(spec), signal)
-          : await load(spec));
+        try {
+          staged.set(key, await load(spec));
+        } catch (error) {
+          signal?.throwIfAborted();
+          if (spec.resolution !== 'optional-deployment') throw error;
+          if (error instanceof HubContractNotFoundError) staged.set(key, undefined);
+          // A transient failure leaves an optional key undecided. Full
+          // initialization may proceed, and the next capability read retries it.
+        }
         signal?.throwIfAborted();
       }
       if (generation !== this.current) continue;
@@ -138,7 +187,10 @@ export class EvmHubContractBindings {
         generation.contracts[key] = value;
         generation.resolved.add(key);
       }
-      return Object.freeze(Object.fromEntries(keys.map(key => [key, generation.contracts[key]]))) as Readonly<Pick<ContractCache, K>>;
+      const contracts = Object.freeze(Object.fromEntries(keys.map(key => [
+        key, generation.resolved.has(key) ? generation.contracts[key] : undefined,
+      ]))) as Readonly<Pick<ContractCache, K>>;
+      return Object.freeze({ generationId: generation.id, contracts });
     }
   }
 }

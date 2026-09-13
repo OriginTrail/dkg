@@ -287,14 +287,13 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     // before the approve fires. If someone moves the approve back outside the
     // lock, `run` is never reached and this turns red.
     const a = new EVMChainAdapter(minimalConfig());
-    (a as any).initialized = true;
-    (a as any).contracts = {
+    (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts,
       knowledgeAssetsLifecycle: {
         connect: () => ({
           getAddress: async () => '0x0000000000000000000000000000000000000005',
         }),
       },
-    };
+    });
     const serializer = (a as any).signerTxSerializer;
     const origRun = serializer.run.bind(serializer);
     const runSpy = recorder((...args: unknown[]) => origRun(...args));
@@ -317,12 +316,11 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
     // acquiring a signer / approving TRAC / sending the publish tx — otherwise a
     // throw after the send leaves a partially-applied publish on-chain.
     const a = new EVMChainAdapter(minimalConfig());
-    (a as any).initialized = true;
-    (a as any).contracts = {
+    (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts,
       knowledgeAssets: { getAddress: async () => '0x0000000000000000000000000000000000000009' },
       knowledgeAssetsStorage: {},
       token: {},
-    };
+    });
     // Any side effect would have to go through one of these first.
     const signerSpy = recorder(async () => {
       throw new Error('SIGNER_ACQUIRED_BEFORE_GUARD');
@@ -463,9 +461,9 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
       allowance: recorder(async () => 0n),
       approve: recorder(() => undefined),
     });
-    (a as any).contracts.token = {
+    (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts, token: {
       connect: recorder(() => tokenWithSigner),
-    };
+    } });
     (a as any).readContractWith = recorder(async () => 0n);
     const publicSend = recorder(async () => {
       throw new Error('public serializer re-entered');
@@ -512,7 +510,10 @@ describe('sendContractTransaction — universal per-wallet serialization (Phase 
     const a = new EVMChainAdapter(minimalConfig());
     const signer = new ethers.Wallet(DEPLOYER_PK);
     const tokenWithSigner = connectable({});
-    (a as any).contracts.token = { connect: recorder(() => tokenWithSigner) };
+    (a as any).installHubContractBindingsForTesting({
+      ...(a as any).contracts,
+      token: { connect: recorder(() => tokenWithSigner) },
+    });
     // Stale-zero allowance read triggers the approve; the #888 post-approve
     // confirmation poll sees the target immediately (separate read path).
     (a as any).readContractWith = recorder(async () => 0n);

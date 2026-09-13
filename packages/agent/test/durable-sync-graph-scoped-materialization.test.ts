@@ -504,7 +504,7 @@ describe('durable graph-scoped KA materialization', () => {
       allowNoAdminSigner: true,
     };
     const chain: any = new EVMChainAdapter(config);
-    chain.initialized = true;
+    chain.installHubContractBindingsForTesting({ ...chain.contracts });
     chain.init = async () => {};
     chain.getLatestMerkleRoot = async () => root;
     chain.getMerkleRootCount = async () => 2n;
@@ -512,7 +512,10 @@ describe('durable graph-scoped KA materialization', () => {
     chain.getLatestMerkleRootPublisher = async () => (
       '0x2222222222222222222222222222222222222222'
     );
-    chain.contracts.knowledgeAssetStorage = {};
+    chain.installHubContractBindingsForTesting({
+      ...chain.contracts,
+      knowledgeAssetStorage: {},
+    });
     chain.getTransactionReceiptWithFailover = async () => { throw transportError; };
 
     try {

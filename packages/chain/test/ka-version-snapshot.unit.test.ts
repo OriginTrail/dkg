@@ -78,9 +78,11 @@ function adapterOver(
     validated.push(provider.__index);
     return 31337n;
   };
-  a.initialized = true;
   a.init = async () => {};
-  a.contracts = { knowledgeAssetStorage: opts.storageDeployed === false ? undefined : {} };
+  a.installHubContractBindingsForTesting({
+    ...a.contracts,
+    knowledgeAssetStorage: opts.storageDeployed === false ? undefined : {},
+  });
   a.providers = providers;
   a.rebindContract = (_c: unknown, provider: (typeof providers)[number]) => {
     const record = (call: string, overrides: { blockTag?: unknown }) =>

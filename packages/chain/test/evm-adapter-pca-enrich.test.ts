@@ -73,11 +73,13 @@ function adapterWithFakeNft(nftOverrides: Record<string, unknown>): EVMChainAdap
       ? { populateTransaction: (...args: unknown[]) => (value as (...args: unknown[]) => unknown)(...args) }
       : value;
   }
-  (a as any).contracts.dkgPublishingConvictionNFT = {
+  (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts,
+    dkgPublishingConvictionNFT: {
     getAddress: async () => NFT_ADDRESS,
     connect: () => connected,
     ...nftOverrides,
-  };
+    },
+  });
   // Leave contracts.token undefined so the allowance/approve branch in
   // create/topUp is skipped — the revert under test comes from the write.
   return a;

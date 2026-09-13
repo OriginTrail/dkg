@@ -123,8 +123,10 @@ describe('multi-RPC read failover (real loopback providers)', () => {
         providers: JsonRpcProvider[];
         contracts: { knowledgeAssetStorage?: Contract };
       };
-      internal.initialized = true;
-      internal.contracts.knowledgeAssetStorage = new Contract(KAS, KAS_ABI, internal.providers[0]);
+      (internal as any).installHubContractBindingsForTesting({
+        ...internal.contracts,
+        knowledgeAssetStorage: new Contract(KAS, KAS_ABI, internal.providers[0]),
+      });
 
       const controller = new AbortController();
       const timeoutError = createRpcTimeoutError('authentication attempt timed out');
@@ -182,8 +184,10 @@ describe('multi-RPC read failover (real loopback providers)', () => {
         providers: JsonRpcProvider[];
         contracts: { knowledgeAssetStorage?: Contract };
       };
-      internal.initialized = true;
-      internal.contracts.knowledgeAssetStorage = new Contract(KAS, KAS_ABI, internal.providers[0]);
+      (internal as any).installHubContractBindingsForTesting({
+        ...internal.contracts,
+        knowledgeAssetStorage: new Contract(KAS, KAS_ABI, internal.providers[0]),
+      });
 
       const controller = new AbortController();
       const timeoutError = createRpcTimeoutError('authentication attempt timed out');

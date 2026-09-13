@@ -140,8 +140,10 @@ export function makeAdapter(registry: any, head = 0, config: Partial<EVMAdapterC
       block === undefined || block >= 0 ? '0x6000' : '0x',
     ),
   };
-  (adapter as any).contracts = { contextGraphNameRegistry: registry };
-  (adapter as any).initialized = true;
+  (adapter as any).installHubContractBindingsForTesting({
+    ...(adapter as any).contracts,
+    contextGraphNameRegistry: registry,
+  });
   (adapter as any).provider = provider;
   (adapter as any).providers = [provider];
   return { adapter, provider };

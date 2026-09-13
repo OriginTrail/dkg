@@ -69,7 +69,6 @@ export function providerQuorumFixture(options: {
   ) => string | Promise<string>;
 }) {
   const adapter: any = new EVMChainAdapter(minimalConfig());
-  adapter.initialized = true;
   adapter.init = vi.fn(async () => {});
   adapter.providers = [...options.providers];
   adapter.rpcUrls = options.providers.map(
@@ -79,7 +78,10 @@ export function providerQuorumFixture(options: {
   const storage = {
     getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6'),
   };
-  adapter.contracts = { contextGraphStorage: storage };
+  adapter.installHubContractBindingsForTesting({
+    ...adapter.contracts,
+    contextGraphStorage: storage,
+  });
   const getLatestContextGraphId = vi.fn(async (provider: object) => {
     if (options.readHighWater === undefined) {
       throw new Error('Unexpected getLatestContextGraphId read');
@@ -113,13 +115,15 @@ export function providerQuorumFixture(options: {
 
 export function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH]) {
   const adapter: any = new EVMChainAdapter(minimalConfig());
-  adapter.initialized = true;
   adapter.init = vi.fn(async () => {});
   let storageAddress = '0x00000000000000000000000000000000000000c6';
   const contextGraphStorage = {
     getAddress: vi.fn(async () => storageAddress),
   };
-  adapter.contracts = { contextGraphStorage };
+  adapter.installHubContractBindingsForTesting({
+    ...adapter.contracts,
+    contextGraphStorage,
+  });
   const currentProvider = {
     getBlock: vi.fn(async (blockNumber: number | string) => ({
       number: typeof blockNumber === 'number' ? blockNumber : 100,
@@ -216,7 +220,10 @@ export function historicalFixture(pages: ReadonlyArray<ReadonlyArray<bigint>> = 
     filters: { ContextGraphCreated: filterFactory },
     interface: { parseLog },
   };
-  base.adapter.contracts = { contextGraphStorage: storage };
+  base.adapter.installHubContractBindingsForTesting({
+    ...base.adapter.contracts,
+    contextGraphStorage: storage,
+  });
   const getNameHash = vi.fn(async () => NAME_HASH);
   base.adapter.rebindContract = vi.fn(() => ({
     getLatestContextGraphId: vi.fn(async (options?: { blockTag?: number }) => {

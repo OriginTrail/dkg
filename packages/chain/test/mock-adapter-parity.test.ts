@@ -492,8 +492,10 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     // missing without touching the network — mirrors the adapter
     // misconfiguration / network-outage case that previously fell back
     // to a hardcoded 3.
-    (evm as any).contracts = { parametersStorage: undefined };
-    (evm as any).initialized = true;
+    (evm as any).installHubContractBindingsForTesting({
+      ...(evm as any).contracts,
+      parametersStorage: undefined,
+    });
     await expect(evm.getMinimumRequiredSignatures()).rejects.toThrow(
       /ParametersStorage contract is not resolvable/,
     );

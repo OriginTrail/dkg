@@ -73,12 +73,15 @@ describe('chain event callback dispatch context', () => {
       await poller.waitForCurrentPoll();
       expect(dispatched.map(call => call.info)).toEqual([11, 12].map(blockNumber => ({ ...testCase.info, blockNumber })));
       expect(filters).toHaveLength(1);
-      const signal = dispatched[0].context.signal;
+      const context = dispatched[0].context;
+      const signal = context.signal;
       expect(filters[0].signal).toBe(signal);
       expect(signal).toBeInstanceOf(AbortSignal);
       expect(signal.aborted).toBe(false);
       for (const call of dispatched) {
+        expect(call.context).toBe(context);
         expect(call.context.signal).toBe(signal);
+        expect(call.context.operation).toBe(context.operation);
         expect(call.context.operation).toEqual({ operationId: expect.any(String), operationName: 'publish' });
       }
       expect(warning).toHaveBeenCalledWith(dispatched[0].context.operation,

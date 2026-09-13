@@ -15,9 +15,16 @@ function adapter(
   overrides: Record<string, unknown> = {},
   useProductionV10Parser = false,
 ) {
-  const chain = Object.assign(createPublishAdapterFixture(), {
+  const chain = createPublishAdapterFixture();
+  const { contracts, ...methodOverrides } = overrides as {
+    contracts?: Record<string, unknown>;
+  } & Record<string, unknown>;
+  (chain as any).installHubContractBindingsForTesting({
+    ...(chain as any).contracts,
+    ...(contracts ?? { knowledgeAssetStorage: {} }),
+  });
+  Object.assign(chain, {
     init: vi.fn(async () => undefined),
-    contracts: { knowledgeAssetStorage: {} },
     getTransactionReceiptWithFailover: vi.fn(async () => null),
     getTransactionWithFailover: vi.fn(async () => null),
     getBlockTimestamp: vi.fn(async () => 1_234_567),
@@ -26,12 +33,12 @@ function adapter(
     // finality; these rows are about receipt PROJECTION, so the gate defaults to satisfied and
     // the dedicated finality rows live in publish-transaction-finality.unit.test.ts.
     isReceiptBlockFinalAndCanonical: vi.fn(async () => true),
-    ...overrides,
-  }) as PublishMethods;
+    ...methodOverrides,
+  });
   if (useProductionV10Parser) {
     delete (chain as unknown as { parseV10PublishReceipt?: unknown }).parseV10PublishReceipt;
   }
-  return chain;
+  return chain as PublishMethods;
 }
 
 describe('canonical finalization receipt capability', () => {

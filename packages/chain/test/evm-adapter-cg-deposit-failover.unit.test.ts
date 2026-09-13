@@ -57,8 +57,7 @@ describe('createOnChainContextGraph — TooLowAllowance recovery uses the failov
     firstRevert?: () => unknown; // first-attempt submitCreate error (default TooLowAllowance)
   }) {
     const a: any = new EVMChainAdapter(minimalConfig());
-    a.initialized = true;
-    a.init = async () => { a.initialized = true; };
+    a.init = async () => {};
     // Isolate the failover read from the chainId preflight (not under test).
     a.ensureConfiguredStaticChainIdValidated = async () => {};
 
@@ -66,7 +65,7 @@ describe('createOnChainContextGraph — TooLowAllowance recovery uses the failov
     a.providers = [p0, p1]; // two endpoints so readContract can fail over
     a.rpcUrls = ['https://primary.example', 'https://backup.example'];
 
-    a.contracts = {
+    a.installHubContractBindingsForTesting({ ...a.contracts,
       parametersStorage: {
         connect: (p: unknown) => ({
           contextGraphRegistrationDeposit: () => opts.depositRead(p === p0 ? 0 : 1),
@@ -76,7 +75,7 @@ describe('createOnChainContextGraph — TooLowAllowance recovery uses the failov
       contextGraphStorage: {
         interface: { parseLog: () => ({ name: 'ContextGraphCreated', args: { contextGraphId: 7n } }) },
       },
-    };
+    });
 
     const ensureSpy = recorder(async (..._a: unknown[]) => {});
     a.ensureV10ApproveTrac = ensureSpy;

@@ -23,15 +23,22 @@ const TX_HASH = `0x${'ab'.repeat(32)}`;
 const BLOCK_HASH = `0x${'cd'.repeat(32)}`;
 
 function adapter(overrides: Record<string, unknown> = {}) {
-  return Object.assign(createPublishAdapterFixture(), {
+  const chain = createPublishAdapterFixture();
+  const { contracts, ...methodOverrides } = overrides as {
+    contracts?: Record<string, unknown>;
+  } & Record<string, unknown>;
+  (chain as any).installHubContractBindingsForTesting({
+    ...(chain as any).contracts,
+    ...(contracts ?? { knowledgeAssetStorage: {} }),
+  });
+  return Object.assign(chain, {
     init: vi.fn(async () => undefined),
     finalityConfirmations: 1,
-    contracts: { knowledgeAssetStorage: {} },
     getTransactionReceiptWithFailover: vi.fn(async () => null),
     getTransactionWithFailover: vi.fn(async () => null),
     getBlockTimestamp: vi.fn(async () => 1_234_567),
     parseV10PublishReceipt: vi.fn(async () => null),
-    ...overrides,
+    ...methodOverrides,
   }) as PublishMethods;
 }
 

@@ -65,15 +65,16 @@ describe('decodeConvictionCostCovered (B8)', () => {
 
   it('attaches CostCovered when resolving a V10 publish receipt by tx hash', async () => {
     const parser = createPublishAdapterFixture();
-    Object.assign(parser, {
-      contracts: {
-        knowledgeAssetStorage: {
-          target: KAS,
-          interface: new Interface([
-            'event KnowledgeAssetCreated(uint256 id, address author)',
-          ]),
-        },
+    (parser as any).installHubContractBindingsForTesting({
+      ...(parser as any).contracts,
+      knowledgeAssetStorage: {
+        target: KAS,
+        interface: new Interface([
+          'event KnowledgeAssetCreated(uint256 id, address author)',
+        ]),
       },
+    });
+    Object.assign(parser, {
       getBlockTimestamp: async () => 1234,
     });
 

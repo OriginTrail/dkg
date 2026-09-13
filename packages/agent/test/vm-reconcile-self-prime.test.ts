@@ -62,6 +62,7 @@ interface AgentInternals {
   ): void;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
   vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
+  vmReconcilePhysicalRuns: Set<Promise<unknown>>;
   store: TripleStore;
 }
 
@@ -1085,7 +1086,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(original.onChainId).toBeUndefined();
   });
 
-  it('settles promptly on lifecycle abort even when the lookup ignores its signal', async () => {
+  it('logically aborts a noncooperative self-prime but retains physical ownership until it settles', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'SelfPrimeAbortRace', chainAdapter: chain });
     stubNode(agent);
@@ -1093,9 +1094,11 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const localCgId = 'gh1098-abort-race';
     const original = { subscribed: true };
     internals.subscribedContextGraphs.set(localCgId, original);
-    internals.resolveContextGraphOnChainIdBinding = async () => (
-      new Promise<never>(() => undefined)
-    );
+    const lookup = deferred<{
+      onChainId: string;
+      provenance: 'ontology';
+    } | null>();
+    internals.resolveContextGraphOnChainIdBinding = async () => lookup.promise;
     const persist = vi.fn();
     (internals as any).persistContextGraphSubscription = persist;
     const controller = new AbortController();
@@ -1107,11 +1110,15 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       () => !controller.signal.aborted,
       controller.signal,
     );
-    await Promise.resolve();
+    await vi.waitFor(() => expect(internals.vmReconcilePhysicalRuns.size).toBe(1));
     controller.abort();
 
     await expect(prime).resolves.toBeNull();
     expect(persist).not.toHaveBeenCalled();
+    expect(internals.vmReconcilePhysicalRuns.size).toBe(1);
+
+    lookup.resolve(null);
+    await vi.waitFor(() => expect(internals.vmReconcilePhysicalRuns.size).toBe(0));
   });
 
   it('an ignored live event heals through the bounded periodic sweep once ontology metadata is available', async () => {

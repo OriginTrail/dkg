@@ -64,12 +64,14 @@ function makeAdapter(storage: any, head = 0) {
   // The scan runs on storage.connect(scanProvider); the double returns itself so
   // its queryFilter is exercised (and records which provider it was bound to).
   storage.connect ??= recorder(() => storage);
-  (a as any).contracts = { knowledgeAssetStorage: storage };
+  (a as any).installHubContractBindingsForTesting({
+    ...(a as any).contracts,
+    knowledgeAssetStorage: storage,
+  });
   // getMaxKaNumberForAuthor now `await this.init()`s first (re-resolve handles
   // on Hub rotation). Mark initialized so init() short-circuits and the injected
   // handle is used; the post-rotation test below exercises the
   // initialized=false re-resolution path explicitly.
-  (a as any).initialized = true;
   (a as any).provider = {
     getBlockNumber: recorder(async () => head),
     getCode: recorder(async () => '0x6000'),
@@ -232,16 +234,21 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     const fresh = mkStorage(7n);
 
     const a = new EVMChainAdapter(minimalConfig());
-    (a as any).contracts = { knowledgeAssetStorage: stale };
-    (a as any).initialized = false; // post-rotation: handles need re-resolving
+    (a as any).installHubContractBindingsForTesting({
+      ...(a as any).contracts,
+      knowledgeAssetStorage: stale,
+    });
+    (a as any).invalidateHubContractBindings(); // post-rotation: handles need re-resolving
     (a as any).provider = {
       getBlockNumber: recorder(async () => 0),
       getCode: recorder(async () => '0x6000'),
     };
     // What the real init() does on a re-init: swap in the fresh binding.
     const init = recorder(async () => {
-      (a as any).contracts.knowledgeAssetStorage = fresh;
-      (a as any).initialized = true;
+      (a as any).installHubContractBindingsForTesting({
+        ...(a as any).contracts,
+        knowledgeAssetStorage: fresh,
+      });
     });
     (a as any).init = init;
 
@@ -863,8 +870,10 @@ describe('EVMChainAdapter.getMaxKaNumberForAuthor — view + bounded fallback (#
     };
     storage.connect = () => storage;
     const a = new EVMChainAdapter(minimalConfig({ kaHighWaterScanPageSize: 10_000 }));
-    (a as any).contracts = { knowledgeAssetStorage: storage };
-    (a as any).initialized = true;
+    (a as any).installHubContractBindingsForTesting({
+      ...(a as any).contracts,
+      knowledgeAssetStorage: storage,
+    });
     const prov = { getBlockNumber: recorder(async () => head), getCode: recorder(async () => '0x6000') };
     (a as any).provider = prov;
     (a as any).providers = [prov];

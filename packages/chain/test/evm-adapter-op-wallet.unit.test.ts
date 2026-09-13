@@ -82,8 +82,10 @@ function makeAdapter(opts: {
     calls.push({ contract: contract?.__name ?? 'unknown', method, args, signer: signer?.address });
     return { hash: '0xtx', blockNumber: 1, index: 0, status: 1 };
   };
-  (a as any).contracts.profile = { __name: 'profile', getAddress: async () => '0xprofile' };
-  (a as any).contracts.identity = { __name: 'identity', getAddress: async () => '0xidentity' };
+  (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts,
+    profile: { __name: 'profile', getAddress: async () => '0xprofile' },
+    identity: { __name: 'identity', getAddress: async () => '0xidentity' },
+  });
   return { a, calls, readContract };
 }
 

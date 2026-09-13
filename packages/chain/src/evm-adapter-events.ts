@@ -56,13 +56,24 @@ export class EventsMethods extends EVMChainAdapterBase {
     return logs;
   }
 
-  /** Every parsed log crosses this boundary, including supplemental mint logs. */
-  private *cancellableLogs<T>(logs: Iterable<T>, signal?: AbortSignal): Iterable<T> {
-    for (const log of logs) {
+  /** Querying and per-log cancellation are one intrinsic scan operation. */
+  private async queryEventLogs(
+    contract: ethers.Contract,
+    label: string,
+    eventFilter: ethers.ContractEventName,
+    filter: EventFilter,
+  ): Promise<AsyncIterable<ethers.Log | ethers.EventLog>> {
+    const { signal } = filter;
+    const logs = await this.queryFilterWithFailover(
+      contract, label, eventFilter, filter.fromBlock ?? 0, filter.toBlock, signal,
+    );
+    return (async function* cancellableLogs() {
+      for (const log of logs) {
+        signal?.throwIfAborted();
+        yield log;
+      }
       signal?.throwIfAborted();
-      yield log;
-    }
-    signal?.throwIfAborted();
+    }());
   }
 
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
@@ -76,8 +87,7 @@ export class EventsMethods extends EVMChainAdapterBase {
     const scan: EvmEventScan = {
       signal,
       query: (contract, label, eventFilter) =>
-        this.queryFilterWithFailover(contract, label, eventFilter, filter.fromBlock ?? 0, filter.toBlock, signal),
-      logs: (logs) => this.cancellableLogs(logs, signal),
+        this.queryEventLogs(contract, label, eventFilter, filter),
     };
     for (const eventType of filter.eventTypes) {
       signal?.throwIfAborted();

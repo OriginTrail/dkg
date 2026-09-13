@@ -4,12 +4,13 @@ import type { ChainEvent } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import {
   EVM_EVENT_DESCRIPTORS, eventContractKeysFor, evmEventDescriptorFor,
-  type EvmEventContractKey, type EvmEventDescriptor, type EvmEventScan,
+  type EvmEventCapabilityKey, type EvmEventDescriptor, type EvmEventScan,
 } from '../src/evm-event-contracts.js';
 import {
   ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings,
-  type EvmHubContractKey, type EvmHubContractSpec,
+  type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSpec,
 } from '../src/evm-hub-contract-bindings.js';
+import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
 
 const first = new Contract('0x0000000000000000000000000000000000000001', []);
 const second = new Contract('0x0000000000000000000000000000000000000002', []);
@@ -19,10 +20,23 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function completeInstallation(
+  overrides: Partial<EvmHubContractInstallation> = {},
+): EvmHubContractInstallation {
+  return {
+    hub: first,
+    identity: first,
+    profile: first,
+    parametersStorage: first,
+    knowledgeAssetStorage: first,
+    ...overrides,
+  };
+}
+
 describe('generation-owned Hub bindings and event selection', () => {
   it('shares one capability across aliases and repeated requested event types', () => {
     expect(eventContractKeysFor(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated']))
-      .toEqual(['knowledgeAssetStorage']);
+      .toEqual(['knowledgeAssetStorage', 'knowledgeAssetsLifecycle']);
     expect(eventContractKeysFor(['NameClaimed', 'ContextGraphNameClaimed']))
       .toEqual(['contextGraphNameRegistry']);
   });
@@ -82,14 +96,25 @@ describe('generation-owned Hub bindings and event selection', () => {
     expect(group.contracts.contextGraphStorage).toBe(second);
   });
 
-  it('preserves missing optional legacy contracts until the Hub generation changes', async () => {
+  it('caches an authoritative missing optional deployment until the Hub generation changes', async () => {
     const group = new EvmHubContractBindings({ hub: first });
-    const load = vi.fn().mockRejectedValueOnce(new Error('legacy contract absent')).mockResolvedValue(first);
+    const load = vi.fn()
+      .mockRejectedValueOnce(new HubContractNotFoundError('ContextGraphNameRegistry', String(first.target)))
+      .mockResolvedValue(first);
     await expect(group.resolve(['contextGraphNameRegistry'], load)).resolves.toEqual({ contextGraphNameRegistry: undefined });
     await group.resolve(['contextGraphNameRegistry'], load);
     expect(load).toHaveBeenCalledOnce();
     group.invalidate();
     await expect(group.resolve(['contextGraphNameRegistry'], load)).resolves.toEqual({ contextGraphNameRegistry: first });
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a transient optional-deployment lookup instead of caching absence', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const load = vi.fn().mockRejectedValueOnce(new Error('temporary RPC failure')).mockResolvedValue(first);
+    await expect(group.resolve(['chronos'], load)).resolves.toEqual({ chronos: undefined });
+    expect(group.resolvedKeys.has('chronos')).toBe(false);
+    await expect(group.resolve(['chronos'], load)).resolves.toEqual({ chronos: first });
     expect(load).toHaveBeenCalledTimes(2);
   });
 
@@ -120,20 +145,20 @@ function decidedAs(handleFor: (key: EvmHubContractKey) => Contract | undefined):
 describe('Hub binding generation ownership', () => {
   it('install decides every boot key at once and runs no loader for the installed generation', async () => {
     const group = new EvmHubContractBindings({ hub: first });
-    const store = { hub: first, contextGraphStorage: second };
+    const store = completeInstallation({ contextGraphStorage: second });
     group.install(store);
     expect(group.contracts).toBe(store);
     expect(group.initialized).toBe(true);
-    expectAgreement(group, decidedAs(key => key === 'contextGraphStorage' ? second : undefined));
+    expectAgreement(group, decidedAs(key => store[key]));
     const loader = vi.fn(async () => first);
     await expect(group.resolve(['contextGraphStorage', 'knowledgeAssetStorage'], loader))
-      .resolves.toEqual({ contextGraphStorage: second, knowledgeAssetStorage: undefined });
+      .resolves.toEqual({ contextGraphStorage: second, knowledgeAssetStorage: first });
     expect(loader).not.toHaveBeenCalled();
   });
 
   it('invalidate retires readiness and decisions while retaining handles unless dropped', async () => {
     const group = new EvmHubContractBindings({ hub: first });
-    group.install({ hub: first, contextGraphStorage: second, knowledgeAssetStorage: first });
+    group.install(completeInstallation({ contextGraphStorage: second }));
     group.invalidate(['knowledgeAssetStorage']);
     expect(group.initialized).toBe(false);
     expectAgreement(group, new Map());
@@ -153,12 +178,14 @@ describe('Hub binding generation ownership', () => {
     await group.resolve(['contextGraphStorage'], async () => first);
     expect(() => group.completeInitialization(generation)).toThrow('cannot publish readiness before resolving: identity');
     expect(group.initialized).toBe(false);
-    const loader = vi.fn(async (spec: EvmHubContractSpec) => spec.optional ? undefined : second);
+    const loader = vi.fn(async (spec: EvmHubContractSpec) => spec.resolution === 'optional-deployment' ? undefined : second);
     await group.resolve(ALL_EVM_HUB_CONTRACT_KEYS, loader);
     expect(loader).toHaveBeenCalledTimes(ALL_EVM_HUB_CONTRACT_KEYS.length - 1);
     expect(group.completeInitialization(generation)).toBe(true);
     expect(group.initialized).toBe(true);
-    expectAgreement(group, decidedAs(key => key === 'contextGraphStorage' ? first : EVM_HUB_CONTRACT_SPECS[key].optional ? undefined : second));
+    expectAgreement(group, decidedAs(key => key === 'contextGraphStorage'
+      ? first
+      : EVM_HUB_CONTRACT_SPECS[key].resolution === 'optional-deployment' ? undefined : second));
     group.invalidate();
     expect(group.completeInitialization(generation)).toBe(false);
     expect(group.initialized).toBe(false);
@@ -169,12 +196,18 @@ describe('Hub binding generation ownership', () => {
     const group = new EvmHubContractBindings({ hub: first });
     const pending = deferred<Contract>();
     const resolving = group.resolve(['contextGraphStorage'], () => pending.promise);
-    const store = { hub: first, contextGraphStorage: second };
+    const store = completeInstallation({ contextGraphStorage: second });
     group.install(store);
     pending.resolve(first);
     await expect(resolving).resolves.toEqual({ contextGraphStorage: second });
     expect(store.contextGraphStorage).toBe(second);
-    expectAgreement(group, decidedAs(key => key === 'contextGraphStorage' ? second : undefined));
+    expectAgreement(group, decidedAs(key => store[key]));
+  });
+
+  it('rejects a production install that omits a required binding', () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    expect(() => group.install({ hub: first } as EvmHubContractInstallation))
+      .toThrow('missing required handles: identity, profile, parametersStorage, knowledgeAssetStorage');
   });
 });
 
@@ -202,8 +235,10 @@ const NAME_HASH = '0x' + 'ab'.repeat(32);
 const AUTHOR = getAddress('0x' + 'a1'.repeat(20));
 const OWNER = getAddress('0x' + 'b2'.repeat(20));
 const MINT_RECIPIENT = getAddress('0x' + 'c3'.repeat(20));
-const EVENT_BINDING_KEYS: readonly EvmEventContractKey[] = [...new Set(EVM_EVENT_DESCRIPTORS.map(descriptor => descriptor.binding))];
 const ALIASES = EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases.map(alias => [alias, descriptor] as const));
+const EVENT_CAPABILITY_KEYS: readonly EvmEventCapabilityKey[] = eventContractKeysFor(
+  EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases),
+);
 
 type EncodedLog = ReturnType<typeof eventInterface.encodeEventLog> & { blockNumber: number; transactionHash: string; transactionIndex: number };
 function logOf(event: string, values: unknown[], blockNumber: number, transactionHash: string, transactionIndex = 0): EncodedLog {
@@ -214,6 +249,10 @@ async function collectAll(events: AsyncIterable<ChainEvent>): Promise<ChainEvent
   const collected: ChainEvent[] = [];
   for await (const event of events) collected.push(event);
   return collected;
+}
+
+async function* asyncLogs(logs: readonly EncodedLog[]): AsyncIterable<EncodedLog> {
+  yield* logs;
 }
 
 /** One parsing scenario per canonical descriptor, keyed by its first alias; logs are keyed by query label in query order. */
@@ -266,7 +305,7 @@ describe('EVM event descriptor registry', () => {
     const aliases = EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases);
     expect(new Set(aliases).size).toBe(aliases.length);
     expect(Object.keys(SCENARIOS).sort()).toEqual(EVM_EVENT_DESCRIPTORS.map(descriptor => descriptor.aliases[0]).sort());
-    expect(eventContractKeysFor([...aliases].reverse())).toEqual(EVENT_BINDING_KEYS);
+    expect(eventContractKeysFor([...aliases].reverse())).toEqual(EVENT_CAPABILITY_KEYS);
     expect(eventContractKeysFor(['unsupported-event'])).toEqual([]);
     expect(evmEventDescriptorFor('unsupported-event')).toBeUndefined();
   });
@@ -274,16 +313,17 @@ describe('EVM event descriptor registry', () => {
   it.each(ALIASES)('%s scans its declared binding and parses every log shape of its descriptor', async (alias, descriptor: EvmEventDescriptor) => {
     const scenario = SCENARIOS[descriptor.aliases[0]];
     expect(evmEventDescriptorFor(alias)).toBe(descriptor);
-    expect(eventContractKeysFor([alias])).toEqual([descriptor.binding]);
+    expect(eventContractKeysFor([alias])).toEqual(
+      'capabilities' in descriptor ? descriptor.capabilities : [descriptor.binding],
+    );
     const contract = new Contract(address, EVENT_ABI);
     const queried: string[] = [];
     const scan: EvmEventScan = {
       query: async (queriedContract, label) => {
         expect(queriedContract).toBe(contract);
         queried.push(label);
-        return scenario.logs[label] ?? [];
+        return asyncLogs(scenario.logs[label] ?? []);
       },
-      logs: logs => logs,
     };
     expect(await collectAll(descriptor.scan(contract, scan))).toEqual(scenario.expected);
     expect(queried).toEqual(Object.keys(scenario.logs));
@@ -291,10 +331,12 @@ describe('EVM event descriptor registry', () => {
 
   it.each(ALIASES)('listenForEvents resolves %s from the registry and scans only its declared binding', async (alias, descriptor: EvmEventDescriptor) => {
     const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
-    const bindings = Object.fromEntries(EVENT_BINDING_KEYS.map((key, index) =>
+    const bindings = Object.fromEntries(EVENT_CAPABILITY_KEYS.map((key, index) =>
       [key, new Contract(`0x${String(index + 1).padStart(40, '0')}`, EVENT_ABI, adapter.getProvider())]));
     const reader = vi.fn(async () => []);
-    Object.assign(adapter, { initialized: true, contracts: { ...bindings }, readContractWith: reader });
+    const internal = adapter as any;
+    internal.installHubContractBindingsForTesting({ ...internal.contracts, ...bindings });
+    internal.readContractWith = reader;
     try {
       expect(await collectAll(adapter.listenForEvents({ eventTypes: [alias] }))).toEqual([]);
       expect(reader).toHaveBeenCalled();
@@ -315,9 +357,8 @@ describe('EVM event descriptor registry', () => {
           if (signal) controller.abort(reason);
           throw new Error('Transfer enumeration unavailable');
         }
-        return label === 'kas.queryFilter(KnowledgeAssetCreated)' ? created : [];
+        return asyncLogs(label === 'kas.queryFilter(KnowledgeAssetCreated)' ? created : []);
       },
-      logs: logs => logs,
     });
     expect(await collectAll(descriptor.scan(contract, scanWith()))).toEqual([
       { type: 'KCCreated', blockNumber: 13, data: { kaId: '6', merkleRoot: ROOT, merkleRootBytes: ROOT, byteSize: '2048', txHash: 'tx-greenfield', txIndex: 2, publisherAddress: AUTHOR, author: AUTHOR, startKAId: '6', endKAId: '6' } },

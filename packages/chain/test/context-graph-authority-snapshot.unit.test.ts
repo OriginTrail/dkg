@@ -54,7 +54,6 @@ function makeEvmAuthorityAdapter(
     allowNoAdminSigner: true,
     chainId: 'evm:31337',
   });
-  adapter.initialized = true;
   adapter.init = async () => {};
   adapter.cgRegistryScanPageSize = 10;
   const evidence: AuthorityEvidence = {
@@ -120,9 +119,9 @@ function makeEvmAuthorityAdapter(
     getBlock: (tag: string | number) => scenario.getBlock(tag),
     getNetwork: async () => ({ chainId: 31337n }),
   };
-  adapter.contracts = {
+  adapter.installHubContractBindingsForTesting({ ...adapter.contracts,
     contextGraphStorage: { connect: () => contract },
-  };
+  });
   adapter.readTipProvider = async (
     _label: string,
     read: (selectedProvider: typeof provider) => Promise<unknown>,
@@ -293,12 +292,12 @@ describe('RFC-64 Context Graph authority snapshots', () => {
       },
     };
     const connectedProviders: object[] = [];
-    adapter.contracts.contextGraphStorage = {
+    adapter.installHubContractBindingsForTesting({ ...adapter.contracts, contextGraphStorage: {
       connect: (provider: object) => {
         connectedProviders.push(provider);
         return provider === stalledProvider ? stalledContract : baseContract;
       },
-    };
+    } });
     adapter.readTipProvider = async (
       _label: string,
       read: (provider: object) => Promise<unknown>,

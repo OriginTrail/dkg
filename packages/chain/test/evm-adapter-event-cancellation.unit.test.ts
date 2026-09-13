@@ -13,16 +13,21 @@ const eventNames = [
   'KnowledgeAssetCreated', 'KnowledgeAssetsMinted', 'NameClaimed', 'ContextGraphCreated',
   'RelayCapabilityUpdated',
 ];
+function installBindings(adapter: EVMChainAdapter, bindings: Record<string, unknown>): void {
+  const internal = adapter as any;
+  internal.installHubContractBindingsForTesting({ ...internal.contracts, ...bindings });
+}
+
 function adapterAt(rpcUrl = 'http://127.0.0.1:59998', rpcUrls?: string[]) {
   const adapter = new EVMChainAdapter({ rpcUrl, rpcUrls, privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
   const contract = new Contract(address, [
     ...eventNames.map(name => `event ${name}()`),
     'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
   ], adapter.getProvider());
-  Object.assign(adapter, { initialized: true, contracts: {
+  installBindings(adapter, {
     knowledgeAssetsStorage: contract, knowledgeAssetStorage: contract,
     contextGraphStorage: contract, contextGraphNameRegistry: contract, profileStorage: contract,
-  } });
+  });
   return adapter;
 }
 async function collect(adapter: EVMChainAdapter, filter: EventFilter) {
@@ -32,6 +37,38 @@ async function collect(adapter: EVMChainAdapter, filter: EventFilter) {
 }
 
 describe('event scan RPC cancellation', () => {
+  it('resolves the V10 lifecycle capability before a cold KCCreated scan', async () => {
+    const hub = new Interface([
+      'function getContractAddress(string name) view returns (address)',
+      'function getAssetStorageAddress(string name) view returns (address)',
+    ]);
+    const requests: string[] = [];
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const server = await rpc.start(async (payload, response) => {
+      let result: unknown = '0x7a69';
+      if (payload.method === 'eth_call') {
+        const call = hub.parseTransaction({ data: (payload.params[0] as { data: string }).data });
+        if (!call) throw new Error('expected Hub lookup');
+        requests.push(String(call.args[0]));
+        result = hub.encodeFunctionResult(call.fragment, [address]);
+      } else if (payload.method === 'eth_getLogs') {
+        result = [];
+      }
+      sendJsonRpcResult(response, payload, result);
+    });
+    const adapter = new EVMChainAdapter({ rpcUrl: server.url,
+      privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    try {
+      expect(adapter.isV10Ready()).toBe(false);
+      expect(await collect(adapter, { eventTypes: ['KCCreated'], fromBlock: 1, toBlock: 20 })).toEqual([]);
+      expect(requests).toEqual(['DKGKnowledgeAssets', 'KnowledgeAssetsLifecycle']);
+      expect(adapter.isV10Ready()).toBe(true);
+    } finally {
+      adapter.destroy();
+      await rpc.stopAll();
+    }
+  });
+
   it('resolves the current Token after cold initialization outlives the rotation replay window', async () => {
     const rpc = createLoopbackJsonRpcTestHarness();
     const hub = new Interface([
@@ -281,13 +318,17 @@ describe('event scan RPC cancellation', () => {
   });
 
   it.each([
-    ['ProfileStorage', ['RelayCapabilityUpdated'], ['ProfileStorage']],
-    ['DKGKnowledgeAssets', ['KCCreated'], ['DKGKnowledgeAssets']],
-    ['KnowledgeAssetsStorage', ['KnowledgeBatchCreated'], ['KnowledgeAssetsStorage']],
-    ['ContextGraphNameRegistry', ['NameClaimed'], ['ContextGraphNameRegistry']],
-    ['ContextGraphStorage', ['ContextGraphCreated'], ['ContextGraphStorage']],
-    ['ContextGraphStorage', ['KCCreated', 'ContextGraphCreated'], ['DKGKnowledgeAssets', 'ContextGraphStorage']],
-  ] as const)('physically cancels only the requested event group at %s without fallback', async (stalledName, eventTypes, expectedNames) => {
+    ['ProfileStorage', ['RelayCapabilityUpdated'], ['ProfileStorage'], ['ProfileStorage']],
+    ['DKGKnowledgeAssets', ['KCCreated'], ['DKGKnowledgeAssets'], ['DKGKnowledgeAssets', 'KnowledgeAssetsLifecycle']],
+    ['KnowledgeAssetsStorage', ['KnowledgeBatchCreated'], ['KnowledgeAssetsStorage'], ['KnowledgeAssetsStorage']],
+    ['ContextGraphNameRegistry', ['NameClaimed'], ['ContextGraphNameRegistry'], ['ContextGraphNameRegistry']],
+    ['ContextGraphStorage', ['ContextGraphCreated'], ['ContextGraphStorage'], ['ContextGraphStorage']],
+    ['ContextGraphStorage', ['KCCreated', 'ContextGraphCreated'],
+      ['DKGKnowledgeAssets', 'KnowledgeAssetsLifecycle', 'ContextGraphStorage'],
+      ['DKGKnowledgeAssets', 'KnowledgeAssetsLifecycle', 'ContextGraphStorage']],
+  ] as const)('physically cancels only the requested event group at %s without fallback', async (
+    stalledName, eventTypes, cancelledNames, capabilityNames,
+  ) => {
     const hub = new Interface([
       'function getContractAddress(string name) view returns (address)',
       'function getAssetStorageAddress(string name) view returns (address)',
@@ -344,12 +385,12 @@ describe('event scan RPC cancellation', () => {
       expect(requests.filter(request => request.name === stalledName)).toHaveLength(1);
       expect(internal.initialized).toBe(false);
       expect(internal.contracts).toEqual(beforeBindings);
-      expect(requests.map(request => request.name)).toEqual(expectedNames);
+      expect(requests.map(request => request.name)).toEqual(cancelledNames);
       // Even bindings resolved before the stalled lookup must be retried:
       // cancellation discards the entire staged capability group.
       stall = false;
       expect(await collect(adapter, { eventTypes: [...eventTypes] })).toEqual([]);
-      expect(requests.map(request => request.name)).toEqual([...expectedNames, ...expectedNames]);
+      expect(requests.map(request => request.name)).toEqual([...cancelledNames, ...capabilityNames]);
       expect(internal.initialized).toBe(false);
       // Successful subset admission installs into the canonical handle store;
       // cancelled staging above installed nothing and full initialization is pending.
@@ -358,10 +399,12 @@ describe('event scan RPC cancellation', () => {
       ].sort());
       expect(internal.contracts.identity).toBeUndefined();
       await collect(adapter, { eventTypes: [...eventTypes] });
-      expect(requests.map(request => request.name)).toEqual([...expectedNames, ...expectedNames]);
+      expect(requests.map(request => request.name)).toEqual([...cancelledNames, ...capabilityNames]);
       internal.applyHubRotationEventName(stalledName);
       await collect(adapter, { eventTypes: [...eventTypes] });
-      expect(requests.map(request => request.name)).toEqual([...expectedNames, ...expectedNames, ...expectedNames]);
+      expect(requests.map(request => request.name)).toEqual([
+        ...cancelledNames, ...capabilityNames, ...capabilityNames,
+      ]);
       // Global initialization composes completed event bindings rather than
       // loading them again, and still initializes its non-event capabilities.
       const beforeFullInit = requests.filter(request => request.name === stalledName).length;
@@ -414,6 +457,19 @@ describe('event scan RPC cancellation', () => {
     } finally { adapter.destroy(); }
   });
 
+  it('passes the requested block bounds to the physical event query', async () => {
+    const adapter = adapterAt();
+    const queryFilter = vi.fn(async () => []);
+    const reader = vi.fn(async (_contract: unknown, _label: string, read: (contract: unknown) => Promise<unknown>) =>
+      read({ queryFilter }));
+    Object.assign(adapter, { readContractWith: reader });
+    try {
+      await collect(adapter, { eventTypes: ['ContextGraphCreated'], fromBlock: 7, toBlock: 19 });
+      expect(queryFilter).toHaveBeenCalledOnce();
+      expect(queryFilter.mock.calls[0]?.slice(1)).toEqual([7, 19]);
+    } finally { adapter.destroy(); }
+  });
+
   it('cancels between yielded logs before parsing or dispatching the next event', async () => {
     const adapter = adapterAt();
     const contract = new Contract(address, [
@@ -422,7 +478,8 @@ describe('event scan RPC cancellation', () => {
     const encoded = contract.interface.encodeEventLog('ContextGraphExpanded', [1n, 2n]);
     const parse = vi.spyOn(contract.interface, 'parseLog');
     const logs = [11, 12].map(blockNumber => ({ ...encoded, blockNumber, transactionHash: `tx-${blockNumber}` }));
-    Object.assign(adapter, { contracts: { contextGraphStorage: contract }, readContractWith: async () => logs });
+    installBindings(adapter, { contextGraphStorage: contract });
+    Object.assign(adapter, { readContractWith: async () => logs });
     const controller = new AbortController();
     const iterator = adapter.listenForEvents({ eventTypes: ['ContextGraphExpanded'], signal: controller.signal })[Symbol.asyncIterator]();
     try {

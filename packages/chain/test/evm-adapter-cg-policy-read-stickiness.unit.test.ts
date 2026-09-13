@@ -65,15 +65,14 @@ interface EndpointViews {
 // harness). `p0` = primary, `p1` = backup.
 function makePolicyAdapter(views: { primary: EndpointViews; backup: EndpointViews }) {
   const a: any = new EVMChainAdapter(minimalConfig());
-  a.initialized = true;
-  a.init = async () => { a.initialized = true; };
+  a.init = async () => {};
   a.ensureConfiguredStaticChainIdValidated = async () => {};
 
   const p0 = {}; const p1 = {};
   a.providers = [p0, p1];
   a.rpcUrls = ['https://primary.example', 'https://backup.example'];
 
-  a.contracts = {
+  a.installHubContractBindingsForTesting({ ...a.contracts,
     contextGraphStorage: {
       connect: (p: unknown) => {
         const v = p === p0 ? views.primary : views.backup;
@@ -83,7 +82,7 @@ function makePolicyAdapter(views: { primary: EndpointViews; backup: EndpointView
         };
       },
     },
-  };
+  });
   return { a };
 }
 

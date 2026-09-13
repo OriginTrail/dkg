@@ -76,9 +76,8 @@ function adapterOver(
   }));
 
   const a: any = new EVMChainAdapter(minimalConfig(finalityConfirmations));
-  a.initialized = true;
   a.init = async () => {};
-  a.contracts = {
+  a.installHubContractBindingsForTesting({ ...a.contracts,
     knowledgeAssetStorage: opts.storageDeployed === false ? undefined : {
       connect(provider: (typeof providers)[number]) {
         return {
@@ -90,7 +89,7 @@ function adapterOver(
         };
       },
     },
-  };
+  });
   // The real failover walks endpoints on transport failure AND on an EMPTY result when the caller
   // asks for that policy (`ReadOpts.isEmptyResult`, which `readProviderRetryingNull` sets). This
   // stand-in models both, and records the policy it was handed so a row can prove production asked

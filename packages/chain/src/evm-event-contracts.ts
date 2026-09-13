@@ -7,20 +7,23 @@ import type { EvmHubContractKey } from './evm-hub-contract-bindings.js';
 
 /**
  * The read boundary a scan borrows from the adapter: cancellation-aware wide
- * log queries over the requested block range, and the per-log checkpoint every
- * parsed log crosses (see `EventsMethods.queryFilterWithFailover` and
- * `cancellableLogs`).
+ * log queries over the requested block range. The returned iterable owns the
+ * per-log cancellation checkpoints, so every parsed log crosses them.
  */
 export interface EvmEventScan {
   readonly signal?: AbortSignal;
-  query(contract: Contract, label: string, filter: ethers.ContractEventName): Promise<(ethers.Log | ethers.EventLog)[]>;
-  logs<T>(logs: Iterable<T>): Iterable<T>;
+  query(
+    contract: Contract,
+    label: string,
+    filter: ethers.ContractEventName,
+  ): Promise<AsyncIterable<ethers.Log | ethers.EventLog>>;
 }
 
 /** One supported EVM event: its aliases, the Hub binding it reads and the scan that parses it. */
 interface EvmEventDescriptorShape {
   readonly aliases: readonly [string, ...string[]];
   readonly binding: EvmHubContractKey;
+  readonly capabilities?: readonly EvmHubContractKey[];
   scan(contract: Contract, scan: EvmEventScan): AsyncIterable<ChainEvent>;
 }
 
@@ -41,10 +44,9 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['RelayCapabilityUpdated'],
     binding: 'profileStorage',
     async *scan(profileStorage: Contract, scan: EvmEventScan) {
-      const logs = await scan.query(
+      for await (const log of await scan.query(
         profileStorage, 'profileStorage.queryFilter(RelayCapabilityUpdated)', profileStorage.filters.RelayCapabilityUpdated(),
-      );
-      for (const log of scan.logs(logs)) {
+      )) {
         const parsed = parseLog(profileStorage, log);
         if (parsed) {
           yield {
@@ -74,6 +76,10 @@ export const EVM_EVENT_DESCRIPTORS = [
     // non-existent `filters.KnowledgeAssetCreated()`.
     aliases: ['KCCreated', 'KnowledgeAssetCreated'],
     binding: 'knowledgeAssetStorage',
+    // Finalization consumers consult isV10Ready() after this scan. Resolve the
+    // lifecycle capability in the same subset so a cold adapter can classify a
+    // valid V10 KCCreated receipt without looking for a legacy expansion event.
+    capabilities: ['knowledgeAssetStorage', 'knowledgeAssetsLifecycle'],
     async *scan(kaStorage: Contract, scan: EvmEventScan) {
       const hasEvent = (name: string) =>
         kaStorage.interface.fragments.some(
@@ -87,7 +93,6 @@ export const EVM_EVENT_DESCRIPTORS = [
 
       const kcFilter = kaStorage.filters[createEventName]();
       const kcLogs = await scan.query(kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter);
-
       // Legacy mint range. `KnowledgeAssetsMinted` is still declared on the
       // greenfield ABI but never emitted by `createKnowledgeAsset`, so
       // this map stays empty there and the per-log fallback below derives
@@ -95,8 +100,9 @@ export const EVM_EVENT_DESCRIPTORS = [
       const mintByTx = new Map<string, { publisherAddress: string; startKAId: string; endKAId: string }>();
       if (hasEvent('KnowledgeAssetsMinted')) {
         const mintFilter = kaStorage.filters.KnowledgeAssetsMinted();
-        const mintLogs = await scan.query(kaStorage, 'kas.queryFilter(KnowledgeAssetsMinted)', mintFilter);
-        for (const ml of scan.logs(mintLogs)) {
+        for await (const ml of await scan.query(
+          kaStorage, 'kas.queryFilter(KnowledgeAssetsMinted)', mintFilter,
+        )) {
           const mp = parseLog(kaStorage, ml);
           if (mp) {
             mintByTx.set(ml.transactionHash, {
@@ -117,8 +123,7 @@ export const EVM_EVENT_DESCRIPTORS = [
       if (isGreenfield) {
         try {
           const transferFilter = kaStorage.filters.Transfer(ethers.ZeroAddress);
-          const transferLogs = await scan.query(kaStorage, 'kas.queryFilter(Transfer)', transferFilter);
-          for (const tl of scan.logs(transferLogs)) {
+          for await (const tl of await scan.query(kaStorage, 'kas.queryFilter(Transfer)', transferFilter)) {
             const tp = parseLog(kaStorage, tl);
             if (tp && tp.args.tokenId != null) {
               ownerByTokenId.set(tp.args.tokenId.toString(), String(tp.args.to));
@@ -131,7 +136,7 @@ export const EVM_EVENT_DESCRIPTORS = [
         }
       }
 
-      for (const log of scan.logs(kcLogs)) {
+      for await (const log of kcLogs) {
         const parsed = parseLog(kaStorage, log);
         if (parsed) {
           const mint = mintByTx.get(log.transactionHash);
@@ -179,8 +184,9 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['KnowledgeBatchCreated'],
     binding: 'knowledgeAssetsStorage',
     async *scan(storage: Contract, scan: EvmEventScan) {
-      const logs = await scan.query(storage, 'kasV9.queryFilter(KnowledgeBatchCreated)', storage.filters.KnowledgeBatchCreated());
-      for (const log of scan.logs(logs)) {
+      for await (const log of await scan.query(
+        storage, 'kasV9.queryFilter(KnowledgeBatchCreated)', storage.filters.KnowledgeBatchCreated(),
+      )) {
         const parsed = parseLog(storage, log);
         if (parsed) {
           yield {
@@ -205,8 +211,9 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['NameClaimed', 'ContextGraphNameClaimed'],
     binding: 'contextGraphNameRegistry',
     async *scan(registry: Contract, scan: EvmEventScan) {
-      const logs = await scan.query(registry, 'cgNameRegistry.queryFilter(NameClaimed)', registry.filters.NameClaimed());
-      for (const log of scan.logs(logs)) {
+      for await (const log of await scan.query(
+        registry, 'cgNameRegistry.queryFilter(NameClaimed)', registry.filters.NameClaimed(),
+      )) {
         const parsed = parseLog(registry, log);
         if (parsed) {
           yield {
@@ -227,8 +234,9 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['ContextGraphExpanded'],
     binding: 'contextGraphStorage',
     async *scan(cgStorage: Contract, scan: EvmEventScan) {
-      const logs = await scan.query(cgStorage, 'cgStorage.queryFilter(ContextGraphExpanded)', cgStorage.filters.ContextGraphExpanded());
-      for (const log of scan.logs(logs)) {
+      for await (const log of await scan.query(
+        cgStorage, 'cgStorage.queryFilter(ContextGraphExpanded)', cgStorage.filters.ContextGraphExpanded(),
+      )) {
         const parsed = parseLog(cgStorage, log);
         if (parsed) {
           yield {
@@ -253,10 +261,9 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['KnowledgeAssetRegisteredToContextGraph'],
     binding: 'contextGraphStorage',
     async *scan(cgStorage: Contract, scan: EvmEventScan) {
-      const logs = await scan.query(
+      for await (const log of await scan.query(
         cgStorage, 'cgStorage.queryFilter(KnowledgeAssetRegisteredToContextGraph)', cgStorage.filters.KnowledgeAssetRegisteredToContextGraph(),
-      );
-      for (const log of scan.logs(logs)) {
+      )) {
         const parsed = parseLog(cgStorage, log);
         if (parsed) {
           yield {
@@ -277,8 +284,9 @@ export const EVM_EVENT_DESCRIPTORS = [
     aliases: ['ContextGraphCreated'],
     binding: 'contextGraphStorage',
     async *scan(cgStorage: Contract, scan: EvmEventScan) {
-      const logs = await scan.query(cgStorage, 'cgStorage.queryFilter(ContextGraphCreated)', cgStorage.filters.ContextGraphCreated());
-      for (const log of scan.logs(logs)) {
+      for await (const log of await scan.query(
+        cgStorage, 'cgStorage.queryFilter(ContextGraphCreated)', cgStorage.filters.ContextGraphCreated(),
+      )) {
         const parsed = parseLog(cgStorage, log);
         if (parsed) {
           // OT-RFC-38 / LU-6 Phase B — `nameHash` is the curator-committed
@@ -308,7 +316,8 @@ export const EVM_EVENT_DESCRIPTORS = [
 
 export type EvmEventDescriptor = (typeof EVM_EVENT_DESCRIPTORS)[number];
 export type EvmEventContractKey = EvmEventDescriptor['binding'];
-export type EvmEventContracts = Readonly<Pick<ContractCache, EvmEventContractKey>>;
+export type EvmEventCapabilityKey = EvmHubContractKey;
+export type EvmEventContracts = Readonly<Pick<ContractCache, EvmEventCapabilityKey>>;
 
 const DESCRIPTOR_BY_ALIAS: ReadonlyMap<string, EvmEventDescriptor> = new Map(
   EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases.map(alias => [alias, descriptor] as const)),
@@ -320,11 +329,12 @@ export function evmEventDescriptorFor(eventType: string): EvmEventDescriptor | u
 }
 
 /** The Hub bindings a scan for these event types must resolve, in declaration order. */
-export function eventContractKeysFor(eventTypes: readonly string[]): readonly EvmEventContractKey[] {
+export function eventContractKeysFor(eventTypes: readonly string[]): readonly EvmEventCapabilityKey[] {
   const selected = new Set(eventTypes);
-  const keys = new Set<EvmEventContractKey>();
+  const keys = new Set<EvmEventCapabilityKey>();
   for (const descriptor of EVM_EVENT_DESCRIPTORS) {
-    if (descriptor.aliases.some(alias => selected.has(alias))) keys.add(descriptor.binding);
+    if (!descriptor.aliases.some(alias => selected.has(alias))) continue;
+    for (const key of 'capabilities' in descriptor ? descriptor.capabilities : [descriptor.binding]) keys.add(key);
   }
   return [...keys];
 }

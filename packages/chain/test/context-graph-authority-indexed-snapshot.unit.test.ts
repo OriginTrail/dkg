@@ -77,7 +77,6 @@ function makeIndexedAuthorityAdapter(
     chainId: 'evm:31337',
     localContextGraphAuthorityIndexStore: authorityIndexStore,
   });
-  adapter.initialized = true;
   adapter.init = async () => {};
   adapter.cgRegistryScanPageSize = 10;
 
@@ -145,9 +144,9 @@ function makeIndexedAuthorityAdapter(
     },
   };
 
-  adapter.contracts = {
+  adapter.installHubContractBindingsForTesting({ ...adapter.contracts,
     contextGraphStorage: { connect: () => contract },
-  };
+  });
   adapter.readTipProvider = async (
     _label: string,
     read: (selectedProvider: IndexedAuthorityProvider) => Promise<unknown>,

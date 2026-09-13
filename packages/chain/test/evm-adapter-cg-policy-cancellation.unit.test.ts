@@ -20,9 +20,8 @@ function makeAdapter() {
     contracts: { contextGraphStorage: object };
     readContractWithOptions: ReturnType<typeof vi.fn>;
   };
-  adapter.initialized = true;
   adapter.init = vi.fn(async () => undefined);
-  adapter.contracts = { contextGraphStorage: {} };
+  adapter.installHubContractBindingsForTesting({ ...adapter.contracts, contextGraphStorage: {} });
   adapter.readContractWithOptions = vi.fn();
   return adapter;
 }

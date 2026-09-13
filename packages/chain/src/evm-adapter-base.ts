@@ -29,7 +29,8 @@ import type {
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import {
   ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings, optionalEvmContract,
-  type EvmHubContractKey, type EvmHubContractSpec, type EvmHubContractStore,
+  type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSnapshot,
+  type EvmHubContractSpec, type EvmHubContractStore,
 } from './evm-hub-contract-bindings.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
@@ -128,23 +129,8 @@ type SerializedSignerWriteContext = {
  * `Hub.getContractAddress(name)` / `Hub.getAssetStorageAddress(name)`. Lazy
  * names listed here MUST match helpers such as `getIdentityStorage()`.
  */
-type ResettableContractCacheKey = {
-  [K in keyof ContractCache]: undefined extends ContractCache[K] ? K : never
-}[keyof ContractCache];
-
-type HubContractCacheKey = Exclude<ResettableContractCacheKey, undefined>;
-
-type HubBindingInvalidationPolicy =
-  | { contractKey: HubContractCacheKey; invalidateOnRotation?: false }
-  | { special: 'identityStorage'; invalidateOnRotation: true };
-
-const HUB_BINDING_INVALIDATOR_ENTRIES: ReadonlyArray<readonly [string, HubBindingInvalidationPolicy]> = [
-  ...ALL_EVM_HUB_CONTRACT_KEYS.map(key => [EVM_HUB_CONTRACT_SPECS[key].name, { contractKey: key }] as const),
-  ['IdentityStorage', { special: 'identityStorage', invalidateOnRotation: true }],
-];
-
-const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
-  HUB_BINDING_INVALIDATOR_ENTRIES,
+const EVM_HUB_CONTRACT_NAMES: ReadonlySet<string> = new Set(
+  ALL_EVM_HUB_CONTRACT_KEYS.map(key => EVM_HUB_CONTRACT_SPECS[key].name),
 );
 
 /**
@@ -186,8 +172,8 @@ const HUB_BINDING_INVALIDATORS = new Map<string, HubBindingInvalidationPolicy>(
  * table exit). Any OBSERVED such rotation of EITHER flushes the whole memo
  * immediately: `applyHubRotationEventName` calls `resolvedContractAddressCache`
  * `.invalidateAll()` unconditionally on every Hub rotation event (round-2 fix —
- * this is what covers ShardingTableStorage, which has no lazy binding and so no
- * `HUB_BINDING_INVALIDATORS` entry). The only residual — a poller-MISSED contract
+ * this is what covers ShardingTableStorage, which has no lazy binding). The only
+ * residual — a poller-MISSED contract
  * rotation of either — is bounded to `RESOLVE_CONTRACT_ADDRESS_MEMO_TTL_MS` (30s,
  * the staleness the codebase already accepts for the sibling `listDesignatableNodes`
  * read), across a compound edge (rare contract rotation × rare poller miss × ≤30s).
@@ -707,23 +693,19 @@ export class EVMChainAdapterBase {
   private readonly hubContractBindings: EvmHubContractBindings;
   /** Hub-bound handles are written only by `hubContractBindings`; lazy slots stay adapter-owned. */
   protected get contracts(): EvmHubContractStore { return this.hubContractBindings.contracts; }
-  /**
-   * Fixture/subclass installation seam: a caller-owned COMPLETE handle set.
-   * Absent optional entries mean "not deployed"; the generation is ready
-   * without running `init()`.
-   */
-  protected set contracts(value: ContractCache) { this.hubContractBindings.install(value); }
-
   protected get initialized(): boolean { return this.hubContractBindings.initialized; }
-  /**
-   * Fixture/subclass seam. `true` declares the current handle set complete
-   * and ready; `false` retires the generation so the next `init()` resolves
-   * every binding again.
-   */
-  protected set initialized(value: boolean) {
-    if (value) this.hubContractBindings.install(this.hubContractBindings.contracts);
-    else this.hubContractBindings.invalidate();
+
+  /** Explicit complete installation seam for subclasses. */
+  protected installHubContractBindings(value: EvmHubContractInstallation): void {
+    this.hubContractBindings.install(value);
   }
+
+  /** Explicit, deliberately partial test-fixture seam. */
+  protected installHubContractBindingsForTesting(value: ContractCache): void {
+    this.hubContractBindings.installTestFixture(value);
+  }
+
+  protected invalidateHubContractBindings(): void { this.hubContractBindings.invalidate(); }
 
   /**
    * Single self-refreshing cache for the `RandomSampling` /
@@ -2851,12 +2833,12 @@ export class EVMChainAdapterBase {
       address = await this.readHubAddress('getAssetStorageAddress', name, options);
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
-        throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+        throw new HubContractNotFoundError(name, this.hubAddress, { cause: err });
       }
       throw err;
     }
     if (address === ethers.ZeroAddress) {
-      throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`);
+      throw new HubContractNotFoundError(name, this.hubAddress);
     }
     return new Contract(address, loadAbi(abiName ?? name), this.signer);
   }
@@ -2906,6 +2888,15 @@ export class EVMChainAdapterBase {
     options: ChainReadOptions = {},
   ): Promise<Readonly<Pick<ContractCache, K>>> {
     return this.hubContractBindings.resolve(keys, spec => this.loadHubContractBinding(spec, options), options.signal);
+  }
+
+  protected resolveHubContractBindingSnapshot<K extends EvmHubContractKey>(
+    keys: readonly K[],
+    options: ChainReadOptions = {},
+  ): Promise<EvmHubContractSnapshot<K>> {
+    return this.hubContractBindings.resolveSnapshot(
+      keys, spec => this.loadHubContractBinding(spec, options), options.signal,
+    );
   }
 
   /** Chronos is an optional boot binding decided by the registry, never re-read ad hoc. */
@@ -4170,13 +4161,11 @@ export class EVMChainAdapterBase {
    *      See the `randomSamplingPairCache` field comment for the
    *      coupling invariants this path preserves.
    *
-   *   2. Names in `HUB_BINDING_INVALIDATORS` may clear a lazy slot and
-   *      dependent cache through `invalidateOnRotation`, then use the same
+   *   2. IdentityStorage clears its dedicated lazy binding, then uses the same
    *      rotation finalization as boot-bound bindings.
    *
-   *   3. Any name in `HUB_BINDING_INVALIDATORS` without a rotation invalidator
-   *      leaves the existing `this.contracts.X` field intact but flips
-   *      `this.initialized` back to `false` so the next `await
+   *   3. Any canonical boot-bound contract name retains its current handle but
+   *      flips `this.initialized` back to `false` so the next `await
    *      this.init()` re-resolves every binding fresh from Hub. Keeping
    *      the old handle until the next init pass avoids a race where an
    *      in-flight public method already passed `init()` and then trips
@@ -4225,8 +4214,8 @@ export class EVMChainAdapterBase {
   protected applyHubRotationEventName(name: string): void {
     // #1583 (review round-2) — flush the resolved-address memo on EVERY observed
     // Hub rotation, unconditionally and first. The memo caches the address of
-    // any non-excluded name, including per-call names with no lazy binding and
-    // so no `HUB_BINDING_INVALIDATORS` entry (`ShardingTableStorage`, resolved
+    // any non-excluded name, including per-call names with no lazy binding
+    // (`ShardingTableStorage`, resolved
     // fresh per ACK in `verifyACKIdentityDetailed`). The pre-round-2 code only
     // flushed inside `finalizeKnownHubRotation`, reached solely for names WITH a
     // policy — so an observed ShardingTableStorage rotation left `nodeExists`
@@ -4241,23 +4230,14 @@ export class EVMChainAdapterBase {
       this.invalidateRandomSamplingPair();
       return;
     }
-    const policy = HUB_BINDING_INVALIDATORS.get(name);
-    if (!policy) return;
-    this.invalidateHubBindingOnRotation(policy);
+    if (name === 'IdentityStorage') this.invalidateIdentityStorageBinding();
+    else if (!EVM_HUB_CONTRACT_NAMES.has(name)) return;
     this.finalizeKnownHubRotation();
-  }
-
-  protected invalidateHubBindingOnRotation(policy: HubBindingInvalidationPolicy): void {
-    if (policy.invalidateOnRotation) this.invalidateHubBinding(policy);
-  }
-
-  /** Lazily bound slots only; Hub-bound handles are retired through `hubContractBindings`. */
-  protected invalidateHubBinding(policy: HubBindingInvalidationPolicy): void {
-    if ('special' in policy && policy.special === 'identityStorage') this.invalidateIdentityStorageBinding();
   }
 
   protected finalizeKnownHubRotation(): void {
     this.hubContractBindings.invalidate();
+    this.pcaReadCache.invalidateAll();
     this.invalidatePublishPreflightCache();
     // #1583 — redundant-but-harmless second flush (the unconditional flush at the
     // top of `applyHubRotationEventName` already cleared the memo for this event).
@@ -4290,9 +4270,8 @@ export class EVMChainAdapterBase {
     // One owner transition retires the generation and drops every Hub-bound
     // handle; lazily bound slots and dependent caches follow.
     this.hubContractBindings.invalidate(ALL_EVM_HUB_CONTRACT_KEYS);
-    for (const policy of HUB_BINDING_INVALIDATORS.values()) {
-      this.invalidateHubBinding(policy);
-    }
+    this.pcaReadCache.invalidateAll();
+    this.invalidateIdentityStorageBinding();
     this.invalidatePublishPreflightCache();
     // #1583 — the write-side self-heal cannot tell which name rotated, so drop
     // the entire resolved-address memo along with every bound handle.
