@@ -1,7 +1,6 @@
 import {
   settlePublicSnapshots,
   unwrapPublicSnapshotRecovery,
-  readPublicSnapshotWalkProgress,
   PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT,
   boundSampledRef,
   type PublicSnapshotMetadata,
@@ -615,6 +614,58 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     let descriptorsAuthoritativeForCg = true;
     let snapshotProgressForCg: PublicSnapshotRecoveryResult | undefined;
     const unresolvedRefSampleForCg: string[] = [];
+    /**
+     * The ONE accounting rule for a failed round: the coverage record from
+     * whatever the walk settled, the warning, the denied/failed/peer-failed
+     * classification and the backoff verdict. The settled snapshot pool calls
+     * it directly with its typed outcome and timed-out evidence; the generic
+     * catch calls it with the last known progress and no pool evidence.
+     */
+    const accountFailedRound = (
+      err: unknown,
+      walk: PublicSnapshotWalkProgress | undefined,
+      timedOutPhases = 0,
+    ): 'stop' | 'continue' => {
+      if (walk) {
+        // Same builder as the success path — the counts arrive as one coherent
+        // group from the walk, never reassembled here.
+        recordSnapshotCoverage(
+          walk,
+          manifestComplete,
+          descriptorsAuthoritativeForCg,
+          materializedFailuresForCg,
+          materializedRefsForCg,
+          unresolvedRefSampleForCg,
+          pid,
+        );
+      }
+      logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (isSyncPermanentRejection(err)) {
+        // Missed-seam alarm (OT-RFC-56) — see durable-sync.ts: the oversize
+        // guard should have filtered this before the insert.
+        logWarn(ctx, `PERMANENT ingest rejection for "${pid}" reached the SWM sync catch — an insert seam is missing the oversize guard (sync/oversize-filter.ts): ${err instanceof Error ? err.message : String(err)}`);
+      }
+      // A timed-out sibling in the settled round is peer evidence in its own
+      // right, whichever cause the round finally surfaced.
+      const backoffWorthy = isSyncBackoffWorthyError(err) || timedOutPhases > 0;
+      if (backoffWorthy) {
+        summary.backoffWorthyFailures += 1;
+      }
+      if (isSyncDeniedError(err)) {
+        summary.deniedPhases += 1;
+      } else if (
+        peerRespondedForContextGraph ||
+        didSyncPeerRespond(err) ||
+        !isSyncTransportFailure(err)
+      ) {
+        summary.failedPhases += 1;
+      } else {
+        peerFailed = true;
+      }
+      return backoffWorthy && shouldStopAfterBackoffWorthyFailure(pid, 'backoff-worthy failure')
+        ? 'stop'
+        : 'continue';
+    };
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
@@ -1293,10 +1344,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         logInfo(ctx, `SWM sync for "${pid}": yielded at the round deadline with `
           + `${snapshotSync.missingCount} of ${snapshotSync.totalSnapshots} snapshot(s) unresolved`);
       }
-      // Fatal and nonfatal siblings can coexist. Account the complete settled
-      // round above before preserving the original failure below, including
-      // primitive throwables that cannot carry an attached metrics record.
-      unwrapPublicSnapshotRecovery(snapshotRecovery);
+      // Fatal and nonfatal siblings can coexist. The complete settled round is
+      // accounted above; the failure itself takes the same rule as any other
+      // failed round, carrying the pool's timed-out evidence, without a detour
+      // through an exception, an attached record and a read-back.
+      if (snapshotRecovery.kind === 'failure') {
+        if (accountFailedRound(snapshotRecovery.error, snapshotSync, snapshotSync.timedOutPhases) === 'stop') break;
+        continue;
+      }
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
       // A snapshot that verified but could not be written must be treated
       // exactly like a snapshot phase that did not complete. Otherwise the meta
@@ -1440,50 +1495,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         );
       }
     } catch (err) {
-      // A snapshot-phase failure unwinds past the coverage record built on the
-      // success path, so a round that materialized 120 Knowledge Assets and then
-      // threw would report NOTHING — and the continuation loop reads
-      // `snapshotsResolved`, so it would see a converging peer as stalled and
-      // drop it. Recover the walk's own counts and record them here.
-      const thrownProgress = readPublicSnapshotWalkProgress(err) ?? snapshotProgressForCg;
-      if (thrownProgress) {
-        // Same builder as the success path — the counts arrive as one coherent
-        // group attached by the walk, never reassembled here.
-        recordSnapshotCoverage(
-          thrownProgress,
-          manifestComplete,
-          descriptorsAuthoritativeForCg,
-          materializedFailuresForCg,
-          materializedRefsForCg,
-          unresolvedRefSampleForCg,
-          pid,
-        );
-      }
-      logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
-      if (isSyncPermanentRejection(err)) {
-        // Missed-seam alarm (OT-RFC-56) — see durable-sync.ts: the oversize
-        // guard should have filtered this before the insert.
-        logWarn(ctx, `PERMANENT ingest rejection for "${pid}" reached the SWM sync catch — an insert seam is missing the oversize guard (sync/oversize-filter.ts): ${err instanceof Error ? err.message : String(err)}`);
-      }
-      const backoffWorthy = isSyncBackoffWorthyError(err)
-        || (snapshotProgressForCg?.timedOutPhases ?? 0) > 0;
-      if (backoffWorthy) {
-        summary.backoffWorthyFailures += 1;
-      }
-      if (isSyncDeniedError(err)) {
-        summary.deniedPhases += 1;
-      } else if (
-        peerRespondedForContextGraph ||
-        didSyncPeerRespond(err) ||
-        !isSyncTransportFailure(err)
-      ) {
-        summary.failedPhases += 1;
-      } else {
-        peerFailed = true;
-      }
-      if (backoffWorthy && shouldStopAfterBackoffWorthyFailure(pid, 'backoff-worthy failure')) {
-        break;
-      }
+      // A throw outside the settled snapshot round unwinds past the coverage
+      // record built on the success path, so a round that materialized 120
+      // Knowledge Assets and then threw would report NOTHING — and the
+      // continuation loop reads `snapshotsResolved`, so it would see a
+      // converging peer as stalled and drop it. Record the last known walk
+      // counts; the pool's own failures never arrive here.
+      if (accountFailedRound(err, snapshotProgressForCg) === 'stop') break;
     }
   }
   if (peerFailed) {

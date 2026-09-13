@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, OversizedRdfLiteralError } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { readPublicSnapshotWalkProgress, runSharedMemorySync, syncPublicSnapshotsForMeta, type PublicSnapshotMetadata } from '../src/sync/requester/shared-memory-sync.js';
@@ -47,7 +47,10 @@ function fixture(count = 8) {
     fetchSyncPages,
     deleteCheckpoint: deleted, setCheckpoint: () => {}, onSnapshotReady: ready, ...overrides,
   });
-  const startSync = (deadline = Date.now() + 60_000) => runSharedMemorySync({
+  const startSync = (
+    deadline = Date.now() + 60_000,
+    logWarn: Parameters<typeof runSharedMemorySync>[0]['logWarn'] = () => {},
+  ) => runSharedMemorySync({
     mode: { kind: 'ordinary' }, ctx: createOperationContext('sync'), remotePeerId: 'peer', contextGraphIds: ['pool'],
     createContextGraphSyncDeadline: () => deadline, fetchSyncPages,
     processSharedMemoryBatch: async () => ({
@@ -56,7 +59,7 @@ function fixture(count = 8) {
     }),
     publicSnapshotStore: store, ensureContextGraph: async () => {}, storeInsert: async () => {},
     deleteCheckpoint: deleted, setCheckpoint: () => {}, ensureOwnedMap: () => new Map(),
-    logInfo: () => {}, logWarn: () => {}, logDebug: () => {},
+    logInfo: () => {}, logWarn, logDebug: () => {},
   });
   const releaseAll = () => responses.forEach((response, i) => response.resolve(page(i)));
   const waitForStarted = (count: number) => vi.waitFor(() => expect(started).toHaveLength(count));
@@ -85,6 +88,31 @@ it.each(['ordinary error', 'frozen error', 'primitive'] as const)('retains a tim
       backoffWorthyFailures: 1, snapshotPlaneIncomplete: 0, failedPhases: 1,
       swmCoverage: { snapshotsResolved: 0, snapshotsTotal: 4, missingCount: 4 },
     });
+    // The settled outcome is accounted directly; nothing rides on the error.
+    expect(readPublicSnapshotRecoveryResult(failure)).toBeUndefined();
+  } finally { f.releaseAll(); await run; }
+});
+
+it('logs a pool-surfaced permanent rejection as a missed seam without backing the peer off', async () => {
+  const f = fixture(2);
+  const warnings: string[] = [];
+  const put = f.store.putSnapshot;
+  f.store.putSnapshot = async input => {
+    if (input.digest === f.refs[1]) throw new OversizedRdfLiteralError({ actualBytes: 100, maxBytes: 10 });
+    return put(input);
+  };
+  const run = f.startSync(Date.now() + 60_000, (_ctx, message) => { warnings.push(message); });
+  try {
+    await f.waitForStarted(2);
+    f.releaseAll();
+    expect(await run).toMatchObject({
+      completedPhases: 1, backoffWorthyFailures: 0, deniedPhases: 0, failedPhases: 1,
+      swmCoverage: { snapshotsTotal: 2, missingCount: 2 },
+    });
+    expect(warnings).toEqual([
+      expect.stringContaining('SWM sync for context graph "pool" from peer failed'),
+      expect.stringContaining('PERMANENT ingest rejection for "pool" reached the SWM sync catch'),
+    ]);
   } finally { f.releaseAll(); await run; }
 });
 
