@@ -547,6 +547,23 @@ export interface ContextGraphAuthorityIndexRevisionReader {
     nameHash: string,
     options?: ChainReadOptions,
   ): Promise<bigint | null>;
+  /**
+   * Resolve many unique name commitments from one finalized index projection.
+   * Missing and zero-hash commitments are omitted; ambiguity fails closed.
+   */
+  resolveFinalizedContextGraphIdsByNameHashes?(
+    nameHashes: readonly string[],
+    options?: ChainReadOptions,
+  ): Promise<ReadonlyMap<string, bigint>>;
+  /**
+   * Resolve a name commitment and its complete authority state atomically at
+   * one finalized anchor. RFC-64 consumers should prefer this over composing
+   * the single-name ID resolver with a later snapshot read.
+   */
+  resolveFinalizedContextGraphAuthoritySnapshotByNameHash?(
+    nameHash: string,
+    options?: ChainReadOptions,
+  ): Promise<ContextGraphAuthoritySnapshot | null>;
   readContextGraphAuthorityIndexRevisions(
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
     options?: ChainReadOptions,

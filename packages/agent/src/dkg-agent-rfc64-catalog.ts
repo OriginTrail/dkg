@@ -1720,6 +1720,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   ): Promise<Readonly<{
     expectedNameHash: string;
     expectedOnChainId: bigint;
+    finalizedSnapshot?: ContextGraphAuthoritySnapshot;
   }> | null> {
     // Local-first CG creation deliberately commits an explicit unregistered
     // state. RFC-64 derives that graph's authority from authenticated local
@@ -1731,12 +1732,28 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const expectedNameHash = explicitNameHash === undefined
       ? this.contextGraphNameCommitment(contextGraphId)
       : this.contextGraphWireId(explicitNameHash);
-    const finalizedResolver = this.chain.contextGraphAuthorityIndexRevisionReader
-      ?.resolveFinalizedContextGraphIdByNameHash;
+    const indexedReader = this.chain.contextGraphAuthorityIndexRevisionReader;
+    const resolveFinalizedSnapshot = indexedReader
+      ?.resolveFinalizedContextGraphAuthoritySnapshotByNameHash;
+    if (resolveFinalizedSnapshot !== undefined) {
+      const finalizedSnapshot = await resolveFinalizedSnapshot.call(
+        indexedReader,
+        expectedNameHash,
+        options,
+      );
+      if (finalizedSnapshot === null) return null;
+      return Object.freeze({
+        expectedNameHash,
+        expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
+        finalizedSnapshot,
+      });
+    }
+
+    const finalizedResolver = indexedReader?.resolveFinalizedContextGraphIdByNameHash;
     const resolved = finalizedResolver === undefined
       ? await this.getContextGraphOnChainId(contextGraphId, options)
       : await finalizedResolver.call(
-          this.chain.contextGraphAuthorityIndexRevisionReader,
+          indexedReader,
           expectedNameHash,
           options,
         );
@@ -1757,12 +1774,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }> | null> {
     const target = await this.resolveRfc64FinalizedAuthorityTargetV1(contextGraphId);
     if (target !== null) {
-      const reader = requireRfc64ContextGraphAuthorityReaderV1(
-        this.contextGraphAuthorityReaderCapability,
-      );
-      const { expectedNameHash, expectedOnChainId } = target;
+      const { expectedNameHash, expectedOnChainId, finalizedSnapshot } = target;
       const snapshot = parseRfc64AuthoritySnapshotV1(
-        await reader.getContextGraphAuthoritySnapshot(expectedOnChainId),
+        finalizedSnapshot
+          ?? await requireRfc64ContextGraphAuthorityReaderV1(
+            this.contextGraphAuthorityReaderCapability,
+          ).getContextGraphAuthoritySnapshot(expectedOnChainId),
         expectedOnChainId,
       );
       if (!snapshot.active || snapshot.nameHash !== expectedNameHash) return null;
@@ -2256,15 +2273,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             );
             if (readSignal?.aborted) throw readSignal.reason;
             if (target === null) return null;
-            const reader = requireRfc64ContextGraphAuthorityReaderV1(
-              this.contextGraphAuthorityReaderCapability,
-            );
-            const { expectedNameHash, expectedOnChainId } = target;
+            const { expectedNameHash, expectedOnChainId, finalizedSnapshot } = target;
             const snapshot = parseRfc64AuthoritySnapshotV1(
-              await reader.getContextGraphAuthoritySnapshot(
-                expectedOnChainId,
-                { signal: readSignal },
-              ),
+              finalizedSnapshot
+                ?? await requireRfc64ContextGraphAuthorityReaderV1(
+                  this.contextGraphAuthorityReaderCapability,
+                ).getContextGraphAuthoritySnapshot(
+                  expectedOnChainId,
+                  { signal: readSignal },
+                ),
               expectedOnChainId,
             );
             return { expectedNameHash, expectedOnChainId, snapshot } as const;

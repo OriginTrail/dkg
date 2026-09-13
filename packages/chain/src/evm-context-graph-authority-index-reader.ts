@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { type Contract, type JsonRpcProvider } from 'ethers';
+import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
 import type {
   ChainReadOptions,
   ContextGraphAuthoritySnapshot,
@@ -18,7 +18,6 @@ import {
   type ContextGraphAuthorityIndexId,
 } from './context-graph-authority-index-id.js';
 import { isRpcEndpointFailoverEligible } from './evm-adapter-rpc.js';
-import { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
 import {
   contextGraphAuthorityEventTopics,
   normalizeContextGraphAuthorityIndexLog,
@@ -26,8 +25,6 @@ import {
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import type { ReadOpts } from './rpc-failover-client.js';
 import {
-  activeRpcRequestContext,
-  withOwnedRpcRequestContext,
   withRpcRequestContext,
 } from './rpc-request-transport.js';
 
@@ -48,7 +45,7 @@ type EvmContextGraphAuthorityIndexReadInputV1 = Readonly<{
   deploymentBlockNumber: number;
   finalized: Readonly<{ number: number; hash: string }>;
   pageSize: number;
-  stabilizationOperation: 'resolution' | 'revision scan';
+  stabilizationOperation: string;
   signal?: AbortSignal;
 }>;
 
@@ -129,18 +126,6 @@ export function readEvmContextGraphAuthorityStateV1(
   );
 }
 
-/** Resolve one unique name commitment through the same durable contract-wide scan. */
-export function readEvmContextGraphAuthorityIdByNameHashV1(
-  input: EvmContextGraphAuthorityIndexReadInputV1 & Readonly<{
-    nameHash: string;
-  }>,
-): Promise<EvmContextGraphAuthorityIndexReadV1<ContextGraphAuthorityIndexId | null>> {
-  return readEvmContextGraphAuthorityIndexProjectionV1(
-    input,
-    (scan) => input.index.resolveNameHash({ ...scan, nameHash: input.nameHash }),
-  );
-}
-
 interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
   readonly index: ContextGraphAuthorityIndex;
   readonly deploymentId: string;
@@ -179,6 +164,43 @@ function snapshotAuthorityRevisionTargetsV1(
   return Object.freeze([...targets]);
 }
 
+function snapshotAuthorityNameHashTargetsV1(
+  nameHashes: unknown,
+): readonly string[] {
+  if (
+    !Array.isArray(nameHashes)
+    || nameHashes.length > CONTEXT_GRAPH_AUTHORITY_INDEX_REVISION_MAX_TARGETS
+  ) {
+    throw new Error('Context Graph authority name-hash target set is invalid');
+  }
+  const targets = new Set<string>();
+  for (const nameHash of nameHashes as readonly unknown[]) {
+    if (typeof nameHash !== 'string' || !ethers.isHexString(nameHash, 32)) {
+      throw new TypeError('Context Graph authority name-hash target must be bytes32');
+    }
+    const normalized = nameHash.toLowerCase();
+    if (normalized !== ethers.ZeroHash) targets.add(normalized);
+  }
+  return Object.freeze([...targets]);
+}
+
+function authoritySnapshotV1(
+  state: ContextGraphAuthorityIndexState,
+  chainId: string,
+  contractAddress: string,
+): ContextGraphAuthoritySnapshot {
+  return Object.freeze({
+    chainId,
+    governanceContract: contractAddress,
+    ...state,
+    contextGraphId: state.contextGraphId,
+    ownershipEra: state.ownershipEra.toString(10),
+    policyVersion: state.policyVersion.toString(10),
+    rosterVersion: state.rosterVersion.toString(10),
+    sourceBlockNumber: state.sourceBlockNumber.toString(10),
+  });
+}
+
 /** Physical provider attempts outlive a cancelled caller and must be drained. */
 class EvmContextGraphAuthorityIndexRevisionReadLifecycleV1 {
   readonly #active = new Set<Promise<unknown>>();
@@ -212,68 +234,133 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
   dependencies: EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1,
 ): ContextGraphAuthorityIndexRevisionReader {
   const lifecycle = new EvmContextGraphAuthorityIndexRevisionReadLifecycleV1();
-  const finalizedNameHashResolver = new ContextGraphNameHashResolver({
-    load: async (nameHash, signal) => {
-      await dependencies.initialize();
-      const base = dependencies.requireContextGraphStorage();
-      return dependencies.readTipProvider(
-        'resolveFinalizedContextGraphIdByNameHash',
-        (provider) => lifecycle.run(() => withOwnedRpcRequestContext(
-          { signal },
-          async () => {
-            const finalized = await provider.getBlock('finalized');
-            if (finalized === null || finalized.hash === null) {
-              throw new Error('finalized Context Graph authority block is unavailable');
-            }
-            const contract = base.connect(provider) as Contract;
-            const contractAddress = (await contract.getAddress()).toLowerCase();
-            const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
-              contractAddress,
-              'resolveFinalizedContextGraphIdByNameHash',
-              'ContextGraphStorage',
-            )).fromBlock;
-            const indexed = await readEvmContextGraphAuthorityIdByNameHashV1({
-              index: dependencies.index,
-              deploymentId: dependencies.deploymentId,
-              contract,
-              contractAddress,
-              provider,
-              deploymentBlockNumber,
-              finalized: { number: finalized.number, hash: finalized.hash },
-              pageSize: dependencies.pageSize(),
-              stabilizationOperation: 'resolution',
-              nameHash,
-              signal,
-            });
-            await indexed.stabilize();
-            return indexed.value === null ? null : BigInt(indexed.value);
+  const runFinalizedProjection = async <T>(
+    operationLabel: string,
+    options: ChainReadOptions,
+    project: (
+      scan: ContextGraphAuthorityIndexScanInput,
+      context: Readonly<{
+        provider: JsonRpcProvider;
+        contractAddress: string;
+      }>,
+    ) => Promise<T>,
+  ): Promise<T> => {
+    options.signal?.throwIfAborted();
+    await dependencies.initialize();
+    options.signal?.throwIfAborted();
+    const base = dependencies.requireContextGraphStorage();
+    return dependencies.readTipProvider(
+      operationLabel,
+      (provider) => lifecycle.run(async () => {
+        const finalized = await provider.getBlock('finalized');
+        if (finalized === null || finalized.hash === null) {
+          throw new Error('finalized Context Graph authority block is unavailable');
+        }
+        const contract = base.connect(provider) as Contract;
+        const contractAddress = (await contract.getAddress()).toLowerCase();
+        const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
+          contractAddress,
+          operationLabel,
+          'ContextGraphStorage',
+        )).fromBlock;
+        const indexed = await readEvmContextGraphAuthorityIndexProjectionV1(
+          {
+            index: dependencies.index,
+            deploymentId: dependencies.deploymentId,
+            contract,
+            contractAddress,
+            provider,
+            deploymentBlockNumber,
+            finalized: { number: finalized.number, hash: finalized.hash },
+            pageSize: dependencies.pageSize(),
+            stabilizationOperation: operationLabel,
           },
-        )),
-        {
-          signal,
-          isRetryable: (error: unknown) => (
-            !signal.aborted && (
-              isContextGraphAuthorityIndexRetryableError(error)
-              || isRpcEndpointFailoverEligible(error)
-            )
-          ),
-          policy: 'wideLogScan',
-        },
-      );
-    },
-  });
+          (scan) => project(scan, { provider, contractAddress }),
+        );
+        await indexed.stabilize();
+        return indexed.value;
+      }),
+      {
+        signal: options.signal,
+        isRetryable: (error: unknown) => (
+          !options.signal?.aborted && (
+            isContextGraphAuthorityIndexRetryableError(error)
+            || isRpcEndpointFailoverEligible(error)
+          )
+        ),
+        policy: 'wideLogScan',
+      },
+    );
+  };
+
+  const resolveFinalizedIdsByNameHashes = async (
+    rawNameHashes: readonly string[],
+    options: ChainReadOptions,
+    operationLabel = 'resolveFinalizedContextGraphIdsByNameHashes',
+  ): Promise<ReadonlyMap<string, bigint>> => {
+    const nameHashes = snapshotAuthorityNameHashTargetsV1(rawNameHashes);
+    options.signal?.throwIfAborted();
+    if (nameHashes.length === 0) return new Map();
+    return runFinalizedProjection(
+      operationLabel,
+      options,
+      async (scan) => {
+        const states = await dependencies.index.statesByNameHashes({
+          ...scan,
+          nameHashes,
+        });
+        return new Map([...states].map(([nameHash, state]) => [
+          nameHash,
+          BigInt(state.contextGraphId),
+        ]));
+      },
+    );
+  };
+
   return Object.freeze({
     whenIdle(): Promise<void> {
       return lifecycle.whenIdle();
     },
-    resolveFinalizedContextGraphIdByNameHash(
+    async resolveFinalizedContextGraphIdByNameHash(
       nameHash: string,
       options: ChainReadOptions = {},
     ): Promise<bigint | null> {
-      return finalizedNameHashResolver.resolve(nameHash, {
-        signal: options.signal,
-        requestClass: activeRpcRequestContext().requestClass,
-      });
+      const normalized = snapshotAuthorityNameHashTargetsV1([nameHash]);
+      if (normalized.length === 0) return null;
+      const resolved = await resolveFinalizedIdsByNameHashes(
+        normalized,
+        options,
+        'resolveFinalizedContextGraphIdByNameHash',
+      );
+      return resolved.get(normalized[0]!) ?? null;
+    },
+    resolveFinalizedContextGraphIdsByNameHashes(
+      nameHashes: readonly string[],
+      options: ChainReadOptions = {},
+    ): Promise<ReadonlyMap<string, bigint>> {
+      return resolveFinalizedIdsByNameHashes(nameHashes, options);
+    },
+    async resolveFinalizedContextGraphAuthoritySnapshotByNameHash(
+      nameHash: string,
+      options: ChainReadOptions = {},
+    ): Promise<ContextGraphAuthoritySnapshot | null> {
+      const nameHashes = snapshotAuthorityNameHashTargetsV1([nameHash]);
+      options.signal?.throwIfAborted();
+      if (nameHashes.length === 0) return null;
+      return runFinalizedProjection(
+        'resolveFinalizedContextGraphAuthoritySnapshotByNameHash',
+        options,
+        async (scan, { provider, contractAddress }) => {
+          const states = await dependencies.index.statesByNameHashes({
+            ...scan,
+            nameHashes,
+          });
+          const state = states.get(nameHashes[0]!);
+          if (state === undefined) return null;
+          const chainId = (await provider.getNetwork()).chainId.toString(10);
+          return authoritySnapshotV1(state, chainId, contractAddress);
+        },
+      );
     },
     async readContextGraphAuthorityIndexRevisions(
       contextGraphIds: readonly ContextGraphAuthorityIndexId[],
@@ -282,52 +369,13 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       const targets = snapshotAuthorityRevisionTargetsV1(contextGraphIds);
       options.signal?.throwIfAborted();
       if (targets.length === 0) return new Map();
-      await dependencies.initialize();
-      const base = dependencies.requireContextGraphStorage();
-      return dependencies.readTipProvider(
+      return runFinalizedProjection(
         'readContextGraphAuthorityIndexRevisions',
-        (provider) => lifecycle.run(async () => {
-          const finalized = await provider.getBlock('finalized');
-          if (finalized === null || finalized.hash === null) {
-            throw new Error('finalized Context Graph authority block is unavailable');
-          }
-          const contract = base.connect(provider) as Contract;
-          const contractAddress = (await contract.getAddress()).toLowerCase();
-          const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
-            contractAddress,
-            'readContextGraphAuthorityIndexRevisions',
-            'ContextGraphStorage',
-          )).fromBlock;
-          const indexed = await readEvmContextGraphAuthorityIndexProjectionV1(
-            {
-              index: dependencies.index,
-              deploymentId: dependencies.deploymentId,
-              contract,
-              contractAddress,
-              provider,
-              deploymentBlockNumber,
-              finalized: { number: finalized.number, hash: finalized.hash },
-              pageSize: dependencies.pageSize(),
-              stabilizationOperation: 'revision scan',
-            },
-            (scan) => dependencies.index.revisions({
-              ...scan,
-              contextGraphIds: targets,
-            }),
-          );
-          await indexed.stabilize();
-          return indexed.value;
+        options,
+        (scan) => dependencies.index.revisions({
+          ...scan,
+          contextGraphIds: targets,
         }),
-        {
-          signal: options.signal,
-          isRetryable: (error: unknown) => (
-            !options.signal?.aborted && (
-              isContextGraphAuthorityIndexRetryableError(error)
-              || isRpcEndpointFailoverEligible(error)
-            )
-          ),
-          policy: 'wideLogScan',
-        },
       );
     },
     async readContextGraphAuthorityIndexSnapshots(
@@ -340,64 +388,19 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       const targets = snapshotAuthorityRevisionTargetsV1(contextGraphIds);
       options.signal?.throwIfAborted();
       if (targets.length === 0) return new Map();
-      await dependencies.initialize();
-      const base = dependencies.requireContextGraphStorage();
-      return dependencies.readTipProvider(
+      return runFinalizedProjection(
         'readContextGraphAuthorityIndexSnapshots',
-        (provider) => lifecycle.run(async () => {
-          const finalized = await provider.getBlock('finalized');
-          if (finalized === null || finalized.hash === null) {
-            throw new Error('finalized Context Graph authority block is unavailable');
-          }
-          const contract = base.connect(provider) as Contract;
-          const contractAddress = (await contract.getAddress()).toLowerCase();
-          const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
-            contractAddress,
-            'readContextGraphAuthorityIndexSnapshots',
-            'ContextGraphStorage',
-          )).fromBlock;
-          const indexed = await readEvmContextGraphAuthorityIndexProjectionV1(
-            {
-              index: dependencies.index,
-              deploymentId: dependencies.deploymentId,
-              contract,
-              contractAddress,
-              provider,
-              deploymentBlockNumber,
-              finalized: { number: finalized.number, hash: finalized.hash },
-              pageSize: dependencies.pageSize(),
-              stabilizationOperation: 'revision scan',
-            },
-            (scan) => dependencies.index.states({
-              ...scan,
-              contextGraphIds: targets,
-            }),
-          );
+        options,
+        async (scan, { provider, contractAddress }) => {
+          const states = await dependencies.index.states({
+            ...scan,
+            contextGraphIds: targets,
+          });
           const chainId = (await provider.getNetwork()).chainId.toString(10);
-          await indexed.stabilize();
-          return new Map([...indexed.value].map(([contextGraphId, state]) => [
+          return new Map([...states].map(([contextGraphId, state]) => [
             contextGraphId,
-            Object.freeze({
-              chainId,
-              governanceContract: contractAddress,
-              ...state,
-              contextGraphId,
-              ownershipEra: state.ownershipEra.toString(10),
-              policyVersion: state.policyVersion.toString(10),
-              rosterVersion: state.rosterVersion.toString(10),
-              sourceBlockNumber: state.sourceBlockNumber.toString(10),
-            }),
+            authoritySnapshotV1(state, chainId, contractAddress),
           ]));
-        }),
-        {
-          signal: options.signal,
-          isRetryable: (error: unknown) => (
-            !options.signal?.aborted && (
-              isContextGraphAuthorityIndexRetryableError(error)
-              || isRpcEndpointFailoverEligible(error)
-            )
-          ),
-          policy: 'wideLogScan',
         },
       );
     },

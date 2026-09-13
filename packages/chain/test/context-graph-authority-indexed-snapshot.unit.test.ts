@@ -15,6 +15,7 @@ import {
   AUTHORITY,
   createAuthorityScenario,
   GOVERNANCE,
+  LATE_NAME_HASH,
   MEMBER,
   NAME_HASH,
   OWNER,
@@ -261,6 +262,67 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 
+  it('projects many finalized name bindings through one index read', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      secondContextGraph: true,
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+    const secondNameHash = `0x${'89'.repeat(32)}`;
+
+    await expect(reader.resolveFinalizedContextGraphIdsByNameHashes!([
+      NAME_HASH.toUpperCase().replace(/^0X/u, '0x'),
+      secondNameHash,
+      ethers.ZeroHash,
+      `0x${'ff'.repeat(32)}`,
+    ])).resolves.toEqual(new Map([
+      [NAME_HASH, 9n],
+      [secondNameHash, 10n],
+    ]));
+    expect(evidence.blockReads).toEqual(['finalized', 16, 26, 30]);
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+  });
+
+  it('does not retain a finalized miss after the authority index advances', async () => {
+    const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
+      lateContextGraphNameHash: LATE_NAME_HASH,
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBeNull();
+    advanceAuthorityHead();
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash!(LATE_NAME_HASH))
+      .resolves.toBe(11n);
+
+    expect(evidence.indexRanges).toEqual([
+      [7, 16], [17, 26], [27, 30],
+      [31, 35],
+    ]);
+  });
+
+  it('resolves name identity and authority state at one finalized horizon', async () => {
+    const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
+      lateContextGraphNameHash: NAME_HASH,
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(NAME_HASH))
+      .resolves.toMatchObject({
+        contextGraphId: '9',
+        nameHash: NAME_HASH,
+        owner: OWNER,
+        sourceBlockNumber: '21',
+      });
+    advanceAuthorityHead();
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(NAME_HASH))
+      .rejects.toThrow('ambiguous across 2 finalized Context Graphs');
+
+    expect(evidence.indexRanges).toEqual([
+      [7, 16], [17, 26], [27, 30],
+      [31, 35],
+    ]);
+  });
+
   it('projects stable per-CG revisions from one shared index advance', async () => {
     const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
       secondContextGraph: true,
@@ -454,6 +516,77 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     gate.release();
   });
 
+  it.each([
+    ['finalized head', (harness: IndexedAuthorityHarness) => harness.holdBlockRead('finalized')],
+    ['stabilization fence', (harness: IndexedAuthorityHarness) => harness.holdBlockRead(30)],
+  ] as const)('keeps name-snapshot cancellation bound during the indexed %s read', async (
+    _stage,
+    hold,
+  ) => {
+    const harness = makeIndexedAuthorityAdapter();
+    bindAbortableTipReader(harness);
+    const gate = hold(harness);
+    const abort = new AbortController();
+    const pending = harness.adapter.contextGraphAuthorityIndexRevisionReader!
+      .resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(NAME_HASH, {
+        signal: abort.signal,
+      });
+    await gate.entered;
+    expect(harness.evidence.readOptions[0]).toMatchObject({
+      policy: 'wideLogScan',
+      signal: abort.signal,
+    });
+    abort.abort(new Error('name-snapshot caller left'));
+    await expect(pending).rejects.toThrow('name-snapshot caller left');
+    gate.release();
+  });
+
+  it('propagates cancellation and retry policy for the finalized name resolver', async () => {
+    const harness = makeIndexedAuthorityAdapter();
+    bindAbortableTipReader(harness);
+    const gate = harness.holdBlockRead('finalized');
+    const abort = new AbortController();
+    const pending = harness.adapter.contextGraphAuthorityIndexRevisionReader!
+      .resolveFinalizedContextGraphIdByNameHash!(NAME_HASH, { signal: abort.signal });
+    await gate.entered;
+    expect(harness.evidence.readOptions[0]).toMatchObject({
+      policy: 'wideLogScan',
+      signal: abort.signal,
+    });
+    expect(harness.evidence.readOptions[0]?.isRetryable?.(
+      new ContextGraphAuthorityIndexRetryableError('retryable index read'),
+    )).toBe(true);
+    expect(harness.evidence.readOptions[0]?.isRetryable?.(
+      new Error('programming failure'),
+    )).toBe(false);
+    abort.abort(new Error('name resolver caller left'));
+    await expect(pending).rejects.toThrow('name resolver caller left');
+    gate.release();
+  });
+
+  it('drains a detached physical name-snapshot scan before becoming idle', async () => {
+    const harness = makeIndexedAuthorityAdapter();
+    bindAbortableTipReader(harness);
+    const gate = harness.holdIndexPageRead();
+    const abort = new AbortController();
+    const reader = harness.adapter.contextGraphAuthorityIndexRevisionReader!;
+    const cancelled = reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(
+      NAME_HASH,
+      { signal: abort.signal },
+    );
+    await gate.entered;
+    abort.abort(new Error('name-snapshot owner closed'));
+    await expect(cancelled).rejects.toThrow('name-snapshot owner closed');
+
+    let idle = false;
+    const drain = reader.whenIdle().then(() => { idle = true; });
+    await Promise.resolve();
+    expect(idle).toBe(false);
+    gate.release();
+    await drain;
+    expect(idle).toBe(true);
+  });
+
   it('drains a detached physical revision scan before the capability becomes idle', async () => {
     const harness = makeIndexedAuthorityAdapter();
     bindAbortableTipReader(harness);
@@ -517,6 +650,40 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       policy: 'wideLogScan',
       signal: abort.signal,
     });
+  });
+
+  it('fails a batch name projection over after a retryable index error', async () => {
+    const harness = makeIndexedAuthorityAdapter();
+    const attempts: string[] = [];
+    const nonArchive: IndexedAuthorityProvider = {
+      ...harness.provider,
+      getBlock: async (tag) => {
+        if (tag === 16) return null;
+        return harness.provider.getBlock(tag);
+      },
+    };
+    (harness.adapter as any).readTipProvider = async (
+      label: string,
+      read: (selected: IndexedAuthorityProvider) => Promise<unknown>,
+      options: IndexedAuthorityEvidence['readOptions'][number],
+    ) => {
+      expect(label).toBe('resolveFinalizedContextGraphIdsByNameHashes');
+      harness.evidence.readOptions.push(options);
+      try {
+        attempts.push('non-archive');
+        return await read(nonArchive);
+      } catch (error) {
+        expect(error).toBeInstanceOf(ContextGraphAuthorityIndexRetryableError);
+        expect(options.isRetryable?.(error)).toBe(true);
+        attempts.push('healthy');
+        return read(harness.provider);
+      }
+    };
+
+    await expect(harness.adapter.contextGraphAuthorityIndexRevisionReader!
+      .resolveFinalizedContextGraphIdsByNameHashes!([NAME_HASH]))
+      .resolves.toEqual(new Map([[NAME_HASH, 9n]]));
+    expect(attempts).toEqual(['non-archive', 'healthy']);
   });
 
   it('rejects an indexed reorg fence then invalidates and rebuilds the replacement fork', async () => {

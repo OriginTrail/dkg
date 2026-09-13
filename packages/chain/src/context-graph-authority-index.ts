@@ -67,6 +67,11 @@ export interface ContextGraphAuthorityIndexNameHashInput
   extends ContextGraphAuthorityIndexScanInput {
   readonly nameHash: string;
 }
+
+export interface ContextGraphAuthorityIndexNameHashesInput
+  extends ContextGraphAuthorityIndexScanInput {
+  readonly nameHashes: readonly string[];
+}
 /**
  * Process-local owner for the durable contract-wide authority index.
  *
@@ -142,15 +147,47 @@ export class ContextGraphAuthorityIndex {
     // ContextGraphStorage permits an explicit zero commitment as an opt-out.
     // It never participates in reverse name binding, even if several slots use it.
     if (nameHash === ZERO_HASH) return null;
+    const matches = await this.statesByNameHashes({
+      ...input,
+      nameHashes: [nameHash],
+    });
+    return matches.get(nameHash)?.contextGraphId ?? null;
+  }
+
+  /**
+   * Project unique name commitments and their complete authority states from
+   * one checkpoint. Missing and zero-hash targets are omitted; any duplicate
+   * finalized commitment fails the whole projection closed.
+   */
+  async statesByNameHashes(
+    input: ContextGraphAuthorityIndexNameHashesInput,
+  ): Promise<ReadonlyMap<string, ContextGraphAuthorityIndexState>> {
+    const targets = new Set<string>();
+    for (const rawNameHash of input.nameHashes) {
+      const nameHash = normalizeHash(rawNameHash);
+      if (nameHash === undefined) {
+        throw new Error('Context Graph authority index name hash is invalid');
+      }
+      if (nameHash !== ZERO_HASH) targets.add(nameHash);
+    }
+    if (targets.size === 0) return new Map();
+
     const checkpoint = await this.#snapshot(input);
-    const matches = checkpoint.states.filter((state) => state.nameHash === nameHash);
-    if (matches.length > 1) {
+    const states = new Map<string, ContextGraphAuthorityIndexState>();
+    const counts = new Map<string, number>();
+    for (const state of checkpoint.states) {
+      if (!targets.has(state.nameHash)) continue;
+      counts.set(state.nameHash, (counts.get(state.nameHash) ?? 0) + 1);
+      states.set(state.nameHash, state);
+    }
+    for (const [nameHash, count] of counts) {
+      if (count <= 1) continue;
       throw new Error(
         `Context Graph name hash ${nameHash} is ambiguous across ` +
-        `${matches.length} finalized Context Graphs`,
+        `${count} finalized Context Graphs`,
       );
     }
-    return matches[0]?.contextGraphId ?? null;
+    return states;
   }
 
   /** Resolve the complete materialized index at one finalized chain anchor. */
