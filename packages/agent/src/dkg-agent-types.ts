@@ -1957,5 +1957,10 @@ export interface DKGAgentACKTransportOptions {
   log?: (message: string) => void;
 }
 
-/** @deprecated Import the canonical model from agent-config-resolution-schema.js. */
-export type { ResolvedDKGAgentConfig } from './agent-config-resolution-schema.js';
+/**
+ * @deprecated Outward-facing compatibility export for consumers compiled against
+ * the pre-policy declaration of this module; the historical fields are
+ * projections of `resourcePolicy`. Internal code imports the canonical model
+ * from resolved-agent-config.js, which omits them.
+ */
+export type { LegacyResolvedDKGAgentConfig as ResolvedDKGAgentConfig } from './resolved-agent-config.js';

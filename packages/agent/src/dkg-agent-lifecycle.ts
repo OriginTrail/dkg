@@ -1,4 +1,4 @@
-import type { ResolvedDKGAgentConfig } from './agent-config-resolution-schema.js';
+import type { ResolvedDKGAgentConfig } from './resolved-agent-config.js';
 import { projectStartupResourceDiagnostics } from './resource-policy.js';
 // SPDX-License-Identifier: Apache-2.0
 

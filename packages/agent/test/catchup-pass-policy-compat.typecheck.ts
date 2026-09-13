@@ -1,5 +1,5 @@
 import { resolveSwmCatchupPassConfig, type DKGAgentConfig } from '@origintrail-official/dkg-agent';
-import type { ResolvedDKGAgentConfig } from '@origintrail-official/dkg-agent/dist/agent-config-resolution-schema.js';
+import type { ResolvedDKGAgentConfig } from '@origintrail-official/dkg-agent/dist/resolved-agent-config.js';
 import type { ResolvedDKGAgentConfig as LegacyResolvedConfig } from '@origintrail-official/dkg-agent/dist/dkg-agent-types.js';
 
 // Named interfaces lack a general string index signature. Both the historical
@@ -13,10 +13,10 @@ resolveSwmCatchupPassConfig(env);
 declare const readonlyEnv: Readonly<CatchupEnv>;
 resolveSwmCatchupPassConfig(readonlyEnv);
 resolveSwmCatchupPassConfig(process.env);
+// The historical export is a strict superset of the canonical runtime model.
 declare const legacyResolved: LegacyResolvedConfig;
 const canonicalResolved: ResolvedDKGAgentConfig = legacyResolved;
-const legacyAgain: LegacyResolvedConfig = canonicalResolved;
-void legacyAgain;
+void canonicalResolved;
 
 const pass = resolveSwmCatchupPassConfig({});
 pass.maxPasses = 2;

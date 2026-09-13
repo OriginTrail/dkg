@@ -3,6 +3,9 @@ import type { StorageAckTiming } from '@origintrail-official/dkg-publisher';
 import type { DKGAgentConfig, Rfc64CatalogBootstrapConfigV1, Rfc64PublicCatalogBootstrapConfigV1 } from './dkg-agent-types.js';
 import type { ResolvedRfc64CatalogAuthoringPolicyV1 } from './rfc64/public-catalog-activation-config-v1.js';
 import type { StartupResourcePolicy, resolveStartupResourcePolicy } from './resource-policy.js';
+import type { SyncAdmissionConfig } from './sync/policy.js';
+import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
+import type { SyncResponderSnapshotLimitsConfig } from './sync/responder/snapshot-policy.js';
 
 /** Resource inputs are derived from the resolver, not from a second omission list.
  * selectedRecoveryContextGraphIds is synthesized during startup, not a raw agent option.
@@ -62,6 +65,55 @@ export type ResolvedDKGAgentConfig =
     rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   };
 
+/**
+ * Fields the pre-policy resolved config exposed. They are projections of
+ * `resourcePolicy` (environment and defaults applied), retained only for
+ * consumers compiled against the historical `dkg-agent-types` declaration.
+ * Internal code sees {@link ResolvedDKGAgentConfig}, which omits them.
+ */
+export interface LegacyResolvedConfigProjection {
+  /** @deprecated Read `resourcePolicy.reconcilerTiming`. */
+  readonly syncReconcilerTiming: SyncReconcilerTiming;
+  /** @deprecated Read `resourcePolicy.admission.limit`; this is the effective limit. */
+  readonly syncGlobalMaxInflight?: number;
+  /** @deprecated Read `resourcePolicy.admission.limit`; this is the effective limit. */
+  readonly syncGlobalLimit?: number;
+  /** @deprecated Read `resourcePolicy.admission.queueLimit`; this is the effective limit. */
+  readonly syncGlobalQueueLimit?: number;
+  /** @deprecated Read `resourcePolicy.admission`; this is the effective admission policy. */
+  readonly syncAdmission?: SyncAdmissionConfig;
+  /** @deprecated Read `resourcePolicy.snapshot.budget`; this is the effective budget. */
+  readonly syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
+}
+
+/** The historical resolved-config contract: the canonical model plus deprecated projections. */
+export type LegacyResolvedDKGAgentConfig = ResolvedDKGAgentConfig & LegacyResolvedConfigProjection;
+
+/** Every deprecated alias derives from the policy, so the runtime keeps one owner. */
+export function projectLegacyResolvedConfig(
+  policy: StartupResourcePolicy,
+): LegacyResolvedConfigProjection {
+  const { reconcilerTiming, admission, snapshot: { budget } } = policy;
+  return {
+    syncReconcilerTiming: reconcilerTiming,
+    ...(admission.limit === undefined
+      ? {}
+      : { syncGlobalMaxInflight: admission.limit, syncGlobalLimit: admission.limit }),
+    ...(admission.queueLimit === undefined ? {} : { syncGlobalQueueLimit: admission.queueLimit }),
+    syncAdmission: {
+      mode: admission.mode,
+      ...(admission.limit === undefined ? {} : { globalMaxInflight: admission.limit }),
+      ...(admission.partitions === undefined
+        ? {}
+        : { fast: admission.partitions.fast, slow: admission.partitions.slow }),
+    },
+    syncResponderSnapshotLimits: {
+      global: { rows: budget.maxRows, bytesEstimate: budget.maxBytesEstimate },
+      local: { rows: budget.maxSnapshotRows, bytesEstimate: budget.maxSnapshotBytesEstimate },
+    },
+  };
+}
+
 /** Values resolved by startup after ACK normalization and protocol admission. */
 export type AgentConfigResolvedValues = Pick<ResolvedDKGAgentConfig,
   | 'genesisId' | 'networkIdentity' | 'rfc64CatalogAccessPolicyAuthority'
@@ -71,11 +123,15 @@ export type AgentConfigResolvedValues = Pick<ResolvedDKGAgentConfig,
   | 'resourcePolicy'
 >;
 
-/** One checked boundary between normalized construction inputs and runtime configuration. */
+/**
+ * One checked boundary between normalized construction inputs and runtime
+ * configuration. The result also carries the deprecated compatibility
+ * projections; internal consumers receive it through the canonical type.
+ */
 export function resolveAgentConfig(
   config: StorageAckNormalizedDKGAgentConfig,
   resolved: AgentConfigResolvedValues,
-): ResolvedDKGAgentConfig {
+): LegacyResolvedDKGAgentConfig {
   const {
     syncReconcilerIntervalMs: _syncReconcilerIntervalMs,
     syncStalenessThresholdMs: _syncStalenessThresholdMs,
@@ -100,5 +156,6 @@ export function resolveAgentConfig(
   const runtimeInput = retained satisfies
     Omit<StorageAckNormalizedDKGAgentConfig, AgentConfigResolutionInputKey>
     & Partial<Record<AgentConfigResolutionInputKey, never>>;
-  return { ...runtimeInput, ...resolved };
+  const runtime: ResolvedDKGAgentConfig = { ...runtimeInput, ...resolved };
+  return { ...runtime, ...projectLegacyResolvedConfig(resolved.resourcePolicy) };
 }

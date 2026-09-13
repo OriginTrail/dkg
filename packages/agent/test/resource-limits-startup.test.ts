@@ -1,14 +1,14 @@
-import { RAW_RESOURCE_CONFIG_KEYS } from '../src/resolved-agent-config.js';
 import { mkdtemp, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
-import { backpressureRegistry, createOperationContext, Logger, type LogRecord } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC, backpressureRegistry, createOperationContext, Logger, type LogRecord } from '@origintrail-official/dkg-core';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import type { DKGAgent as Agent } from '../src/dkg-agent.js';
 import type { StartupResourcePolicy } from '../src/resource-policy.js';
-import type { ResolvedDKGAgentConfig } from '../src/resolved-agent-config.js';
+import type { LegacyResolvedDKGAgentConfig, ResolvedDKGAgentConfig } from '../src/resolved-agent-config.js';
+import { linesFromNquads } from './_helpers/sync-responder.js';
 
 it('starts a real local agent with bounded VM limits and emits one redacted configuration warning', async () => {
   // Importing a pure parser must not freeze the agent's later runtime snapshot.
@@ -64,9 +64,26 @@ it('starts a real local agent with bounded VM limits and emits one redacted conf
     expect(runtimeConfig.onReplicationEvent).toBe(onReplicationEvent);
     expect(runtimeConfig.store).toBe(store);
     const effective = (agent as unknown as { config: { resourcePolicy: StartupResourcePolicy } }).config.resourcePolicy;
-    for (const input of RAW_RESOURCE_CONFIG_KEYS) {
-      expect((agent as unknown as { config: object }).config).not.toHaveProperty(input);
+    // Raw timing inputs never reach the runtime object. The fields the
+    // pre-policy declaration exposed survive only as projections of the
+    // resolved policy: the rejected local row limit reports its effective value.
+    const runtime = (agent as unknown as { config: LegacyResolvedDKGAgentConfig }).config;
+    for (const input of [
+      'syncReconcilerIntervalMs', 'syncStalenessThresholdMs',
+      'syncBackoffBaseMs', 'syncBackoffMaxMs', 'syncBackoffJitter',
+    ]) {
+      expect(runtime).not.toHaveProperty(input);
     }
+    expect(runtime.syncReconcilerTiming).toBe(effective.reconcilerTiming);
+    expect(runtime.syncGlobalMaxInflight).toBe(3);
+    expect(runtime.syncGlobalLimit).toBe(3);
+    expect(runtime.syncGlobalQueueLimit).toBe(6);
+    expect(runtime.syncAdmission).toEqual({ mode: 'shared', globalMaxInflight: 3 });
+    expect(effective.snapshot.budget.maxSnapshotRows).toBe(1234);
+    expect(runtime.syncResponderSnapshotLimits).toEqual({
+      global: { rows: 1234, bytesEstimate: effective.snapshot.budget.maxBytesEstimate },
+      local: { rows: 1234, bytesEstimate: effective.snapshot.budget.maxSnapshotBytesEstimate },
+    });
     // Construction owns numeric resolution. Later environment edits cannot
     // make execution disagree with the policy that startup will report.
     vi.stubEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT', '7');
@@ -388,3 +405,75 @@ it.each((['catalog', 'public compatibility'] as const).flatMap(configuration => 
     }
   },
 );
+
+it.each([
+  { configured: 1, mutated: '1000', served: 'store-bounded pages' },
+  { configured: 1000, mutated: '1', served: 'one retained session snapshot' },
+])('serves durable pages from $served under the startup-resolved per-snapshot budget of $configured rows', async ({ configured, mutated }) => {
+  const { DKGAgent } = await import('../src/dkg-agent.js');
+  const contextGraphId = 'responder-budget';
+  const graph = `did:dkg:context-graph:${contextGraphId}/data`;
+  const dataDir = await mkdtemp(join(tmpdir(), 'dkg-responder-budget-'));
+  const store = new OxigraphStore();
+  await store.insert([0, 1, 2].map((index) => ({
+    graph, subject: `urn:responder-budget:${index}`, predicate: 'http://schema.org/name', object: `"row ${index}"`,
+  })));
+  // A retained snapshot reads the graph once without paging; the bounded
+  // fallback issues ordered OFFSET/LIMIT page queries against the store.
+  const pageQueries: string[] = [];
+  const originalQuery = store.query.bind(store);
+  store.query = (async (sparql: string, ...rest: unknown[]) => {
+    const normalized = sparql.replace(/\s+/g, ' ').trim();
+    if (normalized.includes(`<${graph}>`) && normalized.includes('ORDER BY') && normalized.includes('OFFSET')) {
+      pageQueries.push(normalized);
+    }
+    return (originalQuery as (sparql: string, ...rest: unknown[]) => ReturnType<OxigraphStore['query']>)(sparql, ...rest);
+  }) as OxigraphStore['query'];
+  let agent: Agent | undefined;
+  try {
+    agent = await DKGAgent.create({
+      name: 'Responder budget fixture', dataDir, listenPort: 0, listenHost: '127.0.0.1',
+      nodeRole: 'edge', store, chainAdapter: new NoChainAdapter(), skills: [],
+      rfc64CatalogActivation: { enabled: false },
+      syncResponderSnapshotLimits: { local: { rows: configured } },
+    });
+    // The registered responder must follow the budget resolved at construction,
+    // not a fresh environment read at registration or request time.
+    vi.stubEnv('DKG_SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT', mutated);
+    await agent.start();
+    const handlers = (agent as unknown as { router: { handlers: Map<string, unknown> } }).router.handlers;
+    const respond = handlers.get(PROTOCOL_SYNC) as (
+      data: Uint8Array,
+      peerId: { toString(): string },
+      options?: { signal?: AbortSignal },
+    ) => Promise<Uint8Array>;
+    expect(respond).toBeTypeOf('function');
+    const page = async (offset: number) => linesFromNquads(new TextDecoder().decode(await respond(
+      new TextEncoder().encode(JSON.stringify({
+        contextGraphId, includeSharedMemory: false, phase: 'data', offset, limit: 2,
+        syncSessionId: 'responder-budget-session',
+      })),
+      { toString: () => '12D3KooWResponderBudgetRequester' },
+      { signal: new AbortController().signal },
+    )));
+
+    const first = await page(0);
+    const second = await page(2);
+    expect(first).toHaveLength(2);
+    expect(second).toHaveLength(1);
+    expect(new Set([...first, ...second]).size).toBe(3);
+    if (configured === 1) {
+      expect(pageQueries.length).toBeGreaterThan(0);
+      expect(pageQueries[0]).toContain('LIMIT 2');
+      expect(pageQueries[0]).toContain('OFFSET 0');
+    } else {
+      expect(pageQueries).toEqual([]);
+    }
+  } finally {
+    try { await agent?.stop(); } finally {
+      vi.unstubAllEnvs();
+      await store.close();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }
+});
