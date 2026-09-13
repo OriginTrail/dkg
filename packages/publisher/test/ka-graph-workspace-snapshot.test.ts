@@ -106,4 +106,56 @@ describe('graph-scoped KA workspace snapshots', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('rejects a corrupt legacy ref even when the canonical digest snapshot is valid', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-workspace-corrupt-alias-snapshot-'));
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const snapshots = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      gc: { enabled: false },
+    });
+    const canonicalQuads: Quad[] = [{
+      subject: 'urn:entity:legacy-alias',
+      predicate: 'urn:predicate:value',
+      object: '"canonical"',
+      graph: '',
+    }];
+    const legacyRef = `sha256:${'9'.repeat(64)}`;
+    try {
+      await storeKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId: CONTEXT_GRAPH,
+        shareOperationId: OPERATION_ID,
+        kaUal: UAL,
+        assertionVersion: 1,
+        quads: canonicalQuads,
+        publicSnapshotStore: snapshots,
+      });
+      await snapshots.putSnapshot({
+        digest: legacyRef,
+        quads: [{ ...canonicalQuads[0]!, object: '"corrupt"' }],
+      });
+      await store.insert([{
+        subject: `urn:dkg:share:${CONTEXT_GRAPH}:${OPERATION_ID}`,
+        predicate: `${DKG}publicSnapshotRef`,
+        object: `"${legacyRef}"`,
+        graph: graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH),
+      }]);
+
+      await expect(resolveKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId: CONTEXT_GRAPH,
+        shareOperationId: OPERATION_ID,
+        kaUal: UAL,
+        assertionVersion: 1,
+        publicSnapshotStore: snapshots,
+      })).rejects.toThrow(/snapshot is missing or corrupt/);
+    } finally {
+      snapshots.stopGarbageCollection();
+      await store.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
