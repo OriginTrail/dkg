@@ -294,6 +294,54 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(requester.coordinator.authenticatedAgentAddress(REMOTE_PEER_ID)).toBeUndefined();
   });
 
+  it('keeps base admission usable when the registered handler cannot create a wallet binding', async () => {
+    let registeredHandler: ((data: Uint8Array) => Promise<Uint8Array>) | undefined;
+    const createPeerAgentBinding = vi.fn(async () => {
+      throw new Error('wallet unavailable');
+    });
+    const responder = new NetworkAdmissionCoordinator({
+      admission: new NetworkAdmissionService({
+        networkId: identity.networkId,
+        selfPeerId: REMOTE_PEER_ID,
+      }),
+      identity,
+      selfPeerId: REMOTE_PEER_ID,
+      sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      createPeerAgentBinding,
+      sendIdentityProbe: async () => new Uint8Array(),
+      getConnections: () => [],
+      deletePeerFromPeerStore: async () => {},
+    });
+    responder.registerIdentityProtocol({
+      register: (protocolId, handler) => {
+        expect(protocolId).toBe(PROTOCOL_NETWORK_IDENTITY);
+        registeredHandler = handler;
+      },
+    });
+    const requester = buildCoordinator({
+      identity,
+      sendIdentityProbe: async (_peerId, data) => {
+        if (!registeredHandler) throw new Error('identity handler was not registered');
+        return registeredHandler(data);
+      },
+    });
+    const ctx = createOperationContext('connect');
+
+    await expect(requester.coordinator.ensureAdmitted(REMOTE_PEER_ID, ctx))
+      .resolves.toBe(true);
+    expect(requester.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(requester.coordinator.authenticatedAgentAddress(REMOTE_PEER_ID)).toBeUndefined();
+
+    await expect(requester.coordinator.ensurePeerAgentBinding(
+      REMOTE_PEER_ID,
+      AGENT_ADDRESS,
+      ctx,
+    )).resolves.toBe(false);
+    expect(requester.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(requester.coordinator.authenticatedAgentAddress(REMOTE_PEER_ID)).toBeUndefined();
+    expect(createPeerAgentBinding).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps transport probe failures retryable instead of quarantining the peer', async () => {
     const fixture = buildCoordinator({
       identity,

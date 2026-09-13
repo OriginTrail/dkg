@@ -51,6 +51,30 @@ describe('NetworkAdmissionService', () => {
     expect([...admission.verifiedSameNetworkPeerIds()]).toEqual([]);
   });
 
+  it('atomically replaces and clears wallet-binding evidence with admission transitions', () => {
+    const admission = new NetworkAdmissionService({ networkId: 'network-a' });
+    const firstAddress = '0x1111111111111111111111111111111111111111';
+    const rotatedAddress = '0x2222222222222222222222222222222222222222';
+
+    admission.markVerifiedSameNetwork(VERIFIED_PEER_ID_CID, firstAddress);
+    expect(admission.authenticatedAgentAddress(VERIFIED_PEER_ID)).toBe(firstAddress);
+
+    admission.markVerifiedSameNetwork(VERIFIED_PEER_ID, rotatedAddress);
+    expect(admission.authenticatedAgentAddress(VERIFIED_PEER_ID_CID)).toBe(rotatedAddress);
+
+    admission.markVerifiedSameNetwork(VERIFIED_PEER_ID);
+    expect(admission.isAcceptedPeer(VERIFIED_PEER_ID)).toBe(true);
+    expect(admission.authenticatedAgentAddress(VERIFIED_PEER_ID)).toBeUndefined();
+
+    admission.markVerifiedSameNetwork(VERIFIED_PEER_ID, firstAddress);
+    admission.quarantinePeer(VERIFIED_PEER_ID);
+    expect(admission.authenticatedAgentAddress(VERIFIED_PEER_ID)).toBeUndefined();
+
+    admission.markVerifiedSameNetwork(VERIFIED_PEER_ID);
+    expect(admission.isAcceptedPeer(VERIFIED_PEER_ID)).toBe(true);
+    expect(admission.authenticatedAgentAddress(VERIFIED_PEER_ID)).toBeUndefined();
+  });
+
   it('keeps no-deadline quarantine indefinite for backward compatibility', () => {
     let now = 1_000;
     const admission = new NetworkAdmissionService({

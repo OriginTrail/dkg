@@ -52,7 +52,6 @@ export interface NetworkAdmissionAttemptOptions {
 
 interface NetworkAdmissionAttemptPolicy {
   probeRetrySuppression: 'respect' | 'bypass';
-  requiredAgentAddress?: string;
 }
 
 const AUTOMATIC_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
@@ -168,7 +167,6 @@ export class NetworkAdmissionCoordinator {
   private readonly log?: NetworkAdmissionCoordinatorOptions['log'];
   private readonly probeTimeoutMs: number;
   private readonly inFlight = new Map<CanonicalPeerId, InFlightAdmissionAttempt>();
-  private readonly authenticatedAgentAddresses = new Map<CanonicalPeerId, string>();
 
   constructor(options: NetworkAdmissionCoordinatorOptions) {
     this.admission = options.admission;
@@ -216,9 +214,7 @@ export class NetworkAdmissionCoordinator {
   /** Exact wallet address proven by this peer during its latest identity handshake. */
   authenticatedAgentAddress(peerId: string): string | undefined {
     if (!this.enabled) return undefined;
-    const canonical = canonicalAdmissionPeerId(peerId);
-    if (!this.admission.isAcceptedPeer(canonical)) return undefined;
-    return this.authenticatedAgentAddresses.get(canonical);
+    return this.admission.authenticatedAgentAddress(peerId);
   }
 
   /** Admit the peer and require its wallet-signed binding to match the directory row. */
@@ -230,17 +226,13 @@ export class NetworkAdmissionCoordinator {
   ): Promise<boolean> {
     const normalizedExpectedAddress = expectedAgentAddress.trim().toLowerCase();
     if (!this.enabled || !normalizedExpectedAddress) return false;
-    const admitted = await this.ensureAdmittedWithPolicy(
-      remotePeer,
-      ctx,
-      {
-        probeRetrySuppression: 'respect',
-        requiredAgentAddress: normalizedExpectedAddress,
-      },
-      options,
-    );
+    const canonicalRemotePeer = canonicalAdmissionPeerId(remotePeer);
+    if (this.admission.isRejectedPeer(canonicalRemotePeer)) return false;
+    const currentAddress = this.admission.authenticatedAgentAddress(canonicalRemotePeer);
+    const admitted = currentAddress?.toLowerCase() === normalizedExpectedAddress
+      || await this.refreshPeerAuthentication(canonicalRemotePeer, ctx, options);
     if (!admitted) return false;
-    const authenticated = this.authenticatedAgentAddress(remotePeer);
+    const authenticated = this.admission.authenticatedAgentAddress(canonicalRemotePeer);
     return authenticated?.toLowerCase() === normalizedExpectedAddress;
   }
 
@@ -305,16 +297,29 @@ export class NetworkAdmissionCoordinator {
   ): Promise<boolean> {
     if (!this.enabled) return true;
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
-    if (
-      this.admission.isAcceptedPeer(remotePeerId)
-      && (
-        policy.requiredAgentAddress === undefined
-        || this.authenticatedAgentAddresses.get(remotePeerId)?.toLowerCase()
-          === policy.requiredAgentAddress
-      )
-    ) return true;
+    if (this.admission.isAcceptedPeer(remotePeerId)) return true;
     if (this.admission.isRejectedPeer(remotePeerId)) return false;
     if (options.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal.reason));
+
+    return this.runAdmissionAttempt(remotePeerId, ctx, policy, options);
+  }
+
+  /** Refresh optional peer-authentication evidence without changing ordinary admission policy. */
+  private async refreshPeerAuthentication(
+    remotePeerId: CanonicalPeerId,
+    ctx: OperationContext,
+    options: NetworkAdmissionAttemptOptions,
+  ): Promise<boolean> {
+    if (options.signal?.aborted) return Promise.reject(abortErrorFromSignal(options.signal.reason));
+    return this.runAdmissionAttempt(remotePeerId, ctx, AUTOMATIC_ADMISSION_POLICY, options);
+  }
+
+  private async runAdmissionAttempt(
+    remotePeerId: CanonicalPeerId,
+    ctx: OperationContext,
+    policy: NetworkAdmissionAttemptPolicy,
+    options: NetworkAdmissionAttemptOptions,
+  ): Promise<boolean> {
 
     const existing = this.inFlight.get(remotePeerId);
     if (existing) return existing.wait(options);
@@ -422,12 +427,7 @@ export class NetworkAdmissionCoordinator {
       requesterPeerId: this.selfPeerId,
     });
     if (verdict.ok) {
-      this.admission.markVerifiedSameNetwork(remotePeer);
-      if (verdict.authenticatedAgentAddress) {
-        this.authenticatedAgentAddresses.set(remotePeer, verdict.authenticatedAgentAddress);
-      } else {
-        this.authenticatedAgentAddresses.delete(remotePeer);
-      }
+      this.admission.markVerifiedSameNetwork(remotePeer, verdict.authenticatedAgentAddress);
       return true;
     }
     await this.rejectPeer(remotePeer, ctx, `network identity proof rejected: ${verdict.reason ?? 'unknown reason'}`);
@@ -440,7 +440,6 @@ export class NetworkAdmissionCoordinator {
     // networkId and restarts the peer re-admits without every observer node
     // restarting.
     this.admission.quarantinePeerForCooldown(remotePeer);
-    this.authenticatedAgentAddresses.delete(remotePeer);
     this.cleanupRejectedPeerState?.(remotePeer);
     await this.disconnectAndForgetPeer(remotePeer, ctx);
     this.log?.warn(ctx, `Rejected peer ${remotePeer.slice(-8)}: ${reason}`);

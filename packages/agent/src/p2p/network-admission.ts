@@ -16,6 +16,10 @@ type NetworkAdmissionQuarantineEntry =
   | { kind: 'indefinite' }
   | { kind: 'cooldown'; untilMs: number };
 
+interface NetworkAdmissionVerifiedPeerRecord {
+  readonly authenticatedAgentAddress?: string;
+}
+
 export interface NetworkAdmissionOptions {
   networkId?: string;
   selfPeerId?: string;
@@ -47,7 +51,7 @@ export class NetworkAdmissionService {
   private readonly now: () => number;
   private readonly probeRetry: NetworkAdmissionProbeRetryState;
   private readonly quarantineCooldownMs: number;
-  private readonly verifiedPeerIds = new Set<CanonicalPeerId>();
+  private readonly verifiedPeers = new Map<CanonicalPeerId, NetworkAdmissionVerifiedPeerRecord>();
   private readonly quarantinedPeers = new Map<CanonicalPeerId, NetworkAdmissionQuarantineEntry>();
 
   constructor(options: NetworkAdmissionOptions = {}) {
@@ -70,11 +74,23 @@ export class NetworkAdmissionService {
     return Boolean(this.networkId);
   }
 
-  markVerifiedSameNetwork(peerId: string): void {
+  /** Atomically replace the peer's verified network and optional wallet-binding evidence. */
+  markVerifiedSameNetwork(peerId: string, authenticatedAgentAddress?: string): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
-    this.verifiedPeerIds.add(canonicalPeerId);
+    const normalizedAgentAddress = authenticatedAgentAddress?.trim();
+    this.verifiedPeers.set(canonicalPeerId, normalizedAgentAddress
+      ? { authenticatedAgentAddress: normalizedAgentAddress }
+      : {});
     this.quarantinedPeers.delete(canonicalPeerId);
     this.probeRetry.clear(canonicalPeerId);
+  }
+
+  /** Wallet address proven during this peer's latest successful network handshake. */
+  authenticatedAgentAddress(peerId: string): string | undefined {
+    if (!this.enabled) return undefined;
+    const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
+    if (!this.isAcceptedPeer(canonicalPeerId)) return undefined;
+    return this.verifiedPeers.get(canonicalPeerId)?.authenticatedAgentAddress;
   }
 
   /** Preserve the existing public operation as an explicit indefinite quarantine. */
@@ -110,7 +126,7 @@ export class NetworkAdmissionService {
     if (!canonicalPeerId) return false;
     if (canonicalPeerId === this.selfPeerId) return true;
     if (this.isQuarantined(canonicalPeerId)) return false;
-    return this.verifiedPeerIds.has(canonicalPeerId);
+    return this.verifiedPeers.has(canonicalPeerId);
   }
 
   isRejectedPeer(peerId: string): boolean {
@@ -122,7 +138,7 @@ export class NetworkAdmissionService {
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
     if (!this.enabled) return new Set();
     return new Set(
-      [...this.verifiedPeerIds]
+      [...this.verifiedPeers.keys()]
         .filter((peerId) => !this.isQuarantined(peerId)),
     );
   }
@@ -130,7 +146,7 @@ export class NetworkAdmissionService {
   snapshot(): NetworkAdmissionSnapshot {
     return {
       enabled: this.enabled,
-      verifiedPeerIds: [...this.verifiedPeerIds].sort(),
+      verifiedPeerIds: [...this.verifiedPeers.keys()].sort(),
       quarantinedPeerIds: [...this.quarantinedPeers.keys()]
         .filter((peerId) => this.isQuarantined(peerId))
         .sort(),
@@ -151,7 +167,7 @@ export class NetworkAdmissionService {
   private setQuarantine(peerId: string, entry: NetworkAdmissionQuarantineEntry): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
     this.quarantinedPeers.set(canonicalPeerId, entry);
-    this.verifiedPeerIds.delete(canonicalPeerId);
+    this.verifiedPeers.delete(canonicalPeerId);
     this.probeRetry.clear(canonicalPeerId);
   }
 }
