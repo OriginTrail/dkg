@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import {
   createOperationContext,
   ed25519Sign,
+  PROTOCOL_NETWORK_IDENTITY,
   QuietRetryableHandlerError,
 } from '@origintrail-official/dkg-core';
 import {
@@ -35,6 +36,8 @@ const identity = {
 };
 const AGENT_PRIVATE_KEY = `0x${'11'.repeat(32)}`;
 const AGENT_ADDRESS = new ethers.Wallet(AGENT_PRIVATE_KEY).address;
+const ROTATED_AGENT_PRIVATE_KEY = `0x${'22'.repeat(32)}`;
+const ROTATED_AGENT_ADDRESS = new ethers.Wallet(ROTATED_AGENT_PRIVATE_KEY).address;
 
 describe('protocol admission error boundary', () => {
   it('translates only inbound probe backoff into the core quiet-retryable type', () => {
@@ -184,10 +187,111 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.coordinator.authenticatedAgentAddress(REMOTE_PEER_ID)).toBe(AGENT_ADDRESS);
     await expect(fixture.coordinator.ensurePeerAgentBinding(
       REMOTE_PEER_ID,
+      AGENT_ADDRESS.toLowerCase(),
+      createOperationContext('connect'),
+    )).resolves.toBe(true);
+    expect(sendIdentityProbe).toHaveBeenCalledOnce();
+    await expect(fixture.coordinator.ensurePeerAgentBinding(
+      REMOTE_PEER_ID,
       ethers.Wallet.createRandom().address,
       createOperationContext('connect'),
     )).resolves.toBe(false);
-    expect(sendIdentityProbe).toHaveBeenCalledOnce();
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+  });
+
+  it('refreshes an accepted peer binding when its default wallet rotates', async () => {
+    let activePrivateKey = AGENT_PRIVATE_KEY;
+    let activeAddress = AGENT_ADDRESS;
+    const sendIdentityProbe = vi.fn(async (_peerId: string, data: Uint8Array) => {
+      const request = JSON.parse(new TextDecoder().decode(data));
+      const peerAgentBinding = await signAgentDelegation({
+        agentPrivateKey: activePrivateKey,
+        agentAddress: activeAddress,
+        scope: networkPeerBindingScope({
+          nonce: request.nonce,
+          requesterPeerId: request.requesterPeerId,
+          networkId: request.networkId,
+        }),
+        issuedAtMs: 0,
+        delegateePeerId: REMOTE_PEER_ID,
+      });
+      const response = await signNetworkIdentityResponse({
+        request,
+        identity,
+        responderPeerId: REMOTE_PEER_ID,
+        sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+        peerAgentBinding,
+      });
+      return new TextEncoder().encode(JSON.stringify(response));
+    });
+    const fixture = buildCoordinator({ identity, sendIdentityProbe });
+
+    await expect(fixture.coordinator.ensurePeerAgentBinding(
+      REMOTE_PEER_ID,
+      AGENT_ADDRESS,
+      createOperationContext('connect'),
+    )).resolves.toBe(true);
+
+    activePrivateKey = ROTATED_AGENT_PRIVATE_KEY;
+    activeAddress = ROTATED_AGENT_ADDRESS;
+    await expect(fixture.coordinator.ensurePeerAgentBinding(
+      REMOTE_PEER_ID,
+      ROTATED_AGENT_ADDRESS,
+      createOperationContext('connect'),
+    )).resolves.toBe(true);
+
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+    expect(fixture.coordinator.authenticatedAgentAddress(REMOTE_PEER_ID))
+      .toBe(ROTATED_AGENT_ADDRESS);
+  });
+
+  it('rejects a valid wallet delegation for another peer through the registered handler', async () => {
+    let registeredHandler: ((data: Uint8Array) => Promise<Uint8Array>) | undefined;
+    const responderAdmission = new NetworkAdmissionService({
+      networkId: identity.networkId,
+      selfPeerId: REMOTE_PEER_ID,
+    });
+    const responder = new NetworkAdmissionCoordinator({
+      admission: responderAdmission,
+      identity,
+      selfPeerId: REMOTE_PEER_ID,
+      sign: (payload) => ed25519Sign(payload, REMOTE_PRIVATE_KEY_SEED),
+      createPeerAgentBinding: async ({ request }) => signAgentDelegation({
+        agentPrivateKey: AGENT_PRIVATE_KEY,
+        agentAddress: AGENT_ADDRESS,
+        scope: networkPeerBindingScope({
+          nonce: request.nonce,
+          requesterPeerId: request.requesterPeerId,
+          networkId: request.networkId,
+        }),
+        issuedAtMs: 0,
+        delegateePeerId: SELF_PEER_ID,
+      }),
+      sendIdentityProbe: async () => new Uint8Array(),
+      getConnections: () => [],
+      deletePeerFromPeerStore: async () => {},
+    });
+    responder.registerIdentityProtocol({
+      register: (protocolId, handler) => {
+        expect(protocolId).toBe(PROTOCOL_NETWORK_IDENTITY);
+        registeredHandler = handler;
+      },
+    });
+    const requester = buildCoordinator({
+      identity,
+      sendIdentityProbe: async (_peerId, data) => {
+        if (!registeredHandler) throw new Error('identity handler was not registered');
+        return registeredHandler(data);
+      },
+    });
+
+    await expect(requester.coordinator.ensurePeerAgentBinding(
+      REMOTE_PEER_ID,
+      AGENT_ADDRESS,
+      createOperationContext('connect'),
+    )).resolves.toBe(false);
+    expect(requester.coordinator.isAcceptedPeer(REMOTE_PEER_ID)).toBe(true);
+    expect(requester.coordinator.authenticatedAgentAddress(REMOTE_PEER_ID)).toBeUndefined();
   });
 
   it('keeps transport probe failures retryable instead of quarantining the peer', async () => {

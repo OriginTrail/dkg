@@ -877,6 +877,22 @@ export class AgentRegistryMethods extends DKGAgentBase {
     return addressOrLowercase;
   }
 
+  /** Resolve the default agent only when this daemon owns its signing key. */
+  getDefaultCustodialSigningIdentity(this: DKGAgent): {
+    agentAddress: string;
+    privateKey: string;
+  } | undefined {
+    const defaultAddress = this.defaultAgentAddress;
+    if (!defaultAddress) return undefined;
+    const agentAddress = this.resolveLocalAgentAddress(defaultAddress);
+    const privateKey = this.getCustodialAgentPrivateKey(agentAddress);
+    if (!privateKey) return undefined;
+    return {
+      agentAddress,
+      privateKey,
+    };
+  }
+
   /**
    * Resolve an agent address from a Bearer token.
    * Returns undefined if the token is not an agent token (could be a node-level token).

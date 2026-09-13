@@ -52,22 +52,15 @@ export interface NetworkAdmissionAttemptOptions {
 
 interface NetworkAdmissionAttemptPolicy {
   probeRetrySuppression: 'respect' | 'bypass';
-  requirePeerAgentBinding: boolean;
+  requiredAgentAddress?: string;
 }
 
 const AUTOMATIC_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'respect',
-  requirePeerAgentBinding: false,
 };
 
 const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
-  requirePeerAgentBinding: false,
-};
-
-const AUTHENTICATED_BINDING_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
-  probeRetrySuppression: 'respect',
-  requirePeerAgentBinding: true,
 };
 
 export interface NetworkIdentityProtocolRegistrar {
@@ -235,16 +228,20 @@ export class NetworkAdmissionCoordinator {
     ctx: OperationContext,
     options: NetworkAdmissionAttemptOptions = {},
   ): Promise<boolean> {
-    if (!this.enabled || !expectedAgentAddress.trim()) return false;
+    const normalizedExpectedAddress = expectedAgentAddress.trim().toLowerCase();
+    if (!this.enabled || !normalizedExpectedAddress) return false;
     const admitted = await this.ensureAdmittedWithPolicy(
       remotePeer,
       ctx,
-      AUTHENTICATED_BINDING_ADMISSION_POLICY,
+      {
+        probeRetrySuppression: 'respect',
+        requiredAgentAddress: normalizedExpectedAddress,
+      },
       options,
     );
     if (!admitted) return false;
     const authenticated = this.authenticatedAgentAddress(remotePeer);
-    return authenticated?.toLowerCase() === expectedAgentAddress.trim().toLowerCase();
+    return authenticated?.toLowerCase() === normalizedExpectedAddress;
   }
 
   registerIdentityProtocol(router: NetworkIdentityProtocolRegistrar): void {
@@ -311,8 +308,9 @@ export class NetworkAdmissionCoordinator {
     if (
       this.admission.isAcceptedPeer(remotePeerId)
       && (
-        !policy.requirePeerAgentBinding
-        || this.authenticatedAgentAddresses.has(remotePeerId)
+        policy.requiredAgentAddress === undefined
+        || this.authenticatedAgentAddresses.get(remotePeerId)?.toLowerCase()
+          === policy.requiredAgentAddress
       )
     ) return true;
     if (this.admission.isRejectedPeer(remotePeerId)) return false;

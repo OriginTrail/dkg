@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { ed25519Sign } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
-import { signAgentDelegation } from '../src/auth/agent-delegation.js';
+import {
+  parseSignedAgentDelegation,
+  signAgentDelegation,
+} from '../src/auth/agent-delegation.js';
 import {
   makeNetworkIdentityRequest,
   networkPeerBindingScope,
@@ -209,5 +212,29 @@ describe('network identity proof', () => {
       nonce: 'nonce-1',
       requesterPeerId: 'requester-peer',
     })).resolves.toMatchObject({ ok: false, reason: 'missing signature' });
+  });
+
+  it('never treats a partially shaped wire object as a signed agent delegation', async () => {
+    const incomplete = {
+      agentAddress: AGENT_ADDRESS,
+      scope: 'binding-scope',
+      issuedAtMs: Date.now(),
+      delegateePeerId: REMOTE_PEER_ID,
+      // signature deliberately absent
+    };
+    expect(parseSignedAgentDelegation(incomplete)).toBeUndefined();
+
+    const response = await signedResponse();
+    expect(parseNetworkIdentityResponse({
+      ...response,
+      peerAgentBinding: incomplete,
+    }).peerAgentBinding).toBeUndefined();
+    await expect(verifyNetworkIdentityResponse({
+      response: { ...response, peerAgentBinding: incomplete },
+      remotePeerId: REMOTE_PEER_ID,
+      localIdentity,
+      nonce: 'nonce-1',
+      requesterPeerId: 'requester-peer',
+    })).resolves.toEqual({ ok: true });
   });
 });

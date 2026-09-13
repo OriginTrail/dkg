@@ -2206,15 +2206,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       selfPeerId: this.node.peerId.toString(),
       sign: (payload) => this.wallet.sign(payload),
       createPeerAgentBinding: async ({ request, responderPeerId }) => {
-        const defaultAddress = this.defaultAgentAddress;
-        if (!defaultAddress) return undefined;
-        const record = this.localAgents.get(defaultAddress)
-          ?? [...this.localAgents.values()].find(({ agentAddress }) =>
-            agentAddress.toLowerCase() === defaultAddress.toLowerCase());
-        if (!record?.privateKey) return undefined;
+        const signingIdentity = this.getDefaultCustodialSigningIdentity();
+        if (!signingIdentity) return undefined;
         return signAgentDelegation({
-          agentPrivateKey: record.privateKey,
-          agentAddress: record.agentAddress,
+          agentPrivateKey: signingIdentity.privateKey,
+          agentAddress: signingIdentity.agentAddress,
           scope: networkPeerBindingScope({
             nonce: request.nonce,
             requesterPeerId: request.requesterPeerId,

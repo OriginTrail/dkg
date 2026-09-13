@@ -5,6 +5,7 @@ import {
   type DkgNetworkIdentity,
 } from '@origintrail-official/dkg-core';
 import {
+  parseSignedAgentDelegation,
   verifyAgentDelegation,
   type SignedAgentDelegation,
 } from '../auth/agent-delegation.js';
@@ -154,6 +155,7 @@ export function parseNetworkIdentityResponse(value: unknown): NetworkIdentityRes
   if (!isNonEmptyString(response.networkId)) throw new Error('missing network id');
   if (response.proofKind !== NETWORK_IDENTITY_PROOF_KIND) throw new Error('unsupported proof kind');
   if (!isNonEmptyString(response.signature)) throw new Error('missing signature');
+  const peerAgentBinding = parseSignedAgentDelegation(response.peerAgentBinding);
   return {
     version: NETWORK_IDENTITY_PROOF_VERSION,
     peerId: response.peerId,
@@ -163,9 +165,7 @@ export function parseNetworkIdentityResponse(value: unknown): NetworkIdentityRes
     networkConfigName: isNonEmptyString(response.networkConfigName) ? response.networkConfigName : undefined,
     proofKind: NETWORK_IDENTITY_PROOF_KIND,
     signature: response.signature,
-    ...(isRecord(response.peerAgentBinding)
-      ? { peerAgentBinding: response.peerAgentBinding as unknown as SignedAgentDelegation }
-      : {}),
+    ...(peerAgentBinding === undefined ? {} : { peerAgentBinding }),
   };
 }
 
@@ -241,8 +241,4 @@ export async function verifyNetworkIdentityResponse(
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
