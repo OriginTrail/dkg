@@ -15,28 +15,18 @@ export type RawResourceResolutionInput = Pick<
   Extract<keyof Parameters<typeof resolveStartupResourcePolicy>[0], keyof DKGAgentConfig>
 >;
 
+/** Protocol inputs consumed by startup; the one place they are enumerated. */
 type ProtocolResolutionInput = Pick<DKGAgentConfig,
   | 'rfc64PublicCatalogActivation' | 'rfc64CatalogActivation' | 'rfc64CatalogActivations'
   | 'rfc64CatalogDeploymentProfile' | 'rfc64PublicCatalogAutoPublish'
   | 'rfc64PublicCatalogBootstrap' | 'contextGraphSubscriptionRehydrationEnabled'
 >;
 
-/** Exhaustive diagnostic names; adding a resolver input requires naming it here. */
-const resourceResolutionFields = {
-  syncReconcilerIntervalMs: true, syncStalenessThresholdMs: true,
-  syncBackoffBaseMs: true, syncBackoffMaxMs: true, syncBackoffJitter: true,
-  syncGlobalMaxInflight: true, syncGlobalLimit: true, syncGlobalQueueLimit: true,
-  syncAdmission: true, syncResponderSnapshotLimits: true,
-} satisfies Record<keyof RawResourceResolutionInput, true>;
-const protocolResolutionFields = {
-  rfc64PublicCatalogActivation: true, rfc64CatalogActivation: true, rfc64CatalogActivations: true,
-  rfc64CatalogDeploymentProfile: true, rfc64PublicCatalogAutoPublish: true,
-  rfc64PublicCatalogBootstrap: true, contextGraphSubscriptionRehydrationEnabled: true,
-} satisfies Record<keyof ProtocolResolutionInput, true>;
-export const RAW_RESOURCE_CONFIG_KEYS = Object.freeze(Object.keys(resourceResolutionFields));
-export const RESOLUTION_INPUT_KEYS = Object.freeze([
-  ...RAW_RESOURCE_CONFIG_KEYS, ...Object.keys(protocolResolutionFields),
-]);
+/**
+ * Every construction-only input. This key set drives the resolved type's
+ * omission, and {@link resolveAgentConfig} proves at compile time that its
+ * destructuring removes each of these keys at runtime.
+ */
 export type AgentConfigResolutionInputKey = keyof RawResourceResolutionInput | keyof ProtocolResolutionInput;
 
 export type StorageAckNormalizedDKGAgentConfig = Omit<
