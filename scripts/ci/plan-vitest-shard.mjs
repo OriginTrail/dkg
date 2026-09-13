@@ -72,6 +72,8 @@ const CLI_BODY_MS = Object.freeze({
   'test/daemon-keystore-extra.test.ts': 546,
   'test/daemon-lifecycle-memory-agent-address.test.ts': 3,
   'test/daemon-lifecycle.test.ts': 2450,
+  'test/local-agent-config-transactions.test.ts': 135,
+  'test/local-agent-routes.test.ts': 50,
   'test/daemon-log-rotation-io.test.ts': 4,
   'test/daemon-log-rotation.test.ts': 9,
   'test/daemon-openclaw.part-01.test.ts': 11,

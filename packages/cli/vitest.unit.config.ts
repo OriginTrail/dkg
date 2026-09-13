@@ -219,6 +219,8 @@ export default defineConfig({
           // timeout attribution regressions in the fast unit lane too.
           'test/daemon-openclaw.part-*.test.ts',
           'test/daemon-hermes.test.ts',
+          'test/local-agent-config-transactions.test.ts',
+          'test/local-agent-routes.test.ts',
           'test/daemon-prime-agent.test.ts',
           'test/daemon-prime-agent-persistence.test.ts',
           'test/daemon-sse-final-frame.test.ts',

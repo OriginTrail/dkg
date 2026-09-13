@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi, afterEach } from 'vitest';
@@ -19,10 +19,7 @@ import {
 } from '../src/daemon/hermes.js';
 import {
   type LocalAgentUiAttachDeps,
-  type LocalAgentConnectPlan,
-  extractLocalAgentIntegrationPatch,
   connectLocalAgentIntegrationFromUi,
-  connectLocalAgentIntegration,
   getLocalAgentIntegration,
   mergeLocalAgentIntegrationConfig,
   refreshLocalAgentIntegrationFromUi,
@@ -30,11 +27,8 @@ import {
   updateLocalAgentIntegration,
 } from '../src/daemon/local-agents.js';
 import { handleHermesRoutes } from '../src/daemon/routes/hermes.js';
-import {
-  handleLocalAgentsRoutes,
-  persistLocalAgentAttachPatch,
-} from '../src/daemon/routes/local-agents.js';
-import { handleStatusRoutes } from '../src/daemon/routes/status.js';
+import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
+import { commitLocalAgentConnectPlanForTest } from './_helpers/local-agent-connect.js';
 
 const disconnectHermesProfileMock = vi.hoisted(() => vi.fn());
 const resolveHermesProfileMock = vi.hoisted(() => vi.fn<NonNullable<LocalAgentUiAttachDeps['resolveHermesProfile']>>(() => ({
@@ -139,23 +133,6 @@ function deferred<T = void>() {
     reject = innerReject;
   });
   return { promise, resolve, reject };
-}
-
-function commitConnectPlanForTest(
-  config: DkgConfig,
-  id: string,
-  plan: LocalAgentConnectPlan,
-): { integration: NonNullable<ReturnType<typeof getLocalAgentIntegration>>; notice?: string } {
-  connectLocalAgentIntegration(config, { ...plan.registration, id });
-  updateLocalAgentIntegration(config, id, plan.initialPatch);
-  const afterCommitNotice = plan.ok ? plan.afterCommit?.({
-    current: () => config,
-    persist: async (patch) => { updateLocalAgentIntegration(config, id, patch); },
-  }) : undefined;
-  return {
-    integration: getLocalAgentIntegration(config, id)!,
-    notice: afterCommitNotice ?? plan.notice,
-  };
 }
 
 function makeHermesRouteContext(
@@ -905,370 +882,6 @@ describe('Hermes channel helpers', () => {
 });
 
 describe('Hermes local-agent registry lifecycle', () => {
-  it('keeps node-UI connect and refresh probes outside the config commit queue', async () => {
-    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    const initial = makeConfig({
-      localAgentIntegrations: {
-        hermes: {
-          enabled: true,
-          transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642', healthUrl: 'http://127.0.0.1:8642/stale-health' },
-          capabilities: { chatAttachments: false },
-          metadata: { profileName: 'research', hermesHome: 'C:\\Hermes\\research', operatorLabel: 'initial' },
-          runtime: { status: 'degraded', ready: false },
-        },
-      },
-    });
-    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), initial);
-    let probeEntered!: () => void;
-    let releaseProbe!: () => void;
-    const entered = new Promise<void>(resolve => { probeEntered = resolve; });
-    const blocked = new Promise<void>(resolve => { releaseProbe = resolve; });
-    vi.stubGlobal('fetch', vi.fn(async () => {
-      probeEntered();
-      await blocked;
-      return new Response(JSON.stringify({ ok: true }), { status: 200 });
-    }));
-    const connectReq = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
-      id: 'hermes',
-      metadata: { source: 'node-ui', profileName: 'research', hermesHome: 'C:\\Hermes\\research' },
-    });
-    const connectRes = makeJsonResponse();
-
-    let refreshEntered!: () => void;
-    let releaseRefresh!: () => void;
-    const refreshStarted = new Promise<void>(resolve => { refreshEntered = resolve; });
-    const refreshBlocked = new Promise<void>(resolve => { releaseRefresh = resolve; });
-    let connecting: Promise<unknown> | undefined;
-    let refreshing: Promise<unknown> | undefined;
-    const edits: Promise<unknown>[] = [];
-    try {
-      connecting = handleLocalAgentsRoutes({
-        req: connectReq,
-        res: connectRes,
-        configStore,
-        path: '/api/local-agent-integrations/connect',
-        bridgeAuthToken: 'bridge-token',
-      } as any);
-      await entered;
-      let connectEditCommitted = false;
-      edits.push(configStore.update(current => {
-        const next = structuredClone(current) as DkgConfig;
-        next.name = 'committed during blocked probe';
-        updateLocalAgentIntegration(next, 'hermes', { capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during connect' } });
-        return next;
-      }, 'configuration-only')
-        .then(() => { connectEditCommitted = true; }));
-      await vi.waitFor(() => expect(connectEditCommitted).toBe(true));
-      expect(configStore.current.name).toBe('committed during blocked probe');
-      releaseProbe();
-      await connecting;
-
-      expect(configStore.current.name).toBe('committed during blocked probe');
-      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')).name).toBe('committed during blocked probe');
-      expect(connectRes.statusCode).toBe(200);
-      expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
-        capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during connect' },
-      });
-      expect(configStore.current.localAgentIntegrations?.hermes?.transport).not.toHaveProperty('healthUrl');
-      const connectBody = JSON.parse(connectRes.body);
-      expect(connectBody.integration).toEqual(getLocalAgentIntegration(configStore.current, 'hermes'));
-      expect(configStore.current.localAgentIntegrations?.hermes?.runtime)
-        .toMatchObject({ status: 'ready', ready: true });
-      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')))
-        .toEqual(configStore.current);
-
-      const refreshReq = makeJsonRequest('POST', '/api/local-agent-integrations/hermes/refresh', {});
-      const refreshRes = makeJsonResponse();
-      refreshing = handleLocalAgentsRoutes({
-        req: refreshReq,
-        res: refreshRes,
-        configStore,
-        path: '/api/local-agent-integrations/hermes/refresh',
-        bridgeAuthToken: 'bridge-token',
-      } as any, {
-        refreshFromUi: async () => {
-          refreshEntered();
-          await refreshBlocked;
-          const patch = { runtime: { status: 'ready' as const, ready: true, lastError: null } };
-          return { patch };
-        },
-      });
-      await refreshStarted;
-      let refreshEditCommitted = false;
-      edits.push(configStore.update(current => {
-        const next = structuredClone(current) as DkgConfig;
-        next.name = 'committed during blocked refresh';
-        updateLocalAgentIntegration(next, 'hermes', { runtime: { status: 'degraded', ready: false }, metadata: { operatorLabel: 'edited during refresh' } });
-        return next;
-      }, 'configuration-only')
-        .then(() => { refreshEditCommitted = true; }));
-      await vi.waitFor(() => expect(refreshEditCommitted).toBe(true));
-      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')).name).toBe('committed during blocked refresh');
-      releaseRefresh();
-      await refreshing;
-      expect(configStore.current.name).toBe('committed during blocked refresh');
-
-      expect(refreshRes.statusCode).toBe(200);
-      expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
-        runtime: { status: 'ready', ready: true },
-        capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during refresh' },
-      });
-      expect(JSON.parse(refreshRes.body).integration)
-        .toEqual(getLocalAgentIntegration(configStore.current, 'hermes'));
-      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')))
-        .toEqual(configStore.current);
-    } finally {
-      releaseProbe(); releaseRefresh();
-      await Promise.allSettled([connecting, refreshing, ...edits]);
-      rmSync(dkgHome, { recursive: true, force: true });
-    }
-  });
-
-  it('rebases deferred route attach patches and lets a newer disconnect win', async () => {
-    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
-    let finishAttach!: (patch: Record<string, unknown>) => Promise<void>;
-    const connectFromUi: typeof connectLocalAgentIntegrationFromUi = async (_config, body) => {
-      return {
-        ok: true,
-        registration: extractLocalAgentIntegrationPatch({ ...body, capabilities: { localChat: true } }),
-        initialPatch: { runtime: { status: 'connecting', ready: false, lastError: null } },
-        notice: 'attach scheduled',
-        afterCommit: (sink) => {
-          finishAttach = sink.persist;
-          return 'attach scheduled';
-        },
-      };
-    };
-    const connect = async () => {
-      const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
-        id: 'custom-agent',
-        metadata: { source: 'node-ui', operatorLabel: 'initial' },
-      });
-      const res = makeJsonResponse();
-      await handleLocalAgentsRoutes({ req, res, configStore, path: '/api/local-agent-integrations/connect' } as any, {
-        connectFromUi,
-      });
-      expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body).integration)
-        .toEqual(getLocalAgentIntegration(configStore.current, 'custom-agent'));
-    };
-
-    try {
-      await connect();
-      await configStore.update(current => {
-        const next = structuredClone(current) as DkgConfig;
-        updateLocalAgentIntegration(next, 'custom-agent', {
-          capabilities: { chatAttachments: true },
-          metadata: { operatorLabel: 'edited while attaching' },
-        });
-        return next;
-      }, 'configuration-only');
-      await finishAttach({
-        transport: { kind: 'custom-bridge', bridgeUrl: 'http://127.0.0.1:9444' },
-        metadata: { setupAudit: 'complete' },
-        runtime: { status: 'ready', ready: true, lastError: null },
-      });
-      expect(configStore.current.localAgentIntegrations?.['custom-agent']).toMatchObject({
-        capabilities: { localChat: true, chatAttachments: true },
-        metadata: { source: 'node-ui', operatorLabel: 'edited while attaching', setupAudit: 'complete' },
-        runtime: { status: 'ready', ready: true },
-      });
-
-      await connect();
-      const disconnectReq = makeJsonRequest('PUT', '/api/local-agent-integrations/custom-agent', {
-        enabled: false,
-        runtime: { status: 'disconnected' },
-      });
-      const disconnectRes = makeJsonResponse();
-      await handleLocalAgentsRoutes({
-        req: disconnectReq,
-        res: disconnectRes,
-        configStore,
-        path: '/api/local-agent-integrations/custom-agent',
-      } as any);
-      await finishAttach({ runtime: { status: 'ready', ready: true, lastError: null } });
-
-      expect(disconnectRes.statusCode).toBe(200);
-      expect(JSON.parse(disconnectRes.body).integration)
-        .toEqual(getLocalAgentIntegration(configStore.current, 'custom-agent'));
-      expect(configStore.current.localAgentIntegrations?.['custom-agent']).toMatchObject({
-        enabled: false,
-        metadata: { userDisabled: true },
-        runtime: { status: 'disconnected', ready: false },
-      });
-      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')))
-        .toEqual(configStore.current);
-    } finally {
-      rmSync(dkgHome, { recursive: true, force: true });
-    }
-  });
-
-  it('commits an explicit failed attach state before reporting the route error', async () => {
-    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
-    const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
-      id: 'hermes',
-      metadata: { source: 'node-ui' },
-    });
-    const res = makeJsonResponse();
-    try {
-      await handleLocalAgentsRoutes({
-        req,
-        res,
-        configStore,
-        path: '/api/local-agent-integrations/connect',
-      } as any, {
-        connectFromUi: (candidate, body, token) => connectLocalAgentIntegrationFromUi(candidate, body, token, {
-          probeHermesHealth: async () => { throw new Error('setup probe failed'); },
-        }),
-      });
-
-      expect(res.statusCode).toBe(400);
-      expect(JSON.parse(res.body)).toEqual({ error: 'setup probe failed' });
-      expect(configStore.current.localAgentIntegrations?.hermes?.runtime)
-        .toMatchObject({ status: 'error', ready: false, lastError: 'setup probe failed' });
-      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')))
-        .toEqual(configStore.current);
-    } finally {
-      rmSync(dkgHome, { recursive: true, force: true });
-    }
-  });
-
-  it.each(['connect', 'refresh', 'failed-connect'] as const)('keeps a newer explicit disconnect after blocked %s preparation', async operation => {
-    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig({
-      localAgentIntegrations: { hermes: { enabled: true, runtime: { status: 'ready', ready: true } } },
-    }));
-    const entered = deferred();
-    const released = deferred();
-    const patch = { runtime: { status: 'ready' as const, ready: true, lastError: null } };
-    const path = operation === 'refresh'
-      ? '/api/local-agent-integrations/hermes/refresh' : '/api/local-agent-integrations/connect';
-    const req = makeJsonRequest('POST', path, { id: 'hermes', metadata: { source: 'node-ui' } });
-    const res = makeJsonResponse();
-    const running = handleLocalAgentsRoutes({ req, res, configStore, path } as any, {
-      connectFromUi: async (_config, body) => {
-        entered.resolve();
-        await released.promise;
-        const registration = extractLocalAgentIntegrationPatch(body);
-        if (operation === 'failed-connect') return {
-          ok: false,
-          registration,
-          initialPatch: { runtime: { status: 'error', ready: false, lastError: 'probe failed' } },
-          error: 'probe failed',
-        };
-        return { ok: true, registration, initialPatch: patch };
-      },
-      refreshFromUi: async () => {
-        entered.resolve();
-        await released.promise;
-        return { patch };
-      },
-    });
-    try {
-      await entered.promise;
-      await configStore.update(current => {
-        const next = structuredClone(current) as DkgConfig;
-        updateLocalAgentIntegration(next, 'hermes', { enabled: false, runtime: { status: 'disconnected' } });
-        return next;
-      }, 'configuration-only');
-      released.resolve();
-      await running;
-      expect(res.statusCode).toBe(operation === 'failed-connect' ? 400 : 200);
-      expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
-        enabled: false, metadata: { userDisabled: true }, runtime: { status: 'disconnected', ready: false },
-      });
-      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8'))).toEqual(configStore.current);
-    } finally {
-      released.resolve();
-      await running;
-      await configStore.close();
-      rmSync(dkgHome, { recursive: true, force: true });
-    }
-  });
-
-  it('publishes the legacy register-adapter route through the canonical store', async () => {
-    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
-    const req = makeJsonRequest('POST', '/api/register-adapter', {
-      id: 'openclaw',
-      transport: { gatewayUrl: 'http://127.0.0.1:18789' },
-    });
-    const res = makeJsonResponse();
-    try {
-      await handleStatusRoutes({
-        req,
-        res,
-        configStore,
-        path: '/api/register-adapter',
-        url: new URL('http://localhost/api/register-adapter'),
-      } as any);
-      expect(res.statusCode).toBe(200);
-      expect(JSON.parse(res.body).integration)
-        .toEqual(getLocalAgentIntegration(configStore.current, 'openclaw'));
-      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')))
-        .toEqual(configStore.current);
-    } finally {
-      rmSync(dkgHome, { recursive: true, force: true });
-    }
-  });
-
-  it('rebases deferred integration state through the canonical config store', async () => {
-    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
-    const initial = makeConfig({
-      localAgentIntegrations: {
-        openclaw: {
-          enabled: true,
-          capabilities: { chatAttachments: true },
-          metadata: { operatorLabel: 'keep me' },
-          runtime: { status: 'connecting', ready: false },
-        },
-      },
-    });
-    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), initial);
-    const context = { configStore };
-
-    try {
-      await persistLocalAgentAttachPatch(context, '', { runtime: { status: 'ready' } });
-      await persistLocalAgentAttachPatch(context, 'hermes', { runtime: { status: 'ready' } });
-      expect(configStore.current.localAgentIntegrations).toEqual(initial.localAgentIntegrations);
-
-      await persistLocalAgentAttachPatch(context, ' OpenClaw ', {
-        runtime: { status: 'ready', ready: true, lastError: null },
-        metadata: { setupAudit: 'complete' },
-      });
-      expect(configStore.current.localAgentIntegrations?.openclaw?.runtime)
-        .toMatchObject({ status: 'ready', ready: true });
-      expect(configStore.current.localAgentIntegrations?.openclaw?.capabilities)
-        .toEqual({ chatAttachments: true });
-      expect(configStore.current.localAgentIntegrations?.openclaw?.metadata)
-        .toMatchObject({ operatorLabel: 'keep me', setupAudit: 'complete' });
-
-      await configStore.update(current => ({
-        ...current,
-        localAgentIntegrations: {
-          ...current.localAgentIntegrations,
-          openclaw: {
-            ...current.localAgentIntegrations?.openclaw,
-            enabled: false,
-            runtime: { status: 'disconnected', ready: false, lastError: null },
-          },
-        },
-      }), 'configuration-only');
-      await persistLocalAgentAttachPatch(context, 'openclaw', {
-        enabled: true,
-        runtime: { status: 'ready', ready: true, lastError: null },
-      });
-      expect(configStore.current.localAgentIntegrations?.openclaw)
-        .toMatchObject({ enabled: false, runtime: { status: 'disconnected' } });
-      expect(initial.localAgentIntegrations?.openclaw?.runtime)
-        .toEqual({ status: 'connecting', ready: false });
-    } finally {
-      rmSync(dkgHome, { recursive: true, force: true });
-    }
-  });
-
   it('short-circuits to ready when UI connect reaches bridge health and transport is already stored', async () => {
     // Re-running Connect on an already-attached Hermes integration: the stored
     // transport from the prior install lets us trust the bridge probe directly
@@ -1293,7 +906,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     );
 
     expect(plan.ok).toBe(true);
-    const { integration } = commitConnectPlanForTest(config, 'hermes', plan);
+    const { integration } = commitLocalAgentConnectPlanForTest(config, 'hermes', plan);
     expect(integration.id).toBe('hermes');
     expect(integration.runtime.status).toBe('ready');
     expect(integration.runtime.ready).toBe(true);
@@ -1326,7 +939,7 @@ describe('Hermes local-agent registry lifecycle', () => {
 
     expect(config).toEqual(before);
     expect(plan.ok).toBe(true);
-    const { integration } = commitConnectPlanForTest(config, 'hermes', plan);
+    const { integration } = commitLocalAgentConnectPlanForTest(config, 'hermes', plan);
     expect(resolveHermesProfileMock).not.toHaveBeenCalled();
     expect(integration.metadata).toMatchObject({
       source: 'node-ui',
@@ -1364,7 +977,7 @@ describe('Hermes local-agent registry lifecycle', () => {
 
     expect(plan.ok).toBe(true);
     expect(runHermesSetupStub).not.toHaveBeenCalled();
-    const result = commitConnectPlanForTest(config, 'hermes', plan);
+    const result = commitLocalAgentConnectPlanForTest(config, 'hermes', plan);
     expect(result.integration.runtime.status).toBe('connecting');
     expect(result.integration.runtime.ready).toBe(false);
     expect(result.notice).toContain('Hermes setup started');
@@ -1700,7 +1313,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     );
 
     expect(runHermesSetupStub).not.toHaveBeenCalled();
-    commitConnectPlanForTest(config, 'hermes', plan);
+    commitLocalAgentConnectPlanForTest(config, 'hermes', plan);
     // Wait one microtask so the post-commit attach job can dispatch.
     await new Promise((r) => setImmediate(r));
 
@@ -1734,7 +1347,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     expect(plan.ok).toBe(true);
     expect(runHermesSetupStub).not.toHaveBeenCalled();
     // The initial commit exposes connecting before post-commit setup settles.
-    const result = commitConnectPlanForTest(config, 'hermes', plan);
+    const result = commitLocalAgentConnectPlanForTest(config, 'hermes', plan);
     expect(result.integration.runtime.status).toBe('connecting');
     await new Promise((r) => setImmediate(r));
 
@@ -1776,7 +1389,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     );
 
     expect(runHermesSetupStub).not.toHaveBeenCalled();
-    commitConnectPlanForTest(config, 'hermes', plan);
+    commitLocalAgentConnectPlanForTest(config, 'hermes', plan);
     const signal = await observed.promise;
     expect(signal.aborted).toBe(false);
 
@@ -1813,7 +1426,7 @@ describe('Hermes local-agent registry lifecycle', () => {
     );
 
     expect(plan.ok).toBe(true);
-    const result = commitConnectPlanForTest(config, 'hermes', plan);
+    const result = commitLocalAgentConnectPlanForTest(config, 'hermes', plan);
     expect(result.notice).toBe(
       'Hermes setup started. This chat tab will come online automatically once Hermes finishes setting up.',
     );
@@ -1847,14 +1460,14 @@ describe('Hermes local-agent registry lifecycle', () => {
       deps,
     );
     expect(runHermesSetupStub).not.toHaveBeenCalled();
-    const first = commitConnectPlanForTest(config, 'hermes', firstPlan);
+    const first = commitLocalAgentConnectPlanForTest(config, 'hermes', firstPlan);
     const secondPlan = await connectLocalAgentIntegrationFromUi(
       config,
       { id: 'hermes', metadata: { source: 'node-ui' } },
       'bridge-token',
       deps,
     );
-    const second = commitConnectPlanForTest(config, 'hermes', secondPlan);
+    const second = commitLocalAgentConnectPlanForTest(config, 'hermes', secondPlan);
 
     // First scheduling created the job (notice mentions "started"); second
     // observed the in-flight job and got the "already in progress" notice.
