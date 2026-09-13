@@ -2479,7 +2479,47 @@ describe('discoverContextGraphsFromChain', () => {
     expect(acknowledged).toBe(1);
     expect(entries.some((entry) =>
       entry.level === 'info'
-      && entry.message.includes('pages=1/30 range=[100,199] target=199 complete=true'),
+      && entry.message.includes('outcome=succeeded pages=1/1/30 range=[100,199] target=199 complete=true'),
+    )).toBe(true);
+  }, 15000);
+
+  it('reports identifier-free bounded repair progress when page acknowledgement fails', async () => {
+    const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    (chain as any).scanContextGraphRegistryPages = async function* () {
+      yield {
+        contextGraphs: [],
+        scanProgress: {
+          mode: 'repair',
+          page: 1,
+          pageBudget: 30,
+          fromBlock: 200,
+          toBlock: 299,
+          targetBlock: 999,
+          completesGeneration: false,
+        },
+        ack: async () => { throw new Error('checkpoint store unavailable'); },
+      };
+    };
+    const entries: Array<{ level: string; message: string }> = [];
+    Logger.setSink((entry) => entries.push({ level: entry.level, message: entry.message }));
+    try {
+      const result = await createTestAgent({ chainAdapter: chain });
+      agent = result.agent;
+      await agent.start();
+
+      await expect(agent.repairContextGraphRegistry({
+        pageBudget: 30,
+        minimumIntervalMs: 0,
+      })).rejects.toThrow('checkpoint store unavailable');
+    } finally {
+      Logger.setSink(null);
+    }
+
+    expect(entries.some((entry) =>
+      entry.level === 'info'
+      && entry.message.includes(
+        'outcome=failed pages=0/1/30 range=[200,299] target=999 complete=false',
+      ),
     )).toBe(true);
   }, 15000);
 
@@ -2772,6 +2812,67 @@ describe('discoverContextGraphsFromChain', () => {
     expect(acked).toBe(1);
   }, 15000);
 
+  it.each(['subscription', 'binding'] as const)(
+    'rejects stale discovery persistence after a concurrent %s generation change',
+    async (mutation) => {
+      const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const revealed: ContextGraphOnChain = {
+        contextGraphId: mutation === 'subscription' ? '829' : '830',
+        name: `stale-${mutation}-discovery`,
+        creator: '0x1234',
+        accessPolicy: 0,
+        blockNumber: 100,
+        metadataRevealed: true,
+      };
+      let acked = 0;
+      (chain as any).scanContextGraphRegistryPages = async function* () {
+        yield { contextGraphs: [revealed], ack: async () => { acked += 1; } };
+      };
+      const saved: ContextGraphSubscriptionRecord[] = [];
+      const subscriptionStore: ContextGraphSubscriptionStore = {
+        loadAll: async () => [],
+        save: async (record) => {
+          if (record.id === revealed.name) saved.push(record);
+        },
+        delete: async () => {},
+      };
+      const result = await createTestAgent({
+        chainAdapter: chain,
+        contextGraphSubscriptionStore: subscriptionStore,
+        nodeRole: 'core',
+      });
+      agent = result.agent;
+      await agent.start();
+
+      let releaseQueue: (() => void) | undefined;
+      const queueGate = new Promise<void>((resolve) => { releaseQueue = resolve; });
+      const blocker = (agent as any).enqueueContextGraphSubscriptionPersistWrite(
+        revealed.name,
+        async () => queueGate,
+      ) as Promise<void>;
+      const discovery = agent.discoverContextGraphsFromChain({ mode: 'incremental' });
+      while (!agent.getSubscribedContextGraphs().has(revealed.name)) await Promise.resolve();
+
+      if (mutation === 'subscription') {
+        const current = agent.getSubscribedContextGraphs().get(revealed.name)!;
+        (agent as any).setContextGraphSubscription(revealed.name, {
+          ...current,
+          subscribed: false,
+          coreHosted: false,
+        }, { persist: false });
+      } else {
+        (agent as any).contextGraphBindingState.bump(revealed.name);
+      }
+      releaseQueue?.();
+      await blocker;
+
+      await expect(discovery).rejects.toThrow('changed before its strict subscription snapshot');
+      expect(saved).toEqual([]);
+      expect(acked).toBe(0);
+    },
+    15000,
+  );
+
   it('acknowledges on-demand rows while durably flushing only host state', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const memberName = 'on-demand-member-boundary';
@@ -2856,15 +2957,27 @@ describe('discoverContextGraphsFromChain', () => {
       metadataRevealed: true,
     };
     let acked = 0;
+    const events: string[] = [];
     (chain as any).scanContextGraphRegistryPages = async function* () {
-      yield { contextGraphs: [revealed], ack: async () => { acked += 1; } };
+      yield {
+        contextGraphs: [revealed],
+        ack: async () => {
+          acked += 1;
+          events.push('page-acked');
+        },
+      };
     };
     let failing = true;
+    const saved: ContextGraphSubscriptionRecord[] = [];
     const subscriptionStore: ContextGraphSubscriptionStore = {
       loadAll: async () => [],
       save: async (record) => {
         if (record.id === revealed.name && failing) {
           throw new Error('subscription store unavailable');
+        }
+        if (record.id === revealed.name) {
+          saved.push(record);
+          events.push('subscription-saved');
         }
       },
       delete: async () => {},
@@ -2886,6 +2999,14 @@ describe('discoverContextGraphsFromChain', () => {
     await expect(agent.discoverContextGraphsFromChain({ mode: 'incremental' }))
       .resolves.toBe(0);
     expect(acked).toBe(1);
+    expect(saved).toEqual([
+      expect.objectContaining({
+        id: revealed.name,
+        subscribed: true,
+        onChainId: revealed.contextGraphId,
+      }),
+    ]);
+    expect(events).toEqual(['subscription-saved', 'page-acked']);
   }, 15000);
 
   it('warns once for repeated chain scan failures and logs recovery', async () => {
@@ -3035,6 +3156,12 @@ describe('discoverContextGraphsFromChain', () => {
         pageBudget: 1,
         minimumIntervalMs: 0,
       })).rejects.toThrow('repair unavailable');
+      expect(entries.some((entry) =>
+        entry.level === 'info'
+        && entry.message.includes(
+          'outcome=failed pages=0/0/1 range=[none,none] target=none complete=false',
+        ),
+      )).toBe(true);
 
       liveFails = false;
       await expect(agent.discoverContextGraphsFromChain({

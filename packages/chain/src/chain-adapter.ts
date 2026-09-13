@@ -604,7 +604,7 @@ export type ContextGraphChainScanOptions =
   | ContextGraphLegacyIncrementalScanOptions;
 
 /** Cursor-backed daemon ContextGraphNameRegistry scan modes. */
-export type ContextGraphRegistryScanOptions =
+export type ContextGraphRegistryScanOptions = (
   | {
       mode: 'incremental';
       pageBudget?: number;
@@ -636,7 +636,8 @@ export type ContextGraphRegistryScanOptions =
       mode: 'repair';
       pageBudget: number;
       minimumIntervalMs?: number;
-    };
+    }
+) & ChainReadOptions;
 
 export interface ContextGraphRegistryScanPage {
   contextGraphs: ContextGraphOnChain[];

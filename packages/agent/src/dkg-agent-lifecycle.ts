@@ -9448,11 +9448,39 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
   }
 
-  async persistContextGraphSubscriptionStrict(this: DKGAgent,
+  async persistContextGraphSubscriptionStrict(
+    this: DKGAgent,
     contextGraphId: string,
     subscription?: ContextGraphSub,
     syncScoped?: boolean,
     isCurrent: () => boolean = () => true,
+  ): Promise<void> {
+    await this.persistContextGraphSubscriptionProjectionStrict({
+      contextGraphId,
+      subscription,
+      syncScoped,
+      isCurrent,
+      requireDurableMemberIntent: true,
+      operation: 'join approval',
+    });
+  }
+
+  /**
+   * One strict subscription persistence protocol shared by joins and registry
+   * discovery. It owns snapshot capture, generation validation, per-graph
+   * serialization, and the store-first write. Callers select only whether an
+   * intentionally process-local on-demand member projection is acceptable.
+   */
+  async persistContextGraphSubscriptionProjectionStrict(
+    this: DKGAgent,
+    input: {
+      contextGraphId: string;
+      subscription?: ContextGraphSub;
+      syncScoped?: boolean;
+      isCurrent?: () => boolean;
+      requireDurableMemberIntent: boolean;
+      operation: 'join approval' | 'chain discovery';
+    },
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) {
@@ -9461,41 +9489,46 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // retains the backward-compatible in-memory approval path.
       return;
     }
-    const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
-    const expectedBindingGeneration = this.contextGraphBindingState.capture(contextGraphId);
-    const sub = subscription ?? expectedLiveSub;
+    const expectedLiveSub = this.subscribedContextGraphs.get(input.contextGraphId);
+    const expectedBindingGeneration = this.contextGraphBindingState.capture(input.contextGraphId);
+    const sub = input.subscription ?? expectedLiveSub;
     if (!sub?.subscribed && !sub?.coreHosted) {
       throw new Error(
-        `Cannot persist context graph "${contextGraphId}": active subscription or host state is missing`,
+        `Cannot persist context graph "${input.contextGraphId}": active subscription or host state is missing`,
       );
     }
     const persistence = projectContextGraphSubscriptionPersistence({
-      contextGraphId,
+      contextGraphId: input.contextGraphId,
       subscription: sub,
-      syncScoped: syncScoped ?? (this.config.syncContextGraphs ?? []).includes(contextGraphId),
+      syncScoped: input.syncScoped
+        ?? (this.config.syncContextGraphs ?? []).includes(input.contextGraphId),
     });
-    if (persistence.action !== 'save' || !persistence.persistMemberIntent) {
+    if (persistence.action === 'skip' && !input.requireDurableMemberIntent) return;
+    if (
+      persistence.action !== 'save'
+      || (input.requireDurableMemberIntent && !persistence.persistMemberIntent)
+    ) {
       throw new Error(
-        `Cannot acknowledge join approval for "${contextGraphId}": durable subscription intent is missing`,
+        `Cannot acknowledge ${input.operation} for "${input.contextGraphId}": `
+        + 'durable subscription intent or host state is missing',
       );
     }
     const record = persistence.record;
     // Queue behind any fire-and-forget writes scheduled by subscribe/mark so
     // this final authoritative snapshot is the last write before the ACK.
-    await this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
-      const current = this.subscribedContextGraphs.get(contextGraphId);
+    await this.enqueueContextGraphSubscriptionPersistWrite(input.contextGraphId, async () => {
+      const current = this.subscribedContextGraphs.get(input.contextGraphId);
       if (
-        !isCurrent()
-        ||
-        current !== expectedLiveSub
+        !(input.isCurrent?.() ?? true)
+        || current !== expectedLiveSub
         || (!current?.subscribed && !current?.coreHosted)
         || !this.contextGraphBindingState.isGenerationCurrent(
-          contextGraphId,
+          input.contextGraphId,
           expectedBindingGeneration,
         )
       ) {
         throw asSyncFetchAbortError(new Error(
-          `Context graph "${contextGraphId}" changed before its strict subscription snapshot was persisted`,
+          `Context graph "${input.contextGraphId}" changed before its strict subscription snapshot was persisted`,
         ));
       }
       await store.save(record);
@@ -9508,41 +9541,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * member intent stays process-local, while an independent Core hosting row
    * is still flushed before the registry page can be acknowledged.
    */
-  async persistDiscoveredContextGraphSubscriptionStrict(this: DKGAgent,
+  async persistDiscoveredContextGraphSubscriptionStrict(
+    this: DKGAgent,
     contextGraphId: string,
     subscription: ContextGraphSub,
   ): Promise<void> {
-    const store = this.config.contextGraphSubscriptionStore;
-    if (!store) return;
-    const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
-    const expectedBindingGeneration = this.contextGraphBindingState.capture(contextGraphId);
-    const persistence = projectContextGraphSubscriptionPersistence({
+    await this.persistContextGraphSubscriptionProjectionStrict({
       contextGraphId,
       subscription,
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
-    });
-    if (persistence.action === 'skip') return;
-    if (persistence.action !== 'save') {
-      throw new Error(
-        `Cannot persist discovered context graph "${contextGraphId}": active subscription or host state is missing`,
-      );
-    }
-    const record = persistence.record;
-    await this.enqueueContextGraphSubscriptionPersistWrite(contextGraphId, async () => {
-      const current = this.subscribedContextGraphs.get(contextGraphId);
-      if (
-        current !== expectedLiveSub
-        || (!current?.subscribed && !current?.coreHosted)
-        || !this.contextGraphBindingState.isGenerationCurrent(
-          contextGraphId,
-          expectedBindingGeneration,
-        )
-      ) {
-        throw asSyncFetchAbortError(new Error(
-          `Context graph "${contextGraphId}" changed before its discovery snapshot was persisted`,
-        ));
-      }
-      await store.save(record);
+      requireDurableMemberIntent: false,
+      operation: 'chain discovery',
     });
   }
 

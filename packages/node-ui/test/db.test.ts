@@ -2295,6 +2295,11 @@ describe('DashboardDB — chain RPC cursor stores', () => {
 
     await store.save(key, 5000);
     expect(await store.load(key)).toBe(5000);
+    // The scanner owns the monotonic policy. The physical store must support
+    // an authoritative lower replacement after a bounded chain rollback.
+    await store.save(key, 2101);
+    expect(await store.load(key)).toBe(2101);
+    await store.save(key, 5000);
     const repair = {
       version: 1,
       nextBlock: 1000,

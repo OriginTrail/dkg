@@ -575,6 +575,7 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
 }
 
 export type DiscoverContextGraphsFromChainOptions = {
+  signal?: AbortSignal;
   throwOnChainScanFailure?: boolean;
   pageBudget?: number;
   mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor' | 'seedLiveTail' | 'repair';
@@ -591,6 +592,17 @@ type NormalizedContextGraphDiscoveryScan =
   | { mode: 'seedFromCursor'; pageBudget?: number }
   | { mode: 'seedLiveTail'; pageBudget?: number }
   | { mode: 'repair'; pageBudget: number; minimumIntervalMs?: number };
+
+type ContextGraphRegistryRepairProgress = {
+  readonly pageBudget: number;
+  readonly startedAt: number;
+  observedPages: number;
+  acknowledgedPages: number;
+  fromBlock?: number;
+  toBlock?: number;
+  targetBlock?: number;
+  completed: boolean;
+};
 
 function normalizeContextGraphDiscoveryScan(
   options: DiscoverContextGraphsFromChainOptions,
@@ -2102,13 +2114,39 @@ export class DKGAgent extends DKGAgentBase {
 
   async repairContextGraphRegistry(options: {
     pageBudget: number;
-    minimumIntervalMs: number;
+    minimumIntervalMs?: number;
+    signal?: AbortSignal;
   }): Promise<number> {
-    return this.discoverContextGraphsFromChain({
-      mode: 'repair',
-      throwOnChainScanFailure: true,
-      ...options,
-    });
+    const progress: ContextGraphRegistryRepairProgress = {
+      pageBudget: options.pageBudget,
+      startedAt: Date.now(),
+      observedPages: 0,
+      acknowledgedPages: 0,
+      completed: false,
+    };
+    let outcome: 'succeeded' | 'failed' = 'failed';
+    try {
+      const discovered = await this.discoverContextGraphsFromChainInternal({
+        mode: 'repair',
+        throwOnChainScanFailure: true,
+        ...options,
+      }, progress);
+      outcome = 'succeeded';
+      return discovered;
+    } finally {
+      if (progress.observedPages > 0 || outcome === 'failed') {
+        const fromBlock = progress.fromBlock ?? 'none';
+        const toBlock = progress.toBlock ?? 'none';
+        const targetBlock = progress.targetBlock ?? 'none';
+        this.log.info(
+          createOperationContext('system'),
+          `Chain context graph repair audit: outcome=${outcome} `
+            + `pages=${progress.acknowledgedPages}/${progress.observedPages}/${progress.pageBudget} `
+            + `range=[${fromBlock},${toBlock}] target=${targetBlock} `
+            + `complete=${progress.completed} durationMs=${Date.now() - progress.startedAt}`,
+        );
+      }
+    }
   }
 
   /**
@@ -2124,9 +2162,27 @@ export class DKGAgent extends DKGAgentBase {
   async discoverContextGraphsFromChain(
     options: DiscoverContextGraphsFromChainOptions = {},
   ): Promise<number> {
+    if (options.mode === 'repair') {
+      return this.repairContextGraphRegistry({
+        pageBudget: options.pageBudget ?? 1,
+        ...(options.minimumIntervalMs !== undefined
+          ? { minimumIntervalMs: options.minimumIntervalMs }
+          : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    }
+    return this.discoverContextGraphsFromChainInternal(options);
+  }
+
+  /** Shared page application primitive; repair owns its orchestration above. */
+  private async discoverContextGraphsFromChainInternal(
+    options: DiscoverContextGraphsFromChainOptions,
+    repairProgress?: ContextGraphRegistryRepairProgress,
+  ): Promise<number> {
+    options.signal?.throwIfAborted();
     const ctx = createOperationContext('system');
     const scanMode = normalizeContextGraphDiscoveryScan(options);
-    const scanFailureLane = scanMode.mode === 'repair' ? 'repair' : 'live';
+    const scanFailureLane = repairProgress ? 'repair' : 'live';
     const scanFailureLabel = scanFailureLane === 'repair'
       ? 'Chain context graph repair scan'
       : 'Chain context graph scan';
@@ -2148,12 +2204,6 @@ export class DKGAgent extends DKGAgentBase {
     let onChainContextGraphs: ContextGraphOnChain[] = [];
     let partialChainScan = false;
     let partialChainScanError: unknown;
-    const scanStartedAt = Date.now();
-    let repairPages = 0;
-    let repairFromBlock: number | undefined;
-    let repairToBlock: number | undefined;
-    let repairTargetBlock: number | undefined;
-    let repairCompleted = false;
     const handleChainScanFailure = (err: unknown): ContextGraphOnChain[] | undefined => {
       const message = err instanceof Error ? err.message : String(err);
       const signature = message
@@ -2301,9 +2351,13 @@ export class DKGAgent extends DKGAgentBase {
       }
       await applyDiscoveredContextGraphs(onChainContextGraphs);
     } else {
-      const iterator = this.chain.scanContextGraphRegistryPages!(scanMode)[Symbol.asyncIterator]();
+      const iterator = this.chain.scanContextGraphRegistryPages!({
+        ...scanMode,
+        ...(options.signal ? { signal: options.signal } : {}),
+      })[Symbol.asyncIterator]();
       try {
         while (true) {
+          options.signal?.throwIfAborted();
           let next: Awaited<ReturnType<typeof iterator.next>>;
           try {
             next = await iterator.next();
@@ -2313,15 +2367,22 @@ export class DKGAgent extends DKGAgentBase {
             break;
           }
           if (next.done) break;
-          if (scanMode.mode === 'repair' && next.value.scanProgress) {
-            repairPages += 1;
-            repairFromBlock ??= next.value.scanProgress.fromBlock;
-            repairToBlock = next.value.scanProgress.toBlock;
-            repairTargetBlock = next.value.scanProgress.targetBlock;
-            repairCompleted ||= next.value.scanProgress.completesGeneration;
+          options.signal?.throwIfAborted();
+          if (repairProgress && next.value.scanProgress) {
+            repairProgress.observedPages += 1;
+            repairProgress.fromBlock ??= next.value.scanProgress.fromBlock;
+            repairProgress.toBlock = next.value.scanProgress.toBlock;
+            repairProgress.targetBlock = next.value.scanProgress.targetBlock;
           }
           await applyDiscoveredContextGraphs(next.value.contextGraphs);
+          // Cancellation after local work deliberately leaves the page
+          // unacknowledged so the next process replays the durable boundary.
+          options.signal?.throwIfAborted();
           await next.value.ack();
+          if (repairProgress) {
+            repairProgress.acknowledgedPages += 1;
+            repairProgress.completed ||= next.value.scanProgress?.completesGeneration ?? false;
+          }
         }
       } finally {
         await iterator.return?.();
@@ -2340,14 +2401,6 @@ export class DKGAgent extends DKGAgentBase {
       this.log.info(ctx, `Discovered ${discovered} new context graph(s) from chain`);
     }
     if (options.throwOnChainScanFailure && partialChainScanError) throw partialChainScanError;
-    if (scanMode.mode === 'repair' && repairPages > 0) {
-      this.log.info(
-        ctx,
-        `Chain context graph repair audit: pages=${repairPages}/${scanMode.pageBudget} `
-          + `range=[${repairFromBlock},${repairToBlock}] target=${repairTargetBlock} `
-          + `complete=${repairCompleted} durationMs=${Date.now() - scanStartedAt}`,
-      );
-    }
     return discovered;
   }
 

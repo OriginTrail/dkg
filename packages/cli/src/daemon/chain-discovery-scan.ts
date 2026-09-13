@@ -28,6 +28,42 @@ export type ScanOptions =
   | { mode: 'incremental'; throwOnChainScanFailure: true; pageBudget: number }
   | { mode: 'seedLiveTail'; throwOnChainScanFailure: true; pageBudget: number };
 
+type CancellableScanOptions = ScanOptions & { signal: AbortSignal };
+
+export interface ChainDiscoveryScanRunner {
+  (): Promise<void>;
+  /** Abort and drain the current live/repair scan before agent/store teardown. */
+  close(): Promise<void>;
+}
+
+export interface ChainDiscoveryScanSchedule {
+  /** Clear both startup/interval timers, then abort and drain the runner. */
+  close(): Promise<void>;
+}
+
+export function scheduleChainDiscoveryScanRunner(input: {
+  runner: ChainDiscoveryScanRunner;
+  initialDelayMs?: number;
+  intervalMs?: number;
+}): ChainDiscoveryScanSchedule {
+  let closed = false;
+  const invoke = (): void => { void input.runner(); };
+  const initial = setTimeout(invoke, input.initialDelayMs ?? 15_000);
+  const recurring = setInterval(invoke, input.intervalMs ?? CHAIN_DISCOVERY_SCAN_INTERVAL_MS);
+  initial.unref?.();
+  recurring.unref?.();
+  return {
+    close: async (): Promise<void> => {
+      if (!closed) {
+        closed = true;
+        clearTimeout(initial);
+        clearInterval(recurring);
+      }
+      await input.runner.close();
+    },
+  };
+}
+
 export function chainDiscoveryScanOptions(input: {
   watermarkSeeded: boolean;
   pageBudget?: number;
@@ -158,10 +194,11 @@ const describeError = (error: unknown): string => {
 export function createChainDiscoveryScanRunner(input: {
   agent: {
     hasContextGraphRegistryScanWatermark(): Promise<boolean>;
-    discoverContextGraphsFromChain(options: ScanOptions): Promise<number>;
+    discoverContextGraphsFromChain(options: CancellableScanOptions): Promise<number>;
     repairContextGraphRegistry?(options: {
       pageBudget: number;
       minimumIntervalMs: number;
+      signal: AbortSignal;
     }): Promise<number>;
   };
   log: (msg: string) => void;
@@ -169,9 +206,11 @@ export function createChainDiscoveryScanRunner(input: {
   repairEveryTicks?: number;
   /** @deprecated Use repairEveryTicks. */
   fullScanEvery?: number;
-}): () => Promise<void> {
+}): ChainDiscoveryScanRunner {
   let state = INITIAL_SCAN_SCHEDULER_STATE;
-  let inFlight = false;
+  let inFlight: Promise<void> | undefined;
+  let closed = false;
+  const lifecycleAbort = new AbortController();
 
   const safeLog = (msg: string): void => {
     try {
@@ -200,68 +239,94 @@ export function createChainDiscoveryScanRunner(input: {
     }
   };
 
-  return async () => {
-    if (inFlight) return;
-    inFlight = true;
-    try {
-      const step = planScan(state, { pageBudget: input.pageBudget });
-      let plan: ScanPlan;
-      if (step.kind === 'ready') {
-        plan = step.plan;
-      } else {
-        let watermarkSeeded: boolean;
-        try {
-          watermarkSeeded = await input.agent.hasContextGraphRegistryScanWatermark();
-        } catch (error) {
-          state = step.agedState;
-          safeLog(
-            `Chain scan run ${state.run} skipped (watermark probe failed; retrying next tick): `
-            + describeError(error),
-          );
-          return;
-        }
-        plan = step.complete(watermarkSeeded);
-      }
-
-      let outcome: ScanOutcome;
+  const execute = async (): Promise<void> => {
+    const step = planScan(state, { pageBudget: input.pageBudget });
+    let plan: ScanPlan;
+    if (step.kind === 'ready') {
+      plan = step.plan;
+    } else {
+      let watermarkSeeded: boolean;
       try {
-        outcome = { ok: true, found: await input.agent.discoverContextGraphsFromChain(plan.scan) };
+        watermarkSeeded = await withRpcRequestContext(
+          { requestClass: 'foreground', signal: lifecycleAbort.signal },
+          () => input.agent.hasContextGraphRegistryScanWatermark(),
+        );
       } catch (error) {
-        outcome = { ok: false, error };
+        state = step.agedState;
+        safeLog(
+          `Chain scan run ${state.run} skipped (watermark probe failed; retrying next tick): `
+          + describeError(error),
+        );
+        return;
       }
-      const committed = commitScanOutcome(plan, outcome);
-      state = committed.state;
-      try {
-        const line = reportLine(committed.report);
-        if (line !== undefined) safeLog(line);
-      } catch {
-        /* reporting must never affect scheduling */
-      }
+      plan = step.complete(watermarkSeeded);
+    }
 
-      // Do not add repair traffic while live catch-up is unhealthy. On success,
-      // live has already committed before this independently bounded lane starts.
-      if (outcome.ok && input.agent.repairContextGraphRegistry) {
-        const configuredRepairEvery = input.repairEveryTicks ?? input.fullScanEvery;
-        const repairEvery = typeof configuredRepairEvery === 'number'
-          && Number.isFinite(configuredRepairEvery)
-          && configuredRepairEvery >= 1
-          ? Math.floor(configuredRepairEvery)
-          : CHAIN_REPAIR_AUDIT_EVERY_TICKS;
-        try {
-          const found = await withRpcRequestContext(
-            { requestClass: 'background' },
-            () => input.agent.repairContextGraphRegistry!({
-              pageBudget: input.pageBudget ?? CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
-              minimumIntervalMs: repairEvery * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
-            }),
-          );
-          if (found > 0) safeLog(`Chain repair audit: discovered ${found} new context graph(s)`);
-        } catch (error) {
-          safeLog(`Chain repair audit failed; retrying next tick: ${describeError(error)}`);
-        }
+    let outcome: ScanOutcome;
+    try {
+      outcome = {
+        ok: true,
+        found: await withRpcRequestContext(
+          { requestClass: 'foreground', signal: lifecycleAbort.signal },
+          () => input.agent.discoverContextGraphsFromChain({
+            ...plan.scan,
+            signal: lifecycleAbort.signal,
+          }),
+        ),
+      };
+    } catch (error) {
+      outcome = { ok: false, error };
+    }
+    const committed = commitScanOutcome(plan, outcome);
+    state = committed.state;
+    try {
+      const line = reportLine(committed.report);
+      if (line !== undefined) safeLog(line);
+    } catch {
+      /* reporting must never affect scheduling */
+    }
+
+    // Do not add repair traffic while live catch-up is unhealthy. On success,
+    // live has already committed before this independently bounded lane starts.
+    if (outcome.ok && input.agent.repairContextGraphRegistry) {
+      const configuredRepairEvery = input.repairEveryTicks ?? input.fullScanEvery;
+      const repairEvery = typeof configuredRepairEvery === 'number'
+        && Number.isFinite(configuredRepairEvery)
+        && configuredRepairEvery >= 1
+        ? Math.floor(configuredRepairEvery)
+        : CHAIN_REPAIR_AUDIT_EVERY_TICKS;
+      try {
+        const found = await withRpcRequestContext(
+          { requestClass: 'background', signal: lifecycleAbort.signal },
+          () => input.agent.repairContextGraphRegistry!({
+            pageBudget: input.pageBudget ?? CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+            minimumIntervalMs: repairEvery * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
+            signal: lifecycleAbort.signal,
+          }),
+        );
+        if (found > 0) safeLog(`Chain repair audit: discovered ${found} new context graph(s)`);
+      } catch (error) {
+        safeLog(`Chain repair audit failed; retrying next tick: ${describeError(error)}`);
       }
-    } finally {
-      inFlight = false;
     }
   };
+
+  const runner = (async (): Promise<void> => {
+    if (closed || inFlight) return;
+    const current = execute();
+    inFlight = current;
+    try {
+      await current;
+    } finally {
+      if (inFlight === current) inFlight = undefined;
+    }
+  }) as ChainDiscoveryScanRunner;
+  runner.close = async (): Promise<void> => {
+    if (!closed) {
+      closed = true;
+      lifecycleAbort.abort(new Error('ContextGraphNameRegistry scan runner is closing'));
+    }
+    await inFlight;
+  };
+  return runner;
 }

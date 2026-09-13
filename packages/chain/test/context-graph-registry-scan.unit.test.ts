@@ -669,6 +669,129 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.values.get((store as any).key(key))).toBe(2_101);
   });
 
+  it('replaces a live watermark beyond the bounded rollback window and resumes after restart', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const key = {
+      chainId: 'evm:31337',
+      deploymentId: 'evm:31337:hub=0x0000000000000000000000000000000000000001',
+      registryAddress: REGISTRY,
+    };
+    await store.save(key, 9_000);
+    const registry = makeRegistry();
+    const { adapter, provider } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    provider.getCode = seam(async () => {
+      throw new Error('rollback recovery must not probe deployment history');
+    });
+    registry.queryFilter.setImpl(async () => []);
+
+    await collectRegistryScan(adapter, { mode: 'incremental', pageBudget: 1 });
+
+    expect(provider.getCode.calls).toEqual([]);
+    expect(registry.queryFilter.calls.map(
+      ([, lo, hi]: [unknown, number, number]) => [lo, hi],
+    )).toEqual([[2_051, 2_100]]);
+    expect(store.values.get((store as any).key(key))).toBe(2_101);
+
+    const restartedRegistry = makeRegistry();
+    const { adapter: restarted } = makeAdapter(restartedRegistry, 2_200, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    restartedRegistry.queryFilter.setImpl(async () => []);
+    await collectRegistryScan(restarted, { mode: 'incremental', pageBudget: 1 });
+    expect(restartedRegistry.queryFilter.calls.map(
+      ([, lo, hi]: [unknown, number, number]) => [lo, hi],
+    )).toEqual([[2_051, 2_200]]);
+    expect(store.values.get((store as any).key(key))).toBe(2_201);
+  });
+
+  it('owns live scans exclusively and rejects skipped, duplicate, concurrent, and late acknowledgements', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    let releaseSave: (() => void) | undefined;
+    const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
+    const durableSave = store.save.bind(store);
+    let blockSave = true;
+    store.save = async (key, nextBlock) => {
+      if (blockSave) await saveGate;
+      await durableSave(key, nextBlock);
+    };
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    registry.queryFilter.setImpl(async () => []);
+
+    const owner = adapter.scanContextGraphRegistryPages({
+      mode: 'seedFromCursor',
+      pageBudget: 2,
+    })[Symbol.asyncIterator]();
+    const first = await owner.next();
+    expect(first.done).toBe(false);
+    const overlap = adapter.scanContextGraphRegistryPages({
+      mode: 'incremental',
+      pageBudget: 1,
+    })[Symbol.asyncIterator]();
+    await expect(overlap.next()).rejects.toThrow('already has an active cursor owner');
+
+    const saving = first.value.ack();
+    await Promise.resolve();
+    await expect(first.value.ack()).rejects.toThrow('exactly once');
+    releaseSave?.();
+    await saving;
+    await expect(first.value.ack()).rejects.toThrow('exactly once');
+    const second = await owner.next();
+    expect(second.done).toBe(false);
+    await owner.return?.();
+    await expect(second.value.ack()).rejects.toThrow('stale or no longer owned');
+
+    blockSave = false;
+    const skipped = adapter.scanContextGraphRegistryPages({
+      mode: 'incremental',
+      pageBudget: 2,
+    })[Symbol.asyncIterator]();
+    const skippedPage = await skipped.next();
+    expect(skippedPage.done).toBe(false);
+    await expect(skipped.next()).rejects.toThrow('must be acknowledged before scanning continues');
+  });
+
+  it('leaves an aborted live page unacknowledged for restart replay', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    registry.queryFilter.setImpl(async () => []);
+    const controller = new AbortController();
+    const iterator = adapter.scanContextGraphRegistryPages({
+      mode: 'seedFromCursor',
+      pageBudget: 1,
+      signal: controller.signal,
+    })[Symbol.asyncIterator]();
+    const page = await iterator.next();
+    expect(page.done).toBe(false);
+
+    controller.abort(new Error('daemon closing'));
+    await expect(page.value.ack()).rejects.toThrow('daemon closing');
+    await iterator.return?.();
+    expect(store.saves).toEqual([]);
+
+    const replayRegistry = makeRegistry();
+    const { adapter: replay } = makeAdapter(replayRegistry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    replayRegistry.queryFilter.setImpl(async () => []);
+    await collectRegistryScan(replay, { mode: 'seedFromCursor', pageBudget: 1 });
+    expect(replayRegistry.queryFilter.calls.map(
+      ([, lo, hi]: [unknown, number, number]) => [lo, hi],
+    )).toEqual([[0, 999]]);
+  });
+
   it('fails repair closed before chain RPC when the durable repair capability is absent', async () => {
     const store = {
       load: vi.fn(async () => undefined),
@@ -782,6 +905,45 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.repairAudits.get((store as any).key(key))).not.toHaveProperty('completedAt');
   });
 
+  it('replaces an incomplete repair generation anchored beyond the current stable head', async () => {
+    const store = new MemoryRegistryScanCursorStore();
+    const key = {
+      chainId: 'evm:31337',
+      deploymentId: 'evm:31337:hub=0x0000000000000000000000000000000000000001',
+      registryAddress: REGISTRY,
+    };
+    const oldStartedAt = Date.now() - 10_000;
+    store.repairAudits.set((store as any).key(key), {
+      version: 1,
+      nextBlock: 2_000,
+      targetBlock: 9_000,
+      startedAt: oldStartedAt,
+    });
+    const registry = makeRegistry();
+    const { adapter } = makeAdapter(registry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    registry.queryFilter.setImpl(async () => []);
+
+    await collectRegistryScan(adapter, {
+      mode: 'repair',
+      pageBudget: 1,
+      minimumIntervalMs: 86_400_000,
+    });
+
+    expect(registry.queryFilter.calls.map(
+      ([, lo, hi]: [unknown, number, number]) => [lo, hi],
+    )).toEqual([[0, 999]]);
+    expect(store.repairAudits.get((store as any).key(key))).toMatchObject({
+      version: 1,
+      nextBlock: 1_000,
+      targetBlock: 2_050,
+    });
+    expect((store.repairAudits.get((store as any).key(key)) as any).startedAt)
+      .toBeGreaterThan(oldStartedAt);
+  });
+
   it('does not advance repair progress when atomic checkpoint persistence rejects', async () => {
     const store = new MemoryRegistryScanCursorStore();
     const key = {
@@ -818,24 +980,34 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
     expect(store.repairAudits.get((store as any).key(key))).not.toHaveProperty('completedAt');
 
     store.repairAudit.save = durableSave;
-    const replayRegistry = makeRegistry();
-    const { adapter: replay } = makeAdapter(replayRegistry, 2_100, {
-      cgRegistryScanPageSize: 1_000,
-      contextGraphRegistryScanCursorStore: store,
-    });
-    replayRegistry.queryFilter.setImpl(async () => []);
-    await collectRegistryScan(replay, {
+    registry.queryFilter.clear();
+    await collectRegistryScan(adapter, {
       mode: 'repair',
       pageBudget: 1,
       minimumIntervalMs: 86_400_000,
     });
-    expect(replayRegistry.queryFilter.calls.map(
+    expect(registry.queryFilter.calls.map(
       ([, lo, hi]: [unknown, number, number]) => [lo, hi],
     )).toEqual([[0, 999]]);
     expect(store.repairAudits.get((store as any).key(key))).toMatchObject({
       nextBlock: 1_000,
       targetBlock: 2_050,
     });
+
+    const restartedRegistry = makeRegistry();
+    const { adapter: restarted } = makeAdapter(restartedRegistry, 2_100, {
+      cgRegistryScanPageSize: 1_000,
+      contextGraphRegistryScanCursorStore: store,
+    });
+    restartedRegistry.queryFilter.setImpl(async () => []);
+    await collectRegistryScan(restarted, {
+      mode: 'repair',
+      pageBudget: 1,
+      minimumIntervalMs: 86_400_000,
+    });
+    expect(restartedRegistry.queryFilter.calls.map(
+      ([, lo, hi]: [unknown, number, number]) => [lo, hi],
+    )).toEqual([[1_000, 1_999]]);
   });
 
   it('rejects inconsistent persisted repair checkpoints and cannot be suppressed by future time', async () => {
@@ -850,6 +1022,12 @@ describe('EVMChainAdapter.listContextGraphsFromChain registry scan', () => {
         targetBlock: 100,
         startedAt: now,
         completedAt: now + 24 * 60 * 60 * 1_000,
+      },
+      {
+        version: 1,
+        nextBlock: 100,
+        targetBlock: 100,
+        startedAt: now + 24 * 60 * 60 * 1_000,
       },
     ];
 

@@ -10,6 +10,8 @@ import {
   commitScanOutcome,
   createChainDiscoveryScanRunner,
   planScan,
+  scheduleChainDiscoveryScanRunner,
+  type ChainDiscoveryScanRunner,
   type ScanOptions,
 } from '../src/daemon/chain-discovery-scan.js';
 import {
@@ -90,6 +92,7 @@ describe('createChainDiscoveryScanRunner', () => {
     expect(agent.repairContextGraphRegistry).toHaveBeenCalledWith({
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
       minimumIntervalMs: CHAIN_REPAIR_AUDIT_EVERY_TICKS * CHAIN_DISCOVERY_SCAN_INTERVAL_MS,
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -213,6 +216,7 @@ describe('createChainDiscoveryScanRunner', () => {
       mode: 'incremental',
       throwOnChainScanFailure: true,
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -233,8 +237,40 @@ describe('createChainDiscoveryScanRunner', () => {
       mode: 'incremental',
       throwOnChainScanFailure: true,
       pageBudget: CHAIN_DISCOVERY_SCAN_PAGE_BUDGET,
+      signal: expect.any(AbortSignal),
     });
     expect(agent.repairContextGraphRegistry).not.toHaveBeenCalled();
+  });
+
+  it('aborts and drains the owned scan before close resolves', async () => {
+    let entered = false;
+    let drained = false;
+    const agent = {
+      hasContextGraphRegistryScanWatermark: vi.fn(async () => true),
+      discoverContextGraphsFromChain: vi.fn(async (options: ScanOptions & { signal: AbortSignal }) => {
+        entered = true;
+        try {
+          await new Promise<void>((_resolve, reject) => {
+            options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+          });
+        } finally {
+          drained = true;
+        }
+        return 0;
+      }),
+      repairContextGraphRegistry: vi.fn(async () => 0),
+    };
+    const runner = createChainDiscoveryScanRunner({ agent, log: vi.fn() });
+    const running = runner();
+    while (!entered) await Promise.resolve();
+
+    await runner.close();
+    await running;
+
+    expect(drained).toBe(true);
+    expect(agent.repairContextGraphRegistry).not.toHaveBeenCalled();
+    await runner();
+    expect(agent.discoverContextGraphsFromChain).toHaveBeenCalledTimes(1);
   });
 
   it('contains broken logging and hostile rejection values', async () => {
@@ -252,6 +288,37 @@ describe('createChainDiscoveryScanRunner', () => {
     });
     await expect(runner()).resolves.toBeUndefined();
     await expect(runner()).resolves.toBeUndefined();
+  });
+});
+
+describe('scheduleChainDiscoveryScanRunner', () => {
+  it('owns both timers and drains the runner when the schedule closes', async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const runner = Object.assign(
+        vi.fn(async () => { calls.push('run'); }),
+        { close: vi.fn(async () => { calls.push('drained'); }) },
+      ) as unknown as ChainDiscoveryScanRunner;
+      const schedule = scheduleChainDiscoveryScanRunner({
+        runner,
+        initialDelayMs: 15,
+        intervalMs: 30,
+      });
+
+      await vi.advanceTimersByTimeAsync(15);
+      expect(runner).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(30);
+      expect(runner).toHaveBeenCalledTimes(2);
+
+      await schedule.close();
+      expect(runner.close).toHaveBeenCalledTimes(1);
+      expect(calls.at(-1)).toBe('drained');
+      await vi.advanceTimersByTimeAsync(300);
+      expect(runner).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
