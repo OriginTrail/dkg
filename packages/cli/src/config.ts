@@ -13,6 +13,7 @@ import type {
 } from '@origintrail-official/dkg-agent';
 import {
   resolveRfc64CatalogActivationsV1,
+  type Rfc64CatalogNormalizedActivationStateV1,
   type ResolvedRfc64CatalogActivationConfigV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveRfc64PublicCatalogActivationConfigV1,
@@ -537,6 +538,8 @@ export type Rfc64PublicCatalogActivationChainIdentity =
 export type Rfc64CatalogActivationConfig = Rfc64CatalogActivationConfigV1;
 export type ResolvedRfc64CatalogActivationConfig =
   ResolvedRfc64CatalogActivationConfigV1;
+export type Rfc64CatalogNormalizedActivationState =
+  Rfc64CatalogNormalizedActivationStateV1;
 
 export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */

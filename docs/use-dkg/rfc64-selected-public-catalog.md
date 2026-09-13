@@ -1,43 +1,71 @@
-# RFC-64 selected-public catalog activation
+# RFC-64 catalog activation and staged rollout
 
-RFC-64 catalog synchronization is selected and fail-closed. A valid
-`rfc64PublicCatalog.bootstrap.acceptedPublicPolicies` manifest makes the exact
-CGs it names eligible for RFC-64; no second enable switch is required. A node with no
-`rfc64PublicCatalog` block, or with explicit `enabled: false`, accepts no catalog
-policy, starts no bootstrap pulls, and does not advance catalogs after ordinary
-KA publication.
+On a persistent DKG 10.0.16 node, RFC-64 catalog synchronization is enabled by
+default. Omitting both RFC-64 configuration blocks does not disable it. Normal
+DKG lifecycle facts determine which Context Graphs this node is responsible for:
 
-This activation is intentionally selective. The operator supplies a bounded
-manifest of independently verified, finalized public-CG policy envelopes. The
-CG IDs in that manifest are the single source for:
+- an Edge subscription selects a public CG;
+- Core public hosting selects a public CG; and
+- independently verified current membership selects a private CG.
 
-- per-CG legacy, shadow, or catalog authority eligibility;
-- explicit signed-catalog targets; and
-- optional graph-complete-provider native SWM recovery.
+The node resolves authority for each responsibility from trusted local and
+finalized-chain state. Unknown policy, missing membership, and incomplete
+authority stay fail-closed. Unsubscribing removes an Edge responsibility without
+deleting data that was already verified. The normal persisted-subscription
+rehydration limit still bounds the work activated at startup.
 
-There is no `sync all public CGs` mode in this release. On an edge node, the
-manifest is not a subscription list. Existing `contextGraphs`, foreground
-subscriptions, and their persisted restart state decide which eligible CGs the
-edge follows. Subscribing to an eligible CG immediately makes RFC-64 its SWM
-rail; unsubscribing stops its catalog pulls without deleting already verified
-data. Other eligible public or private CGs remain inactive. The rehydration cap
-still bounds how many persisted user subscriptions are activated at boot.
+`rfc64Catalog` is therefore an optional operator-control and compatibility-seed
+block, not the source of ordinary lifecycle selection. Use it to stage a bounded
+rollout, apply a global stop, or provide independently verified policy, roster,
+provider, and authoring inputs for an explicit graph. The deprecated
+`rfc64PublicCatalog` block remains supported for selected-public compatibility,
+but new operational controls belong under `rfc64Catalog`.
 
-Core nodes retain their configured manifest-wide behavior for the corpus they
-are configured to host. This edge/core distinction changes runtime work selection only;
-it does not turn discovered peers into catalog authorities or weaken the
-configured policy, roster, or peer-identity trust roots.
+Setting `rfc64Catalog.enabled` to `false` is a compatibility rollback for the
+current release: it changes all ordinary responsibilities back to the legacy
+lane. Omission is different and keeps the 10.0.16 RFC-64 default. Prefer the
+rollout controls below for staged operation because they preserve verified
+catalog state and make the intended authority visible in status.
 
-Signed-catalog activation remains the stronger, separate control plane described
-below. Only an operator-pinned `completeSwmProviders` peer may prove the whole
-selected SWM scope terminal. Without that assertion, the receiver retains
-multi-peer union convergence and never treats one ordinary peer's local manifest
-as graph-complete. Private CGs retain curator recovery, and VM remains
-chain/curator driven.
+An explicit bootstrap manifest does not subscribe an Edge node to its CGs.
+Existing `contextGraphs`, live subscriptions, and persisted restart state still
+decide what the Edge follows. Core nodes retain their configured hosting
+responsibilities. Neither lifecycle discovery nor a bootstrap manifest turns a
+discovered peer into an authority or weakens policy, roster, or peer-identity
+verification.
+
+Only an operator-pinned `completeSwmProviders` peer may prove an entire selected
+SWM scope terminal. Without that assertion, recovery retains multi-peer union
+convergence and never treats one ordinary peer's local manifest as graph-complete.
+Private recovery remains membership-gated, and finalized VM reconciliation
+remains chain-authoritative.
 
 ## Configuration
 
-Add the following shape to `~/.dkg/config.json`:
+For a one-graph canary, add this control block to `~/.dkg/config.json`:
+
+```json
+{
+  "rfc64Catalog": {
+    "rollout": {
+      "defaultMode": "legacy",
+      "killSwitch": false,
+      "contextGraphModes": {
+        "0x.../canary-cg": "shadow"
+      }
+    }
+  }
+}
+```
+
+`defaultMode: "legacy"` is the bounding control: existing, newly discovered,
+and otherwise unlisted responsibilities stay on the legacy lane. Only the
+listed CG enters shadow mode. After validating it, change that CG to `catalog`
+and restart; leave the default at `legacy` until the next cohort is explicitly
+listed.
+
+The older selected-public compatibility shape remains accepted when an operator
+must pin a complete policy and provider manifest:
 
 ```json
 {
@@ -101,13 +129,17 @@ Add the following shape to `~/.dkg/config.json`:
 }
 ```
 
-`enabled: true` remains accepted for compatibility, but is redundant when a
-valid manifest is present. `enabled: false` disables the complete activation
-block. The operational emergency stop is the dedicated
-`rollout.killSwitch`; it stops Track-2 protocols and workers without deleting
-verified data or changing any graph's persisted authority mode.
+`enabled: true` remains accepted but is redundant. `enabled: false` on the
+unified block disables release-native RFC-64 selection for all responsibilities
+as a compatibility rollback. The operational emergency stop is the dedicated
+`rollout.killSwitch`; it stops Track-2 protocols and workers, restores the
+ordinary legacy correctness lane for responsible CGs, and does not delete
+verified catalog data. Clearing the switch restores each configured desired
+mode after restart.
 
-Each selected graph may be assigned exactly one restart-stable mode:
+Each graph may be assigned exactly one restart-stable mode. An override may be
+declared before the graph is discovered so the first lifecycle transition uses
+the intended lane:
 
 - `legacy`: only the existing durable/SWM correctness path runs; Track 2 is dormant;
 - `shadow`: the existing path stays authoritative while Track 2 fetches and durably
@@ -115,12 +147,17 @@ Each selected graph may be assigned exactly one restart-stable mode:
 - `catalog`: Track 2 is authoritative for SWM and every overlapping legacy
   durable/SWM recovery path is excluded.
 
-Omitted modes retain the earlier selected-catalog behavior and resolve to
-`catalog`. New rollouts should set every mode explicitly and begin with
-`shadow`. A `catalog` graph does not silently fall back when the kill switch is
-active; changing authority requires an explicit config edit to `legacy` or
-`shadow` followed by restart. Finalized public VM reconciliation remains
-chain-inventoried in every mode and is not disabled by the catalog kill switch.
+Unlisted responsibilities use `rollout.defaultMode`. If `defaultMode` itself is
+omitted, it resolves to `catalog`, preserving the 10.0.16 default. For a bounded
+canary, set `defaultMode` to `legacy`, list only the canary as `shadow`, verify
+it, then advance that explicit override to `catalog`. `defaultMode` belongs only
+under `rfc64Catalog`; the deprecated public-only block remains scoped to its
+manifest.
+
+RFC-64 rollout configuration is snapshotted during daemon startup. Changes to
+`defaultMode`, `contextGraphModes`, `killSwitch`, activation, policy, roster, or
+provider bindings require a daemon restart. Finalized public VM reconciliation
+remains chain-inventoried in every per-CG mode.
 
 The example shows structure only. Do not invent or copy placeholder control
 values. The complete `policyEnvelope` must be the output of an independent
@@ -137,12 +174,12 @@ coverage, while VM remains chain/curator driven. Omit this field unless that
 graph-wide property has been established; ordinary per-author catalog providers
 do not imply it.
 
-`autoPublish` is optional and arms the explicit low-level catalog-authoring
-capability. It does **not** make ordinary KA publication author or advance a
-signed catalog in 10.0.14. Ordinary publication only updates the signed SWM
-inventory shadow, which remains audit evidence and does not drive receiver
-synchronization. A receiver can omit `autoPublish` and keep only the bootstrap
-controls.
+`autoPublish` is optional compatibility configuration for explicit bootstrap
+authoring controls, including announcement peers and delegation bounds.
+Release-native 10.0.16 responsibilities maintain their signed SWM inventories
+and catalog projections from ordinary durable share/finalization lifecycle
+events when current authority and signing capability are available. Receiver-
+only nodes do not need `autoPublish`.
 
 `deploymentProfile` is also optional on a normal chain-connected node. When it
 is omitted, the agent resolves the chain ID and Knowledge Assets Lifecycle
@@ -256,12 +293,45 @@ Restart the daemon and inspect `GET /api/status`:
 The public compatibility block lists public targets only. Private provider
 identities stay out of status. The `rfc64Catalog.privateRecovery` array gives
 local aggregate counts, the effective mode, whether VM is required, and safe
-completion reasons. Both RFC-64 status blocks expose the configured per-CG mode
-map, the kill-switch state, and `runtimeSelection`. On edges,
+completion reasons. `rfc64Catalog.rollout` exposes `defaultMode`, the per-CG
+mode map, and the kill-switch state. Its `configuration` block repeats the
+privacy-safe effective default and counts overrides without revealing private
+graph identifiers. On edges,
 `runtimeSelection.selectedContextGraphs` is the current subscribed intersection
-of the eligible manifest, derived directly from the canonical live subscription
-registry. Sync-scope tracking does not select RFC-64 independently. Bootstrap
-targets for eligible but unsubscribed CGs report `inactive`.
+of the eligible runtime responsibilities, derived directly from the canonical
+live subscription registry. Sync-scope tracking does not select RFC-64
+independently. Bootstrap targets for eligible but unsubscribed CGs report
+`inactive`.
+
+The same block exposes `authorityRpcCircuit`, containing only `state`,
+`consecutiveExhaustions`, and `retryAtMs`. `open` means authority reads are
+cooling down after all configured RPC endpoints were exhausted; `half-open`
+means one recovery probe is in flight; `closed` is normal. This status omits
+endpoint URLs, RPC payloads, and graph identifiers.
+
+```json
+{
+  "rfc64Catalog": {
+    "rollout": {
+      "defaultMode": "legacy",
+      "killSwitch": false,
+      "contextGraphModes": {
+        "0x.../canary-cg": "shadow"
+      }
+    },
+    "configuration": {
+      "defaultMode": "legacy",
+      "legacyOverrideCount": 0,
+      "shadowOverrideCount": 1
+    },
+    "authorityRpcCircuit": {
+      "state": "closed",
+      "consecutiveExhaustions": 0,
+      "retryAtMs": null
+    }
+  }
+}
+```
 
 ```json
 {
@@ -353,10 +423,9 @@ provider loss/failover explicitly.
 
 ## Current boundary
 
-This release exposes the already-built public RFC-64 catalog receiver data
-plane for explicit targets and the selected native SWM recovery lane for
-operator-approved graph-complete providers. Provider peer IDs and finalized
-policy envelopes are still pinned inputs. Signed catalog authoring is explicit;
-the ordinary-publication SWM inventory shadow is not connected to receiver
-convergence. Automatic catalog production, automatic provider discovery, and
-automatic chain-to-policy control-plane generation are later work.
+This release enables release-native RFC-64 responsibilities from ordinary DKG
+lifecycle state and retains explicit bootstrap targets for compatibility and
+controlled recovery. Authority remains fail-closed: registered graphs use
+finalized chain state, private graphs require verified current membership, and
+only an operator assertion may mark a provider graph-complete. Broad automatic
+provider trust is not inferred from peer discovery.

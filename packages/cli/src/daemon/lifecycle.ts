@@ -1346,32 +1346,23 @@ async function runDaemonInnerWithStartupOwnership(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
-  const unifiedRfc64Disabled = config.rfc64Catalog?.enabled === false;
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
-    unifiedRfc64Disabled
-      ? {
-          rfc64Catalog: config.rfc64Catalog,
-          // The unified rollback is authoritative at the daemon boundary too.
-          // Do not let stale deprecated controls extend sync scope, fail
-          // validation, or reach the agent while the replacement is disabled.
-          rfc64PublicCatalog: undefined,
-        }
-      : config,
+    config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
   );
   const rfc64Catalog = rfc64CatalogActivations.catalog;
   const rfc64PublicCatalog = rfc64CatalogActivations.publicCatalog;
+  const rfc64CatalogActivationState = rfc64CatalogActivations.activationState;
   const rfc64RollbackTimestamp = new Date().toISOString();
-  const explicitDisabled = unifiedRfc64Disabled
-    || (config.rfc64Catalog === undefined && config.rfc64PublicCatalog?.enabled === false);
-  if (explicitDisabled) {
+  if (rfc64CatalogActivationState.execution.mode === 'compatibility-rollback') {
     log(
       `[rfc64-catalog-rollback] WARNING source=operator-override reason=deprecated-enabled-false `
       + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs; `
       + 'RFC-64 default correctness is disabled for this compatibility release',
     );
   }
-  const emergencyModes = Object.entries(rfc64Catalog.rollout.contextGraphModes)
+  const effectiveRfc64Rollout = rfc64CatalogActivationState.execution.rollout;
+  const emergencyModes = Object.entries(effectiveRfc64Rollout.contextGraphModes)
     .filter(([, mode]) => mode === 'legacy' || mode === 'shadow')
     .sort(([left], [right]) => left.localeCompare(right));
   if (emergencyModes.length > 0) {
@@ -1380,7 +1371,7 @@ async function runDaemonInnerWithStartupOwnership(
       + `timestamp=${rfc64RollbackTimestamp} affected=${JSON.stringify(emergencyModes)}`,
     );
   }
-  if (rfc64Catalog.rollout.killSwitch) {
+  if (effectiveRfc64Rollout.killSwitch) {
     log(
       `[rfc64-catalog-rollback] WARNING source=kill-switch reason=global-emergency-stop `
       + `timestamp=${rfc64RollbackTimestamp} affected=all-responsible-cgs`,
@@ -1827,19 +1818,9 @@ async function runDaemonInnerWithStartupOwnership(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
-    // The agent owns authoritative activation against the chain adapter it
-    // actually constructed. This daemon-side resolved value is only a
-    // fail-fast/status preview and must not become a second runtime contract.
-    rfc64PublicCatalogActivation: config.rfc64PublicCatalog === undefined
-      ? undefined
-      : rfc64PublicCatalog.enabled
-        ? config.rfc64PublicCatalog
-        : { enabled: false },
-    rfc64CatalogActivation: config.rfc64Catalog === undefined
-      ? undefined
-      : rfc64Catalog.enabled
-        ? config.rfc64Catalog
-        : { enabled: false },
+    // Forward the resolver-issued snapshot. The agent consumes exactly the
+    // same precedence/fallback decision used for sync scope and status.
+    rfc64CatalogActivations,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
     contextGraphSubscriptionRehydrationEnabled,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
@@ -3643,6 +3624,7 @@ async function runDaemonInnerWithStartupOwnership(
         publisherState,
         config,
         rfc64Catalog,
+        rfc64CatalogActivationState,
         rfc64PublicCatalog,
         startedAt,
         dashDb,

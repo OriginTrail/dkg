@@ -456,11 +456,15 @@ import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import { createRfc64CatalogAuthorityRefreshOwnerV1 } from
   './rfc64/catalog-authority-refresh-binding-v1.js';
+import { Rfc64CatalogShadowObservabilityRuntimeV1 } from
+  './rfc64/catalog-shadow-observability-v1.js';
 import { Rfc64PublicCatalogWorkloadOwnerV1 } from
   './rfc64/public-catalog-workload-owner-v1.js';
 import {
+  assertResolvedRfc64CatalogActivationsV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
+  resolveRfc64CatalogExecutionPlanModeV1,
   resolveRfc64CatalogActivationsV1,
   resolveRfc64CatalogAuthoringPolicyV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
@@ -1100,6 +1104,13 @@ export class DKGAgent extends DKGAgentBase {
         );
       },
     });
+    this.rfc64CatalogShadowObservabilityV1 =
+      new Rfc64CatalogShadowObservabilityRuntimeV1({
+        executionPlan: this.config.rfc64CatalogExecutionPlan,
+        readResponsibility: (contextGraphId) =>
+          this.readRfc64CatalogResponsibilityV1(contextGraphId),
+        readResponsibilities: () => this.readRfc64CatalogResponsibilitiesV1(),
+      });
     this.rfc64PublicCatalogOwnerV1 = new Rfc64PublicCatalogWorkloadOwnerV1({
       createService: (ctx) => this.createRfc64PublicCatalogServiceV1(ctx),
       authorityRefresh: authorityRefreshOwner,
@@ -1197,65 +1208,75 @@ export class DKGAgent extends DKGAgentBase {
     const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1(
       constructedAgentChainId,
     );
-    const rfc64UnifiedCatalogExplicitlyDisabled =
-      normalizedConfig.rfc64CatalogActivation?.enabled === false;
-    const activations = resolveRfc64CatalogActivationsV1({
+    const legacyStandaloneControlsPresent =
+      normalizedConfig.rfc64CatalogDeploymentProfile !== undefined
+      || normalizedConfig.rfc64CatalogAccessPolicyAuthority !== undefined
+      || normalizedConfig.rfc64PublicCatalogAutoPublish !== undefined
+      || normalizedConfig.rfc64PublicCatalogBootstrap !== undefined;
+    const suppliedActivations = normalizedConfig.rfc64CatalogActivations;
+    if (
+      suppliedActivations !== undefined
+      && (
+        normalizedConfig.rfc64CatalogActivation !== undefined
+        || normalizedConfig.rfc64PublicCatalogActivation !== undefined
+        || legacyStandaloneControlsPresent
+      )
+    ) {
+      throw new TypeError(
+        'rfc64CatalogActivations is mutually exclusive with raw RFC-64 controls',
+      );
+    }
+    if (suppliedActivations !== undefined) {
+      assertResolvedRfc64CatalogActivationsV1(suppliedActivations, chainIdentity);
+    }
+    const activations = suppliedActivations ?? resolveRfc64CatalogActivationsV1({
       catalog: normalizedConfig.rfc64CatalogActivation,
       publicCatalog: normalizedConfig.rfc64PublicCatalogActivation,
+      legacyStandaloneControlsPresent,
+      persistenceAvailable: normalizedConfig.dataDir !== undefined,
     }, chainIdentity);
     const catalogActivation = activations.catalog;
-    const activation = normalizedConfig.rfc64PublicCatalogActivation === undefined
-      ? undefined
-      : activations.publicCatalog;
+    const activationState = activations.activationState;
+    const compatibilityControlsSuppressed =
+      activationState.execution.mode === 'compatibility-rollback';
+    const deprecatedPublicControlPresent =
+      activationState.configuration.source === 'deprecated-public'
+      || (
+        activationState.configuration.source === 'unified'
+        && activationState.configuration.deprecatedPublicControlPresent
+      );
+    const deprecatedPublicActivationSelected =
+      activationState.execution.mode === 'catalog'
+      && deprecatedPublicControlPresent;
+    const standaloneLegacyControlsAllowed =
+      activationState.execution.mode === 'catalog'
+      && !deprecatedPublicControlPresent;
+    const activation = deprecatedPublicActivationSelected
+      ? activations.publicCatalog
+      : undefined;
     const rfc64PublicCatalogControls = resolveRfc64PublicCatalogControlsV1({
       activation,
-      legacyDeploymentProfile: rfc64UnifiedCatalogExplicitlyDisabled
+      legacyDeploymentProfile: compatibilityControlsSuppressed
         ? undefined
         : normalizedConfig.rfc64CatalogDeploymentProfile,
-      legacyAutoPublish: rfc64UnifiedCatalogExplicitlyDisabled
+      legacyAutoPublish: compatibilityControlsSuppressed
         ? undefined
         : normalizedConfig.rfc64PublicCatalogAutoPublish,
-      legacyBootstrap: rfc64UnifiedCatalogExplicitlyDisabled
+      legacyBootstrap: compatibilityControlsSuppressed
         ? undefined
         : normalizedConfig.rfc64PublicCatalogBootstrap,
     }, chainIdentity);
-    // The unified block owns precedence over the deprecated public-only
-    // alias. Omission is the 10.0.16 product default; explicit enabled=false
-    // remains a one-release compatibility rollback.
-    const rfc64CatalogExplicitlyDisabled =
-      rfc64UnifiedCatalogExplicitlyDisabled
-      || (
-        normalizedConfig.rfc64CatalogActivation === undefined
-        && normalizedConfig.rfc64PublicCatalogActivation?.enabled === false
-      );
-    const rfc64CatalogConfigurationOmitted =
-      normalizedConfig.rfc64CatalogActivation === undefined
-      && normalizedConfig.rfc64PublicCatalogActivation === undefined
-      && normalizedConfig.rfc64CatalogDeploymentProfile === undefined
-      && normalizedConfig.rfc64CatalogAccessPolicyAuthority === undefined
-      && normalizedConfig.rfc64PublicCatalogAutoPublish === undefined
-      && normalizedConfig.rfc64PublicCatalogBootstrap === undefined;
-    // Agents without a persistence root cannot run the catalog service. Preserve
-    // the historical in-memory legacy lane only for a truly omitted RFC-64
-    // configuration; an explicit catalog request is rejected below instead of
-    // silently suppressing both catalog and legacy delivery.
-    const rfc64CatalogEphemeralLegacyFallback =
-      !normalizedConfig.dataDir && rfc64CatalogConfigurationOmitted;
     const rfc64CatalogExecutionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: normalizedConfig.syncContextGraphs ?? [],
-      responsibilityDefaultMode:
-        rfc64CatalogExplicitlyDisabled || rfc64CatalogEphemeralLegacyFallback
-          ? 'legacy'
-          : 'catalog',
+      effectiveRollout: activationState.execution.rollout,
       standaloneTrack2ContextGraphs:
-        normalizedConfig.rfc64PublicCatalogActivation === undefined
+        standaloneLegacyControlsAllowed
           ? (rfc64PublicCatalogControls.bootstrap?.acceptedPublicPolicies.map(
             ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
           ) ?? [])
           : [],
-      activation: rfc64UnifiedCatalogExplicitlyDisabled
-        ? Object.freeze({ ...catalogActivation, enabled: true })
-        : catalogActivation,
+      standaloneTrack2Enabled: false,
+      activation: catalogActivation,
     });
     const config: StorageAckNormalizedDKGAgentConfig = {
       ...normalizedConfig,
@@ -1270,13 +1291,16 @@ export class DKGAgent extends DKGAgentBase {
     if (catalogActivation.bootstrap !== undefined && !config.dataDir) {
       throw new TypeError('rfc64Catalog bootstrap requires dataDir');
     }
-    if (
-      !config.dataDir
-      && !rfc64CatalogExecutionPlan.killSwitchActive
-      && rfc64CatalogExecutionPlan.responsibilityDefaultMode === 'catalog'
-    ) {
+    const rfc64Track2RequiresPersistence =
+      !rfc64CatalogExecutionPlan.killSwitchActive
+      && (
+        rfc64CatalogExecutionPlan.responsibilityDefaultMode !== 'legacy'
+        || rfc64CatalogExecutionPlan.track2ContextGraphs.length > 0
+        || rfc64CatalogExecutionPlan.standaloneTrack2Enabled
+      );
+    if (!config.dataDir && rfc64Track2RequiresPersistence) {
       throw new TypeError(
-        'RFC-64 catalog mode requires dataDir; omit RFC-64 catalog configuration '
+        'RFC-64 Track-2 mode requires dataDir; omit RFC-64 catalog configuration '
         + 'for ephemeral legacy mode or set rfc64CatalogActivation.enabled=false',
       );
     }
@@ -1291,7 +1315,7 @@ export class DKGAgent extends DKGAgentBase {
     const rfc64CatalogDeploymentProfile = catalogActivation.deploymentProfile
       ?? rfc64PublicCatalogControls.deploymentProfile;
     const legacyRfc64CatalogAccessPolicyAuthority = snapshotRfc64CatalogAccessPolicyAuthorityV1(
-      rfc64UnifiedCatalogExplicitlyDisabled
+      compatibilityControlsSuppressed
         ? undefined
         : config.rfc64CatalogAccessPolicyAuthority,
     );
@@ -1323,7 +1347,7 @@ export class DKGAgent extends DKGAgentBase {
       // resolveRfc64CatalogActivationsV1 already folds the compatibility
       // activation into catalogActivation. Only the legacy standalone block
       // still has to be added here.
-      normalizedConfig.rfc64PublicCatalogActivation === undefined
+      standaloneLegacyControlsAllowed
         ? rfc64PublicCatalogBootstrap
         : undefined,
     );
@@ -1395,6 +1419,7 @@ export class DKGAgent extends DKGAgentBase {
     const configWithoutRfc64CatalogControls = { ...config };
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;
     delete configWithoutRfc64CatalogControls.rfc64CatalogActivation;
+    delete configWithoutRfc64CatalogControls.rfc64CatalogActivations;
     delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
@@ -1494,8 +1519,10 @@ export class DKGAgent extends DKGAgentBase {
       provenanceEvents: config.metadataProvenanceEvents,
       resolveDurableRootPromotionAtomicCompanion: (input) => {
         const executionPlan = resolvedConfig.rfc64CatalogExecutionPlan;
-        const configuredMode = executionPlan.contextGraphModes[input.contextGraphId]
-          ?? executionPlan.responsibilityDefaultMode;
+        const configuredMode = resolveRfc64CatalogExecutionPlanModeV1(
+          executionPlan,
+          input.contextGraphId,
+        );
         if (!executionPlan.killSwitchActive && configuredMode !== 'legacy') return;
 
         // Ephemeral legacy mode has no durable state to protect across a later
