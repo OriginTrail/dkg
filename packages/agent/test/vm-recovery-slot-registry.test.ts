@@ -274,6 +274,8 @@ describe('active VM recovery slot ownership', () => {
       candidatePeerIds: ['peer-a'], curatorRosterConfirmed: false, collectionDeadlineAt: 200,
     }).kind).toBe('admitted');
     expect(otherScope.signal.aborted).toBe(true);
+    // Donation is an ordinary cancellation for observers, not a control token.
+    expect((otherScope.signal.reason as Error).name).toBe('AbortError');
     expect(scope.signal.aborted).toBe(false);
     expect(registry.capture(target)).toBeUndefined();
     expect(registry.capture(waiting)).toBeDefined();
@@ -405,6 +407,7 @@ describe('active VM recovery slot ownership', () => {
     expect(second.signal.aborted).toBe(false);
     lifetimes.invalidate(target);
     expect(second.signal.aborted).toBe(true);
+    expect((second.signal.reason as Error).name).toBe('AbortError');
     expect(first.signal.aborted).toBe(false);
     second.release();
   });

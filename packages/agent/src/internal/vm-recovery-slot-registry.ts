@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { OrdinalRecoveryTarget } from '../chain-reconciler.js';
 import { VmRecoveryBatchTransaction } from './vm-recovery-batch-transaction.js';
+import { VmRecoverySlotGeneration, VmRecoverySlotLease } from './vm-recovery-slot-lifetimes.js';
 
 type Target = Pick<OrdinalRecoveryTarget, 'localCgId' | 'onChainCgId' | 'ordinal' | 'ual' | 'merkleRoot'>;
 type SlotLocator = Pick<Target, 'localCgId' | 'onChainCgId' | 'ordinal'>;
@@ -84,16 +85,11 @@ export function vmRecoveryTargetFingerprint(target: Pick<Target, 'ual' | 'merkle
   return `${target.ual}\0${target.merkleRoot.toLowerCase()}`;
 }
 
-interface SlotGeneration {
-  readonly controller: AbortController;
-  users: number;
-}
-
 interface SlotState {
   readonly localCgId: string;
   readonly fingerprint: string;
   record?: MutableRotationRecord;
-  generation?: SlotGeneration;
+  generation?: VmRecoverySlotGeneration;
   reservation?: { readonly kind: 'requester' | 'donor'; readonly admission: SlotAdmission };
 }
 
@@ -102,7 +98,8 @@ interface SlotAdmission {
   readonly target: Target;
   readonly slot: SlotState;
   readonly donor?: { readonly key: string; readonly slot: SlotState; readonly record: MutableRotationRecord };
-  readonly donationReason?: symbol;
+  /** The requesting lease: its own successful donation detaches it instead of canceling it. */
+  readonly exempt?: VmRecoverySlotLease;
   active: boolean;
 }
 
@@ -281,7 +278,7 @@ export class VmRecoverySlotRegistry {
   private reserveAdmission(
     target: Target,
     now: number,
-    donationReason?: symbol,
+    exempt?: VmRecoverySlotLease,
   ): VmRecoverySlotReservation {
     const key = vmRecoverySlotKey(target);
     const slot = this.observedSlot(target);
@@ -294,7 +291,7 @@ export class VmRecoverySlotRegistry {
       this.prune(key, slot);
       return { kind: 'deferred' };
     }
-    const admission: SlotAdmission = { key, target: { ...target }, slot, donor, donationReason, active: true };
+    const admission: SlotAdmission = { key, target: { ...target }, slot, donor, exempt, active: true };
     slot.reservation = { kind: 'requester', admission };
     if (donor) donor.slot.reservation = { kind: 'donor', admission };
     return {
@@ -357,9 +354,9 @@ export class VmRecoverySlotRegistry {
       }
       this.releaseAdmission(admission);
       // The requester is installed and capacity accounting is settled before
-      // donor abort listeners run. Only this reservation's owning scope may
-      // ignore that exact donation; external invalidations never carry it.
-      if (installed && donor) this.invalidateSlot(donor.key, donor.slot, admission.donationReason);
+      // donor abort listeners run. Only the requesting lease is detached
+      // without cancellation; external invalidations exempt no one.
+      if (installed && donor) this.invalidateSlot(donor.key, donor.slot, admission.exempt);
     }
   }
 
@@ -634,49 +631,28 @@ export class VmRecoverySlotRegistry {
   }
 
   begin(): VmRecoverySlotScope {
-    const controller = new AbortController();
-    const donationReason = Symbol('own-vm-slot-donation');
-    const held = new Map<string, { slot: SlotState; generation: SlotGeneration; onAbort: () => void }>();
+    const lease = new VmRecoverySlotLease();
     const reservations = new Set<VmRecoverySlotAdmissionReservation>();
     let released = false;
-    const detach = (key: string) => {
-      const entry = held.get(key);
-      if (!entry) return;
-      held.delete(key);
-      const { slot, generation, onAbort } = entry;
-      generation.controller.signal.removeEventListener('abort', onAbort);
-      generation.users--;
-      if (generation.users === 0 && slot.generation === generation) slot.generation = undefined;
-      this.prune(key, slot);
-    };
     return {
-      signal: controller.signal,
+      signal: lease.signal,
       track: targets => {
-        if (released || controller.signal.aborted) return;
+        if (released || lease.signal.aborted) return;
         for (const target of targets) {
           const key = vmRecoverySlotKey(target);
           const slot = this.observedSlot(target);
-          if (controller.signal.aborted) {
+          if (lease.signal.aborted) {
             if (slot) this.prune(key, slot);
             break;
           }
-          if (!slot) { controller.abort(); break; }
-          if (held.has(key)) continue;
-          const generation = slot.generation ??= { controller: new AbortController(), users: 0 };
-          const onAbort = () => {
-            const reason = generation.controller.signal.reason;
-            detach(key);
-            if (reason !== donationReason) controller.abort(reason);
-          };
-          held.set(key, { slot, generation, onAbort });
-          generation.users++;
-          generation.controller.signal.addEventListener('abort', onAbort, { once: true });
+          if (!slot) { lease.cancel(); break; }
+          lease.attach(slot.generation ??= new VmRecoverySlotGeneration(key));
         }
       },
       reserveAdmission: (target, now) => {
-        if (released || controller.signal.aborted) return { kind: 'deferred' };
-        const result = this.reserveAdmission(target, now, donationReason);
-        if (controller.signal.aborted) {
+        if (released || lease.signal.aborted) return { kind: 'deferred' };
+        const result = this.reserveAdmission(target, now, lease);
+        if (lease.signal.aborted) {
           if (result.kind === 'reserved') result.reservation.release();
           return { kind: 'deferred' };
         }
@@ -684,7 +660,7 @@ export class VmRecoverySlotRegistry {
         const inner = result.reservation;
         const reservation: VmRecoverySlotAdmissionReservation = {
           commit: params => {
-            if (released || controller.signal.aborted) { inner.release(); return { kind: 'deferred' }; }
+            if (released || lease.signal.aborted) { inner.release(); return { kind: 'deferred' }; }
             try { return inner.commit(params); } finally { reservations.delete(reservation); }
           },
           release: () => { inner.release(); reservations.delete(reservation); },
@@ -696,9 +672,18 @@ export class VmRecoverySlotRegistry {
         if (released) return;
         released = true;
         for (const reservation of reservations) reservation.release();
-        for (const key of held.keys()) detach(key);
+        for (const generation of lease.detachAll()) this.retireIdleGeneration(generation);
       },
     };
+  }
+
+  /** A generation nobody tracks any more no longer keeps its slot alive. */
+  private retireIdleGeneration(generation: VmRecoverySlotGeneration): void {
+    if (!generation.idle) return;
+    const slot = this.slots.get(generation.key);
+    if (slot?.generation !== generation) return;
+    slot.generation = undefined;
+    this.prune(generation.key, slot);
   }
 
   /** Observing a replacement fingerprint invalidates only the superseded aggregate. */
@@ -714,12 +699,12 @@ export class VmRecoverySlotRegistry {
     if (slot) this.invalidateSlot(key, slot);
   }
 
-  private invalidateSlot(key: string, slot: SlotState, reason?: symbol): void {
+  private invalidateSlot(key: string, slot: SlotState, exempt?: VmRecoverySlotLease): void {
     if (this.slots.get(key) !== slot) return;
     this.slots.delete(key);
     if (slot.reservation) this.releaseAdmission(slot.reservation.admission);
     slot.record = undefined;
-    slot.generation?.controller.abort(reason);
+    slot.generation?.end(exempt);
   }
 
   invalidateContextGraph(localCgId: string): void {
