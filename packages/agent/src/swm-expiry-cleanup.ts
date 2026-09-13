@@ -1,9 +1,13 @@
-import { GraphManager, resolveSharedMemoryScopeGraphs, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  createOperationContext, GRAPH_KA_CONTENT_SCOPE_VERSION, isSafeIri,
+  createOperationContext, GRAPH_KA_CONTENT_SCOPE_VERSION,
   type Logger,
 } from '@origintrail-official/dkg-core';
-import { swmEntityWriteLockKey, swmKaWriteLockKey, withKeyedLocks } from '@origintrail-official/dkg-publisher';
+import type {
+  DKGPublisher,
+  SharedMemoryExpiredOperation,
+  SharedMemoryExpiryMutationOutcome,
+} from '@origintrail-official/dkg-publisher';
 import { mapWithConcurrencySettled } from './map-with-concurrency.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 import {
@@ -18,9 +22,7 @@ const SWM_CLEANUP_MAX_CONCURRENT_OPERATIONS = 4;
 
 export interface SwmExpiryCleanupContext {
   store: TripleStore;
-  workspaceOwnedEntities: Map<string, Map<string, string>>;
-  /** The same lock domain used by live and local SWM writers. */
-  writeLocks: Map<string, Promise<void>>;
+  publisher: Pick<DKGPublisher, 'expireSharedMemoryOperation'>;
   log: Pick<Logger, 'info' | 'warn'>;
   isClosed: () => boolean;
 }
@@ -39,17 +41,7 @@ export interface SwmExpiryCleanupContinuation {
   readonly restartAfter?: string;
 }
 type CleanupTarget = SharedMemoryGraphDescriptor;
-interface ExpiredOperation {
-  uri: string;
-  roots: string[];
-  scope: { kind: 'legacy' } | { kind: 'graph-v2'; kaUal?: string; snapshotGraph?: string };
-}
-type ExpiredOperationSelector =
-  | { readonly kind: 'batch'; readonly limit: number }
-  | { readonly kind: 'uris'; readonly uris: readonly string[] };
-
-interface CleanupOutcome { triplesDeleted: number; operationRemoved: boolean }
-interface CleanupBatchResult { outcomes: CleanupOutcome[]; errors: unknown[] }
+interface CleanupBatchResult { outcomes: SharedMemoryExpiryMutationOutcome[]; errors: unknown[] }
 
 /** At most four nonempty pages per invocation; continuation rotates graph priority. */
 export async function runSwmExpiryCleanup(
@@ -81,7 +73,12 @@ export async function runSwmExpiryCleanup(
       const target = targets[visited]!;
       let madeProgress = false;
       while (!isClosed() && batches < SWM_CLEANUP_MAX_BATCHES) {
-        const operations = await loadExpiredOperations(store, target.metaGraph, cutoff, { kind: 'batch', limit: SWM_CLEANUP_BATCH_SIZE });
+        const operations = await loadExpiredOperations(
+          store,
+          target.metaGraph,
+          cutoff,
+          SWM_CLEANUP_BATCH_SIZE,
+        );
         if (isClosed() || operations.length === 0) { madeProgress = false; break; }
         batches++;
         // Each operation rediscovers its graph family after acquiring its own
@@ -125,42 +122,22 @@ export async function runSwmExpiryCleanup(
   return result;
 }
 
-/** Discover or revalidate distinct expired identities, then hydrate the same operation model. */
+/** Discover one bounded page of expired operation identities and hydrate their lock inputs. */
 async function loadExpiredOperations(
   store: TripleStore,
   metaGraph: string,
   cutoff: string,
-  selector: ExpiredOperationSelector,
-): Promise<ExpiredOperation[]> {
-  let identityFilter: string;
-  let limit: string;
-  let source: string;
-  switch (selector.kind) {
-    case 'batch':
-      identityFilter = '';
-      limit = `LIMIT ${selector.limit}`;
-      source = 'agent.swmCleanup.expiredOperations';
-      break;
-    case 'uris': {
-      const safeUris = [...new Set(selector.uris.filter(isSafeIri))];
-      if (safeUris.length === 0) return [];
-      identityFilter = `VALUES ?op { ${safeUris.map(uri => `<${uri}>`).join(' ')} }`;
-      limit = '';
-      source = 'agent.swmCleanup.revalidateOperation';
-      break;
-    }
-  }
+  limit: number,
+): Promise<SharedMemoryExpiredOperation[]> {
   // Bound the identity set before expanding roots or optional V2 fields.
-  // Revalidation uses this exact projection while holding each operation's locks.
   const result = await store.query(`SELECT ?op ?re ?scopeVersion ?kaUal ?snapshotGraph WHERE {
     { SELECT DISTINCT ?op WHERE {
       GRAPH <${metaGraph}> {
-        ${identityFilter}
         ?op <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dkg.io/ontology/WorkspaceOperation> .
         ?op <http://dkg.io/ontology/publishedAt> ?ts .
         FILTER(?ts < "${cutoff}"^^<http://www.w3.org/2001/XMLSchema#dateTime>)
       }
-    } ${limit} }
+    } LIMIT ${limit} }
     GRAPH <${metaGraph}> {
       OPTIONAL { ?op <http://dkg.io/ontology/rootEntity> ?re }
       OPTIONAL {
@@ -169,14 +146,17 @@ async function loadExpiredOperations(
         OPTIONAL { ?op <http://dkg.io/ontology/publicSnapshotGraph> ?snapshotGraph }
       }
     }
-  }`, { source });
+  }`, { source: 'agent.swmCleanup.expiredOperations' });
   return decodeExpiredOperations(result);
 }
 
 function decodeExpiredOperations(
   result: Awaited<ReturnType<TripleStore['query']>>,
-): ExpiredOperation[] {
-  const operations = new Map<string, { operation: ExpiredOperation; roots: Set<string> }>();
+): SharedMemoryExpiredOperation[] {
+  const operations = new Map<string, {
+    operation: SharedMemoryExpiredOperation;
+    roots: Set<string>;
+  }>();
   if (result.type !== 'bindings') return [];
   for (const row of result.bindings) {
     if (!row.op) continue;
@@ -199,46 +179,22 @@ function decodeExpiredOperations(
   return [...operations.values()].map(({ operation, roots }) => ({ ...operation, roots: [...roots] }));
 }
 
-function sameExpiredOperation(left: ExpiredOperation, right: ExpiredOperation): boolean {
-  if (left.uri !== right.uri || left.scope.kind !== right.scope.kind) return false;
-  if (left.roots.length !== right.roots.length
-    || [...left.roots].sort().some((root, index) => root !== [...right.roots].sort()[index])) return false;
-  return left.scope.kind === 'legacy' || (
-    right.scope.kind === 'graph-v2'
-    && left.scope.kaUal === right.scope.kaUal
-    && left.scope.snapshotGraph === right.scope.snapshotGraph
-  );
-}
-
 async function cleanupExpiredBatch(
   context: SwmExpiryCleanupContext,
   target: CleanupTarget,
   cutoff: string,
-  candidates: readonly ExpiredOperation[],
+  candidates: readonly SharedMemoryExpiredOperation[],
 ): Promise<CleanupBatchResult> {
   // Keep at most four operation pipelines in flight; the storage scheduler
   // owns lane admission and reservations. Every admitted sibling settles.
   const batch: CleanupBatchResult = { outcomes: [], errors: [] };
-  // Remote counted-delete APIs measure graph-wide before/after counts. Keep
-  // those mutation sequences disjoint within the target, even for distinct
-  // entity keys. Take this gate AFTER entity/KA locks, so a blocked writer
-  // cannot monopolize the graph's cleanup mutation gate.
-  const countedMutations = new Map<string, Promise<void>>();
   const settled = await mapWithConcurrencySettled(candidates, SWM_CLEANUP_MAX_CONCURRENT_OPERATIONS, async candidate => {
     if (context.isClosed()) return undefined;
-    return withKeyedLocks(context.writeLocks, cleanupWriteLockKeys(target, candidate), async () => {
-      if (context.isClosed()) return undefined;
-      const [current] = await loadExpiredOperations(
-        context.store, target.metaGraph, cutoff, { kind: 'uris', uris: [candidate.uri] },
-      );
-      if (context.isClosed() || !current || !sameExpiredOperation(current, candidate)) return undefined;
-      const graphs = await resolveSharedMemoryScopeGraphs(context.store, target.dataGraph, { kind: 'complete-family' });
-      return withKeyedLocks(countedMutations, [target.metaGraph], async () => {
-        // Retention or shutdown can invalidate the pass while this worker
-        // waits for the preceding counted mutation to drain.
-        if (context.isClosed()) return undefined;
-        return cleanupExpiredOperation(context, target, graphs, current);
-      });
+    return context.publisher.expireSharedMemoryOperation({
+      target,
+      candidate,
+      cutoff,
+      isClosed: context.isClosed,
     });
   });
   for (const outcome of settled) {
@@ -246,87 +202,6 @@ async function cleanupExpiredBatch(
     else if (outcome.value) batch.outcomes.push(outcome.value);
   }
   return batch;
-}
-
-function cleanupWriteLockKeys(target: CleanupTarget, operation: ExpiredOperation): string[] {
-  return [
-    ...operation.roots.map(root => swmEntityWriteLockKey(target.contextGraphId, target.subGraphName, root)),
-    ...(operation.scope.kind === 'graph-v2' && operation.scope.kaUal
-      ? [swmKaWriteLockKey(target.contextGraphId, target.subGraphName, operation.scope.kaUal)]
-      : []),
-  ];
-}
-
-/** Finish one operation before yielding; stop joins this physical work before closing storage. */
-async function cleanupExpiredOperation(
-  { store, workspaceOwnedEntities }: SwmExpiryCleanupContext,
-  target: CleanupTarget,
-  graphs: readonly string[],
-  operation: ExpiredOperation,
-): Promise<CleanupOutcome> {
-  let triplesDeleted = await cleanupLegacyRoots(store, graphs, operation.roots);
-  if (operation.scope.kind === 'graph-v2') {
-    triplesDeleted += await cleanupGraphScopedOperation(store, target.metaGraph, operation.uri, operation.scope);
-  }
-  const metadataDeleted = await store.deleteByPattern({ graph: target.metaGraph, subject: operation.uri });
-  triplesDeleted += metadataDeleted;
-  // Remote delete counts are graph-wide deltas: unrelated writes can offset
-  // them. Establish progress from this exact operation while its locks remain
-  // held; keep the reported count only as a metric.
-  const remaining = await store.query(
-    `ASK { GRAPH <${target.metaGraph}> { <${operation.uri}> ?predicate ?object } }`,
-    { source: 'agent.swmCleanup.verifyOperationDeletion' },
-  );
-  const operationRemoved = remaining.type === 'boolean' && remaining.value === false;
-  for (const root of operation.roots) {
-    triplesDeleted += await store.deleteByPattern({ graph: target.metaGraph, subject: root, predicate: 'http://dkg.io/ontology/workspaceOwner' });
-    workspaceOwnedEntities.get(target.ownershipKey)?.delete(root);
-  }
-  return { triplesDeleted, operationRemoved };
-}
-
-async function cleanupLegacyRoots(store: TripleStore, graphs: readonly string[], roots: readonly string[]): Promise<number> {
-  let deleted = 0;
-  for (const root of roots) {
-    for (const graph of graphs) {
-      deleted += await store.deleteByPattern({ graph, subject: root });
-      deleted += await store.deleteBySubjectPrefix(graph, `${root}/.well-known/genid/`);
-    }
-  }
-  return deleted;
-}
-
-async function cleanupGraphScopedOperation(
-  store: TripleStore,
-  metaGraph: string,
-  uri: string,
-  scope: Extract<ExpiredOperation['scope'], { kind: 'graph-v2' }>,
-): Promise<number> {
-  let deleted = 0;
-  const head = scope.kaUal ? `${scope.kaUal}#dkg-swm-head` : '';
-  if (head && isSafeIri(head)) {
-    // A newer operation owns its live head/assertion graph independently of this expiry.
-    const owner = await store.query(`SELECT ?assertionGraph WHERE {
-      GRAPH <${metaGraph}> {
-        <${uri}> <http://dkg.io/ontology/shareOperationId> ?opId .
-        <${head}> <http://dkg.io/ontology/shareOperationId> ?opId .
-        OPTIONAL { <${head}> <http://dkg.io/ontology/assertionGraph> ?assertionGraph }
-      }
-    } LIMIT 1`, { source: 'agent.swmCleanup.currentHeadOwner' });
-    if (owner.type === 'bindings' && owner.bindings.length > 0) {
-      const graph = owner.bindings[0]?.assertionGraph;
-      if (graph && isSafeIri(graph)) {
-        deleted += await store.deleteByPattern({ graph });
-        await store.dropGraph(graph);
-      }
-      deleted += await store.deleteByPattern({ graph: metaGraph, subject: head });
-    }
-  }
-  if (scope.snapshotGraph && isSafeIri(scope.snapshotGraph)) {
-    deleted += await store.deleteByPattern({ graph: scope.snapshotGraph });
-    await store.dropGraph(scope.snapshotGraph);
-  }
-  return deleted;
 }
 
 async function listGraphsByPrefix(store: TripleStore, prefix: string): Promise<string[]> {

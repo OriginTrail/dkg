@@ -35,6 +35,7 @@ import {
 import { handleOpenclawRoutes } from '../src/daemon/routes/openclaw.js';
 import { mergeOpenClawConfig, type AdapterEntryConfig } from '@origintrail-official/dkg-adapter-openclaw';
 import type { DkgConfig } from '../src/config.js';
+import { commitLocalAgentConnectPlanForTest } from './_helpers/local-agent-connect.js';
 
 // Default entryConfig fixture matching the shape `runSetup` builds at
 // Step 5 — same values setup writes into plugins.entries.adapter-openclaw.config.
@@ -139,11 +140,9 @@ describe('local agent integration registry helpers', () => {
     const restartGateway = () => {};
     const waitForReady = () => {};
     const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
-    const saveConfigCalls: unknown[][] = [];
-    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
-    const result = await connectLocalAgentIntegrationFromUi(
+    const plan = await connectLocalAgentIntegrationFromUi(
       config,
       {
         id: 'openclaw',
@@ -155,12 +154,12 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
 
+    const result = commitLocalAgentConnectPlanForTest(config, 'openclaw', plan);
     expect(result.integration.status).toBe('connecting');
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
@@ -171,7 +170,6 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.runtime.ready).toBe(false);
     expect(integration?.runtime.lastError).toBe('setup failed');
     expect(integration?.metadata?.userDisabled).not.toBe(true);
-    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('keeps an already attached OpenClaw integration enabled when a UI reconnect attempt fails', async () => {
@@ -190,11 +188,9 @@ describe('local agent integration registry helpers', () => {
     const restartGateway = () => {};
     const waitForReady = () => {};
     const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
-    const saveConfigCalls: unknown[][] = [];
-    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
-    const result = await connectLocalAgentIntegrationFromUi(
+    const plan = await connectLocalAgentIntegrationFromUi(
       config,
       {
         id: 'openclaw',
@@ -206,12 +202,12 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
 
+    const result = commitLocalAgentConnectPlanForTest(config, 'openclaw', plan);
     expect(result.integration.status).toBe('connecting');
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
@@ -220,7 +216,6 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.enabled).toBe(true);
     expect(integration?.status).toBe('error');
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
-    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('UI connect runs OpenClaw setup, restarts the gateway, and leaves the integration in connecting state while the gateway is still coming up', async () => {
@@ -238,11 +233,9 @@ describe('local agent integration registry helpers', () => {
       { ok: false as const, error: 'bridge still starting' },
     ];
     const probeHealth = async (...args: unknown[]) => { probeHealthCalls.push(args); return probeResults[probeIdx++]; };
-    const saveConfigCalls: unknown[][] = [];
-    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
-    const result = await connectLocalAgentIntegrationFromUi(
+    const plan = await connectLocalAgentIntegrationFromUi(
       config,
       {
         id: 'openclaw',
@@ -254,12 +247,12 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
 
+    const result = commitLocalAgentConnectPlanForTest(config, 'openclaw', plan);
     expect(result.integration.status).toBe('connecting');
     expect(result.integration.runtime.ready).toBe(false);
     expect(result.notice).toContain('come online automatically');
@@ -275,7 +268,6 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.status).toBe('connecting');
     expect(integration?.runtime.ready).toBe(false);
     expect(integration?.runtime.lastError).toBe('bridge still starting');
-    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('UI connect retries OpenClaw readiness after a gateway restart and reports chat-ready when the bridge comes up', async () => {
@@ -292,11 +284,9 @@ describe('local agent integration registry helpers', () => {
       { ok: false as const, error: 'bridge still starting' },
     ];
     const probeHealth = async () => probeResults[probeIdx++];
-    const saveConfigCalls: unknown[][] = [];
-    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
-    const result = await connectLocalAgentIntegrationFromUi(
+    const plan = await connectLocalAgentIntegrationFromUi(
       config,
       {
         id: 'openclaw',
@@ -308,12 +298,12 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
 
+    const result = commitLocalAgentConnectPlanForTest(config, 'openclaw', plan);
     expect(result.integration.status).toBe('connecting');
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;
@@ -326,7 +316,6 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.status).toBe('ready');
     expect(integration?.runtime.ready).toBe(true);
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
-    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('cancels a pending OpenClaw attach job when the integration is disconnected before attach finishes', async () => {
@@ -340,10 +329,9 @@ describe('local agent integration registry helpers', () => {
     const waitForReadyCalls: unknown[][] = [];
     const waitForReady = (...args: unknown[]) => { waitForReadyCalls.push(args); };
     const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
-    const saveConfig = async () => {};
     let attachJob: Promise<void> | null = null;
 
-    const result = await connectLocalAgentIntegrationFromUi(
+    const plan = await connectLocalAgentIntegrationFromUi(
       config,
       {
         id: 'openclaw',
@@ -355,13 +343,14 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
 
+    const result = commitLocalAgentConnectPlanForTest(config, 'openclaw', plan);
     expect(result.integration.status).toBe('connecting');
+    await vi.waitFor(() => expect(releaseSetup).toBeTypeOf('function'));
     cancelPendingLocalAgentAttachJob('openclaw');
     updateLocalAgentIntegration(config, 'openclaw', {
       enabled: false,
@@ -413,10 +402,9 @@ describe('local agent integration registry helpers', () => {
       { ok: false as const, error: 'still starting' },
     ];
     const probeHealth = async () => probeResults[probeIdx++];
-    const saveConfig = async () => {};
     let attachJob: Promise<void> | null = null;
 
-    const result = await connectLocalAgentIntegrationFromUi(
+    const plan = await connectLocalAgentIntegrationFromUi(
       config,
       {
         id: 'openclaw',
@@ -428,12 +416,12 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
 
+    const result = commitLocalAgentConnectPlanForTest(config, 'openclaw', plan);
     expect(result.integration.status).toBe('connecting');
     await waitForReadyStarted;
     cancelPendingLocalAgentAttachJob('openclaw');

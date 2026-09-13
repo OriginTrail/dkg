@@ -197,7 +197,10 @@ export function getHermesChannelTargets(config: Pick<ImmutableDkgConfig, 'localA
     !!explicitHealthUrl
     && (
       (!!normalizedGatewayBase && urlBelongsToBase(explicitHealthUrl, normalizedGatewayBase))
-      || (!!openAiGatewayBase && urlBelongsToBase(explicitHealthUrl, openAiGatewayBase))
+      // Hermes' OpenAI-compatible API has one fixed health route. Treating
+      // every same-origin path as valid lets a legacy bridge health override
+      // survive a transport migration and keeps probing the wrong endpoint.
+      || (!!openAiGatewayBase && explicitHealthUrl === `${trimTrailingSlashes(openAiGatewayBase)}/health`)
     );
   const targets: HermesChannelTarget[] = [];
   const seenInboundUrls = new Set<string>();

@@ -339,10 +339,6 @@ import {
   type SelectedSwmMetaRetentionLimits,
 } from './sync/selected-swm-meta-budget.js';
 import {
-  selectSwmSnapshotCoverage,
-  sharedMemoryOwnershipKeyFromGraph,
-} from './sync/requester/shared-memory-sync.js';
-import {
   emptySharedMemorySyncResult as createEmptySharedMemorySyncResult,
   mergeFleetSharedMemoryDiagnostics,
   mergeSamePeerSharedMemoryDiagnostics,

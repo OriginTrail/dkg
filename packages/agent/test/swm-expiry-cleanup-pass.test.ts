@@ -128,11 +128,11 @@ it.each([
   const selected: string[] = [];
   vi.mocked(f.store.listGraphsByPrefix!).mockImplementation(async prefix => graphs.filter(graph => graph.startsWith(prefix)));
   vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
-    if (options?.source === 'agent.swmCleanup.verifyOperationDeletion') {
+    if (options?.source === 'publisher.swmExpiry.verifyOperationDeletion') {
       const graph = graphs.find(value => sparql.includes(`<${value}>`));
       return { type: 'boolean', value: graph !== last || !deletable || pending };
     }
-    if (options?.source === 'agent.swmCleanup.revalidateOperation') {
+    if (options?.source === 'publisher.swmExpiry.revalidateOperation') {
       const graph = graphs.find(value => sparql.includes(`<${value}>`));
       return { type: 'bindings', bindings: graph ? [{ op: `urn:stalled:${graphs.indexOf(graph)}` }] : [] };
     }
@@ -166,12 +166,12 @@ it.each([
 it('revalidates each operation independently after bounded page discovery', async () => {
   const f = await createSwmExpiryFixture(501);
   await f.agent.cleanupExpiredSharedMemory();
-  const cleanupReads = vi.mocked(f.store.query).mock.calls.filter(([, options]) => options?.source?.startsWith('agent.swmCleanup.'));
+  const cleanupReads = vi.mocked(f.store.query).mock.calls;
   expect(f.operations.size).toBe(0);
   expect(cleanupReads.filter(([, options]) =>
     options?.source === 'agent.swmCleanup.expiredOperations')).toHaveLength(4);
   expect(cleanupReads.filter(([, options]) =>
-    options?.source === 'agent.swmCleanup.revalidateOperation')).toHaveLength(501);
+    options?.source === 'publisher.swmExpiry.revalidateOperation')).toHaveLength(501);
 });
 
 it.each([false, true])('hydrates the same complete operation during discovery and revalidation (V2=%s)', async graphV2 => {
@@ -201,7 +201,7 @@ it.each([false, true])('hydrates the same complete operation during discovery an
   const hydrated = new Map<string, Record<string, string>[]>();
   vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
     const result = await query(sparql, options);
-    if ((options?.source === 'agent.swmCleanup.expiredOperations' || options?.source === 'agent.swmCleanup.revalidateOperation')
+    if ((options?.source === 'agent.swmCleanup.expiredOperations' || options?.source === 'publisher.swmExpiry.revalidateOperation')
       && result.type === 'bindings' && result.bindings.length > 0) {
       hydrated.set(options.source, [...result.bindings].sort((a, b) => a.re.localeCompare(b.re)));
     }
@@ -211,7 +211,7 @@ it.each([false, true])('hydrates the same complete operation during discovery an
   expect(await agent.cleanupExpiredSharedMemory()).toBe(graphV2 ? 11 : 7);
   const discovered = hydrated.get('agent.swmCleanup.expiredOperations');
   expect(discovered).toHaveLength(2);
-  expect(hydrated.get('agent.swmCleanup.revalidateOperation')).toEqual(discovered);
+  expect(hydrated.get('publisher.swmExpiry.revalidateOperation')).toEqual(discovered);
   expect(discovered?.map(row => row.re)).toEqual(['urn:root:a', 'urn:root:b']);
   if (graphV2) {
     expect(discovered).toEqual(expect.arrayContaining([expect.objectContaining({ scopeVersion: expect.any(String), kaUal, snapshotGraph })]));
@@ -227,7 +227,7 @@ it('does not interpolate an unsafe discovered operation URI into revalidation', 
   expect(await f.agent.cleanupExpiredSharedMemory()).toBe(0);
   expect(f.operations.size).toBe(1);
   expect(vi.mocked(f.store.query).mock.calls.some(([, options]) => options?.source === 'agent.swmCleanup.expiredOperations')).toBe(true);
-  expect(vi.mocked(f.store.query).mock.calls.some(([, options]) => options?.source === 'agent.swmCleanup.revalidateOperation')).toBe(false);
+  expect(vi.mocked(f.store.query).mock.calls.some(([, options]) => options?.source === 'publisher.swmExpiry.revalidateOperation')).toBe(false);
   expect(f.store.deleteByPattern).not.toHaveBeenCalled();
 });
 
@@ -243,7 +243,7 @@ it('awaits all 1001 initially expired operations and includes every deletion in 
 it('logs cutoff conversion failures and resolves through the cleanup error contract', async () => {
   const f = await createSwmExpiryFixture(1);
   await expect(runSwmExpiryCleanup(
-    swmExpiryCleanupContext(f.agent, { writeLocks: new Map() }),
+    swmExpiryCleanupContext(f.agent),
     { cutoffMs: 1e20 },
   )).resolves.toMatchObject({ triplesDeleted: 0 });
   expect(f.warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Invalid time value'));
@@ -304,7 +304,7 @@ it.each([false, true])('waits for an admitted deletion after a sibling revalidat
   });
   const read = store.query.bind(store);
   const query = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
-    if (failOnce && options?.source === 'agent.swmCleanup.revalidateOperation' && sparql.includes(`<${failedOp}>`)) {
+    if (failOnce && options?.source === 'publisher.swmExpiry.revalidateOperation' && sparql.includes(`<${failedOp}>`)) {
       failOnce = false; failureObserved = true; throw new Error('injected sibling revalidation failure');
     }
     return read(sparql, options);

@@ -7,6 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { DkgConfig } from '../src/config.js';
 import {
+  commitLocalAgentConnectPlanForTest,
+  commitLocalAgentRefreshPatchForTest,
+} from './_helpers/local-agent-connect.js';
+import {
   getPrimeAgentChannelTargets,
   isPrimeAgentLoopbackUrl,
   normalizePrimeAgentChatPayload,
@@ -553,12 +557,13 @@ describe('connect from the Node UI', () => {
     const runPrimeAgentSetup = vi.fn(async () => ({ ok: true, errors: [], warnings: [] }));
     const config = makeConfig();
 
-    const result = await connectLocalAgentIntegrationFromUi(
+    const plan = await connectLocalAgentIntegrationFromUi(
       config,
       { id: 'prime-agent' } as any,
       'bridge-token',
       { runPrimeAgentSetup } as any,
     );
+    const result = commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
 
     expect(runPrimeAgentSetup).toHaveBeenCalledOnce();
     // No session yet is expected right after install, so this must not read as
@@ -572,12 +577,14 @@ describe('connect from the Node UI', () => {
     writeDescriptor('s1', bridge.url);
     const runPrimeAgentSetup = vi.fn(async () => ({ ok: true, errors: [], warnings: [] }));
 
-    const result = await connectLocalAgentIntegrationFromUi(
-      makeConfig(),
+    const config = makeConfig();
+    const plan = await connectLocalAgentIntegrationFromUi(
+      config,
       { id: 'prime-agent' } as any,
       'bridge-token',
       { runPrimeAgentSetup } as any,
     );
+    const result = commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
 
     expect(result.integration.runtime?.status).toBe('ready');
     expect(result.integration.metadata).toMatchObject({
@@ -594,12 +601,14 @@ describe('connect from the Node UI', () => {
     writeDescriptor('head', head.url, process.pid, '2026-08-07T12:00:00.000Z');
     writeDescriptor('survivor', survivor.url, process.pid, '2026-08-07T11:00:00.000Z');
 
-    const result = await connectLocalAgentIntegrationFromUi(
-      makeConfig(),
+    const config = makeConfig();
+    const plan = await connectLocalAgentIntegrationFromUi(
+      config,
       { id: 'prime-agent' } as any,
       'bridge-token',
       { runPrimeAgentSetup: vi.fn(async () => ({ ok: true, errors: [], warnings: [] })) } as any,
     );
+    const result = commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
 
     expect(result.integration.metadata).toMatchObject({
       sessionCount: 2,
@@ -617,7 +626,8 @@ describe('connect from the Node UI', () => {
       activeSessionId: 'stale',
     };
 
-    const { integration: live } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { patch: livePatch } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const live = commitLocalAgentRefreshPatchForTest(config, 'prime-agent', livePatch);
     expect(live.metadata).toMatchObject({
       sessionCount: 1,
       activeSessionId: 'current',
@@ -625,7 +635,8 @@ describe('connect from the Node UI', () => {
     });
 
     rmSync(join(sessionsDir, 'current.json'));
-    const { integration: idle } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { patch: idlePatch } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const idle = commitLocalAgentRefreshPatchForTest(config, 'prime-agent', idlePatch);
     expect(idle.metadata).toMatchObject({
       sessionCount: 0,
       activeSessionId: null,
@@ -640,12 +651,14 @@ describe('connect from the Node UI', () => {
       warnings: [],
     }));
 
-    const result = await connectLocalAgentIntegrationFromUi(
-      makeConfig(),
+    const config = makeConfig();
+    const plan = await connectLocalAgentIntegrationFromUi(
+      config,
       { id: 'prime-agent' } as any,
       'bridge-token',
       { runPrimeAgentSetup } as any,
     );
+    const result = commitLocalAgentConnectPlanForTest(config, 'prime-agent', plan);
 
     expect(result.integration.runtime?.status).toBe('error');
     expect(result.integration.runtime?.lastError).toContain('not writable');
@@ -672,7 +685,8 @@ describe('refresh from the Node UI', () => {
       },
     } as Partial<DkgConfig>);
 
-    const { integration: result } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { patch } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const result = commitLocalAgentRefreshPatchForTest(config, 'prime-agent', patch);
 
     expect(result.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
     expect(result.transport).toMatchObject({ kind: 'prime-agent-channel', bridgeUrl: bridge.url });
@@ -686,7 +700,8 @@ describe('refresh from the Node UI', () => {
     writeDescriptor('survivor', survivor.url, process.pid, '2026-08-07T11:00:00.000Z');
     const config = enabledConfig();
 
-    const { integration: result } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { patch } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const result = commitLocalAgentRefreshPatchForTest(config, 'prime-agent', patch);
 
     expect(result.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
     expect(result.transport).toMatchObject({
@@ -712,7 +727,8 @@ describe('refresh from the Node UI', () => {
       },
     } as Partial<DkgConfig>);
 
-    const { integration: result } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const { patch } = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    const result = commitLocalAgentRefreshPatchForTest(config, 'prime-agent', patch);
 
     expect(result.runtime).toMatchObject({
       status: 'degraded',

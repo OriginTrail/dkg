@@ -1766,8 +1766,10 @@ export class DKGAgentBase {
     this.workspaceOwnedEntities = workspaceOwnedEntities;
     this.swmExpiryCleanupWorker = new SwmExpiryCleanupWorker(
       (request, isClosed) => runSwmExpiryCleanup({
-        store: this.store, workspaceOwnedEntities: this.workspaceOwnedEntities,
-        writeLocks, log: this.log, isClosed,
+        store: this.store,
+        publisher: this.publisher,
+        log: this.log,
+        isClosed,
       }, request),
       () => this.config.sharedMemoryTtlMs,
       SWM_CLEANUP_INTERVAL_MS,

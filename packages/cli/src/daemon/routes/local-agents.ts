@@ -287,8 +287,6 @@ import {
 import {
   type LocalAgentIntegrationDefinition,
   type LocalAgentIntegrationRecord,
-  type LocalAgentUiConnectResult,
-  LocalAgentUiConnectError,
   LOCAL_AGENT_INTEGRATION_DEFINITIONS,
   isPlainRecord,
   normalizeIntegrationId,
@@ -429,10 +427,6 @@ export interface LocalAgentRoutesDeps {
   refreshFromUi?: typeof refreshLocalAgentIntegrationFromUi;
 }
 
-type PreparedUiConnectOutcome =
-  | { ok: true; result: LocalAgentUiConnectResult }
-  | { ok: false; error: LocalAgentUiConnectError };
-
 export async function handleLocalAgentsRoutes(
   ctx: RequestContext,
   deps: LocalAgentRoutesDeps = {},
@@ -512,37 +506,30 @@ export async function handleLocalAgentsRoutes(
       const wasExplicitlyDisabled = isLocalAgentExplicitlyUserDisabled(
         getStoredLocalAgentIntegrations(config)[normalizeIntegrationId(id)],
       );
-      let releaseInitialCommit!: () => void;
-      const initialCommitFinished = new Promise<void>(resolve => { releaseInitialCommit = resolve; });
-      try {
-        let outcome: PreparedUiConnectOutcome;
-        try {
-          outcome = {
-            ok: true,
-            result: await (deps.connectFromUi ?? connectLocalAgentIntegrationFromUi)(mutableConfigSnapshot(config), parsed, bridgeAuthToken, {
-              saveConfig: async (_deferredCandidate, patch) => {
-                await initialCommitFinished;
-                await persistLocalAgentAttachPatch(ctx, id, patch);
-              },
-            }),
-          };
-        } catch (error) {
-          if (!(error instanceof LocalAgentUiConnectError)) throw error;
-          outcome = { ok: false, error };
-        }
-        const prepared = outcome.ok ? outcome.result : outcome.error;
-        const integration = await commitPreparedLocalAgentPatch(
-          ctx, id, wasExplicitlyDisabled, prepared.patch, prepared.registration,
-        );
-        if (!outcome.ok) throw outcome.error;
-        return jsonResponse(res, 200, {
-          ok: true,
-          integration: withPrimeAgentSessionCount(integration),
-          notice: outcome.result.notice,
-        });
-      } finally {
-        releaseInitialCommit();
+      const plan = await (deps.connectFromUi ?? connectLocalAgentIntegrationFromUi)(
+        config,
+        parsed,
+        bridgeAuthToken,
+      );
+      const integration = await commitPreparedLocalAgentPatch(
+        ctx,
+        id,
+        wasExplicitlyDisabled,
+        plan.initialPatch,
+        plan.registration,
+      );
+      if (!plan.ok) {
+        return jsonResponse(res, 400, { error: plan.error });
       }
+      const afterCommitNotice = plan.afterCommit?.({
+        current: () => ctx.configStore.current,
+        persist: (patch) => persistLocalAgentAttachPatch(ctx, id, patch),
+      });
+      return jsonResponse(res, 200, {
+        ok: true,
+        integration: withPrimeAgentSessionCount(integration),
+        notice: afterCommitNotice ?? plan.notice,
+      });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
     }
@@ -569,7 +556,7 @@ export async function handleLocalAgentsRoutes(
         getStoredLocalAgentIntegrations(config)[normalizedId],
       );
       const prepared = await (deps.refreshFromUi ?? refreshLocalAgentIntegrationFromUi)(
-        mutableConfigSnapshot(config), normalizedId, bridgeAuthToken,
+        config, normalizedId, bridgeAuthToken,
       );
       const integration = await commitPreparedLocalAgentPatch(
         ctx, normalizedId, wasExplicitlyDisabled, prepared.patch,

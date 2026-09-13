@@ -458,3 +458,10 @@ export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
 export { withKeyedLocks, swmKaWriteLockKey, swmEntityWriteLockKey } from './keyed-lock.js';
+export {
+  SharedMemoryExpiryMutationCoordinator,
+  type SharedMemoryExpiredOperation,
+  type SharedMemoryExpiryMutationOutcome,
+  type SharedMemoryExpiryMutationRequest,
+  type SharedMemoryExpiryTarget,
+} from './swm-expiry-mutation.js';

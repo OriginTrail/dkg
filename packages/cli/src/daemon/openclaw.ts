@@ -31,7 +31,6 @@ import {
   dkgDir,
   saveConfig,
   loadConfig,
-  type DkgConfig,
   type LocalAgentIntegrationConfig,
   type LocalAgentIntegrationTransport,
 } from '../config.js';
@@ -471,10 +470,6 @@ export type OpenClawUiAttachDeps = {
     bridgeAuthToken: string | undefined,
     opts?: { ignoreBridgeCache?: boolean; timeoutMs?: number },
   ) => Promise<OpenClawChannelHealthReport>;
-  saveConfig?: (
-    config: DkgConfig,
-    patch: LocalAgentAttachStatePatch,
-  ) => Promise<void>;
   onAttachScheduled?: (id: string, job: Promise<void>) => void;
   verifyMemorySlot?: () => boolean;
 };

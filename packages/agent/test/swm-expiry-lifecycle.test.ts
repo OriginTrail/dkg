@@ -267,7 +267,7 @@ it('stops a never-started agent during manual cleanup without admitting a backlo
 
 it.each([
   'agent.swmCleanup.expiredOperations',
-  'agent.swmCleanup.revalidateOperation',
+  'publisher.swmExpiry.revalidateOperation',
 ])('preserves newly retained operations during an active %s query and serves them through sync', async gatedSource => {
   const cap = captureSyncHandler();
   const actual = await vi.importActual<typeof import('../src/sync/responder/sync-handler.js')>('../src/sync/responder/sync-handler.js');

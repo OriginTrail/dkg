@@ -35,6 +35,7 @@ import {
 import { handleOpenclawRoutes } from '../src/daemon/routes/openclaw.js';
 import { mergeOpenClawConfig, type AdapterEntryConfig } from '@origintrail-official/dkg-adapter-openclaw';
 import type { DkgConfig } from '../src/config.js';
+import { commitLocalAgentRefreshPatchForTest } from './_helpers/local-agent-connect.js';
 
 // Default entryConfig fixture matching the shape `runSetup` builds at
 // Step 5 — same values setup writes into plugins.entries.adapter-openclaw.config.
@@ -372,7 +373,8 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     }) as typeof fetch;
 
     try {
-      const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      const { patch } = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      const integration = commitLocalAgentRefreshPatchForTest(config, 'openclaw', patch);
       expect(fetchCalls).toBeGreaterThan(0);
       expect(integration.status).toBe('ready');
       expect(integration.runtime.ready).toBe(true);
@@ -406,7 +408,8 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     })) as typeof fetch;
 
     try {
-      const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      const { patch } = await refreshLocalAgentIntegrationFromUi(config, 'openclaw', 'bridge-token');
+      const integration = commitLocalAgentRefreshPatchForTest(config, 'openclaw', patch);
       expect(integration.status).toBe('error');
       expect(integration.runtime.ready).toBe(false);
       expect(integration.runtime.lastError).toBeTruthy();
@@ -426,7 +429,8 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     }) as typeof fetch;
 
     try {
-      const { integration } = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+      const { patch } = await refreshLocalAgentIntegrationFromUi(config, 'hermes', 'bridge-token');
+      const integration = commitLocalAgentRefreshPatchForTest(config, 'hermes', patch);
       expect(integration).toBeTruthy();
       expect(integration.id).toBe('hermes');
       expect(fetchCalls).toBe(1);

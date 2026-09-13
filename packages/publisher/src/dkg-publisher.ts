@@ -19,6 +19,11 @@ import { measureCanonicalPublicationPayload } from './publication-payload-measur
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
 import { assertNoKnowledgeAssetPayloadNamedGraphs } from './knowledge-asset-graph-policy.js';
 import { withKeyedLocks, swmEntityWriteLockKey } from './keyed-lock.js';
+import {
+  SharedMemoryExpiryMutationCoordinator,
+  type SharedMemoryExpiryMutationOutcome,
+  type SharedMemoryExpiryMutationRequest,
+} from './swm-expiry-mutation.js';
 import { tagPromoteStep } from './promote-step-tag.js';
 import {
   classifyExactSwmGraphReplaceFailure,
@@ -1163,6 +1168,7 @@ export class DKGPublisher implements Publisher {
   private readonly sessionId = Date.now().toString(36);
   private tentativeCounter = 0;
   readonly writeLocks: Map<string, Promise<void>>;
+  private readonly swmExpiryMutationCoordinator: SharedMemoryExpiryMutationCoordinator;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /** OT-RFC-43 Option 1 — deterministic KA-id allocator (optional; see DKGPublisherConfig). */
   private readonly kaAllocator?: KaIdAllocator;
@@ -1227,6 +1233,11 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities = config.sharedMemoryOwnedEntities ?? new Map();
     this.knownBatchContextGraphs = config.knownBatchContextGraphs ?? new Map();
     this.writeLocks = writeLocksForStore(this.store, config.writeLocks);
+    this.swmExpiryMutationCoordinator = new SharedMemoryExpiryMutationCoordinator({
+      store: this.store,
+      ownedEntities: this.sharedMemoryOwnedEntities,
+      writeLocks: this.writeLocks,
+    });
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
@@ -1279,6 +1290,13 @@ export class DKGPublisher implements Publisher {
         ? {}
         : { publicSnapshotStore: this.publicSnapshotStore }),
     });
+  }
+
+  /** Execute one lock-protected physical expiry mutation in the canonical SWM write domain. */
+  expireSharedMemoryOperation(
+    request: SharedMemoryExpiryMutationRequest,
+  ): Promise<SharedMemoryExpiryMutationOutcome | undefined> {
+    return this.swmExpiryMutationCoordinator.expire(request);
   }
 
   private async onChainContextGraphMatchesLocalId(

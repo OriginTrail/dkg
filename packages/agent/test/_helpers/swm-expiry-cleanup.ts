@@ -47,14 +47,13 @@ export async function stopTrackedSwmExpiryAgents(): Promise<void> {
 
 export function swmExpiryCleanupContext(
   agent: DKGAgent,
-  overrides: Partial<Pick<SwmExpiryCleanupContext, 'writeLocks' | 'isClosed'>> = {},
+  overrides: Partial<Pick<SwmExpiryCleanupContext, 'publisher' | 'isClosed'>> = {},
 ): SwmExpiryCleanupContext {
-  const { store, log, workspaceOwnedEntities, writeLocks } = agent as unknown as SwmExpiryTestInternals;
+  const { store, log, publisher } = agent as unknown as SwmExpiryTestInternals;
   return {
     store,
     log,
-    workspaceOwnedEntities,
-    writeLocks: overrides.writeLocks ?? writeLocks,
+    publisher: overrides.publisher ?? publisher,
     isClosed: overrides.isClosed ?? (() => false),
   };
 }
@@ -83,10 +82,10 @@ export async function createSwmExpiryFixture(
   });
   vi.spyOn(store, 'hasGraph').mockResolvedValue(true);
   vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
-    if (options?.source === 'agent.swmCleanup.verifyOperationDeletion') {
+    if (options?.source === 'publisher.swmExpiry.verifyOperationDeletion') {
       return { type: 'boolean', value: [...operations].some(op => sparql.includes(`<${op}>`)) };
     }
-    if (options?.source === 'agent.swmCleanup.revalidateOperation') {
+    if (options?.source === 'publisher.swmExpiry.revalidateOperation') {
       const op = [...operations].find(candidate => sparql.includes(`<${candidate}>`));
       return { type: 'bindings', bindings: op ? [{ op, re: 'urn:expiry:root' }] : [] };
     }

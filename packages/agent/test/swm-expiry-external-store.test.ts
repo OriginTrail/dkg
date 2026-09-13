@@ -1,7 +1,7 @@
 import { setImmediate } from 'node:timers/promises';
 import { afterEach, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { isStoreSchedulerBusyError, StorePriorityScheduler, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { isStoreSchedulerBusyError, OxigraphStore, StorePriorityScheduler, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { CG, META, WS, stopTrackedSwmExpiryAgents, trackSwmExpiryAgent, type SwmExpiryTestInternals } from './_helpers/swm-expiry-cleanup.js';
 
@@ -62,25 +62,22 @@ function externalStore(inner: TripleStore, afterPatternDelete?: (pattern: Partia
 }
 
 it.each([8, 250])('drains %i distinct entity locks with a four-slot/64-queue remote store and exact deletion totals', async count => {
-  const agent = trackSwmExpiryAgent(await DKGAgent.create({ name: 'expiry-external-store',
-    chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 }));
-  const internals = agent as unknown as SwmExpiryTestInternals;
-  const inner = internals.store;
-  await seedExpiredOperations(inner, count);
+  const inner = new OxigraphStore();
   const { store, stats, scheduler } = externalStore(inner);
-  internals.store = store;
+  const agent = trackSwmExpiryAgent(await DKGAgent.create({ name: 'expiry-external-store',
+    chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000, store }));
+  const internals = agent as unknown as SwmExpiryTestInternals;
+  await seedExpiredOperations(inner, count);
   const warning = vi.spyOn(internals.log, 'warn').mockImplementation(() => {});
-  try {
-    const total = await agent.cleanupExpiredSharedMemory();
-    expect(stats.busy).toBe(0);
-    expect(await inner.countQuads(META)).toBe(0);
-    expect(await inner.countQuads(WS)).toBe(0);
-    expect(total).toBe(count * 6);
-    expect(stats.maxActiveDeletes).toBe(1);
-    expect(warning).not.toHaveBeenCalled();
-    expect(scheduler.snapshot.normalInflight).toBe(0);
-    expect(scheduler.snapshot.normalQueued).toBe(0);
-  } finally { internals.store = inner; }
+  const total = await agent.cleanupExpiredSharedMemory();
+  expect(stats.busy).toBe(0);
+  expect(await inner.countQuads(META)).toBe(0);
+  expect(await inner.countQuads(WS)).toBe(0);
+  expect(total).toBe(count * 6);
+  expect(stats.maxActiveDeletes).toBe(1);
+  expect(warning).not.toHaveBeenCalled();
+  expect(scheduler.snapshot.normalInflight).toBe(0);
+  expect(scheduler.snapshot.normalQueued).toBe(0);
 });
 
 async function seedExpiredOperations(inner: TripleStore, count: number): Promise<void> {
@@ -104,11 +101,7 @@ async function seedExpiredOperations(inner: TripleStore, count: number): Promise
 
 
 it.each([251, 1001])('drains %i expired operations when unrelated writes offset every metadata deletion count', async count => {
-  const agent = trackSwmExpiryAgent(await DKGAgent.create({ name: 'expiry-offset-counts',
-    chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000 }));
-  const internals = agent as unknown as SwmExpiryTestInternals;
-  const inner = internals.store;
-  await seedExpiredOperations(inner, count);
+  const inner = new OxigraphStore();
   let unrelatedWrites = 0;
   const { store, stats, scheduler } = externalStore(inner, async (pattern, deleted) => {
     if (pattern.graph !== META || !pattern.subject?.startsWith('urn:expiry:external:op:')) return;
@@ -121,21 +114,22 @@ it.each([251, 1001])('drains %i expired operations when unrelated writes offset 
     })));
     unrelatedWrites++;
   });
-  internals.store = store;
+  const agent = trackSwmExpiryAgent(await DKGAgent.create({ name: 'expiry-offset-counts',
+    chainAdapter: new MockChainAdapter(), sharedMemoryTtlMs: 60_000, store }));
+  const internals = agent as unknown as SwmExpiryTestInternals;
+  await seedExpiredOperations(inner, count);
   const warning = vi.spyOn(internals.log, 'warn').mockImplementation(() => {});
-  try {
-    const total = await agent.cleanupExpiredSharedMemory();
-    expect(await inner.query(`ASK { GRAPH <${META}> { ?op a <http://dkg.io/ontology/WorkspaceOperation> } }`))
-      .toEqual({ type: 'boolean', value: false });
-    expect(await inner.countQuads(WS)).toBe(0);
-    expect(await inner.countQuads(META)).toBe(count * 3);
-    expect(unrelatedWrites).toBe(count);
-    expect(stats.zeroCountedDeletes).toBe(count);
-    // The adapter still reports graph-wide count deltas; progress is independent.
-    expect(total).toBe(count * 3);
-    expect(stats.busy).toBe(0);
-    expect(warning).not.toHaveBeenCalled();
-    expect(scheduler.snapshot.normalInflight).toBe(0);
-    expect(scheduler.snapshot.normalQueued).toBe(0);
-  } finally { internals.store = inner; }
+  const total = await agent.cleanupExpiredSharedMemory();
+  expect(await inner.query(`ASK { GRAPH <${META}> { ?op a <http://dkg.io/ontology/WorkspaceOperation> } }`))
+    .toEqual({ type: 'boolean', value: false });
+  expect(await inner.countQuads(WS)).toBe(0);
+  expect(await inner.countQuads(META)).toBe(count * 3);
+  expect(unrelatedWrites).toBe(count);
+  expect(stats.zeroCountedDeletes).toBe(count);
+  // The adapter still reports graph-wide count deltas; progress is independent.
+  expect(total).toBe(count * 3);
+  expect(stats.busy).toBe(0);
+  expect(warning).not.toHaveBeenCalled();
+  expect(scheduler.snapshot.normalInflight).toBe(0);
+  expect(scheduler.snapshot.normalQueued).toBe(0);
 }, 120_000);

@@ -35,6 +35,7 @@ import {
 import { handleOpenclawRoutes } from '../src/daemon/routes/openclaw.js';
 import { mergeOpenClawConfig, type AdapterEntryConfig } from '@origintrail-official/dkg-adapter-openclaw';
 import type { DkgConfig } from '../src/config.js';
+import { commitLocalAgentConnectPlanForTest } from './_helpers/local-agent-connect.js';
 
 // Default entryConfig fixture matching the shape `runSetup` builds at
 // Step 5 — same values setup writes into plugins.entries.adapter-openclaw.config.
@@ -183,14 +184,13 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
     const restartGateway = async () => {};
     const waitForReady = async () => ({ ok: true as const, target: 'bridge' });
     const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
-    const saveConfig = async () => {};
     const verifyMemorySlot = () => {
       const raw = readFileSync(openclawConfigPath, 'utf-8');
       return JSON.parse(raw)?.plugins?.slots?.memory === 'adapter-openclaw';
     };
     let attachJob: Promise<void> | null = null;
 
-    const result = await connectLocalAgentIntegrationFromUi(
+    const plan = await connectLocalAgentIntegrationFromUi(
       config,
       { id: 'openclaw', metadata: { source: 'node-ui' } },
       'bridge-token',
@@ -199,12 +199,12 @@ describe('OpenClaw UI Connect/Disconnect/Refresh fresh-HOME integration (issue #
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
         verifyMemorySlot,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
     );
 
+    const result = commitLocalAgentConnectPlanForTest(config, 'openclaw', plan);
     expect(result.integration.status).toBe('connecting');
     if (!attachJob) throw new Error('Expected OpenClaw attach job to be scheduled');
     await attachJob;

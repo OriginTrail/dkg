@@ -82,10 +82,10 @@ it.each([undefined, 'research'])('waits for a real entity share to commit fresh 
       .toMatchObject({ bindings: [{ value: '"fresh"' }] });
     releaseSelection();
     await new Promise(resolve => setImmediate(resolve));
-    expect(reads.mock.calls.filter(([, options]) => options?.source === 'agent.swmCleanup.revalidateOperation')).toHaveLength(0);
+    expect(reads.mock.calls.filter(([, options]) => options?.source === 'publisher.swmExpiry.revalidateOperation')).toHaveLength(0);
     releaseWriter();
     const [fresh] = await Promise.all([writer, cleanup]);
-    expect(reads.mock.calls.some(([, options]) => options?.source === 'agent.swmCleanup.revalidateOperation')).toBe(true);
+    expect(reads.mock.calls.some(([, options]) => options?.source === 'publisher.swmExpiry.revalidateOperation')).toBe(true);
     expect(await query(`SELECT ?value WHERE { GRAPH <${ws}> { <${root}> <urn:value> ?value } }`))
       .toMatchObject({ bindings: [{ value: '"fresh"' }] });
     expect(await query(`SELECT ?op WHERE { GRAPH <${meta}> {
@@ -173,7 +173,7 @@ it.each([undefined, 'research'])('serializes V2 expiry with the real KA staging 
   let held = false;
   vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
     const result = await query(sparql, options);
-    if (!held && options?.source === 'agent.swmCleanup.currentHeadOwner') {
+    if (!held && options?.source === 'publisher.swmExpiry.currentHeadOwner') {
       held = true; entered(); await gate;
     }
     return result;
@@ -242,7 +242,7 @@ it.each([undefined, 'research'])('preserves a V2 writer holding the canonical KA
     cleanup = agent.cleanupExpiredSharedMemory();
     await atSelection;
     await new Promise(resolve => setImmediate(resolve));
-    expect(reads.mock.calls.filter(([, options]) => options?.source === 'agent.swmCleanup.currentHeadOwner')).toHaveLength(0);
+    expect(reads.mock.calls.filter(([, options]) => options?.source === 'publisher.swmExpiry.currentHeadOwner')).toHaveLength(0);
     release();
     await Promise.all([writer, cleanup]);
     expect(await query(`SELECT ?value WHERE { GRAPH <${old.swmGraph}> { <urn:expiry:held-ka-root> <urn:value> ?value } }`))
