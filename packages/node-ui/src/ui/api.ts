@@ -3210,6 +3210,17 @@ export type OperationalWalletCapability =
   | { available: false }
   | { available: true; snapshot: OperationalWalletSnapshot };
 
+function isOperationalWalletEntry(
+  value: unknown,
+): value is OperationalWalletSnapshot['wallets'][number] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Partial<OperationalWalletSnapshot['wallets'][number]>;
+  return typeof item.address === 'string'
+    && typeof item.isAdmin === 'boolean'
+    && typeof item.isPrimary === 'boolean'
+    && (typeof item.registered === 'boolean' || item.registered === null);
+}
+
 function isOperationalWalletSnapshot(value: unknown): value is OperationalWalletSnapshot {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const item = value as Partial<OperationalWalletSnapshot>;
@@ -3217,7 +3228,8 @@ function isOperationalWalletSnapshot(value: unknown): value is OperationalWallet
     && typeof item.hasProfile === 'boolean'
     && typeof item.adminKeyConfigured === 'boolean'
     && typeof item.canManage === 'boolean'
-    && Array.isArray(item.wallets);
+    && Array.isArray(item.wallets)
+    && item.wallets.every(isOperationalWalletEntry);
 }
 
 /**

@@ -16,6 +16,7 @@ import {
   fetchRetentionSettings,
   fetchTelemetrySettings,
   fetchIdentityWalletContracts,
+  fetchOperationalWallets,
   markNotificationsRead,
   fetchRpcHealth,
   fetchQueryHistory,
@@ -254,6 +255,42 @@ describe('UI API tests', () => {
     it('treats a malformed optional identity-wallet bootstrap as unavailable', async () => {
       await expect(fetchIdentityWalletContracts()).resolves.toBeNull();
       expect(requestLog.some(r => r.url.startsWith('/api/identity-wallets/contracts'))).toBe(true);
+    });
+
+    it.each([
+      ['missing address', { isAdmin: false, isPrimary: false, registered: true }],
+      ['non-boolean admin flag', { address: '0xabc', isAdmin: 'yes', isPrimary: false, registered: true }],
+      ['non-boolean primary flag', { address: '0xabc', isAdmin: false, isPrimary: 0, registered: true }],
+      ['invalid registration state', { address: '0xabc', isAdmin: false, isPrimary: false, registered: 'unknown' }],
+    ])('rejects an operational-wallet entry with %s', async (_label, wallet) => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/operational-wallets'),
+        status: 200,
+        body: {
+          identityId: '61',
+          hasProfile: true,
+          adminKeyConfigured: true,
+          canManage: true,
+          wallets: [wallet],
+        },
+      });
+      await expect(fetchOperationalWallets()).resolves.toEqual({ available: false });
+    });
+
+    it('accepts a complete operational-wallet snapshot', async () => {
+      const snapshot = {
+        identityId: '61',
+        hasProfile: true,
+        adminKeyConfigured: true,
+        canManage: true,
+        wallets: [{ address: '0xabc', isAdmin: false, isPrimary: true, registered: null }],
+      };
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/operational-wallets'),
+        status: 200,
+        body: snapshot,
+      });
+      await expect(fetchOperationalWallets()).resolves.toEqual({ available: true, snapshot });
     });
 
     it('fetchEconomics calls /api/economics', async () => {

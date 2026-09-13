@@ -13,8 +13,7 @@ import { PcaAccountCard, type PcaAccountOwnerMode } from './PcaAccountCard.js';
 import { CreatePcaModal } from './CreatePcaModal.js';
 import { ApproveWalletsModal } from './ApproveWalletsModal.js';
 import { GetSponsoredPanel } from './GetSponsoredPanel.js';
-import { IdentityWalletsSection } from './IdentityWalletsSection.js';
-import { eqAddress as eq } from '../../pca/address.js';
+import { eqAddress as eq } from '../../web3/address.js';
 import { resolvePcaOwnerAccess } from '../../pca/ownerAccess.js';
 
 type WalletBootstrapStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -295,8 +294,6 @@ export function ConvictionOverview() {
           </div>
         )}
       </section>
-
-      <IdentityWalletsSection blockExplorerUrl={blockExplorerUrl} />
 
       {loading && accounts.length === 0 ? (
         <div className="v10-pca-card-grid">

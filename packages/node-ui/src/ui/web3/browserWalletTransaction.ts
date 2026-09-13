@@ -11,7 +11,7 @@ import {
   type WriteContractParameters,
 } from 'viem';
 import type { PcaContracts } from '../api.js';
-import { eqAddress } from '../pca/address.js';
+import { eqAddress } from './address.js';
 import { useWalletStore, type WalletState } from '../stores/wallet.js';
 import {
   publicClientFor as defaultPublicClientFor,
@@ -27,7 +27,10 @@ export type BrowserWalletRuntimeState = Pick<
   'provider' | 'address' | 'chainId' | 'expectedChainId' | 'bootstrap'
 >;
 
-export type BrowserWalletBootstrap = Pick<PcaContracts, 'chainId' | 'rpcUrls'>;
+export interface BrowserWalletBootstrap {
+  chainId: string | number;
+  rpcUrls: string[];
+}
 
 export type BrowserWalletPublicClient = Pick<PublicClient, 'readContract' | 'waitForTransactionReceipt'>;
 export interface BrowserWalletClient {
@@ -40,22 +43,26 @@ export interface BrowserWalletClient {
   ): Promise<Hex>;
 }
 
-export interface BrowserWalletRuntimeDeps {
+export interface BrowserWalletRuntimeDeps<
+  Bootstrap extends BrowserWalletBootstrap = PcaContracts,
+> {
   /** Feature-owned bootstrap; defaults to the PCA wallet store for legacy callers. */
-  bootstrap?: BrowserWalletBootstrap;
+  bootstrap?: Bootstrap;
   getWalletState?: () => BrowserWalletRuntimeState;
   publicClientFor?: (chainId: string | number, rpcUrls: string[]) => BrowserWalletPublicClient;
   walletClientFromProvider?: (chain: Chain, provider: Eip1193Provider) => BrowserWalletClient;
 }
 
-export interface BrowserWalletRuntimeContext {
+export interface BrowserWalletRuntimeContext<
+  Bootstrap extends BrowserWalletBootstrap = PcaContracts,
+> {
   provider: Eip1193Provider;
   account: Address;
   expectedChainId: number;
   chain: Chain;
   publicClient: BrowserWalletPublicClient;
   walletClient: BrowserWalletClient;
-  bootstrap: BrowserWalletBootstrap;
+  bootstrap: Bootstrap;
 }
 
 export interface BrowserWalletConnectionPolicy {
@@ -73,8 +80,21 @@ export interface BrowserWalletConnectionPolicy {
   };
 }
 
-function currentState(deps: BrowserWalletRuntimeDeps): BrowserWalletRuntimeState {
+function currentState<Bootstrap extends BrowserWalletBootstrap>(
+  deps: BrowserWalletRuntimeDeps<Bootstrap>,
+): BrowserWalletRuntimeState {
   return deps.getWalletState?.() ?? useWalletStore.getState();
+}
+
+function currentBootstrap<Bootstrap extends BrowserWalletBootstrap>(
+  deps: BrowserWalletRuntimeDeps<Bootstrap>,
+  state: BrowserWalletRuntimeState,
+): Bootstrap | null {
+  if (deps.bootstrap) return deps.bootstrap;
+  // The shared wallet store is PCA-owned for legacy PCA callers. Other
+  // features provide their bootstrap explicitly, preserving their concrete
+  // contract fields across the generic runtime boundary.
+  return state.bootstrap as Bootstrap | null;
 }
 
 export function browserWalletAddress(
@@ -89,15 +109,15 @@ export function browserWalletAddress(
   }
 }
 
-export function loadBrowserWalletRuntime(
-  deps: BrowserWalletRuntimeDeps,
+export function loadBrowserWalletRuntime<Bootstrap extends BrowserWalletBootstrap>(
+  deps: BrowserWalletRuntimeDeps<Bootstrap>,
   policy: BrowserWalletConnectionPolicy,
-): BrowserWalletRuntimeContext {
+): BrowserWalletRuntimeContext<Bootstrap> {
   const state = currentState(deps);
   if (!state.provider || !state.address) {
     throw policy.unavailableError(policy.messages.disconnected);
   }
-  const bootstrap = deps.bootstrap ?? state.bootstrap;
+  const bootstrap = currentBootstrap(deps, state);
   if (!bootstrap) {
     throw policy.unavailableError(policy.messages.bootstrapUnavailable);
   }
@@ -121,9 +141,9 @@ export function loadBrowserWalletRuntime(
   };
 }
 
-export async function assertBrowserWalletStillConnected(
-  ctx: BrowserWalletRuntimeContext,
-  deps: BrowserWalletRuntimeDeps,
+export async function assertBrowserWalletStillConnected<Bootstrap extends BrowserWalletBootstrap>(
+  ctx: BrowserWalletRuntimeContext<Bootstrap>,
+  deps: BrowserWalletRuntimeDeps<Bootstrap>,
   policy: BrowserWalletConnectionPolicy,
 ): Promise<void> {
   const state = currentState(deps);
@@ -165,11 +185,12 @@ export interface BrowserWalletWriteRequest<
 }
 
 export async function submitBrowserWalletTransaction<
+  Bootstrap extends BrowserWalletBootstrap,
   const TAbi extends Abi,
   TFunctionName extends ContractFunctionName<TAbi, 'nonpayable' | 'payable'>,
 >(
-  ctx: BrowserWalletRuntimeContext,
-  deps: BrowserWalletRuntimeDeps,
+  ctx: BrowserWalletRuntimeContext<Bootstrap>,
+  deps: BrowserWalletRuntimeDeps<Bootstrap>,
   policy: BrowserWalletConnectionPolicy,
   request: BrowserWalletWriteRequest<TAbi, TFunctionName>,
   step: 'approve' | 'action',

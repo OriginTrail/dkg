@@ -13,8 +13,8 @@ function providerKey(detail: Eip6963ProviderDetail): string {
 }
 
 /**
- * PCA-local wallet connect surface. It starts EIP-6963 discovery only while PCA
- * UI is mounted, keeps provider metadata display-only, and uses conditional
+ * Shared wallet connect surface. It starts EIP-6963 discovery only while a
+ * browser-wallet UI is mounted, keeps provider metadata display-only, and uses conditional
  * hardware copy per inv-14.
  */
 export function WalletConnectControl({ className = '' }: { className?: string }) {

@@ -11,6 +11,7 @@ import {
   SMALL_BODY_BYTES,
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
+import { executeRestrictedBrowserWalletRpc } from './restricted-browser-wallet-rpc.js';
 
 const RPC_PATH = '/api/identity-wallets/rpc';
 const MAX_BATCH = 20;
@@ -35,8 +36,6 @@ const FEATURE_UNAVAILABLE = {
   error: 'Identity wallet management is not available on this deployment',
 };
 
-type JsonRpcId = string | number | null;
-
 function parseJson(body: string): { ok: true; value: unknown } | { ok: false; error: string } {
   try {
     return { ok: true, value: JSON.parse(body) };
@@ -46,26 +45,6 @@ function parseJson(body: string): { ok: true; value: unknown } | { ok: false; er
       error: `Invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-}
-
-function jsonRpcId(value: unknown): JsonRpcId {
-  return typeof value === 'string' || typeof value === 'number' || value === null ? value : null;
-}
-
-function rpcError(id: JsonRpcId, code: number, message: string, data?: unknown) {
-  return {
-    jsonrpc: '2.0',
-    id,
-    error: { code, message, ...(data === undefined ? {} : { data }) },
-  };
-}
-
-function rpcSuccess(id: JsonRpcId, result: unknown) {
-  return { jsonrpc: '2.0', id, result };
-}
-
-function isRpcMethod(method: string): method is BrowserWalletRpcMethod {
-  return ALLOWED_METHODS.has(method as BrowserWalletRpcMethod);
 }
 
 function isHash(value: unknown): boolean {
@@ -149,51 +128,21 @@ function walletRpcUrls(contracts: IdentityWalletContracts): string[] {
 }
 
 async function handleRpcRequest(agent: RequestContext['agent'], raw: unknown) {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return rpcError(null, -32600, 'Invalid JSON-RPC request');
-  }
-  const request = raw as { id?: unknown; method?: unknown; params?: unknown };
-  const id = jsonRpcId(request.id ?? null);
-  if (typeof request.method !== 'string' || request.method.length === 0) {
-    return rpcError(id, -32600, 'Invalid JSON-RPC method');
-  }
-  if (!isRpcMethod(request.method)) {
-    return rpcError(id, -32601, `Identity wallet RPC method not allowed: ${request.method}`);
-  }
-  if (request.params !== undefined && !Array.isArray(request.params)) {
-    return rpcError(id, -32602, 'Identity wallet RPC params must be an array');
-  }
-  const params = request.params as unknown[] | undefined;
-  const invalidParams = paramsError(request.method, params);
-  if (invalidParams) return rpcError(id, -32602, invalidParams);
-  try {
-    if (request.method === 'eth_call') {
+  return executeRestrictedBrowserWalletRpc(raw, {
+    allowedMethods: ALLOWED_METHODS,
+    nullableResultMethods: NULL_RESULT_METHODS,
+    unavailableMessage: FEATURE_UNAVAILABLE.error,
+    methodErrorPrefix: 'Identity wallet RPC',
+    paramsError,
+    authorizeEthCall: async (params) => {
       const contracts = await agent.getIdentityWalletContracts();
-      if (contracts === null) return rpcError(id, -32004, FEATURE_UNAVAILABLE.error);
-      const invalidCall = ethCallError(params, contracts);
-      if (invalidCall) return rpcError(id, -32602, invalidCall);
-    }
-    const result = await agent.requestIdentityWalletRpc(request.method, params ?? []);
-    if (result === null && !NULL_RESULT_METHODS.has(request.method)) {
-      return rpcError(id, -32004, FEATURE_UNAVAILABLE.error);
-    }
-    return rpcSuccess(id, result);
-  } catch (error) {
-    const transport = classifyChainRpcTransportStatus(error);
-    if (transport) {
-      return rpcError(id, -32002, String(transport.body.error ?? 'Chain RPC transport unavailable'), {
-        code: transport.body.code,
-        ...(transport.body.txHash ? { txHash: transport.body.txHash } : {}),
-      });
-    }
-    return rpcError(
-      id,
-      -32000,
-      `Identity wallet RPC read failed: ${sanitizeRpcMessage(
-        error instanceof Error ? error.message : String(error),
-      )}`,
-    );
-  }
+      return contracts === null
+        ? { available: false }
+        : { available: true, error: ethCallError(params, contracts) };
+    },
+    request: (method, params) => agent.requestIdentityWalletRpc(method, params),
+    readErrorPrefix: 'Identity wallet RPC read failed',
+  });
 }
 
 export async function handleIdentityWalletRoutes(ctx: RequestContext): Promise<void> {

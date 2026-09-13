@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Power, RefreshCw } from 'lucide-react';
 import { useWalletStore, isWrongNetwork } from '../../stores/wallet.js';
-import { truncateAddress } from './format.js';
+import { truncateAddress } from './truncateAddress.js';
 
 function providerLabel(name?: string | null): string {
   const trimmed = name?.trim();
@@ -9,7 +9,7 @@ function providerLabel(name?: string | null): string {
 }
 
 /**
- * Persistent connected-wallet chip for the PCA tab. Provider metadata is
+ * Persistent connected-wallet chip shared by browser-wallet features. Provider metadata is
  * display-only; the chain guard is the actionable state.
  */
 export function WalletPill({ className = '' }: { className?: string }) {

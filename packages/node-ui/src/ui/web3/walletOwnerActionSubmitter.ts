@@ -50,11 +50,11 @@ export interface WalletTxProgressEvent {
   error?: unknown;
 }
 
-export interface WalletOwnerActionSubmitterDeps extends BrowserWalletRuntimeDeps {
+export interface WalletOwnerActionSubmitterDeps extends BrowserWalletRuntimeDeps<PcaContracts> {
   onProgress?: (event: WalletTxProgressEvent) => void;
 }
 
-interface WalletTxContext extends BrowserWalletRuntimeContext {
+interface WalletTxContext extends BrowserWalletRuntimeContext<PcaContracts> {
   owner: Address;
   nft: Address;
   token: Address;

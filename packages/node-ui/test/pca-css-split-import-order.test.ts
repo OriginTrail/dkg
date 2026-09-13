@@ -25,7 +25,6 @@ const EXPECTED_PCA_ORDER = [
   './styles/26-pca-shell-dashboard.css',
   './styles/26-pca-modals-detail.css',
   './styles/26-pca-publish-eligibility.css',
-  './styles/26-pca-identity-wallets.css',
   './styles/26-pca-followup-overrides.css',
 ];
 
@@ -45,6 +44,12 @@ describe('PCA CSS split — styles.css import order (#1354)', () => {
 
   it('imports the follow-up override layer LAST among the PCA files', () => {
     expect(pcaImports[pcaImports.length - 1]).toBe('./styles/26-pca-followup-overrides.css');
+  });
+
+  it('loads node identity-wallet styles as an independent feature layer', () => {
+    const identityIdx = imports.indexOf('./styles/26-identity-wallets.css');
+    const primitivesIdx = imports.indexOf('./styles/26-pca-primitives.css');
+    expect(identityIdx).toBeGreaterThan(primitivesIdx);
   });
 
   it('no longer imports (or ships) the pre-split monolithic 26-pca.css', () => {

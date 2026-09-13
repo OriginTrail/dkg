@@ -40,14 +40,14 @@ vi.mock('../src/ui/web3/identityWalletActions.js', async (original) => {
   };
 });
 
-vi.mock('../src/ui/components/Pca/index.js', () => ({
+vi.mock('../src/ui/components/Wallet/index.js', () => ({
   WalletConnectControl: () => React.createElement('button', null, 'Connect wallet'),
   WalletPill: () => React.createElement('span', null, 'Connected wallet'),
   WalletRow: ({ address, status, trailing }: { address: string; status?: React.ReactNode; trailing?: React.ReactNode }) =>
     React.createElement('div', { 'data-wallet': address }, status, trailing),
 }));
 
-const { IdentityWalletsSection } = await import('../src/ui/pages/conviction/IdentityWalletsSection.js');
+const { IdentityWalletsSection } = await import('../src/ui/pages/identity-wallets/IdentityWalletsSection.js');
 const { useWalletStore } = await import('../src/ui/stores/wallet.js');
 const { WalletReceiptWaitError } = await import('../src/ui/web3/walletTxError.js');
 
@@ -188,7 +188,7 @@ describe('IdentityWalletsSection', () => {
     mocks.fetchOperationalWallets.mockResolvedValue({ available: false });
     const { container, unmount } = await renderSection();
     await waitFor(() => mocks.fetchOperationalWallets.mock.calls.length === 1, 'legacy capability response');
-    expect(container.textContent).toContain('Node identity wallets');
+    expect(container.textContent).toContain('Node Identity Wallets');
     expect(container.querySelector('[data-testid="operational-wallet-editor"]')).toBeTruthy();
     await unmount();
   });

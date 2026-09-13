@@ -9,7 +9,7 @@ import {
   type Hex,
 } from 'viem';
 import type { IdentityWalletContracts } from '../api.js';
-import { eqAddress } from '../pca/address.js';
+import { eqAddress } from './address.js';
 import {
   browserWalletAddress,
   loadBrowserWalletRuntime,
@@ -92,7 +92,7 @@ const MAX_UINT72 = (1n << 72n) - 1n;
 export type IdentityWalletPublicClient = BrowserWalletPublicClient;
 export type IdentityWalletClient = BrowserWalletClient;
 
-export interface IdentityWalletActionDeps extends BrowserWalletRuntimeDeps {
+export interface IdentityWalletActionDeps extends BrowserWalletRuntimeDeps<IdentityWalletContracts> {
   bootstrap?: IdentityWalletContracts;
   onProgress?: (event: IdentityWalletProgressEvent) => void;
 }
@@ -129,7 +129,7 @@ export interface IdentityWalletSummary {
   addresses: IdentityWalletRoleState[];
 }
 
-interface IdentityWalletContext extends BrowserWalletRuntimeContext {
+interface IdentityWalletContext extends BrowserWalletRuntimeContext<IdentityWalletContracts> {
   signer: Address;
   profile: Address;
   identity: Address;

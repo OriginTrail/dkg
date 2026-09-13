@@ -1,7 +1,7 @@
 import React from 'react';
 import type { OperationalWalletSnapshot } from '../../api.js';
-import { WalletRow } from '../../components/Pca/index.js';
-import { eqAddress } from '../../pca/address.js';
+import { WalletRow } from '../../components/Wallet/index.js';
+import { eqAddress } from '../../web3/address.js';
 import type { IdentityWalletSummary } from '../../web3/identityWalletActions.js';
 import type { IdentityWalletRole } from './useIdentityWalletManagement.js';
 
@@ -20,7 +20,7 @@ export function IdentityWalletKnownList({
   return (
     <div className="v10-identity-wallet-known">
       <p className="v10-identity-wallet-subtitle">Wallets known to this node</p>
-      <div className="v10-pca-wallet-list">
+      <div className="v10-identity-wallet-list">
         {wallets.map((wallet) => {
           const roles = summary?.addresses.find((item) => eqAddress(item.address, wallet.address));
           const status = [
@@ -40,7 +40,7 @@ export function IdentityWalletKnownList({
                   {(roles?.operational === true || wallet.registered === true) && (
                     <button
                       type="button"
-                      className="v10-pca-card-btn compact"
+                      className="v10-identity-wallet-btn compact"
                       data-testid={`remove-operational-${wallet.address}`}
                       onClick={() => onRemove('operational', wallet.address)}
                       disabled={!writesEnabled || wallet.isPrimary}
@@ -52,7 +52,7 @@ export function IdentityWalletKnownList({
                   {roles?.admin === true && (
                     <button
                       type="button"
-                      className="v10-pca-card-btn compact"
+                      className="v10-identity-wallet-btn compact"
                       data-testid={`remove-admin-${wallet.address}`}
                       onClick={() => onRemove('admin', wallet.address)}
                       disabled={!writesEnabled || (summary?.adminCount ?? 0) <= 1}

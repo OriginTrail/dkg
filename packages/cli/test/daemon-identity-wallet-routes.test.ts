@@ -113,4 +113,55 @@ describe('daemon identity-wallet browser capability', () => {
     expect(JSON.parse(rejected.res.body).error.code).toBe(-32602);
     expect(rpc).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ['Profile target', CONTRACTS.profile, {}],
+    ['Identity target', CONTRACTS.identity, {}],
+    ['unrelated target', ethers.getAddress(`0x${'44'.repeat(20)}`), {}],
+    ['from transaction field', CONTRACTS.storage, { from: ethers.getAddress(`0x${'55'.repeat(20)}`) }],
+    ['value transaction field', CONTRACTS.storage, { value: '0x0' }],
+    ['gas transaction field', CONTRACTS.storage, { gas: '0x5208' }],
+  ])('rejects the unsafe eth_call case: %s, before adapter delegation', async (
+    _label,
+    to,
+    extraFields,
+  ) => {
+    const rpc = vi.fn(async () => '0x');
+    const agent = {
+      supportsIdentityWalletManagement: true,
+      getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
+      requestIdentityWalletRpc: rpc,
+    };
+    const data = new ethers.Interface([
+      'function keyHasPurpose(uint72 identityId, bytes32 key, uint256 purpose) view returns (bool)',
+    ]).encodeFunctionData('keyHasPurpose', [61n, `0x${'ab'.repeat(32)}`, 1n]);
+    const request = runCtx('POST', '/api/identity-wallets/rpc', agent, {
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'eth_call',
+      params: [{ to, data, ...extraFields }, 'latest'],
+    });
+    await request.done;
+    expect(JSON.parse(request.res.body).error.code).toBe(-32602);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsafe JSON-RPC methods before adapter delegation', async () => {
+    const rpc = vi.fn(async () => '0x');
+    const agent = {
+      supportsIdentityWalletManagement: true,
+      getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
+      requestIdentityWalletRpc: rpc,
+    };
+    const request = runCtx('POST', '/api/identity-wallets/rpc', agent, {
+      jsonrpc: '2.0', id: 10, method: 'eth_sendRawTransaction', params: ['0xdeadbeef'],
+    });
+    await request.done;
+    expect(JSON.parse(request.res.body).error).toMatchObject({
+      code: -32601,
+      message: expect.stringContaining('eth_sendRawTransaction'),
+    });
+    expect(agent.getIdentityWalletContracts).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+  });
 });

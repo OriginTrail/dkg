@@ -6,7 +6,7 @@ import {
   type OperationalWalletSnapshot,
 } from '../../api.js';
 import { useFetch } from '../../hooks.js';
-import { eqAddress } from '../../pca/address.js';
+import { eqAddress } from '../../web3/address.js';
 import { useWalletStore } from '../../stores/wallet.js';
 import { numericChainId } from '../../web3/chainId.js';
 import { publicClientFor } from '../../web3/clients.js';
@@ -161,7 +161,7 @@ export function useIdentityWalletManagement() {
   const knownAddresses = useMemo(() => {
     // Older daemons and e2e fixtures can return an empty object while this
     // capability is unavailable. Treat a missing list as empty instead of
-    // letting the optional feature crash the entire PCA landing page.
+    // letting the optional feature crash the Settings page.
     const addresses = [...(data?.wallets?.map((wallet) => wallet.address) ?? [])];
     if (connected) addresses.push(connected);
     return addresses;

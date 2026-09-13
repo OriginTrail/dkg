@@ -9,7 +9,6 @@ import {
   type V10PublishingConvictionAccountInfo,
 } from '@origintrail-official/dkg-chain';
 import {
-  classifyChainRpcTransportStatus,
   jsonResponse,
   readBody,
   SMALL_BODY_BYTES,
@@ -20,6 +19,7 @@ import type { RequestContext } from './context.js';
 import { parseUint72Decimal } from '@origintrail-official/dkg-core';
 import { pcaConfirmationToWire, type RegisterPcaAgentResponse } from '../../pca-confirmation-wire.js';
 import { canAdministerNode } from '../../auth.js';
+import { executeRestrictedBrowserWalletRpc } from './restricted-browser-wallet-rpc.js';
 
 const ZERO = '0x0000000000000000000000000000000000000000';
 const PCA_RPC_PROXY_PATH = '/api/pca/rpc';
@@ -59,34 +59,6 @@ function safeParseJson(body: string): { ok: true; value: any } | { ok: false; er
   } catch (e: any) {
     return { ok: false, error: `Invalid JSON: ${e?.message ?? String(e)}` };
   }
-}
-
-// PCA RPC proxy guard: allow the browser HW layer's bounded read calls only.
-// Unsupported methods fail before any adapter delegation.
-type JsonRpcId = string | number | null;
-
-function jsonRpcId(value: unknown): JsonRpcId {
-  return typeof value === 'string' || typeof value === 'number' || value === null ? value : null;
-}
-
-function jsonRpcError(id: JsonRpcId, code: number, message: string, data?: unknown): Record<string, unknown> {
-  return {
-    jsonrpc: '2.0',
-    id,
-    error: {
-      code,
-      message,
-      ...(data !== undefined ? { data } : {}),
-    },
-  };
-}
-
-function jsonRpcSuccess(id: JsonRpcId, result: unknown): Record<string, unknown> {
-  return { jsonrpc: '2.0', id, result };
-}
-
-function isPcaRpcMethod(method: string): method is PcaRpcMethod {
-  return PCA_RPC_ALLOWED_METHODS.has(method as PcaRpcMethod);
 }
 
 function walletRpcUrlsForResponse(contracts: PcaContracts): string[] {
@@ -177,48 +149,22 @@ async function handlePcaRpcRequest(
   agent: RequestContext['agent'],
   raw: unknown,
 ): Promise<Record<string, unknown>> {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return jsonRpcError(null, -32600, 'Invalid JSON-RPC request');
-  }
-  const request = raw as { id?: unknown; method?: unknown; params?: unknown };
-  const id = jsonRpcId(request.id ?? null);
-  if (typeof request.method !== 'string' || request.method.length === 0) {
-    return jsonRpcError(id, -32600, 'Invalid JSON-RPC method');
-  }
-  if (!isPcaRpcMethod(request.method)) {
-    return jsonRpcError(id, -32601, `PCA RPC method not allowed: ${request.method}`);
-  }
-  if (request.params !== undefined && !Array.isArray(request.params)) {
-    return jsonRpcError(id, -32602, 'PCA RPC params must be an array');
-  }
-  const paramsError = pcaRpcParamsError(request.method, request.params);
-  if (paramsError) return jsonRpcError(id, -32602, paramsError);
-  try {
-    if (request.method === 'eth_call') {
+  return executeRestrictedBrowserWalletRpc(raw, {
+    allowedMethods: PCA_RPC_ALLOWED_METHODS,
+    nullableResultMethods: PCA_RPC_NULL_RESULT_METHODS,
+    unavailableMessage: FEATURE_UNAVAILABLE_503.error,
+    methodErrorPrefix: 'PCA RPC',
+    paramsError: pcaRpcParamsError,
+    authorizeEthCall: async (params) => {
       const contracts = await agent.getPublishingConvictionContracts();
-      if (contracts === null) return jsonRpcError(id, -32004, FEATURE_UNAVAILABLE_503.error);
-      const ethCallError = pcaRpcEthCallError(request.params, contracts);
-      if (ethCallError) return jsonRpcError(id, -32602, ethCallError);
-    }
-    const result = await agent.requestPublishingConvictionRpc(request.method, request.params ?? []);
-    if (result === null && !PCA_RPC_NULL_RESULT_METHODS.has(request.method)) {
-      return jsonRpcError(id, -32004, FEATURE_UNAVAILABLE_503.error);
-    }
-    return jsonRpcSuccess(id, result);
-  } catch (err: any) {
-    const transport = classifyChainRpcTransportStatus(err);
-    if (transport) {
-      return jsonRpcError(id, -32002, String(transport.body.error ?? 'Chain RPC transport unavailable'), {
-        code: transport.body.code,
-        ...(transport.body.txHash ? { txHash: transport.body.txHash } : {}),
-      });
-    }
-    const msg = sanitizeRpcMessage(err?.message ?? String(err));
-    if (isNoChain(msg) || isPcaUnavailable(err, msg)) {
-      return jsonRpcError(id, -32004, FEATURE_UNAVAILABLE_503.error);
-    }
-    return jsonRpcError(id, -32000, `PCA RPC read failed: ${msg}`);
-  }
+      return contracts === null
+        ? { available: false }
+        : { available: true, error: pcaRpcEthCallError(params, contracts) };
+    },
+    request: (method, params) => agent.requestPublishingConvictionRpc(method, params),
+    isUnavailableError: (error, message) => isNoChain(message) || isPcaUnavailable(error, message),
+    readErrorPrefix: 'PCA RPC read failed',
+  });
 }
 
 // Owner-gated write by a non-owner daemon EOA -> 403 (distinct from 500

@@ -68,7 +68,7 @@ export function IdentityWalletRoleEditor({
       <div className="v10-identity-wallet-actions">
         <button
           type="button"
-          className="v10-pca-card-btn primary"
+          className="v10-identity-wallet-btn primary"
           data-testid={meta.addAction}
           onClick={() => onSubmit(meta.addAction, value)}
           disabled={!writesEnabled || empty}
@@ -77,7 +77,7 @@ export function IdentityWalletRoleEditor({
         </button>
         <button
           type="button"
-          className="v10-pca-card-btn"
+          className="v10-identity-wallet-btn"
           data-testid={meta.removeAction}
           onClick={() => onRemove(role, value)}
           disabled={!writesEnabled || empty || Boolean(finalAdmin)}

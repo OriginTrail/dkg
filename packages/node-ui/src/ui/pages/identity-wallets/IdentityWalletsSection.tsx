@@ -1,5 +1,5 @@
 import React from 'react';
-import { WalletConnectControl, WalletPill } from '../../components/Pca/index.js';
+import { WalletConnectControl, WalletPill } from '../../components/Wallet/index.js';
 import { IdentityWalletKnownList } from './IdentityWalletKnownList.js';
 import { IdentityWalletRoleEditor } from './IdentityWalletRoleEditor.js';
 import {
@@ -8,7 +8,7 @@ import {
 } from './useIdentityWalletManagement.js';
 
 /**
- * Hardware-wallet identity key management, colocated with the PCA publishing-wallet view.
+ * Hardware-wallet management for the node's on-chain identity keys.
  * Contract writes never pass through the daemon: the connected, already-authorized admin
  * wallet signs Profile/Identity calls directly.
  */
@@ -50,11 +50,11 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
     : null;
 
   return (
-    <section className="v10-pca-section v10-identity-wallets" data-testid="identity-wallets-section">
-      <div className="v10-pca-section-head">
+    <section className="card v10-identity-wallets" data-testid="identity-wallets-section">
+      <div className="card-header v10-identity-wallet-header">
         <div>
-          <h3 className="v10-pca-section-title">Node identity wallets</h3>
-          <p className="v10-pca-overview-caveat">
+          <h2 className="card-title">Node Identity Wallets</h2>
+          <p className="v10-identity-wallet-description">
             Register and rotate operational or admin keys for node identity{' '}
             {data?.hasProfile ? data.identityId : '—'}.
             Every change is signed by the connected admin wallet; its private key never enters the node.
@@ -66,6 +66,8 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
         </div>
       </div>
 
+      <div className="card-body">
+
       <div className="v10-identity-wallet-signer">
         {connected ? <WalletPill /> : <WalletConnectControl className="compact" />}
         {connected && !summaryLoading && !summaryError && (
@@ -75,11 +77,11 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
         )}
       </div>
 
-      {loading && !data && <p className="v10-pca-inline-status" role="status">Loading node identity wallets…</p>}
+      {loading && !data && <p className="v10-identity-wallet-status" role="status">Loading node identity wallets…</p>}
       {loadError && !data && (
         <p className="v10-modal-warning" role="alert">
           Couldn&apos;t load this node&apos;s wallet list.{' '}
-          <button type="button" className="v10-pca-card-btn compact" onClick={() => refresh()}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact" onClick={() => refresh()}>Retry</button>
         </p>
       )}
       {data && !data.hasProfile && (
@@ -96,7 +98,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       {summaryError && (
         <p className="v10-modal-warning" role="alert">
           Couldn&apos;t verify identity keys: {summaryError}{' '}
-          <button type="button" className="v10-pca-card-btn compact" onClick={reloadSummary}>Retry</button>
+          <button type="button" className="v10-identity-wallet-btn compact" onClick={reloadSummary}>Retry</button>
         </p>
       )}
 
@@ -133,17 +135,17 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
             Remove {removal.address} as an {removal.role} key from identity {data?.identityId}?
             This takes effect on-chain immediately.
           </span>
-          <button type="button" className="v10-pca-card-btn" onClick={confirmRemoval} disabled={transactionPending}>
+          <button type="button" className="v10-identity-wallet-btn" onClick={confirmRemoval} disabled={transactionPending}>
             Yes, remove
           </button>
-          <button type="button" className="v10-pca-card-btn" onClick={cancelRemoval} disabled={transactionPending}>
+          <button type="button" className="v10-identity-wallet-btn" onClick={cancelRemoval} disabled={transactionPending}>
             Cancel
           </button>
         </div>
       )}
 
       {transactionPending && (
-        <p className="v10-pca-inline-status" role="status">
+        <p className="v10-identity-wallet-status" role="status">
           {transaction.status === 'submitted'
             ? 'Transaction submitted — waiting for on-chain confirmation…'
             : 'Confirm the identity-key transaction on your wallet device…'}
@@ -151,7 +153,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
       )}
       {actionErrorMessage && <p className="v10-modal-error" role="alert">{actionErrorMessage}</p>}
       {completed && (
-        <div className="v10-pca-inline-status" role="status" data-testid="identity-wallet-result">
+        <div className="v10-identity-wallet-status" role="status" data-testid="identity-wallet-result">
           {completed.confirmed
             ? `✓ ${IDENTITY_WALLET_ACTION_META[completed.action].label}: ${completed.address}. `
             : `Transaction broadcast for ${completed.address}, but confirmation is unknown. Check it before retrying. `}
@@ -161,6 +163,7 @@ export function IdentityWalletsSection({ blockExplorerUrl }: { blockExplorerUrl:
           )}
         </div>
       )}
+      </div>
     </section>
   );
 }
