@@ -60,7 +60,11 @@ interface AgentStub {
    * the cache-hit path will fall through to the chain-RPC fallback.
    */
   onChainPublishPolicyCacheUpdatedAt: Map<string, number>;
+  locallyCreatedContextGraphs: Set<string>;
   subscribedContextGraphs: Map<string, { onChainId?: string }>;
+  readLocalContextGraphRegistrationStatus: (
+    id: string,
+  ) => Promise<'registered' | 'unregistered' | null>;
   getContextGraphOnChainId: (id: string) => Promise<string | null>;
   isContextGraphRegistered: (id: string) => Promise<boolean>;
   getStoredContextGraphRegistrationOptions: (id: string) => Promise<{
@@ -77,7 +81,9 @@ function makeStub(overrides: Partial<AgentStub> = {}): AgentStub {
     onChainAccessPolicyCache: new Map(),
     onChainPublishPolicyCache: new Map(),
     onChainPublishPolicyCacheUpdatedAt: new Map(),
+    locallyCreatedContextGraphs: new Set(),
     subscribedContextGraphs: new Map(),
+    readLocalContextGraphRegistrationStatus: recorder(async () => null),
     getContextGraphOnChainId: recorder(async () => null),
     isContextGraphRegistered: recorder(async () => false),
     getStoredContextGraphRegistrationOptions: recorder(async () => ({})),
@@ -208,6 +214,40 @@ describe('DKGAgent.resolveCgCurationForAck', () => {
 });
 
 describe('DKGAgent.getContextGraphOnChainPolicy', () => {
+  it('does not resolve a name hash for an explicitly local-created durable unregistered CG', async () => {
+    const getContextGraphOnChainId = recorder(async () => {
+      throw new Error('CG registry RPC must not gate local-first SWM');
+    });
+    const readRegistrationStatus = recorder(async () => 'unregistered' as const);
+    const stub = makeStub({
+      locallyCreatedContextGraphs: new Set(['cg-local-first']),
+      subscribedContextGraphs: new Map([['cg-local-first', {}]]),
+      readLocalContextGraphRegistrationStatus: readRegistrationStatus,
+      getContextGraphOnChainId,
+    });
+
+    await expect(callPolicy(stub, 'cg-local-first')).resolves.toEqual({});
+    expect(readRegistrationStatus.calls).toEqual([['cg-local-first']]);
+    expect(getContextGraphOnChainId.calls).toEqual([]);
+    expect((stub.isContextGraphRegistered as any).calls).toEqual([]);
+  });
+
+  it('does not infer local-first policy when the durable registration marker is missing', async () => {
+    const getContextGraphOnChainId = recorder(async () => null);
+    const stub = makeStub({
+      locallyCreatedContextGraphs: new Set(['cg-local-marker-missing']),
+      subscribedContextGraphs: new Map([['cg-local-marker-missing', {}]]),
+      readLocalContextGraphRegistrationStatus: recorder(async () => null),
+      getContextGraphOnChainId,
+    });
+
+    await expect(callPolicy(stub, 'cg-local-marker-missing')).resolves.toEqual({});
+    expect(getContextGraphOnChainId.calls.length).toBeGreaterThan(0);
+    expect((stub.isContextGraphRegistered as any).calls).toEqual([
+      ['cg-local-marker-missing'],
+    ]);
+  });
+
   // Cache-hit path: chain-event-populated entries answer immediately
   // without consulting registration status or local triples.
   it('returns cached on-chain policies when both enums are present', async () => {

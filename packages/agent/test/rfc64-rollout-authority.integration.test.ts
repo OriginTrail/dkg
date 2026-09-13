@@ -32,6 +32,7 @@ import {
   RpcEndpointsExhaustedError,
   withRpcRequestContext,
   type ChainAdapter,
+  type ContextGraphAuthorityIndexId,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
@@ -2191,6 +2192,76 @@ describe('RFC-64 rollout authority integration', () => {
       }),
     ]);
     expect(requestReplays).toHaveBeenCalledWith(contextGraphId);
+  });
+
+  it('batches registered responsibility policies through one finalized index read', async () => {
+    const firstContextGraphId = `${AUTHOR}/bulk-responsibility-first`;
+    const secondContextGraphId = `${AUTHOR}/bulk-responsibility-second`;
+    const firstNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(firstContextGraphId),
+    ).toLowerCase();
+    const secondNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(secondContextGraphId),
+    ).toLowerCase();
+    const readPolicies = vi.fn(async (
+      contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+    ) => new Map(contextGraphIds.map((contextGraphId) => [
+      contextGraphId,
+      Object.freeze({
+        ...finalizedAuthoritySnapshot(
+          contextGraphId === '9' ? firstContextGraphId : secondContextGraphId,
+          [],
+          '0',
+        ),
+        contextGraphId,
+        active: true,
+        accessPolicy: 0,
+        nameHash: contextGraphId === '9' ? firstNameHash : secondNameHash,
+      }),
+    ])));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readPolicies,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'bulk-registered-responsibility-policy',
+      config: { chainAdapter },
+    });
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    const legacyPolicy = vi.spyOn(edge, 'getContextGraphOnChainPolicy')
+      .mockRejectedValue(new Error('legacy per-graph policy read must not run'));
+
+    edge.subscribeToContextGraph(firstContextGraphId);
+    edge.subscribeToContextGraph(secondContextGraphId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    const firstSubscription = edge.getSubscribedContextGraphs().get(firstContextGraphId);
+    const secondSubscription = edge.getSubscribedContextGraphs().get(secondContextGraphId);
+    expect(firstSubscription).toBeDefined();
+    expect(secondSubscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(firstContextGraphId, firstSubscription, '9');
+    (edge as any).bindSubscriptionOnChainId(secondContextGraphId, secondSubscription, '10');
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(readPolicies).toHaveBeenCalledOnce();
+    expect(new Set(readPolicies.mock.calls[0]?.[0])).toEqual(new Set(['9', '10']));
+    expect(legacyPolicy).not.toHaveBeenCalled();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        contextGraphId: firstContextGraphId,
+        responsibilityReason: 'edge-subscription',
+      }),
+      expect.objectContaining({
+        contextGraphId: secondContextGraphId,
+        responsibilityReason: 'edge-subscription',
+      }),
+    ]));
+    expect(edge.resolveRfc64CatalogServingAuthorityV1(firstContextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+    expect(edge.resolveRfc64CatalogServingAuthorityV1(secondContextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
   });
 
   it('retains a public chain event that arrives before the cleartext subscription', async () => {

@@ -954,6 +954,29 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     accessPolicy?: number;
     publishPolicy?: number;
   }> {
+    // Keep the explicitly-created local-first state off the registry lookup
+    // path. The registration guard below used to run only after the cache
+    // re-key step had already called `getContextGraphOnChainId()` (twice on a
+    // cache miss), so a perfectly valid WM -> SWM share still depended on two
+    // name-hash RPC lookups even though its durable marker said unregistered.
+    // Match `resolveContextGraphRegistrationBinding()`'s strict provenance
+    // rule: only this node's local-create projection plus the explicit durable
+    // `unregistered` value can short-circuit. Missing/malformed state and
+    // remotely discovered graphs continue through authoritative resolution.
+    if (
+      this.locallyCreatedContextGraphs?.has(contextGraphId) === true
+      && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
+    ) {
+      try {
+        if (await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered') {
+          return {};
+        }
+      } catch {
+        // Preserve the existing fail-closed/best-effort path on a store read
+        // failure; never infer unregistered from unavailable local state.
+      }
+    }
+
     let accessPolicy = this.onChainAccessPolicyCache.get(contextGraphId);
     // Codex review on #872 — `publishPolicy` is mutable on-chain
     // (`PublishPolicyUpdated`) but the cache is only seeded by

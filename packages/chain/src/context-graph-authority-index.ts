@@ -117,6 +117,20 @@ export class ContextGraphAuthorityIndex {
     return revisions;
   }
 
+  /** Project the minimal immutable/read-selection fields for many targets. */
+  async states(
+    input: ContextGraphAuthorityIndexRevisionInput,
+  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthorityIndexState>> {
+    const targetIds = new Set<ContextGraphAuthorityIndexId>(input.contextGraphIds);
+    const checkpoint = await this.#snapshot(input);
+    const states = new Map<ContextGraphAuthorityIndexId, ContextGraphAuthorityIndexState>();
+    for (const state of checkpoint.states) {
+      if (!targetIds.has(state.contextGraphId)) continue;
+      states.set(state.contextGraphId, state);
+    }
+    return states;
+  }
+
   /** Resolve one unique name commitment from the shared contract-wide snapshot. */
   async resolveNameHash(
     input: ContextGraphAuthorityIndexNameHashInput,

@@ -2400,6 +2400,19 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // LOCAL-ONLY CG: created but DELIBERATELY never registered on-chain.
     await agent.createContextGraph({ id: unregisteredCgId, name: 'Unregistered CG Seal E2E' });
 
+    // Keep the semantic boundary explicit: SWM may reserve a globally unique KA
+    // number for eventual VM publication, but it must not discover, inspect, or
+    // create a ContextGraphs record. This catches a regression where an
+    // authority/signing helper quietly turns local-first SWM into a dependency
+    // on the CG registry RPC (or spends gas by registering the graph).
+    const chain = (agent as any).chain;
+    const cgRegistrationWrite = vi.spyOn(chain, 'createContextGraph');
+    const cgNameBindingRead = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    const cgAccessPolicyRead = vi.spyOn(chain, 'getContextGraphAccessPolicy');
+    const cgPublishPolicyRead = vi.spyOn(chain, 'getContextGraphPublishPolicy');
+    const cgParticipantRosterRead = vi.spyOn(chain, 'getContextGraphParticipantAgents');
+    const kaNumberFloorRead = vi.spyOn(chain, 'getMaxKaNumberForAuthor');
+
     const name = 'unregistered-cg-seal';
     await agent.assertion.create(unregisteredCgId, name);
     await agent.assertion.write(unregisteredCgId, name, [
@@ -2411,6 +2424,20 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const fullShare = await agent.assertion.promote(unregisteredCgId, name);
     expect(fullShare.sealed).toBe(true);
     expect(fullShare.publishReady).toBe(true);
+    expect(await agent.assertion.history(unregisteredCgId, name)).toMatchObject({
+      state: 'promoted',
+      status: 'swm-shared',
+      swmCurrentAssertion: expect.any(String),
+    });
+
+    expect(cgRegistrationWrite).not.toHaveBeenCalled();
+    expect(cgNameBindingRead).not.toHaveBeenCalled();
+    expect(cgAccessPolicyRead).not.toHaveBeenCalled();
+    expect(cgPublishPolicyRead).not.toHaveBeenCalled();
+    expect(cgParticipantRosterRead).not.toHaveBeenCalled();
+    // Incidental identity allocation, not CG registration: one cold-author
+    // high-water read keeps the reserved UAL collision-free across restarts.
+    expect(kaNumberFloorRead).toHaveBeenCalledTimes(1);
 
     // CORE ASSERTION: the CG is STILL unregistered after sealing — sealing did
     // NOT register it on-chain. Reintroducing seal-time registration breaks here.

@@ -280,6 +280,76 @@ describe('RpcRequestGovernor', () => {
     await expect(secondForeground).rejects.toThrow('test cleanup');
   });
 
+  it('reserves the configured foreground percentage of queue admission', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 70,
+      burstRequests: 1,
+      maxQueueSize: 10,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('background');
+
+    const controller = new AbortController();
+    const background = Array.from(
+      { length: 3 },
+      () => governor.acquire('background', controller.signal),
+    );
+    await expect(governor.acquire('background')).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+
+    const foreground = Array.from(
+      { length: 7 },
+      () => governor.acquire('foreground', controller.signal),
+    );
+    await expect(governor.acquire('foreground')).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+    expect(governor.snapshot()).toMatchObject({
+      foregroundQueued: 7,
+      backgroundQueued: 3,
+      rejected: 2,
+    });
+
+    controller.abort(new Error('test cleanup'));
+    await Promise.all([
+      ...background.map((pending) => expect(pending).rejects.toThrow('test cleanup')),
+      ...foreground.map((pending) => expect(pending).rejects.toThrow('test cleanup')),
+    ]);
+  });
+
+  it('does not reserve queue slots when foreground reserve is zero', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 2,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('background');
+
+    const controller = new AbortController();
+    const first = governor.acquire('background', controller.signal);
+    const second = governor.acquire('background', controller.signal);
+    await expect(governor.acquire('background')).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+    expect(governor.snapshot()).toMatchObject({
+      foregroundQueued: 0,
+      backgroundQueued: 2,
+      rejected: 1,
+    });
+
+    controller.abort(new Error('test cleanup'));
+    await expect(first).rejects.toThrow('test cleanup');
+    await expect(second).rejects.toThrow('test cleanup');
+  });
+
   it('carries explicit background classification across async context', async () => {
     const governor = new RpcRequestGovernor({
       maxRequestsPerSecond: 100,

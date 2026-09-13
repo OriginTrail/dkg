@@ -3,6 +3,7 @@
 import { type Contract, type JsonRpcProvider } from 'ethers';
 import type {
   ChainReadOptions,
+  ContextGraphAuthoritySnapshot,
   ContextGraphAuthorityIndexRevisionReader,
 } from './chain-adapter.js';
 import {
@@ -316,6 +317,77 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
           );
           await indexed.stabilize();
           return indexed.value;
+        }),
+        {
+          signal: options.signal,
+          isRetryable: (error: unknown) => (
+            !options.signal?.aborted && (
+              isContextGraphAuthorityIndexRetryableError(error)
+              || isRpcEndpointFailoverEligible(error)
+            )
+          ),
+          policy: 'wideLogScan',
+        },
+      );
+    },
+    async readContextGraphAuthorityIndexSnapshots(
+      contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+      options: ChainReadOptions = {},
+    ): Promise<ReadonlyMap<
+      ContextGraphAuthorityIndexId,
+      ContextGraphAuthoritySnapshot
+    >> {
+      const targets = snapshotAuthorityRevisionTargetsV1(contextGraphIds);
+      options.signal?.throwIfAborted();
+      if (targets.length === 0) return new Map();
+      await dependencies.initialize();
+      const base = dependencies.requireContextGraphStorage();
+      return dependencies.readTipProvider(
+        'readContextGraphAuthorityIndexSnapshots',
+        (provider) => lifecycle.run(async () => {
+          const finalized = await provider.getBlock('finalized');
+          if (finalized === null || finalized.hash === null) {
+            throw new Error('finalized Context Graph authority block is unavailable');
+          }
+          const contract = base.connect(provider) as Contract;
+          const contractAddress = (await contract.getAddress()).toLowerCase();
+          const deploymentBlockNumber = (await dependencies.resolveContractDeployBlock(
+            contractAddress,
+            'readContextGraphAuthorityIndexSnapshots',
+            'ContextGraphStorage',
+          )).fromBlock;
+          const indexed = await readEvmContextGraphAuthorityIndexProjectionV1(
+            {
+              index: dependencies.index,
+              deploymentId: dependencies.deploymentId,
+              contract,
+              contractAddress,
+              provider,
+              deploymentBlockNumber,
+              finalized: { number: finalized.number, hash: finalized.hash },
+              pageSize: dependencies.pageSize(),
+              stabilizationOperation: 'revision scan',
+            },
+            (scan) => dependencies.index.states({
+              ...scan,
+              contextGraphIds: targets,
+            }),
+          );
+          const chainId = (await provider.getNetwork()).chainId.toString(10);
+          await indexed.stabilize();
+          return new Map([...indexed.value].map(([contextGraphId, state]) => [
+            contextGraphId,
+            Object.freeze({
+              chainId,
+              governanceContract: contractAddress,
+              ...state,
+              contextGraphId,
+              ownershipEra: state.ownershipEra.toString(10),
+              policyVersion: state.policyVersion.toString(10),
+              rosterVersion: state.rosterVersion.toString(10),
+              sourceBlockNumber: state.sourceBlockNumber.toString(10),
+            }),
+          ]));
         }),
         {
           signal: options.signal,

@@ -25,6 +25,7 @@ const authorityIndexId = (value: string): ContextGraphAuthorityIndexId => (
 );
 
 interface IndexedAuthorityEvidence {
+  readonly blockReads: Array<string | number>;
   readonly filters: Array<readonly [string, ...unknown[]]>;
   readonly staticCalls: Array<readonly [bigint, { blockTag: number }]>;
   readonly readOptions: Array<Readonly<{
@@ -84,6 +85,7 @@ function makeIndexedAuthorityAdapter(
   adapter.cgRegistryScanPageSize = 10;
 
   const evidence: IndexedAuthorityEvidence = {
+    blockReads: [],
     filters: [],
     staticCalls: [],
     readOptions: [],
@@ -130,7 +132,10 @@ function makeIndexedAuthorityAdapter(
   };
 
   const provider: IndexedAuthorityProvider = {
-    getBlock: (tag) => scenario.getBlock(tag),
+    getBlock: (tag) => {
+      evidence.blockReads.push(tag);
+      return scenario.getBlock(tag);
+    },
     getNetwork: async () => ({ chainId: 31337n }),
     getLogs: async (filter) => {
       expect(filter.address).toBe(GOVERNANCE);
@@ -292,6 +297,33 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       initial.get(authorityIndexId('9')),
     );
     expect(evidence.indexRanges.slice(3)).toEqual([[31, 35]]);
+  });
+
+  it('projects many authority snapshots through one finalized anchor and index scan', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter({
+      secondContextGraph: true,
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+
+    await expect(reader.readContextGraphAuthorityIndexSnapshots!([
+      authorityIndexId('9'),
+      authorityIndexId('10'),
+    ])).resolves.toEqual(new Map([
+      ['9', expect.objectContaining({
+        active: true,
+        accessPolicy: 1,
+        nameHash: NAME_HASH,
+        chainId: '31337',
+        governanceContract: GOVERNANCE.toLowerCase(),
+      })],
+      ['10', expect.objectContaining({
+        active: true,
+        accessPolicy: 1,
+      })],
+    ]));
+    expect(evidence.blockReads).toEqual(['finalized', 16, 26, 30]);
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+    expect(evidence.staticCalls).toEqual([]);
   });
 
   it('rejects invalid indexed snapshot ids before deployment discovery or index ranges', async () => {

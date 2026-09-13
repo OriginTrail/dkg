@@ -551,6 +551,18 @@ export interface ContextGraphAuthorityIndexRevisionReader {
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
     options?: ChainReadOptions,
   ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
+  /**
+   * Read complete authority snapshots for many graphs at one finalized anchor.
+   * Responsibility selection and immediate authority acceptance share this
+   * projection. Optional so older/custom adapters retain their point-read path.
+   */
+  readContextGraphAuthorityIndexSnapshots?(
+    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+    options?: ChainReadOptions,
+  ): Promise<ReadonlyMap<
+    ContextGraphAuthorityIndexId,
+    ContextGraphAuthoritySnapshot
+  >>;
   /** Await the physical shared-index scans underlying detached/cancelled waiters. */
   whenIdle(): Promise<void>;
 }
