@@ -172,9 +172,58 @@ describe('Random Sampling proof-time exact repair', () => {
       'eer-0001 failed: connection reset',
     ));
     expect(stopController.signal.aborted).toBe(false);
-    expect(observedSignals.length).toBeGreaterThan(0);
-    expect(observedSignals.every((signal) => signal === observedSignals[0])).toBe(true);
+    expect(observedSignals).toHaveLength(4);
+    expect(observedSignals[2]).toBe(observedSignals[3]);
     expect(observedSignals[0]?.aborted).toBe(false);
+    expect(observedSignals[2]?.aborted).toBe(false);
+  });
+
+  it('reserves enough global deadline for a later Core after an earlier Core stalls', async () => {
+    const liveSignal = new AbortController().signal;
+    let peerTimeoutCount = 0;
+    const attempted: string[] = [];
+    const proofMaterial = { contents: ['recovered'], privateRoots: [] };
+
+    const repaired = await runRandomSamplingExactRepair({
+      chainId: 'base:8453',
+      maxPeers: 'all',
+      timeoutMs: 100,
+      now: () => 0,
+      createTimeoutSignal: () => liveSignal,
+      createPeerTimeoutSignal: () => {
+        peerTimeoutCount += 1;
+        if (peerTimeoutCount !== 1) return liveSignal;
+        const controller = new AbortController();
+        queueMicrotask(() => controller.abort(new DOMException('peer share elapsed', 'TimeoutError')));
+        return controller.signal;
+      },
+      resolveStorageAddress: async () => '0x0000000000000000000000000000000000001234',
+      resolveLocalContextGraphId: () => 'food-safety',
+      resolveCandidatePeerIds: async () => ['peer-stalled', 'peer-holder'],
+      selectPeerWindow: (peerIds) => peerIds,
+      preparePeer: async (peerId, signal) => {
+        attempted.push(peerId);
+        if (peerId === 'peer-stalled') {
+          await new Promise<void>((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          });
+        }
+        return { kind: 'ready' };
+      },
+      fetchExactKnowledgeAsset: async (peerId) => peerId === 'peer-holder'
+        ? { kind: 'found', material: proofMaterial }
+        : { kind: 'miss', disposition: 'clean-absent' },
+      logInfo: vi.fn(),
+    }, {
+      kaId: 7n,
+      cgId: 1n,
+      expectedRoot: new Uint8Array(32),
+      expectedLeafCount: 1n,
+    });
+
+    expect(repaired).toEqual(proofMaterial);
+    expect(attempted).toEqual(['peer-stalled', 'peer-holder']);
+    expect(peerTimeoutCount).toBe(2);
   });
 
   it('reports every structured peer outcome when no provider recovers the asset', async () => {

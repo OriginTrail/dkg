@@ -1,6 +1,10 @@
+import { peerIdFromString } from '@libp2p/peer-id';
+
+export type ProtocolPeerId = ReturnType<typeof peerIdFromString>;
+
 export async function waitForPeerProtocol(
   peerStore: { get(peer: unknown): Promise<{ protocols: string[] }> },
-  peer: { toString(): string },
+  peer: ProtocolPeerId,
   protocol: string,
   attempts: number,
   delayMs: number,
@@ -11,7 +15,7 @@ export async function waitForPeerProtocol(
       throw new DOMException('Protocol readiness wait aborted', 'AbortError');
     }
     try {
-      const peerInfo = await peerStore.get(peer as any);
+      const peerInfo = await peerStore.get(peer);
       if (peerInfo.protocols.includes(protocol)) {
         return true;
       }
@@ -41,4 +45,22 @@ export async function waitForPeerProtocol(
   }
 
   return false;
+}
+
+/** Validate one directory-provided peer-ID string at the p2p boundary. */
+export async function waitForPeerProtocolByString(
+  peerStore: { get(peer: unknown): Promise<{ protocols: string[] }> },
+  peerId: string,
+  protocol: string,
+  attempts: number,
+  delayMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  let peer: ProtocolPeerId;
+  try {
+    peer = peerIdFromString(peerId);
+  } catch {
+    return false;
+  }
+  return waitForPeerProtocol(peerStore, peer, protocol, attempts, delayMs, signal);
 }

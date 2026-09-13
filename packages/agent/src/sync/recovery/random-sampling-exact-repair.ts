@@ -7,6 +7,7 @@ import { buildReconciledKnowledgeAssetUal } from '../../ka-identity.js';
 import type { ExactAssetCommitment } from '../exact-assets.js';
 import {
   runBoundedPreparedPeerTraversal,
+  selectBoundedPreparedPeerWindow,
   type PreparedPeerAttemptRecord,
   type PreparedPeerPreparation,
 } from '../prepared-peer-traversal.js';
@@ -34,6 +35,8 @@ export interface RandomSamplingExactRepairDependencies {
   readonly stopSignal?: AbortSignal;
   readonly timeoutMs?: number;
   readonly createTimeoutSignal?: (timeoutMs: number) => AbortSignal;
+  readonly createPeerTimeoutSignal?: (timeoutMs: number) => AbortSignal;
+  readonly now?: () => number;
   resolveStorageAddress(signal: AbortSignal): Promise<string>;
   resolveLocalContextGraphId(
     onChainContextGraphId: bigint,
@@ -106,6 +109,7 @@ async function executeRandomSamplingExactRepair(
   deps: RandomSamplingExactRepairDependencies,
   input: RandomSamplingExactRepairInput,
   signal: AbortSignal,
+  deadlineMs: number,
 ): Promise<RandomSamplingRepairMaterial> {
   throwIfAborted(signal);
 
@@ -132,41 +136,70 @@ async function executeRandomSamplingExactRepair(
     throw new Error(`Random Sampling repair found no providers for ${localContextGraphId}`);
   }
   const maxPeers = deps.maxPeers === 'all' ? candidatePeerIds.length : deps.maxPeers;
-  const traversal = await runBoundedPreparedPeerTraversal<RandomSamplingExactRepairResult>({
+  const selectedWindow = selectBoundedPreparedPeerWindow({
     candidatePeerIds,
+    maxPeers,
+    selectPeerWindow: (peerIds, { maxPeers: boundedMaxPeers }) => deps.selectPeerWindow(
+      peerIds,
+      {
+        maxPeers: boundedMaxPeers,
+        peerRotationKey: `rs-proof:${localContextGraphId}`,
+      },
+    ),
+  });
+  deps.logInfo(`[rs.tick.kc-repair-window] ${JSON.stringify({
+    assetUal,
+    localContextGraphId,
+    expectedRoot: `0x${expectedCommitment.merkleRootHex}`,
+    expectedLeafCount: expectedCommitment.merkleLeafCount.toString(),
+    candidatePeerIds: selectedWindow.candidatePeerIds,
+    selectedPeerIds: selectedWindow.selectedPeerIds,
+    maxPeers: selectedWindow.maxPeers,
+  })}`);
+  const now = deps.now ?? Date.now;
+  const createPeerTimeoutSignal = deps.createPeerTimeoutSignal ?? AbortSignal.timeout;
+  const peerSignals = new Map<string, AbortSignal>();
+  const peerIndex = new Map(
+    selectedWindow.selectedPeerIds.map((peerId, index) => [peerId, index]),
+  );
+  const traversal = await runBoundedPreparedPeerTraversal<RandomSamplingExactRepairResult>({
+    candidatePeerIds: selectedWindow.selectedPeerIds,
     // The caller bounds this to the complete registry roster. Unlike ordinary
     // reconciliation, one proof-time repair must reach every eligible Core
     // before its deadline; deferring a later Core to another challenge loses
     // the current proof.
-    maxPeers,
+    maxPeers: selectedWindow.selectedPeerIds.length,
     operationLabel: `RS exact repair for ${assetUal} from`,
     assertCurrent: () => {
       if (signal.aborted) throw abortReason(signal);
     },
-    selectPeerWindow: (peerIds, { maxPeers }) => deps.selectPeerWindow(peerIds, {
-      maxPeers,
-      peerRotationKey: `rs-proof:${localContextGraphId}`,
-    }),
-    onWindowSelected: ({ candidatePeerIds: candidates, selectedPeerIds, maxPeers }) => {
-      deps.logInfo(`[rs.tick.kc-repair-window] ${JSON.stringify({
-        assetUal,
-        localContextGraphId,
-        expectedRoot: `0x${expectedCommitment.merkleRootHex}`,
-        expectedLeafCount: expectedCommitment.merkleLeafCount.toString(),
-        candidatePeerIds: candidates,
-        selectedPeerIds,
-        maxPeers,
-      })}`);
+    preparePeer: (peerId) => {
+      const remainingPeers = Math.max(
+        1,
+        selectedWindow.selectedPeerIds.length - (peerIndex.get(peerId) ?? 0),
+      );
+      // Reserve a fair share for every later Core. One stalled dial/fetch may
+      // consume its share, but cannot monopolize the proof's global deadline.
+      const peerBudgetMs = Math.max(
+        1,
+        Math.floor(Math.max(1, deadlineMs - now()) / remainingPeers),
+      );
+      const peerSignal = AbortSignal.any([
+        signal,
+        createPeerTimeoutSignal(peerBudgetMs),
+      ]);
+      peerSignals.set(peerId, peerSignal);
+      return deps.preparePeer(peerId, peerSignal);
     },
-    preparePeer: (peerId) => deps.preparePeer(peerId, signal),
     attemptPeer: async (peerId) => {
       let result: RandomSamplingExactRepairResult;
+      const peerSignal = peerSignals.get(peerId) ?? signal;
       try {
         result = await deps.fetchExactKnowledgeAsset(
           peerId,
           localContextGraphId,
           expectedCommitment,
-          signal,
+          peerSignal,
         );
       } catch (error) {
         if (signal.aborted) throw abortReason(signal);
@@ -201,13 +234,13 @@ export function startRandomSamplingExactRepair(
   deps: RandomSamplingExactRepairDependencies,
   input: RandomSamplingExactRepairInput,
 ): RandomSamplingRepairOperation {
-  const timeoutSignal = (deps.createTimeoutSignal ?? AbortSignal.timeout)(
-    deps.timeoutMs ?? 90_000,
-  );
+  const timeoutMs = deps.timeoutMs ?? 90_000;
+  const deadlineMs = (deps.now ?? Date.now)() + timeoutMs;
+  const timeoutSignal = (deps.createTimeoutSignal ?? AbortSignal.timeout)(timeoutMs);
   const externalSignals = [deps.stopSignal, timeoutSignal]
     .filter((candidate): candidate is AbortSignal => candidate !== undefined);
   return createRandomSamplingRepairOperation(
-    (signal) => executeRandomSamplingExactRepair(deps, input, signal),
+    (signal) => executeRandomSamplingExactRepair(deps, input, signal, deadlineMs),
     externalSignals,
   );
 }

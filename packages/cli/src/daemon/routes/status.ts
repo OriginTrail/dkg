@@ -59,8 +59,7 @@ import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats }
 import {
   DKGAgent,
   loadOpWallets,
-  resolveBooleanSwitch,
-  resolveSyncReconcilerEnabled,
+  resolveSyncLifecycleSwitches,
 } from '@origintrail-official/dkg-agent';
 import {
   rfc64CatalogKillSwitchActiveV1,
@@ -1060,22 +1059,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // setting from the switch the agent actually honors. This projection
       // deliberately uses the same resolver as both runtime reconcile gates,
       // including environment-variable precedence.
-      syncLifecycle: {
-        syncReconcilerEnabled: resolveSyncReconcilerEnabled(
-          config.syncReconcilerEnabled,
-        ),
-        syncOnConnectEnabled: resolveBooleanSwitch(
-          config.syncOnConnectEnabled,
-          'DKG_SYNC_ON_CONNECT_ENABLED',
-          true,
-        ),
-        durableSyncEnabled: resolveBooleanSwitch(
-          config.durableSyncEnabled,
-          'DKG_DURABLE_SYNC_ENABLED',
-          true,
-        ),
-        warmCoreConnectionsEnabled: process.env.DKG_WARM_CORE_CONNECTIONS === '1',
-      },
+      syncLifecycle: resolveSyncLifecycleSwitches(config),
       connectedPeers: uniquePeers.size,
       connections: {
         total: allConns.length,

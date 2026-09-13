@@ -267,13 +267,13 @@ import {
   type CiphertextChunkCatchupRequest,
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
-import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { waitForPeerProtocolByString } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import {
-  findCorePeerIds,
   reconcileWarmCoreConnections,
   type WarmCoreAgent,
 } from './p2p/warm-core-connections.js';
+import { findCorePeerIds } from './p2p/core-peer-discovery.js';
 import {
   deleteSyncPageCheckpoint,
   fetchSyncPages,
@@ -426,11 +426,10 @@ import {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
   resolveNonNegativeIntegerSwitch,
-  resolveBooleanSwitch,
-  resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
+import { resolveSyncLifecycleSwitches } from './sync/lifecycle-switches.js';
 import {
   contextGraphPriority,
   countSyncPriorityClasses,
@@ -1716,15 +1715,15 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 }
 
 function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
-  return resolveSyncReconcilerEnabled(config.syncReconcilerEnabled);
+  return resolveSyncLifecycleSwitches(config).syncReconcilerEnabled;
 }
 
 function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.syncOnConnectEnabled, 'DKG_SYNC_ON_CONNECT_ENABLED', true);
+  return resolveSyncLifecycleSwitches(config).syncOnConnectEnabled;
 }
 
 function durableSyncEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.durableSyncEnabled, 'DKG_DURABLE_SYNC_ENABLED', true);
+  return resolveSyncLifecycleSwitches(config).durableSyncEnabled;
 }
 
 /** OT-RFC-59 responder cap on the peer-controlled raw-scan limit (DoS bound). Honest
@@ -4322,6 +4321,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             findAgents: (options) => this.discovery.findAgents(options),
             selfPeerId: this.peerId,
             signal,
+            // The broad proof-time fallback must be chain-scoped. Profiles
+            // without an operational address or a positive membership read do
+            // not consume the challenge deadline merely by claiming a Core
+            // role in the local Agent Registry graph.
+            isEligibleCore: (agent) => this.isShardingTableCore(
+              agent.agentAddress,
+              { requireProof: true },
+            ),
           }).catch((error) => {
             if (signal.aborted) throw signal.reason ?? error;
             this.log.info(
@@ -5737,16 +5744,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * passes so the phonebook `nodeRole='core'` alone decides. A transient
    * RPC failure denies (we don't pin on an unverifiable gate).
    */
-  async isShardingTableCore(this: DKGAgent, agentAddress: string | undefined): Promise<boolean> {
+  async isShardingTableCore(
+    this: DKGAgent,
+    agentAddress: string | undefined,
+    options: { requireProof?: boolean } = {},
+  ): Promise<boolean> {
     const getIdentityIdForAddress = this.chain.getIdentityIdForAddress?.bind(this.chain);
     const isShardingTableMember = this.chain.isShardingTableMember?.bind(this.chain);
-    if (!getIdentityIdForAddress || !isShardingTableMember) return true; // gate unavailable
+    if (!getIdentityIdForAddress || !isShardingTableMember) return !options.requireProof;
     // A legacy/mixed-version core profile may not carry an operational wallet.
     // Discovery elsewhere supports profiles without `agentAddress`, so treat
     // its absence as "gate unavailable" (fall back to phonebook nodeRole)
     // rather than a hard denial — otherwise the warm set can collapse to zero
     // in a network with healthy but pre-agentAddress cores.
-    if (!agentAddress) return true; // gate unavailable for this profile
+    if (!agentAddress) return !options.requireProof;
     try {
       const identityId = await getIdentityIdForAddress(agentAddress);
       if (identityId === 0n) return false;
@@ -9139,16 +9150,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     peerId: string,
     signal?: AbortSignal,
   ): Promise<boolean> {
-    const { peerIdFromString } = await import('@libp2p/peer-id');
-    let peer: ReturnType<typeof peerIdFromString>;
-    try {
-      peer = peerIdFromString(peerId);
-    } catch {
-      return false;
-    }
-    return waitForPeerProtocol(
+    return waitForPeerProtocolByString(
       this.node.libp2p.peerStore as any,
-      peer,
+      peerId,
       PROTOCOL_SYNC,
       SYNC_PROTOCOL_CHECK_ATTEMPTS,
       SYNC_PROTOCOL_CHECK_DELAY_MS,

@@ -5,7 +5,7 @@ import { DKGAgentBase } from '../src/dkg-agent-base.js';
 
 type LifecycleRepairMethod = typeof LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset;
 type LifecycleRepairInput = Parameters<LifecycleRepairMethod>[0];
-type RegistryAgent = { peerId: string; nodeRole: string };
+type RegistryAgent = { peerId: string; nodeRole: string; agentAddress?: string };
 
 interface RepairAgentHarness {
   started: boolean;
@@ -50,6 +50,10 @@ interface RepairAgentHarness {
   ) => Promise<boolean>;
   ensurePeerConnected: (peerId: string, options: { signal: AbortSignal }) => Promise<void>;
   waitForSyncProtocol: (peerId: string, signal: AbortSignal) => Promise<boolean>;
+  isShardingTableCore: (
+    agentAddress: string | undefined,
+    options?: { requireProof?: boolean },
+  ) => Promise<boolean>;
   syncExactKnowledgeAssetsFromPeerDetailed: (
     peerId: string,
     contextGraphId: string,
@@ -94,6 +98,7 @@ function makeRepairAgent(overrides: Partial<RepairAgentHarness> = {}): RepairAge
     ensurePeerAdmittedForRecovery: vi.fn(async () => true),
     ensurePeerConnected: vi.fn(async () => undefined),
     waitForSyncProtocol: vi.fn(async () => true),
+    isShardingTableCore: vi.fn(async () => true),
     syncExactKnowledgeAssetsFromPeerDetailed: vi.fn(async () => ({
       disposition: 'clean-absent',
       result: { insertedTriples: 0 },
@@ -378,6 +383,39 @@ describe('Random Sampling lifecycle repair adapter', () => {
       expect.anything(),
       expect.stringContaining('registry unavailable'),
     );
+  });
+
+  it('excludes self-declared Core profiles that lack current chain eligibility', async () => {
+    const isShardingTableCore = vi.fn(async (address: string | undefined) => (
+      address === '0x00000000000000000000000000000000000000aa'
+    ));
+    const syncExactKnowledgeAssetsFromPeerDetailed = foundAt(['peer-eligible']);
+    const agentLike = makeRepairAgent({
+      discovery: {
+        findAgents: vi.fn(async () => [
+          {
+            peerId: 'peer-unverified',
+            nodeRole: 'core',
+            agentAddress: '0x00000000000000000000000000000000000000bb',
+          },
+          {
+            peerId: 'peer-eligible',
+            nodeRole: 'core',
+            agentAddress: '0x00000000000000000000000000000000000000aa',
+          },
+        ]),
+      },
+      isShardingTableCore,
+      syncExactKnowledgeAssetsFromPeerDetailed,
+    });
+
+    await expect(runLifecycleRepair(agentLike)).resolves.toEqual(EMPTY_MATERIAL);
+    expect(isShardingTableCore).toHaveBeenCalledWith(
+      '0x00000000000000000000000000000000000000bb',
+      { requireProof: true },
+    );
+    expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
+      .toEqual(['peer-eligible']);
   });
 
   it('falls back to the Core roster when curator discovery fails', async () => {

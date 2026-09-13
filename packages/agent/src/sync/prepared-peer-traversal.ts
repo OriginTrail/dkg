@@ -36,15 +36,15 @@ export interface BoundedPreparedPeerTraversalOptions<T> {
     peerIds: string[],
     options: { readonly maxPeers: number },
   ): readonly string[];
-  /** Diagnostic-only projection of the exact bounded selection before I/O starts. */
-  onWindowSelected?(selection: {
-    readonly candidatePeerIds: readonly string[];
-    readonly selectedPeerIds: readonly string[];
-    readonly maxPeers: number;
-  }): void;
   preparePeer(peerId: string): Promise<PreparedPeerPreparation>;
   attemptPeer(peerId: string): Promise<PreparedPeerAttemptOutcome<T>>;
   log(message: string): void;
+}
+
+export interface PreparedPeerWindowSelection {
+  readonly candidatePeerIds: readonly string[];
+  readonly selectedPeerIds: readonly string[];
+  readonly maxPeers: number;
 }
 
 export interface BoundedPreparedPeerTraversalResult<T> {
@@ -64,14 +64,11 @@ function countPeerAttempts(attempts: readonly PreparedPeerAttemptRecord[]): numb
   return attempts.filter(({ kind }) => kind === 'done' || kind === 'failed' || kind === 'missed').length;
 }
 
-/**
- * Canonical bounded peer preparation and failover policy for exact fetches.
- * Callers retain their evidence construction and result-consumption semantics;
- * the recorded attempts are the single account of how each peer was handled.
- */
-export async function runBoundedPreparedPeerTraversal<T>(
-  options: BoundedPreparedPeerTraversalOptions<T>,
-): Promise<BoundedPreparedPeerTraversalResult<T>> {
+/** Pure window construction shared by traversal and caller-owned telemetry. */
+export function selectBoundedPreparedPeerWindow(options: Pick<
+  BoundedPreparedPeerTraversalOptions<unknown>,
+  'candidatePeerIds' | 'maxPeers' | 'selectPeerWindow'
+>): PreparedPeerWindowSelection {
   const maxPeers = Number.isInteger(options.maxPeers) && options.maxPeers > 0
     ? options.maxPeers
     : 0;
@@ -80,14 +77,21 @@ export async function runBoundedPreparedPeerTraversal<T>(
     ? options.selectPeerWindow(uniqueCandidates, { maxPeers })
     : uniqueCandidates;
   const candidateSet = new Set(uniqueCandidates);
-  const peerWindow = [...new Set(selected)]
+  const selectedPeerIds = [...new Set(selected)]
     .filter((peerId) => candidateSet.has(peerId))
     .slice(0, maxPeers);
-  options.onWindowSelected?.({
-    candidatePeerIds: uniqueCandidates,
-    selectedPeerIds: peerWindow,
-    maxPeers,
-  });
+  return { candidatePeerIds: uniqueCandidates, selectedPeerIds, maxPeers };
+}
+
+/**
+ * Canonical bounded peer preparation and failover policy for exact fetches.
+ * Callers retain their evidence construction and result-consumption semantics;
+ * the recorded attempts are the single account of how each peer was handled.
+ */
+export async function runBoundedPreparedPeerTraversal<T>(
+  options: BoundedPreparedPeerTraversalOptions<T>,
+): Promise<BoundedPreparedPeerTraversalResult<T>> {
+  const { selectedPeerIds: peerWindow } = selectBoundedPreparedPeerWindow(options);
   const attempts: PreparedPeerAttemptRecord[] = [];
 
   for (const peerId of peerWindow) {

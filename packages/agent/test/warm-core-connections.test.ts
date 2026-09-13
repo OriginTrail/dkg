@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
-  findCorePeerIds,
   selectWarmCoreCandidates,
   reconcileWarmCoreConnections,
   type WarmCoreAgent,
   type WarmCoreDeps,
 } from '../src/p2p/warm-core-connections.js';
+import { findCorePeerIds } from '../src/p2p/core-peer-discovery.js';
 
 describe('findCorePeerIds', () => {
   it('returns a deterministic recovery order for an unordered registry result', async () => {
@@ -20,6 +20,20 @@ describe('findCorePeerIds', () => {
 
     await expect(findCorePeerIds({ findAgents, selfPeerId: 'self', signal }))
       .resolves.toEqual(['core-a', 'core-z']);
+  });
+
+  it('filters recovery profiles through the caller-owned chain eligibility gate', async () => {
+    const isEligibleCore = async (agent: { agentAddress?: string }) => (
+      agent.agentAddress === '0xeligible'
+    );
+    await expect(findCorePeerIds({
+      findAgents: async () => [
+        { peerId: 'core-unverified', nodeRole: 'core', agentAddress: '0xunverified' },
+        { peerId: 'core-eligible', nodeRole: 'core', agentAddress: '0xeligible' },
+      ],
+      selfPeerId: 'self',
+      isEligibleCore,
+    })).resolves.toEqual(['core-eligible']);
   });
 });
 

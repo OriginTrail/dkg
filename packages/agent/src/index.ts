@@ -89,9 +89,13 @@ export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
 export {
-  resolveBooleanSwitch,
   resolveSyncReconcilerEnabled,
 } from './sync/backpressure.js';
+export {
+  resolveSyncLifecycleSwitches,
+  type SyncLifecycleSwitchConfig,
+  type SyncLifecycleSwitches,
+} from './sync/lifecycle-switches.js';
 export {
   classifySharedMemoryFreshness,
   type SelectedSharedMemorySyncResult,

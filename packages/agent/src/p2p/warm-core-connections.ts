@@ -1,4 +1,8 @@
 import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  selectCoreAgents,
+  type CorePeerDirectoryEntry,
+} from './core-peer-discovery.js';
 
 /**
  * A.4-lite+ — phonebook-driven warm/pinned connections to Core nodes.
@@ -36,48 +40,13 @@ import { createOperationContext, type OperationContext } from '@origintrail-offi
  */
 
 /** Minimal phonebook shape this module needs. */
-export interface WarmCoreAgent {
-  peerId: string;
-  nodeRole?: string;
-  agentAddress?: string;
-  /** ISO-8601 `dkg:lastSeen` from the phonebook, when known. */
-  lastSeen?: string;
-}
+export interface WarmCoreAgent extends CorePeerDirectoryEntry {}
 
 /** Parse an ISO-8601 `lastSeen` to epoch ms; 0 when absent/unparseable. */
 function lastSeenMs(iso?: string): number {
   if (!iso) return 0;
   const t = Date.parse(iso);
   return Number.isNaN(t) ? 0 : t;
-}
-
-/** Select every de-duplicated Core except this node, preserving input order. */
-export function selectCoreAgents(
-  agents: readonly WarmCoreAgent[],
-  selfPeerId: string,
-): WarmCoreAgent[] {
-  const seen = new Set<string>();
-  const out: WarmCoreAgent[] = [];
-  for (const agent of agents) {
-    if (agent.nodeRole !== 'core') continue;
-    if (!agent.peerId || agent.peerId === selfPeerId) continue;
-    if (seen.has(agent.peerId)) continue;
-    seen.add(agent.peerId);
-    out.push(agent);
-  }
-  return out;
-}
-
-/** Discover a stable, complete, de-duplicated Core peer roster for recovery work. */
-export async function findCorePeerIds(options: {
-  findAgents: (options?: { signal?: AbortSignal }) => Promise<readonly WarmCoreAgent[]>;
-  selfPeerId: string;
-  signal?: AbortSignal;
-}): Promise<string[]> {
-  const agents = await options.findAgents({ signal: options.signal });
-  return selectCoreAgents(agents, options.selfPeerId)
-    .map(({ peerId }) => peerId)
-    .sort();
 }
 
 /**

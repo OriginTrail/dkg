@@ -12,6 +12,7 @@ import {
   JAVA_WRITE_UTF_MAX_BYTES,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
+import { resolveSyncLifecycleSwitches } from './sync/lifecycle-switches.js';
 
 /** Anchor predicate stamped on every root entity that has a private partition. */
 export const PRIVATE_DATA_ANCHOR = 'http://dkg.io/ontology/privateDataAnchor';
@@ -84,7 +85,8 @@ export const SYNC_AUTH_MAX_AGE_MS = 90_000;
  * reconciliation never pays a cold circuit-relay dial to reach a Core.
  * Conservative default (off) — flip to '1' to enable.
  */
-export const WARM_CORE_CONNECTIONS_ENABLED = process.env.DKG_WARM_CORE_CONNECTIONS === '1';
+export const WARM_CORE_CONNECTIONS_ENABLED = resolveSyncLifecycleSwitches()
+  .warmCoreConnectionsEnabled;
 /** How often to refresh the warm-core set from the phonebook + redial drops. */
 export const WARM_CORE_RECONCILE_INTERVAL_MS = 90_000;
 /** Upper bound on simultaneously pinned Cores (slot-exhaustion guard). */

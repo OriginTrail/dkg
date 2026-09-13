@@ -565,6 +565,47 @@ describe('/api/status effective sync lifecycle switches', () => {
     });
   });
 
+  it('surfaces config-only isolation switches used by runtime gates', async () => {
+    const previous = {
+      syncOnConnect: process.env.DKG_SYNC_ON_CONNECT_ENABLED,
+      durableSync: process.env.DKG_DURABLE_SYNC_ENABLED,
+    };
+    delete process.env.DKG_SYNC_ON_CONNECT_ENABLED;
+    delete process.env.DKG_DURABLE_SYNC_ENABLED;
+    try {
+      const response = await requestStatusWithAgent({}, {
+        syncOnConnectEnabled: false,
+        durableSyncEnabled: false,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body.syncLifecycle).toEqual({
+        syncReconcilerEnabled: true,
+        syncOnConnectEnabled: false,
+        durableSyncEnabled: false,
+        warmCoreConnectionsEnabled: false,
+      });
+    } finally {
+      if (previous.syncOnConnect === undefined) delete process.env.DKG_SYNC_ON_CONNECT_ENABLED;
+      else process.env.DKG_SYNC_ON_CONNECT_ENABLED = previous.syncOnConnect;
+      if (previous.durableSync === undefined) delete process.env.DKG_DURABLE_SYNC_ENABLED;
+      else process.env.DKG_DURABLE_SYNC_ENABLED = previous.durableSync;
+    }
+  });
+
+  it('surfaces the exact warm-Core opt-in used by runtime startup', async () => {
+    const previous = process.env.DKG_WARM_CORE_CONNECTIONS;
+    process.env.DKG_WARM_CORE_CONNECTIONS = '1';
+    try {
+      const response = await requestStatusWithAgent({}, {});
+      expect(response.status).toBe(200);
+      expect(response.body.syncLifecycle.warmCoreConnectionsEnabled).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.DKG_WARM_CORE_CONNECTIONS;
+      else process.env.DKG_WARM_CORE_CONNECTIONS = previous;
+    }
+  });
+
   it('surfaces the environment override that runtime actually honors', async () => {
     const previous = process.env.DKG_SYNC_RECONCILER_ENABLED;
     process.env.DKG_SYNC_RECONCILER_ENABLED = 'true';
