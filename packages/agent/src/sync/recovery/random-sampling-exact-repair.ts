@@ -7,7 +7,6 @@ import { buildReconciledKnowledgeAssetUal } from '../../ka-identity.js';
 import type { ExactAssetCommitment } from '../exact-assets.js';
 import {
   runBoundedPreparedPeerTraversal,
-  selectBoundedPreparedPeerWindow,
   type PreparedPeerAttemptRecord,
   type PreparedPeerPreparation,
 } from '../prepared-peer-traversal.js';
@@ -136,9 +135,19 @@ async function executeRandomSamplingExactRepair(
     throw new Error(`Random Sampling repair found no providers for ${localContextGraphId}`);
   }
   const maxPeers = deps.maxPeers === 'all' ? candidatePeerIds.length : deps.maxPeers;
-  const selectedWindow = selectBoundedPreparedPeerWindow({
+  const now = deps.now ?? Date.now;
+  const createPeerTimeoutSignal = deps.createPeerTimeoutSignal ?? AbortSignal.timeout;
+  const traversal = await runBoundedPreparedPeerTraversal<
+    RandomSamplingExactRepairResult,
+    AbortSignal
+  >({
     candidatePeerIds,
+    // The caller bounds this to the complete registry roster. Unlike ordinary
+    // reconciliation, one proof-time repair must reach every eligible Core
+    // before its deadline; deferring a later Core to another challenge loses
+    // the current proof.
     maxPeers,
+    operationLabel: `RS exact repair for ${assetUal} from`,
     selectPeerWindow: (peerIds, { maxPeers: boundedMaxPeers }) => deps.selectPeerWindow(
       peerIds,
       {
@@ -146,38 +155,21 @@ async function executeRandomSamplingExactRepair(
         peerRotationKey: `rs-proof:${localContextGraphId}`,
       },
     ),
-  });
-  deps.logInfo(`[rs.tick.kc-repair-window] ${JSON.stringify({
-    assetUal,
-    localContextGraphId,
-    expectedRoot: `0x${expectedCommitment.merkleRootHex}`,
-    expectedLeafCount: expectedCommitment.merkleLeafCount.toString(),
-    candidatePeerIds: selectedWindow.candidatePeerIds,
-    selectedPeerIds: selectedWindow.selectedPeerIds,
-    maxPeers: selectedWindow.maxPeers,
-  })}`);
-  const now = deps.now ?? Date.now;
-  const createPeerTimeoutSignal = deps.createPeerTimeoutSignal ?? AbortSignal.timeout;
-  const peerSignals = new Map<string, AbortSignal>();
-  const peerIndex = new Map(
-    selectedWindow.selectedPeerIds.map((peerId, index) => [peerId, index]),
-  );
-  const traversal = await runBoundedPreparedPeerTraversal<RandomSamplingExactRepairResult>({
-    candidatePeerIds: selectedWindow.selectedPeerIds,
-    // The caller bounds this to the complete registry roster. Unlike ordinary
-    // reconciliation, one proof-time repair must reach every eligible Core
-    // before its deadline; deferring a later Core to another challenge loses
-    // the current proof.
-    maxPeers: selectedWindow.selectedPeerIds.length,
-    operationLabel: `RS exact repair for ${assetUal} from`,
+    onWindowSelected: (selectedWindow) => {
+      deps.logInfo(`[rs.tick.kc-repair-window] ${JSON.stringify({
+        assetUal,
+        localContextGraphId,
+        expectedRoot: `0x${expectedCommitment.merkleRootHex}`,
+        expectedLeafCount: expectedCommitment.merkleLeafCount.toString(),
+        candidatePeerIds: selectedWindow.candidatePeerIds,
+        selectedPeerIds: selectedWindow.selectedPeerIds,
+        maxPeers: selectedWindow.maxPeers,
+      })}`);
+    },
     assertCurrent: () => {
       if (signal.aborted) throw abortReason(signal);
     },
-    preparePeer: (peerId) => {
-      const remainingPeers = Math.max(
-        1,
-        selectedWindow.selectedPeerIds.length - (peerIndex.get(peerId) ?? 0),
-      );
+    preparePeer: async (peerId, { remainingPeers }) => {
       // Reserve a fair share for every later Core. One stalled dial/fetch may
       // consume its share, but cannot monopolize the proof's global deadline.
       const peerBudgetMs = Math.max(
@@ -188,12 +180,13 @@ async function executeRandomSamplingExactRepair(
         signal,
         createPeerTimeoutSignal(peerBudgetMs),
       ]);
-      peerSignals.set(peerId, peerSignal);
-      return deps.preparePeer(peerId, peerSignal);
+      const preparation = await deps.preparePeer(peerId, peerSignal);
+      return preparation.kind === 'ready'
+        ? { kind: 'ready', prepared: peerSignal }
+        : preparation;
     },
-    attemptPeer: async (peerId) => {
+    attemptPeer: async (peerId, peerSignal) => {
       let result: RandomSamplingExactRepairResult;
-      const peerSignal = peerSignals.get(peerId) ?? signal;
       try {
         result = await deps.fetchExactKnowledgeAsset(
           peerId,

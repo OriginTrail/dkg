@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   runBoundedPreparedPeerTraversal,
-  selectBoundedPreparedPeerWindow,
   type PreparedPeerPreparation,
+  type PreparedPeerWindowSelection,
 } from '../src/sync/prepared-peer-traversal.js';
 
 describe('runBoundedPreparedPeerTraversal', () => {
@@ -55,16 +55,14 @@ describe('runBoundedPreparedPeerTraversal', () => {
 
   it('exhausts a bounded, de-duplicated window selected from unique candidates', async () => {
     const selectPeerWindow = vi.fn((peerIds: string[]) => [...peerIds].reverse().concat('peer-unknown'));
-    const selection = selectBoundedPreparedPeerWindow({
+    let selection: PreparedPeerWindowSelection | undefined;
+    const traversal = await runBoundedPreparedPeerTraversal<never>({
       candidatePeerIds: ['peer-a', 'peer-b', 'peer-a', '', 'peer-c'],
       maxPeers: 2,
       selectPeerWindow,
-    });
-    const traversal = await runBoundedPreparedPeerTraversal<never>({
-      candidatePeerIds: selection.selectedPeerIds,
-      maxPeers: selection.selectedPeerIds.length,
       operationLabel: 'Exact fetch from',
       assertCurrent: () => undefined,
+      onWindowSelected: (selected) => { selection = selected; },
       preparePeer: async () => ({ kind: 'ready' }),
       attemptPeer: async () => ({ kind: 'missed', reason: 'unresolved' }),
       log: vi.fn(),
@@ -84,6 +82,35 @@ describe('runBoundedPreparedPeerTraversal', () => {
         { peerId: 'peer-b', kind: 'missed', reason: 'unresolved' },
       ],
     });
+  });
+
+  it('carries typed preparation state and traversal position into the attempt', async () => {
+    const observed: unknown[] = [];
+    const traversal = await runBoundedPreparedPeerTraversal<string, { token: string }>({
+      candidatePeerIds: ['peer-a', 'peer-b'],
+      maxPeers: 2,
+      operationLabel: 'Typed fetch from',
+      assertCurrent: () => undefined,
+      preparePeer: async (peerId, position) => {
+        observed.push(['prepare', peerId, position]);
+        return { kind: 'ready', prepared: { token: `prepared:${peerId}` } };
+      },
+      attemptPeer: async (peerId, prepared, position) => {
+        observed.push(['attempt', peerId, prepared, position]);
+        return peerId === 'peer-a'
+          ? { kind: 'missed', reason: 'not-here' }
+          : { kind: 'done', result: prepared.token };
+      },
+      log: vi.fn(),
+    });
+
+    expect(traversal.result).toBe('prepared:peer-b');
+    expect(observed).toEqual([
+      ['prepare', 'peer-a', expect.objectContaining({ index: 0, remainingPeers: 2, totalPeers: 2 })],
+      ['attempt', 'peer-a', { token: 'prepared:peer-a' }, expect.objectContaining({ index: 0, remainingPeers: 2 })],
+      ['prepare', 'peer-b', expect.objectContaining({ index: 1, remainingPeers: 1, totalPeers: 2 })],
+      ['attempt', 'peer-b', { token: 'prepared:peer-b' }, expect.objectContaining({ index: 1, remainingPeers: 1 })],
+    ]);
   });
 
   it('propagates cancellation observed after a failed preparation instead of continuing', async () => {
