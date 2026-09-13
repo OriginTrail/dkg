@@ -279,6 +279,7 @@ describe('/api/chain/rpc-health partial adapter configuration', () => {
         '/api/chain/rpc-health',
         null,
         undefined,
+        undefined,
         runtime.routeTransport,
       );
       expect(response.status).toBe(200);
@@ -611,7 +612,7 @@ describe('/api/status RFC-64 private recovery privacy', () => {
           authorityState: 'accepted',
           policySource: 'owner-signed-unregistered',
         }],
-        readRfc64AuthorityRpcCircuitStatusV1: () => ({
+        readRfc64AuthorityRpcCircuitSnapshotV1: () => ({
           state: 'open',
           consecutiveExhaustions: 2,
           retryAtMs: 1_725_987_654_321,
