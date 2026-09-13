@@ -128,6 +128,7 @@ export default defineConfig({
       "test/sync-requester-priority.test.ts",
       "test/sync-requester-progress.test.ts",
       "test/swm-snapshot-coverage.test.ts",
+      "test/swm-snapshot-coverage-selection.test.ts",
       "test/swm-snapshot-throw-progress.test.ts",
       "test/metadata-literal.test.ts",
       "test/rootless-durable-bounded-progress.test.ts",

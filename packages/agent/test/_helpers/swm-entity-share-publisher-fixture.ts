@@ -8,19 +8,26 @@ import { workspaceOperationPublicSliceSubject } from '@origintrail-official/dkg-
 import { storeWorkspaceOperationPublicQuads } from
   '@origintrail-official/dkg-publisher/dist/workspace-resolution.js';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { MemorySnapshotStore, type SwmSyncHarnessShare } from './swm-sync-harness.js';
+import { MemoryWorkspaceSnapshotStore } from './memory-workspace-snapshot-store.js';
+
+export interface EntitySharePublisherFixture {
+  readonly digest: string;
+  readonly payload: readonly Quad[];
+  readonly meta: readonly Quad[];
+  readonly sliceSubject: string;
+}
 
 /** Entity-share manifest and sole snapshot generated through the publisher boundary. */
-export async function makeEntityShareSwmHarnessFixture(options: {
+export async function makeEntitySharePublisherFixture(options: {
   readonly contextGraphId: string;
   readonly shareOperationId: string;
   readonly rootEntity: string;
   readonly payload: readonly Quad[];
   readonly publisherPeerId: string;
-}): Promise<SwmSyncHarnessShare & { readonly sliceSubject: string }> {
+}): Promise<EntitySharePublisherFixture> {
   const store = new OxigraphStore();
   const graphManager = new GraphManager(store);
-  const snapshots = new MemorySnapshotStore();
+  const snapshots = new MemoryWorkspaceSnapshotStore();
   try {
     await storeWorkspaceOperationPublicQuads({
       store,

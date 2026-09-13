@@ -5,7 +5,6 @@
  * SWM materialization and coverage scenarios need.
  */
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, type Quad, type TripleStore } from
   '@origintrail-official/dkg-storage';
 import type { SyncPhase } from '../../src/sync/auth/request-build.js';
@@ -15,17 +14,7 @@ import {
   type SharedMemorySyncSummary,
 } from '../../src/sync/requester/shared-memory-sync.js';
 import { createSharedMemorySnapshotMaterializer } from '../../src/sync/requester/swm-snapshot-materializer.js';
-
-export class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
-  readonly snapshots = new Map<string, Quad[]>();
-  async putSnapshot(input: { readonly digest: string; readonly quads: readonly Quad[] }) {
-    this.snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
-    return { ref: input.digest, byteLength: 0 };
-  }
-  async getSnapshot(ref: string): Promise<Quad[] | null> {
-    return this.snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null;
-  }
-}
+import { MemoryWorkspaceSnapshotStore } from './memory-workspace-snapshot-store.js';
 
 export interface SwmSyncHarnessShare {
   readonly digest: string;
@@ -70,7 +59,7 @@ export type SwmSyncHarnessOptions = SwmSyncHarnessBaseOptions & SwmSyncHarnessSo
 type ManagedSwmSyncHarnessOptions = Omit<SwmSyncHarnessBaseOptions, 'store'> & SwmSyncHarnessSource;
 
 export function makeSwmSyncHarness(options: SwmSyncHarnessOptions) {
-  const snapshotStore = new MemorySnapshotStore();
+  const snapshotStore = new MemoryWorkspaceSnapshotStore();
   const materializer = options.materialization === 'disabled' ? undefined
     : createSharedMemorySnapshotMaterializer({
       store: options.store,
