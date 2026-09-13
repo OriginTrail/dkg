@@ -75,6 +75,18 @@
     "command": "node --test packages/agent/scripts/*.test.mjs"
   },
   {
+    "pattern": "packages/agent/devnet/rfc64-private-catalog/*.test.mjs",
+    "lane": "scripts",
+    "reason": "Deterministic private RFC-64 release-gate contract checks run in the build gate",
+    "cadence": "required",
+    "command": "pnpm test:scripts",
+    "layer": "repository tooling",
+    "prerequisites": [
+      "pnpm frozen install",
+      "built workspace dependencies"
+    ]
+  },
+  {
     "pattern": "test-systems/*.test.ts",
     "lane": "tornado-blazegraph",
     "reason": "Native Oxigraph recovery plus real backend conformance; Blazegraph mandatory in CI",

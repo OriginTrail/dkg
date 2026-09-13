@@ -873,14 +873,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         ctx,
         `RFC-64 responsibility remains blocked after creating "${opts.id}": ${error instanceof Error ? error.message : String(error)}`,
       );
-      void Promise.resolve()
-        .then(() => this.reconcileRfc64CatalogResponsibilityV1(opts.id))
-        .catch((retryError) => {
-          this.log.warn(
-            ctx,
-            `RFC-64 responsibility retry remains blocked for "${opts.id}": ${retryError instanceof Error ? retryError.message : String(retryError)}`,
-          );
-        });
+      this.scheduleRfc64CatalogResponsibilityReconciliationV1(opts.id);
     }
   }
 

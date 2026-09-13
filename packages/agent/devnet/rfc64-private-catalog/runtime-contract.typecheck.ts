@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import {
+  type FinalizedRuntimeV1,
+  type ProbeRuntimeV1,
+  type Rfc64PrivateRuntimeV1,
+} from './agent-runtime.ts';
+import type { Rfc64PrivateFinalizedAgentConfigV1 } from './agent-runtime-factory.ts';
+import type {
+  Rfc64PrivateCatalogStateV1,
+  Rfc64PrivateProcessEvidenceMapV1,
+  Rfc64PrivateScenarioPhasesV1,
+} from './scenario-result.ts';
+import { waitForBootstrapV1 } from './catalog-evidence-handlers.mjs';
+import { publishCatalogBaselineV1 } from './catalog-publication-handlers.mjs';
+
+declare const probeRuntime: ProbeRuntimeV1;
+declare const finalizedRuntime: FinalizedRuntimeV1;
+// @ts-expect-error Probe runtimes expose only the real agent capability.
+void probeRuntime.faultProfile;
+// @ts-expect-error Finalized runtimes expose resolved capabilities, not test strategies.
+void finalizedRuntime.faultProfile;
+
+declare const finalizedAgentConfig: Rfc64PrivateFinalizedAgentConfigV1;
+const exactFinalizedChainConfig: Rfc64PrivateFinalizedAgentConfigV1 = finalizedAgentConfig;
+void exactFinalizedChainConfig;
+
+const missingFinalizedChainConfig: Rfc64PrivateFinalizedAgentConfigV1 = {
+  ...finalizedAgentConfig,
+  // @ts-expect-error The finalized agent boundary requires canonical chainConfig.
+  chainConfig: undefined,
+};
+void missingFinalizedChainConfig;
+
+const misspelledFinalizedChainConfig: Rfc64PrivateFinalizedAgentConfigV1 = {
+  ...finalizedAgentConfig,
+  // @ts-expect-error A misspelled chain field is not part of the finalized config.
+  chainConfg: finalizedAgentConfig.chainConfig,
+};
+void misspelledFinalizedChainConfig;
+
+declare const runtime: Rfc64PrivateRuntimeV1;
+void waitForBootstrapV1(runtime, { timeoutMs: 1_000 });
+void publishCatalogBaselineV1(runtime);
+
+// @ts-expect-error Handler contexts must be the canonical runtime union.
+void waitForBootstrapV1({ kind: 'run', role: 'receiver' }, { timeoutMs: 1_000 });
+
+// @ts-expect-error Publication handlers reject structurally incomplete owner contexts.
+void publishCatalogBaselineV1({ kind: 'run', role: 'owner', publication: null });
+
+declare const phases: Rfc64PrivateScenarioPhasesV1;
+const exactPhases: Rfc64PrivateScenarioPhasesV1 = phases;
+void exactPhases;
+// @ts-expect-error A named phase cannot be omitted from the closed scenario result.
+const missingRestart: Rfc64PrivateScenarioPhasesV1 = {
+  baseline: phases.baseline,
+  failover: phases.failover,
+  revocation: phases.revocation,
+};
+void missingRestart;
+
+// Phase fields are concrete evidence contracts: a state snapshot cannot be
+// substituted for bootstrap provenance simply because both are objects.
+const swappedBaselineEvidence: Rfc64PrivateScenarioPhasesV1 = {
+  ...phases,
+  baseline: {
+    ...phases.baseline,
+    // @ts-expect-error Bootstrap provenance is not an applied catalog state.
+    provider2Bootstrap: phases.baseline.provider2State,
+  },
+};
+void swappedBaselineEvidence;
+
+const malformedNestedState: Rfc64PrivateCatalogStateV1 = {
+  ...phases.failover.receiverState,
+  graphCounts: [
+    // @ts-expect-error Memory evidence requires both layer projections and a typed proof.
+    { kaNumber: 1 },
+  ],
+};
+void malformedNestedState;
+
+declare const processEvidence: Rfc64PrivateProcessEvidenceMapV1;
+const missingTypedProcess: Rfc64PrivateProcessEvidenceMapV1 = {
+  ...processEvidence,
+  // @ts-expect-error The fixed process map cannot omit or undefine the owner actor.
+  owner: undefined,
+};
+void missingTypedProcess;

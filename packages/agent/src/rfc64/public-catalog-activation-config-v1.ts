@@ -27,9 +27,11 @@ import {
 import { snapshotRfc64PublicCatalogAnnouncementPeersV1 } from './catalog-peers-v1.js';
 import {
   mergeRfc64CatalogRolloutConfigsV1,
+  rfc64CatalogRolloutModeForContextGraphV1,
   resolveRfc64CatalogRolloutConfigV1,
   type ResolvedRfc64CatalogRolloutConfigV1,
   type Rfc64CatalogRolloutConfigV1,
+  type Rfc64CatalogRolloutModeV1,
 } from './catalog-rollout-authority-v1.js';
 
 export {
@@ -43,6 +45,7 @@ export {
   resolveRfc64LegacySyncContextGraphsV1,
   resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogExecutionPlanAuthorityV1,
+  resolveRfc64CatalogExecutionPlanModeV1,
   resolveRfc64CatalogResponsibilityAuthorityV1,
   type Rfc64CatalogExecutionPlanV1,
   type ResolvedRfc64CatalogRolloutConfigV1,
@@ -74,6 +77,30 @@ const RFC64_CATALOG_ACTIVATION_FIELDS_V1 = new Set([
   'rollout',
 ]);
 const ZERO_ADDRESS_V1 = `0x${'0'.repeat(40)}`;
+
+function isPlainObjectV1(input: unknown): input is Record<string, unknown> {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return false;
+  const prototype = Object.getPrototypeOf(input);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function sameStructuredValueV1(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => sameStructuredValueV1(value, right[index]));
+  }
+  if (!isPlainObjectV1(left) || !isPlainObjectV1(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => (
+      key === rightKeys[index]
+      && sameStructuredValueV1(left[key], right[key])
+    ));
+}
 
 function assertRfc64PublicCatalogActivationConfigV1(
   input: unknown,
@@ -145,6 +172,8 @@ export interface ResolvedRfc64CatalogActivationConfigV1 {
   readonly selectedContextGraphs: readonly string[];
   readonly selectedPublicContextGraphs: readonly string[];
   readonly selectedPrivateContextGraphs: readonly string[];
+  /** Effective manifest modes; inherited defaults never enter the override map. */
+  readonly selectedContextGraphModes?: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>;
   readonly deploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
   readonly accessPolicyAuthority?: Readonly<{
     readonly localAgentAddress: EvmAddressV1;
@@ -162,6 +191,41 @@ export type Rfc64CatalogActivationInputV1 =
   | Rfc64CatalogActivationConfigV1
   | ResolvedRfc64CatalogActivationConfigV1;
 
+export type Rfc64CatalogActivationConfigurationV1 =
+  | Readonly<{ readonly source: 'omitted' }>
+  | Readonly<{ readonly source: 'legacy-standalone' }>
+  | Readonly<{
+    readonly source: 'unified';
+    readonly deprecatedPublicControlPresent: boolean;
+    readonly activationManifestPresent: boolean;
+    readonly legacyStandaloneControlsPresent: boolean;
+  }>
+  | Readonly<{
+    readonly source: 'deprecated-public';
+    readonly activationManifestPresent: boolean;
+    readonly legacyStandaloneControlsPresent: boolean;
+  }>;
+
+export type Rfc64CatalogActivationExecutionV1 =
+  | Readonly<{
+    readonly mode: 'catalog';
+    readonly rollout: ResolvedRfc64CatalogRolloutConfigV1;
+  }>
+  | Readonly<{
+    readonly mode: 'compatibility-rollback';
+    readonly rollout: ResolvedRfc64CatalogRolloutConfigV1;
+  }>
+  | Readonly<{
+    readonly mode: 'ephemeral-legacy';
+    readonly rollout: ResolvedRfc64CatalogRolloutConfigV1;
+  }>;
+
+/** One immutable interpretation of configuration provenance and runtime execution. */
+export interface Rfc64CatalogNormalizedActivationStateV1 {
+  readonly configuration: Rfc64CatalogActivationConfigurationV1;
+  readonly execution: Rfc64CatalogActivationExecutionV1;
+}
+
 export interface ResolvedRfc64CatalogActivationsV1 {
   /** Policy-neutral union used by the Release-1 runtime. */
   readonly catalog: ResolvedRfc64CatalogActivationConfigV1;
@@ -170,6 +234,96 @@ export interface ResolvedRfc64CatalogActivationsV1 {
   /** Fully resolved unified-selection controls before compatibility manifests are unioned. */
   readonly selectedCatalogAuthoringControls:
     readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[];
+  /** Canonical activation/execution decision consumed by agent and daemon. */
+  readonly activationState: Rfc64CatalogNormalizedActivationStateV1;
+}
+
+/** Validate a plain resolved activation snapshot at the runtime boundary. */
+export function assertResolvedRfc64CatalogActivationsV1(
+  input: unknown,
+  chainIdentity?: Rfc64PublicCatalogActivationChainIdentityV1,
+): asserts input is ResolvedRfc64CatalogActivationsV1 {
+  if (!isPlainObjectV1(input)) {
+    throw new TypeError('rfc64CatalogActivations must be a plain object');
+  }
+  const fields = ['activationState', 'catalog', 'publicCatalog', 'selectedCatalogAuthoringControls'];
+  const keys = Object.keys(input).sort();
+  if (!sameStrings(keys, fields)) {
+    throw new TypeError('rfc64CatalogActivations must contain exactly the resolved fields');
+  }
+  const resolved = input as unknown as ResolvedRfc64CatalogActivationsV1;
+  const identity = chainIdentity
+    ?? resolveRfc64PublicCatalogActivationChainIdentityV1(undefined);
+  const canonicalCatalog = resolveRfc64CatalogActivationInputV1(resolved.catalog, identity);
+  const canonicalPublic = resolveRfc64PublicCatalogActivationInputV1(
+    resolved.publicCatalog,
+    identity,
+  );
+  if (!sameStructuredValueV1(resolved.catalog, canonicalCatalog)) {
+    throw new TypeError('rfc64CatalogActivations.catalog is not a canonical resolved snapshot');
+  }
+  if (!sameStructuredValueV1(resolved.publicCatalog, canonicalPublic)) {
+    throw new TypeError('rfc64CatalogActivations.publicCatalog is not a canonical resolved snapshot');
+  }
+  if (!sameStructuredValueV1(
+    resolved.selectedCatalogAuthoringControls,
+    resolved.catalog.selectedCatalogAuthoringControls,
+  )) {
+    throw new TypeError('rfc64CatalogActivations authoring controls differ from catalog');
+  }
+  const state = resolved.activationState;
+  if (!isPlainObjectV1(state) || !isPlainObjectV1(state.configuration)
+    || !isPlainObjectV1(state.execution)) {
+    throw new TypeError('rfc64CatalogActivations.activationState must be a resolved object');
+  }
+  const configuration = state.configuration;
+  const configurationKeys: Readonly<Record<
+    Rfc64CatalogActivationConfigurationV1['source'], readonly string[]
+  >> = {
+    omitted: ['source'],
+    'legacy-standalone': ['source'],
+    unified: [
+      'activationManifestPresent',
+      'deprecatedPublicControlPresent',
+      'legacyStandaloneControlsPresent',
+      'source',
+    ],
+    'deprecated-public': [
+      'activationManifestPresent',
+      'legacyStandaloneControlsPresent',
+      'source',
+    ],
+  };
+  const expectedConfigurationKeys = configurationKeys[configuration.source];
+  if (expectedConfigurationKeys === undefined
+    || !sameStrings(Object.keys(configuration).sort(), expectedConfigurationKeys)) {
+    throw new TypeError('rfc64CatalogActivations has invalid configuration provenance');
+  }
+  for (const [key, value] of Object.entries(configuration)) {
+    if (key !== 'source' && typeof value !== 'boolean') {
+      throw new TypeError('rfc64CatalogActivations configuration flags must be boolean');
+    }
+  }
+  const execution = state.execution;
+  if (!sameStrings(Object.keys(execution).sort(), ['mode', 'rollout'])
+    || !['catalog', 'compatibility-rollback', 'ephemeral-legacy'].includes(execution.mode)) {
+    throw new TypeError('rfc64CatalogActivations has invalid execution state');
+  }
+  if (execution.mode === 'compatibility-rollback' && resolved.catalog.enabled) {
+    throw new TypeError('rfc64CatalogActivations rollback conflicts with enabled catalog');
+  }
+  if (!resolved.catalog.enabled && execution.mode !== 'compatibility-rollback') {
+    throw new TypeError('rfc64CatalogActivations disabled catalog requires rollback execution');
+  }
+  if (execution.mode === 'ephemeral-legacy' && configuration.source !== 'omitted') {
+    throw new TypeError('rfc64CatalogActivations ephemeral execution requires omitted configuration');
+  }
+  const expectedExecutionRollout = execution.mode === 'catalog'
+    ? resolved.catalog.rollout
+    : Object.freeze({ ...resolved.catalog.rollout, defaultMode: 'legacy' as const });
+  if (!sameStructuredValueV1(execution.rollout, expectedExecutionRollout)) {
+    throw new TypeError('rfc64CatalogActivations execution rollout is inconsistent');
+  }
 }
 
 /**
@@ -197,6 +351,58 @@ export interface ResolvedRfc64PublicCatalogActivationConfigV1 {
 export type Rfc64PublicCatalogActivationInputV1 =
   | Rfc64PublicCatalogActivationConfigV1
   | ResolvedRfc64PublicCatalogActivationConfigV1;
+
+function normalizeRfc64CatalogActivationConfigurationV1(
+  input: Readonly<{
+    readonly catalog?: Rfc64CatalogActivationInputV1;
+    readonly publicCatalog?: Rfc64PublicCatalogActivationInputV1;
+    readonly legacyStandaloneControlsPresent: boolean;
+  }>,
+  compatibilityRollback: boolean,
+): Rfc64CatalogActivationConfigurationV1 {
+  if (input.catalog !== undefined) {
+    return Object.freeze({
+      source: 'unified',
+      deprecatedPublicControlPresent: input.publicCatalog !== undefined,
+      activationManifestPresent: compatibilityRollback
+        ? false
+        : input.catalog.bootstrap !== undefined
+          || input.publicCatalog?.bootstrap !== undefined,
+      legacyStandaloneControlsPresent: input.legacyStandaloneControlsPresent,
+    });
+  }
+  if (input.publicCatalog !== undefined) {
+    return Object.freeze({
+      source: 'deprecated-public',
+      activationManifestPresent: compatibilityRollback
+        ? false
+        : input.publicCatalog.bootstrap !== undefined,
+      legacyStandaloneControlsPresent: input.legacyStandaloneControlsPresent,
+    });
+  }
+  return input.legacyStandaloneControlsPresent
+    ? Object.freeze({ source: 'legacy-standalone' })
+    : Object.freeze({ source: 'omitted' });
+}
+
+function resolveRfc64CatalogActivationExecutionV1(
+  configuration: Rfc64CatalogActivationConfigurationV1,
+  catalogRollout: ResolvedRfc64CatalogRolloutConfigV1,
+  input: Readonly<{
+    readonly compatibilityRollback: boolean;
+    readonly persistenceAvailable: boolean | undefined;
+  }>,
+): Rfc64CatalogActivationExecutionV1 {
+  const mode: Rfc64CatalogActivationExecutionV1['mode'] = input.compatibilityRollback
+    ? 'compatibility-rollback'
+    : input.persistenceAvailable === false && configuration.source === 'omitted'
+      ? 'ephemeral-legacy'
+      : 'catalog';
+  const rollout = mode === 'catalog'
+    ? catalogRollout
+    : Object.freeze({ ...catalogRollout, defaultMode: 'legacy' as const });
+  return Object.freeze({ mode, rollout });
+}
 
 export type ResolvedRfc64PublicCatalogAutoPublishPolicyV1 =
   | Readonly<{
@@ -551,8 +757,11 @@ export function resolveRfc64CatalogActivationInputV1(
   ) {
     const resolvedInput = input as ResolvedRfc64CatalogActivationConfigV1;
     if (resolvedInput.enabled === false) {
-      const rollout = resolvedInput.rollout
-        ?? resolveRfc64CatalogRolloutConfigV1(undefined, [], 'rfc64Catalog');
+      const rollout = resolveRfc64CatalogRolloutConfigV1(
+        resolvedInput.rollout,
+        resolvedInput.selectedContextGraphs,
+        'rfc64Catalog',
+      );
       if (
         resolvedInput.selectedContextGraphs.length !== 0
         || resolvedInput.selectedPublicContextGraphs.length !== 0
@@ -562,7 +771,9 @@ export function resolveRfc64CatalogActivationInputV1(
         || resolvedInput.accessPolicyAuthority !== undefined
         || resolvedInput.autoPublish !== undefined
         || (resolvedInput.selectedCatalogAuthoringControls?.length ?? 0) !== 0
+        || Object.keys(resolvedInput.selectedContextGraphModes ?? {}).length !== 0
         || rollout.killSwitch
+        || rollout.defaultMode !== 'catalog'
         || Object.keys(rollout.contextGraphModes).length !== 0
       ) {
         throw new TypeError('disabled rfc64Catalog activation must not carry controls');
@@ -598,10 +809,17 @@ export function resolveRfc64CatalogActivationInputV1(
         resolved.bootstrap,
         autoPublish,
       );
+    const selectedContextGraphModes = resolvedInput.selectedContextGraphModes === undefined
+      ? undefined
+      : snapshotResolvedSelectedContextGraphModesV1(
+        resolvedInput.selectedContextGraphModes,
+        resolved.selectedContextGraphs,
+      );
     return Object.freeze({
       ...resolved,
       autoPublish,
       selectedCatalogAuthoringControls,
+      ...(selectedContextGraphModes === undefined ? {} : { selectedContextGraphModes }),
     });
   }
   return resolveRfc64CatalogActivationConfigV1(
@@ -620,30 +838,82 @@ export function resolveRfc64CatalogActivationsV1(
   input: {
     readonly catalog?: Rfc64CatalogActivationInputV1;
     readonly publicCatalog?: Rfc64PublicCatalogActivationInputV1;
+    /** Loose pre-activation deployment/authority/publisher/bootstrap controls. */
+    readonly legacyStandaloneControlsPresent?: boolean;
+    /** Omit outside a runtime boundary; configuration-only consumers are durable. */
+    readonly persistenceAvailable?: boolean;
   },
   chainIdentity: Rfc64PublicCatalogActivationChainIdentityV1,
 ): ResolvedRfc64CatalogActivationsV1 {
+  const legacyStandaloneControlsPresent = input.legacyStandaloneControlsPresent === true;
+  const finish = (
+    catalog: ResolvedRfc64CatalogActivationConfigV1,
+    publicCatalog: ResolvedRfc64PublicCatalogActivationConfigV1,
+    selectedCatalogAuthoringControls:
+      readonly ResolvedRfc64SelectedCatalogAuthoringControlV1[],
+    explicitlyDisabled: boolean,
+  ): ResolvedRfc64CatalogActivationsV1 => {
+    const configuration = normalizeRfc64CatalogActivationConfigurationV1({
+      catalog: input.catalog,
+      publicCatalog: input.publicCatalog,
+      legacyStandaloneControlsPresent,
+    }, explicitlyDisabled);
+    const activationState = Object.freeze({
+      configuration,
+      execution: resolveRfc64CatalogActivationExecutionV1(
+        configuration,
+        catalog.rollout,
+        {
+          compatibilityRollback: explicitlyDisabled,
+          persistenceAvailable: input.persistenceAvailable,
+        },
+      ),
+    } satisfies Rfc64CatalogNormalizedActivationStateV1);
+    return Object.freeze({
+      catalog,
+      publicCatalog,
+      selectedCatalogAuthoringControls,
+      activationState,
+    });
+  };
   const catalog = resolveRfc64CatalogActivationInputV1(input.catalog, chainIdentity);
   // The unified block is authoritative. Its explicit compatibility rollback
   // must suppress every deprecated public selection, including stale nested
   // data that should not be parsed while operators are disabling the feature.
   if (!catalog.enabled) {
-    return Object.freeze({
+    return finish(
       catalog,
-      publicCatalog: disabledRfc64PublicCatalogActivationV1(),
-      selectedCatalogAuthoringControls: Object.freeze([]),
-    });
+      disabledRfc64PublicCatalogActivationV1(),
+      Object.freeze([]),
+      true,
+    );
   }
   const publicCatalog = resolveRfc64PublicCatalogActivationInputV1(
     input.publicCatalog,
     chainIdentity,
   );
+  // Before the unified block existed, the deprecated public-only switch was
+  // the release rollback. Preserve that meaning when it is the only supplied
+  // control, and expose the same disabled state to daemon status consumers
+  // that the agent runtime already applies.
+  if (
+    input.catalog === undefined
+    && input.publicCatalog !== undefined
+    && !publicCatalog.enabled
+  ) {
+    return finish(
+      disabledRfc64CatalogActivationV1(),
+      publicCatalog,
+      Object.freeze([]),
+      true,
+    );
+  }
   const selectedCatalogAuthoringControls = catalog.selectedCatalogAuthoringControls;
   if (!catalog.enabled && !publicCatalog.enabled) {
-    return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });
+    return finish(catalog, publicCatalog, selectedCatalogAuthoringControls, false);
   }
   if (!publicCatalog.enabled) {
-    return Object.freeze({ catalog, publicCatalog, selectedCatalogAuthoringControls });
+    return finish(catalog, publicCatalog, selectedCatalogAuthoringControls, false);
   }
 
   const byGraph = new Map<string, Rfc64CatalogBootstrapConfigV1['acceptedPolicies'][number]>();
@@ -703,6 +973,28 @@ export function resolveRfc64CatalogActivationsV1(
     catalog.rollout,
     publicCatalog.rollout,
   );
+  const selectedContextGraphModes: Record<string, Rfc64CatalogRolloutModeV1> =
+    Object.create(null);
+  for (const contextGraphId of catalog.selectedContextGraphs) {
+    selectedContextGraphModes[contextGraphId] =
+      rfc64CatalogRolloutModeForContextGraphV1(catalog, contextGraphId);
+  }
+  for (const contextGraphId of publicCatalog.selectedContextGraphs) {
+    const publicMode = rfc64CatalogRolloutModeForContextGraphV1(
+      publicCatalog,
+      contextGraphId,
+    );
+    const existingMode = selectedContextGraphModes[contextGraphId]
+      ?? catalog.rollout.contextGraphModes[contextGraphId];
+    if (existingMode !== undefined && existingMode !== publicMode) {
+      throw new TypeError(
+        `rfc64Catalog and rfc64PublicCatalog rollout modes conflict for selected graph ${
+          contextGraphId
+        }`,
+      );
+    }
+    selectedContextGraphModes[contextGraphId] = publicMode;
+  }
   const mergedCatalog = Object.freeze({
     enabled: true,
     selectedContextGraphs: Object.freeze([
@@ -711,6 +1003,7 @@ export function resolveRfc64CatalogActivationsV1(
     ]),
     selectedPublicContextGraphs: Object.freeze(selectedPublicContextGraphs),
     selectedPrivateContextGraphs: Object.freeze(selectedPrivateContextGraphs),
+    selectedContextGraphModes: Object.freeze(selectedContextGraphModes),
     deploymentProfile,
     accessPolicyAuthority: catalog.accessPolicyAuthority,
     autoPublish: catalog.autoPublish,
@@ -718,11 +1011,7 @@ export function resolveRfc64CatalogActivationsV1(
     selectedCatalogAuthoringControls,
     rollout,
   });
-  return Object.freeze({
-    catalog: mergedCatalog,
-    publicCatalog,
-    selectedCatalogAuthoringControls,
-  });
+  return finish(mergedCatalog, publicCatalog, selectedCatalogAuthoringControls, false);
 }
 
 /** Join source precedence once at the configuration boundary. */
@@ -1027,6 +1316,37 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+function snapshotResolvedSelectedContextGraphModesV1(
+  input: Readonly<Record<string, Rfc64CatalogRolloutModeV1>>,
+  selectedContextGraphs: readonly string[],
+): Readonly<Record<string, Rfc64CatalogRolloutModeV1>> {
+  if (
+    input === null
+    || typeof input !== 'object'
+    || Array.isArray(input)
+    || (
+      Object.getPrototypeOf(input) !== Object.prototype
+      && Object.getPrototypeOf(input) !== null
+    )
+  ) {
+    throw new TypeError('resolved rfc64Catalog selectedContextGraphModes must be a plain object');
+  }
+  const selected = new Set(selectedContextGraphs);
+  const entries = Object.entries(input);
+  if (
+    entries.length !== selected.size
+    || entries.some(([contextGraphId, mode]) => (
+      !selected.has(contextGraphId)
+      || (mode !== 'legacy' && mode !== 'shadow' && mode !== 'catalog')
+    ))
+  ) {
+    throw new TypeError(
+      'resolved rfc64Catalog selectedContextGraphModes must exactly cover selected graphs',
+    );
+  }
+  return Object.freeze(Object.fromEntries(entries));
+}
+
 /**
  * Re-snapshot a caller-supplied resolved activation at the agent boundary.
  * The selected graph list must exactly equal the manifest-derived list, so a
@@ -1042,8 +1362,11 @@ export function snapshotResolvedRfc64PublicCatalogActivationConfigV1(
   const deploymentProfileInput = input.deploymentProfile;
   const autoPublishInput = input.autoPublish;
   const bootstrapInput = input.bootstrap;
-  const rolloutInput = input.rollout
-    ?? resolveRfc64CatalogRolloutConfigV1(undefined, [], 'rfc64PublicCatalog');
+  const rolloutInput = resolveRfc64CatalogRolloutConfigV1(
+    input.rollout,
+    input.selectedContextGraphs,
+    'rfc64PublicCatalog',
+  );
   if (
     !Array.isArray(selectedContextGraphsInput)
     || selectedContextGraphsInput.length > MAX_SELECTED_PUBLIC_CONTEXT_GRAPHS_V1
@@ -1060,6 +1383,7 @@ export function snapshotResolvedRfc64PublicCatalogActivationConfigV1(
       || autoPublishInput !== undefined
       || bootstrapInput !== undefined
       || rolloutInput.killSwitch
+      || rolloutInput.defaultMode !== 'catalog'
       || Object.keys(rolloutInput.contextGraphModes).length !== 0
     ) {
       throw new TypeError('disabled rfc64PublicCatalogActivation must not carry controls');

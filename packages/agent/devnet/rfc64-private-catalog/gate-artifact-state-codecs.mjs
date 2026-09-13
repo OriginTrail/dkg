@@ -1,0 +1,260 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import {
+  ASSET_NUMBERS,
+  NETWORK_ID,
+  PRIVATE_CATALOG_MEMORY_EXPECTATION,
+} from './fixture.mjs';
+import {
+  assertExactKeysV1,
+  canonicalIsoInstantV1,
+  isDigestV1,
+  plainRecordV1,
+} from './gate-artifact-codec-primitives.mjs';
+import { decodePrivateGateRpcEvidenceV1 } from './gate-artifact-rpc-codec.mjs';
+import { decodePrivateCatalogMemoryEvidenceV1 } from './memory-evidence.mjs';
+
+/** Source-provider state has no bootstrap and proves workspace ownership. */
+export function decodePrivateGateSourceProviderStateV1(value, catalog, topology) {
+  return decodeAppliedCatalogStateV1(
+    value,
+    catalog,
+    topology.ownerProvider.agentAddress,
+    'RFC-64 private gate source provider',
+    Object.freeze({
+      catalogKind: 'current',
+      hasBootstrap: false,
+      memoryKind: 'source',
+      proofKind: 'workspace-head',
+    }),
+  );
+}
+
+/** The second provider bootstraps the current catalog directly from the owner. */
+export function decodePrivateGateProviderStateV1(value, catalog, topology) {
+  return decodeAppliedCatalogStateV1(
+    value,
+    catalog,
+    topology.ownerProvider.agentAddress,
+    'RFC-64 private gate provider2',
+    Object.freeze({
+      catalogKind: 'current',
+      expectedProviderPeerId: topology.ownerProvider.peerId,
+      hasBootstrap: true,
+      memoryKind: 'current',
+      proofKind: 'catalog-row',
+    }),
+  );
+}
+
+/** Baseline receiver state is intentionally pinned to the older VM catalog. */
+export function decodePrivateGateReceiverBaselineStateV1(value, catalog, topology) {
+  return decodeAppliedCatalogStateV1(
+    value,
+    catalog,
+    topology.ownerProvider.agentAddress,
+    'RFC-64 private gate receiver baseline',
+    Object.freeze({
+      catalogKind: 'baseline',
+      expectedProviderPeerId: topology.authorizedProviderReceiver.peerId,
+      hasBootstrap: true,
+      memoryKind: 'baseline',
+      proofKind: 'catalog-row',
+    }),
+  );
+}
+
+/** Failover receiver state must bootstrap the current head from provider2. */
+export function decodePrivateGateFailoverReceiverStateV1(value, catalog, topology) {
+  return decodeAppliedCatalogStateV1(
+    value,
+    catalog,
+    topology.ownerProvider.agentAddress,
+    'RFC-64 private gate failover receiver',
+    Object.freeze({
+      catalogKind: 'current',
+      expectedProviderPeerId: topology.authorizedProviderReceiver.peerId,
+      hasBootstrap: true,
+      memoryKind: 'current',
+      proofKind: 'catalog-row',
+    }),
+  );
+}
+
+/** Revoked state retains the current committed memory obtained from provider2. */
+export function decodePrivateGateRevokedReceiverStateV1(value, catalog, topology) {
+  return decodeAppliedCatalogStateV1(
+    value,
+    catalog,
+    topology.ownerProvider.agentAddress,
+    'RFC-64 private gate revoked receiver',
+    Object.freeze({
+      catalogKind: 'current',
+      expectedProviderPeerId: topology.authorizedProviderReceiver.peerId,
+      hasBootstrap: true,
+      memoryKind: 'current',
+      proofKind: 'catalog-row',
+    }),
+  );
+}
+
+/** Restarted state is read from durable memory and therefore has no bootstrap. */
+export function decodePrivateGateRestartedReceiverStateV1(value, catalog, topology) {
+  return decodeAppliedCatalogStateV1(
+    value,
+    catalog,
+    topology.ownerProvider.agentAddress,
+    'RFC-64 private gate restarted receiver',
+    Object.freeze({
+      catalogKind: 'current',
+      hasBootstrap: false,
+      memoryKind: 'current',
+      proofKind: 'catalog-row',
+    }),
+  );
+}
+
+export function decodePrivateGateFailoverBarrierV1(
+  value,
+  gateStartedAt,
+  gateFinishedAt,
+) {
+  const barrier = plainRecordV1(value, 'RFC-64 private gate failover barrier');
+  assertExactKeysV1(barrier, [
+    'ownerExitCode',
+    'ownerExitedAt',
+    'ownerExitedBeforeReceiverSpawn',
+    'ownerListenerClosed',
+    'provider2ExactHeadAfterOwnerExit',
+    'provider2ListenerDialable',
+    'receiverSpawnedAt',
+  ], 'RFC-64 private gate failover barrier');
+  const ownerExitedAt = canonicalIsoInstantV1(barrier.ownerExitedAt, 'ownerExitedAt');
+  const receiverSpawnedAt = canonicalIsoInstantV1(
+    barrier.receiverSpawnedAt,
+    'receiverSpawnedAt',
+  );
+  if (
+    barrier.ownerExitCode !== 0
+    || barrier.ownerExitedBeforeReceiverSpawn !== true
+    || barrier.ownerListenerClosed !== true
+    || barrier.provider2ExactHeadAfterOwnerExit !== true
+    || barrier.provider2ListenerDialable !== true
+    || ownerExitedAt > receiverSpawnedAt
+    || ownerExitedAt < gateStartedAt
+    || receiverSpawnedAt > gateFinishedAt
+  ) throw new TypeError('RFC-64 private gate failover barrier is inconsistent');
+  return barrier;
+}
+
+function decodeAppliedCatalogStateV1(
+  value,
+  catalog,
+  authorAddress,
+  label,
+  contract,
+) {
+  const state = plainRecordV1(value, `${label} state`);
+  const stateKeys = [
+    'appliedHeadDigest',
+    'catalogScopeDigest',
+    'catalogVersion',
+    'graphCounts',
+    'inventoryRowCount',
+    'receiver',
+    'rpc',
+    'rpcCalls',
+  ];
+  if (contract.hasBootstrap) stateKeys.push('bootstrap');
+  assertExactKeysV1(state, stateKeys, `${label} state`);
+  const expectedVersion = contract.catalogKind === 'baseline'
+    ? PRIVATE_CATALOG_MEMORY_EXPECTATION.finalizedVmBaseline.catalogVersion
+    : catalog.catalogVersion;
+  if (
+    !isDigestV1(state.appliedHeadDigest)
+    || (contract.catalogKind === 'current'
+      && state.appliedHeadDigest !== catalog.headObjectDigest)
+    || (contract.catalogKind === 'baseline'
+      && state.appliedHeadDigest === catalog.headObjectDigest)
+    || state.catalogScopeDigest !== catalog.scopeDigest
+    || state.catalogVersion !== expectedVersion
+    || state.inventoryRowCount !== catalog.inventoryRowCount
+  ) {
+    throw new TypeError(`${label} state is not bound to the catalog`);
+  }
+  const rpc = decodePrivateGateRpcEvidenceV1(state.rpc, `${label} RPC evidence`);
+  if (!Number.isSafeInteger(state.rpcCalls) || state.rpcCalls !== rpc.total) {
+    throw new TypeError(`${label} RPC total is inconsistent`);
+  }
+  if (contract.hasBootstrap) {
+    decodeBootstrapEvidenceV1(
+      state.bootstrap,
+      contract.expectedProviderPeerId,
+      `${label} bootstrap evidence`,
+    );
+  }
+  const receiver = plainRecordV1(state.receiver, `${label} receiver counters`);
+  assertExactKeysV1(receiver, ['applied', 'failed'], `${label} receiver counters`);
+  if (![receiver.applied, receiver.failed].every((count) => (
+    Number.isSafeInteger(count) && count >= 0
+  ))) throw new TypeError(`${label} receiver counters are malformed`);
+  const swm = contract.memoryKind === 'baseline'
+    ? Object.freeze({
+        ...PRIVATE_CATALOG_MEMORY_EXPECTATION.finalizedVmBaseline,
+        proofKind: 'catalog-row',
+      })
+    : Object.freeze({
+        ...PRIVATE_CATALOG_MEMORY_EXPECTATION.swm,
+        proofKind: contract.proofKind,
+      });
+  const vm = contract.memoryKind === 'source'
+    ? Object.freeze({
+        ...PRIVATE_CATALOG_MEMORY_EXPECTATION.finalizedVmBaseline,
+        headKind: 'absent',
+      })
+    : Object.freeze({
+        ...PRIVATE_CATALOG_MEMORY_EXPECTATION.vm,
+        headKind: 'present',
+      });
+  const memory = decodePrivateCatalogMemoryEvidenceV1(state, {
+    assetNumbers: ASSET_NUMBERS,
+    catalogProofBinding: {
+      appliedHeadDigest: state.appliedHeadDigest,
+      catalogVersion: state.catalogVersion,
+      exactExpectedHead: true,
+    },
+    identity: { authorAddress, networkId: NETWORK_ID },
+    swm,
+    vm,
+  }, `${label} graph evidence`);
+  if (memory.length !== Number(BigInt(catalog.inventoryRowCount))) {
+    throw new TypeError(`${label} graph inventory is not catalog-bound`);
+  }
+  return Object.freeze({
+    kaNumbers: Object.freeze(memory.map(({ kaNumber }) => kaNumber)),
+    memory,
+    rpc,
+  });
+}
+
+function decodeBootstrapEvidenceV1(value, expectedProviderPeerId, label) {
+  const bootstrap = plainRecordV1(value, label);
+  assertExactKeysV1(bootstrap, [
+    'appliedTransferProviderPeerId',
+    'attempts',
+    'outcome',
+    'providerPeerId',
+  ], label);
+  if (
+    typeof expectedProviderPeerId !== 'string'
+    || !Number.isSafeInteger(bootstrap.attempts)
+    || bootstrap.attempts < 1
+    || bootstrap.attempts > 1_024
+    || !['applied', 'already-applied'].includes(bootstrap.outcome)
+    || bootstrap.appliedTransferProviderPeerId !== expectedProviderPeerId
+    || (bootstrap.outcome === 'applied'
+      ? bootstrap.providerPeerId !== expectedProviderPeerId
+      : bootstrap.providerPeerId !== null)
+  ) throw new TypeError(`${label} is not bound to the expected provider`);
+  return bootstrap;
+}

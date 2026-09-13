@@ -89,10 +89,37 @@ export class SqliteChainEventCursorStore {
  * historical scan path.
  */
 export class SqliteContextGraphRegistryScanCursorStore {
+  static readonly REPAIR_KEY_PREFIX = 'contextGraphRegistryScan.repair:v1';
+
   private readonly cursors: RuntimePositiveIntegerCursorStore;
   private readonly legacyCursors: SettingsPositiveIntegerCursorStore;
+  private readonly db: Database.Database;
+  readonly repairAudit = {
+    load: async (key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<unknown> => {
+      const row = this.db.prepare(
+        `SELECT value FROM settings WHERE key = ?`,
+      ).get(this.repairKey(key)) as { value: string } | undefined;
+      if (!row) return undefined;
+      try {
+        return JSON.parse(row.value) as unknown;
+      } catch {
+        return undefined;
+      }
+    },
+    save: async (
+      key: { chainId: string; deploymentId: string; registryAddress: string },
+      checkpoint: unknown,
+    ): Promise<void> => {
+      const encoded = JSON.stringify(checkpoint);
+      if (encoded === undefined) throw new Error('Registry repair checkpoint is not serializable');
+      this.db.prepare(
+        `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+      ).run(this.repairKey(key), encoded);
+    },
+  };
 
   constructor(dashboard: DashboardDB) {
+    this.db = dashboard.db;
     this.cursors = new RuntimePositiveIntegerCursorStore(dashboard.db, 'contextGraphRegistryScan.cursor');
     this.legacyCursors = new SettingsPositiveIntegerCursorStore(dashboard.db);
   }
@@ -117,6 +144,15 @@ export class SqliteContextGraphRegistryScanCursorStore {
   private legacyKey(key: { chainId: string; deploymentId: string; registryAddress: string }): string {
     return [
       'contextGraphRegistryScan.cursor',
+      key.chainId,
+      key.deploymentId,
+      key.registryAddress.toLowerCase(),
+    ].join(':');
+  }
+
+  private repairKey(key: { chainId: string; deploymentId: string; registryAddress: string }): string {
+    return [
+      SqliteContextGraphRegistryScanCursorStore.REPAIR_KEY_PREFIX,
       key.chainId,
       key.deploymentId,
       key.registryAddress.toLowerCase(),

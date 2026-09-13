@@ -782,7 +782,7 @@ describe('durable sync lifecycle chain binding', () => {
             enabled: false,
             selectedContextGraphs: [],
             selectedPublicContextGraphs: [],
-            rollout: { killSwitch: false, contextGraphModes: {} },
+            rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
           },
         }),
       },
@@ -1345,6 +1345,8 @@ describe('durable sync lifecycle chain binding', () => {
       subscribedContextGraphs: new Map([[contextGraphId, oldSubscription]]),
       contextGraphBindingState: new ContextGraphBindingState(),
       enqueueContextGraphSubscriptionPersistWrite,
+      persistContextGraphSubscriptionProjectionStrict:
+        LifecycleSyncMethods.prototype.persistContextGraphSubscriptionProjectionStrict,
     };
 
     const capturedSubscription = oldSubscription;

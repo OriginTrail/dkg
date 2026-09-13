@@ -29,6 +29,8 @@ import {
 import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import { openRfc64ControlObjectStoreForOwnedPersistenceRootV1 } from '../src/rfc64/control-object-store-v1-internal.js';
 import { getRfc64PersistenceRootOwnershipForInventoryV1 } from '../src/rfc64/persistence-root-ownership-v1-internal.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from
+  '../src/rfc64/background-work-dispatcher-v1.js';
 import {
   RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1,
 } from '../src/rfc64/persistence-layout-v1.js';
@@ -56,6 +58,7 @@ function syntheticAgent(dataDirectory?: string): any {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),
+    rfc64BackgroundWorkDispatcherV1: new Rfc64BackgroundWorkDispatcherV1(),
     rfc64PersistenceV1: undefined,
     selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
   });
