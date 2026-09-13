@@ -41,7 +41,7 @@ import {
 import {
   createRpcRequestProvider,
   activeRpcRequestAbortSignal,
-  withRpcRequestContext,
+  withOwnedRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import { rpcHost } from './rpc-failover-log.js';
@@ -3607,11 +3607,10 @@ export class EVMChainAdapterBase {
 
     return this.configuredStaticChainIdValidationsByProvider.run(
       provider,
-      (sharedSignal) => withRpcRequestContext(
+      (sharedSignal) => withOwnedRpcRequestContext(
         {
           requestClass: 'foreground',
           signal: sharedSignal,
-          inheritSignal: false,
         },
         () => withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,

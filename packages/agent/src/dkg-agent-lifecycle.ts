@@ -135,7 +135,7 @@ import {
   createRpcTimeoutError,
   enrichEvmError,
   isChainRpcTransportError,
-  withRpcRequestContext,
+  withOwnedRpcRequestContext,
   type ChainAdapter,
   type CreateContextGraphParams,
   type CreateOnChainContextGraphParams,
@@ -4177,10 +4177,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         retryIntervalMs: 30_000,
         requestWhileRunning: 'drop',
         runPass: async (signal) => {
-          await withRpcRequestContext({
+          await withOwnedRpcRequestContext({
             requestClass: 'background',
             signal,
-            inheritSignal: false,
           }, () => this.retryUnavailableContextGraphSubscriptionAuthorities(signal));
           return this.getContextGraphSubscriptionRehydrationStatus()
             ?.dormantReasons.authorityUnavailable.length

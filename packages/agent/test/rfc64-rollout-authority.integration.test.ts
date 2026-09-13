@@ -26,9 +26,11 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
   NoChainAdapter,
+  activeRpcRequestAbortSignal,
   createRpcRequestProvider,
   RpcRequestGovernor,
   RpcEndpointsExhaustedError,
+  withRpcRequestContext,
   type ChainAdapter,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -2275,6 +2277,42 @@ describe('RFC-64 rollout authority integration', () => {
         selectionSource: 'default',
       }),
     ]);
+  });
+
+  it('preserves active responsibility when a refresh owner is cancelled', async () => {
+    const contextGraphId = `${AUTHOR}/cancelled-responsibility-refresh`;
+    const edge = await startAgent({ name: 'cancelled-responsibility-refresh' });
+    const accessPolicy = vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    edge.subscribeToContextGraph(contextGraphId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({ contextGraphId, active: true, mode: 'catalog' }),
+    );
+
+    let notifyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+    accessPolicy.mockImplementation(async () => {
+      const signal = activeRpcRequestAbortSignal();
+      if (signal === undefined) throw new Error('refresh did not bind its owner signal');
+      notifyStarted();
+      await new Promise<never>((_resolve, reject) => {
+        const rejectAbort = () => reject(signal.reason);
+        signal.addEventListener('abort', rejectAbort, { once: true });
+        if (signal.aborted) rejectAbort();
+      });
+      return 'public';
+    });
+    const owner = new AbortController();
+    const refresh = withRpcRequestContext({ signal: owner.signal }, () => (
+      edge.reconcileRfc64CatalogResponsibilityV1(contextGraphId)
+    ));
+    await started;
+    const reason = new Error('superseded responsibility refresh');
+    owner.abort(reason);
+    await expect(refresh).rejects.toBe(reason);
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({ contextGraphId, active: true, mode: 'catalog' }),
+    );
   });
 
   it('derives private responsibility from authenticated DKG ACL state, not a stale RFC-64 roster', async () => {

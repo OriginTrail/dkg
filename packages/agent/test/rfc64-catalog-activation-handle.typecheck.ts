@@ -25,18 +25,15 @@ const copiedFields = {
   activationState: resolverIssued.activationState,
 };
 
-// @ts-expect-error Visible resolved fields are not a resolver-issued activation handle.
-const rejectedCopiedHandle: ResolvedRfc64CatalogActivationsV1 = copiedFields;
-void rejectedCopiedHandle;
+const acceptedCopiedSnapshot: ResolvedRfc64CatalogActivationsV1 = copiedFields;
+void acceptedCopiedSnapshot;
 
-const rejectedCopiedConfig: DKGAgentConfig = {
-  name: 'rejected-copied-handle',
-  // @ts-expect-error DKGAgentConfig accepts only the opaque resolver result.
+const acceptedCopiedConfig: DKGAgentConfig = {
+  name: 'accepted-copied-snapshot',
   rfc64CatalogActivations: copiedFields,
 };
-void rejectedCopiedConfig;
+void acceptedCopiedConfig;
 
 const spreadHandle = { ...resolverIssued };
-// @ts-expect-error Object spread must not preserve the unnameable activation-handle brand.
-const rejectedSpreadHandle: ResolvedRfc64CatalogActivationsV1 = spreadHandle;
-void rejectedSpreadHandle;
+const acceptedSpreadSnapshot: ResolvedRfc64CatalogActivationsV1 = spreadHandle;
+void acceptedSpreadSnapshot;

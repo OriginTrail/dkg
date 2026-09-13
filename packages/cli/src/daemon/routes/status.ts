@@ -61,7 +61,7 @@ import {
   resolveRpcUrls,
   getRpcFailoverStats,
 } from '@origintrail-official/dkg-chain';
-import type { DaemonRouteRpcTransport } from '../../runtime-chain-config.js';
+import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 import {
   DKGAgent,
   loadOpWallets,

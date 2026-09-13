@@ -35,7 +35,7 @@ import type { CatchupTracker } from '../types.js';
 import type { RoutePlugin } from '../plugin-api.js';
 import type { AdmissionStatsView } from '../http-utils.js';
 import type { DaemonLocalLlmService } from '../local-llm-service.js';
-import type { DaemonRouteRpcTransport } from '../../runtime-chain-config.js';
+import type { DaemonRouteRpcTransport } from '../rpc-runtime.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 

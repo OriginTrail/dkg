@@ -1950,6 +1950,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       return next;
     })().catch((error) => {
+      // A superseding lifecycle pass owns the last committed authority. Its
+      // cancellation is not evidence that the graph is no longer a valid
+      // responsibility, so preserve the prior value until a complete refresh
+      // proves otherwise.
+      if (ownerSignal.aborted) {
+        throw ownerSignal.reason instanceof Error ? ownerSignal.reason : error;
+      }
       if (isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
         commit(null);
       }

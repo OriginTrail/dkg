@@ -25,8 +25,6 @@ export interface RpcRequestContext {
 export interface RpcRequestContextInput {
   readonly requestClass?: RpcRequestClass;
   readonly signal?: AbortSignal;
-  /** Internal shared work may deliberately outlive the initiating caller. */
-  readonly inheritSignal?: boolean;
 }
 
 const rpcRequestContext = new AsyncLocalStorage<RpcRequestContext>();
@@ -36,13 +34,12 @@ export function activeRpcRequestContext(): RpcRequestContext {
 }
 
 /**
- * Establish one request policy boundary. Nested scopes inherit priority and
- * compose cancellation exactly once. `inheritSignal:false` is reserved for
- * shared physical work whose lifetime must not be owned by its first waiter.
+ * Establish one compositional request policy boundary. Nested scopes inherit
+ * priority and cancellation, composing an explicit child signal when present.
  */
 export function withRpcRequestContext<T>(input: RpcRequestContextInput, fn: () => T): T {
   const parent = activeRpcRequestContext();
-  const inheritedSignal = input.inheritSignal === false ? undefined : parent.signal;
+  const inheritedSignal = parent.signal;
   const signal = inheritedSignal === undefined
     ? input.signal
     : input.signal === undefined || input.signal === inheritedSignal
@@ -51,6 +48,22 @@ export function withRpcRequestContext<T>(input: RpcRequestContextInput, fn: () =
   return rpcRequestContext.run({
     requestClass: input.requestClass ?? parent.requestClass,
     ...(signal === undefined ? {} : { signal }),
+  }, fn);
+}
+
+/**
+ * Establish a lifecycle-owned request boundary. Priority still inherits when
+ * omitted, while cancellation belongs exclusively to the explicit owner.
+ * Shared physical work uses this boundary so its first waiter cannot cancel it.
+ */
+export function withOwnedRpcRequestContext<T>(
+  input: RpcRequestContextInput,
+  fn: () => T,
+): T {
+  const parent = activeRpcRequestContext();
+  return rpcRequestContext.run({
+    requestClass: input.requestClass ?? parent.requestClass,
+    ...(input.signal === undefined ? {} : { signal: input.signal }),
   }, fn);
 }
 
@@ -76,12 +89,9 @@ export async function withRpcRequestTimeout<T>(
   timeoutMs: number,
   label: string,
   fn: () => Promise<T>,
-  options: { inheritSignal?: boolean } = {},
 ): Promise<T> {
   const timeoutController = new AbortController();
-  const parentSignal = options.inheritSignal === false
-    ? undefined
-    : activeRpcRequestAbortSignal();
+  const parentSignal = activeRpcRequestAbortSignal();
   const signal = parentSignal === undefined
     ? timeoutController.signal
     : AbortSignal.any([parentSignal, timeoutController.signal]);
@@ -101,10 +111,7 @@ export async function withRpcRequestTimeout<T>(
     if (signal.aborted) onAbort();
   });
   try {
-    const attempt = Promise.resolve(withRpcRequestContext({
-      signal,
-      inheritSignal: false,
-    }, fn));
+    const attempt = Promise.resolve(withOwnedRpcRequestContext({ signal }, fn));
     return await Promise.race([attempt, aborted]);
   } finally {
     clearTimeout(timer);

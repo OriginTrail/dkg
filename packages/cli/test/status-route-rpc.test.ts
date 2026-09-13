@@ -35,7 +35,7 @@ import {
 import {
   createDaemonRpcRuntime,
   type DaemonRouteRpcTransport,
-} from '../src/runtime-chain-config.js';
+} from '../src/daemon/rpc-runtime.js';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
 import { DashboardDB } from '@origintrail-official/dkg-node-ui';

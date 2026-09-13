@@ -15,9 +15,12 @@ import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { rpcUsageWindowTotal } from '../src/rpc-usage.js';
 import {
+  activeRpcRequestContext,
   createRpcRequestProvider,
+  withOwnedRpcRequestContext,
   withRpcRequestContext,
   withRpcRequestTimeout,
+  type RpcRequestContext,
 } from '../src/rpc-request-transport.js';
 import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
@@ -56,6 +59,31 @@ describe('RPC request transport', () => {
     if (mp) { await mp.forceFlush().catch(() => {}); await mp.shutdown().catch(() => {}); mp = null; }
     metrics.disable();
     rebuildMetrics();
+  });
+
+  it('separates compositional caller cancellation from owned work cancellation', () => {
+    const caller = new AbortController();
+    const child = new AbortController();
+    const owner = new AbortController();
+    let composed!: RpcRequestContext;
+    let owned!: RpcRequestContext;
+
+    withRpcRequestContext({ requestClass: 'background', signal: caller.signal }, () => {
+      withRpcRequestContext({ signal: child.signal }, () => {
+        composed = activeRpcRequestContext();
+      });
+      withOwnedRpcRequestContext({ signal: owner.signal }, () => {
+        owned = activeRpcRequestContext();
+      });
+    });
+
+    expect(composed.requestClass).toBe('background');
+    expect(owned).toEqual({ requestClass: 'background', signal: owner.signal });
+    caller.abort(new Error('caller left'));
+    expect(composed.signal?.aborted).toBe(true);
+    expect(owned.signal?.aborted).toBe(false);
+    owner.abort(new Error('owner stopped'));
+    expect(owned.signal?.aborted).toBe(true);
   });
 
   it('cancels the active ethers HTTP request when the caller aborts a chain read', async () => {

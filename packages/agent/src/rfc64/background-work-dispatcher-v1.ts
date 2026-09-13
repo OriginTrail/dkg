@@ -2,7 +2,7 @@
 
 import {
   activeRpcRequestAbortSignal,
-  withRpcRequestContext,
+  withOwnedRpcRequestContext,
 } from '@origintrail-official/dkg-chain';
 
 interface KeyedBackgroundPassV1 {
@@ -151,10 +151,9 @@ export class Rfc64BackgroundWorkDispatcherV1 {
       ? uniqueSignals[0]
       : AbortSignal.any(uniqueSignals);
     if (signal.aborted) return Promise.reject(abortError(signal.reason));
-    const operation = Promise.resolve(withRpcRequestContext({
+    const operation = Promise.resolve(withOwnedRpcRequestContext({
       ...(background ? { requestClass: 'background' as const } : {}),
       signal,
-      inheritSignal: false,
     }, () => work(signal)));
     let tracked!: Promise<T>;
     tracked = operation.finally(() => {

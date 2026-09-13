@@ -385,6 +385,19 @@ describe('RpcRequestGovernor', () => {
   });
 
   it('validates every operator-facing limit', () => {
+    expect(() => resolveRpcRequestGovernorPolicy(null as unknown as undefined))
+      .toThrow(/plain object/);
+    expect(() => resolveRpcRequestGovernorPolicy([] as unknown as undefined))
+      .toThrow(/plain object/);
+    expect(() => resolveRpcRequestGovernorPolicy({
+      maxRequestsPerSecond: null,
+    } as unknown as Parameters<typeof resolveRpcRequestGovernorPolicy>[0]))
+      .toThrow(/maxRequestsPerSecond/);
+    expect(() => resolveRpcRequestGovernorPolicy({
+      maxRequestsPerSecond: 1,
+      typo: 2,
+    } as unknown as Parameters<typeof resolveRpcRequestGovernorPolicy>[0]))
+      .toThrow(/unknown field typo/);
     expect(() => resolveRpcRequestGovernorPolicy({ maxRequestsPerSecond: 0 }))
       .toThrow(/maxRequestsPerSecond/);
     expect(() => resolveRpcRequestGovernorPolicy({ foregroundReservePercent: 100 }))

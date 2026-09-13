@@ -154,6 +154,7 @@ export {
   activeRpcRequestAbortSignal,
   boundedRetryFetchRequest,
   createRpcRequestProvider,
+  withOwnedRpcRequestContext,
   withRpcRequestContext,
   withRpcRequestTimeout,
   type RpcRequestClass,

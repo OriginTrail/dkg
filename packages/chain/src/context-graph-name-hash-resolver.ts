@@ -5,6 +5,7 @@ import {
   AbortableKeyedSingleFlight,
   TtlValueCache,
 } from './keyed-ttl-single-flight-cache.js';
+import type { RpcRequestClass } from './rpc-request-transport.js';
 
 const CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS = 30_000;
 
@@ -18,7 +19,7 @@ export interface ContextGraphNameHashResolverDependencies {
 export interface ContextGraphNameHashResolveOptions {
   readonly signal?: AbortSignal;
   /** Explicit caller partition used to prevent priority inversion. */
-  readonly partition?: string;
+  readonly requestClass?: RpcRequestClass;
 }
 
 interface ContextGraphNameHashResolutionCacheEntry {
@@ -42,17 +43,22 @@ interface ContextGraphNameHashResolutionCacheEntry {
  * independent lookup.
  */
 export class ContextGraphNameHashResolver {
-  private readonly partitions = new Map<string, {
+  private readonly partitions: Readonly<Record<RpcRequestClass, {
     readonly cache: TtlValueCache<string, ContextGraphNameHashResolutionCacheEntry>;
     readonly singleFlight: AbortableKeyedSingleFlight<
       string,
       ContextGraphNameHashResolutionCacheEntry
     >;
-  }>();
+  }>>;
 
   constructor(
     private readonly dependencies: ContextGraphNameHashResolverDependencies,
-  ) {}
+  ) {
+    this.partitions = Object.freeze({
+      foreground: this.createPartition(),
+      background: this.createPartition(),
+    });
+  }
 
   async resolve(
     rawNameHash: string,
@@ -62,7 +68,7 @@ export class ContextGraphNameHashResolver {
     const nameHash = normalizeContextGraphNameHash(rawNameHash);
     if (nameHash === ethers.ZeroHash) return null;
 
-    const partition = this.partitionFor(options.partition ?? 'default');
+    const partition = this.partitions[options.requestClass ?? 'foreground'];
     for (;;) {
       const cached = partition.cache.get(nameHash);
       const resolved = cached ?? await partition.singleFlight.run(
@@ -94,32 +100,25 @@ export class ContextGraphNameHashResolver {
     this.invalidateCaches();
   }
 
-  private partitionFor(
-    partition: string,
-  ): {
+  private createPartition(): {
     readonly cache: TtlValueCache<string, ContextGraphNameHashResolutionCacheEntry>;
     readonly singleFlight: AbortableKeyedSingleFlight<
       string,
       ContextGraphNameHashResolutionCacheEntry
     >;
   } {
-    let state = this.partitions.get(partition);
-    if (state === undefined) {
-      state = {
-        cache: new TtlValueCache({
-          ttlMs: ({ value }) => value === null
-            ? CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS
-            : 0,
-        }),
-        singleFlight: new AbortableKeyedSingleFlight(),
-      };
-      this.partitions.set(partition, state);
-    }
-    return state;
+    return {
+      cache: new TtlValueCache({
+        ttlMs: ({ value }) => value === null
+          ? CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS
+          : 0,
+      }),
+      singleFlight: new AbortableKeyedSingleFlight(),
+    };
   }
 
   private invalidateCaches(): void {
-    for (const partition of this.partitions.values()) {
+    for (const partition of Object.values(this.partitions)) {
       partition.cache.clear();
       partition.singleFlight.invalidateAll(
         'Context Graph name-hash binding changed during current-slot resolution',

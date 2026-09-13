@@ -35,7 +35,7 @@ import {
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type Quad } from '@origintrail-official/dkg-storage';
-import { withRpcRequestContext } from '@origintrail-official/dkg-chain';
+import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
 import {
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   resolveKnowledgeAssetOperationPublicQuads,
@@ -319,10 +319,9 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     params: ObserveRfc64DurableSwmPromotionParamsV1,
   ): Promise<void> {
     const observerSignal = rfc64SwmInventoryShadowRuntimeV1(this).shutdownSignal;
-    return withRpcRequestContext({
+    return withOwnedRpcRequestContext({
       requestClass: 'background',
       signal: observerSignal,
-      inheritSignal: false,
     }, async () => {
       const shutdownSignal = observerSignal;
       try {

@@ -1746,6 +1746,18 @@ describe('resolveChainConfig (field-level merge)', () => {
       { chain: { rpcRequestBudget: { foregroundReservePercent: 100 } } },
       { chain: fullNetworkChain },
     )).toThrow(/foregroundReservePercent/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: null as never } },
+      { chain: fullNetworkChain },
+    )).toThrow(/plain object/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: { maxRequestsPerSecond: null as never } } },
+      { chain: fullNetworkChain },
+    )).toThrow(/maxRequestsPerSecond/);
+    expect(() => resolveChainConfig(
+      {},
+      { chain: { ...fullNetworkChain, rpcRequestBudget: null as never } },
+    )).toThrow(/plain object/);
   });
 
   it('merges publisher funding floors with operator precedence', () => {

@@ -1709,6 +1709,15 @@ export function resolveChainConfig(
   const cgRegistryScanPageSize = cfg?.cgRegistryScanPageSize ?? net?.cgRegistryScanPageSize;
   if (cgRegistryScanPageSize !== undefined) merged.cgRegistryScanPageSize = cgRegistryScanPageSize;
   if (cfg?.rpcRequestBudget !== undefined || net?.rpcRequestBudget !== undefined) {
+    // Validate each persisted source before object spread. A malformed block
+    // (notably JSON null) must not disappear during merge and silently restore
+    // the process defaults.
+    if (net?.rpcRequestBudget !== undefined) {
+      resolveRpcRequestGovernorPolicy(net.rpcRequestBudget);
+    }
+    if (cfg?.rpcRequestBudget !== undefined) {
+      resolveRpcRequestGovernorPolicy(cfg.rpcRequestBudget);
+    }
     merged.rpcRequestBudget = resolveRpcRequestGovernorPolicy({
       ...net?.rpcRequestBudget,
       ...cfg?.rpcRequestBudget,

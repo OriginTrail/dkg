@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { RpcRequestGovernor } from '@origintrail-official/dkg-chain';
 import {
   bindRuntimeRpcRequestGovernor,
-  createDaemonRpcRuntime,
   projectRuntimeEvmChainConfig,
 } from '../src/runtime-chain-config.js';
+import { createDaemonRpcRuntime } from '../src/daemon/rpc-runtime.js';
 
 describe('publisher runtime chain config projection', () => {
   it('preserves every adapter-facing runtime knob for standalone startup', () => {

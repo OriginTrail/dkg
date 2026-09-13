@@ -36,6 +36,32 @@ export const DEFAULT_RPC_REQUEST_GOVERNOR_POLICY: RpcRequestGovernorPolicy = Obj
   startupJitterMs: 30_000,
 });
 
+const RPC_REQUEST_GOVERNOR_POLICY_KEYS = new Set([
+  'maxRequestsPerSecond',
+  'foregroundReservePercent',
+  'burstRequests',
+  'maxQueueSize',
+  'startupJitterMs',
+]);
+
+function assertRpcRequestGovernorPolicyInput(
+  input: unknown,
+): asserts input is RpcRequestGovernorPolicyInput | undefined {
+  if (input === undefined) return;
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new TypeError('chain.rpcRequestBudget must be a plain object');
+  }
+  const prototype = Object.getPrototypeOf(input);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError('chain.rpcRequestBudget must be a plain object');
+  }
+  for (const key of Object.keys(input)) {
+    if (!RPC_REQUEST_GOVERNOR_POLICY_KEYS.has(key)) {
+      throw new TypeError(`chain.rpcRequestBudget contains unknown field ${key}`);
+    }
+  }
+}
+
 function finiteNumber(
   value: unknown,
   name: string,
@@ -63,33 +89,44 @@ function finiteInteger(
 export function resolveRpcRequestGovernorPolicy(
   input: RpcRequestGovernorPolicyInput | undefined,
 ): RpcRequestGovernorPolicy {
+  assertRpcRequestGovernorPolicyInput(input);
   return Object.freeze({
     maxRequestsPerSecond: finiteNumber(
-      input?.maxRequestsPerSecond ?? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.maxRequestsPerSecond,
+      input?.maxRequestsPerSecond === undefined
+        ? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.maxRequestsPerSecond
+        : input.maxRequestsPerSecond,
       'chain.rpcRequestBudget.maxRequestsPerSecond',
       0.1,
       10_000,
     ),
     foregroundReservePercent: finiteNumber(
-      input?.foregroundReservePercent ?? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.foregroundReservePercent,
+      input?.foregroundReservePercent === undefined
+        ? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.foregroundReservePercent
+        : input.foregroundReservePercent,
       'chain.rpcRequestBudget.foregroundReservePercent',
       0,
       99,
     ),
     burstRequests: finiteInteger(
-      input?.burstRequests ?? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.burstRequests,
+      input?.burstRequests === undefined
+        ? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.burstRequests
+        : input.burstRequests,
       'chain.rpcRequestBudget.burstRequests',
       1,
       100_000,
     ),
     maxQueueSize: finiteInteger(
-      input?.maxQueueSize ?? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.maxQueueSize,
+      input?.maxQueueSize === undefined
+        ? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.maxQueueSize
+        : input.maxQueueSize,
       'chain.rpcRequestBudget.maxQueueSize',
       1,
       100_000,
     ),
     startupJitterMs: finiteInteger(
-      input?.startupJitterMs ?? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.startupJitterMs,
+      input?.startupJitterMs === undefined
+        ? DEFAULT_RPC_REQUEST_GOVERNOR_POLICY.startupJitterMs
+        : input.startupJitterMs,
       'chain.rpcRequestBudget.startupJitterMs',
       0,
       3_600_000,

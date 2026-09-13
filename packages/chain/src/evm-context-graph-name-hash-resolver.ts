@@ -11,7 +11,7 @@
 import { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
 import {
   activeRpcRequestContext,
-  withRpcRequestContext,
+  withOwnedRpcRequestContext,
 } from './rpc-request-transport.js';
 import {
   type EvmContextGraphNameHashSource,
@@ -37,7 +37,7 @@ export class EvmContextGraphNameHashResolver {
   resolve(nameHash: string, signal?: AbortSignal): Promise<bigint | null> {
     return this.resolutionCache.resolve(nameHash, {
       signal,
-      partition: activeRpcRequestContext().requestClass,
+      requestClass: activeRpcRequestContext().requestClass,
     });
   }
 
@@ -52,7 +52,7 @@ export class EvmContextGraphNameHashResolver {
     signal: AbortSignal,
   ): Promise<bigint | null> {
     try {
-      return await withRpcRequestContext({ signal, inheritSignal: false }, () =>
+      return await withOwnedRpcRequestContext({ signal }, () =>
         this.source.resolve(normalizedNameHash));
     } catch (error) {
       // A provider-consensus fence may summarize individually cancelled reads

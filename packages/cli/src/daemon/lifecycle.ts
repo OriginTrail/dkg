@@ -148,7 +148,7 @@ import {
   exitOnStoreConfigErrors,
   validateNetworkConfigReadiness,
 } from '../config.js';
-import { createDaemonRpcRuntime } from '../runtime-chain-config.js';
+import { createDaemonRpcRuntime } from './rpc-runtime.js';
 import {
   resolveOtlpLogEndpoint,
   type ActiveLogExporterMode,
@@ -1822,7 +1822,7 @@ async function runDaemonInnerWithStartupOwnership(
     ...pickNetworkTunables(config.network ?? {}),
     agentProfileHeartbeatMs: config.network?.agentProfileHeartbeatMs,
     syncContextGraphs: syncContextGraphs,
-    // Forward the resolver-issued snapshot. The agent consumes exactly the
+    // Forward the structurally validated resolved snapshot. The agent consumes exactly the
     // same precedence/fallback decision used for sync scope and status.
     rfc64CatalogActivations,
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
