@@ -55,6 +55,10 @@ function isBlockQuantity(value: unknown): boolean {
   return typeof value === 'string' && /^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(value);
 }
 
+function isNamedBlockTag(value: unknown): boolean {
+  return typeof value === 'string' && ['latest', 'safe', 'finalized'].includes(value);
+}
+
 function paramsError(method: BrowserWalletRpcMethod, params: unknown[] | undefined): string | null {
   const values = params ?? [];
   switch (method) {
@@ -66,7 +70,7 @@ function paramsError(method: BrowserWalletRpcMethod, params: unknown[] | undefin
       return values.length === 1 && isHash(values[0]) ? null : `${method} requires one transaction hash`;
     case 'eth_getBlockByNumber':
       if (values.length !== 2) return `${method} requires a block id and transaction-detail flag`;
-      if (!(isBlockQuantity(values[0]) || ['latest', 'safe', 'finalized'].includes(String(values[0])))) {
+      if (!(isBlockQuantity(values[0]) || isNamedBlockTag(values[0]))) {
         return `${method} requires latest/safe/finalized or a hex block id`;
       }
       return values[1] === false
@@ -75,7 +79,7 @@ function paramsError(method: BrowserWalletRpcMethod, params: unknown[] | undefin
     case 'eth_call':
       if (values.length < 1 || values.length > 2) return 'Identity wallet RPC eth_call accepts one transaction and an optional block id';
       if (values.length === 2 && !(
-        isBlockQuantity(values[1]) || ['latest', 'safe', 'finalized'].includes(String(values[1]))
+        isBlockQuantity(values[1]) || isNamedBlockTag(values[1])
       )) return 'Identity wallet RPC eth_call block id is not allowed';
       return null;
   }

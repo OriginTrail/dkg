@@ -17,9 +17,10 @@ describe('classifyBrowserWalletRead', () => {
     expect(classifyBrowserWalletRead(method, params)).toBe(expected);
   });
 
-  it('preserves an unexpected runtime method for the caller exhaustiveness guard', () => {
+  it('rejects an unexpected runtime method at the classifier boundary', () => {
     const unexpected = 'eth_unexpected' as BrowserWalletRpcMethod;
 
-    expect(classifyBrowserWalletRead(unexpected, [])).toBe(unexpected);
+    expect(() => classifyBrowserWalletRead(unexpected, []))
+      .toThrow('Unsupported browser-wallet RPC method: eth_unexpected');
   });
 });

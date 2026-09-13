@@ -8,6 +8,11 @@ export type BrowserWalletReadStrategy =
   | 'stickyNullable'
   | 'sticky';
 
+function assertNeverBrowserWalletMethod(method: never): never {
+  const description = typeof method === 'string' ? method : '<non-string>';
+  throw new Error(`Unsupported browser-wallet RPC method: ${description}`);
+}
+
 /** Select failover semantics for the bounded read methods used by browser wallets. */
 export function classifyBrowserWalletRead(
   method: BrowserWalletRpcMethod,
@@ -30,6 +35,5 @@ export function classifyBrowserWalletRead(
     case 'eth_chainId':
       return 'sticky';
   }
-  const exhaustive: never = method;
-  return exhaustive;
+  return assertNeverBrowserWalletMethod(method);
 }

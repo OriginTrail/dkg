@@ -220,4 +220,38 @@ describe('daemon identity-wallet browser capability', () => {
     expect(rpc).toHaveBeenCalledOnce();
     expect(rpc).toHaveBeenCalledWith('eth_getTransactionReceipt', [hash]);
   });
+
+  it('returns per-request errors for hostile block tags without rejecting mixed batches', async () => {
+    const rpc = vi.fn(async () => '0x14a34');
+    const agent = {
+      supportsIdentityWalletManagement: true,
+      getIdentityWalletContracts: vi.fn(async () => CONTRACTS),
+      requestBrowserWalletRpc: rpc,
+    };
+    const hostileTag = { toString: null };
+    const request = runCtx('POST', '/api/identity-wallets/rpc', agent, [
+      {
+        jsonrpc: '2.0',
+        id: 30,
+        method: 'eth_getBlockByNumber',
+        params: [hostileTag, false],
+      },
+      {
+        jsonrpc: '2.0',
+        id: 31,
+        method: 'eth_call',
+        params: [{ to: CONTRACTS.storage, data: `0x${'ab'.repeat(32)}` }, hostileTag],
+      },
+      { jsonrpc: '2.0', id: 32, method: 'eth_chainId', params: [] },
+    ]);
+
+    await expect(request.done).resolves.toBeUndefined();
+    expect(JSON.parse(request.res.body)).toEqual([
+      expect.objectContaining({ id: 30, error: expect.objectContaining({ code: -32602 }) }),
+      expect.objectContaining({ id: 31, error: expect.objectContaining({ code: -32602 }) }),
+      { jsonrpc: '2.0', id: 32, result: '0x14a34' },
+    ]);
+    expect(rpc).toHaveBeenCalledOnce();
+    expect(rpc).toHaveBeenCalledWith('eth_chainId', []);
+  });
 });
