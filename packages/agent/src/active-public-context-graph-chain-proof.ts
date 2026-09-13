@@ -12,7 +12,10 @@ export type OnChainAccessPolicyState = 0 | 1 | 'unregistered' | 'unknown';
 export type OnChainAccessPolicyStateResolver = (
   contextGraphId: string,
   operationContext: OperationContext,
-  options: { slotBindingMode: 'chain-attested-repair' },
+  options: {
+    slotBindingMode: 'chain-attested-repair';
+    authorityConsistency: 'finalized-authority-index';
+  },
 ) => Promise<OnChainAccessPolicyState>;
 
 export type OperationAwareActivePublicChainProofResolver = (
@@ -24,7 +27,12 @@ export type BoundActivePublicChainProofResolver = (
   operationContext: OperationContext,
 ) => Promise<ActivePublicContextGraphChainProof>;
 
-/** Strict proof boundary: owns binding policy, RPC classification, and state conversion. */
+/**
+ * Strict metadata-bootstrap proof boundary: owns binding policy, finalized
+ * authority-index consistency, RPC classification, and state conversion.
+ * Runtime SWM/publish policy gates do not use this resolver and retain fresh
+ * current-state reads.
+ */
 export async function resolveActivePublicContextGraphChainProof(
   resolveOnChainAccessPolicyState: OnChainAccessPolicyStateResolver,
   contextGraphId: string,
@@ -35,7 +43,10 @@ export async function resolveActivePublicContextGraphChainProof(
     state = await resolveOnChainAccessPolicyState(
       contextGraphId,
       operationContext,
-      { slotBindingMode: 'chain-attested-repair' },
+      {
+        slotBindingMode: 'chain-attested-repair',
+        authorityConsistency: 'finalized-authority-index',
+      },
     );
   } catch (error) {
     return {
