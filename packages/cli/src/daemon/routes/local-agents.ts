@@ -607,7 +607,8 @@ export async function handleLocalAgentsRoutes(
         && isPlainRecord(normalizedPatch.runtime)
         && normalizedPatch.runtime.status === 'disconnected';
       if (explicitDisconnect && normalizedId) {
-        const connector = localAgentConnectorFor(normalizedId);
+        const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[normalizedId];
+        const connector = localAgentConnectorFor(definition?.connectorKind ?? 'generic');
         await connector.cancelPending(normalizedId);
         const plan = await connector.createDisconnectPlan({
           config,

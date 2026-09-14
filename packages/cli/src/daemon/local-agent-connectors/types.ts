@@ -1,6 +1,8 @@
 import type { ImmutableDkgConfig } from '../../config-snapshot.js';
 import type { LocalAgentIntegrationConfig } from '../../config.js';
 
+export type LocalAgentConnectorKind = 'generic' | 'hermes' | 'openclaw' | 'prime-agent';
+
 export type LocalAgentAttachStatePatch = Partial<Pick<
   LocalAgentIntegrationConfig,
   'enabled' | 'transport' | 'runtime' | 'metadata'

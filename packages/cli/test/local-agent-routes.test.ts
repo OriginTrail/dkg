@@ -454,23 +454,25 @@ describe('generic local-agent routes', () => {
 
 describe('local-agent connector lifecycle contract', () => {
   it('gives every connector one complete lifecycle', () => {
-    const ids = Object.keys(LOCAL_AGENT_INTEGRATION_DEFINITIONS);
+    const definitions = Object.values(LOCAL_AGENT_INTEGRATION_DEFINITIONS);
+    const ids = definitions.map(({ id }) => id);
     expect(ids).toEqual(expect.arrayContaining(['openclaw', 'hermes', 'prime-agent', 'local-llm']));
-    // An id with no dedicated strategy still resolves to the generic
-    // connector, so a new integration cannot reach a half-implemented
-    // lifecycle by being forgotten in one phase.
-    for (const id of [...ids, 'not-registered']) {
-      const connector = localAgentConnectorFor(id);
+    expect(new Set(definitions.map(({ connectorKind }) => connectorKind)))
+      .toEqual(new Set(['generic', 'hermes', 'openclaw', 'prime-agent']));
+    for (const { id, connectorKind } of definitions) {
+      const connector = localAgentConnectorFor(connectorKind);
       expect(typeof connector.createPlan, `${id} connect`).toBe('function');
       expect(typeof connector.createRefreshPlan, `${id} refresh`).toBe('function');
       expect(typeof connector.cancelPending, `${id} cancel`).toBe('function');
       expect(typeof connector.createDisconnectPlan, `${id} disconnect`).toBe('function');
     }
+    expect(() => localAgentConnectorFor('not-registered' as never))
+      .toThrow('Unknown local-agent connector kind');
   });
 
   it('drives connect, refresh and disconnect for a registry-only connector through one contract', async () => {
     const config = makeConfig();
-    const connector = localAgentConnectorFor('not-registered');
+    const connector = localAgentConnectorFor('generic');
 
     const plan = await connector.createPlan({
       config,

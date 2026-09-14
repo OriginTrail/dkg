@@ -2,20 +2,23 @@ import { createHermesConnector, type HermesConnectorDeps } from './hermes.js';
 import { createOpenClawConnector, type OpenClawConnectorDeps } from './openclaw.js';
 import { createPrimeAgentConnector, type PrimeAgentConnectorDeps } from './prime-agent.js';
 import { createGenericConnector } from './generic.js';
-import type { LocalAgentConnectorStrategy } from './types.js';
+import type { LocalAgentConnectorKind, LocalAgentConnectorStrategy } from './types.js';
 
 export type LocalAgentUiAttachDeps = OpenClawConnectorDeps
   & HermesConnectorDeps
   & PrimeAgentConnectorDeps;
 
 export function localAgentConnectorFor(
-  id: string,
+  kind: LocalAgentConnectorKind,
   deps: LocalAgentUiAttachDeps = {},
 ): LocalAgentConnectorStrategy {
-  if (id === 'hermes') return createHermesConnector(deps);
-  if (id === 'openclaw') return createOpenClawConnector(deps);
-  if (id === 'prime-agent') return createPrimeAgentConnector(deps);
-  return createGenericConnector();
+  switch (kind) {
+    case 'generic': return createGenericConnector();
+    case 'hermes': return createHermesConnector(deps);
+    case 'openclaw': return createOpenClawConnector(deps);
+    case 'prime-agent': return createPrimeAgentConnector(deps);
+    default: throw new TypeError(`Unknown local-agent connector kind: ${String(kind)}`);
+  }
 }
 
 export type {
@@ -31,4 +34,5 @@ export type {
   LocalAgentDisconnectContext,
   LocalAgentDisconnectPlan,
   LocalAgentConnectorStrategy,
+  LocalAgentConnectorKind,
 } from './types.js';

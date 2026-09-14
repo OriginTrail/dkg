@@ -46,6 +46,7 @@ import {
   localAgentConnectorFor,
   type LocalAgentAttachStatePatch,
   type LocalAgentConnectPlan,
+  type LocalAgentConnectorKind,
   type LocalAgentUiAttachDeps,
 } from './local-agent-connectors/index.js';
 
@@ -61,6 +62,7 @@ const daemonRequire = createRequire(import.meta.url);
 
 export interface LocalAgentIntegrationDefinition {
   id: string;
+  connectorKind: LocalAgentConnectorKind;
   name: string;
   description: string;
   transportKind?: string;
@@ -84,6 +86,7 @@ export interface LocalAgentIntegrationRecord extends LocalAgentIntegrationConfig
 export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentIntegrationDefinition> = {
   'local-llm': {
     id: 'local-llm',
+    connectorKind: 'generic',
     name: 'DKG Local LLM',
     description: 'Chat with a local llama.cpp or Ollama model through the DKG MCP tool surface.',
     transportKind: 'dkg-local-llm',
@@ -95,6 +98,7 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
   },
   openclaw: {
     id: 'openclaw',
+    connectorKind: 'openclaw',
     name: 'OpenClaw',
     description: 'Connect a local OpenClaw agent through the DKG node.',
     transportKind: 'openclaw-channel',
@@ -113,6 +117,7 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
   },
   hermes: {
     id: 'hermes',
+    connectorKind: 'hermes',
     name: 'Hermes',
     description: 'Connect a local Hermes agent through the DKG node.',
     transportKind: 'hermes-openai',
@@ -132,6 +137,7 @@ export const LOCAL_AGENT_INTEGRATION_DEFINITIONS: Record<string, LocalAgentInteg
   },
   'prime-agent': {
     id: 'prime-agent',
+    connectorKind: 'prime-agent',
     name: 'Prime Agent',
     description: 'Connect a local Prime Intellect Prime Agent through the DKG node.',
     transportKind: 'prime-agent-channel',
@@ -488,9 +494,13 @@ export async function connectLocalAgentIntegrationFromUi(
   deps: LocalAgentUiAttachDeps = {},
 ): Promise<LocalAgentConnectPlan> {
   const requestedId = typeof body.id === 'string' ? normalizeIntegrationId(body.id) : '';
+  const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[requestedId];
   const existingBeforeConnect = requestedId ? getLocalAgentIntegration(config, requestedId) : null;
   const hadStoredTransportBeforeConnect = hasStoredLocalAgentTransportConfig(existingBeforeConnect);
-  const connector = localAgentConnectorFor(requestedId, deps);
+  // Registry-only third-party integrations deliberately use the generic
+  // lifecycle. Built-ins cannot fall through: every definition must name its
+  // connector kind and the connector registry rejects unknown kinds.
+  const connector = localAgentConnectorFor(definition?.connectorKind ?? 'generic', deps);
   const connectBody = connector.prepareBody
     ? await connector.prepareBody(config, body)
     : body;
@@ -731,7 +741,8 @@ export async function refreshLocalAgentIntegrationFromUi(
   if (!existing) {
     throw new Error(`Unknown integration: ${id}`);
   }
-  return localAgentConnectorFor(normalizedId).createRefreshPlan({
+  const definition = LOCAL_AGENT_INTEGRATION_DEFINITIONS[normalizedId];
+  return localAgentConnectorFor(definition?.connectorKind ?? 'generic').createRefreshPlan({
     config,
     id: normalizedId,
     bridgeAuthToken,
