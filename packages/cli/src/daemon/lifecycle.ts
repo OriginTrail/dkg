@@ -67,7 +67,13 @@ import {
   MockChainAdapter,
   mergeRpcUsageWindows,
 } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets, KaNumberAllocator, resolveSyncAgentsMeta } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  isContextGraphMembershipSource,
+  loadOpWallets,
+  KaNumberAllocator,
+  resolveSyncAgentsMeta,
+} from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS, DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
@@ -2009,7 +2015,11 @@ async function runDaemonInnerWithStartupOwnership(
           principalId: row.principal_id,
           role: row.role ?? undefined,
           status: row.status,
-          source: row.source ?? undefined,
+          // SQLite predates the closed source vocabulary, so decode rather
+          // than asserting old or manually edited rows into the trusted type.
+          source: isContextGraphMembershipSource(row.source)
+            ? row.source
+            : undefined,
           displayName: row.display_name ?? undefined,
           ...(metadata ? { metadata } : {}),
           firstSeenAt: row.first_seen_at,

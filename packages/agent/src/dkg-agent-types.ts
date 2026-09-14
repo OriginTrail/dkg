@@ -1013,6 +1013,16 @@ export const CONTEXT_GRAPH_MEMBERSHIP_SOURCES = [
 export type ContextGraphMembershipSource =
   typeof CONTEXT_GRAPH_MEMBERSHIP_SOURCES[number];
 
+const contextGraphMembershipSourceSet: ReadonlySet<string> =
+  new Set(CONTEXT_GRAPH_MEMBERSHIP_SOURCES);
+
+/** Decode the closed source vocabulary at durable or external boundaries. */
+export function isContextGraphMembershipSource(
+  source: unknown,
+): source is ContextGraphMembershipSource {
+  return typeof source === 'string' && contextGraphMembershipSourceSet.has(source);
+}
+
 export interface ContextGraphMembershipRecord {
   contextGraphId: string;
   principalType: ContextGraphMemberPrincipalType;

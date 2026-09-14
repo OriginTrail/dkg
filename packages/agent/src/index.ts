@@ -1,6 +1,11 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry } from './op-wallets.js';
 export {
+  CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
+  isContextGraphMembershipSource,
+  type ContextGraphMembershipSource,
+} from './dkg-agent-types.js';
+export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   generateAgentToken, hashAgentToken,
   ensureWorkspaceEncryptionKey,

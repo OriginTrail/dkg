@@ -2,7 +2,11 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
-import type { ContextGraphMembershipRecord } from '../src/dkg-agent-types.js';
+import {
+  CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
+  isContextGraphMembershipSource,
+  type ContextGraphMembershipRecord,
+} from '../src/dkg-agent-types.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   createLocalContextGraphOriginMembershipRecord,
@@ -32,6 +36,14 @@ function row(
 }
 
 describe('LocalContextGraphProvenance durable restoration', () => {
+  it('decodes only the closed durable membership-source vocabulary', () => {
+    for (const source of CONTEXT_GRAPH_MEMBERSHIP_SOURCES) {
+      expect(isContextGraphMembershipSource(source)).toBe(true);
+    }
+    expect(isContextGraphMembershipSource('seed-import')).toBe(false);
+    expect(isContextGraphMembershipSource(null)).toBe(false);
+  });
+
   it.each(['local-create', 'implicit-swm-write'] as const)(
     'constructs and restores the typed %s origin fact',
     (source) => {
