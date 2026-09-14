@@ -31,37 +31,29 @@ type ContextGraphPageWalkResult =
 interface ContextGraphListAuthorization {
   readonly key: string;
   readonly headers: Record<string, string>;
-  readonly generation: number;
 }
 
-interface InFlightContextGraphPageWalk {
-  readonly generation: number;
-  readonly request: Promise<ContextGraphPageWalkResult>;
+interface ContextGraphListAuthorizationSession extends ContextGraphListAuthorization {
+  cache?: ContextGraphListCacheEntry;
+  inFlight?: {
+    readonly request: Promise<ContextGraphPageWalkResult>;
+  };
 }
 
-const cacheByAuthorization = new Map<string, ContextGraphListCacheEntry>();
-const inFlightByAuthorization = new Map<string, InFlightContextGraphPageWalk>();
-let currentAuthorizationKey: string | undefined;
-let currentAuthorizationGeneration = 0;
+let currentAuthorizationSession: ContextGraphListAuthorizationSession | undefined;
 
 class AuthorizationChangedError extends Error {}
 
-function captureAuthorization(): ContextGraphListAuthorization {
+function captureAuthorization(): ContextGraphListAuthorizationSession {
   const headers = authHeaders();
   const key = headers.Authorization ?? '';
-  if (currentAuthorizationKey === undefined) {
-    currentAuthorizationKey = key;
-  } else if (currentAuthorizationKey !== key) {
-    currentAuthorizationKey = key;
-    currentAuthorizationGeneration += 1;
-    for (const cachedAuthorization of cacheByAuthorization.keys()) {
-      if (cachedAuthorization !== key) cacheByAuthorization.delete(cachedAuthorization);
-    }
-    // Entries carry their generation, so clearing the registry invalidates old
-    // walks without allowing their finally blocks to delete a replacement.
-    inFlightByAuthorization.clear();
+  if (currentAuthorizationSession?.key !== key) {
+    // A session object is the generation token. Replacing it drops the prior
+    // cache and in-flight request together, while captured references remain
+    // safely comparable after every await.
+    currentAuthorizationSession = { key, headers };
   }
-  return { key, headers, generation: currentAuthorizationGeneration };
+  return currentAuthorizationSession;
 }
 
 function cloneView(view: ContextGraphListView): ContextGraphListView {
@@ -103,9 +95,7 @@ async function httpError(response: Response): Promise<HttpError> {
 }
 
 function authorizationIsCurrent(authorization: ContextGraphListAuthorization): boolean {
-  const current = captureAuthorization();
-  return current.key === authorization.key
-    && current.generation === authorization.generation;
+  return captureAuthorization() === authorization;
 }
 
 async function fetchContextGraphPages(
@@ -174,14 +164,14 @@ function isSnapshotChanged(error: unknown): boolean {
 export async function fetchContextGraphs(): Promise<ContextGraphListView> {
   for (let attempt = 0; attempt < CONTEXT_GRAPH_LIST_MAX_RESTARTS; attempt += 1) {
     const authorization = captureAuthorization();
-    const cached = cacheByAuthorization.get(authorization.key);
-    let inFlight = inFlightByAuthorization.get(authorization.key);
-    if (!inFlight || inFlight.generation !== authorization.generation) {
+    const session = authorization;
+    const cached = session.cache;
+    let inFlight = session.inFlight;
+    if (!inFlight) {
       inFlight = {
-        generation: authorization.generation,
         request: fetchContextGraphPages(authorization, cached),
       };
-      inFlightByAuthorization.set(authorization.key, inFlight);
+      session.inFlight = inFlight;
     }
     try {
       const result = await inFlight.request;
@@ -190,19 +180,19 @@ export async function fetchContextGraphs(): Promise<ContextGraphListView> {
         return cloneView(result.view);
       }
       if (result.etag) {
-        cacheByAuthorization.set(authorization.key, {
+        session.cache = {
           etag: result.etag,
           contextGraphs: result.view.contextGraphs.map((row) => ({ ...row })),
-        });
+        };
       } else {
-        cacheByAuthorization.delete(authorization.key);
+        session.cache = undefined;
       }
       return cloneView(result.view);
     } catch (error) {
       if (!(error instanceof AuthorizationChangedError) && !isSnapshotChanged(error)) throw error;
     } finally {
-      if (inFlightByAuthorization.get(authorization.key) === inFlight) {
-        inFlightByAuthorization.delete(authorization.key);
+      if (session.inFlight === inFlight) {
+        session.inFlight = undefined;
       }
     }
   }
