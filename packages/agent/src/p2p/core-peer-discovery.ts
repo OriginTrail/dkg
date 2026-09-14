@@ -69,6 +69,13 @@ export async function findCorePeerIds(options: {
     signal?: AbortSignal,
   ) => Promise<boolean>;
   membershipPolicy: CoreMembershipPolicy;
+  /**
+   * Called for each Core the moment it has passed BOTH authentication and the
+   * membership policy, in completion order. A caller that bounds this
+   * discovery with its own deadline uses it to keep the peers already proven
+   * when a later candidate never settles; the returned roster is unchanged.
+   */
+  onEligible?: (peerId: string) => void;
 }): Promise<string[]> {
   if (!Number.isInteger(options.maxCandidates) || options.maxCandidates <= 0) {
     throw new TypeError('Core discovery maxCandidates must be a positive integer');
@@ -97,11 +104,11 @@ export async function findCorePeerIds(options: {
       const authenticated = await awaitWithAbort((signal) =>
         options.authenticatePeerAddress(agent, signal));
       if (!authenticated) return { agent, authenticated: false as const };
-      return {
-        agent,
-        authenticated: true as const,
-        evidence: await awaitWithAbort((signal) => options.classifyMembership(agent, signal)),
-      };
+      const evidence = await awaitWithAbort((signal) => options.classifyMembership(agent, signal));
+      if (acceptsCoreMembership(evidence, options.membershipPolicy)) {
+        options.onEligible?.(agent.peerId);
+      }
+      return { agent, authenticated: true as const, evidence };
     },
   );
   const eligible = classified

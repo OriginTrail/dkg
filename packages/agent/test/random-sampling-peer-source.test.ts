@@ -168,7 +168,36 @@ describe('Random Sampling proof-time peer source', () => {
     expect(hangingAuthentications).not.toHaveLength(0);
     expect(ports.logInfo).toHaveBeenCalledWith(
       'Random Sampling Core-roster discovery exceeded its 5ms budget for '
-        + `${CG}; continuing with graph-specific providers`,
+        + `${CG}; continuing with graph-specific providers and 0 Core(s) proven in time`,
+    );
+  });
+
+  it('keeps the Cores proven before the budget expires when a later Core hangs', async () => {
+    const ports = makePorts({
+      coreDiscoveryBudgetMs: 20,
+      coreEligibilityConcurrency: 1,
+      resolveCuratorPeerIds: vi.fn(async () => ({ peerIds: ['peer-curator'] })),
+      findCoreAgents: vi.fn(async () => [
+        { peerId: 'core-proven', nodeRole: 'core', agentAddress: '0xaa' },
+        { peerId: 'core-stale', nodeRole: 'core', agentAddress: '0xbb' },
+      ]),
+      // The first Core authenticates and passes membership at once; the stale
+      // row behind it never answers, so only the budget can end the lane.
+      authenticateCorePeerAddress: vi.fn((agent: CorePeerDirectoryEntry) => (
+        agent.peerId === 'core-proven'
+          ? Promise.resolve(true)
+          : new Promise<boolean>(() => {})
+      )),
+    });
+
+    await expect(resolve(ports)).resolves.toMatchObject({
+      corePeerIds: ['core-proven'],
+      candidatePeerIds: ['peer-curator', 'core-proven'],
+    });
+    expect(ports.classifyCoreMembership).toHaveBeenCalledTimes(1);
+    expect(ports.logInfo).toHaveBeenCalledWith(
+      'Random Sampling Core-roster discovery exceeded its 20ms budget for '
+        + `${CG}; continuing with graph-specific providers and 1 Core(s) proven in time`,
     );
   });
 

@@ -112,9 +112,12 @@ function errorMessage(error: unknown): string {
  * The budget is the lane's only exit other than success: an authentication or
  * membership read that never settles is abandoned when it expires, so this
  * fallback can never hold back the graph-specific providers resolved beside it.
- * Cancellation of the repair itself is re-thrown, never degraded to an empty
- * roster, and wallet-binding plus chain-membership remain required for every
- * peer that does make it through.
+ * Expiry is not failure of the whole lane, though — every Core that already
+ * passed both authentication and the membership read is kept, so one stale
+ * directory row cannot erase the healthy Cores proven before it. Cancellation
+ * of the repair itself is re-thrown, never degraded to a partial roster, and
+ * wallet-binding plus chain-membership remain required for every peer that
+ * does make it through.
  */
 async function discoverBoundedCoreRoster(
   ports: RandomSamplingPeerSourcePorts,
@@ -123,6 +126,7 @@ async function discoverBoundedCoreRoster(
 ): Promise<readonly string[]> {
   const budget = new AbortController();
   const budgetTimer = setTimeout(() => budget.abort(), ports.coreDiscoveryBudgetMs);
+  const provenPeerIds = new Set<string>();
   try {
     return await findCorePeerIds({
       findAgents: (options) => ports.findCoreAgents(options),
@@ -139,16 +143,24 @@ async function discoverBoundedCoreRoster(
       classifyMembership: (agent, candidateSignal) =>
         ports.classifyCoreMembership(agent, candidateSignal),
       membershipPolicy: 'proof-required',
+      onEligible: (peerId) => provenPeerIds.add(peerId),
     });
   } catch (error: unknown) {
     if (signal.aborted) throw signal.reason ?? error;
-    ports.logInfo(budget.signal.aborted
-      ? 'Random Sampling Core-roster discovery exceeded its '
-        + `${ports.coreDiscoveryBudgetMs}ms budget for ${localContextGraphId}; `
-        + 'continuing with graph-specific providers'
-      : `Random Sampling Core-roster discovery failed for ${localContextGraphId}: `
-        + errorMessage(error));
-    return [];
+    if (!budget.signal.aborted) {
+      ports.logInfo(
+        `Random Sampling Core-roster discovery failed for ${localContextGraphId}: `
+        + errorMessage(error),
+      );
+      return [];
+    }
+    const proven = [...provenPeerIds].sort();
+    ports.logInfo(
+      'Random Sampling Core-roster discovery exceeded its '
+      + `${ports.coreDiscoveryBudgetMs}ms budget for ${localContextGraphId}; `
+      + `continuing with graph-specific providers and ${proven.length} Core(s) proven in time`,
+    );
+    return proven;
   } finally {
     clearTimeout(budgetTimer);
   }
