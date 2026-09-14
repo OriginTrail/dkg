@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { withRpcRequestContext } from '@origintrail-official/dkg-chain';
-
 export type ContextGraphReadCheck = (id: string, signal: AbortSignal) => Promise<boolean>;
 
 export interface UnscopedContextGraphReadCheckDependencies {
@@ -68,7 +66,7 @@ export async function prepareUnscopedContextGraphReadChecks(
     [registrations, metadataIds] = await Promise.all([
       (async () => {
         try {
-          return await withRpcRequestContext({ signal: preparationSignal }, () => resolve(names, { signal: preparationSignal }));
+          return await resolve(names, { signal: preparationSignal });
         } catch (cause) {
           signal.throwIfAborted();
           throw new RegistrationBatchUnavailable('Context Graph registration is unavailable', { cause });
@@ -93,11 +91,19 @@ export async function prepareUnscopedContextGraphReadChecks(
 
   // A missing, extra, or malformed result is uncertainty, never absence.
   const expected = new Set(names);
-  if (!(registrations instanceof Map) || registrations.size !== expected.size) {
+  const registrationMap = registrations as ReadonlyMap<string, bigint | null> | null;
+  if (
+    registrationMap === null
+    || typeof registrationMap !== 'object'
+    || !Number.isSafeInteger(registrationMap.size)
+    || registrationMap.size < 0
+    || typeof registrationMap[Symbol.iterator] !== 'function'
+    || registrationMap.size !== expected.size
+  ) {
     throw new Error('Cannot authorize unscoped query: incomplete Context Graph registration batch');
   }
   const absentNames = new Set<string>();
-  for (const [name, id] of registrations) {
+  for (const [name, id] of registrationMap) {
     if (!expected.has(name) || (id !== null && (
       typeof id !== 'bigint' || id <= 0n || id >= (1n << 256n)
     ))) {

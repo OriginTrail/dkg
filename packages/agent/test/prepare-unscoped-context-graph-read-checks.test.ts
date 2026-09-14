@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { activeRpcRequestContext } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphCatalogUri,
   contextGraphDataUri, contextGraphMetaUri,
@@ -104,13 +103,33 @@ describe('prepared unscoped Context Graph read checks', () => {
     expect(deps.canReadContextGraph).not.toHaveBeenCalled();
   });
 
+  it('accepts a complete structural ReadonlyMap implementation', async () => {
+    const deps = dependencies();
+    deps.resolveContextGraphIdsByNameHashes.mockImplementation(async (names) => {
+      const values = new Map(names.map((name) => [name, null] as const));
+      return {
+        get: values.get.bind(values),
+        has: values.has.bind(values),
+        forEach: values.forEach.bind(values),
+        entries: values.entries.bind(values),
+        keys: values.keys.bind(values),
+        values: values.values.bind(values),
+        get size() { return values.size; },
+        [Symbol.iterator]: values[Symbol.iterator].bind(values),
+      } satisfies ReadonlyMap<string, bigint | null>;
+    });
+    const signal = new AbortController().signal;
+    const check = await prepareUnscopedContextGraphReadChecks(deps, ['a', 'b'], signal);
+    expect(await Promise.all(['a', 'b'].map((id) => check(id, signal)))).toEqual([true, true]);
+    expect(deps.canReadContextGraph).not.toHaveBeenCalled();
+  });
+
   it('binds bulk transport work to the request signal and rejects late completion after abort', async () => {
     const deps = dependencies();
     const stop = new AbortController();
     let release!: () => void;
     deps.resolveContextGraphIdsByNameHashes.mockImplementation(async (names, options) => {
       expect(options.signal.aborted).toBe(false);
-      expect(activeRpcRequestContext().signal).toBe(options.signal);
       await new Promise<void>((resolve) => { release = resolve; });
       return new Map(names.map((name) => [name, null]));
     });
