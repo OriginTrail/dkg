@@ -2377,6 +2377,101 @@ describe('RFC-64 rollout authority integration', () => {
     );
   });
 
+  it('gates indexed private responsibility and authority on verified membership', async () => {
+    const contextGraphId = `${AUTHOR}/indexed-private-responsibility`;
+    const indexedSnapshot = finalizedAuthoritySnapshot(
+      contextGraphId,
+      [AUTHOR, MEMBER],
+      '0',
+    );
+    const readPolicies = vi.fn(async (
+      contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+    ) => new Map(contextGraphIds.map((contextGraphAuthorityIndexId) => [
+      contextGraphAuthorityIndexId,
+      indexedSnapshot,
+    ])));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readPolicies,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'indexed-private-responsibility',
+      config: {
+        chainAdapter,
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: MEMBER,
+          resolveRemoteAgentAddress: async () => null,
+        },
+      },
+    });
+    (edge as any).defaultAgentAddress = MEMBER;
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    const legacyPolicy = vi.spyOn(edge, 'getContextGraphOnChainPolicy')
+      .mockRejectedValue(new Error('indexed private policy must not use current RPC state'));
+    const hasMembership = vi.spyOn(edge, 'hasRfc64VerifiedPrivateMembershipV1')
+      .mockResolvedValue(false);
+    vi.spyOn(edge, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValue([AUTHOR, MEMBER]);
+    vi.spyOn(edge, 'readRfc64PrivateRosterVersionV1').mockResolvedValue('1');
+    vi.spyOn(edge, 'getCgMeta').mockResolvedValue({
+      ...(await edge.getCgMeta(contextGraphId)),
+      revokedAgents: [],
+    });
+    vi.spyOn(edge, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
+      .mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
+
+    edge.subscribeToContextGraph(contextGraphId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    const subscription = edge.getSubscribedContextGraphs().get(contextGraphId);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(contextGraphId, subscription, '9');
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(readPolicies).toHaveBeenCalled();
+    expect(hasMembership).toHaveBeenCalledWith(contextGraphId);
+    expect(legacyPolicy).not.toHaveBeenCalled();
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual([]);
+    expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      contextGraphId,
+    )).toBeNull();
+    expect(edge.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: false, track2Enabled: false });
+
+    hasMembership.mockResolvedValue(true);
+    await expect(edge.reconcileRfc64CatalogResponsibilityV1(contextGraphId))
+      .resolves.toMatchObject({
+        active: true,
+        responsibilityReason: 'private-membership',
+      });
+
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({
+        contextGraphId,
+        responsibilityReason: 'private-membership',
+        active: true,
+        mode: 'catalog',
+      }),
+    );
+    expect(edge.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+    expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
+      NETWORK_ID,
+      contextGraphId,
+    )).toMatchObject({
+      policy: { accessPolicy: 1 },
+      roster: {
+        members: expect.arrayContaining([
+          expect.objectContaining({ agentAddress: MEMBER }),
+        ]),
+      },
+    });
+    expect(legacyPolicy).not.toHaveBeenCalled();
+  });
+
   it('retains a public chain event that arrives before the cleartext subscription', async () => {
     const contextGraphId = `${AUTHOR}/public-chain-event-first`;
     const wireId = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();

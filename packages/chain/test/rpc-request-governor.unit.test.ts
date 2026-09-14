@@ -249,6 +249,36 @@ describe('RpcRequestGovernor', () => {
     expect(order).toEqual(['foreground', 'background']);
   });
 
+  it('rounds a fractional foreground queue reserve up to one protected slot', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1,
+      foregroundReservePercent: 1,
+      burstRequests: 1,
+      maxQueueSize: 2,
+      startupJitterMs: 0,
+    });
+    await governor.acquire('background');
+
+    const controller = new AbortController();
+    const background = governor.acquire('background', controller.signal);
+    await expect(governor.acquire('background')).rejects.toBeInstanceOf(
+      RpcRequestGovernorQueueFullError,
+    );
+    const foreground = governor.acquire('foreground', controller.signal);
+
+    expect(governor.snapshot()).toMatchObject({
+      foregroundQueued: 1,
+      backgroundQueued: 1,
+      rejected: 1,
+    });
+
+    controller.abort(new Error('test cleanup'));
+    await expect(background).rejects.toThrow('test cleanup');
+    await expect(foreground).rejects.toThrow('test cleanup');
+  });
+
   it('keeps the foreground queue slot reserved when another foreground request is already queued', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
