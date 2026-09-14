@@ -3019,6 +3019,72 @@ describe('RFC-64 rollout authority integration', () => {
     await edge.stop();
   });
 
+  it('deactivates a withdrawn receiver while its in-flight authority batch is still held', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-withdrawn-during-index-failure`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      contextGraphId: '97',
+      accessPolicy: 0,
+      nameHash,
+    });
+    let holdNextRead = false;
+    let markHeldReadStarted!: () => void;
+    let rejectHeldRead!: (reason: Error) => void;
+    const heldReadStarted = new Promise<void>((resolve) => {
+      markHeldReadStarted = resolve;
+    });
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => {
+      if (holdNextRead) {
+        holdNextRead = false;
+        markHeldReadStarted();
+        await new Promise<never>((_resolve, reject) => {
+          rejectHeldRead = reject;
+        });
+      }
+      return new Map(onChainIds.includes('97') ? [['97', snapshot]] : []);
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-terminal-during-index-failure',
+      config: { chainAdapter },
+    });
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+
+    edge.subscribeToContextGraph(contextGraphId);
+    const subscription = edge.getSubscribedContextGraphs().get(contextGraphId);
+    expect(subscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(contextGraphId, subscription, '97');
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+
+    readSnapshots.mockClear();
+    holdNextRead = true;
+    edge.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
+    await heldReadStarted;
+
+    edge.unsubscribeFromContextGraph(contextGraphId);
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+      expect.objectContaining({ contextGraphId }),
+    );
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
+      .toMatchObject({ active: false, track2Enabled: false });
+    expect(readSnapshots).toHaveBeenCalledOnce();
+
+    rejectHeldRead(new Error('held registered authority read failed'));
+    await edge.stop();
+  });
+
   it('fences a stale finalized batch after the subscription is removed', async () => {
     const contextGraphId = `${AUTHOR}/scheduled-stale-unsubscribe`;
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();

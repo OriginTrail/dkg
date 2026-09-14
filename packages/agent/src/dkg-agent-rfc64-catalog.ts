@@ -2189,6 +2189,38 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : null;
   }
 
+  /** Commit one responsibility projection and its matching receiver transition. */
+  private commitRfc64CatalogResponsibilityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    reason: Parameters<Rfc64CatalogResponsibilityRegistryV1['setResponsibility']>[1],
+  ): Rfc64CatalogResponsibilitySelectionV1 {
+    const registry = rfc64CatalogResponsibilityRegistryForV1(
+      this,
+      this.config.rfc64CatalogExecutionPlan,
+    );
+    const transition = registry.setResponsibility(contextGraphId, reason);
+    if (
+      transition.changed
+      && rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1(
+        this.config.rfc64CatalogExecutionPlan,
+        contextGraphId,
+      )
+    ) {
+      this.handleRfc64CatalogReceiverSelectionTransitionV1(
+        contextGraphId,
+        {
+          kind: 'responsibility',
+          previousReceiverActive:
+            transition.previous.active && transition.previous.mode !== 'legacy',
+          nextReceiverActive:
+            transition.next.active && transition.next.mode !== 'legacy',
+        },
+      );
+    }
+    return transition.next;
+  }
+
   /** One unregistered reconciliation body shared by awaited and keyed owners. */
   async reconcileRfc64CatalogResponsibilityCoreV1(
     this: DKGAgent,
@@ -2211,22 +2243,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       );
     const commit = (
       reason: Parameters<Rfc64CatalogResponsibilityRegistryV1['setResponsibility']>[1],
-    ): Rfc64CatalogResponsibilitySelectionV1 => {
-      const transition = registry.setResponsibility(contextGraphId, reason);
-      if (transition.changed && responsibilityOwnsAuthorityWorkload) {
-        this.handleRfc64CatalogReceiverSelectionTransitionV1(
-          contextGraphId,
-          {
-            kind: 'responsibility',
-            previousReceiverActive:
-              transition.previous.active && transition.previous.mode !== 'legacy',
-            nextReceiverActive:
-              transition.next.active && transition.next.mode !== 'legacy',
-          },
-        );
-      }
-      return transition.next;
-    };
+    ) => this.commitRfc64CatalogResponsibilityV1(contextGraphId, reason);
     const revision = options.revision
       ?? nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
@@ -2390,6 +2407,37 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const state = rfc64ScheduledResponsibilityStateForV1(this);
     const targets = state.targets;
     const revision = nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    const pendingWireIdentity = subscription !== undefined
+      && subscription.pendingMeta === true
+      && subscription.onChainId !== undefined
+      && /^[1-9][0-9]*$/.test(subscription.onChainId)
+      && subscription.onChainHash !== undefined
+      && /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
+      && this.contextGraphWireId(subscription.onChainHash) === contextGraphId.toLowerCase();
+    const terminal = rfc64SystemContextGraphIdsV1.has(contextGraphId)
+      || subscription === undefined
+      || (
+        subscription.subscribed !== true
+        && subscription.coreHosted !== true
+        && !pendingWireIdentity
+      );
+    if (terminal) {
+      // Terminal local state has no authority dependency. Advance the revision
+      // first to fence an older in-flight batch, remove any queued successor,
+      // and deactivate the registry/receiver synchronously instead of waiting
+      // behind that batch's physical RPC or retry delay.
+      targets.delete(contextGraphId);
+      state.activityRevision += 1;
+      if (isCurrentRfc64CatalogResponsibilityRevisionV1(
+        this,
+        contextGraphId,
+        revision,
+      )) {
+        this.commitRfc64CatalogResponsibilityV1(contextGraphId, null);
+      }
+      return true;
+    }
     targets.set(contextGraphId, revision);
     state.activityRevision += 1;
     if (state.producerHolds > 0) return true;
