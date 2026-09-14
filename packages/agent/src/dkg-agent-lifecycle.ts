@@ -10006,8 +10006,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('init');
     const membershipRows = await this.localContextGraphProvenance.restoreFromDurableSources({
       membershipStore: this.config.contextGraphMembershipStore,
-      store: this.store,
-      peerId: this.peerId,
       warn: (message) => this.log.warn(ctx, message),
     });
     await this.rehydrateContextGraphSubscriptions(membershipRows);

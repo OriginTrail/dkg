@@ -729,7 +729,8 @@ export class ContextGraphMethods extends DKGAgentBase {
       // Membership is a restart hint and roster projection, not the graph
       // creation transaction. A configured-store failure after store.flush()
       // must not report that the already-durable graph failed to be created.
-      // The creator RDF fact is the compatible restart fallback.
+      // Restart recovery relies only on this node-local membership record;
+      // replicated creator RDF is not trusted as origin evidence.
       await this.upsertContextGraphMember({
         contextGraphId: opts.id,
         principalType: 'agent',

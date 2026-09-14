@@ -1,12 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import {
-  DKG_ONTOLOGY,
-  assertSafeIri,
-  contextGraphMetaGraphUri,
-} from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { strip, stripLiteral } from './dkg-agent-utils.js';
 import type {
   ContextGraphMembershipRecord,
   ContextGraphMembershipStore,
@@ -18,8 +11,6 @@ export type LocalContextGraphProvenanceMembershipSnapshot = Array<
 
 export interface LocalContextGraphProvenanceRestoreInput {
   readonly membershipStore?: ContextGraphMembershipStore;
-  readonly store: Pick<TripleStore, 'query'>;
-  readonly peerId: string;
   readonly warn: (message: string) => void;
 }
 
@@ -61,61 +52,29 @@ export class LocalContextGraphProvenance {
   /**
    * Restore origin from both durable compatibility sources.
    *
-   * Membership rows are the primary restart hint. Older/custom membership
-   * stores may not implement `loadAll`, so the creator RDF fact is also read
-   * as a compatibility fallback. Either source may fail independently; when
-   * both are unavailable callers retain the normal fail-closed chain path.
-   * The returned membership snapshot can be reused by subscription bootstrap
-   * without coupling that bootstrap to provenance persistence details.
+   * Only the node-local membership journal may establish local origin.
+   * Replicated RDF is intentionally excluded: creator/status triples can be
+   * supplied by peers and are therefore not authentication evidence. Older
+   * custom stores without `loadAll`, and failed journal reads, retain the
+   * normal fail-closed chain path. The returned snapshot can be reused by
+   * subscription bootstrap without coupling it to provenance persistence.
    */
   async restoreFromDurableSources(
     input: LocalContextGraphProvenanceRestoreInput,
   ): Promise<LocalContextGraphProvenanceMembershipSnapshot | null> {
     let membershipRows: LocalContextGraphProvenanceMembershipSnapshot | null = null;
-    if (input.membershipStore?.loadAll) {
-      try {
-        membershipRows = await input.membershipStore.loadAll();
-        this.restoreMembershipRecords(membershipRows);
-      } catch (error) {
-        input.warn(
-          `Failed to load local-create membership provenance: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+    if (input.membershipStore?.loadAll === undefined) {
+      input.warn(
+        'Node-local membership provenance cannot be restored: loadAll is unavailable',
+      );
+      return null;
     }
-
-    const contextGraphPrefix = 'did:dkg:context-graph:';
-    const selfCreatorDid = assertSafeIri(`did:dkg:agent:${input.peerId}`);
     try {
-      const result = await input.store.query(`
-        SELECT DISTINCT ?contextGraph ?registrationGraph ?status WHERE {
-          GRAPH ?definitionGraph {
-            ?contextGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
-              <${DKG_ONTOLOGY.DKG_CREATOR}> <${selfCreatorDid}> .
-          }
-          GRAPH ?registrationGraph {
-            ?contextGraph <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status .
-          }
-        }
-      `, { source: 'agent.contextGraph.localCreateProvenance' });
-      if (result.type === 'bindings') {
-        for (const row of result.bindings) {
-          const contextGraphUri = strip(row['contextGraph'] ?? '');
-          if (!contextGraphUri.startsWith(contextGraphPrefix)) continue;
-          const contextGraphId = contextGraphUri.slice(contextGraphPrefix.length);
-          if (!contextGraphId) continue;
-          if (
-            strip(row['registrationGraph'] ?? '')
-              !== contextGraphMetaGraphUri(contextGraphId)
-          ) {
-            continue;
-          }
-          if (stripLiteral(row['status'] ?? '') !== 'unregistered') continue;
-          this.recordLocalCreate(contextGraphId);
-        }
-      }
+      membershipRows = await input.membershipStore.loadAll();
+      this.restoreMembershipRecords(membershipRows);
     } catch (error) {
       input.warn(
-        `Failed to restore RDF local-create provenance: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to load node-local membership provenance: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     return membershipRows;

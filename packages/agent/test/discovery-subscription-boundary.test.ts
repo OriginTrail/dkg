@@ -259,14 +259,11 @@ describe('Context Graph discovery/subscription boundary', () => {
     30_000,
   );
 
-  it.each([
-    ['disabled subscription rehydration', true, true],
-    ['membership store without loadAll', false, false],
-  ] as const)(
-    'restores local-create provenance after restart with %s',
-    async (_label, exposeMembershipLoadAll, configureSubscriptionStore) => {
+  it(
+    'restores node-local create provenance when subscription rehydration is disabled',
+    async () => {
       const dataDir = await mkdtemp(join(tmpdir(), 'dkg-local-create-provenance-'));
-      const contextGraphId = `restart-local-create-${exposeMembershipLoadAll ? 'disabled' : 'rdf'}`;
+      const contextGraphId = 'restart-local-create-disabled';
       const callerAgentAddress = ethers.Wallet.createRandom().address;
       const persistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
       const persistedMemberships = new Map<
@@ -318,28 +315,18 @@ describe('Context Graph discovery/subscription boundary', () => {
           throw new Error('chain RPC unavailable');
         });
         (offlineChain as any).resolveContextGraphIdByNameHash = resolveContextGraphIdByNameHash;
-        const compatibleMembershipStore = exposeMembershipLoadAll
-          ? membershipStore
-          : {
-              upsert: membershipStore.upsert,
-              delete: membershipStore.delete,
-            };
         restarted = await DKGAgent.create({
           name: 'LocalCreateProvenanceRestarted',
           listenHost: '127.0.0.1',
           chainAdapter: offlineChain,
           dataDir,
           contextGraphSubscriptionRehydrationEnabled: false,
-          ...(configureSubscriptionStore
-            ? { contextGraphSubscriptionStore: subscriptionStore }
-            : {}),
-          contextGraphMembershipStore: compatibleMembershipStore,
+          contextGraphSubscriptionStore: subscriptionStore,
+          contextGraphMembershipStore: membershipStore,
         });
         await restarted.start();
 
-        if (configureSubscriptionStore) {
-          expect(restarted.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
-        }
+        expect(restarted.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
         restarted.subscribeToContextGraph(contextGraphId);
         await expect(restarted.resolveContextGraphRegistrationBinding(contextGraphId))
           .resolves.toEqual({ kind: 'unregistered' });

@@ -395,13 +395,6 @@ describe('implicit SWM context graph metadata', () => {
         contextGraphMembershipStore: membershipStore,
       });
       agent = restarted;
-      const query = restarted.store.query.bind(restarted.store);
-      vi.spyOn(restarted.store, 'query').mockImplementation((sparql, options) => {
-        if (options?.source === 'agent.contextGraph.localCreateProvenance') {
-          return Promise.reject(new Error('RDF provenance unavailable'));
-        }
-        return query(sparql, options);
-      });
       await restarted.start();
 
       await expect(restarted.resolveContextGraphRegistrationBinding(contextGraphId))
