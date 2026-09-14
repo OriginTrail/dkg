@@ -1931,11 +1931,13 @@ const SPARQL_VALUE_ORDERED_DATATYPES = [
   'http://www.w3.org/2001/XMLSchema#long',
   'http://www.w3.org/2001/XMLSchema#int',
   'http://www.w3.org/2001/XMLSchema#short',
+  'http://www.w3.org/2001/XMLSchema#time',
   'http://www.w3.org/2001/XMLSchema#byte',
   'http://www.w3.org/2001/XMLSchema#unsignedLong',
   'http://www.w3.org/2001/XMLSchema#unsignedInt',
   'http://www.w3.org/2001/XMLSchema#unsignedShort',
   'http://www.w3.org/2001/XMLSchema#unsignedByte',
+  'http://www.w3.org/2001/XMLSchema#yearMonthDuration',
 ] as const;
 
 const SPARQL_VALUE_ORDERED_DATATYPE_VALUES = SPARQL_VALUE_ORDERED_DATATYPES
