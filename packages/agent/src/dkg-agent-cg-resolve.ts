@@ -2757,8 +2757,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // missing chain IDs once, after deduplication and metadata projection, so
     // ontology, _meta, and storage-only rows all share one consistency policy.
     // Production indexed adapters project every name commitment from one
-    // finalized checkpoint; a current-state pass then fills finalized misses
-    // so a newly mined registration is visible immediately to the CLI/UI.
+    // finalized checkpoint. A finalized miss is not by itself permission to
+    // start a current reverse-name scan: most listing rows are intentionally
+    // unregistered, and doing that once per row recreates the RPC fan-out this
+    // batch is meant to remove. Only a durable local `registered` marker may
+    // opt a missing row into the bounded current-state repair below.
     const rowsMissingOnChainId = rows.filter((row) => !row.onChainId);
     let finalizedTargets: ReadonlyMap<string, FinalizedContextGraphAuthorityTargetV1> =
       new Map();
@@ -2778,19 +2781,29 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           finalizedTargets = new Map(finalizedRead.value.targets);
         }
       } catch {
-        // Listing enrichment is advisory. If the finalized collaborator is
-        // temporarily unavailable, the bounded current-state compatibility
-        // pass below retains the established user-facing behavior.
+        // Listing enrichment is advisory. A failed finalized batch must not
+        // fan out into one current reverse-name scan per discovered row. The
+        // durable-registration gate below still permits a just-mined local
+        // registration to repair its listing identity.
         cacheable = false;
       }
     }
 
     const onChainIdEnrichment = await mapContextGraphListRowsSettled(rows, async (row) => {
       if (row.onChainId) return row;
+      const finalizedTarget = finalizedTargets.get(row.id);
+      if (finalizedTarget !== undefined) {
+        return { ...row, onChainId: finalizedTarget.expectedOnChainId.toString(10) };
+      }
+      const registrationStatus = await optional(
+        () => this.readLocalContextGraphRegistrationStatus(row.id),
+        `local registration status lookup for ${row.id}`,
+      );
+      if (registrationStatus !== 'registered') return row;
       const onChainId = await optional(
         (signal) => this.resolveContextGraphOnChainIdForListing(row.id, {
           signal,
-          finalizedTarget: finalizedTargets.get(row.id) ?? null,
+          finalizedTarget: null,
         }),
         `on-chain id lookup for ${row.id}`,
       );
