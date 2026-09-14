@@ -61,6 +61,22 @@ describe('daemon shared-memory TTL route wiring', () => {
   it('preserves create and subscribe --save through the daemon durable subscription owner', async () => {
     const path = join(daemon!.home, 'config.json');
     const before = await readFile(path, 'utf8');
+    const subscribed = (contextGraphId: string) => {
+      const db = new DatabaseSync(join(daemon!.home, 'node-ui.db'), { readOnly: true });
+      try {
+        return db.prepare(
+          'SELECT subscribed FROM context_graph_subscriptions WHERE context_graph_id = ?',
+        ).get(contextGraphId);
+      } finally { db.close(); }
+    };
+    const markUnsubscribed = (contextGraphId: string) => {
+      const db = new DatabaseSync(join(daemon!.home, 'node-ui.db'));
+      try {
+        db.prepare(
+          'UPDATE context_graph_subscriptions SET subscribed = 0 WHERE context_graph_id = ?',
+        ).run(contextGraphId);
+      } finally { db.close(); }
+    };
     const create = runCli(['context-graph', 'create', 'config-owner-saved', '--save']);
     let id: string;
     try {
@@ -70,17 +86,24 @@ describe('daemon shared-memory TTL route wiring', () => {
       id = match![1].trim();
       expect(result.stdout).toContain('Saved subscription');
     } finally { await create.stop(); }
-    const subscribe = runCli(['subscribe', id, '--save']);
+    expect(subscribed(id)).toMatchObject({ subscribed: 1 });
+
+    const createForSubscribe = runCli(['context-graph', 'create', 'config-owner-subscribed']);
+    let subscribeId: string;
+    try {
+      const result = await createForSubscribe.waitForExit(15_000);
+      const match = result.stdout.match(/^\s*ID:\s+(.+)$/m);
+      expect(match).not.toBeNull();
+      subscribeId = match![1].trim();
+      markUnsubscribed(subscribeId);
+      expect(subscribed(subscribeId)).toMatchObject({ subscribed: 0 });
+    } finally { await createForSubscribe.stop(); }
+    const subscribe = runCli(['subscribe', subscribeId, '--save']);
     try {
       const result = await subscribe.waitForExit(15_000);
       expect(result.stdout).toContain('Synchronization mode: always on');
     } finally { await subscribe.stop(); }
-    // Check the real durable subscription record independently of CLI text.
-    const db = new DatabaseSync(join(daemon!.home, 'node-ui.db'), { readOnly: true });
-    try {
-      expect(db.prepare('SELECT subscribed FROM context_graph_subscriptions WHERE context_graph_id = ?').get(id))
-        .toMatchObject({ subscribed: 1 });
-    } finally { db.close(); }
+    expect(subscribed(subscribeId)).toMatchObject({ subscribed: 1 });
     expect(await readFile(path, 'utf8')).toBe(before);
   });
 

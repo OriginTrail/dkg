@@ -2,7 +2,7 @@
  * Tests for workspace TTL / expiry: expired workspace operations are cleaned
  * up and not served to peers during sync.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -111,9 +111,29 @@ describe('setSharedMemoryTtlMs timer lifecycle', () => {
     // Timer should not be running (TTL=0)
     expect((node as any).swmExpiryCleanupWorker.running).toBe(false);
 
-    // Enable TTL at runtime
-    await node.updateSharedMemoryTtlMs(60_000);
-    expect((node as any).swmExpiryCleanupWorker.running).toBe(true);
+    // The legacy bridge stays synchronous while scheduling real activation.
+    expect(node.setSharedMemoryTtlMs(60_000)).toBeUndefined();
+    await vi.waitFor(() => {
+      expect((node as any).swmExpiryCleanupWorker.running).toBe(true);
+      expect((node as any).config.sharedMemoryTtlMs).toBe(60_000);
+    });
+
+    // A rejected activation rolls the policy back and reports the failure.
+    const activationFailure = new Error('injected TTL activation failure');
+    const worker = (node as any).swmExpiryCleanupWorker;
+    const activation = vi.spyOn(worker, 'onTtlChanged').mockRejectedValueOnce(activationFailure);
+    const warning = vi.spyOn((node as any).log, 'warn');
+    expect(node.setSharedMemoryTtlMs(120_000)).toBeUndefined();
+    await vi.waitFor(() => {
+      expect(activation).toHaveBeenCalledTimes(2);
+      expect((node as any).config.sharedMemoryTtlMs).toBe(60_000);
+      expect(warning).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining('injected TTL activation failure'),
+      );
+    });
+    activation.mockRestore();
+    warning.mockRestore();
 
     // Disable again
     await node.updateSharedMemoryTtlMs(0);
