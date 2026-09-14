@@ -4,21 +4,21 @@ import {
 } from '@origintrail-official/dkg-core';
 import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
-/** Concurrent failures retain their triggering cause and every admitted classification. */
+/**
+ * Concurrent failures retain their triggering cause and every admitted
+ * classification.
+ *
+ * A group holds no classification field of its own. The `isSync*` classifiers
+ * already traverse its causes, so a second representation of the same tag would
+ * only be a way for the two to disagree — and a projection that re-entered the
+ * traversal classifying it would need a special case in every generic tag path.
+ */
 export class SyncFailureGroup extends AggregateError {
-  /** Compatibility projection of the canonical denial tag over the current causes. */
-  declare readonly syncDenied: boolean;
-
   constructor(primary: unknown, additional: readonly unknown[]) {
     super([primary, ...additional], primary instanceof Error
       ? `Concurrent sync failures: ${primary.message}`
       : 'Concurrent sync operations failed', { cause: primary });
     Object.freeze(this.errors);
-    Object.defineProperty(this, 'syncDenied', {
-      enumerable: true,
-      configurable: true,
-      get: () => hasSyncErrorTag(this, 'syncDenied'),
-    });
   }
 }
 
@@ -80,9 +80,6 @@ function toTaggedSyncError(error: unknown, tag: SyncErrorTag): TaggedSyncThrowab
     ? error
     : new Error(String(error), { cause: error });
   syncErrorTagSideChannels[tag].add(taggedError);
-  // A group projects its tags over its causes and its own side-channel entry;
-  // a data property would shadow that live projection.
-  if (taggedError instanceof SyncFailureGroup) return taggedError;
   try {
     Object.defineProperty(taggedError, tag, {
       configurable: true,
@@ -102,8 +99,6 @@ function toTaggedSyncError(error: unknown, tag: SyncErrorTag): TaggedSyncThrowab
 function hasOwnSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
   if (!isTaggableThrowable(error)) return false;
   if (syncErrorTagSideChannels[tag].has(error)) return true;
-  // A group's tag properties project over causes the traversal already visits.
-  if (error instanceof SyncFailureGroup) return false;
   try {
     if ((error as Record<string, unknown>)[tag]) return true;
   } catch {

@@ -350,7 +350,6 @@ it.each(['denied', 'transport'] as const)('preserves a later-index %s failure wh
     expect(outcome.kind).toBe('failure');
     if (outcome.kind !== 'failure') throw new Error('Expected concurrent failures');
     if (kind === 'denied') {
-      expect(outcome.error.syncDenied).toBe(true);
       expect(isSyncDeniedError(outcome.error)).toBe(true);
       expect(didSyncPeerRespond(outcome.error)).toBe(true);
     } else {

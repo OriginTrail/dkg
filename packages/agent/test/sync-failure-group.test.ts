@@ -39,20 +39,20 @@ it('derives denial evidence from current causes instead of a construction-time c
   const group = combineSyncFailures(response, [toSyncTransportFailureError(new Error('second response'))]);
   expect(isSyncDeniedError(group)).toBe(false);
   expect(isKnownRetryableSyncTransportInterruption(group)).toBe(true);
+  // Tagged AFTER the group was built: classification reads the causes as they
+  // are now, so a group can never hold a stale copy of the same evidence.
   Object.assign(response, { syncDenied: true });
-  expect(group).toMatchObject({ syncDenied: true });
-  expect(Object.assign({}, group)).toMatchObject({ syncDenied: true });
   expect(isSyncDeniedError(group)).toBe(true);
   expect(didSyncPeerRespond(group)).toBe(true);
   expect(isKnownRetryableSyncTransportInterruption(group)).toBe(false);
 });
 
-it('projects the canonical denial tag from frozen causes and from the group itself', () => {
+it('classifies denial from a frozen nested cause and from a later tag on the group', () => {
   const denial = toSyncDeniedError(Object.freeze(new Error('denied')));
   expect(Object.keys(denial)).toEqual([]);
   expect(isSyncDeniedError(denial)).toBe(true);
   const group = combineSyncFailures(new Error('disk write failed'), [denial]);
-  expect(group).toMatchObject({ syncDenied: true });
+  expect(isSyncDeniedError(group)).toBe(true);
   expect(didSyncPeerRespond(group)).toBe(true);
   expect(isKnownRetryableSyncTransportInterruption(group)).toBe(false);
 
@@ -60,10 +60,12 @@ it('projects the canonical denial tag from frozen causes and from the group itse
     toSyncTransportFailureError(new Error('first reset')),
     [toSyncTransportFailureError(new Error('second reset'))],
   );
-  expect(later).toMatchObject({ syncDenied: false });
+  expect(isSyncDeniedError(later)).toBe(false);
+  // A boundary may tag the group itself; identity survives and the tag is then
+  // visible both on it and from an enclosing group.
   expect(toSyncDeniedError(later)).toBe(later);
-  expect(later).toMatchObject({ syncDenied: true });
-  expect(Object.assign({}, later)).toMatchObject({ syncDenied: true });
+  expect(isSyncDeniedError(later)).toBe(true);
+  expect(didSyncPeerRespond(later)).toBe(true);
   expect(isSyncDeniedError(combineSyncFailures(new Error('outer'), [later]))).toBe(true);
   expect(isKnownRetryableSyncTransportInterruption(later)).toBe(false);
 });
@@ -75,7 +77,8 @@ it('retains every secondary classification without replacing the triggering loca
   const permanent = new OversizedRdfLiteralError({ actualBytes: 100, maxBytes: 10 });
   const rejected = toSyncValidationRejectionError(Object.freeze(new Error('invalid response')));
   const group = combineSyncFailures(primary, [denial, transport, permanent, rejected, primary]);
-  expect(group).toMatchObject({ cause: primary, errors: [primary, denial, transport, permanent, rejected], syncDenied: true });
+  expect(group).toMatchObject({ cause: primary, errors: [primary, denial, transport, permanent, rejected] });
+  expect(isSyncDeniedError(group)).toBe(true);
   expect(didSyncPeerRespond(group)).toBe(true);
   expect(isSyncTransportFailure(group)).toBe(true);
   expect(isSyncBackoffWorthyError(group)).toBe(true);
