@@ -3,6 +3,7 @@ import {
   type SharedMemorySyncSummary,
 } from '../src/sync/requester/shared-memory-sync.js';
 import {
+  readPublicSnapshotWalkProgress,
   settlePublicSnapshotsForMeta,
   syncPublicSnapshotsForMeta,
 } from '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js';
@@ -21,6 +22,13 @@ const settledProgress: number = settledSnapshotWalk.kind === 'failure'
   ? settledSnapshotWalk.result.readySnapshots
   : settledSnapshotWalk.result.totalSnapshots;
 void settledProgress;
+
+// A consumer compiled against the throwing helper still imports the reader from
+// the published subpath and still gets the walk's progress for what it caught.
+declare const caughtWalkFailure: unknown;
+const recoveredProgress: number | undefined =
+  readPublicSnapshotWalkProgress(caughtWalkFailure)?.readySnapshots;
+void recoveredProgress;
 
 const summary: SharedMemorySyncSummary = {
   snapshotPlaneIncomplete: 0,

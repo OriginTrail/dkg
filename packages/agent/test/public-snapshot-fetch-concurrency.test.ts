@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { createOperationContext, OversizedRdfLiteralError } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
-import { runSharedMemorySync, syncPublicSnapshotsForMeta, type PublicSnapshotMetadata } from '../src/sync/requester/shared-memory-sync.js';
+import { readPublicSnapshotWalkProgress, runSharedMemorySync, syncPublicSnapshotsForMeta, type PublicSnapshotMetadata } from '../src/sync/requester/shared-memory-sync.js';
 import { createRecoveryExecutionAdmission } from '../src/sync/requester/recovery-execution-guard.js';
 import { PUBLIC_SNAPSHOT_FETCH_CONCURRENCY, settlePublicSnapshots } from '../src/sync/requester/public-snapshot-recovery.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncDeniedError, isSyncTransportFailure, toSyncDeniedError, toSyncTransportFailureError } from '../src/sync/error-tags.js';
@@ -443,6 +443,29 @@ it('treats a page-level local yield as its own budget decision and stops further
     });
     expect(f.started).toEqual([0, 1, 2, 3]);
   } finally { f.releaseAll(); await run; }
+});
+
+it('answers the deprecated reader with the progress of the walk that threw', async () => {
+  const f = fixture(4); const failure = new Error('local persistence failed');
+  const put = f.store.putSnapshot;
+  f.store.putSnapshot = async input => {
+    if (input.digest === f.refs[3]) throw failure;
+    return put(input);
+  };
+  const run = f.start();
+  try {
+    await f.waitForStarted(4);
+    f.releaseAll();
+    expect(await run.catch((error: unknown) => error)).toBe(failure);
+    // Beside the error, never on it: the three refs this round did settle are
+    // what a continuation caller needs so it neither replays them nor reads a
+    // converging peer as stalled.
+    expect(readPublicSnapshotWalkProgress(failure)).toEqual({
+      readySnapshots: 3, totalSnapshots: 4, missingCount: 1, missingSample: [f.refs[3]],
+    });
+    expect(Object.keys(failure)).toEqual([]);
+    expect(readPublicSnapshotWalkProgress(new Error('never walked'))).toBeUndefined();
+  } finally { f.releaseAll(); await run.catch(() => {}); }
 });
 
 it('counts prepared reuse entries as ready without cache reads, dispatch or callbacks', async () => {

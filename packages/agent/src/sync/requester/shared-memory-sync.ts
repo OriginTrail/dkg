@@ -1480,10 +1480,59 @@ export type PublicSnapshotSyncOutcome =
   | { readonly kind: 'failure'; readonly result: PublicSnapshotSyncResult; readonly error: unknown };
 
 /**
- * Legacy throwing walk. Kept byte-for-byte compatible: it rethrows the original
- * error with its identity, class and stack intact and attaches nothing to it.
- * Callers that need the progress behind a failure use
- * {@link settlePublicSnapshotsForMeta} instead.
+ * What a failed legacy walk settled, held BESIDE its throwable.
+ *
+ * Consumers compiled against the pre-#2077 helper catch a failed walk and ask
+ * how far it got — a walk that materialized 120 of 250 Knowledge Assets has
+ * real progress, and a continuation caller that cannot read it treats a
+ * converging peer as stalled or replays completed work. That question stays
+ * answerable without writing anything ONTO the caller's error: annotating a
+ * throwable is the side channel this PR removed, and
+ * {@link syncPublicSnapshotsForMeta} still rethrows the original error with its
+ * identity, class and stack untouched — which is also why a frozen or exotic
+ * error keeps its progress here, where a property never could.
+ *
+ * Written by the deprecated throwing adapter only, read only by
+ * {@link readPublicSnapshotWalkProgress}. No path inside this package reads it
+ * back: the recovery core keeps ONE typed transport, and
+ * {@link settlePublicSnapshotsForMeta} is the supported way to see a failure
+ * and its progress together. Entries are weak, so they go with the error.
+ */
+const failedWalkProgress = new WeakMap<object, PublicSnapshotWalkProgress>();
+
+/** Manifest-ordered counts only; metrics travel with the settled outcome. */
+function rememberFailedWalkProgress(error: unknown, walk: PublicSnapshotWalkProgress): void {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return;
+  failedWalkProgress.set(error, {
+    readySnapshots: walk.readySnapshots,
+    totalSnapshots: walk.totalSnapshots,
+    missingCount: walk.missingCount,
+    missingSample: [...walk.missingSample],
+  });
+}
+
+/**
+ * Progress of the walk that threw `error`, or `undefined` when this module did
+ * not throw it (a primitive throwable included).
+ *
+ * @deprecated Prefer {@link settlePublicSnapshotsForMeta}, which returns the
+ * same progress on both branches next to the failure that caused it. This
+ * reader exists for consumers of the throwing helper that predate it.
+ */
+export function readPublicSnapshotWalkProgress(error: unknown): PublicSnapshotWalkProgress | undefined {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return undefined;
+  const walk = failedWalkProgress.get(error);
+  // A fresh copy per read, as before: a caller that edits what it read cannot
+  // change what the next caller sees.
+  return walk && { ...walk, missingSample: [...walk.missingSample] };
+}
+
+/**
+ * Legacy throwing walk. Kept compatible: it rethrows the original error with
+ * its identity, class and stack intact and attaches nothing to it, and the
+ * progress behind that failure stays readable through
+ * {@link readPublicSnapshotWalkProgress}. Callers that can take a settled
+ * result use {@link settlePublicSnapshotsForMeta} instead.
  */
 export async function syncPublicSnapshotsForMeta(params: {
   ctx: OperationContext;
@@ -1519,7 +1568,10 @@ export async function syncPublicSnapshotsForMeta(params: {
   ) => Promise<void>;
 } & PublicSnapshotWalkSource): Promise<PublicSnapshotSyncResult> {
   const outcome = await settlePublicSnapshotsForMeta(params);
-  if (outcome.kind === 'failure') throw outcome.error;
+  if (outcome.kind === 'failure') {
+    rememberFailedWalkProgress(outcome.error, outcome.result);
+    throw outcome.error;
+  }
   return outcome.result;
 }
 
