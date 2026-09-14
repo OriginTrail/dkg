@@ -88,6 +88,7 @@ import type {
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
+import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1301,6 +1302,14 @@ export interface Rfc64CatalogBootstrapConfigV1 {
 
 export interface DKGAgentConfig {
   name: string;
+  /**
+   * Construction seam for the durable finalization inbox. Embedders and tests
+   * may supply a policy-specific store; omission opens the standard SQLite
+   * store in dataDir.
+   */
+  finalizationRecoveryStoreFactory?: (
+    dataDir: string,
+  ) => Promise<FinalizationRecoveryStore>;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
   /** Active network identity used to isolate libp2p and app workflow boundaries. */
