@@ -7,12 +7,12 @@ import {
   normalizeDurableSyncResult,
   normalizeSyncAdmissionSource,
   type DKGAgent,
-  type CatchupPassDecisionReason,
+  type CatchupSyncDiagnostics,
+  type ContextGraphCatchupResult,
   type DurableProgressSummary,
   type DurableProgressClassification,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
-  type SwmSnapshotCoverage,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
 import { PROTOCOL_SYNC, createOperationContext } from '@origintrail-official/dkg-core';
@@ -23,7 +23,14 @@ const DURABLE_CATCHUP_PHASE_HEADROOM_MS = 1_000;
 const MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS = 1_000;
 const DURABLE_CATCHUP_SETTLEMENT_GRACE_MS = 30_000;
 
-export interface CatchupJobResult {
+export interface CatchupJobResult extends Omit<
+  ContextGraphCatchupResult,
+  | 'totalPeers'
+  | 'selectedPeers'
+  | 'sharedMemoryCompletedCleanly'
+  | 'cleanSharedMemoryPeerIds'
+  | 'diagnostics'
+> {
   connectedPeers: number;
   totalPeers?: number;
   selectedPeers?: number;
@@ -67,76 +74,13 @@ export interface CatchupJobResult {
     durable: CatchupPlaneCompletionEvidence & { verifiedPrivateOnlyPeers: number };
     sharedMemory: CatchupPlaneCompletionEvidence;
   };
-  diagnostics?: {
-    noProtocolPeers: number;
-    durable: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      bytesReceived: number;
-      resumedPhases: number;
-      timedOutPhases: number;
-      completedPhases: number;
-      checkpointAdvances: number;
-      emptyResponses: number;
-      metaOnlyResponses: number;
-      /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
-      verifiedPrivateOnlyResponses: number;
-      dataRejectedMissingMeta: number;
-      rejectedKcs: number;
-      failedPeers: number;
-      failedPhases: number;
-      deferredBackpressure: number;
+  diagnostics?: CatchupSyncDiagnostics & {
+    durable: CatchupSyncDiagnostics['durable'] & {
       deniedPhases?: number;
-      /** A resolvable curator never cleanly answered this plane; see
-       * `catchupPlaneProvenByUnanimousEmpty`. */
       authorityUnanswered?: boolean;
     };
-    sharedMemory: {
-      fetchedMetaTriples: number;
-      fetchedDataTriples: number;
-      insertedMetaTriples: number;
-      insertedDataTriples: number;
-      bytesReceived: number;
-      resumedPhases: number;
-      timedOutPhases: number;
-      completedPhases: number;
-      checkpointAdvances: number;
-      emptyResponses: number;
-      droppedDataTriples: number;
-      failedPeers: number;
-      failedPhases: number;
-      deferredBackpressure: number;
-      deniedPhases?: number;
-      /** A resolvable curator never cleanly answered this plane; see
-       * `catchupPlaneProvenByUnanimousEmpty`. */
+    sharedMemory: CatchupSyncDiagnostics['sharedMemory'] & {
       authorityUnanswered?: boolean;
-      /**
-       * Public-SWM snapshot coverage for this graph, selected WHOLE from one
-       * peer round by `selectSwmSnapshotCoverage`. The counts, the peer they
-       * are attributed to and the missing sample are never mixed across peers.
-       */
-      swmCoverage?: SwmSnapshotCoverage;
-      /** Plane-neutral evidence that local admission yielded. */
-      localYield?: true;
-      /** Snapshot phases left incomplete specifically by a local yield; zero on clean results. */
-      snapshotPlaneIncomplete: number;
-      /** Extra passes over the peer set beyond the first. */
-      continuationPasses: number;
-      /**
-       * Why the bounded repeat stopped, as the policy's own closed union — so a
-       * new reason cannot reach the terminal message unnoticed.
-       */
-      continuationStopReason?: CatchupPassDecisionReason;
-      /**
-       * `bytesReceived` split into its replay half (metadata + aggregate data,
-       * which every pass re-fetches in full) and its useful half (snapshot
-       * content), so the cost of repeating the walk stays measurable instead of
-       * being merged into one scalar. The two sum to `bytesReceived`.
-       */
-      replayPhaseBytesReceived: number;
-      snapshotPhaseBytesReceived: number;
     };
   };
 }
@@ -1283,7 +1227,7 @@ class InlineCatchupRunner implements CatchupRunner {
     return this.agent.syncContextGraphFromConnectedPeers(request.contextGraphId, {
       includeSharedMemory: request.includeSharedMemory,
       mode: 'foreground',
-    }) as Promise<CatchupJobResult>;
+    });
   }
 
   async close(): Promise<void> {

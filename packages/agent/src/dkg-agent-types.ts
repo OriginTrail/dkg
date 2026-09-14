@@ -15,8 +15,11 @@
  */
 
 import type { ethers } from 'ethers';
-import type { SharedMemorySyncDiagnostics } from './sync/shared-memory-diagnostics.js';
+import type {
+  SharedMemorySyncAggregate,
+} from './sync/shared-memory-diagnostics.js';
 export type {
+  SharedMemorySyncAggregate,
   SharedMemorySyncDiagnostics,
   SharedMemorySyncResult,
   SwmSnapshotCoverage,
@@ -1224,7 +1227,26 @@ export interface DurableSyncDiagnostics {
 export interface CatchupSyncDiagnostics {
   noProtocolPeers: number;
   durable: DurableSyncDiagnostics;
-  sharedMemory: SharedMemorySyncDiagnostics;
+  sharedMemory: SharedMemorySyncAggregate;
+}
+
+/** Canonical in-process catch-up result; CLI workers may add optional evidence. */
+export interface ContextGraphCatchupResult {
+  connectedPeers: number;
+  totalPeers: number;
+  selectedPeers: number;
+  syncCapablePeers: number;
+  peersTried: number;
+  peersResponded: number;
+  peersSucceeded: number;
+  deferredBackpressure: number;
+  dataSynced: number;
+  sharedMemorySynced: number;
+  sharedMemoryCompletedCleanly: boolean;
+  cleanSharedMemoryPeerIds: readonly string[];
+  denied: boolean;
+  deniedPeers: number;
+  diagnostics: CatchupSyncDiagnostics;
 }
 
 export interface DurableSyncResult extends DurableSyncDiagnostics {
