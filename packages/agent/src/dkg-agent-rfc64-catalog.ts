@@ -181,8 +181,10 @@ import {
   Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1,
   type Rfc64FinalizedAuthoritySnapshotEvidenceV1,
 } from './rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
-import type { Rfc64CatalogAuthorityRefreshRequestV1 } from
-  './rfc64/catalog-authority-refresh-loop-v1.js';
+import {
+  isRfc64SharedStorePressureFailureV1,
+  type Rfc64CatalogAuthorityRefreshRequestV1,
+} from './rfc64/catalog-authority-refresh-loop-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
 export interface Rfc64CatalogAuthorSignerV1 {
@@ -2607,7 +2609,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       throw error;
     }
 
-    for (const [contextGraphId, revision] of authorityTargets) {
+    for (let targetIndex = 0; targetIndex < authorityTargets.length; targetIndex += 1) {
+      const [contextGraphId, revision] = authorityTargets[targetIndex]!;
       if (ownerSignal.aborted) {
         pending.clear();
         throw ownerSignal.reason;
@@ -2631,6 +2634,48 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         if (ownerSignal.aborted) {
           pending.clear();
           throw ownerSignal.reason ?? error;
+        }
+        if (isRfc64SharedStorePressureFailureV1(error)) {
+          // One managed-store timeout/admission failure represents shared
+          // backend pressure. Do not ask every remaining graph to rediscover
+          // the same unavailable store in this pass. Requeue the untouched
+          // suffix behind one abortable retry delay; accepted authority stays
+          // in place until a later complete projection supersedes it.
+          this.log.warn(
+            createOperationContext('system'),
+            `RFC-64 background responsibility batch paused after shared store pressure; `
+            + `${authorityTargets.length - targetIndex} target(s) deferred: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          try {
+            await waitForRfc64ScheduledResponsibilityDelayV1(
+              ownerSignal,
+              RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1,
+            );
+            ownerSignal.throwIfAborted();
+          } catch (retryError) {
+            if (ownerSignal.aborted) pending.clear();
+            throw retryError;
+          }
+          for (const [deferredContextGraphId, deferredRevision] of authorityTargets
+            .slice(targetIndex)) {
+            if (
+              isCurrentRfc64CatalogResponsibilityRevisionV1(
+                this,
+                deferredContextGraphId,
+                deferredRevision,
+              )
+              && !pending.has(deferredContextGraphId)
+            ) {
+              pending.set(deferredContextGraphId, deferredRevision);
+            }
+          }
+          this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+            RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1,
+            (signal) => this.runRfc64ScheduledCatalogResponsibilityBatchV1(signal),
+          );
+          break;
         }
         this.log.warn(
           createOperationContext('system'),

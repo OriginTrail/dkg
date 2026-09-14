@@ -1920,7 +1920,15 @@ export class DKGAgent extends DKGAgentBase {
   recordDiscoveredContextGraph(
     contextGraphId: string,
     metadata: ContextGraphDiscoveryMetadata,
-    options: ContextGraphDiscoveryOptions & { persist?: boolean } = {},
+    options: ContextGraphDiscoveryOptions & {
+      persist?: boolean;
+      /**
+       * Cold store inventory must not bypass a row's recorded dormancy.
+       * Live discovery sources retain the temporary Core activation bridge
+       * until host-mode custody is independent (#1611).
+       */
+      allowCoreCompatibilityActivation?: boolean;
+    } = {},
   ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const next: ContextGraphSub = {
@@ -1950,7 +1958,11 @@ export class DKGAgent extends DKGAgentBase {
       && (existing?.subscribed === true || existing?.coreHosted === true);
     this.setContextGraphSubscription(contextGraphId, next, { persist: persistEnrichment });
 
-    if (!existing && (this.config.nodeRole ?? 'edge') === 'core') {
+    if (
+      !existing
+      && (this.config.nodeRole ?? 'edge') === 'core'
+      && options.allowCoreCompatibilityActivation !== false
+    ) {
       this.subscribeToContextGraph(contextGraphId, {
         trackSyncScope: options.trackSyncScope,
         persist: options.persist,
@@ -2079,13 +2091,14 @@ export class DKGAgent extends DKGAgentBase {
 
     this.log.debug(ctx, `Discovery scan found ${discoveredEntries.size} CG(s) in store`);
 
-    // Private classification may await the store once per graph. Complete it
-    // before deferring scheduled responsibility work, so unrelated lifecycle
-    // notifications are not held behind a potentially long discovery scan.
+    // Private classification is needed only to restore the SWM scope of an
+    // already-active member. Newly catalogued rows do not need a per-row store
+    // read: activation performs its own authority/policy checks, while dormant
+    // rows deliberately install no data-plane work.
     const curatedById = new Map<string, boolean>();
     for (const { id } of discoveredEntries.values()) {
       const existing = this.subscribedContextGraphs.get(id);
-      if (existing === undefined || existing.subscribed) {
+      if (existing?.subscribed === true) {
         curatedById.set(id, await this.isPrivateContextGraph(id));
       }
     }
@@ -2146,8 +2159,21 @@ export class DKGAgent extends DKGAgentBase {
         //   meta row when both exist for the same id.
         const isCurated = curatedById.get(id) === true;
 
-        const recorded = this.recordDiscoveredContextGraph(id, { name, onChainId });
-        const roleOutcome = recorded.subscribed ? 'auto-subscribed for core hosting' : 'catalogued for explicit edge opt-in';
+        const recorded = this.recordDiscoveredContextGraph(
+          id,
+          { name, onChainId },
+          {
+            // A persisted row left dormant during restart must not be
+            // reactivated when the same definition is found in Oxigraph
+            // moments later. Genuinely new discoveries and explicit live
+            // activation paths retain their existing behavior.
+            allowCoreCompatibilityActivation:
+              !this.contextGraphSubscriptionDormancyById.has(id),
+          },
+        );
+        const roleOutcome = recorded.subscribed
+          ? 'auto-subscribed for core hosting'
+          : 'catalogued without activation';
         this.log.info(
           ctx,
           `Discovered ${isCurated ? 'private/allowlisted ' : ''}context graph "${name}" (${id}) from ${source} store — ${roleOutcome}`,

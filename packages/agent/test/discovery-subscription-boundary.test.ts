@@ -697,6 +697,68 @@ describe('Context Graph discovery/subscription boundary', () => {
     }
   }, 30_000);
 
+  it('keeps a large cold store inventory dormant on a core when rehydration is disabled', async () => {
+    const ids = Array.from({ length: 1_000 }, (_, index) => `cold-dormant-${index}`);
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>(ids.map((id) => [id, {
+      id,
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      syncScoped: true,
+    }]));
+    const durableBefore = new Map(
+      [...persisted.entries()].map(([id, record]) => [id, { ...record }]),
+    );
+    const agent = await DKGAgent.create({
+      name: 'CoreColdStoreDiscoveryDisabled',
+      listenHost: '127.0.0.1',
+      nodeRole: 'core',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionRehydrationEnabled: false,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save: async (record) => { persisted.set(record.id, { ...record }); },
+        delete: async (id) => { persisted.delete(id); },
+      },
+    });
+
+    try {
+      await agent.start();
+      await agent.store.insert(ids.map((id) => ({
+        subject: contextGraphDataGraphUri(id),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      })));
+      const classifyPrivate = vi.spyOn(agent as any, 'isPrivateContextGraph');
+
+      expect(await agent.discoverContextGraphsFromStore()).toBe(ids.length);
+      expect(classifyPrivate).not.toHaveBeenCalled();
+      for (const id of ids) {
+        expect(agent.getSubscribedContextGraphs().get(id)?.subscribed).toBe(false);
+        expect((agent as any).gossipRegistered.has(id)).toBe(false);
+        expect((agent as any).config.syncContextGraphs ?? []).not.toContain(id);
+        expect(persisted.get(id)).toEqual(durableBefore.get(id));
+      }
+      expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+        rehydrationEnabled: false,
+        persistedTotal: ids.length,
+        activated: 0,
+        dormant: ids.length,
+      });
+
+      // The gate controls only cold restart activation. Explicit operator
+      // intent remains a normal live path and activates the selected graph.
+      agent.subscribeToContextGraph(ids[0]!);
+      expect(agent.getSubscribedContextGraphs().get(ids[0]!)?.subscribed).toBe(true);
+      expect((agent as any).gossipRegistered.has(ids[0]!)).toBe(true);
+      expect((agent as any).config.syncContextGraphs ?? []).toContain(ids[0]!);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
   it('catalogues revealed chain entries while retaining their authoritative ID', async () => {
     const onChainId = '202';
     const chain = new MockChainAdapter();

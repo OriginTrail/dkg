@@ -76,6 +76,129 @@ export type Rfc64CatalogAuthorityRefreshRequestV1 =
 const AUTO_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1:
 Rfc64CatalogAuthorityRefreshRequestV1 = Object.freeze({ kind: 'auto' });
 
+interface Rfc64CatalogAuthorityRefreshAdmissionEntryV1 {
+  readonly generation: number;
+  readonly signal: AbortSignal;
+  readonly work: () => Promise<Rfc64CatalogAuthorityRefreshResultV1>;
+  readonly resolve: (result: Rfc64CatalogAuthorityRefreshResultV1) => void;
+  readonly reject: (error: unknown) => void;
+  onAbort?: () => void;
+}
+
+/**
+ * A store timeout/admission rejection is shared backend pressure, not one
+ * graph's authority result. Recognize the stable cross-package error codes
+ * (including a shallow wrapper chain) without coupling this orchestration
+ * layer to a concrete storage adapter class.
+ */
+export function isRfc64SharedStorePressureFailureV1(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let candidate = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (candidate === null || typeof candidate !== 'object' || seen.has(candidate)) {
+      return false;
+    }
+    seen.add(candidate);
+    const shaped = candidate as Readonly<Record<string, unknown>>;
+    if (
+      shaped.code === 'STORE_OPERATION_TIMEOUT'
+      || shaped.code === 'STORE_SCHEDULER_BUSY'
+    ) return true;
+    candidate = shaped.cause;
+  }
+  return false;
+}
+
+/**
+ * Authority projection performs local store reads. Keep those reads
+ * single-flight so a large responsibility set cannot fill the store queue.
+ * The first shared store-pressure failure trips only its selector generation;
+ * queued lanes settle as superseded and are retried by the next refresh pass.
+ */
+class Rfc64CatalogAuthorityRefreshAdmissionV1 {
+  readonly #pending: Rfc64CatalogAuthorityRefreshAdmissionEntryV1[] = [];
+  #active = false;
+  #generation = 0;
+  #trippedGeneration: number | null = null;
+
+  beginPass(): number {
+    this.#generation += 1;
+    return this.#generation;
+  }
+
+  run(
+    generation: number,
+    signal: AbortSignal,
+    work: () => Promise<Rfc64CatalogAuthorityRefreshResultV1>,
+  ): Promise<Rfc64CatalogAuthorityRefreshResultV1> {
+    if (signal.aborted) return Promise.reject(signal.reason);
+    if (this.#trippedGeneration === generation) return Promise.resolve('superseded');
+    return new Promise((resolve, reject) => {
+      const admission: Rfc64CatalogAuthorityRefreshAdmissionEntryV1 = {
+        generation,
+        signal,
+        work,
+        resolve,
+        reject,
+      };
+      admission.onAbort = () => {
+        const index = this.#pending.indexOf(admission);
+        if (index < 0) return;
+        this.#pending.splice(index, 1);
+        reject(signal.reason);
+      };
+      signal.addEventListener('abort', admission.onAbort, { once: true });
+      this.#pending.push(admission);
+      this.#drain();
+    });
+  }
+
+  #settleSkippedGeneration(generation: number): void {
+    this.#trippedGeneration = generation;
+    for (let index = this.#pending.length - 1; index >= 0; index -= 1) {
+      const admission = this.#pending[index]!;
+      if (admission.generation !== generation) continue;
+      this.#pending.splice(index, 1);
+      if (admission.onAbort !== undefined) {
+        admission.signal.removeEventListener('abort', admission.onAbort);
+      }
+      admission.resolve('superseded');
+    }
+  }
+
+  #drain(): void {
+    if (this.#active) return;
+    const admission = this.#pending.shift();
+    if (admission === undefined) return;
+    if (admission.onAbort !== undefined) {
+      admission.signal.removeEventListener('abort', admission.onAbort);
+    }
+    if (admission.signal.aborted) {
+      admission.reject(admission.signal.reason);
+      this.#drain();
+      return;
+    }
+    if (this.#trippedGeneration === admission.generation) {
+      admission.resolve('superseded');
+      this.#drain();
+      return;
+    }
+    this.#active = true;
+    void admission.work().then(
+      admission.resolve,
+      (error) => {
+        if (isRfc64SharedStorePressureFailureV1(error)) {
+          this.#settleSkippedGeneration(admission.generation);
+        }
+        admission.reject(error);
+      },
+    ).finally(() => {
+      this.#active = false;
+      this.#drain();
+    });
+  }
+}
+
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
   readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
@@ -113,6 +236,7 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
     revision: string | null;
     force: boolean;
     request: Rfc64CatalogAuthorityRefreshRequestV1;
+    admissionGeneration: number;
   }> | undefined;
 
   constructor(
@@ -122,6 +246,7 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
       signal: AbortSignal,
       request: Rfc64CatalogAuthorityRefreshRequestV1,
     ) => Promise<Rfc64CatalogAuthorityRefreshResultV1>,
+    admission: Rfc64CatalogAuthorityRefreshAdmissionV1,
     onFailure: (contextGraphId: string, error: unknown) => void,
   ) {
     this.#task = new CoalescingRecurringTask({
@@ -130,7 +255,11 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
         const target = this.#target;
         if (target === undefined) return;
         try {
-          const result = await refresh(this.contextGraphId, signal, target.request);
+          const result = await admission.run(
+            target.admissionGeneration,
+            signal,
+            () => refresh(this.contextGraphId, signal, target.request),
+          );
           if (signal.aborted) return;
           if (result === 'superseded') {
             if (target.force) this.#acceptedRevision = undefined;
@@ -157,9 +286,10 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
     revision: string | null,
     force: boolean,
     request: Rfc64CatalogAuthorityRefreshRequestV1,
+    admissionGeneration: number,
   ): boolean {
     if (!this.needsRequest(revision, force)) return false;
-    this.#target = Object.freeze({ revision, force, request });
+    this.#target = Object.freeze({ revision, force, request, admissionGeneration });
     return this.#task.request();
   }
 
@@ -187,6 +317,7 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
   readonly #authorityRevisionSource: Rfc64CatalogAuthorityRevisionSourceV1;
   readonly #lanes = new Map<string, Rfc64CatalogAuthorityRefreshLaneV1>();
+  readonly #refreshAdmission = new Rfc64CatalogAuthorityRefreshAdmissionV1();
   readonly #retirements = new Set<Promise<void>>();
   #passOwner: CoalescingRecurringTask | null = null;
   #passActivityRevision = 0;
@@ -219,6 +350,7 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
     return new Rfc64CatalogAuthorityRefreshLaneV1(
       contextGraphId,
       this.options.refreshContextGraph,
+      this.#refreshAdmission,
       this.options.onRefreshFailure,
     );
   }
@@ -259,6 +391,7 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
   };
 
   async #runRefreshPass(signal: AbortSignal): Promise<void> {
+    const admissionGeneration = this.#refreshAdmission.beginPass();
     let activeContextGraphIds: readonly string[];
     try {
       activeContextGraphIds = this.options.readActiveContextGraphIds();
@@ -350,6 +483,7 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
         initial || safety,
         refreshRequests.get(contextGraphId)
           ?? AUTO_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1,
+        admissionGeneration,
       );
     }
   }

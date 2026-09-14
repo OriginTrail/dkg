@@ -463,8 +463,10 @@ describe('RFC-64 rollout authority integration', () => {
       return 'public';
     });
 
-    expect(edge.scheduleRfc64CatalogResponsibilityReconciliationV1(CONTEXT_GRAPH_ID))
-      .toBe(true);
+    // Keep a real active subscription in the batch. A missing subscription is
+    // terminal local state and is intentionally removed synchronously before
+    // any RPC admission, which would make this shutdown test a false pass.
+    edge.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await vi.waitFor(() => {
       expect(governor.snapshot().backgroundQueued).toBe(1);
     });
@@ -2928,6 +2930,69 @@ describe('RFC-64 rollout authority integration', () => {
     }
   });
 
+  it('pauses a scheduled responsibility batch after one shared store timeout', async () => {
+    const contextGraphIds = Array.from(
+      { length: 16 },
+      (_, index) => `${AUTHOR}/scheduled-store-pressure-${index}`,
+    );
+    const resolveSnapshots = vi.fn(async () => new Map());
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-store-pressure',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    const storePressure = Object.assign(
+      new Error('Managed Oxigraph is recovering; query was not started'),
+      {
+        code: 'STORE_OPERATION_TIMEOUT',
+        retryable: true,
+        outcome: 'not_started',
+      },
+    );
+    const readAccessPolicy = vi.spyOn(edge, 'getExplicitAccessPolicy')
+      .mockRejectedValueOnce(storePressure)
+      .mockResolvedValue('public');
+
+    vi.useFakeTimers();
+    try {
+      for (const contextGraphId of contextGraphIds) {
+        edge.subscribeToContextGraph(contextGraphId);
+      }
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(resolveSnapshots).toHaveBeenCalledOnce();
+      expect(readAccessPolicy).toHaveBeenCalledOnce();
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+        expect.objectContaining({ contextGraphId: expect.stringContaining(
+          '/scheduled-store-pressure-',
+        ) }),
+      );
+
+      await vi.advanceTimersByTimeAsync(30_100);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+      expect(resolveSnapshots).toHaveBeenCalledTimes(2);
+      expect(readAccessPolicy).toHaveBeenCalledTimes(contextGraphIds.length + 1);
+      expect(new Set(edge.readRfc64CatalogResponsibilitiesV1()
+        .map(({ contextGraphId }) => contextGraphId)))
+        .toEqual(new Set(contextGraphIds));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('deactivates a withdrawn responsibility before a sibling index failure retries', async () => {
     const withdrawnContextGraphId = `${AUTHOR}/scheduled-withdrawn-before-index-failure`;
     const retainedContextGraphId = `${AUTHOR}/scheduled-retained-index-failure`;
@@ -3142,12 +3207,16 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('clears failed scheduled targets when shutdown aborts retry before reopen', async () => {
     const staleContextGraphId = `${AUTHOR}/scheduled-close-stale`;
+    const pendingContextGraphId = `${AUTHOR}/scheduled-close-pending`;
     const freshContextGraphId = `${AUTHOR}/scheduled-close-fresh`;
     const staleNameHash = ethers.keccak256(
       ethers.toUtf8Bytes(staleContextGraphId),
     ).toLowerCase();
     const freshNameHash = ethers.keccak256(
       ethers.toUtf8Bytes(freshContextGraphId),
+    ).toLowerCase();
+    const pendingNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(pendingContextGraphId),
     ).toLowerCase();
     let rejectReads = false;
     const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => {
@@ -3188,11 +3257,11 @@ describe('RFC-64 rollout authority integration', () => {
     rejectReads = true;
     edge.subscribeToContextGraph(staleContextGraphId);
     await vi.waitFor(() => expect(resolveSnapshots).toHaveBeenCalledOnce());
-    // Keep a second notification queued while the failed owner is inside its
-    // long retry delay. The shutdown path must clear this successor as well;
-    // otherwise it can survive the aborted run and be replayed after reopen.
-    edge.subscribeToContextGraph(freshContextGraphId);
-    (edge as any).deleteContextGraphSubscription(staleContextGraphId);
+    // The failed pass is now inside its retry delay. Queue another real,
+    // non-terminal target so shutdown must clear work accepted after the
+    // immutable failed selection, not merely observe a target deleted by the
+    // test itself.
+    edge.subscribeToContextGraph(pendingContextGraphId);
     await edge.stop();
 
     rejectReads = false;
@@ -3206,6 +3275,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(resolveSnapshots).toHaveBeenCalled();
     expect(resolveSnapshots.mock.calls.every(([nameHashes]) => (
       !nameHashes.includes(staleNameHash)
+      && !nameHashes.includes(pendingNameHash)
     ))).toBe(true);
     expect(edge.getSubscribedContextGraphs().get(freshContextGraphId)).toMatchObject({
       onChainId: '93',
