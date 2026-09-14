@@ -49,6 +49,14 @@ export class ManagedReadRecoveryCoordinatorV1 {
     token: ManagedReadRecoveryTokenV1 | null,
   ): void {
     if (token === null || token.lifecycleGeneration !== this.#lifecycleGeneration) return;
+    const current = this.#options.readRecoveryState();
+    if (
+      current === null
+      || current.recovering
+      || current.generation !== token.storeGeneration
+    ) {
+      return;
+    }
     const pending = this.#pending;
     if (pending?.storeGeneration === token.storeGeneration && pending.deadline <= deadline) {
       return;
