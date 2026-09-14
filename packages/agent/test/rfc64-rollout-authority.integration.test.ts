@@ -1740,7 +1740,7 @@ describe('RFC-64 rollout authority integration', () => {
       kind: 'finalized-evidence',
       evidence: {
         contextGraphAuthorityIndexId: '9',
-        batchTargetIds: ['9', '10'],
+        batchTargetIds: ['9'],
         snapshot: firstSnapshot,
       },
     });
@@ -1748,7 +1748,7 @@ describe('RFC-64 rollout authority integration', () => {
       kind: 'finalized-evidence',
       evidence: {
         contextGraphAuthorityIndexId: '10',
-        batchTargetIds: ['9', '10'],
+        batchTargetIds: ['10'],
         snapshot: secondSnapshot,
       },
     });
@@ -1757,7 +1757,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     expect(resolveIds).not.toHaveBeenCalled();
     expect(readSnapshots).toHaveBeenCalledOnce();
-    expect(readSnapshots).toHaveBeenCalledWith(['9', '10'], {
+    expect(readSnapshots).toHaveBeenCalledWith(['9'], {
       signal: expect.any(AbortSignal),
     });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
@@ -2278,8 +2278,14 @@ describe('RFC-64 rollout authority integration', () => {
       await prepareAuthorityRefreshLifecycle(readRevisions);
     const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
     expect(subscription).toBeDefined();
-    (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
-    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    // This test owns the refresh runtime directly after its lifecycle was
+    // closed above. Seed its durable target without scheduling the separate
+    // responsibility owner against that intentionally closed coordinator.
+    (edge as any).contextGraphBindingState.bindAuthoritative(
+      CONTEXT_GRAPH_ID,
+      subscription,
+      '9',
+    );
     const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
       .mockResolvedValueOnce(null)
       .mockResolvedValue(authoritySnapshot as never);
@@ -2665,12 +2671,7 @@ describe('RFC-64 rollout authority integration', () => {
     );
     expect(readSnapshots).toHaveBeenCalledTimes(2);
     expect(new Set(readSnapshots.mock.calls[0]![0])).toEqual(
-      new Set([
-        '999',
-        ...targets
-          .filter((target) => target !== missing && target !== conflictingBindingTarget)
-          .map(({ onChainId }) => onChainId),
-      ]),
+      new Set(['999']),
     );
     expect(new Set(readSnapshots.mock.calls[1]![0])).toEqual(
       new Set(targets
@@ -2751,9 +2752,11 @@ describe('RFC-64 rollout authority integration', () => {
     const release = edge.beginRfc64ScheduledCatalogResponsibilityBatchV1();
     try {
       for (let index = 0; index < contextGraphIds.length; index++) {
-        edge.scheduleRfc64CatalogResponsibilityReconciliationV1(
-          contextGraphIds[index]!,
-        );
+        (edge as any).setContextGraphSubscription(contextGraphIds[index]!, {
+          subscribed: true,
+          synced: false,
+          coreHosted: false,
+        }, { persist: false });
         if ((index + 1) % 25 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
       expect(resolveSnapshots).not.toHaveBeenCalled();
@@ -2839,10 +2842,9 @@ describe('RFC-64 rollout authority integration', () => {
     expect(new Set(resolveSnapshots.mock.calls[0]![0])).toEqual(
       new Set(expectedNameHashes),
     );
-    expect(readSnapshots).toHaveBeenCalledTimes(2);
-    for (const [onChainIds] of readSnapshots.mock.calls) {
-      expect(new Set(onChainIds)).toEqual(new Set(snapshotsByOnChainId.keys()));
-    }
+    expect(readSnapshots).toHaveBeenCalledOnce();
+    expect(new Set(readSnapshots.mock.calls[0]![0]))
+      .toEqual(new Set(snapshotsByOnChainId.keys()));
     expect(scalarNameResolution).not.toHaveBeenCalled();
     for (const contextGraphId of contextGraphIds) {
       expect(core.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
@@ -2909,9 +2911,8 @@ describe('RFC-64 rollout authority integration', () => {
       await vi.advanceTimersByTimeAsync(30_100);
       await edge.whenRfc64CatalogResponsibilitiesIdleV1();
       expect(resolveSnapshots).toHaveBeenCalledTimes(2);
-      expect(readSnapshots).toHaveBeenCalledTimes(2);
+      expect(readSnapshots).toHaveBeenCalledOnce();
       expect(readSnapshots.mock.calls.map(([onChainIds]) => onChainIds)).toEqual([
-        ['91'],
         ['91'],
       ]);
       expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
@@ -2925,6 +2926,97 @@ describe('RFC-64 rollout authority integration', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('deactivates a withdrawn responsibility before a sibling index failure retries', async () => {
+    const withdrawnContextGraphId = `${AUTHOR}/scheduled-withdrawn-before-index-failure`;
+    const retainedContextGraphId = `${AUTHOR}/scheduled-retained-index-failure`;
+    const snapshots = new Map([
+      ['95', Object.freeze({
+        ...finalizedAuthoritySnapshot(withdrawnContextGraphId, [], '0'),
+        contextGraphId: '95',
+        accessPolicy: 0,
+        nameHash: ethers.keccak256(
+          ethers.toUtf8Bytes(withdrawnContextGraphId),
+        ).toLowerCase(),
+      })],
+      ['96', Object.freeze({
+        ...finalizedAuthoritySnapshot(retainedContextGraphId, [], '0'),
+        contextGraphId: '96',
+        accessPolicy: 0,
+        nameHash: ethers.keccak256(
+          ethers.toUtf8Bytes(retainedContextGraphId),
+        ).toLowerCase(),
+      })],
+    ] as const);
+    let rejectReads = false;
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => {
+      if (rejectReads) throw new Error('registered sibling index unavailable');
+      return new Map(onChainIds.flatMap((onChainId) => {
+        const snapshot = snapshots.get(onChainId);
+        return snapshot === undefined ? [] : [[onChainId, snapshot] as const];
+      }));
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-terminal-before-index-failure',
+      config: { chainAdapter },
+    });
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+
+    edge.subscribeToContextGraph(withdrawnContextGraphId);
+    edge.subscribeToContextGraph(retainedContextGraphId);
+    const withdrawnSubscription = edge.getSubscribedContextGraphs()
+      .get(withdrawnContextGraphId);
+    const retainedSubscription = edge.getSubscribedContextGraphs()
+      .get(retainedContextGraphId);
+    expect(withdrawnSubscription).toBeDefined();
+    expect(retainedSubscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(
+      withdrawnContextGraphId,
+      withdrawnSubscription,
+      '95',
+    );
+    (edge as any).bindSubscriptionOnChainId(
+      retainedContextGraphId,
+      retainedSubscription,
+      '96',
+    );
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    await edge.reconcileRfc64CatalogAccessAuthorityV1(withdrawnContextGraphId);
+    await edge.reconcileRfc64CatalogAccessAuthorityV1(retainedContextGraphId);
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(withdrawnContextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(retainedContextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+
+    readSnapshots.mockClear();
+    rejectReads = true;
+    const release = edge.beginRfc64ScheduledCatalogResponsibilityBatchV1();
+    edge.unsubscribeFromContextGraph(withdrawnContextGraphId);
+    edge.scheduleRfc64CatalogResponsibilityReconciliationV1(retainedContextGraphId);
+    release();
+    await vi.waitFor(() => expect(readSnapshots).toHaveBeenCalledOnce());
+
+    expect(readSnapshots).toHaveBeenCalledWith(['96'], {
+      signal: expect.any(AbortSignal),
+    });
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+      expect.objectContaining({ contextGraphId: withdrawnContextGraphId }),
+    );
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(withdrawnContextGraphId))
+      .toMatchObject({ active: false, track2Enabled: false });
+    expect(edge.resolveRfc64CatalogReceiverAuthorityV1(retainedContextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+    await edge.stop();
   });
 
   it('fences a stale finalized batch after the subscription is removed', async () => {

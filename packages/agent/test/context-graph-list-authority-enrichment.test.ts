@@ -2,6 +2,7 @@ import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import { enrichContextGraphListAuthorityV1 } from
   '../src/context-graph-list-authority-enrichment.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
@@ -229,6 +230,7 @@ describe('context graph list authority enrichment', () => {
     const resolveCurrent = vi.fn(async () => null);
     const fakeAgent = {
       subscribedContextGraphs: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {
           resolveFinalizedContextGraphIdsByNameHashes: resolveMany,
@@ -282,6 +284,7 @@ describe('context graph list authority enrichment', () => {
     });
     const fakeAgent = {
       subscribedContextGraphs: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {
           resolveFinalizedContextGraphIdsByNameHashes: resolveMany,
