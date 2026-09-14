@@ -29,6 +29,7 @@ import {
   contextGraphPrivateUri,
   contextGraphSharedMemoryUri,
   contextGraphSharedMemoryMetaUri,
+  describeSharedMemoryScope,
   sharedMemoryScopeKey,
   sharedMemoryReadBothFilter,
   contextGraphVerifiableMemoryUri,
@@ -173,6 +174,22 @@ describe('V10 named graph URIs', () => {
     { name: 'legacy empty subgraph', subGraphName: '', expected: '0xAbCd/ExampleCG' },
   ])('preserves the SWM scope key bytes for $name', ({ subGraphName, expected }) => {
     expect(sharedMemoryScopeKey('0xAbCd/ExampleCG', subGraphName)).toBe(expected);
+  });
+
+  it.each([
+    { name: 'root', subGraphName: undefined, expectedSubGraphName: undefined },
+    { name: 'named subgraph', subGraphName: 'Claims', expectedSubGraphName: 'Claims' },
+    { name: 'legacy empty subgraph', subGraphName: '', expectedSubGraphName: '' },
+  ])('constructs one canonical SWM descriptor for $name', ({ subGraphName, expectedSubGraphName }) => {
+    const descriptor = describeSharedMemoryScope('0xAbCd/ExampleCG', subGraphName);
+    expect(descriptor).toEqual({
+      contextGraphId: '0xAbCd/ExampleCG',
+      ...(expectedSubGraphName === undefined ? {} : { subGraphName: expectedSubGraphName }),
+      dataGraph: contextGraphSharedMemoryUri('0xAbCd/ExampleCG', subGraphName),
+      metaGraph: contextGraphSharedMemoryMetaUri('0xAbCd/ExampleCG', subGraphName),
+      ownershipKey: sharedMemoryScopeKey('0xAbCd/ExampleCG', subGraphName),
+    });
+    expect(Object.isFrozen(descriptor)).toBe(true);
   });
 
   it('verifiable memory URI', () => {

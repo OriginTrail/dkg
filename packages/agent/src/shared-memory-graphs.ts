@@ -1,17 +1,12 @@
 import {
   contextGraphSharedMemoryMetaUri,
   contextGraphSharedMemoryUri,
-  sharedMemoryScopeKey,
+  describeSharedMemoryScope,
+  type SharedMemoryScopeDescriptor,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 
-export interface SharedMemoryGraphDescriptor {
-  readonly contextGraphId: string;
-  readonly subGraphName?: string;
-  readonly dataGraph: string;
-  readonly metaGraph: string;
-  readonly ownershipKey: string;
-}
+export type SharedMemoryGraphDescriptor = SharedMemoryScopeDescriptor;
 
 /** Construct the canonical addressing and ownership tuple for one SWM scope. */
 export function describeSharedMemoryGraphs(
@@ -26,13 +21,7 @@ export function describeSharedMemoryGraphs(
   subGraphName?: string,
 ): SharedMemoryGraphDescriptor | undefined {
   if (subGraphName !== undefined && !validateSubGraphName(subGraphName).valid) return undefined;
-  return {
-    contextGraphId,
-    ...(subGraphName === undefined ? {} : { subGraphName }),
-    dataGraph: contextGraphSharedMemoryUri(contextGraphId, subGraphName),
-    metaGraph: contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName),
-    ownershipKey: sharedMemoryScopeKey(contextGraphId, subGraphName),
-  };
+  return describeSharedMemoryScope(contextGraphId, subGraphName);
 }
 
 export function isSharedMemoryBucketDescendantDataGraph(graph: string, bucketGraph: string): boolean {

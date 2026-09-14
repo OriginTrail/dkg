@@ -304,6 +304,32 @@ export function sharedMemoryScopeKey(contextGraphId: string, subGraphName?: stri
   return subGraphName ? `${contextGraphId}\0${subGraphName}` : contextGraphId;
 }
 
+/** Canonical addressing and ownership tuple for one Shared Memory scope. */
+export interface SharedMemoryScopeDescriptor {
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
+  readonly dataGraph: string;
+  readonly metaGraph: string;
+  readonly ownershipKey: string;
+}
+
+/**
+ * Construct one Shared Memory scope without imposing caller policy. The empty
+ * subgraph name remains the legacy root alias used by the URI and key codecs.
+ */
+export function describeSharedMemoryScope(
+  contextGraphId: string,
+  subGraphName?: string,
+): SharedMemoryScopeDescriptor {
+  return Object.freeze({
+    contextGraphId,
+    ...(subGraphName === undefined ? {} : { subGraphName }),
+    dataGraph: contextGraphSharedMemoryUri(contextGraphId, subGraphName),
+    metaGraph: contextGraphSharedMemoryMetaUri(contextGraphId, subGraphName),
+    ownershipKey: sharedMemoryScopeKey(contextGraphId, subGraphName),
+  });
+}
+
 /**
  * SPARQL `FILTER` scoping a `GRAPH ?g` pattern to a shared-working-memory
  * bucket's OT-RFC-46 read-both layout: the bare bucket `<swmGraph>` AND its
