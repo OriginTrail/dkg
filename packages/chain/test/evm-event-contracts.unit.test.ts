@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ChainEvent } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import {
-  EVM_EVENT_DESCRIPTORS, evmEventDescriptorFor, selectEvmEventPlan,
+  EVM_EVENT_DESCRIPTORS, selectEvmEventPlan,
   type EvmEventContractKey, type EvmEventDescriptor, type EvmEventScan,
 } from '../src/evm-event-contracts.js';
 import {
@@ -16,6 +16,11 @@ import type { ContractCache } from '../src/evm-adapter-types.js';
 
 const first = new Contract('0x0000000000000000000000000000000000000001', []);
 const second = new Contract('0x0000000000000000000000000000000000000002', []);
+
+/** Alias lookup as a plan projection — the module exposes only the plan. */
+function descriptorFor(alias: string): EvmEventDescriptor | undefined {
+  return selectEvmEventPlan([alias]).descriptors[0];
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; });
@@ -39,7 +44,7 @@ describe('generation-owned Hub bindings and event selection', () => {
   it('shares one capability across aliases and repeated requested event types', () => {
     const plan = selectEvmEventPlan(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated']);
     expect(plan.bindings).toEqual(['knowledgeAssetStorage']);
-    expect(plan.descriptors).toEqual([evmEventDescriptorFor('KCCreated')]);
+    expect(plan.descriptors).toEqual([descriptorFor('KCCreated')]);
     expect(Object.isFrozen(plan)).toBe(true);
     expect(Object.isFrozen(plan.descriptors)).toBe(true);
     expect(selectEvmEventPlan(['NameClaimed', 'ContextGraphNameClaimed']).bindings)
@@ -490,10 +495,14 @@ describe('EVM event descriptor registry', () => {
     expect(new Set(aliases).size).toBe(aliases.length);
     expect(Object.keys(SCENARIOS).sort()).toEqual(EVM_EVENT_DESCRIPTORS.map(descriptor => descriptor.aliases[0]).sort());
     expect(selectEvmEventPlan([...aliases].reverse()).bindings).toEqual(EVENT_CAPABILITY_KEYS);
-    expect(selectEvmEventPlan(['unsupported-event']).bindings).toEqual([]);
-    expect(evmEventDescriptorFor('unsupported-event')).toBeUndefined();
+    const unsupported = selectEvmEventPlan(['unsupported-event']);
+    expect(unsupported.bindings).toEqual([]);
+    expect(unsupported.descriptors).toEqual([]);
+    // Bindings are deduplicated, so a full plan resolves fewer of them than it runs descriptors.
+    expect(EVENT_CAPABILITY_KEYS.length).toBeLessThan(EVM_EVENT_DESCRIPTORS.length);
+    expect(new Set(EVENT_CAPABILITY_KEYS).size).toBe(EVENT_CAPABILITY_KEYS.length);
     expect(selectEvmEventPlan(['KnowledgeAssetCreated', 'KCCreated', 'KCCreated']).descriptors)
-      .toEqual([evmEventDescriptorFor('KCCreated')]);
+      .toEqual([descriptorFor('KCCreated')]);
   });
 
   it('scans one canonical descriptor once when multiple aliases request it', async () => {
@@ -513,7 +522,7 @@ describe('EVM event descriptor registry', () => {
 
   it.each(ALIASES)('%s scans its declared binding and parses every log shape of its descriptor', async (alias, descriptor: EvmEventDescriptor) => {
     const scenario = SCENARIOS[descriptor.aliases[0]];
-    expect(evmEventDescriptorFor(alias)).toBe(descriptor);
+    expect(descriptorFor(alias)).toBe(descriptor);
     expect(selectEvmEventPlan([alias]).bindings).toEqual([descriptor.binding]);
     const contract = new Contract(address, EVENT_ABI);
     const queried: string[] = [];
@@ -654,7 +663,7 @@ describe('EVM event descriptor registry', () => {
   });
 
   it('KCCreated falls back to the attested author when Transfer enumeration fails, unless the scan was cancelled', async () => {
-    const descriptor = evmEventDescriptorFor('KCCreated')!;
+    const descriptor = descriptorFor('KCCreated')!;
     const contract = new Contract(address, EVENT_ABI);
     const created = [logOf('KnowledgeAssetCreated', [6n, ROOT, 2048n, AUTHOR], 13, 'tx-greenfield', 2)];
     const controller = new AbortController();
@@ -676,7 +685,7 @@ describe('EVM event descriptor registry', () => {
   });
 
   it('reads KCCreated before ownership evidence when an unbounded chain head advances', async () => {
-    const descriptor = evmEventDescriptorFor('KCCreated')!;
+    const descriptor = descriptorFor('KCCreated')!;
     const contract = new Contract(address, EVENT_ABI);
     let createObserved = false;
     const created = logOf('KnowledgeAssetCreated', [6n, ROOT, 2048n, AUTHOR], 101, 'tx-new', 2);

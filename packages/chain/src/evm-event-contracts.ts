@@ -310,23 +310,25 @@ export const EVM_EVENT_DESCRIPTORS = [
 ] as const satisfies readonly EvmEventDescriptorShape[];
 
 export type EvmEventDescriptor = (typeof EVM_EVENT_DESCRIPTORS)[number];
+/**
+ * The only Hub bindings the event surface can select, derived from the table
+ * rather than declared beside it: a Hub key no descriptor reads (`token`,
+ * `staking`, …) is not an event binding and cannot appear in a plan.
+ */
 export type EvmEventContractKey = EvmEventDescriptor['binding'];
 
-const DESCRIPTOR_BY_ALIAS: ReadonlyMap<string, EvmEventDescriptor> = new Map(
-  EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases.map(alias => [alias, descriptor] as const)),
-);
-
-/** The descriptor a requested event type dispatches to; unsupported names have none. */
-export function evmEventDescriptorFor(eventType: string): EvmEventDescriptor | undefined {
-  return DESCRIPTOR_BY_ALIAS.get(eventType);
-}
-
+/** What a scan of the requested aliases needs: which descriptors run, and which bindings they read. */
 export interface EvmEventPlan {
   readonly descriptors: readonly EvmEventDescriptor[];
   readonly bindings: readonly EvmEventContractKey[];
 }
 
-/** One canonical descriptor and binding plan for requested event aliases. */
+/**
+ * The one canonical projection of the table. Aliases of the same descriptor
+ * collapse to a single entry, descriptors keep their declaration order (the
+ * Hub read order of a multi-capability scan) and a binding two descriptors
+ * share is resolved once.
+ */
 export function selectEvmEventPlan(eventTypes: readonly string[]): EvmEventPlan {
   const selectedAliases = new Set(eventTypes);
   const descriptors = Object.freeze(EVM_EVENT_DESCRIPTORS.filter(
