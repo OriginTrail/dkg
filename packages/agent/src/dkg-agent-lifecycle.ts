@@ -627,7 +627,6 @@ import {
   type LocalContextGraphOriginSource,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
-  type CatchupSyncDiagnostics,
   type ContextGraphCatchupDiagnostics,
   type ContextGraphCatchupResult,
   type DurableSyncResult,
