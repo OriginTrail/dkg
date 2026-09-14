@@ -1,6 +1,4 @@
 import {
-  contextGraphSharedMemoryMetaUri,
-  contextGraphSharedMemoryUri,
   describeSharedMemoryScope,
   type SharedMemoryScopeDescriptor,
   validateSubGraphName,
