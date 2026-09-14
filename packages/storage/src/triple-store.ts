@@ -27,6 +27,7 @@ import type {
   Rfc64SharedProjectionStreamOperationV1,
   Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
+import { withKeyedLocks } from '@origintrail-official/dkg-core';
 import type {
   Rfc64ExactBindingsReadOperationV1,
   Rfc64SemanticReadCapabilityResultV1,
@@ -388,16 +389,9 @@ export async function withCountedStoreMutation<T>(
     locks = new Map();
     countedMutationLocks.set(owner, locks);
   }
-  const predecessor = locks.get(scope) ?? Promise.resolve();
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => { release = resolve; });
-  locks.set(scope, gate);
-  await predecessor;
   try {
-    return await mutation();
+    return await withKeyedLocks(locks, [scope], mutation);
   } finally {
-    release();
-    if (locks.get(scope) === gate) locks.delete(scope);
     if (locks.size === 0) countedMutationLocks.delete(owner);
   }
 }

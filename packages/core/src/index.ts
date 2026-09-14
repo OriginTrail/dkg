@@ -14,6 +14,7 @@ export * from './graph-knowledge-asset-metadata.js';
 export * from './trust.js';
 export * from './sparql-operation.js';
 export * from './code-point-order.js';
+export * from './keyed-lock.js';
 export { BoundedLruCache } from './bounded-lru-cache.js';
 export * from './coalescing-recurring-task.js';
 export * from './query-result.js';
