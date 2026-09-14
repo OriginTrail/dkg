@@ -285,6 +285,61 @@ describe('bounded context-graph listing', () => {
     if (restored.ok) expect(restored.etag).toBe(first.etag);
   });
 
+  it('forwards the authenticated caller to privacy-scoped graph listing', async () => {
+    const callerAgentAddress = '0x0000000000000000000000000000000000000001';
+    const publicRow = { ...rows(1)[0]!, id: 'public', accessPolicy: 'public' };
+    const privateRow = { ...rows(1)[0]!, id: 'private', accessPolicy: 'private' };
+    const listContextGraphs = vi.fn(async (options?: { callerAgentAddress?: string | null }) => (
+      options?.callerAgentAddress === callerAgentAddress ? [publicRow, privateRow] : [publicRow]
+    ));
+    const response = responseRecorder();
+
+    await handleContextGraphListRoute({
+      req: { headers: {} },
+      res: response.res,
+      agent: { listContextGraphs },
+      url: new URL('http://localhost/api/context-graph/list?limit=50&projection=full'),
+      requestAgentAddress: callerAgentAddress,
+    } as unknown as RequestContext);
+
+    expect(listContextGraphs).toHaveBeenCalledWith({ callerAgentAddress });
+    expect(JSON.parse(response.state.body ?? '{}').contextGraphs).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'private' })]),
+    );
+  });
+
+  it('maps a changed pagination snapshot to the HTTP 409 restart contract', async () => {
+    let source = rows(2);
+    const listContextGraphs = vi.fn(async () => source);
+    const first = responseRecorder();
+    await handleContextGraphListRoute({
+      req: { headers: {} },
+      res: first.res,
+      agent: { listContextGraphs },
+      url: new URL('http://localhost/api/context-graph/list?limit=1&projection=summary'),
+      requestAgentAddress: null,
+    } as unknown as RequestContext);
+    const cursor = JSON.parse(first.state.body ?? '{}').nextCursor as string;
+    expect(cursor).toBeTruthy();
+
+    source = [...source, { ...rows(1)[0]!, id: 'graph-added-between-pages' }];
+    const next = responseRecorder();
+    await handleContextGraphListRoute({
+      req: { headers: {} },
+      res: next.res,
+      agent: { listContextGraphs },
+      url: new URL(
+        `http://localhost/api/context-graph/list?limit=1&projection=summary&cursor=${encodeURIComponent(cursor)}`,
+      ),
+      requestAgentAddress: null,
+    } as unknown as RequestContext);
+
+    expect(next.state.status).toBe(409);
+    expect(JSON.parse(next.state.body ?? '{}')).toMatchObject({
+      code: 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED',
+    });
+  });
+
   it('returns a bodyless 304 with observability headers for a matching ETag', async () => {
     const listContextGraphs = vi.fn(async () => rows(120));
     const first = responseRecorder();

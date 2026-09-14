@@ -2078,10 +2078,11 @@ export class ApiClient {
     options: ContextGraphListPageOptions,
   ): Promise<ContextGraphListPageResponse>;
   async listContextGraphs(
-    options: ContextGraphListPageOptions = {},
+    options?: ContextGraphListPageOptions,
   ): Promise<ContextGraphListLegacyResponse | ContextGraphListPageResponse> {
-    const encoded = serializeContextGraphListOptions(options);
-    return this.get(`/api/context-graph/list${encoded ? `?${encoded}` : ''}`);
+    if (options === undefined) return this.get('/api/context-graph/list');
+    const encoded = serializeContextGraphListOptions({ projection: 'full', ...options });
+    return this.get(`/api/context-graph/list?${encoded}`);
   }
 
   async contextGraphExists(id: string): Promise<{ id: string; exists: boolean }> {

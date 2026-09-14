@@ -515,6 +515,26 @@ describe('ApiClient', () => {
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/list`);
     });
 
+    it('listContextGraphs({}) selects the paged response contract', async () => {
+      const body = {
+        contextGraphs: [],
+        page: {
+          returned: 0,
+          total: 0,
+          limit: 50,
+          serializedBytes: 128,
+          maxSerializedBytes: 65_536,
+        },
+      };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+
+      const result = await client.listContextGraphs({});
+
+      expect(result.page.total).toBe(0);
+      expect(new URL(calls[0].url).searchParams.get('projection')).toBe('full');
+    });
+
     it('listContextGraphs() forwards bounded pagination and filters', async () => {
       const body = {
         contextGraphs: [{ id: 'p1', name: 'Test', isSystem: false }],

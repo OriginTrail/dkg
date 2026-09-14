@@ -427,6 +427,30 @@ describe('CLI-2 — CORS policy for /api/*', () => {
     const exposed = listed.headers.get('access-control-expose-headers') ?? '';
     expect(exposed).toContain('ETag');
     expect(exposed).toContain('X-DKG-Total-Count');
+    const listedVary = (listed.headers.get('vary') ?? '')
+      .split(',')
+      .map((value) => value.trim().toLowerCase());
+    expect(listedVary).toEqual(expect.arrayContaining(['origin', 'authorization']));
+    expect(listedVary.filter((value) => value === 'origin')).toHaveLength(1);
+    expect(listedVary.filter((value) => value === 'authorization')).toHaveLength(1);
+
+    const conditional = await fetch(
+      urlFor(d, '/api/context-graph/list?limit=1&projection=summary'),
+      {
+        headers: {
+          Origin: origin,
+          ...authHeaders(d),
+          'If-None-Match': listed.headers.get('etag')!,
+        },
+      },
+    );
+    expect(conditional.status).toBe(304);
+    const conditionalVary = (conditional.headers.get('vary') ?? '')
+      .split(',')
+      .map((value) => value.trim().toLowerCase());
+    expect(conditionalVary).toEqual(expect.arrayContaining(['origin', 'authorization']));
+    expect(conditionalVary.filter((value) => value === 'origin')).toHaveLength(1);
+    expect(conditionalVary.filter((value) => value === 'authorization')).toHaveLength(1);
   });
 });
 
