@@ -41,6 +41,7 @@ export interface ManagedOxigraphRuntimeStoreConfigV1 extends TripleStoreConfig {
 export function snapshotManagedOxigraphRuntimeOptionsV1(
   input: unknown,
   managedByDkg = false,
+  omitKeys: readonly string[] = [],
 ): Readonly<Record<string, unknown>> {
   if (input === null || typeof input !== 'object') {
     throw new Error('managed Oxigraph options must be an object of data properties');
@@ -62,7 +63,7 @@ export function snapshotManagedOxigraphRuntimeOptionsV1(
     if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
       throw new Error(`managed Oxigraph option ${key} must be a data property`);
     }
-    if (managedByDkg && key === 'managedByDkg') continue;
+    if ((managedByDkg && key === 'managedByDkg') || omitKeys.includes(key)) continue;
     Object.defineProperty(snapshot, key, {
       configurable: false,
       enumerable: true,

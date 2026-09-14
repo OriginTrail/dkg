@@ -513,6 +513,36 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('preserves legacy one-argument managed hook placement', async () => {
+    const originalFetch = globalThis.fetch;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        timeout: 5,
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      });
+      await expect(store.hasGraph('urn:legacy-timeout-graph')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'oxigraph-server',
+        operation: 'query',
+        storeOperation: 'hasGraph',
+        timeoutMs: 5,
+      });
+      expect(timedOutOperations).toEqual(['query']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('does not relabel a late managed-server response as a timeout', async () => {
     const originalFetch = globalThis.fetch;
     let now = 0;

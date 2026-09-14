@@ -228,6 +228,16 @@ export interface SparqlHttpStoreOptions {
    */
   managedOxigraph?: boolean;
   /**
+   * @deprecated Pass managed hooks as the second argument to
+   * createManagedOxigraphSparqlStoreV1. Retained for one-argument factory
+   * compatibility; the generic SparqlHttpStore constructor ignores it.
+   */
+  onClientTimeout?: (operation: string) => void;
+  /** @deprecated See onClientTimeout. */
+  getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
+  /** @deprecated See onClientTimeout. */
+  onActivityChange?: (activeOperations: number) => void;
+  /**
    * Certified endpoint guarantees. `atomic-update` means a whole
    * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
    * that a query issued after a completed update observes that update, as
@@ -1292,14 +1302,41 @@ export function createManagedOxigraphSparqlStoreV1(
   options: SparqlHttpStoreOptions,
   hooks: ManagedOxigraphRuntimeHooksV1 = {},
 ): SparqlHttpStore {
+  const legacyHooks = extractLegacyManagedOxigraphRuntimeHooksV1(options);
   const config = createManagedOxigraphRuntimeStoreConfigV1({
     backend: 'sparql-http',
-    options: snapshotManagedOxigraphRuntimeOptionsV1(options, true),
-  }, hooks);
+    options: snapshotManagedOxigraphRuntimeOptionsV1(
+      options,
+      true,
+      ['onClientTimeout', 'getRecoveryState', 'onActivityChange'],
+    ),
+  }, { ...legacyHooks, ...hooks });
   return new SparqlHttpStore(
     config.options as unknown as SparqlHttpStoreOptions,
     getManagedOxigraphRuntimeConstructionAuthorityV1(config),
   );
+}
+
+function extractLegacyManagedOxigraphRuntimeHooksV1(
+  options: SparqlHttpStoreOptions,
+): ManagedOxigraphRuntimeHooksV1 {
+  const hooks: {
+    -readonly [K in keyof ManagedOxigraphRuntimeHooksV1]?: ManagedOxigraphRuntimeHooksV1[K];
+  } = {};
+  for (const key of ['onClientTimeout', 'getRecoveryState', 'onActivityChange'] as const) {
+    const descriptor = Object.getOwnPropertyDescriptor(options, key);
+    if (descriptor === undefined) continue;
+    if (!Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+      throw new Error(`managed Oxigraph option ${key} must be a data property`);
+    }
+    const value = descriptor.value;
+    if (value === undefined) continue;
+    if (typeof value !== 'function') {
+      throw new Error(`managed Oxigraph option ${key} must be a function`);
+    }
+    hooks[key] = value;
+  }
+  return hooks;
 }
 
 function normalizeConsistencyProfile(value: unknown): SparqlHttpConsistencyProfile {
