@@ -4,7 +4,7 @@ import { createValidator } from './validation.js';
 import { prepareCaptureContentRdf } from './capture-rdf.js';
 import { buildEpcisQuery, EpcisQueryInputError } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
+import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, SparqlBinding, EPCISEventProjection, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
   contextGraphId: string;
@@ -79,7 +79,10 @@ const MAX_PER_PAGE = 1000;
  * remote triplestore, that is reachable input. The linear parser below
  * runs in O(n) regardless of input shape.
  */
-export function unwrapLiteral(value: string): string {
+export function unwrapLiteral(value: string): string;
+export function unwrapLiteral(value: undefined): undefined;
+export function unwrapLiteral(value: string | undefined): string | undefined;
+export function unwrapLiteral(value: string | undefined): string | undefined {
   if (!value || value.length < 2 || value.charCodeAt(0) !== 34 /* '"' */) {
     return value;
   }
@@ -103,72 +106,72 @@ export function unwrapLiteral(value: string): string {
   return value;
 }
 
-/** Reconstruct a proper EPCIS event object from flat SPARQL bindings. */
-export function toEpcisEvent(binding: Record<string, string>): Record<string, unknown> {
-  const event: Record<string, unknown> = {};
+function parseGroupConcat(value: string | undefined): string[] | undefined {
+  const text = unwrapLiteral(value);
+  return text ? text.split(', ').map((item) => item.trim()).filter(Boolean) : undefined;
+}
+
+/** Reconstruct available fields from a sparse projection; query identity is validated separately. */
+export function toEpcisEvent(binding: SparqlBinding): EPCISEventProjection {
+  const event: EPCISEventProjection = {};
 
   // Strip eventType URI prefix to short name
-  const rawType = unwrapLiteral(binding['eventType'] ?? '');
+  const rawType = unwrapLiteral(binding.eventType ?? '');
   if (rawType) event.type = compactEpcisEventType(rawType);
 
   // Simple string fields — unwrap N-Quads literal quoting, include only when non-empty
-  const eventTime = unwrapLiteral(binding['eventTime']);
+  const eventTime = unwrapLiteral(binding.eventTime);
   if (eventTime) event.eventTime = eventTime;
 
-  const eventTimeZoneOffset = unwrapLiteral(binding['eventTimeZoneOffset']);
+  const eventTimeZoneOffset = unwrapLiteral(binding.eventTimeZoneOffset);
   if (eventTimeZoneOffset) event.eventTimeZoneOffset = eventTimeZoneOffset;
 
-  const action = unwrapLiteral(binding['action']);
+  const action = unwrapLiteral(binding.action);
   if (action) event.action = action;
 
-  const bizStep = unwrapLiteral(binding['bizStep']);
+  const bizStep = unwrapLiteral(binding.bizStep);
   if (bizStep) event.bizStep = bizStep;
 
-  const disposition = unwrapLiteral(binding['disposition']);
+  const disposition = unwrapLiteral(binding.disposition);
   if (disposition) event.disposition = disposition;
 
-  const parentID = unwrapLiteral(binding['parentID']);
+  const parentID = unwrapLiteral(binding.parentID);
   if (parentID) event.parentID = parentID;
 
-  const configurationId = unwrapLiteral(binding['configurationId']);
+  const configurationId = unwrapLiteral(binding.configurationId);
   if (configurationId) event.configurationId = configurationId;
 
-  const shipmentId = unwrapLiteral(binding['shipmentId']);
+  const shipmentId = unwrapLiteral(binding.shipmentId);
   if (shipmentId) event.shipmentId = shipmentId;
 
   // DKG provenance — namespaced field
-  const ual = unwrapLiteral(binding['ual']);
+  const ual = unwrapLiteral(binding.ual);
   if (ual) event['dkg:ual'] = ual;
 
   // Wrap location fields in { id } objects — unwrap literal quoting from URI values
-  const readPoint = unwrapLiteral(binding['readPoint']);
+  const readPoint = unwrapLiteral(binding.readPoint);
   if (readPoint) {
     event.readPoint = { id: readPoint };
   }
-  const bizLocation = unwrapLiteral(binding['bizLocation']);
+  const bizLocation = unwrapLiteral(binding.bizLocation);
   if (bizLocation) {
     event.bizLocation = { id: bizLocation };
   }
 
-  // Split GROUP_CONCAT strings into arrays — unwrap literal quoting first
-  const concatFields: Array<[string, string]> = [
-    ['epcList', 'epcList'],
-    ['childEPCList', 'childEPCs'],
-    ['inputEPCs', 'inputEPCList'],
-    ['outputEPCs', 'outputEPCList'],
-  ];
-  for (const [bindingKey, eventKey] of concatFields) {
-    const val = unwrapLiteral(binding[bindingKey]);
-    if (val) {
-      event[eventKey] = val.split(', ').map((s) => s.trim()).filter(Boolean);
-    }
-  }
+  const epcList = parseGroupConcat(binding.epcList);
+  if (epcList) event.epcList = epcList;
+  const childEPCs = parseGroupConcat(binding.childEPCList);
+  if (childEPCs) event.childEPCs = childEPCs;
+  const inputEPCList = parseGroupConcat(binding.inputEPCs);
+  if (inputEPCList) event.inputEPCList = inputEPCList;
+  const outputEPCList = parseGroupConcat(binding.outputEPCs);
+  if (outputEPCList) event.outputEPCList = outputEPCList;
 
   return event;
 }
 
 /** Add the stored subject as the stable identifier promised by query responses. */
-function decodeQueryEvent(binding: Record<string, string>): EPCISQueryEvent {
+function decodeQueryEvent(binding: SparqlBinding): EPCISQueryEvent {
   const eventID = binding.event;
   if (typeof eventID !== 'string' || !isSafeIri(eventID)) {
     throw new EpcisQueryError('Events query returned a result without a reusable event IRI', 502);
