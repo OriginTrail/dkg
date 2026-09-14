@@ -3404,6 +3404,35 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isCurrent: () => boolean = () => true,
     signal?: AbortSignal,
   ): Promise<VmReconcileTarget> {
+    // System bootstrap/control graphs never have a ContextGraphStorage id.
+    // Keep this guard at the canonical execution boundary as well as in sweep
+    // selection so manual/live callers cannot turn them into historical
+    // reverse-name scans.
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(localCgId)) {
+      throw new ContextGraphNotFoundError(localCgId);
+    }
+    const existingSubscription = this.subscribedContextGraphs.get(localCgId);
+    // Local-origin graphs are deliberately off-chain until registration (or
+    // authoritative registration recovery) installs a numeric binding. Keep
+    // this invariant at the execution boundary too: a job admitted just before
+    // create/register state changed must not fall through to cold name-hash
+    // discovery. Remote unbound subscriptions still use the self-prime path.
+    if (
+      this.localContextGraphProvenance.hasLocalCreate(localCgId)
+      && (existingSubscription === undefined
+        || !this.contextGraphBindingState.hasBindingCandidate(
+          localCgId,
+          existingSubscription,
+        ))
+    ) {
+      throw new ContextGraphNotFoundError(localCgId);
+    }
+    // Registration is the exclusive owner of the local -> numeric binding
+    // transition. A reconcile admitted just before the selection snapshot
+    // changed must retire without starting a competing cold lookup.
+    if (this.contextGraphRegistrationsInFlight?.has(localCgId)) {
+      throw new VmReconcileQueueClosedError();
+    }
     // The operator switch is the outer boundary for every reconcile target.
     // Keep it ahead of subscription self-prime and selected-only name-hash
     // resolution so a disabled reconciler performs no target-specific chain
@@ -3411,7 +3440,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!this.vmReconcileEnabled()) {
       throw new VmReconcileUnavailableError();
     }
-    let sub = this.subscribedContextGraphs.get(localCgId);
+    let sub = existingSubscription;
     if (!sub?.subscribed && !sub?.coreHosted) {
       if (!this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) {
         throw new ContextGraphNotFoundError(localCgId);

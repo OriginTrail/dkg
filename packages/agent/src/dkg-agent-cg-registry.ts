@@ -1051,6 +1051,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<FinalizedContextGraphAuthorityTargetV1 | null> {
+    if (this.contextGraphRegistrationsInFlight?.has(contextGraphId)) {
+      throw new Error(
+        `Context Graph "${contextGraphId}" registration is in flight; finalized authority discovery is suspended`,
+      );
+    }
     // A durable local-first graph deliberately has no chain target. RFC-64
     // authenticates that lane from its local owner metadata instead.
     if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) return null;
@@ -1098,6 +1103,14 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const route = selectContextGraphRegistrationRoute(this, contextGraphId);
     if (route.kind === 'system') {
       return { kind: 'unregistered' };
+    }
+
+    if (this.contextGraphRegistrationsInFlight?.has(contextGraphId)) {
+      return {
+        kind: 'unavailable',
+        reason: 'local-chain-binding-unavailable',
+        detail: 'registration is in flight; chain binding discovery is suspended',
+      };
     }
 
     // A graph created by this node is explicitly local-first until its own

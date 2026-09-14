@@ -759,13 +759,36 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           deposit = 0n;
         }
         if (deposit === 0n) throw err;
-        await this.ensureV10ApproveTrac(
-          this.signer,
-          await contextGraphs.getAddress(),
-          deposit,
-          'cg registration deposit',
-          true,
-        );
+        try {
+          await this.ensureV10ApproveTrac(
+            this.signer,
+            await contextGraphs.getAddress(),
+            deposit,
+            'cg registration deposit',
+            true,
+          );
+        } catch (approvalError) {
+          // The initial create attempt has definitively reverted with
+          // TooLowAllowance and the retry has not been submitted yet. Even if
+          // the approval receipt itself is ambiguous, it cannot have created
+          // the Context Graph. Preserve that distinction for the agent's
+          // durable registration state machine.
+          const failure = approvalError instanceof Error
+            ? approvalError
+            : new Error(String(approvalError));
+          if (Object.isExtensible(failure)) {
+            Object.defineProperty(failure, 'contextGraphRegistrationSubmitted', {
+              configurable: true,
+              enumerable: false,
+              value: false,
+            });
+            throw failure;
+          }
+          throw Object.assign(
+            new Error(failure.message, { cause: approvalError }),
+            { contextGraphRegistrationSubmitted: false as const },
+          );
+        }
         return submitCreate();
       }
     })();

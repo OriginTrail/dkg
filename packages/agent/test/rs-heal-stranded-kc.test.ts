@@ -113,6 +113,9 @@ function makeAgentLike(store: OxigraphStore): unknown {
     // from Core-owned historical reconciliation when planning recent slots.
     config: { nodeRole: 'edge' },
     contextGraphBindingState: new ContextGraphBindingState(),
+    // Object.create(DKGAgent.prototype) bypasses class field initializers.
+    // This synthetic bound-graph fixture has no local-create provenance.
+    localContextGraphProvenance: { hasLocalCreate: () => false },
     rsHealCursorByCg: new Map<string, string>(),
     log: { info: () => undefined, warn: () => undefined, error: () => undefined },
   });

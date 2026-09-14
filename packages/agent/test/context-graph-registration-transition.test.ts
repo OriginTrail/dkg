@@ -55,6 +55,7 @@ async function hasOnChainBinding(agent: RegistrationAgent, id: string): Promise<
 
 async function fixture(id: string): Promise<{
   agent: RegistrationAgent;
+  chain: MockChainAdapter;
   ownerAddress: string;
 }> {
   const chain = new MockChainAdapter();
@@ -78,10 +79,28 @@ async function fixture(id: string): Promise<{
     private: true,
     callerAgentAddress: ownerAddress,
   });
-  return { agent, ownerAddress };
+  return { agent, chain, ownerAddress };
 }
 
 describe('Context Graph registration durability transition', () => {
+  it('does not scan historical name bindings for a fresh local-first registration', async () => {
+    const id = 'registration-fresh-local-first';
+    const { agent, chain, ownerAddress } = await fixture(id);
+    const resolveNameHash = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    agent.registerContextGraphOnChain = vi.fn(async () => {
+      const duringRegistration = await agent.resolveContextGraphRegistrationBinding(id);
+      expect(duringRegistration).toMatchObject({
+        kind: 'unavailable',
+        reason: 'local-chain-binding-unavailable',
+      });
+      return successfulRegistration();
+    });
+
+    await agent.registerContextGraph(id, { callerAgentAddress: ownerAddress });
+
+    expect(resolveNameHash).not.toHaveBeenCalled();
+  });
+
   it('flushes pending before chain submission and bindings before registered', async () => {
     const id = 'registration-order';
     const { agent, ownerAddress } = await fixture(id);
@@ -106,6 +125,42 @@ describe('Context Graph registration durability transition', () => {
       'flush:pending:true',
       'flush:registered:true',
     ]);
+  });
+
+  it('rejects a duplicate registration while the first attempt owns the transition', async () => {
+    const id = 'registration-duplicate-in-flight';
+    const { agent, ownerAddress } = await fixture(id);
+    agent.registerContextGraphOnChain = vi.fn(async () => successfulRegistration());
+    agent.contextGraphRegistrationsInFlight.add(id);
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .rejects.toThrow(`Context graph "${id}" registration is already in flight`);
+
+    expect(agent.registerContextGraphOnChain).not.toHaveBeenCalled();
+    agent.contextGraphRegistrationsInFlight.delete(id);
+  });
+
+  it('restores pending when the final registered marker cannot be committed', async () => {
+    const id = 'registration-final-marker-failure';
+    const { agent, ownerAddress } = await fixture(id);
+    agent.registerContextGraphOnChain = vi.fn(async () => successfulRegistration());
+    const originalUpdate = agent.store.update?.bind(agent.store);
+    expect(originalUpdate).toBeTypeOf('function');
+    agent.store.update = async (sparql, options) => {
+      if (
+        options?.source === 'agent.contextGraph.registrationStatus.persist'
+        && sparql.includes('"registered"')
+      ) {
+        throw new Error('registered status commit unavailable');
+      }
+      await originalUpdate!(sparql, options);
+    };
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .rejects.toThrow('registered status commit unavailable');
+
+    expect(await registrationStatus(agent, id)).toBe('pending');
+    expect(await hasOnChainBinding(agent, id)).toBe(true);
   });
 
   it('restores unregistered after a definitive mined revert', async () => {
@@ -143,6 +198,22 @@ describe('Context Graph registration durability transition', () => {
       .rejects.toBe(ambiguous);
 
     expect(await registrationStatus(agent, id)).toBe('pending');
+  });
+
+  it('restores unregistered when only a preparatory transaction is ambiguous', async () => {
+    const id = 'registration-preparatory-ambiguous';
+    const { agent, ownerAddress } = await fixture(id);
+    const approvalFailure = Object.assign(new Error('approval receipt unavailable'), {
+      code: 'RPC_RECEIPT_LOOKUP_FAILED',
+      txHash: `0x${'ab'.repeat(32)}`,
+      contextGraphRegistrationSubmitted: false,
+    });
+    agent.registerContextGraphOnChain = vi.fn(async () => { throw approvalFailure; });
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .rejects.toBe(approvalFailure);
+
+    expect(await registrationStatus(agent, id)).toBe('unregistered');
   });
 
   it('retains pending when a definitive-failure recovery write is rejected', async () => {

@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { createOperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { VmReconcileShutdownTimeoutError } from '../src/vm-reconcile-service.js';
@@ -12,6 +12,8 @@ import {
 type Subscription = { subscribed: boolean; coreHosted?: boolean; onChainId?: string };
 interface Internals {
   subscribedContextGraphs: Map<string, Subscription>;
+  contextGraphRegistrationsInFlight: Set<string>;
+  localContextGraphProvenance: { recordLocalCreate(id: string): void };
   node: unknown;
   vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
   vmReconcileLifecycleController: AbortController;
@@ -68,14 +70,33 @@ async function fixture(unbound: number, maxPending = 64) {
 it('answers selected membership for subscribed, hosted, discovery and catalog targets without admitting work', async () => {
   const { agent, internals, resolve, canRead, order } = await fixture(2);
   internals.subscribedContextGraphs.set('bound', { subscribed: true, onChainId: '31' });
+  internals.subscribedContextGraphs.set('local-bound', { subscribed: true, onChainId: '34' });
+  internals.localContextGraphProvenance.recordLocalCreate('local-bound');
   internals.subscribedContextGraphs.set('hosted', { subscribed: false, coreHosted: true, onChainId: '32' });
   internals.subscribedContextGraphs.set('hosted-unbound', { subscribed: false, coreHosted: true });
   internals.subscribedContextGraphs.set('inactive', { subscribed: false, onChainId: '33' });
-  vi.spyOn(agent, 'rfc64SelectedVmReconcileTargetIds').mockReturnValue(['catalog', 'cg-0']);
-  for (const key of ['bound', 'hosted', 'catalog', 'cg-0', 'cg-1']) {
+  internals.subscribedContextGraphs.set(SYSTEM_CONTEXT_GRAPHS.AGENTS, { subscribed: true });
+  internals.subscribedContextGraphs.set(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, { subscribed: true });
+  internals.subscribedContextGraphs.set('local-unregistered', { subscribed: true });
+  internals.localContextGraphProvenance.recordLocalCreate('local-unregistered');
+  internals.subscribedContextGraphs.set('registering', { subscribed: true });
+  internals.contextGraphRegistrationsInFlight.add('registering');
+  internals.localContextGraphProvenance.recordLocalCreate('catalog-local');
+  vi.spyOn(agent, 'rfc64SelectedVmReconcileTargetIds')
+    .mockReturnValue(['catalog', 'catalog-local', 'cg-0']);
+  for (const key of ['bound', 'local-bound', 'hosted', 'catalog', 'cg-0', 'cg-1']) {
     expect(agent.isVmReconcileTargetSelected(key)).toBe(true);
   }
-  for (const key of ['hosted-unbound', 'inactive', 'missing']) {
+  for (const key of [
+    'hosted-unbound',
+    'inactive',
+    'missing',
+    'local-unregistered',
+    'catalog-local',
+    'registering',
+    SYSTEM_CONTEXT_GRAPHS.AGENTS,
+    SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+  ]) {
     expect(agent.isVmReconcileTargetSelected(key)).toBe(false);
   }
   expect(resolve).not.toHaveBeenCalled();
@@ -83,9 +104,31 @@ it('answers selected membership for subscribed, hosted, discovery and catalog ta
   expect(order).toEqual([]);
   const schedule = vi.spyOn(internals.vmReconcileScheduling, 'scheduleSweep').mockImplementation(() => {});
   internals.scheduleVmReconcileSweep();
-  expect(schedule).toHaveBeenCalledWith(['bound', 'hosted', 'catalog', 'cg-0'], ['cg-1'], expect.any(Function));
+  expect(schedule).toHaveBeenCalledWith(
+    ['bound', 'local-bound', 'hosted', 'catalog', 'cg-0'],
+    ['cg-1'],
+    expect.any(Function),
+  );
   internals.subscribedContextGraphs.delete('bound');
   expect(agent.isVmReconcileTargetSelected('bound')).toBe(false);
+});
+
+it('rejects system, local-unregistered and actively-registering graphs at the VM execution boundary without chain reads', async () => {
+  const { internals, resolve, canRead } = await fixture(0);
+  internals.subscribedContextGraphs.set(SYSTEM_CONTEXT_GRAPHS.AGENTS, { subscribed: true });
+  internals.subscribedContextGraphs.set('local-unregistered', { subscribed: true });
+  internals.localContextGraphProvenance.recordLocalCreate('local-unregistered');
+  internals.subscribedContextGraphs.set('registering', { subscribed: true });
+  internals.contextGraphRegistrationsInFlight.add('registering');
+
+  await expect(internals.resolveVmReconcileTarget(SYSTEM_CONTEXT_GRAPHS.AGENTS))
+    .rejects.toMatchObject({ code: 'ContextGraphNotFound' });
+  await expect(internals.resolveVmReconcileTarget('local-unregistered'))
+    .rejects.toMatchObject({ code: 'ContextGraphNotFound' });
+  await expect(internals.resolveVmReconcileTarget('registering'))
+    .rejects.toMatchObject({ name: 'VmReconcileQueueClosedError' });
+  expect(resolve).not.toHaveBeenCalled();
+  expect(canRead).not.toHaveBeenCalled();
 });
 
 it('performs zero unbound resolution calls for a burst of unmatched live events', async () => {
