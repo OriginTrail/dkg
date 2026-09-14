@@ -324,19 +324,29 @@ export function evmEventDescriptorFor(eventType: string): EvmEventDescriptor | u
   return DESCRIPTOR_BY_ALIAS.get(eventType);
 }
 
+export interface EvmEventPlan {
+  readonly descriptors: readonly EvmEventDescriptor[];
+  readonly bindings: readonly EvmEventCapabilityKey[];
+}
+
+/** One canonical descriptor and binding plan for requested event aliases. */
+export function selectEvmEventPlan(eventTypes: readonly string[]): EvmEventPlan {
+  const selectedAliases = new Set(eventTypes);
+  const descriptors = Object.freeze(EVM_EVENT_DESCRIPTORS.filter(
+    descriptor => descriptor.aliases.some(alias => selectedAliases.has(alias)),
+  ));
+  const bindings = Object.freeze([...new Set(descriptors.map(descriptor => descriptor.binding))]);
+  return Object.freeze({ descriptors, bindings });
+}
+
 /** Unique descriptors selected by requested aliases, in declaration order. */
 export function selectEvmEventDescriptors(
   eventTypes: readonly string[],
 ): readonly EvmEventDescriptor[] {
-  const selectedAliases = new Set(eventTypes);
-  return EVM_EVENT_DESCRIPTORS.filter(
-    descriptor => descriptor.aliases.some(alias => selectedAliases.has(alias)),
-  );
+  return selectEvmEventPlan(eventTypes).descriptors;
 }
 
 /** The Hub bindings a scan for these event types must resolve, in declaration order. */
 export function eventContractKeysFor(eventTypes: readonly string[]): readonly EvmEventCapabilityKey[] {
-  const keys = new Set<EvmEventCapabilityKey>();
-  for (const descriptor of selectEvmEventDescriptors(eventTypes)) keys.add(descriptor.binding);
-  return [...keys];
+  return selectEvmEventPlan(eventTypes).bindings;
 }

@@ -4,6 +4,7 @@ import type { ChainEvent } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import {
   EVM_EVENT_DESCRIPTORS, eventContractKeysFor, evmEventDescriptorFor, selectEvmEventDescriptors,
+  selectEvmEventPlan,
   type EvmEventCapabilityKey, type EvmEventDescriptor, type EvmEventScan,
 } from '../src/evm-event-contracts.js';
 import {
@@ -37,8 +38,14 @@ function completeInstallation(
 
 describe('generation-owned Hub bindings and event selection', () => {
   it('shares one capability across aliases and repeated requested event types', () => {
-    expect(eventContractKeysFor(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated']))
-      .toEqual(['knowledgeAssetStorage']);
+    const plan = selectEvmEventPlan(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated']);
+    expect(plan.bindings).toEqual(['knowledgeAssetStorage']);
+    expect(plan.descriptors).toEqual([evmEventDescriptorFor('KCCreated')]);
+    expect(Object.isFrozen(plan)).toBe(true);
+    expect(Object.isFrozen(plan.descriptors)).toBe(true);
+    expect(eventContractKeysFor(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated'])).toEqual(plan.bindings);
+    expect(selectEvmEventDescriptors(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated']))
+      .toEqual(plan.descriptors);
     expect(eventContractKeysFor(['NameClaimed', 'ContextGraphNameClaimed']))
       .toEqual(['contextGraphNameRegistry']);
   });
@@ -131,6 +138,47 @@ describe('generation-owned Hub bindings and event selection', () => {
     expect(group.contracts.knowledgeAssetStorage).toBeUndefined();
     await expect(group.resolve(keys, load)).resolves.toEqual({ contextGraphStorage: second, knowledgeAssetStorage: second });
     expect(load).toHaveBeenCalledTimes(4);
+  });
+
+  it('stages non-cancellable initialization reads concurrently and commits them atomically', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const identity = deferred<Contract>();
+    const profile = deferred<Contract>();
+    const started: string[] = [];
+    const resolving = group.resolveForInitialization(['identity', 'profile'], spec => {
+      started.push(spec.name);
+      return spec.name === 'Identity' ? identity.promise : profile.promise;
+    });
+    expect(started).toEqual(['Identity', 'Profile']);
+    identity.resolve(first);
+    await Promise.resolve();
+    expect(group.contracts.identity).toBeUndefined();
+    expect(group.contracts.profile).toBeUndefined();
+    profile.resolve(second);
+    await expect(resolving).resolves.toMatchObject({ contracts: { identity: first, profile: second } });
+    expect(group.contracts.identity).toBe(first);
+    expect(group.contracts.profile).toBe(second);
+  });
+
+  it('settles concurrent initialization reads and discards the complete stale generation', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const identity = deferred<Contract>();
+    const profile = deferred<Contract>();
+    let calls = 0;
+    const resolving = group.resolveForInitialization(['identity', 'profile'], () => {
+      calls++;
+      if (calls === 1) return identity.promise;
+      if (calls === 2) return profile.promise;
+      return Promise.resolve(second);
+    });
+    expect(calls).toBe(2);
+    group.invalidate();
+    identity.resolve(first);
+    profile.resolve(first);
+    await expect(resolving).resolves.toMatchObject({ contracts: { identity: second, profile: second } });
+    expect(calls).toBe(4);
+    expect(group.contracts.identity).toBe(second);
+    expect(group.contracts.profile).toBe(second);
   });
 });
 

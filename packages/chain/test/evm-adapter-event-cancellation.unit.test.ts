@@ -1,5 +1,5 @@
 import type { ServerResponse } from 'node:http';
-import { Contract, Interface } from 'ethers';
+import { Contract, Interface, ZeroAddress } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import type { ChainEvent, EventFilter } from '../src/chain-adapter.js';
@@ -13,6 +13,11 @@ const eventNames = [
   'KnowledgeAssetCreated', 'KnowledgeAssetsMinted', 'NameClaimed', 'ContextGraphCreated',
   'RelayCapabilityUpdated',
 ];
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(done => { resolve = done; });
+  return { promise, resolve };
+}
 function installBindings(adapter: EVMChainAdapter, bindings: Record<string, unknown>): void {
   const internal = adapter as any;
   internal.installHubContractBindingsForTesting({ ...internal.contracts, ...bindings });
@@ -68,6 +73,76 @@ describe('event scan RPC cancellation', () => {
     } finally {
       adapter.destroy();
       await rpc.stopAll();
+    }
+  });
+
+  it('keeps cold V10 readiness observable across Hub lifecycle registration', async () => {
+    const hub = new Interface([
+      'function getContractAddress(string name) view returns (address)',
+      'function getAssetStorageAddress(string name) view returns (address)',
+    ]);
+    let lifecycleAddress = ZeroAddress;
+    const lifecycleLookups: string[] = [];
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const server = await rpc.start(async (payload, response) => {
+      let result: unknown = '0x7a69';
+      if (payload.method === 'eth_call') {
+        const call = hub.parseTransaction({ data: (payload.params[0] as { data: string }).data });
+        if (!call) throw new Error('expected Hub lookup');
+        const name = String(call.args[0]);
+        if (name === 'KnowledgeAssetsLifecycle') lifecycleLookups.push(name);
+        result = hub.encodeFunctionResult(call.fragment, [
+          name === 'KnowledgeAssetsLifecycle' ? lifecycleAddress : address,
+        ]);
+      } else if (payload.method === 'eth_blockNumber') {
+        result = '0x64';
+      } else if (payload.method === 'eth_getLogs') {
+        result = [];
+      }
+      sendJsonRpcResult(response, payload, result);
+    });
+    const adapter = new EVMChainAdapter({ rpcUrl: server.url,
+      privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const internal = adapter as any;
+    try {
+      await expect(adapter.resolveV10FinalizationReadiness()).resolves.toBe(false);
+      expect(internal.hubRotationPoller.isStarted).toBe(true);
+      lifecycleAddress = address;
+      internal.applyHubRotationEventName('KnowledgeAssetsLifecycle');
+      await expect(adapter.resolveV10FinalizationReadiness()).resolves.toBe(true);
+      expect(lifecycleLookups).toEqual(['KnowledgeAssetsLifecycle', 'KnowledgeAssetsLifecycle']);
+    } finally {
+      adapter.destroy();
+      await rpc.stopAll();
+    }
+  });
+
+  it('retires an aborted event scan while Hub rotation-listener startup is pending', async () => {
+    const adapter = adapterAt();
+    const internal = adapter as any;
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    internal.startHubRotationListener = vi.fn(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    const read = vi.spyOn(internal, 'readContractWith');
+    const controller = new AbortController();
+    const reason = new Error('poll admission closed during listener startup');
+    const polling = collect(adapter, {
+      eventTypes: ['ContextGraphCreated'], fromBlock: 1, toBlock: 20, signal: controller.signal,
+    });
+    try {
+      await entered.promise;
+      controller.abort(reason);
+      expect(read).not.toHaveBeenCalled();
+      release.resolve();
+      await expect(polling).rejects.toBe(reason);
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await polling.catch(() => {});
+      adapter.destroy();
     }
   });
 

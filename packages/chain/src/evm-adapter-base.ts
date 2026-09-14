@@ -3968,9 +3968,17 @@ export class EVMChainAdapterBase {
   }
 
   async resolveV10FinalizationReadiness(options: ChainReadOptions = {}): Promise<boolean> {
+    options.signal?.throwIfAborted();
+    await this.ensureHubRotationListenerStarted();
+    options.signal?.throwIfAborted();
     const { knowledgeAssetsLifecycle } = await this.resolveHubContractBindings(
       ['knowledgeAssetsLifecycle'], options,
     );
+    // A disabled listener cannot invalidate an authoritative absence. Retire
+    // that decision so a later readiness probe can observe a new deployment.
+    if (!knowledgeAssetsLifecycle && !this.hubRotationPoller.isStarted) {
+      this.hubContractBindings.invalidate(['knowledgeAssetsLifecycle']);
+    }
     return !!knowledgeAssetsLifecycle;
   }
 

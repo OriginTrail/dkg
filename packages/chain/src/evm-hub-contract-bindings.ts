@@ -204,20 +204,39 @@ export class EvmHubContractBindings {
       signal?.throwIfAborted();
       const generation = this.current;
       const staged = new Map<K, Contract | undefined>();
-      for (const key of keys) {
-        signal?.throwIfAborted();
-        if (generation.resolved.has(key)) continue;
-        const spec = EVM_HUB_CONTRACT_SPECS[key];
-        // Sequential staging leaves no sibling physical request to abandon.
-        try {
-          staged.set(key, await load(spec));
-        } catch (error) {
-          signal?.throwIfAborted();
-          if (spec.resolution !== 'optional-deployment') throw error;
-          if (error instanceof HubContractNotFoundError) staged.set(key, undefined);
-          else if (!deferTransientOptionalFailures) throw error;
+      const unresolved = keys.filter(key => !generation.resolved.has(key));
+      if (signal) {
+        for (const key of unresolved) {
+          signal.throwIfAborted();
+          const spec = EVM_HUB_CONTRACT_SPECS[key];
+          // Sequential staging leaves no sibling physical request to abandon.
+          try {
+            staged.set(key, await load(spec));
+          } catch (error) {
+            signal.throwIfAborted();
+            if (spec.resolution !== 'optional-deployment') throw error;
+            if (error instanceof HubContractNotFoundError) staged.set(key, undefined);
+            else if (!deferTransientOptionalFailures) throw error;
+          }
+          signal.throwIfAborted();
         }
-        signal?.throwIfAborted();
+      } else {
+        // Full initialization and other non-cancellable callers own every
+        // sibling request through settlement, then publish one atomic stage.
+        const settled = await Promise.allSettled(unresolved.map(key => load(EVM_HUB_CONTRACT_SPECS[key])));
+        for (const [index, result] of settled.entries()) {
+          const key = unresolved[index];
+          const spec = EVM_HUB_CONTRACT_SPECS[key];
+          if (result.status === 'fulfilled') {
+            staged.set(key, result.value);
+          } else if (spec.resolution !== 'optional-deployment') {
+            throw result.reason;
+          } else if (result.reason instanceof HubContractNotFoundError) {
+            staged.set(key, undefined);
+          } else if (!deferTransientOptionalFailures) {
+            throw result.reason;
+          }
+        }
       }
       if (generation !== this.current) continue;
       // Handles and decided keys commit together, synchronously, after the
