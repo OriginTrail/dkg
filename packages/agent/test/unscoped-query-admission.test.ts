@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ContextGraphQueryStore } from '../src/context-graph-query-candidates.js';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
   canReadUnscopedQuery,
   type UnscopedQueryAdmissionDependencies,
 } from '../src/unscoped-query-admission.js';
+
+type ContextGraphQueryStore = Pick<TripleStore, 'query' | 'listGraphs' | 'listGraphsByPrefix'>;
 
 const contextGraphIds = Array.from({ length: 10 }, (_, index) => `authority-candidate-${index}`);
 
@@ -16,7 +18,11 @@ function admissionDependencies(
     listGraphs: vi.fn<ContextGraphQueryStore['listGraphs']>(async () => []),
     listGraphsByPrefix: vi.fn<NonNullable<ContextGraphQueryStore['listGraphsByPrefix']>>(async () => []),
   } satisfies ContextGraphQueryStore;
-  return { store, knownContextGraphIds, canReadContextGraph } satisfies UnscopedQueryAdmissionDependencies;
+  return {
+    store: store as TripleStore,
+    knownContextGraphIds,
+    canReadContextGraph,
+  } satisfies UnscopedQueryAdmissionDependencies;
 }
 
 function deferred<T>() {

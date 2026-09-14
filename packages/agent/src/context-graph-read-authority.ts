@@ -51,21 +51,6 @@ export interface ContextGraphReadAuthorityInput {
   getLocalIdentityId(): Promise<bigint>;
 }
 
-/**
- * Request-local batch evidence interpreted only by the canonical resolver.
- * Positive evidence is revalidated through the ordinary live authority read;
- * negative or unavailable evidence replaces only the equivalent cold
- * registration lookup. Metadata absence is usable only while its revision
- * proof remains current.
- */
-export interface ContextGraphReadAuthorityEvidence {
-  registration?:
-    | { kind: 'expected'; onChainId: bigint }
-    | { kind: 'unregistered' }
-    | { kind: 'unavailable' };
-  isLocalMetadataAbsent?: () => boolean;
-}
-
 const decision = (
   outcome: ContextGraphReadAuthorityOutcome,
   source: ContextGraphReadAuthoritySource,
@@ -82,25 +67,16 @@ const decision = (
 
 export async function resolveContextGraphReadAuthorityDecision(
   input: ContextGraphReadAuthorityInput,
-  evidence: ContextGraphReadAuthorityEvidence = {},
 ): Promise<ContextGraphReadAuthorityDecision> {
   if (input.isSystemContextGraph) {
     return decision('allowed', 'system', 'system-context-graph');
   }
 
   let registeredAuthority: RegisteredContextGraphAuthority;
-  if (evidence.registration?.kind === 'unregistered') {
-    registeredAuthority = await Promise.resolve({ kind: 'unregistered' });
-  } else if (evidence.registration?.kind === 'unavailable') {
-    registeredAuthority = await Promise.resolve({
-      kind: 'unavailable', reason: 'chain-name-binding-unavailable',
-    });
-  } else {
-    try {
-      registeredAuthority = await input.getRegisteredAuthority();
-    } catch {
-      return decision('unavailable', 'registered-chain', 'registered-authority-error');
-    }
+  try {
+    registeredAuthority = await input.getRegisteredAuthority();
+  } catch {
+    return decision('unavailable', 'registered-chain', 'registered-authority-error');
   }
   if (registeredAuthority.kind === 'unavailable') {
     return decision(
@@ -109,13 +85,6 @@ export async function resolveContextGraphReadAuthorityDecision(
       registeredAuthority.reason,
       registeredAuthority.onChainId,
     );
-  }
-  if (
-    evidence.registration?.kind === 'expected'
-    && (registeredAuthority.kind === 'unregistered'
-      || registeredAuthority.onChainId !== evidence.registration.onChainId)
-  ) {
-    return decision('unavailable', 'registered-chain', 'chain-name-binding-changed');
   }
   if (registeredAuthority.kind === 'public') {
     return decision('allowed', 'registered-chain', 'chain-public', registeredAuthority.onChainId);
@@ -166,9 +135,7 @@ export async function resolveContextGraphReadAuthorityDecision(
 
   let isPrivate: boolean;
   try {
-    isPrivate = evidence.isLocalMetadataAbsent?.() === true
-      ? false
-      : await input.isPrivateLocalGraph();
+    isPrivate = await input.isPrivateLocalGraph();
   } catch {
     return decision('unavailable', 'legacy-local', 'local-access-policy-unavailable');
   }

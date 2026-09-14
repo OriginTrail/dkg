@@ -6,17 +6,15 @@ import {
   parseContextGraphUri,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
+import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import { runBoundedOperation } from './bounded-operation.js';
-import {
-  listStoredContextGraphQueryCandidates,
-  UNSCOPED_QUERY_ADMISSION_TIMEOUT_MS,
-  type ContextGraphQueryStore,
-} from './context-graph-query-candidates.js';
 import { strip } from './dkg-agent-utils.js';
 import { everyWithConcurrency } from './map-with-concurrency.js';
 
+export const UNSCOPED_QUERY_ADMISSION_TIMEOUT_MS = 5_000;
+
 export interface UnscopedQueryAdmissionDependencies {
-  store: ContextGraphQueryStore;
+  store: TripleStore;
   knownContextGraphIds: Iterable<string>;
   canReadContextGraph: (id: string, signal: AbortSignal) => Promise<boolean>;
   prepareReadChecks?: (
@@ -46,7 +44,7 @@ export async function canReadUnscopedQuery(
         }`,
         { source: 'agent.query.privateGraphAccessPolicy', signal },
       ),
-      listStoredContextGraphQueryCandidates(deps.store, { signal }),
+      new GraphManager(deps.store).listStoredContextGraphOwnerCandidates({ signal }),
     ]);
     signal.throwIfAborted();
     if (result.type !== 'bindings') {

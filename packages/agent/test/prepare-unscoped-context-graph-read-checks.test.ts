@@ -8,6 +8,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { LOCAL_ID, NAME_HASH, selectedFixture } from './context-graph-registration-binding.fixture.js';
+import { createContextGraphRegistrationReadPlan } from '../src/dkg-agent-cg-registry.js';
 import {
   resolveContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
@@ -25,7 +26,17 @@ function dependencies() {
     async () => ({ kind: 'unregistered' }),
   );
   const isPrivateLocalGraph = vi.fn<(id: string) => Promise<boolean>>(async () => true);
-  return {
+  const registrationNameHash = vi.fn<(id: string) => string | undefined>(commitment);
+  const findContextGraphIdsWithReadAuthorityFacts = vi.fn<(
+    ids: readonly string[], signal: AbortSignal,
+  ) => Promise<ReadonlySet<string>>>(async () => new Set<string>());
+  const readMetadataRevision = vi.fn(() => 0);
+  const resolveContextGraphIdsByNameHashes = vi.fn<(
+    names: readonly string[], options: { signal?: AbortSignal },
+  ) => Promise<ReadonlyMap<string, bigint | null>>>(async (names) => (
+      new Map(names.map((name) => [name, null]))
+    ));
+  const deps = {
     inputs, getRegisteredAuthority, isPrivateLocalGraph,
     createReadAuthorityInput: vi.fn<UnscopedContextGraphReadCheckDependencies['createReadAuthorityInput']>((id) => ({
       contextGraphId: id, callerAgentAddress: 'outsider', allowSubscriptionFallback: true,
@@ -41,13 +52,28 @@ function dependencies() {
       hasLegacySubscription: false, getLocalIdentityId: async () => 0n,
       ...inputs.get(id),
     })),
-    registrationNameHash: vi.fn<UnscopedContextGraphReadCheckDependencies['registrationNameHash']>(commitment),
-    findContextGraphIdsWithReadAuthorityFacts: vi.fn<UnscopedContextGraphReadCheckDependencies['findContextGraphIdsWithReadAuthorityFacts']>(async () => new Set<string>()),
-    readMetadataRevision: vi.fn(() => 0),
-    resolveContextGraphIdsByNameHashes: vi.fn<NonNullable<UnscopedContextGraphReadCheckDependencies['resolveContextGraphIdsByNameHashes']>>(
-      async (names) => new Map(names.map((name) => [name, null])),
+    registrationNameHash,
+    findContextGraphIdsWithReadAuthorityFacts,
+    readMetadataRevision,
+    resolveContextGraphIdsByNameHashes,
+    prepareRegistrationReadPlan: vi.fn<UnscopedContextGraphReadCheckDependencies['prepareRegistrationReadPlan']>(
+      (ids, signal) => createContextGraphRegistrationReadPlan({
+        nameHashForBatch: registrationNameHash,
+        resolveByNameHashes: (names, options) => resolveContextGraphIdsByNameHashes(names, options),
+      }, ids, signal),
+    ),
+    prepareReadAuthorityFactsSnapshot: vi.fn<UnscopedContextGraphReadCheckDependencies['prepareReadAuthorityFactsSnapshot']>(
+      async (ids, signal) => {
+        const revision = readMetadataRevision();
+        const present = new Set(await findContextGraphIdsWithReadAuthorityFacts(ids, signal));
+        return {
+          assertCurrent: () => readMetadataRevision() === revision,
+          isAbsent: (id) => !present.has(id),
+        };
+      },
     ),
   };
+  return deps;
 }
 
 describe('prepared unscoped Context Graph read checks', () => {
@@ -156,30 +182,45 @@ describe('prepared unscoped Context Graph read checks', () => {
   it('uses the registry boundary for system, local, wire and numeric precedence', async () => {
     const { agent, subscription } = selectedFixture();
     const ids = [SYSTEM_CONTEXT_GRAPHS.AGENTS, LOCAL_ID, NAME_HASH, '42', 'cold-name'];
-    expect(ids.map((id) => agent.contextGraphRegistrationNameHashForBatch(id)))
-      .toEqual([undefined, undefined, undefined, undefined, 'cold-name']);
-    const deps = dependencies();
-    deps.registrationNameHash.mockImplementation((id) => {
-      const name = agent.contextGraphRegistrationNameHashForBatch(id);
-      return name === undefined ? undefined : commitment(name);
-    });
-    deps.inputs.set(SYSTEM_CONTEXT_GRAPHS.AGENTS, { isSystemContextGraph: true });
     const signal = new AbortController().signal;
-    const check = await prepareUnscopedContextGraphReadChecks(deps, ids, signal);
-    expect(deps.resolveContextGraphIdsByNameHashes.mock.calls[0][0]).toEqual([commitment('cold-name')]);
-    expect(await check(SYSTEM_CONTEXT_GRAPHS.AGENTS, signal)).toBe(true);
-    for (const id of [LOCAL_ID, NAME_HASH, '42']) expect(await check(id, signal)).toBe(false);
+    const resolveBatch = vi.fn(async (names: readonly string[]) => (
+      new Map(names.map((name) => [name, null]))
+    ));
+    (agent.chain as any).resolveContextGraphIdsByNameHashes = resolveBatch;
+    agent.contextGraphNameCommitment = commitment;
+    const plan = await agent.prepareContextGraphRegistrationReadPlan(ids, {
+      signal,
+    });
+    expect(plan?.contextGraphIds).toEqual(['cold-name']);
+    const prepared = await plan!.prepare(signal);
+    expect(resolveBatch.mock.calls[0][0]).toEqual([commitment('cold-name')]);
+    const live = vi.fn(async () => ({ kind: 'unregistered' as const }));
+    for (const id of [SYSTEM_CONTEXT_GRAPHS.AGENTS, LOCAL_ID, NAME_HASH, '42']) {
+      expect(await prepared.resolve(id, live, signal)).toEqual({
+        authority: { kind: 'unregistered' },
+        metadataAbsenceEligible: false,
+      });
+    }
+    expect(live).toHaveBeenCalledTimes(4);
+    expect(await prepared.resolve('cold-name', live, signal)).toEqual({
+      authority: { kind: 'unregistered' },
+      metadataAbsenceEligible: true,
+    });
+    expect(live).toHaveBeenCalledTimes(4);
     // A newly selected invalid binding cannot consume an earlier cold absence.
     agent.subscribedContextGraphs.set('cold-name', { ...subscription, onChainId: 'invalid' });
-    expect(agent.contextGraphRegistrationNameHashForBatch('cold-name')).toBeUndefined();
-    expect(await check('cold-name', signal)).toBe(false);
-    expect(deps.getRegisteredAuthority.mock.calls.map(([id]) => id)).toEqual([LOCAL_ID, NAME_HASH, '42', 'cold-name']);
+    expect(await prepared.resolve('cold-name', live, signal)).toEqual({
+      authority: { kind: 'unregistered' },
+      metadataAbsenceEligible: false,
+    });
+    expect(live).toHaveBeenCalledTimes(5);
   });
 
   it('preserves the existing resolver when the adapter has no bulk capability', async () => {
     const deps = dependencies();
+    deps.prepareRegistrationReadPlan.mockResolvedValue(null);
     const signal = new AbortController().signal;
-    const check = await prepareUnscopedContextGraphReadChecks({ ...deps, resolveContextGraphIdsByNameHashes: undefined }, ['a'], signal);
+    const check = await prepareUnscopedContextGraphReadChecks(deps, ['a'], signal);
     expect(await check('a', signal)).toBe(false);
     expect(deps.findContextGraphIdsWithReadAuthorityFacts).not.toHaveBeenCalled();
     expect(deps.getRegisteredAuthority).toHaveBeenCalledOnce();
@@ -352,12 +393,15 @@ describe('prepared unscoped Context Graph read checks', () => {
     const deps = dependencies();
     const stop = new AbortController();
     let release!: () => void;
+    let started!: () => void;
+    const begun = new Promise<void>((resolve) => { started = resolve; });
     deps.resolveContextGraphIdsByNameHashes.mockImplementation(async (names, options) => {
       expect(options.signal?.aborted).toBe(false);
-      await new Promise<void>((resolve) => { release = resolve; });
+      await new Promise<void>((resolve) => { release = resolve; started(); });
       return new Map(names.map((name) => [name, null]));
     });
     const pending = prepareUnscopedContextGraphReadChecks(deps, ['a'], stop.signal);
+    await begun;
     const outcome = expect(pending).rejects.toThrow('cancelled');
     stop.abort(new Error('cancelled'));
     release();

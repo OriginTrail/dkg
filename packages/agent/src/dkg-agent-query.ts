@@ -724,21 +724,23 @@ export class QueryMethods extends DKGAgentBase {
     ids: readonly string[],
     opts: { callerAgentAddress?: string; signal: AbortSignal },
   ): Promise<ContextGraphReadCheck> {
-    const resolveBatch = this.chain.resolveContextGraphIdsByNameHashes;
     return prepareUnscopedContextGraphReadChecks({
       createReadAuthorityInput: (id, signal) => (
         QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
           this, id, { callerAgentAddress: opts.callerAgentAddress, signal }, CHAIN_POLICY_READ_TIMEOUT_MS,
         )
       ),
-      registrationNameHash: (id) => this.contextGraphRegistrationNameHashForBatch(id),
-      findContextGraphIdsWithReadAuthorityFacts: (candidateIds, readSignal) => (
-        this.contextGraphMetaProjection.findContextGraphIdsWithReadAuthorityFacts(candidateIds, { signal: readSignal })
+      prepareRegistrationReadPlan: (candidateIds, readSignal) => (
+        this.prepareContextGraphRegistrationReadPlan(candidateIds, {
+          signal: readSignal,
+        })
       ),
-      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
-      resolveContextGraphIdsByNameHashes: resolveBatch === undefined
-        ? undefined
-        : (names, options) => resolveBatch.call(this.chain, names, options),
+      prepareReadAuthorityFactsSnapshot: (candidateIds, readSignal) => (
+        this.contextGraphMetaProjection.prepareReadAuthorityFactsSnapshot(
+          candidateIds,
+          { signal: readSignal },
+        )
+      ),
     }, ids, opts.signal);
   }
 

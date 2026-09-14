@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, type TripleStore } from '../src/index.js';
 import {
   workspaceKnowledgeAssetOperationSnapshotGraph,
   workspaceOperationPublicSnapshotGraph,
 } from '@origintrail-official/dkg-core';
-import { listStoredContextGraphQueryCandidates } from '../src/context-graph-query-candidates.js';
 
 const PREFIX = 'did:dkg:context-graph:';
+
+const listStoredContextGraphQueryCandidates = (
+  store: TripleStore,
+  opts: { signal?: AbortSignal } = {},
+) => new GraphManager(store).listStoredContextGraphOwnerCandidates(opts);
 
 function indexedStore(graphs: string[]) {
   const query = vi.fn<TripleStore['query']>(async () => ({ type: 'bindings', bindings: [] }));
@@ -43,7 +47,7 @@ describe('stored context graph candidates for query admission', () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).not.toContain('urn:unrelated:graph');
     expect(listGraphsByPrefix).toHaveBeenCalledWith(PREFIX, {
-      source: 'agent.query.rfc64RuntimePrivateGraphs',
+      source: 'storage.contextGraphOwnerCandidates',
     });
     expect(listGraphs).not.toHaveBeenCalled();
     // Admission cannot depend on metadata existence: ordinary read authority
@@ -75,7 +79,7 @@ describe('stored context graph candidates for query admission', () => {
     const result = await listStoredContextGraphQueryCandidates(store);
     expect(result).toEqual(expect.arrayContaining(['private', 'private/_shared_memory']));
     expect(result).not.toContain('urn:unrelated:graph');
-    expect(listGraphs).toHaveBeenCalledWith({ source: 'agent.query.rfc64RuntimePrivateGraphs' });
+    expect(listGraphs).toHaveBeenCalledWith({ source: 'storage.contextGraphOwnerCandidates' });
     expect(query).not.toHaveBeenCalled();
   });
 
@@ -133,7 +137,7 @@ describe('stored context graph candidates for query admission', () => {
     release([]);
     await failure;
     expect(listGraphsByPrefix).toHaveBeenCalledWith(PREFIX, {
-      source: 'agent.query.rfc64RuntimePrivateGraphs', signal: controller.signal,
+      source: 'storage.contextGraphOwnerCandidates', signal: controller.signal,
     });
   });
 });

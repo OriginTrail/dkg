@@ -62,6 +62,13 @@ interface ProjectionEntry {
   invalidationVersion: number;
 }
 
+export interface ContextGraphReadAuthorityFactsSnapshot {
+  /** True only while no projection source has changed since capture began. */
+  assertCurrent(): boolean;
+  /** Absence in the captured, owned candidate set; meaningful only when current. */
+  isAbsent(contextGraphId: string): boolean;
+}
+
 const DKG_NS = 'https://dkg.network/ontology#';
 const LEGACY_DKG_NS = 'http://dkg.io/ontology/';
 const LEGACY_SCHEMA_NS = 'http://schema.org/';
@@ -229,6 +236,26 @@ export class ContextGraphMetaProjection {
     });
     options.signal?.throwIfAborted();
     return present;
+  }
+
+  /**
+   * Capture an owned request-local absence snapshot. Consumers never compare
+   * revision counters themselves; they ask this projection whether its proof
+   * is still current at the exact point where absence would be used.
+   */
+  async prepareReadAuthorityFactsSnapshot(
+    contextGraphIds: readonly string[],
+    options: QueryOptions = {},
+  ): Promise<ContextGraphReadAuthorityFactsSnapshot> {
+    const revision = this.authorityFactsRevision;
+    const present = new Set(
+      await this.findContextGraphIdsWithReadAuthorityFacts(contextGraphIds, options),
+    );
+    options.signal?.throwIfAborted();
+    return Object.freeze({
+      assertCurrent: () => this.authorityFactsRevision === revision,
+      isAbsent: (contextGraphId: string) => !present.has(contextGraphId),
+    });
   }
 
   async get(contextGraphId: string, options: QueryOptions = {}): Promise<ContextGraphMetaRecord> {

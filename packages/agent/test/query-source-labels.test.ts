@@ -11,11 +11,12 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { QueryMethods } from '../src/dkg-agent-query.js';
-import type { ContextGraphQueryStore } from '../src/context-graph-query-candidates.js';
 import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
 import {
   createRfc64CatalogAccessPolicyRegistryFixture,
 } from './support/rfc64-catalog-access-policy-fixture.js';
+
+type ContextGraphQueryStore = Pick<TripleStore, 'query' | 'listGraphs' | 'listGraphsByPrefix'>;
 
 describe('query caller-provided store labels', () => {
   it('attributes the unscoped private-graph access-policy lookup', async () => {
@@ -44,7 +45,7 @@ describe('query caller-provided store labels', () => {
     );
     expect(listGraphsByPrefix).toHaveBeenCalledWith(
       'did:dkg:context-graph:',
-      expect.objectContaining({ source: 'agent.query.rfc64RuntimePrivateGraphs' }),
+      expect.objectContaining({ source: 'storage.contextGraphOwnerCandidates' }),
     );
   });
 
@@ -129,6 +130,7 @@ function runtimePrivateQueryAgent(options: {
     queryEngine,
     store,
     contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+    prepareContextGraphRegistrationReadPlan: vi.fn(async () => null),
     subscribedContextGraphs: options.subscribed === false
       ? new Map()
       : new Map([[RUNTIME_PRIVATE_CG, { synced: true }]]),
@@ -279,7 +281,7 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
     expect(fixture.store.listGraphsByPrefix).toHaveBeenCalledWith(
       'did:dkg:context-graph:',
-      expect.objectContaining({ source: 'agent.query.rfc64RuntimePrivateGraphs' }),
+      expect.objectContaining({ source: 'storage.contextGraphOwnerCandidates' }),
     );
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });
