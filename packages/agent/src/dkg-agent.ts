@@ -1232,6 +1232,12 @@ export class DKGAgent extends DKGAgentBase {
         inputConfig.syncContextGraphPriorities,
       ),
     });
+    if (
+      normalizedConfig.finalizationRecoveryStoreFactory !== undefined
+      && !normalizedConfig.dataDir
+    ) {
+      throw new TypeError('finalizationRecoveryStoreFactory requires dataDir');
+    }
     const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(normalizedConfig);
     const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
     if (

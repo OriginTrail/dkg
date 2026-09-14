@@ -13,6 +13,7 @@ const factory: FinalizationRecoveryStoreFactory = async (dataDir) => {
 
 const config: DKGAgentConfig = {
   name: 'external-embedder',
+  dataDir: '/var/lib/dkg',
   finalizationRecoveryStoreFactory: factory,
 };
 
