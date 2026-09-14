@@ -93,6 +93,13 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   'invalidateHubContractBindings',
   'resolveHubContractBindingSnapshot',
   'ensureHubRotationListenerStarted',
+  // TS-private helpers of that same registry: key classification, the binding
+  // subset it installs, the adapter-side replacement, and the legacy cache
+  // projection kept for subclasses. All are plumbing behind the seams above.
+  'isHubBindingKey',
+  'selectHubBindings',
+  'replaceAdapterContracts',
+  'createLegacyContractCache',
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
