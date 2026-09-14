@@ -3404,6 +3404,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isCurrent: () => boolean = () => true,
     signal?: AbortSignal,
   ): Promise<VmReconcileTarget> {
+    // System bootstrap/control graphs never have a ContextGraphStorage id.
+    // Keep this guard at the canonical execution boundary as well as in sweep
+    // selection so manual/live callers cannot turn them into historical
+    // reverse-name scans.
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(localCgId)) {
+      throw new ContextGraphNotFoundError(localCgId);
+    }
+    // Registration is the exclusive owner of the local -> numeric binding
+    // transition. A reconcile admitted just before the selection snapshot
+    // changed must retire without starting a competing cold lookup.
+    if (this.contextGraphRegistrationsInFlight?.has(localCgId)) {
+      throw new VmReconcileQueueClosedError();
+    }
     // The operator switch is the outer boundary for every reconcile target.
     // Keep it ahead of subscription self-prime and selected-only name-hash
     // resolution so a disabled reconciler performs no target-specific chain
