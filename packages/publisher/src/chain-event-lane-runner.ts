@@ -6,14 +6,18 @@ import {
   type LaneCursorStore,
 } from './chain-event-lane-cursor-store.js';
 
-export type ChainEventPollerLane =
-  | 'publish'
-  | 'allocatorReconcile'
-  | 'contextGraphDiscovery'
-  | 'vmReconcile'
-  | 'collectionUpdates'
-  | 'allowListUpdates'
-  | 'profileEvents';
+/** Every runtime lane owned by the chain-event poller. */
+export const CHAIN_EVENT_POLLER_LANES = Object.freeze([
+  'publish',
+  'allocatorReconcile',
+  'contextGraphDiscovery',
+  'vmReconcile',
+  'collectionUpdates',
+  'allowListUpdates',
+  'profileEvents',
+] as const);
+
+export type ChainEventPollerLane = (typeof CHAIN_EVENT_POLLER_LANES)[number];
 
 interface ChainEventPollerLaneState {
   lastBlock: number;
