@@ -5,6 +5,7 @@ import {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   validateSubGraphName,
+  workspaceKnowledgeAssetOperationSnapshotGraph as knowledgeAssetSnapshotGraph,
 } from '@origintrail-official/dkg-core';
 import {
   workspacePublicQuadsDigest,
@@ -649,15 +650,6 @@ function subGraphForMetaGraph(contextGraphId: string, metaGraph: string): string
     throw new Error(`Invalid graph-scoped SWM subgraph metadata graph ${metaGraph}`);
   }
   return name;
-}
-
-function knowledgeAssetSnapshotGraph(
-  contextGraphId: string,
-  shareOperationId: string,
-  subGraphName?: string,
-): string {
-  const parts = [contextGraphId, subGraphName ?? '_', shareOperationId].map(encodeURIComponent);
-  return `did:dkg:context-graph:${parts[0]}/_shared_memory_snapshots/${parts[1]}/${parts[2]}/ka`;
 }
 
 function groupByGraphAndSubject(quads: readonly Quad[]): Map<string, Quad[]> {

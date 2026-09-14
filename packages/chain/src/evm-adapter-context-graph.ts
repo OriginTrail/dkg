@@ -1379,4 +1379,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   ): Promise<bigint | null> {
     return this.getContextGraphNameHashResolver().resolve(nameHash, options.signal);
   }
+
+  async resolveContextGraphIdsByNameHashes(
+    nameHashes: readonly string[],
+    options: ChainReadOptions = {},
+  ): Promise<ReadonlyMap<string, bigint | null>> {
+    return this.getContextGraphNameHashResolver().resolveMany(nameHashes, options.signal);
+  }
 }
