@@ -37,6 +37,39 @@ function snapshot(
 }
 
 describe('RFC-64 finalized authority snapshot batch runtime', () => {
+  it('single-flights concurrent normal reads through one immutable target snapshot', async () => {
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const readSnapshots = vi.fn(async (
+      targetIds: readonly ContextGraphAuthorityIndexId[],
+    ) => {
+      await readGate;
+      return new Map(targetIds.map((targetId) => [targetId, snapshot(targetId)]));
+    });
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
+      snapshotTargetIds: () => [ID_9, ID_10],
+      readSnapshots,
+    });
+
+    const first = runtime.read(ID_9);
+    const second = runtime.read(ID_10);
+    await vi.waitFor(() => expect(readSnapshots).toHaveBeenCalledOnce());
+    expect(readSnapshots).toHaveBeenCalledWith([ID_9, ID_10]);
+    releaseRead();
+
+    await expect(first).resolves.toMatchObject({
+      contextGraphAuthorityIndexId: ID_9,
+      batchTargetIds: [ID_9, ID_10],
+      snapshot: { contextGraphId: ID_9 },
+    });
+    await expect(second).resolves.toMatchObject({
+      contextGraphAuthorityIndexId: ID_10,
+      batchTargetIds: [ID_9, ID_10],
+      snapshot: { contextGraphId: ID_10 },
+    });
+    await runtime.whenIdle();
+  });
+
   it('chunks 4,097 targets, preserves the requested graph, and merges only chunk-owned rows', async () => {
     const requestedId = '4097' as ContextGraphAuthorityIndexId;
     const secondChunkId = '4096' as ContextGraphAuthorityIndexId;
@@ -64,8 +97,7 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
       return result;
     });
     const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      collectionDelayMs: 0,
-      collectAdditionalTargetIds: () => subscribedIds,
+      snapshotTargetIds: () => subscribedIds,
       readSnapshots,
     });
 
@@ -112,7 +144,6 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
       return new Map(targetIds.map((targetId) => [targetId, snapshot(targetId)]));
     });
     const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      collectionDelayMs: 0,
       readSnapshots,
     });
 
@@ -155,7 +186,6 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
       ]));
     });
     const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      collectionDelayMs: 0,
       readSnapshots,
     });
 
@@ -174,10 +204,42 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
     });
   });
 
+  it('detaches a cancelled caller while shared physical evidence drains', async () => {
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+    const readSnapshots = vi.fn(async (
+      targetIds: readonly ContextGraphAuthorityIndexId[],
+    ) => {
+      await readGate;
+      return new Map(targetIds.map((targetId) => [targetId, snapshot(targetId)]));
+    });
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
+      snapshotTargetIds: () => [ID_9, ID_10],
+      readSnapshots,
+    });
+    const abort = new AbortController();
+
+    const cancelled = runtime.read(ID_9, abort.signal);
+    const survivor = runtime.read(ID_10);
+    await vi.waitFor(() => expect(readSnapshots).toHaveBeenCalledOnce());
+    abort.abort(new Error('caller closed'));
+    await expect(cancelled).rejects.toThrow('caller closed');
+
+    let idle = false;
+    const drain = runtime.whenIdle().then(() => { idle = true; });
+    await Promise.resolve();
+    expect(idle).toBe(false);
+    releaseRead();
+    await expect(survivor).resolves.toMatchObject({
+      snapshot: { contextGraphId: ID_10 },
+    });
+    await drain;
+    expect(idle).toBe(true);
+  });
+
   it('returns immutable evidence owned by the closed batch lifecycle', async () => {
     const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      collectionDelayMs: 0,
-      collectAdditionalTargetIds: () => [ID_10],
+      snapshotTargetIds: () => [ID_10],
       readSnapshots: async (targetIds) => new Map(
         targetIds.map((targetId) => [targetId, snapshot(targetId)]),
       ),

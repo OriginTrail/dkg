@@ -19,23 +19,19 @@ export interface Rfc64FinalizedAuthoritySnapshotBatchRuntimeOptionsV1 {
   readonly readSnapshots: (
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
   ) => Promise<ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthoritySnapshot>>;
-  /** Lazily sampled while the collection window is still open. */
-  readonly collectAdditionalTargetIds?: () => Iterable<ContextGraphAuthorityIndexId>;
-  readonly collectionDelayMs?: number;
+  /** Complete opportunistic target inventory, sampled once before the read starts. */
+  readonly snapshotTargetIds?: () => Iterable<ContextGraphAuthorityIndexId>;
   /** Physical reader limit; defaults to the production chain capability contract. */
   readonly maxTargetsPerRead?: number;
 }
 
 interface Rfc64PendingFinalizedAuthoritySnapshotBatchV1 {
-  readonly collectingTargetIds: Set<ContextGraphAuthorityIndexId>;
-  closedTargetIds?: ReadonlySet<ContextGraphAuthorityIndexId>;
+  readonly closedTargetIds: ReadonlySet<ContextGraphAuthorityIndexId>;
   readonly result: Promise<ReadonlyMap<
     ContextGraphAuthorityIndexId,
     ContextGraphAuthoritySnapshot
   >>;
 }
-
-const DEFAULT_COLLECTION_DELAY_MS_V1 = 10;
 
 function immutableAuthoritySnapshotV1(
   snapshot: ContextGraphAuthoritySnapshot,
@@ -71,7 +67,6 @@ function waitForBatchV1<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T
 export class Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
   readonly #active = new Set<Rfc64PendingFinalizedAuthoritySnapshotBatchV1>();
   readonly #maxTargetsPerRead: number;
-  #collecting: Rfc64PendingFinalizedAuthoritySnapshotBatchV1 | undefined;
 
   constructor(
     private readonly options: Rfc64FinalizedAuthoritySnapshotBatchRuntimeOptionsV1,
@@ -92,22 +87,25 @@ export class Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
     options: Readonly<{ requireReadAfterRequest?: boolean }> = {},
   ): Promise<Rfc64FinalizedAuthoritySnapshotEvidenceV1> {
     signal?.throwIfAborted();
+    // Let same-turn callers publish their complete subscription/binding state
+    // before one owner snapshots it. This is a scheduler turn, not a mutable
+    // collection window: no batch exists until its target set is closed.
+    await Promise.resolve();
+    signal?.throwIfAborted();
     // A revision-triggered refresh must not join a physical read which began
-    // before that revision was observed. An open collection window is safe:
-    // its finalized anchor will be selected only after this request joined.
+    // before that revision was observed, so it always owns a new immutable
+    // target snapshot and therefore selects a fresh finalized anchor.
     let batch = options.requireReadAfterRequest === true
       ? undefined
       : [...this.#active].find(
-        (candidate) => candidate.closedTargetIds?.has(contextGraphAuthorityIndexId) === true,
+        (candidate) => candidate.closedTargetIds.has(contextGraphAuthorityIndexId),
       );
     if (batch === undefined) {
-      batch = this.#collecting;
-      if (batch === undefined) batch = this.#createBatch(contextGraphAuthorityIndexId);
-      else batch.collectingTargetIds.add(contextGraphAuthorityIndexId);
+      batch = this.#createBatch(contextGraphAuthorityIndexId);
     }
     const snapshots = await waitForBatchV1(batch.result, signal);
     const closedTargetIds = batch.closedTargetIds;
-    if (closedTargetIds === undefined || !closedTargetIds.has(contextGraphAuthorityIndexId)) {
+    if (!closedTargetIds.has(contextGraphAuthorityIndexId)) {
       throw new Error('RFC-64 finalized authority batch did not own the requested graph');
     }
     return Object.freeze({
@@ -131,21 +129,14 @@ export class Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
   #createBatch(
     firstTargetId: ContextGraphAuthorityIndexId,
   ): Rfc64PendingFinalizedAuthoritySnapshotBatchV1 {
-    const collectingTargetIds = new Set<ContextGraphAuthorityIndexId>([firstTargetId]);
-    const batch = {} as Rfc64PendingFinalizedAuthoritySnapshotBatchV1;
-    const result = new Promise<void>((resolve) => {
-      setTimeout(
-        resolve,
-        this.options.collectionDelayMs ?? DEFAULT_COLLECTION_DELAY_MS_V1,
-      );
-    }).then(async () => {
-      if (this.#collecting === batch) this.#collecting = undefined;
-      for (const targetId of this.options.collectAdditionalTargetIds?.() ?? []) {
-        collectingTargetIds.add(targetId);
-      }
-      const closedTargetIds = new Set(collectingTargetIds);
-      batch.closedTargetIds = closedTargetIds;
-      const requestedTargetIds = Object.freeze([...closedTargetIds]);
+    const closedTargetIds = new Set<ContextGraphAuthorityIndexId>([firstTargetId]);
+    for (const targetId of this.options.snapshotTargetIds?.() ?? []) {
+      closedTargetIds.add(targetId);
+    }
+    const requestedTargetIds = Object.freeze([...closedTargetIds]);
+    // Defer the physical read by one microtask only so the fully initialized,
+    // closed batch is visible to concurrent callers before transport starts.
+    const result = Promise.resolve().then(async () => {
       const owned = new Map<ContextGraphAuthorityIndexId, ContextGraphAuthoritySnapshot>();
       for (
         let offset = 0;
@@ -167,13 +158,14 @@ export class Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
         }
       }
       return owned as ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthoritySnapshot>;
-    }).finally(() => {
-      this.#active.delete(batch);
-      if (this.#collecting === batch) this.#collecting = undefined;
     });
-    Object.assign(batch, { collectingTargetIds, result });
-    this.#collecting = batch;
+    const batch: Rfc64PendingFinalizedAuthoritySnapshotBatchV1 = {
+      closedTargetIds,
+      result,
+    };
     this.#active.add(batch);
+    const remove = () => this.#active.delete(batch);
+    void result.then(remove, remove);
     return batch;
   }
 }
