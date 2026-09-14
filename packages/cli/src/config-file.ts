@@ -1,8 +1,12 @@
-import { constants, lstatSync, readlinkSync, realpathSync } from 'node:fs';
+import { constants } from 'node:fs';
 import { copyFile, mkdir, rename, unlink } from 'node:fs/promises';
-import { basename, dirname, resolve } from 'node:path';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { resolveAtomicWriteDestination, writeFileAtomic } from './fs-utils.js';
+import {
+  resolveAtomicWriteDestination,
+  resolveAtomicWriteDestinationSync,
+  writeFileAtomic,
+} from './fs-utils.js';
 import { acquireConfigWriteLease } from './config-write-lease.js';
 
 export interface FileActivation<T> {
@@ -36,7 +40,7 @@ export class ConfigFileStore {
   static open(path: string): ConfigFileStore {
     // Resolve synchronously before enqueueing so aliases share call ordering,
     // including an ordinary save immediately followed by a daemon update.
-    const destination = resolvedConfigDestination(path);
+    const destination = resolveAtomicWriteDestinationSync(path);
     let store = this.#stores.get(destination);
     if (!store) {
       store = new ConfigFileStore(destination);
@@ -155,22 +159,6 @@ export class ConfigFileStore {
       if (backup && !preserveBackup) await unlink(backup).catch(() => undefined);
     }
   }
-}
-
-/** Canonicalize file and parent-directory aliases, including not-yet-created targets. */
-function resolvedConfigDestination(path: string, followedLinks = 0): string {
-  const absolute = resolve(path);
-  try { return realpathSync.native(absolute); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  try {
-    if (lstatSync(absolute).isSymbolicLink()) {
-      if (followedLinks >= 40) throw Object.assign(new Error(`Too many symbolic links resolving ${path}`), { code: 'ELOOP' });
-      return resolvedConfigDestination(resolve(dirname(absolute), readlinkSync(absolute)), followedLinks + 1);
-    }
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  const parent = dirname(absolute);
-  if (parent === absolute) return absolute;
-  return resolve(resolvedConfigDestination(parent, followedLinks), basename(absolute));
 }
 
 export function configFileStore(path: string): ConfigFileStore {

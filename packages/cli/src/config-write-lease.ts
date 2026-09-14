@@ -1,5 +1,6 @@
 import { chmod, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { resolveAtomicWriteDestination } from './fs-utils.js';
 
 export interface ConfigWriteLease {
   release(): void;
@@ -12,9 +13,10 @@ export interface ConfigWriteLease {
  * releases the lock; the configuration itself remains an atomic JSON file.
  */
 export async function acquireConfigWriteLease(configPath: string): Promise<ConfigWriteLease> {
-  await mkdir(dirname(configPath), { recursive: true });
+  const destination = await resolveAtomicWriteDestination(configPath);
+  await mkdir(dirname(destination), { recursive: true });
   const { DatabaseSync } = await import('node:sqlite');
-  const path = `${configPath}.write-lock.sqlite`;
+  const path = `${destination}.write-lock.sqlite`;
   const db = new DatabaseSync(path);
   try {
     await chmod(path, 0o600);
