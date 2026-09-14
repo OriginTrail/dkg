@@ -130,7 +130,7 @@ async function runCli(
   }
 }
 
-describe.sequential('dkg epcis subcommands', { timeout: 240_000 }, () => {
+describe('dkg epcis subcommands', { concurrent: false, timeout: 240_000 }, () => {
   let stub: Awaited<ReturnType<typeof startStub>>;
   let dkgHome: string;
 

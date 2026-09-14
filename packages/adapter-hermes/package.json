@@ -31,8 +31,8 @@
     "@origintrail-official/dkg-core": "workspace:*"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^5.0.0",
-    "vitest": "^5.0.0"
+    "@vitest/coverage-v8": "catalog:",
+    "vitest": "catalog:"
   },
   "publishConfig": {
     "access": "public"

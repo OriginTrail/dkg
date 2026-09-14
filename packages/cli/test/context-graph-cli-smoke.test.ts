@@ -12,7 +12,7 @@ const execFileAsync = promisify(execFile);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
 
-describe.sequential('context-graph CLI smoke', () => {
+describe('context-graph CLI smoke', { concurrent: false }, () => {
   let dkgHome: string;
   let server: ReturnType<typeof createServer>;
   let apiPort: string;

@@ -26,7 +26,7 @@ import {
 // Focused private OKF lifecycle coverage: per-concept import, private CG
 // safety, resumability checkpoints, and large-concept chunk/retry behavior.
 
-describe.sequential('dkg okf private lifecycle', { timeout: 180_000 }, () => {
+describe('dkg okf private lifecycle', { concurrent: false, timeout: 180_000 }, () => {
   let stub: Awaited<ReturnType<typeof startStub>>;
   let dkgHome: string;
   const createdCGs = new Set<string>();

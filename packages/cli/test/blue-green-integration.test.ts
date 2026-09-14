@@ -10,7 +10,7 @@ import { execSync } from 'node:child_process';
  * Uses real filesystem and git operations — no mocks.
  * Uses tiny repos with shell build scripts to keep it fast.
  */
-describe.sequential('blue-green integration', () => {
+describe('blue-green integration', { concurrent: false }, () => {
   let tmpDir: string;
   let bareRepo: string;
   let dkgHome: string;

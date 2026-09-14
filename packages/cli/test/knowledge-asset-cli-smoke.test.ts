@@ -20,7 +20,7 @@ const PRE_SIGNED_AUTHOR_ATTESTATION = {
   signature: { r: `0x${'33'.repeat(32)}`, vs: `0x${'44'.repeat(32)}` },
 };
 
-describe.sequential('knowledge-asset CLI smoke', () => {
+describe('knowledge-asset CLI smoke', { concurrent: false }, () => {
   let dkgHome: string;
   let server: ReturnType<typeof createServer> | undefined;
   let smokeApiPort: string;

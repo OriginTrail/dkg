@@ -25,8 +25,8 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1",
-    "@types/node": "^26",
-    "vitest": "^5.0.0"
+    "@types/node": "catalog:",
+    "vitest": "catalog:"
   },
   "publishConfig": {
     "access": "public"
