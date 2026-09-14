@@ -1434,6 +1434,19 @@ export async function performNpmUpdateEdge(
   currentVersion: string | null,
   log: (msg: string) => void,
 ): Promise<UpdateStatus> {
+  // Same pre-activation gate as the Core slot swap (`activateStagedSlot`), and
+  // for the same reason: the daemon refuses to start without usable
+  // `node:sqlite`, so installing over the running Edge release on such a
+  // runtime would report success and then leave the node unable to restart.
+  // Edge has no slot to fall back to — the install IS the activation — so the
+  // check has to run before `npm install -g` replaces the global entry point.
+  try {
+    assertNodeRuntimeSupported();
+  } catch (error) {
+    log(`Auto-update (npm-edge): refusing to install ${targetVersion}: `
+      + `${error instanceof Error ? error.message : String(error)}`);
+    return "failed";
+  }
   if (_updateInProgress) {
     log("Auto-update (npm-edge): another update is already in progress, skipping");
     return "failed";

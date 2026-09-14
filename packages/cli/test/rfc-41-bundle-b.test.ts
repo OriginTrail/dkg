@@ -14,7 +14,7 @@
 // its own ~/.dkg-style temp home via process.env.DKG_HOME so the
 // production helpers (`dkgDir()`, `releasesDir()`) point at it.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { existsSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -251,6 +251,25 @@ describe('performNpmUpdateEdge (Bundle B1b)', () => {
 
   afterEach(() => {
     Object.assign(_autoUpdateIo, origIo);
+  });
+
+  it('refuses the global install when the launch runtime cannot load SQLite', async () => {
+    // Edge has no slot to fall back to: the npm install IS the activation, so
+    // an unsupported runtime has to be refused BEFORE the global entry point
+    // is replaced — otherwise the update reports success and the daemon then
+    // exits on its own startup gate with no previous release still active.
+    const log = makeLog();
+    const probe = vi.spyOn(process, 'getBuiltinModule').mockReturnValue(undefined);
+    try {
+      const result = await performNpmUpdateEdge('10.0.0-rc.12', '10.0.0-rc.11', log.fn);
+
+      expect(result).toBe('failed');
+      expect(execCalls).toEqual([]);
+      expect(execFileCalls).toEqual([]);
+      expect(existsSync(join(dkgHome, 'previous-version'))).toBe(false);
+      expect(log.calls.some((m) => m.includes('refusing to install 10.0.0-rc.12'))).toBe(true);
+      expect(log.calls.some((m) => m.includes('node:sqlite'))).toBe(true);
+    } finally { probe.mockRestore(); }
   });
 
   it('records previous-version and runs npm install -g on success', async () => {
