@@ -21,7 +21,7 @@ import {
   planBoundedGraphScopedDurableBatch,
   type GraphScopedDurableManifestPlan,
 } from '../durable-integrity.js';
-import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
+import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncDeniedError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import {
   createDurableSyncAccumulator,
   finalizeDurableSyncCompletion,
@@ -1516,7 +1516,7 @@ async function runDurableSyncWithBudget(
       if (backoffWorthy) {
         recordDurableSyncDiagnostics(accumulator, { backoffWorthyFailures: 1 });
       }
-      if ((pidErr as Error & { syncDenied?: boolean }).syncDenied) {
+      if (isSyncDeniedError(pidErr)) {
         onAccessDenied?.(pid);
         recordDurableSyncDiagnostics(accumulator, { deniedPhases: 1 });
       } else if (

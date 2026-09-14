@@ -139,6 +139,8 @@ export default defineConfig({
       "test/peer-selection.test.ts",
       "test/sync-requester-priority.test.ts",
       "test/sync-requester-progress.test.ts",
+      "test/public-snapshot-fetch-concurrency.test.ts",
+      "test/sync-failure-group.test.ts",
       "test/swm-snapshot-coverage.test.ts",
       "test/swm-snapshot-coverage-selection.test.ts",
       "test/swm-snapshot-throw-progress.test.ts",

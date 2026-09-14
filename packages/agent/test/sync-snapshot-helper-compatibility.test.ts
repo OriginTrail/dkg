@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { syncPublicSnapshotsForMeta } from '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js';
+import {
+  PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
+  readPublicSnapshotWalkProgress,
+  settlePublicSnapshotsForMeta,
+  syncPublicSnapshotsForMeta,
+} from '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js';
 import { createSyncWorkAdmission } from '@origintrail-official/dkg-agent/dist/sync/work-admission.js';
 
 const payload: Quad[] = [{ subject: 'urn:legacy:asset', predicate: 'urn:legacy:value', object: '"one"', graph: '' }];
@@ -26,6 +31,55 @@ function legacyParams(cached = false) {
       putSnapshot: vi.fn(async () => ({ ref: digest, byteLength: 42 })),
     },
     deleteCheckpoint: vi.fn(), setCheckpoint: vi.fn(), onSnapshotReady: vi.fn(),
+  };
+}
+
+/**
+ * A four-ref manifest that cannot finish: two refs are already cached, one
+ * fetch fails outright, and one answers with a prefix that never completed.
+ */
+function partialWalkParams(failure: Error) {
+  const payloads = Array.from({ length: 4 }, (_, index): Quad[] => [
+    { subject: `urn:legacy:partial:${index}`, predicate: 'urn:legacy:value', object: `"${index}"`, graph: '' },
+  ]);
+  const refs = payloads.map(workspacePublicQuadsDigest);
+  const walkMeta = refs.flatMap((ref, index) => [
+    ['publicSnapshotRef', ref], ['publicQuadsDigest', ref], ['publicQuadsCount', '1'],
+  ].map(([name, value]): Quad => ({
+    subject: `urn:legacy:partial:op:${index}`,
+    predicate: `http://dkg.io/ontology/${name}`,
+    object: `"${value}"`,
+    graph: '',
+  })));
+  const fetchSyncPages = vi.fn<Parameters<typeof syncPublicSnapshotsForMeta>[0]['fetchSyncPages']>(
+    async (_ctx, _peer, _cg, _shared, _phase, _graph, _deadline, options) => {
+      if (options!.snapshotRef === refs[1]) throw failure;
+      return {
+        quads: [], bytesReceived: 7, resumedFromOffset: 0, nextOffset: 1,
+        checkpointKey: 'snapshot', completed: false, timedOut: false,
+      };
+    },
+  );
+  return {
+    refs,
+    params: {
+      ctx: createOperationContext('sync'), remotePeerId: 'legacy-peer', contextGraphId: 'legacy-cg',
+      deadline: Date.now() + 60_000, metaQuads: walkMeta, fetchSyncPages,
+      // Asked for, never assumed: the pool is what lets positions on BOTH
+      // sides of the failure settle, which is the progress a continuation
+      // caller needs to read back. A consumer that requests nothing walks
+      // sequentially (public-snapshot-fetch-concurrency.test.ts) and recovers
+      // the progress its own order produced.
+      fetchConcurrency: PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
+      publicSnapshotStore: {
+        getSnapshot: vi.fn(async (ref: string): Promise<Quad[] | null> => {
+          const index = refs.indexOf(ref);
+          return index === 0 || index === 2 ? payloads[index]! : null;
+        }),
+        putSnapshot: vi.fn(async () => ({ ref: refs[0]!, byteLength: 7 })),
+      },
+      deleteCheckpoint: vi.fn(), setCheckpoint: vi.fn(),
+    },
   };
 }
 
@@ -80,5 +134,56 @@ describe('published snapshot helper compatibility', () => {
       .toMatchObject({ completed: false, localYield: true });
     expect(params.publicSnapshotStore.getSnapshot).not.toHaveBeenCalled();
     expect(params.fetchSyncPages).not.toHaveBeenCalled();
+  });
+
+  it('recovers the ordered progress of a partially completed failed walk', async () => {
+    const boom = new Error('snapshot stream reset');
+    const { refs, params } = partialWalkParams(boom);
+
+    // The published throwing helper is unchanged: it rethrows the original
+    // error with its own identity and carries nothing on it.
+    expect(await syncPublicSnapshotsForMeta(params).catch((error: unknown) => error)).toBe(boom);
+
+    // What the throw cannot express, the settled helper does: a continuation
+    // caller reading only the error would see a converging peer as stalled.
+    const outcome = await settlePublicSnapshotsForMeta(params);
+    expect(outcome.kind).toBe('failure');
+    if (outcome.kind !== 'failure') throw new Error('Expected a failed walk');
+    expect(outcome.error).toBe(boom);
+    expect(outcome.result).toMatchObject({
+      completed: false,
+      readySnapshots: 2,
+      totalSnapshots: 4,
+      missingCount: 2,
+      // Reduced in manifest order, not in the order the pool settled.
+      missingSample: [refs[1], refs[3]],
+    });
+  });
+
+  /**
+   * The consumer this helper actually has: it imports the throwing helper and
+   * the reader from the published subpath, catches, and continues from what the
+   * round reported. The frozen row is the one a property could never serve.
+   */
+  it.each([false, true])('recovers a caught walk\'s progress through the published reader (frozen=%s)', async frozen => {
+    const boom = new Error('snapshot stream reset');
+    if (frozen) Object.freeze(boom);
+    const { refs, params } = partialWalkParams(boom);
+
+    const caught = await syncPublicSnapshotsForMeta(params).catch((error: unknown) => error);
+    expect(caught).toBe(boom);
+    // Recovered from beside the error, never from something written onto it.
+    expect(Object.keys(caught as object)).toEqual([]);
+    expect('__swmPublicSnapshotProgress' in (caught as object)).toBe(false);
+
+    expect(readPublicSnapshotWalkProgress(caught)).toEqual({
+      readySnapshots: 2, totalSnapshots: 4, missingCount: 2, missingSample: [refs[1], refs[3]],
+    });
+    // Each read hands back its own copy, and an unrelated throwable has none.
+    const first = readPublicSnapshotWalkProgress(caught)!;
+    first.missingSample.length = 0;
+    expect(readPublicSnapshotWalkProgress(caught)!.missingSample).toEqual([refs[1], refs[3]]);
+    expect(readPublicSnapshotWalkProgress(new Error('unrelated'))).toBeUndefined();
+    expect(readPublicSnapshotWalkProgress('snapshot stream reset')).toBeUndefined();
   });
 });

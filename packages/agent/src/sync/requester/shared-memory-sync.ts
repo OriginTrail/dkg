@@ -3,6 +3,24 @@ import {
   type SyncWorkAdmission,
 } from '../work-admission.js';
 import {
+  settlePublicSnapshots,
+  PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
+  PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT,
+  boundSampledRef,
+  type PublicSnapshotMetadata,
+  type PublicSnapshotWalkPlan,
+  type PublicSnapshotWalkProgress,
+  type PublicSnapshotRecoveryResult,
+  type PublicSnapshotRecoveryOutcome,
+} from './public-snapshot-recovery.js';
+export {
+  PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
+  type PublicSnapshotMetadata,
+  type PublicSnapshotWalkEntry,
+  type PublicSnapshotWalkPlan,
+  type PublicSnapshotWalkProgress,
+} from './public-snapshot-recovery.js';
+import {
   createEntitySliceRecoveryPlan,
   planEntityRecovery,
   type EntityRecoveryPhaseOutcome,
@@ -25,9 +43,9 @@ export {
 import {
   mergeLocalBudgetYieldEvidence,
 } from '../shared-memory-completion.js';
-import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
+import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
-import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
+import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncDeniedError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import {
   isNamedSubgraphSharedMemoryDataGraph,
   isNamedSubgraphSharedMemoryMetaGraph,
@@ -54,33 +72,6 @@ import {
 import { canonicalQuadKey } from './quad-key.js';
 
 const DKG = 'http://dkg.io/ontology/';
-
-/**
- * Cap on identifiers reported for an unresolved manifest. A public peer chooses
- * how many snapshots it advertises, so an unbounded list would let it size a
- * structure on this node; the exact figure travels as `missingCount`.
- */
-const PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT = 10;
-/**
- * Stored length of ONE sampled ref.
- *
- * A ref is a `dkg:publicSnapshotRef` literal chosen by a remote peer and only
- * `.trim()`ed on the way in, so its length is peer-controlled. Capping the
- * SAMPLE SIZE bounds how many we keep, not how big each one is: ten refs of a
- * megabyte each still cross the worker RPC and sit in the diagnostics record.
- *
- * Bounded at the source as well as at the renderer. The renderer's bound is what
- * protects the operator-facing sentence; this one keeps an oversized literal out
- * of memory and off the wire, which the renderer cannot do from the far side.
- */
-const PUBLIC_SNAPSHOT_REF_SAMPLE_MAX_CHARS = 128;
-
-/** Bound one sampled ref. Truncation is marked so it cannot read as complete. */
-function boundSampledRef(ref: string): string {
-  return ref.length > PUBLIC_SNAPSHOT_REF_SAMPLE_MAX_CHARS
-    ? `${ref.slice(0, PUBLIC_SNAPSHOT_REF_SAMPLE_MAX_CHARS)}\u2026`
-    : ref;
-}
 
 /**
  * Own the one-round metadata commit policy for graph-scoped snapshots.
@@ -190,65 +181,6 @@ class GraphScopedSnapshotCommitCoordinator {
   }
 }
 
-/**
- * Snapshot-walk progress carried OUT of a throw.
- *
- * A snapshot-phase transport failure throws, and the throw unwinds past the
- * point where the caller reads the walk's return value — so a round that
- * materialized 120 Knowledge Assets and then failed on the 121st reported
- * ZERO. That is not merely a diagnostics gap: the continuation loop's progress
- * signal is `swmCoverage.snapshotsResolved`, so the high-water mark never
- * moved, and the loop declared `coverage-stalled` and abandoned a peer that
- * was converging — the exact behaviour #2050 exists to remove.
- *
- * The counts are the walk's own, so `snapshotsResolved + missingCount ===
- * snapshotsTotal` holds on this path exactly as it does on the returned one.
- */
-export interface PublicSnapshotWalkProgress {
-  readySnapshots: number;
-  totalSnapshots: number;
-  missingCount: number;
-  missingSample: string[];
-}
-
-/** Non-enumerable so the payload never widens a structured-clone or log dump. */
-const PUBLIC_SNAPSHOT_PROGRESS_KEY = '__swmPublicSnapshotProgress';
-
-function attachPublicSnapshotWalkProgress(err: unknown, progress: PublicSnapshotWalkProgress): void {
-  if (typeof err !== 'object' || err === null) return;
-  try {
-    Object.defineProperty(err, PUBLIC_SNAPSHOT_PROGRESS_KEY, {
-      value: progress,
-      enumerable: false,
-      configurable: true,
-      writable: true,
-    });
-  } catch {
-    // A frozen or exotic error is not worth failing the round over; the
-    // caller simply records no coverage for it, exactly as before.
-  }
-}
-
-/** Read progress attached by {@link syncPublicSnapshotsForMeta} before it rethrew. */
-export function readPublicSnapshotWalkProgress(err: unknown): PublicSnapshotWalkProgress | undefined {
-  if (typeof err !== 'object' || err === null) return undefined;
-  const progress = (err as Record<string, unknown>)[PUBLIC_SNAPSHOT_PROGRESS_KEY];
-  if (typeof progress !== 'object' || progress === null) return undefined;
-  const candidate = progress as Partial<PublicSnapshotWalkProgress>;
-  // Validated rather than trusted: this crosses an `unknown` boundary, and a
-  // fabricated denominator would corrupt the coverage record the pass loop and
-  // the terminal message both read.
-  if (
-    !Number.isSafeInteger(candidate.readySnapshots)
-    || !Number.isSafeInteger(candidate.totalSnapshots)
-    || !Number.isSafeInteger(candidate.missingCount)
-    || !Array.isArray(candidate.missingSample)
-  ) {
-    return undefined;
-  }
-  return candidate as PublicSnapshotWalkProgress;
-}
-
 export interface SharedMemoryMetadataFetchRequest {
   readonly ctx: OperationContext;
   readonly remotePeerId: string;
@@ -262,14 +194,6 @@ export interface SharedMemoryMetadataFetchOutcome {
   readonly result: SyncPageResult;
   /** True when this exact invocation retained a resumable metadata prefix. */
   readonly continuationYielded: boolean;
-}
-
-/** Immutable manifest order and validated reuse decisions for one pass. */
-export interface PublicSnapshotWalkPlan {
-  readonly entries: readonly {
-    readonly snapshot: PublicSnapshotMetadata;
-    readonly reuse: boolean;
-  }[];
 }
 
 export interface SnapshotWalkPreparation {
@@ -592,8 +516,63 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     let materializedFailuresForCg = 0;
     let materializedRefsForCg = 0;
     let descriptorsAuthoritativeForCg = true;
-    let snapshotProgressForCg: PublicSnapshotWalkProgress | undefined;
+    let snapshotProgressForCg: PublicSnapshotRecoveryResult | undefined;
     const unresolvedRefSampleForCg: string[] = [];
+    /**
+     * The ONE accounting rule for a failed round: the coverage record from
+     * whatever the walk settled, the warning, the denied/failed/peer-failed
+     * classification and the backoff verdict. The settled snapshot pool calls
+     * it directly with its typed outcome and timed-out evidence; the generic
+     * catch calls it with the last known progress and no pool evidence.
+     */
+    const accountFailedRound = (
+      err: unknown,
+      walk: PublicSnapshotWalkProgress | undefined,
+      timedOutPhases = 0,
+    ): 'stop' | 'continue' => {
+      if (walk) {
+        // Same builder as the success path — the counts arrive as one coherent
+        // group from the walk, never reassembled here.
+        recordSnapshotCoverage(
+          walk,
+          manifestComplete,
+          descriptorsAuthoritativeForCg,
+          materializedFailuresForCg,
+          materializedRefsForCg,
+          unresolvedRefSampleForCg,
+          pid,
+        );
+      }
+      logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (isSyncPermanentRejection(err)) {
+        // Missed-seam alarm (OT-RFC-56) — see durable-sync.ts: the oversize
+        // guard should have filtered this before the insert.
+        logWarn(ctx, `PERMANENT ingest rejection for "${pid}" reached the SWM sync catch — an insert seam is missing the oversize guard (sync/oversize-filter.ts): ${err instanceof Error ? err.message : String(err)}`);
+      }
+      // A timed-out sibling in the settled round is peer evidence in its own
+      // right, whichever cause the round finally surfaced.
+      const backoffWorthy = isSyncBackoffWorthyError(err) || timedOutPhases > 0;
+      if (backoffWorthy) {
+        summary.backoffWorthyFailures += 1;
+      }
+      if (isSyncDeniedError(err)) {
+        summary.deniedPhases += 1;
+      } else if (
+        peerRespondedForContextGraph ||
+        didSyncPeerRespond(err) ||
+        !isSyncTransportFailure(err)
+      ) {
+        recordSharedMemoryPhaseFailure(
+          summary,
+          isSyncTransportFailure(err) ? 'transport' : 'materialization',
+        );
+      } else {
+        peerFailed = true;
+      }
+      return backoffWorthy && shouldStopAfterBackoffWorthyFailure(pid, 'backoff-worthy failure')
+        ? 'stop'
+        : 'continue';
+    };
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
       const wsMetaGraph = contextGraphWorkspaceMetaGraphUri(pid);
@@ -1198,7 +1177,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
 
       const snapshotStartedAt = Date.now();
       recoveryBoundary.assertCurrent();
-      const snapshotSync = await syncPublicSnapshotsForMeta({
+      const snapshotRecovery = await settlePublicSnapshotsForMeta({
         ctx,
         remotePeerId,
         contextGraphId: pid,
@@ -1210,6 +1189,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             metaQuads: processed.verifiedMeta,
             recoveryOrder: snapshotRecoveryOrder,
           }),
+        // The bounded pool is requested HERE, not defaulted in the walk. This
+        // round owns every port it passes below — the fetch, the store and the
+        // `onSnapshotReady` materializer are all this module's — so it can
+        // state that they are safe to enter concurrently. A caller that hands
+        // in its own ports and asks for nothing stays sequential.
+        fetchConcurrency: PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
         publicSnapshotStore,
         fetchSyncPages,
         deleteCheckpoint,
@@ -1254,6 +1239,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           }
         },
       });
+      const snapshotSync = snapshotRecovery.result;
       snapshotProgressForCg = snapshotSync;
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
@@ -1267,7 +1253,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.resumedPhases += snapshotSync.resumedPhases;
       summary.timedOutPhases += snapshotSync.timedOutPhases;
       summary.completedPhases += snapshotSync.completedPhases;
-      summary.checkpointAdvances += snapshotSync.checkpointAdvances;
       // A voluntary yield is OUR budget decision, not the peer's fault. It is
       // recorded here and deliberately kept out of `timedOutPhases`, which
       // feeds `backoffWorthyFailure` and would back the peer off for it. It is
@@ -1283,6 +1268,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           (summary.snapshotPlaneIncomplete ?? 0) + 1;
         logInfo(ctx, `SWM sync for "${pid}": yielded at the round deadline with `
           + `${snapshotSync.missingCount} of ${snapshotSync.totalSnapshots} snapshot(s) unresolved`);
+      }
+      // Fatal and nonfatal siblings can coexist. The complete settled round is
+      // accounted above; the failure itself takes the same rule as any other
+      // failed round, carrying the pool's timed-out evidence, without a detour
+      // through an exception, an attached record and a read-back.
+      if (snapshotRecovery.kind === 'failure') {
+        if (accountFailedRound(snapshotRecovery.error, snapshotSync, snapshotSync.timedOutPhases) === 'stop') break;
+        continue;
       }
       const snapshotDurationMs = Date.now() - snapshotStartedAt;
       // A snapshot that verified but could not be written must be treated
@@ -1328,7 +1321,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if (!snapshotPhaseUsable) {
         // Retain independently verified data, but keep the phase incomplete
         // while graph-scoped assets or selected evidence remain unproven.
-        const localBudgetOnly = snapshotSync.phaseFailureCause === 'local-budget'
+        const localBudgetOnly = snapshotSync.outcome === 'local-budget-yield'
           && materializationFailures === 0
           && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0)
           && snapshotEvidenceAccepted;
@@ -1438,52 +1431,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         );
       }
     } catch (err) {
-      // A snapshot-phase failure unwinds past the coverage record built on the
-      // success path, so a round that materialized 120 Knowledge Assets and then
-      // threw would report NOTHING — and the continuation loop reads
-      // `snapshotsResolved`, so it would see a converging peer as stalled and
-      // drop it. Recover the walk's own counts and record them here.
-      const thrownProgress = readPublicSnapshotWalkProgress(err) ?? snapshotProgressForCg;
-      if (thrownProgress) {
-        // Same builder as the success path — the counts arrive as one coherent
-        // group attached by the walk, never reassembled here.
-        recordSnapshotCoverage(
-          thrownProgress,
-          manifestComplete,
-          descriptorsAuthoritativeForCg,
-          materializedFailuresForCg,
-          materializedRefsForCg,
-          unresolvedRefSampleForCg,
-          pid,
-        );
-      }
-      logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
-      if (isSyncPermanentRejection(err)) {
-        // Missed-seam alarm (OT-RFC-56) — see durable-sync.ts: the oversize
-        // guard should have filtered this before the insert.
-        logWarn(ctx, `PERMANENT ingest rejection for "${pid}" reached the SWM sync catch — an insert seam is missing the oversize guard (sync/oversize-filter.ts): ${err instanceof Error ? err.message : String(err)}`);
-      }
-      const backoffWorthy = isSyncBackoffWorthyError(err);
-      if (backoffWorthy) {
-        summary.backoffWorthyFailures += 1;
-      }
-      if ((err as Error & { syncDenied?: boolean }).syncDenied) {
-        summary.deniedPhases += 1;
-      } else if (
-        peerRespondedForContextGraph ||
-        didSyncPeerRespond(err) ||
-        !isSyncTransportFailure(err)
-      ) {
-        recordSharedMemoryPhaseFailure(
-          summary,
-          isSyncTransportFailure(err) ? 'transport' : 'materialization',
-        );
-      } else {
-        peerFailed = true;
-      }
-      if (backoffWorthy && shouldStopAfterBackoffWorthyFailure(pid, 'backoff-worthy failure')) {
-        break;
-      }
+      // A throw outside the settled snapshot round unwinds past the coverage
+      // record built on the success path, so a round that materialized 120
+      // Knowledge Assets and then threw would report NOTHING — and the
+      // continuation loop reads `snapshotsResolved`, so it would see a
+      // converging peer as stalled and drop it. Record the last known walk
+      // counts; the pool's own failures never arrive here.
+      if (accountFailedRound(err, snapshotProgressForCg) === 'stop') break;
     }
   }
   if (peerFailed) {
@@ -1496,21 +1450,120 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   return summary;
 }
 
-export interface PublicSnapshotMetadata {
-  ref: string;
-  digest: string;
-  count: number;
-  /** Optional, non-authoritative scheduling hint parsed with the manifest. */
-  publishedAtMs?: number;
-  /** Optional UAL suffix used only as a deterministic recency fallback. */
-  ualOrdinal?: bigint;
+/**
+ * The pre-#2077 result of the throwing helper: the canonical walk result, plus
+ * the three fields that helper has always also returned.
+ *
+ * They exist for its existing consumers and are derived HERE, at the one
+ * compatibility adapter, rather than translated into every walk result:
+ * `checkpointAdvances` is structurally zero — a walk deletes checkpoints and
+ * advances none — and the two phase fields restate `outcome` in the
+ * shared-memory diagnostics vocabulary.
+ */
+export interface PublicSnapshotSyncResult extends PublicSnapshotRecoveryResult {
+  readonly checkpointAdvances: 0;
+  /** Direct cause for this helper's single incomplete snapshot phase. */
+  readonly phaseFailureCause?: SharedMemoryPhaseFailureCause;
+  /** One incomplete phase only when every unresolved ref is due to local admission. */
+  readonly localYieldFailedPhases: number;
 }
 
+/** Add what the legacy helper published on top of the canonical walk result. */
+function legacySnapshotSyncResult(result: PublicSnapshotRecoveryResult): PublicSnapshotSyncResult {
+  const localBudgetOnly = result.outcome === 'local-budget-yield';
+  return {
+    ...result,
+    checkpointAdvances: 0,
+    ...(result.completed
+      ? {}
+      : { phaseFailureCause: localBudgetOnly ? 'local-budget' as const : 'transport' as const }),
+    localYieldFailedPhases: localBudgetOnly ? 1 : 0,
+  };
+}
+
+/**
+ * Settled shared-memory walk: the walk's own result, paired with the failure
+ * when one occurred.
+ *
+ * A walk that materialized 120 of 250 Knowledge Assets and then failed has real
+ * progress to report, and a continuation caller that cannot read it treats a
+ * converging peer as stalled or replays completed work. The throwing helper
+ * cannot carry that out — annotating the throwable is exactly the side channel
+ * this module removed — so the settled outcome is where progress and error
+ * identity travel together.
+ */
+export type PublicSnapshotSyncOutcome = PublicSnapshotRecoveryOutcome;
+
+/**
+ * What a failed legacy walk settled, held BESIDE its throwable.
+ *
+ * Consumers compiled against the pre-#2077 helper catch a failed walk and ask
+ * how far it got — a walk that materialized 120 of 250 Knowledge Assets has
+ * real progress, and a continuation caller that cannot read it treats a
+ * converging peer as stalled or replays completed work. That question stays
+ * answerable without writing anything ONTO the caller's error: annotating a
+ * throwable is the side channel this PR removed, and
+ * {@link syncPublicSnapshotsForMeta} still rethrows the original error with its
+ * identity, class and stack untouched — which is also why a frozen or exotic
+ * error keeps its progress here, where a property never could.
+ *
+ * Written by the deprecated throwing adapter only, read only by
+ * {@link readPublicSnapshotWalkProgress}. No path inside this package reads it
+ * back: the recovery core keeps ONE typed transport, and
+ * {@link settlePublicSnapshotsForMeta} is the supported way to see a failure
+ * and its progress together. Entries are weak, so they go with the error.
+ */
+const failedWalkProgress = new WeakMap<object, PublicSnapshotWalkProgress>();
+
+/** Manifest-ordered counts only; metrics travel with the settled outcome. */
+function rememberFailedWalkProgress(error: unknown, walk: PublicSnapshotWalkProgress): void {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return;
+  failedWalkProgress.set(error, {
+    readySnapshots: walk.readySnapshots,
+    totalSnapshots: walk.totalSnapshots,
+    missingCount: walk.missingCount,
+    missingSample: [...walk.missingSample],
+  });
+}
+
+/**
+ * Progress of the walk that threw `error`, or `undefined` when this module did
+ * not throw it (a primitive throwable included).
+ *
+ * @deprecated Prefer {@link settlePublicSnapshotsForMeta}, which returns the
+ * same progress on both branches next to the failure that caused it. This
+ * reader exists for consumers of the throwing helper that predate it.
+ */
+export function readPublicSnapshotWalkProgress(error: unknown): PublicSnapshotWalkProgress | undefined {
+  if ((typeof error !== 'object' && typeof error !== 'function') || error === null) return undefined;
+  const walk = failedWalkProgress.get(error);
+  // A fresh copy per read, as before: a caller that edits what it read cannot
+  // change what the next caller sees.
+  return walk && { ...walk, missingSample: [...walk.missingSample] };
+}
+
+/**
+ * Legacy throwing walk. Kept compatible: it rethrows the original error with
+ * its identity, class and stack intact and attaches nothing to it, and the
+ * progress behind that failure stays readable through
+ * {@link readPublicSnapshotWalkProgress}. Callers that can take a settled
+ * result use {@link settlePublicSnapshotsForMeta} instead.
+ */
 export async function syncPublicSnapshotsForMeta(params: {
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
   deadline: number;
+  /**
+   * Opt in to the bounded fetch pool, up to
+   * {@link PUBLIC_SNAPSHOT_FETCH_CONCURRENCY}.
+   *
+   * OMITTED MEANS SEQUENTIAL, as this helper has always behaved: every port the
+   * caller supplies — `fetchSyncPages`, the snapshot store and
+   * `onSnapshotReady` — is entered one at a time. Request a pool only when the
+   * ports tolerate reentrancy.
+   */
+  fetchConcurrency?: number;
   /** Shared operation admission; legacy callers use their existing deadline. */
   workAdmission?: SyncWorkAdmission;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
@@ -1528,272 +1581,52 @@ export async function syncPublicSnapshotsForMeta(params: {
     snapshot: PublicSnapshotMetadata,
     source: 'cache' | 'network',
   ) => Promise<void>;
-} & PublicSnapshotWalkSource): Promise<{
-  bytesReceived: number;
-  resumedPhases: number;
-  timedOutPhases: number;
-  completedPhases: number;
-  checkpointAdvances: number;
-  /** Immutable snapshot refs already valid locally or fetched in this round. */
-  readySnapshots: number;
-  /** Total immutable snapshot refs declared by the verified SWM metadata. */
-  totalSnapshots: number;
-  completed: boolean;
-  /** Exact count of declared refs this round did not resolve. */
-  missingCount: number;
-  /**
-   * Bounded identifiers for the shortfall. A public peer controls manifest
-   * size, so this is capped; `missingCount` carries the true figure.
-   */
-  missingSample: string[];
-  /**
-   * The round stopped on OUR OWN clock with refs still unfetched — a voluntary
-   * yield, not a peer fault. Callers must surface this as
-   * a local-yield completion and must NOT fold it into `timedOutPhases`, which
-   * marks the peer backoff-worthy (`durable-progress.ts` `backoffWorthyFailure`).
-   */
-  localYield?: true;
-  /** Direct cause for this helper's single incomplete snapshot phase. */
-  phaseFailureCause?: SharedMemoryPhaseFailureCause;
-  /** One incomplete phase only when every unresolved ref is due to local admission. */
-  localYieldFailedPhases?: number;
-}> {
+} & PublicSnapshotWalkSource): Promise<PublicSnapshotSyncResult> {
+  const outcome = await settlePublicSnapshotsForMeta(params);
+  if (outcome.kind === 'failure') {
+    rememberFailedWalkProgress(outcome.error, outcome.result);
+    throw outcome.error;
+  }
+  return legacySnapshotSyncResult(outcome.result);
+}
+
+/**
+ * Walk one manifest and settle, never throw: every admitted operation is
+ * accounted in manifest order before the outcome is returned, so a failed walk
+ * still reports `readySnapshots`, `missingCount` and its bounded
+ * `missingSample` alongside the triggering error.
+ */
+export async function settlePublicSnapshotsForMeta(
+  params: Parameters<typeof syncPublicSnapshotsForMeta>[0],
+): Promise<PublicSnapshotSyncOutcome> {
   const workAdmission = params.workAdmission ?? composeSyncWorkAdmission({
     deadline: params.deadline,
     scope: { sharing: 'coalescible', key: 'direct-snapshot-walk' },
   });
-  const executionBoundary = params.executionBoundary
-    ?? createRecoveryExecutionAdmission();
+  const executionBoundary = params.executionBoundary ?? createRecoveryExecutionAdmission();
   executionBoundary.assertCurrent();
-  const manifestSnapshots = params.snapshotWalk
-    ? []
-    : collectPublicSnapshotMetadata(params.metaQuads);
+  const manifestSnapshots = params.snapshotWalk ? [] : collectPublicSnapshotMetadata(params.metaQuads);
+  // A prepared walk carries the owner's reuse decision per position; a direct
+  // manifest walk reuses nothing and validates every ref itself.
   const entries = params.snapshotWalk?.entries ?? (
     params.recoveryOrder === 'recent-balanced'
       ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
       : manifestSnapshots
   ).map(snapshot => ({ snapshot, reuse: false }));
-  if (entries.length === 0) {
-    return {
-      bytesReceived: 0,
-      resumedPhases: 0,
-      timedOutPhases: 0,
-      completedPhases: 0,
-      checkpointAdvances: 0,
-      readySnapshots: 0,
-      totalSnapshots: 0,
-      completed: true,
-      missingCount: 0,
-      missingSample: [],
-    };
-  }
-  if (!params.publicSnapshotStore) {
-    throw new Error(
-      `Cannot sync shared-memory public snapshot refs for "${params.contextGraphId}" without a public snapshot store`,
-    );
-  }
-
-  let bytesReceived = 0;
-  let resumedPhases = 0;
-  let timedOutPhases = 0;
-  let completedPhases = 0;
-  let checkpointAdvances = 0;
-  let readySnapshots = 0;
-  let missingCount = 0;
-  let hasIndependentShortfall = false;
-  let localYield: true | undefined;
-  const missingSample: string[] = [];
-  const noteMissing = (ref: string): void => {
-    missingCount += 1;
-    if (missingSample.length < PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT) {
-      missingSample.push(boundSampledRef(ref));
-    }
-  };
-  /** Every ref from `index` onward is unresolved; record them and stop. */
-  const abandonFrom = (index: number): void => {
-    for (let i = index; i < entries.length; i += 1) noteMissing(entries[i]!.snapshot.ref);
-  };
-
-  /**
-   * Carry what the walk achieved out through a throw.
-   *
-   * Everything from `index` on is unresolved — the ref that threw included —
-   * so the counts obey the same `resolved + missing === total` invariant the
-   * returned value does. Without this the caller's `catch` sees only an error,
-   * builds no coverage record, and the continuation loop reads a pass that
-   * materialized real Knowledge Assets as non-advancing.
-   */
-  const rethrowWithProgress = (err: unknown, index: number): never => {
-    abandonFrom(index);
-    attachPublicSnapshotWalkProgress(err, {
-      readySnapshots,
-      totalSnapshots: entries.length,
-      missingCount,
-      missingSample,
-    });
-    throw err;
-  };
-
-  for (const [index, { snapshot, reuse }] of entries.entries()) {
-    executionBoundary.assertCurrent();
-    // The owner decides which manifest-bound evidence this pass can reuse.
-    // Avoid repeating blob and assertion validation when that owner has
-    // already established it, leaving time for unresolved refs to advance.
-    if (reuse) {
-      readySnapshots += 1;
-      continue;
-    }
-    // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
-    // for this one. Both halves matter:
-    //
-    // - Before, not after: first or changed-file validation can require a full
-    //   read and digest, and a miss is a network round trip. Checking afterwards
-    //   would let one KA overrun the budget it was supposed to respect.
-    // - Before the fetch specifically: no `SyncPageResult` exists yet, so
-    //   `timedOutPhases` structurally CANNOT move on this path. That is what
-    //   keeps a local budget decision from being reported as a peer timeout and
-    //   putting a healthy responder into backoff.
-    //
-    // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
-    // can never leave a partially materialized asset.
-    if (!workAdmission.canAdmitWork()) {
-      localYield = true;
-      abandonFrom(index);
-      break;
-    }
-    try {
-      if (await executionBoundary.read(
-        () => hasValidSnapshot(params.publicSnapshotStore!, snapshot),
-      )) {
-        if (params.onSnapshotReady) {
-          executionBoundary.assertCurrent();
-          await params.onSnapshotReady(snapshot, 'cache');
-          executionBoundary.assertCurrent();
-        }
-        readySnapshots += 1;
-        continue;
-      }
-
-      // Cache validation can consume the allowance without producing a hit.
-      // Admit no new transport after that local work exhausts the budget.
-      if (!workAdmission.canAdmitWork()) {
-        localYield = true;
-        abandonFrom(index);
-        break;
-      }
-
-      const snapshotOptions: SyncPageFetchOptions = {
-        snapshotRef: snapshot.ref,
-        workAdmission,
-        ...(executionBoundary.signal === undefined ? {} : { signal: executionBoundary.signal }),
-      };
-      const result = await executionBoundary.read(() => params.fetchSyncPages(
-        params.ctx,
-        params.remotePeerId,
-        params.contextGraphId,
-        true,
-        'snapshot',
-        '',
-        params.deadline,
-        snapshotOptions,
-      ));
-      bytesReceived += result.bytesReceived;
-      resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;
-      timedOutPhases += result.timedOut ? 1 : 0;
-      localYield = mergeLocalBudgetYieldEvidence(localYield, result.localYield);
-      if (result.completed) {
-        executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
-      }
-      else {
-        hasIndependentShortfall ||= !result.localYield;
-        // `fetchSyncPages` returns only the quads fetched during THIS call. We do
-        // not persist an unverified prefix, so resuming a snapshot at nextOffset
-        // would validate only the tail against the full digest/count and can never
-        // succeed. Restart this one immutable KA at offset zero on the next round;
-        // already completed snapshots remain cached and are skipped, preserving
-        // monotonic recovery progress across the CG without accepting a partial
-        // asset.
-        executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
-        abandonFrom(index);
-        break;
-      }
-
-      const snapshotQuads = result.quads.map((quad) => ({ ...quad, graph: '' }));
-      if (snapshotQuads.length < snapshot.count) {
-        // A relayed stream can terminate cleanly after returning a prefix. The
-        // requester then sees `completed=true`, but the signed metadata gives us
-        // an authoritative expected count and proves that this is incomplete,
-        // not corrupt. Never cache or apply the prefix; retry it from offset zero
-        // in a later bounded recovery round. Equal-count digest mismatches remain
-        // fatal below so a complete but tampered snapshot is never softened into
-        // a transport retry.
-        //
-        // SKIP this ref and keep walking, rather than returning. Ref order is
-        // byte-identical on every pass (`Map` insertion order), so returning here
-        // would pin every future pass at this same index: one permanently
-        // unserveable ref would stall the whole manifest forever and drive a
-        // repeat-pass design to a fixed point at zero progress. Skipping costs
-        // this KA and nothing else — it stays uncached and unapplied, and is
-        // retried from offset zero next pass.
-        executionBoundary.admitSyncMutation(() => params.deleteCheckpoint(result.checkpointKey));
-        noteMissing(snapshot.ref);
-        hasIndependentShortfall = true;
-        continue;
-      }
-      const actualDigest = workspacePublicQuadsDigest(snapshotQuads);
-      if (actualDigest !== snapshot.digest || snapshotQuads.length !== snapshot.count) {
-        throw new Error(
-          `Shared-memory public snapshot ${snapshot.ref} failed digest/count validation ` +
-          `(expected ${snapshot.digest}/${snapshot.count}, got ${actualDigest}/${snapshotQuads.length})`,
-        );
-      }
-      await executionBoundary.admitAsyncMutation(() => params.publicSnapshotStore!.putSnapshot({
-        digest: snapshot.digest,
-        quads: snapshotQuads,
-      }));
-      if (params.onSnapshotReady) {
-        executionBoundary.assertCurrent();
-        await params.onSnapshotReady(snapshot, 'network');
-        executionBoundary.assertCurrent();
-      }
-      completedPhases += 1;
-      readySnapshots += 1;
-    } catch (err) {
-      executionBoundary.assertCurrent();
-      // Any failure in this KA's work — the blob read, the fetch, the
-      // digest check, the store write, or materialization — leaves the walk
-      // here. Carry what earlier iterations achieved out with it.
-      rethrowWithProgress(err, index);
-    }
-  }
-
-  return {
-    bytesReceived,
-    resumedPhases,
-    timedOutPhases,
-    completedPhases,
-    checkpointAdvances,
-    readySnapshots,
-    totalSnapshots: entries.length,
-    // The ONLY completion expression, and it is derived rather than asserted.
-    // Every path that gives up on a ref — the deadline yield, a fetch that did
-    // not complete, and the skipped short prefix — routes through
-    // `noteMissing`, so a round can no longer fall out of the loop claiming
-    // success while having abandoned work. A hardcoded `true` here is exactly
-    // how skip-and-continue would have silently reported a complete manifest.
-    completed: missingCount === 0,
-    missingCount,
-    missingSample,
-    ...(localYield ? { localYield } : {}),
-    ...(missingCount === 0
-      ? {}
-      : {
-          phaseFailureCause: localYield && !hasIndependentShortfall
-            ? 'local-budget' as const
-            : 'transport' as const,
-        }),
-    localYieldFailedPhases: localYield && !hasIndependentShortfall ? 1 : 0,
-  };
+  return settlePublicSnapshots({
+    entries,
+    contextGraphId: params.contextGraphId,
+    workAdmission,
+    concurrency: params.fetchConcurrency,
+    store: params.publicSnapshotStore,
+    executionBoundary,
+    fetchSnapshot: (snapshot, signal) => params.fetchSyncPages(
+      params.ctx, params.remotePeerId, params.contextGraphId, true, 'snapshot', '', params.deadline,
+      { snapshotRef: snapshot.ref, workAdmission, ...(signal === undefined ? {} : { signal }) },
+    ),
+    deleteCheckpoint: params.deleteCheckpoint,
+    onSnapshotReady: params.onSnapshotReady,
+  });
 }
 
 export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
@@ -1968,22 +1801,6 @@ function countGraphBackedSnapshotOperations(metaQuads: readonly Quad[]): number 
   ).size;
 }
 
-async function hasValidSnapshot(
-  publicSnapshotStore: WorkspacePublicSnapshotStore,
-  snapshot: PublicSnapshotMetadata,
-): Promise<boolean> {
-  let quads: Quad[] | null;
-  try {
-    if (publicSnapshotStore.validateSnapshot) {
-      return await publicSnapshotStore.validateSnapshot(snapshot.ref, snapshot.digest, snapshot.count);
-    }
-    quads = await publicSnapshotStore.getSnapshot(snapshot.ref);
-  } catch {
-    return false;
-  }
-  if (!quads) return false;
-  return quads.length === snapshot.count && workspacePublicQuadsDigest(quads) === snapshot.digest;
-}
 
 function parseIntegerLiteral(value: string | undefined): number | undefined {
   const parsed = Number.parseInt(stripLiteral(value) ?? '', 10);

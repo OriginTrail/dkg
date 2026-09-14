@@ -19,6 +19,7 @@
 * [Node Components](how-dkg-works/node-architecture.md)
 * [Agents & Trust](how-dkg-works/agents-and-trust.md)
 * [Memory Layers](how-dkg-works/memory-layers.md)
+* [Public Snapshot Recovery](how-dkg-works/public-snapshot-recovery.md)
 * [Context Graphs](how-dkg-works/context-graphs.md)
 * [Knowledge Assets](how-dkg-works/knowledge-assets.md)
 * [Conviction & Economics](how-dkg-works/conviction-and-economics.md)

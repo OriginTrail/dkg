@@ -603,6 +603,12 @@ async function recoverContextGraphSwmUnlocked(
         ? { snapshotWalk: privatePreparation.plan }
         : { metaQuads: activeGraphMeta }),
       publicSnapshotStore: deps.publicSnapshotStore,
+      // Sequential by contract: the prepared plan spends this job's ONE shared
+      // allowance on unresolved entries before re-validating retained ones, and
+      // that priority holds only when no later entry's cache work is admitted
+      // before this entry's dispatch decision. The bounded pool (#2077) still
+      // serves the public and direct walks, whose entries carry no priority.
+      fetchConcurrency: 1,
       // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,
       // post-read checks, signal attachment, and checkpoint commits.
       fetchSyncPages: deps.fetchSyncPages,

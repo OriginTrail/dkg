@@ -13,6 +13,9 @@ import {
 } from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
 import {
+  didSyncPeerRespond,
+  isSyncBackoffWorthyError,
+  isSyncDeniedError,
   toSyncTransportFailureError,
   toSyncValidationRejectionError,
 } from '../src/sync/error-tags.js';
@@ -475,6 +478,16 @@ describe('exact sync accumulation limits', () => {
         message: 'operation timed out',
         cause: 'operation timed out',
       });
+    }
+    if (name === 'denial') {
+      // The sentinel arrives on an ORDINARY response page — one valid page was
+      // served first, so this is not the generation-prime branch. The peer
+      // spoke, so the canonical denial tag has to travel with the throw: an
+      // untagged Error here would be recorded as a failed phase and would put a
+      // responding peer into backoff instead of a denied phase.
+      expect(isSyncDeniedError(rejected)).toBe(true);
+      expect(didSyncPeerRespond(rejected)).toBe(true);
+      expect(isSyncBackoffWorthyError(rejected)).toBe(false);
     }
     expect(checkpointStore.get(checkpointKey)).toBeUndefined();
 

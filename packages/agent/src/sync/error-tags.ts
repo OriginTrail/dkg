@@ -4,7 +4,55 @@ import {
 } from '@origintrail-official/dkg-core';
 import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
+/**
+ * Concurrent failures retain their triggering cause and every admitted
+ * classification.
+ *
+ * A group holds no classification field of its own. The `isSync*` classifiers
+ * already traverse its causes, so a second representation of the same tag would
+ * only be a way for the two to disagree — and a projection that re-entered the
+ * traversal classifying it would need a special case in every generic tag path.
+ */
+export class SyncFailureGroup extends AggregateError {
+  constructor(primary: unknown, additional: readonly unknown[]) {
+    super([primary, ...additional], primary instanceof Error
+      ? `Concurrent sync failures: ${primary.message}`
+      : 'Concurrent sync operations failed', { cause: primary });
+    Object.freeze(this.errors);
+  }
+}
+
+/** Preserve single-error identity, including frozen errors tagged through side channels. */
+export function combineSyncFailures(primary: unknown, additional: readonly unknown[]): unknown {
+  const unique = [...new Set([primary, ...additional])];
+  return unique.length === 1 ? primary : new SyncFailureGroup(primary, unique.slice(1));
+}
+
+/** One traversal owns nested groups; classification selects its aggregation rule. */
+function syncFailureCauseView(error: unknown) {
+  const causes: unknown[] = [];
+  const leaves: unknown[] = [];
+  const pending = [error];
+  const seen = new Set<unknown>();
+  while (pending.length > 0) {
+    const cause = pending.pop();
+    if (seen.has(cause)) continue;
+    seen.add(cause);
+    causes.push(cause);
+    if (cause instanceof SyncFailureGroup) {
+      for (let index = cause.errors.length - 1; index >= 0; index--) pending.push(cause.errors[index]);
+    } else {
+      leaves.push(cause);
+    }
+  }
+  return {
+    anyCause: (predicate: (cause: unknown) => boolean) => causes.some(predicate),
+    everyCause: (predicate: (cause: unknown) => boolean) => leaves.length > 0 && leaves.every(predicate),
+  };
+}
+
 type SyncErrorTag =
+  | 'syncDenied'
   | 'syncPeerResponded'
   | 'syncTransportFailure'
   | 'syncValidationRejected'
@@ -13,6 +61,7 @@ type SyncErrorTag =
 type TaggedSyncThrowable = object;
 
 const syncErrorTagSideChannels: Record<SyncErrorTag, WeakSet<object>> = {
+  syncDenied: new WeakSet(),
   syncPeerResponded: new WeakSet(),
   syncTransportFailure: new WeakSet(),
   syncValidationRejected: new WeakSet(),
@@ -47,14 +96,34 @@ function toTaggedSyncError(error: unknown, tag: SyncErrorTag): TaggedSyncThrowab
   return taggedError;
 }
 
-function hasSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
+function hasOwnSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
   if (!isTaggableThrowable(error)) return false;
   if (syncErrorTagSideChannels[tag].has(error)) return true;
   try {
-    return Boolean((error as Record<string, unknown>)[tag]);
+    if ((error as Record<string, unknown>)[tag]) return true;
   } catch {
-    return false;
+    // An unreadable own property must not hide classified concurrent causes.
   }
+  return false;
+}
+
+function hasSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
+  return syncFailureCauseView(error).anyCause(cause => hasOwnSyncErrorTag(cause, tag));
+}
+
+/**
+ * The peer answered with its denial sentinel. The peer spoke, so a denial is
+ * never a transport interruption; requesters account it as a denied phase
+ * rather than a failure worth backing off from.
+ */
+export function toSyncDeniedError<T extends object>(error: T): T;
+export function toSyncDeniedError(error: unknown): TaggedSyncThrowable;
+export function toSyncDeniedError(error: unknown): TaggedSyncThrowable {
+  return toTaggedSyncError(error, 'syncDenied');
+}
+
+export function isSyncDeniedError(error: unknown): boolean {
+  return hasSyncErrorTag(error, 'syncDenied');
 }
 
 export function toSyncPeerRespondedError<T extends object>(error: T): T;
@@ -102,19 +171,11 @@ export function isSyncValidationRejection(error: unknown): boolean {
 
 export function didSyncPeerRespond(error: unknown): boolean {
   if (hasSyncErrorTag(error, 'syncPeerResponded')) return true;
-  try {
-    return Boolean(isTaggableThrowable(error) && (error as { syncDenied?: boolean }).syncDenied);
-  } catch {
-    return false;
-  }
+  return isSyncDeniedError(error);
 }
 
 export function isSyncTransportFailure(error: unknown): boolean {
   return hasSyncErrorTag(error, 'syncTransportFailure');
-}
-
-function isSyncLocalRequestFailure(error: unknown): boolean {
-  return hasSyncErrorTag(error, 'syncLocalRequestFailure');
 }
 
 function syncErrorMessage(error: unknown): string {
@@ -133,17 +194,23 @@ function syncErrorMessage(error: unknown): string {
  * failure, or caller abort must never be reclassified by message.
  */
 export function isKnownRetryableSyncTransportInterruption(error: unknown): boolean {
-  if (
-    isSyncValidationRejection(error)
-    || didSyncPeerRespond(error)
-    || isChainRpcTransportError(error)
-    || isSyncLocalRequestFailure(error)
-  ) return false;
+  const causes = syncFailureCauseView(error);
+  if (causes.anyCause(cause =>
+    hasOwnSyncErrorTag(cause, 'syncValidationRejected')
+    || hasOwnSyncErrorTag(cause, 'syncPeerResponded')
+    || hasOwnSyncErrorTag(cause, 'syncDenied')
+    || isChainRpcTransportError(cause)
+    || hasOwnSyncErrorTag(cause, 'syncLocalRequestFailure')
+  )) return false;
 
+  return causes.everyCause(isRetryableTransportLeaf);
+}
+
+function isRetryableTransportLeaf(error: unknown): boolean {
   // The transport boundary is authoritative even when its deadline surfaces
   // as AbortError. Caller/node cancellation is rejected separately by the
   // requester's live signal before this classifier is consulted.
-  if (isSyncTransportFailure(error)) return true;
+  if (hasOwnSyncErrorTag(error, 'syncTransportFailure')) return true;
 
   // Never infer an untagged AbortError from message text: the same shape is
   // used for caller cancellation and transport deadlines.
@@ -163,12 +230,16 @@ export function isKnownRetryableSyncTransportInterruption(error: unknown): boole
  * fixed.
  */
 export function isSyncPermanentRejection(error: unknown): boolean {
-  return isOversizedRdfLiteralError(error);
+  return syncFailureCauseView(error).anyCause(isOversizedRdfLiteralError);
 }
 
 export function isSyncBackoffWorthyError(error: unknown): boolean {
+  return syncFailureCauseView(error).anyCause(isBackoffWorthyLeaf);
+}
+
+function isBackoffWorthyLeaf(error: unknown): boolean {
   if (
-    isSyncTransportFailure(error)
+    hasOwnSyncErrorTag(error, 'syncTransportFailure')
     || isChainRpcTransportError(error)
     || isRecoverableSendError(error)
   ) return true;
