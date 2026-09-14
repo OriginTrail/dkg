@@ -2251,12 +2251,18 @@ async function readRowsPageFromExactGraphPlan(
       const isFinalGraphPage = entryOffset + expectedRows === entry.rowCount;
       const seekEntry = cursorActive && cursor !== undefined && cursor !== null;
       const offsetClause = seekFilter || seekEntry ? '' : `\n        OFFSET ${entryOffset}`;
+      // Keep the no-cursor query compact and compatible with adapters and
+      // instrumentation that recognize the established one-line graph
+      // pattern.  Cursor pages need the expanded form for their FILTER.
+      const graphPattern = seekFilter
+        ? `GRAPH <${assertSafeIri(entry.graph)}> {
+            ?s ?p ?o
+            FILTER(${seekFilter})
+          }`
+        : `GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }`;
       const result = await store.query(`
         SELECT ?s ?p ?o WHERE {
-          GRAPH <${assertSafeIri(entry.graph)}> {
-            ?s ?p ?o
-            ${seekFilter ? `FILTER(${seekFilter})` : ''}
-          }
+          ${graphPattern}
         }
         ORDER BY ?s ?p ?o
         ${offsetClause}
