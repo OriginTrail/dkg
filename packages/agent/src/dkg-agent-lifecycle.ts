@@ -4640,6 +4640,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options: {
       selectedSwmRetry?: boolean;
       rfc64RecoveryPlan?: Readonly<Rfc64AuthorizedSwmRecoveryPlanV1>;
+      /** Accepted RFC-64 authority exposed a scope hidden from the prior pass. */
+      authorityScopeChanged?: boolean;
     } = {},
   ): boolean {
     if (!this.peerSyncSession.checkpoint()) return false;
@@ -4653,6 +4655,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
       return false;
     }
+    const authorityScopeChanged = options.authorityScopeChanged === true;
+    if (authorityScopeChanged) this.peerSyncSession.clearBackoff(remotePeer);
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
     const exactRecoveryPlan = options.rfc64RecoveryPlan;
@@ -4668,6 +4672,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const { lastSuccessfulSync } = admissionState;
     if (
       !selectedSwmRetryRequired &&
+      !authorityScopeChanged &&
       lastSuccessfulSync != null &&
       lastSuccessfulSync > disconnectBoundary &&
       now - lastSuccessfulSync < syncTiming.stalenessThresholdMs
@@ -4697,10 +4702,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // One exact post-catalog recovery may arrive just after an ordinary
       // timer completed. Its dedicated timestamp above permits that upgrade
       // once while keeping subsequent periodic exact plans bounded.
-      if (exactRecoveryPlan === undefined) return false;
+      if (exactRecoveryPlan === undefined && !authorityScopeChanged) return false;
     }
 
-    if (backoff && now < backoff.nextRetryAt) {
+    if (!authorityScopeChanged && backoff && now < backoff.nextRetryAt) {
       return false;
     }
 

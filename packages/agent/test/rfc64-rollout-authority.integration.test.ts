@@ -2000,18 +2000,42 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('retries superseded runtime refreshes and suppresses committed unchanged revisions', async () => {
     const revision = `0x${'ab'.repeat(32)}`;
-    const readRevisions = vi.fn(async () => new Map([['9', revision]]));
+    let holdNextRevisionRead = false;
+    let markRevisionReadStarted!: () => void;
+    let releaseRevisionRead!: () => void;
+    const revisionReadStarted = new Promise<void>((resolve) => {
+      markRevisionReadStarted = resolve;
+    });
+    const revisionReadGate = new Promise<void>((resolve) => {
+      releaseRevisionRead = resolve;
+    });
+    const readRevisions = vi.fn(async () => {
+      if (holdNextRevisionRead) {
+        holdNextRevisionRead = false;
+        markRevisionReadStarted();
+        await revisionReadGate;
+      }
+      return new Map([['9', revision]]);
+    });
     const { authoritySnapshot, edge, runtime } =
       await prepareAuthorityRefreshLifecycle(readRevisions);
     const subscription = edge.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID);
     expect(subscription).toBeDefined();
     (edge as any).bindSubscriptionOnChainId(CONTEXT_GRAPH_ID, subscription, '9');
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
     const reconcile = vi.spyOn(edge, 'reconcileRfc64CatalogAccessAuthorityV1')
       .mockResolvedValueOnce(null)
       .mockResolvedValue(authoritySnapshot as never);
     vi.useFakeTimers();
     try {
+      holdNextRevisionRead = true;
       runtime.start(createOperationContext('system'));
+      await revisionReadStarted;
+      // Make the coalesced selection change explicit while the first selector
+      // is physically in flight; relying on unrelated responsibility-owner
+      // microtask ordering made this assertion scheduler-dependent.
+      (edge as any).rfc64PublicCatalogOwnerV1.requestAuthorityRefresh();
+      releaseRevisionRead();
       await runtime.whenIdle();
       // Runtime startup coalesces one responsibility update behind its initial
       // pass. The first result is superseded; the follow-up must therefore run
@@ -3062,6 +3086,14 @@ describe('RFC-64 rollout authority integration', () => {
 
     const staleRefresh = curator.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
     await staleVersionRead;
+    // A refresh must not create a transport outage while it reads the next
+    // finalized generation. The already accepted snapshot remains the latest
+    // finalized authority until this attempt either commits or blocks.
+    expect(curator.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+    expect(curator.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+    expect(curator.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId)).toBe(true);
     const currentAuthority = await curator.reconcileRfc64CatalogAccessAuthorityV1(
       contextGraphId,
     );

@@ -492,6 +492,8 @@ const rfc64CatalogAuthorityProgressV1 =
   new WeakMap<DKGAgent, Map<string, Rfc64CatalogAuthorityProgressV1>>();
 const rfc64CatalogAuthorityRevisionsV1 =
   new WeakMap<DKGAgent, Map<string, number>>();
+const rfc64AuthorityAcceptedCatchupTimersV1 =
+  new WeakMap<DKGAgent, ReturnType<typeof setTimeout>>();
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64ResponsibilityAuthorityBatchRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1>();
@@ -2198,6 +2200,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
       return null;
     }
+    const previousAuthorityProgress = rfc64CatalogAuthorityProgressV1
+      .get(this)?.get(contextGraphId);
     const authorityRevision = nextRfc64CatalogAuthorityRevisionV1(this, contextGraphId);
     setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
       state: 'resolving',
@@ -2414,7 +2418,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         policyDigest: authority.policyDigest,
         roster: authority.roster,
       });
-      if (rfc64CatalogAuthorityGenerationChangedV1(previousAuthority, acceptedAuthority)) {
+      const authorityGenerationChanged = rfc64CatalogAuthorityGenerationChangedV1(
+        previousAuthority,
+        acceptedAuthority,
+      );
+      if (authorityGenerationChanged) {
         service.deactivateReceiverContextGraph(contextGraphId);
         this.clearRfc64CatalogOperationalTargetsV1(contextGraphId);
       }
@@ -2426,6 +2434,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         reason: null,
         updatedAtMs: Date.now(),
       });
+      // A first subscription attempt can race this authority bootstrap and
+      // correctly fail closed. Re-enter the idempotent transport reconciler
+      // exactly when authority becomes usable (or its generation changes),
+      // rather than on every periodic unchanged refresh.
+      if (previousAuthorityProgress?.state !== 'accepted' || authorityGenerationChanged) {
+        this.queueSharedMemoryGossipSubscription(contextGraphId);
+        this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
+      }
       await this.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
       return authority;
     } catch (error) {
@@ -2446,6 +2462,40 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       throw error;
     }
+  }
+
+  /**
+   * Coalesce a batch of accepted authority transitions into one connected-peer
+   * catch-up. A peer may have completed an ordinary sync while those graphs
+   * were correctly denied as pending; the resulting freshness stamp must not
+   * suppress the first pass with the newly accepted scope.
+   */
+  private scheduleRfc64AuthorityAcceptedPeerCatchupV1(this: DKGAgent): void {
+    const existing = rfc64AuthorityAcceptedCatchupTimersV1.get(this);
+    if (existing !== undefined) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      if (rfc64AuthorityAcceptedCatchupTimersV1.get(this) !== timer) return;
+      rfc64AuthorityAcceptedCatchupTimersV1.delete(this);
+      if (!this.started) return;
+      for (const peer of this.node.libp2p.getPeers()) {
+        const peerId = peer.toString();
+        this.queueSyncFromPeerOnConnect(
+          peerId,
+          (failedPeerId, error) => {
+            this.log.warn(
+              createOperationContext('sync'),
+              `RFC-64 authority catch-up from ${failedPeerId.slice(-8)} failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          },
+          0,
+          { authorityScopeChanged: true },
+        );
+      }
+    }, 3_000);
+    (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
+    rfc64AuthorityAcceptedCatchupTimersV1.set(this, timer);
   }
 
   /**
@@ -2498,8 +2548,28 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       killSwitchActive: this.config.rfc64CatalogExecutionPlan.killSwitchActive,
     });
     const authorityProgress = rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId);
+    const service = this.rfc64PublicCatalogServiceV1;
+    const networkId = (
+      this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId
+    ) as NetworkIdV1 | undefined;
+    // A refresh reads a newer finalized snapshot before replacing the one the
+    // service has already accepted. The prior snapshot remains the latest
+    // finalized authority during that read; temporarily disabling its receiver
+    // would make every concurrent SHARE/sync fail closed and create a recovery
+    // hole on each periodic refresh. A terminal blocked result still disables
+    // the receiver below.
+    const retainsAcceptedAuthorityWhileRefreshing = authorityProgress?.state === 'resolving'
+      && service !== undefined
+      && networkId !== undefined
+      && networkId !== 'none'
+      && service.acceptedPolicySnapshot(
+        networkId,
+        contextGraphId as ContextGraphIdV1,
+      ) !== null;
     return selection.active && selection.mode !== 'legacy'
       && authorityProgress?.state !== 'accepted'
+      && !retainsAcceptedAuthorityWhileRefreshing
       ? projectRfc64CatalogReceiverAuthorityV1(resolved, { active: false })
       : resolved;
   }
@@ -2527,8 +2597,22 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       killSwitchActive: this.config.rfc64CatalogExecutionPlan.killSwitchActive,
     });
     const authorityProgress = rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId);
+    const service = this.rfc64PublicCatalogServiceV1;
+    const networkId = (
+      this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId
+    ) as NetworkIdV1 | undefined;
+    const retainsAcceptedAuthorityWhileRefreshing = authorityProgress?.state === 'resolving'
+      && service !== undefined
+      && networkId !== undefined
+      && networkId !== 'none'
+      && service.acceptedPolicySnapshot(
+        networkId,
+        contextGraphId as ContextGraphIdV1,
+      ) !== null;
     return selection.active && selection.mode !== 'legacy'
       && authorityProgress?.state !== 'accepted'
+      && !retainsAcceptedAuthorityWhileRefreshing
       ? projectRfc64CatalogReceiverAuthorityV1(resolved, { active: false })
       : resolved;
   }
