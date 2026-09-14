@@ -22,8 +22,14 @@ export interface OxigraphWalMaintenanceOptions {
   cancel?: (handle: IntervalHandle) => void;
 }
 
+export interface OxigraphWalMaintenanceActivityLease {
+  report(activeOperations: number): void;
+  dispose(): void;
+}
+
 export interface OxigraphWalMaintenanceCoordinator {
   reportActivity(activeOperations: number): void;
+  registerActivity(): OxigraphWalMaintenanceActivityLease;
   serverLifecycleChanged(): void;
   stop(): void;
 }
@@ -51,13 +57,18 @@ export function createOxigraphWalMaintenanceCoordinator(
   const now = options.now ?? Date.now;
   const schedule = options.schedule ?? setInterval;
   const cancel = options.cancel ?? clearInterval;
-  let activeOperations = 0;
+  let legacyActiveOperations = 0;
+  const activitySources = new Map<symbol, number>();
   let idleSince: number | null = null;
   let lastRestartAt = Number.NEGATIVE_INFINITY;
   let stopped = false;
 
+  const totalActiveOperations = (): number => legacyActiveOperations
+    + [...activitySources.values()].reduce((sum, active) => sum + active, 0);
+
   const evaluate = (): void => {
     const observedAt = now();
+    const activeOperations = totalActiveOperations();
     if (!options.serverAvailable() || activeOperations !== 0) {
       idleSince = null;
       return;
@@ -94,22 +105,46 @@ export function createOxigraphWalMaintenanceCoordinator(
   const timer = schedule(evaluate, checkIntervalMs);
   timer.unref?.();
 
+  const updateActivity = (activeOperations: number): void => {
+    if (activeOperations > 0) idleSince = null;
+    else if (options.serverAvailable() && idleSince === null) idleSince = now();
+  };
+
   return {
     reportActivity(active: number): void {
       if (stopped) return;
       if (!Number.isSafeInteger(active) || active < 0) return;
-      activeOperations = active;
-      if (active > 0) idleSince = null;
-      else if (options.serverAvailable() && idleSince === null) idleSince = now();
+      legacyActiveOperations = active;
+      updateActivity(totalActiveOperations());
+    },
+    registerActivity(): OxigraphWalMaintenanceActivityLease {
+      const key = Symbol('oxigraph-store-activity');
+      activitySources.set(key, 0);
+      let disposed = false;
+      return {
+        report(active: number): void {
+          if (stopped || disposed) return;
+          if (!Number.isSafeInteger(active) || active < 0) return;
+          activitySources.set(key, active);
+          updateActivity(totalActiveOperations());
+        },
+        dispose(): void {
+          if (disposed) return;
+          disposed = true;
+          activitySources.delete(key);
+          updateActivity(totalActiveOperations());
+        },
+      };
     },
     serverLifecycleChanged(): void {
       if (stopped) return;
-      idleSince = options.serverAvailable() && activeOperations === 0 ? now() : null;
+      idleSince = options.serverAvailable() && totalActiveOperations() === 0 ? now() : null;
     },
     stop(): void {
       if (stopped) return;
       stopped = true;
       idleSince = null;
+      activitySources.clear();
       cancel(timer);
     },
   };

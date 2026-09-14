@@ -453,9 +453,7 @@ export async function startManagedOxigraph(
   }
   const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig, {
     getRecoveryState: () => handle.getRecoveryState(),
-    onActivityChange: (activeOperations: number) => {
-      handle.reportStoreActivity(activeOperations);
-    },
+    registerActivity: () => handle.registerStoreActivity(),
     onClientTimeout: (operation: string) => {
       if (operation !== 'query' && operation !== 'construct') return;
       handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);

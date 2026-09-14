@@ -513,6 +513,36 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('preserves the generic timeout callback without managed authority', async () => {
+    const originalFetch = globalThis.fetch;
+    const timedOutOperations: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason),
+          { once: true },
+        );
+      })) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://example.test/query',
+        timeout: 5,
+        onClientTimeout: (operation) => timedOutOperations.push(operation),
+      });
+      await expect(store.hasGraph('urn:generic-timeout-graph')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        backend: 'sparql-http',
+        operation: 'query',
+        storeOperation: 'hasGraph',
+        timeoutMs: 5,
+      });
+      expect(timedOutOperations).toEqual(['query']);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('preserves legacy one-argument managed hook placement', async () => {
     const originalFetch = globalThis.fetch;
     const timedOutOperations: string[] = [];
@@ -1717,6 +1747,78 @@ describe('SparqlHttpStore (test server)', () => {
       releases[1]!();
       await second;
       expect(activity).toEqual([1, 2, 1, 0]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('aggregates activity independently for two stores sharing one runtime', async () => {
+    const originalFetch = globalThis.fetch;
+    const releases: Array<() => void> = [];
+    const activeByStore = new Map<symbol, number>();
+    const aggregateActivity: number[] = [];
+    const registerActivity = () => {
+      const key = Symbol('store');
+      activeByStore.set(key, 0);
+      return {
+        report(active: number) {
+          activeByStore.set(key, active);
+          aggregateActivity.push([...activeByStore.values()].reduce((sum, value) => sum + value, 0));
+        },
+        dispose() {
+          activeByStore.delete(key);
+        },
+      };
+    };
+    globalThis.fetch = (async () => await new Promise<Response>((resolve) => {
+      releases.push(() => resolve(new Response(
+        JSON.stringify({ head: {}, boolean: true }),
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      )));
+    })) as typeof fetch;
+    try {
+      const options = { queryEndpoint: 'http://127.0.0.1:7878/query' };
+      const firstStore = createManagedOxigraphSparqlStoreV1(options, { registerActivity });
+      const secondStore = createManagedOxigraphSparqlStoreV1(options, { registerActivity });
+      const first = firstStore.query('ASK { ?s ?p ?o }');
+      const second = secondStore.query('ASK { ?s ?p ?o }');
+      while (releases.length < 2) await Promise.resolve();
+      expect(aggregateActivity).toContain(2);
+
+      releases[0]!();
+      await first;
+      expect(aggregateActivity.at(-1)).toBe(1);
+      releases[1]!();
+      await second;
+      expect(aggregateActivity.at(-1)).toBe(0);
+      await firstStore.close();
+      await secondStore.close();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('keeps the managed activity fence busy during an in-flight mutation', async () => {
+    const originalFetch = globalThis.fetch;
+    let release!: () => void;
+    const response = new Promise<Response>((resolve) => {
+      release = () => resolve(new Response('', { status: 200 }));
+    });
+    const activity: number[] = [];
+    globalThis.fetch = (async () => response) as typeof fetch;
+    try {
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+        updateEndpoint: 'http://127.0.0.1:7878/update',
+      }, {
+        onActivityChange: (activeOperations) => activity.push(activeOperations),
+      });
+      const updating = store.update('INSERT DATA { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "o" } }');
+      while (activity.at(-1) !== 1) await Promise.resolve();
+      expect(activity.at(-1)).toBe(1);
+      release();
+      await updating;
+      expect(activity.at(-1)).toBe(0);
     } finally {
       globalThis.fetch = originalFetch;
     }

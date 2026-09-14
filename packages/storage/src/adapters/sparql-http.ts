@@ -86,6 +86,7 @@ import {
   getManagedOxigraphRuntimeHooksV1,
   isManagedOxigraphRuntimeConstructionAuthorityV1,
   snapshotManagedOxigraphRuntimeOptionsV1,
+  type ManagedOxigraphRuntimeActivityLeaseV1,
   type ManagedOxigraphRuntimeHooksV1,
   type ManagedOxigraphRuntimeStateV1,
 } from '../managed-oxigraph-runtime-store.js';
@@ -289,6 +290,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly managedOxigraph: boolean;
   private readonly onClientTimeout?: (operation: string) => void;
   private readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
+  private managedActivityLease: ManagedOxigraphRuntimeActivityLeaseV1 | null = null;
   private readonly consistencyProfile: SparqlHttpConsistencyProfile;
   private readonly scheduler: StorePriorityScheduler;
 
@@ -327,8 +329,13 @@ export class SparqlHttpStore implements TripleStore {
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
-    this.onClientTimeout = managedRuntimeHooks?.onClientTimeout;
+    // Preserve the long-standing generic timeout observer. Managed runtime
+    // hooks take precedence only when authenticated authority was supplied;
+    // the ordinary adapter must not lose its callback merely because daemon
+    // hooks now travel through the opaque construction context.
+    this.onClientTimeout = managedRuntimeHooks?.onClientTimeout ?? options.onClientTimeout;
     this.getRecoveryState = managedRuntimeHooks?.getRecoveryState;
+    this.managedActivityLease = this.openManagedActivityLease(managedRuntimeHooks);
     this.workLifecycle = new AbortableStoreWorkLifecycle({
       onActivityChange: (activeOperations) => {
         this.activeStoreOperations = activeOperations;
@@ -382,9 +389,26 @@ export class SparqlHttpStore implements TripleStore {
     hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
   ): void {
     try {
-      hooks?.onActivityChange?.(this.activeStoreOperations + this.retainedManagedReads);
+      const activeOperations = this.activeStoreOperations + this.retainedManagedReads;
+      if (hooks?.registerActivity) {
+        this.managedActivityLease ??= this.openManagedActivityLease(hooks);
+        this.managedActivityLease?.report(activeOperations);
+      } else {
+        hooks?.onActivityChange?.(activeOperations);
+      }
     } catch {
       // Runtime observation cannot alter store operation semantics.
+    }
+  }
+
+  private openManagedActivityLease(
+    hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
+  ): ManagedOxigraphRuntimeActivityLeaseV1 | null {
+    if (!hooks?.registerActivity) return null;
+    try {
+      return hooks.registerActivity();
+    } catch {
+      return null;
     }
   }
 
@@ -1291,6 +1315,12 @@ export class SparqlHttpStore implements TripleStore {
     // operation admitted before close while rejecting work attempted during
     // close. A fresh generation is installed only after the drain completes.
     await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
+    try {
+      this.managedActivityLease?.dispose();
+    } catch {
+      // Runtime observation cannot alter store close semantics.
+    }
+    this.managedActivityLease = null;
   }
 }
 

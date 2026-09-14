@@ -206,6 +206,7 @@ export {
 export {
   createManagedOxigraphRuntimeStoreConfigV1,
   withManagedOxigraphRuntimeStoreConfigV1,
+  type ManagedOxigraphRuntimeActivityLeaseV1,
   type ManagedOxigraphRuntimeHooksV1,
   type ManagedOxigraphRuntimeStoreConfigV1,
 } from './managed-oxigraph-runtime-store.js';

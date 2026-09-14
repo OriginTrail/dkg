@@ -825,7 +825,20 @@ describe('startManagedOxigraph (real download + real server)', () => {
             updateEndpoint: `http://127.0.0.1:${port}/update`,
           },
         });
-        const reportStoreActivity = vi.spyOn(result!.handle, 'reportStoreActivity');
+        const activityReports: number[] = [];
+        const originalRegisterStoreActivity = result!.handle.registerStoreActivity.bind(result!.handle);
+        const registerStoreActivity = vi
+          .spyOn(result!.handle, 'registerStoreActivity')
+          .mockImplementation(() => {
+            const lease = originalRegisterStoreActivity();
+            return {
+              report: (activeOperations: number) => {
+                activityReports.push(activeOperations);
+                lease.report(activeOperations);
+              },
+              dispose: () => lease.dispose(),
+            };
+          });
         const runtimeStore = await createTripleStore(result!.storeConfig);
         try {
           expect(() => new SyncSharedProjectionStoreV1(runtimeStore)).not.toThrow();
@@ -833,8 +846,9 @@ describe('startManagedOxigraph (real download + real server)', () => {
             type: 'boolean',
             value: false,
           });
-          expect(reportStoreActivity).toHaveBeenCalledWith(1);
-          expect(reportStoreActivity).toHaveBeenLastCalledWith(0);
+          expect(registerStoreActivity).toHaveBeenCalledOnce();
+          expect(activityReports).toContain(1);
+          expect(activityReports.at(-1)).toBe(0);
         } finally {
           await runtimeStore.close();
         }

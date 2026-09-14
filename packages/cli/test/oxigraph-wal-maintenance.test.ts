@@ -122,6 +122,39 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     expect(measureRetainedWalBytes).toHaveBeenCalledTimes(2);
   });
 
+  it('aggregates activity from independent store leases', () => {
+    const requestRestart = vi.fn(() => true);
+    const controlled = controlledCoordinator({ requestRestart });
+    controlled.setServerAvailable(true);
+    const first = controlled.coordinator.registerActivity();
+    const second = controlled.coordinator.registerActivity();
+
+    first.report(1);
+    second.report(0);
+    controlled.setNow(80);
+    controlled.tick();
+    expect(requestRestart).not.toHaveBeenCalled();
+
+    // Releasing one adapter while the other remains busy must not open the
+    // maintenance window.
+    first.report(0);
+    second.report(1);
+    controlled.setNow(160);
+    controlled.tick();
+    expect(requestRestart).not.toHaveBeenCalled();
+
+    second.report(0);
+    controlled.setNow(239);
+    controlled.tick();
+    expect(requestRestart).not.toHaveBeenCalled();
+    controlled.setNow(240);
+    controlled.tick();
+    expect(requestRestart).toHaveBeenCalledOnce();
+
+    first.dispose();
+    second.dispose();
+  });
+
   it('contains measurement failures and stops its timer', () => {
     const log = vi.fn();
     const controlled = controlledCoordinator({

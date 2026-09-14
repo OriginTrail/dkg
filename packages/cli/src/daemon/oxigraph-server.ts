@@ -44,6 +44,7 @@ import {
 import {
   createOxigraphWalMaintenanceCoordinator,
   resolveWalRestartThresholdBytes,
+  type OxigraphWalMaintenanceActivityLease,
 } from './oxigraph-wal-maintenance.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { findListenOwnerPid } from './oxigraph-listen-port.js';
@@ -140,6 +141,8 @@ export interface OxigraphServerHandle {
   requestRestart(reason: string): boolean;
   /** Runtime-only store activity signal used to fence WAL maintenance. */
   reportStoreActivity(activeOperations: number): void;
+  /** Register one store's activity when a supervisor is shared by adapters. */
+  registerStoreActivity(): OxigraphWalMaintenanceActivityLease;
   /** Runtime-only recovery state consumed by the managed SPARQL adapter. */
   getRecoveryState(): OxigraphRecoveryState;
   /** Stop the server and prevent further restarts. Idempotent. */
@@ -596,6 +599,8 @@ export async function startOxigraphServer(
   const reportStoreActivity = (activeOperations: number): void => {
     walMaintenance.reportActivity(activeOperations);
   };
+  const registerStoreActivity = (): OxigraphWalMaintenanceActivityLease =>
+    walMaintenance.registerActivity();
 
   const getRecoveryState = (): OxigraphRecoveryState => ({
     recovering: lifecycle.phase === 'restart-verifying'
@@ -733,6 +738,7 @@ export async function startOxigraphServer(
           updateEndpoint,
           requestRestart,
           reportStoreActivity,
+          registerStoreActivity,
           getRecoveryState,
           stop,
           killSync,

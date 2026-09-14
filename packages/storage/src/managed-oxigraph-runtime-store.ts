@@ -2,10 +2,23 @@ import type { TripleStoreConfig } from './triple-store.js';
 
 const MANAGED_RUNTIME_CONTEXT = Symbol('dkg.managed-oxigraph-runtime-v1');
 const managedRuntimeContexts = new WeakSet<object>();
+const MANAGED_RUNTIME_DECORATOR_KEYS = [
+  'largeLiteralStorage',
+  'graphSetIndex',
+  'changelog',
+] as const;
+type ManagedRuntimeDecoratorKey = typeof MANAGED_RUNTIME_DECORATOR_KEYS[number];
+type ManagedRuntimeDecorators = Pick<TripleStoreConfig, ManagedRuntimeDecoratorKey>;
 
 export interface ManagedOxigraphRuntimeStateV1 {
   readonly recovering: boolean;
   readonly generation: number;
+}
+
+/** Per-adapter activity lease used when more than one store shares a runtime. */
+export interface ManagedOxigraphRuntimeActivityLeaseV1 {
+  report(activeOperations: number): void;
+  dispose(): void;
 }
 
 /** Runtime control plane supplied only by the daemon-owned construction path. */
@@ -13,6 +26,8 @@ export interface ManagedOxigraphRuntimeHooksV1 {
   readonly onClientTimeout?: (operation: string) => void;
   readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
   readonly onActivityChange?: (activeOperations: number) => void;
+  /** Prefer a per-store lease so a shared supervisor can aggregate activity. */
+  readonly registerActivity?: () => ManagedOxigraphRuntimeActivityLeaseV1;
 }
 
 interface ManagedOxigraphRuntimeContextV1 {
@@ -109,15 +124,7 @@ export function createManagedOxigraphRuntimeStoreConfigV1(
   const runtimeConfig = {
     backend: 'sparql-http' as const,
     options,
-    ...(config.largeLiteralStorage === undefined
-      ? {}
-      : { largeLiteralStorage: config.largeLiteralStorage }),
-    ...(config.graphSetIndex === undefined
-      ? {}
-      : { graphSetIndex: config.graphSetIndex }),
-    ...(config.changelog === undefined
-      ? {}
-      : { changelog: config.changelog }),
+    ...copyManagedRuntimeDecorators(config),
   } as ManagedOxigraphRuntimeStoreConfigV1;
   Object.defineProperty(runtimeConfig, MANAGED_RUNTIME_CONTEXT, {
     configurable: false,
@@ -144,18 +151,27 @@ export function withManagedOxigraphRuntimeStoreConfigV1(
   if (hooks === undefined) {
     throw new Error('managed Oxigraph runtime config has no authenticated control plane');
   }
-  const decorator = <K extends 'largeLiteralStorage' | 'graphSetIndex' | 'changelog'>(
-    key: K,
-  ): TripleStoreConfig[K] => Object.prototype.hasOwnProperty.call(updates, key)
-    ? updates[key]
-    : config[key];
   return createManagedOxigraphRuntimeStoreConfigV1({
     backend: config.backend,
     options: config.options,
-    largeLiteralStorage: decorator('largeLiteralStorage'),
-    graphSetIndex: decorator('graphSetIndex'),
-    changelog: decorator('changelog'),
+    ...copyManagedRuntimeDecorators(config, updates),
   }, hooks);
+}
+
+/** Copy and merge the complete decorator model in one descriptor-free pass. */
+function copyManagedRuntimeDecorators(
+  source: TripleStoreConfig,
+  updates?: Readonly<Partial<ManagedRuntimeDecorators>>,
+): Partial<ManagedRuntimeDecorators> {
+  const decorators: Partial<ManagedRuntimeDecorators> = {};
+  for (const key of MANAGED_RUNTIME_DECORATOR_KEYS) {
+    const value = updates !== undefined
+      && Object.prototype.hasOwnProperty.call(updates, key)
+      ? updates[key]
+      : source[key];
+    if (value !== undefined) decorators[key] = value;
+  }
+  return decorators;
 }
 
 /** @internal Read only by the generic construction boundary before cloning. */
