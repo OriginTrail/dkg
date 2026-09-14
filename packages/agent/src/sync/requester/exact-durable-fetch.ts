@@ -159,11 +159,12 @@ export function classifyExactDurableFetch(params: {
 }
 
 /**
- * Detect the rolling-upgrade case where an older responder ignored the
- * additive exact filter and returned a clean bounded prefix that omitted the
- * requested descriptor. Fresh empty exact responses remain ordinary clean
- * absence; incomplete, rejected, or challenge-pinned responses do not produce
- * capability evidence.
+ * Detect the rolling-upgrade case where an older responder ignored a singleton
+ * exact filter and returned a clean bounded prefix that omitted the requested
+ * descriptor. A partial batched hit is not negative capability evidence: a
+ * capable responder may legitimately hold only some requested assets. Fresh
+ * empty exact responses remain ordinary clean absence; incomplete, rejected,
+ * or challenge-pinned responses do not produce capability evidence.
  */
 export function classifyExactAssetResponderCapability(params: {
   requestedAssetCount: number;
@@ -175,7 +176,7 @@ export function classifyExactAssetResponderCapability(params: {
   dataRejectedMissingMeta: number;
 }): ExactAssetResponderCapability | undefined {
   if (
-    params.requestedAssetCount === 0
+    params.requestedAssetCount !== 1
     || !params.metaFetched
     || !isCleanExactPhase(params.metaResult)
     || !isCleanExactPhase(params.dataResult)

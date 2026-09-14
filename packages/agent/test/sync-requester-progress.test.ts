@@ -31,6 +31,7 @@ function durableFetchRecorder(
   return recorder(impl);
 }
 const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
+const MISSING_EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/8';
 
 function deniedError(): Error & { syncDenied: boolean } {
   const err = new Error('access denied') as Error & { syncDenied: boolean };
@@ -1429,6 +1430,7 @@ describe('exact durable fetch disposition', () => {
     dataRejectedMissingMeta?: number;
     fetchError?: Error;
     abortAfterMeta?: boolean;
+    exactUals?: string[];
   } = {}) {
     const controller = new AbortController();
     return runDurableSyncDetailed({
@@ -1436,7 +1438,9 @@ describe('exact durable fetch disposition', () => {
       remotePeerId: 'exact-peer',
       contextGraphIds: ['exact-cg'],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection([EXACT_UAL]),
+      exactAssetSelectionFor: () => createUalOnlyExactAssetSelection(
+        options.exactUals ?? [EXACT_UAL],
+      ),
       fetchSyncPages: async ({ phase }) => {
         if (options.fetchError) throw options.fetchError;
         const page = pageResult('exact-cg', phase, {
@@ -1548,6 +1552,38 @@ describe('exact durable fetch disposition', () => {
     });
     expect(detailed.exactFetchDisposition).toBe('incomplete');
     expect(detailed.exactResponderCapability).toBe('legacy-filter-unsupported');
+  });
+
+  it('does not infer legacy capability from a partial batched hit', async () => {
+    const assertionGraph = 'did:dkg:context-graph:exact-cg/_verifiable_memory/asset/7';
+    const detailed = await runExact({
+      exactUals: [EXACT_UAL, MISSING_EXACT_UAL],
+      rawMeta: [
+        {
+          subject: EXACT_UAL,
+          predicate: 'http://dkg.io/ontology/kaUal',
+          object: EXACT_UAL,
+          graph: 'did:dkg:context-graph:exact-cg/_meta',
+        } as Quad,
+        {
+          subject: EXACT_UAL,
+          predicate: 'http://dkg.io/ontology/assertionGraph',
+          object: assertionGraph,
+          graph: 'did:dkg:context-graph:exact-cg/_meta',
+        } as Quad,
+      ],
+      rawData: [{
+        subject: 'http://example.com/entity',
+        predicate: 'http://example.com/value',
+        object: '"present"',
+        graph: assertionGraph,
+      } as Quad],
+      meta: { nextOffset: 2 },
+      data: { nextOffset: 1 },
+    });
+
+    expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed).not.toHaveProperty('exactResponderCapability');
   });
 
   it('does not verify or store an exact phase rejected by its accumulation limit', async () => {

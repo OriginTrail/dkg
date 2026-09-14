@@ -3003,14 +3003,21 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     (internals as any).selectCatchupPeers = () => [connectedPeer];
     (internals as any).waitForSyncProtocol = async () => true;
     (internals as any).ensurePeerAdmittedForRecovery = async () => true;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => ({
-      result: {
-        fetchedDataTriples: 0, fetchedMetaTriples: 1, insertedTriples: 0,
-        failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
-      },
-      disposition: 'incomplete',
-      responderCapability: 'legacy-filter-unsupported',
-    });
+    const exactFetches: string[] = [];
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      _peerId: string,
+      contextGraphId: string,
+    ) => {
+      exactFetches.push(contextGraphId);
+      return {
+        result: {
+          fetchedDataTriples: 0, fetchedMetaTriples: 1, insertedTriples: 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: 'incomplete',
+        responderCapability: 'legacy-filter-unsupported',
+      };
+    };
     const fallbacks: unknown[][] = [];
     (internals as any).runLegacyDurableSyncDetailed = async (...args: unknown[]) => {
       fallbacks.push(args);
@@ -3034,6 +3041,20 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(fallbacks[0]?.slice(1, 4)).toEqual([peerId, [localCgId], undefined]);
     expect((internals as any).vmReconcileExactPeerCapabilities.get(peerId))
       .toMatchObject({ connectionKey: expect.any(String), expiresAt: expect.any(Number) });
+
+    const nextCgId = '0x0000000000000000000000000000000000000001/legacy-capability-next';
+    const nextTarget = {
+      ...vmRecoveryTarget(nextCgId, 0, 'legacy-capability-next'),
+      onChainCgId: '2',
+    };
+    const nextResult = await internals.recoverVmReconcileBatch(
+      nextCgId, 2n, [nextTarget], 100, () => true,
+    );
+
+    expect(nextResult.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(exactFetches).toEqual([localCgId]);
+    expect(fallbacks).toHaveLength(2);
+    expect(fallbacks[1]?.slice(1, 4)).toEqual([peerId, [nextCgId], undefined]);
   });
 
   it('expires or invalidates remembered legacy capability when the connection changes', async () => {
@@ -3070,7 +3091,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect((internals as any).vmReconcileExactPeerCapabilities.has(peerId)).toBe(false);
   });
 
-  it('filters remembered legacy peers from a fresh exact-recovery candidate selection and bounds the cache', async () => {
+  it('keeps remembered legacy peers eligible for bounded fallback and bounds the cache', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmLegacyCapabilityBound', chainAdapter: chain });
     const internals = agent as unknown as AgentInternals;
@@ -3098,9 +3119,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const policy = new VmRecoveryProviderPolicy();
     expect((internals as any).selectVmReconcileExactCandidate(
       undefined,
-      [peerIds[0], peerIds[peerIds.length - 1]],
+      [peerIds[peerIds.length - 1]],
       policy,
-    )).toBe(peerIds[0]);
+    )).toBe(peerIds[peerIds.length - 1]);
     expect((internals as any).vmReconcileExactPeerCapabilities.size)
       .toBeLessThanOrEqual(DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES);
 
