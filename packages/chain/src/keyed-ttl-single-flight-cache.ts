@@ -158,14 +158,13 @@ interface AbortableSingleFlightState<V> {
  *
  * A caller abandoning its wait never poisons peers. When the final waiter
  * leaves, the physical operation is aborted and detached from the key so a
- * later caller can start fresh. Invalidation also aborts the current physical
- * request and advances an epoch, preventing an implementation that ignores
- * cancellation from publishing a stale success through `onSuccess`.
+ * later caller can start fresh. Invalidation also aborts and detaches the
+ * current physical request; the exact-state check prevents an implementation
+ * that ignores cancellation from publishing a stale success through
+ * `onSuccess`.
  */
 export class AbortableKeyedSingleFlight<K, V> {
   private readonly inflight = new Map<K, AbortableSingleFlightState<V>>();
-
-  private readonly epochs = new Map<K, number>();
 
   async run(
     key: K,
@@ -176,7 +175,6 @@ export class AbortableKeyedSingleFlight<K, V> {
   ): Promise<V> {
     let state = this.inflight.get(key);
     if (state === undefined) {
-      const epoch = this.epoch(key);
       const controller = new AbortController();
       state = {
         controller,
@@ -189,7 +187,7 @@ export class AbortableKeyedSingleFlight<K, V> {
       shared.promise = Promise.resolve()
         .then(() => load(controller.signal))
         .then((value) => {
-          if (onSuccess !== undefined && this.epoch(key) === epoch) onSuccess(value);
+          if (onSuccess !== undefined && this.inflight.get(key) === shared) onSuccess(value);
           return value;
         })
         .finally(() => {
@@ -206,7 +204,6 @@ export class AbortableKeyedSingleFlight<K, V> {
       state.waiters -= 1;
       if (state.waiters === 0 && !state.settled) {
         if (this.inflight.get(key) === state) this.inflight.delete(key);
-        this.bumpEpoch(key);
         const abandoned = new Error(abandonmentMessage);
         abandoned.name = 'AbortError';
         state.controller.abort(abandoned);
@@ -217,7 +214,6 @@ export class AbortableKeyedSingleFlight<K, V> {
   invalidate(key: K, reason = 'Shared request was invalidated'): void {
     const state = this.inflight.get(key);
     this.inflight.delete(key);
-    this.bumpEpoch(key);
     if (state !== undefined && !state.settled) {
       const invalidated = new Error(reason);
       invalidated.name = 'AbortError';
@@ -228,14 +224,6 @@ export class AbortableKeyedSingleFlight<K, V> {
   invalidateAll(reason = 'Shared requests were invalidated'): void {
     const keys = [...this.inflight.keys()];
     for (const key of keys) this.invalidate(key, reason);
-  }
-
-  private epoch(key: K): number {
-    return this.epochs.get(key) ?? 0;
-  }
-
-  private bumpEpoch(key: K): void {
-    this.epochs.set(key, this.epoch(key) + 1);
   }
 }
 

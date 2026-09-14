@@ -448,7 +448,7 @@ type ContextGraphRegistrationRoute =
   | { kind: 'name-hash' };
 
 /** The shared route order for ordinary registration and prepared cold reads. */
-export function selectContextGraphRegistrationRoute(
+function selectContextGraphRegistrationRoute(
   agent: {
     resolveContextGraphNameHashBindingTarget: OmitThisParameter<DKGAgent['resolveContextGraphNameHashBindingTarget']>;
   },
@@ -462,6 +462,13 @@ export function selectContextGraphRegistrationRoute(
 }
 
 export class ContextGraphRegistryMethods extends DKGAgentBase {
+  /** Cold name-hash route selected by the same boundary as scalar resolution. */
+  contextGraphRegistrationNameHashForBatch(this: DKGAgent, contextGraphId: string): string | undefined {
+    return selectContextGraphRegistrationRoute(this, contextGraphId).kind === 'name-hash'
+      ? this.contextGraphNameCommitment(contextGraphId)
+      : undefined;
+  }
+
   /**
    * Check whether a context graph has been registered on-chain.
    */

@@ -94,6 +94,27 @@ describe('unscoped query admission', () => {
       .resolves.toBe(false);
   });
 
+  it('returns on the first denial, aborts active siblings and leaves queued owners untouched', async () => {
+    const gates = contextGraphIds.map(() => deferred<boolean>());
+    const receivedSignals = new Map<string, AbortSignal>();
+    const canReadContextGraph = vi.fn(async (id: string, signal: AbortSignal) => {
+      receivedSignals.set(id, signal);
+      if (id === contextGraphIds[0]) return false;
+      return gates[contextGraphIds.indexOf(id)].promise;
+    });
+    const pending = canReadUnscopedQuery(admissionDependencies(canReadContextGraph));
+    try {
+      await expect(pending).resolves.toBe(false);
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+      expect([...receivedSignals.values()].every((signal) => signal.aborted)).toBe(true);
+      for (const gate of gates) gate.resolve(true);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+    } finally {
+      for (const gate of gates) gate.resolve(true);
+    }
+  });
+
   it('rejects promptly with the original authority failure and aborts pending siblings', async () => {
     const gates = contextGraphIds.map(() => deferred<boolean>());
     const receivedSignals = new Map<string, AbortSignal>();
@@ -160,7 +181,7 @@ describe('unscoped query admission', () => {
     expect(new Set(candidates)).toEqual(new Set(ids));
     expect(candidates).toHaveLength(ids.length);
     expect(signal).toBeInstanceOf(AbortSignal);
-    expect(prepared).toHaveBeenCalledTimes(ids.length);
+    expect(prepared.mock.calls.length).toBeLessThan(ids.length);
     expect(prepared).toHaveBeenCalledWith(ids[749], signal);
     expect(fallback).not.toHaveBeenCalled();
   });

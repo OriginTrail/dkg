@@ -37,8 +37,6 @@ export interface ContextGraphReadAuthorityInput {
   getPeerId(): string;
   getAllowedPeers(): Promise<string[] | null>;
   getRegisteredAuthority(): Promise<RegisteredContextGraphAuthority>;
-  /** Request-local registration evidence can only reject a contradictory read. */
-  expectedRegistrationId?: bigint;
   isAgentAllowed(agentAddress: string | undefined, roster: readonly string[]): boolean;
   hasLocalAgentInRoster(roster: readonly string[]): boolean;
   resolveRfc64PrivateRoster(): readonly string[] | null | undefined;
@@ -51,6 +49,21 @@ export interface ContextGraphReadAuthorityInput {
   getLegacyParticipants(): Promise<string[] | null>;
   hasLegacySubscription: boolean;
   getLocalIdentityId(): Promise<bigint>;
+}
+
+/**
+ * Request-local batch evidence interpreted only by the canonical resolver.
+ * Positive evidence is revalidated through the ordinary live authority read;
+ * negative or unavailable evidence replaces only the equivalent cold
+ * registration lookup. Metadata absence is usable only while its revision
+ * proof remains current.
+ */
+export interface ContextGraphReadAuthorityEvidence {
+  registration?:
+    | { kind: 'expected'; onChainId: bigint }
+    | { kind: 'unregistered' }
+    | { kind: 'unavailable' };
+  isLocalMetadataAbsent?: () => boolean;
 }
 
 const decision = (
@@ -69,16 +82,25 @@ const decision = (
 
 export async function resolveContextGraphReadAuthorityDecision(
   input: ContextGraphReadAuthorityInput,
+  evidence: ContextGraphReadAuthorityEvidence = {},
 ): Promise<ContextGraphReadAuthorityDecision> {
   if (input.isSystemContextGraph) {
     return decision('allowed', 'system', 'system-context-graph');
   }
 
   let registeredAuthority: RegisteredContextGraphAuthority;
-  try {
-    registeredAuthority = await input.getRegisteredAuthority();
-  } catch {
-    return decision('unavailable', 'registered-chain', 'registered-authority-error');
+  if (evidence.registration?.kind === 'unregistered') {
+    registeredAuthority = await Promise.resolve({ kind: 'unregistered' });
+  } else if (evidence.registration?.kind === 'unavailable') {
+    registeredAuthority = await Promise.resolve({
+      kind: 'unavailable', reason: 'chain-name-binding-unavailable',
+    });
+  } else {
+    try {
+      registeredAuthority = await input.getRegisteredAuthority();
+    } catch {
+      return decision('unavailable', 'registered-chain', 'registered-authority-error');
+    }
   }
   if (registeredAuthority.kind === 'unavailable') {
     return decision(
@@ -89,9 +111,9 @@ export async function resolveContextGraphReadAuthorityDecision(
     );
   }
   if (
-    input.expectedRegistrationId !== undefined
+    evidence.registration?.kind === 'expected'
     && (registeredAuthority.kind === 'unregistered'
-      || registeredAuthority.onChainId !== input.expectedRegistrationId)
+      || registeredAuthority.onChainId !== evidence.registration.onChainId)
   ) {
     return decision('unavailable', 'registered-chain', 'chain-name-binding-changed');
   }
@@ -144,7 +166,9 @@ export async function resolveContextGraphReadAuthorityDecision(
 
   let isPrivate: boolean;
   try {
-    isPrivate = await input.isPrivateLocalGraph();
+    isPrivate = evidence.isLocalMetadataAbsent?.() === true
+      ? false
+      : await input.isPrivateLocalGraph();
   } catch {
     return decision('unavailable', 'legacy-local', 'local-access-policy-unavailable');
   }

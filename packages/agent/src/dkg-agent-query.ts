@@ -13,7 +13,6 @@ import {
   prepareUnscopedContextGraphReadChecks,
   type ContextGraphReadCheck,
 } from './prepare-unscoped-context-graph-read-checks.js';
-import { selectContextGraphRegistrationRoute } from './dkg-agent-cg-registry.js';
 import { executeUnscopedQuery } from './unscoped-query-consistency.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -732,11 +731,7 @@ export class QueryMethods extends DKGAgentBase {
           this, id, { callerAgentAddress: opts.callerAgentAddress, signal }, CHAIN_POLICY_READ_TIMEOUT_MS,
         )
       ),
-      registrationNameHash: (id) => (
-        selectContextGraphRegistrationRoute(this, id).kind === 'name-hash'
-          ? this.contextGraphNameCommitment(id)
-          : undefined
-      ),
+      registrationNameHash: (id) => this.contextGraphRegistrationNameHashForBatch(id),
       findContextGraphIdsWithReadAuthorityFacts: (candidateIds, readSignal) => (
         this.contextGraphMetaProjection.findContextGraphIdsWithReadAuthorityFacts(candidateIds, { signal: readSignal })
       ),

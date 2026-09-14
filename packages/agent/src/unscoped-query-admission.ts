@@ -13,7 +13,7 @@ import {
   type ContextGraphQueryStore,
 } from './context-graph-query-candidates.js';
 import { strip } from './dkg-agent-utils.js';
-import { mapWithConcurrency } from './map-with-concurrency.js';
+import { everyWithConcurrency } from './map-with-concurrency.js';
 
 export interface UnscopedQueryAdmissionDependencies {
   store: ContextGraphQueryStore;
@@ -85,14 +85,16 @@ export async function canReadUnscopedQuery(
         ? await deps.prepareReadChecks(ids, signal)
         : deps.canReadContextGraph;
       signal.throwIfAborted();
-      const readable = await mapWithConcurrency(ids, 4, async (id) => {
+      return await everyWithConcurrency(ids, 4, async (id) => {
         signal.throwIfAborted();
         const allowed = await canRead(id, signal);
+        if (!allowed) {
+          stop.abort(new Error('Unscoped query denied by Context Graph read authority'));
+          return false;
+        }
         signal.throwIfAborted();
-        return allowed;
+        return true;
       });
-      signal.throwIfAborted();
-      return readable.every(Boolean);
     } finally {
       stop.abort();
     }

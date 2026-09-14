@@ -7,7 +7,6 @@ import {
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
-import { selectContextGraphRegistrationRoute } from '../src/dkg-agent-cg-registry.js';
 import { LOCAL_ID, NAME_HASH, selectedFixture } from './context-graph-registration-binding.fixture.js';
 import {
   resolveContextGraphReadAuthorityDecision,
@@ -154,15 +153,16 @@ describe('prepared unscoped Context Graph read checks', () => {
     expect(deps.isPrivateLocalGraph).toHaveBeenCalledOnce();
   });
 
-  it('uses the real registration selector for system, local, wire and numeric precedence', async () => {
+  it('uses the registry boundary for system, local, wire and numeric precedence', async () => {
     const { agent, subscription } = selectedFixture();
     const ids = [SYSTEM_CONTEXT_GRAPHS.AGENTS, LOCAL_ID, NAME_HASH, '42', 'cold-name'];
-    expect(ids.map((id) => selectContextGraphRegistrationRoute(agent, id).kind))
-      .toEqual(['system', 'local', 'local', 'numeric', 'name-hash']);
+    expect(ids.map((id) => agent.contextGraphRegistrationNameHashForBatch(id)))
+      .toEqual([undefined, undefined, undefined, undefined, 'cold-name']);
     const deps = dependencies();
-    deps.registrationNameHash.mockImplementation((id) => (
-      selectContextGraphRegistrationRoute(agent, id).kind === 'name-hash' ? commitment(id) : undefined
-    ));
+    deps.registrationNameHash.mockImplementation((id) => {
+      const name = agent.contextGraphRegistrationNameHashForBatch(id);
+      return name === undefined ? undefined : commitment(name);
+    });
     deps.inputs.set(SYSTEM_CONTEXT_GRAPHS.AGENTS, { isSystemContextGraph: true });
     const signal = new AbortController().signal;
     const check = await prepareUnscopedContextGraphReadChecks(deps, ids, signal);
@@ -171,7 +171,7 @@ describe('prepared unscoped Context Graph read checks', () => {
     for (const id of [LOCAL_ID, NAME_HASH, '42']) expect(await check(id, signal)).toBe(false);
     // A newly selected invalid binding cannot consume an earlier cold absence.
     agent.subscribedContextGraphs.set('cold-name', { ...subscription, onChainId: 'invalid' });
-    expect(selectContextGraphRegistrationRoute(agent, 'cold-name').kind).toBe('local');
+    expect(agent.contextGraphRegistrationNameHashForBatch('cold-name')).toBeUndefined();
     expect(await check('cold-name', signal)).toBe(false);
     expect(deps.getRegisteredAuthority.mock.calls.map(([id]) => id)).toEqual([LOCAL_ID, NAME_HASH, '42', 'cold-name']);
   });

@@ -52,7 +52,8 @@ interface ContextGraphNameHashResolutionCacheEntry {
 export class ContextGraphNameHashResolver {
   private globalInvalidationRevision = 0;
 
-  private readonly nameInvalidationRevisions = new Map<string, number>();
+  /** Per-name revisions exist only while a scalar result can still be delivered. */
+  private readonly activeNameInvalidations = new Map<string, { revision: number; readers: number }>();
 
   private readonly partitions: Readonly<Record<RpcRequestClass, {
     readonly cache: TtlValueCache<string, ContextGraphNameHashResolutionCacheEntry>;
@@ -79,53 +80,64 @@ export class ContextGraphNameHashResolver {
     const nameHash = normalizeContextGraphNameHash(rawNameHash);
     if (nameHash === ethers.ZeroHash) return null;
     const globalRevision = this.globalInvalidationRevision;
-    const nameRevision = this.nameInvalidationRevisions.get(nameHash) ?? 0;
+    const activeInvalidation = this.activeNameInvalidations.get(nameHash) ?? { revision: 0, readers: 0 };
+    activeInvalidation.readers += 1;
+    this.activeNameInvalidations.set(nameHash, activeInvalidation);
+    const nameRevision = activeInvalidation.revision;
 
     const partition = this.partitions[options.requestClass ?? 'foreground'];
-    for (;;) {
-      const cached = partition.cache.get(nameHash);
-      const resolved = cached ?? await partition.singleFlight.run(
-        nameHash,
-        async (physicalSignal) => {
-          const value = await this.dependencies.load(nameHash, physicalSignal);
-          // A superseded loader may ignore cancellation. Its old absence proof
-          // must not reach waiting callers or repopulate the negative cache.
-          physicalSignal.throwIfAborted();
-          // A cold current-slot load may advance the source generation itself.
-          // Stamp the resulting miss after that commit so the next caller does
-          // not immediately discard a fresh negative cache and repeat every
-          // chain fence. A later, independent state advance still invalidates
-          // the entry through the equality check below.
-          return { value, generation: this.dependencies.generation?.() };
-        },
-        options.signal,
-        (value) => { partition.cache.set(nameHash, value); },
-        'Context Graph name-hash resolution has no active waiters',
-      );
-      // Invalidation may follow physical completion but precede this waiter’s
-      // continuation. Reject its old result without disturbing newer work.
-      if (
-        globalRevision !== this.globalInvalidationRevision
-        || nameRevision !== (this.nameInvalidationRevisions.get(nameHash) ?? 0)
-      ) {
-        throw Object.assign(
-          new Error('Context Graph name-hash resolution was invalidated before delivery'),
-          { name: 'AbortError' },
+    try {
+      for (;;) {
+        const cached = partition.cache.get(nameHash);
+        const resolved = cached ?? await partition.singleFlight.run(
+          nameHash,
+          async (physicalSignal) => {
+            const value = await this.dependencies.load(nameHash, physicalSignal);
+            // A superseded loader may ignore cancellation. Its old absence proof
+            // must not reach waiting callers or repopulate the negative cache.
+            physicalSignal.throwIfAborted();
+            // A cold current-slot load may advance the source generation itself.
+            // Stamp the resulting miss after that commit so the next caller does
+            // not immediately discard a fresh negative cache and repeat every
+            // chain fence. A later, independent state advance still invalidates
+            // the entry through the equality check below.
+            return { value, generation: this.dependencies.generation?.() };
+          },
+          options.signal,
+          (value) => { partition.cache.set(nameHash, value); },
+          'Context Graph name-hash resolution has no active waiters',
         );
+        // Invalidation may follow physical completion but precede this waiter’s
+        // continuation. Reject its old result without disturbing newer work.
+        if (
+          globalRevision !== this.globalInvalidationRevision
+          || nameRevision !== activeInvalidation.revision
+        ) {
+          throw Object.assign(
+            new Error('Context Graph name-hash resolution was invalidated before delivery'),
+            { name: 'AbortError' },
+          );
+        }
+        const currentGeneration = this.dependencies.generation?.();
+        if (
+          resolved.generation === undefined
+          || currentGeneration === resolved.generation
+        ) return resolved.value;
+        partition.cache.delete(nameHash);
+        partition.singleFlight.invalidate(nameHash);
       }
-      const currentGeneration = this.dependencies.generation?.();
-      if (
-        resolved.generation === undefined
-        || currentGeneration === resolved.generation
-      ) return resolved.value;
-      partition.cache.delete(nameHash);
-      partition.singleFlight.invalidate(nameHash);
+    } finally {
+      activeInvalidation.readers -= 1;
+      if (activeInvalidation.readers === 0
+        && this.activeNameInvalidations.get(nameHash) === activeInvalidation) {
+        this.activeNameInvalidations.delete(nameHash);
+      }
     }
   }
 
   invalidateAll(): void {
     this.globalInvalidationRevision += 1;
-    this.nameInvalidationRevisions.clear();
+    for (const invalidation of this.activeNameInvalidations.values()) invalidation.revision += 1;
     this.invalidateCaches();
   }
 
@@ -133,7 +145,8 @@ export class ContextGraphNameHashResolver {
   invalidateNames(rawNameHashes: readonly string[]): void {
     const names = normalizeContextGraphNameHashBatch(rawNameHashes);
     for (const name of names) {
-      this.nameInvalidationRevisions.set(name, (this.nameInvalidationRevisions.get(name) ?? 0) + 1);
+      const invalidation = this.activeNameInvalidations.get(name);
+      if (invalidation !== undefined) invalidation.revision += 1;
     }
     for (const partition of Object.values(this.partitions)) {
       for (const name of names) {

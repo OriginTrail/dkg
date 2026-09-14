@@ -3,6 +3,7 @@
 import type { ChainReadOptions } from '@origintrail-official/dkg-chain';
 import {
   resolveContextGraphReadAuthorityDecision,
+  type ContextGraphReadAuthorityEvidence,
   type ContextGraphReadAuthorityInput,
 } from './context-graph-read-authority.js';
 
@@ -37,27 +38,12 @@ export async function prepareUnscopedContextGraphReadChecks(
   const decide = async (
     id: string,
     readSignal: AbortSignal,
-    evidence?: { registration: bigint | 'unregistered' | 'unavailable'; isMetadataAbsent?: () => boolean },
+    evidence: ContextGraphReadAuthorityEvidence = {},
   ): Promise<boolean> => {
     signal.throwIfAborted();
     readSignal.throwIfAborted();
     const input = deps.createReadAuthorityInput(id, readSignal);
-    const result = await resolveContextGraphReadAuthorityDecision({
-      ...input,
-      ...(typeof evidence?.registration === 'bigint' && {
-        expectedRegistrationId: evidence.registration,
-      }),
-      ...(evidence && typeof evidence.registration !== 'bigint' && {
-        getRegisteredAuthority: async () => evidence.registration === 'unregistered'
-          ? { kind: 'unregistered' as const }
-          : { kind: 'unavailable' as const, reason: 'chain-name-binding-unavailable' as const },
-      }),
-      ...(evidence?.isMetadataAbsent && {
-        isPrivateLocalGraph: () => evidence.isMetadataAbsent!()
-          ? Promise.resolve(false)
-          : input.isPrivateLocalGraph(),
-      }),
-    });
+    const result = await resolveContextGraphReadAuthorityDecision(input, evidence);
     signal.throwIfAborted();
     readSignal.throwIfAborted();
     return result.outcome === 'allowed';
@@ -111,7 +97,7 @@ export async function prepareUnscopedContextGraphReadChecks(
       readSignal.throwIfAborted();
       const hash = hashesById.get(id);
       return hash !== undefined && deps.registrationNameHash(id) === hash
-        ? decide(id, readSignal, { registration: 'unavailable' })
+        ? decide(id, readSignal, { registration: { kind: 'unavailable' } })
         : original(id, readSignal);
     };
   } finally {
@@ -167,7 +153,9 @@ export async function prepareUnscopedContextGraphReadChecks(
       // A fresh positive binding must not become an optimistic scalar miss or
       // a different binding, even if a local route appears during preparation.
       // The canonical resolver still reads live policy/roster/peer authority.
-      return decide(id, readSignal, { registration: expectedRegistrationId });
+      return decide(id, readSignal, {
+        registration: { kind: 'expected', onChainId: expectedRegistrationId },
+      });
     }
     if (
       hash === undefined
@@ -175,8 +163,8 @@ export async function prepareUnscopedContextGraphReadChecks(
       || deps.registrationNameHash(id) !== hash
     ) return original(id, readSignal);
     return decide(id, readSignal, {
-      registration: 'unregistered',
-      isMetadataAbsent: () => !metadataCandidates.has(id)
+      registration: { kind: 'unregistered' },
+      isLocalMetadataAbsent: () => !metadataCandidates.has(id)
         && deps.readMetadataRevision() === metadataRevision,
     });
   };
