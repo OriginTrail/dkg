@@ -10,6 +10,7 @@ import {
   ChainEventLaneRunner,
   type ChainEventPollerLaneSpec,
 } from './chain-event-lane-runner.js';
+import { CHAIN_EVENT_POLLER_LANES } from './chain-event-lanes.js';
 import type { CursorPersistence as RunnerCursorPersistence } from './chain-event-lane-cursor-store.js';
 
 export type { ChainEventPollerLane } from './chain-event-lane-runner.js';
@@ -175,11 +176,6 @@ export class ChainEventPoller {
     });
   }
 
-  /** Initialize cursor storage from this poller's canonical runtime lane specifications. */
-  async seedConfiguredLaneCursors(blockNumber: number): Promise<void> {
-    await this.laneRunner.seedConfiguredLaneCursors(blockNumber);
-  }
-
   async start(): Promise<void> {
     if (this.running) return;
     if (this.pollLifecycle.signal.aborted) {
@@ -268,7 +264,7 @@ export class ChainEventPoller {
   }
 
   private laneSpecs(): ChainEventPollerLaneSpec[] {
-    return [
+    const lanes: ChainEventPollerLaneSpec[] = [
       {
         name: 'publish',
         enabled: () => this.publishHandler.hasPendingPublishes,
@@ -340,6 +336,12 @@ export class ChainEventPoller {
         dispatch: (event, ctx) => this.handleProfileEvent(event, ctx),
       },
     ];
+    const names = lanes.map(({ name }) => name);
+    if (names.length !== CHAIN_EVENT_POLLER_LANES.length
+      || names.some((name, index) => name !== CHAIN_EVENT_POLLER_LANES[index])) {
+      throw new Error('Chain event poller lane specifications do not match the canonical lane list.');
+    }
+    return lanes;
   }
 
   private async poll(): Promise<void> {

@@ -1,4 +1,7 @@
-import type { ChainEventPollerLane } from './chain-event-lane-runner.js';
+import {
+  CHAIN_EVENT_POLLER_LANES,
+  type ChainEventPollerLane,
+} from './chain-event-lanes.js';
 
 /** Legacy aggregate cursor persistence for saving/loading one shared cursor. */
 export interface LegacyCursorPersistence {
@@ -53,4 +56,32 @@ export function createLaneCursorStore(cursorPersistence?: CursorPersistence): La
     },
     saveLegacyAggregate: (blockNumber) => legacyStore.save(blockNumber),
   };
+}
+
+export async function seedLaneCursorStore(
+  cursorStore: LaneCursorStore | undefined,
+  lanes: readonly ChainEventPollerLane[],
+  blockNumber: number,
+): Promise<void> {
+  if (!cursorStore) throw new Error('Chain event cursor persistence is not configured.');
+  if (!Number.isSafeInteger(blockNumber) || blockNumber < 0) {
+    throw new Error('Chain event cursor seed must be a non-negative safe integer.');
+  }
+  if (cursorStore.kind === 'legacy') {
+    await cursorStore.saveLegacyAggregate(blockNumber);
+    return;
+  }
+  for (const lane of new Set(lanes)) await cursorStore.saveLane(lane, blockNumber);
+}
+
+/** Seed persistent storage for every production poller lane without constructing a poller. */
+export async function seedChainEventPollerCursors(
+  cursorPersistence: CursorPersistence,
+  blockNumber: number,
+): Promise<void> {
+  await seedLaneCursorStore(
+    createLaneCursorStore(cursorPersistence),
+    CHAIN_EVENT_POLLER_LANES,
+    blockNumber,
+  );
 }

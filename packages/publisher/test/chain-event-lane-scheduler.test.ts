@@ -9,31 +9,19 @@ import type {
   LaneCursorPersistence,
   LegacyCursorPersistence,
 } from '../src/chain-event-poller.js';
+import { seedChainEventPollerCursors } from '../src/chain-event-lane-cursor-store.js';
 import { ChainEventLaneRunner } from '../src/chain-event-lane-runner.js';
 import type { ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
 import { makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
 
 describe('ChainEventPoller scheduler', () => {
-  it('seeds every cursor from the poller runtime specifications', async () => {
+  it('seeds every production cursor without activating optional poller callbacks', async () => {
     const saved: Array<{ lane: ChainEventPollerLane; block: number }> = [];
     const cursor: LaneCursorPersistence = {
       async loadLane() { return undefined; },
       async saveLane(lane, block) { saved.push({ lane, block }); },
     };
-    const { adapter } = makeChain({ head: 100 });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      cursorPersistence: cursor,
-      onContextGraphCreated: async () => { /* sink */ },
-      onCollectionUpdated: async () => { /* sink */ },
-      onAllowListUpdated: async () => { /* sink */ },
-      onProfileEvent: async () => { /* sink */ },
-      onKARegisteredToContextGraph: async () => { /* sink */ },
-      onKnowledgeAssetCreated: async () => { /* sink */ },
-    });
-
-    await poller.seedConfiguredLaneCursors(42);
+    await seedChainEventPollerCursors(cursor, 42);
 
     expect(saved).toEqual([
       { lane: 'publish', block: 42 },
@@ -51,15 +39,7 @@ describe('ChainEventPoller scheduler', () => {
       async loadLane() { return undefined; },
       async saveLane() { /* sink */ },
     };
-    const { adapter } = makeChain({ head: 100 });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      cursorPersistence: cursor,
-      onContextGraphCreated: async () => { /* sink */ },
-    });
-
-    await expect(poller.seedConfiguredLaneCursors(blockNumber))
+    await expect(seedChainEventPollerCursors(cursor, blockNumber))
       .rejects.toThrow(/non-negative safe integer/);
   });
 
@@ -69,17 +49,43 @@ describe('ChainEventPoller scheduler', () => {
       async load() { return undefined; },
       async save(blockNumber) { saved.push(blockNumber); },
     };
-    const { adapter } = makeChain({ head: 100 });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      cursorPersistence: cursor,
-      onContextGraphCreated: async () => { /* sink */ },
-    });
-
-    await poller.seedConfiguredLaneCursors(42);
+    await seedChainEventPollerCursors(cursor, 42);
 
     expect(saved).toEqual([42]);
+  });
+
+  it('applies a legacy explicit seed to a disabled full-history lane before activation', async () => {
+    let enabled = false;
+    const saved: number[] = [];
+    const cursor: LegacyCursorPersistence = {
+      async load() { return undefined; },
+      async save(blockNumber) { saved.push(blockNumber); },
+    };
+    const { adapter, filters } = makeChain({ head: 100 });
+    const lane: ChainEventPollerLaneSpec = {
+      name: 'allocatorReconcile',
+      enabled: () => enabled,
+      eventTypes: () => ['KCCreated'],
+      requiresFullHistory: () => true,
+      canUseLegacyAggregateCursor: () => false,
+      cadenceMs: 20,
+      dispatch: async () => { /* sink */ },
+    };
+    const runner = new ChainEventLaneRunner({
+      chain: adapter,
+      lanes: [lane],
+      maxRange: 1000,
+      clock: () => 0,
+      log: { info() {}, warn() {}, error() {} } as any,
+      cursorPersistence: cursor,
+    });
+
+    await runner.seedConfiguredLaneCursors(42);
+    enabled = true;
+    await runner.poll();
+
+    expect(saved).toEqual([42]);
+    expect(filters.map(({ fromBlock, toBlock }) => [fromBlock, toBlock])).toEqual([[43, 100]]);
   });
 
   it('classifies every poller RPC as background work', async () => {

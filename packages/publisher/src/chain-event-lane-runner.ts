@@ -2,18 +2,13 @@ import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-officia
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   createLaneCursorStore,
+  seedLaneCursorStore,
   type CursorPersistence,
   type LaneCursorStore,
 } from './chain-event-lane-cursor-store.js';
+import type { ChainEventPollerLane } from './chain-event-lanes.js';
 
-export type ChainEventPollerLane =
-  | 'publish'
-  | 'allocatorReconcile'
-  | 'contextGraphDiscovery'
-  | 'vmReconcile'
-  | 'collectionUpdates'
-  | 'allowListUpdates'
-  | 'profileEvents';
+export type { ChainEventPollerLane } from './chain-event-lanes.js';
 
 interface ChainEventPollerLaneState {
   lastBlock: number;
@@ -97,16 +92,17 @@ export class ChainEventLaneRunner {
 
   /** Seed every configured runtime lane through the same specifications used by polling. */
   async seedConfiguredLaneCursors(blockNumber: number): Promise<void> {
-    if (!this.cursorStore) throw new Error('Chain event cursor persistence is not configured.');
-    if (!Number.isSafeInteger(blockNumber) || blockNumber < 0) {
-      throw new Error('Chain event cursor seed must be a non-negative safe integer.');
-    }
-    if (this.cursorStore.kind === 'legacy') {
-      await this.cursorStore.saveLegacyAggregate(blockNumber);
-      return;
-    }
-    for (const lane of new Set(this.lanes.map(({ name }) => name))) {
-      await this.cursorStore.saveLane(lane, blockNumber);
+    const lanes = [...new Set(this.lanes.map(({ name }) => name))];
+    await seedLaneCursorStore(this.cursorStore, lanes, blockNumber);
+    // A legacy aggregate store cannot represent lanes that deliberately ignore
+    // migration cursors. An explicit seed still applies to every lane owned by
+    // this runner, including currently disabled full-history lanes that become
+    // active later in the same lifetime.
+    for (const lane of lanes) {
+      const state = this.stateFor(lane);
+      state.lastBlock = blockNumber;
+      state.headKnown = true;
+      this.restoredLanes.add(lane);
     }
   }
 
