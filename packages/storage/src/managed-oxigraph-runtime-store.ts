@@ -127,6 +127,36 @@ export function createManagedOxigraphRuntimeStoreConfigV1(
   return Object.freeze(runtimeConfig);
 }
 
+/**
+ * Rebuild the decorator portion of a managed runtime config while carrying
+ * its authenticated control-plane hooks forward. The endpoint and managed
+ * ownership snapshot remain fixed; callers can only replace store decorators.
+ */
+export function withManagedOxigraphRuntimeStoreConfigV1(
+  config: ManagedOxigraphRuntimeStoreConfigV1,
+  updates: Readonly<Partial<Pick<
+    TripleStoreConfig,
+    'largeLiteralStorage' | 'graphSetIndex' | 'changelog'
+  >>>,
+): ManagedOxigraphRuntimeStoreConfigV1 {
+  const hooks = getManagedOxigraphRuntimeHooksV1(config);
+  if (hooks === undefined) {
+    throw new Error('managed Oxigraph runtime config has no authenticated control plane');
+  }
+  const decorator = <K extends 'largeLiteralStorage' | 'graphSetIndex' | 'changelog'>(
+    key: K,
+  ): TripleStoreConfig[K] => Object.prototype.hasOwnProperty.call(updates, key)
+    ? updates[key]
+    : config[key];
+  return createManagedOxigraphRuntimeStoreConfigV1({
+    backend: config.backend,
+    options: config.options,
+    largeLiteralStorage: decorator('largeLiteralStorage'),
+    graphSetIndex: decorator('graphSetIndex'),
+    changelog: decorator('changelog'),
+  }, hooks);
+}
+
 /** @internal Read only by the generic construction boundary before cloning. */
 export function isManagedOxigraphRuntimeStoreConfigV1(
   candidate: unknown,

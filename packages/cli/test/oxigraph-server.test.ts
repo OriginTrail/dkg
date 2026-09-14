@@ -31,7 +31,10 @@ import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { measureRetainedWalBytes } from '../src/daemon/oxigraph-wal.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
-import { OXIGRAPH_VERSION } from '../src/daemon/oxigraph-binary.js';
+import {
+  OXIGRAPH_VERSION,
+  resolveOxigraphBinary,
+} from '../src/daemon/oxigraph-binary.js';
 import {
   childOwnsListenPort,
   findListenOwnerPid,
@@ -631,11 +634,20 @@ describe('startOxigraphServer (real child processes)', () => {
   );
 });
 
-const nativeOxigraphTestBinary = process.env.DKG_OXIGRAPH_TEST_BINARY;
+let nativeOxigraphTestBinary = process.env.DKG_OXIGRAPH_TEST_BINARY;
 
-describe.skipIf(!nativeOxigraphTestBinary)(
+describe(
   'managed response completeness (pinned real Oxigraph executable)',
   () => {
+    beforeAll(async () => {
+      if (nativeOxigraphTestBinary) return;
+      const resolved = await resolveOxigraphBinary({
+        cacheDir: join(tmpdir(), 'dkg-required-oxigraph-test-binary'),
+        log: () => {},
+      });
+      nativeOxigraphTestBinary = resolved.path;
+    }, 120_000);
+
     it('rejects native-deadline SELECT and CONSTRUCT streams instead of returning partial data', async () => {
       const binaryPath = nativeOxigraphTestBinary!;
       expect(await executableVersion(binaryPath)).toBe(`oxigraph ${OXIGRAPH_VERSION}`);

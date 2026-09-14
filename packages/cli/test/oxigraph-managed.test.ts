@@ -19,7 +19,6 @@ import { delimiter, join } from 'node:path';
 import {
   SyncSharedProjectionStoreV1,
   createTripleStore,
-  getManagedOxigraphRuntimeHooksV1,
 } from '@origintrail-official/dkg-storage';
 
 import {
@@ -663,31 +662,49 @@ describe('startManagedOxigraph (real download + real server)', () => {
       config: {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { port, readyTimeoutMs: 5_000 },
+          options: { port, readyTimeoutMs: 5_000, clientTimeoutMs: 50 },
         },
       },
       dataDir,
       platform: 'freebsd',
       log: () => {},
     });
+    const originalFetch = globalThis.fetch;
+    const endpointPrefix = `http://127.0.0.1:${port}/`;
+    globalThis.fetch = (async (input, init) => {
+      if (String(input).startsWith(endpointPrefix) && init?.method === 'POST') {
+        return await new Promise<Response>((_resolve, reject) => {
+          const signal = init.signal;
+          const onAbort = () => reject(
+            signal?.reason instanceof Error
+              ? signal.reason
+              : new Error('managed store request aborted'),
+          );
+          if (signal?.aborted) onAbort();
+          else signal?.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
+    let store: Awaited<ReturnType<typeof createTripleStore>> | undefined;
     try {
-      const hooks = getManagedOxigraphRuntimeHooksV1(result!.storeConfig)!;
-      const onClientTimeout = hooks.onClientTimeout!;
-      const getRecoveryState = hooks.getRecoveryState as () => {
-        recovering: boolean;
-        generation: number;
-      };
+      store = await createTripleStore(result!.storeConfig);
       const pid1 = await fetchManagedPid(port);
 
-      onClientTimeout('insert');
+      await expect(store.update(
+        'INSERT DATA { <urn:mutation> <urn:does-not-restart> "true" }',
+      )).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
       await new Promise((resolve) => setTimeout(resolve, 150));
       expect(await fetchManagedPid(port)).toBe(pid1);
-      expect(getRecoveryState().generation).toBe(0);
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
 
-      onClientTimeout('query');
+      await expect(store.query('ASK { ?s ?p ?o }')).rejects.toMatchObject({
+        code: 'STORE_OPERATION_TIMEOUT',
+        operation: 'query',
+      });
       // Close store admission while ownership verification is in flight. The
       // generation advances only after the verified listener is signalled.
-      expect(getRecoveryState()).toEqual({ recovering: true, generation: 0 });
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
       let pid2 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -700,12 +717,16 @@ describe('startManagedOxigraph (real download + real server)', () => {
       }
       expect(pid2).toBeGreaterThan(0);
       expect(pid2).not.toBe(pid1);
-      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+      for (let i = 0; i < 50 && result!.handle.getRecoveryState().recovering; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
 
-      onClientTimeout('construct');
+      await expect(store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'))
+        .rejects.toMatchObject({
+          code: 'STORE_OPERATION_TIMEOUT',
+          operation: 'construct',
+        });
       let pid3 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -718,11 +739,13 @@ describe('startManagedOxigraph (real download + real server)', () => {
       }
       expect(pid3).toBeGreaterThan(0);
       expect(pid3).not.toBe(pid2);
-      for (let i = 0; i < 50 && getRecoveryState().recovering; i++) {
+      for (let i = 0; i < 50 && result!.handle.getRecoveryState().recovering; i++) {
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(getRecoveryState()).toEqual({ recovering: false, generation: 2 });
+      expect(result!.handle.getRecoveryState()).toEqual({ recovering: false, generation: 2 });
     } finally {
+      globalThis.fetch = originalFetch;
+      await store?.close();
       await result?.handle.stop();
       await rm(dataDir, { recursive: true, force: true });
     }
@@ -803,16 +826,15 @@ describe('startManagedOxigraph (real download + real server)', () => {
           },
         });
         const reportStoreActivity = vi.spyOn(result!.handle, 'reportStoreActivity');
-        const onActivityChange = getManagedOxigraphRuntimeHooksV1(
-          result!.storeConfig,
-        )?.onActivityChange;
-        expect(onActivityChange).toBeTypeOf('function');
-        onActivityChange?.(2);
-        onActivityChange?.(0);
-        expect(reportStoreActivity.mock.calls).toEqual([[2], [0]]);
         const runtimeStore = await createTripleStore(result!.storeConfig);
         try {
           expect(() => new SyncSharedProjectionStoreV1(runtimeStore)).not.toThrow();
+          await expect(runtimeStore.query('ASK { ?s ?p ?o }')).resolves.toMatchObject({
+            type: 'boolean',
+            value: false,
+          });
+          expect(reportStoreActivity).toHaveBeenCalledWith(1);
+          expect(reportStoreActivity).toHaveBeenLastCalledWith(0);
         } finally {
           await runtimeStore.close();
         }
