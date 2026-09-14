@@ -2272,7 +2272,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(requestReplays).toHaveBeenCalledWith(contextGraphId);
   });
 
-  it('batches registered responsibility policies through one finalized index read', async () => {
+  it('batches registered responsibility policies once per consumer stage', async () => {
     const firstContextGraphId = `${AUTHOR}/bulk-responsibility-first`;
     const secondContextGraphId = `${AUTHOR}/bulk-responsibility-second`;
     const firstNameHash = ethers.keccak256(
@@ -2329,8 +2329,13 @@ describe('RFC-64 rollout authority integration', () => {
     (edge as any).bindSubscriptionOnChainId(secondContextGraphId, secondSubscription, '10');
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
 
-    expect(readPolicies).toHaveBeenCalledOnce();
-    expect(new Set(readPolicies.mock.calls[0]?.[0])).toEqual(new Set(['9', '10']));
+    // Responsibility selection and the downstream SWM-gossip metadata proof
+    // are separate consumers. Each stage is one complete bulk read, never one
+    // physical read per graph, and no completed authority evidence is cached.
+    expect(readPolicies).toHaveBeenCalledTimes(2);
+    for (const [targetIds] of readPolicies.mock.calls) {
+      expect(new Set(targetIds)).toEqual(new Set(['9', '10']));
+    }
     expect(legacyPolicy).not.toHaveBeenCalled();
     expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -2359,7 +2364,8 @@ describe('RFC-64 rollout authority integration', () => {
     finalizedSourceBlockNumber = '43';
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(firstContextGraphId))
       .resolves.toMatchObject({ policy: { era: '1' } });
-    expect(readPolicies).toHaveBeenCalledTimes(2);
+    expect(readPolicies).toHaveBeenCalledTimes(3);
+    expect(new Set(readPolicies.mock.calls[2]?.[0])).toEqual(new Set(['9', '10']));
     expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
       NETWORK_ID,
       firstContextGraphId,
