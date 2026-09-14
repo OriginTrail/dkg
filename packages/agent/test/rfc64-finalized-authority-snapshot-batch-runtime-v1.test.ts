@@ -46,13 +46,11 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
       await readGate;
       return new Map(targetIds.map((targetId) => [targetId, snapshot(targetId)]));
     });
-    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      snapshotTargetIds: () => [ID_9, ID_10],
-      readSnapshots,
-    });
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({ readSnapshots });
+    const batch = runtime.createBatch([ID_9, ID_10]);
 
-    const first = runtime.read(ID_9);
-    const second = runtime.read(ID_10);
+    const first = batch.read(ID_9);
+    const second = batch.read(ID_10);
     await vi.waitFor(() => expect(readSnapshots).toHaveBeenCalledOnce());
     expect(readSnapshots).toHaveBeenCalledWith([ID_9, ID_10]);
     releaseRead();
@@ -93,14 +91,12 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
       await readGate;
       return result;
     });
-    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      snapshotTargetIds: () => subscribedIds,
-      readSnapshots,
-    });
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({ readSnapshots });
+    const batch = runtime.createBatch(subscribedIds);
 
-    const requested = runtime.read(requestedId);
+    const requested = batch.read(requestedId);
     await readStarted;
-    const otherCaller = runtime.read(otherCallerId);
+    const otherCaller = batch.read(otherCallerId);
     releaseRead();
 
     await expect(requested).resolves.toMatchObject({
@@ -116,7 +112,7 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
       },
     });
     expect(readSnapshots).toHaveBeenCalledOnce();
-    expect(readSnapshots.mock.calls[0]?.[0][0]).toBe(requestedId);
+    expect(readSnapshots.mock.calls[0]?.[0][0]).toBe(subscribedIds[0]);
     expect(readSnapshots.mock.calls[0]?.[0]).toContain(otherCallerId);
     await runtime.whenIdle();
   });
@@ -158,7 +154,7 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
     await runtime.whenIdle();
   });
 
-  it('does not let a freshness-fenced caller join an already running read', async () => {
+  it('does not let a later explicit batch join an already running read', async () => {
     let markFirstReadStarted!: () => void;
     let releaseFirstRead!: () => void;
     const firstReadStarted = new Promise<void>((resolve) => { markFirstReadStarted = resolve; });
@@ -181,10 +177,10 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
       readSnapshots,
     });
 
-    const stale = runtime.read(ID_9);
+    const stale = runtime.createBatch([ID_9]).read(ID_9);
     await firstReadStarted;
     owner = '0x2222222222222222222222222222222222222222';
-    const fresh = runtime.read(ID_9, undefined, { freshnessRequest: {} });
+    const fresh = runtime.createBatch([ID_9]).read(ID_9);
     await vi.waitFor(() => expect(readSnapshots).toHaveBeenCalledTimes(2));
     releaseFirstRead();
 
@@ -196,28 +192,25 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
     });
   });
 
-  it('shares one freshness request across CG lanes and fences a later request', async () => {
+  it('shares one explicit batch across CG lanes and fences a later batch', async () => {
     let owner = '0x1111111111111111111111111111111111111111';
     const readSnapshots = vi.fn(async (
       targetIds: readonly ContextGraphAuthorityIndexId[],
     ) => new Map(targetIds.map((targetId) => [targetId, snapshot(targetId, owner)])));
-    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      snapshotTargetIds: () => [ID_9, ID_10],
-      readSnapshots,
-    });
-    const firstPass = {};
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({ readSnapshots });
+    const firstPass = runtime.createBatch([ID_9, ID_10]);
 
     await expect(Promise.all([
-      runtime.read(ID_9, undefined, { freshnessRequest: firstPass }),
-      runtime.read(ID_10, undefined, { freshnessRequest: firstPass }),
+      firstPass.read(ID_9),
+      firstPass.read(ID_10),
     ])).resolves.toHaveLength(2);
     // A lane that reaches the owner after the read completed still consumes
     // the exact pass-owned evidence rather than starting another full batch.
-    await runtime.read(ID_10, undefined, { freshnessRequest: firstPass });
+    await firstPass.read(ID_10);
     expect(readSnapshots).toHaveBeenCalledOnce();
 
     owner = '0x2222222222222222222222222222222222222222';
-    await expect(runtime.read(ID_9, undefined, { freshnessRequest: {} }))
+    await expect(runtime.createBatch([ID_9]).read(ID_9))
       .resolves.toMatchObject({ snapshot: { owner } });
     expect(readSnapshots).toHaveBeenCalledTimes(2);
   });
@@ -231,14 +224,12 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
       await readGate;
       return new Map(targetIds.map((targetId) => [targetId, snapshot(targetId)]));
     });
-    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      snapshotTargetIds: () => [ID_9, ID_10],
-      readSnapshots,
-    });
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({ readSnapshots });
+    const batch = runtime.createBatch([ID_9, ID_10]);
     const abort = new AbortController();
 
-    const cancelled = runtime.read(ID_9, abort.signal);
-    const survivor = runtime.read(ID_10);
+    const cancelled = batch.read(ID_9, abort.signal);
+    const survivor = batch.read(ID_10);
     await vi.waitFor(() => expect(readSnapshots).toHaveBeenCalledOnce());
     abort.abort(new Error('caller closed'));
     await expect(cancelled).rejects.toThrow('caller closed');
@@ -257,13 +248,12 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
 
   it('returns immutable evidence owned by the closed batch lifecycle', async () => {
     const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      snapshotTargetIds: () => [ID_10],
       readSnapshots: async (targetIds) => new Map(
         targetIds.map((targetId) => [targetId, snapshot(targetId)]),
       ),
     });
 
-    const evidence = await runtime.read(ID_9);
+    const evidence = await runtime.createBatch([ID_9, ID_10]).read(ID_9);
     expect(evidence.batchTargetIds).toEqual([ID_9, ID_10]);
     expect(Object.isFrozen(evidence)).toBe(true);
     expect(Object.isFrozen(evidence.batchTargetIds)).toBe(true);

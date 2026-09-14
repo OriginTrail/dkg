@@ -3,6 +3,7 @@ export { loadOpWallets, generateWallets, type OpWalletsConfig, type WalletEntry 
 export {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
   isContextGraphMembershipSource,
+  type KnownContextGraphMembershipSource,
   type ContextGraphMembershipSource,
 } from './dkg-agent-types.js';
 export {

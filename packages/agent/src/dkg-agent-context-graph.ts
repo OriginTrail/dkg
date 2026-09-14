@@ -1028,7 +1028,10 @@ export class ContextGraphMethods extends DKGAgentBase {
       `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
       { source: 'agent.contextGraph.register.status' },
     );
-    if (statusResult.type === 'bindings' && statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered') {
+    const registrationStatus = statusResult.type === 'bindings'
+      ? statusResult.bindings[0]?.['status']?.replace(/^"|"$/g, '')
+      : undefined;
+    if (registrationStatus === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
     }
@@ -1458,6 +1461,23 @@ export class ContextGraphMethods extends DKGAgentBase {
     // subscribe will key on the wrong topic.
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
 
+    // Make the local-first bypass impossible before the transaction can
+    // commit. If the process exits, or any post-transaction store write
+    // fails, `pending` forces authority consumers to reconcile with chain
+    // instead of trusting the older `unregistered` fact indefinitely.
+    await deleteByPatternWithoutCount(this.store, {
+      graph: cgMetaGraph,
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+    });
+    await this.store.insert([{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+      object: `"pending"`,
+      graph: cgMetaGraph,
+    }]);
+    this.contextGraphMetaProjection.markDirty(id);
+
     const result = await this.registerContextGraphOnChain({
       accessPolicy: resolvedLocalAccessPolicy,
       publishPolicy,
@@ -1476,11 +1496,6 @@ export class ContextGraphMethods extends DKGAgentBase {
     // slot from the curator's private `_meta` snapshot.  A private joiner may
     // have missed the one-shot ontology gossip emitted below and must not be
     // left unable to start chain-driven VM reconciliation as a result.
-    await deleteByPatternWithoutCount(this.store, {
-      graph: cgMetaGraph,
-      subject: contextGraphUri,
-      predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
-    });
     // Single-valued binding guard (RS heal): the on-chain id is immutable, so
     // clear any prior value before insert — the cgId resolver / heal read this
     // and must never see a multi-valued (LIMIT-1-nondeterministic) binding.
@@ -1495,7 +1510,6 @@ export class ContextGraphMethods extends DKGAgentBase {
       predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
     });
     await this.store.insert([
-      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS, object: `"registered"`, graph: cgMetaGraph },
       { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
       { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: cgMetaGraph },
       // Persist the wire-id commitment in the cg's _meta graph so a
@@ -1503,6 +1517,20 @@ export class ContextGraphMethods extends DKGAgentBase {
       // topic without re-reading the chain event.
       { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${nameHash}"`, graph: cgMetaGraph },
     ]);
+    // Keep `pending` durable until every recovery binding above is committed.
+    // A crash or store failure before this final flip therefore forces the
+    // next authority read to reconcile the now-discoverable chain slot.
+    await deleteByPatternWithoutCount(this.store, {
+      graph: cgMetaGraph,
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+    });
+    await this.store.insert([{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+      object: `"registered"`,
+      graph: cgMetaGraph,
+    }]);
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirty(id);
     // We no longer persist `publishAuthorityAccountId` locally even on

@@ -85,7 +85,6 @@ describe('RFC-64 catalog authority refresh loop', () => {
       sourceBlockHash: `0x${'44'.repeat(32)}`,
     } satisfies ContextGraphAuthoritySnapshot])));
     const authorityRuntime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-      snapshotTargetIds: () => indexIds.values(),
       readSnapshots,
     });
     const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
@@ -95,9 +94,23 @@ describe('RFC-64 catalog authority refresh loop', () => {
         ['cg-b', revision],
       ]))),
       onActiveContextGraphIdsReadFailure: () => undefined,
-      refreshContextGraph: async (contextGraphId, signal, request) => {
-        await authorityRuntime.read(indexIds.get(contextGraphId)!, signal, {
-          freshnessRequest: request.authorityReadRequest,
+      createRefreshRequests: async (contextGraphIds, signal) => {
+        const batch = authorityRuntime.createBatch(
+          contextGraphIds.map((contextGraphId) => indexIds.get(contextGraphId)!),
+        );
+        return new Map(await Promise.all(contextGraphIds.map(async (contextGraphId) => [
+          contextGraphId,
+          {
+            finalizedAuthorityEvidence: await batch.read(
+              indexIds.get(contextGraphId)!,
+              signal,
+            ),
+          },
+        ] as const)));
+      },
+      refreshContextGraph: async (contextGraphId, _signal, request) => {
+        expect(request.finalizedAuthorityEvidence).toMatchObject({
+          contextGraphAuthorityIndexId: indexIds.get(contextGraphId),
         });
         return COMMITTED;
       },

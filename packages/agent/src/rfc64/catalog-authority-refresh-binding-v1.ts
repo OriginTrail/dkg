@@ -12,6 +12,7 @@ import {
   Rfc64CatalogAuthorityRevisionReadFailureV1,
   type Rfc64CatalogAuthorityRefreshResultV1,
   type Rfc64CatalogAuthorityRefreshRequestV1,
+  type Rfc64CatalogAuthorityRefreshLoopOptionsV1,
   type Rfc64CatalogAuthorityRefreshSchedulerV1,
   type Rfc64CatalogAuthorityRevisionReadV1,
   type Rfc64CatalogAuthorityRevisionSourceV1,
@@ -91,6 +92,9 @@ export interface Rfc64CatalogAuthorityRefreshBindingV1 {
     signal: AbortSignal,
     request: Rfc64CatalogAuthorityRefreshRequestV1,
   ) => Promise<Rfc64CatalogAuthorityRefreshResultV1>;
+  readonly createRefreshRequests?: Rfc64CatalogAuthorityRefreshLoopOptionsV1[
+    'createRefreshRequests'
+  ];
   readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
   readonly onAuthorityRevisionsReadFailure: (error: unknown) => void;
   readonly onRefreshFailure: (contextGraphId: string, error: unknown) => void;
@@ -110,6 +114,9 @@ export function createRfc64CatalogAuthorityRefreshOwnerV1(
       binding.revisionSource,
     ),
     refreshContextGraph: binding.refreshContextGraph,
+    ...(binding.createRefreshRequests === undefined
+      ? {}
+      : { createRefreshRequests: binding.createRefreshRequests }),
     onActiveContextGraphIdsReadFailure: binding.onActiveContextGraphIdsReadFailure,
     onAuthorityRevisionsReadFailure: binding.onAuthorityRevisionsReadFailure,
     onRefreshFailure: binding.onRefreshFailure,

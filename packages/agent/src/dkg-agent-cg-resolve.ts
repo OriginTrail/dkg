@@ -490,7 +490,7 @@ export interface ContextGraphListAuthorityEnrichmentOptionsV1 {
   readonly readRegistrationStatus: (
     contextGraphId: string,
   ) => Promise<ContextGraphListAuthorityAttemptV1<
-    'registered' | 'unregistered' | null
+    'registered' | 'unregistered' | 'pending' | null
   >>;
   readonly readCurrentOnChainId: (
     contextGraphId: string,
@@ -541,6 +541,10 @@ export async function enrichContextGraphListAuthorityV1(
       }
     }
     if (mode.kind !== 'legacy-current') {
+      // A failed finalized batch is not permission to fan the same failed
+      // historical lookup out once per durable row. Leave the entire result
+      // visibly uncached and retry one shared read on the next request.
+      if (mode.kind === 'degraded-finalized-index') return row;
       const registrationStatus = await options.readRegistrationStatus(row.id);
       if (!registrationStatus.ok) {
         cacheable = false;

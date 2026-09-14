@@ -26,6 +26,23 @@ describe('Context Graph registration resolution deadlines', () => {
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
+  it('reconciles a durable pending registration against chain authority', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
+    fixture.query.mockResolvedValueOnce({
+      type: 'bindings',
+      bindings: [{ status: '"pending"' }],
+    });
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({
+        kind: 'registered',
+        onChainId: 42n,
+        provenance: 'reverse-name-hash',
+      });
+    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledOnce();
+  });
+
   it('rejects local-first proof when a numeric chain binding exists', async () => {
     const fixture = selectedFixture();
     fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);

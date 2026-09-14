@@ -1010,8 +1010,14 @@ export const CONTEXT_GRAPH_MEMBERSHIP_SOURCES = [
   // Retained for custom-store migration fixtures and legacy integrations.
   'pre-existing',
 ] as const;
-export type ContextGraphMembershipSource =
+export type KnownContextGraphMembershipSource =
   typeof CONTEXT_GRAPH_MEMBERSHIP_SOURCES[number];
+/**
+ * Public persistence integrations have always been allowed to attach their
+ * own provenance label. Keep that source-compatible contract while treating
+ * only the known internal vocabulary as trusted protocol evidence.
+ */
+export type ContextGraphMembershipSource = string;
 
 const contextGraphMembershipSourceSet: ReadonlySet<string> =
   new Set(CONTEXT_GRAPH_MEMBERSHIP_SOURCES);
@@ -1019,7 +1025,7 @@ const contextGraphMembershipSourceSet: ReadonlySet<string> =
 /** Decode the closed source vocabulary at durable or external boundaries. */
 export function isContextGraphMembershipSource(
   source: unknown,
-): source is ContextGraphMembershipSource {
+): source is KnownContextGraphMembershipSource {
   return typeof source === 'string' && contextGraphMembershipSourceSet.has(source);
 }
 

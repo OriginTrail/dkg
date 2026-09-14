@@ -69,7 +69,6 @@ import {
 } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
-  isContextGraphMembershipSource,
   loadOpWallets,
   KaNumberAllocator,
   resolveSyncAgentsMeta,
@@ -2015,11 +2014,10 @@ async function runDaemonInnerWithStartupOwnership(
           principalId: row.principal_id,
           role: row.role ?? undefined,
           status: row.status,
-          // SQLite predates the closed source vocabulary, so decode rather
-          // than asserting old or manually edited rows into the trusted type.
-          source: isContextGraphMembershipSource(row.source)
-            ? row.source
-            : undefined,
+          // Preserve application-specific labels for public custom-store
+          // compatibility. The agent's provenance classifier recognizes only
+          // its two trusted local-origin literals.
+          source: row.source ?? undefined,
           displayName: row.display_name ?? undefined,
           ...(metadata ? { metadata } : {}),
           firstSeenAt: row.first_seen_at,

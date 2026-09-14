@@ -54,6 +54,13 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
     return this.#authorityReads;
   }
 
+  /** Coalesce lifecycle nudges into the authority owner's next explicit pass. */
+  requestAuthorityRefresh(): void {
+    const authorityRefresh = this.#options.authorityRefresh as
+      Rfc64CatalogWorkloadOwnerV1 & Readonly<{ trigger?: () => void }>;
+    authorityRefresh.trigger?.();
+  }
+
   start(ctx: OperationContext): void {
     if (this.#close !== null) {
       throw new Error('RFC-64 public catalog owner cannot start while close is in progress');

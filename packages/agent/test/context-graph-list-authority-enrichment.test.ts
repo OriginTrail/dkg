@@ -41,7 +41,9 @@ function listingAgent(input: {
       }> }
     | { kind: 'legacy-current' }
   >;
-  registrationStatus?: (id: string) => Promise<'registered' | 'unregistered' | null>;
+  registrationStatus?: (
+    id: string,
+  ) => Promise<'registered' | 'unregistered' | 'pending' | null>;
   resolveCurrent?: (
     id: string,
     options?: { signal?: AbortSignal; source?: string },
@@ -88,7 +90,7 @@ async function list(fakeAgent: object) {
 }
 
 describe('context graph list authority enrichment', () => {
-  it('exposes degraded indexed mode without fanning out beyond durable repair', async () => {
+  it('exposes degraded indexed mode without fanning out into durable repair', async () => {
     const rows = ['registered-local', 'unregistered-local'].map((id) => ({
       id,
       uri: contextGraphDataUri(id),
@@ -117,12 +119,8 @@ describe('context graph list authority enrichment', () => {
 
     expect(result.mode).toEqual({ kind: 'degraded-finalized-index' });
     expect(result.cacheable).toBe(false);
-    expect(result.rows).toEqual([
-      expect.objectContaining({ id: 'registered-local', onChainId: '71' }),
-      expect.not.objectContaining({ onChainId: expect.anything() }),
-    ]);
-    expect(readCurrentOnChainId).toHaveBeenCalledOnce();
-    expect(readCurrentOnChainId).toHaveBeenCalledWith('registered-local');
+    expect(result.rows).toEqual(rows);
+    expect(readCurrentOnChainId).not.toHaveBeenCalled();
   });
 
   it('uses finalized hits without current-state resolution', async () => {
@@ -206,7 +204,7 @@ describe('context graph list authority enrichment', () => {
     const result = await list(fixture.fakeAgent);
 
     expect(result.rows).toHaveLength(MISS_COUNT);
-    expect(fixture.readRegistrationStatus).toHaveBeenCalledTimes(MISS_COUNT);
+    expect(fixture.readRegistrationStatus).not.toHaveBeenCalled();
     expect(fixture.resolveCurrent).not.toHaveBeenCalled();
   });
 

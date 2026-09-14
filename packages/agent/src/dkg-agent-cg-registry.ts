@@ -464,7 +464,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async readLocalContextGraphRegistrationStatus(
     this: DKGAgent,
     contextGraphId: string,
-  ): Promise<'registered' | 'unregistered' | null> {
+  ): Promise<'registered' | 'unregistered' | 'pending' | null> {
     const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const result = await this.store.query(
@@ -474,7 +474,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     if (result.type !== 'bindings') return null;
     const rawStatus = result.bindings[0]?.['status'];
     const status = rawStatus === undefined ? undefined : stripLiteral(rawStatus);
-    return status === 'registered' || status === 'unregistered' ? status : null;
+    return status === 'registered' || status === 'unregistered' || status === 'pending'
+      ? status
+      : null;
   }
 
   /**

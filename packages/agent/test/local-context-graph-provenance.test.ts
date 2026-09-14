@@ -44,6 +44,21 @@ describe('LocalContextGraphProvenance durable restoration', () => {
     expect(isContextGraphMembershipSource(null)).toBe(false);
   });
 
+  it('keeps arbitrary custom-store sources compatible but never trusts them as local origin', () => {
+    const custom: ContextGraphMembershipRecord = row('custom-source', {
+      principalType: 'agent',
+      status: 'active',
+      source: 'migration-v2',
+    });
+    const provenance = new LocalContextGraphProvenance();
+
+    provenance.restoreMembershipRecords([custom]);
+
+    expect(custom.source).toBe('migration-v2');
+    expect(isContextGraphMembershipSource(custom.source)).toBe(false);
+    expect(provenance.hasLocalCreate(custom.contextGraphId)).toBe(false);
+  });
+
   it.each(['local-create', 'implicit-swm-write'] as const)(
     'constructs and restores the typed %s origin fact',
     (source) => {
