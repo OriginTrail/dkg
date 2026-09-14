@@ -441,6 +441,33 @@ describe('Random Sampling lifecycle repair adapter', () => {
       .toEqual(['peer-known']);
   });
 
+  it('offers already-connected peers as candidates without offering this node', async () => {
+    const syncExactKnowledgeAssetsFromPeerDetailed = foundAt(['peer-connected']);
+    const agentLike = makeRepairAgent({
+      node: {
+        stopSignal: undefined,
+        libp2p: {
+          getConnections: () => [
+            { remotePeer: { toString: () => 'peer-connected' } },
+            { remotePeer: { toString: () => 'self' } },
+          ],
+        },
+      },
+      syncExactKnowledgeAssetsFromPeerDetailed,
+    });
+
+    await expect(runLifecycleRepair(agentLike)).resolves.toEqual(EMPTY_MATERIAL);
+    expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
+      .toEqual(['peer-connected']);
+    const candidateMessage = vi.mocked(agentLike.log.info).mock.calls
+      .map(([, message]) => message)
+      .find((message) => message.includes('[rs.tick.kc-repair-candidates]'));
+    expect(JSON.parse(candidateMessage!.split('] ')[1]!)).toMatchObject({
+      connectedPeerIds: ['peer-connected', 'self'],
+      candidatePeerIds: ['peer-connected'],
+    });
+  });
+
   it('falls back to graph-specific providers when Core discovery fails', async () => {
     const logInfo = vi.fn();
     const syncExactKnowledgeAssetsFromPeerDetailed = foundAt(['peer-curator']);

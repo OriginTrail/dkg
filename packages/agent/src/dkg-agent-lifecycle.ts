@@ -276,10 +276,13 @@ import {
 } from './p2p/warm-core-connections.js';
 import {
   acceptsCoreMembership,
-  findCorePeerIds,
   type CorePeerDirectoryEntry,
   type CoreMembershipEvidence,
 } from './p2p/core-peer-discovery.js';
+import {
+  createRandomSamplingPeerSource,
+  type RandomSamplingPeerSource,
+} from './sync/recovery/random-sampling-peer-source.js';
 import {
   deleteSyncPageCheckpoint,
   fetchSyncPages,
@@ -4297,6 +4300,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     input: RandomSamplingExactRepairInput,
   ): RandomSamplingRepairOperation {
     const ctx = createOperationContext('sync');
+    // The peer-source module owns the proof-time policy — parallel curator/Core
+    // discovery, source priority, cancellation, Core membership and peer
+    // preparation. This block only names which agent capability answers each port.
+    const peerSource: RandomSamplingPeerSource = createRandomSamplingPeerSource({
+      selfPeerId: this.peerId,
+      maxRosterPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+      coreEligibilityConcurrency: CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+      coreMembershipPolicy: 'proof-required',
+      isStarted: () => this.started,
+      resolveCuratorPeerIds: (localContextGraphId, options) =>
+        this.resolveCuratorPeerIdsForCg(localContextGraphId, options),
+      findCoreAgents: (options) => this.discovery.findAgents(options),
+      authenticateCorePeerAddress: (agent, signal) =>
+        this.authenticateCorePeerAddress(agent, signal),
+      classifyCoreMembership: (agent) => this.classifyShardingTableCore(agent.agentAddress),
+      observedCandidatePeerIds: (localContextGraphId) =>
+        this.vmReconcileObservedCandidatePeerIds(localContextGraphId),
+      preferredPeerId: (localContextGraphId) => this.preferredSyncPeers.get(localContextGraphId),
+      connectedPeerIds: () => this.node.libp2p.getConnections()
+        .map((connection) => connection.remotePeer.toString()),
+      ensurePeerAdmitted: (peerId, signal) => this.ensurePeerAdmittedForRecovery(
+        peerId,
+        ctx,
+        'Random Sampling exact repair peer',
+        signal,
+      ),
+      ensurePeerConnected: (peerId, signal) => this.ensurePeerConnected(peerId, { signal }),
+      hasSyncProtocol: (peerId, signal) => this.waitForSyncProtocol(peerId, signal),
+      logInfo: (message) => this.log.info(ctx, message),
+    });
     const dependencies = {
       chainId: this.chain.chainId,
       // Proof-time repair gets one challenge deadline. Deferring a later Core
@@ -4309,100 +4342,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         : this.chain.getKnowledgeAssetsLifecycleAddress(),
       resolveLocalContextGraphId: (cgId, signal) =>
         this.resolveRandomSamplingLocalContextGraphId(cgId, signal),
-      resolveCandidatePeerIds: async (localContextGraphId, signal) => {
-        const isCurrent = () => this.started && !signal.aborted;
-        const [curatorResolution, corePeerIds] = await Promise.all([
-          this.resolveCuratorPeerIdsForCg(
-            localContextGraphId,
-            {
-              maxPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
-              signal,
-              isCurrent,
-            },
-          ).catch((error) => {
-            if (signal.aborted) throw signal.reason ?? error;
-            return { peerIds: [] as string[] };
-          }),
-          // Registry Core discovery and graph-specific curator discovery are
-          // independent. Resolve them together, then preserve graph-specific
-          // providers ahead of this broad fallback roster.
-          findCorePeerIds({
-            findAgents: (options) => this.discovery.findAgents(options),
-            selfPeerId: this.peerId,
-            maxCandidates: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
-            eligibilityConcurrency: CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
-            signal,
-            authenticatePeerAddress: (agent, candidateSignal) =>
-              this.authenticateCorePeerAddress(agent, candidateSignal),
-            // The broad proof-time fallback must be chain-scoped. Profiles
-            // without an operational address or a positive membership read do
-            // not consume the challenge deadline merely by claiming a Core
-            // role in the local Agent Registry graph.
-            classifyMembership: (agent) => this.classifyShardingTableCore(
-              agent.agentAddress,
-            ),
-            membershipPolicy: 'proof-required',
-          }).catch((error) => {
-            if (signal.aborted) throw signal.reason ?? error;
-            this.log.info(
-              ctx,
-              `Random Sampling Core-roster discovery failed for ${localContextGraphId}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-            return [] as string[];
-          }),
-        ]);
-        if (!isCurrent()) {
-          throw signal.reason ?? asSyncFetchAbortError(new Error(
-            `Random Sampling provider discovery for ${localContextGraphId} is no longer current`,
-          ));
-        }
-        const observedPeerIds = this.vmReconcileObservedCandidatePeerIds(
-          localContextGraphId,
-        );
-        const connectedPeerIds = this.node.libp2p.getConnections()
-          .map((connection) => connection.remotePeer.toString());
-        const preferredPeerId = this.preferredSyncPeers.get(localContextGraphId);
-        const candidatePeerIds = [...new Set([
-          ...curatorResolution.peerIds,
-          ...observedPeerIds,
-          preferredPeerId,
-          ...connectedPeerIds,
-          ...corePeerIds,
-        ].filter((peerId): peerId is string => Boolean(
-          peerId && peerId !== this.peerId,
-        )))];
-        // This diagnostic-only ledger lets a managed black-box fixture prove
-        // why a later Core was eligible without exposing any private content.
-        this.log.info(ctx, `[rs.tick.kc-repair-candidates] ${JSON.stringify({
-          localContextGraphId,
-          curatorPeerIds: curatorResolution.peerIds,
-          observedPeerIds,
-          preferredPeerId: preferredPeerId ?? null,
-          connectedPeerIds,
-          corePeerIds,
-          candidatePeerIds,
-        })}`);
-        return candidatePeerIds;
-      },
+      resolveCandidatePeerIds: (localContextGraphId, signal) =>
+        peerSource.resolveCandidatePeerIds(localContextGraphId, signal),
       selectPeerWindow: (peerIds, options) => this.selectCatchupPeerWindow(
         peerIds.map((peerId) => ({ toString: () => peerId })),
         options,
       ).map((peer) => peer.toString()),
-      preparePeer: async (peerId, signal) => {
-        // Declined admission and a missing sync protocol are expected peer
-        // outcomes; the traversal records them as skips, not failures.
-        if (!(await this.ensurePeerAdmittedForRecovery(
-          peerId,
-          ctx,
-          'Random Sampling exact repair peer',
-          signal,
-        ))) return { kind: 'skipped', reason: 'not-admitted' };
-        await this.ensurePeerConnected(peerId, { signal });
-        if (!(await this.waitForSyncProtocol(peerId, signal))) {
-          return { kind: 'skipped', reason: 'sync-protocol-unavailable' };
-        }
-        return { kind: 'ready' };
-      },
+      preparePeer: (peerId, signal) => peerSource.preparePeer(peerId, signal),
       fetchExactKnowledgeAsset: async (
         peerId,
         localContextGraphId,
