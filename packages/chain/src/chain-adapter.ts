@@ -2352,6 +2352,20 @@ export interface ChainAdapter {
     nameHash: string,
     options?: ChainReadOptions,
   ): Promise<bigint | null>;
+
+  /**
+   * Request-scoped bulk equivalent of the exact current name-hash lookup.
+   * Returns every unique lowercase bytes32 key supplied by the caller,
+   * including null for proven misses. A partial or ambiguous batch MUST reject.
+   * Absence from a returned map is never proof of non-registration.
+   * Implementations page historical creation inventory by block range and
+   * share fences across the complete input batch. They must not reuse a
+   * persistent negative snapshot for an independent call.
+   */
+  resolveContextGraphIdsByNameHashes?(
+    nameHashes: readonly string[],
+    options?: ChainReadOptions,
+  ): Promise<ReadonlyMap<string, bigint | null>>;
 }
 
 // ----- Backward-compat deprecated aliases -----

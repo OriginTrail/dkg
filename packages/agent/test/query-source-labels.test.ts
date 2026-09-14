@@ -7,12 +7,16 @@ import type {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
+  type GraphWriteRevisionSource,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { QueryMethods } from '../src/dkg-agent-query.js';
+import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
 import {
   createRfc64CatalogAccessPolicyRegistryFixture,
 } from './support/rfc64-catalog-access-policy-fixture.js';
+
+type ContextGraphQueryStore = Pick<TripleStore, 'query' | 'listGraphs' | 'listGraphsByPrefix'>;
 
 describe('query caller-provided store labels', () => {
   it('attributes the unscoped private-graph access-policy lookup', async () => {
@@ -21,17 +25,19 @@ describe('query caller-provided store labels', () => {
       bindings: [],
     }));
     const listGraphsByPrefix = vi.fn(async () => []);
-    const store = { query, listGraphsByPrefix } as unknown as TripleStore;
+    const store = {
+      query,
+      listGraphs: vi.fn<ContextGraphQueryStore['listGraphs']>(async () => []),
+      listGraphsByPrefix,
+    } satisfies ContextGraphQueryStore;
 
     await expect(
-      QueryMethods.prototype.getDisallowedGraphPrefixes.call(
-        {
-          store,
-          config: {},
-          subscribedContextGraphs: new Map(),
-        } as never,
-      ),
-    ).resolves.toEqual([]);
+      canReadUnscopedQuery({
+        store,
+        knownContextGraphIds: [],
+        canReadContextGraph: vi.fn(async () => true),
+      }),
+    ).resolves.toBe(true);
 
     expect(query).toHaveBeenCalledOnce();
     expect(query.mock.calls[0]?.[1]?.source).toBe(
@@ -39,7 +45,7 @@ describe('query caller-provided store labels', () => {
     );
     expect(listGraphsByPrefix).toHaveBeenCalledWith(
       'did:dkg:context-graph:',
-      { source: 'agent.query.rfc64RuntimePrivateGraphs' },
+      expect.objectContaining({ source: 'storage.contextGraphOwnerCandidates' }),
     );
   });
 
@@ -93,6 +99,12 @@ function runtimePrivateQueryAgent(options: {
     query: vi.fn(async () => ({ bindings: [{ value: 'visible' }] })),
   };
   const store = {
+    // This fixture has no writers; model the stable local-store capability
+    // required across unscoped admission and query execution.
+    writeRevisionCoverage: 'all-writers' as const,
+    getWriteRevision: vi.fn<GraphWriteRevisionSource['getWriteRevision']>(
+      () => ({ generation: 0, stable: true }),
+    ),
     query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
     listGraphsByPrefix: vi.fn(async () => (
       options.storedContextGraph === true
@@ -117,6 +129,8 @@ function runtimePrivateQueryAgent(options: {
     log: { info() {}, warn() {}, debug() {}, error() {} },
     queryEngine,
     store,
+    contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+    prepareContextGraphRegistrationReadPlan: vi.fn(async () => null),
     subscribedContextGraphs: options.subscribed === false
       ? new Map()
       : new Map([[RUNTIME_PRIVATE_CG, { synced: true }]]),
@@ -130,8 +144,6 @@ function runtimePrivateQueryAgent(options: {
     resolveContextGraphReadAuthority:
       QueryMethods.prototype.resolveContextGraphReadAuthority,
     canReadContextGraph: QueryMethods.prototype.canReadContextGraph,
-    getDisallowedGraphPrefixes: QueryMethods.prototype.getDisallowedGraphPrefixes,
-    sparqlReferencesPrivateGraphs: QueryMethods.prototype.sparqlReferencesPrivateGraphs,
   };
   return {
     agent,
@@ -143,6 +155,23 @@ function runtimePrivateQueryAgent(options: {
 }
 
 describe('runtime-accepted RFC-64 private query authorization', () => {
+  it('does not execute SPARQL when unscoped read authority throws', async () => {
+    const fixture = runtimePrivateQueryAgent();
+    const authorityFailure = new Error('authority lookup failed');
+    fixture.acceptedPolicySnapshot.mockImplementation(() => { throw authorityFailure; });
+
+    await expect(QueryMethods.prototype.query.call(
+      fixture.agent as never,
+      'ASK { GRAPH ?g { ?s ?p ?o } }',
+      { callerAgentAddress: OUTSIDER },
+    )).rejects.toBe(authorityFailure);
+    expect(fixture.acceptedPolicySnapshot).toHaveBeenCalledWith(
+      RUNTIME_NETWORK_ID,
+      RUNTIME_PRIVATE_CG,
+    );
+    expect(fixture.queryEngine.query).not.toHaveBeenCalled();
+  });
+
   it('uses a live private roster for scoped VM reads without bootstrap config', async () => {
     const fixture = runtimePrivateQueryAgent();
     expect(fixture.agent.config).not.toHaveProperty('rfc64CatalogBootstrap');
@@ -252,7 +281,7 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
     expect(fixture.store.listGraphsByPrefix).toHaveBeenCalledWith(
       'did:dkg:context-graph:',
-      { source: 'agent.query.rfc64RuntimePrivateGraphs' },
+      expect.objectContaining({ source: 'storage.contextGraphOwnerCandidates' }),
     );
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });

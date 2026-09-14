@@ -3,7 +3,6 @@
 import { ethers } from 'ethers';
 import {
   AbortableKeyedSingleFlight,
-  SingleFlightInvalidatedError,
   TtlValueCache,
 } from './keyed-ttl-single-flight-cache.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
@@ -11,6 +10,13 @@ import type { RpcRequestClass } from './rpc-request-transport.js';
 const CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS = 30_000;
 const CONTEXT_GRAPH_NAME_HASH_INVALIDATED_MESSAGE =
   'Context Graph name-hash binding changed during current-slot resolution';
+
+export function normalizeContextGraphNameHashBatch(nameHashes: readonly string[]): readonly string[] {
+  if (!Array.isArray(nameHashes)) {
+    throw new TypeError('Context Graph name-hash batch must be an array');
+  }
+  return [...new Set(nameHashes.map(normalizeContextGraphNameHash))];
+}
 
 export interface ContextGraphNameHashResolverDependencies {
   /** One concrete adapter-owned lookup for a normalized bytes32 commitment. */
@@ -74,34 +80,24 @@ export class ContextGraphNameHashResolver {
     const partition = this.partitions[options.requestClass ?? 'foreground'];
     for (;;) {
       const cached = partition.cache.get(nameHash);
-      let resolved: ContextGraphNameHashResolutionCacheEntry;
-      try {
-        resolved = cached ?? await partition.singleFlight.run(
-          nameHash,
-          async (physicalSignal) => ({
-            value: await this.dependencies.load(nameHash, physicalSignal),
-            // A cold current-slot load may advance the source generation itself.
-            // Stamp the resulting miss after that commit so the next caller does
-            // not immediately discard a fresh negative cache and repeat every
-            // chain fence. A later, independent state advance still invalidates
-            // the entry through the equality check below.
-            generation: this.dependencies.generation?.(),
-          }),
-          options.signal,
-          (value) => { partition.cache.set(nameHash, value); },
-          'Context Graph name-hash resolution has no active waiters',
-        );
-      } catch (error) {
-        // Adapter-wide cache invalidation is a stale-work fence, not an
-        // operation failure. The old physical read is already aborted and
-        // prevented from publishing; restart this caller against the new
-        // generation unless its own deadline/cancellation has fired.
-        if (
-          !options.signal?.aborted
-          && error instanceof SingleFlightInvalidatedError
-        ) continue;
-        throw error;
-      }
+      const resolved = cached ?? await partition.singleFlight.run(
+        nameHash,
+        async (physicalSignal) => {
+          const value = await this.dependencies.load(nameHash, physicalSignal);
+          // A superseded loader may ignore cancellation. Its old absence proof
+          // must not reach waiting callers or repopulate the negative cache.
+          physicalSignal.throwIfAborted();
+          // A cold current-slot load may advance the source generation itself.
+          // Stamp the resulting miss after that commit so the next caller does
+          // not immediately discard a fresh negative cache and repeat every
+          // chain fence. A later, independent state advance still invalidates
+          // the entry through the equality check below.
+          return { value, generation: this.dependencies.generation?.() };
+        },
+        options.signal,
+        (value) => { partition.cache.set(nameHash, value); },
+        'Context Graph name-hash resolution has no active waiters',
+      );
       const currentGeneration = this.dependencies.generation?.();
       if (
         resolved.generation === undefined
@@ -114,6 +110,20 @@ export class ContextGraphNameHashResolver {
 
   invalidateAll(): void {
     this.invalidateCaches();
+  }
+
+  /** Reconcile fresh batch evidence without disturbing unrelated scalar work. */
+  invalidateNames(rawNameHashes: readonly string[]): void {
+    const names = normalizeContextGraphNameHashBatch(rawNameHashes);
+    for (const partition of Object.values(this.partitions)) {
+      for (const name of names) {
+        partition.cache.delete(name);
+        partition.singleFlight.invalidate(
+          name,
+          'Context Graph name-hash resolution was superseded by a fresh batch',
+        );
+      }
+    }
   }
 
   private createPartition(): {

@@ -163,6 +163,7 @@ interface AbortableSingleFlightState<V> {
   promise: Promise<V>;
   waiters: number;
   settled: boolean;
+  invalidated: SingleFlightInvalidatedError | undefined;
 }
 
 /**
@@ -170,14 +171,13 @@ interface AbortableSingleFlightState<V> {
  *
  * A caller abandoning its wait never poisons peers. When the final waiter
  * leaves, the physical operation is aborted and detached from the key so a
- * later caller can start fresh. Invalidation also aborts the current physical
- * request and advances an epoch, preventing an implementation that ignores
- * cancellation from publishing a stale success through `onSuccess`.
+ * later caller can start fresh. Invalidation aborts and detaches the current
+ * physical request, suppresses stale publication through `onSuccess`, and
+ * rejects enrolled waiters even if the loader ignores cancellation or already
+ * completed before its result could be delivered.
  */
 export class AbortableKeyedSingleFlight<K, V> {
   private readonly inflight = new Map<K, AbortableSingleFlightState<V>>();
-
-  private readonly epochs = new Map<K, number>();
 
   async run(
     key: K,
@@ -188,40 +188,45 @@ export class AbortableKeyedSingleFlight<K, V> {
   ): Promise<V> {
     let state = this.inflight.get(key);
     if (state === undefined) {
-      const epoch = this.epoch(key);
       const controller = new AbortController();
       state = {
         controller,
         promise: Promise.resolve(undefined as V),
         waiters: 0,
         settled: false,
+        invalidated: undefined,
       };
       const shared = state;
       // Enrol the initiating waiter before physical work can settle.
       shared.promise = Promise.resolve()
         .then(() => load(controller.signal))
         .then((value) => {
-          if (onSuccess !== undefined && this.epoch(key) === epoch) onSuccess(value);
+          if (onSuccess !== undefined && this.inflight.get(key) === shared) onSuccess(value);
           return value;
         })
         .finally(() => {
           shared.settled = true;
-          if (this.inflight.get(key) === shared) this.inflight.delete(key);
+          if (shared.waiters === 0 && this.inflight.get(key) === shared) {
+            this.inflight.delete(key);
+          }
         });
       this.inflight.set(key, shared);
     }
 
     state.waiters += 1;
     try {
-      return await waitForSignal(state.promise, waiterSignal);
+      const value = await waitForSignal(state.promise, waiterSignal);
+      if (state.invalidated !== undefined) throw state.invalidated;
+      return value;
     } finally {
       state.waiters -= 1;
-      if (state.waiters === 0 && !state.settled) {
+      if (state.waiters === 0) {
         if (this.inflight.get(key) === state) this.inflight.delete(key);
-        this.bumpEpoch(key);
-        const abandoned = new Error(abandonmentMessage);
-        abandoned.name = 'AbortError';
-        state.controller.abort(abandoned);
+        if (!state.settled && state.invalidated === undefined) {
+          const abandoned = new Error(abandonmentMessage);
+          abandoned.name = 'AbortError';
+          state.controller.abort(abandoned);
+        }
       }
     }
   }
@@ -229,24 +234,16 @@ export class AbortableKeyedSingleFlight<K, V> {
   invalidate(key: K, reason = 'Shared request was invalidated'): void {
     const state = this.inflight.get(key);
     this.inflight.delete(key);
-    this.bumpEpoch(key);
-    if (state !== undefined && !state.settled) {
+    if (state !== undefined) {
       const invalidated = new SingleFlightInvalidatedError(reason);
-      state.controller.abort(invalidated);
+      state.invalidated = invalidated;
+      if (!state.settled) state.controller.abort(invalidated);
     }
   }
 
   invalidateAll(reason = 'Shared requests were invalidated'): void {
     const keys = [...this.inflight.keys()];
     for (const key of keys) this.invalidate(key, reason);
-  }
-
-  private epoch(key: K): number {
-    return this.epochs.get(key) ?? 0;
-  }
-
-  private bumpEpoch(key: K): void {
-    this.epochs.set(key, this.epoch(key) + 1);
   }
 }
 

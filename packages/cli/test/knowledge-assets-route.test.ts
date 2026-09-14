@@ -596,12 +596,14 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       });
 
       it('a bare FULL share (no skipSeal) → 200 sealed:true / publishReady:true', async () => {
-        await createKa(REG, 'share-full-default');
-        await write(REG, 'share-full-default', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+        const created = await createKa(REG, 'share-full-default');
+        expect(created.status, `full share create: ${JSON.stringify(created.body)}`).toBe(201);
+        const written = await write(REG, 'share-full-default', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+        expect(written.status, `full share write: ${JSON.stringify(written.body)}`).toBe(200);
         const res = await postJson(daemon, '/api/knowledge-assets/share-full-default/swm/share', {
           contextGraphId: REG,
         });
-        expect(res.status).toBe(200);
+        expect(res.status, `full share: ${JSON.stringify(res.body)}`).toBe(200);
         expect(res.body.swmShared).toBe(true);
         expect(res.body.promotedCount).toBeGreaterThan(0);
         expect(res.body.sealed).toBe(true);

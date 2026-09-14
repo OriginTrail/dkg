@@ -20,6 +20,7 @@ type BindingAgentMethods = Pick<DKGAgent,
   | 'resolveFinalizedContextGraphAuthorityTargetsV1'
   | 'resolveFinalizedContextGraphAuthorityTargetV1'
   | 'resolveContextGraphRegistrationBinding'
+  | 'prepareContextGraphRegistrationReadPlan'
   | 'canReadContextGraph'
   | 'persistVmReconcileWatermark'
   | 'selfPrimeSubscriptionOnChainId'

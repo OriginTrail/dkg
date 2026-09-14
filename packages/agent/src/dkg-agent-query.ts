@@ -8,13 +8,19 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { canReadUnscopedQuery } from './unscoped-query-admission.js';
+import {
+  prepareUnscopedContextGraphReadChecks,
+  type ContextGraphReadCheck,
+} from './prepare-unscoped-context-graph-read-checks.js';
+import { executeUnscopedQuery } from './unscoped-query-consistency.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
-  contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
+  contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
@@ -31,7 +37,7 @@ import {
   decodeGossipEnvelope, type GossipEnvelopeMsg,
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
+  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS,
   assertContextGraphIdV1, assertNetworkIdV1,
   type ContextGraphIdV1, type NetworkIdV1,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
@@ -94,7 +100,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { PrivateContentStore, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -378,6 +384,7 @@ import type { DKGAgent } from './dkg-agent.js';
 import {
   resolveContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
+  type ContextGraphReadAuthorityInput,
 } from './context-graph-read-authority.js';
 
 export class QueryMethods extends DKGAgentBase {
@@ -604,32 +611,6 @@ export class QueryMethods extends DKGAgentBase {
       return emptyQueryResultForKind(sparql);
     }
 
-    // When no context graph is specified, exclude private CGs the caller cannot
-    // read to prevent data leakage via unscoped or FROM-less SPARQL.
-    let excludeGraphPrefixes: string[] | undefined;
-    if (!opts.contextGraphId) {
-      excludeGraphPrefixes = await this.getDisallowedGraphPrefixes({
-        callerAgentAddress: callerAgentAddressStr,
-      });
-      // Per spec Axiom 1 every shared query must be resolved within a CG.
-      // Reject explicit GRAPH/FROM clauses that reference private CGs the
-      // caller cannot read — post-filtering alone cannot prevent leaks via
-      // aggregates (ASK, COUNT) or projections that omit graph/subject.
-      if (excludeGraphPrefixes.length > 0 && this.sparqlReferencesPrivateGraphs(sparql, excludeGraphPrefixes)) {
-        this.log.info(ctx, 'Query denied: SPARQL references private context graphs the caller cannot read');
-        return emptyQueryResultForKind(sparql);
-      }
-      // Post-filtering cannot make arbitrary unscoped SPARQL safe: ASK,
-      // aggregates, and projections that omit the GRAPH variable can disclose
-      // private rows before bindings are filtered. Until the query engine owns
-      // a dataset-level graph exclusion, fail closed when this caller lacks any
-      // private CG on the node. Scoped public queries remain available.
-      if (excludeGraphPrefixes.length > 0) {
-        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every private context graph');
-        return emptyQueryResultForKind(sparql);
-      }
-    }
-
     // #1106 (3): an UNAUTHENTICATED / admin caller omitting `agentAddress`
     // on a working-memory read previously fell back to the bare peerId
     // namespace — but rc.17 WM data is keyed by the agent's EVM wallet, so
@@ -658,9 +639,8 @@ export class QueryMethods extends DKGAgentBase {
         effectiveWmAddress.toLowerCase() === defaultEvmLc ? [this.peerId!] : [this.defaultAgentAddress!];
     }
 
-    const result = await this.queryEngine.query(sparql, {
+    const execute = () => this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,
-      excludeGraphPrefixes,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
@@ -679,6 +659,31 @@ export class QueryMethods extends DKGAgentBase {
       // callers on the legacy shape still get the trust gate without
       // engines needing to know about both names.
       minTrust: opts.minTrust ?? opts._minTrust,
+    });
+    // Arbitrary unscoped SPARQL can reveal private data through aggregates or
+    // projections without a graph column. The executor owns admission and both
+    // local consistency checks, including the release of the materialized result.
+    const result = opts.contextGraphId ? await execute() : await executeUnscopedQuery({
+      store: this.store,
+      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+      admit: () => canReadUnscopedQuery({
+        store: this.store,
+        knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
+        canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
+          callerAgentAddress: callerAgentAddressStr,
+          signal,
+        }),
+        prepareReadChecks: (ids, signal) => (
+          QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
+            this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
+          )
+        ),
+      }, { signal: opts.signal }),
+      execute,
+      denied: () => {
+        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
+        return emptyQueryResultForKind(sparql);
+      },
     });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
@@ -699,6 +704,44 @@ export class QueryMethods extends DKGAgentBase {
     } = {},
   ): Promise<boolean> {
     return (await this.resolveContextGraphReadAuthority(contextGraphId, opts)).outcome === 'allowed';
+  }
+
+  /** Candidate owners that must enter the same canonical authority resolver as scoped reads. */
+  private contextGraphReadAuthorityCandidateSeeds(this: DKGAgent): ReadonlySet<string> {
+    return new Set([
+      ...(this.config.rfc64CatalogBootstrap?.acceptedPolicies ?? []).flatMap(
+        ({ policyEnvelope }) => policyEnvelope.payload.accessPolicy === 1
+          ? [policyEnvelope.payload.contextGraphId]
+          : [],
+      ),
+      ...this.subscribedContextGraphs.keys(),
+      ...(this.config.syncContextGraphs ?? []),
+    ]);
+  }
+
+  /** Keep batch preparation beside the canonical authority resolver and its sources. */
+  private prepareContextGraphReadAuthorityChecks(this: DKGAgent,
+    ids: readonly string[],
+    opts: { callerAgentAddress?: string; signal: AbortSignal },
+  ): Promise<ContextGraphReadCheck> {
+    return prepareUnscopedContextGraphReadChecks({
+      createReadAuthorityInput: (id, signal) => (
+        QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+          this, id, { callerAgentAddress: opts.callerAgentAddress, signal }, CHAIN_POLICY_READ_TIMEOUT_MS,
+        )
+      ),
+      prepareRegistrationReadPlan: (candidateIds, readSignal) => (
+        this.prepareContextGraphRegistrationReadPlan(candidateIds, {
+          signal: readSignal,
+        })
+      ),
+      prepareReadAuthorityFactsSnapshot: (candidateIds, readSignal) => (
+        this.contextGraphMetaProjection.prepareReadAuthorityFactsSnapshot(
+          candidateIds,
+          { signal: readSignal },
+        )
+      ),
+    }, ids, opts.signal);
   }
 
   public async resolveContextGraphReadAuthority(this: DKGAgent,
@@ -794,10 +837,26 @@ export class QueryMethods extends DKGAgentBase {
     },
     registrationTimeoutMs: number,
   ): Promise<ContextGraphReadAuthorityDecision> {
+    return resolveContextGraphReadAuthorityDecision(
+      QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+        this, contextGraphId, opts, registrationTimeoutMs,
+      ),
+    );
+  }
+
+  private createContextGraphReadAuthorityInput(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+    },
+    registrationTimeoutMs: number,
+  ): ContextGraphReadAuthorityInput {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? [];
-    return resolveContextGraphReadAuthorityDecision({
+    return {
       contextGraphId,
       callerAgentAddress: opts.callerAgentAddress,
       allowSubscriptionFallback: opts.allowSubscriptionFallback !== false,
@@ -835,7 +894,7 @@ export class QueryMethods extends DKGAgentBase {
           || (this.config.syncContextGraphs ?? []).includes(contextGraphId)
         ),
       getLocalIdentityId: () => this.chain.getIdentityId(),
-    });
+    };
   }
 
   /**
@@ -905,67 +964,6 @@ export class QueryMethods extends DKGAgentBase {
       }
     }
     return null;
-  }
-
-  /**
-   * Returns graph URI prefixes for private CGs the caller cannot read.
-   * Used to exclude them from unscoped queries.
-   */
-  async getDisallowedGraphPrefixes(this: DKGAgent, opts: { callerAgentAddress?: string } = {}): Promise<string[]> {
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const result = await this.store.query(
-      `SELECT ?cg WHERE {
-        GRAPH <${ontologyGraph}> {
-          ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
-        }
-      }`,
-      { source: 'agent.query.privateGraphAccessPolicy' },
-    );
-    const privateContextGraphIds = new Set<string>();
-    if (result.type === 'bindings') {
-      for (const row of result.bindings) {
-        const cgUri = row['cg'];
-        if (!cgUri) continue;
-        const match = cgUri.match(/^<?did:dkg:context-graph:([^>]+)>?$/);
-        if (match?.[1]) privateContextGraphIds.add(match[1]);
-      }
-    }
-    for (const { policyEnvelope } of this.config?.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
-      if (policyEnvelope.payload.accessPolicy === 1) {
-        privateContextGraphIds.add(policyEnvelope.payload.contextGraphId);
-      }
-    }
-    // Runtime authority can be accepted independently of startup bootstrap.
-    // Subscription/sync selection and the bounded local graph-name index
-    // supply CG candidates without exposing the private policy registry itself.
-    const runtimeCandidates = new Set<string>([
-      ...this.subscribedContextGraphs.keys(),
-      ...(this.config.syncContextGraphs ?? []),
-      ...await new GraphManager(this.store).listContextGraphs({
-        source: 'agent.query.rfc64RuntimePrivateGraphs',
-      }),
-    ]);
-    for (const contextGraphId of runtimeCandidates) {
-      if (this.resolveRfc64PrivateReadRosterV1(contextGraphId) !== undefined) {
-        privateContextGraphIds.add(contextGraphId);
-      }
-    }
-    const prefixes: string[] = [];
-    for (const contextGraphId of privateContextGraphIds) {
-      if (await this.canReadContextGraph(contextGraphId, {
-        callerAgentAddress: opts.callerAgentAddress,
-      })) continue;
-      // Exclude all named graphs under this CG (data, _meta, _shared_memory, etc.)
-      prefixes.push(`did:dkg:context-graph:${contextGraphId}`);
-    }
-    return prefixes;
-  }
-
-  sparqlReferencesPrivateGraphs(this: DKGAgent, sparql: string, disallowedPrefixes: string[]): boolean {
-    if (disallowedPrefixes.length === 0) return false;
-    const upper = sparql.toUpperCase();
-    if (!upper.includes('GRAPH') && !upper.includes('FROM')) return false;
-    return disallowedPrefixes.some(prefix => sparql.includes(prefix));
   }
 
   /**
