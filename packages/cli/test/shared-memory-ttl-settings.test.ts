@@ -132,7 +132,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
   it.each(routes)('reports an unexpected setter failure as HTTP 500 through %s', async route => {
     const persistedBefore = await readFile(configPath(), 'utf8');
     const configBefore = structuredClone(config);
-    vi.spyOn(agent, 'setSharedMemoryTtlMs').mockImplementationOnce(() => { throw new Error('worker failure'); });
+    vi.spyOn(agent, 'updateSharedMemoryTtlMs').mockRejectedValueOnce(new Error('worker failure'));
     const response = await fetch(baseUrl + route, { method: 'PUT', body: '{"ttlDays":2}' });
     expect(response.status).toBe(500);
     expect(await response.json()).toEqual({ error: 'worker failure' });
@@ -147,7 +147,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
     const operationsBefore = await readOperations();
     const persistedBefore = await readFile(configPath(), 'utf8');
     const configBefore = structuredClone(config);
-    const setter = vi.spyOn(agent, 'setSharedMemoryTtlMs');
+    const setter = vi.spyOn(agent, 'updateSharedMemoryTtlMs');
     vi.spyOn(configStore, 'update').mockImplementationOnce(async () => {
       // Force physical cleanup while persistence is unresolved. The previous
       // ordering applies the shorter TTL here and irreversibly deletes the row.
@@ -227,7 +227,7 @@ describe('shared-memory TTL settings HTTP boundary', () => {
 
   it.each(routes)('preserves the payload-limit error for the HTTP boundary through %s', async route => {
     const persistedBefore = await readFile(configPath(), 'utf8');
-    const setter = vi.spyOn(agent, 'setSharedMemoryTtlMs');
+    const setter = vi.spyOn(agent, 'updateSharedMemoryTtlMs');
     const response = await fetch(baseUrl + route, {
       method: 'PUT', body: JSON.stringify({ ttlDays: 2, padding: 'x'.repeat(SMALL_BODY_BYTES) }),
     });

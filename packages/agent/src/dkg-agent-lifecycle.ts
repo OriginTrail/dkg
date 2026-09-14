@@ -10545,9 +10545,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /**
    * Update the shared memory TTL at runtime. Takes effect immediately for queries
-   * and invalidates an active cleanup cutoff without requiring a restart.
+   * and schedules invalidation of an active cleanup cutoff without requiring a
+   * restart. This compatibility method intentionally retains its original void
+   * return contract; callers that need activation completion should use
+   * updateSharedMemoryTtlMs().
    */
-  async setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): Promise<void> {
+  setSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): void {
+    void this.updateSharedMemoryTtlMs(ttlMs).catch((error) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `Shared memory TTL activation failed and was rolled back: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+  }
+
+  /** Update the runtime TTL and await cleanup-policy activation or rollback. */
+  async updateSharedMemoryTtlMs(this: DKGAgent, ttlMs: number): Promise<void> {
     validateSharedMemoryTtlMs(ttlMs);
     const previous = this.config.sharedMemoryTtlMs;
     this.config.sharedMemoryTtlMs = ttlMs;

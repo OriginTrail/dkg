@@ -44,7 +44,7 @@ it('uses one runtime TTL update for the registered responder cutoff and automati
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
   try {
     expect(await cap.invoke({ ...request, syncSessionId: 'ttl-disabled' })).toContain(stale[0]!.subject);
-    await agent.setSharedMemoryTtlMs(60_000);
+    await agent.updateSharedMemoryTtlMs(60_000);
     // The scheduled cleanup has not run yet; serving must already use the new TTL.
     expect(cleanupQueries()).toBe(0);
     const filtered = await cap.invoke({ ...request, syncSessionId: 'ttl-enabled' });
@@ -53,7 +53,7 @@ it('uses one runtime TTL update for the registered responder cutoff and automati
     await vi.advanceTimersByTimeAsync(0);
     expect(cleanupQueries()).toBeGreaterThan(0);
     expect(await store.query(`SELECT ?p WHERE { GRAPH <${META}> { <${stale[0]!.subject}> ?p ?o } }`)).toMatchObject({ bindings: [] });
-    await agent.setSharedMemoryTtlMs(0);
+    await agent.updateSharedMemoryTtlMs(0);
     await store.insert(stale);
     const afterDisable = cleanupQueries();
     await vi.advanceTimersByTimeAsync(900_001);
@@ -97,7 +97,7 @@ it('clears single-flight state after a store failure so the next call can recove
 
 it('keeps a disabled cleanup from selecting expired operations', async () => {
   const f = await createSwmExpiryFixture(1);
-  await f.agent.setSharedMemoryTtlMs(0);
+  await f.agent.updateSharedMemoryTtlMs(0);
   expect(await f.agent.cleanupExpiredSharedMemory()).toBe(0);
   expect(f.stats.selections).toBe(0);
 });
@@ -132,7 +132,7 @@ it('stops a real active cleanup before deletion when TTL is disabled mid-selecti
   internals.swmExpiryCleanupWorker.start();
   const timerTurn = vi.advanceTimersByTimeAsync(0);
   await selected;
-  const disabling = agent.setSharedMemoryTtlMs(0);
+  const disabling = agent.updateSharedMemoryTtlMs(0);
   releaseSelection();
   await Promise.all([timerTurn, disabling]);
   await vi.advanceTimersByTimeAsync(100);
@@ -232,7 +232,7 @@ it.each([-1, NaN, Infinity, 1e20])('rejects invalid TTL %s at creation and befor
     .then(agent => { trackSwmExpiryAgent(agent); return agent; });
   await expect(creation).rejects.toThrow('sharedMemoryTtlMs');
   const f = await createSwmExpiryFixture(1);
-  await expect(f.agent.setSharedMemoryTtlMs(ttlMs)).rejects.toThrow('sharedMemoryTtlMs');
+  await expect(f.agent.updateSharedMemoryTtlMs(ttlMs)).rejects.toThrow('sharedMemoryTtlMs');
   expect(await f.agent.cleanupExpiredSharedMemory()).toBe(3);
 });
 
@@ -301,11 +301,11 @@ it.each([
     return result;
   });
   const deletes = vi.spyOn(store, 'deleteByPattern');
-  await agent.setSharedMemoryTtlMs(hour);
+  await agent.updateSharedMemoryTtlMs(hour);
   const cleanup = agent.cleanupExpiredSharedMemory();
   try {
     await selected;
-    const changingTtl = agent.setSharedMemoryTtlMs(48 * hour);
+    const changingTtl = agent.updateSharedMemoryTtlMs(48 * hour);
     release();
     expect(await cleanup).toBe(0);
     await changingTtl;
@@ -363,7 +363,7 @@ it('preserves a newly retained operation queued behind a counted cleanup mutatio
     return result;
   });
 
-  await agent.setSharedMemoryTtlMs(hour);
+  await agent.updateSharedMemoryTtlMs(hour);
   const cleanup = agent.cleanupExpiredSharedMemory();
   try {
     await Promise.all([firstMutation, familiesResolved]);
@@ -374,7 +374,7 @@ it('preserves a newly retained operation queued behind a counted cleanup mutatio
     const retainedRoot = roots.find(root => root !== blockedRoot)!;
     const retainedOperation = operations[roots.indexOf(retainedRoot)]![0]!.subject;
 
-    const changingTtl = agent.setSharedMemoryTtlMs(48 * hour);
+    const changingTtl = agent.updateSharedMemoryTtlMs(48 * hour);
     releaseFirstMutation();
     await cleanup;
     await changingTtl;

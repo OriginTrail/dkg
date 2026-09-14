@@ -112,11 +112,11 @@ describe('setSharedMemoryTtlMs timer lifecycle', () => {
     expect((node as any).swmExpiryCleanupWorker.running).toBe(false);
 
     // Enable TTL at runtime
-    await node.setSharedMemoryTtlMs(60_000);
+    await node.updateSharedMemoryTtlMs(60_000);
     expect((node as any).swmExpiryCleanupWorker.running).toBe(true);
 
     // Disable again
-    await node.setSharedMemoryTtlMs(0);
+    await node.updateSharedMemoryTtlMs(0);
     expect((node as any).swmExpiryCleanupWorker.running).toBe(false);
   }, 10000);
 });

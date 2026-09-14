@@ -34,8 +34,8 @@ export async function handleSharedMemoryTtlSettings({ req, res, configStore, age
     await configStore.update(
       current => ({ ...current, sharedMemoryTtlMs: ttlMs, workspaceTtlMs: ttlMs }),
       (_next, previous) => ({
-        apply: () => agent.setSharedMemoryTtlMs(ttlMs),
-        rollback: () => agent.setSharedMemoryTtlMs(resolveSharedMemoryTtlMs(previous) ?? 30 * DAY_MS),
+        apply: () => agent.updateSharedMemoryTtlMs(ttlMs),
+        rollback: () => agent.updateSharedMemoryTtlMs(resolveSharedMemoryTtlMs(previous) ?? 30 * DAY_MS),
       }),
     );
     return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
