@@ -50,7 +50,7 @@ import {
   knowledgeAssetShare,
 } from '../src/ui/api.js';
 import { fetchContextGraphs } from '../src/ui/context-graph-api.js';
-import type { ContextGraphListSummaryRow } from '@origintrail-official/dkg-core';
+import type { ContextGraphListSummaryRow } from '@origintrail-official/dkg-core/context-graph-list-wire';
 
 let server: Server;
 let baseUrl: string;

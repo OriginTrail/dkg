@@ -2,7 +2,7 @@ import {
   serializeContextGraphListOptions,
   type ContextGraphListPageResponse,
   type ContextGraphListSummaryRow,
-} from '@origintrail-official/dkg-core';
+} from '@origintrail-official/dkg-core/context-graph-list-wire';
 import { BASE, authHeaders, fetchWithTimeout, HttpError } from './http.js';
 
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60_000;
