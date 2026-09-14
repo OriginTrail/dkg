@@ -107,22 +107,20 @@ export async function enrichContextGraphListAuthorityV1(
     if (row.onChainId) return row;
     if (mode.kind === 'finalized-index') {
       const finalizedTarget = mode.targets.get(row.id);
-      if (finalizedTarget !== undefined) {
-        return { ...row, onChainId: finalizedTarget.expectedOnChainId.toString(10) };
-      }
+      // The batch owns one finalized horizon for the complete requested
+      // inventory. An omitted target is therefore finalized absence at that
+      // horizon, not permission to reopen current-state discovery once per
+      // local row. Mixing those horizons both weakens the listing's authority
+      // semantics and turns stale durable `registered` markers into a scalar
+      // historical-RPC fan-out.
+      return finalizedTarget === undefined
+        ? row
+        : { ...row, onChainId: finalizedTarget.expectedOnChainId.toString(10) };
     }
-    if (mode.kind !== 'legacy-current') {
-      // A failed finalized batch is not permission to fan the same failed
-      // historical lookup out once per durable row. Leave the entire result
-      // visibly uncached and retry one shared read on the next request.
-      if (mode.kind === 'degraded-finalized-index') return row;
-      const registrationStatus = await options.readRegistrationStatus(row.id);
-      if (!registrationStatus.ok) {
-        cacheable = false;
-        return row;
-      }
-      if (registrationStatus.value !== 'registered') return row;
-    }
+    // A failed finalized batch is not permission to fan the same failed
+    // historical lookup out once per durable row. Leave the entire result
+    // visibly uncached and retry one shared read on the next request.
+    if (mode.kind === 'degraded-finalized-index') return row;
     const current = await options.readCurrentOnChainId(row.id);
     if (!current.ok) {
       cacheable = false;
