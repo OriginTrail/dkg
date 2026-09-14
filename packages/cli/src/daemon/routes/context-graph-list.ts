@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto';
 import {
   CONTEXT_GRAPH_LIST_PROJECTIONS,
+  CONTEXT_GRAPH_LIST_WIRE_KEYS,
   CONTEXT_GRAPH_LIST_WIRE_KEY_VALUES,
   type ContextGraphListFullRow,
   type ContextGraphListPageResponse,
@@ -63,10 +64,11 @@ function parseBoolean(
   searchParams: URLSearchParams,
   key: 'subscribed' | 'synced' | 'onChain',
 ): { ok: true; value?: boolean } | { ok: false; error: string } {
-  const raw = searchParams.get(key);
+  const wireKey = CONTEXT_GRAPH_LIST_WIRE_KEYS[key];
+  const raw = searchParams.get(wireKey);
   if (raw === null) return { ok: true };
   if (raw !== 'true' && raw !== 'false') {
-    return { ok: false, error: `"${key}" must be "true" or "false"` };
+    return { ok: false, error: `"${wireKey}" must be "true" or "false"` };
   }
   return { ok: true, value: raw === 'true' };
 }
@@ -130,7 +132,7 @@ export function parseContextGraphListQuery(
     }
   }
 
-  const rawLimit = searchParams.get('limit');
+  const rawLimit = searchParams.get(CONTEXT_GRAPH_LIST_WIRE_KEYS.limit);
   let limit = CONTEXT_GRAPH_LIST_DEFAULT_LIMIT;
   if (rawLimit !== null) {
     if (!/^[0-9]+$/.test(rawLimit) || !Number.isSafeInteger(Number(rawLimit))) {
@@ -145,7 +147,7 @@ export function parseContextGraphListQuery(
     }
   }
 
-  const rawProjection = searchParams.get('projection') ?? 'full';
+  const rawProjection = searchParams.get(CONTEXT_GRAPH_LIST_WIRE_KEYS.projection) ?? 'full';
   if (!(CONTEXT_GRAPH_LIST_PROJECTIONS as readonly string[]).includes(rawProjection)) {
     return { ok: false, error: '"projection" must be "full" or "summary"' };
   }
@@ -158,7 +160,7 @@ export function parseContextGraphListQuery(
   const onChain = parseBoolean(searchParams, 'onChain');
   if (!onChain.ok) return onChain;
 
-  const rawSearch = searchParams.get('q');
+  const rawSearch = searchParams.get(CONTEXT_GRAPH_LIST_WIRE_KEYS.q);
   const search = rawSearch?.trim().toLocaleLowerCase('en-US') || undefined;
   if (search && search.length > 256) {
     return { ok: false, error: '"q" must not exceed 256 characters' };
@@ -174,7 +176,7 @@ export function parseContextGraphListQuery(
   const fingerprint = queryFingerprint(filters);
   const query: ContextGraphListQuery = { limit, fingerprint, ...filters };
 
-  const rawCursor = searchParams.get('cursor');
+  const rawCursor = searchParams.get(CONTEXT_GRAPH_LIST_WIRE_KEYS.cursor);
   if (rawCursor !== null) {
     const cursor = decodeCursor(rawCursor);
     if (!cursor) {

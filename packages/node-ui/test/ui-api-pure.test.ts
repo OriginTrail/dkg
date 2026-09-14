@@ -308,6 +308,17 @@ describe('UI API tests', () => {
       expect(requestLog).toHaveLength(1);
     });
 
+    it('rejects a malformed context-graph page at the decoded boundary', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/context-graph/list'),
+        status: 200,
+        body: { contextGraphs: 'not-an-array', nextCursor: 42 },
+      });
+
+      await expect(fetchContextGraphs()).rejects.toThrow('Invalid context-graph list page');
+      expect(requestLog).toHaveLength(1);
+    });
+
     it('surfaces a later-page transport error without returning a partial list', async () => {
       contextGraphPagination = {
         etag: '"context-graphs-later-error"',

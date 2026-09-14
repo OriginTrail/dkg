@@ -8,7 +8,10 @@ import {
   parseContextGraphListQuery,
 } from '../src/daemon/routes/context-graph-list.js';
 import { jsonResponseHeaders } from '../src/daemon/http-utils.js';
-import type { ContextGraphListFullRow } from '@origintrail-official/dkg-core';
+import {
+  serializeContextGraphListOptions,
+  type ContextGraphListFullRow,
+} from '@origintrail-official/dkg-core';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
 function rows(count: number): ContextGraphListFullRow[] {
@@ -180,6 +183,58 @@ describe('bounded context-graph listing', () => {
       }),
     ]);
     expect(page.payload.contextGraphs[0]).not.toHaveProperty('uri');
+  });
+
+  it('matches q against graph names with trimming and case folding', () => {
+    const source = [
+      { ...rows(1)[0]!, id: 'opaque-a', name: 'Alpha Supply Graph' },
+      { ...rows(1)[0]!, id: 'opaque-b', name: 'Beta Logistics Graph' },
+    ];
+    const page = buildContextGraphListPage(
+      source,
+      pagedQuery({ projection: 'summary', q: '  sUPPly  ' }),
+    );
+    expect(page.ok).toBe(true);
+    if (!page.ok) throw new Error(page.error);
+    expect(page.payload.contextGraphs.map((row) => row.id)).toEqual(['opaque-a']);
+  });
+
+  it('round-trips every public option through the canonical wire-key map', () => {
+    const first = buildContextGraphListPage(
+      rows(20),
+      pagedQuery({
+        limit: '2',
+        projection: 'summary',
+        subscribed: 'true',
+        synced: 'false',
+        onChain: 'true',
+        q: 'graph',
+      }),
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error(first.error);
+    const serialized = serializeContextGraphListOptions({
+      limit: 2,
+      projection: 'summary',
+      subscribed: true,
+      synced: false,
+      onChain: true,
+      q: 'graph',
+      ...(first.payload.nextCursor ? { cursor: first.payload.nextCursor } : {}),
+    });
+    const parsed = parseContextGraphListQuery(new URLSearchParams(serialized));
+    expect(parsed).toMatchObject({
+      ok: true,
+      mode: 'paged',
+      query: {
+        limit: 2,
+        projection: 'summary',
+        subscribed: true,
+        synced: false,
+        onChain: true,
+        search: 'graph',
+      },
+    });
   });
 
   it('applies subscribed, synced, and onChain filters independently', () => {

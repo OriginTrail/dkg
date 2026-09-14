@@ -1,6 +1,5 @@
 import {
   serializeContextGraphListOptions,
-  type ContextGraphListPageResponse,
   type ContextGraphListSummaryRow,
 } from '@origintrail-official/dkg-core/context-graph-list-wire';
 import { BASE, authHeaders, fetchWithTimeout, HttpError } from './http.js';
@@ -19,15 +18,17 @@ interface ContextGraphListCacheEntry extends ContextGraphListView {
   etag: string;
 }
 
-class ContextGraphAuthorizationChangedError extends Error {
-  constructor() {
-    super('Context-graph authorization changed during pagination');
-    this.name = 'ContextGraphAuthorizationChangedError';
-  }
-}
+type DecodedContextGraphListPage = {
+  contextGraphs: ContextGraphListSummaryRow[];
+  nextCursor?: string;
+};
+
+type ContextGraphPageWalkResult =
+  | { kind: 'not-modified' }
+  | { kind: 'loaded'; view: ContextGraphListView; etag?: string };
 
 const cacheByAuthorization = new Map<string, ContextGraphListCacheEntry>();
-const inFlightByAuthorization = new Map<string, Promise<ContextGraphListView>>();
+const inFlightByAuthorization = new Map<string, Promise<ContextGraphPageWalkResult>>();
 
 function captureAuthorization(): { key: string; headers: Record<string, string> } {
   const headers = authHeaders();
@@ -48,11 +49,11 @@ function isSummaryRow(value: unknown): value is ContextGraphListSummaryRow {
     && typeof row.synced === 'boolean';
 }
 
-function decodePage(value: unknown): ContextGraphListPageResponse<ContextGraphListSummaryRow> {
+function decodePage(value: unknown): DecodedContextGraphListPage {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Invalid context-graph list page');
   }
-  const page = value as Partial<ContextGraphListPageResponse<ContextGraphListSummaryRow>>;
+  const page = value as Partial<DecodedContextGraphListPage>;
   if (
     !Array.isArray(page.contextGraphs)
     || !page.contextGraphs.every(isSummaryRow)
@@ -60,7 +61,10 @@ function decodePage(value: unknown): ContextGraphListPageResponse<ContextGraphLi
   ) {
     throw new Error('Invalid context-graph list page');
   }
-  return page as ContextGraphListPageResponse<ContextGraphListSummaryRow>;
+  return {
+    contextGraphs: page.contextGraphs,
+    ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
+  };
 }
 
 async function httpError(response: Response): Promise<HttpError> {
@@ -75,8 +79,8 @@ function authorizationIsCurrent(key: string): boolean {
 
 async function fetchContextGraphPages(
   authorization: { key: string; headers: Record<string, string> },
-): Promise<ContextGraphListView> {
-  const cached = cacheByAuthorization.get(authorization.key);
+  cachedEtag?: string,
+): Promise<ContextGraphPageWalkResult> {
   const requestPage = async (cursor?: string, etag?: string): Promise<Response> => {
     const query = serializeContextGraphListOptions({
       limit: CONTEXT_GRAPH_LIST_PAGE_LIMIT,
@@ -91,13 +95,8 @@ async function fetchContextGraphPages(
     }, CONTEXT_GRAPH_LOAD_TIMEOUT_MS);
   };
 
-  let response = await requestPage(undefined, cached?.etag);
-  if (response.status === 304 && cached) {
-    if (!authorizationIsCurrent(authorization.key)) {
-      throw new ContextGraphAuthorizationChangedError();
-    }
-    return cloneView(cached);
-  }
+  let response = await requestPage(undefined, cachedEtag);
+  if (response.status === 304) return { kind: 'not-modified' };
   if (!response.ok) throw await httpError(response);
 
   const etag = response.headers.get('etag') ?? undefined;
@@ -118,28 +117,18 @@ async function fetchContextGraphPages(
     }
   }
 
-  if (!authorizationIsCurrent(authorization.key)) {
-    throw new ContextGraphAuthorizationChangedError();
-  }
   const visible = contextGraphs.filter((row) => !row.isSystem);
-  if (etag) {
-    cacheByAuthorization.set(authorization.key, {
-      etag,
-      contextGraphs: visible.map((row) => ({ ...row })),
-    });
-  } else {
-    cacheByAuthorization.delete(authorization.key);
-  }
-  return { contextGraphs: visible };
+  return {
+    kind: 'loaded',
+    view: { contextGraphs: visible },
+    ...(etag === undefined ? {} : { etag }),
+  };
 }
 
-function isRestartable(error: unknown): boolean {
-  return error instanceof ContextGraphAuthorizationChangedError
-    || (
-      error instanceof HttpError
-      && error.status === 409
-      && (error.body as { code?: unknown } | undefined)?.code === SNAPSHOT_CHANGED_CODE
-    );
+function isSnapshotChanged(error: unknown): boolean {
+  return error instanceof HttpError
+    && error.status === 409
+    && (error.body as { code?: unknown } | undefined)?.code === SNAPSHOT_CHANGED_CODE;
 }
 
 export async function fetchContextGraphs(): Promise<ContextGraphListView> {
@@ -150,17 +139,30 @@ export async function fetchContextGraphs(): Promise<ContextGraphListView> {
         cacheByAuthorization.delete(cachedAuthorization);
       }
     }
+    const cached = cacheByAuthorization.get(authorization.key);
     let request = inFlightByAuthorization.get(authorization.key);
     if (!request) {
-      request = fetchContextGraphPages(authorization);
+      request = fetchContextGraphPages(authorization, cached?.etag);
       inFlightByAuthorization.set(authorization.key, request);
     }
     try {
-      const view = await request;
+      const result = await request;
       if (!authorizationIsCurrent(authorization.key)) continue;
-      return cloneView(view);
+      if (result.kind === 'not-modified') {
+        if (!cached) throw new Error('Context-graph list returned 304 without a cached view');
+        return cloneView(cached);
+      }
+      if (result.etag) {
+        cacheByAuthorization.set(authorization.key, {
+          etag: result.etag,
+          contextGraphs: result.view.contextGraphs.map((row) => ({ ...row })),
+        });
+      } else {
+        cacheByAuthorization.delete(authorization.key);
+      }
+      return cloneView(result.view);
     } catch (error) {
-      if (!isRestartable(error)) throw error;
+      if (!isSnapshotChanged(error)) throw error;
     } finally {
       if (inFlightByAuthorization.get(authorization.key) === request) {
         inFlightByAuthorization.delete(authorization.key);

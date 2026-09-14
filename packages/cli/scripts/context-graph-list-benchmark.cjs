@@ -3,26 +3,6 @@
 const REFRESHES = 1_200;
 const ROWS = 537;
 
-function sampleHeap(profile) {
-  profile.peakBytes = Math.max(profile.peakBytes, process.memoryUsage().heapUsed);
-}
-
-function heapProfile(run) {
-  global.gc?.();
-  const profile = {
-    baselineBytes: process.memoryUsage().heapUsed,
-    peakBytes: process.memoryUsage().heapUsed,
-  };
-  const value = run(profile);
-  global.gc?.();
-  const retainedBytes = process.memoryUsage().heapUsed - profile.baselineBytes;
-  return {
-    value,
-    peakDeltaBytes: Math.max(0, profile.peakBytes - profile.baselineBytes),
-    retainedDeltaBytes: Math.max(0, retainedBytes),
-  };
-}
-
 function makeRows() {
   return Array.from({ length: ROWS }, (_, index) => ({
     id: `context-graph-${String(index).padStart(4, '0')}`,
@@ -46,23 +26,17 @@ async function main() {
     buildContextGraphListPage,
     parseContextGraphListQuery,
   } = await import('../dist/daemon/routes/context-graph-list.js');
+  const { serializeContextGraphListOptions } = await import(
+    '@origintrail-official/dkg-core/context-graph-list-wire'
+  );
   const rows = makeRows();
   const legacyBody = JSON.stringify({ contextGraphs: rows });
 
-  const legacy = heapProfile((profile) => {
-    let checksum = 0;
-    for (let refresh = 0; refresh < REFRESHES; refresh += 1) {
-      const parsed = JSON.parse(legacyBody);
-      checksum += parsed.contextGraphs.length;
-      sampleHeap(profile);
-    }
-    return { checksum };
-  });
-
-  const parsedQuery = parseContextGraphListQuery(new URLSearchParams({
+  const initialOptions = {
     limit: '100',
     projection: 'summary',
-  }));
+  };
+  const parsedQuery = parseContextGraphListQuery(new URLSearchParams(initialOptions));
   if (!parsedQuery.ok || parsedQuery.mode !== 'paged') {
     throw new Error('Unable to create the benchmark pagination query');
   }
@@ -72,12 +46,21 @@ async function main() {
   do {
     const built = buildContextGraphListPage(rows, pageQuery);
     if (!built.ok) throw new Error(built.error);
-    const body = JSON.stringify(built.payload);
-    pageBodies.push(body);
-    pageQuery = built.payload.nextCursor
-      ? { ...pageQuery, cursorDigest: Buffer.from(built.payload.nextCursor, 'base64url')
-        .toString('utf8').split(':').at(-1) }
-      : undefined;
+    pageBodies.push(built.body);
+    if (!built.payload.nextCursor) {
+      pageQuery = undefined;
+      continue;
+    }
+    const serialized = serializeContextGraphListOptions({
+      limit: Number(initialOptions.limit),
+      projection: initialOptions.projection,
+      cursor: built.payload.nextCursor,
+    });
+    const nextQuery = parseContextGraphListQuery(new URLSearchParams(serialized));
+    if (!nextQuery.ok || nextQuery.mode !== 'paged') {
+      throw new Error('Unable to parse the benchmark continuation query');
+    }
+    pageQuery = nextQuery.query;
   } while (pageQuery);
 
   const pageSizes = pageBodies.map((body) => Buffer.byteLength(body));
@@ -86,26 +69,16 @@ async function main() {
     throw new Error(`Page exceeded ${CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES} bytes`);
   }
 
-  const bounded = heapProfile((profile) => {
-    const cachedRows = [];
-    for (const body of pageBodies) {
-      const page = JSON.parse(body);
-      cachedRows.push(...page.contextGraphs);
-      sampleHeap(profile);
-    }
-
-    if (cachedRows.length !== ROWS) {
-      throw new Error(`Expected ${ROWS} cached rows, received ${cachedRows.length}`);
-    }
-    // The remaining refreshes receive 304 with no response body and reuse this cache.
-    for (let refresh = 1; refresh < REFRESHES; refresh += 1) sampleHeap(profile);
-    return {
-      pagesOnInitialRefresh: pageSizes.length,
-      maxPageBytes,
-      transferredBodyBytes: pageSizes.reduce((total, bytes) => total + bytes, 0),
-      parsedRows: cachedRows.length,
-    };
-  });
+  const cachedRows = pageBodies.flatMap((body) => JSON.parse(body).contextGraphs);
+  if (cachedRows.length !== ROWS) {
+    throw new Error(`Expected ${ROWS} cached rows, received ${cachedRows.length}`);
+  }
+  const bounded = {
+    pagesOnInitialRefresh: pageSizes.length,
+    maxPageBytes,
+    transferredBodyBytes: pageSizes.reduce((total, bytes) => total + bytes, 0),
+    parsedRows: cachedRows.length,
+  };
 
   const legacyTransferredBodyBytes = Buffer.byteLength(legacyBody) * REFRESHES;
   const result = {
@@ -114,21 +87,17 @@ async function main() {
       responseBytes: Buffer.byteLength(legacyBody),
       transferredBodyBytes: legacyTransferredBodyBytes,
       parsedRows: ROWS * REFRESHES,
-      clientPeakHeapDeltaBytes: legacy.peakDeltaBytes,
-      clientRetainedHeapDeltaBytes: legacy.retainedDeltaBytes,
     },
     bounded: {
-      ...bounded.value,
+      ...bounded,
       conditionalRefreshes: REFRESHES - 1,
-      clientPeakHeapDeltaBytes: bounded.peakDeltaBytes,
-      clientRetainedHeapDeltaBytes: bounded.retainedDeltaBytes,
     },
     reduction: {
       transferredBodyPercent: Number((
-        (1 - bounded.value.transferredBodyBytes / legacyTransferredBodyBytes) * 100
+        (1 - bounded.transferredBodyBytes / legacyTransferredBodyBytes) * 100
       ).toFixed(4)),
       parsedRowsPercent: Number((
-        (1 - bounded.value.parsedRows / (ROWS * REFRESHES)) * 100
+        (1 - bounded.parsedRows / (ROWS * REFRESHES)) * 100
       ).toFixed(4)),
     },
   };
