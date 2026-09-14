@@ -341,6 +341,8 @@ export {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type LocalContextGraphOriginRecord,
+  type LocalContextGraphOriginSource,
   type ContextGraphJoinPolicyMode,
   type ContextGraphJoinPolicyRecord,
   type ContextGraphJoinPolicyAuditEventType,

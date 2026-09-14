@@ -2424,6 +2424,61 @@ describe('RFC-64 rollout authority integration', () => {
     );
   });
 
+  it('keeps finalized snapshot absence explicit through refresh reconciliation', async () => {
+    const contextGraphId = `${AUTHOR}/finalized-absence`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    const readSnapshots = vi.fn(async () => new Map());
+    const resolveIds = vi.fn(async (nameHashes: readonly string[]) => new Map([
+      [nameHashes[0]!, 9n],
+    ]));
+    const pointAuthorityRead = vi.fn(async () => finalizedAuthoritySnapshot(
+      contextGraphId,
+      [],
+      '0',
+    ));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      getContextGraphAuthoritySnapshot: pointAuthorityRead,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdsByNameHashes: resolveIds,
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'finalized-authority-absence',
+      config: { chainAdapter },
+    });
+    edge.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '9',
+      onChainHash: expectedNameHash,
+    });
+    const legacyPolicy = vi.spyOn(edge, 'getContextGraphOnChainPolicy')
+      .mockRejectedValue(new Error('finalized absence must not reopen current policy'));
+    const signal = new AbortController().signal;
+
+    const requests = await edge.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    );
+    const request = requests.get(contextGraphId);
+
+    expect(request).toEqual({ finalizedAuthorityEvidence: null });
+    expect(Object.isFrozen(request)).toBe(true);
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request?.finalizedAuthorityEvidence,
+    )).rejects.toThrow('no finalized indexed authority');
+    expect(resolveIds).toHaveBeenCalledWith([expectedNameHash], { signal });
+    expect(readSnapshots).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
+    expect(pointAuthorityRead).not.toHaveBeenCalled();
+    expect(legacyPolicy).not.toHaveBeenCalled();
+  });
+
   it('gates indexed private responsibility and authority on verified membership', async () => {
     const contextGraphId = `${AUTHOR}/indexed-private-responsibility`;
     const indexedSnapshot = finalizedAuthoritySnapshot(

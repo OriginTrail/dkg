@@ -812,8 +812,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // A graph created by this node is explicitly local-first until its own
     // registration transaction commits. Do not turn SWM signing/gossip into a
     // chain availability dependency during that phase. The provenance set is
-    // populated only by the local create boundary (and its durable membership
-    // record), while the RDF status is the transactionally updated register
+    // populated only by the local create boundary (and its durable graph-level
+    // origin journal), while the RDF status is the transactionally updated register
     // boundary; neither fact is inferred from remote discovery.
     if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
       try {

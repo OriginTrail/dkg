@@ -305,7 +305,7 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(5);
   });
 
-  it('discards a refresh invalidated while its slot reads are in flight', async () => {
+  it('discards and retries a refresh invalidated while its slot reads are in flight', async () => {
     const { adapter, readContractWithOptions } = fixture([NAME_HASH]);
     const firstRead = deferred<string>();
     let blockFirst = true;
@@ -326,9 +326,7 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     adapter.invalidatePublishPreflightCache();
     blockFirst = false;
     firstRead.resolve(NAME_HASH);
-    await expect(invalidated).rejects.toThrow(/binding changed during current-slot resolution/i);
-
-    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(1n);
+    await expect(invalidated).resolves.toBe(1n);
     expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(3);
   });
 
@@ -351,7 +349,7 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     });
 
     await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /binding changed during current-slot resolution/i,
+      /ambiguous.*2 numeric ids/i,
     );
   });
 

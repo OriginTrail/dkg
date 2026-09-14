@@ -1969,8 +1969,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       const targetId = target.expectedOnChainId.toString(10) as
         ContextGraphAuthorityIndexId;
+      const evidence = evidenceByTargetId.get(targetId);
       return [contextGraphId, Object.freeze({
-        finalizedAuthorityEvidence: evidenceByTargetId.get(targetId) ?? null,
+        // Collapse a batch-owned missing row to the refresh protocol's null
+        // sentinel. Passing an evidence wrapper whose snapshot is null is
+        // equivalent today, but keeping one canonical absence value makes it
+        // impossible for a later consumer to mistake the wrapper for present
+        // authority and reopen a current-state point read.
+        finalizedAuthorityEvidence:
+          evidence === undefined || evidence.snapshot === null ? null : evidence,
       })];
     }));
   }

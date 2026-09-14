@@ -1040,6 +1040,21 @@ export interface ContextGraphMembershipRecord {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Immutable node-local evidence that a Context Graph originated on this node.
+ * This is deliberately keyed only by Context Graph id: membership principals
+ * and their roles remain mutable and must never own creation provenance.
+ */
+export type LocalContextGraphOriginSource =
+  | 'local-create'
+  | 'implicit-swm-write';
+
+export interface LocalContextGraphOriginRecord {
+  contextGraphId: string;
+  source: LocalContextGraphOriginSource;
+  createdAt: number;
+}
+
 export interface ContextGraphMembershipStore {
   /**
    * Load persisted membership facts for restart recovery. Optional so custom
@@ -1049,6 +1064,16 @@ export interface ContextGraphMembershipStore {
     firstSeenAt?: number;
     updatedAt: number;
   }>>;
+  /**
+   * Load graph-level local-origin facts. Optional for source compatibility
+   * with custom stores predating the independent provenance journal.
+   */
+  loadLocalOrigins?(): Promise<LocalContextGraphOriginRecord[]>;
+  /**
+   * Insert a graph-level origin fact monotonically. Implementations must not
+   * replace an existing row for the same Context Graph id.
+   */
+  recordLocalOrigin?(record: LocalContextGraphOriginRecord): Promise<void>;
   upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }

@@ -163,6 +163,40 @@ describe('LocalContextGraphProvenance durable restoration', () => {
     ]));
   });
 
+  it('prefers graph-level origin after the matching membership source is overwritten', async () => {
+    const records = [row('stable-origin', {
+      principalType: 'agent',
+      status: 'active',
+      source: 'allowed-agent',
+    })];
+    const provenance = new LocalContextGraphProvenance();
+    const loadLocalOrigins = vi.fn(async () => [{
+      contextGraphId: 'stable-origin',
+      source: 'local-create' as const,
+      createdAt: 1,
+    }]);
+    const fakeAgent = {
+      config: {
+        contextGraphMembershipStore: {
+          loadAll: async () => records,
+          loadLocalOrigins,
+          recordLocalOrigin: async () => undefined,
+          upsert: async () => undefined,
+          delete: async () => undefined,
+        },
+      },
+      localContextGraphProvenance: provenance,
+      log: { warn: vi.fn() },
+      rehydrateContextGraphSubscriptions: vi.fn(async () => undefined),
+    };
+
+    await (LifecycleSyncMethods.prototype as any)
+      .rehydrateContextGraphsFromDurableState.call(fakeAgent);
+
+    expect(loadLocalOrigins).toHaveBeenCalledOnce();
+    expect(provenance.hasLocalCreate('stable-origin')).toBe(true);
+  });
+
   it.each([
     [
       'loadAll is unavailable',

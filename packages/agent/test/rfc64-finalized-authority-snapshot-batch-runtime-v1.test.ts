@@ -265,4 +265,21 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
     }).toThrow();
     await runtime.whenIdle();
   });
+
+  it('returns immutable null evidence for a requested snapshot omitted by the batch', async () => {
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
+      readSnapshots: async () => new Map(),
+    });
+
+    const evidence = await runtime.createBatch([ID_9, ID_10]).read(ID_9);
+
+    expect(evidence).toEqual({
+      contextGraphAuthorityIndexId: ID_9,
+      batchTargetIds: [ID_9, ID_10],
+      snapshot: null,
+    });
+    expect(Object.isFrozen(evidence)).toBe(true);
+    expect(Object.isFrozen(evidence.batchTargetIds)).toBe(true);
+    await runtime.whenIdle();
+  });
 });

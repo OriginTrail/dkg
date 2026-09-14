@@ -620,6 +620,7 @@ import {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipSource,
+  type LocalContextGraphOriginSource,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -679,6 +680,8 @@ import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
+import { createLocalContextGraphOriginMembershipRecord } from
+  './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
@@ -9843,6 +9846,50 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
+  /**
+   * Record node-local graph origin independently from mutable membership.
+   *
+   * Built-in stores use a monotonic graph-keyed journal. Older custom stores
+   * retain restart safety through a reserved membership key that ordinary
+   * curator/allowlist updates cannot collide with. Once the graph itself has
+   * been flushed this method is deliberately best-effort: persistence failure
+   * cannot make an already-created graph appear to have failed creation.
+   */
+  async persistLocalContextGraphOrigin(
+    this: DKGAgent,
+    contextGraphId: string,
+    source: LocalContextGraphOriginSource,
+  ): Promise<void> {
+    this.localContextGraphProvenance.recordLocalCreate(contextGraphId);
+    const store = this.config.contextGraphMembershipStore;
+    if (store === undefined) return;
+    try {
+      if (store.recordLocalOrigin !== undefined) {
+        await this.enqueueContextGraphMembershipPersistWrite(
+          `local-origin\0${contextGraphId}`,
+          () => store.recordLocalOrigin!({
+            contextGraphId,
+            source,
+            createdAt: Date.now(),
+          }),
+          { strict: true },
+        );
+        return;
+      }
+      await this.upsertContextGraphMember(createLocalContextGraphOriginMembershipRecord({
+        contextGraphId,
+        principalId: `did:dkg:local-origin:${this.peerId}`,
+        role: 'local-origin',
+        source,
+      }), { strict: true });
+    } catch (error) {
+      this.log.warn(
+        createOperationContext('system'),
+        `Failed to persist local Context Graph origin for "${contextGraphId}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   deleteContextGraphMember(this: DKGAgent,
     contextGraphId: string,
     principalType: ContextGraphMemberPrincipalType,
@@ -10067,11 +10114,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // subscription recovery are independent projections of this immutable
         // snapshot; neither lower-level component owns the other's I/O.
         membershipRows = await membershipStore.loadAll();
-        this.localContextGraphProvenance.restoreMembershipRecords(membershipRows);
+        if (membershipStore.loadLocalOrigins === undefined) {
+          // Compatibility path for custom stores predating the independent
+          // graph-keyed journal. New built-in stores never derive provenance
+          // from mutable membership rows.
+          this.localContextGraphProvenance.restoreMembershipRecords(membershipRows);
+        }
       } catch (error) {
         this.log.warn(
           ctx,
           `Failed to load node-local membership provenance: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (membershipStore?.loadLocalOrigins !== undefined) {
+      try {
+        this.localContextGraphProvenance.restoreOriginRecords(
+          await membershipStore.loadLocalOrigins(),
+        );
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Failed to load node-local Context Graph origin journal: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }

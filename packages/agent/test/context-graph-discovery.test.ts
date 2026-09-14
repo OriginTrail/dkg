@@ -334,8 +334,19 @@ describe('implicit SWM context graph metadata', () => {
       string,
       ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
     >();
+    const persistedOrigins = new Map<string, {
+      contextGraphId: string;
+      source: 'local-create' | 'implicit-swm-write';
+      createdAt: number;
+    }>();
     const membershipStore: ContextGraphMembershipStore = {
       loadAll: async () => [...persistedMemberships.values()].map((row) => ({ ...row })),
+      loadLocalOrigins: async () => [...persistedOrigins.values()].map((row) => ({ ...row })),
+      recordLocalOrigin: async (record) => {
+        if (!persistedOrigins.has(record.contextGraphId)) {
+          persistedOrigins.set(record.contextGraphId, { ...record });
+        }
+      },
       upsert: async (record) => {
         persistedMemberships.set(
           `${record.contextGraphId}\0${record.principalType}\0${record.principalId}`,
@@ -379,6 +390,12 @@ describe('implicit SWM context graph metadata', () => {
           status: 'active',
         }),
       ]));
+      expect([...persistedOrigins.values()]).toEqual([
+        expect.objectContaining({
+          contextGraphId,
+          source: 'implicit-swm-write',
+        }),
+      ]);
 
       const offlineChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
       const registryResolve = vi.spyOn(offlineChain, 'resolveContextGraphIdByNameHash')

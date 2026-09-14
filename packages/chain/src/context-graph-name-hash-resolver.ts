@@ -8,6 +8,8 @@ import {
 import type { RpcRequestClass } from './rpc-request-transport.js';
 
 const CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS = 30_000;
+const CONTEXT_GRAPH_NAME_HASH_INVALIDATED_MESSAGE =
+  'Context Graph name-hash binding changed during current-slot resolution';
 
 export interface ContextGraphNameHashResolverDependencies {
   /** One concrete adapter-owned lookup for a normalized bytes32 commitment. */
@@ -71,21 +73,36 @@ export class ContextGraphNameHashResolver {
     const partition = this.partitions[options.requestClass ?? 'foreground'];
     for (;;) {
       const cached = partition.cache.get(nameHash);
-      const resolved = cached ?? await partition.singleFlight.run(
-        nameHash,
-        async (physicalSignal) => ({
-          value: await this.dependencies.load(nameHash, physicalSignal),
-          // A cold current-slot load may advance the source generation itself.
-          // Stamp the resulting miss after that commit so the next caller does
-          // not immediately discard a fresh negative cache and repeat every
-          // chain fence. A later, independent state advance still invalidates
-          // the entry through the equality check below.
-          generation: this.dependencies.generation?.(),
-        }),
-        options.signal,
-        (value) => { partition.cache.set(nameHash, value); },
-        'Context Graph name-hash resolution has no active waiters',
-      );
+      let resolved: ContextGraphNameHashResolutionCacheEntry;
+      try {
+        resolved = cached ?? await partition.singleFlight.run(
+          nameHash,
+          async (physicalSignal) => ({
+            value: await this.dependencies.load(nameHash, physicalSignal),
+            // A cold current-slot load may advance the source generation itself.
+            // Stamp the resulting miss after that commit so the next caller does
+            // not immediately discard a fresh negative cache and repeat every
+            // chain fence. A later, independent state advance still invalidates
+            // the entry through the equality check below.
+            generation: this.dependencies.generation?.(),
+          }),
+          options.signal,
+          (value) => { partition.cache.set(nameHash, value); },
+          'Context Graph name-hash resolution has no active waiters',
+        );
+      } catch (error) {
+        // Adapter-wide cache invalidation is a stale-work fence, not an
+        // operation failure. The old physical read is already aborted and
+        // prevented from publishing; restart this caller against the new
+        // generation unless its own deadline/cancellation has fired.
+        if (
+          !options.signal?.aborted
+          && error instanceof Error
+          && error.name === 'AbortError'
+          && error.message === CONTEXT_GRAPH_NAME_HASH_INVALIDATED_MESSAGE
+        ) continue;
+        throw error;
+      }
       const currentGeneration = this.dependencies.generation?.();
       if (
         resolved.generation === undefined
@@ -121,7 +138,7 @@ export class ContextGraphNameHashResolver {
     for (const partition of Object.values(this.partitions)) {
       partition.cache.clear();
       partition.singleFlight.invalidateAll(
-        'Context Graph name-hash binding changed during current-slot resolution',
+        CONTEXT_GRAPH_NAME_HASH_INVALIDATED_MESSAGE,
       );
     }
   }

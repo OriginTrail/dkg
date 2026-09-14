@@ -264,12 +264,18 @@ describe('Context Graph discovery/subscription boundary', () => {
     async () => {
       const dataDir = await mkdtemp(join(tmpdir(), 'dkg-local-create-provenance-'));
       const contextGraphId = 'restart-local-create-disabled';
+      const noAgentContextGraphId = 'restart-local-create-no-agent';
       const callerAgentAddress = ethers.Wallet.createRandom().address;
       const persistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
       const persistedMemberships = new Map<
         string,
         ContextGraphMembershipRecord & { updatedAt: number }
       >();
+      const persistedOrigins = new Map<string, {
+        contextGraphId: string;
+        source: 'local-create' | 'implicit-swm-write';
+        createdAt: number;
+      }>();
       const subscriptionStore = {
         loadAll: async () => [...persistedSubscriptions.values()].map((record) => ({ ...record })),
         save: async (record: ContextGraphSubscriptionRecord) => {
@@ -279,6 +285,16 @@ describe('Context Graph discovery/subscription boundary', () => {
       };
       const membershipStore = {
         loadAll: async () => [...persistedMemberships.values()].map((record) => ({ ...record })),
+        loadLocalOrigins: async () => [...persistedOrigins.values()].map((record) => ({ ...record })),
+        recordLocalOrigin: async (record: {
+          contextGraphId: string;
+          source: 'local-create' | 'implicit-swm-write';
+          createdAt: number;
+        }) => {
+          if (!persistedOrigins.has(record.contextGraphId)) {
+            persistedOrigins.set(record.contextGraphId, { ...record });
+          }
+        },
         upsert: async (record: ContextGraphMembershipRecord & { updatedAt: number }) => {
           persistedMemberships.set(
             `${record.contextGraphId}\0${record.principalType}\0${record.principalId}`,
@@ -306,9 +322,28 @@ describe('Context Graph discovery/subscription boundary', () => {
           id: contextGraphId,
           name: contextGraphId,
           callerAgentAddress,
+          // This overwrites the creator's mutable membership row in the same
+          // create call. Graph-level provenance must remain independent.
+          allowedAgents: [callerAgentAddress],
+        });
+        await first.createContextGraph({
+          id: noAgentContextGraphId,
+          name: noAgentContextGraphId,
         });
         await first.stop();
         first = undefined;
+
+        expect([...persistedMemberships.values()]).toContainEqual(
+          expect.objectContaining({
+            contextGraphId,
+            principalId: callerAgentAddress,
+            source: 'allowed-agent',
+          }),
+        );
+        expect([...persistedOrigins.keys()].sort()).toEqual([
+          contextGraphId,
+          noAgentContextGraphId,
+        ].sort());
 
         const offlineChain = new MockChainAdapter();
         const resolveContextGraphIdByNameHash = vi.fn(async () => {
@@ -326,14 +361,16 @@ describe('Context Graph discovery/subscription boundary', () => {
         });
         await restarted.start();
 
-        expect(restarted.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
-        restarted.subscribeToContextGraph(contextGraphId);
-        await expect(restarted.resolveContextGraphRegistrationBinding(contextGraphId))
-          .resolves.toEqual({ kind: 'unregistered' });
-        await expect(restarted.getContextGraphOnChainPolicy(contextGraphId))
-          .resolves.toEqual({});
-        expect((restarted as any).localContextGraphProvenance.hasLocalCreate(contextGraphId))
-          .toBe(true);
+        for (const id of [contextGraphId, noAgentContextGraphId]) {
+          expect(restarted.getSubscribedContextGraphs().has(id)).toBe(false);
+          restarted.subscribeToContextGraph(id);
+          await expect(restarted.resolveContextGraphRegistrationBinding(id))
+            .resolves.toEqual({ kind: 'unregistered' });
+          await expect(restarted.getContextGraphOnChainPolicy(id))
+            .resolves.toEqual({});
+          expect((restarted as any).localContextGraphProvenance.hasLocalCreate(id))
+            .toBe(true);
+        }
         expect(resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
       } finally {
         await first?.stop().catch(() => {});
@@ -1135,9 +1172,15 @@ describe('Context Graph discovery/subscription boundary', () => {
       expect((agent as any).config.syncContextGraphs ?? []).not.toContain('explicit-local-create');
       expect((agent as any).gossipRegistered.has('explicit-local-create')).toBe(false);
       expect(persisted.has('explicit-local-create')).toBe(false);
-      expect([...members.values()].some((record) =>
+      expect([...members.values()].filter((record) =>
         record.contextGraphId === 'explicit-local-create',
-      )).toBe(false);
+      )).toEqual([
+        expect.objectContaining({
+          role: 'local-origin',
+          source: 'local-create',
+          status: 'active',
+        }),
+      ]);
       expect(agent.getSubscribedContextGraphs().get('implicit-local-write')?.subscribed).toBe(true);
     } finally {
       await agent.stop().catch(() => {});

@@ -705,7 +705,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     // From this boundary onward the graph exists durably. Origin is an
     // immutable fact, so publish its runtime projection before any best-effort
     // subscription, membership, gossip, or RFC-64 follow-up can run.
-    this.localContextGraphProvenance.recordLocalCreate(opts.id);
+    await this.persistLocalContextGraphOrigin(opts.id, 'local-create');
 
     this.setContextGraphSubscription(opts.id, {
       name: opts.name,
@@ -728,11 +728,11 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     const curatorAgentAddress = opts.callerAgentAddress ?? this.defaultAgentAddress;
     if (curatorAgentAddress) {
-      // Membership is a restart hint and roster projection, not the graph
-      // creation transaction. A configured-store failure after store.flush()
-      // must not report that the already-durable graph failed to be created.
-      // Restart recovery relies only on this node-local membership record;
-      // replicated creator RDF is not trusted as origin evidence.
+      // Membership is a roster projection, not the graph creation transaction
+      // or its immutable provenance. A configured-store failure after
+      // store.flush() must not report that the already-durable graph failed to
+      // be created. The independent origin journal above owns restart proof;
+      // replicated creator RDF is never trusted as origin evidence.
       await this.upsertContextGraphMember(createLocalContextGraphOriginMembershipRecord({
         contextGraphId: opts.id,
         principalId: curatorAgentAddress,

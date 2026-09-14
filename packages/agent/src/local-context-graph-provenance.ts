@@ -3,11 +3,11 @@
 import type {
   ContextGraphMembershipRecord,
   ContextGraphMembershipSource,
+  LocalContextGraphOriginRecord,
+  LocalContextGraphOriginSource,
 } from './dkg-agent-types.js';
 
-export type LocalContextGraphOriginSource =
-  | 'local-create'
-  | 'implicit-swm-write';
+export type { LocalContextGraphOriginSource } from './dkg-agent-types.js';
 
 export type LocalContextGraphOriginMembershipRecord = ContextGraphMembershipRecord & {
   readonly principalType: 'agent';
@@ -53,7 +53,22 @@ export class LocalContextGraphProvenance {
     return this.#createdContextGraphIds.has(contextGraphId);
   }
 
-  /** Restore only explicit active local-creation facts from the node-local store. */
+  /** Restore the independent, graph-keyed durable origin journal. */
+  restoreOriginRecords(
+    records: Iterable<Pick<LocalContextGraphOriginRecord,
+      'contextGraphId' | 'source'>>,
+  ): void {
+    for (const record of records) {
+      if (isLocalContextGraphOriginSource(record.source)) {
+        this.recordLocalCreate(record.contextGraphId);
+      }
+    }
+  }
+
+  /**
+   * Compatibility restoration for custom/older stores that have not adopted
+   * the independent graph-origin journal yet.
+   */
   restoreMembershipRecords(
     records: Iterable<Pick<ContextGraphMembershipRecord,
       'contextGraphId' | 'principalType' | 'status' | 'source'>>,
