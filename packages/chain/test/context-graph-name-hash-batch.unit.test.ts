@@ -62,6 +62,35 @@ describe('bounded Context Graph name-hash batch resolution', () => {
     expect((await scenario.adapter.resolveContextGraphIdsByNameHashes([NAME_HASH])).get(NAME_HASH)).toBe(1n);
   });
 
+  it('bypasses a cached single-name miss when a fresh batch sees a registration', async () => {
+    const scenario = fixture([]);
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
+    const readsBeforeBatch = callsForMethod(
+      scenario.readContractWithOptions,
+      'getLatestContextGraphId',
+    ).length;
+    scenario.hashes.set(1n, NAME_HASH);
+    scenario.setLatestId(1n);
+    expect((await scenario.adapter.resolveContextGraphIdsByNameHashes([NAME_HASH])).get(NAME_HASH)).toBe(1n);
+    expect(callsForMethod(
+      scenario.readContractWithOptions,
+      'getLatestContextGraphId',
+    ).length).toBeGreaterThan(readsBeforeBatch);
+  });
+
+  it('routes single and batch APIs through one shared orchestration path', async () => {
+    const scenario = fixture([NAME_HASH, OTHER_HASH]);
+    const resolveNames = vi.spyOn(scenario.fence as unknown as {
+      resolveNames(names: readonly string[], historicalNameHashFilter: string | null): Promise<ReadonlyMap<string, bigint | null>>;
+    }, 'resolveNames');
+    await scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH);
+    await scenario.adapter.resolveContextGraphIdsByNameHashes([OTHER_HASH]);
+    expect(resolveNames.mock.calls).toEqual([
+      [[NAME_HASH], NAME_HASH],
+      [[OTHER_HASH], null],
+    ]);
+  });
+
   it('rejects the entire batch if any requested name has duplicate slots', async () => {
     const scenario = fixture([NAME_HASH, OTHER_HASH, OTHER_HASH]);
     await expect(scenario.adapter.resolveContextGraphIdsByNameHashes([NAME_HASH, OTHER_HASH]))
@@ -77,6 +106,18 @@ describe('bounded Context Graph name-hash batch resolution', () => {
       return original(...args);
     });
     await expect(scenario.adapter.resolveContextGraphIdsByNameHashes([NAME_HASH, OTHER_HASH]))
+      .rejects.toThrow(/registry advanced/i);
+  });
+
+  it('rechecks the registry after verifying a single-name bulk result', async () => {
+    const scenario = fixture([NAME_HASH]);
+    let highWaterReads = 0;
+    const original = scenario.readContractWithOptions.getMockImplementation()!;
+    scenario.readContractWithOptions.mockImplementation(async (...args: Parameters<typeof original>) => {
+      if (args[2] === 'getLatestContextGraphId' && ++highWaterReads === 3) return 2n;
+      return original(...args);
+    });
+    await expect(scenario.adapter.resolveContextGraphIdsByNameHashes([NAME_HASH]))
       .rejects.toThrow(/registry advanced/i);
   });
 
