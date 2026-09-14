@@ -266,7 +266,13 @@ describe('local-agent configuration transactions', () => {
         release();
         await request;
 
-        expect(res.statusCode).toBe(200);
+        expect(res.statusCode).toBe(operation === 'connect' ? 409 : 200);
+        if (operation === 'connect') {
+          expect(JSON.parse(res.body)).toMatchObject({
+            ok: false,
+            code: 'LOCAL_AGENT_PLAN_SUPERSEDED',
+          });
+        }
         expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
           runtime: { status: 'degraded', ready: false, lastError: 'newer edit' },
           metadata: { operatorLabel: `edited during ${operation}` },

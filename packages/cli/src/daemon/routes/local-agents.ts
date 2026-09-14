@@ -521,15 +521,21 @@ export async function handleLocalAgentsRoutes(
         preparedEntryRevision,
         (draft, normalizedId) => connectLocalAgentIntegration(draft, { ...plan.state, id: normalizedId }),
       );
+      if (!committed) {
+        return jsonResponse(res, 409, {
+          ok: false,
+          code: 'LOCAL_AGENT_PLAN_SUPERSEDED',
+          error: 'The integration changed while connection setup was in progress.',
+          integration: withPrimeAgentSessionCount(integration),
+        });
+      }
       if (!plan.ok) {
         return jsonResponse(res, 400, { error: plan.error });
       }
-      const afterCommitNotice = committed
-        ? plan.afterCommit?.({
-            current: () => ctx.configStore.current,
-            persist: (patch) => persistLocalAgentAttachPatch(ctx, id, patch),
-          })
-        : undefined;
+      const afterCommitNotice = plan.afterCommit?.({
+        current: () => ctx.configStore.current,
+        persist: (patch) => persistLocalAgentAttachPatch(ctx, id, patch),
+      });
       return jsonResponse(res, 200, {
         ok: true,
         integration: withPrimeAgentSessionCount(integration),

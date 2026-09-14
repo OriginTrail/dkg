@@ -280,7 +280,13 @@ describe('generic local-agent routes', () => {
       }, 'configuration-only');
       released.resolve();
       await running;
-      expect(res.statusCode).toBe(operation === 'failed-connect' ? 400 : 200);
+      expect(res.statusCode).toBe(operation === 'refresh' ? 200 : 409);
+      if (operation !== 'refresh') {
+        expect(JSON.parse(res.body)).toMatchObject({
+          ok: false,
+          code: 'LOCAL_AGENT_PLAN_SUPERSEDED',
+        });
+      }
       expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
         enabled: false, metadata: { userDisabled: true }, runtime: { status: 'disconnected', ready: false },
       });
@@ -317,7 +323,11 @@ describe('generic local-agent routes', () => {
       connectFromUi: async (_config, body) => {
         entered.resolve();
         await released.promise;
-        return { ok: true, state: extractLocalAgentIntegrationPatch(body) };
+        return {
+          ok: true,
+          state: extractLocalAgentIntegrationPatch(body),
+          notice: 'Hermes is connected and chat-ready.',
+        };
       },
     });
     try {
@@ -334,6 +344,15 @@ describe('generic local-agent routes', () => {
       }, 'configuration-only');
       released.resolve();
       await running;
+      expect(res.statusCode).toBe(409);
+      const body = JSON.parse(res.body);
+      expect(body).toMatchObject({
+        ok: false,
+        code: 'LOCAL_AGENT_PLAN_SUPERSEDED',
+        integration: getLocalAgentIntegration(configStore.current, 'hermes'),
+      });
+      expect(body).not.toHaveProperty('notice');
+      expect(body.error).not.toContain('connected');
       expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
         enabled: false,
         updatedAt: '2026-09-02T00:00:00.000Z',
