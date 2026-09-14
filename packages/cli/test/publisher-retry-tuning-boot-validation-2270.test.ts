@@ -68,7 +68,7 @@ vi.mock('../src/daemon/daemon-log-file-writer.js', async importOriginal => {
   };
 });
 
-const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+const { runDaemonInnerFromConfigForTesting } = await import('../src/daemon/lifecycle.js');
 
 function createFakeServer() {
   const server = {
@@ -148,7 +148,7 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     publisher: Record<string, unknown>,
     overrides: Record<string, unknown> = {},
   ): Promise<unknown> {
-    return runDaemonInner(true, {
+    return runDaemonInnerFromConfigForTesting(true, {
       name: 'retry-tuning-boot-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,

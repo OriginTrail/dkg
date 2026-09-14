@@ -33,7 +33,7 @@ vi.mock('../src/config.js', async importOriginal => {
   };
 });
 
-const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+const { runDaemonInnerFromConfigForTesting } = await import('../src/daemon/lifecycle.js');
 
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
@@ -118,7 +118,7 @@ describe('daemon startup network validation', () => {
         throw new Error(`process.exit:${code}`);
       }) as never);
 
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'predeployment-startup-test',
       networkConfig: 'mainnet-base',
       listenPort: 0,
@@ -152,7 +152,7 @@ describe('daemon startup network validation', () => {
       throw new Error(`process.exit:${code}`);
     }) as never);
 
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'startup-log-rotation-test',
       networkConfig: 'missing-mainnet',
       listenPort: 0,
@@ -188,7 +188,7 @@ describe('daemon startup network validation', () => {
         throw new Error(`process.exit:${code}`);
       }) as never);
 
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'missing-network-startup-test',
       networkConfig: 'missing-mainnet',
       listenPort: 0,
@@ -222,7 +222,7 @@ describe('daemon startup network validation', () => {
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'genesis-startup-test',
       listenPort: 0,
       nodeRole: 'edge',
@@ -319,7 +319,7 @@ describe('daemon startup network validation', () => {
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'omitted-chainid-startup-test',
       networkConfig: 'local-evm',
       listenPort: 0,

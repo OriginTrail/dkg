@@ -55,7 +55,7 @@ vi.mock('../src/publisher-runner.js', async importOriginal => {
   };
 });
 
-const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+const { runDaemonInnerFromConfigForTesting } = await import('../src/daemon/lifecycle.js');
 
 function createFakeServer() {
   const server = {
@@ -135,7 +135,7 @@ describe('runDaemonInner publisher admission-config wiring (#1836, #2270)', () =
   // capture the exact create arg (the DKGAgent.create forwarding).
   async function captureCreateArg(configOverrides: Record<string, unknown> = {}): Promise<any> {
     mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'maxretries-wiring-core-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
@@ -204,7 +204,7 @@ describe('runDaemonInner publisher admission-config wiring (#1836, #2270)', () =
       throw new Error('after-publisher-control');
     });
 
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'maxretries-wiring-admission-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,

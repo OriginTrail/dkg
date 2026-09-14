@@ -1,10 +1,12 @@
 import {
+  GraphManager,
   resolveSharedMemoryScopeGraphs,
   type TripleStore,
   withCountedStoreMutation,
 } from '@origintrail-official/dkg-storage';
 import {
   isSafeIri,
+  sharedMemoryScopeKey,
 } from '@origintrail-official/dkg-core';
 import {
   swmEntityWriteLockKey,
@@ -18,7 +20,7 @@ import {
 
 export type { SharedMemoryExpiredOperation } from './swm-expiry-operation.js';
 
-export interface SharedMemoryExpiryTarget {
+interface ResolvedSharedMemoryExpiryScope {
   readonly contextGraphId: string;
   readonly subGraphName?: string;
   readonly dataGraph: string;
@@ -27,7 +29,8 @@ export interface SharedMemoryExpiryTarget {
 }
 
 export interface SharedMemoryExpiryMutationRequest {
-  readonly target: SharedMemoryExpiryTarget;
+  readonly contextGraphId: string;
+  readonly subGraphName?: string;
   readonly candidate: SharedMemoryExpiredOperation;
   readonly cutoff: string;
   readonly isClosed: () => boolean;
@@ -53,11 +56,13 @@ interface SharedMemoryExpiryMutationCoordinatorOptions {
  */
 export class SharedMemoryExpiryMutationCoordinator {
   readonly #store: TripleStore;
+  readonly #graphManager: GraphManager;
   readonly #ownedEntities: Map<string, Map<string, string>>;
   readonly #writeLocks: Map<string, Promise<void>>;
 
   constructor(options: SharedMemoryExpiryMutationCoordinatorOptions) {
     this.#store = options.store;
+    this.#graphManager = new GraphManager(options.store);
     this.#ownedEntities = options.ownedEntities;
     this.#writeLocks = options.writeLocks;
   }
@@ -65,8 +70,9 @@ export class SharedMemoryExpiryMutationCoordinator {
   async expire(
     request: SharedMemoryExpiryMutationRequest,
   ): Promise<SharedMemoryExpiryMutationOutcome | undefined> {
-    const { target, candidate, cutoff, isClosed } = request;
+    const { contextGraphId, subGraphName, candidate, cutoff, isClosed } = request;
     if (isClosed() || !isSafeIri(candidate.uri)) return undefined;
+    const target = this.#resolveScope(contextGraphId, subGraphName);
     return withKeyedLocks(this.#writeLocks, this.#writeLockKeys(target, candidate), async () => {
       if (isClosed()) return undefined;
       const current = await this.#loadCurrentExpiredOperation(target.metaGraph, cutoff, candidate.uri);
@@ -87,7 +93,7 @@ export class SharedMemoryExpiryMutationCoordinator {
   }
 
   #writeLockKeys(
-    target: SharedMemoryExpiryTarget,
+    target: ResolvedSharedMemoryExpiryScope,
     operation: SharedMemoryExpiredOperation,
   ): string[] {
     return [
@@ -130,7 +136,7 @@ export class SharedMemoryExpiryMutationCoordinator {
   }
 
   async #deleteCurrentOperation(
-    target: SharedMemoryExpiryTarget,
+    target: ResolvedSharedMemoryExpiryScope,
     graphs: readonly string[],
     operation: SharedMemoryExpiredOperation,
   ): Promise<SharedMemoryExpiryMutationOutcome> {
@@ -206,6 +212,19 @@ export class SharedMemoryExpiryMutationCoordinator {
       await this.#store.dropGraph(scope.snapshotGraph);
     }
     return deleted;
+  }
+
+  #resolveScope(
+    contextGraphId: string,
+    subGraphName?: string,
+  ): ResolvedSharedMemoryExpiryScope {
+    return {
+      contextGraphId,
+      ...(subGraphName === undefined ? {} : { subGraphName }),
+      dataGraph: this.#graphManager.sharedMemoryUri(contextGraphId, subGraphName),
+      metaGraph: this.#graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName),
+      ownershipKey: sharedMemoryScopeKey(contextGraphId, subGraphName),
+    };
   }
 }
 

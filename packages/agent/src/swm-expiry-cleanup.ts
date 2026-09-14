@@ -162,7 +162,8 @@ async function cleanupExpiredBatch(
   const settled = await mapWithConcurrencySettled(candidates, SWM_CLEANUP_MAX_CONCURRENT_OPERATIONS, async candidate => {
     if (context.isClosed()) return undefined;
     return context.publisher.expireSharedMemoryOperation({
-      target,
+      contextGraphId: target.contextGraphId,
+      ...(target.subGraphName === undefined ? {} : { subGraphName: target.subGraphName }),
       candidate,
       cutoff,
       isClosed: context.isClosed,

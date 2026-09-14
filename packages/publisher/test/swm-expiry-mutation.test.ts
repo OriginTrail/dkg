@@ -3,25 +3,22 @@ import type { QueryResult, TripleStore } from '@origintrail-official/dkg-storage
 import {
   SharedMemoryExpiryMutationCoordinator,
   type SharedMemoryExpiredOperation,
-  type SharedMemoryExpiryTarget,
 } from '../src/swm-expiry-mutation.js';
 
 const OPERATION = 'urn:dkg:swm-operation:expired';
-const DATA_GRAPH = 'urn:dkg:swm:data';
-const META_GRAPH = 'urn:dkg:swm:meta';
+const DATA_GRAPH = 'did:dkg:context-graph:test-cg/claims/_shared_memory';
+const META_GRAPH = 'did:dkg:context-graph:test-cg/claims/_shared_memory_meta';
 const ROOT_A = 'urn:dkg:entity:a';
 const ROOT_B = 'urn:dkg:entity:b';
 const KA_UAL = 'did:dkg:hardhat:31337/0x1111111111111111111111111111111111111111/7';
 const ASSERTION_GRAPH = 'urn:dkg:assertion:7';
 const SNAPSHOT_GRAPH = 'urn:dkg:snapshot:7';
 
-const target: SharedMemoryExpiryTarget = {
+const scope = {
   contextGraphId: 'test-cg',
   subGraphName: 'claims',
-  dataGraph: DATA_GRAPH,
-  metaGraph: META_GRAPH,
-  ownershipKey: 'test-cg\0claims',
 };
+const OWNERSHIP_KEY = 'test-cg\0claims';
 
 function makeStore(results: QueryResult[], graphs: string[] = []) {
   const query = vi.fn(async () => {
@@ -62,10 +59,10 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
       scope: { kind: 'legacy' },
     };
 
-    await expect(expiry.expire({ target, candidate: legacy, cutoff: '2026-01-01T00:00:00.000Z', isClosed: () => true }))
+    await expect(expiry.expire({ ...scope, candidate: legacy, cutoff: '2026-01-01T00:00:00.000Z', isClosed: () => true }))
       .resolves.toBeUndefined();
     await expect(expiry.expire({
-      target,
+      ...scope,
       candidate: { ...legacy, uri: 'urn:dkg:unsafe iri' },
       cutoff: '2026-01-01T00:00:00.000Z',
       isClosed: () => false,
@@ -84,7 +81,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
     const expiry = coordinator(harness.store, new Map(), writeLocks);
 
     await expect(expiry.expire({
-      target,
+      ...scope,
       candidate: { uri: OPERATION, roots: [ROOT_A], scope: { kind: 'legacy' } },
       cutoff: '2026-01-01T00:00:00.000Z',
       isClosed: () => false,
@@ -101,7 +98,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
     const expiry = coordinator(harness.store);
 
     await expect(expiry.expire({
-      target,
+      ...scope,
       candidate: { uri: OPERATION, roots: [], scope: { kind: 'legacy' } },
       cutoff: '2026-01-01T00:00:00.000Z',
       isClosed: () => false,
@@ -120,7 +117,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
       .mockReturnValueOnce(true);
 
     await expect(coordinator(harness.store).expire({
-      target,
+      ...scope,
       candidate: { uri: OPERATION, roots: [ROOT_A], scope: { kind: 'legacy' } },
       cutoff: '2026-01-01T00:00:00.000Z',
       isClosed,
@@ -145,7 +142,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
       `${DATA_GRAPH}/child`,
       `${DATA_GRAPH}/staging/incomplete`,
     ]);
-    const owned = new Map([[target.ownershipKey, new Map([
+    const owned = new Map([[OWNERSHIP_KEY, new Map([
       [ROOT_A, OPERATION],
       [ROOT_B, OPERATION],
       ['urn:dkg:entity:retained', 'urn:dkg:other-operation'],
@@ -153,7 +150,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
     const writeLocks = new Map<string, Promise<void>>();
 
     await expect(coordinator(harness.store, owned, writeLocks).expire({
-      target,
+      ...scope,
       candidate: { uri: OPERATION, roots: [ROOT_B, ROOT_A], scope: { kind: 'legacy' } },
       cutoff: '2026-01-01T00:00:00.000Z',
       isClosed: () => false,
@@ -168,9 +165,9 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
     );
     expect(harness.deleteByPattern).toHaveBeenCalledWith({ graph: META_GRAPH, subject: OPERATION });
     expect(harness.query.mock.calls[1]?.[0]).toContain(`ASK { GRAPH <${META_GRAPH}>`);
-    expect(owned.get(target.ownershipKey)?.has(ROOT_A)).toBe(false);
-    expect(owned.get(target.ownershipKey)?.has(ROOT_B)).toBe(false);
-    expect(owned.get(target.ownershipKey)?.has('urn:dkg:entity:retained')).toBe(true);
+    expect(owned.get(OWNERSHIP_KEY)?.has(ROOT_A)).toBe(false);
+    expect(owned.get(OWNERSHIP_KEY)?.has(ROOT_B)).toBe(false);
+    expect(owned.get(OWNERSHIP_KEY)?.has('urn:dkg:entity:retained')).toBe(true);
     expect(writeLocks.size).toBe(0);
   });
 
@@ -189,7 +186,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
       { type: 'bindings', bindings: [{ assertionGraph: ASSERTION_GRAPH }] },
       { type: 'boolean', value: false },
     ]);
-    const owned = new Map([[target.ownershipKey, new Map([[ROOT_A, OPERATION]])]]);
+    const owned = new Map([[OWNERSHIP_KEY, new Map([[ROOT_A, OPERATION]])]]);
     const candidate: SharedMemoryExpiredOperation = {
       uri: OPERATION,
       roots: [ROOT_A],
@@ -197,7 +194,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
     };
 
     await expect(coordinator(harness.store, owned).expire({
-      target,
+      ...scope,
       candidate,
       cutoff: '2026-01-01T00:00:00.000Z',
       isClosed: () => false,
@@ -210,7 +207,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
     expect(harness.deleteByPattern).toHaveBeenCalledWith({ graph: SNAPSHOT_GRAPH });
     expect(harness.dropGraph).toHaveBeenNthCalledWith(1, ASSERTION_GRAPH);
     expect(harness.dropGraph).toHaveBeenNthCalledWith(2, SNAPSHOT_GRAPH);
-    expect(owned.get(target.ownershipKey)?.has(ROOT_A)).toBe(false);
+    expect(owned.get(OWNERSHIP_KEY)?.has(ROOT_A)).toBe(false);
   });
 
   it('keeps a graph-scoped live head when another operation owns it', async () => {
@@ -229,7 +226,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
     ]);
 
     await expect(coordinator(harness.store).expire({
-      target,
+      ...scope,
       candidate: {
         uri: OPERATION,
         roots: [],
@@ -261,7 +258,7 @@ describe('SharedMemoryExpiryMutationCoordinator', () => {
     });
 
     await expect(coordinator(harness.store).expire({
-      target,
+      ...scope,
       candidate: { uri: OPERATION, roots: [ROOT_A], scope: { kind: 'legacy' } },
       cutoff: '2026-01-01T00:00:00.000Z',
       isClosed: () => false,

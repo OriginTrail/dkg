@@ -59,7 +59,7 @@ vi.mock('../src/daemon/vm-publish-intent-backfill.js', async importOriginal => {
   return { ...actual, backfillVmPublishIntentIndexOnBoot: mocks.backfillOnBoot };
 });
 
-const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+const { runDaemonInnerFromConfigForTesting } = await import('../src/daemon/lifecycle.js');
 
 function createFakeServer() {
   const server = {
@@ -171,7 +171,7 @@ describe('runDaemonInner VM-publish intent backfill wiring (#1828)', () => {
     mocks.createPublisherControlFromStore.mockReturnValue(fakeControl as never);
     mocks.backfillOnBoot.mockRejectedValue(new Error('after-backfill'));
 
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'backfill-wiring-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,

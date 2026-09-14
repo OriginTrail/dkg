@@ -463,6 +463,5 @@ export {
   type SharedMemoryExpiredOperation,
   type SharedMemoryExpiryMutationOutcome,
   type SharedMemoryExpiryMutationRequest,
-  type SharedMemoryExpiryTarget,
 } from './swm-expiry-mutation.js';
 export { decodeSharedMemoryExpiredOperations } from './swm-expiry-operation.js';

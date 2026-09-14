@@ -1102,12 +1102,11 @@ export async function bootstrapConfiguredContextGraphs(input: {
 
 export async function runDaemonInner(
   foreground: boolean,
-  config: Awaited<ReturnType<typeof loadConfig>> | DkgConfigStore,
+  configStore: DkgConfigStore,
   startedAt: number,
   shutdownPolicy: ShutdownPolicy,
 ): Promise<void> {
   let cleanupOwnedStartupResources: (() => Promise<void>) | undefined;
-  const configStore = config instanceof DkgConfigStore ? config : await DkgConfigStore.open(new DkgHomeFiles(), config);
   try {
     await runDaemonInnerWithStartupOwnership(
       foreground,
@@ -1121,6 +1120,17 @@ export async function runDaemonInner(
     finally { await configStore.close(); }
     throw error;
   }
+}
+
+/** Explicit raw-config ownership wrapper for daemon integration tests. */
+export async function runDaemonInnerFromConfigForTesting(
+  foreground: boolean,
+  config: Awaited<ReturnType<typeof loadConfig>>,
+  startedAt: number,
+  shutdownPolicy: ShutdownPolicy,
+): Promise<void> {
+  const configStore = await DkgConfigStore.open(new DkgHomeFiles(), config);
+  return runDaemonInner(foreground, configStore, startedAt, shutdownPolicy);
 }
 
 async function runDaemonInnerWithStartupOwnership(

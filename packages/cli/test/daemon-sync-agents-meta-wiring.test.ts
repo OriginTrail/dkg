@@ -45,7 +45,7 @@ vi.mock('../src/config.js', async importOriginal => {
   };
 });
 
-const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+const { runDaemonInnerFromConfigForTesting } = await import('../src/daemon/lifecycle.js');
 
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
@@ -110,7 +110,7 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
   // Drive runDaemonInner as a CORE node and return the options object that was
   // handed to DKGAgent.create. `configOverrides` is merged onto the base config.
   async function captureCreateArg(configOverrides: Record<string, unknown> = {}): Promise<any> {
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'sync-agents-meta-core-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,

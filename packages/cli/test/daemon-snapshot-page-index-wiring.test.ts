@@ -53,7 +53,7 @@ vi.mock('../src/publisher-runner.js', async importOriginal => {
   };
 });
 
-const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+const { runDaemonInnerFromConfigForTesting } = await import('../src/daemon/lifecycle.js');
 const { SqliteSnapshotPageIndexStore } = await import('../src/daemon/snapshot-page-index-store.js');
 
 function createFakeServer() {
@@ -194,7 +194,7 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
     };
     mocks.createPublicSnapshotStore.mockReturnValue(publicSnapshotStore);
 
-    await runDaemonInner(true, {
+    await runDaemonInnerFromConfigForTesting(true, {
       name: 'snapshot-index-wiring-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,

@@ -163,7 +163,7 @@ vi.mock('../src/publisher-runner.js', async importOriginal => {
   };
 });
 
-const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
+const { runDaemonInnerFromConfigForTesting } = await import('../src/daemon/lifecycle.js');
 const { DKGAgent: RealDKGAgent } = await vi.importActual<
   typeof import('@origintrail-official/dkg-agent')
 >('@origintrail-official/dkg-agent');
@@ -304,7 +304,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         throw new Error('after-agent-create');
       });
     }
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'storage-ack-timing-core-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
@@ -386,7 +386,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
         .mockResolvedValueOnce(failure);
 
       try {
-        await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
           name: 'storage-ack-timing-core-test',
           networkConfig: 'mainnet-gnosis',
           listenPort: 0,
@@ -662,7 +662,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
   });
 
   it('rejects a cross-network RFC-64 manifest before DKGAgent.create', async () => {
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'storage-ack-timing-core-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
@@ -801,7 +801,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
   });
 
   it('validates malformed StorageACK timing before chain-reset wipe can run', async () => {
-    await expect(runDaemonInner(true, {
+    await expect(runDaemonInnerFromConfigForTesting(true, {
       name: 'storage-ack-invalid-before-wipe-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
@@ -891,7 +891,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     };
     mocks.agentCreate.mockResolvedValue(fakeAgent);
 
-    await runDaemonInner(true, {
+    await runDaemonInnerFromConfigForTesting(true, {
       name: 'storage-ack-async-publisher-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
