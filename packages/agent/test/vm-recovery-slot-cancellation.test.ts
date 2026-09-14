@@ -4,10 +4,7 @@ import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import { waitForPeerProtocol } from '../src/p2p/protocol-readiness.js';
 import type { ContextGraphSub } from '../src/dkg-agent-types.js';
-import {
-  vmRecoverySlotKey,
-  type VmRecoverySlotRegistry,
-} from '../src/internal/vm-recovery-slot-registry.js';
+import { vmRecoverySlotKey } from '../src/internal/vm-recovery-slot-registry.js';
 import {
   getSyncBackpressureSnapshot,
   resolveSyncGlobalBackpressure,
