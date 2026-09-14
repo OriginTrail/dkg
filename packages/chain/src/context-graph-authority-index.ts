@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { MAX_DECIMAL_U256, parseCanonicalDecimalU256 } from '@origintrail-official/dkg-core';
 import { applyContextGraphAuthorityGenerationEvent } from './context-graph-authority-generation.js';
 
 /**
@@ -123,10 +124,28 @@ function normalizeNonNegativeSafeInteger(value: unknown): number | undefined {
   return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : undefined;
 }
 
-function normalizePositiveDecimal(value: unknown): string | undefined {
-  return typeof value === 'string' && /^[1-9][0-9]*$/.test(value)
-    ? value
-    : undefined;
+/** ContextGraphStorage token ids: canonical decimal, positive, within uint256. */
+function normalizeContextGraphId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  try {
+    return parseCanonicalDecimalU256(value, 'contextGraphId') > 0n ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Counter invariants of the transition model: every ownership transfer also
+ * bumps the policy and roster versions, so neither can trail the ownership
+ * era. A durable row violating this was never produced by the reducer.
+ */
+function hasPossibleAuthorityCounters(state: {
+  readonly ownershipEra: number;
+  readonly policyVersion: number;
+  readonly rosterVersion: number;
+}): boolean {
+  return state.policyVersion >= state.ownershipEra
+    && state.rosterVersion >= state.ownershipEra;
 }
 
 function compareContextGraphIds(left: string, right: string): number {
@@ -153,7 +172,7 @@ function normalizeIndexState(
 ): ContextGraphAuthorityIndexState | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const candidate = value as Partial<Record<keyof ContextGraphAuthorityIndexState, unknown>>;
-  const contextGraphId = normalizePositiveDecimal(candidate.contextGraphId);
+  const contextGraphId = normalizeContextGraphId(candidate.contextGraphId);
   const nameHash = normalizeHash(candidate.nameHash);
   const ownershipEra = normalizeNonNegativeSafeInteger(candidate.ownershipEra);
   const policyVersion = normalizeNonNegativeSafeInteger(candidate.policyVersion);
@@ -170,6 +189,7 @@ function normalizeIndexState(
     || sourceBlockHash === undefined
     || sourceBlockNumber < cursor.deploymentBlockNumber
     || sourceBlockNumber > cursor.throughBlockNumber
+    || !hasPossibleAuthorityCounters({ ownershipEra, policyVersion, rosterVersion })
   ) return undefined;
   return freezeState({
     contextGraphId,
@@ -234,7 +254,11 @@ function normalizePageEvent(
   throughBlockNumber: number,
   throughBlockHash: string,
 ): ContextGraphAuthorityIndexEvent {
-  if (typeof event.contextGraphId !== 'bigint' || event.contextGraphId <= 0n) {
+  if (
+    typeof event.contextGraphId !== 'bigint'
+    || event.contextGraphId <= 0n
+    || event.contextGraphId > MAX_DECIMAL_U256
+  ) {
     throw new Error('Context Graph authority index event has an invalid context graph id');
   }
   const blockNumber = normalizeNonNegativeSafeInteger(event.blockNumber);

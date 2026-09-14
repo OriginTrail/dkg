@@ -15,19 +15,35 @@ interface ContextGraphAuthorityGenerationEventBase {
   readonly blockHash: string;
 }
 
+type ContextGraphAuthorityPayloadlessEventName =
+  | 'Transfer'
+  | 'PublishPolicyUpdated'
+  | 'PublishAuthorityUpdated'
+  | 'AgentParticipantAdded'
+  | 'AgentParticipantRemoved';
+
+/**
+ * One union member per event name, so `Extract<..., { name: N }>` yields the
+ * exact variant and a creation name can never be paired with a payload-less
+ * event (or vice versa) at a typed boundary.
+ */
 export type ContextGraphAuthorityGenerationEvent =
   | (ContextGraphAuthorityGenerationEventBase & {
       readonly name: 'ContextGraphCreated';
       readonly nameHash: string;
     })
-  | (ContextGraphAuthorityGenerationEventBase & {
-      readonly name:
-        | 'Transfer'
-        | 'PublishPolicyUpdated'
-        | 'PublishAuthorityUpdated'
-        | 'AgentParticipantAdded'
-        | 'AgentParticipantRemoved';
-    });
+  | {
+      [Name in ContextGraphAuthorityPayloadlessEventName]:
+        ContextGraphAuthorityGenerationEventBase & { readonly name: Name };
+    }[ContextGraphAuthorityPayloadlessEventName];
+
+export type ContextGraphAuthorityGenerationEventName =
+  ContextGraphAuthorityGenerationEvent['name'];
+
+/** The event variant carrying `name`, including its name-specific payload. */
+export type ContextGraphAuthorityGenerationEventOf<
+  Name extends ContextGraphAuthorityGenerationEventName,
+> = Extract<ContextGraphAuthorityGenerationEvent, { readonly name: Name }>;
 
 function increment(value: number, label: string): number {
   const next = value + 1;

@@ -314,6 +314,61 @@ describe('contract-wide Context Graph authority index reducer', () => {
     })).toBeUndefined();
   });
 
+  it('rejects checkpoint rows the transition model can never produce', () => {
+    const valid = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 20,
+      throughBlockHash: blockHash(20),
+      events: [
+        creation(9n, 10, 1, NAME_9),
+        event('Transfer', 9n, 12, 0, { from: OWNER, to: NEXT_OWNER }),
+      ],
+    }).checkpoint;
+    const row = valid.states[0]!;
+    expect(row).toMatchObject({ ownershipEra: 1, policyVersion: 1, rosterVersion: 1 });
+    expect(normalizeContextGraphAuthorityIndexCheckpoint(valid)).toEqual(valid);
+
+    // Every ownership transfer also bumps the policy and roster versions, so a
+    // row whose versions trail the era was never emitted by the reducer and
+    // must force a cold rebuild instead of seeding a suffix reduction.
+    for (const counters of [
+      { ownershipEra: 1, policyVersion: 0, rosterVersion: 0 },
+      { ownershipEra: 1, policyVersion: 1, rosterVersion: 0 },
+      { ownershipEra: 1, policyVersion: 0, rosterVersion: 1 },
+      { ownershipEra: 2, policyVersion: 1, rosterVersion: 1 },
+    ]) {
+      expect(normalizeContextGraphAuthorityIndexCheckpoint({
+        ...valid,
+        states: [{ ...row, ...counters }],
+      })).toBeUndefined();
+    }
+    // Policy and roster versions may legitimately run ahead of the era.
+    const ahead = { ...valid, states: [{ ...row, policyVersion: 3, rosterVersion: 5 }] };
+    expect(normalizeContextGraphAuthorityIndexCheckpoint(ahead)).toEqual(ahead);
+  });
+
+  it('bounds durable and page-event graph ids to the uint256 token domain', () => {
+    const maxId = (1n << 256n) - 1n;
+    const atMax = reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 20,
+      throughBlockHash: blockHash(20),
+      events: [creation(maxId, 10, 1, NAME_9)],
+    }).checkpoint;
+    expect(atMax.states[0]!.contextGraphId).toBe(maxId.toString());
+    expect(normalizeContextGraphAuthorityIndexCheckpoint(atMax)).toEqual(atMax);
+    expect(normalizeContextGraphAuthorityIndexCheckpoint({
+      ...atMax,
+      states: [{ ...atMax.states[0], contextGraphId: (maxId + 1n).toString() }],
+    })).toBeUndefined();
+    expect(() => reduceContextGraphAuthorityIndexPage({
+      deploymentBlockNumber: 10,
+      throughBlockNumber: 20,
+      throughBlockHash: blockHash(20),
+      events: [creation(maxId + 1n, 10, 1, NAME_9)],
+    })).toThrow('invalid context graph id');
+  });
+
   it('decodes opaque durable reads only at the chain-owned boundary', async () => {
     const store: ContextGraphAuthorityIndexStore = {
       load: async () => ({ cursor: 'not-a-cursor', states: [] }),

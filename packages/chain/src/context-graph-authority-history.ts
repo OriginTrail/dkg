@@ -57,6 +57,10 @@ export type ContextGraphAuthorityHistoryEventName =
   | 'AgentParticipantAdded'
   | 'AgentParticipantRemoved';
 
+/** A payload-less history event stamped with the stream name it was read from. */
+type NamedContextGraphAuthorityHistoryEvent<Name extends ContextGraphAuthorityHistoryEventName> =
+  ContextGraphAuthorityHistoryEvent & { readonly name: Name };
+
 export interface ContextGraphAuthorityHistoryEventQuery {
   readonly name: ContextGraphAuthorityHistoryEventName;
   readonly contextGraphId: bigint;
@@ -537,18 +541,21 @@ async function loadContextGraphAuthorityHistory(
   const fromBlock = previous === undefined
     ? await input.loadColdFromBlock()
     : previous.throughBlockNumber + 1;
-  const read = async (
-    name: ContextGraphAuthorityHistoryEventName,
-  ): Promise<ContextGraphAuthorityHistoryEvent[]> => {
-    const events: ContextGraphAuthorityHistoryEvent[] = [];
+  // The reader already knows each stream's name, so attach it here and the
+  // reducer receives genuinely typed generation events downstream.
+  const read = async <Name extends ContextGraphAuthorityHistoryEventName>(
+    name: Name,
+  ): Promise<NamedContextGraphAuthorityHistoryEvent<Name>[]> => {
+    const events: NamedContextGraphAuthorityHistoryEvent<Name>[] = [];
     for (let lo = fromBlock; lo <= input.finalized.number; lo += input.pageSize) {
       input.signal?.throwIfAborted();
       const hi = Math.min(lo + input.pageSize - 1, input.finalized.number);
-      events.push(...await input.readEvents(
+      const page = await input.readEvents(
         { name, contextGraphId: input.contextGraphId },
         lo,
         hi,
-      ));
+      );
+      events.push(...page.map((event) => ({ ...event, name })));
     }
     return events;
   };
@@ -596,19 +603,13 @@ async function loadContextGraphAuthorityHistory(
       );
     }
   }
-  const named = <T extends ContextGraphAuthorityHistoryEvent>(
-    name: ContextGraphAuthorityGenerationEvent['name'],
-    events: readonly T[],
-  ) => events.map((event) => ({ ...event, name } as ContextGraphAuthorityGenerationEvent & {
-    readonly index: number;
-  }));
-  const events = [
-    ...named('ContextGraphCreated', created),
-    ...named('Transfer', transfers),
-    ...named('PublishPolicyUpdated', publishPolicy),
-    ...named('PublishAuthorityUpdated', publishAuthority),
-    ...named('AgentParticipantAdded', participantAdds),
-    ...named('AgentParticipantRemoved', participantRemoves),
+  const events: Array<ContextGraphAuthorityGenerationEvent & { readonly index: number }> = [
+    ...created.map((event) => ({ ...event, name: 'ContextGraphCreated' as const })),
+    ...transfers,
+    ...publishPolicy,
+    ...publishAuthority,
+    ...participantAdds,
+    ...participantRemoves,
   ].sort((left, right) => (
     left.blockNumber - right.blockNumber || left.index - right.index
   ));
