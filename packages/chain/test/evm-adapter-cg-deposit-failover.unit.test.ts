@@ -158,6 +158,24 @@ describe('createOnChainContextGraph — TooLowAllowance recovery uses the failov
     expect(sendSpy.calls).toHaveLength(1);
   });
 
+  it('wraps a non-extensible approval failure with the pre-submission marker', async () => {
+    const approvalFailure = Object.preventExtensions(new Error('sealed approval failure'));
+    const { a, sendSpy } = makeCgAdapter({
+      depositRead: async () => DEPOSIT,
+      approvalFailure,
+    });
+
+    const thrown = await a.createOnChainContextGraph(CG_PARAMS).catch((error) => error);
+
+    expect(thrown).not.toBe(approvalFailure);
+    expect(thrown).toMatchObject({
+      message: approvalFailure.message,
+      cause: approvalFailure,
+      contextGraphRegistrationSubmitted: false,
+    });
+    expect(sendSpy.calls).toHaveLength(1);
+  });
+
   it('dormant deposit (reads 0): no approve (deposit===0n branch), original revert propagates', async () => {
     const { a, ensureSpy } = makeCgAdapter({ depositRead: async () => 0n });
     await expect(a.createOnChainContextGraph(CG_PARAMS)).rejects.toThrow('TooLowAllowance');
