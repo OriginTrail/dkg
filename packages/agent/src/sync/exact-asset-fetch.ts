@@ -326,8 +326,17 @@ export async function runExactAssetFetch(
     maxPeers: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
     operationLabel: 'Exact asset fetch from',
     assertCurrent: () => requireCurrent(deps),
-    preparePeer: deps.preparePeer,
     attemptPeer: async (peerId) => {
+      let prepared: boolean;
+      try {
+        prepared = await deps.preparePeer(peerId);
+      } catch (error) {
+        requireCurrent(deps);
+        return { kind: 'prepare-failed' as const, error };
+      }
+      requireCurrent(deps);
+      if (!prepared) return { kind: 'skipped' as const, reason: 'unprepared' };
+
       let failure: unknown;
       try {
         await deps.fetchFromPeer(peerId, [...remaining.keys()]);
@@ -361,8 +370,8 @@ export async function runExactAssetFetch(
           : { kind: 'done' as const, diagnostic: failure };
       }
       return failure === undefined
-        ? { kind: 'continue' as const }
-        : { kind: 'continue' as const, error: failure };
+        ? { kind: 'missed' as const, reason: 'unresolved' }
+        : { kind: 'failed' as const, error: failure };
     },
     log: deps.log,
   });

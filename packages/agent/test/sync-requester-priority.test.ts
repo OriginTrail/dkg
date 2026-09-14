@@ -16,9 +16,16 @@ import { syncPriorityClass } from '../src/sync/policy.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from
   './_helpers/swm-target-executor-session-fixture.js';
+import type { SyncLifecycleSwitches } from '../src/sync/lifecycle-switches.js';
 
 const ctx = createOperationContext('sync');
 const noop = () => {};
+const ENABLED_SYNC_LIFECYCLE_SWITCHES = Object.freeze({
+  syncReconcilerEnabled: true,
+  syncOnConnectEnabled: true,
+  durableSyncEnabled: true,
+  warmCoreConnectionsEnabled: false,
+}) satisfies Readonly<SyncLifecycleSwitches>;
 
 function page(contextGraphId: string, phase: string) {
   return {
@@ -242,6 +249,7 @@ describe('requester per-CG priority admission', () => {
       | ReturnType<typeof createSwmTargetExecutorSessionFactoryForTest>
       | undefined;
     const agent = {
+      syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
       config: { syncContextGraphPriorities: {} },
       store: {},
       listSubGraphs: async () => [],
@@ -324,6 +332,7 @@ describe('requester per-CG priority admission', () => {
       | ReturnType<typeof createSwmTargetExecutorSessionFactoryForTest>
       | undefined;
     const agent = {
+      syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
       config: { syncContextGraphPriorities: {} },
       store: {},
       listSubGraphs: async () => { throw new Error('local admission lookup failed'); },

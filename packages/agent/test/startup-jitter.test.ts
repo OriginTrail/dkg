@@ -4,6 +4,7 @@ import {
   resolveVmReconcileStartupMaxDelayMs,
   scheduleAfterStartupJitter,
 } from '../src/startup-jitter.js';
+import { DKGAgent } from '../src/dkg-agent.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -59,4 +60,42 @@ describe('resolveVmReconcileStartupMaxDelayMs', () => {
     expect(resolveVmReconcileStartupMaxDelayMs('-1', 3_600_000)).toBe(0);
     expect(resolveVmReconcileStartupMaxDelayMs('120000', 3_600_000)).toBe(120_000);
   });
+});
+
+describe('warm-core startup lifecycle switch', () => {
+  it.each([
+    { atConstruction: '1', beforeStart: '0', expected: true },
+    { atConstruction: '0', beforeStart: '1', expected: false },
+  ])(
+    'uses the construction snapshot ($atConstruction -> $beforeStart)',
+    async ({ atConstruction, beforeStart, expected }) => {
+      const previous = process.env.DKG_WARM_CORE_CONNECTIONS;
+      process.env.DKG_WARM_CORE_CONNECTIONS = atConstruction;
+      let agent: DKGAgent | undefined;
+      try {
+        agent = await DKGAgent.create({
+          name: `WarmCoreSnapshot-${atConstruction}-${beforeStart}`,
+          listenHost: '127.0.0.1',
+          listenPort: 0,
+          syncReconcilerEnabled: false,
+          syncOnConnectEnabled: false,
+          durableSyncEnabled: false,
+        });
+        const reconcile = vi.spyOn(agent, 'reconcileWarmCoreConnections')
+          .mockResolvedValue(undefined);
+
+        process.env.DKG_WARM_CORE_CONNECTIONS = beforeStart;
+        await agent.start();
+
+        expect((agent as any).syncLifecycleSwitches.warmCoreConnectionsEnabled)
+          .toBe(expected);
+        expect(reconcile).toHaveBeenCalledTimes(expected ? 1 : 0);
+        expect((agent as any).warmCoreTimer === null).toBe(!expected);
+      } finally {
+        await agent?.stop().catch(() => undefined);
+        if (previous === undefined) delete process.env.DKG_WARM_CORE_CONNECTIONS;
+        else process.env.DKG_WARM_CORE_CONNECTIONS = previous;
+      }
+    },
+  );
 });

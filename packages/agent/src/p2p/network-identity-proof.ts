@@ -4,6 +4,11 @@ import {
   PROTOCOL_NETWORK_IDENTITY,
   type DkgNetworkIdentity,
 } from '@origintrail-official/dkg-core';
+import {
+  parseSignedAgentDelegation,
+  verifyAgentDelegation,
+  type SignedAgentDelegation,
+} from '../auth/agent-delegation.js';
 import { canonicalPeerIdString } from './peer-id.js';
 
 export const NETWORK_IDENTITY_PROOF_VERSION = 1;
@@ -27,6 +32,8 @@ export interface NetworkIdentityResponse {
   networkConfigName?: string;
   proofKind: typeof NETWORK_IDENTITY_PROOF_KIND;
   signature: string;
+  /** Optional EVM-wallet proof binding the responder's libp2p peer to its agent address. */
+  peerAgentBinding?: SignedAgentDelegation;
 }
 
 export interface VerifyNetworkIdentityResponseInput {
@@ -37,9 +44,28 @@ export interface VerifyNetworkIdentityResponseInput {
   requesterPeerId: string;
 }
 
-export interface VerifyNetworkIdentityResponseResult {
-  ok: boolean;
-  reason?: string;
+/**
+ * Verification outcome as a discriminated union, so only the states this
+ * boundary can actually produce are representable: a rejection always carries
+ * its reason, and only an accepted peer can carry wallet evidence. A legacy
+ * peer without the optional binding still verifies as `{ ok: true }`.
+ */
+export type VerifyNetworkIdentityResponseResult =
+  | { readonly ok: false; readonly reason: string }
+  | { readonly ok: true; readonly authenticatedAgentAddress?: string };
+
+/** Fresh, network-scoped delegation scope used by the optional wallet binding. */
+export function networkPeerBindingScope(input: {
+  nonce: string;
+  requesterPeerId: string;
+  networkId: string;
+}): string {
+  return JSON.stringify({
+    purpose: 'dkg.network-peer-binding.v1',
+    networkId: input.networkId,
+    nonce: input.nonce,
+    requesterPeerId: input.requesterPeerId,
+  });
 }
 
 export function makeNetworkIdentityRequest(input: {
@@ -82,6 +108,7 @@ export async function signNetworkIdentityResponse(input: {
   identity: DkgNetworkIdentity;
   responderPeerId: string;
   sign: (payload: Uint8Array) => Promise<Uint8Array>;
+  peerAgentBinding?: SignedAgentDelegation;
 }): Promise<NetworkIdentityResponse> {
   const payload = networkIdentityProofPayload({
     nonce: input.request.nonce,
@@ -101,6 +128,9 @@ export async function signNetworkIdentityResponse(input: {
     networkConfigName: input.identity.networkConfigName,
     proofKind: NETWORK_IDENTITY_PROOF_KIND,
     signature: Buffer.from(signature).toString('base64'),
+    ...(input.peerAgentBinding === undefined
+      ? {}
+      : { peerAgentBinding: input.peerAgentBinding }),
   };
 }
 
@@ -129,6 +159,7 @@ export function parseNetworkIdentityResponse(value: unknown): NetworkIdentityRes
   if (!isNonEmptyString(response.networkId)) throw new Error('missing network id');
   if (response.proofKind !== NETWORK_IDENTITY_PROOF_KIND) throw new Error('unsupported proof kind');
   if (!isNonEmptyString(response.signature)) throw new Error('missing signature');
+  const peerAgentBinding = parseSignedAgentDelegation(response.peerAgentBinding);
   return {
     version: NETWORK_IDENTITY_PROOF_VERSION,
     peerId: response.peerId,
@@ -138,6 +169,7 @@ export function parseNetworkIdentityResponse(value: unknown): NetworkIdentityRes
     networkConfigName: isNonEmptyString(response.networkConfigName) ? response.networkConfigName : undefined,
     proofKind: NETWORK_IDENTITY_PROOF_KIND,
     signature: response.signature,
+    ...(peerAgentBinding === undefined ? {} : { peerAgentBinding }),
   };
 }
 
@@ -185,7 +217,30 @@ export async function verifyNetworkIdentityResponse(
   });
   const signature = Buffer.from(response.signature, 'base64');
   const valid = await ed25519Verify(signature, payload, publicKey);
-  return valid ? { ok: true } : { ok: false, reason: 'invalid signature' };
+  if (!valid) return { ok: false, reason: 'invalid signature' };
+
+  // This extension is deliberately optional so upgraded nodes continue to
+  // admit legacy peers. Security-sensitive callers (such as proof-time Core
+  // discovery) require authenticatedAgentAddress and therefore fail closed
+  // for a legacy or malformed binding without breaking the base overlay.
+  if (response.peerAgentBinding) {
+    try {
+      const binding = verifyAgentDelegation(response.peerAgentBinding, {
+        expectedScope: networkPeerBindingScope({
+          nonce: input.nonce,
+          requesterPeerId: input.requesterPeerId,
+          networkId: response.networkId,
+        }),
+      });
+      if (!binding.delegateePeerId) return { ok: true };
+      const boundPeerId = canonicalPeerIdString(binding.delegateePeerId);
+      if (boundPeerId !== remotePeerId) return { ok: true };
+      return { ok: true, authenticatedAgentAddress: binding.agentAddress };
+    } catch {
+      return { ok: true };
+    }
+  }
+  return { ok: true };
 }
 
 function isNonEmptyString(value: unknown): value is string {

@@ -61,6 +61,61 @@ export interface SignedAgentDelegation extends AgentDelegationPayload {
 }
 
 /**
+ * Parse an untrusted wire value without asserting it is a signed delegation.
+ * Cryptographic validity remains the responsibility of
+ * {@link verifyAgentDelegation}; this function establishes only the complete
+ * runtime shape required by the TypeScript type.
+ */
+export function parseSignedAgentDelegation(value: unknown): SignedAgentDelegation | undefined {
+  if (!isRecord(value)) return undefined;
+  if (!isNonEmptyString(value.agentAddress) || !ethers.isAddress(value.agentAddress)) return undefined;
+  if (!isNonEmptyString(value.scope)) return undefined;
+  if (!isNonNegativeFiniteNumber(value.issuedAtMs)) return undefined;
+  if (value.expiresAtMs !== undefined && !isNonNegativeFiniteNumber(value.expiresAtMs)) return undefined;
+  if (value.delegateePeerId !== undefined && !isNonEmptyString(value.delegateePeerId)) return undefined;
+  if (value.delegateeOpKey !== undefined && !isNonEmptyString(value.delegateeOpKey)) return undefined;
+  if (value.delegateePeerId === undefined && value.delegateeOpKey === undefined) return undefined;
+  if (!isNonEmptyString(value.signature)) return undefined;
+
+  let workspaceEncryptionKeys: SignedAgentDelegation['workspaceEncryptionKeys'];
+  if (value.workspaceEncryptionKeys !== undefined) {
+    if (!Array.isArray(value.workspaceEncryptionKeys)) return undefined;
+    workspaceEncryptionKeys = [];
+    for (const key of value.workspaceEncryptionKeys) {
+      if (
+        !isRecord(key)
+        || key.encryptionKeyAlgorithm !== 'X25519'
+        || !isNonEmptyString(key.publicEncryptionKey)
+        || !isNonEmptyString(key.encryptionKeyProof)
+      ) return undefined;
+      workspaceEncryptionKeys.push({
+        encryptionKeyAlgorithm: 'X25519',
+        publicEncryptionKey: key.publicEncryptionKey,
+        encryptionKeyProof: key.encryptionKeyProof,
+      });
+    }
+  }
+  if (
+    value.workspaceEncryptionKeysSignature !== undefined
+    && !isNonEmptyString(value.workspaceEncryptionKeysSignature)
+  ) return undefined;
+
+  return {
+    agentAddress: value.agentAddress,
+    scope: value.scope,
+    issuedAtMs: value.issuedAtMs,
+    ...(value.expiresAtMs === undefined ? {} : { expiresAtMs: value.expiresAtMs }),
+    ...(value.delegateePeerId === undefined ? {} : { delegateePeerId: value.delegateePeerId }),
+    ...(value.delegateeOpKey === undefined ? {} : { delegateeOpKey: value.delegateeOpKey }),
+    signature: value.signature,
+    ...(workspaceEncryptionKeys === undefined ? {} : { workspaceEncryptionKeys }),
+    ...(value.workspaceEncryptionKeysSignature === undefined
+      ? {}
+      : { workspaceEncryptionKeysSignature: value.workspaceEncryptionKeysSignature }),
+  };
+}
+
+/**
  * Bind a cold-enrollment key bundle to one otherwise backwards-compatible v2
  * delegation. Sorting makes transport reordering harmless while retaining
  * duplicates in the signed payload, so removing or adding any entry changes
@@ -233,4 +288,16 @@ export function verifyAgentDelegation(
 
   const { signature: _signature, ...payload } = delegation;
   return payload;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isNonNegativeFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }

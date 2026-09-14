@@ -418,7 +418,6 @@ import {
   MESSAGE_OUTBOX_TICK_MS,
   AGENT_PROFILE_HEARTBEAT_MS,
   AGENT_PROFILE_STALE_THRESHOLD_MS,
-  WARM_CORE_CONNECTIONS_ENABLED,
   WARM_CORE_RECONCILE_INTERVAL_MS,
   WARM_CORE_MAX,
   WARM_CORE_KEEPALIVE_TAG,
@@ -510,7 +509,6 @@ import type { DKGAgent } from './dkg-agent.js';
 import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
-import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
 
@@ -2899,7 +2897,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
    */
   vmReconcileEnabled(this: DKGAgent): boolean {
     return (
-      resolveSyncReconcilerEnabled(this.config.syncReconcilerEnabled)
+      this.syncLifecycleSwitches.syncReconcilerEnabled
       &&
       this.chain.chainId !== 'none' &&
       typeof this.chain.getContextGraphKCCount === 'function' &&
@@ -3354,7 +3352,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         const remotePeer = this.node.libp2p.getConnections()
           .find((connection) => connection.remotePeer.toString() === peerId)
           ?.remotePeer;
-        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer, signal))) return false;
+        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer.toString(), signal))) return false;
         return this.ensurePeerAdmittedForRecovery(
           peerId,
           ctx,
@@ -6034,7 +6032,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
         recoveryWorkRan = true;
         const protocolReady = connectedPeer
-          ? await this.waitForSyncProtocol(connectedPeer, signal)
+          ? await this.waitForSyncProtocol(connectedPeer.toString(), signal)
           : false;
         if (!isRecoveryCurrent()) return staleRecovery();
         if (!connectedPeer || !protocolReady) {

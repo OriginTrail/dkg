@@ -1,10 +1,229 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   selectWarmCoreCandidates,
   reconcileWarmCoreConnections,
   type WarmCoreAgent,
   type WarmCoreDeps,
 } from '../src/p2p/warm-core-connections.js';
+import {
+  acceptsCoreMembership,
+  findCorePeerIds,
+} from '../src/p2p/core-peer-discovery.js';
+
+describe('findCorePeerIds', () => {
+  const authenticatePeerAddress = async () => true;
+
+  it('returns a deterministic recovery order for an unordered registry result', async () => {
+    const signal = new AbortController().signal;
+    const findAgents = async () => [
+      { peerId: 'core-z', nodeRole: 'core' },
+      { peerId: 'core-a', nodeRole: 'core' },
+      { peerId: 'self', nodeRole: 'core' },
+      { peerId: 'edge-a', nodeRole: 'edge' },
+      { peerId: 'core-z', nodeRole: 'core' },
+    ];
+
+    await expect(findCorePeerIds({
+      findAgents,
+      selfPeerId: 'self',
+      signal,
+      maxCandidates: 10,
+      eligibilityConcurrency: 2,
+      authenticatePeerAddress,
+      classifyMembership: async () => 'member',
+      membershipPolicy: 'proof-required',
+    }))
+      .resolves.toEqual(['core-a', 'core-z']);
+  });
+
+  it('filters recovery profiles through the caller-owned chain eligibility gate', async () => {
+    await expect(findCorePeerIds({
+      findAgents: async () => [
+        { peerId: 'core-unverified', nodeRole: 'core', agentAddress: '0xunverified' },
+        { peerId: 'core-eligible', nodeRole: 'core', agentAddress: '0xeligible' },
+      ],
+      selfPeerId: 'self',
+      maxCandidates: 10,
+      eligibilityConcurrency: 2,
+      authenticatePeerAddress,
+      classifyMembership: async (agent) => (
+        agent.agentAddress === '0xeligible' ? 'member' : 'non-member'
+      ),
+      membershipPolicy: 'proof-required',
+    })).resolves.toEqual(['core-eligible']);
+  });
+
+  it.each([
+    ['candidate limit', { maxCandidates: 0, eligibilityConcurrency: 1 }],
+    ['eligibility concurrency', { maxCandidates: 1, eligibilityConcurrency: 0 }],
+  ])('rejects a non-positive %s', async (_label, bounds) => {
+    await expect(findCorePeerIds({
+      findAgents: async () => [],
+      selfPeerId: 'self',
+      ...bounds,
+      authenticatePeerAddress,
+      classifyMembership: async () => 'member',
+      membershipPolicy: 'proof-required',
+    })).rejects.toThrow(/positive integer/);
+  });
+
+  it('bounds registry output and concurrent membership reads', async () => {
+    let active = 0;
+    let peak = 0;
+    let calls = 0;
+    const findAgents = async (options: { limit: number }) => {
+      expect(options.limit).toBe(40);
+      return Array.from({ length: 1_000 }, (_, index) => ({
+        peerId: `core-${String(index).padStart(4, '0')}`,
+        nodeRole: 'core',
+      }));
+    };
+
+    const peers = await findCorePeerIds({
+      findAgents,
+      selfPeerId: 'self',
+      maxCandidates: 40,
+      eligibilityConcurrency: 4,
+      membershipPolicy: 'proof-required',
+      authenticatePeerAddress,
+      classifyMembership: async () => {
+        calls += 1;
+        active += 1;
+        peak = Math.max(peak, active);
+        await Promise.resolve();
+        active -= 1;
+        return 'member';
+      },
+    });
+
+    expect(peers).toHaveLength(40);
+    expect(calls).toBe(40);
+    expect(peak).toBeLessThanOrEqual(4);
+  });
+
+  it('settles promptly on abort when membership reads ignore cancellation', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const discovery = findCorePeerIds({
+      findAgents: async () => Array.from({ length: 100 }, (_, index) => ({
+        peerId: `core-${index}`,
+        nodeRole: 'core',
+      })),
+      selfPeerId: 'self',
+      maxCandidates: 20,
+      eligibilityConcurrency: 3,
+      signal: controller.signal,
+      membershipPolicy: 'proof-required',
+      authenticatePeerAddress,
+      classifyMembership: async () => {
+        calls += 1;
+        return new Promise(() => {});
+      },
+    });
+    await vi.waitFor(() => expect(calls).toBe(3));
+    const reason = new Error('repair deadline elapsed');
+    controller.abort(reason);
+
+    await expect(discovery).rejects.toBe(reason);
+    expect(calls).toBeLessThanOrEqual(3);
+  });
+
+  it('does not start registry or membership work after cancellation', async () => {
+    const reason = new Error('repair already expired');
+    const controller = new AbortController();
+    controller.abort(reason);
+    const findAgents = vi.fn(async () => [{ peerId: 'core-a', nodeRole: 'core' }]);
+    const classifyMembership = vi.fn(async () => 'member' as const);
+    const authenticate = vi.fn(async () => true);
+
+    await expect(findCorePeerIds({
+      findAgents,
+      selfPeerId: 'self',
+      maxCandidates: 20,
+      eligibilityConcurrency: 3,
+      signal: controller.signal,
+      membershipPolicy: 'proof-required',
+      authenticatePeerAddress: authenticate,
+      classifyMembership,
+    })).rejects.toBe(reason);
+    expect(findAgents).not.toHaveBeenCalled();
+    expect(authenticate).not.toHaveBeenCalled();
+    expect(classifyMembership).not.toHaveBeenCalled();
+  });
+
+  it('removes every caller-abort listener after successful discovery', async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+
+    await expect(findCorePeerIds({
+      findAgents: async () => [{ peerId: 'core-a', nodeRole: 'core' }],
+      selfPeerId: 'self',
+      maxCandidates: 2,
+      eligibilityConcurrency: 1,
+      signal: controller.signal,
+      membershipPolicy: 'proof-required',
+      authenticatePeerAddress,
+      classifyMembership: async () => 'member',
+    })).resolves.toEqual(['core-a']);
+
+    expect(add).toHaveBeenCalledTimes(3);
+    expect(remove).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects a peer that borrows a staked address without its wallet binding', async () => {
+    const classifyMembership = vi.fn(async () => 'member' as const);
+    await expect(findCorePeerIds({
+      findAgents: async () => [{
+        peerId: 'attacker-peer',
+        nodeRole: 'core',
+        agentAddress: '0x00000000000000000000000000000000000000aa',
+      }],
+      selfPeerId: 'self',
+      maxCandidates: 10,
+      eligibilityConcurrency: 2,
+      membershipPolicy: 'proof-required',
+      authenticatePeerAddress: async () => false,
+      classifyMembership,
+    })).resolves.toEqual([]);
+    expect(classifyMembership).not.toHaveBeenCalled();
+  });
+
+  it('filters role before applying the Core candidate cap', async () => {
+    const findAgents = vi.fn(async (options: { nodeRole: 'core'; limit: number }) => {
+      expect(options).toMatchObject({ nodeRole: 'core', limit: 2 });
+      // Defensive local filtering still protects callers backed by an older or
+      // non-conforming directory implementation.
+      return [
+        { peerId: 'edge-a', nodeRole: 'edge' },
+        { peerId: 'edge-b', nodeRole: 'edge' },
+        { peerId: 'edge-c', nodeRole: 'edge' },
+        { peerId: 'core-a', nodeRole: 'core' },
+        { peerId: 'core-b', nodeRole: 'core' },
+      ];
+    });
+    await expect(findCorePeerIds({
+      findAgents,
+      selfPeerId: 'self',
+      maxCandidates: 2,
+      eligibilityConcurrency: 2,
+      membershipPolicy: 'proof-required',
+      authenticatePeerAddress,
+      classifyMembership: async () => 'member',
+    })).resolves.toEqual(['core-a', 'core-b']);
+  });
+
+  it('makes legacy warm and proof-required unknown-evidence policies explicit', () => {
+    expect(acceptsCoreMembership('member', 'warm-compatible')).toBe(true);
+    expect(acceptsCoreMembership('unavailable', 'warm-compatible')).toBe(true);
+    expect(acceptsCoreMembership('indeterminate', 'warm-compatible')).toBe(false);
+    expect(acceptsCoreMembership('non-member', 'warm-compatible')).toBe(false);
+    expect(acceptsCoreMembership('member', 'proof-required')).toBe(true);
+    expect(acceptsCoreMembership('unavailable', 'proof-required')).toBe(false);
+    expect(acceptsCoreMembership('indeterminate', 'proof-required')).toBe(false);
+    expect(acceptsCoreMembership('non-member', 'proof-required')).toBe(false);
+  });
+});
 
 describe('selectWarmCoreCandidates', () => {
   it('keeps only nodeRole=core, drops self, dedupes, preserves order', () => {

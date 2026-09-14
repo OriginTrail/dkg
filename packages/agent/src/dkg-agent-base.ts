@@ -35,6 +35,10 @@ import type { ContextGraphDormancyReason } from './context-graph-subscription-do
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import { SyncOnConnectPeerScheduler } from './sync/on-connect/peer-scheduler.js';
 import {
+  resolveSyncLifecycleSwitches,
+  type SyncLifecycleSwitches,
+} from './sync/lifecycle-switches.js';
+import {
   SwmTargetExecutorSessionFactoryV1,
   type SwmTargetExecutorPortsV1,
   type SwmTargetExecutorV1,
@@ -342,7 +346,6 @@ import {
   MESSAGE_OUTBOX_TICK_MS,
   AGENT_PROFILE_HEARTBEAT_MS,
   AGENT_PROFILE_STALE_THRESHOLD_MS,
-  WARM_CORE_CONNECTIONS_ENABLED,
   WARM_CORE_RECONCILE_INTERVAL_MS,
   WARM_CORE_MAX,
   WARM_CORE_KEEPALIVE_TAG,
@@ -1205,6 +1208,8 @@ export class DKGAgentBase {
   // chain — which would risk a duplicate profile / double-stake.
   protected profileProvisioningInFlight = false;
   protected readonly config: ResolvedDKGAgentConfig;
+  /** Immutable effective switches shared by runtime gates and public status. */
+  readonly syncLifecycleSwitches: Readonly<SyncLifecycleSwitches>;
   protected started = false;
   /**
    * One OT-RFC-64 persistence owner for the inventory lease and every resource
@@ -1819,6 +1824,7 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
   ) {
     this.config = config;
+    this.syncLifecycleSwitches = Object.freeze(resolveSyncLifecycleSwitches(config));
     this.wallet = wallet;
     this.node = node;
     this.store = store;

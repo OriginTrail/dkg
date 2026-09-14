@@ -1020,6 +1020,22 @@ async function waitForSyncProtocolFromPeerProtocols(
   return false;
 }
 
+export interface CatchupSyncProtocolAgent {
+  getPeerProtocols?: (peerId: string) => Promise<string[]>;
+  waitForSyncProtocol(peerId: string): Promise<boolean>;
+}
+
+/** Preserve the string-only agent boundary even on compatibility fallbacks. */
+export async function waitForCatchupSyncProtocol(
+  agent: CatchupSyncProtocolAgent,
+  peerId: string,
+): Promise<boolean> {
+  if (typeof agent.getPeerProtocols === 'function') {
+    return waitForSyncProtocolFromPeerProtocols(agent.getPeerProtocols.bind(agent), peerId);
+  }
+  return agent.waitForSyncProtocol(peerId);
+}
+
 class WorkerCatchupRunner implements CatchupRunner {
   private readonly worker: Worker;
   private nextRunId = 0;
@@ -1181,10 +1197,7 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
       case 'waitForSyncProtocol': {
         const [peerId] = args as [string];
-        if (typeof agent.getPeerProtocols === 'function') {
-          return waitForSyncProtocolFromPeerProtocols(agent.getPeerProtocols.bind(agent), peerId);
-        }
-        return agent.waitForSyncProtocol({ toString: () => peerId });
+        return waitForCatchupSyncProtocol(agent as CatchupSyncProtocolAgent, peerId);
       }
       case 'syncDurable': {
         const [peerId, contextGraphId, priority, source] = args as [

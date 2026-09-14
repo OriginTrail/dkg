@@ -1,4 +1,8 @@
 import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  selectCoreAgents,
+  type CorePeerDirectoryEntry,
+} from './core-peer-discovery.js';
 
 /**
  * A.4-lite+ — phonebook-driven warm/pinned connections to Core nodes.
@@ -36,13 +40,7 @@ import { createOperationContext, type OperationContext } from '@origintrail-offi
  */
 
 /** Minimal phonebook shape this module needs. */
-export interface WarmCoreAgent {
-  peerId: string;
-  nodeRole?: string;
-  agentAddress?: string;
-  /** ISO-8601 `dkg:lastSeen` from the phonebook, when known. */
-  lastSeen?: string;
-}
+export interface WarmCoreAgent extends CorePeerDirectoryEntry {}
 
 /** Parse an ISO-8601 `lastSeen` to epoch ms; 0 when absent/unparseable. */
 function lastSeenMs(iso?: string): number {
@@ -69,15 +67,7 @@ export function selectWarmCoreCandidates(
   selfPeerId: string,
   opts?: { nowMs?: number; staleThresholdMs?: number },
 ): WarmCoreAgent[] {
-  const seen = new Set<string>();
-  const out: WarmCoreAgent[] = [];
-  for (const agent of agents) {
-    if (agent.nodeRole !== 'core') continue;
-    if (!agent.peerId || agent.peerId === selfPeerId) continue;
-    if (seen.has(agent.peerId)) continue;
-    seen.add(agent.peerId);
-    out.push(agent);
-  }
+  const out = selectCoreAgents(agents, selfPeerId);
   const nowMs = opts?.nowMs;
   const staleThresholdMs = opts?.staleThresholdMs;
   const filtered =

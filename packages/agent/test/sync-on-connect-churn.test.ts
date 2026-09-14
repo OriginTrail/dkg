@@ -561,8 +561,9 @@ describe('sync-on-connect churn gates', () => {
   });
 
   it('makes sync-on-connect requester paths no-op when the emergency switch is disabled', async () => {
-    const agent = await createUnstartedAgent('SyncOnConnectDisabled');
-    agent.config.syncOnConnectEnabled = false;
+    const agent = await createUnstartedAgent('SyncOnConnectDisabled', {
+      syncOnConnectEnabled: false,
+    });
     agent.started = true;
     const calls: string[] = [];
     const runOrdinary = async (peerId: string) => {
@@ -578,8 +579,9 @@ describe('sync-on-connect churn gates', () => {
   });
 
   it('makes durable sync requester paths no-op when the emergency switch is disabled', async () => {
-    const agent = await createUnstartedAgent('DurableSyncDisabled');
-    agent.config.durableSyncEnabled = false;
+    const agent = await createUnstartedAgent('DurableSyncDisabled', {
+      durableSyncEnabled: false,
+    });
 
     const durable = await agent.syncFromPeerDetailed(PEER_A, ['cg-a']);
     expect(durable).toMatchObject({

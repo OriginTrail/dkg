@@ -298,7 +298,6 @@ import {
   MESSAGE_OUTBOX_TICK_MS,
   AGENT_PROFILE_HEARTBEAT_MS,
   AGENT_PROFILE_STALE_THRESHOLD_MS,
-  WARM_CORE_CONNECTIONS_ENABLED,
   WARM_CORE_RECONCILE_INTERVAL_MS,
   WARM_CORE_MAX,
   WARM_CORE_KEEPALIVE_TAG,
@@ -876,6 +875,22 @@ export class AgentRegistryMethods extends DKGAgentBase {
       if (this.localAgents.has(checksum)) return checksum;
     } catch { /* fall through */ }
     return addressOrLowercase;
+  }
+
+  /** Resolve the default agent only when this daemon owns its signing key. */
+  getDefaultCustodialSigningIdentity(this: DKGAgent): {
+    agentAddress: string;
+    privateKey: string;
+  } | undefined {
+    const defaultAddress = this.defaultAgentAddress;
+    if (!defaultAddress) return undefined;
+    const agentAddress = this.resolveLocalAgentAddress(defaultAddress);
+    const privateKey = this.getCustodialAgentPrivateKey(agentAddress);
+    if (!privateKey) return undefined;
+    return {
+      agentAddress,
+      privateKey,
+    };
   }
 
   /**

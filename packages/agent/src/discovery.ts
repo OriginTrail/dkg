@@ -160,6 +160,7 @@ export class DiscoveryClient {
   async findAgents(options: {
     framework?: string;
     agentAddress?: string;
+    nodeRole?: 'core' | 'edge';
     limit?: number;
     signal?: AbortSignal;
   } = {}): Promise<DiscoveredAgent[]> {
@@ -169,6 +170,9 @@ export class DiscoveryClient {
     }
     if (options.agentAddress) {
       filter += `\n      ?agent <${DKG}agentAddress> "${escapeSparqlLiteral(options.agentAddress)}" .`;
+    }
+    if (options.nodeRole) {
+      filter += `\n      ?agent <${DKG}nodeRole> "${escapeSparqlLiteral(options.nodeRole)}" .`;
     }
 
     const sparql = `

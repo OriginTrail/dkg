@@ -10,7 +10,18 @@ import {
   catchupPlaneReady,
   classifyDurableCatchupRequest,
   runDurableCatchupLeg,
+  waitForCatchupSyncProtocol,
 } from '../src/catchup-runner.js';
+
+describe('catchup sync protocol compatibility', () => {
+  it('keeps the legacy agent fallback on the canonical peer-id string contract', async () => {
+    const waitForSyncProtocol = vi.fn(async (peerId: string) => peerId === 'peer-legacy');
+
+    await expect(waitForCatchupSyncProtocol({ waitForSyncProtocol }, 'peer-legacy'))
+      .resolves.toBe(true);
+    expect(waitForSyncProtocol).toHaveBeenCalledWith('peer-legacy');
+  });
+});
 
 describe('catchup runner progress accounting', () => {
   it('does not count timed-out peers as success, including after partial progress', () => {

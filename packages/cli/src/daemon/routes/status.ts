@@ -59,7 +59,6 @@ import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats }
 import {
   DKGAgent,
   loadOpWallets,
-  resolveSyncReconcilerEnabled,
 } from '@origintrail-official/dkg-agent';
 import {
   rfc64CatalogKillSwitchActiveV1,
@@ -1057,13 +1056,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       },
       // The certification harness must be able to distinguish an operator
       // setting from the switch the agent actually honors. This projection
-      // deliberately uses the same resolver as both runtime reconcile gates,
-      // including environment-variable precedence.
-      syncLifecycle: {
-        syncReconcilerEnabled: resolveSyncReconcilerEnabled(
-          config.syncReconcilerEnabled,
-        ),
-      },
+      // deliberately reads the same immutable startup snapshot as the runtime
+      // gates, including configuration/environment precedence at construction.
+      syncLifecycle: agent.syncLifecycleSwitches,
       connectedPeers: uniquePeers.size,
       connections: {
         total: allConns.length,

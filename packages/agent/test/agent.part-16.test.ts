@@ -25,6 +25,21 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
   coordinator.ensureAdmitted = async () => true;
 }
 
+// Catch-up probes sync readiness through the libp2p peer store, which only
+// answers for canonical peer IDs. These valid Ed25519 IDs play the named
+// roles in the connected-peer fan-out cases below.
+const CANONICAL_TEST_PEER_IDS = {
+  cleanMiss: '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw',
+  timedOut: '12D3KooWCV9mkCJkKkyNLvvPNRTsvpGMstN5E4C5jtXUK61S3xan',
+  denied: '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb',
+  serving: '12D3KooWFHUALUrdSfrVHSxtCRCJC9xvxS7nYfM6T1sbYVak9HTu',
+  deniedEmpty: '12D3KooWFq5KMnSMyYr8Z8t8a6Vh1Y6N6KkF5UZjLpCqUkBJsAaa',
+  cleanEmpty: '12D3KooWGiQrwo1jXJsHaQK4kFYx3xVDp5tWHPEnpUUEUbygP4WL',
+  metaOnly: '12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ',
+  metaOnlyClean: '12D3KooWLb1bH9NfMSjJDmsZxufmw5UFD8wajVKnvD5HfL3VbqGq',
+  privateOnlyClean: '12D3KooWPvHB21rJUKQuPb7sZDCyveJmtsL3PryNN3y99n6hqRNh',
+} as const;
+
 // #1236 🔵: clean (all-zero, no-backoff, made-no-progress) detailed
 // sync summaries shaped to match the production `DurableSyncResult` /
 // `SharedMemorySyncResult` returns of `syncFromPeerDetailed` /
@@ -318,8 +333,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const cleanPeer = { toString: () => 'peer-clean-miss' };
-        const timedOutPeer = { toString: () => 'peer-timed-out' };
+        const cleanPeer = { toString: () => CANONICAL_TEST_PEER_IDS.cleanMiss };
+        const timedOutPeer = { toString: () => CANONICAL_TEST_PEER_IDS.timedOut };
         (agent.node.libp2p as any).getConnections = () => [
           { remotePeer: cleanPeer } as any,
           { remotePeer: timedOutPeer } as any,
@@ -565,8 +580,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const deniedPeer = { toString: () => 'peer-denied' };
-        const servingPeer = { toString: () => 'peer-serving' };
+        const deniedPeer = { toString: () => CANONICAL_TEST_PEER_IDS.denied };
+        const servingPeer = { toString: () => CANONICAL_TEST_PEER_IDS.serving };
         (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer: deniedPeer } as any,
           { remotePeer: servingPeer } as any,
@@ -576,7 +591,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         } as any));
 
         (agent as any).syncFromPeerDetailed = recorder(async (peerId: string) => {
-          if (peerId === 'peer-denied') {
+          if (peerId === deniedPeer.toString()) {
             return {
               insertedTriples: 0,
               fetchedMetaTriples: 0,
@@ -642,8 +657,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const deniedPeer = { toString: () => 'peer-denied-empty' };
-        const cleanPeer = { toString: () => 'peer-clean-empty' };
+        const deniedPeer = { toString: () => CANONICAL_TEST_PEER_IDS.deniedEmpty };
+        const cleanPeer = { toString: () => CANONICAL_TEST_PEER_IDS.cleanEmpty };
         (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer: deniedPeer } as any,
           { remotePeer: cleanPeer } as any,
@@ -663,12 +678,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           timedOutPhases: 0,
           completedPhases: 0,
           checkpointAdvances: 0,
-          emptyResponses: peerId === 'peer-clean-empty' ? 1 : 0,
+          emptyResponses: peerId === cleanPeer.toString() ? 1 : 0,
           metaOnlyResponses: 0,
           dataRejectedMissingMeta: 0,
           rejectedKcs: 0,
           failedPeers: 0,
-          deniedPhases: peerId === 'peer-denied-empty' ? 1 : 0,
+          deniedPhases: peerId === deniedPeer.toString() ? 1 : 0,
         }));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
@@ -696,7 +711,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const remotePeer = { toString: () => 'peer-meta-only' };
+        const remotePeer = { toString: () => CANONICAL_TEST_PEER_IDS.metaOnly };
         (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);
@@ -769,7 +784,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const remotePeer = { toString: () => 'peer-meta-only-clean' };
+        const remotePeer = { toString: () => CANONICAL_TEST_PEER_IDS.metaOnlyClean };
         (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);
@@ -842,7 +857,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
 
-        const remotePeer = { toString: () => 'peer-private-only-clean' };
+        const remotePeer = { toString: () => CANONICAL_TEST_PEER_IDS.privateOnlyClean };
         (agent.node.libp2p as any).getConnections = recorder(() => [
           { remotePeer } as any,
         ]);

@@ -128,4 +128,36 @@ describe('DiscoveryClient.findAgents distinct-row boundary', () => {
     expect(issuedQuery).not.toMatch(/LIMIT\s+2/);
     expect(agents.map((agent) => agent.peerId)).toEqual(['peer-same', 'peer-second']);
   });
+
+  it('constrains the directory query by role before applying the caller-visible limit', async () => {
+    let issuedQuery = '';
+    const engine = {
+      query: async (sparql: string) => {
+        issuedQuery = sparql;
+        return {
+          bindings: [
+            {
+              agent: 'did:dkg:agent:0x1111111111111111111111111111111111111111',
+              name: '"core-one"',
+              peerId: '"peer-core-one"',
+              nodeRole: '"core"',
+            },
+            {
+              agent: 'did:dkg:agent:0x2222222222222222222222222222222222222222',
+              name: '"core-two"',
+              peerId: '"peer-core-two"',
+              nodeRole: '"core"',
+            },
+          ],
+        };
+      },
+    } as unknown as QueryEngine;
+
+    const agents = await new DiscoveryClient(engine).findAgents({ nodeRole: 'core', limit: 1 });
+
+    expect(issuedQuery).toContain(
+      '<https://dkg.network/ontology#nodeRole> "core"',
+    );
+    expect(agents.map(({ peerId }) => peerId)).toEqual(['peer-core-one']);
+  });
 });

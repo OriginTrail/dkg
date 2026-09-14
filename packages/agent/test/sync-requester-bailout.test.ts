@@ -18,9 +18,16 @@ import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { createSwmTargetExecutorSessionFactoryForTest } from
   './_helpers/swm-target-executor-session-fixture.js';
+import type { SyncLifecycleSwitches } from '../src/sync/lifecycle-switches.js';
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
 const noop = () => {};
+const ENABLED_SYNC_LIFECYCLE_SWITCHES = Object.freeze({
+  syncReconcilerEnabled: true,
+  syncOnConnectEnabled: true,
+  durableSyncEnabled: true,
+  warmCoreConnectionsEnabled: false,
+}) satisfies Readonly<SyncLifecycleSwitches>;
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -504,6 +511,7 @@ describe('lifecycle shared-memory fanout isolation', () => {
       | ReturnType<typeof createSwmTargetExecutorSessionFactoryForTest>
       | undefined;
     const agent = {
+      syncLifecycleSwitches: ENABLED_SYNC_LIFECYCLE_SWITCHES,
       config: { syncContextGraphPriorities: {} },
       store: {},
       listSubGraphs: async () => [],

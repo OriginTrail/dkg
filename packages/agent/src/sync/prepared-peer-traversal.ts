@@ -1,18 +1,39 @@
+/** Outcome of one caller-owned attempt against a selected peer. */
 export type PreparedPeerAttemptOutcome<T> =
+  /** An expected, non-error condition that excludes this peer from a real attempt. */
+  | { readonly kind: 'skipped'; readonly reason: string }
+  /** Peer preparation failed before a network fetch was attempted. */
+  | { readonly kind: 'prepare-failed'; readonly error: unknown }
   | {
       readonly kind: 'done';
       readonly result?: T;
       /** A recoverable transport failure may still leave inspected durable progress complete. */
       readonly diagnostic?: unknown;
     }
-  | {
-      readonly kind: 'continue';
-      readonly error?: unknown;
-    }
-  | {
-      readonly kind: 'terminal';
-      readonly error: unknown;
-    };
+  /** The attempt failed; failover continues with the next peer. */
+  | { readonly kind: 'failed'; readonly error: unknown }
+  /** The peer answered without an error but did not resolve the request. */
+  | { readonly kind: 'missed'; readonly reason: string }
+  /** The traversal stops and surfaces this error. */
+  | { readonly kind: 'terminal'; readonly error: unknown };
+
+/** How one peer of the window was handled, in the same vocabulary as the outcomes. */
+export type PreparedPeerAttemptRecord =
+  | { readonly peerId: string; readonly kind: 'skipped'; readonly reason: string }
+  | { readonly peerId: string; readonly kind: 'prepare-failed'; readonly error: unknown }
+  | { readonly peerId: string; readonly kind: 'failed'; readonly error: unknown }
+  | { readonly peerId: string; readonly kind: 'missed'; readonly reason: string }
+  | { readonly peerId: string; readonly kind: 'done' };
+
+/** Stable position metadata for one peer in the selected traversal window. */
+export interface PreparedPeerTraversalPosition {
+  /** Zero-based position in the selected window. */
+  readonly index: number;
+  /** Current peer plus every peer that remains after it. */
+  readonly remainingPeers: number;
+  readonly totalPeers: number;
+  readonly selectedPeerIds: readonly string[];
+}
 
 export interface BoundedPreparedPeerTraversalOptions<T> {
   readonly candidatePeerIds: readonly string[];
@@ -23,30 +44,43 @@ export interface BoundedPreparedPeerTraversalOptions<T> {
     peerIds: string[],
     options: { readonly maxPeers: number },
   ): readonly string[];
-  preparePeer(peerId: string): Promise<boolean>;
-  attemptPeer(peerId: string): Promise<PreparedPeerAttemptOutcome<T>>;
+  /** Called exactly once after de-duplication and window selection. */
+  onWindowSelected?(selection: PreparedPeerWindowSelection): void;
+  attemptPeer(
+    peerId: string,
+    position: PreparedPeerTraversalPosition,
+  ): Promise<PreparedPeerAttemptOutcome<T>>;
   log(message: string): void;
+}
+
+export interface PreparedPeerWindowSelection {
+  readonly candidatePeerIds: readonly string[];
+  readonly selectedPeerIds: readonly string[];
+  readonly maxPeers: number;
 }
 
 export interface BoundedPreparedPeerTraversalResult<T> {
   readonly completion: 'done' | 'exhausted';
   readonly result?: T;
+  /** One record per peer taken from the window, in traversal order. */
+  readonly attempts: readonly PreparedPeerAttemptRecord[];
+  /** Prepared peers that were actually attempted, derived from {@link attempts}. */
   readonly peerAttempts: number;
-  readonly attemptedPeerIds: readonly string[];
-  readonly peerWindow: readonly string[];
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * Canonical bounded peer preparation and failover policy for exact fetches.
- * Callers retain their evidence construction and result-consumption semantics.
- */
-export async function runBoundedPreparedPeerTraversal<T>(
-  options: BoundedPreparedPeerTraversalOptions<T>,
-): Promise<BoundedPreparedPeerTraversalResult<T>> {
+function countPeerAttempts(attempts: readonly PreparedPeerAttemptRecord[]): number {
+  return attempts.filter(({ kind }) => kind === 'done' || kind === 'failed' || kind === 'missed').length;
+}
+
+/** Pure window construction shared by traversal and caller-owned telemetry. */
+export function selectBoundedPreparedPeerWindow(options: Pick<
+  BoundedPreparedPeerTraversalOptions<unknown>,
+  'candidatePeerIds' | 'maxPeers' | 'selectPeerWindow'
+>): PreparedPeerWindowSelection {
   const maxPeers = Number.isInteger(options.maxPeers) && options.maxPeers > 0
     ? options.maxPeers
     : 0;
@@ -55,41 +89,60 @@ export async function runBoundedPreparedPeerTraversal<T>(
     ? options.selectPeerWindow(uniqueCandidates, { maxPeers })
     : uniqueCandidates;
   const candidateSet = new Set(uniqueCandidates);
-  const peerWindow = [...new Set(selected)]
+  const selectedPeerIds = [...new Set(selected)]
     .filter((peerId) => candidateSet.has(peerId))
     .slice(0, maxPeers);
-  const attemptedPeerIds: string[] = [];
-  let peerAttempts = 0;
+  return { candidatePeerIds: uniqueCandidates, selectedPeerIds, maxPeers };
+}
 
-  for (const peerId of peerWindow) {
-    options.assertCurrent();
-    attemptedPeerIds.push(peerId);
+/**
+ * Canonical bounded peer-window iteration and outcome accounting. The caller
+ * owns preparation, deadlines, transport, and result interpretation inside one
+ * explicit attempt callback.
+ */
+export async function runBoundedPreparedPeerTraversal<T>(
+  options: BoundedPreparedPeerTraversalOptions<T>,
+): Promise<BoundedPreparedPeerTraversalResult<T>> {
+  const selection = selectBoundedPreparedPeerWindow(options);
+  options.onWindowSelected?.(selection);
+  const peerWindow = selection.selectedPeerIds;
+  const attempts: PreparedPeerAttemptRecord[] = [];
 
-    let prepared: boolean;
-    try {
-      prepared = await options.preparePeer(peerId);
-    } catch (error) {
-      options.assertCurrent();
-      options.log(`${options.operationLabel} ${peerId} failed: ${errorMessage(error)}`);
-      continue;
-    }
+  for (const [index, peerId] of peerWindow.entries()) {
     options.assertCurrent();
-    if (!prepared) continue;
-    peerAttempts += 1;
+    const position: PreparedPeerTraversalPosition = {
+      index,
+      remainingPeers: peerWindow.length - index,
+      totalPeers: peerWindow.length,
+      selectedPeerIds: peerWindow,
+    };
 
     let outcome: PreparedPeerAttemptOutcome<T>;
     try {
-      outcome = await options.attemptPeer(peerId);
+      outcome = await options.attemptPeer(peerId, position);
     } catch (error) {
       options.assertCurrent();
       throw error;
     }
     options.assertCurrent();
+    if (outcome.kind === 'skipped') {
+      attempts.push({ peerId, kind: 'skipped', reason: outcome.reason });
+      options.log(`${options.operationLabel} ${peerId} skipped: ${outcome.reason}`);
+      continue;
+    }
+    if (outcome.kind === 'prepare-failed') {
+      attempts.push({ peerId, kind: 'prepare-failed', error: outcome.error });
+      options.log(`${options.operationLabel} ${peerId} failed: ${errorMessage(outcome.error)}`);
+      continue;
+    }
     if (outcome.kind === 'terminal') throw outcome.error;
-    if (outcome.kind === 'continue') {
-      if (outcome.error !== undefined) {
-        options.log(`${options.operationLabel} ${peerId} failed: ${errorMessage(outcome.error)}`);
-      }
+    if (outcome.kind === 'failed') {
+      attempts.push({ peerId, kind: 'failed', error: outcome.error });
+      options.log(`${options.operationLabel} ${peerId} failed: ${errorMessage(outcome.error)}`);
+      continue;
+    }
+    if (outcome.kind === 'missed') {
+      attempts.push({ peerId, kind: 'missed', reason: outcome.reason });
       continue;
     }
     if (outcome.diagnostic !== undefined) {
@@ -97,19 +150,18 @@ export async function runBoundedPreparedPeerTraversal<T>(
         `${options.operationLabel} ${peerId} failed: ${errorMessage(outcome.diagnostic)}`,
       );
     }
+    attempts.push({ peerId, kind: 'done' });
     return {
       completion: 'done',
       ...(outcome.result === undefined ? {} : { result: outcome.result }),
-      peerAttempts,
-      attemptedPeerIds,
-      peerWindow,
+      attempts,
+      peerAttempts: countPeerAttempts(attempts),
     };
   }
 
   return {
     completion: 'exhausted',
-    peerAttempts,
-    attemptedPeerIds,
-    peerWindow,
+    attempts,
+    peerAttempts: countPeerAttempts(attempts),
   };
 }

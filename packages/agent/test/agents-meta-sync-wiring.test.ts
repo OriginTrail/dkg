@@ -26,6 +26,7 @@ import { runDurableSync } from '../src/sync/requester/durable-sync.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from
   '../src/rfc64/public-catalog-activation-config-v1.js';
+import { resolveSyncLifecycleSwitches } from '../src/sync/lifecycle-switches.js';
 
 const mockedRunDurableSync = vi.mocked(runDurableSync);
 
@@ -40,6 +41,7 @@ const mockedRunDurableSync = vi.mocked(runDurableSync);
 // established fake-`this` pattern in imported-artifact.test.ts.
 function fakeAgent(config: { nodeRole?: 'core' | 'edge'; syncAgentsMeta?: boolean }): any {
   return {
+    syncLifecycleSwitches: Object.freeze(resolveSyncLifecycleSwitches(config)),
     config: {
       ...config,
       rfc64CatalogExecutionPlan: resolveRfc64CatalogExecutionPlanV1({

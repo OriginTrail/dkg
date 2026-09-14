@@ -231,7 +231,7 @@ describe('abortable recovery connection helpers', () => {
           return { protocols: [] };
         },
       },
-      { toString: () => 'peer-under-test' },
+      peerIdFromString('12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6'),
       '/dkg/test/sync',
       3,
       10_000,

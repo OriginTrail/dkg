@@ -79,12 +79,11 @@ export const SYNC_AUTH_MAX_AGE_MS = 90_000;
 
 // ── Warm core connections (A.4-lite+) ─────────────────────────────────
 /**
- * Opt-in: when set, the agent keeps a small set of Core nodes warm
+ * When the startup-owned lifecycle snapshot enables it, the agent keeps a small set of Core nodes warm
  * (connection pinned + auto-redialed by libp2p) so catch-up / chain-driven
  * reconciliation never pays a cold circuit-relay dial to reach a Core.
- * Conservative default (off) — flip to '1' to enable.
+ * Conservative default (off) — set `DKG_WARM_CORE_CONNECTIONS=1` before startup.
  */
-export const WARM_CORE_CONNECTIONS_ENABLED = process.env.DKG_WARM_CORE_CONNECTIONS === '1';
 /** How often to refresh the warm-core set from the phonebook + redial drops. */
 export const WARM_CORE_RECONCILE_INTERVAL_MS = 90_000;
 /** Upper bound on simultaneously pinned Cores (slot-exhaustion guard). */
