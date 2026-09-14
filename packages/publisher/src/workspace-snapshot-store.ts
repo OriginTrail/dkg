@@ -15,17 +15,14 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameSnapshotSource, sameSnapshotFileIdentity, snapshotPath, SnapshotSourceChangedError, type OpenedSnapshotSource, type SnapshotFileSource, type SnapshotFileIdentity, type SnapshotFileReader } from './workspace-snapshot-source.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import {
-  SnapshotWriteCapacityCoordinator,
+  createSnapshotWriteCapacityAdmission,
   type SnapshotWriteCapacityAdmission,
   type SnapshotWriteCapacityPorts,
 } from './workspace-snapshot-write-capacity.js';
 
-export {
-  SnapshotStorageCapacityError,
-  type SnapshotWriteCapacityAdmission,
-  type SnapshotWriteCapacityLease,
-  type SnapshotWriteCapacityPorts,
-} from './workspace-snapshot-write-capacity.js';
+// Only the capacity ERROR is package surface; admission, its ports and its
+// lease protocol stay internal to the store implementation.
+export { SnapshotStorageCapacityError } from './workspace-snapshot-write-capacity.js';
 
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
@@ -74,13 +71,6 @@ export interface FileWorkspacePublicSnapshotStoreOptions {
   }>;
   /** Test seam; production callers use Date.now(). */
   readonly now?: () => number;
-  /**
-   * Test seam over write admission. Production stores build a
-   * SnapshotWriteCapacityCoordinator over their own filesystem and GC ports.
-   */
-  readonly createWriteCapacityAdmission?: (
-    ports: SnapshotWriteCapacityPorts,
-  ) => SnapshotWriteCapacityAdmission;
 }
 
 export interface WorkspacePublicSnapshotStore {
@@ -223,9 +213,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
           }
         },
       };
-      const createAdmission = options.createWriteCapacityAdmission
-        ?? ((capacityPorts: SnapshotWriteCapacityPorts) => new SnapshotWriteCapacityCoordinator(capacityPorts));
-      this.writeCapacity = createAdmission(ports);
+      this.writeCapacity = createSnapshotWriteCapacityAdmission(ports);
       this.gcTimer = setInterval(() => {
         void this.collectGarbage().then((result) => {
           if (

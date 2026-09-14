@@ -23,7 +23,11 @@ import {
   workspacePublicQuadsDigest,
   serializeWorkspacePublicSnapshotQuads,
 } from '../src/workspace-snapshot-store.js';
-import { SnapshotWriteCapacityCoordinator, type SnapshotWriteCapacityLease } from '../src/workspace-snapshot-write-capacity.js';
+import {
+  SnapshotWriteCapacityCoordinator,
+  withSnapshotWriteCapacityAdmission,
+  type SnapshotWriteCapacityLease,
+} from '../src/workspace-snapshot-write-capacity.js';
 
 import { DIGEST, MemoryPageIndexStore, makeQuads, digestFor, snapshotDirectory, snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
@@ -879,11 +883,8 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
     let releaseWrites!: () => void;
     const writesBlocked = new Promise<void>(resolve => { releaseWrites = resolve; });
     let decisions = 0; let accepted = 0;
-    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
-      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
-        targetFreeBytes: hardReserveBytes + 1, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
-      getAvailableBytes: async () => capacity - await committedBytes(),
-      createWriteCapacityAdmission: ports => {
+    const store = withSnapshotWriteCapacityAdmission(
+      ports => {
         const coordinator = new SnapshotWriteCapacityCoordinator(ports);
         return {
           reserve: async bytes => {
@@ -896,7 +897,12 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
           },
         };
       },
-    });
+      () => new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
+          targetFreeBytes: hardReserveBytes + 1, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
+        getAvailableBytes: async () => capacity - await committedBytes(),
+      }),
+    );
     const writes = Promise.allSettled(inputs.map(input => store.putSnapshot(input)));
     try {
       await vi.waitFor(() => expect(decisions).toBe(4));
@@ -938,16 +944,8 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
     const readStartedGate = new Promise<void>(resolve => { readStarted = resolve; });
     let reads = 0;
     let first = true;
-    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
-      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
-        targetFreeBytes: hardReserveBytes + 2, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
-      getAvailableBytes: async () => {
-        const reading = ++reads;
-        const available = capacity - await committedBytes();
-        if (reading === 2) { readStarted(); await readGate; }
-        return available;
-      },
-      createWriteCapacityAdmission: ports => {
+    const store = withSnapshotWriteCapacityAdmission(
+      ports => {
         const coordinator = new SnapshotWriteCapacityCoordinator(ports);
         return {
           reserve: async requiredBytes => {
@@ -957,7 +955,17 @@ describe('FileWorkspacePublicSnapshotStore GC v1', () => {
           },
         };
       },
-    });
+      () => new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
+          targetFreeBytes: hardReserveBytes + 2, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
+        getAvailableBytes: async () => {
+          const reading = ++reads;
+          const available = capacity - await committedBytes();
+          if (reading === 2) { readStarted(); await readGate; }
+          return available;
+        },
+      }),
+    );
     const firstWrite = store.putSnapshot(inputs[0]!);
     let secondWrite: Promise<unknown> | undefined;
     try {

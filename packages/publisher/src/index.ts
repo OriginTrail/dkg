@@ -452,11 +452,6 @@ export {
   type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,
 } from './workspace-snapshot-store.js';
-export {
-  type SnapshotWriteCapacityAdmission,
-  type SnapshotWriteCapacityLease,
-  type SnapshotWriteCapacityPorts,
-} from './workspace-snapshot-write-capacity.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, type OnContextGraphCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';

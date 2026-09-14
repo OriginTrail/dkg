@@ -128,3 +128,51 @@ export class SnapshotWriteCapacityCoordinator implements SnapshotWriteCapacityAd
     }
   }
 }
+
+type SnapshotWriteCapacityAdmissionFactory =
+  (ports: SnapshotWriteCapacityPorts) => SnapshotWriteCapacityAdmission;
+
+let pendingAdmission: SnapshotWriteCapacityAdmissionFactory | undefined;
+
+/**
+ * The store's ONE construction point for write admission.
+ *
+ * Production always coordinates, so the coordinator, its ports and its lease
+ * protocol stay inside this package instead of becoming store options a
+ * consumer could replace.
+ */
+export function createSnapshotWriteCapacityAdmission(
+  ports: SnapshotWriteCapacityPorts,
+): SnapshotWriteCapacityAdmission {
+  const override = pendingAdmission;
+  pendingAdmission = undefined;
+  return override ? override(ports) : new SnapshotWriteCapacityCoordinator(ports);
+}
+
+/**
+ * Package-private admission seam for the store's integration tests, which have
+ * to hold a reservation open while sibling writes compete for capacity.
+ *
+ * The override exists only for the synchronous `construct()` call and is
+ * consumed by the one store built inside it, so it can never reach another
+ * store and is always absent in production. A `construct` that builds no
+ * admission — garbage collection disabled, or a rejected configuration — is
+ * reported rather than silently running against the real coordinator.
+ */
+export function withSnapshotWriteCapacityAdmission<T>(
+  createAdmission: SnapshotWriteCapacityAdmissionFactory,
+  construct: () => T,
+): T {
+  let consumed = false;
+  pendingAdmission = (ports) => {
+    consumed = true;
+    return createAdmission(ports);
+  };
+  try {
+    const constructed = construct();
+    if (!consumed) throw new Error('Snapshot write capacity admission override was not consumed');
+    return constructed;
+  } finally {
+    pendingAdmission = undefined;
+  }
+}

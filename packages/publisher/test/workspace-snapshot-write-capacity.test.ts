@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  createSnapshotWriteCapacityAdmission,
   SnapshotStorageCapacityError,
   SnapshotWriteCapacityCoordinator,
+  withSnapshotWriteCapacityAdmission,
+  type SnapshotWriteCapacityAdmission,
   type SnapshotWriteCapacityPorts,
 } from '../src/workspace-snapshot-write-capacity.js';
 
@@ -119,5 +122,33 @@ describe('SnapshotWriteCapacityCoordinator', () => {
     reclaimable = 0;
     await expect(coordinator.reserve(WRITE)).rejects.toBeInstanceOf(SnapshotStorageCapacityError);
     expect(collectGarbage).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('write capacity admission construction', () => {
+  const gated: SnapshotWriteCapacityAdmission = {
+    reserve: async () => ({ markMaterialized: () => {}, release: () => {} }),
+  };
+
+  it('replaces admission for one construction and coordinates for every other', () => {
+    expect(createSnapshotWriteCapacityAdmission(ports(() => HARD_RESERVE)))
+      .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
+    expect(withSnapshotWriteCapacityAdmission(
+      () => gated,
+      () => createSnapshotWriteCapacityAdmission(ports(() => HARD_RESERVE)),
+    )).toBe(gated);
+    // The seam is one construction wide: production, and every later store,
+    // still coordinates.
+    expect(createSnapshotWriteCapacityAdmission(ports(() => HARD_RESERVE)))
+      .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
+  });
+
+  it('reports an override that the construction never consumed', () => {
+    // Otherwise a gated test whose store built no admission would quietly run
+    // against the real coordinator and prove nothing about the gate.
+    expect(() => withSnapshotWriteCapacityAdmission(() => gated, () => 'no admission built'))
+      .toThrow('override was not consumed');
+    expect(createSnapshotWriteCapacityAdmission(ports(() => HARD_RESERVE)))
+      .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
   });
 });
