@@ -302,6 +302,41 @@ describe('bounded context-graph listing', () => {
     expect(boundary).not.toHaveProperty('descriptionTruncated');
   });
 
+  it('keeps oversized optional metadata from rejecting the whole summary page', () => {
+    const malformed = {
+      ...rows(1)[0]!,
+      id: 'oversized-optional-metadata',
+      curator: 'c'.repeat(257),
+      accessPolicy: 'p'.repeat(65),
+      onChainId: '9'.repeat(129),
+    };
+    const valid = {
+      ...rows(1)[0]!,
+      id: 'valid-after-oversized-metadata',
+      curator: 'did:dkg:agent:0x1234',
+      accessPolicy: 'public',
+      onChainId: '42',
+    };
+    const page = buildContextGraphListPage(
+      [malformed, valid],
+      pagedQuery({ limit: '10', projection: 'summary' }),
+    );
+    expect(page.ok).toBe(true);
+    if (!page.ok) throw new Error(page.error);
+    expect(page.payload.contextGraphs.map((row) => row.id)).toEqual([
+      malformed.id,
+      valid.id,
+    ]);
+    expect(page.payload.contextGraphs[0]).not.toHaveProperty('curator');
+    expect(page.payload.contextGraphs[0]).not.toHaveProperty('accessPolicy');
+    expect(page.payload.contextGraphs[0]).not.toHaveProperty('onChainId');
+    expect(page.payload.contextGraphs[1]).toMatchObject({
+      curator: valid.curator,
+      accessPolicy: valid.accessPolicy,
+      onChainId: valid.onChainId,
+    });
+  });
+
   it('truncates astral Unicode on code-point boundaries', () => {
     const page = buildContextGraphListPage(
       [

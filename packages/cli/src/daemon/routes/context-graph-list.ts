@@ -53,7 +53,7 @@ export interface ContextGraphListQuery {
   synced?: boolean;
   onChain?: boolean;
   search?: string;
-  cursorDigest?: string;
+  cursorPosition?: number;
   cursorCollectionDigest?: string;
   fingerprint: string;
 }
@@ -65,7 +65,7 @@ export type ContextGraphListQueryResult =
 
 const KNOWN_QUERY_KEYS = new Set(CONTEXT_GRAPH_LIST_WIRE_KEY_VALUES);
 const CURSOR_PREFIX = 'v2:';
-const CURSOR_BODY_RE = /^([0-9a-f]{16}):([0-9a-f]{64}):([0-9a-f]{64})$/;
+const CURSOR_BODY_RE = /^([0-9a-f]{16}):([0-9a-f]{64}):([0-9]+)$/;
 
 function parseBoolean(
   searchParams: URLSearchParams,
@@ -99,10 +99,10 @@ function queryFingerprint(query: {
 function encodeCursor(
   fingerprint: string,
   collectionDigest: string,
-  rowDigest: string,
+  position: number,
 ): string {
   return Buffer.from(
-    `${CURSOR_PREFIX}${fingerprint}:${collectionDigest}:${rowDigest}`,
+    `${CURSOR_PREFIX}${fingerprint}:${collectionDigest}:${position}`,
     'utf8',
   )
     .toString('base64url');
@@ -111,7 +111,7 @@ function encodeCursor(
 function decodeCursor(cursor: string): {
   fingerprint: string;
   collectionDigest: string;
-  rowDigest: string;
+  position: number;
 } | undefined {
   if (cursor.length > 256) return undefined;
   const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
@@ -121,7 +121,7 @@ function decodeCursor(cursor: string): {
   return {
     fingerprint: match[1]!,
     collectionDigest: match[2]!,
-    rowDigest: match[3]!,
+    position: Number(match[3]),
   };
 }
 
@@ -195,15 +195,14 @@ export function parseContextGraphListQuery(
         error: '"cursor" was issued under different filter or projection parameters',
       };
     }
-    query.cursorDigest = cursor.rowDigest;
+    if (!Number.isSafeInteger(cursor.position)) {
+      return { ok: false, error: '"cursor" position is outside the supported range' };
+    }
+    query.cursorPosition = cursor.position;
     query.cursorCollectionDigest = cursor.collectionDigest;
   }
 
   return { ok: true, mode: 'paged', query };
-}
-
-function rowDigest(row: ContextGraphListFullRow): string {
-  return createHash('sha256').update(row.id, 'utf8').digest('hex');
 }
 
 function hasOnChainId(row: ContextGraphListFullRow): boolean {
@@ -226,18 +225,25 @@ function summaryRow(row: ContextGraphListFullRow): ContextGraphListSummaryRow {
   const description = row.description === undefined
     ? undefined
     : truncateCodePoints(row.description, 512);
+  const boundedOptional = (value: string | undefined, limit: number): string | undefined => {
+    if (value === undefined) return undefined;
+    return [...value].length <= limit ? value : undefined;
+  };
+  const curator = boundedOptional(row.curator, 256);
+  const accessPolicy = boundedOptional(row.accessPolicy, 64);
+  const onChainId = boundedOptional(row.onChainId, 128);
   return {
     id: row.id,
     name: name.value,
     ...(name.truncated ? { nameTruncated: true } : {}),
     ...(description === undefined ? {} : { description: description.value }),
     ...(description?.truncated ? { descriptionTruncated: true } : {}),
-    ...(row.curator === undefined ? {} : { curator: row.curator }),
-    ...(row.accessPolicy === undefined ? {} : { accessPolicy: row.accessPolicy }),
+    ...(curator === undefined ? {} : { curator }),
+    ...(accessPolicy === undefined ? {} : { accessPolicy }),
     isSystem: row.isSystem,
     subscribed: row.subscribed,
     synced: row.synced,
-    ...(row.onChainId === undefined ? {} : { onChainId: row.onChainId }),
+    ...(onChainId === undefined ? {} : { onChainId }),
     ...(row.callerInvolved === undefined
       ? {}
       : { callerInvolved: row.callerInvolved === true }),
@@ -294,7 +300,7 @@ export function canonicalizeContextGraphRowsForPaging(
 function prepareRows(
   rows: ContextGraphListFullRow[],
   query: ContextGraphListQuery,
-): Array<{ digest: string; row: ContextGraphListRow }> {
+): ContextGraphListRow[] {
   return canonicalizeContextGraphRowsForPaging(rows)
     .filter((row) => query.subscribed === undefined
       || (row.subscribed === true) === query.subscribed)
@@ -306,17 +312,8 @@ function prepareRows(
       row.id.toLocaleLowerCase('en-US').includes(query.search)
       || row.name.toLocaleLowerCase('en-US').includes(query.search)
     ))
-    .map((row) => ({
-      digest: rowDigest(row),
-      row: query.projection === 'summary' ? summaryRow(row) : { ...row },
-    }))
-    .sort((left, right) => (
-      left.digest < right.digest
-        ? -1
-        : left.digest > right.digest
-          ? 1
-          : left.row.id.localeCompare(right.row.id)
-    ));
+    .map((row) => query.projection === 'summary' ? summaryRow(row) : { ...row })
+    .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 }
 
 export type ContextGraphListPagePayload = ContextGraphListPageResponse;
@@ -381,9 +378,8 @@ export function buildContextGraphListPage(
       code: CONTEXT_GRAPH_LIST_ERROR_CODES.snapshotChanged,
     };
   }
-  const after = query.cursorDigest === undefined
-    ? prepared
-    : prepared.filter((entry) => entry.digest > query.cursorDigest!);
+  const start = query.cursorPosition ?? 0;
+  const after = prepared.slice(start);
   const pageEntries = after.slice(0, query.limit);
 
   while (pageEntries.length > 0) {
@@ -392,11 +388,11 @@ export function buildContextGraphListPage(
       ? encodeCursor(
           query.fingerprint,
           collectionDigest,
-          pageEntries[pageEntries.length - 1]!.digest,
+          start + pageEntries.length,
         )
       : undefined;
     const built = payloadWithExactSize(
-      pageEntries.map((entry) => entry.row),
+      pageEntries,
       prepared.length,
       query.limit,
       nextCursor,
