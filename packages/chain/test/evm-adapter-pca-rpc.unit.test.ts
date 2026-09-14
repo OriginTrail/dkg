@@ -257,7 +257,7 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
       identity: { getAddress: async () => '0x' + '44'.repeat(20) },
     };
     delete contracts[missingContract];
-    installBindings(adapter, contracts);
+    Object.assign((adapter as any).contracts, contracts);
     const getIdentityStorage = vi.fn(async () => ({
       getAddress: async () => '0x' + '55'.repeat(20),
     }));

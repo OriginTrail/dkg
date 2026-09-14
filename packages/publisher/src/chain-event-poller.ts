@@ -20,8 +20,20 @@ export type {
   LegacyCursorPersistence,
 } from './chain-event-lane-cursor-store.js';
 
+type ChainEventCallback<T, R> = {
+  bivarianceHack(info: T, context?: ChainEventDispatchContext): R;
+}['bivarianceHack'];
+
+function invokeChainEventCallback<T, R>(
+  callback: ChainEventCallback<T, R>,
+  info: T,
+  context: ChainEventDispatchContext,
+): R {
+  return (callback as (value: T, dispatch: ChainEventDispatchContext) => R)(info, context);
+}
+
 /** Callback invoked when a ContextGraphCreated event is detected. */
-export type OnContextGraphCreated = (info: {
+export type OnContextGraphCreated = ChainEventCallback<{
   contextGraphId: string;
   creator: string;
   accessPolicy: number;
@@ -35,28 +47,28 @@ export type OnContextGraphCreated = (info: {
    */
   nameHash?: string | null;
   blockNumber: number;
-}, context: ChainEventDispatchContext) => Promise<void>;
+}, Promise<void>>;
 
 /** Callback for KnowledgeAssetUpdated events (spec §5.1). */
-export type OnCollectionUpdated = (info: {
+export type OnCollectionUpdated = ChainEventCallback<{
   merkleRoot: Uint8Array;
   batchId: bigint;
   blockNumber: number;
-}, context: ChainEventDispatchContext) => Promise<void>;
+}, Promise<void>>;
 
 /** Callback for AllowListUpdated events (spec §5.1). */
-export type OnAllowListUpdated = (info: {
+export type OnAllowListUpdated = ChainEventCallback<{
   contextGraphId: string;
   agent: string;
   added: boolean;
   blockNumber: number;
-}, context: ChainEventDispatchContext) => Promise<void>;
+}, Promise<void>>;
 
 /** Callback for ProfileCreated / ProfileUpdated events (spec §5.1). */
-export type OnProfileEvent = (info: {
+export type OnProfileEvent = ChainEventCallback<{
   identityId: bigint;
   blockNumber: number;
-}, context: ChainEventDispatchContext) => Promise<void>;
+}, Promise<void>>;
 
 /**
  * Callback for `KnowledgeAssetRegisteredToContextGraph` events — the
@@ -66,13 +78,13 @@ export type OnProfileEvent = (info: {
  * (the event does not carry the per-CG ordinal), so a missed event is
  * harmless — the periodic/startup sweep fills it in.
  */
-export type OnKARegisteredToContextGraph = (info: {
+export type OnKARegisteredToContextGraph = ChainEventCallback<{
   contextGraphId: string;
   kaId: bigint;
   txHash: string;
   txIndex?: number;
   blockNumber: number;
-}, context: ChainEventDispatchContext) => Promise<void>;
+}, Promise<void>>;
 
 /**
  * Callback for `KnowledgeAssetCreated` events — OT-RFC-43 Option-1 allocator
@@ -81,7 +93,9 @@ export type OnKARegisteredToContextGraph = (info: {
  * `number` is the per-author ordinal extracted from the low 96 bits of `kaId`
  * using full-precision bigint math.
  */
-export type OnKnowledgeAssetCreated = (e: { kaId: bigint; author: string; number: bigint; txHash: string; txIndex: number; blockNumber: number }, context: ChainEventDispatchContext) => void | Promise<void>;
+export type OnKnowledgeAssetCreated = ChainEventCallback<{
+  kaId: bigint; author: string; number: bigint; txHash: string; txIndex: number; blockNumber: number;
+}, void | Promise<void>>;
 
 export interface ChainEventPollerConfig {
   chain: ChainAdapter;
@@ -396,7 +410,7 @@ export class ChainEventPoller {
     );
 
     try {
-      await this.onContextGraphCreated({
+      await invokeChainEventCallback(this.onContextGraphCreated, {
         contextGraphId,
         creator,
         accessPolicy,
@@ -423,7 +437,9 @@ export class ChainEventPoller {
     );
 
     try {
-      await this.onCollectionUpdated({ merkleRoot, batchId, blockNumber: event.blockNumber }, context);
+      await invokeChainEventCallback(
+        this.onCollectionUpdated, { merkleRoot, batchId, blockNumber: event.blockNumber }, context,
+      );
     } catch (err) {
       this.log.warn(ctx, `onCollectionUpdated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -442,7 +458,9 @@ export class ChainEventPoller {
     );
 
     try {
-      await this.onAllowListUpdated({ contextGraphId, agent, added, blockNumber: event.blockNumber }, context);
+      await invokeChainEventCallback(
+        this.onAllowListUpdated, { contextGraphId, agent, added, blockNumber: event.blockNumber }, context,
+      );
     } catch (err) {
       this.log.warn(ctx, `onAllowListUpdated callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -459,7 +477,9 @@ export class ChainEventPoller {
     );
 
     try {
-      await this.onProfileEvent({ identityId, blockNumber: event.blockNumber }, context);
+      await invokeChainEventCallback(
+        this.onProfileEvent, { identityId, blockNumber: event.blockNumber }, context,
+      );
     } catch (err) {
       this.log.warn(ctx, `onProfileEvent callback failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -484,7 +504,7 @@ export class ChainEventPoller {
     );
 
     try {
-      await this.onKARegisteredToContextGraph({
+      await invokeChainEventCallback(this.onKARegisteredToContextGraph, {
         contextGraphId,
         kaId,
         txHash,
@@ -518,7 +538,7 @@ export class ChainEventPoller {
     );
 
     try {
-      await this.onKnowledgeAssetCreated({
+      await invokeChainEventCallback(this.onKnowledgeAssetCreated, {
         kaId,
         author,
         number,

@@ -4,6 +4,7 @@ import type {
   ChainAdapter,
   EventFilter,
 } from '@origintrail-official/dkg-chain';
+import { resolveChainV10FinalizationReadiness } from '@origintrail-official/dkg-chain';
 import {
   decodeFinalizationMessage,
   getMetrics,
@@ -2234,9 +2235,7 @@ export class FinalizationRecovery<
           ...(txIndex !== undefined ? { txIndex } : {}),
         };
       }
-      const v10Ready = typeof this.chain.resolveV10FinalizationReadiness === 'function'
-        ? await this.chain.resolveV10FinalizationReadiness()
-        : this.chain.isV10Ready?.();
+      const v10Ready = await resolveChainV10FinalizationReadiness(this.chain);
       if (v10Ready) {
         return {
           verified: true,

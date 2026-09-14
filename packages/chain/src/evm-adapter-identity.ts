@@ -270,11 +270,12 @@ export class IdentityMethods extends EVMChainAdapterBase {
 
   async getRelayCapable(identityId: bigint): Promise<boolean> {
     await this.init();
-    if (!this.contracts.profileStorage) {
+    const { profileStorage } = await this.resolveHubContractBindings(['profileStorage']);
+    if (!profileStorage) {
       throw new Error('getRelayCapable: ProfileStorage not deployed on this Hub.');
     }
     return Boolean(await this.readContract(
-      this.contracts.profileStorage, 'profileStorage.getRelayCapable', 'getRelayCapable', identityId,
+      profileStorage, 'profileStorage.getRelayCapable', 'getRelayCapable', identityId,
     ));
   }
 

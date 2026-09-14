@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter, type ChainEvent, type EventFilter } from '@origintrail-official/dkg-chain';
 import { Logger, TypedEventBus } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { ChainEventPoller, type ChainEventPollerConfig, type ChainEventPollerLane } from '../src/chain-event-poller.js';
+import {
+  ChainEventPoller,
+  type ChainEventPollerConfig,
+  type ChainEventPollerLane,
+  type OnContextGraphCreated,
+} from '../src/chain-event-poller.js';
 import type { ChainEventDispatchContext } from '../src/chain-event-dispatch-context.js';
 import { PublishHandler } from '../src/publish-handler.js';
 
@@ -39,6 +44,24 @@ const cases = [
 ] as const;
 
 describe('chain event callback dispatch context', () => {
+  it('keeps one-argument callback invocation and context-aware implementations source-compatible', async () => {
+    const seen: string[] = [];
+    const legacy: OnContextGraphCreated = async info => { seen.push(info.contextGraphId); };
+    const invokeLegacy = (callback: OnContextGraphCreated) => callback({
+      contextGraphId: 'legacy', creator: 'creator', accessPolicy: 0, blockNumber: 1,
+    });
+    await invokeLegacy(legacy);
+    const contextAware: OnContextGraphCreated = async (
+      info,
+      context: ChainEventDispatchContext,
+    ) => { seen.push(`${info.contextGraphId}:${context.operation.operationName}`); };
+    const config: Pick<ChainEventPollerConfig, 'onContextGraphCreated'> = {
+      onContextGraphCreated: contextAware,
+    };
+    expect(config.onContextGraphCreated).toBe(contextAware);
+    expect(seen).toEqual(['legacy']);
+  });
+
   // Include legacy callbacks even when the current EVM deployment does not
   // emit their events; all adapters use the same generation-owned context.
   it.each(cases)('retains the generation context and isolates $type callback failures', async testCase => {

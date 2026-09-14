@@ -35,7 +35,7 @@ export class PcaReadCache {
     accountId: bigint,
     extended: boolean,
     load: () => Promise<V10PublishingConvictionAccountInfo | null>,
-    generationId = 0,
+    generationId: number,
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     const key = this.accountInfoCacheKey(accountId, extended, generationId);
     return this.accountInfoCache.getOrLoad(key, key, load);
@@ -89,7 +89,7 @@ export class PcaReadCache {
     this.invalidateAllPcaAgents();
   }
 
-  private accountInfoCacheKey(accountId: bigint, extended: boolean, generationId = 0): string {
+  private accountInfoCacheKey(accountId: bigint, extended: boolean, generationId: number): string {
     return `${generationId}:${accountId.toString()}:${extended ? 'extended' : 'base'}`;
   }
 

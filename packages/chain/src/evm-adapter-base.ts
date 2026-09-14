@@ -707,9 +707,17 @@ export class EVMChainAdapterBase {
     this.hubContractBindings.install(value);
   }
 
-  /** Explicit, deliberately partial test-fixture seam. */
+  /** Install a complete test generation while keeping registry invariants truthful. */
   protected installHubContractBindingsForTesting(value: ContractCache): void {
-    this.hubContractBindings.installTestFixture(value);
+    const fallback = value.hub ?? this.hubContractBindings.contracts.hub;
+    this.hubContractBindings.install({
+      ...value,
+      hub: fallback,
+      identity: value.identity ?? fallback,
+      profile: value.profile ?? fallback,
+      parametersStorage: value.parametersStorage ?? fallback,
+      knowledgeAssetStorage: value.knowledgeAssetStorage ?? fallback,
+    });
   }
 
   protected invalidateHubContractBindings(): void { this.hubContractBindings.invalidate(); }
@@ -781,6 +789,8 @@ export class EVMChainAdapterBase {
   protected readonly resolvedContractAddressCache: ReadThroughTtlCache<string, string>;
 
   protected readonly hubRotationPoller: HubRotationPoller;
+  private hubRotationListenerStart: Promise<void> | null = null;
+  private destroyed = false;
 
   /**
    * Single-flight guard for the best-effort
@@ -2929,10 +2939,12 @@ export class EVMChainAdapterBase {
     const bootContractKeys = ALL_EVM_HUB_CONTRACT_KEYS.filter(key => key !== 'token');
     for (;;) {
       const generation = this.hubContractBindings.generation;
-      await this.hubContractBindings.resolve(bootContractKeys, spec => this.loadHubContractBinding(spec));
+      await this.hubContractBindings.resolveForInitialization(
+        bootContractKeys, spec => this.loadHubContractBinding(spec),
+      );
       // Random Sampling retains its existing pair/TTL owner and generation guard.
       await optionalEvmContract(() => this.resolveAndAssignRandomSamplingPair());
-      await this.startHubRotationListener();
+      await this.ensureHubRotationListenerStarted();
       // A rotation during slow Random Sampling initialization can age out of
       // the watcher's replay window. Resolve Token after that wait and watcher
       // startup, while retaining the generation check for observed rotations.
@@ -4225,6 +4237,19 @@ export class EVMChainAdapterBase {
     }
   }
 
+  /** One tracked transition shared by full initialization and event-only reads. */
+  protected ensureHubRotationListenerStarted(): Promise<void> {
+    if (this.destroyed || this.hubRotationPoller.isStarted) return Promise.resolve();
+    if (this.hubRotationListenerStart) return this.hubRotationListenerStart;
+    const pending = this.startHubRotationListener()
+      .finally(() => {
+        if (this.destroyed) this.hubRotationPoller.stop();
+        if (this.hubRotationListenerStart === pending) this.hubRotationListenerStart = null;
+      });
+    this.hubRotationListenerStart = pending;
+    return pending;
+  }
+
   protected applyHubRotationEventName(name: string): void {
     // #1583 (review round-2) — flush the resolved-address memo on EVERY observed
     // Hub rotation, unconditionally and first. The memo caches the address of
@@ -4323,6 +4348,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    this.destroyed = true;
     this.hubRotationPoller.stop();
     this.contextGraphAuthorityHistory.clear();
     this.contextGraphAuthorityIndex?.clear();

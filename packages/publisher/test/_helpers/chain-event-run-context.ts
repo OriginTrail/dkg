@@ -31,7 +31,10 @@ const legacyCallbacks: Pick<ChainEventPollerConfig,
   onKARegisteredToContextGraph: async info => { void info; },
   onKnowledgeAssetCreated: async info => { void info; },
 };
-const awareCallback: NonNullable<ChainEventPollerConfig['onContextGraphCreated']> = async (_info, run) => {
+const awareCallback: NonNullable<ChainEventPollerConfig['onContextGraphCreated']> = async (
+  _info,
+  run: ChainEventDispatchContext,
+) => {
   const owningSignal: AbortSignal = run.signal;
   void owningSignal;
 };

@@ -54,7 +54,8 @@ export class EventsMethods extends EVMChainAdapterBase {
     const keys = eventContractKeysFor(filter.eventTypes);
     const contracts = await this.resolveHubContractBindings(keys, { signal });
     signal?.throwIfAborted();
-    if (keys.length > 0 && !this.initialized) void this.startHubRotationListener();
+    if (keys.length > 0) await this.ensureHubRotationListenerStarted();
+    signal?.throwIfAborted();
 
     const scan: EvmEventScan = {
       signal,

@@ -7,7 +7,8 @@ import {
   type EvmEventCapabilityKey, type EvmEventDescriptor, type EvmEventScan,
 } from '../src/evm-event-contracts.js';
 import {
-  ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings,
+  ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, REQUIRED_EVM_HUB_CONTRACT_KEYS,
+  EvmHubContractBindings,
   type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSpec,
 } from '../src/evm-hub-contract-bindings.js';
 import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
@@ -136,7 +137,9 @@ describe('generation-owned Hub bindings and event selection', () => {
 function expectAgreement(group: EvmHubContractBindings, decided: ReadonlyMap<EvmHubContractKey, Contract | undefined>): void {
   expect([...group.resolvedKeys].sort()).toEqual([...decided.keys()].sort());
   for (const [key, handle] of decided) expect(group.contracts[key]).toBe(handle);
-  if (group.initialized) expect(group.resolvedKeys.size).toBe(ALL_EVM_HUB_CONTRACT_KEYS.length);
+  if (group.initialized) {
+    for (const key of REQUIRED_EVM_HUB_CONTRACT_KEYS) expect(group.resolvedKeys.has(key)).toBe(true);
+  }
 }
 
 function decidedAs(handleFor: (key: EvmHubContractKey) => Contract | undefined): Map<EvmHubContractKey, Contract | undefined> {
@@ -155,6 +158,16 @@ describe('Hub binding generation ownership', () => {
     await expect(group.resolve(['contextGraphStorage', 'knowledgeAssetStorage'], loader))
       .resolves.toEqual({ contextGraphStorage: second, knowledgeAssetStorage: first });
     expect(loader).not.toHaveBeenCalled();
+  });
+
+  it('keeps compatibility cache writes separate from generation readiness', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    group.compatibilityContracts.chronos = first;
+    expect(group.resolvedKeys.has('chronos')).toBe(false);
+    const loader = vi.fn(async () => second);
+    await expect(group.resolve(['chronos'], loader)).resolves.toEqual({ chronos: second });
+    expect(loader).toHaveBeenCalledOnce();
+    expect(group.resolvedKeys.has('chronos')).toBe(true);
   });
 
   it('invalidate retires readiness and decisions while retaining handles unless dropped', async () => {
@@ -191,6 +204,23 @@ describe('Hub binding generation ownership', () => {
     expect(group.completeInitialization(generation)).toBe(false);
     expect(group.initialized).toBe(false);
     expectAgreement(group, new Map());
+  });
+
+  it('publishes required readiness while leaving a transient optional binding retryable', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const generation = group.generation;
+    const failure = new Error('temporary Chronos RPC failure');
+    const loader = vi.fn(async (spec: EvmHubContractSpec) => {
+      if (spec.name === 'Chronos') throw failure;
+      return first;
+    });
+    await expect(group.resolveForInitialization(
+      [...REQUIRED_EVM_HUB_CONTRACT_KEYS, 'chronos'], loader,
+    )).resolves.toBeDefined();
+    expect(group.resolvedKeys.has('chronos')).toBe(false);
+    expect(group.completeInitialization(generation)).toBe(true);
+    await expect(group.resolve(['chronos'], loader)).rejects.toBe(failure);
+    expect(group.resolvedKeys.has('chronos')).toBe(false);
   });
 
   it('an install during a staged lookup wins and the stale lookup commits nothing', async () => {
@@ -343,6 +373,29 @@ describe('EVM event descriptor registry', () => {
     } finally { adapter.destroy(); }
   });
 
+  it('awaits one shared Hub rotation-listener transition before event reads', async () => {
+    const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const contract = new Contract(address, EVENT_ABI, adapter.getProvider());
+    const entered = deferred<void>();
+    const internal = adapter as any;
+    internal.installHubContractBindingsForTesting({ ...internal.contracts, profileStorage: contract });
+    internal.startHubRotationListener = vi.fn(() => entered.promise);
+    internal.readContractWith = vi.fn(async () => []);
+    const firstScan = collectAll(adapter.listenForEvents({ eventTypes: ['RelayCapabilityUpdated'] }));
+    const secondScan = collectAll(adapter.listenForEvents({ eventTypes: ['RelayCapabilityUpdated'] }));
+    try {
+      await vi.waitFor(() => expect(internal.startHubRotationListener).toHaveBeenCalledOnce());
+      expect(internal.readContractWith).not.toHaveBeenCalled();
+      entered.resolve(undefined);
+      await expect(Promise.all([firstScan, secondScan])).resolves.toEqual([[], []]);
+      expect(internal.startHubRotationListener).toHaveBeenCalledOnce();
+    } finally {
+      entered.resolve(undefined);
+      adapter.destroy();
+      await Promise.allSettled([firstScan, secondScan]);
+    }
+  });
+
   it('uses the same transient optional-binding contract for subset and ordinary consumers', async () => {
     const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
     const contract = new Contract(address, EVENT_ABI, adapter.getProvider());
@@ -350,7 +403,7 @@ describe('EVM event descriptor registry', () => {
     let profileAttempts = 0;
     const internal = adapter as any;
     internal.loadHubContractBinding = vi.fn(async (spec: EvmHubContractSpec) => {
-      if (spec.name === 'ProfileStorage' && profileAttempts++ < 2) throw failure;
+      if (spec.name === 'ProfileStorage' && profileAttempts++ < 3) throw failure;
       return contract;
     });
     internal.resolveAndAssignRandomSamplingPair = vi.fn(async () => undefined);
@@ -362,7 +415,7 @@ describe('EVM event descriptor registry', () => {
         .rejects.toBe(failure);
       await expect(adapter.getRelayCapable(7n)).rejects.toBe(failure);
       await expect(adapter.getRelayCapable(7n)).resolves.toBe(true);
-      expect(profileAttempts).toBe(3);
+      expect(profileAttempts).toBe(4);
     } finally { adapter.destroy(); }
   });
 

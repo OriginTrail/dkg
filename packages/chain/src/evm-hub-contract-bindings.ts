@@ -65,7 +65,6 @@ export async function optionalEvmContract<T>(load: () => Promise<T>, signal?: Ab
 interface EvmHubContractGeneration {
   readonly id: number;
   readonly contracts: ContractCache;
-  readonly compatibilityContracts: ContractCache;
   readonly resolved: Set<EvmHubContractKey>;
   initialized: boolean;
 }
@@ -88,8 +87,8 @@ export class EvmHubContractBindings {
 
   get initialized(): boolean { return this.current.initialized; }
 
-  /** Mutable compatibility view for existing adapter subclasses. */
-  get compatibilityContracts(): ContractCache { return this.current.compatibilityContracts; }
+  /** Mutable compatibility view; readiness changes only through explicit transitions. */
+  get compatibilityContracts(): ContractCache { return this.current.contracts; }
 
   /** Boot keys the current generation has decided. */
   get resolvedKeys(): ReadonlySet<EvmHubContractKey> { return this.current.resolved; }
@@ -107,13 +106,6 @@ export class EvmHubContractBindings {
     if (missing.length > 0) {
       throw new Error(`Hub binding installation is missing required handles: ${missing.join(', ')}`);
     }
-    this.current = this.createGeneration(
-      contracts, new Set(ALL_EVM_HUB_CONTRACT_KEYS), true,
-    );
-  }
-
-  /** Deliberate partial fixture seam; production installation must use {@link install}. */
-  installTestFixture(contracts: ContractCache): void {
     this.current = this.createGeneration(
       contracts, new Set(ALL_EVM_HUB_CONTRACT_KEYS), true,
     );
@@ -151,10 +143,10 @@ export class EvmHubContractBindings {
     this.current = this.createGeneration(contracts, new Set(), false);
   }
 
-  /** A full initializer may finish only the exact, completely decided generation it began. */
+  /** A full initializer may finish only the exact generation with every required binding decided. */
   completeInitialization(generation: object): boolean {
     if (generation !== this.current) return false;
-    const undecided = ALL_EVM_HUB_CONTRACT_KEYS.filter(key => !this.current.resolved.has(key));
+    const undecided = REQUIRED_EVM_HUB_CONTRACT_KEYS.filter(key => !this.current.resolved.has(key));
     if (undecided.length > 0) {
       throw new Error(`Hub bindings cannot publish readiness before resolving: ${undecided.join(', ')}`);
     }
@@ -175,6 +167,24 @@ export class EvmHubContractBindings {
     load: (spec: EvmHubContractSpec) => Promise<Contract | undefined>,
     signal?: AbortSignal,
   ): Promise<EvmHubContractSnapshot<K>> {
+    return this.resolveSnapshotWithPolicy(keys, load, signal, false);
+  }
+
+  /** Full boot may defer transient optional failures; targeted reads still surface them. */
+  async resolveForInitialization<K extends EvmHubContractKey>(
+    keys: readonly K[],
+    load: (spec: EvmHubContractSpec) => Promise<Contract | undefined>,
+    signal?: AbortSignal,
+  ): Promise<EvmHubContractSnapshot<K>> {
+    return this.resolveSnapshotWithPolicy(keys, load, signal, true);
+  }
+
+  private async resolveSnapshotWithPolicy<K extends EvmHubContractKey>(
+    keys: readonly K[],
+    load: (spec: EvmHubContractSpec) => Promise<Contract | undefined>,
+    signal: AbortSignal | undefined,
+    deferTransientOptionalFailures: boolean,
+  ): Promise<EvmHubContractSnapshot<K>> {
     for (;;) {
       signal?.throwIfAborted();
       const generation = this.current;
@@ -190,7 +200,7 @@ export class EvmHubContractBindings {
           signal?.throwIfAborted();
           if (spec.resolution !== 'optional-deployment') throw error;
           if (error instanceof HubContractNotFoundError) staged.set(key, undefined);
-          else throw error;
+          else if (!deferTransientOptionalFailures) throw error;
         }
         signal?.throwIfAborted();
       }
@@ -218,23 +228,9 @@ export class EvmHubContractBindings {
     const generation = {
       id: this.nextGenerationId++,
       contracts,
-      compatibilityContracts: undefined as unknown as ContractCache,
       resolved,
       initialized,
     };
-    generation.compatibilityContracts = new Proxy(contracts, {
-      set: (target, property, value) => {
-        Reflect.set(target, property, value);
-        if (
-          this.current === generation
-          && typeof property === 'string'
-          && Object.prototype.hasOwnProperty.call(EVM_HUB_CONTRACT_SPECS, property)
-        ) {
-          generation.resolved.add(property as EvmHubContractKey);
-        }
-        return true;
-      },
-    });
     return generation;
   }
 }

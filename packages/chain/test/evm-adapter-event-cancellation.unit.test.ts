@@ -37,7 +37,7 @@ async function collect(adapter: EVMChainAdapter, filter: EventFilter) {
 }
 
 describe('event scan RPC cancellation', () => {
-  it('resolves the V10 lifecycle capability before a cold KCCreated scan', async () => {
+  it('keeps a cold KCCreated scan independent of V10 lifecycle readiness', async () => {
     const hub = new Interface([
       'function getContractAddress(string name) view returns (address)',
       'function getAssetStorageAddress(string name) view returns (address)',
@@ -61,8 +61,10 @@ describe('event scan RPC cancellation', () => {
     try {
       expect(adapter.isV10Ready()).toBe(false);
       expect(await collect(adapter, { eventTypes: ['KCCreated'], fromBlock: 1, toBlock: 20 })).toEqual([]);
+      expect(requests).toEqual(['DKGKnowledgeAssets']);
+      expect(adapter.isV10Ready()).toBe(false);
+      await expect(adapter.resolveV10FinalizationReadiness()).resolves.toBe(true);
       expect(requests).toEqual(['DKGKnowledgeAssets', 'KnowledgeAssetsLifecycle']);
-      expect(adapter.isV10Ready()).toBe(true);
     } finally {
       adapter.destroy();
       await rpc.stopAll();
@@ -232,7 +234,8 @@ describe('event scan RPC cancellation', () => {
       controller.abort(new Error('poll generation stopped'));
       expect(await pending).toMatchObject({ failed: true });
       await requestDisconnected;
-      expect(methods).toEqual([boundary === 'head' ? 'eth_blockNumber' : 'eth_getLogs']);
+      expect(methods.filter(method => method === (boundary === 'head' ? 'eth_blockNumber' : 'eth_getLogs')))
+        .toHaveLength(1);
     } finally {
       controller.abort();
       adapter.destroy();
@@ -319,13 +322,13 @@ describe('event scan RPC cancellation', () => {
 
   it.each([
     ['ProfileStorage', ['RelayCapabilityUpdated'], ['ProfileStorage'], ['ProfileStorage']],
-    ['DKGKnowledgeAssets', ['KCCreated'], ['DKGKnowledgeAssets'], ['DKGKnowledgeAssets', 'KnowledgeAssetsLifecycle']],
+    ['DKGKnowledgeAssets', ['KCCreated'], ['DKGKnowledgeAssets'], ['DKGKnowledgeAssets']],
     ['KnowledgeAssetsStorage', ['KnowledgeBatchCreated'], ['KnowledgeAssetsStorage'], ['KnowledgeAssetsStorage']],
     ['ContextGraphNameRegistry', ['NameClaimed'], ['ContextGraphNameRegistry'], ['ContextGraphNameRegistry']],
     ['ContextGraphStorage', ['ContextGraphCreated'], ['ContextGraphStorage'], ['ContextGraphStorage']],
     ['ContextGraphStorage', ['KCCreated', 'ContextGraphCreated'],
-      ['DKGKnowledgeAssets', 'KnowledgeAssetsLifecycle', 'ContextGraphStorage'],
-      ['DKGKnowledgeAssets', 'KnowledgeAssetsLifecycle', 'ContextGraphStorage']],
+      ['DKGKnowledgeAssets', 'ContextGraphStorage'],
+      ['DKGKnowledgeAssets', 'ContextGraphStorage']],
   ] as const)('physically cancels only the requested event group at %s without fallback', async (
     stalledName, eventTypes, cancelledNames, capabilityNames,
   ) => {

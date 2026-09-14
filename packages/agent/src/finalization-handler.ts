@@ -39,6 +39,7 @@ import {
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import {
+  resolveChainV10FinalizationReadiness,
   resolvePublicFinalizedMaterializationAuthority,
   type ChainAdapter,
   type EventFilter,
@@ -3924,9 +3925,7 @@ export class FinalizationHandler {
       // Skip the legacy ContextGraphExpanded check — the batch verification
       // above is sufficient for V10.
       if (ctxGraphId) {
-        const v10Ready = typeof this.chain.resolveV10FinalizationReadiness === 'function'
-          ? await this.chain.resolveV10FinalizationReadiness()
-          : typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready();
+        const v10Ready = await resolveChainV10FinalizationReadiness(this.chain);
         if (v10Ready) {
           return { verified: true, authorAddress, txIndex: verifiedTxIndex };
         }

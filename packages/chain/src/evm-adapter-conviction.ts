@@ -28,6 +28,11 @@ import type { PcaMutationInvalidation } from './pca-read-cache.js';
 import { withRpcRequestTimeout } from './rpc-request-transport.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import type { EvmHubContractSnapshot } from './evm-hub-contract-bindings.js';
+
+type PcaBindingSnapshot =
+  | EvmHubContractSnapshot<'dkgPublishingConvictionNFT'>
+  | EvmHubContractSnapshot<'dkgPublishingConvictionNFT' | 'chronos'>;
 
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
@@ -234,7 +239,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     if (baseCost <= 0n) return true;
     try {
       const info = await this.readPublishingConvictionAccountInfo(
-        accountId, false, convictionNft, chronos, snapshot.generationId,
+        accountId, false, snapshot,
       );
       if (!info) return false;
 
@@ -412,19 +417,18 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     const convictionNft = snapshot.contracts.dkgPublishingConvictionNFT;
     if (!convictionNft) throw new PcaUnavailableError();
     return this.readPublishingConvictionAccountInfo(
-      accountId, !!opts?.extended, convictionNft,
-      'chronos' in snapshot.contracts ? snapshot.contracts.chronos : undefined,
-      snapshot.generationId,
+      accountId, !!opts?.extended, snapshot,
     );
   }
 
   private readPublishingConvictionAccountInfo(
     accountId: bigint,
     extended: boolean,
-    convictionNft: Contract,
-    chronos: Contract | undefined,
-    generationId: number,
+    snapshot: PcaBindingSnapshot,
   ): Promise<V10PublishingConvictionAccountInfo | null> {
+    const convictionNft = snapshot.contracts.dkgPublishingConvictionNFT;
+    if (!convictionNft) throw new PcaUnavailableError();
+    const chronos = 'chronos' in snapshot.contracts ? snapshot.contracts.chronos : undefined;
     return this.pcaReadCache.getAccountInfo(accountId, extended, async () => {
       try {
         const t = await this.readContract(
@@ -477,7 +481,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
         }
         throw err;
       }
-    }, generationId);
+    }, snapshot.generationId);
   }
 
   async topUpPublishingConvictionAccount(accountId: bigint, amount: bigint): Promise<TxResult> {
