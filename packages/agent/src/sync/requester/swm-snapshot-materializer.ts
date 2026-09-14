@@ -592,47 +592,47 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;
       if (!Number.isSafeInteger(expected) || expected < 0) return false;
-      const validationProbe = validationMemo.probe({
-        graph: descriptor.assertionGraph,
-        digest: descriptor.publicQuadsDigest,
-        count: expected,
-      });
-      if (validationProbe.reusable) return true;
-      // 1) Count gate: exact-IRI scope, so bounded — and cheap enough to run
-      // on an exact-validation miss. Strictly equal: a short graph is a partial
-      // write and must be replaced, not treated as already materialized.
-      const countResult = await deps.store.query(
-        `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.countGraph' },
+      return validationMemo.validate(
+        {
+          graph: descriptor.assertionGraph,
+          digest: descriptor.publicQuadsDigest,
+          count: expected,
+        },
+        async () => {
+          // 1) Count gate: exact-IRI scope, so bounded — and cheap enough to run
+          // on an exact-validation miss. Strictly equal: a short graph is a partial
+          // write and must be replaced, not treated as already materialized.
+          const countResult = await deps.store.query(
+            `SELECT (COUNT(*) AS ?n) WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
+            { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.countGraph' },
+          );
+          if (countResult.type !== 'bindings' || countResult.bindings.length === 0) return false;
+          const present = Number.parseInt(literalValue(countResult.bindings[0]?.['n']) ?? '0', 10);
+          if (!Number.isFinite(present) || present !== expected) return false;
+          if (expected === 0 && !(await hasHealthyEmptyProjectionControlPlane(descriptor))) {
+            return false;
+          }
+          // 2) Content binding: a matching count does not prove the stored graph
+          // is THIS descriptor's content — all versions of a graph-scoped KA share
+          // one graph URI, so an older version of equal size would otherwise pass
+          // and the verified newer snapshot would be skipped forever. Reading the
+          // graph back only runs when the count already matches, so it is bounded
+          // by exactly the snapshot size we would otherwise write; the digest is
+          // the same store-roundtrip check `resolveWorkspaceOperation` relies on.
+          const contentResult = await deps.store.query(
+            `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
+            { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readGraph' },
+          );
+          // TripleStore adapters guarantee a quad result for CONSTRUCT queries.
+          // Fail closed if an adapter violates that contract.
+          if (contentResult.type !== 'quads') return false;
+          const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
+          return workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
+        },
       );
-      if (countResult.type !== 'bindings' || countResult.bindings.length === 0) return false;
-      const present = Number.parseInt(literalValue(countResult.bindings[0]?.['n']) ?? '0', 10);
-      if (!Number.isFinite(present) || present !== expected) return false;
-      if (expected === 0 && !(await hasHealthyEmptyProjectionControlPlane(descriptor))) {
-        return false;
-      }
-      // 2) Content binding: a matching count does not prove the stored graph
-      // is THIS descriptor's content — all versions of a graph-scoped KA share
-      // one graph URI, so an older version of equal size would otherwise pass
-      // and the verified newer snapshot would be skipped forever. Reading the
-      // graph back only runs when the count already matches, so it is bounded
-      // by exactly the snapshot size we would otherwise write; the digest is
-      // the same store-roundtrip check `resolveWorkspaceOperation` relies on.
-      const contentResult = await deps.store.query(
-        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o } }`,
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readGraph' },
-      );
-      // TripleStore adapters guarantee a quad result for CONSTRUCT queries.
-      // Fail closed if an adapter violates that contract.
-      if (contentResult.type !== 'quads') return false;
-      const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
-      const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
-      if (matches) validationProbe.recordVerified();
-      return matches;
     },
 
     replaceGraph: async (graphUri, quads) => {
-      validationMemo.delete(graphUri);
       // Deliberately NOT routed through the sync lane's guarded union insert:
       // a KA graph is all-or-nothing and digest-verified, so it must land via
       // the atomic replace or not at all.

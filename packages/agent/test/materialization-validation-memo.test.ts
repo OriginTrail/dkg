@@ -91,41 +91,42 @@ function materializer(store: TripleStore) {
 }
 
 describe('#1963 MaterializationValidationMemo', () => {
-  it('expires an entry at the exact TTL boundary', () => {
-    let now = 1_000;
+  it('reuses a successful validation while the all-writers revision is unchanged', async () => {
     const memo = createMaterializationValidationMemo(
       revisionStore(() => ({ generation: 7, stable: true })),
-      { ttlMs: 50, now: () => now },
     );
     const descriptor = memoDescriptor();
-    const initial = memo.probe(descriptor);
-    expect(initial.reusable).toBe(false);
-    initial.recordVerified();
-
-    now += 49;
-    expect(memo.probe(descriptor).reusable).toBe(true);
-    now += 1;
-    expect(memo.probe(descriptor).reusable).toBe(false);
+    let exactValidations = 0;
+    const exactValidation = async () => {
+      exactValidations += 1;
+      return true;
+    };
+    await expect(memo.validate(descriptor, exactValidation)).resolves.toBe(true);
+    await expect(memo.validate(descriptor, exactValidation)).resolves.toBe(true);
+    expect(exactValidations).toBe(1);
   });
 
-  it('evicts the least recently used entry at its configured bound', () => {
+  it('evicts the least recently used entry at its configured bound', async () => {
     const memo = createMaterializationValidationMemo(
       revisionStore(() => ({ generation: 1, stable: true })),
       { maxEntries: 1 },
     );
     const descriptorA = memoDescriptor(`${GRAPH}:a`);
     const descriptorB = memoDescriptor(`${GRAPH}:b`);
-    memo.probe(descriptorA).recordVerified();
-    memo.probe(descriptorB).recordVerified();
-    expect(memo.probe(descriptorA).reusable).toBe(false);
-    expect(memo.probe(descriptorB).reusable).toBe(true);
+    let validationsA = 0;
+    let validationsB = 0;
+    await memo.validate(descriptorA, async () => { validationsA += 1; return true; });
+    await memo.validate(descriptorB, async () => { validationsB += 1; return true; });
+    await memo.validate(descriptorA, async () => { validationsA += 1; return true; });
+    await memo.validate(descriptorB, async () => { validationsB += 1; return true; });
+    expect([validationsA, validationsB]).toEqual([2, 2]);
   });
 
   it.each([
     ['changed', { generation: 2, stable: true } as GraphWriteRevision],
     ['unstable', { generation: 1, stable: false } as GraphWriteRevision],
     ['unreadable', new Error('revision unavailable')],
-  ])('does not populate when the final revision is %s', (_name, finalRevision) => {
+  ])('does not populate when the final revision is %s', async (_name, finalRevision) => {
     let calls = 0;
     const memo = createMaterializationValidationMemo(revisionStore(() => {
       calls += 1;
@@ -137,10 +138,35 @@ describe('#1963 MaterializationValidationMemo', () => {
       return { generation: 2, stable: true };
     }));
     const descriptor = memoDescriptor();
-    const probe = memo.probe(descriptor);
-    expect(probe.reusable).toBe(false);
-    probe.recordVerified();
-    expect(memo.probe(descriptor).reusable).toBe(false);
+    let validations = 0;
+    const exactValidation = async () => { validations += 1; return true; };
+    await expect(memo.validate(descriptor, exactValidation)).resolves.toBe(true);
+    await expect(memo.validate(descriptor, exactValidation)).resolves.toBe(true);
+    expect(validations).toBe(2);
+  });
+
+  it('does not cache a failed or throwing exact validation', async () => {
+    const memo = createMaterializationValidationMemo(
+      revisionStore(() => ({ generation: 1, stable: true })),
+    );
+    const descriptor = memoDescriptor();
+    await expect(memo.validate(descriptor, async () => false)).resolves.toBe(false);
+    await expect(memo.validate(descriptor, async () => {
+      throw new Error('exact validation failed');
+    })).rejects.toThrow('exact validation failed');
+    await expect(memo.validate(descriptor, async () => true)).resolves.toBe(true);
+  });
+
+  it('never memoizes a zero-count descriptor', async () => {
+    const memo = createMaterializationValidationMemo(
+      revisionStore(() => ({ generation: 1, stable: true })),
+    );
+    const descriptor = { ...memoDescriptor(), count: 0 };
+    let validations = 0;
+    const exactValidation = async () => { validations += 1; return true; };
+    await expect(memo.validate(descriptor, exactValidation)).resolves.toBe(true);
+    await expect(memo.validate(descriptor, exactValidation)).resolves.toBe(true);
+    expect(validations).toBe(2);
   });
 });
 
@@ -172,7 +198,7 @@ describe('#1963 isGraphAssetMaterialized validation memo', () => {
     expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
   });
 
-  it('forces exact validation after a local graph mutation', async () => {
+  it('invalidates the same descriptor after an equal-count local graph mutation', async () => {
     const inner = newStore();
     const v1 = payload('v1', 6);
     const v2 = payload('v2', 6);
@@ -180,9 +206,10 @@ describe('#1963 isGraphAssetMaterialized validation memo', () => {
     const counted = countingStore(inner);
     const mat = materializer(counted.store);
 
-    expect(await mat.isGraphAssetMaterialized(materializationDescriptor(v1))).toBe(true);
+    const descriptor = materializationDescriptor(v1);
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
     await inner.replaceGraph(GRAPH, v2.map((quad) => ({ ...quad, graph: GRAPH })));
-    expect(await mat.isGraphAssetMaterialized(materializationDescriptor(v2))).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(false);
     expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
   });
 
@@ -200,7 +227,7 @@ describe('#1963 isGraphAssetMaterialized validation memo', () => {
     expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
   });
 
-  it('cannot hit an entry after the expected digest or count changes', async () => {
+  it('does not hit for mismatched descriptors or discard the verified entry on failure', async () => {
     const inner = newStore();
     const v1 = payload('v1', 6);
     const v2 = payload('v2', 6);
@@ -217,7 +244,7 @@ describe('#1963 isGraphAssetMaterialized validation memo', () => {
     })).toBe(false);
     expect([counted.counts(), counted.constructs()]).toEqual([3, 2]);
     expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
-    expect([counted.counts(), counted.constructs()]).toEqual([4, 3]);
+    expect([counted.counts(), counted.constructs()]).toEqual([3, 2]);
   });
 
   it('never caches a failed digest validation', async () => {
