@@ -8,27 +8,26 @@
  * Node UI can validate its cached multi-page list with one conditional request.
  */
 import { createHash } from 'node:crypto';
-import { corsHeaders, jsonResponse } from '../http-utils.js';
+import {
+  CONTEXT_GRAPH_LIST_PROJECTIONS,
+  CONTEXT_GRAPH_LIST_WIRE_KEY_VALUES,
+  type ContextGraphListFullRow,
+  type ContextGraphListPageResponse,
+  type ContextGraphListProjection,
+  type ContextGraphListRow,
+  type ContextGraphListSummaryRow,
+} from '@origintrail-official/dkg-core';
+import {
+  jsonResponse,
+  jsonResponseHeaders,
+  jsonSerializedResponse,
+  serializeJsonResponseBody,
+} from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
 export const CONTEXT_GRAPH_LIST_DEFAULT_LIMIT = 50;
 export const CONTEXT_GRAPH_LIST_MAX_LIMIT = 100;
 export const CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES = 64 * 1024;
-
-export type ContextGraphListProjection = 'full' | 'summary';
-
-export type ContextGraphListRow = Record<string, unknown> & {
-  id: string;
-  name?: string;
-  description?: string;
-  curator?: string;
-  accessPolicy?: string;
-  isSystem?: boolean;
-  subscribed?: boolean;
-  synced?: boolean;
-  onChainId?: string;
-  callerInvolved?: boolean;
-};
 
 export interface ContextGraphListQuery {
   limit: number;
@@ -38,6 +37,7 @@ export interface ContextGraphListQuery {
   onChain?: boolean;
   search?: string;
   cursorDigest?: string;
+  cursorCollectionDigest?: string;
   fingerprint: string;
 }
 
@@ -46,17 +46,9 @@ export type ContextGraphListQueryResult =
   | { ok: true; mode: 'paged'; query: ContextGraphListQuery }
   | { ok: false; error: string };
 
-const KNOWN_QUERY_KEYS = new Set([
-  'limit',
-  'cursor',
-  'projection',
-  'subscribed',
-  'synced',
-  'onChain',
-  'q',
-]);
-const CURSOR_PREFIX = 'v1:';
-const CURSOR_BODY_RE = /^([0-9a-f]{16}):([0-9a-f]{64})$/;
+const KNOWN_QUERY_KEYS = new Set(CONTEXT_GRAPH_LIST_WIRE_KEY_VALUES);
+const CURSOR_PREFIX = 'v2:';
+const CURSOR_BODY_RE = /^([0-9a-f]{16}):([0-9a-f]{64}):([0-9a-f]{64})$/;
 
 function parseBoolean(
   searchParams: URLSearchParams,
@@ -86,13 +78,21 @@ function queryFingerprint(query: {
   ]), 'utf8').digest('hex').slice(0, 16);
 }
 
-function encodeCursor(fingerprint: string, rowDigest: string): string {
-  return Buffer.from(`${CURSOR_PREFIX}${fingerprint}:${rowDigest}`, 'utf8')
+function encodeCursor(
+  fingerprint: string,
+  collectionDigest: string,
+  rowDigest: string,
+): string {
+  return Buffer.from(
+    `${CURSOR_PREFIX}${fingerprint}:${collectionDigest}:${rowDigest}`,
+    'utf8',
+  )
     .toString('base64url');
 }
 
 function decodeCursor(cursor: string): {
   fingerprint: string;
+  collectionDigest: string;
   rowDigest: string;
 } | undefined {
   if (cursor.length > 256) return undefined;
@@ -100,7 +100,11 @@ function decodeCursor(cursor: string): {
   if (!decoded.startsWith(CURSOR_PREFIX)) return undefined;
   const match = CURSOR_BODY_RE.exec(decoded.slice(CURSOR_PREFIX.length));
   if (!match) return undefined;
-  return { fingerprint: match[1]!, rowDigest: match[2]! };
+  return {
+    fingerprint: match[1]!,
+    collectionDigest: match[2]!,
+    rowDigest: match[3]!,
+  };
 }
 
 export function parseContextGraphListQuery(
@@ -133,7 +137,7 @@ export function parseContextGraphListQuery(
   }
 
   const rawProjection = searchParams.get('projection') ?? 'full';
-  if (rawProjection !== 'full' && rawProjection !== 'summary') {
+  if (!(CONTEXT_GRAPH_LIST_PROJECTIONS as readonly string[]).includes(rawProjection)) {
     return { ok: false, error: '"projection" must be "full" or "summary"' };
   }
   const projection = rawProjection as ContextGraphListProjection;
@@ -174,30 +178,24 @@ export function parseContextGraphListQuery(
       };
     }
     query.cursorDigest = cursor.rowDigest;
+    query.cursorCollectionDigest = cursor.collectionDigest;
   }
 
   return { ok: true, mode: 'paged', query };
 }
 
-function wireStringify(value: unknown): string {
-  return JSON.stringify(value, (_key, entry) => (
-    typeof entry === 'bigint' ? entry.toString() : entry
-  ));
-}
-
-function rowDigest(row: ContextGraphListRow): string {
+function rowDigest(row: ContextGraphListFullRow): string {
   return createHash('sha256').update(row.id, 'utf8').digest('hex');
 }
 
-function hasOnChainId(row: ContextGraphListRow): boolean {
-  const value = row.onChainId ?? row.onChainContextGraphId;
-  if (typeof value === 'string') return value.trim() !== '' && value.trim() !== '0';
-  return value !== undefined && value !== null && value !== false && value !== 0;
+function hasOnChainId(row: ContextGraphListFullRow): boolean {
+  const value = row.onChainId;
+  return value !== undefined && value.trim() !== '' && value.trim() !== '0';
 }
 
-function summaryRow(row: ContextGraphListRow): ContextGraphListRow {
-  const rawName = typeof row.name === 'string' ? row.name : row.id;
-  const rawDescription = typeof row.description === 'string' ? row.description : undefined;
+function summaryRow(row: ContextGraphListFullRow): ContextGraphListSummaryRow {
+  const rawName = row.name;
+  const rawDescription = row.description;
   return {
     id: row.id,
     name: rawName.slice(0, 256),
@@ -206,11 +204,11 @@ function summaryRow(row: ContextGraphListRow): ContextGraphListRow {
     ...(rawDescription !== undefined && rawDescription.length > 512
       ? { descriptionTruncated: true }
       : {}),
-    ...(typeof row.curator === 'string' ? { curator: row.curator } : {}),
-    ...(typeof row.accessPolicy === 'string' ? { accessPolicy: row.accessPolicy } : {}),
-    isSystem: row.isSystem === true,
-    subscribed: row.subscribed === true,
-    synced: row.synced === true,
+    ...(row.curator === undefined ? {} : { curator: row.curator }),
+    ...(row.accessPolicy === undefined ? {} : { accessPolicy: row.accessPolicy }),
+    isSystem: row.isSystem,
+    subscribed: row.subscribed,
+    synced: row.synced,
     ...(row.onChainId === undefined ? {} : { onChainId: row.onChainId }),
     ...(row.callerInvolved === undefined
       ? {}
@@ -219,14 +217,17 @@ function summaryRow(row: ContextGraphListRow): ContextGraphListRow {
 }
 
 function prepareRows(
-  rows: ContextGraphListRow[],
+  rows: ContextGraphListFullRow[],
   query: ContextGraphListQuery,
 ): Array<{ digest: string; row: ContextGraphListRow }> {
-  const unique = new Map<string, ContextGraphListRow>();
+  const unique = new Map<string, ContextGraphListFullRow>();
   for (const row of rows) {
-    if (!row || typeof row.id !== 'string' || row.id.length === 0) continue;
+    if (row.id.length === 0) continue;
     const existing = unique.get(row.id);
-    if (!existing || wireStringify(row) < wireStringify(existing)) {
+    if (
+      !existing
+      || serializeJsonResponseBody(row) < serializeJsonResponseBody(existing)
+    ) {
       unique.set(row.id, row);
     }
   }
@@ -240,8 +241,7 @@ function prepareRows(
       || hasOnChainId(row) === query.onChain)
     .filter((row) => query.search === undefined || (
       row.id.toLocaleLowerCase('en-US').includes(query.search)
-      || (typeof row.name === 'string'
-        && row.name.toLocaleLowerCase('en-US').includes(query.search))
+      || row.name.toLocaleLowerCase('en-US').includes(query.search)
     ))
     .map((row) => ({
       digest: rowDigest(row),
@@ -256,39 +256,30 @@ function prepareRows(
     ));
 }
 
-export interface ContextGraphListPagePayload {
-  contextGraphs: ContextGraphListRow[];
-  nextCursor?: string;
-  page: {
-    returned: number;
-    total: number;
-    limit: number;
-    serializedBytes: number;
-    maxSerializedBytes: number;
-    elapsedMs: number;
-  };
-}
+export type ContextGraphListPagePayload = ContextGraphListPageResponse;
 
 export type ContextGraphListPageResult =
   | {
       ok: true;
       payload: ContextGraphListPagePayload;
       etag: string;
+      body: string;
       serializedBytes: number;
     }
   | {
       ok: false;
       error: string;
-      code: 'CONTEXT_GRAPH_LIST_ENTRY_TOO_LARGE';
+      code:
+        | 'CONTEXT_GRAPH_LIST_ENTRY_TOO_LARGE'
+        | 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED';
     };
 
 function payloadWithExactSize(
   rows: ContextGraphListRow[],
   total: number,
   limit: number,
-  elapsedMs: number,
   nextCursor: string | undefined,
-): { payload: ContextGraphListPagePayload; serializedBytes: number } {
+): { payload: ContextGraphListPagePayload; body: string; serializedBytes: number } {
   const payload: ContextGraphListPagePayload = {
     contextGraphs: rows,
     ...(nextCursor === undefined ? {} : { nextCursor }),
@@ -298,28 +289,37 @@ function payloadWithExactSize(
       limit,
       serializedBytes: 0,
       maxSerializedBytes: CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
-      elapsedMs,
     },
   };
   let serializedBytes = 0;
-  for (let iteration = 0; iteration < 6; iteration += 1) {
+  for (let iteration = 0; iteration < 10; iteration += 1) {
     payload.page.serializedBytes = serializedBytes;
-    const nextSize = Buffer.byteLength(wireStringify(payload));
-    if (nextSize === serializedBytes) break;
+    const body = serializeJsonResponseBody(payload);
+    const nextSize = Buffer.byteLength(body);
+    if (nextSize === serializedBytes) return { payload, body, serializedBytes };
     serializedBytes = nextSize;
   }
-  payload.page.serializedBytes = serializedBytes;
-  serializedBytes = Buffer.byteLength(wireStringify(payload));
-  payload.page.serializedBytes = serializedBytes;
-  return { payload, serializedBytes: Buffer.byteLength(wireStringify(payload)) };
+  throw new Error('Context-graph response byte accounting did not converge');
 }
 
 export function buildContextGraphListPage(
-  rows: ContextGraphListRow[],
+  rows: ContextGraphListFullRow[],
   query: ContextGraphListQuery,
-  elapsedMs = 0,
 ): ContextGraphListPageResult {
   const prepared = prepareRows(rows, query);
+  const collectionDigest = createHash('sha256')
+    .update(serializeJsonResponseBody(prepared), 'utf8')
+    .digest('hex');
+  if (
+    query.cursorCollectionDigest !== undefined
+    && query.cursorCollectionDigest !== collectionDigest
+  ) {
+    return {
+      ok: false,
+      error: 'The context-graph registry changed during pagination; restart from the first page',
+      code: 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED',
+    };
+  }
   const after = query.cursorDigest === undefined
     ? prepared
     : prepared.filter((entry) => entry.digest > query.cursorDigest!);
@@ -328,22 +328,20 @@ export function buildContextGraphListPage(
   while (pageEntries.length > 0) {
     const moreRowsRemain = after.length > pageEntries.length;
     const nextCursor = moreRowsRemain
-      ? encodeCursor(query.fingerprint, pageEntries[pageEntries.length - 1]!.digest)
+      ? encodeCursor(
+          query.fingerprint,
+          collectionDigest,
+          pageEntries[pageEntries.length - 1]!.digest,
+        )
       : undefined;
     const built = payloadWithExactSize(
       pageEntries.map((entry) => entry.row),
       prepared.length,
       query.limit,
-      elapsedMs,
       nextCursor,
     );
     if (built.serializedBytes <= CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES) {
-      const etagDigest = createHash('sha256').update(wireStringify({
-        fingerprint: query.fingerprint,
-        limit: query.limit,
-        cursor: query.cursorDigest ?? null,
-        collection: prepared,
-      }), 'utf8').digest('hex');
+      const etagDigest = createHash('sha256').update(built.body, 'utf8').digest('hex');
       return {
         ok: true,
         ...built,
@@ -361,13 +359,8 @@ export function buildContextGraphListPage(
     };
   }
 
-  const built = payloadWithExactSize([], prepared.length, query.limit, elapsedMs, undefined);
-  const etagDigest = createHash('sha256').update(wireStringify({
-    fingerprint: query.fingerprint,
-    limit: query.limit,
-    cursor: query.cursorDigest ?? null,
-    collection: prepared,
-  }), 'utf8').digest('hex');
+  const built = payloadWithExactSize([], prepared.length, query.limit, undefined);
+  const etagDigest = createHash('sha256').update(built.body, 'utf8').digest('hex');
   return { ok: true, ...built, etag: `"dkg-cg-list-${etagDigest}"` };
 }
 
@@ -381,7 +374,6 @@ function etagMatches(header: string | string[] | undefined, etag: string): boole
 }
 
 function responseHeaders(
-  ctx: Pick<RequestContext, 'res'>,
   values: {
     returned: number;
     total: number;
@@ -391,14 +383,12 @@ function responseHeaders(
     mode: 'legacy' | 'paged';
   },
 ): Record<string, string> {
-  const origin = ((ctx.res as unknown as { __corsOrigin?: string | null }).__corsOrigin) ?? null;
   return {
-    ...corsHeaders(origin),
     ...(values.etag === undefined ? {} : {
       ETag: values.etag,
       'Cache-Control': 'private, no-cache',
     }),
-    Vary: origin && origin !== '*' ? 'Origin, Authorization' : 'Authorization',
+    Vary: 'Authorization',
     'X-DKG-List-Mode': values.mode,
     'X-DKG-Result-Count': String(values.returned),
     'X-DKG-Total-Count': String(values.total),
@@ -418,13 +408,13 @@ export async function handleContextGraphListRoute(ctx: RequestContext): Promise<
 
   const contextGraphs = await ctx.agent.listContextGraphs({
     callerAgentAddress: ctx.requestAgentAddress ?? null,
-  }) as ContextGraphListRow[];
+  });
   const elapsedMs = Math.round((performance.now() - startedAt) * 100) / 100;
 
   if (parsed.mode === 'legacy') {
     const payload = { contextGraphs };
-    const serializedBytes = Buffer.byteLength(wireStringify(payload));
-    jsonResponse(ctx.res, 200, payload, undefined, responseHeaders(ctx, {
+    const serializedBytes = Buffer.byteLength(serializeJsonResponseBody(payload));
+    jsonResponse(ctx.res, 200, payload, undefined, responseHeaders({
       returned: contextGraphs.length,
       total: contextGraphs.length,
       bytes: serializedBytes,
@@ -434,17 +424,21 @@ export async function handleContextGraphListRoute(ctx: RequestContext): Promise<
     return;
   }
 
-  const page = buildContextGraphListPage(contextGraphs, parsed.query, elapsedMs);
+  const page = buildContextGraphListPage(contextGraphs, parsed.query);
   if (!page.ok) {
-    jsonResponse(ctx.res, 413, {
-      error: page.error,
-      code: page.code,
-      maxSerializedBytes: CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
-    });
+    jsonResponse(
+      ctx.res,
+      page.code === 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED' ? 409 : 413,
+      {
+        error: page.error,
+        code: page.code,
+        maxSerializedBytes: CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
+      },
+    );
     return;
   }
 
-  const headers = responseHeaders(ctx, {
+  const headers = responseHeaders({
     returned: page.payload.page.returned,
     total: page.payload.page.total,
     bytes: page.serializedBytes,
@@ -453,9 +447,18 @@ export async function handleContextGraphListRoute(ctx: RequestContext): Promise<
     mode: 'paged',
   });
   if (etagMatches(ctx.req.headers['if-none-match'], page.etag)) {
-    ctx.res.writeHead(304, { ...headers, 'X-DKG-Response-Bytes': '0' });
+    ctx.res.writeHead(304, jsonResponseHeaders(ctx.res, undefined, {
+      ...headers,
+      'X-DKG-Response-Bytes': '0',
+    }));
     ctx.res.end();
     return;
   }
-  jsonResponse(ctx.res, 200, page.payload, undefined, headers);
+  jsonSerializedResponse(
+    ctx.res,
+    200,
+    page.body,
+    undefined,
+    headers,
+  );
 }

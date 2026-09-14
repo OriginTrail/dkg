@@ -402,6 +402,32 @@ describe('CLI-2 — CORS policy for /api/*', () => {
     const acao = res.headers.get('access-control-allow-origin');
     expect(acao === `http://127.0.0.1:${d.apiPort}` || acao === '*').toBe(true);
   });
+
+  it('allows and exposes conditional context-graph polling headers cross-origin', async () => {
+    const d = daemon!;
+    const origin = `http://localhost:${d.apiPort}`;
+    const preflight = await fetch(urlFor(d, '/api/context-graph/list?limit=1'), {
+      method: 'OPTIONS',
+      headers: {
+        Origin: origin,
+        'Access-Control-Request-Method': 'GET',
+        'Access-Control-Request-Headers': 'Authorization, If-None-Match',
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get('access-control-allow-origin')).toBe(origin);
+    expect(preflight.headers.get('access-control-allow-headers')).toContain('If-None-Match');
+
+    const listed = await fetch(
+      urlFor(d, '/api/context-graph/list?limit=1&projection=summary'),
+      { headers: { Origin: origin, ...authHeaders(d) } },
+    );
+    expect(listed.status).toBe(200);
+    expect(listed.headers.get('etag')).toMatch(/^"dkg-cg-list-/);
+    const exposed = listed.headers.get('access-control-expose-headers') ?? '';
+    expect(exposed).toContain('ETag');
+    expect(exposed).toContain('X-DKG-Total-Count');
+  });
 });
 
 // ---------------------------------------------------------------------------

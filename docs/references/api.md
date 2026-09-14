@@ -28,7 +28,10 @@ GET /api/context-graph/list?limit=100&projection=summary
 
 The bounded form orders rows deterministically and returns `nextCursor` while
 more rows remain. Pass that opaque cursor with the same filters and projection
-to read the next page. `limit` defaults to 50 and cannot exceed 100. Every
+to read the next page. The cursor is bound to the first page's collection; if
+the registry changes during the walk, the server returns `409` with
+`CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED` and the client must restart at page one.
+`limit` defaults to 50 and cannot exceed 100. Every
 bounded response is capped at 64 KiB of serialized JSON; the server may return
 fewer rows than requested to stay below that byte limit.
 
@@ -40,9 +43,10 @@ descriptions at 512 characters, with `nameTruncated` or
 fields within the same response bound.
 
 Paged responses include `page.returned`, `page.total`, `page.serializedBytes`,
-`page.maxSerializedBytes`, and `page.elapsedMs`. The same values are exposed as
-`X-DKG-Result-Count`, `X-DKG-Total-Count`, `X-DKG-Response-Bytes`, and
-`X-DKG-Route-Ms` headers. Send the first page's `ETag` in `If-None-Match`; a
+and `page.maxSerializedBytes`. Counts and exact response bytes are also exposed
+as `X-DKG-Result-Count`, `X-DKG-Total-Count`, and `X-DKG-Response-Bytes` headers;
+route timing is exposed through `X-DKG-Route-Ms` and `Server-Timing`. Send the
+first page's `ETag` in `If-None-Match`; a
 `304 Not Modified` means the complete filtered collection is unchanged, not
 only the first page.
 

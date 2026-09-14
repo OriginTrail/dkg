@@ -4,11 +4,11 @@ import {
   CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
   handleContextGraphListRoute,
   parseContextGraphListQuery,
-  type ContextGraphListRow,
 } from '../src/daemon/routes/context-graph-list.js';
+import type { ContextGraphListFullRow } from '@origintrail-official/dkg-core';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
-function rows(count: number): ContextGraphListRow[] {
+function rows(count: number): ContextGraphListFullRow[] {
   return Array.from({ length: count }, (_, index) => ({
     id: `graph-${String(index).padStart(4, '0')}`,
     uri: `did:dkg:context-graph:graph-${index}`,
@@ -82,7 +82,7 @@ describe('bounded context-graph listing', () => {
         projection: 'summary',
         ...(cursor === undefined ? {} : { cursor }),
       });
-      const page = buildContextGraphListPage(source, query, 1.25);
+      const page = buildContextGraphListPage(source, query);
       expect(page.ok).toBe(true);
       if (!page.ok) throw new Error(page.error);
       expect(page.serializedBytes).toBeLessThanOrEqual(CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES);
@@ -98,22 +98,29 @@ describe('bounded context-graph listing', () => {
     expect(new Set(observed)).toEqual(new Set(source.map((row) => row.id)));
   });
 
-  it('deduplicates ids and binds cursors to the filters and projection', () => {
+  it('deduplicates ids before reporting the total or returning rows', () => {
     const source = [
       ...rows(20),
       { ...rows(1)[0]!, name: 'Conflicting duplicate' },
     ];
-    const firstQuery = pagedQuery({
-      limit: '3',
-      projection: 'summary',
-      subscribed: 'true',
-    });
+    const firstQuery = pagedQuery({ limit: '100', projection: 'summary' });
     const first = buildContextGraphListPage(source, firstQuery);
     expect(first.ok).toBe(true);
     if (!first.ok) throw new Error(first.error);
-    expect(first.payload.contextGraphs.map((row) => row.id)).toHaveLength(3);
-    expect(first.payload.nextCursor).toBeDefined();
+    const ids = first.payload.contextGraphs.map((row) => row.id);
+    expect(ids).toHaveLength(20);
+    expect(new Set(ids).size).toBe(20);
+    expect(first.payload.page.total).toBe(20);
+    expect(first.payload.nextCursor).toBeUndefined();
+  });
 
+  it('binds cursors to the filters and projection', () => {
+    const first = buildContextGraphListPage(
+      rows(20),
+      pagedQuery({ limit: '3', projection: 'summary', subscribed: 'true' }),
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error(first.error);
     const changed = parseContextGraphListQuery(new URLSearchParams({
       limit: '3',
       projection: 'full',
@@ -124,14 +131,11 @@ describe('bounded context-graph listing', () => {
     if (!changed.ok) expect(changed.error).toMatch(/different filter or projection/);
   });
 
-  it('applies list filters before projecting summary rows', () => {
+  it('applies search before projecting summary rows', () => {
     const page = buildContextGraphListPage(
       rows(30),
       pagedQuery({
         projection: 'summary',
-        subscribed: 'true',
-        synced: 'true',
-        onChain: 'true',
         q: 'graph-0000',
       }),
     );
@@ -146,6 +150,71 @@ describe('bounded context-graph listing', () => {
       }),
     ]);
     expect(page.payload.contextGraphs[0]).not.toHaveProperty('uri');
+  });
+
+  it('applies subscribed, synced, and onChain filters independently', () => {
+    const source = rows(30);
+    const cases = [
+      {
+        params: { projection: 'summary', subscribed: 'false' },
+        expected: source.filter((row) => !row.subscribed).map((row) => row.id),
+      },
+      {
+        params: { projection: 'summary', synced: 'true' },
+        expected: source.filter((row) => row.synced).map((row) => row.id),
+      },
+      {
+        params: { projection: 'summary', onChain: 'false' },
+        expected: source.filter((row) => row.onChainId === undefined).map((row) => row.id),
+      },
+    ];
+    for (const testCase of cases) {
+      const page = buildContextGraphListPage(source, pagedQuery(testCase.params));
+      expect(page.ok).toBe(true);
+      if (!page.ok) throw new Error(page.error);
+      expect(new Set(page.payload.contextGraphs.map((row) => row.id))).toEqual(
+        new Set(testCase.expected),
+      );
+      expect(page.payload.contextGraphs.length).toBeGreaterThan(0);
+      expect(page.payload.contextGraphs.length).toBeLessThan(source.length);
+    }
+  });
+
+  it('enforces exact summary name and description boundaries', () => {
+    const source: ContextGraphListFullRow[] = [
+      {
+        ...rows(1)[0]!,
+        id: 'oversized-summary',
+        name: 'n'.repeat(257),
+        description: 'd'.repeat(513),
+      },
+      {
+        ...rows(1)[0]!,
+        id: 'boundary-summary',
+        name: 'b'.repeat(256),
+        description: 'c'.repeat(512),
+      },
+    ];
+    const page = buildContextGraphListPage(
+      source,
+      pagedQuery({ limit: '10', projection: 'summary' }),
+    );
+    expect(page.ok).toBe(true);
+    if (!page.ok) throw new Error(page.error);
+    const oversized = page.payload.contextGraphs.find((row) => row.id === 'oversized-summary');
+    const boundary = page.payload.contextGraphs.find((row) => row.id === 'boundary-summary');
+    expect(oversized).toMatchObject({
+      name: 'n'.repeat(256),
+      nameTruncated: true,
+      description: 'd'.repeat(512),
+      descriptionTruncated: true,
+    });
+    expect(boundary).toMatchObject({
+      name: 'b'.repeat(256),
+      description: 'c'.repeat(512),
+    });
+    expect(boundary).not.toHaveProperty('nameTruncated');
+    expect(boundary).not.toHaveProperty('descriptionTruncated');
   });
 
   it('shrinks a page by serialized bytes and rejects one oversized full row', () => {
@@ -163,7 +232,6 @@ describe('bounded context-graph listing', () => {
     expect(summary.payload.contextGraphs.length).toBeGreaterThan(0);
     expect(summary.payload.contextGraphs.length).toBeLessThan(100);
     expect(summary.payload.nextCursor).toBeDefined();
-    expect(summary.payload.contextGraphs[0]).toMatchObject({ descriptionTruncated: true });
 
     const oversized = buildContextGraphListPage(
       [{ ...rows(1)[0]!, description: 'z'.repeat(70_000) }],
@@ -190,6 +258,33 @@ describe('bounded context-graph listing', () => {
     expect(changed.etag).not.toBe(original.etag);
   });
 
+  it('rejects a later page when the collection changed after its cursor was issued', () => {
+    const source = rows(101);
+    const first = buildContextGraphListPage(
+      source,
+      pagedQuery({ limit: '100', projection: 'summary' }),
+    );
+    expect(first.ok).toBe(true);
+    if (!first.ok) throw new Error(first.error);
+    const cursor = first.payload.nextCursor!;
+
+    const changed = buildContextGraphListPage(
+      source.slice(0, -1),
+      pagedQuery({ limit: '100', projection: 'summary', cursor }),
+    );
+    expect(changed).toMatchObject({
+      ok: false,
+      code: 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED',
+    });
+
+    const restored = buildContextGraphListPage(
+      source,
+      pagedQuery({ limit: '100', projection: 'summary' }),
+    );
+    expect(restored.ok).toBe(true);
+    if (restored.ok) expect(restored.etag).toBe(first.etag);
+  });
+
   it('returns a bodyless 304 with observability headers for a matching ETag', async () => {
     const listContextGraphs = vi.fn(async () => rows(120));
     const first = responseRecorder();
@@ -208,6 +303,9 @@ describe('bounded context-graph listing', () => {
       'X-DKG-Total-Count': '120',
     });
     expect(first.state.headers?.ETag).toMatch(/^"dkg-cg-list-[0-9a-f]{64}"$/);
+    expect(Buffer.byteLength(first.state.body ?? '')).toBe(
+      Number(first.state.headers?.['X-DKG-Response-Bytes']),
+    );
 
     const conditional = responseRecorder();
     await handleContextGraphListRoute({

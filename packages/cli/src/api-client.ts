@@ -22,6 +22,10 @@ import { DkgHomeFiles, isProcessRunning } from './config.js';
 import {
   serializeAgentListOptions,
   type AgentListPageOptions,
+  serializeContextGraphListOptions,
+  type ContextGraphListLegacyResponse,
+  type ContextGraphListPageOptions,
+  type ContextGraphListPageResponse,
 } from '@origintrail-official/dkg-core';
 import { loadApiClientToken } from './auth.js';
 import {
@@ -2069,50 +2073,14 @@ export class ApiClient {
     return this.get('/api/agent/identity');
   }
 
-  async listContextGraphs(options: {
-    limit?: number;
-    cursor?: string;
-    projection?: 'full' | 'summary';
-    subscribed?: boolean;
-    synced?: boolean;
-    onChain?: boolean;
-    q?: string;
-  } = {}): Promise<{
-    contextGraphs: Array<{
-      id: string;
-      uri?: string;
-      name: string;
-      nameTruncated?: boolean;
-      description?: string;
-      descriptionTruncated?: boolean;
-      creator?: string;
-      createdAt?: string;
-      isSystem: boolean;
-      subscribed?: boolean;
-      synced?: boolean;
-      curator?: string;
-      accessPolicy?: string;
-      callerInvolved?: boolean;
-    }>;
-    nextCursor?: string;
-    page?: {
-      returned: number;
-      total: number;
-      limit: number;
-      serializedBytes: number;
-      maxSerializedBytes: number;
-      elapsedMs: number;
-    };
-  }> {
-    const query = new URLSearchParams();
-    if (options.limit !== undefined) query.set('limit', String(options.limit));
-    if (options.cursor !== undefined) query.set('cursor', options.cursor);
-    if (options.projection !== undefined) query.set('projection', options.projection);
-    if (options.subscribed !== undefined) query.set('subscribed', String(options.subscribed));
-    if (options.synced !== undefined) query.set('synced', String(options.synced));
-    if (options.onChain !== undefined) query.set('onChain', String(options.onChain));
-    if (options.q !== undefined) query.set('q', options.q);
-    const encoded = query.toString();
+  async listContextGraphs(): Promise<ContextGraphListLegacyResponse>;
+  async listContextGraphs(
+    options: ContextGraphListPageOptions,
+  ): Promise<ContextGraphListPageResponse>;
+  async listContextGraphs(
+    options: ContextGraphListPageOptions = {},
+  ): Promise<ContextGraphListLegacyResponse | ContextGraphListPageResponse> {
+    const encoded = serializeContextGraphListOptions(options);
     return this.get(`/api/context-graph/list${encoded ? `?${encoded}` : ''}`);
   }
 

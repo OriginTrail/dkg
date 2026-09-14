@@ -6,7 +6,6 @@ import {
   fetchStatus,
   fetchAgents,
   fetchMetrics,
-  fetchContextGraphs,
   fetchOperations,
   fetchOperationsWithPhases,
   fetchOperation,
@@ -50,6 +49,8 @@ import {
   knowledgeAssetFinalize,
   knowledgeAssetShare,
 } from '../src/ui/api.js';
+import { fetchContextGraphs } from '../src/ui/context-graph-api.js';
+import type { ContextGraphListSummaryRow } from '@origintrail-official/dkg-core';
 
 let server: Server;
 let baseUrl: string;
@@ -62,8 +63,21 @@ const requestLog: Array<{
 let queryBindings: any[] = [];
 let contextGraphPagination: {
   etag: string;
-  pages: Record<string, { contextGraphs: any[]; nextCursor?: string }>;
+  pages: Record<string, { contextGraphs: ContextGraphListSummaryRow[]; nextCursor?: string }>;
 } | undefined;
+
+function contextGraphSummary(
+  id: string,
+  isSystem = false,
+): ContextGraphListSummaryRow {
+  return {
+    id,
+    name: id,
+    isSystem,
+    subscribed: false,
+    synced: false,
+  };
+}
 // Scripted per-call responses (status + body) for tests that need a non-200
 // reply, e.g. a fail-closed publish precondition. Each entry is consumed on
 // first match (FIFO). Cleared in beforeEach.
@@ -71,6 +85,8 @@ type ResponseOverride = {
   match: (url: string, method: string, body: string) => boolean;
   status: number;
   body: unknown;
+  headers?: Record<string, string>;
+  delayMs?: number;
 };
 let responseOverrides: ResponseOverride[] = [];
 
@@ -79,7 +95,7 @@ function startTestServer(): Promise<void> {
     server = createServer((req, res) => {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
+      req.on('end', async () => {
         const reqUrl = req.url ?? '';
         const reqMethod = req.method ?? '';
         requestLog.push({ url: reqUrl, method: reqMethod, body, headers: req.headers });
@@ -89,7 +105,13 @@ function startTestServer(): Promise<void> {
         const ovIdx = responseOverrides.findIndex(o => o.match(reqUrl, reqMethod, body));
         if (ovIdx !== -1) {
           const [ov] = responseOverrides.splice(ovIdx, 1);
-          res.writeHead(ov.status, { 'Content-Type': 'application/json' });
+          if (ov.delayMs) {
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, ov.delayMs));
+          }
+          res.writeHead(ov.status, {
+            'Content-Type': 'application/json',
+            ...ov.headers,
+          });
           res.end(JSON.stringify(ov.body));
           return;
         }
@@ -152,7 +174,7 @@ function startTestServer(): Promise<void> {
         } else if (url.startsWith('/api/per-type-stats')) {
           res.end(JSON.stringify({ buckets: [], types: [], series: {} }));
         } else if (url.startsWith('/api/context-graph/list') || url.startsWith('/api/context-graphs')) {
-          res.end(JSON.stringify({ contextGraphs: [{ id: 'cg1' }] }));
+          res.end(JSON.stringify({ contextGraphs: [contextGraphSummary('cg1')] }));
         } else if (url.startsWith('/api/query')) {
           res.end(JSON.stringify({ result: { bindings: queryBindings } }));
         } else if (url.startsWith('/api/shared-memory')) {
@@ -203,6 +225,7 @@ describe('UI API tests', () => {
     queryBindings = [];
     responseOverrides = [];
     contextGraphPagination = undefined;
+    if (typeof window !== 'undefined') window.__DKG_TOKEN__ = undefined;
   });
 
   describe('fileUrl', () => {
@@ -249,26 +272,26 @@ describe('UI API tests', () => {
         pages: {
           '': {
             contextGraphs: [
-              { id: 'cg-1', isSystem: false },
-              { id: 'agents', isSystem: true },
+              contextGraphSummary('cg-1'),
+              contextGraphSummary('agents', true),
             ],
             nextCursor: 'page-2',
           },
-          'page-2': { contextGraphs: [{ id: 'cg-2', isSystem: false }] },
+          'page-2': { contextGraphs: [contextGraphSummary('cg-2')] },
         },
       };
 
       await expect(fetchContextGraphs()).resolves.toEqual({
-        contextGraphs: [{ id: 'cg-1', isSystem: false }, { id: 'cg-2', isSystem: false }],
+        contextGraphs: [contextGraphSummary('cg-1'), contextGraphSummary('cg-2')],
       });
       expect(requestLog.map((entry) => entry.url)).toEqual([
         '/api/context-graph/list?limit=100&projection=summary',
-        '/api/context-graph/list?limit=100&projection=summary&cursor=page-2',
+        '/api/context-graph/list?limit=100&cursor=page-2&projection=summary',
       ]);
 
       requestLog.length = 0;
       await expect(fetchContextGraphs()).resolves.toEqual({
-        contextGraphs: [{ id: 'cg-1', isSystem: false }, { id: 'cg-2', isSystem: false }],
+        contextGraphs: [contextGraphSummary('cg-1'), contextGraphSummary('cg-2')],
       });
       expect(requestLog).toHaveLength(1);
       expect(requestLog[0]?.headers['if-none-match']).toBe('"context-graphs-v1"');
@@ -289,7 +312,7 @@ describe('UI API tests', () => {
       contextGraphPagination = {
         etag: '"context-graphs-later-error"',
         pages: {
-          '': { contextGraphs: [{ id: 'cg-1' }], nextCursor: 'failed-page' },
+          '': { contextGraphs: [contextGraphSummary('cg-1')], nextCursor: 'failed-page' },
         },
       };
       responseOverrides.push({
@@ -301,7 +324,7 @@ describe('UI API tests', () => {
       await expect(fetchContextGraphs()).rejects.toThrow('HTTP 502');
       expect(requestLog.map((entry) => entry.url)).toEqual([
         '/api/context-graph/list?limit=100&projection=summary',
-        '/api/context-graph/list?limit=100&projection=summary&cursor=failed-page',
+        '/api/context-graph/list?limit=100&cursor=failed-page&projection=summary',
       ]);
     });
 
@@ -309,8 +332,8 @@ describe('UI API tests', () => {
       contextGraphPagination = {
         etag: '"context-graphs-repeated-cursor"',
         pages: {
-          '': { contextGraphs: [{ id: 'cg-1' }], nextCursor: 'repeated' },
-          repeated: { contextGraphs: [{ id: 'cg-2' }], nextCursor: 'repeated' },
+          '': { contextGraphs: [contextGraphSummary('cg-1')], nextCursor: 'repeated' },
+          repeated: { contextGraphs: [contextGraphSummary('cg-2')], nextCursor: 'repeated' },
         },
       };
 
@@ -321,7 +344,7 @@ describe('UI API tests', () => {
     it('coalesces concurrent context-graph walks and returns independent arrays', async () => {
       contextGraphPagination = {
         etag: '"context-graphs-coalesced"',
-        pages: { '': { contextGraphs: [{ id: 'cg-shared' }] } },
+        pages: { '': { contextGraphs: [contextGraphSummary('cg-shared')] } },
       };
 
       const first = fetchContextGraphs();
@@ -331,6 +354,91 @@ describe('UI API tests', () => {
       expect(requestLog).toHaveLength(1);
       expect(firstResult).toEqual(secondResult);
       expect(firstResult.contextGraphs).not.toBe(secondResult.contextGraphs);
+    });
+
+    it('restarts a page walk when the registry snapshot changes', async () => {
+      responseOverrides.push(
+        {
+          match: (url) => url.includes('/api/context-graph/list?') && !url.includes('cursor='),
+          status: 200,
+          body: {
+            contextGraphs: [contextGraphSummary('cg-old-1')],
+            nextCursor: 'old-page-2',
+          },
+          headers: { ETag: '"old-snapshot"' },
+        },
+        {
+          match: (url) => url.includes('cursor=old-page-2'),
+          status: 409,
+          body: {
+            code: 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED',
+            error: 'registry changed',
+          },
+        },
+        {
+          match: (url) => url.includes('/api/context-graph/list?') && !url.includes('cursor='),
+          status: 200,
+          body: {
+            contextGraphs: [
+              contextGraphSummary('cg-new-1'),
+              contextGraphSummary('cg-new-2'),
+            ],
+          },
+          headers: { ETag: '"new-snapshot"' },
+        },
+      );
+
+      await expect(fetchContextGraphs()).resolves.toEqual({
+        contextGraphs: [
+          contextGraphSummary('cg-new-1'),
+          contextGraphSummary('cg-new-2'),
+        ],
+      });
+      expect(requestLog).toHaveLength(3);
+    });
+
+    it('never coalesces or returns a page walk across bearer identities', async () => {
+      if (typeof window === 'undefined') {
+        (globalThis as any).window = {};
+      }
+      window.__DKG_TOKEN__ = 'token-a';
+      responseOverrides.push(
+        {
+          match: () => true,
+          status: 200,
+          body: { contextGraphs: [contextGraphSummary('private-a')] },
+          headers: { ETag: '"token-a"' },
+          delayMs: 100,
+        },
+        {
+          match: () => true,
+          status: 200,
+          body: { contextGraphs: [contextGraphSummary('visible-b')] },
+          headers: { ETag: '"token-b"' },
+        },
+        {
+          match: () => true,
+          status: 304,
+          body: undefined,
+          headers: { ETag: '"token-b"' },
+        },
+      );
+
+      const underA = fetchContextGraphs();
+      while (requestLog.length < 1) {
+        await new Promise((resolveRequest) => setTimeout(resolveRequest, 0));
+      }
+      window.__DKG_TOKEN__ = 'token-b';
+      const underB = fetchContextGraphs();
+      const [resultA, resultB] = await Promise.all([underA, underB]);
+
+      expect(resultA).toEqual({ contextGraphs: [contextGraphSummary('visible-b')] });
+      expect(resultB).toEqual({ contextGraphs: [contextGraphSummary('visible-b')] });
+      expect(requestLog).toHaveLength(3);
+      expect(requestLog[0]?.headers.authorization).toBe('Bearer token-a');
+      expect(requestLog.slice(1).every(
+        (entry) => entry.headers.authorization === 'Bearer token-b',
+      )).toBe(true);
     });
 
     it('fetchStatus calls /api/status', async () => {
