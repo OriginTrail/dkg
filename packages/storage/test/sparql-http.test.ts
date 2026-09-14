@@ -497,6 +497,7 @@ describe('SparqlHttpStore (test server)', () => {
       const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: 'http://127.0.0.1:7878/query',
         timeout: 5,
+      }, {
         onClientTimeout: (operation) => timedOutOperations.push(operation),
       });
       await expect(store.hasGraph('urn:timed-out-graph')).rejects.toMatchObject({
@@ -515,7 +516,6 @@ describe('SparqlHttpStore (test server)', () => {
   it('does not relabel a late managed-server response as a timeout', async () => {
     const originalFetch = globalThis.fetch;
     let now = 0;
-    const timedOutOperations: string[] = [];
     globalThis.fetch = (async () => {
       now = 60_000;
       return new Response('request timed out', { status: 500 });
@@ -527,14 +527,12 @@ describe('SparqlHttpStore (test server)', () => {
         timeout: 125_000,
         slowQueryThresholdMs: 0,
         now: () => now,
-        onClientTimeout: (operation) => timedOutOperations.push(operation),
       });
 
       await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
         code: 'SPARQL_HTTP_RESPONSE',
         operation: 'query',
       });
-      expect(timedOutOperations).toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -543,7 +541,6 @@ describe('SparqlHttpStore (test server)', () => {
   it('preserves a caller abort after the former server-timeout threshold', async () => {
     const originalFetch = globalThis.fetch;
     let now = 0;
-    const timedOutOperations: string[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
       new Promise<Response>((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
@@ -556,7 +553,6 @@ describe('SparqlHttpStore (test server)', () => {
         timeout: 125_000,
         slowQueryThresholdMs: 0,
         now: () => now,
-        onClientTimeout: (operation) => timedOutOperations.push(operation),
       });
       const query = store.query(
         'SELECT ?s WHERE { ?s ?p ?o }',
@@ -567,7 +563,6 @@ describe('SparqlHttpStore (test server)', () => {
       caller.abort(new Error('caller aborted after 56 seconds'));
 
       await expect(query).rejects.toThrow('caller aborted after 56 seconds');
-      expect(timedOutOperations).toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -610,6 +605,7 @@ describe('SparqlHttpStore (test server)', () => {
         queryEndpoint: 'http://127.0.0.1:7878/query',
         updateEndpoint: 'http://127.0.0.1:7878/update',
         timeout: 100,
+      }, {
         getRecoveryState: () => recovery,
         onClientTimeout: (operation) => {
           if (operation !== 'query') return;
@@ -676,6 +672,7 @@ describe('SparqlHttpStore (test server)', () => {
         queryEndpoint: 'http://127.0.0.1:7878/query',
         updateEndpoint: 'http://127.0.0.1:7878/update',
         timeout: 5_000,
+      }, {
         getRecoveryState: () => recovery,
       });
       const writeFailure = managed.insert([{
@@ -713,6 +710,7 @@ describe('SparqlHttpStore (test server)', () => {
     try {
       const managed = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: 'http://127.0.0.1:7878/query',
+      }, {
         onClientTimeout,
       });
       await expect(managed.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
@@ -1646,6 +1644,7 @@ describe('SparqlHttpStore (test server)', () => {
       const recoveringStore = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: 'http://127.0.0.1:7878/query',
         updateEndpoint: 'http://127.0.0.1:7878/update',
+      }, {
         getRecoveryState: () => ({ recovering: true, generation: 1 }),
       });
       const before = recoveringStore.getWriteRevision(graph);
@@ -1669,8 +1668,9 @@ describe('SparqlHttpStore (test server)', () => {
       )));
     })) as typeof fetch;
     try {
-      const store = new SparqlHttpStore({
-        queryEndpoint: 'http://activity.test/query',
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+      }, {
         onActivityChange: (activeOperations) => {
           activity.push(activeOperations);
           if (activeOperations === 2) throw new Error('observer failure');
@@ -1713,9 +1713,10 @@ describe('SparqlHttpStore (test server)', () => {
         healthReservedSlots: 0,
         backgroundReservedSlots: 0,
       });
-      const store = new SparqlHttpStore({
-        queryEndpoint: 'http://queued-activity.test/query',
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
         scheduler,
+      }, {
         onActivityChange: (activeOperations) => activity.push(activeOperations),
       });
       const first = store.query('ASK { ?s ?p ?o }');

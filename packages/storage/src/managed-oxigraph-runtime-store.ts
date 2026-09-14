@@ -1,9 +1,23 @@
 import type { TripleStoreConfig } from './triple-store.js';
 
 const MANAGED_RUNTIME_CONTEXT = Symbol('dkg.managed-oxigraph-runtime-v1');
-const MANAGED_RUNTIME_AUTHORITY = Object.freeze({
-  kind: 'dkg-managed-oxigraph-runtime-v1',
-} as const);
+const managedRuntimeContexts = new WeakSet<object>();
+
+export interface ManagedOxigraphRuntimeStateV1 {
+  readonly recovering: boolean;
+  readonly generation: number;
+}
+
+/** Runtime control plane supplied only by the daemon-owned construction path. */
+export interface ManagedOxigraphRuntimeHooksV1 {
+  readonly onClientTimeout?: (operation: string) => void;
+  readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
+  readonly onActivityChange?: (activeOperations: number) => void;
+}
+
+interface ManagedOxigraphRuntimeContextV1 {
+  readonly hooks: Readonly<ManagedOxigraphRuntimeHooksV1>;
+}
 
 /**
  * Explicit runtime-only construction input for a DKG-supervised local
@@ -14,7 +28,7 @@ const MANAGED_RUNTIME_AUTHORITY = Object.freeze({
 export interface ManagedOxigraphRuntimeStoreConfigV1 extends TripleStoreConfig {
   readonly backend: 'sparql-http';
   readonly options: Record<string, unknown>;
-  readonly [MANAGED_RUNTIME_CONTEXT]: typeof MANAGED_RUNTIME_AUTHORITY;
+  readonly [MANAGED_RUNTIME_CONTEXT]: ManagedOxigraphRuntimeContextV1;
 }
 
 /**
@@ -69,6 +83,7 @@ export function snapshotManagedOxigraphRuntimeOptionsV1(
 
 export function createManagedOxigraphRuntimeStoreConfigV1(
   config: TripleStoreConfig,
+  hooks: ManagedOxigraphRuntimeHooksV1 = {},
 ): ManagedOxigraphRuntimeStoreConfigV1 {
   if (config.backend !== 'sparql-http') {
     throw new Error('managed Oxigraph runtime config must use the sparql-http backend');
@@ -86,6 +101,10 @@ export function createManagedOxigraphRuntimeStoreConfigV1(
     throw new Error('managed Oxigraph runtime config must be owned by the DKG daemon');
   }
 
+  const context: ManagedOxigraphRuntimeContextV1 = Object.freeze({
+    hooks: Object.freeze({ ...hooks }),
+  });
+  managedRuntimeContexts.add(context);
   const runtimeConfig = {
     backend: 'sparql-http' as const,
     options,
@@ -102,7 +121,7 @@ export function createManagedOxigraphRuntimeStoreConfigV1(
   Object.defineProperty(runtimeConfig, MANAGED_RUNTIME_CONTEXT, {
     configurable: false,
     enumerable: false,
-    value: MANAGED_RUNTIME_AUTHORITY,
+    value: context,
     writable: false,
   });
   return Object.freeze(runtimeConfig);
@@ -123,8 +142,10 @@ export function getManagedOxigraphRuntimeConstructionAuthorityV1(
   const descriptor = Object.getOwnPropertyDescriptor(candidate, MANAGED_RUNTIME_CONTEXT);
   return descriptor !== undefined
     && Object.prototype.hasOwnProperty.call(descriptor, 'value')
-    && descriptor.value === MANAGED_RUNTIME_AUTHORITY
-    ? MANAGED_RUNTIME_AUTHORITY
+    && typeof descriptor.value === 'object'
+    && descriptor.value !== null
+    && managedRuntimeContexts.has(descriptor.value)
+    ? descriptor.value
     : undefined;
 }
 
@@ -132,7 +153,21 @@ export function getManagedOxigraphRuntimeConstructionAuthorityV1(
 export function isManagedOxigraphRuntimeConstructionAuthorityV1(
   candidate: unknown,
 ): boolean {
-  return candidate === MANAGED_RUNTIME_AUTHORITY;
+  return typeof candidate === 'object'
+    && candidate !== null
+    && managedRuntimeContexts.has(candidate);
+}
+
+/** @internal Recover the typed daemon hooks from an authenticated context. */
+export function getManagedOxigraphRuntimeHooksV1(
+  candidate: unknown,
+): Readonly<ManagedOxigraphRuntimeHooksV1> | undefined {
+  const context = isManagedOxigraphRuntimeConstructionAuthorityV1(candidate)
+    ? candidate
+    : getManagedOxigraphRuntimeConstructionAuthorityV1(candidate);
+  return context !== undefined
+    ? (context as ManagedOxigraphRuntimeContextV1).hooks
+    : undefined;
 }
 
 function assertLoopbackEndpoint(input: unknown, label: string): void {

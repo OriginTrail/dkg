@@ -84,6 +84,22 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     );
   });
 
+  it.each([
+    [99, 0],
+    [100, 1],
+  ])('restarts only at or above the threshold: %i bytes', (walBytes, expectedRestarts) => {
+    const requestRestart = vi.fn(() => true);
+    const controlled = controlledCoordinator({
+      measureRetainedWalBytes: () => walBytes,
+      requestRestart,
+    });
+    controlled.setServerAvailable(true);
+    controlled.setNow(80);
+    controlled.tick();
+
+    expect(requestRestart).toHaveBeenCalledTimes(expectedRestarts);
+  });
+
   it('prevents another restart until both a new idle window and cooldown elapse', () => {
     const measureRetainedWalBytes = vi.fn(() => 101);
     const requestRestart = vi.fn(() => true);

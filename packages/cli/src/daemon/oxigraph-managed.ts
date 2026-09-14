@@ -38,6 +38,7 @@ import {
   startOxigraphServer,
   type OxigraphServerHandle,
   type OxigraphServerIo,
+  type StartOxigraphServerOptions,
 } from './oxigraph-server.js';
 import { resolveWalRestartThresholdBytes } from './oxigraph-wal-maintenance.js';
 import {
@@ -375,6 +376,29 @@ export interface StartManagedOxigraphOptions {
   readyTimeoutMs?: number;
 }
 
+/** Typed adapter from the launch plan to the supervisor boundary. */
+export function buildManagedOxigraphServerStartOptions(input: {
+  readonly plan: ManagedOxigraphPlan;
+  readonly binaryPath: string;
+  readonly log: (message: string) => void;
+  readonly readyTimeoutMs?: number;
+  readonly platform?: NodeJS.Platform;
+  readonly serverIo?: Partial<OxigraphServerIo>;
+}): StartOxigraphServerOptions {
+  return {
+    binaryPath: input.binaryPath,
+    location: input.plan.location,
+    port: input.plan.port,
+    log: input.log,
+    readyTimeoutMs: input.readyTimeoutMs ?? input.plan.readyTimeoutMs,
+    queryTimeoutS: input.plan.queryTimeoutS,
+    memoryLimits: input.plan.memoryLimits,
+    walRestartThresholdBytes: input.plan.walRestartThresholdBytes,
+    platform: input.platform,
+    io: input.serverIo,
+  };
+}
+
 /**
  * Start the managed server if configured. Returns null when the node uses
  * a different backend (so callers can `const m = await start(...); if (m)
@@ -407,18 +431,14 @@ export async function startManagedOxigraph(
   );
   if (plan === null) return null;
 
-  const handle = await startOxigraphServer({
+  const handle = await startOxigraphServer(buildManagedOxigraphServerStartOptions({
+    plan,
     binaryPath: binary.path,
-    location: plan.location,
-    port: plan.port,
     log,
-    readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,
-    queryTimeoutS: plan.queryTimeoutS,
-    memoryLimits: plan.memoryLimits,
-    walRestartThresholdBytes: plan.walRestartThresholdBytes,
+    readyTimeoutMs: opts.readyTimeoutMs,
     platform: opts.platform,
-    io: opts.serverIo,
-  });
+    serverIo: opts.serverIo,
+  }));
 
   const runtimeStoreConfig: TripleStoreConfig = {
     backend: 'sparql-http',
@@ -426,20 +446,21 @@ export async function startManagedOxigraph(
       ...plan.storeConfigTemplate.options,
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
-      getRecoveryState: () => handle.getRecoveryState(),
-      onActivityChange: (activeOperations: number) => {
-        handle.reportStoreActivity(activeOperations);
-      },
-      onClientTimeout: (operation: string) => {
-        if (operation !== 'query' && operation !== 'construct') return;
-        handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
-      },
     },
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
     runtimeStoreConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
   }
-  const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig);
+  const storeConfig = createManagedOxigraphRuntimeStoreConfigV1(runtimeStoreConfig, {
+    getRecoveryState: () => handle.getRecoveryState(),
+    onActivityChange: (activeOperations: number) => {
+      handle.reportStoreActivity(activeOperations);
+    },
+    onClientTimeout: (operation: string) => {
+      if (operation !== 'query' && operation !== 'construct') return;
+      handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);
+    },
+  });
 
   return {
     handle,

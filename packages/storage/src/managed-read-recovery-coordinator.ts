@@ -15,6 +15,8 @@ export interface ManagedReadRecoveryCoordinatorOptionsV1 {
   readonly now: () => number;
   readonly readRecoveryState: () => ManagedReadRecoveryStateV1 | null;
   readonly recover: (operation: 'query' | 'construct') => void;
+  /** Retained server work fences maintenance after caller-visible cancellation. */
+  readonly onPendingChange?: (pending: boolean) => void;
 }
 
 /**
@@ -55,7 +57,7 @@ export class ManagedReadRecoveryCoordinatorV1 {
     }
     clearTimeout(pending?.timer);
     const timer = setTimeout(() => {
-      if (this.#pending?.timer === timer) this.#pending = undefined;
+      if (this.#pending?.timer !== timer) return;
       const current = this.#options.readRecoveryState();
       if (
         token.lifecycleGeneration === this.#lifecycleGeneration
@@ -65,14 +67,29 @@ export class ManagedReadRecoveryCoordinatorV1 {
       ) {
         this.#options.recover(operation);
       }
+      if (this.#pending?.timer === timer) {
+        this.#pending = undefined;
+        this.#reportPending(false);
+      }
     }, Math.max(0, deadline - this.#options.now()));
     timer.unref?.();
     this.#pending = { timer, deadline, storeGeneration: token.storeGeneration };
+    if (pending === undefined) this.#reportPending(true);
   }
 
   close(): void {
     this.#lifecycleGeneration += 1;
     clearTimeout(this.#pending?.timer);
+    const hadPending = this.#pending !== undefined;
     this.#pending = undefined;
+    if (hadPending) this.#reportPending(false);
+  }
+
+  #reportPending(pending: boolean): void {
+    try {
+      this.#options.onPendingChange?.(pending);
+    } catch {
+      // Observation cannot alter retained recovery semantics.
+    }
   }
 }

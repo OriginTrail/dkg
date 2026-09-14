@@ -83,8 +83,11 @@ import type {
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
   getManagedOxigraphRuntimeConstructionAuthorityV1,
+  getManagedOxigraphRuntimeHooksV1,
   isManagedOxigraphRuntimeConstructionAuthorityV1,
   snapshotManagedOxigraphRuntimeOptionsV1,
+  type ManagedOxigraphRuntimeHooksV1,
+  type ManagedOxigraphRuntimeStateV1,
 } from '../managed-oxigraph-runtime-store.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
@@ -193,11 +196,6 @@ export interface SparqlHttpSlowQueryEvent {
   queryBytes: number;
 }
 
-export interface SparqlHttpRecoveryState {
-  recovering: boolean;
-  generation: number;
-}
-
 export type SparqlHttpConsistencyProfile =
   | 'best-effort'
   | 'atomic-update'
@@ -229,18 +227,6 @@ export interface SparqlHttpStoreOptions {
    * closed instead of failing boot; it never grants managed guarantees.
    */
   managedOxigraph?: boolean;
-  /** Runtime-only recovery hook for a client deadline, including a cancelled
-   * managed read reaching its retained deadline with server work unconfirmed. */
-  onClientTimeout?: (operation: string) => void;
-  /** Runtime-only managed-server state used to classify restart collateral. */
-  getRecoveryState?: () => SparqlHttpRecoveryState;
-  /**
-   * Runtime-only activity signal for daemon-owned maintenance. The callback
-   * receives the number of admitted or queued store operations and is invoked
-   * after every transition. It is observational and cannot affect an
-   * operation's result.
-   */
-  onActivityChange?: (activeOperations: number) => void;
   /**
    * Certified endpoint guarantees. `atomic-update` means a whole
    * multi-operation SPARQL Update is one transaction. `atomic-readback` adds
@@ -292,7 +278,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly managedByDkg: boolean;
   private readonly managedOxigraph: boolean;
   private readonly onClientTimeout?: (operation: string) => void;
-  private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
+  private readonly getRecoveryState?: () => ManagedOxigraphRuntimeStateV1;
   private readonly consistencyProfile: SparqlHttpConsistencyProfile;
   private readonly scheduler: StorePriorityScheduler;
 
@@ -302,6 +288,8 @@ export class SparqlHttpStore implements TripleStore {
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
   private readonly workLifecycle: AbortableStoreWorkLifecycle;
   private readonly managedReadRecovery: ManagedReadRecoveryCoordinatorV1;
+  private activeStoreOperations = 0;
+  private retainedManagedReads = 0;
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
   private listGraphsGeneration = 0;
@@ -325,13 +313,17 @@ export class SparqlHttpStore implements TripleStore {
     this.managedOxigraph = isManagedOxigraphRuntimeConstructionAuthorityV1(
       constructionAuthority,
     );
+    const managedRuntimeHooks = getManagedOxigraphRuntimeHooksV1(constructionAuthority);
     this.rfc64SharedProjectionStreamCertifiedV1 = this.managedOxigraph;
     this.rfc64ExactBindingsReadCertifiedV1 = this.managedOxigraph;
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
-    this.onClientTimeout = options.onClientTimeout;
-    this.getRecoveryState = options.getRecoveryState;
+    this.onClientTimeout = managedRuntimeHooks?.onClientTimeout;
+    this.getRecoveryState = managedRuntimeHooks?.getRecoveryState;
     this.workLifecycle = new AbortableStoreWorkLifecycle({
-      onActivityChange: options.onActivityChange,
+      onActivityChange: (activeOperations) => {
+        this.activeStoreOperations = activeOperations;
+        this.reportManagedRuntimeActivity(managedRuntimeHooks);
+      },
     });
     this.consistencyProfile = this.managedOxigraph
       ? 'atomic-readback'
@@ -352,6 +344,10 @@ export class SparqlHttpStore implements TripleStore {
       now: this.now,
       readRecoveryState: () => this.readRecoveryState(),
       recover: (operation) => this.notifyClientTimeout(operation),
+      onPendingChange: (pending) => {
+        this.retainedManagedReads = pending ? 1 : 0;
+        this.reportManagedRuntimeActivity(managedRuntimeHooks);
+      },
     });
     // Content-Type is set per-request by the query/mutation transports (direct POST:
     // application/sparql-query | application/sparql-update). Only shared
@@ -369,6 +365,16 @@ export class SparqlHttpStore implements TripleStore {
           excerpt,
         ),
       }, RFC64_MANAGED_OXIGRAPH_PROJECTION_RESPONSE_STRATEGY_V1);
+    }
+  }
+
+  private reportManagedRuntimeActivity(
+    hooks: Readonly<ManagedOxigraphRuntimeHooksV1> | undefined,
+  ): void {
+    try {
+      hooks?.onActivityChange?.(this.activeStoreOperations + this.retainedManagedReads);
+    } catch {
+      // Runtime observation cannot alter store operation semantics.
     }
   }
 
@@ -447,7 +453,7 @@ export class SparqlHttpStore implements TripleStore {
     );
   }
 
-  private readRecoveryState(): SparqlHttpRecoveryState | null {
+  private readRecoveryState(): ManagedOxigraphRuntimeStateV1 | null {
     if (!this.managedOxigraph || !this.getRecoveryState) return null;
     try {
       const state = this.getRecoveryState();
@@ -479,7 +485,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   private recoveryInterrupted(
-    started: SparqlHttpRecoveryState | null,
+    started: ManagedOxigraphRuntimeStateV1 | null,
   ): boolean {
     const current = this.readRecoveryState();
     return current !== null && (
@@ -1284,11 +1290,12 @@ export class SparqlHttpStore implements TripleStore {
  */
 export function createManagedOxigraphSparqlStoreV1(
   options: SparqlHttpStoreOptions,
+  hooks: ManagedOxigraphRuntimeHooksV1 = {},
 ): SparqlHttpStore {
   const config = createManagedOxigraphRuntimeStoreConfigV1({
     backend: 'sparql-http',
     options: snapshotManagedOxigraphRuntimeOptionsV1(options, true),
-  });
+  }, hooks);
   return new SparqlHttpStore(
     config.options as unknown as SparqlHttpStoreOptions,
     getManagedOxigraphRuntimeConstructionAuthorityV1(config),

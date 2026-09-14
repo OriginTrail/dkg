@@ -28,6 +28,7 @@ import {
   createManagedOxigraphSparqlStoreV1,
 } from '@origintrail-official/dkg-storage';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
+import { measureRetainedWalBytes } from '../src/daemon/oxigraph-wal.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
 import { OXIGRAPH_VERSION } from '../src/daemon/oxigraph-binary.js';
@@ -691,6 +692,67 @@ describe.skipIf(!nativeOxigraphTestBinary)(
           operation: 'construct',
           outcome: 'indeterminate',
         });
+      } finally {
+        await store.close();
+        await handle.stop();
+        await rm(location, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('reopens real retained WAL and preserves written data', async () => {
+      const binaryPath = nativeOxigraphTestBinary!;
+      expect(await executableVersion(binaryPath)).toBe(`oxigraph ${OXIGRAPH_VERSION}`);
+
+      const location = await mkdtemp(join(tmpdir(), 'oxi-native-wal-maintenance-'));
+      const port = await freePort();
+      const handle = await startOxigraphServer({
+        binaryPath,
+        location,
+        port,
+        readyTimeoutMs: 10_000,
+        readyIntervalMs: 50,
+        stopGraceMs: 2_000,
+        restartBackoffBaseMs: 100,
+        restartBackoffMaxMs: 200,
+        walRestartThresholdBytes: 4_096,
+        walMaintenanceCheckIntervalMs: 100,
+        walRestartIdleMs: 1_000,
+        walRestartCooldownMs: 60_000,
+        log: () => {},
+      });
+      const endpoint = `http://127.0.0.1:${port}`;
+      const store = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: `${endpoint}/query`,
+        updateEndpoint: `${endpoint}/update`,
+        timeout: 10_000,
+      }, {
+        getRecoveryState: () => handle.getRecoveryState(),
+        onActivityChange: (activeOperations) => handle.reportStoreActivity(activeOperations),
+        onClientTimeout: (operation) => handle.requestRestart(`${operation} timed out`),
+      });
+
+      try {
+        await store.insert(Array.from({ length: 500 }, (_, index) => ({
+          subject: `urn:wal-maintenance:${index}`,
+          predicate: 'urn:retained',
+          object: `"value-${index}-${'x'.repeat(64)}"`,
+          graph: 'urn:wal-maintenance-graph',
+        })));
+        const retainedBefore = measureRetainedWalBytes(location);
+        expect(retainedBefore).toBeGreaterThanOrEqual(4_096);
+
+        const deadline = Date.now() + 15_000;
+        while (
+          (handle.getRecoveryState().generation === 0 || handle.getRecoveryState().recovering)
+          && Date.now() < deadline
+        ) {
+          await sleep(50);
+        }
+        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 1 });
+        expect(measureRetainedWalBytes(location)).toBeLessThan(retainedBefore);
+        await expect(store.query(
+          'ASK { GRAPH <urn:wal-maintenance-graph> { <urn:wal-maintenance:42> <urn:retained> ?o } }',
+        )).resolves.toMatchObject({ type: 'boolean', value: true });
       } finally {
         await store.close();
         await handle.stop();
