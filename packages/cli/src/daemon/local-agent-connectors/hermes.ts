@@ -181,6 +181,33 @@ export function createHermesConnector(deps: HermesConnectorDeps = {}): LocalAgen
       },
     };
   };
+  const createRefreshPlan: LocalAgentConnectorStrategy['createRefreshPlan'] = async ({
+    config,
+    bridgeAuthToken,
+  }) => {
+    const health = await probeHermesChannelHealth(config, bridgeAuthToken, { timeoutMs: 3_000 });
+    if (health.ok) {
+      const transport = transportPatchFromHermesTarget(config, health.target)
+        ?? (health.target === 'gateway'
+          ? { kind: 'hermes-openai' as const, gatewayUrl: DEFAULT_HERMES_API_SERVER_URL }
+          : undefined);
+      return {
+        patch: {
+          transport,
+          runtime: { status: 'ready', ready: true, lastError: null },
+        },
+      };
+    }
+    return {
+      patch: {
+        runtime: {
+          status: 'degraded',
+          ready: false,
+          lastError: health.error ?? 'Hermes bridge offline',
+        },
+      },
+    };
+  };
   const createDisconnectPlan: LocalAgentConnectorStrategy['createDisconnectPlan'] = async ({ config, state }) => {
     try {
       const { reverseHermesSetupForUi } = await import('../local-agents.js');
@@ -210,5 +237,5 @@ export function createHermesConnector(deps: HermesConnectorDeps = {}): LocalAgen
       };
     }
   };
-  return { prepareBody, createPlan, cancelPending, createDisconnectPlan };
+  return { prepareBody, createPlan, createRefreshPlan, cancelPending, createDisconnectPlan };
 }

@@ -1,6 +1,7 @@
 import type {
   LocalAgentConnectPlan,
   LocalAgentConnectorPlan,
+  LocalAgentConnectorStrategy,
 } from '../src/daemon/local-agent-connectors/types.js';
 
 const connectorPlan = {
@@ -54,7 +55,24 @@ const connectorCannotReplaceManifest: LocalAgentConnectorPlan = {
   },
 };
 
+// Every lifecycle phase is dispatched through this one contract, so a
+// connector that implements only connect must not typecheck. Adding an
+// integration cannot leave refresh, cancellation or disconnect behind.
+// @ts-expect-error a connect-only strategy is not a complete connector lifecycle
+const partialLifecycle: LocalAgentConnectorStrategy = {
+  createPlan: async () => ({ ok: true, state: {} }),
+};
+
+const completeLifecycle: LocalAgentConnectorStrategy = {
+  createPlan: async () => ({ ok: true, state: {} }),
+  createRefreshPlan: async () => ({ patch: {} }),
+  cancelPending: () => undefined,
+  createDisconnectPlan: async ({ state }) => ({ state }),
+};
+
 void [
+  partialLifecycle,
+  completeLifecycle,
   connectorPlan,
   connectorWithAttachHandle,
   preparedPlan,

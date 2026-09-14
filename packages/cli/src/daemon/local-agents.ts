@@ -27,7 +27,6 @@ import {
   type LocalAgentIntegrationStatus,
   type LocalAgentIntegrationTransport,
 } from '../config.js';
-import { daemonState } from './state.js';
 // Pull every needed symbol from openclaw — including the previously
 // module-private helpers that handle-request and these flows reach
 // into.
@@ -36,8 +35,6 @@ import {
   OpenClawChannelHealthReport,
   cancelPendingLocalAgentAttachJob,
   getOpenClawChannelTargets,
-  probeOpenClawChannelHealth,
-  transportPatchFromOpenClawTarget,
   ensureOpenClawBridgeAvailable,
   buildOpenClawChannelHeaders,
   trimTrailingSlashes,
@@ -45,16 +42,6 @@ import {
   loadBridgeAuthToken,
   localOpenclawConfigPath,
 } from './openclaw.js';
-import {
-  DEFAULT_HERMES_API_SERVER_URL,
-  probeHermesChannelHealth,
-  transportPatchFromHermesTarget,
-} from './hermes.js';
-import {
-  probePrimeAgentChannelHealth,
-  targetFromDescriptor,
-  transportPatchFromPrimeAgentTarget,
-} from './prime-agent.js';
 import {
   localAgentConnectorFor,
   type LocalAgentAttachStatePatch,
@@ -727,6 +714,13 @@ export async function reverseLocalAgentSetupForUi(
   }
 }
 
+/**
+ * Re-probe one registered integration through its connector.
+ *
+ * Refresh is the read-only lifecycle phase: the connector decides the live
+ * patch from a health probe alone. It never runs setup, so this orchestrator
+ * deliberately exposes no dependency injection point.
+ */
 export async function refreshLocalAgentIntegrationFromUi(
   config: ImmutableDkgConfig,
   id: string,
@@ -737,90 +731,9 @@ export async function refreshLocalAgentIntegrationFromUi(
   if (!existing) {
     throw new Error(`Unknown integration: ${id}`);
   }
-  const applyPatch = (patch: LocalAgentAttachStatePatch) => ({ patch });
-  if (normalizedId === 'prime-agent') {
-    const health = await probePrimeAgentChannelHealth(bridgeAuthToken, { timeoutMs: 3_000 });
-    const live = health.sessions.find((session) => session.sessionId === health.target)
-      ?? health.sessions[0];
-    // Keep the UI conversation pin on the descriptor-order head, matching the
-    // Connect path. The health probe may fall through to an older survivor for
-    // transport readiness without silently moving the operator to that chat.
-    const metadata = {
-      sessionCount: health.sessionCount,
-      activeSessionId: health.sessions[0]?.sessionId ?? null,
-      activeMemorySessionId: health.sessions[0]?.memorySessionId ?? null,
-    };
-    if (health.ok && live) {
-      return applyPatch({
-        transport: transportPatchFromPrimeAgentTarget(targetFromDescriptor(live)),
-        runtime: { status: 'ready', ready: true, lastError: null },
-        metadata,
-      });
-    }
-    return applyPatch({
-      runtime: {
-        status: 'degraded',
-        ready: false,
-        lastError: health.error ?? 'no live Prime Agent session',
-      },
-      metadata,
-    });
-  }
-  if (normalizedId !== 'openclaw') {
-    if (normalizedId === 'hermes') {
-      const health = await probeHermesChannelHealth(config, bridgeAuthToken, {
-        timeoutMs: 3_000,
-      });
-
-      if (health.ok) {
-        const transport = transportPatchFromHermesTarget(config, health.target)
-          ?? (health.target === 'gateway'
-            ? { kind: 'hermes-openai', gatewayUrl: DEFAULT_HERMES_API_SERVER_URL }
-            : undefined);
-        return applyPatch({
-          transport,
-          runtime: {
-            status: 'ready',
-            ready: true,
-            lastError: null,
-          },
-        });
-      }
-
-      return applyPatch({
-        runtime: {
-          status: 'degraded',
-          ready: false,
-          lastError: health.error ?? 'Hermes bridge offline',
-        },
-      });
-    }
-
-    return { patch: {} };
-  }
-
-  daemonState.openClawBridgeHealth = null;
-  const health = await probeOpenClawChannelHealth(config, bridgeAuthToken, {
-    ignoreBridgeCache: true,
-    timeoutMs: 3_000,
-  });
-
-  if (health.ok) {
-    return applyPatch({
-      transport: transportPatchFromOpenClawTarget(config, health.target),
-      runtime: {
-        status: 'ready',
-        ready: true,
-        lastError: null,
-      },
-    });
-  }
-
-  return applyPatch({
-    runtime: {
-      status: 'error',
-      ready: false,
-      lastError: health.error ?? 'OpenClaw bridge offline',
-    },
+  return localAgentConnectorFor(normalizedId).createRefreshPlan({
+    config,
+    id: normalizedId,
+    bridgeAuthToken,
   });
 }

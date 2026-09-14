@@ -9,6 +9,7 @@ export function createGenericConnector(): LocalAgentConnectorStrategy {
       state: {},
       notice: `${requested.name} was registered. Chat will appear here once its framework bridge is available.`,
     }),
+    createRefreshPlan: async () => ({ patch: {} }),
     cancelPending,
     createDisconnectPlan: async ({ state }) => ({ state }),
   };

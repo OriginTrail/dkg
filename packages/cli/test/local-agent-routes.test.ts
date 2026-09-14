@@ -7,11 +7,14 @@ import { DkgHomeFiles, type DkgConfig } from '../src/config.js';
 import { DkgConfigStore } from '../src/daemon-config-store.js';
 import {
   type LocalAgentUiAttachDeps,
+  LOCAL_AGENT_INTEGRATION_DEFINITIONS,
   connectLocalAgentIntegrationFromUi,
   extractLocalAgentIntegrationPatch,
   getLocalAgentIntegration,
+  refreshLocalAgentIntegrationFromUi,
   updateLocalAgentIntegration,
 } from '../src/daemon/local-agents.js';
+import { localAgentConnectorFor } from '../src/daemon/local-agent-connectors/index.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 
@@ -447,4 +450,67 @@ describe('generic local-agent routes', () => {
     }
   });
 
+});
+
+describe('local-agent connector lifecycle contract', () => {
+  it('gives every connector one complete lifecycle', () => {
+    const ids = Object.keys(LOCAL_AGENT_INTEGRATION_DEFINITIONS);
+    expect(ids).toEqual(expect.arrayContaining(['openclaw', 'hermes', 'prime-agent', 'local-llm']));
+    // An id with no dedicated strategy still resolves to the generic
+    // connector, so a new integration cannot reach a half-implemented
+    // lifecycle by being forgotten in one phase.
+    for (const id of [...ids, 'not-registered']) {
+      const connector = localAgentConnectorFor(id);
+      expect(typeof connector.createPlan, `${id} connect`).toBe('function');
+      expect(typeof connector.createRefreshPlan, `${id} refresh`).toBe('function');
+      expect(typeof connector.cancelPending, `${id} cancel`).toBe('function');
+      expect(typeof connector.createDisconnectPlan, `${id} disconnect`).toBe('function');
+    }
+  });
+
+  it('drives connect, refresh and disconnect for a registry-only connector through one contract', async () => {
+    const config = makeConfig();
+    const connector = localAgentConnectorFor('not-registered');
+
+    const plan = await connector.createPlan({
+      config,
+      body: {},
+      bridgeAuthToken: undefined,
+      requested: { id: 'not-registered', name: 'Not Registered' },
+      existingBeforeConnect: null,
+      hadStoredTransportBeforeConnect: false,
+    });
+    expect(plan.ok).toBe(true);
+    expect(plan.state).toEqual({});
+    expect(plan.notice).toContain('Not Registered');
+
+    const refresh = await connector.createRefreshPlan({
+      config,
+      id: 'not-registered',
+      bridgeAuthToken: 'bridge-token',
+    });
+    expect(refresh.patch).toEqual({});
+
+    await connector.cancelPending('not-registered');
+
+    const disconnect = await connector.createDisconnectPlan({
+      config,
+      id: 'not-registered',
+      state: { enabled: false },
+    });
+    expect(disconnect.state).toEqual({ enabled: false });
+  });
+
+  it('refreshes a registry-only integration through the generic strategy', async () => {
+    const { patch } = await refreshLocalAgentIntegrationFromUi(
+      makeConfig(), 'local-llm', 'bridge-token',
+    );
+    expect(patch).toEqual({});
+  });
+
+  it('rejects a refresh for an integration the registry does not define', async () => {
+    await expect(
+      refreshLocalAgentIntegrationFromUi(makeConfig(), 'does-not-exist', 'bridge-token'),
+    ).rejects.toThrow(/Unknown integration/);
+  });
 });

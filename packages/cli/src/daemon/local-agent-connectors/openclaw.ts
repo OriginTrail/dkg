@@ -115,6 +115,33 @@ export function createOpenClawConnector(deps: OpenClawConnectorDeps = {}): Local
       },
     };
   };
+  const createRefreshPlan: LocalAgentConnectorStrategy['createRefreshPlan'] = async ({
+    config,
+    bridgeAuthToken,
+  }) => {
+    daemonState.openClawBridgeHealth = null;
+    const health = await probeOpenClawChannelHealth(config, bridgeAuthToken, {
+      ignoreBridgeCache: true,
+      timeoutMs: 3_000,
+    });
+    if (health.ok) {
+      return {
+        patch: {
+          transport: transportPatchFromOpenClawTarget(config, health.target),
+          runtime: { status: 'ready', ready: true, lastError: null },
+        },
+      };
+    }
+    return {
+      patch: {
+        runtime: {
+          status: 'error',
+          ready: false,
+          lastError: health.error ?? 'OpenClaw bridge offline',
+        },
+      },
+    };
+  };
   const createDisconnectPlan: LocalAgentConnectorStrategy['createDisconnectPlan'] = async ({ config, state }) => {
     try {
       const { reverseLocalAgentSetupForUi } = await import('../local-agents.js');
@@ -132,5 +159,5 @@ export function createOpenClawConnector(deps: OpenClawConnectorDeps = {}): Local
       };
     }
   };
-  return { createPlan, cancelPending, createDisconnectPlan };
+  return { createPlan, createRefreshPlan, cancelPending, createDisconnectPlan };
 }

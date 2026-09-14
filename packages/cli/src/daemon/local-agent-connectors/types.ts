@@ -54,6 +54,17 @@ export interface LocalAgentConnectorContext {
   hadStoredTransportBeforeConnect: boolean;
 }
 
+/** Live re-probe of an already-registered integration. Never runs setup. */
+export interface LocalAgentRefreshContext {
+  config: ImmutableDkgConfig;
+  id: string;
+  bridgeAuthToken: string | undefined;
+}
+
+export interface LocalAgentRefreshPlan {
+  patch: LocalAgentAttachStatePatch;
+}
+
 export interface LocalAgentDisconnectContext {
   config: ImmutableDkgConfig;
   id: string;
@@ -70,6 +81,7 @@ export interface LocalAgentConnectorStrategy {
     body: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>;
   createPlan: (context: LocalAgentConnectorContext) => Promise<LocalAgentConnectorPlan>;
+  createRefreshPlan: (context: LocalAgentRefreshContext) => Promise<LocalAgentRefreshPlan>;
   cancelPending: (id: string) => void | Promise<void>;
   createDisconnectPlan: (
     context: LocalAgentDisconnectContext,

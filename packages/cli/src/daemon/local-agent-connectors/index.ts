@@ -26,6 +26,8 @@ export type {
   LocalAgentConnectPlan,
   LocalAgentConnectorPlan,
   LocalAgentConnectorContext,
+  LocalAgentRefreshContext,
+  LocalAgentRefreshPlan,
   LocalAgentDisconnectContext,
   LocalAgentDisconnectPlan,
   LocalAgentConnectorStrategy,
