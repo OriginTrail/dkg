@@ -43,15 +43,41 @@ describe('ChainEventPoller scheduler', () => {
       .rejects.toThrow(/non-negative safe integer/);
   });
 
-  it('seeds a legacy aggregate cursor once', async () => {
+  it('refuses to seed every production lane through a legacy aggregate cursor', async () => {
     const saved: number[] = [];
     const cursor: LegacyCursorPersistence = {
       async load() { return undefined; },
       async save(blockNumber) { saved.push(blockNumber); },
     };
+
+    await expect(seedChainEventPollerCursors(cursor, 42))
+      .rejects.toThrow(/loadLane and saveLane/);
+    expect(saved).toEqual([]);
+  });
+
+  it('restores a seeded allocator lane at seed + 1 after reconstructing the poller', async () => {
+    const saved = new Map<ChainEventPollerLane, number>();
+    const cursor: LaneCursorPersistence = {
+      async loadLane(lane) { return saved.get(lane); },
+      async saveLane(lane, block) { saved.set(lane, block); },
+    };
     await seedChainEventPollerCursors(cursor, 42);
 
-    expect(saved).toEqual([42]);
+    const { adapter, filters } = makeChain({ head: 100 });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      cursorPersistence: cursor,
+      onKnowledgeAssetCreated: async () => { /* sink */ },
+    });
+
+    await poller.start();
+    await poller.waitForCurrentPoll();
+    await poller.stop();
+
+    expect(filters.map(({ eventTypes, fromBlock, toBlock }) => [eventTypes, fromBlock, toBlock]))
+      .toEqual([[['KCCreated'], 43, 100]]);
   });
 
   it('applies a legacy explicit seed to a disabled full-history lane before activation', async () => {

@@ -74,14 +74,26 @@ export async function seedLaneCursorStore(
   for (const lane of new Set(lanes)) await cursorStore.saveLane(lane, blockNumber);
 }
 
-/** Seed persistent storage for every production poller lane without constructing a poller. */
+/**
+ * Seed persistent storage for every production poller lane without constructing a poller.
+ *
+ * Only lane-aware persistence can honour that contract. A legacy aggregate
+ * cursor is deliberately ignored by full-history lanes such as
+ * `allocatorReconcile`, so one aggregate write would report success while that
+ * lane still replays its complete history after the next restart. Seeding a
+ * legacy aggregate therefore has to stay a runner-scoped operation, where the
+ * seed also lives in the lane state for the rest of that runner's lifetime.
+ */
 export async function seedChainEventPollerCursors(
   cursorPersistence: CursorPersistence,
   blockNumber: number,
 ): Promise<void> {
-  await seedLaneCursorStore(
-    createLaneCursorStore(cursorPersistence),
-    CHAIN_EVENT_POLLER_LANES,
-    blockNumber,
-  );
+  const cursorStore = createLaneCursorStore(cursorPersistence);
+  if (cursorStore?.kind === 'legacy') {
+    throw new Error(
+      'Chain event cursor persistence must provide loadLane and saveLane to seed every production poller lane; '
+      + 'a legacy aggregate cursor cannot restore full-history lanes.',
+    );
+  }
+  await seedLaneCursorStore(cursorStore, CHAIN_EVENT_POLLER_LANES, blockNumber);
 }
