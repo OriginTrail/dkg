@@ -246,6 +246,15 @@ export class ContextGraphMetaProjection {
     return new GraphManager(this.store).listDeclaredContextGraphs(options);
   }
 
+  /**
+   * Declared identities PLUS the legacy bare roots that predate RDF
+   * declarations, from the one named-graph enumeration that produces both.
+   * Listing callers use this so a locally stored legacy graph stays visible.
+   */
+  async listStoredContextGraphIds(options: QueryOptions = {}): Promise<string[]> {
+    return new GraphManager(this.store).listContextGraphs(options);
+  }
+
   private async listGraphsByPrefix(prefix: string, options: QueryOptions): Promise<string[]> {
     if (this.store.listGraphsByPrefix) return this.store.listGraphsByPrefix(prefix, options);
     return (await this.store.listGraphs(options)).filter((graphUri) => graphUri.startsWith(prefix));

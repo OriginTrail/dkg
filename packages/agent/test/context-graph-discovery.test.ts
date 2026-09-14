@@ -534,6 +534,32 @@ describe('listContextGraphs merge', () => {
     expect(contextGraphs.find(p => p.id === 'phantom-cg')).toBeUndefined();
   }, 15000);
 
+  it('keeps an undeclared legacy bare-root graph visible in projection mode', async () => {
+    // Graphs created before context graphs declared themselves in RDF exist
+    // only as a bare storage root. The projection listing must still surface
+    // them, as the storage-backed enumeration it replaced did.
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+    await store.insert([{
+      subject: 'urn:legacy:asset',
+      predicate: 'http://schema.org/name',
+      object: '"Legacy API CG"',
+      graph: contextGraphDataGraphUri('legacy-api-cg'),
+    }]);
+
+    const previous = process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+    process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = '1';
+    try {
+      const contextGraphs = await agent.listContextGraphs();
+      expect(contextGraphs.find((row) => row.id === 'legacy-api-cg')).toBeDefined();
+    } finally {
+      if (previous === undefined) delete process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+      else process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = previous;
+    }
+  }, 15000);
+
   it('keeps phantom-candidate subscriptions when local content probe times out', async () => {
     const result = await createTestAgent({ store: sparqlHttpStoreBackedBy(new OxigraphStore()) });
     agent = result.agent;

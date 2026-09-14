@@ -231,24 +231,45 @@ describe('host-mode bookkeeping key canonicalisation', () => {
     expect(reconcile).toHaveBeenCalledWith(cg);
   });
 
-  it('unwires a revoked persisted host subscription after all CG graphs disappear', async () => {
+  it('unwires a revoked host subscription known ONLY from the persisted marker', async () => {
     const { core, bus } = await makeCore();
     const cg = 'undeclared-revoked-host';
     const internals = core as unknown as AgentInternals;
-    await core.enableSwmHostModeFor(cg);
-    await internals.awaitHostModePersistence(cg);
-    expect(await internals.swmHostModeStore!.listHostModeSubscribedCgs()).toContain(cg);
+    // Persisted-only state, as after a restart: the marker exists while
+    // declarations, stored graphs, subscriptions, handlers and the live
+    // host-mode map are all empty. `enableSwmHostModeFor` is deliberately NOT
+    // called here — otherwise live bookkeeping, not
+    // `listHostModeSubscribedCgs()`, would supply the reconcile candidate and
+    // the persisted path would never be exercised.
+    await internals.swmHostModeStore!.markHostModeSubscribed(
+      internals.hostModePersistenceStoreKey(cg),
+    );
+    expect(await internals.swmHostModeStore!.listHostModeSubscribedCgs())
+      .toContain(internals.hostModePersistenceStoreKey(cg));
     expect(await new GraphManager(core.store).listContextGraphs()).not.toContain(cg);
-    expect(totalHandlers(bus)).toBe(1);
+    expect(internals.swmHostModeSubscribed.size).toBe(0);
+    expect(internals.swmHostModeHandlers.size).toBe(0);
+    expect(totalHandlers(bus)).toBe(0);
 
+    const visited: string[] = [];
+    const reconcileOne = internals.reconcileSwmHostModeSubscription.bind(core);
+    internals.reconcileSwmHostModeSubscription = async (contextGraphId: string) => {
+      visited.push(contextGraphId);
+      await reconcileOne(contextGraphId);
+    };
     vi.spyOn(core, 'rfc64LegacySwmGossipAllowedForContextGraph').mockReturnValue(false);
     await core.reconcileHostModeSubscriptions();
     await internals.awaitHostModePersistence(cg);
 
+    // The persisted candidate was visited and its marker cleared under the
+    // revoked policy, without ever wiring a handler.
+    expect(visited.map((id) => internals.hostModePersistenceStoreKey(id)))
+      .toContain(internals.hostModePersistenceStoreKey(cg));
     expect(totalHandlers(bus)).toBe(0);
     expect(internals.swmHostModeSubscribed.size).toBe(0);
     expect(internals.swmHostModeHandlers.size).toBe(0);
-    expect(await internals.swmHostModeStore!.listHostModeSubscribedCgs()).not.toContain(cg);
+    expect(await internals.swmHostModeStore!.listHostModeSubscribedCgs())
+      .not.toContain(internals.hostModePersistenceStoreKey(cg));
   });
 
   it('cleartext subscribe followed by wire-hash subscribe for the same CG is idempotent', async () => {

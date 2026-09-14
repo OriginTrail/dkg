@@ -1161,16 +1161,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // the wire path.
     const wireCgId = this.canonicalSwmHostModeKey(contextGraphId);
     const handler = this.swmHostModeHandlers.get(wireCgId);
-    if (!handler) return;
-    const swmTopic = contextGraphWorkspaceTopic(wireCgId);
-    this.gossip.offMessage(swmTopic, handler);
-    this.swmHostModeHandlers.delete(wireCgId);
-    this.swmHostModeSubscribed.delete(wireCgId);
-    this.swmHostModeCurated.delete(wireCgId);
+    if (handler) {
+      const swmTopic = contextGraphWorkspaceTopic(wireCgId);
+      this.gossip.offMessage(swmTopic, handler);
+      this.swmHostModeHandlers.delete(wireCgId);
+      this.swmHostModeSubscribed.delete(wireCgId);
+      this.swmHostModeCurated.delete(wireCgId);
+    }
     // B3: clear the persisted host-mode designation so a restart
     // does NOT re-engage. Serialized via the per-CG persistence
     // queue (see `enqueueHostModePersistence` for the ordering
     // rationale).
+    //
+    // This runs even when this process holds no handler for the CG. A
+    // persisted designation outlives its handler — a marker recovered from
+    // disk before wiring, or a wire attempt that failed — and leaving it
+    // behind would re-engage a CG whose authority has already been revoked.
+    // `markHostModeUnsubscribed` is idempotent, so a CG that was never
+    // host-subscribed costs one meta read and writes nothing.
     this.enqueueHostModePersistence(contextGraphId, false);
   }
 

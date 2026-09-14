@@ -740,13 +740,16 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // and wrap per-row reads in withBudget (per A1's LIST_CONTEXT_GRAPHS_*_BUDGET_MS);
     // this projection path currently lacks the per-read budgets/abort-signal the
     // legacy path has. (Track C security review.)
-    const candidateIds = new Set(await this.contextGraphMetaProjection.listDeclaredContextGraphIds());
+    // Declarations are authoritative, but they are not the whole set: graphs
+    // created before context graphs declared themselves in RDF exist only as
+    // a bare storage root. The stored listing returns both from ONE named-graph
+    // enumeration, so keeping legacy roots visible costs no extra scan — and
+    // the per-row local-content check below still hides phantom candidates.
+    const candidateIds = new Set(await this.contextGraphMetaProjection.listStoredContextGraphIds());
     for (const [id] of this.subscribedContextGraphs) {
       candidateIds.add(id);
     }
 
-    // The projection already uses the shared declaration-based enumeration.
-    // Repeating it through GraphManager would scan the same sources twice.
     const rows = await mapContextGraphListRows([...candidateIds].sort(), async (id): Promise<InternalContextGraphListRow | null> => {
       if (!id) return null;
       const sub = this.subscribedContextGraphs.get(id);

@@ -50,7 +50,8 @@ describe('context graph list row concurrency', () => {
     const probe = concurrencyProbe();
     const fakeAgent = {
       contextGraphMetaProjection: {
-        listDeclaredContextGraphIds: async () => IDS,
+        // Declared identities plus legacy bare roots, from one enumeration.
+        listStoredContextGraphIds: async () => IDS,
       },
       subscribedContextGraphs: new Map(),
       store: {
