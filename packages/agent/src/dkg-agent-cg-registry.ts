@@ -96,7 +96,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -709,37 +709,23 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     const resolveMany = indexReader.resolveFinalizedContextGraphIdsByNameHashes;
     if (resolveMany !== undefined) {
-      const maxTargetsPerRead = indexReader.maxTargetCount
-        ?? CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS;
-      if (!Number.isSafeInteger(maxTargetsPerRead) || maxTargetsPerRead < 1) {
-        throw new TypeError(
-          'Context Graph finalized authority reader target limit must be a positive integer',
-        );
-      }
       const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
-      for (let offset = 0; offset < bindingTargets.length; offset += maxTargetsPerRead) {
-        options.signal?.throwIfAborted();
-        const ownedTargets = bindingTargets.slice(offset, offset + maxTargetsPerRead);
-        const resolvedByNameHash = await resolveMany.call(
-          indexReader,
-          ownedTargets.map(({ expectedNameHash }) => expectedNameHash),
-          options,
-        );
-        // Custom readers are allowed for tests/integrations and may not honor
-        // the signal themselves. Never publish a chunk that completed after
-        // its caller cancelled, including the final chunk.
-        options.signal?.throwIfAborted();
-        // A custom reader may return a superset. Project only the exact target
-        // slice owned by this read so a cross-chunk entry cannot overwrite or
-        // synthesize another chunk's binding.
-        for (const { contextGraphId, expectedNameHash } of ownedTargets) {
-          const expectedOnChainId = resolvedByNameHash.get(expectedNameHash);
-          if (expectedOnChainId !== undefined) {
-            targets.set(contextGraphId, Object.freeze({
-              expectedNameHash,
-              expectedOnChainId,
-            }));
-          }
+      options.signal?.throwIfAborted();
+      const resolvedByNameHash = await resolveMany.call(
+        indexReader,
+        bindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+        options,
+      );
+      // Custom readers may not honor cancellation or may return a superset.
+      // Publish only exact logical targets after the caller's final fence.
+      options.signal?.throwIfAborted();
+      for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+        const expectedOnChainId = resolvedByNameHash.get(expectedNameHash);
+        if (expectedOnChainId !== undefined) {
+          targets.set(contextGraphId, Object.freeze({
+            expectedNameHash,
+            expectedOnChainId,
+          }));
         }
       }
       return { kind: 'finalized-index', targets };

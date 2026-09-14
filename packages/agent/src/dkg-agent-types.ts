@@ -994,6 +994,24 @@ export interface ContextGraphWritePreflightProbe {
 
 export type ContextGraphMemberPrincipalType = 'node' | 'agent' | 'identity';
 export type ContextGraphMemberStatus = 'active' | 'removed' | 'pending';
+export const CONTEXT_GRAPH_MEMBERSHIP_SOURCES = [
+  'local-create',
+  'implicit-swm-write',
+  'allowed-peer',
+  'allowed-agent',
+  'participant-agent',
+  'on-chain-registration',
+  'join-approved',
+  'join-rejected',
+  'join-request',
+  'join-request-outbox-response',
+  'subscription',
+  'rehydrated-subscription',
+  // Retained for custom-store migration fixtures and legacy integrations.
+  'pre-existing',
+] as const;
+export type ContextGraphMembershipSource =
+  typeof CONTEXT_GRAPH_MEMBERSHIP_SOURCES[number];
 
 export interface ContextGraphMembershipRecord {
   contextGraphId: string;
@@ -1001,7 +1019,7 @@ export interface ContextGraphMembershipRecord {
   principalId: string;
   role?: string;
   status: ContextGraphMemberStatus;
-  source?: string;
+  source?: ContextGraphMembershipSource;
   displayName?: string;
   metadata?: Record<string, unknown>;
 }

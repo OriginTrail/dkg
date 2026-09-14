@@ -1129,9 +1129,14 @@ export class DKGAgent extends DKGAgentBase {
           `RFC-64 authority revision scan incomplete: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
-      refreshContextGraph: async (contextGraphId, signal) => (
+      refreshContextGraph: async (contextGraphId, signal, request) => (
         withRpcRequestContext({ requestClass: 'background', signal }, async () => (
-          await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal) === null
+          await this.reconcileRfc64CatalogAccessAuthorityV1(
+            contextGraphId,
+            signal,
+            undefined,
+            request.authorityReadRequest,
+          ) === null
             ? 'superseded'
             : 'committed'
         ))

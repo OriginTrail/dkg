@@ -619,6 +619,7 @@ import {
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
+  type ContextGraphMembershipSource,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -9867,7 +9868,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
   }
 
-  persistLocalNodeMembership(this: DKGAgent, contextGraphId: string, source = 'subscription'): void {
+  persistLocalNodeMembership(
+    this: DKGAgent,
+    contextGraphId: string,
+    source: ContextGraphMembershipSource = 'subscription',
+  ): void {
     const sub = this.subscribedContextGraphs.get(contextGraphId);
     this.upsertContextGraphMember({
       contextGraphId,

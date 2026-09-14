@@ -11,6 +11,7 @@ import {
   Rfc64CatalogAuthorityRefreshLoopV1,
   Rfc64CatalogAuthorityRevisionReadFailureV1,
   type Rfc64CatalogAuthorityRefreshResultV1,
+  type Rfc64CatalogAuthorityRefreshRequestV1,
   type Rfc64CatalogAuthorityRefreshSchedulerV1,
   type Rfc64CatalogAuthorityRevisionReadV1,
   type Rfc64CatalogAuthorityRevisionSourceV1,
@@ -88,6 +89,7 @@ export interface Rfc64CatalogAuthorityRefreshBindingV1 {
   readonly refreshContextGraph: (
     contextGraphId: string,
     signal: AbortSignal,
+    request: Rfc64CatalogAuthorityRefreshRequestV1,
   ) => Promise<Rfc64CatalogAuthorityRefreshResultV1>;
   readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
   readonly onAuthorityRevisionsReadFailure: (error: unknown) => void;

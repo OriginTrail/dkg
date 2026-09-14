@@ -146,10 +146,7 @@ interface EvmContextGraphAuthorityIndexRevisionReaderDependenciesV1 {
 function snapshotAuthorityRevisionTargetsV1(
   contextGraphIds: unknown,
 ): readonly ContextGraphAuthorityIndexId[] {
-  if (
-    !Array.isArray(contextGraphIds)
-    || contextGraphIds.length > CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
-  ) {
+  if (!Array.isArray(contextGraphIds)) {
     throw new Error('Context Graph authority revision target set is invalid');
   }
   const targets = new Set<ContextGraphAuthorityIndexId>();
@@ -166,10 +163,7 @@ function snapshotAuthorityRevisionTargetsV1(
 function snapshotAuthorityNameHashTargetsV1(
   nameHashes: unknown,
 ): readonly string[] {
-  if (
-    !Array.isArray(nameHashes)
-    || nameHashes.length > CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
-  ) {
+  if (!Array.isArray(nameHashes)) {
     throw new Error('Context Graph authority name-hash target set is invalid');
   }
   const targets = new Set<string>();
@@ -304,20 +298,33 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       operationLabel,
       options,
       async (scan) => {
-        const states = await dependencies.index.statesByNameHashes({
-          ...scan,
-          nameHashes,
-        });
-        return new Map([...states].map(([nameHash, state]) => [
-          nameHash,
-          BigInt(state.contextGraphId),
-        ]));
+        const resolved = new Map<string, bigint>();
+        for (
+          let offset = 0;
+          offset < nameHashes.length;
+          offset += CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
+        ) {
+          options.signal?.throwIfAborted();
+          const ownedNameHashes = nameHashes.slice(
+            offset,
+            offset + CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
+          );
+          const states = await dependencies.index.statesByNameHashes({
+            ...scan,
+            nameHashes: ownedNameHashes,
+          });
+          options.signal?.throwIfAborted();
+          for (const nameHash of ownedNameHashes) {
+            const state = states.get(nameHash);
+            if (state !== undefined) resolved.set(nameHash, BigInt(state.contextGraphId));
+          }
+        }
+        return resolved;
       },
     );
   };
 
   return Object.freeze({
-    maxTargetCount: CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
     whenIdle(): Promise<void> {
       return lifecycle.whenIdle();
     },
@@ -372,10 +379,30 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       return runFinalizedProjection(
         'readContextGraphAuthorityIndexRevisions',
         options,
-        (scan) => dependencies.index.revisions({
-          ...scan,
-          contextGraphIds: targets,
-        }),
+        async (scan) => {
+          const revisions = new Map<ContextGraphAuthorityIndexId, string>();
+          for (
+            let offset = 0;
+            offset < targets.length;
+            offset += CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
+          ) {
+            options.signal?.throwIfAborted();
+            const ownedTargets = targets.slice(
+              offset,
+              offset + CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
+            );
+            const projected = await dependencies.index.revisions({
+              ...scan,
+              contextGraphIds: ownedTargets,
+            });
+            options.signal?.throwIfAborted();
+            for (const target of ownedTargets) {
+              const revision = projected.get(target);
+              if (revision !== undefined) revisions.set(target, revision);
+            }
+          }
+          return revisions;
+        },
       );
     },
     async readContextGraphAuthorityIndexSnapshots(
@@ -392,15 +419,37 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
         'readContextGraphAuthorityIndexSnapshots',
         options,
         async (scan, { provider, contractAddress }) => {
-          const states = await dependencies.index.states({
-            ...scan,
-            contextGraphIds: targets,
-          });
           const chainId = (await provider.getNetwork()).chainId.toString(10);
-          return new Map([...states].map(([contextGraphId, state]) => [
-            contextGraphId,
-            authoritySnapshotV1(state, chainId, contractAddress),
-          ]));
+          const snapshots = new Map<
+            ContextGraphAuthorityIndexId,
+            ContextGraphAuthoritySnapshot
+          >();
+          for (
+            let offset = 0;
+            offset < targets.length;
+            offset += CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
+          ) {
+            options.signal?.throwIfAborted();
+            const ownedTargets = targets.slice(
+              offset,
+              offset + CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
+            );
+            const states = await dependencies.index.states({
+              ...scan,
+              contextGraphIds: ownedTargets,
+            });
+            options.signal?.throwIfAborted();
+            for (const target of ownedTargets) {
+              const state = states.get(target);
+              if (state !== undefined) {
+                snapshots.set(
+                  target,
+                  authoritySnapshotV1(state, chainId, contractAddress),
+                );
+              }
+            }
+          }
+          return snapshots;
         },
       );
     },

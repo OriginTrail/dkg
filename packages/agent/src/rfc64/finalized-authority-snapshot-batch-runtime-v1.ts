@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
   type ContextGraphAuthorityIndexId,
   type ContextGraphAuthoritySnapshot,
 } from '@origintrail-official/dkg-chain';
@@ -21,8 +20,6 @@ export interface Rfc64FinalizedAuthoritySnapshotBatchRuntimeOptionsV1 {
   ) => Promise<ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthoritySnapshot>>;
   /** Complete opportunistic target inventory, sampled once before the read starts. */
   readonly snapshotTargetIds?: () => Iterable<ContextGraphAuthorityIndexId>;
-  /** Physical reader limit; defaults to the production chain capability contract. */
-  readonly maxTargetsPerRead?: number;
 }
 
 interface Rfc64PendingFinalizedAuthoritySnapshotBatchV1 {
@@ -32,6 +29,8 @@ interface Rfc64PendingFinalizedAuthoritySnapshotBatchV1 {
     ContextGraphAuthoritySnapshot
   >>;
 }
+
+export type Rfc64FinalizedAuthoritySnapshotFreshnessRequestV1 = object;
 
 function immutableAuthoritySnapshotV1(
   snapshot: ContextGraphAuthoritySnapshot,
@@ -61,30 +60,26 @@ function waitForBatchV1<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T
  * Owns short-lived finalized-index batches without retaining time-based
  * authority cache state. A batch's target set closes before its physical reads
  * start; callers may share that result only when their ID is in that exact
- * set. Oversized sets are read in bounded chunks, and snapshot evidence is
+ * set. The chain capability owns any physical chunking. Snapshot evidence is
  * copied and frozen before it leaves this owner.
  */
 export class Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
   readonly #active = new Set<Rfc64PendingFinalizedAuthoritySnapshotBatchV1>();
-  readonly #maxTargetsPerRead: number;
+  readonly #freshnessBatches = new WeakMap<
+    Rfc64FinalizedAuthoritySnapshotFreshnessRequestV1,
+    Set<Rfc64PendingFinalizedAuthoritySnapshotBatchV1>
+  >();
 
   constructor(
     private readonly options: Rfc64FinalizedAuthoritySnapshotBatchRuntimeOptionsV1,
-  ) {
-    this.#maxTargetsPerRead = options.maxTargetsPerRead
-      ?? CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS;
-    if (
-      !Number.isSafeInteger(this.#maxTargetsPerRead)
-      || this.#maxTargetsPerRead < 1
-    ) {
-      throw new TypeError('RFC-64 finalized authority batch limit must be a positive integer');
-    }
-  }
+  ) {}
 
   async read(
     contextGraphAuthorityIndexId: ContextGraphAuthorityIndexId,
     signal?: AbortSignal,
-    options: Readonly<{ requireReadAfterRequest?: boolean }> = {},
+    options: Readonly<{
+      freshnessRequest?: Rfc64FinalizedAuthoritySnapshotFreshnessRequestV1;
+    }> = {},
   ): Promise<Rfc64FinalizedAuthoritySnapshotEvidenceV1> {
     signal?.throwIfAborted();
     // Let same-turn callers publish their complete subscription/binding state
@@ -92,16 +87,29 @@ export class Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
     // collection window: no batch exists until its target set is closed.
     await Promise.resolve();
     signal?.throwIfAborted();
-    // A revision-triggered refresh must not join a physical read which began
-    // before that revision was observed, so it always owns a new immutable
-    // target snapshot and therefore selects a fresh finalized anchor.
-    let batch = options.requireReadAfterRequest === true
+    // Every refresh pass owns an opaque request token. All of its CG lanes use
+    // the same immutable batch even when a fast read completes before a later
+    // lane reaches this boundary. A later pass has another token and therefore
+    // cannot reuse evidence selected before its revision was observed.
+    const freshnessRequest = options.freshnessRequest;
+    const requestBatches = freshnessRequest === undefined
       ? undefined
-      : [...this.#active].find(
-        (candidate) => candidate.closedTargetIds.has(contextGraphAuthorityIndexId),
-      );
+      : this.#freshnessBatches.get(freshnessRequest);
+    const eligibleBatches = freshnessRequest === undefined
+      ? this.#active
+      : requestBatches ?? [];
+    let batch = [...eligibleBatches].find(
+      (candidate) => candidate.closedTargetIds.has(contextGraphAuthorityIndexId),
+    );
     if (batch === undefined) {
       batch = this.#createBatch(contextGraphAuthorityIndexId);
+      if (freshnessRequest !== undefined) {
+        const batches = requestBatches ?? new Set();
+        batches.add(batch);
+        if (requestBatches === undefined) {
+          this.#freshnessBatches.set(freshnessRequest, batches);
+        }
+      }
     }
     const snapshots = await waitForBatchV1(batch.result, signal);
     const closedTargetIds = batch.closedTargetIds;
@@ -138,23 +146,13 @@ export class Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
     // closed batch is visible to concurrent callers before transport starts.
     const result = Promise.resolve().then(async () => {
       const owned = new Map<ContextGraphAuthorityIndexId, ContextGraphAuthoritySnapshot>();
-      for (
-        let offset = 0;
-        offset < requestedTargetIds.length;
-        offset += this.#maxTargetsPerRead
-      ) {
-        const chunk = Object.freeze(requestedTargetIds.slice(
-          offset,
-          offset + this.#maxTargetsPerRead,
-        ));
-        const snapshots = await this.options.readSnapshots(chunk);
-        // Only merge keys owned by this closed chunk. A custom reader cannot
-        // inject unrelated authority into another caller's logical batch.
-        for (const targetId of chunk) {
-          const snapshot = snapshots.get(targetId);
-          if (snapshot !== undefined) {
-            owned.set(targetId, immutableAuthoritySnapshotV1(snapshot));
-          }
+      const snapshots = await this.options.readSnapshots(requestedTargetIds);
+      // Only merge keys owned by this closed logical set. A custom reader
+      // cannot inject unrelated authority into another caller's batch.
+      for (const targetId of requestedTargetIds) {
+        const snapshot = snapshots.get(targetId);
+        if (snapshot !== undefined) {
+          owned.set(targetId, immutableAuthoritySnapshotV1(snapshot));
         }
       }
       return owned as ReadonlyMap<ContextGraphAuthorityIndexId, ContextGraphAuthoritySnapshot>;

@@ -176,6 +176,7 @@ import {
 import {
   Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1,
   type Rfc64FinalizedAuthoritySnapshotEvidenceV1,
+  type Rfc64FinalizedAuthoritySnapshotFreshnessRequestV1,
 } from './rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
 
 /** Minimal EIP-191 EOA signer (ethers.Wallet-compatible) for author-catalog objects. */
@@ -1872,7 +1873,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     onChainId: string,
     signal?: AbortSignal,
-    options: Readonly<{ requireReadAfterRequest?: boolean }> = {},
+    options: Readonly<{
+      freshnessRequest?: Rfc64FinalizedAuthoritySnapshotFreshnessRequestV1;
+    }> = {},
   ): Promise<Rfc64FinalizedAuthoritySnapshotEvidenceV1 | undefined> {
     const indexedReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     const readSnapshots = indexedReader?.readContextGraphAuthorityIndexSnapshots;
@@ -1885,9 +1888,6 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     let runtime = rfc64ResponsibilityAuthorityBatchRuntimesV1.get(this);
     if (runtime === undefined) {
       runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-        ...(indexedReader.maxTargetCount === undefined
-          ? {}
-          : { maxTargetsPerRead: indexedReader.maxTargetCount }),
         snapshotTargetIds: () => {
           const targets: ContextGraphAuthorityIndexId[] = [];
           for (const subscription of this.subscribedContextGraphs.values()) {
@@ -1918,8 +1918,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
 
   /**
    * Share one immutable finalized-index target snapshot across registered
-   * callers whose IDs it explicitly owns. The batch owner chunks physical
-   * reads to the adapter's advertised limit. Results are never retained as a
+   * callers whose IDs it explicitly owns. The chain capability owns physical
+   * chunking. Results are never retained as a
    * time-based authority cache.
    */
   async readRfc64BatchedFinalizedAuthoritySnapshotV1(
@@ -2125,6 +2125,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphId: string,
     signal?: AbortSignal,
     finalizedAuthorityEvidence?: Rfc64FinalizedAuthoritySnapshotEvidenceV1,
+    authorityReadRequest?: Rfc64FinalizedAuthoritySnapshotFreshnessRequestV1,
   ): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | null> {
     const service = this.rfc64PublicCatalogServiceV1;
     if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
@@ -2167,15 +2168,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         throw new Error('RFC-64 finalized authority evidence belongs to another graph');
       }
       // Responsibility bootstrap passes the exact evidence it used for policy
-      // selection. Independent/revision-triggered refreshes require a physical
-      // read whose finalized anchor is selected after this refresh began.
+      // selection. A scheduled refresh pass shares one opaque request across
+      // all of its CG lanes; an independent refresh creates its own request.
       const ownedAuthorityEvidence = boundOnChainId === undefined
         ? undefined
         : finalizedAuthorityEvidence
           ?? await this.readRfc64FinalizedAuthoritySnapshotEvidenceV1(
             boundOnChainId,
             signal,
-            { requireReadAfterRequest: true },
+            { freshnessRequest: authorityReadRequest ?? Object.freeze({}) },
           );
       const batchedSnapshot = ownedAuthorityEvidence?.snapshot;
       const registeredAuthorityRead = localFirstUnregistered

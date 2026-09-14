@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import type {
+  ContextGraphAuthorityIndexId,
+  ContextGraphAuthoritySnapshot,
+} from '@origintrail-official/dkg-chain';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   Rfc64CatalogAuthorityRefreshLoopV1,
@@ -9,6 +13,8 @@ import {
   '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   '../src/rfc64/catalog-authority-config-v1.js';
+import { Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 } from
+  '../src/rfc64/finalized-authority-snapshot-batch-runtime-v1.js';
 
 const COMMITTED = 'committed' as const;
 const SUPERSEDED = 'superseded' as const;
@@ -51,6 +57,69 @@ function revisionSource(
 }
 
 describe('RFC-64 catalog authority refresh loop', () => {
+  it('performs one logical authority read per multi-graph pass and fences the next revision', async () => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    let revision = 'revision-1';
+    const indexIds = new Map<string, ContextGraphAuthorityIndexId>([
+      ['cg-a', '9' as ContextGraphAuthorityIndexId],
+      ['cg-b', '10' as ContextGraphAuthorityIndexId],
+    ]);
+    const readSnapshots = vi.fn(async (
+      targetIds: readonly ContextGraphAuthorityIndexId[],
+    ) => new Map(targetIds.map((contextGraphId) => [contextGraphId, {
+      chainId: '20430',
+      governanceContract: '0x3333333333333333333333333333333333333333',
+      contextGraphId,
+      owner: '0x1111111111111111111111111111111111111111',
+      active: true,
+      accessPolicy: 0,
+      publishPolicy: 1,
+      publishAuthority: null,
+      publishAuthorityAccountId: '0',
+      participantAgents: [],
+      nameHash: `0x${contextGraphId.padStart(64, '0')}`,
+      ownershipEra: '0',
+      policyVersion: '0',
+      rosterVersion: '0',
+      sourceBlockNumber: '42',
+      sourceBlockHash: `0x${'44'.repeat(32)}`,
+    } satisfies ContextGraphAuthoritySnapshot])));
+    const authorityRuntime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
+      snapshotTargetIds: () => indexIds.values(),
+      readSnapshots,
+    });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(new Map([
+        ['cg-a', revision],
+        ['cg-b', revision],
+      ]))),
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId, signal, request) => {
+        await authorityRuntime.read(indexIds.get(contextGraphId)!, signal, {
+          freshnessRequest: request.authorityReadRequest,
+        });
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+    expect(readSnapshots).toHaveBeenCalledOnce();
+    expect(readSnapshots).toHaveBeenLastCalledWith([
+      '9' as ContextGraphAuthorityIndexId,
+      '10' as ContextGraphAuthorityIndexId,
+    ]);
+
+    revision = 'revision-2';
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+    expect(readSnapshots).toHaveBeenCalledTimes(2);
+    await loop.close();
+  });
+
   it('reports an active-set read failure and retries on the next tick', async () => {
     const { scheduled, scheduler } = createSchedulerHarness();
     const failure = new Error('catalog responsibility read failed');

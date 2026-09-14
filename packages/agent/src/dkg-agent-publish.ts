@@ -455,6 +455,8 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { createLocalContextGraphOriginMembershipRecord } from
+  './local-context-graph-provenance.js';
 
 type KnowledgeAssetVmPublicationOperationPlan =
   | {
@@ -2673,14 +2675,12 @@ export class PublishMethods extends DKGAgentBase {
     });
 
     if (curatorAgentAddress) {
-      this.upsertContextGraphMember({
+      this.upsertContextGraphMember(createLocalContextGraphOriginMembershipRecord({
         contextGraphId,
-        principalType: 'agent',
         principalId: curatorAgentAddress,
         role: 'curator',
-        status: 'active',
         source: 'implicit-swm-write',
-      });
+      }));
     }
 
     this.log.info(

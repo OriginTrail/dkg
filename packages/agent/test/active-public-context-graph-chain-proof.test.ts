@@ -33,10 +33,9 @@ function resolveStrictPublicProof(
   contextGraphId: string,
 ) {
   return resolveActivePublicContextGraphChainProof(
-    (id, operationContext, options) => agent.resolveOnChainAccessPolicyState(
+    (id, operationContext) => agent.resolveFinalizedOnChainAccessPolicyState(
       id,
       operationContext,
-      options,
     ),
     contextGraphId,
     createOperationContext('init'),
@@ -80,10 +79,6 @@ describe('active-public Context Graph chain proof', () => {
       expect(resolvePolicyState).toHaveBeenCalledWith(
         'test-context-graph',
         operationContext,
-        {
-          slotBindingMode: 'chain-attested-repair',
-          authorityConsistency: 'finalized-authority-index',
-        },
       );
     },
   );

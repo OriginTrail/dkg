@@ -924,14 +924,100 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     operationContext: OperationContext,
   ): Promise<ActivePublicContextGraphChainProof> {
     return resolveStrictActivePublicChainProof(
-      (id, resolverOperationContext, options) => this.resolveOnChainAccessPolicyState(
+      (id, resolverOperationContext) => this.resolveFinalizedOnChainAccessPolicyState(
         id,
         resolverOperationContext,
-        options,
       ),
       contextGraphId,
       operationContext,
     );
+  }
+
+  /**
+   * Metadata-bootstrap authority proof. Indexed adapters resolve identity,
+   * liveness, and policy from one finalized snapshot; legacy adapters retain
+   * the strict current-state repair path explicitly at this boundary.
+   */
+  async resolveFinalizedOnChainAccessPolicyState(this: DKGAgent,
+    contextGraphId: string,
+    opCtx?: OperationContext,
+  ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    const trimmed = contextGraphId.trim();
+    let onChainId: string | null = null;
+    let resolvedFromLocalCg = false;
+    if (typeof this.getContextGraphOnChainId === 'function') {
+      onChainId = await this.getContextGraphOnChainId(contextGraphId);
+      if (onChainId) resolvedFromLocalCg = true;
+    }
+    if (!onChainId && /^\d+$/.test(trimmed)) {
+      if (typeof this.contextGraphExists === 'function') {
+        try {
+          if (!(await this.contextGraphExists(trimmed))) onChainId = trimmed;
+        } catch {
+          return 'unknown';
+        }
+      } else {
+        onChainId = trimmed;
+      }
+    }
+    if (!onChainId) return 'unregistered';
+
+    try {
+      const parsed = BigInt(onChainId);
+      if (
+        parsed <= 0n
+        || parsed > ethers.MaxUint256
+        || parsed.toString(10) !== onChainId
+      ) return 'unknown';
+    } catch {
+      return 'unknown';
+    }
+
+    const indexedSnapshot = await this.readRfc64BatchedFinalizedAuthoritySnapshotV1(
+      onChainId,
+    );
+    if (indexedSnapshot === undefined) {
+      // Preserve the exact address resolution above when a legacy adapter has
+      // no finalized-index capability. Re-resolving through the generic
+      // policy helper can reinterpret a numeric local CG as a raw slot after
+      // a stateful resolver changes, bypassing its required name-hash proof.
+      if (resolvedFromLocalCg && !(await this.localCgMatchesOnChainSlot(
+        contextGraphId,
+        onChainId,
+        opCtx,
+        { bindingMode: 'chain-attested-repair' },
+      ))) return 'unknown';
+      const policy = await this.readLiveOnChainAccessPolicy(onChainId, opCtx);
+      return policy === 0 || policy === 1 ? policy : 'unknown';
+    }
+    if (
+      indexedSnapshot === null
+      || indexedSnapshot.contextGraphId !== onChainId
+      || indexedSnapshot.active !== true
+    ) return 'unknown';
+
+    if (resolvedFromLocalCg) {
+      const bindingOutcome = evaluateContextGraphSlotBindingCommitment(
+        contextGraphId,
+        onChainId,
+        indexedSnapshot.nameHash,
+        false,
+        (localId) => this.isWireIdKeyedSubscription(localId),
+        (message) => this.log.warn(
+          opCtx ?? createOperationContext('share'),
+          message,
+        ),
+      );
+      if (!mapContextGraphSlotBindingOutcome(
+        bindingOutcome,
+        'chain-attested-repair',
+      )) return 'unknown';
+    }
+
+    const accessPolicy = indexedSnapshot.accessPolicy;
+    if (accessPolicy !== 0 && accessPolicy !== 1) return 'unknown';
+    this.onChainAccessPolicyCache.set(onChainId, accessPolicy);
+    return accessPolicy;
   }
 
   /**
@@ -1045,7 +1131,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: {
       slotBindingMode?: PublicPolicySlotBindingMode;
-      authorityConsistency?: 'finalized-authority-index';
     } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
     const trimmed = contextGraphId.trim();
@@ -1095,64 +1180,6 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // long-standing plaintext-inline default for local-only workspaces (and the
     // boolean gate reads it as not-public).
     if (!onChainId) return 'unregistered';
-
-    // Configured-graph metadata bootstrap may explicitly request the RFC-64
-    // finalized authority index. That path can prove identity, liveness, and
-    // access policy for every subscribed graph from one coherent batch instead
-    // of issuing three point reads (name-hash + active + policy) per graph. The
-    // batch reader validates its finalized anchor and remains fail-closed: an
-    // absent/inactive/mis-keyed/mis-bound snapshot is UNKNOWN, while a read
-    // rejection propagates exactly like the legacy point reads. The default
-    // current-state path below is deliberately unchanged: SWM plaintext and
-    // publish-inline security gates must observe a recent deactivation or
-    // policy change without waiting for finalized-index convergence.
-    let numericOnChainId: bigint | undefined;
-    try {
-      const parsed = BigInt(onChainId);
-      if (
-        parsed > 0n
-        && parsed <= ethers.MaxUint256
-        && parsed.toString(10) === onChainId
-      ) numericOnChainId = parsed;
-    } catch {
-      // The legacy path owns malformed-id compatibility and diagnostics.
-    }
-    const indexedSnapshot = (
-      options.authorityConsistency !== 'finalized-authority-index'
-      || numericOnChainId === undefined
-    )
-      ? undefined
-      : await this.readRfc64BatchedFinalizedAuthoritySnapshotV1(onChainId);
-    if (indexedSnapshot !== undefined) {
-      if (
-        indexedSnapshot === null
-        || indexedSnapshot.contextGraphId !== onChainId
-        || indexedSnapshot.active !== true
-      ) return 'unknown';
-
-      if (resolvedFromLocalCg) {
-        const bindingMode = options.slotBindingMode ?? 'legacy-policy';
-        const bindingOutcome = evaluateContextGraphSlotBindingCommitment(
-          contextGraphId,
-          onChainId,
-          indexedSnapshot.nameHash,
-          bindingMode !== 'chain-attested-repair',
-          (localId) => this.isWireIdKeyedSubscription(localId),
-          (message) => this.log.warn(
-            opCtx ?? createOperationContext('share'),
-            message,
-          ),
-        );
-        if (!mapContextGraphSlotBindingOutcome(bindingOutcome, bindingMode)) {
-          return 'unknown';
-        }
-      }
-
-      const accessPolicy = indexedSnapshot.accessPolicy;
-      if (accessPolicy !== 0 && accessPolicy !== 1) return 'unknown';
-      this.onChainAccessPolicyCache.set(onChainId, accessPolicy);
-      return accessPolicy;
-    }
 
     // IDENTITY BINDING (#884 review GZEqF). A candidate resolved from the
     // LOCAL mapping must be proven to still BE this CG on the current chain

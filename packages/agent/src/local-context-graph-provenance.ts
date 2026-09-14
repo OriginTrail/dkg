@@ -1,6 +1,54 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ContextGraphMembershipRecord } from './dkg-agent-types.js';
+import type {
+  ContextGraphMembershipRecord,
+  ContextGraphMembershipSource,
+} from './dkg-agent-types.js';
+
+export type LocalContextGraphOriginSource =
+  | 'local-create'
+  | 'implicit-swm-write';
+
+const localOriginByMembershipSource = Object.freeze({
+  'local-create': true,
+  'implicit-swm-write': true,
+  'allowed-peer': false,
+  'allowed-agent': false,
+  'participant-agent': false,
+  'on-chain-registration': false,
+  'join-approved': false,
+  'join-rejected': false,
+  'join-request': false,
+  'join-request-outbox-response': false,
+  'subscription': false,
+  'rehydrated-subscription': false,
+  'pre-existing': false,
+} satisfies Record<ContextGraphMembershipSource, boolean>);
+
+export type LocalContextGraphOriginMembershipRecord = ContextGraphMembershipRecord & {
+  readonly principalType: 'agent';
+  readonly status: 'active';
+  readonly source: LocalContextGraphOriginSource;
+};
+
+export function createLocalContextGraphOriginMembershipRecord(
+  input: Omit<
+    LocalContextGraphOriginMembershipRecord,
+    'principalType' | 'status'
+  >,
+): LocalContextGraphOriginMembershipRecord {
+  return {
+    ...input,
+    principalType: 'agent',
+    status: 'active',
+  };
+}
+
+export function isLocalContextGraphOriginSource(
+  source: ContextGraphMembershipSource | undefined,
+): source is LocalContextGraphOriginSource {
+  return source !== undefined && localOriginByMembershipSource[source];
+}
 
 /**
  * Process-local projection of the durable facts that prove a Context Graph
@@ -30,7 +78,7 @@ export class LocalContextGraphProvenance {
       if (
         record.principalType === 'agent'
         && record.status === 'active'
-        && (record.source === 'local-create' || record.source === 'implicit-swm-write')
+        && isLocalContextGraphOriginSource(record.source)
       ) {
         this.recordLocalCreate(record.contextGraphId);
       }

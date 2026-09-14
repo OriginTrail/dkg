@@ -253,7 +253,7 @@ type JoinApprovalRetryEntry = {
   nextAttemptAt: number;
   lastError: string;
 };
-type ListContextGraphsRow = {
+export type ListContextGraphsRow = {
   id: string;
   uri: string;
   name: string;
@@ -344,6 +344,8 @@ import { createAbortError, runBoundedOperation } from './bounded-operation.js';
 import type { RegisteredContextGraphAuthority } from
   './registered-context-graph-authority.js';
 import type { FinalizedContextGraphAuthorityTargetV1 } from
+  './dkg-agent-cg-registry.js';
+import type { FinalizedContextGraphAuthorityTargetsResolutionV1 } from
   './dkg-agent-cg-registry.js';
 import type { LiveOnChainAccessPolicyState } from
   './internal/context-graph-authority/context-graph-access-policy.js';
@@ -463,6 +465,103 @@ async function mapContextGraphListRowsSettled<T, R>(
     } catch (reason) {
       return { status: 'rejected', reason } as const;
     }
+  });
+}
+
+type ContextGraphListAuthorityAttemptV1<T> =
+  | Readonly<{ ok: true; value: T }>
+  | Readonly<{ ok: false; error: unknown }>;
+
+export type ContextGraphListAuthorityEnrichmentModeV1 =
+  | Readonly<{
+      kind: 'finalized-index';
+      targets: ReadonlyMap<string, FinalizedContextGraphAuthorityTargetV1>;
+    }>
+  | Readonly<{ kind: 'legacy-current' }>
+  | Readonly<{ kind: 'degraded-finalized-index' }>;
+
+export interface ContextGraphListAuthorityEnrichmentOptionsV1 {
+  readonly rows: readonly ListContextGraphsRow[];
+  readonly readFinalizedTargets: (
+    contextGraphIds: readonly string[],
+  ) => Promise<ContextGraphListAuthorityAttemptV1<
+    FinalizedContextGraphAuthorityTargetsResolutionV1
+  >>;
+  readonly readRegistrationStatus: (
+    contextGraphId: string,
+  ) => Promise<ContextGraphListAuthorityAttemptV1<
+    'registered' | 'unregistered' | null
+  >>;
+  readonly readCurrentOnChainId: (
+    contextGraphId: string,
+  ) => Promise<ContextGraphListAuthorityAttemptV1<string | null>>;
+}
+
+/**
+ * Focused authority-enrichment collaborator. Its mode makes the anti-fan-out
+ * contract explicit: finalized misses/failures may use only durable registered
+ * repair, while legacy adapters retain their historical current-state reads.
+ */
+export async function enrichContextGraphListAuthorityV1(
+  options: ContextGraphListAuthorityEnrichmentOptionsV1,
+): Promise<Readonly<{
+  rows: ListContextGraphsRow[];
+  cacheable: boolean;
+  mode: ContextGraphListAuthorityEnrichmentModeV1;
+}>> {
+  let cacheable = true;
+  const rowsMissingOnChainId = options.rows.filter((row) => !row.onChainId);
+  let mode: ContextGraphListAuthorityEnrichmentModeV1 = {
+    kind: 'finalized-index',
+    targets: new Map(),
+  };
+  if (rowsMissingOnChainId.length > 0) {
+    try {
+      const finalizedRead = await options.readFinalizedTargets(
+        rowsMissingOnChainId.map((row) => row.id),
+      );
+      if (!finalizedRead.ok) {
+        cacheable = false;
+        mode = { kind: 'degraded-finalized-index' };
+      } else {
+        mode = finalizedRead.value;
+      }
+    } catch {
+      cacheable = false;
+      mode = { kind: 'degraded-finalized-index' };
+    }
+  }
+
+  const enriched = await mapContextGraphListRowsSettled(options.rows, async (row) => {
+    if (row.onChainId) return row;
+    if (mode.kind === 'finalized-index') {
+      const finalizedTarget = mode.targets.get(row.id);
+      if (finalizedTarget !== undefined) {
+        return { ...row, onChainId: finalizedTarget.expectedOnChainId.toString(10) };
+      }
+    }
+    if (mode.kind !== 'legacy-current') {
+      const registrationStatus = await options.readRegistrationStatus(row.id);
+      if (!registrationStatus.ok) {
+        cacheable = false;
+        return row;
+      }
+      if (registrationStatus.value !== 'registered') return row;
+    }
+    const current = await options.readCurrentOnChainId(row.id);
+    if (!current.ok) {
+      cacheable = false;
+      return row;
+    }
+    return current.value ? { ...row, onChainId: current.value } : row;
+  });
+  return Object.freeze({
+    rows: enriched.map((entry) => {
+      if (entry.status === 'fulfilled') return entry.value;
+      throw entry.reason;
+    }),
+    cacheable,
+    mode,
   });
 }
 
@@ -2753,78 +2852,32 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       throw entry.reason;
     });
 
-    // Discovery only establishes row identity and source precedence. Resolve
-    // missing chain IDs once, after deduplication and metadata projection, so
-    // ontology, _meta, and storage-only rows all share one consistency policy.
-    // Production indexed adapters project every name commitment from one
-    // finalized checkpoint. A finalized miss is not by itself permission to
-    // start a current reverse-name scan: most listing rows are intentionally
-    // unregistered, and doing that once per row recreates the RPC fan-out this
-    // batch is meant to remove. Only a durable local `registered` marker may
-    // opt a missing row into the bounded current-state repair below.
-    const rowsMissingOnChainId = rows.filter((row) => !row.onChainId);
-    let finalizedTargets: ReadonlyMap<string, FinalizedContextGraphAuthorityTargetV1> =
-      new Map();
-    let useLegacyCurrentResolution = false;
-    if (rowsMissingOnChainId.length > 0) {
-      try {
-        const finalizedRead = await withBudget(
-          (signal) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
-            rowsMissingOnChainId.map((row) => row.id),
-            { signal },
-          ),
-          'batched finalized on-chain id enrichment',
-          scanBudgetMs,
-        );
-        if (!finalizedRead.ok) {
-          cacheable = false;
-        } else if (finalizedRead.value.kind === 'finalized-index') {
-          finalizedTargets = new Map(finalizedRead.value.targets);
-        } else {
-          // Adapters without a finalized authority index historically resolved
-          // every projected row against current chain state. Preserve that
-          // compatibility path: remotely discovered registered graphs do not
-          // have this node's durable registration marker, so gating these reads
-          // on local status would silently drop their known on-chain ids.
-          // Finalized-index misses and failed/expired batch reads deliberately
-          // do not enter this path, keeping their anti-fan-out guarantee.
-          useLegacyCurrentResolution = true;
-        }
-      } catch {
-        // Listing enrichment is advisory. A failed finalized batch must not
-        // fan out into one current reverse-name scan per discovered row. The
-        // durable-registration gate below still permits a just-mined local
-        // registration to repair its listing identity.
-        cacheable = false;
-      }
-    }
-
-    const onChainIdEnrichment = await mapContextGraphListRowsSettled(rows, async (row) => {
-      if (row.onChainId) return row;
-      const finalizedTarget = finalizedTargets.get(row.id);
-      if (finalizedTarget !== undefined) {
-        return { ...row, onChainId: finalizedTarget.expectedOnChainId.toString(10) };
-      }
-      if (!useLegacyCurrentResolution) {
-        const registrationStatus = await optional(
-          () => this.readLocalContextGraphRegistrationStatus(row.id),
-          `local registration status lookup for ${row.id}`,
-        );
-        if (registrationStatus !== 'registered') return row;
-      }
-      const onChainId = await optional(
-        (signal) => this.getContextGraphOnChainId(row.id, {
+    // Discovery establishes row identity; this collaborator owns the complete
+    // finalized/legacy/degraded authority-enrichment state machine.
+    const authorityEnrichment = await enrichContextGraphListAuthorityV1({
+      rows,
+      readFinalizedTargets: (contextGraphIds) => withBudget(
+        (signal) => this.resolveFinalizedContextGraphAuthorityTargetsV1(
+          contextGraphIds,
+          { signal },
+        ),
+        'batched finalized on-chain id enrichment',
+        scanBudgetMs,
+      ),
+      readRegistrationStatus: (contextGraphId) => withBudget(
+        () => this.readLocalContextGraphRegistrationStatus(contextGraphId),
+        `local registration status lookup for ${contextGraphId}`,
+      ),
+      readCurrentOnChainId: (contextGraphId) => withBudget(
+        (signal) => this.getContextGraphOnChainId(contextGraphId, {
           signal,
           source: 'agent.contextGraph.list.onChainId',
         }),
-        `on-chain id lookup for ${row.id}`,
-      );
-      return onChainId ? { ...row, onChainId } : row;
+        `on-chain id lookup for ${contextGraphId}`,
+      ),
     });
-    rows = onChainIdEnrichment.map((entry) => {
-      if (entry.status === 'fulfilled') return entry.value;
-      throw entry.reason;
-    });
+    rows = authorityEnrichment.rows;
+    if (!authorityEnrichment.cacheable) cacheable = false;
 
     const curatorBackfills = await mapContextGraphListRowsSettled(rows, async (r) => {
       if (r.curator?.trim()) return r;

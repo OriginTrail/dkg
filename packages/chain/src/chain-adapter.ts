@@ -537,13 +537,15 @@ export interface ContextGraphAuthoritySnapshot {
   readonly sourceBlockHash: string;
 }
 
-/** Maximum target IDs accepted by one materialized authority-index projection. */
+/** Internal physical projection size used by production authority-index readers. */
 export const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS = 4_096;
 
-/** Explicit daemon-local authority-index scheduling surface. */
+/**
+ * Logical finalized-authority capability. Callers provide the complete target
+ * set for one operation; the chain implementation owns validation, physical
+ * chunking, projection, and the single finalized anchor.
+ */
 export interface ContextGraphAuthorityIndexRevisionReader {
-  /** Optional custom-reader override; production readers expose the default limit. */
-  readonly maxTargetCount?: number;
   /**
    * Resolve one RFC-64 authority binding at the index's finalized anchor.
    * This intentionally differs from the public current-state name resolver.

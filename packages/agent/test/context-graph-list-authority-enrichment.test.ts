@@ -2,7 +2,10 @@ import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
-import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
+import {
+  ContextGraphResolveMethods,
+  enrichContextGraphListAuthorityV1,
+} from '../src/dkg-agent-cg-resolve.js';
 
 const CALLER_ADDRESS = '0x1111111111111111111111111111111111111111';
 const MISS_COUNT = 417;
@@ -85,6 +88,43 @@ async function list(fakeAgent: object) {
 }
 
 describe('context graph list authority enrichment', () => {
+  it('exposes degraded indexed mode without fanning out beyond durable repair', async () => {
+    const rows = ['registered-local', 'unregistered-local'].map((id) => ({
+      id,
+      uri: contextGraphDataUri(id),
+      name: id,
+      isSystem: false,
+      subscribed: true,
+      synced: true,
+    }));
+    const readCurrentOnChainId = vi.fn(async (id: string) => ({
+      ok: true as const,
+      value: id === 'registered-local' ? '71' : null,
+    }));
+
+    const result = await enrichContextGraphListAuthorityV1({
+      rows,
+      readFinalizedTargets: async () => ({
+        ok: false,
+        error: new Error('index unavailable'),
+      }),
+      readRegistrationStatus: async (id) => ({
+        ok: true,
+        value: id === 'registered-local' ? 'registered' : 'unregistered',
+      }),
+      readCurrentOnChainId,
+    });
+
+    expect(result.mode).toEqual({ kind: 'degraded-finalized-index' });
+    expect(result.cacheable).toBe(false);
+    expect(result.rows).toEqual([
+      expect.objectContaining({ id: 'registered-local', onChainId: '71' }),
+      expect.not.objectContaining({ onChainId: expect.anything() }),
+    ]);
+    expect(readCurrentOnChainId).toHaveBeenCalledOnce();
+    expect(readCurrentOnChainId).toHaveBeenCalledWith('registered-local');
+  });
+
   it('uses finalized hits without current-state resolution', async () => {
     const id = 'listing-finalized-hit';
     const fixture = listingAgent({
@@ -170,7 +210,7 @@ describe('context graph list authority enrichment', () => {
     expect(fixture.resolveCurrent).not.toHaveBeenCalled();
   });
 
-  it('chunks 4,097 finalized listing targets and ignores cross-chunk results', async () => {
+  it('delegates 4,097 finalized listing targets once and ignores superset results', async () => {
     const ids = Array.from({ length: 4_097 }, (_, index) => `listing-boundary-${index}`);
     const hashById = new Map(ids.map((id, index) => [
       id,
@@ -181,14 +221,11 @@ describe('context graph list authority enrichment', () => {
       BigInt(index + 1_000),
     ]));
     const resolveMany = vi.fn(async (nameHashes: readonly string[]) => {
-      if (nameHashes.length > 4_096) throw new Error('reader target limit exceeded');
       const resolved = new Map(nameHashes.map((nameHash) => [
         nameHash,
         onChainIdByHash.get(nameHash)!,
       ]));
-      if (resolveMany.mock.calls.length === 2) {
-        resolved.set(hashById.get(ids[0]!)!, 999_999n);
-      }
+      resolved.set(`0x${'ff'.repeat(32)}`, 999_999n);
       return resolved;
     });
     const readRegistrationStatus = vi.fn(async () => null);
@@ -197,7 +234,6 @@ describe('context graph list authority enrichment', () => {
       subscribedContextGraphs: new Map(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {
-          maxTargetCount: 4_096,
           resolveFinalizedContextGraphIdsByNameHashes: resolveMany,
         },
       },
@@ -227,8 +263,8 @@ describe('context graph list authority enrichment', () => {
 
     const result = await list(fakeAgent);
 
-    expect(resolveMany.mock.calls.map(([nameHashes]) => nameHashes.length))
-      .toEqual([4_096, 1]);
+    expect(resolveMany).toHaveBeenCalledOnce();
+    expect(resolveMany.mock.calls[0]?.[0]).toHaveLength(4_097);
     expect(result.rows).toHaveLength(ids.length);
     expect(result.rows.every((row: { id: string; onChainId?: string }, index: number) => (
       row.id === ids[index] && row.onChainId === String(index + 1_000)
@@ -238,7 +274,7 @@ describe('context graph list authority enrichment', () => {
     expect(resolveCurrent).not.toHaveBeenCalled();
   });
 
-  it('rejects when cancellation lands inside the final chunk reader', async () => {
+  it('rejects when cancellation lands inside the logical reader', async () => {
     const id = 'listing-cancelled-final-chunk';
     const nameHash = `0x${'ab'.repeat(32)}`;
     const controller = new AbortController();
@@ -251,7 +287,6 @@ describe('context graph list authority enrichment', () => {
       subscribedContextGraphs: new Map(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {
-          maxTargetCount: 4_096,
           resolveFinalizedContextGraphIdsByNameHashes: resolveMany,
         },
       },

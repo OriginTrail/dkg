@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { ethers } from 'ethers';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
@@ -422,7 +422,7 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       .resolves.toBeInstanceOf(Map);
   });
 
-  it('rejects invalid revision target sets before reading the shared index', async () => {
+  it('validates revision targets and owns physical chunking behind one finalized anchor', async () => {
     const { adapter, evidence } = makeIndexedAuthorityAdapter();
     const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
 
@@ -433,13 +433,41 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
       ]))
         .rejects.toThrow('target id is invalid');
     }
+    const revisions = vi.spyOn(
+      (adapter as any).contextGraphAuthorityIndex,
+      'revisions',
+    );
     await expect(reader.readContextGraphAuthorityIndexRevisions(
-      Array.from(
-        { length: 4_097 },
-        (_, index) => authorityIndexId(String(index + 1)),
-      ),
-    )).rejects.toThrow('target set is invalid');
-    expect(evidence.indexRanges).toEqual([]);
+      Array.from({ length: 4_097 }, (_, index) => authorityIndexId(String(index + 1))),
+    )).resolves.toEqual(new Map([[
+      '9',
+      expect.stringMatching(/^0x[0-9a-f]{64}$/u),
+    ]]));
+    expect(revisions.mock.calls.map(([input]) => input.contextGraphIds.length))
+      .toEqual([4_096, 1]);
+    expect(evidence.blockReads.filter((tag) => tag === 'finalized')).toHaveLength(1);
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+  });
+
+  it('owns oversized name-hash chunking and superset projection at one finalized anchor', async () => {
+    const { adapter, evidence } = makeIndexedAuthorityAdapter();
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+    const statesByNameHashes = vi.spyOn(
+      (adapter as any).contextGraphAuthorityIndex,
+      'statesByNameHashes',
+    );
+    const nameHashes = Array.from(
+      { length: 4_096 },
+      (_, index) => ethers.zeroPadValue(ethers.toBeHex(index + 1), 32),
+    );
+    nameHashes.push(NAME_HASH);
+
+    await expect(reader.resolveFinalizedContextGraphIdsByNameHashes!(nameHashes))
+      .resolves.toEqual(new Map([[NAME_HASH, 9n]]));
+    expect(statesByNameHashes.mock.calls.map(([input]) => input.nameHashes.length))
+      .toEqual([4_096, 1]);
+    expect(evidence.blockReads.filter((tag) => tag === 'finalized')).toHaveLength(1);
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
   });
 
   it('rejects a stale revision projection and rebuilds the replacement fork', async () => {

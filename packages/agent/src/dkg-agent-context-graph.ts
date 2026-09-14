@@ -374,6 +374,8 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { createLocalContextGraphOriginMembershipRecord } from
+  './local-context-graph-provenance.js';
 import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-admission-lock.js';
 import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
 import {
@@ -731,14 +733,12 @@ export class ContextGraphMethods extends DKGAgentBase {
       // must not report that the already-durable graph failed to be created.
       // Restart recovery relies only on this node-local membership record;
       // replicated creator RDF is not trusted as origin evidence.
-      await this.upsertContextGraphMember({
+      await this.upsertContextGraphMember(createLocalContextGraphOriginMembershipRecord({
         contextGraphId: opts.id,
-        principalType: 'agent',
         principalId: curatorAgentAddress,
         role: 'curator',
-        status: 'active',
         source: 'local-create',
-      });
+      }));
     }
 
     for (const peer of opts.allowedPeers ?? []) {

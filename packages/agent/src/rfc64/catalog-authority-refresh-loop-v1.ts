@@ -63,6 +63,10 @@ export interface Rfc64CatalogAuthorityRevisionSourceV1 {
 }
 
 export type Rfc64CatalogAuthorityRefreshResultV1 = 'committed' | 'superseded';
+export type Rfc64CatalogAuthorityRefreshRequestV1 = Readonly<{
+  /** Opaque pass identity shared by every lane selected from one revision scan. */
+  authorityReadRequest: object;
+}>;
 
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
@@ -73,6 +77,7 @@ export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly refreshContextGraph: (
     contextGraphId: string,
     signal: AbortSignal,
+    request: Rfc64CatalogAuthorityRefreshRequestV1,
   ) => Promise<Rfc64CatalogAuthorityRefreshResultV1>;
   readonly onRefreshFailure: (contextGraphId: string, error: unknown) => void;
   readonly scheduler?: Rfc64CatalogAuthorityRefreshSchedulerV1;
@@ -92,13 +97,18 @@ Rfc64CatalogAuthorityRevisionSourceV1 = Object.freeze({
 class Rfc64CatalogAuthorityRefreshLaneV1 {
   readonly #task: CoalescingRecurringTask;
   #acceptedRevision: string | undefined;
-  #target: Readonly<{ revision: string | null; force: boolean }> | undefined;
+  #target: Readonly<{
+    revision: string | null;
+    force: boolean;
+    request: Rfc64CatalogAuthorityRefreshRequestV1;
+  }> | undefined;
 
   constructor(
     readonly contextGraphId: string,
     refresh: (
       contextGraphId: string,
       signal: AbortSignal,
+      request: Rfc64CatalogAuthorityRefreshRequestV1,
     ) => Promise<Rfc64CatalogAuthorityRefreshResultV1>,
     onFailure: (contextGraphId: string, error: unknown) => void,
   ) {
@@ -108,7 +118,7 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
         const target = this.#target;
         if (target === undefined) return;
         try {
-          const result = await refresh(this.contextGraphId, signal);
+          const result = await refresh(this.contextGraphId, signal, target.request);
           if (signal.aborted) return;
           if (result === 'superseded') {
             if (target.force) this.#acceptedRevision = undefined;
@@ -131,14 +141,18 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
     return this.#task.closed;
   }
 
-  request(revision: string | null, force: boolean): boolean {
+  request(
+    revision: string | null,
+    force: boolean,
+    request: Rfc64CatalogAuthorityRefreshRequestV1,
+  ): boolean {
     if (!force && revision !== null && this.#acceptedRevision === revision) return false;
     if (
       this.#task.running
       && this.#target?.revision === revision
       && (!force || this.#target.force)
     ) return false;
-    this.#target = Object.freeze({ revision, force });
+    this.#target = Object.freeze({ revision, force, request });
     return this.#task.request();
   }
 
@@ -276,6 +290,9 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       }
     }
     signal.throwIfAborted();
+    const refreshRequest: Rfc64CatalogAuthorityRefreshRequestV1 = Object.freeze({
+      authorityReadRequest: Object.freeze({}),
+    });
 
     for (const contextGraphId of desiredContextGraphIds) {
       if (
@@ -288,7 +305,7 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
         this.#lanes.set(contextGraphId, lane);
       }
       const revision = revisions.get(contextGraphId) ?? null;
-      lane.request(revision, initial || safety);
+      lane.request(revision, initial || safety, refreshRequest);
     }
   }
 

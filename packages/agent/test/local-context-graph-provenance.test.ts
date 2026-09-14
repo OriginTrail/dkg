@@ -4,7 +4,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { ContextGraphMembershipRecord } from '../src/dkg-agent-types.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { LocalContextGraphProvenance } from
+import {
+  createLocalContextGraphOriginMembershipRecord,
+  LocalContextGraphProvenance,
+} from
   '../src/local-context-graph-provenance.js';
 import {
   LOCAL_ID,
@@ -29,6 +32,28 @@ function row(
 }
 
 describe('LocalContextGraphProvenance durable restoration', () => {
+  it.each(['local-create', 'implicit-swm-write'] as const)(
+    'constructs and restores the typed %s origin fact',
+    (source) => {
+      const record = createLocalContextGraphOriginMembershipRecord({
+        contextGraphId: `typed-${source}`,
+        principalId: `did:test:${source}`,
+        role: 'curator',
+        source,
+      });
+      const provenance = new LocalContextGraphProvenance();
+
+      provenance.restoreMembershipRecords([record]);
+
+      expect(record).toMatchObject({
+        principalType: 'agent',
+        status: 'active',
+        source,
+      });
+      expect(provenance.hasLocalCreate(`typed-${source}`)).toBe(true);
+    },
+  );
+
   it('restores only active agent rows with a node-local origin source', async () => {
     const records = [
       row('explicit-local', {

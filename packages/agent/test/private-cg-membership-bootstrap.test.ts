@@ -340,17 +340,10 @@ describe('private CG membership bootstrap recovery', () => {
       metaSynced: false,
     });
     const publicOnChainProof = vi.fn(async () => 0 as const);
-    (agent as any).resolveOnChainAccessPolicyState = publicOnChainProof;
+    (agent as any).resolveFinalizedOnChainAccessPolicyState = publicOnChainProof;
 
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
-    expect(publicOnChainProof).toHaveBeenCalledWith(
-      contextGraphId,
-      expect.any(Object),
-      expect.objectContaining({
-        authorityConsistency: 'finalized-authority-index',
-        slotBindingMode: 'chain-attested-repair',
-      }),
-    );
+    expect(publicOnChainProof).toHaveBeenCalledWith(contextGraphId, expect.any(Object));
   });
 
   it('accepts an unregistered public replica only with active public on-chain proof', async () => {
@@ -366,7 +359,7 @@ describe('private CG membership bootstrap recovery', () => {
     });
     const strictPublicOnChainProof = vi.fn(async () => 0 as const);
     const legacyPublicOnChainProof = vi.fn(async () => true);
-    (agent as any).resolveOnChainAccessPolicyState = strictPublicOnChainProof;
+    (agent as any).resolveFinalizedOnChainAccessPolicyState = strictPublicOnChainProof;
     (agent as any).isContextGraphPublicOnChain = legacyPublicOnChainProof;
 
     expect(await (agent as any).hasConfirmedMetaState(
@@ -376,10 +369,6 @@ describe('private CG membership bootstrap recovery', () => {
     expect(strictPublicOnChainProof).toHaveBeenCalledWith(
       contextGraphId,
       expect.any(Object),
-      expect.objectContaining({
-        authorityConsistency: 'finalized-authority-index',
-        slotBindingMode: 'chain-attested-repair',
-      }),
     );
   });
 

@@ -70,30 +70,27 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
     await runtime.whenIdle();
   });
 
-  it('chunks 4,097 targets, preserves the requested graph, and merges only chunk-owned rows', async () => {
+  it('delegates 4,097 logical targets once and merges only batch-owned rows', async () => {
     const requestedId = '4097' as ContextGraphAuthorityIndexId;
-    const secondChunkId = '4096' as ContextGraphAuthorityIndexId;
+    const otherCallerId = '4096' as ContextGraphAuthorityIndexId;
     const subscribedIds = Array.from(
       { length: 4_097 },
       (_, index) => String(index + 1) as ContextGraphAuthorityIndexId,
     );
-    let markFirstChunkStarted!: () => void;
-    let releaseFirstChunk!: () => void;
-    const firstChunkStarted = new Promise<void>((resolve) => { markFirstChunkStarted = resolve; });
-    const firstChunkGate = new Promise<void>((resolve) => { releaseFirstChunk = resolve; });
-    const injectedOwner = '0xffffffffffffffffffffffffffffffffffffffff';
+    let markReadStarted!: () => void;
+    let releaseRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { markReadStarted = resolve; });
+    const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
     const readSnapshots = vi.fn(async (
       targetIds: readonly ContextGraphAuthorityIndexId[],
     ) => {
-      expect(targetIds.length).toBeLessThanOrEqual(4_096);
+      expect(targetIds).toHaveLength(4_097);
       const result = new Map(targetIds.map((targetId) => [targetId, snapshot(targetId)]));
-      if (readSnapshots.mock.calls.length === 1) {
-        // A custom reader returning an unrelated row must not let one chunk
-        // inject authority into another chunk's caller.
-        result.set(secondChunkId, snapshot(secondChunkId, injectedOwner));
-        markFirstChunkStarted();
-        await firstChunkGate;
-      }
+      result.set('9999' as ContextGraphAuthorityIndexId, snapshot(
+        '9999' as ContextGraphAuthorityIndexId,
+      ));
+      markReadStarted();
+      await readGate;
       return result;
     });
     const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
@@ -102,30 +99,25 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
     });
 
     const requested = runtime.read(requestedId);
-    await firstChunkStarted;
-    const overflowCaller = runtime.read(secondChunkId);
-    releaseFirstChunk();
+    await readStarted;
+    const otherCaller = runtime.read(otherCallerId);
+    releaseRead();
 
     await expect(requested).resolves.toMatchObject({
       contextGraphAuthorityIndexId: requestedId,
       batchTargetIds: expect.arrayContaining([requestedId]),
       snapshot: { contextGraphId: requestedId },
     });
-    await expect(overflowCaller).resolves.toMatchObject({
-      contextGraphAuthorityIndexId: secondChunkId,
+    await expect(otherCaller).resolves.toMatchObject({
+      contextGraphAuthorityIndexId: otherCallerId,
       snapshot: {
-        contextGraphId: secondChunkId,
+        contextGraphId: otherCallerId,
         owner: '0x1111111111111111111111111111111111111111',
       },
     });
-    expect(readSnapshots).toHaveBeenCalledTimes(2);
-    expect(readSnapshots.mock.calls.map(([targetIds]) => targetIds.length)).toEqual([
-      4_096,
-      1,
-    ]);
+    expect(readSnapshots).toHaveBeenCalledOnce();
     expect(readSnapshots.mock.calls[0]?.[0][0]).toBe(requestedId);
-    expect(readSnapshots.mock.calls[0]?.[0]).not.toContain(secondChunkId);
-    expect(readSnapshots.mock.calls[1]?.[0]).toEqual([secondChunkId]);
+    expect(readSnapshots.mock.calls[0]?.[0]).toContain(otherCallerId);
     await runtime.whenIdle();
   });
 
@@ -192,7 +184,7 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
     const stale = runtime.read(ID_9);
     await firstReadStarted;
     owner = '0x2222222222222222222222222222222222222222';
-    const fresh = runtime.read(ID_9, undefined, { requireReadAfterRequest: true });
+    const fresh = runtime.read(ID_9, undefined, { freshnessRequest: {} });
     await vi.waitFor(() => expect(readSnapshots).toHaveBeenCalledTimes(2));
     releaseFirstRead();
 
@@ -202,6 +194,32 @@ describe('RFC-64 finalized authority snapshot batch runtime', () => {
     await expect(fresh).resolves.toMatchObject({
       snapshot: { owner: '0x2222222222222222222222222222222222222222' },
     });
+  });
+
+  it('shares one freshness request across CG lanes and fences a later request', async () => {
+    let owner = '0x1111111111111111111111111111111111111111';
+    const readSnapshots = vi.fn(async (
+      targetIds: readonly ContextGraphAuthorityIndexId[],
+    ) => new Map(targetIds.map((targetId) => [targetId, snapshot(targetId, owner)])));
+    const runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
+      snapshotTargetIds: () => [ID_9, ID_10],
+      readSnapshots,
+    });
+    const firstPass = {};
+
+    await expect(Promise.all([
+      runtime.read(ID_9, undefined, { freshnessRequest: firstPass }),
+      runtime.read(ID_10, undefined, { freshnessRequest: firstPass }),
+    ])).resolves.toHaveLength(2);
+    // A lane that reaches the owner after the read completed still consumes
+    // the exact pass-owned evidence rather than starting another full batch.
+    await runtime.read(ID_10, undefined, { freshnessRequest: firstPass });
+    expect(readSnapshots).toHaveBeenCalledOnce();
+
+    owner = '0x2222222222222222222222222222222222222222';
+    await expect(runtime.read(ID_9, undefined, { freshnessRequest: {} }))
+      .resolves.toMatchObject({ snapshot: { owner } });
+    expect(readSnapshots).toHaveBeenCalledTimes(2);
   });
 
   it('detaches a cancelled caller while shared physical evidence drains', async () => {
