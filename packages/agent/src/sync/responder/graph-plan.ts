@@ -1951,16 +1951,13 @@ function hasUnsupportedExactGraphCursorTerm(cursor: ExactGraphPageCursor): boole
 
 /**
  * Build a SPARQL predicate for one term being strictly after a cursor term in
- * the backend's `ORDER BY` order.  IRI/blank-node rank is explicit, while
+ * the backend's `ORDER BY` order. IRI rank is explicit, while
  * literal values use value comparison for ordered XSD datatypes and lexical
  * comparison otherwise.  The datatype/language tie-break mirrors Oxigraph's
  * RDF-term ordering and is covered by the mixed-term regression fixture.
  */
 function termAfterExactGraphCursor(variable: string, cursorTerm: string): string {
   const formatted = formatTerm(cursorTerm);
-  if (cursorTerm.startsWith('_:')) {
-    return `(isIRI(${variable}) || isLiteral(${variable}))`;
-  }
   if (!cursorTerm.startsWith('"')) {
     return `(isLiteral(${variable}) || (isIRI(${variable}) && STR(${variable}) > STR(${formatted})))`;
   }
@@ -2025,18 +2022,14 @@ function rememberExactGraphPageCursor(
   plan.cursors.delete(offset);
   plan.cursors.set(offset, cursor);
   while (plan.cursors.size > EXACT_GRAPH_CURSOR_CACHE_MAX_ENTRIES) {
-    const oldest = plan.cursors.keys().next().value as number | undefined;
-    if (oldest === undefined) break;
+    let evict = plan.cursors.keys().next().value as number;
     // Offset zero is the session origin and is never evicted.
-    if (oldest === 0) {
+    if (evict === 0) {
       const next = plan.cursors.keys();
       next.next();
-      const evict = next.next().value as number | undefined;
-      if (evict === undefined) break;
-      plan.cursors.delete(evict);
-    } else {
-      plan.cursors.delete(oldest);
+      evict = next.next().value as number;
     }
+    plan.cursors.delete(evict);
   }
 }
 
@@ -2233,6 +2226,9 @@ async function readRowsPageFromExactGraphPlan(
     const expectedRows = Math.min(entry.rowCount - entryOffset, remaining);
     if (expectedRows <= 0) {
       cursorActive = false;
+      // The cursor already consumed this graph. Subsequent graphs start at
+      // their own zero offset rather than reusing the request's global offset.
+      skip = 0;
       continue;
     }
     let added = 0;
