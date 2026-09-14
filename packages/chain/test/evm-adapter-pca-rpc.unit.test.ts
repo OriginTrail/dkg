@@ -250,13 +250,13 @@ describe('EVMChainAdapter PCA RPC bridge', () => {
     _contractName,
     missingContract,
   ) => {
-    class MissingRequiredBindingAdapter extends EVMChainAdapter {
-      protected override get hubContracts() {
-        return { ...super.hubContracts, [missingContract]: undefined };
-      }
-    }
-    const adapter = new MissingRequiredBindingAdapter(minimalConfig());
+    const adapter = new EVMChainAdapter(minimalConfig());
     (adapter as unknown as { init: () => Promise<void> }).init = async () => undefined;
+    installBindings(adapter, {
+      profile: { getAddress: async () => '0x' + '33'.repeat(20) },
+      identity: { getAddress: async () => '0x' + '44'.repeat(20) },
+    });
+    adapter.retireHubContractBindingsForTesting([missingContract]);
     const getIdentityStorage = vi.fn(async () => ({
       getAddress: async () => '0x' + '55'.repeat(20),
     }));
