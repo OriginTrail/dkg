@@ -13,7 +13,6 @@ export * from './publisher.js';
 export * from './publication-pricing.js';
 export * from './publication-payload-measurement.js';
 export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
-export { CHAIN_EVENT_POLLER_LANES, type ChainEventPollerLane } from './chain-event-lane-runner.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export {
@@ -454,7 +453,13 @@ export {
   type WorkspacePublicSnapshotStore,
 } from './workspace-snapshot-store.js';
 export { UpdateHandler } from './update-handler.js';
-export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, type OnContextGraphCreated } from './chain-event-poller.js';
+export {
+  ChainEventPoller,
+  type ChainEventPollerConfig,
+  type ChainEventPollerLane,
+  type CursorPersistence,
+  type OnContextGraphCreated,
+} from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';
 export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';

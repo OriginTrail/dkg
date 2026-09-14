@@ -6,18 +6,14 @@ import {
   type LaneCursorStore,
 } from './chain-event-lane-cursor-store.js';
 
-/** Every runtime lane owned by the chain-event poller. */
-export const CHAIN_EVENT_POLLER_LANES = Object.freeze([
-  'publish',
-  'allocatorReconcile',
-  'contextGraphDiscovery',
-  'vmReconcile',
-  'collectionUpdates',
-  'allowListUpdates',
-  'profileEvents',
-] as const);
-
-export type ChainEventPollerLane = (typeof CHAIN_EVENT_POLLER_LANES)[number];
+export type ChainEventPollerLane =
+  | 'publish'
+  | 'allocatorReconcile'
+  | 'contextGraphDiscovery'
+  | 'vmReconcile'
+  | 'collectionUpdates'
+  | 'allowListUpdates'
+  | 'profileEvents';
 
 interface ChainEventPollerLaneState {
   lastBlock: number;
@@ -97,6 +93,21 @@ export class ChainEventLaneRunner {
 
   async restoreCurrentlyActive(ctx: OperationContext): Promise<void> {
     await this.restoreLaneCursors(this.activeLaneSpecs(), ctx);
+  }
+
+  /** Seed every configured runtime lane through the same specifications used by polling. */
+  async seedConfiguredLaneCursors(blockNumber: number): Promise<void> {
+    if (!this.cursorStore) throw new Error('Chain event cursor persistence is not configured.');
+    if (!Number.isSafeInteger(blockNumber) || blockNumber < 0) {
+      throw new Error('Chain event cursor seed must be a non-negative safe integer.');
+    }
+    if (this.cursorStore.kind === 'legacy') {
+      await this.cursorStore.saveLegacyAggregate(blockNumber);
+      return;
+    }
+    for (const lane of new Set(this.lanes.map(({ name }) => name))) {
+      await this.cursorStore.saveLane(lane, blockNumber);
+    }
   }
 
   async poll(signal?: AbortSignal): Promise<void> {

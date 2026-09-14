@@ -29,6 +29,40 @@ function recordCleanAbsence(
 }
 
 describe('active VM recovery slot ownership', () => {
+  it('backs off an all-unavailable roster without fabricating attempt or absence evidence', () => {
+    const peers = ['peer-a', 'peer-b'];
+    const registry = new VmRecoverySlotRegistry(1);
+    const admission = registry.admit(target, {
+      candidatePeerIds: peers,
+      curatorRosterConfirmed: true,
+      collectionDeadlineAt: 100,
+    }, 0);
+    if (admission.kind === 'deferred') throw new Error('expected slot admission');
+    const policy = {
+      now: 10,
+      getLocalPeerId: () => 'local',
+      baseBackoffMs: 10,
+      maxBackoffMs: 100,
+    };
+
+    registry.settleUnavailablePeers(target, peers, admission.slot.handle, policy, new Set(peers));
+
+    const settled = registry.read(target, admission.slot.handle);
+    expect(settled).toMatchObject({
+      phase: 'backoff',
+      backoffKind: 'incomplete-cycle',
+      failures: 1,
+      attemptedPeerIds: [],
+      cleanAbsentPeerIds: [],
+    });
+    expect(settled!.nextRetryAt).toBeGreaterThan(policy.now);
+    expect(registry.prepare(target, {
+      candidatePeerIds: peers,
+      curatorRosterConfirmed: true,
+      collectionDeadlineAt: 200,
+    }, settled!.nextRetryAt - 1)).toMatchObject({ kind: 'backoff' });
+  });
+
   it.each(['immediate', 'reserved'] as const)('releases an empty %s roster without retiring a donor', kind => {
     const registry = new VmRecoverySlotRegistry(1);
     const original = admitFor(registry);

@@ -175,6 +175,11 @@ export class ChainEventPoller {
     });
   }
 
+  /** Initialize cursor storage from this poller's canonical runtime lane specifications. */
+  async seedConfiguredLaneCursors(blockNumber: number): Promise<void> {
+    await this.laneRunner.seedConfiguredLaneCursors(blockNumber);
+  }
+
   async start(): Promise<void> {
     if (this.running) return;
     if (this.pollLifecycle.signal.aborted) {
