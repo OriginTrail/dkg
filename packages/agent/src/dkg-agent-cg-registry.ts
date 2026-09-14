@@ -300,6 +300,7 @@ import {
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
+  CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
 } from './dkg-agent-constants.js';
 import { runBoundedOperation } from './bounded-operation.js';
@@ -315,7 +316,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -622,13 +622,29 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveContextGraphRegistrationBinding(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: {
+      signal?: AbortSignal;
+      registrationTimeoutMs?: number;
+    } = {},
   ): Promise<ContextGraphRegistrationBinding> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return { kind: 'unregistered' };
     }
 
     const localTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+    const hasBindingCandidate = localTarget !== null
+      && this.contextGraphBindingState.hasBindingCandidate(
+        localTarget.localId,
+        localTarget.subscription,
+      );
+    // Existing authoritative/reverse bindings are hot revalidation reads and
+    // must fail promptly. A graph with no candidate needs the bounded cold
+    // name-hash index path; under the process RPC governor that work can
+    // legitimately outlive the policy-read deadline without being unhealthy.
+    const registrationResolutionTimeoutMs = options.registrationTimeoutMs
+      ?? (hasBindingCandidate
+        ? CHAIN_POLICY_READ_TIMEOUT_MS
+        : CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS);
     if (localTarget !== null) {
       try {
         const binding = await runBoundedOperation(
@@ -638,7 +654,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           }),
           {
             label: `resolveContextGraphOnChainIdBinding(${contextGraphId})`,
-            timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+            timeoutMs: registrationResolutionTimeoutMs,
             signal: options.signal,
           },
         );
@@ -692,7 +708,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         (signal) => resolveByNameHash.call(this.chain, nameHash, { signal }),
         {
           label: `resolveContextGraphIdByNameHash(${nameHash})`,
-          timeoutMs: CHAIN_POLICY_READ_TIMEOUT_MS,
+          timeoutMs: registrationResolutionTimeoutMs,
           signal: options.signal,
         },
       );

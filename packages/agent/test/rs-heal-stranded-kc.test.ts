@@ -567,7 +567,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     agentLike.contextGraphBindingState = new ContextGraphBindingState();
     agentLike.reconcileCursors = new Map();
     agentLike.vmReconcilePhysicalRuns = new Set();
-    agentLike.vmReconcileDispatcher = {
+    agentLike.vmReconcileScheduling = {
       dispatch: async <T>(_key: string, source: string): Promise<T> => {
         priorities.push(source === 'periodic' ? 'background' : 'foreground');
         return SwmHostModeMethods.prototype.executeVmReconcileForCg.call(
@@ -583,7 +583,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     // subscription row now that persisted rows cannot authorize themselves.
     agentLike.canReadContextGraph = async () => true;
     agentLike.chain = { getContextGraphKCCount: async () => 0n };
-    agentLike.ensureVmReconcileDispatcher = SwmHostModeMethods.prototype.ensureVmReconcileDispatcher;
+    agentLike.ensureVmReconcileScheduling = SwmHostModeMethods.prototype.ensureVmReconcileScheduling;
     agentLike.resolveVmReconcileTarget = SwmHostModeMethods.prototype.resolveVmReconcileTarget;
     agentLike.createVmReconcileDeps = SwmHostModeMethods.prototype.createVmReconcileDeps;
     agentLike.toContextGraphReconcileResult = SwmHostModeMethods.prototype.toContextGraphReconcileResult;

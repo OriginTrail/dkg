@@ -42,24 +42,36 @@
 import type { SignedTransactionEnvelope } from './chain-adapter.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
 import { withSpan, getMetrics } from '@origintrail-official/dkg-core';
-import { withTimeout, isRetryableRpcError, isThrottleRpcError, isKnownTransactionError, assertSuccessfulReceipt, sleep } from './evm-adapter-rpc.js';
-import { errorCode, errorMessage } from './evm-adapter-errors.js';
+import {
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
+  isRetryableRpcError,
+  isThrottleRpcError,
+  isKnownTransactionError,
+  sleep,
+} from './evm-adapter-rpc.js';
+import { errorCode, errorMessage, errorRetryAfterMs } from './evm-adapter-errors.js';
 import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
-import { ChainRpcTransportError, createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import {
+  ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
+  createRpcTimeoutError,
+  type RpcEndpointExhaustionKind,
+} from './chain-rpc-transport-error.js';
 import { withRpcUsageConsumer } from './rpc-usage.js';
-import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
+import {
+  withRpcRequestContext,
+  withRpcRequestTimeout,
+} from './rpc-request-transport.js';
 import {
   RPC_READ_STALL_TIMEOUT_MS,
   RPC_LOG_SCAN_TIMEOUT_MS,
   RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
   RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
   RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
-  RPC_RECEIPT_POLL_INTERVAL_MS,
   STICKY_PREFERRED_TTL_MS,
-  resolveReceiptTimeoutMs,
 } from './evm-adapter-constants.js';
-import { waitForReceiptWithDeadline } from './receipt-wait.js';
 
 /**
  * One RPC endpoint as a SINGLE boundary: the bare per-endpoint provider paired
@@ -94,8 +106,9 @@ export type ReadPolicy =
   | 'failOpenFundingRead';
 
 /** Per-read options: timeout/failover behavior plus an explicit low-cardinality
- *  telemetry consumer key for `eth_call` attribution. `label` remains a human
- *  failover/span label and is not implicitly part of the daemon log contract. */
+ *  telemetry consumer key for raw-read attribution (`eth_call` and
+ *  `eth_getLogs`). `label` remains a human failover/span label and is not
+ *  implicitly part of the daemon log contract. */
 export interface ReadOpts {
   policy?: ReadPolicy;
   isRetryable?: (err: unknown) => boolean;
@@ -156,16 +169,14 @@ interface ProviderPassOptions<T> {
   onServed: (endpoint: RpcEndpoint, value: T) => void;
 }
 
-type ProviderSetExhaustionKind = 'all-throttled' | 'mixed';
-
 /** Internal exhaustion detail used only while deciding whether to retry a pass. */
-class ProviderSetExhaustedError extends ChainRpcTransportError {
+class ProviderSetExhaustedError extends RpcEndpointsExhaustedError {
   constructor(
     message: string,
-    readonly exhaustionKind: ProviderSetExhaustionKind,
-    opts: { cause: unknown; rpcUrls: readonly string[] },
+    exhaustionKind: RpcEndpointExhaustionKind,
+    opts: { cause: unknown; rpcUrls: readonly string[]; retryAfterMs?: number },
   ) {
-    super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
+    super(message, { ...opts, exhaustionKind });
   }
 }
 
@@ -215,16 +226,16 @@ export interface StickinessOptions {
 
 /**
  * Failover classifier for CONTRACT VIEW reads (`readContract`'s default): the
- * generic `isRetryableRpcError` transient set MINUS `BAD_DATA`. A view `BAD_DATA`
+ * endpoint-failover transient set MINUS `BAD_DATA`. A view `BAD_DATA`
  * ("could not decode result data") is a DETERMINISTIC client-side decode of an
  * empty / wrong-shape return for the ABI type — not an RPC outage — so failing
  * over would re-hit the same decode on every endpoint and mask it as
  * `RPC_ENDPOINTS_EXHAUSTED`; it is rethrown instead. (Direct provider reads —
  * getCode/getBalance/getNetwork — never produce BAD_DATA, so they keep the
- * unmodified `isRetryableRpcError`.)
+ * unmodified endpoint-failover classifier.)
  */
 export function isContractViewRetryable(err: unknown): boolean {
-  return isRetryableRpcError(err) && errorCode(err) !== 'BAD_DATA';
+  return isRpcEndpointFailoverEligible(err) && errorCode(err) !== 'BAD_DATA';
 }
 
 /**
@@ -334,7 +345,7 @@ export class RpcFailoverClient {
    * all are exhausted, throws the typed `RPC_ENDPOINTS_EXHAUSTED` (→ bounded
    * 503). A NON-retryable error is rethrown AT ONCE (failing over a deterministic
    * chain error would only mask it). The default classifier is
-   * `isRetryableRpcError`; override it via `opts.isRetryable` for reads whose
+   * `isRpcEndpointFailoverEligible`; override it via `opts.isRetryable` for reads whose
    * error shapes carry domain meaning (e.g. `getMaxKaNumberForAuthor`'s
    * absent-view). `fn` receives the active provider (`p => p.getCode(addr)`) and
    * MUST be a PURE read — no sign / broadcast / WAL — since it may execute on
@@ -352,7 +363,7 @@ export class RpcFailoverClient {
       fn,
       {
         isRetryable: error => !opts?.signal?.aborted && (
-          opts?.isRetryable ?? isRetryableRpcError
+          opts?.isRetryable ?? isRpcEndpointFailoverEligible
         )(error),
         intent: skipPreferred ? 'transparentRead' : 'stickyRead',
         attemptTimeoutMs: providerCount => resolveCapMs(policy, providerCount),
@@ -366,7 +377,7 @@ export class RpcFailoverClient {
     );
     const run = () => this.runReadPasses(label, runPass, opts?.endpointSetRetry);
     const runWithAbort = () => opts?.signal
-      ? withRpcRequestAbortSignal(opts.signal, run)
+      ? withRpcRequestContext({ signal: opts.signal }, run)
       : run();
     return opts?.rpcUsageConsumer
       ? withRpcUsageConsumer(opts.rpcUsageConsumer, runWithAbort)
@@ -436,7 +447,7 @@ export class RpcFailoverClient {
       { attributes: { 'rpc.method': 'eth_call', 'dkg.chain_id': chainId, 'dkg.read': label } },
     );
     const runWithAbort = () => opts?.signal
-      ? withRpcRequestAbortSignal(opts.signal, run)
+      ? withRpcRequestContext({ signal: opts.signal }, run)
       : run();
     return opts?.rpcUsageConsumer
       ? withRpcUsageConsumer(opts.rpcUsageConsumer, runWithAbort)
@@ -485,20 +496,28 @@ export class RpcFailoverClient {
         );
         const rpcSigner = this.rebindSigner(signer, endpoint.provider);
         const connected = this.rebindContract(contract, rpcSigner) as any;
-        const populated = await withTimeout<ethers.TransactionRequest>(
-          connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
+        const populated = await withRpcRequestTimeout<ethers.TransactionRequest>(
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
           `${label} transaction population via RPC #${i + 1}`,
+          () => connected[method].populateTransaction(...args) as Promise<ethers.TransactionRequest>,
         );
         if (opts?.gasLimitBufferBps && populated.gasLimit == null) {
           try {
-            const est = (await withTimeout<bigint>(
-              connected[method].estimateGas(...args) as Promise<bigint>,
+            const est = (await withRpcRequestTimeout<bigint>(
               RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
               `${label} gas estimation via RPC #${i + 1}`,
+              () => connected[method].estimateGas(...args) as Promise<bigint>,
             ));
             populated.gasLimit = (est * BigInt(10_000 + opts.gasLimitBufferBps)) / 10_000n;
           } catch (estErr) {
+            // Local governor pressure is caller-level backpressure, not an
+            // endpoint defect and not permission to drop the requested OOG
+            // headroom. Preserve the original retry-later error unchanged:
+            // the caller may retry later, while this transport must neither
+            // switch providers nor sign an unbuffered transaction.
+            if (classifyRpcRetryDisposition(estErr) === 'retry-later') {
+              throw estErr;
+            }
             // A RETRYABLE estimate failure must not silently drop the OOG
             // headroom: if another RPC is left, re-throw so the loop fails over
             // to it (it may estimate fine and apply the buffer). Only on the LAST
@@ -506,7 +525,7 @@ export class RpcFailoverClient {
             // can't help — fall back to ethers' own unbuffered estimate during
             // signing, leaving a breadcrumb so a recurring OOG isn't a mystery.
             const hasMoreProviders = i < attempts.length - 1;
-            if (isRetryableRpcError(estErr) && hasMoreProviders) {
+            if (isRpcEndpointFailoverEligible(estErr) && hasMoreProviders) {
               throw estErr;
             }
             console.warn(
@@ -516,10 +535,10 @@ export class RpcFailoverClient {
             );
           }
         }
-        const signed = await withTimeout(
-          this.signPopulated(rpcSigner, populated),
+        const signed = await withRpcRequestTimeout(
           RPC_TRANSACTION_POPULATION_ATTEMPT_TIMEOUT_MS,
           `${label} transaction signing via RPC #${i + 1}`,
+          () => this.signPopulated(rpcSigner, populated),
         );
         // Signed on this endpoint → 'nonceWrite' marks it WRITE-proven (nonce-safe)
         // so it's preferred for the read-your-write ops that follow (the caller's
@@ -528,7 +547,7 @@ export class RpcFailoverClient {
         noteRpcServed(`${label} preparation`, endpoint.rpcUrl, { mode: 'read', key: this.servedWriteKey('tx-preparation') });
         return signed;
       } catch (err) {
-        if (!isRetryableRpcError(err)) throw err;
+        if (!isRpcEndpointFailoverEligible(err)) throw err;
         lastRetryable = err;
         attempt.recordFailure(); // de-prefer a failed backend
         if (i < attempts.length - 1) {
@@ -554,7 +573,7 @@ export class RpcFailoverClient {
     getMetrics().chainRpcFailoverTotal.add(1, {
       rpc_method: 'eth_estimateGas', chain_id: this.chainId(), reason: 'exhausted',
     });
-    throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', message, {
+    throw new RpcEndpointsExhaustedError(message, {
       cause: lastRetryable,
       rpcUrls: canonical.map((e) => e.rpcUrl),
     });
@@ -590,10 +609,10 @@ export class RpcFailoverClient {
                 RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
                 `${label} chainId validation via RPC #${i + 1}`,
               );
-              await withTimeout(
-                provider.broadcastTransaction(signedTx),
+              await withRpcRequestTimeout(
                 RPC_BROADCAST_ATTEMPT_TIMEOUT_MS,
                 `${label} broadcast via RPC #${i + 1}`,
+                () => provider.broadcastTransaction(signedTx),
               );
               span.setAttribute('dkg.tx_hash', txHash);
               this.recordRpcOutcome('eth_sendRawTransaction', 'ok');
@@ -610,7 +629,23 @@ export class RpcFailoverClient {
                 noteRpcServed(`${label} broadcast`, endpoint.rpcUrl, { mode: 'write' });
                 return;
               }
-              if (!isRetryableRpcError(err)) {
+              if (classifyRpcRetryDisposition(err) === 'retry-later') {
+                this.recordRpcOutcome('eth_sendRawTransaction', this.rpcOutcome(err), { retryable: true });
+                if (errorCode(err) === 'RPC_REQUEST_GOVERNOR_QUEUE_FULL') {
+                  // A signed write is already in progress at this boundary. The
+                  // current raw attempt did not start, but an earlier endpoint
+                  // may have accepted the same transaction before its response
+                  // failed. Preserve the hash and an indeterminate operation
+                  // outcome at the HTTP boundary.
+                  throw new ChainRpcTransportError(
+                    'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+                    errorMessage(err),
+                    { cause: err, txHash },
+                  );
+                }
+                throw err;
+              }
+              if (!isRpcEndpointFailoverEligible(err)) {
                 this.recordRpcOutcome('eth_sendRawTransaction', this.rpcOutcome(err), { retryable: false });
                 throw err;
               }
@@ -628,8 +663,7 @@ export class RpcFailoverClient {
           // broadcast-time all-endpoints-exhausted failure maps to a retryable 503 at
           // the HTTP boundary, not a generic 500 — an exhaustion after a provider
           // populated/signed would otherwise surface code-less.
-          throw new ChainRpcTransportError(
-            'RPC_ENDPOINTS_EXHAUSTED',
+          throw new RpcEndpointsExhaustedError(
             `${label} broadcast failed on all configured RPC endpoints for tx ${txHash}: ${errorMessage(lastRetryable)}`,
             { cause: lastRetryable, rpcUrls: canonical.map((e) => e.rpcUrl), txHash },
           );
@@ -668,7 +702,7 @@ export class RpcFailoverClient {
             logLabel,
             provider => provider.getTransactionReceipt(txHash),
             {
-              isRetryable: error => !options.signal?.aborted && isRetryableRpcError(error),
+              isRetryable: error => !options.signal?.aborted && isRpcEndpointFailoverEligible(error),
               intent: 'receiptRead',
               attemptTimeoutMs: () => RPC_RECEIPT_ATTEMPT_TIMEOUT_MS,
               ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }),
@@ -722,7 +756,7 @@ export class RpcFailoverClient {
       { attributes: { 'rpc.method': 'eth_getTransactionReceipt', 'dkg.chain_id': chainId } },
     );
     return options.signal
-      ? withRpcRequestAbortSignal(options.signal, run)
+      ? withRpcRequestContext({ signal: options.signal }, run)
       : run();
   }
 
@@ -750,6 +784,7 @@ export class RpcFailoverClient {
     const configuredAttemptTimeoutMs = options.attemptTimeoutMs(canonical.length);
     let lastRetryable: unknown;
     let allEndpointsThrottled = true;
+    let retryAfterMs: number | undefined;
     let sawEmpty = false;
     let lastEmpty: T | undefined;
     let deadlineExpiredBeforeAttempt = false;
@@ -802,9 +837,15 @@ export class RpcFailoverClient {
         options.onServed(endpoint, out);
         return out;
       } catch (err) {
+        if (classifyRpcRetryDisposition(err) === 'retry-later') throw err;
         if (!options.isRetryable(err)) throw err;
         lastRetryable = err;
-        if (!isThrottleRpcError(err)) allEndpointsThrottled = false;
+        if (!isThrottleRpcError(err)) {
+          allEndpointsThrottled = false;
+        } else {
+          const hint = errorRetryAfterMs(err);
+          if (hint !== undefined) retryAfterMs = Math.max(retryAfterMs ?? 0, hint);
+        }
         attempt.recordFailure(); // de-prefer a failed backend
         const canTryNext = options.deadlineMs === undefined || Date.now() < options.deadlineMs;
         if (!isLast && canTryNext) {
@@ -833,6 +874,7 @@ export class RpcFailoverClient {
       throw new ProviderSetExhaustedError(message, allEndpointsThrottled ? 'all-throttled' : 'mixed', {
         cause: lastRetryable,
         rpcUrls: canonical.map((e) => e.rpcUrl),
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
       });
     }
     // Either every endpoint returned empty with no errors, or the caller's
@@ -843,8 +885,7 @@ export class RpcFailoverClient {
     }
     // Unreachable when >=1 endpoint is configured (each iteration returns,
     // continues on empty, or throws / sets lastRetryable). Guard the 0-endpoint case.
-    throw new ChainRpcTransportError(
-      'RPC_ENDPOINTS_EXHAUSTED',
+    throw new RpcEndpointsExhaustedError(
       `${label} read failed: no configured RPC endpoints`,
       { rpcUrls: [] },
     );
@@ -865,7 +906,7 @@ export class RpcFailoverClient {
     if (remainingMs <= 0) {
       throw createRpcTimeoutError(`${label} exceeded its endpoint-attempt deadline`);
     }
-    return withTimeout(stage(), remainingMs, label);
+    return withRpcRequestTimeout(remainingMs, label, stage);
   }
 
   /**
@@ -922,70 +963,19 @@ export class RpcFailoverClient {
     timeoutLabel: string,
   ): Promise<void> {
     if (!this.validateEndpoint) return;
-    const validation = this.validateEndpoint(endpoint);
     if (timeoutMs == null) {
-      await validation;
+      await this.validateEndpoint(endpoint);
       return;
     }
-    await withTimeout(validation, timeoutMs, timeoutLabel);
+    await withRpcRequestTimeout(
+      timeoutMs,
+      timeoutLabel,
+      () => this.validateEndpoint!(endpoint),
+    );
   }
 
   /** Rebind a SIGNER to `provider` for one per-endpoint populate+sign attempt. */
   private rebindSigner(signer: Wallet, provider: JsonRpcProvider): Wallet {
     return signer.connect(provider);
   }
-}
-
-export interface TransactionReceiptWaitOptions {
-  /** Overall submitted-transaction receipt deadline (default 10 minutes). */
-  receiptTimeoutMs?: number;
-  /** Low-cardinality transport label. Defaults to `direct transaction`. */
-  logLabel?: string;
-}
-
-/** One direct receipt endpoint with optional telemetry metadata kept in-band. */
-export interface TransactionReceiptEndpoint {
-  provider: JsonRpcProvider;
-  rpcUrl?: string;
-}
-
-/**
- * Stable direct-write receipt boundary used by CLI commands after broadcast.
- * It constructs the same concrete `RpcFailoverClient` the adapter uses, leaving
- * `receipt-wait.ts` responsible only for operation-level polling/deadline logic.
- */
-export async function waitForTransactionReceiptWithFailover(
-  endpoints: readonly TransactionReceiptEndpoint[],
-  txHash: string,
-  options: TransactionReceiptWaitOptions = {},
-): Promise<ethers.TransactionReceipt> {
-  const receiptTimeoutMs = resolveReceiptTimeoutMs(options.receiptTimeoutMs);
-  const logLabel = options.logLabel ?? 'direct transaction';
-  const rpcEndpoints: RpcEndpoint[] = endpoints.map((endpoint, index) => ({
-    provider: endpoint.provider,
-    // URL is telemetry/stickiness metadata only. Keep URL-less endpoints in the
-    // pass with a non-secret stable label rather than filtering them out.
-    rpcUrl: endpoint.rpcUrl ?? `dkg-direct-rpc://endpoint-${index + 1}`,
-  }));
-  const receiptTransport = new RpcFailoverClient(
-    () => rpcEndpoints,
-    async () => { throw new Error('receipt-only RPC transport cannot sign'); },
-    () => 'direct',
-    // This helper owns one transaction wait, so cross-operation preference has
-    // no value; disabling it preserves the configured endpoint order per poll.
-    { stickiness: { enabled: false } },
-  );
-
-  return waitForReceiptWithDeadline({
-    txHash,
-    receiptTimeoutMs,
-    pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
-    getReceipt: (hash, { deadlineMs }) => receiptTransport.getReceipt(hash, {
-      deadlineMs,
-      logLabel: `${logLabel} receipt lookup`,
-    }),
-    assertSuccessfulReceipt: receipt => assertSuccessfulReceipt(receipt, logLabel),
-    formatTimeoutMessage: () =>
-      `Transaction ${txHash} was broadcast but no receipt was found within ${receiptTimeoutMs}ms`,
-  });
 }

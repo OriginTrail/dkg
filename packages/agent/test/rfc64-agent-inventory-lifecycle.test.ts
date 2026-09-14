@@ -1,3 +1,4 @@
+import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -28,6 +29,8 @@ import {
 import { openRfc64PersistenceV1 } from '../src/rfc64/persistence-v1.js';
 import { openRfc64ControlObjectStoreForOwnedPersistenceRootV1 } from '../src/rfc64/control-object-store-v1-internal.js';
 import { getRfc64PersistenceRootOwnershipForInventoryV1 } from '../src/rfc64/persistence-root-ownership-v1-internal.js';
+import { Rfc64BackgroundWorkDispatcherV1 } from
+  '../src/rfc64/background-work-dispatcher-v1.js';
 import {
   RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1,
 } from '../src/rfc64/persistence-layout-v1.js';
@@ -49,10 +52,13 @@ function temporaryDataDirectory(): string {
 
 function syntheticAgent(dataDirectory?: string): any {
   const agent = Object.create(DKGAgent.prototype) as any;
+  agent.peerSyncSession = PeerSyncSession.stopped();
+  agent.lastSyncDisconnectedAt = new Map();
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),
+    rfc64BackgroundWorkDispatcherV1: new Rfc64BackgroundWorkDispatcherV1(),
     rfc64PersistenceV1: undefined,
     selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
   });
@@ -167,7 +173,7 @@ function minimalStartedAgent(
     randomSamplingHandle: null,
     inFlightSubstrateFanOutCount: () => 0,
     router: { closePooling: vi.fn(async () => {}) },
-    node: { stop: vi.fn(async () => { order.push('node'); }) },
+    node: { libp2p: { getPeers: () => [] }, stop: vi.fn(async () => { order.push('node'); }) },
     syncVerifyWorker: { close: vi.fn(async () => { order.push('sync-worker'); }) },
     rfc64PersistenceV1: {
       close: () => {

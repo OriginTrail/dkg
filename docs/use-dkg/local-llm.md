@@ -582,7 +582,10 @@ Keep the selected local model server running, then open Node UI and select **DKG
 Local LLM** in the Agents panel. There is no separate provider selector in the
 browser: Node UI uses `DKG_LLM_URL`, `DKG_LLM_MODEL`, and `DKG_LLM_BACKEND`
 from the daemon environment. `DKG_LLM_BACKEND` accepts `ollama`, `llama.cpp`,
-or the backward-compatible default `auto`. The integration remains read-only:
+or the backward-compatible default `auto`. Node UI hides the integration when
+none of those environment overrides is set and no server is reachable at the
+default local endpoint. An explicitly configured server remains visible while
+offline so the panel can report its error. The integration remains read-only:
 the daemon always creates this
 UI runtime with writes disabled. The HTTP surface is also node-admin-only.
 Agent-scoped bearer tokens receive `403` and cannot start, continue, or clear

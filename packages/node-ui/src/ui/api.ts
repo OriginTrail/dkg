@@ -19,9 +19,10 @@ import type {
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 
 // Re-export the shared transport so existing `../api.js` consumers of these
-// keep working (barrel), and the PCA client from its extracted module.
+// keep working (barrel), and domain clients from their extracted modules.
 export { authHeaders, HttpError } from './http.js';
 export * from './pca-api.js';
+export * from './identity-wallet-api.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
@@ -721,8 +722,8 @@ export async function fetchAssertionUals(contextGraphId: string): Promise<Record
   const data = await executeQuery(sparql, { contextGraphId });
   const map: Record<string, string> = {};
   for (const b of (data?.result?.bindings ?? [])) {
-    const name = typeof b.name === 'string' ? b.name : b.name?.value;
-    const ual = typeof b.ual === 'string' ? b.ual : b.ual?.value;
+    const name = bv(b.name);
+    const ual = bv(b.ual);
     if (name && ual && !map[name]) map[name] = ual;
   }
   return map;
@@ -1423,8 +1424,8 @@ export async function listAssertions(
   const bindings: any[] = listData?.result?.bindings ?? [];
   const countByGraph = new Map<string, number>();
   for (const b of (countData?.result?.bindings ?? [])) {
-    const g = typeof b.g === 'string' ? b.g : b.g?.value;
-    const cntRaw = typeof b.cnt === 'string' ? b.cnt : b.cnt?.value;
+    const g = bv(b.g);
+    const cntRaw = bv(b.cnt);
     // The aggregate comes back as a typed RDF literal whose lexical form can be
     // wrapped: `"21"^^<http://www.w3.org/2001/XMLSchema#integer>`. A bare
     // `parseInt('"21"^^…')` reads the leading quote and yields NaN, which the
@@ -1961,6 +1962,7 @@ export type LocalAgentChannelTarget = 'bridge' | 'gateway';
 
 export interface LocalAgentHealthResponse {
   ok: boolean;
+  configured?: boolean;
   ready?: boolean;
   reachable?: boolean;
   offline?: boolean;
@@ -2802,7 +2804,9 @@ function hermesDetail(
   return null;
 }
 
-async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecord): Promise<LocalAgentIntegration> {
+async function mapLocalAgentIntegrationRecord(
+  record: LocalAgentIntegrationRecord,
+): Promise<LocalAgentIntegration | null> {
   const id = String(record.id ?? '').toLowerCase();
   const surface = LOCAL_AGENT_SURFACES[id];
   const hasChatBridge = record.capabilities?.localChat === true && surface?.chatSupported === true;
@@ -2813,6 +2817,15 @@ async function mapLocalAgentIntegrationRecord(record: LocalAgentIntegrationRecor
   const health = configured && hasChatBridge && surface?.fetchHealth
     ? normalizeLocalAgentHealth(await surface.fetchHealth().catch(() => null))
     : null;
+  // The daemon-owned integration exists in the registry on every node. Keep it
+  // out of the UI when the operator supplied no local-LLM configuration and
+  // the conventional local endpoint did not pass the LLM readiness probe.
+  // Reachability alone is insufficient: an unrelated HTTP service can occupy
+  // the default port. An explicit but temporarily offline configuration
+  // remains visible so its error is useful.
+  if (id === 'local-llm' && health?.configured === false && health.ready !== true) {
+    return null;
+  }
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
   const chatReady = health?.ok === true && !degraded;
   const bridgeOnline = chatReady;
@@ -2971,7 +2984,10 @@ export async function fetchRegistryIntegrations(opts: { tier?: RegistryTrustTier
 
 export async function fetchLocalAgentIntegrations(): Promise<{ integrations: LocalAgentIntegration[] }> {
   const response = await get<{ integrations?: LocalAgentIntegrationRecord[] }>('/api/local-agent-integrations');
-  const integrations = await Promise.all((response.integrations ?? []).map(mapLocalAgentIntegrationRecord));
+  const mapped = await Promise.all((response.integrations ?? []).map(mapLocalAgentIntegrationRecord));
+  const integrations = mapped.filter(
+    (integration): integration is LocalAgentIntegration => integration !== null,
+  );
 
   integrations.sort((a, b) => {
     const aPriority = a.id === 'openclaw' ? 0 : 1;
@@ -3177,6 +3193,7 @@ export const fetchWalletsBalances = () =>
     symbol?: string;
     error?: string;
   }>('/api/wallets/balances');
+
 export const fetchRpcHealth = () =>
   get<{
     ok: boolean;

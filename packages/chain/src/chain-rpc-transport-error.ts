@@ -11,9 +11,10 @@
  * over a single set of chain-NAMESPACED codes:
  *   - `RPC_ENDPOINTS_EXHAUSTED`   — every configured RPC failed over (writes)
  *   - `RPC_RECEIPT_LOOKUP_FAILED` — receipt lookup failed on every endpoint
+ *   - `RPC_REQUEST_GOVERNOR_QUEUE_FULL` — local admission queue has no capacity
  *   - `RPC_TIMEOUT`               — receipt wait / bounded RPC request timed out
  *
- * All three are chain-OWNED, namespaced codes — only the chain/CLI failover
+ * All four are chain-OWNED, namespaced codes — only the chain/CLI failover
  * stack ever stamps them — so the guard is ONE simple structural check (`code`),
  * with no `instanceof`/prototype coupling and identical behaviour for every
  * transport case (each survives a plain-object re-wrap that preserves `.code`).
@@ -30,6 +31,7 @@
 export const CHAIN_RPC_TRANSPORT_CODES = [
   'RPC_ENDPOINTS_EXHAUSTED',
   'RPC_RECEIPT_LOOKUP_FAILED',
+  'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
   'RPC_TIMEOUT',
 ] as const;
 
@@ -52,6 +54,15 @@ export interface ChainRpcTransportErrorLike {
   txHash?: string;
 }
 
+export type RpcEndpointExhaustionKind = 'all-throttled' | 'mixed';
+
+/** Narrow transport variant whose metadata is meaningful only for pool exhaustion. */
+export interface RpcEndpointsExhaustedErrorLike extends ChainRpcTransportErrorLike {
+  code: 'RPC_ENDPOINTS_EXHAUSTED';
+  exhaustionKind?: RpcEndpointExhaustionKind;
+  retryAfterMs?: number;
+}
+
 export class ChainRpcTransportError extends Error {
   readonly code: ChainRpcTransportCode;
 
@@ -61,10 +72,15 @@ export class ChainRpcTransportError extends Error {
   readonly rpcUrls?: readonly string[];
 
   readonly txHash?: string;
+
   constructor(
     code: ChainRpcTransportCode,
     message: string,
-    opts?: { cause?: unknown; rpcUrls?: readonly string[]; txHash?: string },
+    opts?: {
+      cause?: unknown;
+      rpcUrls?: readonly string[];
+      txHash?: string;
+    },
   ) {
     super(message, opts?.cause !== undefined ? { cause: opts.cause } : undefined);
     this.name = 'ChainRpcTransportError';
@@ -72,6 +88,35 @@ export class ChainRpcTransportError extends Error {
     if (opts?.rpcUrls) this.rpcUrls = Object.freeze([...opts.rpcUrls]);
     if (opts?.txHash) this.txHash = opts.txHash;
   }
+}
+
+export class RpcEndpointsExhaustedError
+  extends ChainRpcTransportError
+  implements RpcEndpointsExhaustedErrorLike {
+  declare readonly code: 'RPC_ENDPOINTS_EXHAUSTED';
+  readonly exhaustionKind?: RpcEndpointExhaustionKind;
+  readonly retryAfterMs?: number;
+
+  constructor(
+    message: string,
+    opts?: {
+      cause?: unknown;
+      rpcUrls?: readonly string[];
+      txHash?: string;
+      exhaustionKind?: RpcEndpointExhaustionKind;
+      retryAfterMs?: number;
+    },
+  ) {
+    super('RPC_ENDPOINTS_EXHAUSTED', message, opts);
+    if (opts?.exhaustionKind) this.exhaustionKind = opts.exhaustionKind;
+    if (opts?.retryAfterMs !== undefined) this.retryAfterMs = opts.retryAfterMs;
+  }
+}
+
+export function isRpcEndpointsExhaustedError(
+  err: unknown,
+): err is RpcEndpointsExhaustedErrorLike {
+  return isChainRpcTransportError(err) && err.code === 'RPC_ENDPOINTS_EXHAUSTED';
 }
 
 /**

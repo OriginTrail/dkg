@@ -63,12 +63,23 @@ describe('daemon local LLM service', () => {
       DKG_LLM_BACKEND: ' llama-cpp ',
       DKG_PROJECT: ' testing ',
     })).toEqual({
+      configured: true,
       llamaUrl: 'http://127.0.0.1:9090/v1/chat/completions',
       model: 'qwen',
       probeStrategy: { kind: 'llama.cpp' },
       defaultProjectId: 'testing',
       logDir: '/tmp/dkg/logs/local-llm',
     });
+  });
+
+  it('distinguishes an untouched default endpoint from explicit local-LLM configuration', () => {
+    expect(resolveDaemonLocalLlmSettings('/tmp/dkg', {}).configured).toBe(false);
+    expect(resolveDaemonLocalLlmSettings('/tmp/dkg', {
+      DKG_LLM_MODEL: ' local-model ',
+    }).configured).toBe(true);
+    expect(resolveDaemonLocalLlmSettings('/tmp/dkg', {
+      LLAMA_URL: ' http://127.0.0.1:8080/v1/chat/completions ',
+    }).configured).toBe(true);
   });
 
   it('maps an invalid configured backend to structured offline health and chat errors', async () => {
@@ -83,6 +94,7 @@ describe('daemon local LLM service', () => {
 
     expect(await service.health()).toEqual(expect.objectContaining({
       ok: false,
+      configured: true,
       ready: false,
       reachable: false,
       offline: true,
@@ -320,7 +332,7 @@ describe('daemon local LLM service', () => {
       createSession,
     });
     expect(await offline.health()).toEqual(expect.objectContaining({
-      ok: false, reachable: false, offline: true,
+      ok: false, configured: false, reachable: false, offline: true,
     }));
     await expect(offline.chat({ message: 'hello' })).rejects.toMatchObject({
       code: 'LOCAL_LLM_OFFLINE', status: 503,

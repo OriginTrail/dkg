@@ -6,8 +6,6 @@ import {
   type KaNumberStore,
   type MessageDirection,
   type MessageIdempotencyStore,
-  type ProtocolOutboxEntry,
-  type ProtocolOutboxStore,
   type ContextGraphJoinPolicyRecord,
   parseContextGraphJoinPolicyRecord,
   DEFAULT_SYNC_CHECKPOINT_TTL_MS,
@@ -26,10 +24,14 @@ import {
 } from './routine-log-retention.js';
 export {
   SqliteChainEventCursorStore,
+  SqliteContextGraphAuthorityIndexStore,
+  SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-export const SCHEMA_VERSION = 35;
+export { SqliteProtocolOutboxStore, type SqliteProtocolOutboxStoreOptions } from './protocol-outbox-store.js';
+
+export const SCHEMA_VERSION = 36;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -344,6 +346,14 @@ export class DashboardDB {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
       }
     };
+    const ensureContextGraphAuthorityIndexSchema = () => this.db.exec(`
+      CREATE TABLE IF NOT EXISTS context_graph_authority_indexes (
+        scope TEXT PRIMARY KEY CHECK (length(trim(scope)) > 0),
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        checkpoint_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
       // Repair restored/development databases that carry the current version
@@ -351,6 +361,7 @@ export class DashboardDB {
       ensureJoinApprovalRepairMarker();
       ensureSyncCheckpointResumeColumns();
       ensureJoinPolicyAuditCapTrigger();
+      ensureContextGraphAuthorityIndexSchema();
       installRoutineLogRetentionSchema(this.db);
       return;
     }
@@ -1288,6 +1299,11 @@ export class DashboardDB {
       // row ids, so overflow checks are O(1) and each prune touches at most one
       // configured batch.
       installRoutineLogRetentionSchema(this.db);
+    }
+    if (version < 36) {
+      // One opaque checkpoint per physical ContextGraphStorage deployment.
+      // Chain owns decoding/integrity; SQLite owns atomic revision CAS.
+      ensureContextGraphAuthorityIndexSchema();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
@@ -3730,312 +3746,6 @@ export class SqliteMessageIdempotencyStore implements MessageIdempotencyStore {
       .prepare(`DELETE FROM message_idempotency WHERE ts < ?`)
       .run(tsMs);
     return result.changes;
-  }
-}
-
-/**
- * SQLite-backed `ProtocolOutboxStore` against the V12
- * `protocol_outbox` table. Sender-side durable retry queue, keyed
- * by `(peer, protocol, message_id)`. The substrate's reliability
- * floor: a daemon crash mid-retry doesn't lose the message — the
- * next startup's `Messenger.processOutboxTick` picks up exactly
- * where the crash left off (modulo the in-flight bytes that died
- * with the process, which is documented as the "in-flight queue
- * caveat" in CHANGELOG for rc.9).
- *
- * The backoff ladder + max-age are NOT stored in SQL — they live
- * on the wrapping `ProtocolOutbox` in `packages/core`, and only
- * the resulting `next_attempt_at` and `first_failure_at` timestamps
- * land in the table. This keeps the schema independent of policy
- * changes: bumping the ladder doesn't require a migration.
- *
- * Constructor takes a `maxAgeMs` so `dropExpired` can apply it
- * directly in SQL (avoiding a full table read).
- */
-export interface SqliteProtocolOutboxStoreOptions {
-  /**
-   * Max age (ms) from `firstFailureAt` before `dropExpired(now)`
-   * evicts an entry. Defaults to 24h. Mirrors the wrapping
-   * `ProtocolOutbox`'s `maxAgeMs` so both layers agree.
-   */
-  maxAgeMs?: number;
-  /**
-   * Function that returns the backoff (ms) to apply for an entry
-   * about to bump to `attempts`. The schema does NOT store the
-   * ladder; PR-2's `lifecycle.ts` wiring passes the wrapping
-   * `ProtocolOutbox`'s `backoffFor` method here so policy lives in
-   * one place. Defaults to a flat 5s backoff so the store works
-   * standalone in tests + before the wrapping outbox is wired.
-   */
-  backoffFor?: (attempts: number) => number;
-}
-
-export class SqliteProtocolOutboxStore implements ProtocolOutboxStore {
-  private readonly db: Database.Database;
-  private maxAgeMs = 24 * 60 * 60 * 1000;
-  private backoffFor: (attempts: number) => number = (_attempts) => 5_000;
-
-  constructor(dashboard: DashboardDB, options: SqliteProtocolOutboxStoreOptions = {}) {
-    this.db = dashboard.db;
-    this.configurePolicy(options);
-  }
-
-  configurePolicy(options: SqliteProtocolOutboxStoreOptions = {}): void {
-    this.maxAgeMs = options.maxAgeMs ?? this.maxAgeMs;
-    this.backoffFor = options.backoffFor ?? this.backoffFor;
-  }
-
-  enqueue(
-    peer: string,
-    protocol: string,
-    messageId: string,
-    payload: Uint8Array,
-    error: string,
-    now: number,
-  ): ProtocolOutboxEntry {
-    const existing = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-      )
-      .get(peer, protocol, messageId) as
-      | {
-          peer_id: string;
-          protocol: string;
-          message_id: string;
-          payload: Buffer;
-          attempts: number;
-          first_failure_at: number;
-          last_attempt_at: number;
-          next_attempt_at: number;
-          last_error: string | null;
-        }
-      | undefined;
-
-    if (existing) {
-      const newAttempts = existing.attempts + 1;
-      const nextAttemptAt = now + this.backoffFor(newAttempts);
-      this.db
-        .prepare(
-          `UPDATE protocol_outbox
-           SET attempts = ?, last_attempt_at = ?, next_attempt_at = ?, last_error = ?
-           WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-        )
-        .run(newAttempts, now, nextAttemptAt, error, peer, protocol, messageId);
-      return {
-        peer,
-        protocol,
-        messageId,
-        payload: new Uint8Array(existing.payload),
-        attempts: newAttempts,
-        firstFailureAt: existing.first_failure_at,
-        lastAttemptAt: now,
-        nextAttemptAt,
-        lastError: error,
-      };
-    }
-
-    const attempts = 1;
-    const nextAttemptAt = now + this.backoffFor(attempts);
-    const blob = Buffer.from(payload);
-    this.db
-      .prepare(
-        `INSERT INTO protocol_outbox
-           (peer_id, protocol, message_id, payload, attempts,
-            first_failure_at, last_attempt_at, next_attempt_at, last_error)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(peer, protocol, messageId, blob, attempts, now, now, nextAttemptAt, error);
-    return {
-      peer,
-      protocol,
-      messageId,
-      payload: new Uint8Array(blob),
-      attempts,
-      firstFailureAt: now,
-      lastAttemptAt: now,
-      nextAttemptAt,
-      lastError: error,
-    };
-  }
-
-  markDelivered(peer: string, protocol: string, messageId: string): boolean {
-    const result = this.db
-      .prepare(
-        `DELETE FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-      )
-      .run(peer, protocol, messageId);
-    return result.changes > 0;
-  }
-
-  hasEntry(peer: string, protocol: string, messageId: string): boolean {
-    const row = this.db
-      .prepare(
-        `SELECT 1 FROM protocol_outbox
-         WHERE peer_id = ? AND protocol = ? AND message_id = ? LIMIT 1`,
-      )
-      .get(peer, protocol, messageId) as { 1: number } | undefined;
-    return row !== undefined;
-  }
-
-  hasPendingFor(peer: string): boolean {
-    return this.db.prepare('SELECT 1 FROM protocol_outbox WHERE peer_id = ? LIMIT 1').get(peer) !== undefined;
-  }
-
-  pendingFor(peer: string): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE peer_id = ?
-         ORDER BY first_failure_at ASC, protocol ASC, message_id ASC`,
-      )
-      .all(peer) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  due(now: number): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE next_attempt_at <= ?
-         ORDER BY next_attempt_at ASC, first_failure_at ASC,
-                  peer_id ASC, protocol ASC, message_id ASC`,
-      )
-      .all(now) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  duePage(now: number, limit: number): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox
-         WHERE next_attempt_at <= ?
-         ORDER BY next_attempt_at ASC, first_failure_at ASC,
-                  peer_id ASC, protocol ASC, message_id ASC
-         LIMIT ?`,
-      )
-      .all(now, limit) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  dropExpired(now: number): ProtocolOutboxEntry[] {
-    const cutoff = now - this.maxAgeMs;
-    const rows = this.db
-      .prepare(`SELECT * FROM protocol_outbox WHERE first_failure_at < ?`)
-      .all(cutoff) as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    this.db.prepare(`DELETE FROM protocol_outbox WHERE first_failure_at < ?`).run(cutoff);
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  size(): number {
-    const row = this.db.prepare(`SELECT COUNT(*) as c FROM protocol_outbox`).get() as {
-      c: number;
-    };
-    return row.c;
-  }
-
-  list(): ProtocolOutboxEntry[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM protocol_outbox ORDER BY first_failure_at ASC`)
-      .all() as Array<{
-      peer_id: string;
-      protocol: string;
-      message_id: string;
-      payload: Buffer;
-      attempts: number;
-      first_failure_at: number;
-      last_attempt_at: number;
-      next_attempt_at: number;
-      last_error: string | null;
-    }>;
-    return rows.map(SqliteProtocolOutboxStore.rowToEntry);
-  }
-
-  getEntry(peer: string, protocol: string, messageId: string): ProtocolOutboxEntry | undefined {
-    const row = this.db
-      .prepare(
-        `SELECT * FROM protocol_outbox WHERE peer_id = ? AND protocol = ? AND message_id = ?`,
-      )
-      .get(peer, protocol, messageId) as
-      | {
-          peer_id: string;
-          protocol: string;
-          message_id: string;
-          payload: Buffer;
-          attempts: number;
-          first_failure_at: number;
-          last_attempt_at: number;
-          next_attempt_at: number;
-          last_error: string | null;
-        }
-      | undefined;
-    if (!row) return undefined;
-    return SqliteProtocolOutboxStore.rowToEntry(row);
-  }
-
-  private static rowToEntry(row: {
-    peer_id: string;
-    protocol: string;
-    message_id: string;
-    payload: Buffer;
-    attempts: number;
-    first_failure_at: number;
-    last_attempt_at: number;
-    next_attempt_at: number;
-    last_error: string | null;
-  }): ProtocolOutboxEntry {
-    return {
-      peer: row.peer_id,
-      protocol: row.protocol,
-      messageId: row.message_id,
-      payload: new Uint8Array(row.payload),
-      attempts: row.attempts,
-      firstFailureAt: row.first_failure_at,
-      lastAttemptAt: row.last_attempt_at,
-      nextAttemptAt: row.next_attempt_at,
-      lastError: row.last_error ?? '',
-    };
   }
 }
 

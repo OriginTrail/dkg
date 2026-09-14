@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, type AgentPeerDiscovery, type AgentPeerPage } from '../src/index.js';
 
 describe('private SWM curator recovery planning', () => {
   const agents: DKGAgent[] = [];
@@ -323,47 +323,47 @@ describe('private SWM curator recovery planning', () => {
     const curator = ethers.Wallet.createRandom().address.toLowerCase();
     const contextGraphId = `${curator}/paged-curator-plan`;
     const agent = await createAgent('CuratorRecoveryPagination');
-    const pages = [
-      ['peer-001', 'peer-002', 'peer-003'],
-      ['peer-002', 'peer-003', 'peer-004'],
+    const pages: AgentPeerPage[] = [
+      { peerIds: ['peer-001', 'peer-002'], nextAfterPeerId: 'peer-002' },
+      { peerIds: ['peer-002'], nextAfterPeerId: 'peer-002' },
     ];
     const calls: Array<{ afterPeerId?: string; limit?: number }> = [];
-    const internals = agent as any;
-    internals.localAgents.clear();
-    internals.discovery = {
-      findAgentPeerIdsByAddress: async (
+    const provider: AgentPeerDiscovery = {
+      findAgentPeerPageByAddress: async (
         _address: string,
-        options: { afterPeerId?: string; limit?: number },
+        options,
       ) => {
         calls.push(options);
-        return pages[calls.length - 1] ?? [];
+        return pages[calls.length - 1] ?? { peerIds: [], nextAfterPeerId: null };
       },
-      findAgents: async () => [],
     };
 
-    const first = await internals.resolveCuratorPeerIdsForCg(contextGraphId, {
+    vi.spyOn(agent.discovery, 'findAgentPeerPageByAddress').mockImplementation(provider.findAgentPeerPageByAddress);
+    const first = await agent.resolveCuratorPeerIdsForCg(contextGraphId, {
       maxPeerIds: 2,
       pagePeerIds: 1,
     });
-    const second = await internals.resolveCuratorPeerIdsForCg(contextGraphId, {
+    const second = await agent.resolveCuratorPeerIdsForCg(contextGraphId, {
       maxPeerIds: 2,
       pagePeerIds: 1,
-      afterPeerId: first.nextPageAfterPeerId,
+      afterPeerId: first.rosterStatus === 'continue'
+        ? first.nextPageAfterPeerId
+        : undefined,
     });
 
     expect(first).toMatchObject({
       peerIds: ['peer-001'],
-      overflowed: true,
+      rosterStatus: 'continue',
       nextPageAfterPeerId: 'peer-001',
     });
     expect(second).toMatchObject({
       peerIds: ['peer-002'],
-      overflowed: true,
+      rosterStatus: 'continue',
       nextPageAfterPeerId: 'peer-002',
     });
     expect(calls).toEqual([
-      { limit: 3, signal: undefined },
-      { afterPeerId: 'peer-001', limit: 2, signal: undefined },
+      { limit: 2, signal: undefined },
+      { afterPeerId: 'peer-001', limit: 1, signal: undefined },
     ]);
   });
 

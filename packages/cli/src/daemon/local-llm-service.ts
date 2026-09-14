@@ -53,6 +53,8 @@ export class DaemonLocalLlmError extends Error {
 
 export interface DaemonLocalLlmHealth {
   ok: boolean;
+  /** True when the operator supplied at least one local-LLM environment override. */
+  configured: boolean;
   ready: boolean;
   reachable: boolean;
   offline: boolean;
@@ -130,6 +132,7 @@ export function resolveDaemonLocalLlmSettings(
   dkgHome: string,
   env: NodeJS.ProcessEnv = process.env,
 ): {
+  configured: boolean;
   llamaUrl: string;
   model: string;
   probeStrategy: LocalModelEndpointProbeStrategy;
@@ -138,7 +141,15 @@ export function resolveDaemonLocalLlmSettings(
   logDir: string;
 } {
   const probe = resolveProbeStrategy(env.DKG_LLM_BACKEND);
+  const configured = [
+    env.DKG_LLM_URL,
+    env.LLAMA_URL,
+    env.DKG_LLM_MODEL,
+    env.LLAMA_MODEL,
+    env.DKG_LLM_BACKEND,
+  ].some((value) => trimmed(value) !== undefined);
   return {
+    configured,
     llamaUrl: trimmed(env.DKG_LLM_URL)
       ?? trimmed(env.LLAMA_URL)
       ?? 'http://127.0.0.1:8080/v1/chat/completions',
@@ -209,6 +220,7 @@ export function createDaemonLocalLlmService(
       const ready = availability.status === 'ready' && !initFailure && !closed;
       return {
         ok: ready,
+        configured: settings.configured,
         ready,
         reachable,
         offline: !reachable,

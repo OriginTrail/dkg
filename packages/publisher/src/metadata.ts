@@ -1,3 +1,5 @@
+import { formatUncheckedWorkspaceOperationSubject } from './workspace-metadata-subjects.js';
+import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { deleteByPatternWithoutCount, GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
 import {
@@ -1081,37 +1083,18 @@ export function generateShareMetadata(
   meta: ShareMetadata,
   swmMetaGraph: string,
 ): Quad[] {
-  const quads: Quad[] = [];
-  const subject = `urn:dkg:share:${meta.contextGraphId}:${meta.shareOperationId}`;
-
-  quads.push(
-    mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
-    mq(subject, `${DKG}contextGraphId`, lit(meta.contextGraphId), swmMetaGraph),
-    mq(subject, `${DKG}shareOperationId`, lit(meta.shareOperationId), swmMetaGraph),
-    mq(subject, `${DKG}publisherPeerId`, lit(meta.publisherPeerId), swmMetaGraph),
-    mq(
-      subject,
-      `${PROV}wasAttributedTo`,
-      meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId),
-      swmMetaGraph,
-    ),
-    mq(
-      subject,
-      `${DKG}publishedAt`,
-      dateLit(meta.timestamp),
-      swmMetaGraph,
-    ),
-  );
-
-  if (meta.subGraphName) {
-    quads.push(mq(subject, `${DKG}subGraphName`, lit(meta.subGraphName), swmMetaGraph));
-  }
-
-  for (const rootEntity of meta.rootEntities) {
-    quads.push(...entityMemberQuads(subject, rootEntity, swmMetaGraph));
-  }
-
-  return quads;
+  const subject = formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId);
+  const rows: Quad[] = [
+    mq(subject, ENTITY_SHARE.type, `${DKG}WorkspaceOperation`, swmMetaGraph),
+    mq(subject, ENTITY_SHARE.contextGraphId, lit(meta.contextGraphId), swmMetaGraph),
+    mq(subject, ENTITY_SHARE.shareOperationId, lit(meta.shareOperationId), swmMetaGraph),
+    mq(subject, ENTITY_SHARE.publisherPeerId, lit(meta.publisherPeerId), swmMetaGraph),
+    mq(subject, ENTITY_SHARE.wasAttributedTo, meta.agentAddress ? agentDid(meta.agentAddress) : lit(meta.publisherPeerId), swmMetaGraph),
+    mq(subject, ENTITY_SHARE.publishedAt, dateLit(meta.timestamp), swmMetaGraph),
+  ];
+  if (meta.subGraphName) rows.push(mq(subject, ENTITY_SHARE.subGraphName, lit(meta.subGraphName), swmMetaGraph));
+  for (const rootEntity of meta.rootEntities) rows.push(mq(subject, ENTITY_SHARE.rootEntity, rootEntity, swmMetaGraph));
+  return rows;
 }
 
 /** @deprecated Use generateShareMetadata */
@@ -1174,7 +1157,7 @@ export function generateKnowledgeAssetShareMetadata(
   ) {
     throw new Error('Graph-scoped KA share has an invalid access-policy peer envelope');
   }
-  const subject = `urn:dkg:share:${meta.contextGraphId}:${meta.shareOperationId}`;
+  const subject = formatUncheckedWorkspaceOperationSubject(meta.contextGraphId, meta.shareOperationId);
   const quads = [
     mq(subject, `${RDF}type`, `${DKG}WorkspaceOperation`, swmMetaGraph),
     mq(subject, `${DKG}contextGraphId`, lit(meta.contextGraphId), swmMetaGraph),

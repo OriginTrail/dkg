@@ -1,4 +1,14 @@
 export * from './chain-adapter.js';
+export { assertContextGraphAuthorityIndexId } from
+  './context-graph-authority-index-id.js';
+export {
+  type ContextGraphAuthorityHistoryCheckpointV1,
+  type ContextGraphAuthorityHistoryState,
+  type ContextGraphAuthorityHistoryStore,
+} from './context-graph-authority-history.js';
+export {
+  type ContextGraphAuthorityIndexStore,
+} from './context-graph-authority-index-checkpoint.js';
 export {
   bindContextGraphAuthorityReader,
   type ContextGraphAuthorityReader,
@@ -122,18 +132,48 @@ export {
 } from './publisher-plan.js';
 // RPC-usage accounting: ONLY the typed window contract is public API (consumed
 // by the ChainAdapter.drainRpcUsage capability, the agent boundary, and the
-// daemon's rpc_usage log emission). The parsing/label-bounding helpers stay
-// package-internal (imported via ./rpc-usage.js) so the transport accounting
-// implementation can change without a public-API break.
+// daemon's rpc_usage log emission). Endpoint-slot normalization is shared with
+// downstream formatters so producer and consumer use one bounded vocabulary.
 export {
+  createRpcUsageRecorder,
   emptyRpcUsageWindow,
   mergeRpcUsageWindows,
+  RPC_ENDPOINT_SLOT_LABELS,
   normalizeRpcUsageWindow,
+  normalizeRpcEndpointSlotLabel,
   rpcUsageWindowTotal,
+  type RpcEndpointSlotLabel,
+  type RpcUsageAttribution,
   type NormalizedRpcUsageWindow,
   type RpcUsageDrainable,
+  type RpcUsageRecorder,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+export {
+  activeRpcRequestContext,
+  activeRpcRequestAbortSignal,
+  boundedRetryFetchRequest,
+  createRpcRequestProvider,
+  withOwnedRpcRequestContext,
+  withRpcRequestContext,
+  withRpcRequestTimeout,
+  type RpcRequestClass,
+  type RpcRequestAdmission,
+  type RpcRequestContext,
+  type RpcRequestContextInput,
+  type RpcRequestProviderConfig,
+} from './rpc-request-transport.js';
+export {
+  DEFAULT_RPC_REQUEST_GOVERNOR_POLICY,
+  RpcRequestGovernor,
+  RpcRequestGovernorQueueFullError,
+  isRpcRequestGovernorQueueFullError,
+  resolveRpcRequestGovernorPolicy,
+  type RpcRequestGovernorPolicy,
+  type RpcRequestGovernorPolicyInput,
+  type RpcRequestGovernorClock,
+  type RpcRequestGovernorWindow,
+} from './rpc-request-governor.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
@@ -141,6 +181,8 @@ export {
   type EVMAdapterConfig,
   decodeEvmError,
   enrichEvmError,
+  classifyRpcRetryDisposition,
+  isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   isKnownTransactionError,
   resolveRpcUrls,
@@ -151,14 +193,19 @@ export {
   isNoFundedPublisherWalletError,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   type PublisherWalletBalance,
+  type RpcRetryDisposition,
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
   ChainRpcTransportError,
+  RpcEndpointsExhaustedError,
   isChainRpcTransportError,
+  isRpcEndpointsExhaustedError,
   createRpcTimeoutError,
   type ChainRpcTransportCode,
   type ChainRpcTransportErrorLike,
+  type RpcEndpointExhaustionKind,
+  type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
 export {
   // Surfaced for the daemon /api/status counter + the CLI failover loop.
@@ -189,4 +236,12 @@ export {
   waitForTransactionReceiptWithFailover,
   type TransactionReceiptEndpoint,
   type TransactionReceiptWaitOptions,
-} from './rpc-failover-client.js';
+} from './transaction-receipt-failover.js';
+
+export {
+  readRandomSamplingAvailability,
+  type RandomSamplingAvailability,
+  type RandomSamplingAvailabilityReader,
+  type RandomSamplingAvailabilityResolver,
+  type LegacyRandomSamplingAvailabilityReader,
+} from './random-sampling-availability.js';

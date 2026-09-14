@@ -23,6 +23,7 @@ import {
   computeFlatKCMerkleLeafCountV10,
   computeFlatKCRootV10,
 } from '../src/merkle.js';
+import { swmKaWriteLockKey, withKeyedLocks } from '../src/keyed-lock.js';
 
 const CONTEXT_GRAPH_ID = '42';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -63,6 +64,71 @@ function byteSizeFloor(quads: readonly Pick<Quad, 'subject' | 'predicate' | 'obj
 }
 
 describe('graph-scoped publish storage ACKs', () => {
+  it('serializes workspace persistence in the shared per-KA lock domain', async () => {
+    const store = new OxigraphStore();
+    const writeLocks = new Map<string, Promise<void>>();
+    const quads: Quad[] = [{
+      subject: 'urn:asset:locked',
+      predicate: 'urn:p:value',
+      object: '"locked"',
+      graph: SWM_GRAPH,
+    }];
+    await store.insert(quads);
+    const config = handlerConfig(ethers.Wallet.createRandom(), false);
+    const handler = new StorageACKHandler(
+      store,
+      { ...config, workspaceWriteLocks: writeLocks },
+      new TypedEventBus(),
+    );
+    const merkleRoot = computeFlatKCRootV10(quads, []);
+    const intent = encodePublishIntent({
+      merkleRoot,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      publisherPeerId: 'publisher-peer',
+      publicByteSize: byteSizeFloor(quads),
+      isPrivate: false,
+      kaCount: 1,
+      rootEntities: [],
+      merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: quads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    let release!: () => void;
+    let entered!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const lockEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const lock = withKeyedLocks(
+      writeLocks,
+      [swmKaWriteLockKey(CONTEXT_GRAPH_ID, undefined, UAL)],
+      async () => {
+        entered();
+        await blocked;
+      },
+    );
+    await lockEntered;
+
+    let settled = false;
+    const response = handler.handler(intent, PEER).finally(() => { settled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+
+    release();
+    await lock;
+    await expect(response).resolves.toBeInstanceOf(Uint8Array);
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ kaUal: UAL });
+  });
+
   it.each([
     {
       label: 'content without triples',

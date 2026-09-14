@@ -138,6 +138,10 @@ export function finalizationRecoveryRowToEntry(
     ...(verifiedEvidence ? { verifiedEvidence } : {}),
     generation: asSafeInteger(row.generation, 'generation'),
     attemptCount: asSafeInteger(row.attempt_count, 'attempt_count'),
+    ...(optionalString(row.failure_signature)
+      ? { failureSignature: String(row.failure_signature) }
+      : {}),
+    failureStreak: asSafeInteger(row.failure_streak, 'failure_streak'),
     ...(row.next_attempt_at === null
       ? {}
       : { nextAttemptAt: asSafeInteger(row.next_attempt_at, 'next_attempt_at') }),

@@ -9,6 +9,7 @@ import { computeNetworkId } from '../../core/src/genesis.js';
 import {
   loadNetworkConfig,
   loadConfig,
+  DkgHomeFiles,
   removePid,
   removeApiPort,
   saveConfig,
@@ -37,6 +38,7 @@ import {
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
+  resolveRfc64CatalogActivations,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveStorageAckTiming,
@@ -78,14 +80,14 @@ describe('resolveRfc64PublicCatalogActivation', () => {
   it('is fail-closed when omitted or explicitly disabled', () => {
     expect(resolveRfc64PublicCatalogActivation({}, chainIdentity)).toEqual({
       enabled: false,
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
       selectedContextGraphs: [],
     });
     expect(resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: { enabled: false },
     }, chainIdentity)).toEqual({
       enabled: false,
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
       selectedContextGraphs: [],
     });
     expect(resolveRfc64PublicCatalogActivation({
@@ -106,7 +108,7 @@ describe('resolveRfc64PublicCatalogActivation', () => {
       },
     }, chainIdentity)).toEqual({
       enabled: false,
-      rollout: { killSwitch: false, contextGraphModes: {} },
+      rollout: { killSwitch: false, defaultMode: 'catalog', contextGraphModes: {} },
       selectedContextGraphs: [],
     });
   });
@@ -711,6 +713,35 @@ describe('localAgentIntegrations config round-trip', () => {
     if (tempDir) await rm(tempDir, { recursive: true, force: true });
   });
 
+  it('keeps symmetric control-file operations bound to one immutable home', async () => {
+    const files = new DkgHomeFiles();
+    const otherHome = join(tempDir, 'other-home');
+    await mkdir(otherHome);
+    process.env.DKG_HOME = otherHome;
+    expect(Object.isFrozen(files)).toBe(true);
+    expect(files.home).toBe(tempDir);
+    expect(files.tokenPath).toBe(dkgAuthTokenPath(tempDir));
+    await writePid(222);
+    await writeApiPort(9444);
+    await files.writePid(111);
+    await files.writeApiPort(9333);
+    await files.saveConfig({ ...await files.loadConfig(), name: 'home-a' });
+    expect(files.configExists()).toBe(true);
+    expect((await files.loadConfig()).name).toBe('home-a');
+    expect(files.readConfigSync()).toMatchObject({ name: 'home-a' });
+    expect(await files.readPid()).toBe(111);
+    expect(await files.readApiPort()).toBe(9333);
+    expect(await readPid()).toBe(222);
+    expect(await readApiPort()).toBe(9444);
+    expect(configExists()).toBe(false);
+    await files.removePid();
+    await files.removeApiPort();
+    expect(await files.readPid()).toBeNull();
+    expect(await files.readApiPort()).toBeNull();
+    expect(await readPid()).toBe(222);
+    expect(await readApiPort()).toBe(9444);
+  });
+
   it('persists the generic local agent integration registry', async () => {
     await saveConfig({
       name: 'test-node',
@@ -795,36 +826,55 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(resolveNetworkConfigName(loaded)).toBe('mainnet-base');
   });
 
-  it('round-trips RFC-64 per-CG authority and kill-switch state', async () => {
+  it('round-trips a bounded RFC-64 canary and advances it only after a restart edit', async () => {
     const contextGraphId = 'restart-stable-rollout-cg';
     await saveConfig({
       name: 'test-node',
       apiPort: 9200,
       listenPort: 0,
       nodeRole: 'edge',
-      rfc64PublicCatalog: {
+      rfc64Catalog: {
         rollout: {
-          killSwitch: true,
+          killSwitch: false,
+          defaultMode: 'legacy',
           contextGraphModes: { [contextGraphId]: 'shadow' },
-        },
-        bootstrap: {
-          acceptedPublicPolicies: [policy(contextGraphId)],
-          retryIntervalMs: 30_000,
         },
       },
     });
 
     const loaded = await loadConfig();
-    expect(loaded.rfc64PublicCatalog?.rollout).toEqual({
-      killSwitch: true,
+    expect(loaded.rfc64Catalog?.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
       contextGraphModes: { [contextGraphId]: 'shadow' },
     });
-    expect(resolveRfc64PublicCatalogActivation(loaded, {
+    expect(resolveRfc64CatalogActivations(loaded, {
       networkId: 'otp:20430',
       evmChainId: '20430',
-    }).rollout).toEqual({
-      killSwitch: true,
+    }).catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
       contextGraphModes: { [contextGraphId]: 'shadow' },
+    });
+
+    await saveConfig({
+      ...loaded,
+      rfc64Catalog: {
+        ...loaded.rfc64Catalog,
+        rollout: {
+          ...loaded.rfc64Catalog?.rollout,
+          contextGraphModes: { [contextGraphId]: 'catalog' },
+        },
+      },
+    });
+    const restarted = await loadConfig();
+    expect(resolveRfc64CatalogActivations(restarted, {
+      networkId: 'otp:20430',
+      evmChainId: '20430',
+    }).catalog.rollout).toEqual({
+      killSwitch: false,
+      defaultMode: 'legacy',
+      contextGraphModes: { [contextGraphId]: 'catalog' },
     });
   });
 
@@ -1668,6 +1718,46 @@ describe('resolveChainConfig (field-level merge)', () => {
       { chain: { ...fullNetworkChain, cgRegistryScanPageSize: 10_000 } },
     );
     expect(overridden?.cgRegistryScanPageSize).toBe(4_000);
+  });
+
+  it('merges and validates the RPC request budget per field', () => {
+    const merged = resolveChainConfig(
+      { chain: { rpcRequestBudget: { maxRequestsPerSecond: 7, maxQueueSize: 32 } } },
+      {
+        chain: {
+          ...fullNetworkChain,
+          rpcRequestBudget: {
+            maxRequestsPerSecond: 12,
+            foregroundReservePercent: 75,
+            burstRequests: 24,
+            startupJitterMs: 45_000,
+          },
+        },
+      },
+    );
+    expect(merged?.rpcRequestBudget).toEqual({
+      maxRequestsPerSecond: 7,
+      foregroundReservePercent: 75,
+      burstRequests: 24,
+      maxQueueSize: 32,
+      startupJitterMs: 45_000,
+    });
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: { foregroundReservePercent: 100 } } },
+      { chain: fullNetworkChain },
+    )).toThrow(/foregroundReservePercent/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: null as never } },
+      { chain: fullNetworkChain },
+    )).toThrow(/plain object/);
+    expect(() => resolveChainConfig(
+      { chain: { rpcRequestBudget: { maxRequestsPerSecond: null as never } } },
+      { chain: fullNetworkChain },
+    )).toThrow(/maxRequestsPerSecond/);
+    expect(() => resolveChainConfig(
+      {},
+      { chain: { ...fullNetworkChain, rpcRequestBudget: null as never } },
+    )).toThrow(/plain object/);
   });
 
   it('merges publisher funding floors with operator precedence', () => {

@@ -1,5 +1,9 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import {
+  resolveRfc64CatalogActivationsV1,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
+} from '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   handleStatusRoutes,
@@ -20,6 +24,9 @@ const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
   enabled: false,
   selectedContextGraphs: [],
 };
+const EPHEMERAL_RFC64_ACTIVATION_STATE = resolveRfc64CatalogActivationsV1({
+  persistenceAvailable: false,
+}, resolveRfc64PublicCatalogActivationChainIdentityV1(undefined)).activationState;
 
 interface Deferred<T> {
   promise: Promise<T>;
@@ -60,6 +67,7 @@ async function startStatusServer(query: () => Promise<unknown>): Promise<{
         },
       },
       rfc64PublicCatalog: DISABLED_RFC64_PUBLIC_CATALOG,
+      rfc64CatalogActivationState: EPHEMERAL_RFC64_ACTIVATION_STATE,
       startedAt: Date.now(),
       agent: {
         peerId: 'peer-status-store-quads-test',

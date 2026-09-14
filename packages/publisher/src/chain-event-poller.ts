@@ -1,4 +1,8 @@
-import type { ChainAdapter, ChainEvent } from '@origintrail-official/dkg-chain';
+import {
+  withRpcRequestContext,
+  type ChainAdapter,
+  type ChainEvent,
+} from '@origintrail-official/dkg-chain';
 import { Logger, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
@@ -133,6 +137,8 @@ export class ChainEventPoller {
   private readonly log = new Logger('ChainEventPoller');
   private timer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  /** Owns every chain request issued by the current poller lifetime. */
+  private pollLifecycle = new AbortController();
   /**
    * The currently-executing `poll()` promise (or `null` when idle).
    *
@@ -171,13 +177,17 @@ export class ChainEventPoller {
 
   async start(): Promise<void> {
     if (this.running) return;
+    if (this.pollLifecycle.signal.aborted) {
+      this.pollLifecycle = new AbortController();
+    }
+    const lifecycle = this.pollLifecycle;
     this.running = true;
 
     const ctx = createOperationContext('system');
 
     // Restore cursor from persistent storage (spec §5.1: scan from last processed block)
     await this.laneRunner.restoreCurrentlyActive(ctx);
-    if (!this.running) return;
+    if (!this.running || this.pollLifecycle !== lifecycle) return;
 
     this.log.info(ctx, `Starting chain event poller (interval=${this.intervalMs}ms)`);
 
@@ -232,6 +242,12 @@ export class ChainEventPoller {
       this.timer = null;
     }
     this.running = false;
+    if (!this.pollLifecycle.signal.aborted) {
+      this.pollLifecycle.abort(new DOMException(
+        'Chain event poller is stopping',
+        'AbortError',
+      ));
+    }
     const pending = this.inFlightPoll;
     if (pending) {
       // The `.catch(() => {})` chain at the call sites already swallows
@@ -322,7 +338,10 @@ export class ChainEventPoller {
   }
 
   private async poll(): Promise<void> {
-    await this.laneRunner.poll();
+    await withRpcRequestContext(
+      { requestClass: 'background', signal: this.pollLifecycle.signal },
+      () => this.laneRunner.poll(this.pollLifecycle.signal),
+    );
   }
 
   private async handleBatchCreated(event: ChainEvent, ctx: OperationContext): Promise<void> {

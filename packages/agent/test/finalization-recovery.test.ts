@@ -30,12 +30,17 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from '../src/finalization-graph-envelope.js';
 import {
+  FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
   FinalizationRecovery,
 } from '../src/finalization-recovery.js';
+import { FinalizationPublisherAuthorityObserver } from '../src/finalization-publisher-authority-observer.js';
 import {
   openSqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
-import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
+import type {
+  FinalizationRecoveryEntry,
+  FinalizationRecoveryStore,
+} from '../src/finalization-recovery-store.js';
 
 const CONTEXT_GRAPH = 'finalization-recovery-admission';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -206,6 +211,53 @@ describe('graph-scoped finalization recovery admission', () => {
     expect(processUnjournaled).toHaveBeenCalledWith(input);
   });
 
+  it('retries publisher authority on a promoted row and reports store refusal', async () => {
+    const prepared = { publisherPeerId: '12D3KooWPublisher' };
+    const promoted = {
+      state: 'REORGED',
+      generation: 7,
+    } as FinalizationRecoveryEntry;
+    const recordPendingTrustedPublisher = vi.fn(async () => false);
+    const recordTrustedPublisher = vi.fn(async () => false);
+    const get = vi.fn(async () => promoted);
+    const warn = vi.fn();
+    const observer = new FinalizationPublisherAuthorityObserver<void, typeof prepared>({
+      maxFailedProbes: 4,
+      prepare: async () => prepared,
+      log: { info: vi.fn(), warn },
+    });
+    const store = {
+      recordPendingTrustedPublisher,
+      recordTrustedPublisher,
+      get,
+    } as unknown as FinalizationRecoveryStore;
+
+    await expect(observer.observe({
+      store,
+      identity: {
+        entryKey: 'promoted-entry',
+        generation: 'pending',
+        sourcePeerId: prepared.publisherPeerId,
+      },
+      ual: UAL,
+      prepareInput: undefined,
+    })).resolves.toEqual({ prepared });
+
+    expect(recordPendingTrustedPublisher).toHaveBeenCalledWith(
+      'promoted-entry',
+      prepared.publisherPeerId,
+    );
+    expect(get).toHaveBeenCalledWith('promoted-entry');
+    expect(recordTrustedPublisher).toHaveBeenCalledWith(
+      'promoted-entry',
+      promoted.generation,
+      prepared.publisherPeerId,
+    );
+    expect(warn).toHaveBeenCalledWith(
+      `Finalization recovery inbox refused publisher authority for ${UAL}`,
+    );
+  });
+
   it('preserves publisher authority when a trusted duplicate arrives while deferred', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-pending-publisher-'));
     let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
@@ -227,6 +279,7 @@ describe('graph-scoped finalization recovery admission', () => {
       });
       const preparedSources: Array<string | undefined> = [];
       let appliedAccess: { policy: string; peers: string[] } | undefined;
+      let workspaceAvailable = false;
       const recovery = new FinalizationRecovery(
         store,
         recoveryChain(),
@@ -235,6 +288,7 @@ describe('graph-scoped finalization recovery admission', () => {
           ...recoveryMaterializer(),
           prepare: async (input) => {
             preparedSources.push(input.sourcePeerId);
+            if (!workspaceAvailable) return undefined;
             return {
               onChainContextGraphId: '42',
               localTopicOnChainContextGraphId: '42',
@@ -262,6 +316,11 @@ describe('graph-scoped finalization recovery admission', () => {
         ...baseInput,
         sourcePeerId: '12D3KooWRelay',
       });
+      await recovery.processLiveOutcome({
+        ...baseInput,
+        sourcePeerId: '12D3KooWPublisher',
+      });
+      workspaceAvailable = true;
       await recovery.processLiveOutcome({
         ...baseInput,
         sourcePeerId: '12D3KooWPublisher',
@@ -380,6 +439,182 @@ describe('graph-scoped finalization recovery admission', () => {
       now = deferred.nextAttemptAt!;
       await expect(recovery.processDueBatch(16)).resolves.toBe(1);
       expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('parks a stable deferred failure while chain reconciliation can still wake it', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-stable-failure-'));
+    let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;
+    try {
+      let now = 1_000;
+      let repairReady = false;
+      store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      const makeRecovery = () => new FinalizationRecovery(
+        store,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => repairReady
+            ? { status: 'confirmed', receipt: confirmedReceipt() }
+            : { status: 'pending' },
+        }),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => repairReady ? 'applied' as const : 'deferred' as const,
+          replayVerified: async () => repairReady ? 'promoted' as const : 'no-swm' as const,
+        },
+      );
+      let recovery = makeRecovery();
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      // The first two identical worker outcomes use the ordinary exponential
+      // delay. The third consecutive identical outcome enters the stable park.
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      let [entry] = await store.list();
+      expect(entry).toMatchObject({
+        attemptCount: 1,
+        failureStreak: 1,
+        lastError: 'canonical-receipt-pending',
+      });
+      await store.close();
+      store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      recovery = makeRecovery();
+      now = entry!.nextAttemptAt!;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      [entry] = await store.list();
+      now = entry!.nextAttemptAt!;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      [entry] = await store.list();
+      expect(entry).toMatchObject({
+        attemptCount: 3,
+        failureSignature: 'receipt-pending',
+        failureStreak: 3,
+        lastError: 'canonical-receipt-pending',
+      });
+      expect(entry!.nextAttemptAt).toBe(now + FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS);
+
+      await expect(recovery.processDueBatch(16)).resolves.toBe(0);
+
+      // An authoritative reconciliation is a state-change trigger and does
+      // not wait for the autonomous retry deadline.
+      repairReady = true;
+      await expect(recovery.replayMatching({
+        chainId: 'base:84532',
+        contextGraphId: CONTEXT_GRAPH,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: PACKED_KA_ID.toString(),
+      })).resolves.toBe('recovered');
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+      store = undefined;
+    } finally {
+      await store?.close().catch(() => {});
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('resets the stable streak when recovery advances to a different stage', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-stage-progress-'));
+    try {
+      let now = 1_000;
+      let receiptPending = true;
+      const store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => {
+            return receiptPending
+              ? { status: 'pending' as const }
+              : { status: 'confirmed' as const, receipt: confirmedReceipt() };
+          },
+        }),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          apply: async () => 'deferred' as const,
+        },
+        { now: () => now },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      await recovery.processDueBatch(16);
+      let [entry] = await store.list();
+      expect(entry).toMatchObject({ failureSignature: 'receipt-pending', failureStreak: 1 });
+      now = entry!.nextAttemptAt!;
+      await recovery.processDueBatch(16);
+      [entry] = await store.list();
+      expect(entry).toMatchObject({ failureSignature: 'receipt-pending', failureStreak: 2 });
+
+      now = entry!.nextAttemptAt!;
+      receiptPending = false;
+      await recovery.processDueBatch(16);
+      [entry] = await store.list();
+      expect(entry).toMatchObject({
+        state: 'VERIFIED',
+        failureSignature: 'apply-deferred',
+        failureStreak: 1,
+      });
+      expect(entry!.nextAttemptAt).toBeLessThan(
+        now + FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS,
+      );
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('caps a stable retry at the live deadline and rejects it there', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-stable-expiry-'));
+    try {
+      let now = 1_000;
+      const store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const liveRetryWindowMs = 5_000;
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => ({ status: 'pending' }),
+        }),
+        { info: () => {}, warn: () => {} },
+        recoveryMaterializer(),
+        { now: () => now, liveRetryWindowMs },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+        const [entry] = await store.list();
+        now = entry!.nextAttemptAt!;
+      }
+      const [parked] = await store.list();
+      expect(parked).toMatchObject({ attemptCount: 3, failureStreak: 3 });
+      expect(parked!.nextAttemptAt).toBe(parked!.createdAt + liveRetryWindowMs);
+
+      now = parked!.nextAttemptAt!;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(await store.list()).toMatchObject([{
+        state: 'REJECTED',
+        attemptCount: 3,
+      }]);
       await store.close();
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -834,6 +1069,69 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('bounds parked alternate-relay probes while recording the publisher immediately', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-authority-probes-'));
+    try {
+      let now = 1_000;
+      let receiptCalls = 0;
+      const preparedSources: Array<string | undefined> = [];
+      const store = await openSqliteFinalizationRecoveryStore(directory, { now: () => now });
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain({
+          resolveCanonicalFinalizationReceipt: async () => {
+            receiptCalls += 1;
+            return { status: 'pending' };
+          },
+        }),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          prepare: async (input) => {
+            preparedSources.push(input.sourcePeerId);
+            return recoveryMaterializer().prepare();
+          },
+        },
+        { now: () => now },
+      );
+      const baseInput = {
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        candidate: parsedMessage(),
+      };
+
+      await recovery.processLive({ ...baseInput, sourcePeerId: '12D3KooWRelayA' });
+      for (let duplicate = 0; duplicate < 5; duplicate += 1) {
+        await recovery.processLive({ ...baseInput, sourcePeerId: '12D3KooWRelayB' });
+      }
+      expect(preparedSources).toEqual(['12D3KooWRelayA', '12D3KooWRelayB']);
+      expect(receiptCalls).toBe(1);
+
+      // A and B plus 4,095 new relay identities exceed the production 4,096
+      // bound. The oldest failed identity (A) must then be probed again.
+      for (let relay = 0; relay < 4_095; relay += 1) {
+        await recovery.processLive({
+          ...baseInput,
+          sourcePeerId: `12D3KooWRelay-${relay}`,
+        });
+      }
+      await recovery.processLive({ ...baseInput, sourcePeerId: '12D3KooWRelayA' });
+      expect(preparedSources).toHaveLength(4_098);
+      expect(preparedSources.at(-1)).toBe('12D3KooWRelayA');
+
+      await recovery.processLive({ ...baseInput, sourcePeerId: '12D3KooWPublisher' });
+      expect(preparedSources.at(-1)).toBe('12D3KooWPublisher');
+      expect(await store.list()).toMatchObject([{
+        trustedPublisherPeerId: '12D3KooWPublisher',
+        attemptCount: 1,
+      }]);
+      expect(receiptCalls).toBe(1);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('lets chain reconciliation recover an entry before its worker deadline', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-reconcile-deadline-'));
     try {
@@ -854,7 +1152,9 @@ describe('graph-scoped finalization recovery admission', () => {
         sourcePeerId: '12D3KooWPublisher',
         candidate: parsedMessage(),
       });
-      await store.recordAttempt(entry!.key, entry!.generation, 'worker busy', 60_000);
+      await store.recordAttempt(entry!.key, entry!.generation, 'worker busy', {
+        mode: 'ordinary', retryDelayMs: 60_000,
+      });
 
       await expect(recovery.replayMatching({
         chainId: chain.chainId,
@@ -1943,6 +2243,10 @@ describe('graph-scoped finalization recovery admission', () => {
 
       for (let attempt = 0; attempt < 5; attempt += 1) {
         await recovery.processLive(liveInput);
+        const [current] = await store.list();
+        if (current?.state !== 'SETTLED' && current?.nextAttemptAt !== null) {
+          now = current!.nextAttemptAt!;
+        }
       }
       expect(await store.list()).toMatchObject([{
         state: 'SETTLED',

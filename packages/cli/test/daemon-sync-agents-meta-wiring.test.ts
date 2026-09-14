@@ -134,6 +134,13 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
     return createArg;
   }
 
+  it.each([undefined, { batchSize: 50, maxPayloadBytes: 8 * 1024 * 1024, concurrency: 2 }])(
+    'passes operator outbox limits into agent construction: %j', async limits => {
+      const createArg = await captureCreateArg({ messengerOutboxDrain: limits });
+      expect(createArg.messengerOutboxDrain).toEqual(limits);
+    },
+  );
+
   it('defaults syncAgentsMeta=false for a core node with no config flag and no env', async () => {
     const createArg = await captureCreateArg();
     // Regression trap: a revert to `role === 'core' ? true : config.syncAgentsMeta`

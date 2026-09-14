@@ -34,6 +34,8 @@ export interface FinalizationRecoveryEntry {
   verifiedEvidence?: VerifiedGraphScopedFinalizationEvidence;
   generation: number;
   attemptCount: number;
+  failureSignature?: string;
+  failureStreak: number;
   nextAttemptAt?: number;
   lastError?: string;
   createdAt: number;
@@ -88,6 +90,8 @@ export interface FinalizationRecoveryVerifiedEvidenceUpdate {
   attemptCount: number;
   nextAttemptAt: number | null;
   lastError: string | null;
+  failureSignature: string | null;
+  failureStreak: number;
 }
 
 export type FinalizationRecoveryVerifiedEvidenceTransitionPlan =
@@ -142,6 +146,12 @@ export function planFinalizationRecoveryVerifiedEvidenceTransition(
       lastError: commit.placement === 'canonical-moved'
         ? commit.reason
         : current.lastError ?? null,
+      failureSignature: commit.placement === 'canonical-moved'
+        ? null
+        : current.failureSignature ?? null,
+      failureStreak: commit.placement === 'canonical-moved'
+        ? 0
+        : current.failureStreak,
     },
   };
 }
@@ -149,6 +159,93 @@ export function planFinalizationRecoveryVerifiedEvidenceTransition(
 export type FinalizationRecoverySettledPublisherUpgradeResult =
   | { status: 'recorded' | 'existing'; entry: FinalizationRecoveryEntry }
   | { status: 'conflict' | 'missing' | 'closed' };
+
+export type FinalizationRecoveryFailureCode =
+  | 'workspace-unavailable'
+  | 'publisher-authority-pending'
+  | 'receipt-pending'
+  | 'context-graph-binding-pending'
+  | 'evidence-commit-pending'
+  | 'apply-deferred'
+  | 'vm-metadata-pending'
+  | 'store-scheduler-busy'
+  | 'background-chain-unavailable'
+  | 'background-binding-pending'
+  | 'background-no-match'
+  | 'background-replay-failed'
+  | 'settled-upgrade-deferred'
+  | 'settled-reorg-deferred';
+
+export type FinalizationRecoveryAttemptPolicy =
+  | {
+      mode: 'ordinary';
+      retryDelayMs?: number;
+    }
+  | {
+      mode: 'stable-failure';
+      retryDelayMs: number;
+      failureCode: FinalizationRecoveryFailureCode;
+      stableFailureThreshold: number;
+      stableFailureRetryMs: number;
+      /** A stable live failure must be reconsidered no later than this time. */
+      retryDeadlineAt: number;
+    };
+
+export type FinalizationRecoveryAttemptResult =
+  | { status: 'updated'; entry: FinalizationRecoveryEntry }
+  | { status: 'stale' | 'closed' };
+
+export interface FinalizationRecoveryAttemptUpdate {
+  attemptCount: number;
+  lastError: string | null;
+  failureSignature: string | null;
+  failureStreak: number;
+  nextAttemptAt: number | null;
+}
+
+/** Pure retry policy over one durable entry snapshot. */
+export function planFinalizationRecoveryAttempt(
+  current: FinalizationRecoveryEntry,
+  lastError: string | undefined,
+  policy: FinalizationRecoveryAttemptPolicy,
+  now: number,
+): FinalizationRecoveryAttemptUpdate {
+  const failureSignature = policy.mode === 'stable-failure'
+    ? policy.failureCode
+    : undefined;
+  const failureStreak = failureSignature === undefined
+    ? 0
+    : current.failureSignature === failureSignature
+      ? current.failureStreak + 1
+      : 1;
+  let delayMs = policy.retryDelayMs;
+  if (
+    policy.mode === 'stable-failure'
+    && failureStreak >= policy.stableFailureThreshold
+  ) {
+    delayMs = Math.max(policy.retryDelayMs, policy.stableFailureRetryMs);
+  }
+  let nextAttemptAt = delayMs === undefined
+    ? current.nextAttemptAt ?? null
+    : Math.max(current.nextAttemptAt ?? 0, now + Math.max(0, delayMs));
+  if (
+    policy.mode === 'stable-failure'
+    && failureStreak >= policy.stableFailureThreshold
+    && nextAttemptAt !== null
+  ) {
+    // Only stable failures are capped. Once the deadline has elapsed this
+    // immediate due time is safe because replay's next pass terminally rejects
+    // the live entry. Ordinary and SETTLED retries retain their future backoff.
+    nextAttemptAt = Math.min(nextAttemptAt, Math.max(now, policy.retryDeadlineAt));
+  }
+  return {
+    attemptCount: current.attemptCount + 1,
+    lastError: lastError ?? null,
+    failureSignature: failureSignature ?? null,
+    failureStreak,
+    nextAttemptAt,
+  };
+}
 
 export interface FinalizationRecoveryHealth {
   available: boolean;
@@ -231,8 +328,8 @@ export interface FinalizationRecoveryStore {
     key: string,
     generation: number,
     lastError?: string,
-    retryDelayMs?: number,
-  ): Promise<void>;
+    policy?: FinalizationRecoveryAttemptPolicy,
+  ): Promise<FinalizationRecoveryAttemptResult>;
   health(): Promise<FinalizationRecoveryHealth>;
   close(): Promise<void>;
 }

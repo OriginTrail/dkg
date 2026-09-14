@@ -73,7 +73,7 @@ import {
   statSync,
   utimesSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { isExternalBackend, getSparqlEndpoint, CHANGELOG_GRAPH } from '@origintrail-official/dkg-storage';
 
 const STATE_FILE = '.network-state.json';
@@ -150,19 +150,8 @@ const SPARQL_SCOPED_DELETE =
   'WHERE { GRAPH ?g { ?s ?p ?o } ' +
   `FILTER(strstarts(str(?g), "${V10_GRAPH_PREFIX}") || strstarts(str(?g), "${PUBLISHER_GRAPH_PREFIX}") || str(?g) = "${CHANGELOG_GRAPH}") }`;
 
-export interface ChainResetWipeResult {
-  /** True when a wipe was performed. */
-  wiped: boolean;
-  /**
-   * True when a wipe WOULD have run (marker mismatch) but was bypassed
-   * because `skip` was set (`DKG_SKIP_CHAIN_RESET_WIPE=1`). Mutually
-   * exclusive with `wiped`. The marker is deliberately NOT persisted on a
-   * skip, so the wipe re-triggers once the env var is unset.
-   */
-  skipped: boolean;
-  /** The marker we had persisted before this boot, or null on first boot / no persisted state. */
-  prevMarker: string | null;
-  /** Files removed during the wipe (relative to dataDir). Empty when `wiped=false`. */
+interface ChainResetWipeEffects {
+  /** Files removed during the wipe (relative to dataDir). Empty when no wipe ran. */
   removedFiles: string[];
   /**
    * `store.nq` backup filenames created by renaming it instead of deleting it
@@ -171,11 +160,65 @@ export interface ChainResetWipeResult {
    * present (or the rename failed — then the failure is in `failedFiles`).
    */
   backedUpFiles: string[];
-  /**
-   * Files we attempted to wipe but could not remove. When non-empty, the
-   * marker is intentionally not persisted so the wipe retries on next boot.
-   */
-  failedFiles: Array<{ file: string; error: string }>;
+}
+
+interface ChainResetWipeFailure { file: string; error: string }
+
+interface NoChainResetWipeEffects {
+  attempted: false;
+  requiresStoreRetag: false;
+  removedFiles: [];
+  backedUpFiles: [];
+  failedFiles: [];
+  markerError?: never;
+}
+
+interface AttemptedChainResetWipeEffects extends ChainResetWipeEffects {
+  attempted: true;
+  /** A managed external DROP ALL was sent and may have removed ownership. */
+  requiresStoreRetag: boolean;
+}
+
+/**
+ * Inactive means no reset marker is configured; steady means it already matches.
+ * A skipped mismatch preserves the old marker so unsetting the opt-out retries.
+ * Completed means all cleanup succeeded and the new marker was saved. Incomplete
+ * cleanup and marker-write failure both retry next boot, but only incomplete
+ * cleanup leaves failedFiles. Every attempted outcome may require re-tagging an
+ * external store whose ownership tag was removed by DROP ALL.
+ */
+export type ChainResetWipeResult =
+  | ({ status: 'inactive'; prevMarker: null } & NoChainResetWipeEffects)
+  | ({ status: 'steady'; prevMarker: string } & NoChainResetWipeEffects)
+  | ({ status: 'skipped'; prevMarker: string | null } & NoChainResetWipeEffects)
+  | ({ status: 'completed'; prevMarker: string | null; failedFiles: []; markerError?: never } & AttemptedChainResetWipeEffects)
+  | ({ status: 'incomplete'; prevMarker: string | null; failedFiles: [ChainResetWipeFailure, ...ChainResetWipeFailure[]]; markerError?: never } & AttemptedChainResetWipeEffects)
+  | ({ status: 'marker-write-failed'; prevMarker: string | null; failedFiles: []; markerError: string } & AttemptedChainResetWipeEffects);
+
+/** Operator-facing summary for reset outcomes that performed a wipe. */
+export function formatChainResetWipeOutcome(
+  result: ChainResetWipeResult,
+  currentMarker: string | undefined,
+): string[] {
+  if (!result.attempted) return [];
+
+  const outcome = result.status === 'completed' ? 'complete' : result.status;
+  const messages = [
+    `Chain-state auto-wipe ${outcome}: ${result.removedFiles.length} file(s) removed, `
+      + `${result.backedUpFiles.length} backed up `
+      + `(prev marker: ${result.prevMarker ?? '<none>'}, now: ${currentMarker})`,
+  ];
+  if (result.status === 'incomplete') {
+    messages.push(
+      `WARN: ${result.failedFiles.length} wipe target(s) failed; the reset will retry on next boot.`,
+    );
+  } else if (result.status === 'marker-write-failed') {
+    messages.push(
+      `WARN: reset marker could not be saved: ${result.markerError}. `
+        + 'The reset will retry on next boot.',
+    );
+  }
+  return messages;
 }
 
 export interface ChainResetWipeOptions {
@@ -313,7 +356,7 @@ async function performExternalWipe(
   storeConfig: ChainResetWipeStoreConfig,
   fetchImpl: typeof globalThis.fetch,
   log: (msg: string) => void,
-): Promise<{ label: string; ok: boolean; error?: string }> {
+): Promise<{ label: string; ok: boolean; requiresStoreRetag: boolean; error?: string }> {
   const { updateUrl, headers } = getSparqlEndpoint({
     backend: storeConfig.backend,
     options: storeConfig.options,
@@ -343,14 +386,14 @@ async function performExternalWipe(
       const text = await res.text().catch(() => '');
       const error = `${res.status} ${res.statusText}: ${text.slice(0, 200)}`;
       log(`  WARN: external wipe failed: ${error}`);
-      return { label, ok: false, error };
+      return { label, ok: false, requiresStoreRetag: managed, error };
     }
     log(`  removed: ${label}`);
-    return { label, ok: true };
+    return { label, ok: true, requiresStoreRetag: managed };
   } catch (err) {
     const error = (err as Error).message;
     log(`  WARN: external wipe transport error: ${error}`);
-    return { label, ok: false, error };
+    return { label, ok: false, requiresStoreRetag: managed, error };
   }
 }
 
@@ -547,8 +590,11 @@ function performWipe(
   const walAbs = walPath && walPath.length > 0
     ? walPath
     : join(dataDir, 'random-sampling.wal');
-  const walLabel = walAbs.startsWith(dataDir)
-    ? walAbs.slice(dataDir.length).replace(/^[/\\]+/, '')
+  const relativeWalPath = relative(dataDir, walAbs);
+  const walLabel = relativeWalPath !== '..'
+    && !relativeWalPath.startsWith(`..${sep}`)
+    && !isAbsolute(relativeWalPath)
+    ? relativeWalPath
     : walAbs;
   wipeAbs(walAbs, walLabel || 'random-sampling.wal');
   for (const suffix of ['', '-journal', '-wal', '-shm']) {
@@ -589,14 +635,14 @@ export async function chainResetWipe(
   // touched so we don't accidentally turn on the protocol later just
   // because some leftover state file made the comparison non-trivial.
   if (opts.currentMarker === undefined) {
-    return { wiped: false, skipped: false, prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+    return { status: 'inactive', attempted: false, requiresStoreRetag: false, prevMarker: null, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   const prev = loadState(opts.dataDir);
   const prevMarker = prev?.chainResetMarker ?? null;
 
   if (prevMarker === opts.currentMarker) {
-    return { wiped: false, skipped: false, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+    return { status: 'steady', attempted: false, requiresStoreRetag: false, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   // Dev-loop opt-out. A wipe WOULD run here (marker mismatch, including
@@ -611,7 +657,7 @@ export async function chainResetWipe(
       `Chain reset wipe skipped (DKG_SKIP_CHAIN_RESET_WIPE=1): marker ${prevMarker ?? '<none>'} → ${opts.currentMarker}. ` +
       `Local chain-state preserved; unset the env var to wipe.`,
     );
-    return { wiped: false, skipped: true, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
+    return { status: 'skipped', attempted: false, requiresStoreRetag: false, prevMarker, removedFiles: [], backedUpFiles: [], failedFiles: [] };
   }
 
   // Mismatch (including "first boot with marker present"): wipe.
@@ -635,7 +681,7 @@ export async function chainResetWipe(
   let removedFiles: string[] = [];
   let backedUpFiles: string[] = [];
   let failedFiles: Array<{ file: string; error: string }> = [];
-  let markerPersisted = false;
+  let requiresStoreRetag = false;
   try {
     ({ removedFiles, backedUpFiles, failedFiles } = performWipe(
       opts.dataDir,
@@ -660,6 +706,7 @@ export async function chainResetWipe(
   if (opts.storeConfig && isExternalBackend(opts.storeConfig.backend)) {
     try {
       const result = await performExternalWipe(opts.storeConfig, fetchImpl, log);
+      requiresStoreRetag = result.requiresStoreRetag;
       if (result.ok) {
         removedFiles.push(result.label);
       } else {
@@ -672,30 +719,18 @@ export async function chainResetWipe(
     }
   }
 
-  if (failedFiles.length === 0) {
-    try {
-      saveState(opts.dataDir, opts.currentMarker);
-      markerPersisted = true;
-    } catch (err) {
-      log(
-        `WARN: failed to persist chain reset marker (${opts.currentMarker}): ${(err as Error).message}. Wipe will retry on next boot.`,
-      );
-    }
-  } else {
-    log(
-      `WARN: chain-state wipe incomplete (${failedFiles.length} failure${failedFiles.length === 1 ? '' : 's'}). ` +
-      'Chain reset marker was not persisted; wipe will retry on next boot.',
-    );
-  }
-  if (failedFiles.length === 0 && markerPersisted) {
-    log('Chain-state wipe complete. Continuing boot.');
-  } else if (failedFiles.length === 0) {
-    log('Chain-state wipe complete, but marker was not persisted. Continuing boot; wipe will retry on next boot.');
-  } else {
-    log('Chain-state wipe incomplete. Continuing boot so operator can repair filesystem state.');
+  const firstFailure = failedFiles[0];
+  if (firstFailure) {
+    return { status: 'incomplete', attempted: true, requiresStoreRetag, prevMarker, removedFiles, backedUpFiles, failedFiles: [firstFailure, ...failedFiles.slice(1)] };
   }
 
-  return { wiped: true, skipped: false, prevMarker, removedFiles, backedUpFiles, failedFiles };
+  try {
+    saveState(opts.dataDir, opts.currentMarker);
+  } catch (err) {
+    const markerError = (err as Error).message;
+    return { status: 'marker-write-failed', attempted: true, requiresStoreRetag, prevMarker, removedFiles, backedUpFiles, failedFiles: [], markerError };
+  }
+  return { status: 'completed', attempted: true, requiresStoreRetag, prevMarker, removedFiles, backedUpFiles, failedFiles: [] };
 }
 
 // =====================================================================

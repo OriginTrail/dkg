@@ -9,6 +9,7 @@
  * cross-calls resolve against the composed class.
  */
 
+import { readAgentPeerPage } from './agent-peer-discovery.js';
 import { createHash } from 'node:crypto';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -359,7 +360,6 @@ import {
   type LocalSwmSenderKeySendState,
   type LocalSwmSenderKeyReceiveState,
   type PendingSenderKeyEntry,
-  type RandomSamplingStartResult,
   type ACKSignerResolution,
   type SyncRequestEnvelope,
   type CclPublishedResultEntry,
@@ -567,6 +567,26 @@ function curatorDidNeedsRegistryResolution(curatorIdentifier: string): boolean {
   return curatorIdentifier.startsWith('0x');
 }
 
+type CuratorWalletRegistryResolver = (
+  agent: DKGAgent,
+  wallet: string,
+  signal: AbortSignal | undefined,
+) => Promise<string | undefined>;
+
+const resolveRichCuratorWalletPeer: CuratorWalletRegistryResolver = async (
+  agent,
+  wallet,
+  signal,
+) => (await agent.discovery.findAgents({ signal })).find(
+  (candidate) => candidate.agentAddress?.toLowerCase() === wallet.toLowerCase(),
+)?.peerId;
+
+const resolveBoundedCuratorWalletPeer: CuratorWalletRegistryResolver = async (
+  agent,
+  wallet,
+  signal,
+) => (await readAgentPeerPage(agent.discovery, wallet, { limit: 1, signal })).peerIds[0];
+
 /**
  * Resolve the curator peer for a Context Graph together with WHERE it came from.
  *
@@ -596,7 +616,7 @@ function curatorDidNeedsRegistryResolution(curatorIdentifier: string): boolean {
  * was echoed back". Only the resolver knows which branch it took.
  */
 
-export async function resolveCuratorSyncPeer(
+async function resolveCuratorSyncPeerWithRegistry(
   agent: DKGAgent,
   /**
    * The agent's `preferredSyncPeers`, passed explicitly because it is both read
@@ -605,7 +625,8 @@ export async function resolveCuratorSyncPeer(
    */
   bootstrapHints: Map<string, string>,
   contextGraphId: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal },
+  resolveWalletPeer: CuratorWalletRegistryResolver,
 ): Promise<SyncPeerResolution> {
   const approvedCuratorPeerId = bootstrapHints.get(contextGraphId);
   const fromHint = (): SyncPeerResolution => (approvedCuratorPeerId
@@ -657,14 +678,10 @@ export async function resolveCuratorSyncPeer(
     if (!resolved) {
       try {
         throwIfSyncAuthAborted(options.signal);
-        const agents = await agent.discovery.findAgents({ signal: options.signal });
+        const peerId = await resolveWalletPeer(agent, curatorIdentifier, options.signal);
         throwIfSyncAuthAborted(options.signal);
-        const matches = agents.filter(
-          (a) => a.agentAddress?.toLowerCase() === curatorIdentifier.toLowerCase(),
-        );
-        const match = matches[0];
-        if (match) {
-          curatorPeerId = match.peerId;
+        if (peerId) {
+          curatorPeerId = peerId;
           resolved = true;
           // NEVER authoritative, however many matches came back. `findAgents()`
           // queries the LOCAL Agent Registry only, so "one match" means one match
@@ -708,6 +725,37 @@ export async function resolveCuratorSyncPeer(
 
   bootstrapHints.delete(contextGraphId);
   return { peerId: curatorPeerId, provenance };
+}
+
+export function resolveCuratorSyncPeer(
+  agent: DKGAgent,
+  bootstrapHints: Map<string, string>,
+  contextGraphId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<SyncPeerResolution> {
+  return resolveCuratorSyncPeerWithRegistry(
+    agent,
+    bootstrapHints,
+    contextGraphId,
+    options,
+    resolveRichCuratorWalletPeer,
+  );
+}
+
+/** Resolve one refresh candidate without crossing the bounded page contract. */
+export function resolveBoundedCuratorSyncPeer(
+  agent: DKGAgent,
+  bootstrapHints: Map<string, string>,
+  contextGraphId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<SyncPeerResolution> {
+  return resolveCuratorSyncPeerWithRegistry(
+    agent,
+    bootstrapHints,
+    contextGraphId,
+    options,
+    resolveBoundedCuratorWalletPeer,
+  );
 }
 
 export class ContextGraphResolveMethods extends DKGAgentBase {
@@ -1523,11 +1571,18 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   async resolveRegisteredContextGraphAuthority(
     this: DKGAgent,
     contextGraphId: string,
-    options: { allowCachedRoster?: boolean; signal?: AbortSignal } = {},
+    options: {
+      allowCachedRoster?: boolean;
+      signal?: AbortSignal;
+      registrationTimeoutMs?: number;
+    } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
       contextGraphId,
-      { signal: options.signal },
+      {
+        signal: options.signal,
+        registrationTimeoutMs: options.registrationTimeoutMs,
+      },
     );
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;
@@ -2359,6 +2414,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         ]);
         return { ok: true, value };
       } catch (error) {
+        // Aborting the caller can make a downstream keyed single-flight reject
+        // first with its own abandonment error. Once this budget controller has
+        // fired, the observable outcome of the operation is still the timeout
+        // that caused the cancellation, regardless of which rejection wins the
+        // Promise.race microtask ordering.
+        if (controller.signal.aborted && controller.signal.reason === timeoutError) {
+          return { ok: false, error: timeoutError };
+        }
+        // Internal cancellation from an abandoned shared enrichment is a
+        // degraded optional answer, not an RPC failure for the whole listing.
+        // Required scans still rethrow this result at their call sites.
+        if (error instanceof Error && error.name === 'AbortError') {
+          return { ok: false, error };
+        }
         if (!(error instanceof ListContextGraphsBudgetExceeded)) {
           throw error;
         }

@@ -179,6 +179,31 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
     expect(getRpcFailoverStats().exhaustions).toBe(1);
   });
 
+  it('surfaces the provider-pass shape and largest Retry-After hint', async () => {
+    const throttle = (seconds: number) => Object.assign(
+      new Error('server response 429 Too Many Requests'),
+      {
+        response: {
+          statusCode: 429,
+          headers: { 'retry-after': String(seconds) },
+        },
+      },
+    );
+    const primary = { read: recorder(async () => { throw throttle(3); }) };
+    const backup = { read: recorder(async () => { throw throttle(11); }) };
+    const client = makeClient(
+      [primary, backup],
+      ['https://primary.example', 'https://backup.example'],
+    );
+
+    await expect(client.read('authority history', (provider: any) => provider.read()))
+      .rejects.toMatchObject({
+        code: 'RPC_ENDPOINTS_EXHAUSTED',
+        exhaustionKind: 'all-throttled',
+        retryAfterMs: 11_000,
+      });
+  });
+
   it('does not retry a mixed timeout plus 429 endpoint exhaustion', async () => {
     const primary = { read: recorder(async () => { const error: any = new Error('timed out'); error.code = 'TIMEOUT'; throw error; }) };
     const backup = { read: recorder(async () => { throw retryable429(); }) };
@@ -189,7 +214,10 @@ describe('RpcFailoverClient.read — read-failover loop logic (bare-mock, #1336)
 
     await expect(client.read('getBlock', (provider: any) => provider.read(), {
       endpointSetRetry: 'all-throttled',
-    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    })).rejects.toMatchObject({
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+      exhaustionKind: 'mixed',
+    });
     expect(primary.read.calls).toHaveLength(1);
     expect(backup.read.calls).toHaveLength(1);
   });

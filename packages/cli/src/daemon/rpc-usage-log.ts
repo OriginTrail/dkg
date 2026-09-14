@@ -10,13 +10,21 @@
  *
  * Companion diagnostic line shape for `eth_call` attribution:
  *   rpc_usage_by_consumer method=eth_call consumer=pcaNFT.getAccountInfo count=7 window_s=60 chain=base:8453
+ *
+ * `eth_getLogs` additionally identifies the non-secret configured endpoint slot:
+ *   rpc_usage_by_consumer method=eth_getLogs consumer=getContextGraphAuthoritySnapshot endpoint_slot=fallback_1 count=7 window_s=60 chain=base:8453
+ *
+ * The shared transport budget emits one state + delta line per window:
+ *   rpc_request_governor max_rps=10 background_max_rps=2 foreground_queued=0 background_queued=4 ...
  */
 
 import {
+  normalizeRpcEndpointSlotLabel,
   normalizeRpcUsageWindow,
   rpcUsageWindowTotal,
   type RpcUsageDrainable,
   type RpcUsageWindow,
+  type RpcRequestGovernorWindow,
 } from '@origintrail-official/dkg-chain';
 
 /** logfmt-token safety: methods/chain ids are self-generated, but never emit a token that could break parsing. */
@@ -33,21 +41,69 @@ export function formatRpcUsageLines(
   usage: RpcUsageWindow,
   windowSeconds: number,
   chainId?: string,
+  requestGovernor?: RpcRequestGovernorWindow,
 ): string[] {
   if (!usage) return [];
   const normalized = normalizeRpcUsageWindow(usage);
-  if (rpcUsageWindowTotal(normalized) <= 0) return [];
+  if (rpcUsageWindowTotal(normalized) <= 0 && requestGovernor === undefined) return [];
   const chain = chainId ? ` chain=${safeToken(chainId, 'unknown')}` : '';
   const lines: string[] = [];
   for (const [method, count] of Object.entries(normalized.byMethod)) {
     if (!Number.isFinite(count) || count <= 0) continue;
     lines.push(`rpc_usage method=${safeToken(method, 'other')} count=${Math.floor(count)} window_s=${windowSeconds}${chain}`);
   }
-  for (const [consumer, count] of Object.entries(normalized.ethCallByConsumer)) {
-    if (!Number.isFinite(count) || count <= 0) continue;
+  const attributionLines = new Map<string, {
+    method: 'eth_call' | 'eth_getLogs';
+    consumer: string;
+    endpointSlot?: string;
+    count: number;
+  }>();
+  for (const attribution of normalized.attributions) {
+    if (!Number.isFinite(attribution.count) || attribution.count <= 0) continue;
+    const consumer = safeToken(attribution.consumer, 'other');
+    const endpointSlot = attribution.method === 'eth_getLogs'
+      ? normalizeRpcEndpointSlotLabel(attribution.endpointSlot)
+      : undefined;
+    const key = `${attribution.method}\0${consumer}\0${endpointSlot ?? ''}`;
+    const existing = attributionLines.get(key);
+    if (existing) existing.count += Math.floor(attribution.count);
+    else {
+      attributionLines.set(key, {
+        method: attribution.method,
+        consumer,
+        ...(endpointSlot ? { endpointSlot } : {}),
+        count: Math.floor(attribution.count),
+      });
+    }
+  }
+  for (const { method, consumer, endpointSlot, count } of attributionLines.values()) {
     lines.push(
-      `rpc_usage_by_consumer method=eth_call consumer=${safeToken(consumer, 'other')} ` +
-      `count=${Math.floor(count)} window_s=${windowSeconds}${chain}`,
+      `rpc_usage_by_consumer method=${method} consumer=${consumer} ` +
+      `${endpointSlot ? `endpoint_slot=${endpointSlot} ` : ''}` +
+      `count=${count} window_s=${windowSeconds}${chain}`,
+    );
+  }
+  const governor = requestGovernor;
+  if (governor !== undefined) {
+    const decimal = (value: number) => Number.isFinite(value)
+      ? Math.max(0, value).toFixed(3).replace(/\.?0+$/u, '')
+      : '0';
+    const integer = (value: number) => Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+    lines.push(
+      `rpc_request_governor max_rps=${decimal(governor.maxRequestsPerSecond)} `
+      + `background_max_rps=${decimal(governor.backgroundMaxRequestsPerSecond)} `
+      + `available=${decimal(governor.availableTokens)} `
+      + `background_available=${decimal(governor.backgroundAvailableTokens)} `
+      + `foreground_queued=${integer(governor.foregroundQueued)} `
+      + `background_queued=${integer(governor.backgroundQueued)} `
+      + `foreground_admitted=${integer(governor.foregroundAdmitted)} `
+      + `background_admitted=${integer(governor.backgroundAdmitted)} `
+      + `foreground_deferred=${integer(governor.foregroundDeferred)} `
+      + `background_deferred=${integer(governor.backgroundDeferred)} `
+      + `rejected=${integer(governor.rejected)} `
+      + `cancelled=${integer(governor.cancelled)} `
+      + `startup_delay_ms=${integer(governor.startupDelayRemainingMs)} `
+      + `window_s=${windowSeconds}${chain}`,
     );
   }
   return lines;
@@ -55,6 +111,11 @@ export function formatRpcUsageLines(
 
 /** What the daemon drains: anything (partially) implementing the shared contract. */
 export type RpcUsageSource = Partial<RpcUsageDrainable>;
+
+/** Process-wide governor state has one drain owner, separate from usage sums. */
+export interface RpcTelemetrySource extends RpcUsageSource {
+  drainRpcRequestGovernor?: () => RpcRequestGovernorWindow;
+}
 
 /**
  * Drain the source's RPC-usage window and emit one `rpc_usage` line per method
@@ -64,15 +125,25 @@ export type RpcUsageSource = Partial<RpcUsageDrainable>;
  * missing capability or an empty window). Never throws.
  */
 export function emitRpcUsage(
-  source: RpcUsageSource | undefined,
+  source: RpcTelemetrySource | undefined,
   emit: (line: string) => void,
   windowSeconds: number,
   chainId?: string,
 ): number {
+  let usage: RpcUsageWindow = { byMethod: {}, lifetimeTotal: 0 };
+  let governor: RpcRequestGovernorWindow | undefined;
   try {
-    const usage = source?.drainRpcUsage?.();
-    if (!usage) return 0;
-    const lines = formatRpcUsageLines(usage, windowSeconds, chainId);
+    usage = source?.drainRpcUsage?.() ?? usage;
+  } catch {
+    // One broken source must not suppress the independently owned governor.
+  }
+  try {
+    governor = source?.drainRpcRequestGovernor?.();
+  } catch {
+    // Usage accounting remains useful when the governor snapshot is unavailable.
+  }
+  try {
+    const lines = formatRpcUsageLines(usage, windowSeconds, chainId, governor);
     for (const line of lines) emit(line);
     return lines.length;
   } catch {
@@ -98,7 +169,7 @@ export interface RpcUsageTelemetryHandle {
  * `stop()` at teardown — no feature scheduling embedded in the daemon monolith.
  */
 export function startRpcUsageTelemetry(opts: {
-  source: RpcUsageSource;
+  source: RpcTelemetrySource;
   emit: (line: string) => void;
   chainId?: string;
   /** Window length in seconds (default 60). */

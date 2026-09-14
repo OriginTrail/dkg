@@ -344,6 +344,18 @@ export const ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS = 60_000;
  */
 export const CHAIN_POLICY_READ_TIMEOUT_MS = 2_500;
 
+/**
+ * Cold Context Graph name-hash resolution may need to build the adapter's
+ * bounded, provider-fenced reverse index before it can answer the first
+ * lookup.  That work is deliberately heavier than one policy eth_call (up to
+ * the chain adapter's fixed current-slot enumeration bound), so applying the
+ * 2.5s hot-path policy deadline leaves valid persisted subscriptions dormant
+ * on a mature registry.  Keep a finite startup/discovery deadline while
+ * allowing the adapter-owned index build to complete; subsequent lookups
+ * reuse the process-local index and remain fast.
+ */
+export const CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS = 120_000;
+
 // ── SWM sender-key ────────────────────────────────────────────────────
 /** Shared operation context for pending sender-key drain logging. */
 export const SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX: OperationContext = {

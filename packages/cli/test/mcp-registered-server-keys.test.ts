@@ -1,13 +1,14 @@
+import { selectMcpClientTargets, type McpClientConfigShape, type ClientTarget } from '../src/mcp-client-registry.js';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { McpPhysicalConfig } from '../src/mcp-physical-config.js';
 
 import {
   readRegisteredServerKeys,
-  type ClientTarget,
   type ServerKeyProbe,
-} from '../src/mcp-setup.js';
+} from '../src/mcp-client-config.js';
 
 // `dkg integration installed` reads MCP client configs through this helper to
 // decide whether an integration is wired into a client. The detectInstalled
@@ -28,11 +29,11 @@ afterEach(async () => {
 async function target(
   filename: string,
   body: string,
-  extra: Partial<ClientTarget> = {},
-): Promise<ClientTarget> {
+  shape: McpClientConfigShape = { format: 'json', serverContainer: 'mcpServers' },
+): Promise<McpPhysicalConfig> {
   const configPath = join(dir, filename);
   await writeFile(configPath, body, 'utf8');
-  return { name: 'Test', configPath, displayPath: configPath, ...extra };
+  return McpPhysicalConfig.create([{ configPath, displayPath: configPath, ...shape }]);
 }
 
 /** Fails loudly with the probe's own reason instead of a bare undefined. */
@@ -55,9 +56,9 @@ describe('readRegisteredServerKeys', () => {
 
   // VSCode + Copilot Chat uses `servers.<name>` rather than `mcpServers.<name>`.
   // A detector hardcoding `mcpServers` would silently report nothing here.
-  it('honours a non-default entryPath container', async () => {
+  it('honours a non-default serverContainer container', async () => {
     const t = await target('vscode.json', JSON.stringify({ servers: { dkg: blk(), mine: blk() } }), {
-      entryPath: 'servers.dkg',
+      format: 'json', serverContainer: 'servers',
     });
     expect(keysOf(readRegisteredServerKeys(t))).toEqual(['dkg', 'mine']);
   });
@@ -66,7 +67,7 @@ describe('readRegisteredServerKeys', () => {
   it('reads a TOML config with its own container', async () => {
     const t = await target('codex.toml', '[mcp_servers.dkg]\ncommand = "x"\n\n[mcp_servers.mine]\ncommand = "y"\n', {
       format: 'toml',
-      entryPath: 'mcp_servers.dkg',
+      serverContainer: 'mcp_servers',
     });
     expect(keysOf(readRegisteredServerKeys(t))).toEqual(['dkg', 'mine']);
   });
@@ -106,11 +107,12 @@ describe('readRegisteredServerKeys', () => {
   it('treats an absent config file as a SUCCESSFUL probe with no servers', async () => {
     // Nothing to read is a real answer: this client registered nothing.
     const t: ClientTarget = {
+      id: 'cursor', location: 'native', format: 'json', serverContainer: 'mcpServers',
       name: 'Absent',
       configPath: join(dir, 'nope.json'),
       displayPath: 'nope.json',
     };
-    expect(readRegisteredServerKeys(t)).toEqual({ ok: true, servers: {} });
+    expect(readRegisteredServerKeys(selectMcpClientTargets([t])[0]!.file)).toEqual({ ok: true, servers: {} });
   });
 
   it('treats a missing container as a SUCCESSFUL probe with no servers', async () => {
