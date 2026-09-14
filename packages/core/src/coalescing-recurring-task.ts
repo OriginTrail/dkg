@@ -7,13 +7,14 @@ export type CoalescingRecurringTaskPassResult =
   | 'idle'
   | { readonly rearmAfterMs: number };
 
-export interface CoalescingRecurringTaskOptions {
+export interface CoalescingRecurringTaskOptions<TJob = undefined> {
   readonly retryIntervalMs?: number;
   /** Default queues one follow-up pass; periodic owners may instead drop overlap. */
   readonly requestWhileRunning?: 'coalesce' | 'drop';
   /** Returning idle suppresses periodic rearming until the next explicit request. */
   readonly runPass: (
     signal: AbortSignal,
+    job: TJob | undefined,
   ) => Promise<CoalescingRecurringTaskPassResult | void>;
   readonly onError: (error: unknown) => void;
   readonly beforePeriodicPass?: () => void;
@@ -21,8 +22,8 @@ export interface CoalescingRecurringTaskOptions {
 }
 
 /** Owns one cancellable pass, coalescing, periodic scheduling, and physical drain. */
-export class CoalescingRecurringTask {
-  readonly #options: CoalescingRecurringTaskOptions;
+export class CoalescingRecurringTask<TJob = undefined> {
+  readonly #options: CoalescingRecurringTaskOptions<TJob>;
   #closed = false;
   #requested = false;
   #running = false;
@@ -32,8 +33,9 @@ export class CoalescingRecurringTask {
   #closeAbortReason: Error | null = null;
   #drainAbortReason: Error | null = null;
   #suppressRearmForRun: Promise<void> | null = null;
+  #job: TJob | undefined;
 
-  constructor(options: CoalescingRecurringTaskOptions) {
+  constructor(options: CoalescingRecurringTaskOptions<TJob>) {
     this.#options = options;
   }
 
@@ -52,6 +54,25 @@ export class CoalescingRecurringTask {
 
   owns(signal: AbortSignal): boolean {
     return this.#abortController?.signal === signal && !signal.aborted;
+  }
+
+  /** Read the one job whose requests are being coalesced by this task. */
+  get currentJob(): TJob | undefined {
+    return this.#job;
+  }
+
+  /** Create, upgrade, or join the task-owned job. */
+  updateJob(update: (current: TJob | undefined) => TJob | undefined): TJob | undefined {
+    if (this.#closed) return undefined;
+    this.#job = update(this.#job);
+    return this.#job;
+  }
+
+  /** Retire only the job generation the caller completed. */
+  retireJob(expected: TJob): boolean {
+    if (this.#job !== expected) return false;
+    this.#job = undefined;
+    return true;
   }
 
   /** Admit or coalesce a pass without creating concurrent workload owners. */
@@ -78,6 +99,7 @@ export class CoalescingRecurringTask {
     if (this.#closed || this.#timer !== null || this.#run !== null) return false;
     this.#timer = setTimeout(() => {
       this.#timer = null;
+      this.#options.beforePeriodicPass?.();
       this.request();
     }, Math.max(0, delayMs));
     this.#timer.unref?.();
@@ -212,7 +234,7 @@ export class CoalescingRecurringTask {
         && this.#requested
       ) {
         this.#requested = false;
-        passResult = (await this.#options.runPass(abortController.signal)) ?? 'rearm';
+        passResult = (await this.#options.runPass(abortController.signal, this.#job)) ?? 'rearm';
       }
       return passResult;
     } finally {

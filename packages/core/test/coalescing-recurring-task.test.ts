@@ -7,6 +7,37 @@ afterEach(() => {
 });
 
 describe('CoalescingRecurringTask', () => {
+  it('owns one joinable job and retires only the completed generation', async () => {
+    type Job = { cutoff: number; waiters: number };
+    const seen: Job[] = [];
+    const runner = new CoalescingRecurringTask<Job>({
+      runPass: async (_signal, job) => {
+        if (job) seen.push(job);
+        return 'idle';
+      },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+    const first = runner.updateJob(() => ({ cutoff: 10, waiters: 1 }))!;
+    const joined = runner.updateJob((current) => {
+      if (!current) throw new Error('expected current job');
+      current.cutoff = 20;
+      current.waiters += 1;
+      return current;
+    });
+
+    expect(joined).toBe(first);
+    runner.requestNow();
+    await runner.whenIdle();
+    expect(seen).toEqual([first]);
+    expect(first).toEqual({ cutoff: 20, waiters: 2 });
+    expect(runner.retireJob({ cutoff: 20, waiters: 2 })).toBe(false);
+    expect(runner.retireJob(first)).toBe(true);
+    expect(runner.currentJob).toBeUndefined();
+    await runner.close();
+    expect(runner.updateJob(() => first)).toBeUndefined();
+  });
+
   it('drops overlapping requests when the workload selects fixed-cadence semantics', async () => {
     let release!: () => void;
     let markStarted!: () => void;

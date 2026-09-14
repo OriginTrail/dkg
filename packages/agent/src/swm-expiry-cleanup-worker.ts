@@ -7,26 +7,24 @@ import type {
   SwmExpiryCleanupResult,
 } from './swm-expiry-cleanup.js';
 
-interface ManualFlight {
-  cutoffMs: number;
-  triplesDeleted: number;
-  readonly completion: Promise<number>;
+interface ManualCompletion {
+  readonly promise: Promise<number>;
   readonly resolve: (deleted: number) => void;
   readonly reject: (error: unknown) => void;
 }
 
-interface ActivePeriodicPass {
-  readonly cutoffMs: number;
-  joined?: ManualFlight;
+interface CleanupJob {
+  cutoffMs: number;
+  continuation?: SwmExpiryCleanupContinuation;
+  triplesDeleted: number;
+  inPass: boolean;
+  manual?: ManualCompletion;
 }
 
-/** SWM cutoff, continuation, and result policy over the canonical task owner. */
+/** SWM cutoff, continuation, and result policy over one task-owned cleanup job. */
 export class SwmExpiryCleanupWorker {
-  private task: CoalescingRecurringTask;
+  private task: CoalescingRecurringTask<CleanupJob>;
   private periodicEnabled = false;
-  private continuation?: SwmExpiryCleanupContinuation;
-  private manualFlight?: ManualFlight;
-  private activePeriodic?: ActivePeriodicPass;
   private stopping?: Promise<void>;
 
   constructor(
@@ -57,147 +55,163 @@ export class SwmExpiryCleanupWorker {
   async onTtlChanged(): Promise<void> {
     const task = this.task;
     if (task.closed || this.stopping) return;
-    this.continuation = undefined;
     const ttlMs = this.getSharedMemoryTtlMs();
-    if (this.manualFlight && ttlMs > 0) this.manualFlight.cutoffMs = Date.now() - ttlMs;
+    task.updateJob((job) => {
+      if (!job) return undefined;
+      job.continuation = undefined;
+      if (ttlMs > 0) job.cutoffMs = Date.now() - ttlMs;
+      return job;
+    });
     await task.cancelAndDrain('SWM retention policy changed');
     if (task !== this.task || task.closed || this.stopping) return;
 
     const currentTtlMs = this.getSharedMemoryTtlMs();
+    const job = task.currentJob;
     if (currentTtlMs === 0) {
-      this.resolveManualFlight();
-    } else if (this.manualFlight) {
+      if (job) this.resolveJob(job);
+    } else if (job) {
       if (!task.running) task.requestNow();
     } else if (this.periodicEnabled) {
       task.schedule(0);
     }
   }
 
-  /** Join one owned manual drain; newer calls refresh its cutoff. */
+  /** Upgrade or join the single cleanup job with the current public cutoff. */
   runNow(): Promise<number> {
     const ttlMs = this.getSharedMemoryTtlMs();
     if (this.task.closed || this.stopping || ttlMs === 0) return Promise.resolve(0);
     const cutoffMs = Date.now() - ttlMs;
-    if (this.manualFlight) {
-      if (cutoffMs !== this.manualFlight.cutoffMs) {
-        this.manualFlight.cutoffMs = cutoffMs;
-        this.continuation = undefined;
+    let completion: ManualCompletion | undefined;
+    let created = false;
+    const job = this.task.updateJob((current) => {
+      created = current === undefined;
+      const owned = current ?? { cutoffMs, triplesDeleted: 0, inPass: false };
+      if (owned.cutoffMs !== cutoffMs) {
+        owned.cutoffMs = cutoffMs;
+        owned.continuation = undefined;
       }
-      if (!this.task.running) this.task.requestNow();
-      return this.manualFlight.completion;
-    }
-
-    let resolve!: (deleted: number) => void;
-    let reject!: (error: unknown) => void;
-    const completion = new Promise<number>((yes, no) => { resolve = yes; reject = no; });
-    const flight: ManualFlight = { cutoffMs, triplesDeleted: 0, completion, resolve, reject };
-    this.manualFlight = flight;
-    this.continuation = undefined;
-    if (this.activePeriodic) this.activePeriodic.joined = flight;
-    else this.task.requestNow();
-    return completion;
+      if (!owned.manual) {
+        // A queued continuation becomes a fresh public sweep. A physical pass
+        // already in progress is joined and its mutations count toward the
+        // manual result.
+        if (!owned.inPass) {
+          owned.continuation = undefined;
+          owned.triplesDeleted = 0;
+        }
+        owned.manual = this.createManualCompletion();
+      }
+      completion = owned.manual;
+      return owned;
+    });
+    if (!job || !completion) return Promise.resolve(0);
+    if (created || !this.task.running) this.task.requestNow();
+    return completion.promise;
   }
 
   stop(): Promise<void> {
     if (this.stopping) return this.stopping;
     this.periodicEnabled = false;
-    this.continuation = undefined;
     const task = this.task;
     const stopping = task.close().then(() => {
-      this.resolveManualFlight();
+      const job = task.currentJob;
+      if (job) this.resolveJob(job, task);
       if (this.stopping === stopping) this.stopping = undefined;
     });
     this.stopping = stopping;
     return stopping;
   }
 
-  private createTask(): CoalescingRecurringTask {
-    return new CoalescingRecurringTask({
+  private createTask(): CoalescingRecurringTask<CleanupJob> {
+    let task!: CoalescingRecurringTask<CleanupJob>;
+    task = new CoalescingRecurringTask<CleanupJob>({
       retryIntervalMs: this.intervalMs,
-      runPass: signal => this.runPass(signal),
+      runPass: (signal, job) => this.runPass(task, signal, job),
       onError: () => undefined,
+      beforePeriodicPass: () => this.preparePeriodicJob(task),
       closingMessage: 'SWM expiry cleanup is stopping',
+    });
+    return task;
+  }
+
+  private preparePeriodicJob(task: CoalescingRecurringTask<CleanupJob>): void {
+    const ttlMs = this.getSharedMemoryTtlMs();
+    if (ttlMs <= 0) return;
+    const cutoffMs = Date.now() - ttlMs;
+    task.updateJob((current) => {
+      const job = current ?? { cutoffMs, triplesDeleted: 0, inPass: false };
+      job.cutoffMs = cutoffMs;
+      return job;
     });
   }
 
-  private async runPass(signal: AbortSignal) {
+  private async runPass(
+    task: CoalescingRecurringTask<CleanupJob>,
+    signal: AbortSignal,
+    job: CleanupJob | undefined,
+  ) {
     // Keep admission cancellable when runNow() is immediately followed by stop().
     await Promise.resolve();
-    if (!this.owns(signal)) return 'idle' as const;
-    const manual = this.manualFlight;
+    if (!job || !this.owns(task, signal, job)) return 'idle' as const;
+    const cutoffMs = job.cutoffMs;
+    const continuation = job.continuation;
+    job.continuation = undefined;
+    let result: SwmExpiryCleanupResult;
+    job.inPass = true;
     try {
-      if (manual) await this.runManualPasses(manual, signal);
-      else await this.runPeriodicPass(signal);
-    } catch (error) {
-      if (!this.task.owns(signal)) return 'idle' as const;
-      if (manual && this.manualFlight === manual) {
-        this.manualFlight = undefined;
-        manual.reject(error);
-      }
-      throw error;
-    }
-    if (!this.owns(signal) || this.manualFlight || !this.periodicEnabled) return 'idle' as const;
-    return { rearmAfterMs: this.continuation ? 10 : this.intervalMs };
-  }
-
-  private async runManualPasses(flight: ManualFlight, signal: AbortSignal): Promise<void> {
-    while (this.owns(signal) && this.manualFlight === flight) {
-      const cutoffMs = flight.cutoffMs;
-      const continuation = this.continuation;
-      this.continuation = undefined;
-      const result = await this.processPass(
+      result = await this.processPass(
         { cutoffMs, continuation },
-        () => !this.owns(signal),
+        () => !this.owns(task, signal, job),
       );
-      flight.triplesDeleted += result.triplesDeleted;
-      if (!this.owns(signal) || this.manualFlight !== flight) return;
-      if (flight.cutoffMs !== cutoffMs) continue;
-      this.continuation = result.continuation;
-      if (!this.continuation) {
-        this.resolveManualFlight(flight);
-        return;
+    } catch (error) {
+      if (!this.owns(task, signal, job)) return 'idle' as const;
+      task.retireJob(job);
+      job.manual?.reject(error);
+      throw error;
+    } finally {
+      job.inPass = false;
+    }
+    job.triplesDeleted += result.triplesDeleted;
+    if (!this.owns(task, signal, job)) return 'idle' as const;
+
+    const cutoffUnchanged = job.cutoffMs === cutoffMs;
+    if (cutoffUnchanged) job.continuation = result.continuation;
+    if (job.manual) {
+      if (cutoffUnchanged && !job.continuation) {
+        this.resolveJob(job, task);
+        return this.periodicEnabled ? { rearmAfterMs: this.intervalMs } : 'idle' as const;
       }
       await setImmediate();
+      if (this.owns(task, signal, job)) task.request();
+      return 'idle' as const;
     }
+
+    if (job.continuation) return { rearmAfterMs: 10 };
+    task.retireJob(job);
+    return this.periodicEnabled ? { rearmAfterMs: this.intervalMs } : 'idle' as const;
   }
 
-  private async runPeriodicPass(signal: AbortSignal): Promise<void> {
-    const cutoffMs = Date.now() - this.getSharedMemoryTtlMs();
-    const active: ActivePeriodicPass = { cutoffMs };
-    this.activePeriodic = active;
-    const continuation = this.continuation;
-    this.continuation = undefined;
-    try {
-      const result = await this.processPass(
-        { cutoffMs, continuation },
-        () => !this.owns(signal),
-      );
-      const joined = active.joined;
-      if (joined && this.manualFlight === joined) joined.triplesDeleted += result.triplesDeleted;
-      if (!this.owns(signal)) return;
-      this.continuation = result.continuation;
-      if (joined && this.manualFlight === joined) {
-        if (joined.cutoffMs !== cutoffMs) this.continuation = undefined;
-        if (!this.continuation && joined.cutoffMs === cutoffMs) {
-          this.resolveManualFlight(joined);
-        } else {
-          // The joined pass did not satisfy the manual request. Admit exactly
-          // one follow-up through the scheduler's ordinary request boundary.
-          this.task.requestNow();
-        }
-      }
-    } finally {
-      if (this.activePeriodic === active) this.activePeriodic = undefined;
-    }
+  private owns(
+    task: CoalescingRecurringTask<CleanupJob>,
+    signal: AbortSignal,
+    job: CleanupJob,
+  ): boolean {
+    return this.getSharedMemoryTtlMs() > 0
+      && task.owns(signal)
+      && task.currentJob === job;
   }
 
-  private owns(signal: AbortSignal): boolean {
-    return this.getSharedMemoryTtlMs() > 0 && this.task.owns(signal);
+  private createManualCompletion(): ManualCompletion {
+    let resolve!: (deleted: number) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<number>((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
   }
 
-  private resolveManualFlight(expected = this.manualFlight): void {
-    if (!expected || this.manualFlight !== expected) return;
-    this.manualFlight = undefined;
-    expected.resolve(expected.triplesDeleted);
+  private resolveJob(
+    job: CleanupJob,
+    task: CoalescingRecurringTask<CleanupJob> = this.task,
+  ): void {
+    if (!task.retireJob(job)) return;
+    job.manual?.resolve(job.triplesDeleted);
   }
 }
