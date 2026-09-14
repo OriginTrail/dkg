@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { getAddress } from 'ethers';
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from './hub-binding-test-fixture.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { getPcaLogicInterface } from '../src/evm-adapter-errors.js';

@@ -13,7 +13,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
-import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 
 const ADDRESS = '0x1111111111111111111111111111111111111111';
@@ -77,8 +77,8 @@ function adapterOver(
 
   const a: any = new EVMChainAdapter(minimalConfig(finalityConfirmations));
   a.init = async () => {};
-  a.installHubContractBindingsForTesting({ ...a.contracts,
-    knowledgeAssetStorage: opts.storageDeployed === false ? undefined : {
+  if (opts.storageDeployed !== false) a.installHubContractBindingsForTesting({ ...a.contracts,
+    knowledgeAssetStorage: {
       connect(provider: (typeof providers)[number]) {
         return {
           async ownerOf(kaId: bigint, overrides: { blockTag?: unknown }) {

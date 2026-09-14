@@ -3,7 +3,7 @@
 import { ethers } from 'ethers';
 import { describe, expect, it } from 'vitest';
 
-import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import type { ContextGraphAuthorityIndexId } from '../src/chain-adapter.js';
 import { ContextGraphAuthorityIndexRetryableError } from
   '../src/context-graph-authority-index.js';

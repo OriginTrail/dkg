@@ -27,7 +27,7 @@
  * `wideLogScan` policy) that does NOT live in the extracted module.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from './hub-binding-test-fixture.js';
 import { RpcFailoverClient, type RpcFailoverClientOptions, type SignPopulatedFn } from '../src/rpc-failover-client.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { getRpcFailoverStats, _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';

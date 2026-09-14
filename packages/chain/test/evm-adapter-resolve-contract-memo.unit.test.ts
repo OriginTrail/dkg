@@ -15,7 +15,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { ethers } from 'ethers';
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from './hub-binding-test-fixture.js';
 // Import the production TTL const directly (it is exported from the adapter base,
 // same idiom as decodeConvictionCostCovered / CG_REGISTRY_*), so the TTL-backstop
 // test stays coupled to production without a class-surface mirror.

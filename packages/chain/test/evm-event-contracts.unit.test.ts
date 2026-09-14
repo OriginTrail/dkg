@@ -1,7 +1,7 @@
 import { Contract, Interface, ZeroAddress, getAddress } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChainEvent } from '../src/chain-adapter.js';
-import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import {
   EVM_EVENT_DESCRIPTORS, eventContractKeysFor, evmEventDescriptorFor,
   type EvmEventCapabilityKey, type EvmEventDescriptor, type EvmEventScan,
@@ -151,23 +151,36 @@ describe('Hub binding generation ownership', () => {
     const group = new EvmHubContractBindings({ hub: first });
     const store = completeInstallation({ contextGraphStorage: second });
     group.install(store);
-    expect(group.contracts).toBe(store);
+    expect(group.contracts).not.toBe(store);
     expect(group.initialized).toBe(true);
     expectAgreement(group, decidedAs(key => store[key]));
+    store.contextGraphStorage = first;
+    expect(group.contracts.contextGraphStorage).toBe(second);
     const loader = vi.fn(async () => first);
     await expect(group.resolve(['contextGraphStorage', 'knowledgeAssetStorage'], loader))
       .resolves.toEqual({ contextGraphStorage: second, knowledgeAssetStorage: first });
     expect(loader).not.toHaveBeenCalled();
   });
 
-  it('keeps compatibility cache writes separate from generation readiness', async () => {
+  it('turns legacy boot-binding writes into explicit generation transitions', async () => {
     const group = new EvmHubContractBindings({ hub: first });
+    const before = group.generation;
     group.compatibilityContracts.chronos = first;
-    expect(group.resolvedKeys.has('chronos')).toBe(false);
-    const loader = vi.fn(async () => second);
-    await expect(group.resolve(['chronos'], loader)).resolves.toEqual({ chronos: second });
-    expect(loader).toHaveBeenCalledOnce();
+    expect(group.generation).not.toBe(before);
     expect(group.resolvedKeys.has('chronos')).toBe(true);
+    const loader = vi.fn(async () => second);
+    await expect(group.resolve(['chronos'], loader)).resolves.toEqual({ chronos: first });
+    expect(loader).not.toHaveBeenCalled();
+  });
+
+  it('never gives two different boot handle sets the same generation id', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    group.install(completeInstallation({ chronos: first }));
+    const before = await group.resolveSnapshot(['chronos'], async () => first);
+    group.compatibilityContracts.chronos = second;
+    const after = await group.resolveSnapshot(['chronos'], async () => first);
+    expect(after.contracts.chronos).toBe(second);
+    expect(after.generationId).not.toBe(before.generationId);
   });
 
   it('invalidate retires readiness and decisions while retaining handles unless dropped', async () => {

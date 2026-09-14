@@ -21,9 +21,11 @@ bindings.contracts.identityStorage = handle;
 
 class Probe extends EVMChainAdapter {
   seed(bindings: ContractCache): void {
-    // Deprecated protected writes remain source-compatible for public-package subclasses.
+    // Whole-cache replacement remains a contained legacy transition.
     this.contracts = bindings;
+    // @ts-expect-error boot bindings are readonly through the subclass view
     this.contracts.chronos = handle;
+    // Adapter-owned lazy slots remain writable.
     this.contracts.randomSampling = handle;
     this.initialized = true;
     this.initialized = false;

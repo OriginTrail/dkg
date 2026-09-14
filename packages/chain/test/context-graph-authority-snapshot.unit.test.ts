@@ -3,7 +3,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ContextGraphAuthoritySnapshot } from '../src/chain-adapter.js';
-import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import {
   AUTHORITY,

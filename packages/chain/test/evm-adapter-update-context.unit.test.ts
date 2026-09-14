@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest';
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from './hub-binding-test-fixture.js';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 
 const TEST_PRIVATE_KEY =

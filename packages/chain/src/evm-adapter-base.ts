@@ -30,7 +30,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import {
   ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings, optionalEvmContract,
   type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSnapshot,
-  type EvmHubContractSpec,
+  type EvmHubContractSpec, type EvmHubContractStore,
 } from './evm-hub-contract-bindings.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
@@ -692,10 +692,12 @@ export class EVMChainAdapterBase {
 
   private readonly hubContractBindings: EvmHubContractBindings;
   /**
-   * @deprecated Existing subclasses may still replace or mutate this cache.
+   * @deprecated Existing subclasses may still replace this cache or mutate
+   * adapter-owned lazy slots. Boot bindings are readonly; new subclasses
+   * should use the owner lifecycle methods instead.
    * New subclasses should use the explicit install and invalidation methods.
    */
-  protected get contracts(): ContractCache { return this.hubContractBindings.compatibilityContracts; }
+  protected get contracts(): EvmHubContractStore { return this.hubContractBindings.contracts; }
   protected set contracts(value: ContractCache) { this.hubContractBindings.replaceFromSubclass(value); }
 
   /** @deprecated Existing subclasses may still publish or retire readiness. */
@@ -705,19 +707,6 @@ export class EVMChainAdapterBase {
   /** Explicit complete installation seam for subclasses. */
   protected installHubContractBindings(value: EvmHubContractInstallation): void {
     this.hubContractBindings.install(value);
-  }
-
-  /** Install a complete test generation while keeping registry invariants truthful. */
-  protected installHubContractBindingsForTesting(value: ContractCache): void {
-    const fallback = value.hub ?? this.hubContractBindings.contracts.hub;
-    this.hubContractBindings.install({
-      ...value,
-      hub: fallback,
-      identity: value.identity ?? fallback,
-      profile: value.profile ?? fallback,
-      parametersStorage: value.parametersStorage ?? fallback,
-      knowledgeAssetStorage: value.knowledgeAssetStorage ?? fallback,
-    });
   }
 
   protected invalidateHubContractBindings(): void { this.hubContractBindings.invalidate(); }

@@ -38,7 +38,7 @@
  */
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { Contract, Interface, JsonRpcProvider } from 'ethers';
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from './hub-binding-test-fixture.js';
 import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
 import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';

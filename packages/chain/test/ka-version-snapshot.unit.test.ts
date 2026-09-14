@@ -12,7 +12,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 
 const KA_ID = 7n;
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -79,10 +79,12 @@ function adapterOver(
     return 31337n;
   };
   a.init = async () => {};
-  a.installHubContractBindingsForTesting({
-    ...a.contracts,
-    knowledgeAssetStorage: opts.storageDeployed === false ? undefined : {},
-  });
+  if (opts.storageDeployed !== false) {
+    a.installHubContractBindingsForTesting({
+      ...a.contracts,
+      knowledgeAssetStorage: {},
+    });
+  }
   a.providers = providers;
   a.rebindContract = (_c: unknown, provider: (typeof providers)[number]) => {
     const record = (call: string, overrides: { blockTag?: unknown }) =>

@@ -5,7 +5,7 @@ import {
   CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS,
   CONTEXT_GRAPH_NAME_HASH_GOVERNED_READ_TIMEOUT_MS,
 } from '../src/evm-context-graph-name-hash-fence.js';
-import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import {
   DEFAULT_RPC_REQUEST_GOVERNOR_POLICY,
   RpcRequestGovernor,

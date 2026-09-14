@@ -14,7 +14,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { ethers } from 'ethers';
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from './hub-binding-test-fixture.js';
 import { computeUpdateACKDigest } from '@origintrail-official/dkg-core';
 import { connectable } from './connectable.js';
 

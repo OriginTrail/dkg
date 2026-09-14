@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from './hub-binding-test-fixture.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { connectable } from './connectable.js';
 

@@ -42,6 +42,15 @@ export type EvmHubContractInstallation = ContractCache & Required<Pick<ContractC
 export type EvmHubContractStore =
   Readonly<Pick<ContractCache, 'hub' | EvmHubContractKey>> & Omit<ContractCache, 'hub' | EvmHubContractKey>;
 
+const EVM_ADAPTER_LAZY_CONTRACT_KEYS = Object.freeze([
+  'randomSampling',
+  'randomSamplingStorage',
+  'identityStorage',
+  'convictionStakingStorage',
+  'stakingStorage',
+] as const satisfies readonly (Exclude<keyof ContractCache, 'hub' | EvmHubContractKey>)[]);
+type EvmAdapterLazyContractKey = (typeof EVM_ADAPTER_LAZY_CONTRACT_KEYS)[number];
+
 /** Optional deployments retain their legacy fallback, but never swallow cancellation. */
 export async function optionalEvmContract<T>(load: () => Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
   signal?.throwIfAborted();
@@ -78,17 +87,21 @@ export interface EvmHubContractSnapshot<K extends EvmHubContractKey> {
 export class EvmHubContractBindings {
   private nextGenerationId = 1;
   private current: EvmHubContractGeneration;
+  private readonly adapterContracts: Partial<Pick<ContractCache, EvmAdapterLazyContractKey>> = {};
+  private readonly compatibilityView: ContractCache;
 
   constructor(contracts: ContractCache) {
     this.current = this.createGeneration(contracts, new Set(), false);
+    this.copyAdapterContracts(contracts);
+    this.compatibilityView = this.createCompatibilityView();
   }
 
-  get contracts(): EvmHubContractStore { return this.current.contracts; }
+  get contracts(): EvmHubContractStore { return this.compatibilityView; }
 
   get initialized(): boolean { return this.current.initialized; }
 
-  /** Mutable compatibility view; readiness changes only through explicit transitions. */
-  get compatibilityContracts(): ContractCache { return this.current.contracts; }
+  /** Deprecated subclass view backed by explicit generation and lazy-slot accessors. */
+  get compatibilityContracts(): ContractCache { return this.compatibilityView; }
 
   /** Boot keys the current generation has decided. */
   get resolvedKeys(): ReadonlySet<EvmHubContractKey> { return this.current.resolved; }
@@ -113,7 +126,9 @@ export class EvmHubContractBindings {
 
   /** @deprecated Compatibility transition for protected subclass assignment. */
   replaceFromSubclass(contracts: ContractCache): void {
-    const initialized = this.current.initialized;
+    const initialized = this.current.initialized
+      && REQUIRED_EVM_HUB_CONTRACT_KEYS.every(key => contracts[key] !== undefined);
+    this.copyAdapterContracts(contracts);
     this.current = this.createGeneration(
       contracts,
       initialized ? new Set(ALL_EVM_HUB_CONTRACT_KEYS) : new Set(),
@@ -225,12 +240,68 @@ export class EvmHubContractBindings {
     resolved: Set<EvmHubContractKey>,
     initialized: boolean,
   ): EvmHubContractGeneration {
+    const ownedContracts = Object.fromEntries([
+      ['hub', contracts.hub],
+      ...ALL_EVM_HUB_CONTRACT_KEYS.map(key => [key, contracts[key]] as const),
+    ]) as unknown as ContractCache;
     const generation = {
       id: this.nextGenerationId++,
-      contracts,
+      contracts: ownedContracts,
       resolved,
       initialized,
     };
     return generation;
+  }
+
+  private createCompatibilityView(): ContractCache {
+    const view = {} as ContractCache;
+    Object.defineProperty(view, 'hub', this.bindingDescriptor('hub'));
+    for (const key of ALL_EVM_HUB_CONTRACT_KEYS) {
+      Object.defineProperty(view, key, this.bindingDescriptor(key));
+    }
+    for (const key of EVM_ADAPTER_LAZY_CONTRACT_KEYS) {
+      Object.defineProperty(view, key, {
+        enumerable: true,
+        configurable: false,
+        get: () => this.adapterContracts[key],
+        set: (value: Contract | undefined) => { this.adapterContracts[key] = value; },
+      });
+    }
+    return view;
+  }
+
+  private bindingDescriptor(key: 'hub' | EvmHubContractKey): PropertyDescriptor {
+    return {
+      enumerable: true,
+      configurable: false,
+      get: () => this.current.contracts[key],
+      set: (value: Contract | undefined) => this.replaceBindingFromSubclass(key, value),
+    };
+  }
+
+  private replaceBindingFromSubclass(
+    key: 'hub' | EvmHubContractKey,
+    value: Contract | undefined,
+  ): void {
+    if (this.current.contracts[key] === value) return;
+    if (key === 'hub' && value === undefined) {
+      throw new Error('Hub binding cannot be removed');
+    }
+    const contracts = { ...this.current.contracts, [key]: value } as ContractCache;
+    if (key === 'hub') {
+      this.current = this.createGeneration(contracts, new Set(), false);
+      return;
+    }
+    const resolved = new Set(this.current.resolved);
+    resolved.add(key);
+    const initialized = this.current.initialized
+      && REQUIRED_EVM_HUB_CONTRACT_KEYS.every(required => contracts[required] !== undefined);
+    this.current = this.createGeneration(contracts, resolved, initialized);
+  }
+
+  private copyAdapterContracts(contracts: ContractCache): void {
+    for (const key of EVM_ADAPTER_LAZY_CONTRACT_KEYS) {
+      this.adapterContracts[key] = contracts[key];
+    }
   }
 }

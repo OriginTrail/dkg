@@ -1,7 +1,7 @@
 import type { ServerResponse } from 'node:http';
 import { Contract, Interface } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
-import { EVMChainAdapter } from '../src/evm-adapter.js';
+import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import type { ChainEvent, EventFilter } from '../src/chain-adapter.js';
 import { eventContractKeysFor } from '../src/evm-event-contracts.js';
 import { createLoopbackJsonRpcTestHarness, sendJsonRpcResult } from './loopback-rpc-harness.js';
@@ -397,9 +397,10 @@ describe('event scan RPC cancellation', () => {
       expect(internal.initialized).toBe(false);
       // Successful subset admission installs into the canonical handle store;
       // cancelled staging above installed nothing and full initialization is pending.
-      expect(Object.keys(internal.contracts).sort()).toEqual([
-        ...Object.keys(beforeBindings), ...eventContractKeysFor(eventTypes),
-      ].sort());
+      expect(Object.keys(internal.contracts).sort()).toEqual(Object.keys(beforeBindings).sort());
+      for (const key of eventContractKeysFor(eventTypes)) {
+        expect(internal.contracts[key]).toBeDefined();
+      }
       expect(internal.contracts.identity).toBeUndefined();
       await collect(adapter, { eventTypes: [...eventTypes] });
       expect(requests.map(request => request.name)).toEqual([...cancelledNames, ...capabilityNames]);

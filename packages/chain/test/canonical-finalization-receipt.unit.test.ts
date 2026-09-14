@@ -233,7 +233,9 @@ describe('canonical finalization receipt capability', () => {
         endKAId: legacyBatchId,
       },
     });
-    expect(chain.parseV10PublishReceipt).not.toHaveBeenCalled();
+    // A fully initialized V10 generation always owns its required storage
+    // binding, so the shared parser first asks it and then falls back to V9.
+    expect(chain.parseV10PublishReceipt).toHaveBeenCalledOnce();
     expect(getBlockTimestamp).toHaveBeenCalledWith(123, {});
   });
 

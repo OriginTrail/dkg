@@ -11,7 +11,6 @@ import {
   decodeEvmError,
   effectivePublishAllowance,
   enrichEvmError,
-  EVMChainAdapter,
   InsufficientPublisherFundsError,
   isNoFundedPublisherWalletError,
   isTooLowAllowanceError,
@@ -19,6 +18,7 @@ import {
   V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
   type EVMAdapterConfig,
 } from '../src/evm-adapter.js';
+import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import {
   DEFAULT_APPROVAL_POLICY,
   DEFAULT_REPLENISH_TARGET_ALLOWANCE,

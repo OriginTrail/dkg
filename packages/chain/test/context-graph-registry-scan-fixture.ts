@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from './hub-binding-test-fixture.js';
 import type {
   ContextGraphOnChain,
   ContextGraphRegistryScanOptions,

@@ -90,9 +90,9 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // MockChainAdapter has no Hub registry and therefore no equivalent state to
   // install, invalidate, or snapshot.
   'installHubContractBindings',
-  'installHubContractBindingsForTesting',
   'invalidateHubContractBindings',
   'resolveHubContractBindingSnapshot',
+  'ensureHubRotationListenerStarted',
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
@@ -498,14 +498,9 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       privateKey: '0x' + '1'.repeat(64),
       allowNoAdminSigner: true,
     });
-    // Force the contracts cache into a state where parametersStorage is
-    // missing without touching the network — mirrors the adapter
-    // misconfiguration / network-outage case that previously fell back
-    // to a hardcoded 3.
-    (evm as any).installHubContractBindingsForTesting({
-      ...(evm as any).contracts,
-      parametersStorage: undefined,
-    });
+    // Leave the fresh generation unresolved and bypass physical initialization
+    // so the capability sees an actually absent required binding.
+    (evm as any).init = async () => undefined;
     await expect(evm.getMinimumRequiredSignatures()).rejects.toThrow(
       /ParametersStorage contract is not resolvable/,
     );

@@ -1,6 +1,6 @@
 import { ethers, type JsonRpcProvider } from 'ethers';
 import { expect, vi } from 'vitest';
-import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from './hub-binding-test-fixture.js';
 import {
   CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS,
 } from '../src/evm-context-graph-name-hash-fence.js';
