@@ -346,7 +346,10 @@ describe('private CG membership bootstrap recovery', () => {
     expect(publicOnChainProof).toHaveBeenCalledWith(
       contextGraphId,
       expect.any(Object),
-      { slotBindingMode: 'chain-attested-repair' },
+      expect.objectContaining({
+        authorityConsistency: 'finalized-authority-index',
+        slotBindingMode: 'chain-attested-repair',
+      }),
     );
   });
 
@@ -373,7 +376,10 @@ describe('private CG membership bootstrap recovery', () => {
     expect(strictPublicOnChainProof).toHaveBeenCalledWith(
       contextGraphId,
       expect.any(Object),
-      { slotBindingMode: 'chain-attested-repair' },
+      expect.objectContaining({
+        authorityConsistency: 'finalized-authority-index',
+        slotBindingMode: 'chain-attested-repair',
+      }),
     );
   });
 
