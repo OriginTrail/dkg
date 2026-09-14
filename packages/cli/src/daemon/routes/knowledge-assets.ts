@@ -291,6 +291,17 @@ function respondAssertionError(res: RequestContext["res"], e: any): void {
     });
     return;
   }
+  // GH#1425 — discard is valid only for an active WM draft. A shared or
+  // published asset must keep its lifecycle metadata so it can be reopened;
+  // expose the engine's typed precondition as an actionable conflict instead
+  // of leaking it as a generic 500.
+  if (e?.code === "KA_WM_LIFECYCLE_REQUIRED") {
+    jsonResponse(res, 409, {
+      error: e.message,
+      code: "KA_WM_LIFECYCLE_REQUIRED",
+    });
+    return;
+  }
   // KA-number-floor reconcile couldn't reach the chain (e.g. a rate-limited RPC
   // 429'd the one-time-per-author read) -> retryable 503, not 500.
   if (respondIfReconcileUnavailable(res, e)) return;
