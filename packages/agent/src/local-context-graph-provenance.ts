@@ -3,28 +3,11 @@
 import type {
   ContextGraphMembershipRecord,
   ContextGraphMembershipSource,
-  KnownContextGraphMembershipSource,
 } from './dkg-agent-types.js';
 
 export type LocalContextGraphOriginSource =
   | 'local-create'
   | 'implicit-swm-write';
-
-const localOriginByMembershipSource = Object.freeze({
-  'local-create': true,
-  'implicit-swm-write': true,
-  'allowed-peer': false,
-  'allowed-agent': false,
-  'participant-agent': false,
-  'on-chain-registration': false,
-  'join-approved': false,
-  'join-rejected': false,
-  'join-request': false,
-  'join-request-outbox-response': false,
-  'subscription': false,
-  'rehydrated-subscription': false,
-  'pre-existing': false,
-} satisfies Record<KnownContextGraphMembershipSource, boolean>);
 
 export type LocalContextGraphOriginMembershipRecord = ContextGraphMembershipRecord & {
   readonly principalType: 'agent';
