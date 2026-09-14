@@ -1569,10 +1569,11 @@ describe('RFC-64 rollout authority integration', () => {
           callerAgentAddress: AUTHOR,
         });
       }
-      // Let the scheduled responsibility owner's quiet window elapse before
-      // waiting for its physical batch while fake timers are installed.
+      // Register the idle waiter before advancing fake time so any successor
+      // quiet window scheduled by the physical batch is included in the wait.
+      const responsibilityIdle = edge.whenRfc64CatalogResponsibilitiesIdleV1();
       await vi.advanceTimersByTimeAsync(1_000);
-      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      await responsibilityIdle;
       expect(queueSync).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(3_000);
@@ -1699,7 +1700,11 @@ describe('RFC-64 rollout authority integration', () => {
       throw new Error('atomic refresh must not reopen name-to-id resolution');
     });
     const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
-      onChainIds.includes('9') ? [['9', firstSnapshot]] : [],
+      onChainIds.flatMap((onChainId) => {
+        if (onChainId === '9') return [['9', firstSnapshot] as const];
+        if (onChainId === '10') return [['10', secondSnapshot] as const];
+        return [];
+      }),
     ));
     const pointAuthorityRead = vi.fn(async () => {
       throw new Error('atomic refresh must not perform a point snapshot read');
@@ -1758,7 +1763,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     expect(resolveIds).not.toHaveBeenCalled();
     expect(readSnapshots).toHaveBeenCalledOnce();
-    expect(readSnapshots).toHaveBeenCalledWith(['9'], {
+    expect(readSnapshots).toHaveBeenCalledWith(['9', '10'], {
       signal: expect.any(AbortSignal),
     });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
@@ -2600,6 +2605,18 @@ describe('RFC-64 rollout authority integration', () => {
         return snapshot === undefined ? [] : [[nameHash, snapshot] as const];
       }),
     ));
+    const snapshotsByOnChainId = new Map(
+      [...snapshotsByNameHash.values()].map((snapshot) => [
+        BigInt(snapshot.contextGraphId).toString(10),
+        snapshot,
+      ] as const),
+    );
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      onChainIds.flatMap((onChainId) => {
+        const snapshot = snapshotsByOnChainId.get(onChainId);
+        return snapshot === undefined ? [] : [[onChainId, snapshot] as const];
+      }),
+    ));
     const scalarNameResolution = vi.fn(async () => {
       throw new Error('scheduled responsibility must not fan out scalar name resolution');
     });
@@ -2611,6 +2628,7 @@ describe('RFC-64 rollout authority integration', () => {
       getContextGraphAuthoritySnapshot: scalarSnapshot,
       contextGraphAuthorityIndexRevisionReader: {
         resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
         readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
         whenIdle: vi.fn(async () => undefined),
       },
@@ -2621,6 +2639,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
     resolveSnapshots.mockClear();
+    readSnapshots.mockClear();
     const requestAuthorityRefresh = vi.spyOn(
       (edge as any).rfc64PublicCatalogOwnerV1,
       'requestAuthorityRefresh',
@@ -2644,11 +2663,22 @@ describe('RFC-64 rollout authority integration', () => {
     );
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
 
-    expect(resolveSnapshots).toHaveBeenCalledTimes(2);
+    expect(resolveSnapshots).toHaveBeenCalledOnce();
     expect(new Set(resolveSnapshots.mock.calls[0]![0])).toEqual(
-      new Set(targets.map(({ nameHash }) => nameHash)),
+      new Set(targets
+        .filter((target) => target !== conflictingBindingTarget)
+        .map(({ nameHash }) => nameHash)),
     );
-    expect(new Set(resolveSnapshots.mock.calls[1]![0])).toEqual(
+    expect(readSnapshots).toHaveBeenCalledTimes(2);
+    expect(new Set(readSnapshots.mock.calls[0]![0])).toEqual(
+      new Set([
+        '999',
+        ...targets
+          .filter((target) => target !== missing && target !== conflictingBindingTarget)
+          .map(({ onChainId }) => onChainId),
+      ]),
+    );
+    expect(new Set(readSnapshots.mock.calls[1]![0])).toEqual(
       new Set(targets
         .filter((target) => ![
           missing,
@@ -2656,7 +2686,7 @@ describe('RFC-64 rollout authority integration', () => {
           nameMismatchTarget,
           idMismatchTarget,
         ].includes(target))
-        .map(({ nameHash }) => nameHash)),
+        .map(({ onChainId }) => onChainId)),
     );
     expect(privateMembership).toHaveBeenCalledWith(privateTarget.contextGraphId);
     expect(privateMembership).not.toHaveBeenCalledWith(missing.contextGraphId);
@@ -2703,6 +2733,7 @@ describe('RFC-64 rollout authority integration', () => {
       ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase()
     ));
     const resolveSnapshots = vi.fn(async () => new Map());
+    const readSnapshots = vi.fn(async () => new Map());
     const scalarNameResolution = vi.fn(async () => {
       throw new Error('large scheduled inventory must not use scalar resolution');
     });
@@ -2710,6 +2741,7 @@ describe('RFC-64 rollout authority integration', () => {
       resolveContextGraphIdByNameHash: scalarNameResolution,
       contextGraphAuthorityIndexRevisionReader: {
         resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
         readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
         whenIdle: vi.fn(async () => undefined),
       },
@@ -2720,6 +2752,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
     resolveSnapshots.mockClear();
+    readSnapshots.mockClear();
 
     const release = edge.beginRfc64ScheduledCatalogResponsibilityBatchV1();
     try {
@@ -2739,6 +2772,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(new Set(resolveSnapshots.mock.calls[0]![0])).toEqual(
       new Set(expectedNameHashes),
     );
+    expect(readSnapshots).not.toHaveBeenCalled();
     expect(scalarNameResolution).not.toHaveBeenCalled();
   });
 
@@ -2762,6 +2796,15 @@ describe('RFC-64 rollout authority integration', () => {
     const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => new Map(
       nameHashes.map((nameHash) => [nameHash, snapshotsByNameHash.get(nameHash)!]),
     ));
+    const snapshotsByOnChainId = new Map(
+      [...snapshotsByNameHash.values()].map((snapshot) => [
+        snapshot.contextGraphId,
+        snapshot,
+      ] as const),
+    );
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      onChainIds.map((onChainId) => [onChainId, snapshotsByOnChainId.get(onChainId)!]),
+    ));
     const scalarNameResolution = vi.fn(async () => {
       throw new Error('store discovery responsibility must not use scalar resolution');
     });
@@ -2769,6 +2812,7 @@ describe('RFC-64 rollout authority integration', () => {
       resolveContextGraphIdByNameHash: scalarNameResolution,
       contextGraphAuthorityIndexRevisionReader: {
         resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
         readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
         whenIdle: vi.fn(async () => undefined),
       },
@@ -2779,6 +2823,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     await core.whenRfc64CatalogResponsibilitiesIdleV1();
     resolveSnapshots.mockClear();
+    readSnapshots.mockClear();
     vi.spyOn((core as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
       .mockImplementation(() => undefined);
     vi.spyOn(core, 'getExplicitAccessPolicy').mockResolvedValue(null);
@@ -2796,13 +2841,14 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(core.discoverContextGraphsFromStore()).resolves.toBe(64);
     await core.whenRfc64CatalogResponsibilitiesIdleV1();
 
-    expect(resolveSnapshots).toHaveBeenCalledTimes(2);
+    expect(resolveSnapshots).toHaveBeenCalledOnce();
     expect(new Set(resolveSnapshots.mock.calls[0]![0])).toEqual(
       new Set(expectedNameHashes),
     );
-    expect(new Set(resolveSnapshots.mock.calls[1]![0])).toEqual(
-      new Set(expectedNameHashes),
-    );
+    expect(readSnapshots).toHaveBeenCalledTimes(2);
+    for (const [onChainIds] of readSnapshots.mock.calls) {
+      expect(new Set(onChainIds)).toEqual(new Set(snapshotsByOnChainId.keys()));
+    }
     expect(scalarNameResolution).not.toHaveBeenCalled();
     for (const contextGraphId of contextGraphIds) {
       expect(core.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
@@ -2829,6 +2875,9 @@ describe('RFC-64 rollout authority integration', () => {
       }
       return new Map(nameHashes.includes(nameHash) ? [[nameHash, snapshot]] : []);
     });
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      onChainIds.includes('91') ? [['91', snapshot]] : [],
+    ));
     const scalarNameResolution = vi.fn(async () => {
       throw new Error('scheduled batch retry must not fan out scalar resolution');
     });
@@ -2836,6 +2885,7 @@ describe('RFC-64 rollout authority integration', () => {
       resolveContextGraphIdByNameHash: scalarNameResolution,
       contextGraphAuthorityIndexRevisionReader: {
         resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
         readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
         whenIdle: vi.fn(async () => undefined),
       },
@@ -2846,6 +2896,7 @@ describe('RFC-64 rollout authority integration', () => {
     });
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
     resolveSnapshots.mockClear();
+    readSnapshots.mockClear();
     vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
       .mockImplementation(() => undefined);
     vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
@@ -2863,7 +2914,12 @@ describe('RFC-64 rollout authority integration', () => {
 
       await vi.advanceTimersByTimeAsync(30_100);
       await edge.whenRfc64CatalogResponsibilitiesIdleV1();
-      expect(resolveSnapshots).toHaveBeenCalledTimes(3);
+      expect(resolveSnapshots).toHaveBeenCalledTimes(2);
+      expect(readSnapshots).toHaveBeenCalledTimes(2);
+      expect(readSnapshots.mock.calls.map(([onChainIds]) => onChainIds)).toEqual([
+        ['91'],
+        ['91'],
+      ]);
       expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
         expect.objectContaining({ contextGraphId, responsibilityReason: 'edge-subscription' }),
       );
@@ -2895,6 +2951,9 @@ describe('RFC-64 rollout authority integration', () => {
       }
       return new Map(nameHashes.includes(nameHash) ? [[nameHash, snapshot]] : []);
     });
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      onChainIds.includes('92') ? [['92', snapshot]] : [],
+    ));
     const scalarNameResolution = vi.fn(async () => {
       throw new Error('stale scheduled work must not use scalar resolution');
     });
@@ -2902,6 +2961,7 @@ describe('RFC-64 rollout authority integration', () => {
       resolveContextGraphIdByNameHash: scalarNameResolution,
       contextGraphAuthorityIndexRevisionReader: {
         resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
         readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
         whenIdle: vi.fn(async () => undefined),
       },
@@ -2947,9 +3007,18 @@ describe('RFC-64 rollout authority integration', () => {
         nameHash: freshNameHash,
       })]] : []);
     });
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      onChainIds.includes('93') ? [['93', Object.freeze({
+        ...finalizedAuthoritySnapshot(freshContextGraphId, [], '0'),
+        contextGraphId: '93',
+        accessPolicy: 0,
+        nameHash: freshNameHash,
+      })]] : [],
+    ));
     const chainAdapter = Object.assign(new NoChainAdapter(), {
       contextGraphAuthorityIndexRevisionReader: {
         resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
         readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
         whenIdle: vi.fn(async () => undefined),
       },

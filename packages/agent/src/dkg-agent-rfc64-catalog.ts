@@ -2007,13 +2007,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     signal.throwIfAborted();
     const registeredCandidates = contextGraphIds.filter((id) => !localFirst.has(id));
-    const canResolveCompleteSnapshots =
-      indexedReader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes !== undefined
-      || (
-        registeredCandidates.length === 1
-        && indexedReader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash !== undefined
-      );
-    if (readSnapshots === undefined && !canResolveCompleteSnapshots) {
+    if (readSnapshots === undefined) {
       return new Map(contextGraphIds.map((contextGraphId) => [
         contextGraphId,
         Object.freeze({ kind: 'auto' as const }),
@@ -2050,31 +2044,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       ContextGraphAuthorityIndexId,
       Rfc64FinalizedAuthoritySnapshotEvidenceV1
     >();
-    for (const target of resolution.targets.values()) {
-      if (target.finalizedSnapshot === undefined) continue;
-      const targetId = target.expectedOnChainId.toString(10) as
-        ContextGraphAuthorityIndexId;
-      evidenceByTargetId.set(targetId, Object.freeze({
-        contextGraphAuthorityIndexId: targetId,
-        batchTargetIds: targetIds,
-        snapshot: Object.freeze({
-          ...target.finalizedSnapshot,
-          participantAgents: Object.freeze([
-            ...target.finalizedSnapshot.participantAgents,
-          ]),
-        }),
-      }));
-    }
-    const missingTargetIds = targetIds.filter((targetId) => (
-      !evidenceByTargetId.has(targetId)
-    ));
-    if (missingTargetIds.length > 0) {
-      if (readSnapshots === undefined) {
-        return new Map(contextGraphIds.map((contextGraphId) => [
-          contextGraphId,
-          Object.freeze({ kind: 'auto' as const }),
-        ]));
-      }
+    if (targetIds.length > 0) {
       let runtime = rfc64ResponsibilityAuthorityBatchRuntimesV1.get(this);
       if (runtime === undefined) {
         runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
@@ -2091,9 +2061,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         });
         rfc64ResponsibilityAuthorityBatchRuntimesV1.set(this, runtime);
       }
-      const missingBatch = runtime.createBatch(missingTargetIds);
-      await Promise.all(missingTargetIds.map(async (targetId) => {
-        evidenceByTargetId.set(targetId, await missingBatch.read(targetId, signal));
+      const evidenceBatch = runtime.createBatch(targetIds);
+      await Promise.all(targetIds.map(async (targetId) => {
+        evidenceByTargetId.set(targetId, await evidenceBatch.read(targetId, signal));
       }));
     }
     signal.throwIfAborted();
