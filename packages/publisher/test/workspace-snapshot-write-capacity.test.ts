@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  createSnapshotWriteCapacityAdmission,
+  resolveSnapshotWriteCapacityAdmission,
+  snapshotStoreOptionsWithAdmission,
   SnapshotStorageCapacityError,
   SnapshotWriteCapacityCoordinator,
-  withSnapshotWriteCapacityAdmission,
   type SnapshotWriteCapacityAdmission,
   type SnapshotWriteCapacityPorts,
 } from '../src/workspace-snapshot-write-capacity.js';
@@ -126,29 +126,45 @@ describe('SnapshotWriteCapacityCoordinator', () => {
 });
 
 describe('write capacity admission construction', () => {
-  const gated: SnapshotWriteCapacityAdmission = {
+  const admission = (): SnapshotWriteCapacityAdmission => ({
     reserve: async () => ({ markMaterialized: () => {}, release: () => {} }),
-  };
-
-  it('replaces admission for one construction and coordinates for every other', () => {
-    expect(createSnapshotWriteCapacityAdmission(ports(() => HARD_RESERVE)))
-      .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
-    expect(withSnapshotWriteCapacityAdmission(
-      () => gated,
-      () => createSnapshotWriteCapacityAdmission(ports(() => HARD_RESERVE)),
-    )).toBe(gated);
-    // The seam is one construction wide: production, and every later store,
-    // still coordinates.
-    expect(createSnapshotWriteCapacityAdmission(ports(() => HARD_RESERVE)))
-      .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
   });
 
-  it('reports an override that the construction never consumed', () => {
-    // Otherwise a gated test whose store built no admission would quietly run
-    // against the real coordinator and prove nothing about the gate.
-    expect(() => withSnapshotWriteCapacityAdmission(() => gated, () => 'no admission built'))
-      .toThrow('override was not consumed');
-    expect(createSnapshotWriteCapacityAdmission(ports(() => HARD_RESERVE)))
+  it('coordinates for options that carry no seam', () => {
+    // Production configuration cannot name the seam, so it always coordinates.
+    expect(resolveSnapshotWriteCapacityAdmission({}, ports(() => HARD_RESERVE)))
       .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
+    expect(resolveSnapshotWriteCapacityAdmission(
+      { gc: { enabled: true } },
+      ports(() => HARD_RESERVE),
+    )).toBeInstanceOf(SnapshotWriteCapacityCoordinator);
+  });
+
+  it('resolves each options object to the admission it carries, in any order', () => {
+    const first = admission();
+    const second = admission();
+    const firstOptions = snapshotStoreOptionsWithAdmission(() => first, { gc: { enabled: true } });
+    const secondOptions = snapshotStoreOptionsWithAdmission(() => second, { gc: { enabled: true } });
+    // Nothing is consumed and nothing is ordered: a later resolution cannot
+    // take an earlier one's factory, and a plain object between them still
+    // coordinates.
+    expect(resolveSnapshotWriteCapacityAdmission(secondOptions, ports(() => HARD_RESERVE))).toBe(second);
+    expect(resolveSnapshotWriteCapacityAdmission({}, ports(() => HARD_RESERVE)))
+      .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
+    expect(resolveSnapshotWriteCapacityAdmission(firstOptions, ports(() => HARD_RESERVE))).toBe(first);
+    expect(resolveSnapshotWriteCapacityAdmission(firstOptions, ports(() => HARD_RESERVE))).toBe(first);
+  });
+
+  it('builds the admission from the ports of the store being constructed', () => {
+    const received: SnapshotWriteCapacityPorts[] = [];
+    const options = snapshotStoreOptionsWithAdmission(
+      seamPorts => { received.push(seamPorts); return admission(); },
+      { gc: { enabled: true } },
+    );
+    const storePorts = ports(() => HARD_RESERVE);
+    resolveSnapshotWriteCapacityAdmission(options, storePorts);
+    expect(received).toEqual([storePorts]);
+    // The options keep their ordinary shape; the seam is not policy.
+    expect(Object.keys(options)).toEqual(['gc']);
   });
 });

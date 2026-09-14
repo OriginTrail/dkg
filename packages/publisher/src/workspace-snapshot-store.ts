@@ -15,7 +15,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameSnapshotSource, sameSnapshotFileIdentity, snapshotPath, SnapshotSourceChangedError, type OpenedSnapshotSource, type SnapshotFileSource, type SnapshotFileIdentity, type SnapshotFileReader } from './workspace-snapshot-source.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import {
-  createSnapshotWriteCapacityAdmission,
+  resolveSnapshotWriteCapacityAdmission,
   type SnapshotWriteCapacityAdmission,
   type SnapshotWriteCapacityPorts,
 } from './workspace-snapshot-write-capacity.js';
@@ -213,7 +213,10 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
           }
         },
       };
-      this.writeCapacity = createSnapshotWriteCapacityAdmission(ports);
+      // Admission comes from THESE options: the coordinator in production, or
+      // the seam a package-internal caller put on the options it built for this
+      // store. Nothing outside this construction can decide it.
+      this.writeCapacity = resolveSnapshotWriteCapacityAdmission(options, ports);
       this.gcTimer = setInterval(() => {
         void this.collectGarbage().then((result) => {
           if (

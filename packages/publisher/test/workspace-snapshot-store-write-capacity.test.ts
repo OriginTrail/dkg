@@ -8,8 +8,8 @@ import {
   serializeWorkspacePublicSnapshotQuads,
 } from '../src/workspace-snapshot-store.js';
 import {
+  snapshotStoreOptionsWithAdmission,
   SnapshotWriteCapacityCoordinator,
-  withSnapshotWriteCapacityAdmission,
   type SnapshotWriteCapacityLease,
 } from '../src/workspace-snapshot-write-capacity.js';
 
@@ -156,7 +156,7 @@ describe('FileWorkspacePublicSnapshotStore write capacity', () => {
     let releaseWrites!: () => void;
     const writesBlocked = new Promise<void>(resolve => { releaseWrites = resolve; });
     let decisions = 0; let accepted = 0;
-    const store = withSnapshotWriteCapacityAdmission(
+    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, snapshotStoreOptionsWithAdmission(
       ports => {
         const coordinator = new SnapshotWriteCapacityCoordinator(ports);
         return {
@@ -170,12 +170,12 @@ describe('FileWorkspacePublicSnapshotStore write capacity', () => {
           },
         };
       },
-      () => new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      {
         gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
           targetFreeBytes: hardReserveBytes + 1, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
         getAvailableBytes: async () => capacity - await committedBytes(),
-      }),
-    );
+      },
+    ));
     const writes = Promise.allSettled(inputs.map(input => store.putSnapshot(input)));
     try {
       await vi.waitFor(() => expect(decisions).toBe(4));
@@ -214,7 +214,7 @@ describe('FileWorkspacePublicSnapshotStore write capacity', () => {
     const readStartedGate = new Promise<void>(resolve => { readStarted = resolve; });
     let reads = 0;
     let first = true;
-    const store = withSnapshotWriteCapacityAdmission(
+    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, snapshotStoreOptionsWithAdmission(
       ports => {
         const coordinator = new SnapshotWriteCapacityCoordinator(ports);
         return {
@@ -225,7 +225,7 @@ describe('FileWorkspacePublicSnapshotStore write capacity', () => {
           },
         };
       },
-      () => new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      {
         gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: hardReserveBytes + 1,
           targetFreeBytes: hardReserveBytes + 2, hardReserveBytes, minAgeMs: Number.MAX_SAFE_INTEGER },
         getAvailableBytes: async () => {
@@ -234,8 +234,8 @@ describe('FileWorkspacePublicSnapshotStore write capacity', () => {
           if (reading === 2) { readStarted(); await readGate; }
           return available;
         },
-      }),
-    );
+      },
+    ));
     const firstWrite = store.putSnapshot(inputs[0]!);
     let secondWrite: Promise<unknown> | undefined;
     try {
@@ -281,6 +281,53 @@ describe('FileWorkspacePublicSnapshotStore write capacity', () => {
       expect(logs).toEqual([expect.stringMatching(/^\[SWM-SNAPSHOT-GC\] triggered=true snapshots=1 /)]);
     } finally {
       store.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Admission belongs to ONE store: the seam travels on the options that store
+   * was built from, so neither a sibling nor a store constructed while those
+   * options are in hand can be given — or steal — another store's coordinator.
+   */
+  it('gives each store the admission its own options name, nested or plain', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-admission-isolation-'));
+    const inputs = Array.from({ length: 3 }, (_, i) => ({ digest: digestFor(940 + i), quads: makeQuads(3, `isolated-${i}`) }));
+    const writeBytes = inputs.map(input => Buffer.byteLength(serializeWorkspacePublicSnapshotQuads(input.quads), 'utf8'));
+    const policy = {
+      gc: { enabled: true, intervalMs: 60_000, triggerFreeBytes: 1_000,
+        targetFreeBytes: 2_000, hardReserveBytes: 500, minAgeMs: Number.MAX_SAFE_INTEGER },
+      getAvailableBytes: async () => 1_000_000,
+    };
+    const reservedByFirst: number[] = [];
+    const reservedBySecond: number[] = [];
+    const gated = (reserved: number[]) => snapshotStoreOptionsWithAdmission(
+      ports => {
+        const coordinator = new SnapshotWriteCapacityCoordinator(ports);
+        return { reserve: async bytes => { reserved.push(bytes); return coordinator.reserve(bytes); } };
+      },
+      { ...policy },
+    );
+    let second!: FileWorkspacePublicSnapshotStore;
+    let ungated!: FileWorkspacePublicSnapshotStore;
+    // The other two GC-enabled stores are constructed WHILE the first store's
+    // options are already in hand — the shape that let a construction-ordered
+    // override reach the wrong store.
+    const first = new FileWorkspacePublicSnapshotStore(directory, undefined, ((options) => {
+      second = new FileWorkspacePublicSnapshotStore(directory, undefined, gated(reservedBySecond));
+      ungated = new FileWorkspacePublicSnapshotStore(directory, undefined, { ...policy });
+      return options;
+    })(gated(reservedByFirst)));
+    try {
+      await expect(first.putSnapshot(inputs[0]!)).resolves.toMatchObject({ ref: inputs[0]!.digest });
+      await expect(second.putSnapshot(inputs[1]!)).resolves.toMatchObject({ ref: inputs[1]!.digest });
+      // The store with no seam admitted its own write through the coordinator.
+      await expect(ungated.putSnapshot(inputs[2]!)).resolves.toMatchObject({ ref: inputs[2]!.digest });
+      expect(reservedByFirst).toEqual([writeBytes[0]]);
+      expect(reservedBySecond).toEqual([writeBytes[1]]);
+      await expect(stat(snapshotPath(directory, inputs[2]!.digest))).resolves.toMatchObject({ size: writeBytes[2] });
+    } finally {
+      [first, second, ungated].forEach(store => { store.stopGarbageCollection(); });
       await rm(directory, { recursive: true, force: true });
     }
   });
