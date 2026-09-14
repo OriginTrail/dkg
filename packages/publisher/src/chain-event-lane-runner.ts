@@ -6,7 +6,7 @@ import {
   type CursorPersistence,
   type LaneCursorStore,
 } from './chain-event-lane-cursor-store.js';
-import type { ChainEventPollerLane } from './chain-event-lanes.js';
+import { CHAIN_EVENT_POLLER_LANES, type ChainEventPollerLane } from './chain-event-lanes.js';
 
 export type { ChainEventPollerLane } from './chain-event-lanes.js';
 
@@ -32,6 +32,22 @@ export interface ChainEventPollerLaneSpec {
   cadenceMs: number;
   dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
   onBackfillFromGenesis?(ctx: OperationContext): void;
+}
+
+/**
+ * One lane's behaviour, declared under its lane name so the lane union stays
+ * the only list of lane names.
+ */
+export type ChainEventPollerLaneBehavior = Omit<ChainEventPollerLaneSpec, 'name'>;
+
+/** Every poller lane's behaviour, exhaustive by construction. */
+export type ChainEventPollerLaneDeclarations = Record<ChainEventPollerLane, ChainEventPollerLaneBehavior>;
+
+/** Ordered runtime specifications derived from the canonical lane order. */
+export function chainEventPollerLaneSpecs(
+  declarations: ChainEventPollerLaneDeclarations,
+): ChainEventPollerLaneSpec[] {
+  return CHAIN_EVENT_POLLER_LANES.map((name) => ({ name, ...declarations[name] }));
 }
 
 interface ChainEventPollerLaneRuntime {

@@ -8,9 +8,10 @@ import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 import {
   ChainEventLaneRunner,
+  chainEventPollerLaneSpecs,
+  type ChainEventPollerLaneDeclarations,
   type ChainEventPollerLaneSpec,
 } from './chain-event-lane-runner.js';
-import { CHAIN_EVENT_POLLER_LANES } from './chain-event-lanes.js';
 import type { CursorPersistence as RunnerCursorPersistence } from './chain-event-lane-cursor-store.js';
 
 export type { ChainEventPollerLane } from './chain-event-lane-runner.js';
@@ -264,9 +265,11 @@ export class ChainEventPoller {
   }
 
   private laneSpecs(): ChainEventPollerLaneSpec[] {
-    const lanes: ChainEventPollerLaneSpec[] = [
-      {
-        name: 'publish',
+    // The lane union in `chain-event-lanes.ts` is the only list of lane names:
+    // this declaration is exhaustive by type, and both the runner's ordered
+    // specifications and cursor seeding derive from that one order.
+    const lanes: ChainEventPollerLaneDeclarations = {
+      publish: {
         enabled: () => this.publishHandler.hasPendingPublishes,
         eventTypes: () => ['KCCreated'],
         requiresFullHistory: () => this.publishHandler.hasRestoredPendingPublishes,
@@ -278,8 +281,7 @@ export class ChainEventPoller {
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleBatchCreated(event, ctx),
       },
-      {
-        name: 'allocatorReconcile',
+      allocatorReconcile: {
         enabled: () => !!this.onKnowledgeAssetCreated,
         eventTypes: () => ['KCCreated'],
         requiresFullHistory: () => true,
@@ -291,8 +293,7 @@ export class ChainEventPoller {
           this.log.info(ctx, 'Allocator-reconciliation watcher wired and no persisted cursor - scanning from block 0 (codex PR #976 F9 backfill)');
         },
       },
-      {
-        name: 'contextGraphDiscovery',
+      contextGraphDiscovery: {
         enabled: () => !!this.onContextGraphCreated,
         eventTypes: () => ['NameClaimed', 'ContextGraphCreated'],
         // This poller is the low-latency live tail for new context graphs.
@@ -303,45 +304,36 @@ export class ChainEventPoller {
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleContextGraphCreated(event, ctx),
       },
-      {
-        name: 'vmReconcile',
+      vmReconcile: {
         enabled: () => !!this.onKARegisteredToContextGraph,
         eventTypes: () => ['KnowledgeAssetRegisteredToContextGraph'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleKARegistered(event, ctx),
       },
-      {
-        name: 'collectionUpdates',
+      collectionUpdates: {
         enabled: () => !!this.onCollectionUpdated,
         eventTypes: () => ['KnowledgeAssetUpdated'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleCollectionUpdated(event, ctx),
       },
-      {
-        name: 'allowListUpdates',
+      allowListUpdates: {
         enabled: () => !!this.onAllowListUpdated,
         eventTypes: () => ['AllowListUpdated'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleAllowListUpdated(event, ctx),
       },
-      {
-        name: 'profileEvents',
+      profileEvents: {
         enabled: () => !!this.onProfileEvent,
         eventTypes: () => ['ProfileCreated', 'ProfileUpdated'],
         requiresFullHistory: () => false,
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx) => this.handleProfileEvent(event, ctx),
       },
-    ];
-    const names = lanes.map(({ name }) => name);
-    if (names.length !== CHAIN_EVENT_POLLER_LANES.length
-      || names.some((name, index) => name !== CHAIN_EVENT_POLLER_LANES[index])) {
-      throw new Error('Chain event poller lane specifications do not match the canonical lane list.');
-    }
-    return lanes;
+    };
+    return chainEventPollerLaneSpecs(lanes);
   }
 
   private async poll(): Promise<void> {
