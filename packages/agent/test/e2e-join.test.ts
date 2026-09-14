@@ -43,6 +43,16 @@ const CG = 'curated-join-e2e';
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 
+function makeSharedChainConfig() {
+  const { rpcUrl, hubAddress } = getSharedContext();
+  return {
+    rpcUrl,
+    hubAddress,
+    operationalKeys: [HARDHAT_KEYS.CORE_OP],
+    chainId: 'evm:31337',
+  };
+}
+
 async function pollUntil<T>(
   fn: () => Promise<T>,
   pred: (v: T) => boolean,
@@ -100,6 +110,10 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       chainAdapter: sharedChain,
       nodeRole: 'core',
       dataDir: curatorDataDir,
+      // The pre-built adapter remains the shared chain used by this E2E. The
+      // explicit config supplies the trusted RPC endpoints required by the
+      // RFC-64 finalized catalog precommit.
+      chainConfig: makeSharedChainConfig(),
     });
     joiner = await DKGAgent.create({
       ...TEST_SNAPSHOT_CONFIG,
@@ -115,6 +129,9 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
         save: async (record) => { joinerPersistedSubscriptions.set(record.id, { ...record }); },
         delete: async (id) => { joinerPersistedSubscriptions.delete(id); },
       },
+      // Keep the shared adapter while giving RFC-64 a trusted RPC/Hub
+      // configuration for finalized catalog recovery.
+      chainConfig: makeSharedChainConfig(),
     });
 
     await curator.start();
@@ -203,6 +220,13 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     );
 
     expect(caughtUp).toEqual({ subscribed: true, hasData: true });
+    const catalogStatus = (await joiner.readRfc64CatalogOperationalStatusV1())
+      .find((status) => status.contextGraphId === CG);
+    expect(catalogStatus).toMatchObject({
+      phase: 'complete',
+      catalogServiceStarted: true,
+      appliedCatalogHeadDigest: expect.any(String),
+    });
     // The 10.0.16 default installs RFC-64 catalog responsibility for an
     // approved private member. Catch-up must complete without reviving the
     // legacy GossipSub or durable-sync receiver lanes.
