@@ -1841,9 +1841,9 @@ export class DKGAgentBase {
   /** Open after RFC-64 ownership and before networking starts. */
   protected async prepareFinalizationRecoveryStore(): Promise<void> {
     if (!this.config.dataDir || this.finalizationRuntime.getRecoveryStore()) return;
-    const store = await openSqliteFinalizationRecoveryStore(
-      this.config.dataDir,
-    );
+    const store = this.config.finalizationRecoveryStoreFactory
+      ? await this.config.finalizationRecoveryStoreFactory(this.config.dataDir)
+      : await openSqliteFinalizationRecoveryStore(this.config.dataDir);
     this.finalizationRuntime.attachRecoveryStore(store);
   }
 
