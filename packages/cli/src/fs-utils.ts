@@ -40,47 +40,69 @@ const nodeSyncResolutionIo: SyncAtomicWriteResolutionIo = {
   readlink: path => readlinkSync(path, 'utf8'),
 };
 
-type DestinationResolutionRequest =
-  | { readonly kind: 'lstat'; readonly path: string }
-  | { readonly kind: 'readlink'; readonly path: string };
-
 interface DestinationResolutionState {
   followedLinks: number;
 }
 
-/**
- * The single config-destination algorithm. Sync registration and async I/O
- * drive this same resolver so ownership, locking, backup, and publication use
- * identical identities for final/parent symlinks and nonexistent targets.
- */
-function* destinationResolver(
-  path: string,
-  state: DestinationResolutionState,
-): Generator<DestinationResolutionRequest, string, AtomicWriteDestinationStatus | string | undefined> {
-  const absolute = resolve(path);
-  const status = yield { kind: 'lstat', path: absolute };
-  if (status !== undefined && typeof status !== 'string' && status.isSymbolicLink()) {
-    if (state.followedLinks >= 40) {
-      const error = new Error(`Too many symbolic links while resolving ${path}`) as NodeJS.ErrnoException;
-      error.code = 'ELOOP';
-      throw error;
-    }
-    state.followedLinks += 1;
-    const target = yield { kind: 'readlink', path: absolute };
-    if (typeof target !== 'string') throw new Error(`Invalid symbolic link target for ${absolute}`);
-    return yield* destinationResolver(
-      isAbsolute(target) ? target : resolve(dirname(absolute), target),
-      state,
-    );
-  }
-
-  const parent = dirname(absolute);
-  if (parent === absolute) return absolute;
-  return resolve(yield* destinationResolver(parent, state), basename(absolute));
-}
-
 function missingDestination(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function tooManyLinks(path: string): Error {
+  const error = new Error(`Too many symbolic links while resolving ${path}`) as NodeJS.ErrnoException;
+  error.code = 'ELOOP';
+  return error;
+}
+
+function symlinkTarget(absolute: string, target: string): string {
+  return isAbsolute(target) ? target : resolve(dirname(absolute), target);
+}
+
+function resolveDestinationSync(
+  path: string,
+  io: SyncAtomicWriteResolutionIo,
+  state: DestinationResolutionState,
+): string {
+  const absolute = resolve(path);
+  let status: AtomicWriteDestinationStatus | undefined;
+  try {
+    status = io.lstat(absolute);
+  } catch (error) {
+    if (!missingDestination(error)) throw error;
+  }
+  if (status?.isSymbolicLink()) {
+    if (state.followedLinks >= 40) throw tooManyLinks(path);
+    state.followedLinks += 1;
+    return resolveDestinationSync(symlinkTarget(absolute, io.readlink(absolute)), io, state);
+  }
+  const parent = dirname(absolute);
+  return parent === absolute
+    ? absolute
+    : resolve(resolveDestinationSync(parent, io, state), basename(absolute));
+}
+
+async function resolveDestination(
+  path: string,
+  inspect: (path: string) => Promise<AtomicWriteDestinationStatus>,
+  readTarget: (path: string) => Promise<string>,
+  state: DestinationResolutionState,
+): Promise<string> {
+  const absolute = resolve(path);
+  let status: AtomicWriteDestinationStatus | undefined;
+  try {
+    status = await inspect(absolute);
+  } catch (error) {
+    if (!missingDestination(error)) throw error;
+  }
+  if (status?.isSymbolicLink()) {
+    if (state.followedLinks >= 40) throw tooManyLinks(path);
+    state.followedLinks += 1;
+    return resolveDestination(symlinkTarget(absolute, await readTarget(absolute)), inspect, readTarget, state);
+  }
+  const parent = dirname(absolute);
+  return parent === absolute
+    ? absolute
+    : resolve(await resolveDestination(parent, inspect, readTarget, state), basename(absolute));
 }
 
 /** Synchronous adapter used when registering a process-local config owner. */
@@ -88,26 +110,7 @@ export function resolveAtomicWriteDestinationSync(
   path: string,
   io: SyncAtomicWriteResolutionIo = nodeSyncResolutionIo,
 ): string {
-  const resolver = destinationResolver(path, { followedLinks: 0 });
-  let step = resolver.next();
-  while (!step.done) {
-    const request = step.value;
-    try {
-      if (request.kind === 'readlink') {
-        step = resolver.next(io.readlink(request.path));
-      } else {
-        try {
-          step = resolver.next(io.lstat(request.path));
-        } catch (error) {
-          if (!missingDestination(error)) throw error;
-          step = resolver.next(undefined);
-        }
-      }
-    } catch (error) {
-      step = resolver.throw(error);
-    }
-  }
-  return step.value;
+  return resolveDestinationSync(path, io, { followedLinks: 0 });
 }
 
 /** Async adapter used by leases and atomic publication, including custom I/O. */
@@ -117,26 +120,7 @@ export async function resolveAtomicWriteDestination(
 ): Promise<string> {
   const inspect = io.lstat ?? lstat;
   const readTarget = io.readlink ?? readlink;
-  const resolver = destinationResolver(path, { followedLinks: 0 });
-  let step = resolver.next();
-  while (!step.done) {
-    const request = step.value;
-    try {
-      if (request.kind === 'readlink') {
-        step = resolver.next(await readTarget(request.path));
-      } else {
-        try {
-          step = resolver.next(await inspect(request.path));
-        } catch (error) {
-          if (!missingDestination(error)) throw error;
-          step = resolver.next(undefined);
-        }
-      }
-    } catch (error) {
-      step = resolver.throw(error);
-    }
-  }
-  return step.value;
+  return resolveDestination(path, inspect, readTarget, { followedLinks: 0 });
 }
 
 /** Publish a complete file through one shared temp-write/rename primitive. */
