@@ -220,8 +220,16 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
     );
 
     expect(caughtUp).toEqual({ subscribed: true, hasData: true });
-    const catalogStatus = (await joiner.readRfc64CatalogOperationalStatusV1())
-      .find((status) => status.contextGraphId === CG);
+    // Data catch-up and RFC-64 catalog application are independent async
+    // completions. Seeing the synchronized entity proves the former, but the
+    // status can still legitimately be `applying` for the latter. Wait for the
+    // terminal state this assertion is intended to verify.
+    const catalogStatus = await pollUntil(
+      async () => (await joiner.readRfc64CatalogOperationalStatusV1())
+        .find((status) => status.contextGraphId === CG),
+      (status) => status?.phase === 'complete',
+      60_000,
+    );
     expect(catalogStatus).toMatchObject({
       phase: 'complete',
       catalogServiceStarted: true,
