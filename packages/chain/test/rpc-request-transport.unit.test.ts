@@ -618,23 +618,26 @@ describe('RPC request transport', () => {
     }
   });
 
-  it('accounts every entry in an ungoverned batched payload at the HTTP-attempt boundary', async () => {
+  it('batches public sends and accounts every entry at the HTTP-attempt boundary', async () => {
     const rpc = await startLoopbackRpc();
     servers.push(rpc);
     const observed: string[] = [];
     const provider = createBatchedRpcRequestProvider(rpc.url, {
       maxRetries: 0,
+      network: Network.from(31_337),
       providerOptions: { batchMaxCount: 2 },
       onRequest: (method) => { observed.push(method); },
     });
     try {
-      await expect(provider._send([
-        { id: 1, jsonrpc: '2.0', method: 'eth_blockNumber', params: [] },
-        { id: 2, jsonrpc: '2.0', method: 'eth_chainId', params: [] },
-      ])).resolves.toHaveLength(2);
-      expect(observed).toEqual(['eth_blockNumber', 'eth_chainId']);
+      const blockNumber = provider.send('eth_blockNumber', []);
+      const code = provider.send('eth_getCode', []);
+      await expect(Promise.all([blockNumber, code])).resolves.toEqual(['0x10', '0x1234']);
+      expect(observed).toEqual(['eth_blockNumber', 'eth_getCode']);
       expect(rpc.hits('eth_blockNumber')).toBe(1);
-      expect(rpc.hits('eth_chainId')).toBe(1);
+      expect(rpc.hits('eth_getCode')).toBe(1);
+      expect(rpc.httpRequestMethods()).toEqual([
+        ['eth_blockNumber', 'eth_getCode'],
+      ]);
     } finally {
       provider.destroy();
     }
