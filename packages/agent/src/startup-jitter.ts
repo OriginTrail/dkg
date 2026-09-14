@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { AGENT_RESOURCE_ENV_SPECS, RESOURCE_MAX, resourceInteger, resourceIntegerEnv } from './resource-limits.js';
 
 /** Stable across restarts, distinct across peers, and trivially testable. */
 export function deterministicStartupJitterMs(seed: string, maxDelayMs: number): number {
@@ -30,8 +31,7 @@ export function resolveVmReconcileStartupMaxDelayMs(
   configured: string | undefined,
   sweepIntervalMs: number,
 ): number {
-  const fallback = Math.max(0, sweepIntervalMs);
-  if (configured === undefined || configured.trim() === '') return fallback;
-  const parsed = Number(configured);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
+  const bounds = { min: 0, max: RESOURCE_MAX.timerMs } as const;
+  const fallback = resourceInteger(sweepIntervalMs, bounds, 'sweepIntervalMs') ?? AGENT_RESOURCE_ENV_SPECS.DKG_VM_RECONCILE_INTERVAL_MS.fallback;
+  return resourceIntegerEnv(configured, bounds, 'DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS') ?? fallback;
 }

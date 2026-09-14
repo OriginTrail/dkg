@@ -1,10 +1,30 @@
-import { describe, expect, it } from 'vitest';
+import { RESOURCE_MAX } from '../src/resource-limits.js';
+import { describe, expect, it, vi } from 'vitest';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   CATCHUP_STOP_ON_PROOF,
   catchupWaveSizes,
   resolveCatchupStopOnProof,
 } from '../src/sync/catchup-concurrency.js';
+
+it.each([
+  { configured: '1024', expected: 1024 },
+  { configured: '1025', expected: 4 },
+])('captures catch-up concurrency at module load: $configured → $expected', async ({ configured, expected }) => {
+  vi.resetModules();
+  vi.stubEnv('DKG_CATCHUP_MAX_CONCURRENT_PEERS', configured);
+  try {
+    const runtime = await import('../src/sync/catchup-concurrency.js');
+    expect(runtime.CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBe(expected);
+    // Later environment changes must not replace the process-scoped snapshot.
+    vi.stubEnv('DKG_CATCHUP_MAX_CONCURRENT_PEERS', '7');
+    const reimported = await import('../src/sync/catchup-concurrency.js');
+    expect(reimported.CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBe(expected);
+  } finally {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  }
+});
 
 describe('catchupWaveSizes', () => {
   it('starts with a single peer so a proving authority costs one payload', () => {
@@ -52,15 +72,17 @@ describe('catchupWaveSizes', () => {
     expect(catchupWaveSizes(-2, 4)).toEqual([]);
   });
 
+  it('accepts the concurrency ceiling and falls back to serial waves above it', () => {
+    expect(catchupWaveSizes(RESOURCE_MAX.concurrency + 1, RESOURCE_MAX.concurrency, RESOURCE_MAX.concurrency))
+      .toEqual([RESOURCE_MAX.concurrency, 1]);
+    expect(catchupWaveSizes(3, RESOURCE_MAX.concurrency + 1)).toEqual([1, 1, 1]);
+  });
+
   it('resolves the shared fan-out cap to a positive integer', () => {
-    // Deliberately NOT asserting an upper bound: the constant is
-    // env-overridable and production applies no clamp, so pinning an arbitrary
-    // ceiling here would fail a validly configured node
-    // (`DKG_CATCHUP_MAX_CONCURRENT_PEERS=32`) while proving nothing about the
-    // code. The real contract is the parse: a positive integer, else the
-    // default.
+    // Environment overrides obey the same resource ceiling as explicit caps.
     expect(Number.isInteger(CATCHUP_MAX_CONCURRENT_PEER_SYNCS)).toBe(true);
     expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeGreaterThan(0);
+    expect(CATCHUP_MAX_CONCURRENT_PEER_SYNCS).toBeLessThanOrEqual(RESOURCE_MAX.concurrency);
   });
 });
 

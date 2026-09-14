@@ -441,7 +441,9 @@ describe('BackpressureMonitor', () => {
     let now = 1_000;
     const tracker = new SchedulerPressureTracker({
       scheduler: 'sync-global', now: () => now,
-      capacity: { capacityModel, queueLimit: 1, lanes: { durable: { queueLimit: 1 } } },
+      capacity: capacityModel === 'shared'
+        ? { capacityModel, queueLimit: 1 }
+        : { capacityModel, queueLimit: 1, lanes: { durable: { queueLimit: 1 } } },
       thresholds: { degradedQueueAgeMs: 10_000, stalledActiveAgeMs: 20_000, rejectionStateWindowMs: 30_000 },
     });
     const registry = new BackpressureRegistry();
@@ -808,7 +810,7 @@ describe('BackpressureMonitor', () => {
     // old branch read `0 / limit >= 0` as degraded on an idle lane; that must
     // still happen for `partitioned`, and must not for `shared`.
     const now = 1_000;
-    const idleLane = (capacity: Parameters<typeof SchedulerPressureTracker>[0]['capacity']) => {
+    const idleLane = (capacity: ConstructorParameters<typeof SchedulerPressureTracker>[0]['capacity']) => {
       const tracker = new SchedulerPressureTracker({
         scheduler: 'probe',
         now: () => now,

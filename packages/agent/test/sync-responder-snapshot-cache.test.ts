@@ -166,27 +166,32 @@ describe('sync responder snapshot budget defaults', () => {
     });
   });
 
-  it('warns for invalid env leaves, falls through to config, and clamps local to global', () => {
-    const warnings: string[] = [];
-    const resolved = resolveSyncResponderSnapshotPolicy({
+  it('retains legacy clamp flags and warning callbacks at the sync-handler boundary', () => {
+    const config = {
       global: { rows: 100, bytesEstimate: 200 },
       local: { rows: 150, bytesEstimate: 250 },
-    }, {
+    };
+    const env = {
       DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT: 'invalid',
       DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_BYTES_ESTIMATE_LIMIT: '',
-    }, (message) => warnings.push(message));
+    };
+    const resolved = resolveSyncResponderSnapshotPolicy(config, env);
     expect(resolved).toEqual({
       budget: {
-        maxRows: 100,
-        maxBytesEstimate: 200,
-        maxSnapshotRows: 100,
-        maxSnapshotBytesEstimate: 200,
+        maxRows: 100, maxBytesEstimate: 200,
+        maxSnapshotRows: 100, maxSnapshotBytesEstimate: 200,
       },
       localRowsClamped: true,
       localBytesEstimateClamped: true,
     });
-    expect(warnings).toHaveLength(3);
-    expect(warnings[0]).toContain('DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT');
+    const warnings: string[] = [];
+    expect(resolveSyncResponderSnapshotBudgetOptions(config, env, (message) => warnings.push(message)))
+      .toEqual(resolved.budget);
+    expect(warnings).toEqual([
+      'Ignoring invalid resource setting DKG_SYNC_RESPONDER_GLOBAL_SNAPSHOT_ROW_LIMIT; using fallback',
+      'Clamped syncResponderSnapshotLimits.local.rows from 150 to global.rows 100',
+      'Clamped syncResponderSnapshotLimits.local.bytesEstimate from 250 to global.bytesEstimate 200',
+    ]);
   });
 });
 

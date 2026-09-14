@@ -131,7 +131,9 @@ describe('sync responder snapshot config validation', () => {
     ['global.bytesEstimate', { global: { bytesEstimate: 1.5 } }],
     ['local.rows', { local: { rows: -1 } }],
     ['local.bytesEstimate', { local: { bytesEstimate: Number.MAX_SAFE_INTEGER + 1 } }],
-  ])('reports the exact invalid leaf path %s', (path, config) => {
+  ])('rejects invalid numeric leaves at the public boundary for %s', (path, config) => {
+    expect(() => validateSyncResponderSnapshotLimitsConfig(config))
+      .toThrow(TypeError);
     expect(() => validateSyncResponderSnapshotLimitsConfig(config))
       .toThrow(`syncResponderSnapshotLimits.${path}`);
   });

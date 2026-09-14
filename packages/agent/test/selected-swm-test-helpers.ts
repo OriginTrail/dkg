@@ -1,3 +1,5 @@
+import { resolveStartupResourcePolicy, type StartupResourcePolicy } from '../src/resource-policy.js';
+import { resolveAgentResourceSnapshots } from '../src/resource-limits.js';
 import type { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { vi } from 'vitest';
 import {
@@ -355,6 +357,9 @@ export async function callTrySyncFromPeer(
     }>;
     resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
     recordSyncReconcilerFailure: (peerId: string) => void;
+    applySyncOnConnectAccounting?: (
+      peerId: string, outcome: Parameters<NonNullable<typeof onSyncAccounting>>[0],
+    ) => void;
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
   agent.trySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer;
@@ -464,6 +469,7 @@ export interface SelectedSwmLifecycleHarnessOptions {
 
 export interface SelectedSwmLifecycleAgentFixture {
   config: {
+    resourcePolicy: StartupResourcePolicy;
     syncContextGraphPriorities: Readonly<Record<string, number>>;
     syncResponderSnapshotLimits?: {
       global?: { rows?: number; bytesEstimate?: number };
@@ -530,6 +536,9 @@ export interface SelectedSwmLifecycleAgentFixture {
     contextGraphId: string,
   ) => { legacySyncAllowed: boolean };
   createSwmTargetExecutorSessionV1: () => SwmTargetExecutorV1;
+  acquireRfc64SwmRecoveryTargetLeaseV1: (target: Rfc64SwmRecoveryTargetV1) => Rfc64SwmRecoveryTargetLeaseV1;
+  getSelectedSwmMetaTransfers: () => SelectedSwmMetaTransferCoordinator;
+  closeSelectedSwmMetaTransfers: () => Promise<void>;
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
 }
@@ -667,8 +676,7 @@ export function createSelectedSwmLifecycleHarness(
   let selectedSwmMetaTransfers: SelectedSwmMetaTransferCoordinator | undefined;
   let createTargetExecutorSession: (() => SwmTargetExecutorV1) | undefined;
 
-  const agent: SelectedSwmLifecycleAgentFixture = {
-    config: {
+  const config = {
       syncContextGraphPriorities: options.priorities ?? {},
       ...(options.metaContinuationLimits
         ? {
@@ -689,7 +697,9 @@ export function createSelectedSwmLifecycleHarness(
           },
         }
         : {}),
-    },
+    };
+  const agent: SelectedSwmLifecycleAgentFixture = {
+    config: { ...config, resourcePolicy: resolveStartupResourcePolicy(config, process.env, resolveAgentResourceSnapshots(process.env)) },
     selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
     store,
     writeLocks: new Map(),

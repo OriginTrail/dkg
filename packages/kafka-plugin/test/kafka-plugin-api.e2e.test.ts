@@ -35,16 +35,10 @@ const REC1_OP_ADDRESS = '0x90F79bf6EB2c4f870365E785982E1f101E93b906';
 interface Daemon {
   home: string;
   apiPort: number;
-  listenPort: number;
   child: ChildProcess;
   token: string;
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
-}
-const API_PORT_BASE = 22000;
-const LISTEN_PORT_BASE = 23000;
-function uniquePort(base: number): number {
-  return base + Math.floor(Math.random() * 1000);
 }
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -163,16 +157,17 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
     await ensureFixtureEntrypoint(dirname(dirname(opts.pluginPath)), opts.pluginPath);
   }
   const home = await mkdtemp(join(tmpdir(), 'dkg-kafka-plugin-e2e-'));
-  const apiPort = uniquePort(API_PORT_BASE);
-  const listenPort = uniquePort(LISTEN_PORT_BASE);
-  await writeDaemonConfig(home, apiPort, listenPort, opts);
+  // Let the daemon keep OS-assigned sockets; picking and releasing a port in
+  // the parent leaves a race with the other live topology and CI processes.
+  let apiPort = 0;
+  await writeDaemonConfig(home, 0, 0, opts);
   const stdioLog = join(home, 'daemon-stdio.log');
   const logHandle = await open(stdioLog, 'a');
   const child = spawn('node', [CLI_ENTRY, 'daemon-worker'], {
     env: {
       ...process.env,
       DKG_HOME: home,
-      DKG_API_PORT: String(apiPort),
+      DKG_API_PORT: '0',
       DKG_NO_BLUE_GREEN: '1',
       DKG_DISABLE_TELEMETRY: '1',
     },
@@ -186,7 +181,7 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
       return '<could not read daemon stdio log>';
     }
   };
-  const daemon: Daemon = { home, apiPort, listenPort, child, token: '' };
+  const daemon: Daemon = { home, apiPort, child, token: '' };
   child.once('exit', (code, signal) => {
     daemon.exitCode = code;
     daemon.signal = signal;
@@ -199,6 +194,10 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
         );
       }
       try {
+        apiPort = Number(await readFile(join(home, 'api.port'), 'utf-8'));
+        if (!Number.isInteger(apiPort) || apiPort <= 0 || apiPort > 65535) {
+          throw new Error('Daemon has not published a bound API port');
+        }
         const res = await fetch(`http://127.0.0.1:${apiPort}/api/status`);
         if (res.ok) break;
       } catch { /* not ready yet */ }
@@ -209,6 +208,7 @@ async function startDaemon(opts: DaemonOpts): Promise<Daemon> {
         );
       }
     }
+    daemon.apiPort = apiPort;
     await logHandle.close();
     const raw = await readFile(join(home, 'auth.token'), 'utf-8');
     const token = raw.split('\n').map((l) => l.trim()).find((l) => l.length > 0 && !l.startsWith('#'));

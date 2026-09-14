@@ -4,6 +4,8 @@ import { join } from 'node:path';
 
 import {
   computeNetworkId,
+  assertUnsignedContextGraphPolicyEnvelopeV1,
+  type UnsignedContextGraphPolicyEnvelopeV1,
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
   type EvmAddressV1,
@@ -36,12 +38,14 @@ export const RFC64_ROLLOUT_DEPLOYMENT = Object.freeze({
   assertedAtKav10Address: RFC64_ROLLOUT_KAV10,
 }) as CatalogSealDeploymentProfileV1;
 
-export function rfc64RolloutPolicyEnvelope() {
-  return unsignedOpenContextGraphPolicyEnvelopeV1(buildOpenOwnerContextGraphPolicyV1({
+export function rfc64RolloutPolicyEnvelope(): UnsignedContextGraphPolicyEnvelopeV1 {
+  const envelope = unsignedOpenContextGraphPolicyEnvelopeV1(buildOpenOwnerContextGraphPolicyV1({
     networkId: RFC64_ROLLOUT_NETWORK_ID,
     contextGraphId: RFC64_ROLLOUT_CONTEXT_GRAPH_ID,
     ownerAddress: RFC64_ROLLOUT_AUTHOR,
   }));
+  assertUnsignedContextGraphPolicyEnvelopeV1(envelope);
+  return envelope;
 }
 
 export function rfc64RolloutActivation(

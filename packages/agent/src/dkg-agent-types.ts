@@ -54,7 +54,6 @@ import type {
   PublicationPricingPolicy,
   PhaseCallback,
   SharedMemoryPublicSnapshotStorageConfig,
-  StorageAckTiming,
   StorageAckTimingInput,
   WorkspacePublicSnapshotStore,
   CursorPersistence as ChainEventCursorPersistence,
@@ -80,14 +79,12 @@ import type {
   Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
   ResolvedRfc64CatalogActivationsV1,
-  ResolvedRfc64CatalogAuthoringPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
   SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
-import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1872,33 +1869,10 @@ export interface DKGAgentACKTransportOptions {
   log?: (message: string) => void;
 }
 
-export type ResolvedDKGAgentConfig =
-  Omit<
-    DKGAgentConfig,
-    | 'storageAckTiming'
-    | 'ackHandlerDeadlineMs'
-    | 'ackSendTimeoutMs'
-    | 'syncReconcilerIntervalMs'
-    | 'syncStalenessThresholdMs'
-    | 'syncBackoffBaseMs'
-    | 'syncBackoffMaxMs'
-    | 'syncBackoffJitter'
-    | 'rfc64CatalogActivation'
-    | 'rfc64CatalogActivations'
-    | 'rfc64PublicCatalogActivation'
-    | 'rfc64PublicCatalogAutoPublish'
-    | 'rfc64PublicCatalogBootstrap'
-    | 'rfc64CatalogDeploymentProfile'
-    | 'contextGraphSubscriptionRehydrationEnabled'
-  > & {
-    contextGraphSubscriptionRehydrationEnabled: boolean;
-    storageAckTiming: StorageAckTiming;
-    syncReconcilerTiming: SyncReconcilerTiming;
-    rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
-    rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
-    /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */
-    rfc64CatalogExecutionPlan: import('./rfc64/catalog-rollout-authority-v1.js')
-      .Rfc64CatalogExecutionPlanV1;
-    rfc64CatalogAuthoringPolicy?: ResolvedRfc64CatalogAuthoringPolicyV1;
-    rfc64PublicCatalogBootstrap?: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
-  };
+/**
+ * @deprecated Outward-facing compatibility export for consumers compiled against
+ * the pre-policy declaration of this module; the historical fields are
+ * projections of `resourcePolicy`. Internal code imports the canonical model
+ * from resolved-agent-config.js, which omits them.
+ */
+export type { LegacyResolvedDKGAgentConfig as ResolvedDKGAgentConfig } from './resolved-agent-config.js';

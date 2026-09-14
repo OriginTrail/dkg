@@ -1,3 +1,7 @@
+import { resolveAgentConfig, type ResolvedDKGAgentConfig, type StorageAckNormalizedDKGAgentConfig } from './resolved-agent-config.js';
+import { VM_RESOURCE_ENV } from './resource-runtime.js';
+import { CATCHUP_RESOURCE_ENV } from './sync/catchup-runtime.js';
+import { resolveStartupResourcePolicy } from './resource-policy.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -235,8 +239,8 @@ import { authorizePrivateSyncRequest } from './sync/auth/request-authorize.js';
 import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import {
   resolveSyncContextGraphPriorities,
-  validateSyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
+import { assertSyncResponderSnapshotLimitsShape } from './sync/responder/snapshot-policy.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
@@ -387,7 +391,6 @@ import {
   type DKGAgentACKTransportOptions,
   type ImportedArtifactByteStore,
   type ReplicationEvent,
-  type ResolvedDKGAgentConfig,
   type MessengerOutboxDrainOptions,
   type MessengerOutboxStats,
 } from './dkg-agent-types.js';
@@ -412,7 +415,6 @@ import {
   isLocalOxigraphConfig,
   sliceIntoCiphertextChunks,
 } from './dkg-agent-helpers.js';
-import { resolveSyncReconcilerTiming } from './sync/reconciler-timing.js';
 import {
   swmSenderStateKey,
   swmReceiverStateKey,
@@ -457,6 +459,8 @@ import {
 } from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
+import { resolveRfc64SelectedRecoveryContextGraphIdsV1 } from
+  './rfc64/swm-recovery-plan-v1.js';
 import { createRfc64CatalogAuthorityRefreshOwnerV1 } from
   './rfc64/catalog-authority-refresh-binding-v1.js';
 import { Rfc64CatalogShadowObservabilityRuntimeV1 } from
@@ -465,6 +469,7 @@ import { Rfc64PublicCatalogWorkloadOwnerV1 } from
   './rfc64/public-catalog-workload-owner-v1.js';
 import {
   assertResolvedRfc64CatalogActivationsV1,
+  rfc64ExecutionPlanAllowsLegacySyncV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
   resolveRfc64CatalogExecutionPlanModeV1,
@@ -710,10 +715,6 @@ function throwStorageAckTimingConflict(): never {
   );
 }
 
-type StorageAckNormalizedDKGAgentConfig = Omit<
-  DKGAgentConfig,
-  'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'
-> & Pick<ResolvedDKGAgentConfig, 'storageAckTiming'>;
 
 function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalizedDKGAgentConfig {
   const hasStorageAckTiming = config.storageAckTiming !== undefined && config.storageAckTiming !== null;
@@ -1241,7 +1242,7 @@ export class DKGAgent extends DKGAgentBase {
         'DKGAgentConfig.contextGraphSubscriptionRehydrationEnabled must be a boolean',
       );
     }
-    validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
+    assertSyncResponderSnapshotLimitsShape(inputConfig.syncResponderSnapshotLimits);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
       syncContextGraphPriorities: resolveSyncContextGraphPriorities(
@@ -1412,6 +1413,21 @@ export class DKGAgent extends DKGAgentBase {
       legacyPublicFallback: rfc64PublicCatalogControls.autoPublishPolicy,
       acceptedPolicies: rfc64CatalogBootstrap?.acceptedPolicies ?? [],
     });
+    const selectedRecoveryContextGraphIds = resolveRfc64SelectedRecoveryContextGraphIdsV1(
+      resolveRfc64RuntimeCatalogBootstrapConfigV1(
+        rfc64CatalogBootstrap,
+        rfc64PublicCatalogBootstrap,
+      ),
+    ).filter((contextGraphId) => (
+      rfc64ExecutionPlanAllowsLegacySyncV1(rfc64CatalogExecutionPlan, contextGraphId)
+    ));
+    // Reject structural resource-policy errors before allocating a wallet or store.
+    // Immutable RFC-64 recovery scope is part of the canonical startup policy;
+    // only live Edge subscriptions are overlaid at admission time.
+    const resourcePolicy = resolveStartupResourcePolicy({
+      ...config,
+      selectedRecoveryContextGraphIds,
+    }, process.env, { vm: VM_RESOURCE_ENV, catchup: CATCHUP_RESOURCE_ENV });
     let wallet: DKGAgentWallet;
     if (config.dataDir) {
       try {
@@ -1472,21 +1488,7 @@ export class DKGAgent extends DKGAgentBase {
       networkId: computedNetworkId,
       chainId: constructedAgentChainId,
     };
-    const configWithoutRfc64CatalogControls = { ...config };
-    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogActivation;
-    delete configWithoutRfc64CatalogControls.rfc64CatalogActivation;
-    delete configWithoutRfc64CatalogControls.rfc64CatalogActivations;
-    delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
-    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
-    delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
-    delete configWithoutRfc64CatalogControls.contextGraphSubscriptionRehydrationEnabled;
-    delete configWithoutRfc64CatalogControls.syncReconcilerIntervalMs;
-    delete configWithoutRfc64CatalogControls.syncStalenessThresholdMs;
-    delete configWithoutRfc64CatalogControls.syncBackoffBaseMs;
-    delete configWithoutRfc64CatalogControls.syncBackoffMaxMs;
-    delete configWithoutRfc64CatalogControls.syncBackoffJitter;
-    const resolvedConfig: ResolvedDKGAgentConfig = {
-      ...configWithoutRfc64CatalogControls,
+    const resolvedConfig = resolveAgentConfig(config, {
       genesisId,
       networkIdentity,
       rfc64CatalogAccessPolicyAuthority,
@@ -1496,8 +1498,8 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogExecutionPlan,
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
-      syncReconcilerTiming: resolveSyncReconcilerTiming(config),
-    };
+      resourcePolicy,
+    });
 
     const port = config.listenPort ?? 0;
     const host = config.listenHost ?? '0.0.0.0';

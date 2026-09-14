@@ -1,5 +1,5 @@
 import type { DKGAgentConfig } from '../src/index.js';
-import type { ResolvedDKGAgentConfig } from '../src/dkg-agent-types.js';
+import type { ResolvedDKGAgentConfig } from '../src/resolved-agent-config.js';
 
 // Public callers can keep the two-field input that was valid before the
 // concurrency limit was added. The resolved internal shape is still complete.

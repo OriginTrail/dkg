@@ -1,16 +1,5 @@
+export { validateSyncResponderSnapshotLimitsConfig, type SyncResponderSnapshotLimitsConfig } from './responder/snapshot-policy.js';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
-
-export interface SyncResponderSnapshotLimitsConfig {
-  global?: {
-    rows?: number;
-    bytesEstimate?: number;
-  };
-  /** Per retained responder snapshot (peer/session/phase/Context Graph). */
-  local?: {
-    rows?: number;
-    bytesEstimate?: number;
-  };
-}
 
 export interface SyncContextGraphPriorityConfig {
   [contextGraphId: string]: number;
@@ -104,35 +93,6 @@ export function normalizeSyncAdmissionSource(
   return source !== undefined && SYNC_ADMISSION_SOURCE_SET.has(source)
     ? source as SyncAdmissionSource
     : 'unspecified';
-}
-
-const SNAPSHOT_LIMIT_PATHS = [
-  ['global', 'rows'],
-  ['global', 'bytesEstimate'],
-  ['local', 'rows'],
-  ['local', 'bytesEstimate'],
-] as const;
-
-export function validateSyncResponderSnapshotLimitsConfig(
-  config: SyncResponderSnapshotLimitsConfig | undefined,
-): void {
-  if (config === undefined) return;
-  if (config === null || typeof config !== 'object' || Array.isArray(config)) {
-    throw new TypeError('Invalid syncResponderSnapshotLimits: expected an object');
-  }
-  for (const [scope, leaf] of SNAPSHOT_LIMIT_PATHS) {
-    const nested = config[scope];
-    if (nested === undefined) continue;
-    if (nested === null || typeof nested !== 'object' || Array.isArray(nested)) {
-      throw new TypeError(`Invalid syncResponderSnapshotLimits.${scope}: expected an object`);
-    }
-    const value = nested[leaf];
-    if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
-      throw new TypeError(
-        `Invalid syncResponderSnapshotLimits.${scope}.${leaf}: expected a positive safe integer`,
-      );
-    }
-  }
 }
 
 export function normalizeSyncContextGraphPriorities(
