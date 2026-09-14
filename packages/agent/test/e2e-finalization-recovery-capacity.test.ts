@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,11 +9,11 @@ import {
 } from '../src/index.js';
 import {
   bindAndSubscribePublicContextGraph,
-  DKGAgent,
+  createPublishProtocolAgent,
   pollUntil,
   sleep,
   stageRootlessAssertion,
-  type DKGAgent as DKGAgentType,
+  type PublishProtocolAgent,
 } from './_helpers/publish-protocol.js';
 import { openSqliteFinalizationRecoveryStore } from
   '../src/finalization-recovery-sqlite-store.js';
@@ -65,7 +65,7 @@ async function fillFinalizationRecoveryInbox(
 }
 
 interface CapacityRecoveryReceiver {
-  readonly node: DKGAgentType;
+  readonly node: PublishProtocolAgent;
   readonly store: FinalizationRecoveryStore;
   fillInbox(): Promise<void>;
   releaseCapacity(): Promise<void>;
@@ -79,9 +79,9 @@ async function createCapacityRecoveryReceiver(
 ): Promise<CapacityRecoveryReceiver> {
   const dataDir = await mkdtemp(join(tmpdir(), `dkg-2091-${prefix}-`));
   const captured: { store?: FinalizationRecoveryStore } = {};
-  let node: DKGAgentType | undefined;
+  let node: PublishProtocolAgent | undefined;
   try {
-    node = await DKGAgent.create({
+    node = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name,
       listenPort: 0,
@@ -125,9 +125,63 @@ async function createCapacityRecoveryReceiver(
   }
 }
 
+interface CapacityRecoveryReceiverSpec {
+  readonly name: string;
+  readonly privateKey: string;
+  readonly prefix: string;
+}
+
+type CapacityRecoveryReceiverFactory = (
+  name: string,
+  privateKey: string,
+  prefix: string,
+) => Promise<CapacityRecoveryReceiver>;
+
+async function createCapacityRecoveryReceivers(
+  specs: readonly CapacityRecoveryReceiverSpec[],
+  createReceiver: CapacityRecoveryReceiverFactory = createCapacityRecoveryReceiver,
+): Promise<CapacityRecoveryReceiver[]> {
+  const created: CapacityRecoveryReceiver[] = [];
+  try {
+    for (const spec of specs) {
+      created.push(await createReceiver(spec.name, spec.privateKey, spec.prefix));
+    }
+    return created;
+  } catch (error) {
+    await Promise.allSettled(created.map((receiver) => receiver.close()));
+    throw error;
+  }
+}
+
+describe('capacity recovery receiver setup', () => {
+  it('closes earlier receivers when a later factory call fails', async () => {
+    const close = vi.fn(async () => undefined);
+    const first: CapacityRecoveryReceiver = {
+      node: undefined!,
+      store: undefined!,
+      fillInbox: async () => undefined,
+      releaseCapacity: async () => undefined,
+      close,
+    };
+    const setupFailure = new Error('second receiver setup failed');
+    const createReceiver = vi.fn<CapacityRecoveryReceiverFactory>(async (name) => {
+      if (name === 'second') throw setupFailure;
+      return first;
+    });
+
+    await expect(createCapacityRecoveryReceivers([
+      { name: 'first', privateKey: 'first-key', prefix: 'first-prefix' },
+      { name: 'second', privateKey: 'second-key', prefix: 'second-prefix' },
+    ], createReceiver)).rejects.toBe(setupFailure);
+
+    expect(createReceiver).toHaveBeenCalledTimes(2);
+    expect(close).toHaveBeenCalledOnce();
+  });
+});
+
 describe('E2E: acknowledged-core finalization recovery at inbox capacity', () => {
   const contextGraphId = 'publish-protocol-capacity-recovery-e2e';
-  let nodeA: DKGAgentType;
+  let nodeA: PublishProtocolAgent;
   const receivers: CapacityRecoveryReceiver[] = [];
   let describeSnapshot: string | undefined;
 
@@ -140,7 +194,7 @@ describe('E2E: acknowledged-core finalization recovery at inbox capacity', () =>
       HARDHAT_KEYS.DEPLOYER,
       2,
     );
-    nodeA = await DKGAgent.create({
+    nodeA = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'CapacityPublisher',
       listenPort: 0,
@@ -148,10 +202,10 @@ describe('E2E: acknowledged-core finalization recovery at inbox capacity', () =>
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
       nodeRole: 'core',
     });
-    receivers.push(
-      await createCapacityRecoveryReceiver('CapacityCoreB', HARDHAT_KEYS.REC1_OP, 'core-b'),
-      await createCapacityRecoveryReceiver('CapacityCoreC', HARDHAT_KEYS.REC2_OP, 'core-c'),
-    );
+    receivers.push(...await createCapacityRecoveryReceivers([
+      { name: 'CapacityCoreB', privateKey: HARDHAT_KEYS.REC1_OP, prefix: 'core-b' },
+      { name: 'CapacityCoreC', privateKey: HARDHAT_KEYS.REC2_OP, prefix: 'core-c' },
+    ]));
     await nodeA.start();
     await sleep(800);
     const addrA = nodeA.multiaddrs.find(

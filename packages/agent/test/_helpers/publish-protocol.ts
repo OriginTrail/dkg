@@ -1,23 +1,28 @@
 import { DKGAgent as RealDKGAgent } from '../../src/index.js';
+import {
+  contextGraphDataUri,
+  DKG_ONTOLOGY,
+  SYSTEM_CONTEXT_GRAPHS,
+} from '@origintrail-official/dkg-core';
 
-export type DKGAgent = RealDKGAgent;
+export type PublishProtocolAgent = RealDKGAgent;
 
 /** Shared agent constructor for protocol E2E suites that isolate pre-RFC-64 behavior. */
-export const DKGAgent = {
-  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
-    return RealDKGAgent.create({
-      rfc64CatalogActivation: { enabled: false },
-      ...config,
-    });
-  },
-};
+export function createPublishProtocolAgent(
+  config: Parameters<typeof RealDKGAgent.create>[0],
+): Promise<PublishProtocolAgent> {
+  return RealDKGAgent.create({
+    rfc64CatalogActivation: { enabled: false },
+    ...config,
+  });
+}
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function stageRootlessAssertion(
-  node: DKGAgent,
+  node: PublishProtocolAgent,
   contextGraphId: string,
   name: string,
   quads: Array<{ subject: string; predicate: string; object: string }>,
@@ -28,28 +33,18 @@ export async function stageRootlessAssertion(
 }
 
 export async function bindAndSubscribePublicContextGraph(
-  node: DKGAgent,
+  node: PublishProtocolAgent,
   contextGraphId: string,
   onChainId: string,
 ): Promise<void> {
   // Role-aware activation fails closed until the local label is bound to the
   // live public on-chain CG. Protocol tests bind deterministically instead of
   // racing background ontology discovery before subscribing replicas.
-  const store = (node as unknown as {
-    store: {
-      insert(quads: Array<{
-        subject: string;
-        predicate: string;
-        object: string;
-        graph: string;
-      }>): Promise<unknown>;
-    };
-  }).store;
-  await store.insert([{
-    subject: `did:dkg:context-graph:${contextGraphId}`,
-    predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+  await node.store.insert([{
+    subject: contextGraphDataUri(contextGraphId),
+    predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
     object: `"${onChainId}"`,
-    graph: 'did:dkg:context-graph:ontology',
+    graph: contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
   }]);
   node.subscribeToContextGraph(contextGraphId);
 }
