@@ -11,6 +11,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import {
+  asGraphWriteRevisionSource,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -47,6 +48,10 @@ import {
   PrivateSwmSnapshotWalkRegistry,
   type PrivateSwmSnapshotWalkLease,
 } from './private-swm-snapshot-walk-registry.js';
+import {
+  MaterializationValidationMemo,
+  resolveMaterializationValidationMemoEnabled,
+} from './materialization-validation-memo.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
@@ -128,6 +133,10 @@ export class SwmTargetExecutorV1 {
   constructor(
     ports: SwmTargetExecutorPortsV1,
     private readonly privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
+    validationMemo = new MaterializationValidationMemo(
+      asGraphWriteRevisionSource(ports.store),
+      { enabled: resolveMaterializationValidationMemoEnabled() },
+    ),
   ) {
     this.#ports = ports;
     this.#privateRecoveryBudgetMs = normalizePrivateSwmRecoveryBudgetMs(
@@ -137,6 +146,7 @@ export class SwmTargetExecutorV1 {
       store: ports.store,
       writeLocks: ports.writeLocks,
       invalidateListContextGraphsCache: ports.invalidateListContextGraphsCache,
+      validationMemo,
     });
     this.#recoveryMutation = ports.recoveryMutation;
   }
@@ -321,10 +331,14 @@ export class SwmTargetExecutorV1 {
   }
 }
 
-/** Stable typed composition with isolated session caches and shared manifest progress. */
+/**
+ * Stable typed composition with isolated session state, shared manifest
+ * progress, and one bounded materialization-validation memo per agent runtime.
+ */
 export class SwmTargetExecutorSessionFactoryV1 {
   readonly #ports: SwmTargetExecutorPortsV1;
   readonly #privateSnapshotWalks: PrivateSwmSnapshotWalkRegistry;
+  readonly #materializationValidationMemo: MaterializationValidationMemo;
 
   constructor(
     ports: SwmTargetExecutorPortsV1,
@@ -332,10 +346,18 @@ export class SwmTargetExecutorSessionFactoryV1 {
   ) {
     this.#ports = ports;
     this.#privateSnapshotWalks = privateSnapshotWalks;
+    this.#materializationValidationMemo = new MaterializationValidationMemo(
+      asGraphWriteRevisionSource(ports.store),
+      { enabled: resolveMaterializationValidationMemoEnabled() },
+    );
   }
 
   createSession(): SwmTargetExecutorV1 {
-    return new SwmTargetExecutorV1(this.#ports, this.#privateSnapshotWalks);
+    return new SwmTargetExecutorV1(
+      this.#ports,
+      this.#privateSnapshotWalks,
+      this.#materializationValidationMemo,
+    );
   }
 }
 

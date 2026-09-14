@@ -263,8 +263,13 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
   environment?: Readonly<Record<string, string | undefined>>;
+  /**
+   * Stable factory-owned memo for production session reuse. Standalone callers
+   * may omit it and retain an isolated materializer-local memo.
+   */
+  validationMemo?: MaterializationValidationMemo;
 }): SharedMemorySnapshotMaterializer {
-  const validationMemo = new MaterializationValidationMemo(
+  const validationMemo = deps.validationMemo ?? new MaterializationValidationMemo(
     asGraphWriteRevisionSource(deps.store),
     {
       enabled: resolveMaterializationValidationMemoEnabled(deps.environment),

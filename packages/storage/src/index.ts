@@ -274,6 +274,13 @@ export {
   type KnowledgeAssetPrivateReadOptions,
 } from './private-store.js';
 export { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from './local-trusted-controls.js';
+export {
+  SWM_MATERIALIZATION_WITNESS_GRAPH,
+  swmMaterializationWitnessSubject,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+  invalidateSwmMaterializationWitness,
+} from './swm-materialization-witness.js';
 
 // Side-effect: register built-in adapters
 import './adapters/oxigraph.js';
