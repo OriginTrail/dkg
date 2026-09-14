@@ -16,9 +16,10 @@ import {
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import {
   MaterializationValidationMemo,
+  resolveMaterializationValidationMemoEnabled,
+  type MaterializationValidationDescriptor,
 } from '../src/sync/requester/materialization-validation-memo.js';
 import type {
-  GraphScopedSwmMaterializationDescriptor,
   GraphScopedSwmRecoveryDescriptor,
 } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from
@@ -66,7 +67,7 @@ function materializationDescriptor(
   };
 }
 
-function memoDescriptor(graph = GRAPH): GraphScopedSwmMaterializationDescriptor {
+function memoDescriptor(graph = GRAPH): MaterializationValidationDescriptor {
   return {
     assertionGraph: graph,
     publicQuadsDigest: `sha256:${'a'.repeat(64)}`,
@@ -113,13 +114,36 @@ function countingStore(inner: TripleStore) {
   return { store, constructs: () => constructs, counts: () => counts };
 }
 
-function materializer(store: TripleStore) {
+function materializer(
+  store: TripleStore,
+  environment?: Readonly<Record<string, string | undefined>>,
+) {
   return createSharedMemorySnapshotMaterializer({
     store,
     writeLocks: new Map<string, Promise<void>>(),
     invalidateListContextGraphsCache: () => {},
+    environment,
   });
 }
+
+describe('resolveMaterializationValidationMemoEnabled', () => {
+  it('defaults on and accepts both the named switch and legacy alias', () => {
+    expect(resolveMaterializationValidationMemoEnabled({})).toBe(true);
+    expect(resolveMaterializationValidationMemoEnabled({
+      DKG_SWM_MATERIALIZATION_VALIDATION_MEMO: '0',
+    })).toBe(false);
+    expect(resolveMaterializationValidationMemoEnabled({
+      DKG_SWM_MATERIALIZATION_WITNESS: 'false',
+    })).toBe(false);
+  });
+
+  it('gives the semantically named switch precedence over the legacy alias', () => {
+    expect(resolveMaterializationValidationMemoEnabled({
+      DKG_SWM_MATERIALIZATION_VALIDATION_MEMO: 'on',
+      DKG_SWM_MATERIALIZATION_WITNESS: 'off',
+    })).toBe(true);
+  });
+});
 
 describe('#1963 MaterializationValidationMemo', () => {
   it('reuses a successful validation while the all-writers revision is unchanged', async () => {
@@ -128,8 +152,8 @@ describe('#1963 MaterializationValidationMemo', () => {
     );
     const descriptor = memoDescriptor();
     let exactValidations = 0;
-    let exactDescriptor: GraphScopedSwmMaterializationDescriptor | undefined;
-    const exactValidation = async (validatedDescriptor: GraphScopedSwmMaterializationDescriptor) => {
+    let exactDescriptor: MaterializationValidationDescriptor | undefined;
+    const exactValidation = async (validatedDescriptor: MaterializationValidationDescriptor) => {
       exactValidations += 1;
       exactDescriptor = validatedDescriptor;
       return true;
@@ -296,23 +320,18 @@ describe('#1963 isGraphAssetMaterialized validation memo', () => {
   });
 
   it('preserves the operator switch for disabling validation memoization', async () => {
-    const previous = process.env['DKG_SWM_MATERIALIZATION_WITNESS'];
-    process.env['DKG_SWM_MATERIALIZATION_WITNESS'] = '0';
-    try {
-      const inner = newStore();
-      const quads = payload('v1', 6);
-      await inner.replaceGraph(GRAPH, quads.map((quad) => ({ ...quad, graph: GRAPH })));
-      const counted = countingStore(inner);
-      const mat = materializer(counted.store);
-      const descriptor = materializationDescriptor(quads);
+    const inner = newStore();
+    const quads = payload('v1', 6);
+    await inner.replaceGraph(GRAPH, quads.map((quad) => ({ ...quad, graph: GRAPH })));
+    const counted = countingStore(inner);
+    const mat = materializer(counted.store, {
+      DKG_SWM_MATERIALIZATION_VALIDATION_MEMO: '0',
+    });
+    const descriptor = materializationDescriptor(quads);
 
-      expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
-      expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
-      expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
-    } finally {
-      if (previous === undefined) delete process.env['DKG_SWM_MATERIALIZATION_WITNESS'];
-      else process.env['DKG_SWM_MATERIALIZATION_WITNESS'] = previous;
-    }
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
   });
 
   it('validates every time when the store exposes no write revision', async () => {

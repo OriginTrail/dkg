@@ -27,7 +27,10 @@ import {
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
 import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
-import { MaterializationValidationMemo } from './materialization-validation-memo.js';
+import {
+  MaterializationValidationMemo,
+  resolveMaterializationValidationMemoEnabled,
+} from './materialization-validation-memo.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -259,12 +262,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    */
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
+  environment?: Readonly<Record<string, string | undefined>>;
 }): SharedMemorySnapshotMaterializer {
-  const memoSwitch = process.env['DKG_SWM_MATERIALIZATION_WITNESS']?.trim();
   const validationMemo = new MaterializationValidationMemo(
     asGraphWriteRevisionSource(deps.store),
     {
-      enabled: !memoSwitch || (memoSwitch !== '0' && memoSwitch.toLowerCase() !== 'false'),
+      enabled: resolveMaterializationValidationMemoEnabled(deps.environment),
     },
   );
 

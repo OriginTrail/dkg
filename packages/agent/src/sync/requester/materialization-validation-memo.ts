@@ -3,11 +3,34 @@ import {
   type GraphWriteRevision,
   type GraphWriteRevisionSource,
 } from '@origintrail-official/dkg-storage';
-import type {
-  GraphScopedSwmMaterializationDescriptor,
-} from '../graph-scoped-swm-recovery.js';
+import { parseBooleanEnv } from '../agents-meta-policy.js';
 
 const DEFAULT_MAX_ENTRIES = 4_096;
+
+export const MATERIALIZATION_VALIDATION_MEMO_ENV =
+  'DKG_SWM_MATERIALIZATION_VALIDATION_MEMO';
+export const MATERIALIZATION_VALIDATION_MEMO_LEGACY_ENV =
+  'DKG_SWM_MATERIALIZATION_WITNESS';
+
+/** The exact content claim the memo can safely reuse. */
+export interface MaterializationValidationDescriptor {
+  readonly assertionGraph: string;
+  readonly publicQuadsDigest: string;
+  readonly publicQuadsCount: number;
+}
+
+/**
+ * Resolve the process-local optimization switch at one configuration boundary.
+ * The old witness variable remains a compatibility alias while the new name
+ * describes the validation memo that now owns the behavior.
+ */
+export function resolveMaterializationValidationMemoEnabled(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  const explicit = parseBooleanEnv(environment[MATERIALIZATION_VALIDATION_MEMO_ENV]);
+  const legacy = parseBooleanEnv(environment[MATERIALIZATION_VALIDATION_MEMO_LEGACY_ENV]);
+  return explicit ?? legacy ?? true;
+}
 
 interface MaterializationValidationEntry {
   readonly digest: string;
@@ -43,7 +66,7 @@ export class MaterializationValidationMemo {
   }
 
   private stableRevision(
-    descriptor: GraphScopedSwmMaterializationDescriptor,
+    descriptor: MaterializationValidationDescriptor,
   ): GraphWriteRevision | null {
     if (
       !this.enabled
@@ -60,7 +83,7 @@ export class MaterializationValidationMemo {
     }
   }
 
-  async validate<Descriptor extends GraphScopedSwmMaterializationDescriptor>(
+  async validate<Descriptor extends MaterializationValidationDescriptor>(
     descriptor: Descriptor,
     exactValidation: (descriptor: Descriptor) => Promise<boolean>,
   ): Promise<boolean> {
