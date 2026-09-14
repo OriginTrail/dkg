@@ -3,6 +3,52 @@
 export const CONTEXT_GRAPH_LIST_PROJECTIONS = ['full', 'summary'] as const;
 export type ContextGraphListProjection = (typeof CONTEXT_GRAPH_LIST_PROJECTIONS)[number];
 
+export const CONTEXT_GRAPH_LIST_DEFAULT_LIMIT = 50;
+export const CONTEXT_GRAPH_LIST_MAX_LIMIT = 100;
+export const CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES = 64 * 1024;
+
+export const CONTEXT_GRAPH_LIST_ERROR_CODES = {
+  entryTooLarge: 'CONTEXT_GRAPH_LIST_ENTRY_TOO_LARGE',
+  snapshotChanged: 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED',
+} as const;
+export type ContextGraphListErrorCode =
+  (typeof CONTEXT_GRAPH_LIST_ERROR_CODES)[keyof typeof CONTEXT_GRAPH_LIST_ERROR_CODES];
+
+export function isContextGraphListErrorCode(value: unknown): value is ContextGraphListErrorCode {
+  return Object.values(CONTEXT_GRAPH_LIST_ERROR_CODES).some((code) => code === value);
+}
+
+export interface ContextGraphListErrorResponse {
+  error: string;
+  code: ContextGraphListErrorCode;
+  maxSerializedBytes?: number;
+}
+
+/** Decode the protocol-significant error vocabulary without an unchecked body cast. */
+export function decodeContextGraphListErrorResponse(
+  value: unknown,
+): ContextGraphListErrorResponse | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const response = value as Partial<ContextGraphListErrorResponse>;
+  if (
+    typeof response.error !== 'string'
+    || !isContextGraphListErrorCode(response.code)
+    || (
+      response.maxSerializedBytes !== undefined
+      && (!Number.isSafeInteger(response.maxSerializedBytes) || response.maxSerializedBytes < 1)
+    )
+  ) {
+    return undefined;
+  }
+  return {
+    error: response.error,
+    code: response.code,
+    ...(response.maxSerializedBytes === undefined
+      ? {}
+      : { maxSerializedBytes: response.maxSerializedBytes }),
+  };
+}
+
 /** Canonical row returned by DKGAgent.listContextGraphs and the legacy endpoint. */
 export interface ContextGraphListFullRow {
   id: string;

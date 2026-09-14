@@ -9,9 +9,14 @@
  */
 import { createHash } from 'node:crypto';
 import {
+  CONTEXT_GRAPH_LIST_DEFAULT_LIMIT,
+  CONTEXT_GRAPH_LIST_ERROR_CODES,
+  CONTEXT_GRAPH_LIST_MAX_LIMIT,
+  CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
   CONTEXT_GRAPH_LIST_PROJECTIONS,
   CONTEXT_GRAPH_LIST_WIRE_KEYS,
   CONTEXT_GRAPH_LIST_WIRE_KEY_VALUES,
+  type ContextGraphListErrorCode,
   type ContextGraphListFullRow,
   type ContextGraphListPageResponse,
   type ContextGraphListProjection,
@@ -26,9 +31,11 @@ import {
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
-export const CONTEXT_GRAPH_LIST_DEFAULT_LIMIT = 50;
-export const CONTEXT_GRAPH_LIST_MAX_LIMIT = 100;
-export const CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES = 64 * 1024;
+export {
+  CONTEXT_GRAPH_LIST_DEFAULT_LIMIT,
+  CONTEXT_GRAPH_LIST_MAX_LIMIT,
+  CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
+};
 export const CONTEXT_GRAPH_LIST_EXPOSE_HEADERS = [
   'ETag',
   'X-DKG-List-Mode',
@@ -325,9 +332,7 @@ export type ContextGraphListPageResult =
   | {
       ok: false;
       error: string;
-      code:
-        | 'CONTEXT_GRAPH_LIST_ENTRY_TOO_LARGE'
-        | 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED';
+      code: ContextGraphListErrorCode;
     };
 
 function payloadWithExactSize(
@@ -373,7 +378,7 @@ export function buildContextGraphListPage(
     return {
       ok: false,
       error: 'The context-graph registry changed during pagination; restart from the first page',
-      code: 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED',
+      code: CONTEXT_GRAPH_LIST_ERROR_CODES.snapshotChanged,
     };
   }
   const after = query.cursorDigest === undefined
@@ -411,7 +416,7 @@ export function buildContextGraphListPage(
     return {
       ok: false,
       error: `One context-graph ${query.projection} row exceeds the ${CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES}-byte paginated response limit`,
-      code: 'CONTEXT_GRAPH_LIST_ENTRY_TOO_LARGE',
+      code: CONTEXT_GRAPH_LIST_ERROR_CODES.entryTooLarge,
     };
   }
 
@@ -489,7 +494,7 @@ export async function handleContextGraphListRoute(
   if (!page.ok) {
     jsonResponse(
       ctx.res,
-      page.code === 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED' ? 409 : 413,
+      page.code === CONTEXT_GRAPH_LIST_ERROR_CODES.snapshotChanged ? 409 : 413,
       {
         error: page.error,
         code: page.code,

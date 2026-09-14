@@ -1,14 +1,15 @@
 import {
+  CONTEXT_GRAPH_LIST_ERROR_CODES,
+  CONTEXT_GRAPH_LIST_MAX_LIMIT,
+  decodeContextGraphListErrorResponse,
   serializeContextGraphListOptions,
   type ContextGraphListSummaryRow,
 } from '@origintrail-official/dkg-core/context-graph-list-wire';
 import { BASE, authHeaders, fetchWithTimeout, HttpError } from './http.js';
 
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60_000;
-const CONTEXT_GRAPH_LIST_PAGE_LIMIT = 100;
 const CONTEXT_GRAPH_LIST_MAX_PAGES = 10_000;
 const CONTEXT_GRAPH_LIST_MAX_RESTARTS = 3;
-const SNAPSHOT_CHANGED_CODE = 'CONTEXT_GRAPH_LIST_SNAPSHOT_CHANGED';
 
 export interface ContextGraphListView {
   contextGraphs: ContextGraphListSummaryRow[];
@@ -24,15 +25,43 @@ type DecodedContextGraphListPage = {
 };
 
 type ContextGraphPageWalkResult =
-  | { kind: 'not-modified' }
+  | { kind: 'not-modified'; view: ContextGraphListView }
   | { kind: 'loaded'; view: ContextGraphListView; etag?: string };
 
-const cacheByAuthorization = new Map<string, ContextGraphListCacheEntry>();
-const inFlightByAuthorization = new Map<string, Promise<ContextGraphPageWalkResult>>();
+interface ContextGraphListAuthorization {
+  readonly key: string;
+  readonly headers: Record<string, string>;
+  readonly generation: number;
+}
 
-function captureAuthorization(): { key: string; headers: Record<string, string> } {
+interface InFlightContextGraphPageWalk {
+  readonly generation: number;
+  readonly request: Promise<ContextGraphPageWalkResult>;
+}
+
+const cacheByAuthorization = new Map<string, ContextGraphListCacheEntry>();
+const inFlightByAuthorization = new Map<string, InFlightContextGraphPageWalk>();
+let currentAuthorizationKey: string | undefined;
+let currentAuthorizationGeneration = 0;
+
+class AuthorizationChangedError extends Error {}
+
+function captureAuthorization(): ContextGraphListAuthorization {
   const headers = authHeaders();
-  return { key: headers.Authorization ?? '', headers };
+  const key = headers.Authorization ?? '';
+  if (currentAuthorizationKey === undefined) {
+    currentAuthorizationKey = key;
+  } else if (currentAuthorizationKey !== key) {
+    currentAuthorizationKey = key;
+    currentAuthorizationGeneration += 1;
+    for (const cachedAuthorization of cacheByAuthorization.keys()) {
+      if (cachedAuthorization !== key) cacheByAuthorization.delete(cachedAuthorization);
+    }
+    // Entries carry their generation, so clearing the registry invalidates old
+    // walks without allowing their finally blocks to delete a replacement.
+    inFlightByAuthorization.clear();
+  }
+  return { key, headers, generation: currentAuthorizationGeneration };
 }
 
 function cloneView(view: ContextGraphListView): ContextGraphListView {
@@ -73,17 +102,20 @@ async function httpError(response: Response): Promise<HttpError> {
   return new HttpError(response.status, message, body);
 }
 
-function authorizationIsCurrent(key: string): boolean {
-  return captureAuthorization().key === key;
+function authorizationIsCurrent(authorization: ContextGraphListAuthorization): boolean {
+  const current = captureAuthorization();
+  return current.key === authorization.key
+    && current.generation === authorization.generation;
 }
 
 async function fetchContextGraphPages(
-  authorization: { key: string; headers: Record<string, string> },
-  cachedEtag?: string,
+  authorization: ContextGraphListAuthorization,
+  cached?: ContextGraphListCacheEntry,
 ): Promise<ContextGraphPageWalkResult> {
   const requestPage = async (cursor?: string, etag?: string): Promise<Response> => {
+    if (!authorizationIsCurrent(authorization)) throw new AuthorizationChangedError();
     const query = serializeContextGraphListOptions({
-      limit: CONTEXT_GRAPH_LIST_PAGE_LIMIT,
+      limit: CONTEXT_GRAPH_LIST_MAX_LIMIT,
       projection: 'summary',
       ...(cursor === undefined ? {} : { cursor }),
     });
@@ -95,8 +127,12 @@ async function fetchContextGraphPages(
     }, CONTEXT_GRAPH_LOAD_TIMEOUT_MS);
   };
 
-  let response = await requestPage(undefined, cachedEtag);
-  if (response.status === 304) return { kind: 'not-modified' };
+  let response = await requestPage(undefined, cached?.etag);
+  if (!authorizationIsCurrent(authorization)) throw new AuthorizationChangedError();
+  if (response.status === 304) {
+    if (!cached) throw new Error('Context-graph list returned an unexpected 304');
+    return { kind: 'not-modified', view: cached };
+  }
   if (!response.ok) throw await httpError(response);
 
   const etag = response.headers.get('etag') ?? undefined;
@@ -104,6 +140,7 @@ async function fetchContextGraphPages(
   const seenCursors = new Set<string>();
   for (let pageNumber = 0; pageNumber < CONTEXT_GRAPH_LIST_MAX_PAGES; pageNumber += 1) {
     const data = decodePage(await response.json());
+    if (!authorizationIsCurrent(authorization)) throw new AuthorizationChangedError();
     contextGraphs.push(...data.contextGraphs);
     if (!data.nextCursor) break;
     if (seenCursors.has(data.nextCursor)) {
@@ -126,31 +163,31 @@ async function fetchContextGraphPages(
 }
 
 function isSnapshotChanged(error: unknown): boolean {
+  const response = error instanceof HttpError
+    ? decodeContextGraphListErrorResponse(error.body)
+    : undefined;
   return error instanceof HttpError
     && error.status === 409
-    && (error.body as { code?: unknown } | undefined)?.code === SNAPSHOT_CHANGED_CODE;
+    && response?.code === CONTEXT_GRAPH_LIST_ERROR_CODES.snapshotChanged;
 }
 
 export async function fetchContextGraphs(): Promise<ContextGraphListView> {
   for (let attempt = 0; attempt < CONTEXT_GRAPH_LIST_MAX_RESTARTS; attempt += 1) {
     const authorization = captureAuthorization();
-    for (const cachedAuthorization of cacheByAuthorization.keys()) {
-      if (cachedAuthorization !== authorization.key) {
-        cacheByAuthorization.delete(cachedAuthorization);
-      }
-    }
     const cached = cacheByAuthorization.get(authorization.key);
-    let request = inFlightByAuthorization.get(authorization.key);
-    if (!request) {
-      request = fetchContextGraphPages(authorization, cached?.etag);
-      inFlightByAuthorization.set(authorization.key, request);
+    let inFlight = inFlightByAuthorization.get(authorization.key);
+    if (!inFlight || inFlight.generation !== authorization.generation) {
+      inFlight = {
+        generation: authorization.generation,
+        request: fetchContextGraphPages(authorization, cached),
+      };
+      inFlightByAuthorization.set(authorization.key, inFlight);
     }
     try {
-      const result = await request;
-      if (!authorizationIsCurrent(authorization.key)) continue;
+      const result = await inFlight.request;
+      if (!authorizationIsCurrent(authorization)) continue;
       if (result.kind === 'not-modified') {
-        if (!cached) throw new Error('Context-graph list returned 304 without a cached view');
-        return cloneView(cached);
+        return cloneView(result.view);
       }
       if (result.etag) {
         cacheByAuthorization.set(authorization.key, {
@@ -162,9 +199,9 @@ export async function fetchContextGraphs(): Promise<ContextGraphListView> {
       }
       return cloneView(result.view);
     } catch (error) {
-      if (!isSnapshotChanged(error)) throw error;
+      if (!(error instanceof AuthorizationChangedError) && !isSnapshotChanged(error)) throw error;
     } finally {
-      if (inFlightByAuthorization.get(authorization.key) === request) {
+      if (inFlightByAuthorization.get(authorization.key) === inFlight) {
         inFlightByAuthorization.delete(authorization.key);
       }
     }

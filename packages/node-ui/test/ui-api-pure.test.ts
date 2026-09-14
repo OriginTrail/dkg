@@ -452,6 +452,105 @@ describe('UI API tests', () => {
       )).toBe(true);
     });
 
+    it('does not send a stale-authorized continuation after the bearer changes', async () => {
+      if (typeof window === 'undefined') (globalThis as any).window = {};
+      window.__DKG_TOKEN__ = 'token-a';
+      responseOverrides.push(
+        {
+          match: () => true,
+          status: 200,
+          body: {
+            contextGraphs: [contextGraphSummary('private-a')],
+            nextCursor: 'private-a-page-2',
+          },
+          headers: { ETag: '"token-a"' },
+          delayMs: 50,
+        },
+        {
+          match: () => true,
+          status: 200,
+          body: { contextGraphs: [contextGraphSummary('visible-b')] },
+          headers: { ETag: '"token-b"' },
+        },
+      );
+
+      const result = fetchContextGraphs();
+      while (requestLog.length < 1) {
+        await new Promise((resolveRequest) => setTimeout(resolveRequest, 0));
+      }
+      window.__DKG_TOKEN__ = 'token-b';
+
+      await expect(result).resolves.toEqual({
+        contextGraphs: [contextGraphSummary('visible-b')],
+      });
+      expect(requestLog).toHaveLength(2);
+      expect(requestLog.some((entry) => entry.url.includes('private-a-page-2'))).toBe(false);
+      expect(requestLog.map((entry) => entry.headers.authorization)).toEqual([
+        'Bearer token-a',
+        'Bearer token-b',
+      ]);
+    });
+
+    it('invalidates a delayed conditional walk across an A to B to A change', async () => {
+      if (typeof window === 'undefined') (globalThis as any).window = {};
+      window.__DKG_TOKEN__ = 'token-a';
+      contextGraphPagination = {
+        etag: '"token-a-cached"',
+        pages: { '': { contextGraphs: [contextGraphSummary('cached-a')] } },
+      };
+      await fetchContextGraphs();
+
+      contextGraphPagination = undefined;
+      requestLog.length = 0;
+      responseOverrides.push(
+        {
+          match: () => true,
+          status: 304,
+          body: undefined,
+          headers: { ETag: '"token-a-cached"' },
+          delayMs: 40,
+        },
+        {
+          match: () => true,
+          status: 200,
+          body: { contextGraphs: [contextGraphSummary('visible-b')] },
+          headers: { ETag: '"token-b"' },
+          delayMs: 40,
+        },
+        {
+          match: () => true,
+          status: 200,
+          body: { contextGraphs: [contextGraphSummary('fresh-a')] },
+          headers: { ETag: '"token-a-fresh"' },
+          delayMs: 120,
+        },
+      );
+
+      const oldA = fetchContextGraphs();
+      while (requestLog.length < 1) {
+        await new Promise((resolveRequest) => setTimeout(resolveRequest, 0));
+      }
+      window.__DKG_TOKEN__ = 'token-b';
+      const underB = fetchContextGraphs();
+      while (requestLog.length < 2) {
+        await new Promise((resolveRequest) => setTimeout(resolveRequest, 0));
+      }
+      window.__DKG_TOKEN__ = 'token-a';
+      const currentA = fetchContextGraphs();
+
+      await expect(Promise.all([oldA, underB, currentA])).resolves.toEqual([
+        { contextGraphs: [contextGraphSummary('fresh-a')] },
+        { contextGraphs: [contextGraphSummary('fresh-a')] },
+        { contextGraphs: [contextGraphSummary('fresh-a')] },
+      ]);
+      expect(requestLog).toHaveLength(3);
+      expect(requestLog.map((entry) => entry.headers.authorization)).toEqual([
+        'Bearer token-a',
+        'Bearer token-b',
+        'Bearer token-a',
+      ]);
+    });
+
     it('fetchStatus calls /api/status', async () => {
       const res = await fetchStatus();
       expect(res).toEqual({ peerId: 'abc', synced: true });

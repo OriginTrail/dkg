@@ -20,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
 import {
+  CONTEXT_GRAPH_LIST_DEFAULT_LIMIT,
   serializeAgentListOptions,
   type AgentListPageOptions,
   serializeContextGraphListOptions,
@@ -2086,7 +2087,11 @@ export class ApiClient {
     options?: ContextGraphListPageOptions,
   ): Promise<ContextGraphListLegacyResponse | ContextGraphListPageResponse> {
     if (options === undefined) return this.get('/api/context-graph/list');
-    const encoded = serializeContextGraphListOptions({ projection: 'full', ...options });
+    const encoded = serializeContextGraphListOptions({
+      limit: CONTEXT_GRAPH_LIST_DEFAULT_LIMIT,
+      projection: 'full',
+      ...options,
+    });
     return this.get(`/api/context-graph/list?${encoded}`);
   }
 
