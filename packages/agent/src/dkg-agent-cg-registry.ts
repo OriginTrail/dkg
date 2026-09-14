@@ -403,11 +403,23 @@ export type ContextGraphRegistrationBinding =
       detail?: string;
     };
 
-export type FinalizedContextGraphAuthorityTargetV1 = Readonly<{
-  expectedNameHash: string;
-  expectedOnChainId: bigint;
-  finalizedSnapshot?: ContextGraphAuthoritySnapshot;
-}>;
+export type FinalizedContextGraphAuthorityTargetV1 =
+  | Readonly<{
+      kind: 'durable-binding';
+      expectedNameHash: string;
+      expectedOnChainId: bigint;
+    }>
+  | Readonly<{
+      kind: 'resolved-snapshot';
+      expectedNameHash: string;
+      expectedOnChainId: bigint;
+      finalizedSnapshot: ContextGraphAuthoritySnapshot;
+    }>
+  | Readonly<{
+      kind: 'resolved-id';
+      expectedNameHash: string;
+      expectedOnChainId: bigint;
+    }>;
 
 export type FinalizedContextGraphAuthorityTargetsResolutionV1 = Readonly<
   | {
@@ -928,6 +940,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const reverseBindingTargets = bindingTargets.filter((target) => {
       if (target.expectedOnChainId === undefined) return true;
       targets.set(target.contextGraphId, Object.freeze({
+        kind: 'durable-binding' as const,
         expectedNameHash: target.expectedNameHash,
         expectedOnChainId: target.expectedOnChainId,
       }));
@@ -953,6 +966,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         const finalizedSnapshot = snapshotsByNameHash.get(expectedNameHash);
         if (finalizedSnapshot !== undefined) {
           targets.set(contextGraphId, Object.freeze({
+            kind: 'resolved-snapshot' as const,
             expectedNameHash,
             expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
             finalizedSnapshot,
@@ -974,6 +988,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         );
         if (finalizedSnapshot !== null) {
           targets.set(contextGraphId, Object.freeze({
+            kind: 'resolved-snapshot' as const,
             expectedNameHash,
             expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
             finalizedSnapshot,
@@ -998,6 +1013,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         const expectedOnChainId = resolvedByNameHash.get(expectedNameHash);
         if (expectedOnChainId !== undefined) {
           targets.set(contextGraphId, Object.freeze({
+            kind: 'resolved-id' as const,
             expectedNameHash,
             expectedOnChainId,
           }));
@@ -1016,6 +1032,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       );
       if (expectedOnChainId !== null) {
         targets.set(contextGraphId, Object.freeze({
+          kind: 'resolved-id' as const,
           expectedNameHash,
           expectedOnChainId,
         }));
@@ -1054,6 +1071,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     return resolved === null
       ? null
       : Object.freeze({
+          kind: 'resolved-id' as const,
           expectedNameHash,
           expectedOnChainId: BigInt(resolved),
         });

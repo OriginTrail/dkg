@@ -424,6 +424,7 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase, createListContextGraphsCacheInvalidatingStore } from './dkg-agent-base.js';
+import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
@@ -2095,13 +2096,16 @@ export class DKGAgent extends DKGAgentBase {
     // already-active member. Newly catalogued rows do not need a per-row store
     // read: activation performs its own authority/policy checks, while dormant
     // rows deliberately install no data-plane work.
-    const curatedById = new Map<string, boolean>();
-    for (const { id } of discoveredEntries.values()) {
+    const curatedCandidates = [...discoveredEntries.values()].filter(({ id }) => {
       const existing = this.subscribedContextGraphs.get(id);
-      if (existing?.subscribed === true) {
-        curatedById.set(id, await this.isPrivateContextGraph(id));
-      }
-    }
+      return existing?.subscribed === true;
+    });
+    const curatedResults = await mapWithConcurrency(
+      curatedCandidates,
+      DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY,
+      async ({ id }) => [id, await this.isPrivateContextGraph(id)] as const,
+    );
+    const curatedById = new Map(curatedResults);
 
     // Recording and the temporary Core auto-subscribe bridge are synchronous.
     // Defer only this narrow producer burst so every discovered row enters one

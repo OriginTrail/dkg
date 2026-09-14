@@ -1765,10 +1765,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }> | null> {
     const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(contextGraphId);
     if (target !== null) {
-      const { expectedNameHash, expectedOnChainId, finalizedSnapshot } = target;
+      const { expectedNameHash, expectedOnChainId } = target;
       const snapshot = parseRfc64AuthoritySnapshotV1(
-        finalizedSnapshot
-          ?? await requireRfc64ContextGraphAuthorityReaderV1(
+        target.kind === 'resolved-snapshot'
+          ? target.finalizedSnapshot
+          : await requireRfc64ContextGraphAuthorityReaderV1(
             this.contextGraphAuthorityReaderCapability,
           ).getContextGraphAuthoritySnapshot(expectedOnChainId),
         expectedOnChainId,
@@ -2030,9 +2031,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       ]));
     }
 
-    const inlineTargets = [...resolution.targets.entries()].filter(
-      ([, target]) => target.finalizedSnapshot !== undefined,
-    );
+    const inlineTargets = [...resolution.targets.entries()].flatMap(([contextGraphId, target]) => (
+      target.kind === 'resolved-snapshot'
+        ? [[contextGraphId, target] as const]
+        : []
+    ));
     const inlineTargetIds = Object.freeze([...new Set(inlineTargets.map(([, target]) => {
       const value = target.expectedOnChainId.toString(10);
       assertContextGraphAuthorityIndexId(value, 'RFC-64 refresh inline authority-index id');
@@ -2045,7 +2048,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     for (const [contextGraphId, target] of inlineTargets) {
       const targetId = target.expectedOnChainId.toString(10) as
         ContextGraphAuthorityIndexId;
-      const snapshot = target.finalizedSnapshot!;
+      const snapshot = target.finalizedSnapshot;
       evidenceByContextGraphId.set(contextGraphId, Object.freeze({
         contextGraphAuthorityIndexId: targetId,
         batchTargetIds: inlineTargetIds,
@@ -2059,15 +2062,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const numericTargetContextGraphIds = new Set<string>();
     const numericTargetIds = Object.freeze([...new Set(
       [...resolution.targets.entries()].flatMap(([contextGraphId, target]) => {
-        if (target.finalizedSnapshot !== undefined) return [];
-        const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
-        const localId = canonicalTarget?.localId ?? contextGraphId;
-        const subscription = canonicalTarget?.subscription
-          ?? this.subscribedContextGraphs.get(localId);
-        const durableOnChainId = this.contextGraphBindingState
-          .authorityIndexOnChainIdFor(localId, subscription);
+        if (target.kind !== 'durable-binding') return [];
         const targetId = target.expectedOnChainId.toString(10);
-        if (durableOnChainId !== targetId) return [];
         assertContextGraphAuthorityIndexId(targetId, 'RFC-64 refresh authority-index id');
         numericTargetContextGraphIds.add(contextGraphId);
         return [targetId as ContextGraphAuthorityIndexId];
@@ -2805,10 +2801,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               );
               if (readSignal?.aborted) throw readSignal.reason;
               if (target === null) return null;
-              const { expectedNameHash, expectedOnChainId, finalizedSnapshot } = target;
+              const { expectedNameHash, expectedOnChainId } = target;
               const snapshot = parseRfc64AuthoritySnapshotV1(
-                finalizedSnapshot
-                  ?? await requireRfc64ContextGraphAuthorityReaderV1(
+                target.kind === 'resolved-snapshot'
+                  ? target.finalizedSnapshot
+                  : await requireRfc64ContextGraphAuthorityReaderV1(
                     this.contextGraphAuthorityReaderCapability,
                   ).getContextGraphAuthoritySnapshot(
                     expectedOnChainId,
