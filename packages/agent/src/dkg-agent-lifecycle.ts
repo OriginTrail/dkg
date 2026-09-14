@@ -281,6 +281,7 @@ import {
 } from './p2p/core-peer-discovery.js';
 import {
   createRandomSamplingPeerSource,
+  RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS,
   type RandomSamplingPeerSource,
 } from './sync/recovery/random-sampling-peer-source.js';
 import {
@@ -4307,6 +4308,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       selfPeerId: this.peerId,
       maxRosterPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
       coreEligibilityConcurrency: CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+      coreDiscoveryBudgetMs: RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS,
       isStarted: () => this.started,
       resolveCuratorPeerIds: (localContextGraphId, options) =>
         this.resolveCuratorPeerIdsForCg(localContextGraphId, options),

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC, tripleContentV10, type OperationContext } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS } from '../src/sync/recovery/random-sampling-peer-source.js';
 
 type LifecycleRepairMethod = typeof LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset;
 type LifecycleRepairInput = Parameters<LifecycleRepairMethod>[0];
@@ -374,6 +375,46 @@ describe('Random Sampling lifecycle repair adapter', () => {
     expect(vi.mocked(agentLike.waitForSyncProtocol).mock.calls[0]?.[1])
       .toBeInstanceOf(AbortSignal);
     expect(vi.mocked(agentLike.waitForSyncProtocol).mock.calls[0]?.[0]).toBe(peers[0]);
+  });
+
+  it('attempts a known curator while Core authentication hangs, well inside the proof deadline', async () => {
+    // Fake timers leave the repair's own 90s AbortSignal.timeout untouched, so
+    // nothing but the Core lane's budget can release this repair: advancing by
+    // that budget is the whole proof.
+    vi.useFakeTimers();
+    try {
+      const authenticateCorePeerAddress = vi.fn(() => new Promise<boolean>(() => {}));
+      const syncExactKnowledgeAssetsFromPeerDetailed = foundAt(['peer-curator']);
+      const agentLike = makeRepairAgent({
+        resolveCuratorPeerIdsForCg: vi.fn(async () => ({ peerIds: ['peer-curator'] })),
+        discovery: {
+          findAgents: vi.fn(async () => Array.from({ length: 64 }, (_, index) => ({
+            peerId: `core-stale-${index}`,
+            nodeRole: 'core',
+            agentAddress: `0x${String(index).padStart(40, '0')}`,
+          }))),
+        },
+        // Every stale profile's live identity handshake stays pending and
+        // ignores the cancellation it is handed.
+        authenticateCorePeerAddress,
+        syncExactKnowledgeAssetsFromPeerDetailed,
+      });
+
+      const pending = runLifecycleRepair(agentLike);
+      await vi.advanceTimersByTimeAsync(RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS);
+
+      await expect(pending).resolves.toEqual(EMPTY_MATERIAL);
+      expect(authenticateCorePeerAddress).toHaveBeenCalled();
+      expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
+        .toEqual(['peer-curator']);
+      expect(RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS).toBeLessThan(90_000);
+      expect(vi.mocked(agentLike.log.info).mock.calls.map(([, message]) => message))
+        .toContainEqual('Random Sampling Core-roster discovery exceeded its '
+          + `${RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS}ms budget for food-safety; `
+          + 'continuing with graph-specific providers');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('reaches a later Core in the same repair even when registry order is shuffled', async () => {

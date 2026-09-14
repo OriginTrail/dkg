@@ -42,6 +42,12 @@ export interface RandomSamplingPeerSourcePorts {
   /** Bound on both the curator roster and the discovered Core roster. */
   readonly maxRosterPeerIds: number;
   readonly coreEligibilityConcurrency: number;
+  /**
+   * Wall-clock ceiling on the whole Core fallback lane — registry query plus
+   * every authentication and membership read. See
+   * {@link RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS}.
+   */
+  readonly coreDiscoveryBudgetMs: number;
   /** False once the owning agent has stopped, independently of the signal. */
   isStarted(): boolean;
   resolveCuratorPeerIds(
@@ -75,6 +81,18 @@ export interface RandomSamplingPeerSourcePorts {
   logInfo(message: string): void;
 }
 
+/**
+ * Ceiling on the optional Core fallback lane, one sixth of the 90 s challenge
+ * deadline `startRandomSamplingExactRepair` applies by default.
+ *
+ * Core discovery is a fallback: it widens the roster, it never decides whether
+ * the repair can succeed. A stale directory row whose authentication never
+ * settles must therefore not be able to spend the deadline that the already
+ * known graph-specific providers need, so the lane is abandoned at this bound
+ * and the repair proceeds with whatever it has.
+ */
+export const RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS = 15_000;
+
 /** The lifecycle stopped between discovery and selection; surface it as an abort. */
 function noLongerCurrentError(localContextGraphId: string): Error {
   const error = new Error(
@@ -89,12 +107,61 @@ function errorMessage(error: unknown): string {
 }
 
 /**
+ * Discover the broad Core fallback roster under its own deadline.
+ *
+ * The budget is the lane's only exit other than success: an authentication or
+ * membership read that never settles is abandoned when it expires, so this
+ * fallback can never hold back the graph-specific providers resolved beside it.
+ * Cancellation of the repair itself is re-thrown, never degraded to an empty
+ * roster, and wallet-binding plus chain-membership remain required for every
+ * peer that does make it through.
+ */
+async function discoverBoundedCoreRoster(
+  ports: RandomSamplingPeerSourcePorts,
+  localContextGraphId: string,
+  signal: AbortSignal,
+): Promise<readonly string[]> {
+  const budget = new AbortController();
+  const budgetTimer = setTimeout(() => budget.abort(), ports.coreDiscoveryBudgetMs);
+  try {
+    return await findCorePeerIds({
+      findAgents: (options) => ports.findCoreAgents(options),
+      selfPeerId: ports.selfPeerId,
+      maxCandidates: ports.maxRosterPeerIds,
+      eligibilityConcurrency: ports.coreEligibilityConcurrency,
+      signal: AbortSignal.any([signal, budget.signal]),
+      authenticatePeerAddress: (agent, candidateSignal) =>
+        ports.authenticateCorePeerAddress(agent, candidateSignal),
+      // The broad proof-time fallback must be chain-scoped. Profiles without an
+      // operational address or a positive membership read do not consume the
+      // challenge deadline merely by claiming a Core role in the local Agent
+      // Registry graph.
+      classifyMembership: (agent, candidateSignal) =>
+        ports.classifyCoreMembership(agent, candidateSignal),
+      membershipPolicy: 'proof-required',
+    });
+  } catch (error: unknown) {
+    if (signal.aborted) throw signal.reason ?? error;
+    ports.logInfo(budget.signal.aborted
+      ? 'Random Sampling Core-roster discovery exceeded its '
+        + `${ports.coreDiscoveryBudgetMs}ms budget for ${localContextGraphId}; `
+        + 'continuing with graph-specific providers'
+      : `Random Sampling Core-roster discovery failed for ${localContextGraphId}: `
+        + errorMessage(error));
+    return [];
+  } finally {
+    clearTimeout(budgetTimer);
+  }
+}
+
+/**
  * Resolve the proof-time candidate roster.
  *
  * Graph-specific curator discovery and the broad Agent Registry Core roster are
  * independent, so they run concurrently; either may fail without losing the
- * other. Cancellation is never swallowed — an aborted signal re-throws its own
- * reason instead of degrading to an empty source.
+ * other, and the Core lane carries its own budget so it can never outlast them.
+ * Cancellation is never swallowed — an aborted signal re-throws its own reason
+ * instead of degrading to an empty source.
  */
 export async function resolveRandomSamplingCandidatePeers(
   ports: RandomSamplingPeerSourcePorts,
@@ -111,28 +178,7 @@ export async function resolveRandomSamplingCandidatePeers(
       if (signal.aborted) throw signal.reason ?? error;
       return { peerIds: [] as readonly string[] };
     }),
-    findCorePeerIds({
-      findAgents: (options) => ports.findCoreAgents(options),
-      selfPeerId: ports.selfPeerId,
-      maxCandidates: ports.maxRosterPeerIds,
-      eligibilityConcurrency: ports.coreEligibilityConcurrency,
-      signal,
-      authenticatePeerAddress: (agent, candidateSignal) =>
-        ports.authenticateCorePeerAddress(agent, candidateSignal),
-      // The broad proof-time fallback must be chain-scoped. Profiles without an
-      // operational address or a positive membership read do not consume the
-      // challenge deadline merely by claiming a Core role in the local Agent
-      // Registry graph.
-      classifyMembership: (agent, candidateSignal) =>
-        ports.classifyCoreMembership(agent, candidateSignal),
-      membershipPolicy: 'proof-required',
-    }).catch((error: unknown) => {
-      if (signal.aborted) throw signal.reason ?? error;
-      ports.logInfo(
-        `Random Sampling Core-roster discovery failed for ${localContextGraphId}: ${errorMessage(error)}`,
-      );
-      return [] as readonly string[];
-    }),
+    discoverBoundedCoreRoster(ports, localContextGraphId, signal),
   ]);
   if (!isCurrent()) {
     throw signal.reason ?? noLongerCurrentError(localContextGraphId);

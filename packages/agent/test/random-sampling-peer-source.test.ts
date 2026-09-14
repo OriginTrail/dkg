@@ -17,6 +17,9 @@ function makePorts(
     selfPeerId: 'self',
     maxRosterPeerIds: 64,
     coreEligibilityConcurrency: 4,
+    // Far longer than any hermetic case needs, so only the budget cases below
+    // observe the bound.
+    coreDiscoveryBudgetMs: 60_000,
     isStarted: () => true,
     resolveCuratorPeerIds: vi.fn(async () => ({ peerIds: [] as string[] })),
     findCoreAgents: vi.fn(async () => [] as CorePeerDirectoryEntry[]),
@@ -138,6 +141,66 @@ describe('Random Sampling proof-time peer source', () => {
     expect(ports.logInfo).toHaveBeenCalledWith(
       `Random Sampling Core-roster discovery failed for ${CG}: registry offline`,
     );
+  });
+
+  it('abandons a Core lane that outlasts its budget instead of holding back a known provider', async () => {
+    const hangingAuthentications: CorePeerDirectoryEntry[] = [];
+    const ports = makePorts({
+      coreDiscoveryBudgetMs: 5,
+      resolveCuratorPeerIds: vi.fn(async () => ({ peerIds: ['peer-curator'] })),
+      observedCandidatePeerIds: vi.fn(() => ['peer-observed']),
+      findCoreAgents: vi.fn(async () => [
+        { peerId: 'core-stale-a', nodeRole: 'core', agentAddress: '0xaa' },
+        { peerId: 'core-stale-b', nodeRole: 'core', agentAddress: '0xbb' },
+      ]),
+      // A stale directory row whose live identity handshake never answers and
+      // never observes the cancellation it was handed.
+      authenticateCorePeerAddress: vi.fn((agent: CorePeerDirectoryEntry) => {
+        hangingAuthentications.push(agent);
+        return new Promise<boolean>(() => {});
+      }),
+    });
+
+    await expect(resolve(ports)).resolves.toMatchObject({
+      corePeerIds: [],
+      candidatePeerIds: ['peer-curator', 'peer-observed'],
+    });
+    expect(hangingAuthentications).not.toHaveLength(0);
+    expect(ports.logInfo).toHaveBeenCalledWith(
+      'Random Sampling Core-roster discovery exceeded its 5ms budget for '
+        + `${CG}; continuing with graph-specific providers`,
+    );
+  });
+
+  it('keeps a Core roster that resolves inside its budget', async () => {
+    const ports = makePorts({
+      coreDiscoveryBudgetMs: 5_000,
+      resolveCuratorPeerIds: vi.fn(async () => ({ peerIds: ['peer-curator'] })),
+      findCoreAgents: vi.fn(async () => [
+        { peerId: 'core-a', nodeRole: 'core', agentAddress: '0xaa' },
+      ]),
+    });
+
+    await expect(resolve(ports)).resolves.toMatchObject({
+      corePeerIds: ['core-a'],
+      candidatePeerIds: ['peer-curator', 'core-a'],
+    });
+    expect(ports.logInfo).not.toHaveBeenCalled();
+  });
+
+  it('prefers the repair cancellation reason over its own discovery budget', async () => {
+    const controller = new AbortController();
+    const reason = new Error('prover stopped');
+    const ports = makePorts({
+      coreDiscoveryBudgetMs: 5,
+      findCoreAgents: vi.fn(async () => {
+        controller.abort(reason);
+        return new Promise<CorePeerDirectoryEntry[]>(() => {});
+      }),
+    });
+
+    await expect(resolve(ports, controller.signal)).rejects.toBe(reason);
+    expect(ports.logInfo).not.toHaveBeenCalled();
   });
 
   it('keeps the Core roster when curator discovery fails', async () => {
