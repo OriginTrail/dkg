@@ -9,7 +9,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   deleteByPatternWithoutCount,
-  invalidateSwmMaterializationWitness,
   type GraphManager,
   type Quad,
   type TripleStore,
@@ -65,10 +64,6 @@ export async function finalizeCommittedAssertionPromote(
     const operationId = operationIntent.operationId;
     const operationTimestamp = new Date(operationIntent.timestampMs);
     const { accessPolicy, allowedPeers } = operationIntent;
-    // The exact SWM replacement invalidates the witness even when its quad count is unchanged.
-    await invalidateSwmMaterializationWitness(host.store, swmGraphUri, {
-      source: 'publisher.promoteWmToSwm.witnessInvalidate',
-    }).catch(() => {});
     // Retain WM until all durable metadata is complete. The operation intent
     // remains available even after cleanup so empty-WM recovery can validate
     // the exact SWM payload and repair this same operation.

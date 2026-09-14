@@ -21,90 +21,15 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  asGraphWriteRevisionSource,
   deleteByPatternWithoutCount,
-  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
 import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
+import { createMaterializationValidationMemo } from './materialization-validation-memo.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const DEFAULT_VALIDATION_MEMO_MAX_ENTRIES = 4_096;
-const DEFAULT_VALIDATION_MEMO_TTL_MS = 30_000;
-
-interface MaterializationValidationMemoEntry {
-  digest: string;
-  count: number;
-  writeGeneration: number;
-  expiresAtMs: number;
-}
-
-class MaterializationValidationMemo {
-  private readonly entries = new Map<string, MaterializationValidationMemoEntry>();
-
-  constructor(
-    private readonly maxEntries: number,
-    private readonly ttlMs: number,
-    private readonly now: () => number,
-  ) {}
-
-  currentTime(): number {
-    const value = this.now();
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new TypeError('materialization validation memo clock must return a non-negative safe integer');
-    }
-    return value;
-  }
-
-  get(
-    graph: string,
-    digest: string,
-    count: number,
-    writeGeneration: number,
-    nowMs: number,
-  ): MaterializationValidationMemoEntry | null {
-    const entry = this.entries.get(graph);
-    if (
-      !entry
-      || entry.digest !== digest
-      || entry.count !== count
-      || entry.writeGeneration !== writeGeneration
-      || entry.expiresAtMs <= nowMs
-    ) {
-      this.entries.delete(graph);
-      return null;
-    }
-    this.entries.delete(graph);
-    this.entries.set(graph, entry);
-    return entry;
-  }
-
-  set(graph: string, digest: string, count: number, writeGeneration: number, nowMs: number): void {
-    const expiresAtMs = nowMs + this.ttlMs;
-    if (!Number.isSafeInteger(expiresAtMs)) {
-      throw new TypeError('materialization validation memo expiry exceeds the safe integer range');
-    }
-    this.entries.delete(graph);
-    this.entries.set(graph, {
-      digest,
-      count,
-      writeGeneration,
-      expiresAtMs,
-    });
-    while (this.entries.size > this.maxEntries) {
-      const oldest = this.entries.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.entries.delete(oldest);
-    }
-  }
-
-  delete(graph: string): void {
-    this.entries.delete(graph);
-  }
-}
-
 /**
  * GH#2273 preservation validators — each names ONE invariant of the
  * preserved-winner contract. `selectRepairIdentity` orchestrates them; the
@@ -333,44 +258,8 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    */
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
-  validationMemo?: {
-    maxEntries?: number;
-    ttlMs?: number;
-    now?: () => number;
-  };
 }): SharedMemorySnapshotMaterializer {
-  // Preserve #2079's operator kill switch while replacing its durable witness
-  // lookup with the stricter revision/TTL-bound in-memory memo.
-  const validationMemoEnabled = (() => {
-    const raw = process.env['DKG_SWM_MATERIALIZATION_WITNESS']?.trim();
-    if (!raw) return true;
-    return raw !== '0' && raw.toLowerCase() !== 'false';
-  })();
-  const validationMemoMaxEntries = deps.validationMemo?.maxEntries
-    ?? DEFAULT_VALIDATION_MEMO_MAX_ENTRIES;
-  const validationMemoTtlMs = deps.validationMemo?.ttlMs ?? DEFAULT_VALIDATION_MEMO_TTL_MS;
-  if (!Number.isSafeInteger(validationMemoMaxEntries) || validationMemoMaxEntries < 1) {
-    throw new TypeError('validationMemo.maxEntries must be a positive safe integer');
-  }
-  if (!Number.isSafeInteger(validationMemoTtlMs) || validationMemoTtlMs < 1) {
-    throw new TypeError('validationMemo.ttlMs must be a positive safe integer');
-  }
-  const validationMemo = new MaterializationValidationMemo(
-    validationMemoMaxEntries,
-    validationMemoTtlMs,
-    deps.validationMemo?.now ?? Date.now,
-  );
-  const writeRevisionSource = asGraphWriteRevisionSource(deps.store);
-
-  const readStableWriteGeneration = (graph: string): number | null => {
-    if (!writeRevisionSource) return null;
-    try {
-      const revision = writeRevisionSource.getWriteRevision(graph);
-      return revision.stable ? revision.generation : null;
-    } catch {
-      return null;
-    }
-  };
+  const validationMemo = createMaterializationValidationMemo(deps.store);
 
   /**
    * The ONE discovery of which operation subjects a head references AND this
@@ -703,27 +592,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;
       if (!Number.isSafeInteger(expected) || expected < 0) return false;
-      const validationStartedAt = validationMemo.currentTime();
-      const initialWriteGeneration = readStableWriteGeneration(descriptor.assertionGraph);
-      // Reuse is deliberately process-local and short-lived. The write
-      // revision fences every mutation visible to this store instance; the TTL
-      // bounds staleness when another process can write to the same backend.
-      // Missing or unstable revision capability always falls through to the
-      // exact count + digest validation below.
-      if (
-        expected > 0
-        && validationMemoEnabled
-        && initialWriteGeneration !== null
-        && validationMemo.get(
-          descriptor.assertionGraph,
-          descriptor.publicQuadsDigest,
-          expected,
-          initialWriteGeneration,
-          validationStartedAt,
-        )
-      ) {
-        return true;
-      }
+      const validationProbe = validationMemo.probe({
+        graph: descriptor.assertionGraph,
+        digest: descriptor.publicQuadsDigest,
+        count: expected,
+      });
+      if (validationProbe.reusable) return true;
       // 1) Count gate: exact-IRI scope, so bounded — and cheap enough to run
       // on an exact-validation miss. Strictly equal: a short graph is a partial
       // write and must be replaced, not treated as already materialized.
@@ -753,26 +627,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       if (contentResult.type !== 'quads') return false;
       const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
       const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
-      if (
-        matches
-        && expected > 0
-        && validationMemoEnabled
-        && initialWriteGeneration !== null
-      ) {
-        // Only the exact-match branch can populate the memo. Bracketing the
-        // full read with equal stable revisions prevents caching a graph that
-        // changed while its digest was being computed.
-        const finalWriteGeneration = readStableWriteGeneration(descriptor.assertionGraph);
-        if (finalWriteGeneration === initialWriteGeneration) {
-          validationMemo.set(
-            descriptor.assertionGraph,
-            descriptor.publicQuadsDigest,
-            expected,
-            finalWriteGeneration,
-            validationMemo.currentTime(),
-          );
-        }
-      }
+      if (matches) validationProbe.recordVerified();
       return matches;
     },
 
@@ -788,13 +643,6 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         priority: 'background',
         source: 'agent.sharedMemorySync.materializeSnapshot',
       });
-      // The graph write revision invalidates the in-memory memo even if this
-      // best-effort durable cleanup fails. Digest binding remains a second
-      // defence against equal-count version changes.
-      await invalidateSwmMaterializationWitness(deps.store, graphUri, {
-        priority: 'background',
-        source: 'agent.sharedMemorySync.materializeSnapshot.witnessInvalidate',
-      }).catch(() => {});
       deps.invalidateListContextGraphsCache();
     },
 

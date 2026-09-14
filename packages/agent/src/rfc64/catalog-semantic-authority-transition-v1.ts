@@ -17,7 +17,6 @@ import {
   type KaIdV1,
 } from '@origintrail-official/dkg-core';
 import {
-  invalidateSwmMaterializationWitness,
   quadsToNQuads,
   readExactGraphPaged,
   readExactGraphPagedWithDiscoveredCount,
@@ -211,9 +210,6 @@ async function removeRfc64CatalogOwnedProjectionV1(
       'store lacks atomic named-graph and author-seal replacement for catalog removal',
     );
   }
-  await invalidateSwmMaterializationWitness(store, removal.swmGraph, {
-    source: 'rfc64-public-catalog-native-deactivation.witnessInvalidate',
-  }).catch(() => {});
   let graphExists: boolean;
   let sealRows;
   try {

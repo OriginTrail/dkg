@@ -47,8 +47,6 @@ import {
   OxigraphStore,
   quadsToNQuads,
   readExactGraphPaged,
-  readSwmMaterializationWitness,
-  writeSwmMaterializationWitness,
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
@@ -57,7 +55,6 @@ import {
   generateGraphKnowledgeAssetMetadata,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
-  workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -486,7 +483,7 @@ async function seedSignedSwmWorkspaceV1(
 async function seedPreexistingFinalizedTwinV1(
   agent: DKGAgent,
   seal: CanonicalGraphScopedAuthorSealV1,
-): Promise<Readonly<{ swmGraph: string; vmGraph: string; publicQuadsDigest: string }>> {
+): Promise<Readonly<{ swmGraph: string; vmGraph: string }>> {
   const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
   const swmGraph = knowledgeAssetLayerGraphUri(
     CONTEXT_GRAPH_ID,
@@ -529,13 +526,7 @@ async function seedPreexistingFinalizedTwinV1(
     assertionVersion: seal.assertionVersion,
     shareOperationId,
   });
-  const publicQuadsDigest = workspacePublicQuadsDigest(PROJECTION_QUADS);
-  expect(await writeSwmMaterializationWitness(
-    agent.store,
-    swmGraph,
-    publicQuadsDigest,
-  )).toBe(true);
-  return Object.freeze({ swmGraph, vmGraph, publicQuadsDigest });
+  return Object.freeze({ swmGraph, vmGraph });
 }
 
 function confirmedVmMetadataForSealV1(
@@ -8509,14 +8500,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         vi.spyOn(agent.publisher, 'clearPublishedKnowledgeAssetSwm')
           .mockImplementation(async (...args) => {
             retirementClearCalls += 1;
-            // Catalog activation invalidates any previous memo. Recreate it at
-            // the production retirement boundary so this assertion proves the
-            // coordinator's post-clear invalidation, not activation's replace.
-            expect(await writeSwmMaterializationWitness(
-              agent.store,
-              preexistingTwin.swmGraph,
-              preexistingTwin.publicQuadsDigest,
-            )).toBe(true);
             signalRetirementStarted();
             await retirementGate;
             await clearPublishedKnowledgeAssetSwm(...args);
@@ -8541,11 +8524,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         .toBe(PROJECTION_QUADS.length);
       expect(await authorizedCold.store.countQuads(preexistingTwin.swmGraph))
         .toBe(PROJECTION_QUADS.length);
-      expect(await readSwmMaterializationWitness(
-        authorizedCold.store,
-        preexistingTwin.swmGraph,
-        preexistingTwin.publicQuadsDigest,
-      )).toBe(true);
     } finally {
       releaseRetirement();
     }
@@ -8581,11 +8559,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(await authorizedCold.store.countQuads(preexistingTwin.vmGraph))
       .toBe(PROJECTION_QUADS.length);
     expect(await authorizedCold.store.countQuads(preexistingTwin.swmGraph)).toBe(0);
-    expect(await readSwmMaterializationWitness(
-      authorizedCold.store,
-      preexistingTwin.swmGraph,
-      preexistingTwin.publicQuadsDigest,
-    )).toBe(false);
     await authorizedCold.synchronizeRfc64PublicCatalogFromProviderV1({
       remotePeerId: provider.peerId,
       scope: {

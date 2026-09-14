@@ -17,7 +17,6 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   GraphManager,
-  invalidateSwmMaterializationWitness,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -259,7 +258,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
       if (swmQuads.length === 0) return 'already-retired-finalized';
       if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';
-      await retireAndInvalidate(params, evidence);
+      await params.retire(evidence);
       return 'retired';
     }
     if (head.version !== evidence.assertionVersion) return 'head-version-mismatch';
@@ -279,27 +278,13 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
     // failed, re-enter the idempotent retirement callback to finish metadata
     // cleanup instead of permanently returning early on an absent graph.
     if (swmQuads.length === 0) {
-      await retireAndInvalidate(params, evidence);
+      await params.retire(evidence);
       return 'retired';
     }
     if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';
-    await retireAndInvalidate(params, evidence);
+    await params.retire(evidence);
     return 'retired';
   });
-}
-
-async function retireAndInvalidate(
-  params: {
-    readonly store: TripleStore;
-    readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
-  },
-  evidence: FinalizedSwmTwinEvidence,
-): Promise<void> {
-  await params.retire(evidence);
-  await invalidateSwmMaterializationWitness(params.store, evidence.swmGraph, {
-    priority: 'background',
-    source: 'agent.durableSync.finalizedSwmTwin.witnessInvalidate',
-  }).catch(() => {});
 }
 
 function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): VmArrivalFinalizedSwmTwinEvidence {

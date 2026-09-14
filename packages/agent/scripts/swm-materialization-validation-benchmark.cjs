@@ -45,7 +45,7 @@ function createInstrumentedStore(graphs, revisionAware) {
     },
   };
   if (revisionAware) {
-    store.writeRevisionCoverage = 'process-local';
+    store.writeRevisionCoverage = 'all-writers';
     store.getWriteRevision = () => ({ generation: 0, stable: true });
   }
   return { store, metrics };

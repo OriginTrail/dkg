@@ -303,7 +303,7 @@
     "test/swm-gossip-signing.test.ts": 454,
     "test/swm-head-identity-preservation.test.ts": 120,
     "test/swm-late-joiner-deferred-gossip.test.ts": 281,
-    "test/swm-materialization-witness.test.ts": 51,
+    "test/materialization-validation-memo.test.ts": 51,
     "test/swm-member-recovery-auth.test.ts": 8,
     "test/swm-plaintext-oracle-wiring.test.ts": 176,
     "test/swm-public-cg-plaintext.test.ts": 30,

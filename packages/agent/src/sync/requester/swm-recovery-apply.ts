@@ -7,7 +7,6 @@ import {
 import {
   GraphManager,
   deleteByPatternWithoutCount,
-  invalidateSwmMaterializationWitness,
   tryReplaceGraphAtomically,
   type Quad,
   type TripleStore,
@@ -349,8 +348,8 @@ export async function applySwmRecovery(params: {
 
 /**
  * Canonical exact-asset mutation primitive shared by incremental snapshot
- * commits and the final recovery plan. It owns graph replacement, witness
- * invalidation, stored-identity preservation, and active-head cleanup.
+ * commits and the final recovery plan. It owns graph replacement,
+ * stored-identity preservation, and active-head cleanup.
  */
 export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
   contextGraphId: string;
@@ -366,11 +365,6 @@ export async function applyVerifiedSwmRecoveryGraphAsset(params: Readonly<{
       asset.descriptor.assertionGraph,
       [...asset.replacementQuads],
     );
-    await invalidateSwmMaterializationWitness(
-      ports.store,
-      asset.descriptor.assertionGraph,
-      { source: 'agent.swmRecovery.witnessInvalidate' },
-    ).catch(() => {});
   }
 
   if (asset.kind === 'preserve-equivalent') {

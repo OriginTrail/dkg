@@ -230,10 +230,8 @@ export default defineConfig({
       "test/swm-sender-key-stale-target.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",
-      // #2079 — the already-materialized witness: the warm-path win, the count
-      // gate that keeps it self-healing, and the digest binding that makes an
-      // equal-count version change safe.
-      "test/swm-materialization-witness.test.ts",
+      // #1963 — bounded exact-validation memo, including revision fences.
+      "test/materialization-validation-memo.test.ts",
       "test/replace-subject-agent-wrapper.test.ts",
     ],
     testTimeout: 60_000,

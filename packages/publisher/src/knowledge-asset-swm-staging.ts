@@ -5,7 +5,6 @@ import {
 import {
   GraphManager,
   canonicalSharedMemoryScopeWriteGraph,
-  invalidateSwmMaterializationWitness,
   resolveSharedMemoryScopeGraphs,
   tryReplaceGraphAtomically,
   type Quad,
@@ -169,9 +168,6 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
       swmGraph,
       publicQuads.map((quad) => ({ ...quad, graph: swmGraph })),
     );
-    await invalidateSwmMaterializationWitness(input.store, swmGraph, {
-      source: 'publisher.stageKnowledgeAssetSharedWorkingMemoryV1.witnessInvalidate',
-    }).catch(() => {});
     if (!replaced) {
       throw Object.assign(
         new Error(`Graph-scoped update requires atomic SWM replacement at ${swmGraph}`),
