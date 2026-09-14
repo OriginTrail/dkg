@@ -123,6 +123,17 @@ it('retires a rejected shared call and permits the next invocation to recover', 
   await worker.stop();
 });
 
+it('queues a new manual flight while the completed flight is still retiring', async () => {
+  const pass = vi.fn()
+    .mockResolvedValueOnce({ triplesDeleted: 0 })
+    .mockResolvedValueOnce({ triplesDeleted: 2 });
+  const worker = new SwmExpiryCleanupWorker(pass, () => 100);
+  expect(await worker.runNow()).toBe(0);
+  expect(await worker.runNow()).toBe(2);
+  expect(pass).toHaveBeenCalledTimes(2);
+  await worker.stop();
+});
+
 it('starts disabled and safely retires failures from scheduled and stopping work', async () => {
   vi.useFakeTimers();
   const blocked = deferred<SwmExpiryCleanupResult>();
