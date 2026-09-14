@@ -107,6 +107,31 @@ describe('context graph list authority enrichment', () => {
     expect(fixture.resolveCurrent).not.toHaveBeenCalled();
   });
 
+  it('preserves current resolution for remote registered rows on legacy adapters', async () => {
+    const id = 'listing-legacy-remote-registered';
+    const fixture = listingAgent({
+      ids: [id],
+      resolveFinalized: async () => ({ kind: 'legacy-current' }),
+      registrationStatus: async () => null,
+      resolveCurrent: async () => '902',
+    });
+
+    const result = await list(fixture.fakeAgent);
+
+    expect(result.rows).toEqual([
+      expect.objectContaining({ id, onChainId: '902' }),
+    ]);
+    expect(fixture.readRegistrationStatus).not.toHaveBeenCalled();
+    expect(fixture.resolveCurrent).toHaveBeenCalledOnce();
+    expect(fixture.resolveCurrent).toHaveBeenCalledWith(
+      id,
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+        source: 'agent.contextGraph.list.onChainId',
+      }),
+    );
+  });
+
   it('does not fan 400+ ordinary finalized misses into current RPC resolution', async () => {
     const ids = Array.from({ length: MISS_COUNT }, (_, index) => `listing-miss-${index}`);
     const fixture = listingAgent({

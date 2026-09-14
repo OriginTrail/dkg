@@ -2765,6 +2765,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const rowsMissingOnChainId = rows.filter((row) => !row.onChainId);
     let finalizedTargets: ReadonlyMap<string, FinalizedContextGraphAuthorityTargetV1> =
       new Map();
+    let useLegacyCurrentResolution = false;
     if (rowsMissingOnChainId.length > 0) {
       try {
         const finalizedRead = await withBudget(
@@ -2779,6 +2780,15 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
           cacheable = false;
         } else if (finalizedRead.value.kind === 'finalized-index') {
           finalizedTargets = new Map(finalizedRead.value.targets);
+        } else {
+          // Adapters without a finalized authority index historically resolved
+          // every projected row against current chain state. Preserve that
+          // compatibility path: remotely discovered registered graphs do not
+          // have this node's durable registration marker, so gating these reads
+          // on local status would silently drop their known on-chain ids.
+          // Finalized-index misses and failed/expired batch reads deliberately
+          // do not enter this path, keeping their anti-fan-out guarantee.
+          useLegacyCurrentResolution = true;
         }
       } catch {
         // Listing enrichment is advisory. A failed finalized batch must not
@@ -2795,11 +2805,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       if (finalizedTarget !== undefined) {
         return { ...row, onChainId: finalizedTarget.expectedOnChainId.toString(10) };
       }
-      const registrationStatus = await optional(
-        () => this.readLocalContextGraphRegistrationStatus(row.id),
-        `local registration status lookup for ${row.id}`,
-      );
-      if (registrationStatus !== 'registered') return row;
+      if (!useLegacyCurrentResolution) {
+        const registrationStatus = await optional(
+          () => this.readLocalContextGraphRegistrationStatus(row.id),
+          `local registration status lookup for ${row.id}`,
+        );
+        if (registrationStatus !== 'registered') return row;
+      }
       const onChainId = await optional(
         (signal) => this.getContextGraphOnChainId(row.id, {
           signal,
