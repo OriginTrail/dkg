@@ -3,9 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ChainEvent } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import {
-  EVM_EVENT_DESCRIPTORS, eventContractKeysFor, evmEventDescriptorFor, selectEvmEventDescriptors,
-  selectEvmEventPlan,
-  type EvmEventCapabilityKey, type EvmEventDescriptor, type EvmEventScan,
+  EVM_EVENT_DESCRIPTORS, evmEventDescriptorFor, selectEvmEventPlan,
+  type EvmEventContractKey, type EvmEventDescriptor, type EvmEventScan,
 } from '../src/evm-event-contracts.js';
 import {
   ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, REQUIRED_EVM_HUB_CONTRACT_KEYS,
@@ -43,10 +42,7 @@ describe('generation-owned Hub bindings and event selection', () => {
     expect(plan.descriptors).toEqual([evmEventDescriptorFor('KCCreated')]);
     expect(Object.isFrozen(plan)).toBe(true);
     expect(Object.isFrozen(plan.descriptors)).toBe(true);
-    expect(eventContractKeysFor(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated'])).toEqual(plan.bindings);
-    expect(selectEvmEventDescriptors(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated']))
-      .toEqual(plan.descriptors);
-    expect(eventContractKeysFor(['NameClaimed', 'ContextGraphNameClaimed']))
+    expect(selectEvmEventPlan(['NameClaimed', 'ContextGraphNameClaimed']).bindings)
       .toEqual(['contextGraphNameRegistry']);
   });
 
@@ -295,17 +291,17 @@ describe('Hub binding generation ownership', () => {
 
   it('keeps adapter-owned lazy bindings across Hub installation and invalidation', () => {
     class OwnershipProbe extends EVMChainAdapter {
-      seedLazyBinding(binding: Contract): void { this.contracts.randomSampling = binding; }
+      seedLazyBinding(binding: Contract): void { this.adapterContracts.randomSampling = binding; }
 
       installHubBindings(bindings: EvmHubContractInstallation): void {
         this.installHubContractBindings(bindings);
       }
 
-      rotateHubBinding(binding: Contract): void { this.contracts.chronos = binding; }
+      rotateHubBinding(binding: Contract): void { this.replaceHubContractBinding('chronos', binding); }
 
       invalidateHubBindings(): void { this.invalidateHubContractBindings(); }
 
-      lazyBinding(): Contract | undefined { return this.contracts.randomSampling; }
+      lazyBinding(): Contract | undefined { return this.adapterContracts.randomSampling; }
     }
 
     const adapter = new OwnershipProbe({
@@ -424,9 +420,9 @@ const AUTHOR = getAddress('0x' + 'a1'.repeat(20));
 const OWNER = getAddress('0x' + 'b2'.repeat(20));
 const MINT_RECIPIENT = getAddress('0x' + 'c3'.repeat(20));
 const ALIASES = EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases.map(alias => [alias, descriptor] as const));
-const EVENT_CAPABILITY_KEYS: readonly EvmEventCapabilityKey[] = eventContractKeysFor(
+const EVENT_CAPABILITY_KEYS: readonly EvmEventContractKey[] = selectEvmEventPlan(
   EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases),
-);
+).bindings;
 
 type EncodedLog = ReturnType<typeof eventInterface.encodeEventLog> & { blockNumber: number; transactionHash: string; transactionIndex: number };
 function logOf(event: string, values: unknown[], blockNumber: number, transactionHash: string, transactionIndex = 0): EncodedLog {
@@ -493,10 +489,10 @@ describe('EVM event descriptor registry', () => {
     const aliases = EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases);
     expect(new Set(aliases).size).toBe(aliases.length);
     expect(Object.keys(SCENARIOS).sort()).toEqual(EVM_EVENT_DESCRIPTORS.map(descriptor => descriptor.aliases[0]).sort());
-    expect(eventContractKeysFor([...aliases].reverse())).toEqual(EVENT_CAPABILITY_KEYS);
-    expect(eventContractKeysFor(['unsupported-event'])).toEqual([]);
+    expect(selectEvmEventPlan([...aliases].reverse()).bindings).toEqual(EVENT_CAPABILITY_KEYS);
+    expect(selectEvmEventPlan(['unsupported-event']).bindings).toEqual([]);
     expect(evmEventDescriptorFor('unsupported-event')).toBeUndefined();
-    expect(selectEvmEventDescriptors(['KnowledgeAssetCreated', 'KCCreated', 'KCCreated']))
+    expect(selectEvmEventPlan(['KnowledgeAssetCreated', 'KCCreated', 'KCCreated']).descriptors)
       .toEqual([evmEventDescriptorFor('KCCreated')]);
   });
 
@@ -518,7 +514,7 @@ describe('EVM event descriptor registry', () => {
   it.each(ALIASES)('%s scans its declared binding and parses every log shape of its descriptor', async (alias, descriptor: EvmEventDescriptor) => {
     const scenario = SCENARIOS[descriptor.aliases[0]];
     expect(evmEventDescriptorFor(alias)).toBe(descriptor);
-    expect(eventContractKeysFor([alias])).toEqual([descriptor.binding]);
+    expect(selectEvmEventPlan([alias]).bindings).toEqual([descriptor.binding]);
     const contract = new Contract(address, EVENT_ABI);
     const queried: string[] = [];
     const scan: EvmEventScan = {

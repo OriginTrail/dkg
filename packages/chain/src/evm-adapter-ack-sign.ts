@@ -31,14 +31,14 @@ export class AckSignMethods extends EVMChainAdapterBase {
     // fallback to a hardcoded `3` (or any other value) when
     // ParametersStorage isn't resolvable would let verify use the
     // wrong quorum without anyone noticing. Refuse to guess.
-    if (!this.contracts.parametersStorage) {
+    if (!this.hubContracts.parametersStorage) {
       throw new Error(
         'getMinimumRequiredSignatures: ParametersStorage contract is not resolvable. ' +
         'Verify cannot enforce ACK quorum without a real chain read — fix the adapter wiring or pass an explicit override.',
       );
     }
     const value = Number(await this.readContract(
-      this.contracts.parametersStorage,
+      this.hubContracts.parametersStorage,
       'parametersStorage.minimumRequiredSignatures',
       'minimumRequiredSignatures',
     ));

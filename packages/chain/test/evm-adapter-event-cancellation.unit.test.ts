@@ -3,7 +3,7 @@ import { Contract, Interface, ZeroAddress } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import type { ChainEvent, EventFilter } from '../src/chain-adapter.js';
-import { eventContractKeysFor } from '../src/evm-event-contracts.js';
+import { selectEvmEventPlan } from '../src/evm-event-contracts.js';
 import { createLoopbackJsonRpcTestHarness, sendJsonRpcResult } from './loopback-rpc-harness.js';
 
 const PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -513,7 +513,7 @@ describe('event scan RPC cancellation', () => {
       // Successful subset admission installs into the canonical handle store;
       // cancelled staging above installed nothing and full initialization is pending.
       expect(Object.keys(internal.contracts).sort()).toEqual(Object.keys(beforeBindings).sort());
-      for (const key of eventContractKeysFor(eventTypes)) {
+      for (const key of selectEvmEventPlan(eventTypes).bindings) {
         expect(internal.contracts[key]).toBeDefined();
       }
       expect(internal.contracts.identity).toBeUndefined();
@@ -586,6 +586,30 @@ describe('event scan RPC cancellation', () => {
       await collect(adapter, { eventTypes: ['ContextGraphCreated'], fromBlock: 7, toBlock: 19 });
       expect(queryFilter).toHaveBeenCalledOnce();
       expect(queryFilter.mock.calls[0]?.slice(1)).toEqual([7, 19]);
+    } finally { adapter.destroy(); }
+  });
+
+  it('rejects a completed event page when its Hub binding generation rotated during the scan', async () => {
+    const adapter = adapterAt();
+    const internal = adapter as unknown as {
+      invalidateHubContractBindings(): void;
+      readContractWith: (
+        contract: unknown,
+        label: string,
+        read: (contract: { queryFilter: () => Promise<unknown[]> }) => Promise<unknown>,
+      ) => Promise<unknown>;
+    };
+    internal.readContractWith = async (_contract, _label, read) => {
+      const result = await read({ queryFilter: async () => [] });
+      internal.invalidateHubContractBindings();
+      return result;
+    };
+    try {
+      await expect(collect(adapter, {
+        eventTypes: ['ContextGraphCreated'],
+        fromBlock: 101,
+        toBlock: 120,
+      })).rejects.toThrow('Hub contract bindings changed during event scan');
     } finally { adapter.destroy(); }
   });
 

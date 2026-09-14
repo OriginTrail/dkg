@@ -90,6 +90,11 @@ export class EvmHubContractBindings {
 
   get generation(): object { return this.current; }
 
+  /** Whether a borrowed snapshot still belongs to the active Hub generation. */
+  isCurrent(snapshot: Pick<EvmHubContractSnapshot<EvmHubContractKey>, 'generationId'>): boolean {
+    return snapshot.generationId === this.current.id;
+  }
+
   /**
    * Install a complete caller-owned Hub handle set. Every boot key is decided by this call — an
    * absent optional entry means "not deployed" — so the new generation is

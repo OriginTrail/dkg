@@ -23,8 +23,8 @@ export class IdentityMethods extends EVMChainAdapterBase {
   /** Independent all-or-none browser capability for node-identity key rotation. */
   async getIdentityWalletContracts(): Promise<IdentityWalletContracts | null> {
     await this.init();
-    const profile = this.contracts.profile;
-    const identity = this.contracts.identity;
+    const profile = this.hubContracts.profile;
+    const identity = this.hubContracts.identity;
     if (!profile || !identity) return null;
     let storage: Contract;
     try {
@@ -111,7 +111,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     }
 
     await this.sendContractTransaction(
-      this.contracts.profile!,
+      this.hubContracts.profile!,
       'addOperationalWallets',
       [identityId, missing],
       this.adminSigner,
@@ -160,7 +160,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       );
     }
     const receipt = await this.sendContractTransaction(
-      this.contracts.profile!,
+      this.hubContracts.profile!,
       'addOperationalWallets',
       [identityId, [wallet]],
       this.adminSigner,
@@ -241,7 +241,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       );
     }
     const receipt = await this.sendContractTransaction(
-      this.contracts.identity!,
+      this.hubContracts.identity!,
       'removeKey',
       [identityId, this.walletKeyHash(wallet)],
       this.adminSigner,
@@ -281,7 +281,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
 
   async setRelayCapable(relayCapable: boolean): Promise<TxResult> {
     await this.init();
-    if (!this.contracts.profile) {
+    if (!this.hubContracts.profile) {
       throw new Error('setRelayCapable: Profile not deployed on this Hub.');
     }
     const identityId = await this.getIdentityId();
@@ -289,7 +289,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       throw new Error('setRelayCapable: signer has no on-chain profile (call ensureProfile first).');
     }
     const receipt = await this.sendContractTransaction(
-      this.contracts.profile,
+      this.hubContracts.profile,
       'updateRelayCapable',
       [identityId, relayCapable],
       this.signer,
@@ -334,7 +334,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
       const nodeId = ethers.hexlify(ethers.randomBytes(32));
 
       const receipt = await this.sendContractTransaction(
-        this.contracts.profile!,
+        this.hubContracts.profile!,
         'createProfile',
         [this.adminSigner.address, [], nodeName, nodeId, 0],
         this.signer,
@@ -343,7 +343,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
 
       for (const log of receipt.logs) {
         try {
-          const parsed = this.contracts.identity!.interface.parseLog({
+          const parsed = this.hubContracts.identity!.interface.parseLog({
             topics: [...log.topics],
             data: log.data,
           });
@@ -377,17 +377,17 @@ export class IdentityMethods extends EVMChainAdapterBase {
     // custodies TRAC.
     const stakeAmount = options?.stakeAmount ?? ethers.parseEther('50000');
     const lockTier = options?.lockTier ?? 1; // tier 1 = 1-month, cheapest non-zero multiplier
-    if (stakeAmount > 0n && this.contracts.token) {
+    if (stakeAmount > 0n && this.hubContracts.token) {
       try {
         const stakingNFT = await this.resolveContract('DKGStakingConvictionNFT');
         const stakingV10Addr: string = await this.readContract(
-          this.contracts.hub, 'Hub.getContractAddress(StakingV10)', 'getContractAddress', 'StakingV10',
+          this.hubContracts.hub, 'Hub.getContractAddress(StakingV10)', 'getContractAddress', 'StakingV10',
         );
         if (stakingV10Addr === ethers.ZeroAddress) {
           throw new Error('StakingV10 not registered in Hub — V10 staking unavailable');
         }
         await this.sendContractTransaction(
-          this.contracts.token,
+          this.hubContracts.token,
           'approve',
           [stakingV10Addr, stakeAmount],
           this.signer,
@@ -425,7 +425,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
     const nodeId = proof.publicKey.length > 0 ? proof.publicKey : ethers.randomBytes(32);
 
     const receipt = await this.sendContractTransaction(
-      this.contracts.profile!,
+      this.hubContracts.profile!,
       'createProfile',
       [this.adminSigner.address, [], nodeName, nodeId, 0],
       this.signer,
@@ -434,7 +434,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
 
     for (const log of receipt.logs) {
       try {
-        const parsed = this.contracts.identity!.interface.parseLog({
+        const parsed = this.hubContracts.identity!.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
@@ -448,7 +448,7 @@ export class IdentityMethods extends EVMChainAdapterBase {
 
     for (const log of receipt.logs) {
       try {
-        const parsed = this.contracts.profile!.interface.parseLog({
+        const parsed = this.hubContracts.profile!.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });

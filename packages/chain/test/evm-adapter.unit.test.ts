@@ -663,7 +663,7 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     await expect(a.getIdentityId()).resolves.toBe(7n);
     expect(readContract.calls).toHaveLength(1);
 
-    (a as any).contracts.identityStorage = { stale: true };
+    (a as any).adapterContracts.identityStorage = { stale: true };
     const init = recorder(async () => {
       (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts });
     });
@@ -685,7 +685,7 @@ describe('EVMChainAdapter getIdentityIdForAddress cache', () => {
     await expect(a.getIdentityId()).resolves.toBe(7n);
     expect(readContract.calls).toHaveLength(1);
 
-    (a as any).contracts.identityStorage = { stale: true };
+    (a as any).adapterContracts.identityStorage = { stale: true };
     (a as any).invalidateAllBoundContracts();
 
     expect((a as any).contracts.identityStorage).toBeUndefined();
@@ -2321,8 +2321,8 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
 
   it('invalidateRandomSamplingPair drops both the cache AND the side-channel contract handles (Codex N15)', () => {
     const a = new EVMChainAdapter(minimalConfig());
-    (a as any).contracts.randomSampling = { dummy: 'rs' };
-    (a as any).contracts.randomSamplingStorage = { dummy: 'rss' };
+    (a as any).adapterContracts.randomSampling = { dummy: 'rs' };
+    (a as any).adapterContracts.randomSamplingStorage = { dummy: 'rss' };
     (a as any).randomSamplingPairCache.cached = { rs: 'x', rss: 'y' };
     (a as any).randomSamplingPairCache.resolvedAt = Date.now();
 

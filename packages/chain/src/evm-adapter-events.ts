@@ -52,10 +52,17 @@ export class EventsMethods extends EVMChainAdapterBase {
     const { signal } = filter;
     signal?.throwIfAborted();
     const plan = selectEvmEventPlan(filter.eventTypes);
-    const contracts = await this.resolveHubContractBindings(plan.bindings, { signal });
+    const bindings = await this.resolveHubContractBindingSnapshot(plan.bindings, { signal });
     signal?.throwIfAborted();
     if (plan.bindings.length > 0) await this.ensureHubRotationListenerStarted();
     signal?.throwIfAborted();
+
+    const requireCurrentBindings = () => {
+      if (!this.isHubContractBindingSnapshotCurrent(bindings)) {
+        throw new Error('Hub contract bindings changed during event scan');
+      }
+    };
+    requireCurrentBindings();
 
     const scan: EvmEventScan = {
       signal,
@@ -64,10 +71,14 @@ export class EventsMethods extends EVMChainAdapterBase {
     };
     for (const descriptor of plan.descriptors) {
       signal?.throwIfAborted();
-      const contract = contracts[descriptor.binding];
+      requireCurrentBindings();
+      const contract = bindings.contracts[descriptor.binding];
       // Unsupported names and absent optional deployments yield nothing.
       if (!contract) continue;
       yield* descriptor.scan(contract, scan);
+      signal?.throwIfAborted();
+      requireCurrentBindings();
     }
+    requireCurrentBindings();
   }
 }

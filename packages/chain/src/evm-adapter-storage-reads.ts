@@ -50,7 +50,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   // =====================================================================
 
   requireKCStorage(): Contract {
-    const kas = this.contracts.knowledgeAssetStorage;
+    const kas = this.hubContracts.knowledgeAssetStorage;
     if (!kas) {
       throw new Error(
         'DKGKnowledgeAssets not deployed in this Hub. ' +
@@ -122,7 +122,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     blockNumber: number;
   } | null> {
     await this.init();
-    const kas = this.contracts.knowledgeAssetStorage;
+    const kas = this.hubContracts.knowledgeAssetStorage;
     if (!kas) return null;
     const readOne = async (provider: JsonRpcProvider) => {
       // r15 (3814317260) / r17 (3814893080) — every endpoint must prove it is THIS chain before its

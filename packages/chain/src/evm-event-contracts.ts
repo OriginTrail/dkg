@@ -2,7 +2,6 @@
 
 import { ethers, type Contract } from 'ethers';
 import type { ChainEvent } from './chain-adapter.js';
-import type { ContractCache } from './evm-adapter-types.js';
 import type { EvmHubContractKey } from './evm-hub-contract-bindings.js';
 
 /**
@@ -312,8 +311,6 @@ export const EVM_EVENT_DESCRIPTORS = [
 
 export type EvmEventDescriptor = (typeof EVM_EVENT_DESCRIPTORS)[number];
 export type EvmEventContractKey = EvmEventDescriptor['binding'];
-export type EvmEventCapabilityKey = EvmHubContractKey;
-export type EvmEventContracts = Readonly<Pick<ContractCache, EvmEventCapabilityKey>>;
 
 const DESCRIPTOR_BY_ALIAS: ReadonlyMap<string, EvmEventDescriptor> = new Map(
   EVM_EVENT_DESCRIPTORS.flatMap(descriptor => descriptor.aliases.map(alias => [alias, descriptor] as const)),
@@ -326,7 +323,7 @@ export function evmEventDescriptorFor(eventType: string): EvmEventDescriptor | u
 
 export interface EvmEventPlan {
   readonly descriptors: readonly EvmEventDescriptor[];
-  readonly bindings: readonly EvmEventCapabilityKey[];
+  readonly bindings: readonly EvmEventContractKey[];
 }
 
 /** One canonical descriptor and binding plan for requested event aliases. */
@@ -337,16 +334,4 @@ export function selectEvmEventPlan(eventTypes: readonly string[]): EvmEventPlan 
   ));
   const bindings = Object.freeze([...new Set(descriptors.map(descriptor => descriptor.binding))]);
   return Object.freeze({ descriptors, bindings });
-}
-
-/** Unique descriptors selected by requested aliases, in declaration order. */
-export function selectEvmEventDescriptors(
-  eventTypes: readonly string[],
-): readonly EvmEventDescriptor[] {
-  return selectEvmEventPlan(eventTypes).descriptors;
-}
-
-/** The Hub bindings a scan for these event types must resolve, in declaration order. */
-export function eventContractKeysFor(eventTypes: readonly string[]): readonly EvmEventCapabilityKey[] {
-  return selectEvmEventPlan(eventTypes).bindings;
 }

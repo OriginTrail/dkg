@@ -36,7 +36,7 @@ declare const ethers: any;
 
 // Shell class that hosts the archived methods. The shape mirrors the
 // `EVMChainAdapter` class in `src/evm-adapter.ts` closely enough that
-// `this.contracts.knowledgeAssets`, `this.nextSigner()`, etc. type-check
+// `this.hubContracts.knowledgeAssets`, `this.nextSigner()`, etc. type-check
 // under `// @ts-nocheck`. No instance of this class is ever constructed
 // at runtime — the file exists only as a diff reference.
 class EVMChainAdapter_V8_V9_Archive {
@@ -60,11 +60,11 @@ class EVMChainAdapter_V8_V9_Archive {
     this.requireV9();
 
     const txSigner = this.nextSigner();
-    const ka = this.contracts.knowledgeAssets!.connect(txSigner) as Contract;
-    const kaAddress = await this.contracts.knowledgeAssets!.getAddress();
+    const ka = this.hubContracts.knowledgeAssets!.connect(txSigner) as Contract;
+    const kaAddress = await this.hubContracts.knowledgeAssets!.getAddress();
 
-    if (this.contracts.token && params.tokenAmount > 0n) {
-      const token = this.contracts.token.connect(txSigner) as Contract;
+    if (this.hubContracts.token && params.tokenAmount > 0n) {
+      const token = this.hubContracts.token.connect(txSigner) as Contract;
       const currentAllowance: bigint = await token.allowance(txSigner.address, kaAddress);
       if (currentAllowance < params.tokenAmount) {
         const approveTx = await token.approve(kaAddress, ethers.MaxUint256);
@@ -100,7 +100,7 @@ class EVMChainAdapter_V8_V9_Archive {
 
     for (const log of receipt.logs) {
       try {
-        const parsed = this.contracts.knowledgeAssetsStorage!.interface.parseLog({
+        const parsed = this.hubContracts.knowledgeAssetsStorage!.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
@@ -148,7 +148,7 @@ class EVMChainAdapter_V8_V9_Archive {
 
     // The contract requires the original publisher to call update.
     // Query the on-chain batch publisher and select the matching signer.
-    const storage = this.contracts.knowledgeAssetsStorage;
+    const storage = this.hubContracts.knowledgeAssetsStorage;
     if (storage) {
       try {
         const onChainPublisher: string = await storage.getBatchPublisher(params.batchId);
@@ -170,7 +170,7 @@ class EVMChainAdapter_V8_V9_Archive {
     }
     if (!signer) signer = this.nextSigner();
 
-    const ka = this.contracts.knowledgeAssets!.connect(signer) as Contract;
+    const ka = this.hubContracts.knowledgeAssets!.connect(signer) as Contract;
 
     const tx = await ka.updateKnowledgeAssets(
       params.batchId,
@@ -197,13 +197,13 @@ class EVMChainAdapter_V8_V9_Archive {
     await this.init();
     this.requireV9();
 
-    const ka = this.contracts.knowledgeAssets!;
+    const ka = this.hubContracts.knowledgeAssets!;
 
-    if (this.contracts.token && params.tokenAmount > 0n) {
+    if (this.hubContracts.token && params.tokenAmount > 0n) {
       const kaAddress = await ka.getAddress();
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, kaAddress);
+      const currentAllowance: bigint = await this.hubContracts.token.allowance(this.signer.address, kaAddress);
       if (currentAllowance < params.tokenAmount) {
-        const approveTx = await this.contracts.token.approve(kaAddress, ethers.MaxUint256);
+        const approveTx = await this.hubContracts.token.approve(kaAddress, ethers.MaxUint256);
         await approveTx.wait();
       }
     }
@@ -233,7 +233,7 @@ class EVMChainAdapter_V8_V9_Archive {
     await this.init();
     this.requireV9();
 
-    const tx = await this.contracts.knowledgeAssets!.transferNamespace(newOwner);
+    const tx = await this.hubContracts.knowledgeAssets!.transferNamespace(newOwner);
     const receipt = await tx.wait();
 
     return {
@@ -300,14 +300,14 @@ class EVMChainAdapter_V8_V9_Archive {
     // Approving the NFT here would still leave the inner `stakingV10.stake`
     // call short on allowance and revert. Mirror the pattern used in
     // `ensureProfile` / `scripts/devnet.sh`.
-    if (this.contracts.token && amount > 0n) {
-      const stakingV10Addr: string = await this.contracts.hub.getContractAddress('StakingV10');
+    if (this.hubContracts.token && amount > 0n) {
+      const stakingV10Addr: string = await this.hubContracts.hub.getContractAddress('StakingV10');
       if (stakingV10Addr === ethers.ZeroAddress) {
         throw new Error('StakingV10 not registered in Hub — V10 staking unavailable');
       }
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, stakingV10Addr);
+      const currentAllowance: bigint = await this.hubContracts.token.allowance(this.signer.address, stakingV10Addr);
       if (currentAllowance < amount) {
-        await (await this.contracts.token.approve(stakingV10Addr, ethers.MaxUint256)).wait();
+        await (await this.hubContracts.token.approve(stakingV10Addr, ethers.MaxUint256)).wait();
       }
     }
 
@@ -342,10 +342,10 @@ class EVMChainAdapter_V8_V9_Archive {
     const pca = this.contracts.publishingConvictionAccount;
     const pcaAddress = await pca.getAddress();
 
-    if (this.contracts.token && amount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, pcaAddress);
+    if (this.hubContracts.token && amount > 0n) {
+      const currentAllowance: bigint = await this.hubContracts.token.allowance(this.signer.address, pcaAddress);
       if (currentAllowance < amount) {
-        const approveTx = await this.contracts.token.approve(pcaAddress, ethers.MaxUint256);
+        const approveTx = await this.hubContracts.token.approve(pcaAddress, ethers.MaxUint256);
         await approveTx.wait();
       }
     }
@@ -386,10 +386,10 @@ class EVMChainAdapter_V8_V9_Archive {
     const pca = this.contracts.publishingConvictionAccount;
     const pcaAddress = await pca.getAddress();
 
-    if (this.contracts.token && amount > 0n) {
-      const currentAllowance: bigint = await this.contracts.token.allowance(this.signer.address, pcaAddress);
+    if (this.hubContracts.token && amount > 0n) {
+      const currentAllowance: bigint = await this.hubContracts.token.allowance(this.signer.address, pcaAddress);
       if (currentAllowance < amount) {
-        const approveTx = await this.contracts.token.approve(pcaAddress, ethers.MaxUint256);
+        const approveTx = await this.hubContracts.token.approve(pcaAddress, ethers.MaxUint256);
         await approveTx.wait();
       }
     }
@@ -500,15 +500,15 @@ class EVMChainAdapter_V8_V9_Archive {
 
   async publishKnowledgeAssetsPermanent(params: PermanentPublishParams): Promise<OnChainPublishResult> {
     await this.init();
-    if (!this.contracts.knowledgeAssets) throw new Error('KnowledgeAssets contract not deployed.');
+    if (!this.hubContracts.knowledgeAssets) throw new Error('KnowledgeAssets contract not deployed.');
 
     const publishSigner = this.nextSigner();
-    const kaAddr = await this.contracts.knowledgeAssets.getAddress();
+    const kaAddr = await this.hubContracts.knowledgeAssets.getAddress();
 
-    if (this.contracts.token && params.tokenAmount > 0n) {
-      const allowance: bigint = await this.contracts.token.allowance(publishSigner.address, kaAddr);
+    if (this.hubContracts.token && params.tokenAmount > 0n) {
+      const allowance: bigint = await this.hubContracts.token.allowance(publishSigner.address, kaAddr);
       if (allowance < params.tokenAmount) {
-        await (await (this.contracts.token.connect(publishSigner) as Contract).approve(kaAddr, ethers.MaxUint256)).wait();
+        await (await (this.hubContracts.token.connect(publishSigner) as Contract).approve(kaAddr, ethers.MaxUint256)).wait();
       }
     }
 
@@ -516,7 +516,7 @@ class EVMChainAdapter_V8_V9_Archive {
     const rValues = params.receiverSignatures.map((s) => s.r);
     const vsValues = params.receiverSignatures.map((s) => s.vs);
 
-    const ka = this.contracts.knowledgeAssets.connect(publishSigner) as Contract;
+    const ka = this.hubContracts.knowledgeAssets.connect(publishSigner) as Contract;
     const tx = await ka.batchMintKnowledgeAssetsPermanent(
       params.kaCount,
       params.publisherNodeIdentityId,
@@ -531,7 +531,7 @@ class EVMChainAdapter_V8_V9_Archive {
     );
 
     const receipt = await tx.wait();
-    const storageIface = this.contracts.knowledgeAssetsStorage!.interface;
+    const storageIface = this.hubContracts.knowledgeAssetsStorage!.interface;
 
     let batchId = 0n;
     let startKAId: bigint | undefined;

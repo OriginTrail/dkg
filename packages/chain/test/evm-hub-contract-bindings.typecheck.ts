@@ -21,12 +21,11 @@ bindings.contracts.identityStorage = handle;
 
 class Probe extends EVMChainAdapter {
   seed(bindings: ContractCache): void {
-    // Whole-cache replacement remains a contained legacy transition.
+    // Whole-cache replacement remains a contained compatibility transition.
     this.contracts = bindings;
-    // Legacy slot writes remain source-compatible and become owner transitions.
+    // @ts-expect-error compatibility snapshots are read-only
     this.contracts.chronos = handle;
-    // Adapter-owned lazy slots remain writable.
-    this.contracts.randomSampling = handle;
+    this.adapterContracts.randomSampling = handle;
     this.initialized = true;
     this.initialized = false;
   }

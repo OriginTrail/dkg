@@ -252,7 +252,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
     await this.init();
-    const registry = this.contracts.contextGraphNameRegistry;
+    const registry = this.hubContracts.contextGraphNameRegistry;
     const name = params.name ?? params.metadata?.['name'];
     if (!registry || !name) {
       throw new Error(
@@ -302,7 +302,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async revealContextGraphMetadata(contextGraphId: string, name: string, description: string): Promise<TxResult> {
     await this.init();
-    const registry = this.contracts.contextGraphNameRegistry;
+    const registry = this.hubContracts.contextGraphNameRegistry;
     if (!registry) throw new Error('revealContextGraphMetadata: ContextGraphNameRegistry not available');
     const receipt = await this.sendContractTransaction(
       registry,
@@ -317,7 +317,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
     await this.init();
-    const registry = this.contracts.contextGraphNameRegistry;
+    const registry = this.hubContracts.contextGraphNameRegistry;
     if (!registry) return false;
     const registryAddress = (await registry.getAddress()).toLowerCase();
     return (await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)) != null;
@@ -328,7 +328,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     options?: ContextGraphChainScanOptions,
   ): Promise<ContextGraphOnChain[]> {
     await this.init();
-    const registry = this.contracts.contextGraphNameRegistry;
+    const registry = this.hubContracts.contextGraphNameRegistry;
     if (!registry) return [];
     const registryAddress = (await registry.getAddress()).toLowerCase();
     const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
@@ -345,7 +345,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
     }
     await this.init();
-    const registry = this.contracts.contextGraphNameRegistry;
+    const registry = this.hubContracts.contextGraphNameRegistry;
     if (!registry) return;
     const registryAddress = (await registry.getAddress()).toLowerCase();
     if (scanPlan.mode === 'repair') {
@@ -685,7 +685,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     await this.init();
-    if (!this.contracts.contextGraphs || !this.contracts.contextGraphStorage) {
+    if (!this.hubContracts.contextGraphs || !this.hubContracts.contextGraphStorage) {
       throw new Error('ContextGraphs contract not deployed. Deploy ContextGraphs and ContextGraphStorage first.');
     }
 
@@ -696,7 +696,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
     }
 
-    const contextGraphs = this.contracts.contextGraphs;
+    const contextGraphs = this.hubContracts.contextGraphs;
     const createArgs = [
       params.participantAgents ?? [],
       params.metadataBatchId ?? 0n,
@@ -745,7 +745,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         // publish. `readContract` fails over on transport errors (429/5xx/timeout)
         // and rethrows a decoded revert unchanged; the catch → 0n now fires only
         // when ALL endpoints fail or the deposit is genuinely dormant.
-        const ps = this.contracts.parametersStorage as Contract | undefined;
+        const ps = this.hubContracts.parametersStorage as Contract | undefined;
         let deposit = 0n;
         try {
           deposit = ps
@@ -773,7 +773,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     let contextGraphId: bigint | undefined;
     for (const log of receipt.logs) {
       try {
-        const parsed = this.contracts.contextGraphStorage!.interface.parseLog({
+        const parsed = this.hubContracts.contextGraphStorage!.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
@@ -805,7 +805,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async addContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
     await this.init();
-    const contextGraphs = this.contracts.contextGraphs;
+    const contextGraphs = this.hubContracts.contextGraphs;
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
@@ -826,7 +826,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async removeContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
     await this.init();
-    const contextGraphs = this.contracts.contextGraphs;
+    const contextGraphs = this.hubContracts.contextGraphs;
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
@@ -847,12 +847,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async verify(params: VerifyParams): Promise<TxResult> {
     await this.init();
-    if (!this.contracts.contextGraphs) {
+    if (!this.hubContracts.contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
 
     const receipt = await this.sendContractTransaction(
-      this.contracts.contextGraphs,
+      this.hubContracts.contextGraphs,
       'registerKnowledgeAsset',
       [params.contextGraphId, params.batchId],
       this.signer,
@@ -869,10 +869,10 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async publishToContextGraph(params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
     await this.init();
-    if (!this.contracts.knowledgeAssets) {
+    if (!this.hubContracts.knowledgeAssets) {
       throw new Error('KnowledgeAssets contract not deployed.');
     }
-    if (!this.contracts.knowledgeAssetsStorage) {
+    if (!this.hubContracts.knowledgeAssetsStorage) {
       throw new Error('KnowledgeAssetsStorage contract not deployed (required for log parsing).');
     }
 
@@ -968,7 +968,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // Unreachable below (kept for type-completeness until the mirror is removed);
     // the unsupported-mirror guard above throws before any on-chain side effect.
     const v10ChainId = await this.getEvmChainId();
-    const v10KavAddress = await this.contracts.knowledgeAssetsLifecycle!.getAddress();
+    const v10KavAddress = await this.hubContracts.knowledgeAssetsLifecycle!.getAddress();
     const authorTypedData = buildAuthorAttestationTypedData({
       chainId: v10ChainId,
       kav10Address: v10KavAddress,

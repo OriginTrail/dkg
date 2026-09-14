@@ -23,8 +23,8 @@ class AvailabilityAdapter extends EVMChainAdapter {
     if (this.bindingFailure !== undefined) throw this.bindingFailure;
     const rs = new Contract('0x0000000000000000000000000000000000000002', []);
     const rss = new Contract('0x0000000000000000000000000000000000000003', []);
-    this.contracts.randomSampling = rs;
-    this.contracts.randomSamplingStorage = rss;
+    this.adapterContracts.randomSampling = rs;
+    this.adapterContracts.randomSamplingStorage = rss;
     return { rs, rss };
   }
   override async isShardingTableMember(identityId: bigint): Promise<boolean> {

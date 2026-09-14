@@ -89,11 +89,11 @@ export class PublishMethods extends EVMChainAdapterBase {
     publicByteSize: bigint,
     epochs: number,
   ): Promise<bigint> {
-    if (!this.contracts.askStorage) {
+    if (!this.hubContracts.askStorage) {
       throw new Error('AskStorage not available');
     }
     const ask = await this.readContract(
-      this.contracts.askStorage,
+      this.hubContracts.askStorage,
       'askStorage.getStakeWeightedAverageAsk',
       'getStakeWeightedAverageAsk',
     );
@@ -118,7 +118,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       explicitPublishEpochs: request.explicitPublishEpochs,
       defaultPublishEpochs: request.defaultPublishEpochs,
       quote,
-      conviction: this.contracts.dkgPublishingConvictionNFT
+      conviction: this.hubContracts.dkgPublishingConvictionNFT
         ? this.publisherConvictionPlanReader()
         : undefined,
     });
@@ -230,7 +230,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     this.requireV9();
 
     const receipt = await this.sendContractTransaction(
-      this.contracts.knowledgeAssets!,
+      this.hubContracts.knowledgeAssets!,
       'reserveUALRange',
       [count],
       this.signer,
@@ -239,7 +239,7 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     for (const log of receipt.logs) {
       try {
-        const parsed = this.contracts.knowledgeAssetsStorage!.interface.parseLog({
+        const parsed = this.hubContracts.knowledgeAssetsStorage!.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
@@ -263,16 +263,16 @@ export class PublishMethods extends EVMChainAdapterBase {
     await this.init();
     this.requireV9();
 
-    const ka = this.contracts.knowledgeAssets!;
+    const ka = this.hubContracts.knowledgeAssets!;
     const kaAddress = await ka.getAddress();
 
-    if (this.contracts.token && params.tokenAmount > 0n) {
+    if (this.hubContracts.token && params.tokenAmount > 0n) {
       const currentAllowance: bigint = await this.readContract(
-        this.contracts.token, 'token.allowance', 'allowance', this.signer.address, kaAddress,
+        this.hubContracts.token, 'token.allowance', 'allowance', this.signer.address, kaAddress,
       );
       if (currentAllowance < params.tokenAmount) {
         await this.sendContractTransaction(
-          this.contracts.token,
+          this.hubContracts.token,
           'approve',
           [kaAddress, ethers.MaxUint256],
           this.signer,
@@ -310,7 +310,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     let batchId = 0n;
     for (const log of receipt.logs) {
       try {
-        const parsed = this.contracts.knowledgeAssetsStorage!.interface.parseLog({
+        const parsed = this.hubContracts.knowledgeAssetsStorage!.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
@@ -341,7 +341,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     options: ChainReadOptions = {},
   ): Promise<KAUpdateVerification> {
     await this.init();
-    if (!this.contracts.knowledgeAssetsStorage && !this.contracts.knowledgeAssetStorage) {
+    if (!this.hubContracts.knowledgeAssetsStorage && !this.hubContracts.knowledgeAssetStorage) {
       return { verified: false };
     }
 
@@ -354,8 +354,8 @@ export class PublishMethods extends EVMChainAdapterBase {
       let onChainMerkleRoot: Uint8Array | undefined;
 
       // V9: KnowledgeBatchUpdated on KnowledgeAssetsStorage
-      if (!onChainMerkleRoot && this.contracts.knowledgeAssetsStorage) {
-        const storage = this.contracts.knowledgeAssetsStorage;
+      if (!onChainMerkleRoot && this.hubContracts.knowledgeAssetsStorage) {
+        const storage = this.hubContracts.knowledgeAssetsStorage;
         const storageAddress = (await storage.getAddress()).toLowerCase();
         for (const log of receipt.logs) {
           if (log.address.toLowerCase() !== storageAddress) continue;
@@ -370,8 +370,8 @@ export class PublishMethods extends EVMChainAdapterBase {
       }
 
       // V10: KnowledgeAssetUpdated on DKGKnowledgeAssets
-      if (!onChainMerkleRoot && this.contracts.knowledgeAssetStorage) {
-        const kas = this.contracts.knowledgeAssetStorage;
+      if (!onChainMerkleRoot && this.hubContracts.knowledgeAssetStorage) {
+        const kas = this.hubContracts.knowledgeAssetStorage;
         const kcsAddress = (await kas.getAddress()).toLowerCase();
         for (const log of receipt.logs) {
           if (log.address.toLowerCase() !== kcsAddress) continue;
@@ -399,10 +399,10 @@ export class PublishMethods extends EVMChainAdapterBase {
       // contains multiple updates for the same KA.
       let onChainPublisher: string | undefined;
       let merkleRootCount: bigint | undefined;
-      if (this.contracts.knowledgeAssetStorage) {
+      if (this.hubContracts.knowledgeAssetStorage) {
         try {
           const roots = await this.readContractWithOptions(
-            this.contracts.knowledgeAssetStorage,
+            this.hubContracts.knowledgeAssetStorage,
             'kas.getMerkleRootsAtUpdateBlock',
             'getMerkleRoots',
             [batchId, { blockTag: receipt.blockNumber }],
@@ -423,7 +423,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           let preBlockCount = 0;
           if (receipt.blockNumber > 0) {
             const before = await this.readContractWithOptions(
-              this.contracts.knowledgeAssetStorage,
+              this.hubContracts.knowledgeAssetStorage,
               'kas.getMerkleRootsBeforeUpdateBlock',
               'getMerkleRoots',
               [batchId, { blockTag: receipt.blockNumber - 1 }],
@@ -470,13 +470,13 @@ export class PublishMethods extends EVMChainAdapterBase {
         }
       }
       if (
-        !this.contracts.knowledgeAssetStorage
+        !this.hubContracts.knowledgeAssetStorage
         && (!onChainPublisher || onChainPublisher === ethers.ZeroAddress)
-        && this.contracts.knowledgeAssetsStorage
+        && this.hubContracts.knowledgeAssetsStorage
       ) {
         try {
           onChainPublisher = await this.readContract(
-            this.contracts.knowledgeAssetsStorage, 'kasV9.getBatchPublisher',
+            this.hubContracts.knowledgeAssetsStorage, 'kasV9.getBatchPublisher',
             'getBatchPublisher', batchId,
           );
         } catch { /* not found in V9 storage */ }
@@ -514,9 +514,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     endKAId: bigint,
   ): Promise<boolean> {
     await this.init();
-    if (!this.contracts.knowledgeAssetsStorage) return false;
+    if (!this.hubContracts.knowledgeAssetsStorage) return false;
 
-    const storage = this.contracts.knowledgeAssetsStorage;
+    const storage = this.hubContracts.knowledgeAssetsStorage;
     const count = await this.readContract(
       storage, 'kasV9.getPublisherRangesCount', 'getPublisherRangesCount', publisherAddress,
     );
@@ -654,7 +654,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           if (!block || !block.hash) return null;
           const accountNonce = await provider.getTransactionCount(params.address, block.number);
           let kaMinted: boolean | null = null;
-          const storage = this.contracts.knowledgeAssetStorage;
+          const storage = this.hubContracts.knowledgeAssetStorage;
           if (storage) {
             try {
               const owner: string = await this.rebindContract(storage as Contract, provider)
@@ -717,12 +717,12 @@ export class PublishMethods extends EVMChainAdapterBase {
     });
     if (!receipt || receipt.status !== 1) return { receipt, publish: null };
 
-    const v10 = this.contracts.knowledgeAssetStorage
+    const v10 = this.hubContracts.knowledgeAssetStorage
       ? await this.parseV10PublishReceipt(receipt, options)
       : null;
     if (v10) return { receipt, publish: v10 };
 
-    const v9 = this.contracts.knowledgeAssetsStorage
+    const v9 = this.hubContracts.knowledgeAssetsStorage
       ? await this.parseV9PublishReceipt(receipt, options)
       : null;
     return { receipt, publish: v9 };
@@ -793,7 +793,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
     options: ChainReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
-    const kas = this.contracts.knowledgeAssetStorage;
+    const kas = this.hubContracts.knowledgeAssetStorage;
     if (!kas) return null;
 
     let kaId = 0n;
@@ -860,7 +860,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     receipt: NonNullable<Awaited<ReturnType<typeof this.provider.getTransactionReceipt>>>,
     options: ChainReadOptions = {},
   ): Promise<OnChainPublishResult | null> {
-    const storage = this.contracts.knowledgeAssetsStorage;
+    const storage = this.hubContracts.knowledgeAssetsStorage;
     if (!storage) return null;
 
     let batchId = 0n;
@@ -940,7 +940,7 @@ export class PublishMethods extends EVMChainAdapterBase {
    * on-chain submission see the same `newTokenAmount`.
    */
   async resolveCurrentTokenAmount(kaId: bigint): Promise<bigint> {
-    const kas = this.contracts.knowledgeAssetStorage;
+    const kas = this.hubContracts.knowledgeAssetStorage;
     if (!kas) return 0n;
     try {
       return BigInt(await this.readContract(
@@ -958,7 +958,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     currentTokenAmount: bigint;
     userProvidedNewTokenAmount?: bigint;
   }): Promise<bigint> {
-    const kas = this.contracts.knowledgeAssetStorage;
+    const kas = this.hubContracts.knowledgeAssetStorage;
     let currentByteSize = 0n;
     let endEpoch = 0n;
     if (kas) {
@@ -975,15 +975,15 @@ export class PublishMethods extends EVMChainAdapterBase {
 
     let currentEpoch = 0n;
     const needsGrowthSizing = params.newByteSize > currentByteSize;
-    if (needsGrowthSizing && !this.contracts.chronos) {
+    if (needsGrowthSizing && !this.hubContracts.chronos) {
       throw new Error(
         'Chronos contract binding required for byte-size growth update tokenAmount sizing',
       );
     }
-    if (this.contracts.chronos) {
+    if (this.hubContracts.chronos) {
       try {
         currentEpoch = BigInt(await this.readContract(
-          this.contracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
+          this.hubContracts.chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',
         ));
       } catch (err) {
         throw new Error(
@@ -994,10 +994,10 @@ export class PublishMethods extends EVMChainAdapterBase {
     const remainingEpochs = endEpoch > currentEpoch ? endEpoch - currentEpoch : 0n;
 
     let growthCost = 0n;
-    if (params.newByteSize > currentByteSize && this.contracts.askStorage) {
+    if (params.newByteSize > currentByteSize && this.hubContracts.askStorage) {
       try {
         const ask = BigInt(await this.readContract(
-          this.contracts.askStorage, 'askStorage.getStakeWeightedAverageAsk', 'getStakeWeightedAverageAsk',
+          this.hubContracts.askStorage, 'askStorage.getStakeWeightedAverageAsk', 'getStakeWeightedAverageAsk',
         ));
         const byteSizeGrowth = params.newByteSize - currentByteSize;
         if (remainingEpochs > 0n) {
@@ -1044,12 +1044,12 @@ export class PublishMethods extends EVMChainAdapterBase {
     newCatalogLeafCount?: number;
   }): Promise<Uint8Array> {
     await this.init();
-    if (!this.contracts.knowledgeAssetsLifecycle) {
+    if (!this.hubContracts.knowledgeAssetsLifecycle) {
       throw new Error('KnowledgeAssetsLifecycle contract not deployed');
     }
 
-    const kas = this.contracts.knowledgeAssetStorage;
-    const kav10Address = await this.contracts.knowledgeAssetsLifecycle.getAddress();
+    const kas = this.hubContracts.knowledgeAssetStorage;
+    const kav10Address = await this.hubContracts.knowledgeAssetsLifecycle.getAddress();
     const evmChainId = await this.getEvmChainId();
 
     const currentTokenAmount = await this.resolveCurrentTokenAmount(params.kaId);
@@ -1067,11 +1067,11 @@ export class PublishMethods extends EVMChainAdapterBase {
     });
 
     let contextGraphId = 0n;
-    if (this.contracts.contextGraphStorage) {
+    if (this.hubContracts.contextGraphStorage) {
       try {
         contextGraphId = BigInt(
           await this.readContract(
-            this.contracts.contextGraphStorage, 'cgStorage.kaToContextGraph',
+            this.hubContracts.contextGraphStorage, 'cgStorage.kaToContextGraph',
             'kaToContextGraph', params.kaId,
           ),
         );
@@ -1136,14 +1136,14 @@ export class PublishMethods extends EVMChainAdapterBase {
   }> {
     await this.init();
 
-    const kas = this.contracts.knowledgeAssetStorage;
+    const kas = this.hubContracts.knowledgeAssetStorage;
 
     let contextGraphId = 0n;
-    if (this.contracts.contextGraphStorage) {
+    if (this.hubContracts.contextGraphStorage) {
       try {
         contextGraphId = BigInt(
           await this.readContract(
-            this.contracts.contextGraphStorage, 'cgStorage.kaToContextGraph',
+            this.hubContracts.contextGraphStorage, 'cgStorage.kaToContextGraph',
             'kaToContextGraph', params.kaId,
           ),
         );
@@ -1180,14 +1180,14 @@ export class PublishMethods extends EVMChainAdapterBase {
   async updateKnowledgeCollectionV10(params: V10UpdateKAParams): Promise<TxResult> {
     await this.init();
 
-    if (!this.contracts.knowledgeAssetsLifecycle) {
+    if (!this.hubContracts.knowledgeAssetsLifecycle) {
       throw new Error('KnowledgeAssetsLifecycle contract not deployed — cannot update via V10 path.');
     }
 
     let signer: Wallet | undefined;
 
     // Look up the on-chain publisher to select the correct signer.
-    const kas = this.contracts.knowledgeAssetStorage;
+    const kas = this.hubContracts.knowledgeAssetStorage;
     if (kas) {
       try {
         const onChainPublisher: string = await this.readContract(
@@ -1210,9 +1210,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
     if (!signer) signer = this.nextSigner();
 
-    const ka = this.contracts.knowledgeAssetsLifecycle.connect(signer) as Contract;
+    const ka = this.hubContracts.knowledgeAssetsLifecycle.connect(signer) as Contract;
 
-    const kav10Address = await this.contracts.knowledgeAssetsLifecycle.getAddress();
+    const kav10Address = await this.hubContracts.knowledgeAssetsLifecycle.getAddress();
     const evmChainId = await this.getEvmChainId();
 
     const identityId = params.publisherNodeIdentityId ?? await this.getIdentityId();
@@ -1250,7 +1250,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     });
 
     // Look up the contextGraphId for this KC
-    const contextGraphStorage = this.contracts.contextGraphStorage;
+    const contextGraphStorage = this.hubContracts.contextGraphStorage;
     let contextGraphId = 0n;
     if (contextGraphStorage) {
       try {
