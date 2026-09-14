@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +8,7 @@ import { DkgHomeFiles, type DkgConfig } from '../src/config.js';
 import { DkgConfigStore } from '../src/daemon-config-store.js';
 import {
   type LocalAgentUiAttachDeps,
+  connectLocalAgentIntegrationFromUi,
   getLocalAgentIntegration,
   updateLocalAgentIntegration,
 } from '../src/daemon/local-agents.js';
@@ -21,10 +23,15 @@ const resolveHermesProfileMock = vi.hoisted(() => vi.fn<NonNullable<LocalAgentUi
   hermesHome: 'C:\\Hermes\\default',
   memoryMode: 'provider',
 })));
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, writeFile: vi.fn(actual.writeFile) };
+});
 vi.mock('@origintrail-official/dkg-adapter-hermes', () => ({
   disconnectHermesProfile: disconnectHermesProfileMock,
   resolveHermesProfile: resolveHermesProfileMock,
 }));
+const fs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 
 function makeConfig(overrides: Partial<DkgConfig> = {}): DkgConfig {
   return {
@@ -70,6 +77,7 @@ function makeJsonResponse() {
 }
 
 afterEach(() => {
+  vi.mocked(writeFile).mockImplementation(fs.writeFile);
   vi.unstubAllGlobals();
   disconnectHermesProfileMock.mockReset();
   resolveHermesProfileMock.mockReset();
@@ -81,6 +89,99 @@ afterEach(() => {
 });
 
 describe('local-agent configuration transactions', () => {
+  it('keeps connecting durable and permits a retry after deferred Hermes publication fails', async () => {
+    const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+    const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), makeConfig());
+    let releaseFirstSetup!: () => void;
+    const firstSetupBlocked = new Promise<void>(resolve => { releaseFirstSetup = resolve; });
+    let setupCalls = 0;
+    const runHermesSetup = vi.fn(async () => {
+      setupCalls += 1;
+      if (setupCalls === 1) await firstSetupBlocked;
+      return {
+        ok: true,
+        status: 'configured' as const,
+        profile: {
+          hermesHome: 'C:\\Hermes\\default',
+          configPath: '',
+          stateDir: 'unused-test-state',
+          memoryMode: 'provider',
+        },
+        daemonStarted: false,
+        fundedWallets: [],
+        transport: {
+          kind: 'hermes-openai' as const,
+          gatewayUrl: 'http://127.0.0.1:8642',
+        },
+        warnings: [],
+        errors: [],
+      };
+    });
+    const attachJobs: Promise<void>[] = [];
+    const connectFromUi: typeof connectLocalAgentIntegrationFromUi = (candidate, body, token) => (
+      connectLocalAgentIntegrationFromUi(candidate, body, token, {
+        probeHermesHealth: async () => ({ ok: false, error: 'offline' }),
+        runHermesSetup,
+        onAttachScheduled: (_id, job) => { attachJobs.push(job); },
+      })
+    );
+
+    const connect = async () => {
+      const req = makeJsonRequest('POST', '/api/local-agent-integrations/connect', {
+        id: 'hermes',
+        metadata: { source: 'node-ui' },
+      });
+      const res = makeJsonResponse();
+      await handleLocalAgentsRoutes({
+        req,
+        res,
+        configStore,
+        path: '/api/local-agent-integrations/connect',
+        bridgeAuthToken: 'bridge-token',
+      } as any, { connectFromUi });
+      return res;
+    };
+
+    try {
+      const first = await connect();
+      expect(first.statusCode).toBe(200);
+      expect(configStore.current.localAgentIntegrations?.hermes?.runtime)
+        .toMatchObject({ status: 'connecting', ready: false });
+      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8'))
+        .localAgentIntegrations.hermes.runtime)
+        .toMatchObject({ status: 'connecting', ready: false });
+      expect(attachJobs).toHaveLength(1);
+
+      vi.mocked(writeFile).mockRejectedValue(new Error('disk full'));
+      releaseFirstSetup();
+      await expect(attachJobs[0]).rejects.toThrow('disk full');
+
+      expect(configStore.current.localAgentIntegrations?.hermes?.runtime)
+        .toMatchObject({ status: 'connecting', ready: false });
+      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8'))
+        .localAgentIntegrations.hermes.runtime)
+        .toMatchObject({ status: 'connecting', ready: false });
+
+      vi.mocked(writeFile).mockImplementation(fs.writeFile);
+      const second = await connect();
+      expect(second.statusCode).toBe(200);
+      expect(attachJobs).toHaveLength(2);
+      expect(attachJobs[1]).not.toBe(attachJobs[0]);
+      await attachJobs[1];
+      expect(runHermesSetup).toHaveBeenCalledTimes(2);
+      expect(configStore.current.localAgentIntegrations?.hermes?.runtime)
+        .toMatchObject({ status: 'ready', ready: true });
+      expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8'))
+        .localAgentIntegrations.hermes.runtime)
+        .toMatchObject({ status: 'ready', ready: true });
+    } finally {
+      releaseFirstSetup();
+      await Promise.allSettled(attachJobs);
+      await configStore.close();
+      rmSync(dkgHome, { recursive: true, force: true });
+    }
+  });
+
   it('commits prepared integration state across unrelated top-level config edits', async () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
     const initial = makeConfig({

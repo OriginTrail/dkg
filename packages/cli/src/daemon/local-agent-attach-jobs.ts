@@ -64,6 +64,11 @@ export function scheduleAttachJob(
     }),
   };
   pendingAttachJobs.set(integrationId, jobState);
+  // Routes deliberately leave deferred attach work in the background. Keep a
+  // rejection observer attached so a failed persistence attempt does not turn
+  // into an unhandled process rejection; callers that capture `job` still see
+  // the original rejected promise.
+  void jobState.job.catch(() => undefined);
   onAttachScheduled?.(integrationId, jobState.job);
   return { started: true, job: jobState.job, controller };
 }
