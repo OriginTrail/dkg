@@ -320,7 +320,9 @@ describe('startOxigraphServer (real child processes)', () => {
     try {
       const pid1 = await fetchPid(port);
       expect(handle.requestRestart('query exceeded the managed SPARQL client deadline')).toBe(true);
-      expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+      // Recovery admission closes before asynchronous listener verification,
+      // so a new store operation cannot race the signal boundary.
+      expect(handle.getRecoveryState()).toEqual({ recovering: true, generation: 0 });
       expect(handle.requestRestart('duplicate timeout')).toBe(false);
 
       let pid2 = 0;
@@ -521,6 +523,53 @@ describe('startOxigraphServer (real child processes)', () => {
     // respawned by now and the probe would answer.
     await sleep(600);
     expect(await portAnswers(port)).toBe(false);
+  });
+
+  it('reopens above the retained-WAL threshold only after store work stays idle', async () => {
+    const port = await freePort();
+    const logs: string[] = [];
+    let measurements = 0;
+    const handle = await startOxigraphServer(startOpts(port, {
+      log: (line: string) => logs.push(line),
+      walRestartThresholdBytes: 100,
+      walMaintenanceCheckIntervalMs: 20,
+      walRestartIdleMs: 80,
+      walRestartCooldownMs: 60_000,
+      io: {
+        measureRetainedWalBytes: () => {
+          measurements += 1;
+          return measurements === 1 ? 0 : 101;
+        },
+      },
+    }));
+    try {
+      const firstPid = await fetchPid(port);
+      handle.reportStoreActivity(1);
+      await sleep(180);
+      expect(await fetchPid(port)).toBe(firstPid);
+      expect(measurements).toBe(1);
+
+      handle.reportStoreActivity(0);
+      let replacementPid = firstPid;
+      for (let i = 0; i < 100; i++) {
+        await sleep(30);
+        try {
+          replacementPid = await fetchPid(port);
+          if (replacementPid !== firstPid) break;
+        } catch {
+          /* supervised reopen is between processes */
+        }
+      }
+      expect(replacementPid).not.toBe(firstPid);
+      expect(logs.join('\n')).toContain(
+        '101 B retained WAL reached the 100 B maintenance threshold',
+      );
+    } finally {
+      await handle.stop();
+    }
+    const measurementsAfterStop = measurements;
+    await sleep(100);
+    expect(measurements).toBe(measurementsAfterStop);
   });
 });
 

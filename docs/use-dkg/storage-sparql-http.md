@@ -72,6 +72,7 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
       "location": "/var/lib/dkg/oxigraph-data",
       "cacheDir": "/var/lib/dkg/oxigraph-bin",
       "clientTimeoutMs": 30000,
+      "walRestartThresholdBytes": 4294967296,
       "memoryHighMiB": 2048,
       "memoryMaxMiB": 3072
     }
@@ -82,6 +83,8 @@ Managed Oxigraph accepts optional launch settings under `store.options`:
 The daemon sizes the startup readiness wait automatically from the RocksDB write-ahead log retained in `location`. Oxigraph is not closed cleanly on shutdown (it installs no SIGTERM handler), so every start replays the previous session's log, and that replay is what a fixed deadline used to cut short. The derived wait assumes a pessimistic 4 MB/s replay floor and is not truncated below that work allowance; when a replay is pending the daemon logs the size and the allowance, then reports progress every 10 seconds.
 
 `readyTimeoutMs` **overrides** that automatic sizing with an explicit maximum, used verbatim and never extended. It must be a positive integer; invalid values are ignored. You normally should not set it — if you configured it as a workaround for a node that would not start, remove it. When an explicit value is lower than the automatic estimate the daemon logs a warning naming both numbers, because that combination is what keeps a recovering node down.
+
+Managed Oxigraph also checks retained RocksDB WAL once per minute. When it reaches 4 GiB, the daemon waits until no store operation has been admitted or queued for 30 seconds, then performs an ownership-verified supervised reopen. A successful read-write open replays and truncates the retained WAL, which bounds growth across long daemon sessions without cutting through an active query or update. Set `store.options.walRestartThresholdBytes` to a positive integer to choose a different threshold; the 4 GiB default sits just above the largest field retention observed when this policy was added.
 
 `clientTimeoutMs` is the SPARQL HTTP client deadline in milliseconds. Managed Oxigraph defaults to 30 seconds. Without an explicit native deadline, Oxigraph 0.5.x client deadlines are capped at 55 seconds, ahead of the server's implicit 60-second HTTP cutoff. A client query deadline triggers a supervised database restart, since ending an HTTP request does not prove that its database evaluation stopped.
 

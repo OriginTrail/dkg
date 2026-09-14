@@ -1657,6 +1657,40 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
+  it('reports concurrent store activity without letting the observer affect results', async () => {
+    const originalFetch = globalThis.fetch;
+    const releases: Array<() => void> = [];
+    const activity: number[] = [];
+    globalThis.fetch = (async () => await new Promise<Response>((resolve) => {
+      releases.push(() => resolve(new Response(
+        JSON.stringify({ head: {}, boolean: true }),
+        { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+      )));
+    })) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://activity.test/query',
+        onActivityChange: (activeOperations) => {
+          activity.push(activeOperations);
+          if (activeOperations === 2) throw new Error('observer failure');
+        },
+      });
+      const first = store.query('ASK { ?s ?p ?o }');
+      const second = store.query('ASK { ?s ?p ?o }');
+      while (releases.length < 2) await Promise.resolve();
+      expect(activity).toEqual([1, 2]);
+
+      releases[0]!();
+      await first;
+      expect(activity).toEqual([1, 2, 1]);
+      releases[1]!();
+      await second;
+      expect(activity).toEqual([1, 2, 1, 0]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it('deleteByPattern sends DELETE WHERE to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.deleteByPattern({ subject: 'http://ex.org/s', graph: 'http://ex.org/g' });

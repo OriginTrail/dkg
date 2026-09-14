@@ -35,6 +35,7 @@ import {
   type OxigraphBinaryIo,
 } from './oxigraph-binary.js';
 import {
+  DEFAULT_WAL_RESTART_THRESHOLD_BYTES,
   startOxigraphServer,
   type OxigraphServerHandle,
   type OxigraphServerIo,
@@ -248,6 +249,8 @@ export interface ManagedOxigraphPlan {
   clientTimeoutMs: number;
   /** Finite limits applied to an isolated systemd user scope. */
   memoryLimits?: OxigraphMemoryLimits;
+  /** Retained WAL size that schedules an idle supervised reopen. */
+  walRestartThresholdBytes: number;
   /**
    * sharedMemoryPublicSnapshotStorage with a defaulted `directory`, set
    * only when the operator enabled it. Same rewrite hazard as
@@ -274,6 +277,10 @@ export function planManagedOxigraph(
   const options = config.store.options ?? {};
   const port = resolveManagedOxigraphPort(options);
   const readyTimeoutMs = resolvePositiveIntegerOption(options, 'readyTimeoutMs');
+  const walRestartThresholdBytes = resolvePositiveIntegerOption(
+    options,
+    'walRestartThresholdBytes',
+  ) ?? DEFAULT_WAL_RESTART_THRESHOLD_BYTES;
   // Oxigraph 0.5.x implements `--timeout-s` with one sleeping OS thread per
   // query. Under sustained load those timer threads can exhaust the process
   // before they expire. Keep the native deadline opt-in; the HTTP adapter's
@@ -344,6 +351,7 @@ export function planManagedOxigraph(
     queryTimeoutS,
     clientTimeoutMs,
     memoryLimits,
+    walRestartThresholdBytes,
     sharedMemoryPublicSnapshotStorage,
   };
 }
@@ -408,6 +416,7 @@ export async function startManagedOxigraph(
     readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,
     queryTimeoutS: plan.queryTimeoutS,
     memoryLimits: plan.memoryLimits,
+    walRestartThresholdBytes: plan.walRestartThresholdBytes,
     platform: opts.platform,
     io: opts.serverIo,
   });
@@ -419,6 +428,9 @@ export async function startManagedOxigraph(
       queryEndpoint: handle.queryEndpoint,
       updateEndpoint: handle.updateEndpoint,
       getRecoveryState: () => handle.getRecoveryState(),
+      onActivityChange: (activeOperations: number) => {
+        handle.reportStoreActivity(activeOperations);
+      },
       onClientTimeout: (operation: string) => {
         if (operation !== 'query' && operation !== 'construct') return;
         handle.requestRestart(`${operation} exceeded the managed SPARQL client deadline`);

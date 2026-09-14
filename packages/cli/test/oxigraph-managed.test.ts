@@ -121,6 +121,7 @@ describe('planManagedOxigraph', () => {
     });
     expect(plan!.queryTimeoutS).toBeUndefined();
     expect(plan!.clientTimeoutMs).toBe(30_000);
+    expect(plan!.walRestartThresholdBytes).toBe(4 * 1024 ** 3);
   });
 
   it('honours operator overrides for port, location and cacheDir', () => {
@@ -128,7 +129,12 @@ describe('planManagedOxigraph', () => {
       {
         store: {
           backend: MANAGED_OXIGRAPH_BACKEND,
-          options: { port: 9999, location: '/mnt/oxi', cacheDir: '/mnt/oxi-bin' },
+          options: {
+            port: 9999,
+            location: '/mnt/oxi',
+            cacheDir: '/mnt/oxi-bin',
+            walRestartThresholdBytes: 1_234,
+          },
         },
       },
       '/data',
@@ -136,6 +142,7 @@ describe('planManagedOxigraph', () => {
     expect(plan!.port).toBe(9999);
     expect(plan!.location).toBe('/mnt/oxi');
     expect(plan!.cacheDir).toBe('/mnt/oxi-bin');
+    expect(plan!.walRestartThresholdBytes).toBe(1_234);
   });
 
   it('omits the unsafe native query timeout for bundled Oxigraph 0.5.x on macOS', () => {
@@ -643,9 +650,9 @@ describe('startManagedOxigraph (real download + real server)', () => {
       expect(getRecoveryState().generation).toBe(0);
 
       onClientTimeout('query');
-      // Ownership verification is asynchronous; an unverified request is not
-      // yet a recovery generation and must not be exposed as one.
-      expect(getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+      // Close store admission while ownership verification is in flight. The
+      // generation advances only after the verified listener is signalled.
+      expect(getRecoveryState()).toEqual({ recovering: true, generation: 0 });
       let pid2 = 0;
       for (let i = 0; i < 100; i++) {
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -759,6 +766,7 @@ describe('startManagedOxigraph (real download + real server)', () => {
             queryEndpoint: `http://127.0.0.1:${port}/query`,
             updateEndpoint: `http://127.0.0.1:${port}/update`,
             getRecoveryState: expect.any(Function),
+            onActivityChange: expect.any(Function),
             onClientTimeout: expect.any(Function),
           },
         });
