@@ -642,6 +642,42 @@ describe('graph-scoped finalization handler', () => {
     expect(metadata).toMatchObject({ type: 'boolean', value: true });
   });
 
+  it.each([
+    {
+      label: 'accepts an authenticated publisher envelope',
+      sourcePeerId: '12D3KooWPublisher',
+      expectedPolicy: 'allowList',
+      expectsReader: true,
+    },
+    {
+      label: 'ignores the same envelope from a relay',
+      sourcePeerId: '12D3KooWUntrustedRelay',
+      expectedPolicy: 'ownerOnly',
+      expectsReader: false,
+    },
+  ])('$label when private legacy workspace metadata omitted accessPolicy', async ({
+    sourcePeerId,
+    expectedPolicy,
+    expectsReader,
+  }) => {
+    const { message } = await stageGraph();
+    await handler.handleFinalizationMessage(encodeFinalizationMessage({
+      ...message,
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWReader'],
+    }), CG, sourcePeerId);
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + `<http://dkg.io/ontology/accessPolicy> "${expectedPolicy}" } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + '<http://dkg.io/ontology/allowedPeer> "12D3KooWReader" } }',
+    )).resolves.toMatchObject({ type: 'boolean', value: expectsReader });
+  });
+
   it('ignores an access envelope supplied by a relay that is not the durable owner', async () => {
     const { message } = await stageGraph({ accessPolicy: 'ownerOnly' });
 
@@ -3760,7 +3796,7 @@ describe('graph-scoped finalization handler', () => {
       graphManager,
       contextGraphId: CG,
       kaUal: UAL,
-    })).rejects.toThrow(/head carries 2 shareOperationId values/);
+    })).rejects.toThrow(/head references a missing share operation/);
 
     const internals = handler as unknown as {
       verifyChainCgBinding: () => Promise<boolean>;
@@ -3779,6 +3815,53 @@ describe('graph-scoped finalization handler', () => {
       authorAddress: AUTHOR,
     }, createOperationContext('system')))
       .resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+  });
+
+  it('resolves an equivalent storage-ACK workspace-head alias during finalization', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const equivalentOperationId = 'storage-ack-equivalent';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      shareOperationId: equivalentOperationId,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      quads: [{
+        subject: 'urn:asset:one',
+        predicate: 'urn:predicate:value',
+        object: '"one"',
+        graph: swmGraph,
+      }, {
+        subject: 'urn:asset:two',
+        predicate: 'urn:predicate:value',
+        object: '"two"',
+        graph: swmGraph,
+      }],
+      privateMerkleRoot: message.privateMerkleRoot,
+      privateTripleCount: message.privateTripleCount,
+      publisherPeerId: '12D3KooWPublisher',
+      timestamp: new Date(Date.now() + 1_000),
+    });
+    await store.insert([{
+      graph: graphManager.sharedMemoryMetaUri(CG),
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(equivalentOperationId),
+    }]);
+
+    await expect(resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CG,
+      kaUal: UAL,
+    })).resolves.toMatchObject({ shareOperationId: equivalentOperationId });
+    await expect(handler.handleFinalizationMessage(
+      encodeFinalizationMessage(message),
+      CG,
+    )).resolves.toBeUndefined();
 
     expect(await store.countQuads(vmGraph)).toBe(2);
   });

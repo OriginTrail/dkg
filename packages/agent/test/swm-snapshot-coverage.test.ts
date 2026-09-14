@@ -158,13 +158,56 @@ describe('public SWM snapshot coverage (#2050)', () => {
     const descriptors = parseGraphScopedSwmRecoveryDescriptors({
       contextGraphId: source.contextGraphId, metaQuads: source.servedMeta,
     });
-    expect(descriptors.map(descriptor => descriptor.publicSnapshotRef)).toEqual([current.digest]);
+    expect(descriptors).toMatchObject([{
+      snapshotSource: {
+        locator: { kind: 'store', ref: current.digest },
+      },
+    }]);
 
     const { summary, snapshotFetches } = await runManagedSwmSyncHarness({ ctx, ...source });
     expect(snapshotFetches).toEqual([]);
     expect(summary.insertedDataTriples).toBeGreaterThanOrEqual(current.payload.length);
     expect(summary.failedPhases).toBe(0);
     expect(summary.swmCoverage).toEqual(expectedCoverage);
+  });
+
+  it('does not resolve a corrupt advertised legacy ref from a valid canonical digest copy', async () => {
+    const { share } = swmFixtures(COVERAGE_CG);
+    const current = share({
+      version: 1,
+      operationId: 'op-corrupt-legacy-ref',
+      marker: 'canonical',
+      ual: 'did:dkg:hardhat:31337/0xcccccccccccccccccccccccccccccccccccccccc/9',
+    });
+    const legacyRef = `sha256:${'9'.repeat(64)}`;
+    const servedMeta = current.meta.map((row) => (
+      row.subject === current.operationSubject && row.predicate.endsWith('publicSnapshotRef')
+        ? { ...row, object: `"${legacyRef}"` }
+        : row
+    ));
+    const corrupt = [{ ...current.payload[0]!, object: '"corrupt"' }];
+
+    const { summary, snapshotFetches } = await runManagedSwmSyncHarness({
+      ctx,
+      contextGraphId: COVERAGE_CG,
+      remotePeerId: 'peer-corrupt-ref-deadbeef',
+      servedMeta,
+      cachedSnapshots: new Map([
+        [legacyRef, corrupt],
+        [current.digest, current.payload],
+      ]),
+      fetchPage: async ({ phase }, fallback) => phase === 'snapshot'
+        ? { ...fallback, completed: false, timedOut: true }
+        : fallback,
+    });
+
+    expect(snapshotFetches).toEqual([legacyRef]);
+    expect(summary.swmCoverage).toMatchObject({
+      snapshotsResolved: 0,
+      snapshotsTotal: 1,
+      missingCount: 1,
+      missingSample: [legacyRef],
+    });
   });
 
   it('resolves a cached entity share with no graph-scoped descriptor and no graph write', async () => {

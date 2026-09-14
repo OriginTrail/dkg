@@ -244,11 +244,11 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
     expect(originalWorkspace.head).toMatchObject({
       shareOperationId: intent.shareOperationId,
       assertionVersion: intent.assertionVersion,
-      accessPolicy: intent.accessPolicy,
+      access: { kind: 'persisted', accessPolicy: intent.accessPolicy },
       publicQuadsDigest: originalWorkspace.operation.publicQuadsDigest,
       publisherPeerId: originalWorkspace.operation.publisherPeerId,
     });
-    expect([...(originalWorkspace.head?.allowedPeers ?? [])].sort()).toEqual(
+    expect([...(originalWorkspace.head?.access.allowedPeers ?? [])].sort()).toEqual(
       options.accessPolicy === 'allowList' ? ['reader-a', 'reader-b'] : [],
     );
 
@@ -370,7 +370,9 @@ describe('queued named KA UPDATE retry [GH#2482]', () => {
       expect(newerIntent.shareOperationId).not.toBe(intent.shareOperationId);
       const newerWorkspace = await fixture.readWorkspace(newerIntent);
       if (change === 'content') expect(newerIntent.sealMerkleRoot).not.toBe(intent.sealMerkleRoot);
-      else expect(newerWorkspace.head).toMatchObject({ accessPolicy: 'allowList', allowedPeers: ['new-reader'] });
+      else expect(newerWorkspace.head).toMatchObject({
+        access: { kind: 'persisted', accessPolicy: 'allowList', allowedPeers: ['new-reader'] },
+      });
 
       expect(await queue.retryDetailed({ jobId })).toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
       const rejected = await queue.processNext('wallet-1');
@@ -2382,9 +2384,9 @@ describe('rootless graph-scoped KA lifecycle', () => {
       contextGraphId: cg,
       kaUal: intent.kaUal,
     });
-    expect(head?.accessPolicy).toBe('allowList');
-    expect(head?.allowedPeers).toHaveLength(allowedPeers.length);
-    expect(new Set(head?.allowedPeers)).toEqual(new Set(allowedPeers));
+    expect(head?.access).toMatchObject({ kind: 'persisted', accessPolicy: 'allowList' });
+    expect(head?.access.allowedPeers).toHaveLength(allowedPeers.length);
+    expect(new Set(head?.access.allowedPeers)).toEqual(new Set(allowedPeers));
     publisherPromote.mockRestore();
   }, 30_000);
 

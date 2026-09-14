@@ -13,6 +13,7 @@ import type { StageKnowledgeAssetSharedWorkingMemoryInputV1 } from '../src/knowl
 import {
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
+  storeKnowledgeAssetOperationPublicQuads,
 } from '../src/workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from '../src/workspace-snapshot-store.js';
 
@@ -266,6 +267,41 @@ describe('knowledge-asset SWM staging', () => {
       expect(fixture.snapshotStore.putSnapshot).not.toHaveBeenCalled();
     },
   );
+
+  it('reuses an originator intent after a later equivalent storage-ACK alias is unioned', async () => {
+    const fixture = await createReusableOperation();
+    const alias = 'storage-ack-later-alias';
+    await storeKnowledgeAssetOperationPublicQuads({
+      store: fixture.store,
+      graphManager: fixture.graphManager,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      kaUal: UAL,
+      assertionVersion: VERSION,
+      shareOperationId: alias,
+      quads: A,
+      privateMerkleRoot: fixture.input.privateMerkleRoot,
+      privateTripleCount: fixture.input.privateTripleCount,
+      publisherPeerId: fixture.input.publisherPeerId,
+      accessPolicy: fixture.input.accessPolicy,
+      timestamp: new Date('2026-07-19T12:00:05.000Z'),
+    });
+    await fixture.store.insert([{
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: JSON.stringify(alias),
+      graph: fixture.graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH_ID),
+    }]);
+    const aliasedHead = await resolveKnowledgeAssetWorkspaceHead(fixture.headInput);
+    expect(aliasedHead?.shareOperationId).toBe(alias);
+    expect(aliasedHead?.shareOperationIds).toEqual(['queued-operation', alias]);
+    const assertNoWrites = trackStoreWrites(fixture.store);
+
+    await expect(fixture.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      ...fixture.input,
+      reuseExistingOperation: true,
+    })).resolves.toEqual(fixture.staged);
+    assertNoWrites();
+  });
 
   it('preserves a newer head when the queued operation still exists', async () => {
     const fixture = await createReusableOperation();
