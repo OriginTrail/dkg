@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
-/** The facet of a slot that capacity accounting reads. */
-export interface VmRecoveryCapacitySlot {
+/** One occupied slot owned by the capacity component. */
+interface VmRecoveryCapacityOwner {
   readonly localCgId: string;
-  readonly ownerToken?: symbol;
-  readonly expired: boolean;
+  readonly ownerToken: symbol;
 }
 
 /** One requester waiting for capacity, optionally backed by the donor it will replace. */
@@ -17,15 +16,16 @@ export interface VmRecoveryPendingAdmission {
  * Bounded capacity and fair donor reservations. A reservation counts toward
  * capacity across asynchronous discovery, so concurrent batches cannot
  * over-admit; a reserved donor keeps its evidence until the requester commits.
- * The store sees only immutable ownership projections and never reads evidence
- * or cancels anything.
+ * This component owns the incremental occupied-slot index. It asks the evidence
+ * owner only whether a particular immutable owner token is expired, and never
+ * reads evidence or cancels work itself.
  */
 export class VmRecoverySlotCapacity {
+  private readonly occupied = new Map<string, VmRecoveryCapacityOwner>();
   private readonly live = new Set<VmRecoveryPendingAdmission>();
-  private readonly pending = new Map<string, {
-    readonly role: 'requester' | 'donor';
-    readonly admission: VmRecoveryPendingAdmission;
-  }>();
+  private readonly pending = new Map<string,
+    | { readonly role: 'requester'; readonly admission: VmRecoveryPendingAdmission; readonly localCgId: string }
+    | { readonly role: 'donor'; readonly admission: VmRecoveryPendingAdmission }>();
 
   constructor(private readonly maxEntries: number) {
     if (!Number.isSafeInteger(maxEntries) || maxEntries <= 0) {
@@ -37,6 +37,27 @@ export class VmRecoverySlotCapacity {
     return this.pending.get(key)?.admission;
   }
 
+  get size(): number { return this.occupied.size; }
+
+  /** Register a newly retained evidence owner. */
+  acquire(key: string, localCgId: string, ownerToken: symbol): void {
+    this.occupied.set(key, { localCgId, ownerToken });
+  }
+
+  /** Retire only the owner generation named by the caller. */
+  retire(key: string, ownerToken: symbol): boolean {
+    if (this.occupied.get(key)?.ownerToken !== ownerToken) return false;
+    return this.occupied.delete(key);
+  }
+
+  /** Preserve the registry's least-recently-touched donor ordering. */
+  touch(key: string, ownerToken: symbol): void {
+    const owner = this.occupied.get(key);
+    if (owner?.ownerToken !== ownerToken) return;
+    this.occupied.delete(key);
+    this.occupied.set(key, owner);
+  }
+
   isActive(admission: VmRecoveryPendingAdmission): boolean {
     return this.live.has(admission);
   }
@@ -46,10 +67,14 @@ export class VmRecoverySlotCapacity {
     return this.pending.get(key)?.role === 'donor';
   }
 
-  /** Count the requester that will own reserved capacity, not its departing donor. */
-  private ownsCapacity(key: string, slot: VmRecoveryCapacitySlot): boolean {
-    const role = this.pending.get(key)?.role;
-    return role === 'requester' || (slot.ownerToken !== undefined && role !== 'donor');
+  /** Count each reserved requester and exclude the donor it will replace. */
+  private reservedOccupancy(): number {
+    let count = 0;
+    for (const key of this.occupied.keys()) if (this.pending.get(key)?.role !== 'donor') count++;
+    for (const [key, pending] of this.pending) {
+      if (pending.role === 'requester' && !this.occupied.has(key)) count++;
+    }
+    return count;
   }
 
   /**
@@ -60,37 +85,59 @@ export class VmRecoverySlotCapacity {
   reserve(
     key: string,
     requestingCgId: string,
-    slots: ReadonlyMap<string, VmRecoveryCapacitySlot>,
+    isExpired: (key: string, ownerToken: symbol) => boolean,
   ): VmRecoveryPendingAdmission | undefined {
     if (this.pending.has(key)) return undefined;
-    let occupied = 0;
-    for (const [slotKey, slot] of slots) if (this.ownsCapacity(slotKey, slot)) occupied++;
-    const donor = occupied < this.maxEntries ? undefined : this.findDonor(slots, requestingCgId);
+    const occupied = this.reservedOccupancy();
+    const donor = occupied < this.maxEntries ? undefined : this.findDonor(requestingCgId, isExpired);
     if (occupied >= this.maxEntries && !donor) return undefined;
     const admission: VmRecoveryPendingAdmission = { key, donor };
     this.live.add(admission);
-    this.pending.set(key, { role: 'requester', admission });
+    this.pending.set(key, { role: 'requester', admission, localCgId: requestingCgId });
     if (donor) this.pending.set(donor.key, { role: 'donor', admission });
     return admission;
   }
 
   private findDonor(
-    slots: ReadonlyMap<string, VmRecoveryCapacitySlot>,
     requestingCgId: string,
+    isExpired: (key: string, ownerToken: symbol) => boolean,
   ): VmRecoveryPendingAdmission['donor'] {
     const countsByCg = new Map<string, number>();
-    for (const [key, slot] of slots) {
-      if (this.ownsCapacity(key, slot)) countsByCg.set(slot.localCgId, (countsByCg.get(slot.localCgId) ?? 0) + 1);
-      if (!slot.ownerToken || this.pending.has(key) || !slot.expired) continue;
-      return { key, ownerToken: slot.ownerToken };
+    for (const [key, owner] of this.occupied) {
+      if (this.pending.get(key)?.role !== 'donor') {
+        countsByCg.set(owner.localCgId, (countsByCg.get(owner.localCgId) ?? 0) + 1);
+      }
+      if (this.pending.has(key) || !isExpired(key, owner.ownerToken)) continue;
+      return { key, ownerToken: owner.ownerToken };
+    }
+    for (const [key, pending] of this.pending) {
+      if (pending.role === 'requester' && !this.occupied.has(key)) {
+        countsByCg.set(pending.localCgId, (countsByCg.get(pending.localCgId) ?? 0) + 1);
+      }
     }
     if (!requestingCgId || (countsByCg.get(requestingCgId) ?? 0) !== 0) return undefined;
-    for (const [key, slot] of slots) {
-      if (slot.ownerToken && !this.pending.has(key) && (countsByCg.get(slot.localCgId) ?? 0) > 1) {
-        return { key, ownerToken: slot.ownerToken };
+    for (const [key, owner] of this.occupied) {
+      if (!this.pending.has(key) && (countsByCg.get(owner.localCgId) ?? 0) > 1) {
+        return { key, ownerToken: owner.ownerToken };
       }
     }
     return undefined;
+  }
+
+  /** Atomically transfer a reservation's capacity ownership to its requester. */
+  commit(
+    admission: VmRecoveryPendingAdmission,
+    owner: VmRecoveryCapacityOwner,
+  ): boolean {
+    if (!this.live.has(admission)
+      || this.pending.get(admission.key)?.admission !== admission
+      || this.pending.get(admission.key)?.role !== 'requester'
+      || this.occupied.has(admission.key)) return false;
+    if (admission.donor
+      && this.occupied.get(admission.donor.key)?.ownerToken !== admission.donor.ownerToken) return false;
+    if (admission.donor) this.occupied.delete(admission.donor.key);
+    this.acquire(admission.key, owner.localCgId, owner.ownerToken);
+    return true;
   }
 
   /** Release one admission; returns the keys it no longer reserves. */

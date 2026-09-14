@@ -25,7 +25,6 @@ import {
 } from './vm-recovery-rotation-evidence.js';
 import {
   VmRecoverySlotCapacity,
-  type VmRecoveryCapacitySlot,
   type VmRecoveryPendingAdmission,
 } from './vm-recovery-slot-capacity.js';
 import { VmRecoverySlotGeneration, VmRecoverySlotLease } from './vm-recovery-slot-lifetimes.js';
@@ -155,9 +154,7 @@ export class VmRecoverySlotRegistry {
   }
 
   get recordCount(): number {
-    let count = 0;
-    for (const slot of this.slots.values()) if (slot.record) count++;
-    return count;
+    return this.capacity.size;
   }
 
   /** Detached point-in-time values for diagnostics; snapshots carry no command authority. */
@@ -210,7 +207,10 @@ export class VmRecoverySlotRegistry {
     if (!slot) return;
     const pending = this.capacity.pendingAt(key);
     if (pending) this.releaseAdmission(pending);
-    slot.record = undefined;
+    if (slot.record) {
+      this.capacity.retire(key, slot.record.handle);
+      slot.record = undefined;
+    }
     this.prune(key, slot);
   }
 
@@ -218,6 +218,7 @@ export class VmRecoverySlotRegistry {
     if (!this.isCurrent(target, handle)) return;
     const key = vmRecoverySlotKey(target);
     const slot = this.slots.get(key)!;
+    this.capacity.touch(key, handle);
     this.slots.delete(key);
     this.slots.set(key, slot);
   }
@@ -237,16 +238,9 @@ export class VmRecoverySlotRegistry {
     return slot;
   }
 
-  private capacitySlots(now: number): ReadonlyMap<string, VmRecoveryCapacitySlot> {
-    const capacitySlots = new Map<string, VmRecoveryCapacitySlot>();
-    for (const [key, slot] of this.slots) {
-      capacitySlots.set(key, Object.freeze({
-        localCgId: slot.localCgId,
-        ownerToken: slot.record?.handle,
-        expired: slot.record ? isRotationExpired(slot.record, now) : false,
-      }));
-    }
-    return capacitySlots;
+  private isExpiredCapacityOwner(key: string, ownerToken: symbol, now: number): boolean {
+    const record = this.slots.get(key)?.record;
+    return record?.handle === ownerToken && isRotationExpired(record, now);
   }
 
   /** Immediate and delayed admission use the same reserved-capacity transition. */
@@ -261,7 +255,11 @@ export class VmRecoverySlotRegistry {
     const slot = this.observedSlot(target);
     if (!slot) return { kind: 'deferred' };
     if (slot.record) return { kind: 'existing', slot: captureRotation(slot.record) };
-    const pending = this.capacity.reserve(key, target.localCgId, this.capacitySlots(now));
+    const pending = this.capacity.reserve(
+      key,
+      target.localCgId,
+      (ownerKey, ownerToken) => this.isExpiredCapacityOwner(ownerKey, ownerToken, now),
+    );
     if (!pending) {
       this.prune(key, slot);
       return { kind: 'deferred' };
@@ -297,6 +295,9 @@ export class VmRecoverySlotRegistry {
       if (params.candidatePeerIds.length === 0 || !this.capacity.isActive(pending) || !slot || slot.record
         || (donation && donor?.record?.handle !== donation.ownerToken)) return { kind: 'deferred' };
       const record = createRotationRecord(target, slot.fingerprint, params);
+      if (!this.capacity.commit(pending, { localCgId: target.localCgId, ownerToken: record.handle })) {
+        return { kind: 'deferred' };
+      }
       if (donor) donor.record = undefined;
       slot.record = record;
       this.slots.delete(key);
@@ -720,7 +721,10 @@ export class VmRecoverySlotRegistry {
     this.slots.delete(key);
     const pending = this.capacity.pendingAt(key);
     if (pending) this.releaseAdmission(pending);
-    slot.record = undefined;
+    if (slot.record) {
+      this.capacity.retire(key, slot.record.handle);
+      slot.record = undefined;
+    }
     slot.generation?.end(exempt);
   }
 
