@@ -441,6 +441,26 @@ function localContextGraphIdFromTerm(raw: unknown): string | undefined {
     : undefined;
 }
 
+type ContextGraphRegistrationRoute =
+  | { kind: 'system' }
+  | { kind: 'local'; target: NonNullable<ReturnType<DKGAgent['resolveContextGraphNameHashBindingTarget']>> }
+  | { kind: 'numeric' }
+  | { kind: 'name-hash' };
+
+/** The shared route order for ordinary registration and prepared cold reads. */
+export function selectContextGraphRegistrationRoute(
+  agent: {
+    resolveContextGraphNameHashBindingTarget: OmitThisParameter<DKGAgent['resolveContextGraphNameHashBindingTarget']>;
+  },
+  contextGraphId: string,
+): ContextGraphRegistrationRoute {
+  if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return { kind: 'system' };
+  const target = agent.resolveContextGraphNameHashBindingTarget(contextGraphId);
+  if (target !== null) return { kind: 'local', target };
+  if (isCanonicalPositiveContextGraphId(contextGraphId)) return { kind: 'numeric' };
+  return { kind: 'name-hash' };
+}
+
 export class ContextGraphRegistryMethods extends DKGAgentBase {
   /**
    * Check whether a context graph has been registered on-chain.
@@ -627,11 +647,12 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       registrationTimeoutMs?: number;
     } = {},
   ): Promise<ContextGraphRegistrationBinding> {
-    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
+    const route = selectContextGraphRegistrationRoute(this, contextGraphId);
+    if (route.kind === 'system') {
       return { kind: 'unregistered' };
     }
 
-    const localTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+    const localTarget = route.kind === 'local' ? route.target : null;
     const hasBindingCandidate = localTarget !== null
       && this.contextGraphBindingState.hasBindingCandidate(
         localTarget.localId,
@@ -673,7 +694,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       }
     }
 
-    if (isCanonicalPositiveContextGraphId(contextGraphId)) {
+    if (route.kind === 'numeric') {
       let localGraphExists: boolean;
       try {
         localGraphExists = await runBoundedOperation(

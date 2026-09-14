@@ -13,7 +13,7 @@ import {
   prepareUnscopedContextGraphReadChecks,
   type ContextGraphReadCheck,
 } from './prepare-unscoped-context-graph-read-checks.js';
-import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
+import { selectContextGraphRegistrationRoute } from './dkg-agent-cg-registry.js';
 import { captureUnscopedQueryConsistency } from './unscoped-query-consistency.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -385,6 +385,7 @@ import type { DKGAgent } from './dkg-agent.js';
 import {
   resolveContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
+  type ContextGraphReadAuthorityInput,
 } from './context-graph-read-authority.js';
 
 export class QueryMethods extends DKGAgentBase {
@@ -735,27 +736,17 @@ export class QueryMethods extends DKGAgentBase {
     ids: readonly string[],
     opts: { callerAgentAddress?: string; signal: AbortSignal },
   ): Promise<ContextGraphReadCheck> {
-    const authoritySeeds = QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this);
-    const canReadContextGraph = (contextGraphId: string, signal: AbortSignal) => this.canReadContextGraph(contextGraphId, {
-      callerAgentAddress: opts.callerAgentAddress,
-      signal,
-    });
     const resolveBatch = this.chain.resolveContextGraphIdsByNameHashes;
     return prepareUnscopedContextGraphReadChecks({
-      canReadContextGraph,
-      contextGraphNameCommitment: (id) => this.contextGraphNameCommitment(id),
-      requiresIndividualRead: (id) => (
-        authoritySeeds.has(id)
-        || (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)
-        || isCanonicalPositiveContextGraphId(id)
-        || this.resolveContextGraphNameHashBindingTarget(id) !== null
-        || this.resolveRfc64PrivateReadRosterV1(id) !== undefined
-        || (this.config.rfc64CatalogBootstrap?.acceptedPolicies ?? []).some(
-          ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === id,
+      createReadAuthorityInput: (id, signal) => (
+        QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+          this, id, { callerAgentAddress: opts.callerAgentAddress, signal }, CHAIN_POLICY_READ_TIMEOUT_MS,
         )
-        || (this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies ?? []).some(
-          ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === id,
-        )
+      ),
+      registrationNameHash: (id) => (
+        selectContextGraphRegistrationRoute(this, id).kind === 'name-hash'
+          ? this.contextGraphNameCommitment(id)
+          : undefined
       ),
       findContextGraphIdsWithReadAuthorityFacts: (candidateIds, readSignal) => (
         this.contextGraphMetaProjection.findContextGraphIdsWithReadAuthorityFacts(candidateIds, { signal: readSignal })
@@ -809,10 +800,26 @@ export class QueryMethods extends DKGAgentBase {
     },
     registrationTimeoutMs: number,
   ): Promise<ContextGraphReadAuthorityDecision> {
+    return resolveContextGraphReadAuthorityDecision(
+      QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+        this, contextGraphId, opts, registrationTimeoutMs,
+      ),
+    );
+  }
+
+  private createContextGraphReadAuthorityInput(this: DKGAgent,
+    contextGraphId: string,
+    opts: {
+      callerAgentAddress?: string;
+      allowSubscriptionFallback?: boolean;
+      signal?: AbortSignal;
+    },
+    registrationTimeoutMs: number,
+  ): ContextGraphReadAuthorityInput {
     const acceptedPublicPolicies = this.config.rfc64CatalogBootstrap?.acceptedPolicies
       ?? this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
       ?? [];
-    return resolveContextGraphReadAuthorityDecision({
+    return {
       contextGraphId,
       callerAgentAddress: opts.callerAgentAddress,
       allowSubscriptionFallback: opts.allowSubscriptionFallback !== false,
@@ -850,7 +857,7 @@ export class QueryMethods extends DKGAgentBase {
           || (this.config.syncContextGraphs ?? []).includes(contextGraphId)
         ),
       getLocalIdentityId: () => this.chain.getIdentityId(),
-    });
+    };
   }
 
   /**

@@ -1,26 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ChainReadOptions } from '@origintrail-official/dkg-chain';
+import {
+  resolveContextGraphReadAuthorityDecision,
+  type ContextGraphReadAuthorityInput,
+} from './context-graph-read-authority.js';
+
 export type ContextGraphReadCheck = (id: string, signal: AbortSignal) => Promise<boolean>;
 
 export interface UnscopedContextGraphReadCheckDependencies {
-  canReadContextGraph: ContextGraphReadCheck;
-  contextGraphNameCommitment(id: string): string;
-  requiresIndividualRead(id: string): boolean;
+  createReadAuthorityInput(id: string, signal: AbortSignal): ContextGraphReadAuthorityInput;
+  /** Undefined unless the current canonical route is cold name-hash lookup. */
+  registrationNameHash(id: string): string | undefined;
   findContextGraphIdsWithReadAuthorityFacts(
     ids: readonly string[], signal: AbortSignal,
   ): Promise<ReadonlySet<string>>;
   readMetadataRevision(): number;
   resolveContextGraphIdsByNameHashes?: (
-    nameHashes: readonly string[], options: { signal: AbortSignal },
+    nameHashes: readonly string[], options: ChainReadOptions,
   ) => Promise<ReadonlyMap<string, bigint | null>>;
 }
 
 class RegistrationBatchUnavailable extends Error {}
 
 /**
- * Avoid per-KA cold lookups only for proven unregistered, metadata-free names.
- * Positive/known/restricted candidates retain the existing authority resolver.
- * The returned checker owns no persistent cache and accepts no caller grants.
+ * Prepare request-local I/O evidence, then run every candidate through the
+ * canonical read decision. Absence may replace a cold registration read or a
+ * metadata read, never the live RFC64/pending/roster/peer/subscription branches.
  */
 export async function prepareUnscopedContextGraphReadChecks(
   deps: UnscopedContextGraphReadCheckDependencies,
@@ -28,14 +34,32 @@ export async function prepareUnscopedContextGraphReadChecks(
   signal: AbortSignal,
 ): Promise<ContextGraphReadCheck> {
   signal.throwIfAborted();
-  const original: ContextGraphReadCheck = async (id, readSignal) => {
+  const decide = async (
+    id: string,
+    readSignal: AbortSignal,
+    evidence?: { registration: 'unregistered' | 'unavailable'; isMetadataAbsent?: () => boolean },
+  ): Promise<boolean> => {
     signal.throwIfAborted();
     readSignal.throwIfAborted();
-    const allowed = await deps.canReadContextGraph(id, readSignal);
+    const input = deps.createReadAuthorityInput(id, readSignal);
+    const result = await resolveContextGraphReadAuthorityDecision({
+      ...input,
+      ...(evidence && {
+        getRegisteredAuthority: async () => evidence.registration === 'unregistered'
+          ? { kind: 'unregistered' as const }
+          : { kind: 'unavailable' as const, reason: 'chain-name-binding-unavailable' as const },
+      }),
+      ...(evidence?.isMetadataAbsent && {
+        isPrivateLocalGraph: () => evidence.isMetadataAbsent!()
+          ? Promise.resolve(false)
+          : input.isPrivateLocalGraph(),
+      }),
+    });
     signal.throwIfAborted();
     readSignal.throwIfAborted();
-    return allowed;
+    return result.outcome === 'allowed';
   };
+  const original: ContextGraphReadCheck = (id, readSignal) => decide(id, readSignal);
   const resolve = deps.resolveContextGraphIdsByNameHashes;
   if (resolve === undefined) return original;
 
@@ -47,8 +71,8 @@ export async function prepareUnscopedContextGraphReadChecks(
     }
     examined += 1;
     signal.throwIfAborted();
-    if (deps.requiresIndividualRead(id)) continue;
-    const hash = deps.contextGraphNameCommitment(id);
+    const hash = deps.registrationNameHash(id);
+    if (hash === undefined) continue;
     if (!/^0x[0-9a-f]{64}$/.test(hash)) {
       throw new Error('Cannot authorize unscoped query: invalid Context Graph name commitment');
     }
@@ -79,10 +103,13 @@ export async function prepareUnscopedContextGraphReadChecks(
     if (!(error instanceof RegistrationBatchUnavailable)) throw error;
     // Match the ordinary resolver's unavailable-registration denial. Never
     // retry these names through a more optimistic local-only authority path.
-    return async (_id, readSignal) => {
+    return async (id, readSignal) => {
       signal.throwIfAborted();
       readSignal.throwIfAborted();
-      return false;
+      const hash = hashesById.get(id);
+      return hash !== undefined && deps.registrationNameHash(id) === hash
+        ? decide(id, readSignal, { registration: 'unavailable' })
+        : original(id, readSignal);
     };
   } finally {
     preparationStop.abort();
@@ -91,26 +118,36 @@ export async function prepareUnscopedContextGraphReadChecks(
 
   // A missing, extra, or malformed result is uncertainty, never absence.
   const expected = new Set(names);
-  const registrationMap = registrations as ReadonlyMap<string, bigint | null> | null;
   if (
-    registrationMap === null
-    || typeof registrationMap !== 'object'
-    || !Number.isSafeInteger(registrationMap.size)
-    || registrationMap.size < 0
-    || typeof registrationMap[Symbol.iterator] !== 'function'
-    || registrationMap.size !== expected.size
+    registrations == null
+    || typeof registrations[Symbol.iterator] !== 'function'
+    || registrations.size !== expected.size
   ) {
     throw new Error('Cannot authorize unscoped query: incomplete Context Graph registration batch');
   }
   const absentNames = new Set<string>();
-  for (const [name, id] of registrationMap) {
-    if (!expected.has(name) || (id !== null && (
+  const seenNames = new Set<string>();
+  for (const entry of registrations) {
+    signal.throwIfAborted();
+    if (seenNames.size >= expected.size || !Array.isArray(entry) || entry.length !== 2) {
+      throw new Error('Cannot authorize unscoped query: invalid Context Graph registration batch');
+    }
+    const [name, id] = entry;
+    if (!expected.has(name) || seenNames.has(name) || (id !== null && (
       typeof id !== 'bigint' || id <= 0n || id >= (1n << 256n)
     ))) {
       throw new Error('Cannot authorize unscoped query: invalid Context Graph registration batch');
     }
+    seenNames.add(name);
     if (id === null) absentNames.add(name);
+    if (seenNames.size % 512 === 0) {
+      await new Promise<void>((resolveTurn) => setImmediate(resolveTurn));
+    }
   }
+  if (seenNames.size !== expected.size) {
+    throw new Error('Cannot authorize unscoped query: incomplete Context Graph registration batch');
+  }
+  signal.throwIfAborted();
   const metadataCandidates = new Set(metadataIds);
   if ([...metadataCandidates].some((id) => !hashesById.has(id))) {
     throw new Error('Cannot authorize unscoped query: invalid local read-authority candidate');
@@ -123,12 +160,12 @@ export async function prepareUnscopedContextGraphReadChecks(
     if (
       hash === undefined
       || !absentNames.has(hash)
-      || metadataCandidates.has(id)
-      || deps.readMetadataRevision() !== metadataRevision
-      || deps.requiresIndividualRead(id)
+      || deps.registrationNameHash(id) !== hash
     ) return original(id, readSignal);
-    // This is the existing legacy-local-public fallback: current registration
-    // was absent, and neither metadata nor runtime state can impose a gate.
-    return true;
+    return decide(id, readSignal, {
+      registration: 'unregistered',
+      isMetadataAbsent: () => !metadataCandidates.has(id)
+        && deps.readMetadataRevision() === metadataRevision,
+    });
   };
 }

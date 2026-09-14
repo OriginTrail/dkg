@@ -65,6 +65,9 @@ describe('bounded Context Graph name-hash batch resolution', () => {
   it('bypasses a cached single-name miss when a fresh batch sees a registration', async () => {
     const scenario = fixture([]);
     await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
+    const cachedReadCount = scenario.readContractWithOptions.mock.calls.length;
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
+    expect(scenario.readContractWithOptions).toHaveBeenCalledTimes(cachedReadCount);
     const readsBeforeBatch = callsForMethod(
       scenario.readContractWithOptions,
       'getLatestContextGraphId',
@@ -76,6 +79,50 @@ describe('bounded Context Graph name-hash batch resolution', () => {
       scenario.readContractWithOptions,
       'getLatestContextGraphId',
     ).length).toBeGreaterThan(readsBeforeBatch);
+    expect(callsForMethod(scenario.readContractWithOptions, 'getNameHash')).toHaveLength(2);
+  });
+
+  describe.each(['one-name', 'with-zero-and-duplicate'] as const)('%s bulk singleton fences', (mode) => {
+    function resolve(scenario: ReturnType<typeof fixture>) {
+      return scenario.adapter.resolveContextGraphIdsByNameHashes(
+        mode === 'one-name' ? [NAME_HASH] : [NAME_HASH, ethers.ZeroHash, NAME_HASH],
+      );
+    }
+
+    it('rejects a miss when the registry advances after its verification boundary', async () => {
+      const scenario = fixture([OTHER_HASH]);
+      const read = scenario.fence.loadProviderHighWaters.bind(scenario.fence);
+      let reads = 0;
+      vi.spyOn(scenario.fence, 'loadProviderHighWaters').mockImplementation(async () => {
+        const result = await read();
+        if (++reads === 2) {
+          scenario.hashes.set(2n, NAME_HASH);
+          scenario.setLatestId(2n);
+        }
+        return result;
+      });
+      await expect(resolve(scenario)).rejects.toThrow(/registry advanced/i);
+      expect(scenario.fence.currentSlotRevision).toBe(0);
+    });
+
+    it.each(['duplicate', 'reorg'] as const)('rejects a %s during positive verification without committing slots', async (change) => {
+      const scenario = fixture([NAME_HASH]);
+      const read = scenario.fence.readCurrentNameHash.bind(scenario.fence);
+      vi.spyOn(scenario.fence, 'readCurrentNameHash').mockImplementation(async (...args) => {
+        const result = await read(...args);
+        if (args[1] === undefined) {
+          if (change === 'duplicate') {
+            scenario.hashes.set(2n, NAME_HASH);
+            scenario.setLatestId(2n);
+          } else {
+            scenario.setAnchorHash(`0x${'55'.repeat(32)}`);
+          }
+        }
+        return result;
+      });
+      await expect(resolve(scenario)).rejects.toThrow(/registry advanced|canonical chain anchor changed/i);
+      expect(scenario.fence.currentSlotRevision).toBe(0);
+    });
   });
 
   it('routes single and batch APIs through one shared orchestration path', async () => {

@@ -156,13 +156,17 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
   it('does not execute SPARQL when unscoped read authority throws', async () => {
     const fixture = runtimePrivateQueryAgent();
     const authorityFailure = new Error('authority lookup failed');
-    vi.spyOn(fixture.agent, 'canReadContextGraph').mockRejectedValue(authorityFailure);
+    fixture.acceptedPolicySnapshot.mockImplementation(() => { throw authorityFailure; });
 
     await expect(QueryMethods.prototype.query.call(
       fixture.agent as never,
       'ASK { GRAPH ?g { ?s ?p ?o } }',
       { callerAgentAddress: OUTSIDER },
     )).rejects.toBe(authorityFailure);
+    expect(fixture.acceptedPolicySnapshot).toHaveBeenCalledWith(
+      RUNTIME_NETWORK_ID,
+      RUNTIME_PRIVATE_CG,
+    );
     expect(fixture.queryEngine.query).not.toHaveBeenCalled();
   });
 

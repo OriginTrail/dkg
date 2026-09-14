@@ -758,14 +758,12 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     vi.spyOn(agent.store, 'listGraphsByPrefix').mockImplementation(async (prefix, options) => (
       (await listGraphsByPrefix(prefix, options)).sort()
     ));
-    const readAuthority = vi.spyOn(agent, 'canReadContextGraph');
+    const readAuthority = vi.spyOn(agent, 'getContextGraphAgentGateAddresses');
 
     await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
       .resolves.toEqual({ bindings: [] });
     expect(queryExecution).not.toHaveBeenCalled();
-    expect(readAuthority).toHaveBeenCalledWith(lastPrivateId, expect.objectContaining({ callerAgentAddress: OUTSIDER }));
-    const checkedIds = readAuthority.mock.calls.map(([id]) => id);
-    expect(checkedIds.indexOf(lastPrivateId)).toBeGreaterThanOrEqual(128);
+    expect(readAuthority).toHaveBeenCalledWith(lastPrivateId);
 
     const owner = await agent.query(markerQuery(lastPrivatePrefix), { callerAgentAddress: OWNER });
     expect(owner.bindings).toEqual([{ g: contextGraphMetaGraphUri(lastPrivateId), s: PRIVATE_MARKER }]);

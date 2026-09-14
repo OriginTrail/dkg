@@ -7,6 +7,12 @@ import {
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { selectContextGraphRegistrationRoute } from '../src/dkg-agent-cg-registry.js';
+import { LOCAL_ID, NAME_HASH, selectedFixture } from './context-graph-registration-binding.fixture.js';
+import {
+  resolveContextGraphReadAuthorityDecision,
+  type ContextGraphReadAuthorityInput,
+} from '../src/context-graph-read-authority.js';
 import {
   prepareUnscopedContextGraphReadChecks,
   type UnscopedContextGraphReadCheckDependencies,
@@ -15,16 +21,34 @@ import {
 const commitment = (id: string) => ethers.keccak256(ethers.toUtf8Bytes(id));
 
 function dependencies() {
+  const inputs = new Map<string, Partial<ContextGraphReadAuthorityInput>>();
+  const getRegisteredAuthority = vi.fn<(id: string) => ReturnType<ContextGraphReadAuthorityInput['getRegisteredAuthority']>>(
+    async () => ({ kind: 'unregistered' }),
+  );
+  const isPrivateLocalGraph = vi.fn<(id: string) => Promise<boolean>>(async () => true);
   return {
-    canReadContextGraph: vi.fn<UnscopedContextGraphReadCheckDependencies['canReadContextGraph']>(async () => false),
-    contextGraphNameCommitment: vi.fn(commitment),
-    requiresIndividualRead: vi.fn<UnscopedContextGraphReadCheckDependencies['requiresIndividualRead']>(() => false),
+    inputs, getRegisteredAuthority, isPrivateLocalGraph,
+    createReadAuthorityInput: vi.fn<UnscopedContextGraphReadCheckDependencies['createReadAuthorityInput']>((id) => ({
+      contextGraphId: id, callerAgentAddress: 'outsider', allowSubscriptionFallback: true,
+      isSystemContextGraph: false, getPeerId: () => 'peer-outsider',
+      getAllowedPeers: async () => null,
+      getRegisteredAuthority: () => getRegisteredAuthority(id),
+      isAgentAllowed: (agent, roster) => agent !== undefined && roster.includes(agent),
+      hasLocalAgentInRoster: (roster) => roster.includes('outsider'),
+      resolveRfc64PrivateRoster: () => undefined,
+      hasAcceptedRfc64PublicPolicy: false, isPendingMetadata: false,
+      isPrivateLocalGraph: () => isPrivateLocalGraph(id),
+      getLocalAgentGate: async () => null, getLegacyParticipants: async () => null,
+      hasLegacySubscription: false, getLocalIdentityId: async () => 0n,
+      ...inputs.get(id),
+    })),
+    registrationNameHash: vi.fn<UnscopedContextGraphReadCheckDependencies['registrationNameHash']>(commitment),
     findContextGraphIdsWithReadAuthorityFacts: vi.fn<UnscopedContextGraphReadCheckDependencies['findContextGraphIdsWithReadAuthorityFacts']>(async () => new Set<string>()),
     readMetadataRevision: vi.fn(() => 0),
     resolveContextGraphIdsByNameHashes: vi.fn<NonNullable<UnscopedContextGraphReadCheckDependencies['resolveContextGraphIdsByNameHashes']>>(
       async (names) => new Map(names.map((name) => [name, null])),
     ),
-  } satisfies UnscopedContextGraphReadCheckDependencies;
+  };
 }
 
 describe('prepared unscoped Context Graph read checks', () => {
@@ -36,20 +60,22 @@ describe('prepared unscoped Context Graph read checks', () => {
     expect(await Promise.all(ids.map((id) => check(id, signal)))).toEqual(ids.map(() => true));
     expect(deps.resolveContextGraphIdsByNameHashes).toHaveBeenCalledTimes(1);
     expect(deps.resolveContextGraphIdsByNameHashes.mock.calls[0][0]).toHaveLength(650);
-    expect(deps.canReadContextGraph).not.toHaveBeenCalled();
+    expect(deps.createReadAuthorityInput).toHaveBeenCalledTimes(650);
+    expect(deps.getRegisteredAuthority).not.toHaveBeenCalled();
+    expect(deps.isPrivateLocalGraph).not.toHaveBeenCalled();
   });
 
-  it('keeps known/numeric/current-binding/wire aliases and live private selections on full authority', async () => {
-    const individual = new Set(['known', '42', 'current-binding', 'wire-alias', 'live-private']);
+  it('keeps non-name routes and unknown checker IDs on the original canonical inputs', async () => {
+    const individual = new Set(['known', '42', 'current-binding', 'wire-alias']);
     const deps = dependencies();
-    deps.requiresIndividualRead.mockImplementation((id: string) => individual.has(id));
+    deps.registrationNameHash.mockImplementation((id) => individual.has(id) ? undefined : commitment(id));
     const signal = new AbortController().signal;
     const check = await prepareUnscopedContextGraphReadChecks(deps, [...individual, 'ordinary'], signal);
     for (const id of individual) expect(await check(id, signal)).toBe(false);
     expect(await check('ordinary', signal)).toBe(true);
     expect(await check('not-in-prepared-request', signal)).toBe(false);
     expect(deps.resolveContextGraphIdsByNameHashes.mock.calls[0][0]).toEqual([commitment('ordinary')]);
-    expect(deps.canReadContextGraph).toHaveBeenCalledTimes(individual.size + 1);
+    expect(deps.getRegisteredAuthority).toHaveBeenCalledTimes(individual.size + 1);
   });
 
   it('retains positive registration and metadata-only private gates beyond the previous cutoff', async () => {
@@ -61,22 +87,49 @@ describe('prepared unscoped Context Graph read checks', () => {
       new Map(names.map((name) => [name, name === commitment(registered) ? 9n : null]))
     ));
     deps.findContextGraphIdsWithReadAuthorityFacts.mockResolvedValue(new Set([privateGate]));
+    deps.getRegisteredAuthority.mockImplementation(async (id) => id === registered
+      ? { kind: 'private', onChainId: 9n, participantAgents: ['owner'] }
+      : { kind: 'unregistered' });
     const signal = new AbortController().signal;
     const check = await prepareUnscopedContextGraphReadChecks(deps, ids, signal);
     expect(await check(registered, signal)).toBe(false);
     expect(await check(privateGate, signal)).toBe(false);
     expect(await check(ids[0], signal)).toBe(true);
-    expect(deps.canReadContextGraph.mock.calls.map(([id]) => id)).toEqual([registered, privateGate]);
+    expect(deps.getRegisteredAuthority.mock.calls.map(([id]) => id)).toEqual([registered]);
+    expect(deps.isPrivateLocalGraph.mock.calls.map(([id]) => id)).toEqual([privateGate]);
   });
 
-  it.each(['local-state', 'metadata-revision'])('rechecks %s after preparation', async (change) => {
+  it.each(['local-state', 'name-hash', 'metadata-revision'])('rechecks %s after preparation', async (change) => {
     const deps = dependencies();
     const signal = new AbortController().signal;
     const check = await prepareUnscopedContextGraphReadChecks(deps, ['candidate'], signal);
-    if (change === 'local-state') deps.requiresIndividualRead.mockReturnValue(true);
+    if (change === 'local-state') deps.registrationNameHash.mockReturnValue(undefined);
+    else if (change === 'name-hash') deps.registrationNameHash.mockReturnValue(commitment('changed-binding'));
     else deps.readMetadataRevision.mockReturnValue(1);
     expect(await check('candidate', signal)).toBe(false);
-    expect(deps.canReadContextGraph).toHaveBeenCalledOnce();
+    expect(deps.isPrivateLocalGraph).toHaveBeenCalledOnce();
+  });
+
+  it('uses the real registration selector for system, local, wire and numeric precedence', async () => {
+    const { agent, subscription } = selectedFixture();
+    const ids = [SYSTEM_CONTEXT_GRAPHS.AGENTS, LOCAL_ID, NAME_HASH, '42', 'cold-name'];
+    expect(ids.map((id) => selectContextGraphRegistrationRoute(agent, id).kind))
+      .toEqual(['system', 'local', 'local', 'numeric', 'name-hash']);
+    const deps = dependencies();
+    deps.registrationNameHash.mockImplementation((id) => (
+      selectContextGraphRegistrationRoute(agent, id).kind === 'name-hash' ? commitment(id) : undefined
+    ));
+    deps.inputs.set(SYSTEM_CONTEXT_GRAPHS.AGENTS, { isSystemContextGraph: true });
+    const signal = new AbortController().signal;
+    const check = await prepareUnscopedContextGraphReadChecks(deps, ids, signal);
+    expect(deps.resolveContextGraphIdsByNameHashes.mock.calls[0][0]).toEqual([commitment('cold-name')]);
+    expect(await check(SYSTEM_CONTEXT_GRAPHS.AGENTS, signal)).toBe(true);
+    for (const id of [LOCAL_ID, NAME_HASH, '42']) expect(await check(id, signal)).toBe(false);
+    // A newly selected invalid binding cannot consume an earlier cold absence.
+    agent.subscribedContextGraphs.set('cold-name', { ...subscription, onChainId: 'invalid' });
+    expect(selectContextGraphRegistrationRoute(agent, 'cold-name').kind).toBe('local');
+    expect(await check('cold-name', signal)).toBe(false);
+    expect(deps.getRegisteredAuthority.mock.calls.map(([id]) => id)).toEqual([LOCAL_ID, NAME_HASH, '42', 'cold-name']);
   });
 
   it('preserves the existing resolver when the adapter has no bulk capability', async () => {
@@ -85,7 +138,74 @@ describe('prepared unscoped Context Graph read checks', () => {
     const check = await prepareUnscopedContextGraphReadChecks({ ...deps, resolveContextGraphIdsByNameHashes: undefined }, ['a'], signal);
     expect(await check('a', signal)).toBe(false);
     expect(deps.findContextGraphIdsWithReadAuthorityFacts).not.toHaveBeenCalled();
-    expect(deps.canReadContextGraph).toHaveBeenCalledOnce();
+    expect(deps.getRegisteredAuthority).toHaveBeenCalledOnce();
+  });
+
+  const canonicalCases: Array<{
+    name: string;
+    input: Partial<ContextGraphReadAuthorityInput>;
+    allowed: boolean;
+    registered?: boolean;
+    metadata?: boolean;
+  }> = [
+    { name: 'system', input: { isSystemContextGraph: true }, allowed: true },
+    { name: 'registered public precedes pending metadata', input: {
+      getRegisteredAuthority: async () => ({ kind: 'public', onChainId: 7n }), isPendingMetadata: true,
+    }, registered: true, allowed: true },
+    { name: 'registered private precedes accepted public', input: {
+      getRegisteredAuthority: async () => ({ kind: 'private', onChainId: 7n, participantAgents: ['owner'] }),
+      hasAcceptedRfc64PublicPolicy: true,
+    }, registered: true, allowed: false },
+    { name: 'registered private retains peer restriction', input: {
+      getRegisteredAuthority: async () => ({ kind: 'private', onChainId: 7n, participantAgents: ['outsider'] }),
+      getAllowedPeers: async () => ['other-peer'],
+    }, registered: true, allowed: false },
+    { name: 'unavailable registration precedes accepted public', input: {
+      getRegisteredAuthority: async () => ({ kind: 'unavailable', reason: 'chain-name-binding-unavailable' }),
+      hasAcceptedRfc64PublicPolicy: true,
+    }, registered: true, allowed: false },
+    { name: 'live RFC64 missing roster', input: { resolveRfc64PrivateRoster: () => null }, allowed: false },
+    { name: 'live RFC64 outsider', input: { resolveRfc64PrivateRoster: () => ['owner'] }, allowed: false },
+    { name: 'live RFC64 participant', input: { resolveRfc64PrivateRoster: () => ['outsider'] }, allowed: true },
+    { name: 'accepted public precedes pending metadata', input: {
+      hasAcceptedRfc64PublicPolicy: true, isPendingMetadata: true,
+    }, allowed: true },
+    { name: 'pending metadata', input: { isPendingMetadata: true }, allowed: false },
+    { name: 'local public', input: { isPrivateLocalGraph: async () => false }, allowed: true },
+    { name: 'local agent gate', input: { getLocalAgentGate: async () => ['owner'] }, metadata: true, allowed: false },
+    { name: 'local agent and peer gate', input: {
+      getLocalAgentGate: async () => ['outsider'], getAllowedPeers: async () => ['other-peer'],
+    }, metadata: true, allowed: false },
+    { name: 'legacy subscription', input: { hasLegacySubscription: true }, metadata: true, allowed: true },
+    { name: 'disabled legacy subscription fallback', input: {
+      hasLegacySubscription: true, allowSubscriptionFallback: false,
+    }, metadata: true, allowed: false },
+    { name: 'legacy identity participant', input: {
+      getLegacyParticipants: async () => ['42'], getLocalIdentityId: async () => 42n,
+    }, metadata: true, allowed: true },
+  ];
+  it.each(canonicalCases)('keeps canonical precedence for $name after preparation', async ({ input, allowed, registered, metadata }) => {
+    const deps = dependencies();
+    if (registered) deps.resolveContextGraphIdsByNameHashes.mockResolvedValue(new Map([[commitment('a'), 7n]]));
+    if (metadata) deps.findContextGraphIdsWithReadAuthorityFacts.mockResolvedValue(new Set(['a']));
+    const signal = new AbortController().signal;
+    const check = await prepareUnscopedContextGraphReadChecks(deps, ['a'], signal);
+    // Populate live authority only after preparation; no prepared boolean or
+    // query-local list may override the canonical decision's current inputs.
+    deps.inputs.set('a', input);
+    const ordinary = await resolveContextGraphReadAuthorityDecision(deps.createReadAuthorityInput('a', signal));
+    expect(ordinary.outcome === 'allowed').toBe(allowed);
+    expect(await check('a', signal)).toBe(allowed);
+  });
+
+  it('checks metadata absence at its canonical use after the registration await', async () => {
+    const deps = dependencies();
+    const signal = new AbortController().signal;
+    const check = await prepareUnscopedContextGraphReadChecks(deps, ['a'], signal);
+    const pending = check('a', signal);
+    deps.readMetadataRevision.mockReturnValue(1);
+    expect(await pending).toBe(false);
+    expect(deps.isPrivateLocalGraph).toHaveBeenCalledWith('a');
   });
 
   it.each(['missing', 'extra', 'wrong-key', 'zero', 'overflow'])('rejects %s registration maps without granting an owner', async (malformation) => {
@@ -100,7 +220,7 @@ describe('prepared unscoped Context Graph read checks', () => {
     });
     await expect(prepareUnscopedContextGraphReadChecks(deps, ['a', 'b'], new AbortController().signal))
       .rejects.toThrow(/registration batch/);
-    expect(deps.canReadContextGraph).not.toHaveBeenCalled();
+    expect(deps.getRegisteredAuthority).not.toHaveBeenCalled();
   });
 
   it('accepts a complete structural ReadonlyMap implementation', async () => {
@@ -121,7 +241,67 @@ describe('prepared unscoped Context Graph read checks', () => {
     const signal = new AbortController().signal;
     const check = await prepareUnscopedContextGraphReadChecks(deps, ['a', 'b'], signal);
     expect(await Promise.all(['a', 'b'].map((id) => check(id, signal)))).toEqual([true, true]);
-    expect(deps.canReadContextGraph).not.toHaveBeenCalled();
+    expect(deps.getRegisteredAuthority).not.toHaveBeenCalled();
+  });
+
+  it('rejects duplicate private entries that replace a registered result with absence and omit another owner', async () => {
+    const deps = dependencies();
+    deps.getRegisteredAuthority.mockImplementation(async (id) => id === 'private'
+      ? { kind: 'private', onChainId: 7n, participantAgents: ['owner'] }
+      : { kind: 'public', onChainId: 8n });
+    deps.resolveContextGraphIdsByNameHashes.mockImplementation(async () => {
+      const values = new Map<string, bigint | null>([[commitment('private'), 7n], [commitment('public'), null]]);
+      return {
+        get: values.get.bind(values), has: values.has.bind(values),
+        forEach: values.forEach.bind(values), entries: values.entries.bind(values),
+        keys: values.keys.bind(values), values: values.values.bind(values), size: 2,
+        *[Symbol.iterator]() {
+          yield [commitment('private'), 7n] as [string, bigint | null];
+          yield [commitment('private'), null] as [string, bigint | null];
+        },
+      } satisfies ReadonlyMap<string, bigint | null>;
+    });
+    await expect(prepareUnscopedContextGraphReadChecks(deps, ['private', 'public'], new AbortController().signal))
+      .rejects.toThrow(/registration batch/);
+  });
+
+  it.each(['short', 'tuple', 'extra', 'infinite'] as const)('rejects a %s iterator independently of its reported size', async (malformation) => {
+    const deps = dependencies();
+    let iterations = 0;
+    deps.resolveContextGraphIdsByNameHashes.mockImplementation(async (names) => {
+      const base = new Map(names.map((name) => [name, null]));
+      return {
+        size: names.length,
+        *[Symbol.iterator]() {
+          iterations += 1;
+          yield malformation === 'tuple' ? [names[0]] : [names[0], null];
+          if (malformation === 'short' || malformation === 'tuple') return;
+          iterations += 1;
+          yield [names[1], null];
+          do {
+            iterations += 1;
+            yield [names[0], null];
+          } while (malformation === 'infinite');
+        },
+        get: base.get.bind(base), has: base.has.bind(base), forEach: base.forEach.bind(base),
+        entries: base.entries.bind(base), keys: base.keys.bind(base), values: base.values.bind(base),
+      } as ReadonlyMap<string, bigint | null>;
+    });
+    await expect(prepareUnscopedContextGraphReadChecks(deps, ['a', 'b'], new AbortController().signal))
+      .rejects.toThrow(/registration batch/);
+    expect(iterations).toBeLessThanOrEqual(3);
+    expect(deps.createReadAuthorityInput).not.toHaveBeenCalled();
+  });
+
+  it('owns the validated absence snapshot after an adapter mutates its returned map', async () => {
+    const deps = dependencies();
+    const result = new Map<string, bigint | null>([[commitment('a'), 7n]]);
+    deps.resolveContextGraphIdsByNameHashes.mockResolvedValue(result);
+    const signal = new AbortController().signal;
+    const check = await prepareUnscopedContextGraphReadChecks(deps, ['a'], signal);
+    result.set(commitment('a'), null);
+    expect(await check('a', signal)).toBe(false);
+    expect(deps.getRegisteredAuthority).toHaveBeenCalledWith('a');
   });
 
   it('binds bulk transport work to the request signal and rejects late completion after abort', async () => {
@@ -129,7 +309,7 @@ describe('prepared unscoped Context Graph read checks', () => {
     const stop = new AbortController();
     let release!: () => void;
     deps.resolveContextGraphIdsByNameHashes.mockImplementation(async (names, options) => {
-      expect(options.signal.aborted).toBe(false);
+      expect(options.signal?.aborted).toBe(false);
       await new Promise<void>((resolve) => { release = resolve; });
       return new Map(names.map((name) => [name, null]));
     });
@@ -138,7 +318,7 @@ describe('prepared unscoped Context Graph read checks', () => {
     stop.abort(new Error('cancelled'));
     release();
     await outcome;
-    expect(deps.canReadContextGraph).not.toHaveBeenCalled();
+    expect(deps.getRegisteredAuthority).not.toHaveBeenCalled();
   });
 
   it('denies unavailable registration promptly and aborts hanging metadata work', async () => {
@@ -153,7 +333,7 @@ describe('prepared unscoped Context Graph read checks', () => {
     const check = await prepareUnscopedContextGraphReadChecks(deps, ['a'], signal);
     expect(metadataSignal.aborted).toBe(true);
     expect(await check('a', signal)).toBe(false);
-    expect(deps.canReadContextGraph).not.toHaveBeenCalled();
+    expect(deps.getRegisteredAuthority).not.toHaveBeenCalled();
   });
 
   it('cancels four active metadata batches and never starts queued batches after registration failure', async () => {
@@ -191,7 +371,7 @@ describe('prepared unscoped Context Graph read checks', () => {
     for (const release of releases) release();
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(query).toHaveBeenCalledTimes(4);
-    expect(deps.canReadContextGraph).not.toHaveBeenCalled();
+    expect(deps.getRegisteredAuthority).not.toHaveBeenCalled();
     await store.close();
   });
 
@@ -203,7 +383,7 @@ describe('prepared unscoped Context Graph read checks', () => {
       deps, Array.from({ length: 2048 }, (_, i) => `candidate-${i}`), stop.signal,
     )).rejects.toThrow('cancelled while preparing');
     expect(deps.resolveContextGraphIdsByNameHashes).not.toHaveBeenCalled();
-    expect(deps.contextGraphNameCommitment.mock.calls.length).toBeLessThan(2048);
+    expect(deps.registrationNameHash.mock.calls.length).toBeLessThan(2048);
   });
 });
 
@@ -224,8 +404,8 @@ describe('batched local read-authority facts', () => {
     deps.findContextGraphIdsWithReadAuthorityFacts.mockImplementation((ids, signal) => (
       projection.findContextGraphIdsWithReadAuthorityFacts(ids, { signal })
     ));
-    deps.canReadContextGraph.mockImplementation(async (candidate) => (
-      (await projection.get(candidate)).accessPolicy !== 'private'
+    deps.isPrivateLocalGraph.mockImplementation(async (candidate) => (
+      (await projection.get(candidate)).accessPolicy === 'private'
     ));
     const signal = new AbortController().signal;
     const check = await prepareUnscopedContextGraphReadChecks(deps, [id], signal);
@@ -241,7 +421,7 @@ describe('batched local read-authority facts', () => {
     else await store.replaceSubject!(graphs[source], contextGraphDataUri(id), quads);
     expect((await projection.get(id)).accessPolicy).toBe('private');
     expect(await check(id, signal)).toBe(false);
-    expect(deps.canReadContextGraph).toHaveBeenCalledWith(id, signal);
+    expect(deps.isPrivateLocalGraph).toHaveBeenCalledWith(id);
     await store.close();
   });
 
