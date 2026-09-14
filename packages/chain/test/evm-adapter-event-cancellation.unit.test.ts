@@ -648,3 +648,87 @@ describe('event scan RPC cancellation', () => {
     } finally { adapter.destroy(); }
   });
 });
+
+describe('event page Hub binding generation', () => {
+  const RETIRED = '0x00000000000000000000000000000000000000aa';
+  const REPLACEMENT = '0x00000000000000000000000000000000000000bb';
+
+  it('fails a page rotated mid-scan and replays the same range against the replacement address', async () => {
+    const hub = new Interface([
+      'function getContractAddress(string name) view returns (address)',
+      'function getAssetStorageAddress(string name) view returns (address)',
+    ]);
+    const rotatedAddresses = new Set([RETIRED, REPLACEMENT]);
+    // Only the ContextGraphStorage scans; the rotation poller reads the Hub.
+    const scanned: string[] = [];
+    let contextGraphStorage = RETIRED;
+    let rotateDuringNextScan = true;
+    let rotate = (): void => {};
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const server = await rpc.start(async (payload, response) => {
+      let result: unknown = '0x7a69';
+      if (payload.method === 'eth_call') {
+        const call = hub.parseTransaction({ data: (payload.params[0] as { data: string }).data });
+        if (!call) throw new Error('expected Hub lookup');
+        result = hub.encodeFunctionResult(call.fragment, [
+          String(call.args[0]) === 'ContextGraphStorage' ? contextGraphStorage : address,
+        ]);
+      } else if (payload.method === 'eth_getLogs') {
+        const queried = String((payload.params[0] as { address?: string }).address ?? '').toLowerCase();
+        if (rotatedAddresses.has(queried)) scanned.push(queried);
+        // The rotation lands after the page captured its handles and while its
+        // wide log scan is in flight — exactly the window the guard closes.
+        if (queried === RETIRED && rotateDuringNextScan) {
+          rotateDuringNextScan = false;
+          rotate();
+        }
+        result = [];
+      }
+      sendJsonRpcResult(response, payload, result);
+    });
+    const adapter = new EVMChainAdapter({ rpcUrl: server.url,
+      privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const internal = adapter as unknown as { applyHubRotationEventName(name: string): void };
+    rotate = () => {
+      contextGraphStorage = REPLACEMENT;
+      internal.applyHubRotationEventName('ContextGraphStorage');
+    };
+    const page = { eventTypes: ['ContextGraphCreated'], fromBlock: 101, toBlock: 120 };
+    try {
+      // The scan itself succeeded against the retired address and returned no
+      // events. Without the generation guard the page would complete and its
+      // lane would checkpoint block 120, permanently skipping whatever the
+      // replacement emitted in 101-120. It must fail instead.
+      await expect(collect(adapter, page))
+        .rejects.toThrow('Hub contract bindings changed during event scan');
+      expect(scanned).toEqual([RETIRED]);
+      // A failed page leaves the lane cursor where it was (proven for the lane
+      // itself by the publisher's backoff/replay suite), so the replay covers
+      // the same range — now against the address the Hub actually points at.
+      expect(await collect(adapter, page)).toEqual([]);
+      expect(scanned).toEqual([RETIRED, REPLACEMENT]);
+    } finally {
+      adapter.destroy();
+      await rpc.stopAll();
+    }
+  });
+
+  it('fails a page whose bindings rotated before its first descriptor scan', async () => {
+    const adapter = adapterAt();
+    const internal = adapter as unknown as { applyHubRotationEventName(name: string): void };
+    const reader = vi.fn(async () => []);
+    Object.assign(adapter, {
+      ensureHubRotationListenerStarted: async () => {
+        // A watcher that replays a rotation as it starts retires the generation
+        // the page already resolved, before any descriptor has been scanned.
+        internal.applyHubRotationEventName('ContextGraphStorage');
+      },
+      readContractWith: reader,
+    });
+    try {
+      await expect(collect(adapter, { eventTypes: ['ContextGraphCreated'], fromBlock: 101, toBlock: 120 }))
+        .rejects.toThrow('Hub contract bindings changed during event scan');
+      expect(reader).not.toHaveBeenCalled();
+    } finally { adapter.destroy(); }
+  });
+});
