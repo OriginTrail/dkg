@@ -3,6 +3,8 @@
 import { contextGraphStorageOwnerCandidates } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
+export type ContextGraphQueryStore = Pick<TripleStore, 'query' | 'listGraphs' | 'listGraphsByPrefix'>;
+
 export const MAX_UNSCOPED_QUERY_OWNER_CANDIDATES = 512;
 export const UNSCOPED_QUERY_ADMISSION_TIMEOUT_MS = 5_000;
 
@@ -18,7 +20,7 @@ export function assertUnscopedQueryCandidateLimit(count: number): void {
  * Missing metadata cannot rule out a legacy owner of an ambiguous graph name.
  */
 export async function listStoredContextGraphQueryCandidates(
-  store: TripleStore,
+  store: ContextGraphQueryStore,
   opts: { signal?: AbortSignal } = {},
 ): Promise<string[]> {
   const prefix = 'did:dkg:context-graph:';
