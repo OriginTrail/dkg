@@ -458,47 +458,12 @@ export class VmRecoverySlotRegistry {
     return 'settled';
   }
 
+  /** The batch transaction plans on top of the same scope primitive as `begin`. */
   beginBatch(): VmRecoveryBatchTransaction {
-    const lease = new VmRecoverySlotLease();
-    const reservations = new Set<VmRecoverySlotAdmissionReservation>();
-    let released = false;
+    const scope = this.openScope();
     let state: { readonly kind: 'new' | 'committed' | 'released' }
       | { readonly kind: 'reserved'; readonly entries: readonly VmRecoveryBatchEntry[]; readonly targetCount: number }
       = { kind: 'new' };
-
-    const track = (targets: readonly Target[]): void => {
-      if (released || lease.signal.aborted) return;
-      for (const target of targets) {
-        const key = vmRecoverySlotKey(target);
-        const slot = this.observedSlot(target);
-        if (lease.signal.aborted) {
-          if (slot) this.prune(key, slot);
-          break;
-        }
-        if (!slot) { lease.cancel(); break; }
-        lease.attach(slot.generation ??= new VmRecoverySlotGeneration(key));
-      }
-    };
-
-    const reserveAdmission = (target: Target, now: number): VmRecoverySlotReservation => {
-      if (released || lease.signal.aborted) return { kind: 'deferred' };
-      const result = this.reserveAdmission(target, now, lease);
-      if (lease.signal.aborted) {
-        if (result.kind === 'reserved') result.reservation.release();
-        return { kind: 'deferred' };
-      }
-      if (result.kind !== 'reserved') return result;
-      const inner = result.reservation;
-      const reservation: VmRecoverySlotAdmissionReservation = {
-        commit: params => {
-          if (released || lease.signal.aborted) { inner.release(); return { kind: 'deferred' }; }
-          try { return inner.commit(params); } finally { reservations.delete(reservation); }
-        },
-        release: () => { inner.release(); reservations.delete(reservation); },
-      };
-      reservations.add(reservation);
-      return { kind: 'reserved', reservation };
-    };
 
     const reserveTarget = (
       target: OrdinalRecoveryTarget,
@@ -518,7 +483,7 @@ export class VmRecoverySlotRegistry {
         // now instead of carrying a retired handle through discovery.
         if (prepared.kind !== 'evidence-free') return prepared;
       }
-      const admission = reserveAdmission(target, options.now);
+      const admission = scope.reserveAdmission(target, options.now);
       switch (admission.kind) {
         case 'reserved': return admission;
         case 'existing': return { kind: 'owned', slot: admission.slot };
@@ -527,11 +492,8 @@ export class VmRecoverySlotRegistry {
     };
 
     const release = (): void => {
-      if (released) return;
-      released = true;
       state = { kind: 'released' };
-      for (const reservation of reservations) reservation.release();
-      for (const generation of lease.detachAll()) this.retireIdleGeneration(generation);
+      scope.release();
     };
 
     const reserveBatch: VmRecoveryBatchTransaction['reserveBatch'] = options => {
@@ -559,7 +521,7 @@ export class VmRecoverySlotRegistry {
           .map(({ target }) => target);
         const suppressedRecords = entries.flatMap(({ admission }) => admission.kind === 'backoff'
           ? [admission.slot.snapshot] : []);
-        track(initiallyEligibleTargets);
+        scope.track(initiallyEligibleTargets);
         return { initiallyEligibleTargets, suppressedRecords };
       } catch (error) {
         release();
@@ -577,7 +539,7 @@ export class VmRecoverySlotRegistry {
           collectionDeadlineAt: options.collectionDeadlineAt,
         };
         const prepared = entries.map(({ target, index, admission }) => {
-          const stale = lease.signal.aborted || !options.isCurrent();
+          const stale = scope.signal.aborted || !options.isCurrent();
           let result: VmRecoveryPreparation;
           switch (admission.kind) {
             case 'invalidated': result = admission; break;
@@ -614,7 +576,7 @@ export class VmRecoverySlotRegistry {
           }
         }).sort((left, right) => Number(right.prepared.kind === 'owned') - Number(left.prepared.kind === 'owned')
           || left.index - right.index);
-        track(eligible.map(({ target }) => target));
+        scope.track(eligible.map(({ target }) => target));
         return {
           eligible,
           ...(lastAdmitted && targetCount > 0
@@ -627,7 +589,7 @@ export class VmRecoverySlotRegistry {
       }
     };
     const transaction: VmRecoveryBatchTransaction = {
-      signal: lease.signal,
+      signal: scope.signal,
       reserveBatch,
       commit,
       release,
@@ -647,7 +609,21 @@ export class VmRecoverySlotRegistry {
     return this.slots.get(key)?.record?.handle === handle && this.capacity.isReservedDonor(key);
   }
 
+  /**
+   * Open a scope over retained slots. Focused suites drive the shared
+   * primitive through this entry point; `beginBatch` composes the same one.
+   */
   begin(): VmRecoverySlotScope {
+    return this.openScope();
+  }
+
+  /**
+   * The one lease/reservation lifetime: tracking attaches generations and
+   * cancels on a vanished slot, admission is guarded by cancellation and
+   * release, and release returns every reservation and retires idle
+   * generations.
+   */
+  private openScope(): VmRecoverySlotScope {
     const lease = new VmRecoverySlotLease();
     const reservations = new Set<VmRecoverySlotAdmissionReservation>();
     let released = false;
