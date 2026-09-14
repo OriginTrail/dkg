@@ -887,6 +887,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       source?: string;
+      onRpcRead?: () => void;
     } = {},
   ): Promise<string | null> {
     const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
@@ -905,8 +906,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetsV1(
     this: DKGAgent,
     contextGraphIds: readonly string[],
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; onRpcRead?: () => void } = {},
   ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
+    const chainReadOptions = options.signal === undefined
+      ? {}
+      : { signal: options.signal };
     const uniqueContextGraphIds = [...new Set(contextGraphIds)];
     const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
       const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
@@ -954,10 +958,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
     if (resolveSnapshots !== undefined) {
       options.signal?.throwIfAborted();
+      options.onRpcRead?.();
       const snapshotsByNameHash = await resolveSnapshots.call(
         indexReader,
         reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
-        options,
+        chainReadOptions,
       );
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
@@ -981,10 +986,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         .resolveFinalizedContextGraphAuthoritySnapshotByNameHash;
       if (resolveSnapshot !== undefined) {
         const [{ contextGraphId, expectedNameHash }] = reverseBindingTargets;
+        options.onRpcRead?.();
         const finalizedSnapshot = await resolveSnapshot.call(
           indexReader,
           expectedNameHash,
-          options,
+          chainReadOptions,
         );
         if (finalizedSnapshot !== null) {
           targets.set(contextGraphId, Object.freeze({
@@ -1001,10 +1007,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const resolveMany = indexReader.resolveFinalizedContextGraphIdsByNameHashes;
     if (resolveMany !== undefined) {
       options.signal?.throwIfAborted();
+      options.onRpcRead?.();
       const resolvedByNameHash = await resolveMany.call(
         indexReader,
         reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
-        options,
+        chainReadOptions,
       );
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
@@ -1025,10 +1032,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const resolveOne = indexReader.resolveFinalizedContextGraphIdByNameHash;
     if (resolveOne === undefined) return { kind: 'legacy-current' };
     for (const { contextGraphId, expectedNameHash } of reverseBindingTargets) {
+      options.onRpcRead?.();
       const expectedOnChainId = await resolveOne.call(
         indexReader,
         expectedNameHash,
-        options,
+        chainReadOptions,
       );
       if (expectedOnChainId !== null) {
         targets.set(contextGraphId, Object.freeze({
@@ -1049,7 +1057,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveFinalizedContextGraphAuthorityTargetV1(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; onRpcRead?: () => void } = {},
   ): Promise<FinalizedContextGraphAuthorityTargetV1 | null> {
     if (this.contextGraphRegistrationsInFlight?.has(contextGraphId)) {
       throw new Error(
@@ -1239,14 +1247,14 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async resolveContextGraphOnChainIdBinding(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal; source?: string } = {},
+    options: { signal?: AbortSignal; source?: string; onRpcRead?: () => void } = {},
   ): Promise<(
     | { onChainId: string; provenance: 'authoritative' | 'ontology' }
     | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
   ) | null> {
     const currentBinding = await this.resolveCurrentNameHashContextGraphBinding(
       contextGraphId,
-      { signal: options.signal },
+      { signal: options.signal, onRpcRead: options.onRpcRead },
     );
     if (currentBinding !== undefined) return currentBinding;
 

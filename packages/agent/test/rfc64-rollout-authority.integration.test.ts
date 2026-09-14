@@ -1936,14 +1936,21 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('propagates caller cancellation into the registered authority snapshot read', async () => {
     let readSignal: AbortSignal | undefined;
+    const readStarted = Promise.withResolvers<void>();
     const readAuthority = vi.fn(async (
       _contextGraphId: bigint,
       options?: { signal?: AbortSignal },
     ) => {
       readSignal = options?.signal;
-      return Object.freeze({
-        ...finalizedAuthoritySnapshot(CONTEXT_GRAPH_ID, [], '0'),
-        accessPolicy: 0,
+      readStarted.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        if (readSignal?.aborted) {
+          reject(readSignal.reason);
+          return;
+        }
+        readSignal?.addEventListener('abort', () => reject(readSignal!.reason), {
+          once: true,
+        });
       });
     });
     const edge = await startAgent({
@@ -1957,13 +1964,15 @@ describe('RFC-64 rollout authority integration', () => {
     vi.spyOn(edge, 'getContextGraphOnChainId').mockResolvedValue('9');
     const controller = new AbortController();
 
-    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+    const operation = edge.reconcileRfc64CatalogAccessAuthorityV1(
       CONTEXT_GRAPH_ID,
       controller.signal,
-    )).resolves.toMatchObject({ policy: { contextGraphId: CONTEXT_GRAPH_ID } });
+    );
+    await readStarted.promise;
     expect(readSignal).toBeInstanceOf(AbortSignal);
     const reason = new Error('caller stopped');
     controller.abort(reason);
+    await expect(operation).rejects.toBe(reason);
     expect(readSignal).toMatchObject({ aborted: true, reason });
   });
 

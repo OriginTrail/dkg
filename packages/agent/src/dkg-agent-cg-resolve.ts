@@ -1935,7 +1935,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   async resolveCurrentNameHashContextGraphBinding(
     this: DKGAgent,
     requestedId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; onRpcRead?: () => void } = {},
   ): Promise<(
     | { onChainId: string; provenance: 'authoritative' }
     | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
@@ -1979,6 +1979,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
       return undefined;
     }
+    options.onRpcRead?.();
     const resolved = options.signal === undefined
       ? await resolve.call(this.chain, target.nameHash)
       : await resolve.call(this.chain, target.nameHash, { signal: options.signal });

@@ -25,6 +25,11 @@ export interface Rfc64AuthorityReadCoordinatorSnapshotV1 {
   readonly retryAtMs: number | null;
 }
 
+export interface Rfc64AuthorityRpcProbeEvidenceV1 {
+  /** Record that this operation actually exercised the governed RPC pool. */
+  markRpcAttempt(): void;
+}
+
 /**
  * A caller-visible deferral, distinct from a failed RPC attempt. Callers may
  * keep their last accepted authority while the shared provider pool cools down.
@@ -92,7 +97,6 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   readonly #random: () => number;
   #consecutiveExhaustions = 0;
   #retryAtMs = 0;
-  #running = false;
   #tail: Promise<void> = Promise.resolve();
   #lifecycleAbort = new AbortController();
 
@@ -123,7 +127,10 @@ export class Rfc64AuthorityReadCoordinatorV1 {
 
   async run<T>(
     signal: AbortSignal | undefined,
-    operation: (signal: AbortSignal | undefined) => Promise<T>,
+    operation: (
+      signal: AbortSignal,
+      evidence: Rfc64AuthorityRpcProbeEvidenceV1,
+    ) => Promise<T>,
   ): Promise<T> {
     const runSignal = signal === undefined
       ? this.#lifecycleAbort.signal
@@ -142,17 +149,22 @@ export class Rfc64AuthorityReadCoordinatorV1 {
           );
         }
 
-        this.#running = true;
+        let rpcAttempted = false;
+        const evidence: Rfc64AuthorityRpcProbeEvidenceV1 = Object.freeze({
+          markRpcAttempt: () => { rpcAttempted = true; },
+        });
         try {
-          const result = await operation(runSignal);
-          this.#consecutiveExhaustions = 0;
-          this.#retryAtMs = 0;
+          const result = await operation(runSignal, evidence);
+          // A local/cache-only answer is useful to its caller, but cannot
+          // prove that a previously exhausted provider pool has recovered.
+          if (this.#consecutiveExhaustions === 0 || rpcAttempted) {
+            this.#consecutiveExhaustions = 0;
+            this.#retryAtMs = 0;
+          }
           return result;
         } catch (error) {
           if (isRpcEndpointsExhaustedError(error)) this.#open(error);
           throw error;
-        } finally {
-          this.#running = false;
         }
       } finally {
         release();
@@ -198,11 +210,11 @@ export class Rfc64AuthorityReadCoordinatorV1 {
   snapshot(): Rfc64AuthorityReadCoordinatorSnapshotV1 {
     const now = this.#now();
     return Object.freeze({
-      state: this.#running && this.#consecutiveExhaustions > 0
-        ? 'half-open'
+      state: this.#consecutiveExhaustions === 0
+        ? 'closed'
         : now < this.#retryAtMs
           ? 'open'
-          : 'closed',
+          : 'half-open',
       consecutiveExhaustions: this.#consecutiveExhaustions,
       retryAtMs: this.#retryAtMs > now ? this.#retryAtMs : null,
     });
