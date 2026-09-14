@@ -1,6 +1,7 @@
 import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 
 const CALLER_ADDRESS = '0x1111111111111111111111111111111111111111';
@@ -142,6 +143,74 @@ describe('context graph list authority enrichment', () => {
     expect(result.rows).toHaveLength(MISS_COUNT);
     expect(fixture.readRegistrationStatus).toHaveBeenCalledTimes(MISS_COUNT);
     expect(fixture.resolveCurrent).not.toHaveBeenCalled();
+  });
+
+  it('chunks 4,097 finalized listing targets and ignores cross-chunk results', async () => {
+    const ids = Array.from({ length: 4_097 }, (_, index) => `listing-boundary-${index}`);
+    const hashById = new Map(ids.map((id, index) => [
+      id,
+      `0x${(index + 1).toString(16).padStart(64, '0')}`,
+    ]));
+    const onChainIdByHash = new Map(ids.map((id, index) => [
+      hashById.get(id)!,
+      BigInt(index + 1_000),
+    ]));
+    const resolveMany = vi.fn(async (nameHashes: readonly string[]) => {
+      if (nameHashes.length > 4_096) throw new Error('reader target limit exceeded');
+      const resolved = new Map(nameHashes.map((nameHash) => [
+        nameHash,
+        onChainIdByHash.get(nameHash)!,
+      ]));
+      if (resolveMany.mock.calls.length === 2) {
+        resolved.set(hashById.get(ids[0]!)!, 999_999n);
+      }
+      return resolved;
+    });
+    const readRegistrationStatus = vi.fn(async () => null);
+    const resolveCurrent = vi.fn(async () => null);
+    const fakeAgent = {
+      subscribedContextGraphs: new Map(),
+      chain: {
+        contextGraphAuthorityIndexRevisionReader: {
+          maxTargetCount: 4_096,
+          resolveFinalizedContextGraphIdsByNameHashes: resolveMany,
+        },
+      },
+      resolveContextGraphNameHashBindingTarget: () => undefined,
+      contextGraphNameCommitment: (id: string) => hashById.get(id)!,
+      store: {
+        query: async () => ({
+          type: 'bindings' as const,
+          bindings: ids.map((id) => ({
+            ctxGraph: contextGraphDataUri(id),
+            name: `"${id}"`,
+            access: '"public"',
+          })),
+        }),
+        listGraphsByPrefix: async () => [],
+      },
+      getCgMeta: async (id: string) => projectedMeta(id),
+      resolveFinalizedContextGraphAuthorityTargetsV1:
+        ContextGraphRegistryMethods.prototype.resolveFinalizedContextGraphAuthorityTargetsV1,
+      readLocalContextGraphRegistrationStatus: readRegistrationStatus,
+      getContextGraphOnChainId: resolveCurrent,
+      getContextGraphCurator: async () => undefined,
+      isPrivateContextGraph: async () => false,
+      curatorDidMatchesChecksumAgent: () => false,
+      callerIsAllowlistedAgentParticipant: async () => false,
+    };
+
+    const result = await list(fakeAgent);
+
+    expect(resolveMany.mock.calls.map(([nameHashes]) => nameHashes.length))
+      .toEqual([4_096, 1]);
+    expect(result.rows).toHaveLength(ids.length);
+    expect(result.rows.every((row: { id: string; onChainId?: string }, index: number) => (
+      row.id === ids[index] && row.onChainId === String(index + 1_000)
+    ))).toBe(true);
+    expect(result.rows[0]?.onChainId).toBe('1000');
+    expect(readRegistrationStatus).not.toHaveBeenCalled();
+    expect(resolveCurrent).not.toHaveBeenCalled();
   });
 
   it('repairs a just-mined local registration only after durable registered evidence', async () => {
