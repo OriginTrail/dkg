@@ -81,7 +81,7 @@ afterEach(() => {
 });
 
 describe('local-agent configuration transactions', () => {
-  it('keeps node-UI connect and refresh probes outside the config commit queue', async () => {
+  it('keeps node-UI probes outside the config queue without overwriting newer integration edits', async () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
     const initial = makeConfig({
       localAgentIntegrations: {
@@ -149,7 +149,7 @@ describe('local-agent configuration transactions', () => {
       const connectBody = JSON.parse(connectRes.body);
       expect(connectBody.integration).toEqual(getLocalAgentIntegration(configStore.current, 'hermes'));
       expect(configStore.current.localAgentIntegrations?.hermes?.runtime)
-        .toMatchObject({ status: 'ready', ready: true });
+        .toMatchObject({ status: 'degraded', ready: false });
       expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')))
         .toEqual(configStore.current);
 
@@ -186,7 +186,7 @@ describe('local-agent configuration transactions', () => {
 
       expect(refreshRes.statusCode).toBe(200);
       expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
-        runtime: { status: 'ready', ready: true },
+        runtime: { status: 'degraded', ready: false },
         capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during refresh' },
       });
       expect(JSON.parse(refreshRes.body).integration)
