@@ -77,6 +77,7 @@ export default defineConfig({
       'test/storage-ack-priority-lane.test.ts',
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
+      'test/workspace-snapshot-store-write-capacity.test.ts',
       'test/workspace-snapshot-write-capacity.test.ts',
       'test/workspace-snapshot-validation.test.ts',
       'test/workspace-head-cardinality.test.ts',
