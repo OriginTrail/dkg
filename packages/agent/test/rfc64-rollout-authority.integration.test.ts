@@ -311,15 +311,15 @@ describe('RFC-64 rollout authority integration', () => {
     try {
       runtime.start(createOperationContext('system'));
       await runtime.whenIdle();
-      // Startup retains one coalesced follow-up for responsibility changes
-      // observed while the initial selection pass is settling.
-      expect(readRevisions).toHaveBeenCalledTimes(2);
+      // Scheduled responsibility batching settles before the refresh owner starts,
+      // so startup needs only the owner's initial revision read.
+      expect(readRevisions).toHaveBeenCalledOnce();
       expect(readRevisions).toHaveBeenCalledWith(['9'], {
         signal: expect.any(AbortSignal),
       });
       expect(observedSignal?.aborted).toBe(false);
       expect(governor.snapshot()).toMatchObject({
-        backgroundAdmitted: 2,
+        backgroundAdmitted: 1,
         foregroundAdmitted: 0,
       });
     } finally {
@@ -1569,6 +1569,9 @@ describe('RFC-64 rollout authority integration', () => {
           callerAgentAddress: AUTHOR,
         });
       }
+      // Let the scheduled responsibility owner's quiet window elapse before
+      // waiting for its physical batch while fake timers are installed.
+      await vi.advanceTimersByTimeAsync(1_000);
       await edge.whenRfc64CatalogResponsibilitiesIdleV1();
       expect(queueSync).not.toHaveBeenCalled();
 
@@ -2426,17 +2429,16 @@ describe('RFC-64 rollout authority integration', () => {
     expect(flush).toHaveBeenCalledOnce();
     await expect(edge.contextGraphExists(contextGraphId)).resolves.toBe(true);
     expect(observedPostCommitFailure).toBe(true);
-    await vi.waitFor(() => {
-      expect(policyRead.mock.calls.length).toBeGreaterThanOrEqual(3);
-      expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
-        expect.objectContaining({
-          contextGraphId,
-          responsibilityReason: 'edge-subscription',
-          active: true,
-          mode: 'catalog',
-        }),
-      );
-    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(policyRead).toHaveBeenCalledTimes(2);
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+      expect.objectContaining({
+        contextGraphId,
+        responsibilityReason: 'edge-subscription',
+        active: true,
+        mode: 'catalog',
+      }),
+    );
 
     // No trusted owner was supplied, so the retry may recover responsibility
     // selection but authority remains visibly blocked and the receiver stays
