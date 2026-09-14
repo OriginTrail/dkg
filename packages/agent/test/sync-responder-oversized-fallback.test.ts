@@ -466,6 +466,60 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     expect(offsets).toContain(1);
   });
 
+  it.each(['double', 'float'])('uses OFFSET compatibility paging for xsd:%s NaN ordering', async (datatype) => {
+    const cgId = `exact-graph-${datatype}-nan-cursor`;
+    const graph = `did:dkg:context-graph:${cgId}/context/1`;
+    const datatypeIri = `http://www.w3.org/2001/XMLSchema#${datatype}`;
+    const store = new OxigraphStore();
+    await store.insert(['-INF', '0', '1', 'INF', 'NaN'].map((value) => ({
+      graph,
+      subject: 'urn:test:s',
+      predicate: 'urn:test:p',
+      object: `"${value}"^^<${datatypeIri}>`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 1,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const offsets: number[] = [];
+    let seekPageQueries = 0;
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: Parameters<OxigraphStore['query']>[1]) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (normalized.includes(`GRAPH <${graph}>`) && normalized.includes('ORDER BY ?s ?p ?o')) {
+        const match = normalized.match(/OFFSET (\d+)/);
+        if (match) offsets.push(Number(match[1]));
+        else if (normalized.includes('FILTER(')) seekPageQueries += 1;
+      }
+      return originalQuery(sparql, options);
+    }) as OxigraphStore['query'];
+
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 1,
+      syncSessionId: `${datatype}-nan-cursor-session`,
+    };
+    const collected: string[] = [];
+    for (let offset = 0; offset < 5; offset += 1) {
+      const page = linesFromNquads(await cap.invoke({ ...base, offset }));
+      expect(page).toHaveLength(1);
+      collected.push(...page);
+    }
+
+    expect(collected).toHaveLength(5);
+    expect(new Set(collected)).toHaveLength(5);
+    expect(collected.some((line) => line.includes(`"NaN"^^<${datatypeIri}>`))).toBe(true);
+    expect(offsets).toEqual([0, 1, 2, 3, 4]);
+    expect(seekPageQueries).toBe(0);
+  });
+
   it('keeps exact-graph cursor memory bounded while serving many pages', async () => {
     const cgId = 'exact-graph-cursor-eviction';
     const graph = `did:dkg:context-graph:${cgId}/context/1`;
