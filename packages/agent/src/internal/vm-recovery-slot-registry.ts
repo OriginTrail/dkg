@@ -6,6 +6,7 @@ import {
   creditRotationCleanAbsence,
   createRotationRecord,
   hasUnconfirmedAbsence,
+  isRotationExpired,
   membershipMatches,
   recordRotationPeerVisit,
   reviseRotationRoster,
@@ -22,7 +23,11 @@ import {
   type VmRecoverySlotLocator,
   type VmRecoveryTarget,
 } from './vm-recovery-rotation-evidence.js';
-import { VmRecoverySlotCapacity, type VmRecoveryPendingAdmission } from './vm-recovery-slot-capacity.js';
+import {
+  VmRecoverySlotCapacity,
+  type VmRecoveryCapacitySlot,
+  type VmRecoveryPendingAdmission,
+} from './vm-recovery-slot-capacity.js';
 import { VmRecoverySlotGeneration, VmRecoverySlotLease } from './vm-recovery-slot-lifetimes.js';
 
 export type {
@@ -232,6 +237,18 @@ export class VmRecoverySlotRegistry {
     return slot;
   }
 
+  private capacitySlots(now: number): ReadonlyMap<string, VmRecoveryCapacitySlot> {
+    const capacitySlots = new Map<string, VmRecoveryCapacitySlot>();
+    for (const [key, slot] of this.slots) {
+      capacitySlots.set(key, Object.freeze({
+        localCgId: slot.localCgId,
+        ownerToken: slot.record?.handle,
+        expired: slot.record ? isRotationExpired(slot.record, now) : false,
+      }));
+    }
+    return capacitySlots;
+  }
+
   /** Immediate and delayed admission use the same reserved-capacity transition. */
   admit(target: Target, params: VmRecoveryAdmissionParams, now: number): VmRecoverySlotAdmission {
     if (params.candidatePeerIds.length === 0) return { kind: 'deferred' };
@@ -244,7 +261,7 @@ export class VmRecoverySlotRegistry {
     const slot = this.observedSlot(target);
     if (!slot) return { kind: 'deferred' };
     if (slot.record) return { kind: 'existing', slot: captureRotation(slot.record) };
-    const pending = this.capacity.reserve(key, target.localCgId, this.slots, now);
+    const pending = this.capacity.reserve(key, target.localCgId, this.capacitySlots(now));
     if (!pending) {
       this.prune(key, slot);
       return { kind: 'deferred' };
@@ -278,7 +295,7 @@ export class VmRecoverySlotRegistry {
     let installed = false;
     try {
       if (params.candidatePeerIds.length === 0 || !this.capacity.isActive(pending) || !slot || slot.record
-        || (donation && donor?.record !== donation.record)) return { kind: 'deferred' };
+        || (donation && donor?.record?.handle !== donation.ownerToken)) return { kind: 'deferred' };
       const record = createRotationRecord(target, slot.fingerprint, params);
       if (donor) donor.record = undefined;
       slot.record = record;
