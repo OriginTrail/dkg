@@ -44,7 +44,7 @@ interface StoppedState {
 }
 
 type WorkerState = IdleState | ScheduledState | RunningState | StoppingState | StoppedState;
-type RunAction = 'none' | 'manual' | 'periodic-continuation' | 'periodic-interval';
+type RunAction = 'none' | 'manual' | 'manual-complete' | 'periodic-continuation' | 'periodic-interval';
 
 /** One explicit owner for SWM cleanup admission, cancellation, and rearming. */
 export class SwmExpiryCleanupWorker {
@@ -207,6 +207,7 @@ export class SwmExpiryCleanupWorker {
 
   private async execute(running: RunningState): Promise<void> {
     let action: RunAction = 'none';
+    let manualFailure: { flight: ManualFlight; error: unknown } | undefined;
     try {
       // Preserve a cancellable admission boundary: runNow() followed immediately
       // by stop() must retire before any storage request is dispatched.
@@ -219,10 +220,7 @@ export class SwmExpiryCleanupWorker {
       if (this.owns(running)) {
         if (running.mode === 'manual') {
           const flight = this.manualFlight;
-          if (flight) {
-            this.manualFlight = undefined;
-            flight.reject(error);
-          }
+          if (flight) manualFailure = { flight, error };
         } else if (running.joinedManual) {
           this.continuation = undefined;
           action = 'manual';
@@ -232,7 +230,16 @@ export class SwmExpiryCleanupWorker {
     } finally {
       if (this.state === running) {
         this.state = { kind: 'idle' };
-        this.applyAction(action, running.generation);
+        if (manualFailure && this.manualFlight === manualFailure.flight) {
+          this.manualFlight = undefined;
+          manualFailure.flight.reject(manualFailure.error);
+          this.applyAction(this.periodicEnabled ? 'periodic-interval' : 'none', running.generation);
+        } else if (action === 'manual-complete') {
+          this.resolveManualFlight();
+          this.applyAction(this.periodicEnabled ? 'periodic-interval' : 'none', running.generation);
+        } else {
+          this.applyAction(action, running.generation);
+        }
       }
       running.resolve();
     }
@@ -254,8 +261,7 @@ export class SwmExpiryCleanupWorker {
       if (flight.cutoffMs !== cutoffMs) continue;
       this.continuation = result.continuation;
       if (!this.continuation) {
-        this.resolveManualFlight(flight);
-        return this.periodicEnabled ? 'periodic-interval' : 'none';
+        return 'manual-complete';
       }
       await setImmediate();
     }
