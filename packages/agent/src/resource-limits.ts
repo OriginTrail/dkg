@@ -76,7 +76,14 @@ export class ResourceConfigWarnings {
 export type ResourceOwner = 'vm' | 'catchup';
 
 interface EnvironmentIntegerSpec extends IntegerBounds {
-  fallback: number;
+  /**
+   * The value used when the environment supplies none or an invalid one.
+   * `{ from }` derives it from another setting's RESOLVED value, which is how
+   * a dependent setting stays in this registry instead of needing its own
+   * parser. The referenced setting must belong to the same owner and be
+   * declared earlier, so it is already resolved; both are checked below.
+   */
+  fallback: number | { readonly from: string };
   owner: ResourceOwner;
   /** Whether startup diagnostics publish the resolved value. */
   diagnostic: boolean;
@@ -89,6 +96,13 @@ interface EnvironmentIntegerSpec extends IntegerBounds {
  */
 export const AGENT_RESOURCE_ENV_SPECS = {
   DKG_VM_RECONCILE_INTERVAL_MS: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.timerMs, fallback: 60_000 },
+  // Startup jitter defaults to one reconcile interval. Zero is a valid
+  // configured value (no jitter), so the bound starts at 0; startup
+  // diagnostics do not publish it.
+  DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS: {
+    owner: 'vm', diagnostic: false, min: 0, max: RESOURCE_MAX.timerMs,
+    fallback: { from: 'DKG_VM_RECONCILE_INTERVAL_MS' },
+  },
   DKG_VM_RECONCILE_BACKOFF_MAX_MS: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.timerMs, fallback: 600_000 },
   DKG_VM_RECONCILE_CACHE_MAX_ENTRIES: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.cacheEntries, fallback: 1_000 },
   DKG_VM_RECONCILE_CG_STATE_MAX_ENTRIES: { owner: 'vm', diagnostic: true, min: 1, max: RESOURCE_MAX.cacheEntries, fallback: 1_000 },
@@ -108,6 +122,16 @@ export const AGENT_RESOURCE_ENV_SPECS = {
 
 type AgentResourceEnvSpecs = typeof AGENT_RESOURCE_ENV_SPECS;
 export type AgentResourceEnvName = keyof AgentResourceEnvSpecs;
+
+/** Every dependent fallback names a real setting; a typo is a compile error. */
+type DependentFallbacksResolve = {
+  [Name in AgentResourceEnvName]:
+    AgentResourceEnvSpecs[Name]['fallback'] extends { readonly from: infer From }
+      ? From extends AgentResourceEnvName ? true : never
+      : true;
+}[AgentResourceEnvName];
+const _dependentFallbacksResolve: DependentFallbacksResolve = true;
+void _dependentFallbacksResolve;
 
 /** The settings the descriptor assigns to `Owner`; `Diagnostic` narrows to published ones. */
 export type OwnedResourceEnvName<Owner extends ResourceOwner, Diagnostic extends boolean = boolean> = {
@@ -162,9 +186,33 @@ function resolveOwnedResourceEnvironment<Owner extends ResourceOwner>(
   const values = {} as Record<OwnedResourceEnvName<Owner>, number>;
   for (const name of ownedResourceEnvNames(owner)) {
     const spec = AGENT_RESOURCE_ENV_SPECS[name];
-    values[name] = resourceIntegerEnv(env[name], spec, name, warnings.reject) ?? spec.fallback;
+    const fallback = typeof spec.fallback === 'number'
+      ? spec.fallback
+      : resolvedDependency(spec.fallback.from, name, values);
+    values[name] = resourceIntegerEnv(env[name], spec, name, warnings.reject) ?? fallback;
   }
   return { values, rejected: [...warnings.settings] };
+}
+
+/**
+ * The resolved value a dependent fallback derives from. Declaration order is
+ * resolution order, so a dependency declared later — or owned by another
+ * slice, which this loop never resolves — is a declaration error, not a
+ * silent zero.
+ */
+function resolvedDependency(
+  from: string,
+  dependent: string,
+  values: Record<string, number>,
+): number {
+  const resolved = values[from];
+  if (resolved === undefined) {
+    throw new Error(
+      `${dependent} derives its fallback from ${from}, which is not resolved first `
+      + 'in AGENT_RESOURCE_ENV_SPECS under the same owner',
+    );
+  }
+  return resolved;
 }
 
 /** VM-owned process settings. Importing a catch-up helper never initializes this slice. */
@@ -172,14 +220,11 @@ export function resolveVmResourceEnvironment(
   env: Readonly<Record<string, string | undefined>>,
 ): VmResourceSnapshot {
   const resolved = resolveOwnedResourceEnvironment('vm', env);
-  const startupMaxDelayMs = resourceIntegerEnv(env.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS,
-    { min: 0, max: RESOURCE_MAX.timerMs }, 'DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS',
-    (name) => resolved.rejected.push(name))
-    ?? resolved.values.DKG_VM_RECONCILE_INTERVAL_MS;
   return Object.freeze({
     owner: 'vm',
     values: Object.freeze(resolved.values),
-    startupMaxDelayMs,
+    // Named projection of a descriptor setting, kept for the static consumers.
+    startupMaxDelayMs: resolved.values.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS,
     rejected: Object.freeze(resolved.rejected),
   });
 }

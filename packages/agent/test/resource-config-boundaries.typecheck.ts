@@ -17,6 +17,16 @@ export type LegacyAckAliasesStayOutsideRuntime = AssertNever<Extract<'ackHandler
 // exactly one owner, and each owner's snapshot is a distinct slice.
 export type OwnersPartitionEverySetting = AssertNever<Extract<OwnedResourceEnvName<'vm'>, OwnedResourceEnvName<'catchup'>>>;
 declare const snapshots: AgentResourceSnapshots;
+// The dependent startup delay is an ordinary descriptor setting: partitioned to
+// the VM owner, and excluded from the published diagnostics by its own flag
+// rather than by living outside the registry.
+export type StartupDelayIsOwned =
+  AssertNever<Exclude<'DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS', OwnedResourceEnvName<'vm'>>>;
+export type StartupDelayIsNotPublished =
+  AssertNever<Extract<'DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS', OwnedResourceEnvName<'vm', true>>>;
+const startupDelay: number = snapshots.vm.values.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS;
+// @ts-expect-error The dependent setting belongs to the VM owner, not catch-up.
+void snapshots.catchup.values.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS;
 const vmSlice: VmResourceSnapshot = snapshots.vm;
 const catchupSlice: CatchupResourceSnapshot = snapshots.catchup;
 const batchSize: number = snapshots.vm.values.DKG_VM_RECONCILE_BATCH_SIZE;
@@ -41,7 +51,7 @@ resolvePolicy({}, {}, snapshots);
 resolvePolicy({}, {}, snapshots.vm);
 // @ts-expect-error Neither owner is resolved implicitly from the environment.
 resolvePolicy({}, {});
-void [vmSlice, catchupSlice, batchSize, bundleAsVm, catchupAsVm, vmAsCatchup, mergedAsVm];
+void [startupDelay, vmSlice, catchupSlice, batchSize, bundleAsVm, catchupAsVm, vmAsCatchup, mergedAsVm];
 
 const capacity: SchedulerPressureCapacity = { capacityModel: 'shared', inflightLimit: 2, queueLimit: 4 };
 const common = { scheduler: 'capacity-contract', operation: () => 'work' };

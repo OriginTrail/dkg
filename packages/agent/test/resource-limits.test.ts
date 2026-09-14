@@ -68,6 +68,13 @@ describe('bounded resource integers', () => {
   });
 });
 
+/** A dependent fallback resolves through the descriptor, exactly as production does. */
+function descriptorFallback(spec: { fallback: number | { readonly from: string } }): number {
+  if (typeof spec.fallback === 'number') return spec.fallback;
+  const source = (AGENT_RESOURCE_ENV_SPECS as Record<string, { fallback: number | { readonly from: string } }>)[spec.fallback.from];
+  return descriptorFallback(source);
+}
+
 describe('restart-scoped VM and catch-up environment policy', () => {
   it.each(Object.entries(AGENT_RESOURCE_ENV_SPECS))('%s rejects out-of-range values and retains boundaries', (name, spec) => {
     // The descriptor's owner decides which slice resolves the setting; the
@@ -82,13 +89,13 @@ describe('restart-scoped VM and catch-up environment policy', () => {
       return { value: (values as Record<string, number>)[name], rejected };
     };
     for (const raw of [...invalidNumbers, spec.max + 1, ...(spec.min ? [0] : [])].map(String)) {
-      expect(resolve(raw)).toEqual({ value: spec.fallback, rejected: [name] });
+      expect(resolve(raw)).toEqual({ value: descriptorFallback(spec), rejected: [name] });
     }
     for (const value of [spec.min, spec.max]) {
       expect(resolve(String(value))).toEqual({ value, rejected: [] });
     }
     for (const raw of [undefined, '', ' ']) {
-      expect(resolve(raw)).toEqual({ value: spec.fallback, rejected: [] });
+      expect(resolve(raw)).toEqual({ value: descriptorFallback(spec), rejected: [] });
     }
   });
 
@@ -96,7 +103,10 @@ describe('restart-scoped VM and catch-up environment policy', () => {
     const vm = ownedResourceEnvNames('vm');
     const catchup = ownedResourceEnvNames('catchup');
     expect([...vm, ...catchup].sort()).toEqual(Object.keys(AGENT_RESOURCE_ENV_SPECS).sort());
-    expect(vm).toEqual(ownedResourceEnvNames('vm', true));
+    // Every VM setting is published except the dependent startup delay.
+    expect(ownedResourceEnvNames('vm', false)).toEqual(['DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS']);
+    expect([...ownedResourceEnvNames('vm', true), ...ownedResourceEnvNames('vm', false)].sort())
+      .toEqual([...vm].sort());
     expect(ownedResourceEnvNames('catchup', false)).toEqual([]);
     const snapshots = resolveAgentResourceSnapshots({});
     expect(Object.keys(snapshots.vm.values)).toEqual(vm);
@@ -114,6 +124,45 @@ describe('restart-scoped VM and catch-up environment policy', () => {
     }
     expect(resolveVmResourceEnvironment({ DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS: '0' }).startupMaxDelayMs).toBe(0);
     expect(resolveVmResourceEnvironment({ DKG_VM_RECONCILE_INTERVAL_MS: 'Infinity' }).startupMaxDelayMs).toBe(60_000);
+  });
+
+  it('refuses a dependent fallback whose source the owner does not resolve first', () => {
+    // The guard behind the {from} contract: a dependency declared later, or
+    // owned by another slice, must fail loudly at startup instead of
+    // silently resolving to undefined.
+    const specs = AGENT_RESOURCE_ENV_SPECS as unknown as Record<string, unknown>;
+    specs.DKG_TEST_DEPENDENT_MS = {
+      owner: 'vm', diagnostic: false, min: 0, max: 10,
+      fallback: { from: 'DKG_CATCHUP_MAX_CONCURRENT_PEERS' },
+    };
+    try {
+      expect(() => resolveVmResourceEnvironment({})).toThrow(/not resolved first/);
+    } finally {
+      delete specs.DKG_TEST_DEPENDENT_MS;
+    }
+    expect(ownedResourceEnvNames('vm')).not.toContain('DKG_TEST_DEPENDENT_MS');
+  });
+
+  it('resolves startup jitter through the descriptor, not a bespoke parser', () => {
+    // The setting is owned and bounded by the registry like every other one.
+    const spec = AGENT_RESOURCE_ENV_SPECS.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS;
+    expect(spec).toMatchObject({ owner: 'vm', diagnostic: false, min: 0, max: RESOURCE_MAX.timerMs });
+    expect(spec.fallback).toEqual({ from: 'DKG_VM_RECONCILE_INTERVAL_MS' });
+    expect(ownedResourceEnvNames('vm')).toContain('DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS');
+
+    // Its fallback tracks the RESOLVED interval, including a rejected one.
+    const tracked = resolveVmResourceEnvironment({ DKG_VM_RECONCILE_INTERVAL_MS: '90000' });
+    expect(tracked.values.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS).toBe(90_000);
+    expect(tracked.startupMaxDelayMs).toBe(90_000);
+    expect(resolveVmResourceEnvironment({ DKG_VM_RECONCILE_INTERVAL_MS: '-5' }))
+      .toMatchObject({ startupMaxDelayMs: 60_000, rejected: ['DKG_VM_RECONCILE_INTERVAL_MS'] });
+
+    // A configured value still wins, and the slice reports it in one place.
+    const configured = resolveVmResourceEnvironment({
+      DKG_VM_RECONCILE_INTERVAL_MS: '90000', DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS: '1234',
+    });
+    expect(configured.values.DKG_VM_RECONCILE_STARTUP_MAX_DELAY_MS).toBe(1_234);
+    expect(configured.startupMaxDelayMs).toBe(1_234);
   });
 });
 
