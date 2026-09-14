@@ -12,6 +12,8 @@ import {
   knowledgeAssetLayerGraphUri,
   type TimestampMsV1,
   validateSubGraphName,
+  workspaceOperationPublicSnapshotGraph,
+  workspaceKnowledgeAssetOperationSnapshotGraph,
 } from '@origintrail-official/dkg-core';
 import type { LiftPublishSnapshotRequest } from './lift-job.js';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
@@ -1423,31 +1425,6 @@ function normalizeOptionalSubGraphName(subGraphName: string | undefined): string
 
 
 
-
-function workspaceOperationPublicSnapshotGraph(
-  contextGraphId: string,
-  shareOperationId: string,
-  rootEntity: string,
-  subGraphName?: string,
-): string {
-  const parts = [contextGraphId, subGraphName ?? '_', shareOperationId, rootEntity]
-    .map((part) => encodeURIComponent(part));
-  const graph = `did:dkg:context-graph:${parts[0]}/_shared_memory_snapshots/${parts[1]}/${parts[2]}/${parts[3]}/_shared_memory`;
-  assertSafeIri(graph);
-  return graph;
-}
-
-function workspaceKnowledgeAssetOperationSnapshotGraph(
-  contextGraphId: string,
-  shareOperationId: string,
-  subGraphName?: string,
-): string {
-  const parts = [contextGraphId, subGraphName ?? '_', shareOperationId]
-    .map((part) => encodeURIComponent(part));
-  const graph = `did:dkg:context-graph:${parts[0]}/_shared_memory_snapshots/${parts[1]}/${parts[2]}/ka`;
-  assertSafeIri(graph);
-  return graph;
-}
 
 async function resolveSnapshotGraphQuads(store: TripleStore, snapshotGraph: string): Promise<Quad[]> {
   const result = await store.query(

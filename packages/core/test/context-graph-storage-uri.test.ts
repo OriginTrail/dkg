@@ -18,6 +18,10 @@ import {
 } from '../src/constants.js';
 import { MemoryLayer } from '../src/memory-model.js';
 import {
+  workspaceKnowledgeAssetOperationSnapshotGraph,
+  workspaceOperationPublicSnapshotGraph,
+} from '../src/context-graph-snapshot-uri.js';
+import {
   buildCatalogAssertionScopeV1,
   type CatalogLaneV1,
 } from '../src/author-catalog-codec.js';
@@ -157,6 +161,40 @@ describe('contextGraphStorageOwnerCandidates', () => {
     `${PREFIX}v1/root/%FF/_shared_memory`,
   ])('retains valid legacy ownership when a tagged interpretation is malformed: %s', (uri) => {
     expect(contextGraphStorageOwnerCandidates(uri)).toContain('v1/root');
+  });
+
+  it('recognizes the persisted snapshot from native finalized SWM retirement', () => {
+    const id = '0x1111111111111111111111111111111111111111/native-wiring';
+    const uri = workspaceKnowledgeAssetOperationSnapshotGraph(id, 'preexisting-finalized-twin-v1');
+    expect(contextGraphStorageOwnerCandidates(uri)).toContain(id);
+  });
+
+  it.each([undefined, 'reports!%FF'])('recognizes both legacy snapshot layouts for subgraph %s', (subGraphName) => {
+    for (const id of ROOTS) {
+      for (const uri of [
+        workspaceKnowledgeAssetOperationSnapshotGraph(id, 'share/operation', subGraphName),
+        workspaceOperationPublicSnapshotGraph(id, 'share/operation', 'https://example.org/entity', subGraphName),
+      ]) {
+        expect(contextGraphStorageOwnerCandidates(uri), uri).toContain(id);
+      }
+    }
+  });
+
+  it('does not discard raw legacy interpretations of a snapshot-shaped graph', () => {
+    const id = 'tenant/_shared_memory_snapshots/_/operation/ka';
+    expect(contextGraphStorageOwnerCandidates(contextGraphDataUri(id)))
+      .toEqual(expect.arrayContaining([id, 'tenant']));
+  });
+
+  it.each([
+    'team%2frepo/_shared_memory_snapshots/_/operation/ka',
+    'team%2Frepo/_shared_memory_snapshots/_/operation/ka/extra',
+    'team%2Frepo/_shared_memory_snapshots/_/operation',
+    'team%2Frepo/_shared_memory_snapshots/reports%FF/operation/ka',
+    'team%2Frepo/_shared_memory_snapshots/_/operation%ZZ/ka',
+    'team%2Frepo/_shared_memory_snapshots/_/operation/root%FF/_shared_memory',
+  ])('does not infer a decoded owner from an invalid snapshot shape %s', (tail) => {
+    expect(contextGraphStorageOwnerCandidates(`${PREFIX}${tail}`)).toBeUndefined();
   });
 
   it('does not decode a noncanonical catalog component', () => {

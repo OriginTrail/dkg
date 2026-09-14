@@ -9,6 +9,7 @@ import {
   AuthorCatalogCodecError,
   parseCatalogAssertionScopeV1,
 } from './author-catalog-codec.js';
+import { parseWorkspaceSnapshotContextGraphId } from './context-graph-snapshot-uri.js';
 
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 
@@ -76,6 +77,9 @@ export function contextGraphStorageOwnerCandidates(uri: string): readonly string
 
   const assertion = parseContextGraphAssertionUri(uri);
   if (assertion) addScope(assertion.scope);
+
+  const snapshotOwner = parseWorkspaceSnapshotContextGraphId(uri);
+  if (snapshotOwner !== undefined) owners.add(snapshotOwner);
 
   return owners.size === 0 ? undefined : Object.freeze([...owners]);
 }
