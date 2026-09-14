@@ -32,6 +32,13 @@ void store.update(latest => {
   next.name = 'committed through owner';
   return next;
 }, 'configuration-only');
+const nameRevision = store.captureRevision(latest => latest.name);
+void store.updateIfRevision(
+  nameRevision,
+  latest => latest.name,
+  latest => ({ ...latest, name: 'conditional commit' }),
+  'configuration-only',
+);
 
 // Existing mutable configurations and full chain literals remain valid reader inputs.
 resolveChainConfig(draft, null);

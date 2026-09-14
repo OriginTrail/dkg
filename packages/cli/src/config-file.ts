@@ -13,7 +13,9 @@ export interface FileActivation<T> {
 export interface ConfigFileWriter {
   /** Includes ordinary writes admitted before the daemon claimed this file. */
   ready: Promise<string | undefined>;
-  commit<T>(prepare: () => { contents: string; activation: FileActivation<T> }): Promise<T>;
+  commit<T>(prepare: () =>
+    | { contents: string; activation: FileActivation<T> }
+    | { unchanged: T }): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -60,7 +62,9 @@ export class ConfigFileStore {
         // Check inside the lane: even updates queued before the failed rollback
         // must not prepare a candidate from the now-unreliable runtime snapshot.
         if (unreconciled) throw unreconciled;
-        const { contents, activation } = prepare();
+        const transaction = prepare();
+        if ('unchanged' in transaction) return transaction.unchanged;
+        const { contents, activation } = transaction;
         try {
           return await this.#publishTransaction(contents, activation);
         } catch (error) {

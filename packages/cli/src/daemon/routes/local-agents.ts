@@ -1,4 +1,4 @@
-import type { ImmutableDkgConfig } from '../../config-snapshot.js';
+import type { DkgConfigRevision, ImmutableDkgConfig } from '../../daemon-config-store.js';
 // daemon/routes/local-agents.ts
 //
 // Route handlers for local-agent-integrations list / connect / update / reverse / refresh.
@@ -383,23 +383,27 @@ export async function persistLocalAgentAttachPatch(
 ): Promise<void> {
   const normalizedId = normalizeIntegrationId(id);
   if (!normalizedId) return;
-  await ctx.configStore.update((current): DkgConfig | ImmutableDkgConfig => {
+  await ctx.configStore.updateConditional(current => {
     const stored = getStoredLocalAgentIntegrations(current);
     const currentEntry = stored[normalizedId];
-    if (!currentEntry) return current;
+    if (!currentEntry) return { changed: false };
     // An operator disconnect that completed after setup started always wins,
     // including when a failed attach also proposes enabled:false.
     if (
       currentEntry?.enabled === false
       && (isLocalAgentExplicitlyUserDisabled(currentEntry) || attachPatch.enabled !== false)
     ) {
-      return current;
+      return { changed: false };
     }
     const next = mutableConfigSnapshot(current);
     updateLocalAgentIntegration(next, normalizedId, attachPatch);
-    return next;
+    return { changed: true, next };
   }, 'configuration-only');
 }
+
+type LocalAgentEntryRevision = DkgConfigRevision<
+  ReturnType<typeof getStoredLocalAgentIntegrations>[string]
+>;
 
 /**
  * Commit prepared connect/refresh state against the latest snapshot through a
@@ -409,21 +413,25 @@ export async function persistLocalAgentAttachPatch(
 async function commitPreparedLocalAgentPatch(
   ctx: Pick<RequestContext, 'configStore'>,
   id: string,
-  preparedEntryRevision: string,
+  preparedEntryRevision: LocalAgentEntryRevision,
   reduce: (draft: DkgConfig, normalizedId: string) => void,
 ): Promise<{ integration: LocalAgentIntegrationRecord; committed: boolean }> {
   const normalizedId = normalizeIntegrationId(id);
   if (!normalizedId) throw new Error(`Unknown integration: ${id}`);
-  let committed = false;
-  await ctx.configStore.update((current): DkgConfig | ImmutableDkgConfig => {
-    const currentEntry = getStoredLocalAgentIntegrations(current)[normalizedId];
-    if (JSON.stringify(currentEntry ?? null) !== preparedEntryRevision) return current;
-    const next = mutableConfigSnapshot(current);
-    reduce(next, normalizedId);
-    committed = true;
-    return next;
-  }, 'configuration-only');
-  return { integration: getLocalAgentIntegration(ctx.configStore.current, normalizedId)!, committed };
+  const result = await ctx.configStore.updateIfRevision(
+    preparedEntryRevision,
+    current => getStoredLocalAgentIntegrations(current)[normalizedId],
+    (current): DkgConfig | ImmutableDkgConfig => {
+      const next = mutableConfigSnapshot(current);
+      reduce(next, normalizedId);
+      return next;
+    },
+    'configuration-only',
+  );
+  return {
+    integration: getLocalAgentIntegration(result.current, normalizedId)!,
+    committed: result.changed,
+  };
 }
 
 export interface LocalAgentRoutesDeps {
@@ -507,11 +515,13 @@ export async function handleLocalAgentsRoutes(
       }
 
       const id = String(parsed.id ?? '');
-      const preparedEntryRevision = JSON.stringify(
-        getStoredLocalAgentIntegrations(config)[normalizeIntegrationId(id)] ?? null,
+      const preparedConfig = ctx.configStore.current;
+      const normalizedId = normalizeIntegrationId(id);
+      const preparedEntryRevision = ctx.configStore.captureRevision(
+        current => getStoredLocalAgentIntegrations(current)[normalizedId],
       );
       const plan = await (deps.connectFromUi ?? connectLocalAgentIntegrationFromUi)(
-        config,
+        preparedConfig,
         parsed,
         bridgeAuthToken,
       );
@@ -563,11 +573,12 @@ export async function handleLocalAgentsRoutes(
       return jsonResponse(res, 404, { error: 'Unknown integration' });
     }
     try {
-      const preparedEntryRevision = JSON.stringify(
-        getStoredLocalAgentIntegrations(config)[normalizedId] ?? null,
+      const preparedConfig = ctx.configStore.current;
+      const preparedEntryRevision = ctx.configStore.captureRevision(
+        current => getStoredLocalAgentIntegrations(current)[normalizedId],
       );
       const prepared = await (deps.refreshFromUi ?? refreshLocalAgentIntegrationFromUi)(
-        config, normalizedId, bridgeAuthToken,
+        preparedConfig, normalizedId, bridgeAuthToken,
       );
       const { integration } = await commitPreparedLocalAgentPatch(
         ctx, normalizedId, preparedEntryRevision,

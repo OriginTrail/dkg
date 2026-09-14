@@ -204,6 +204,87 @@ describe('configuration file publication', () => {
     expect(JSON.parse(await fs.readFile(path, 'utf8'))).toMatchObject({ name: 'saved before claim', sharedMemoryTtlMs: 5678 });
   });
 
+  it('skips publication and activation for an unmatched semantic revision', async () => {
+    const files = new DkgHomeFiles(directory);
+    const initial: DkgConfig = {
+      name: 'initial',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      localAgentIntegrations: {
+        hermes: { metadata: { first: 'one', second: 'two' } },
+      },
+    };
+    await files.saveConfig(initial);
+    const owner = await DkgConfigStore.open(files, initial);
+    const revision = owner.captureRevision(
+      current => current.localAgentIntegrations?.hermes,
+    );
+    await owner.update(current => ({
+      ...current,
+      localAgentIntegrations: {
+        ...current.localAgentIntegrations,
+        hermes: { metadata: { second: 'two', first: 'changed' } },
+      },
+    }), 'configuration-only');
+    const before = await fs.readFile(path, 'utf8');
+    const beforeInode = statSync(path).ino;
+    vi.mocked(writeFile).mockClear();
+    vi.mocked(copyFile).mockClear();
+    const update = vi.fn((current: typeof owner.current) => ({ ...current, name: 'stale' }));
+    const activate = vi.fn(() => ({ apply() {}, rollback() {} }));
+
+    const result = await owner.updateIfRevision(
+      revision,
+      current => current.localAgentIntegrations?.hermes,
+      update,
+      activate,
+    );
+
+    expect(result).toEqual({ current: owner.current, changed: false });
+    expect(update).not.toHaveBeenCalled();
+    expect(activate).not.toHaveBeenCalled();
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(copyFile).not.toHaveBeenCalled();
+    expect(statSync(path).ino).toBe(beforeInode);
+    expect(await fs.readFile(path, 'utf8')).toBe(before);
+  });
+
+  it('matches semantic revisions across property insertion order', async () => {
+    const files = new DkgHomeFiles(directory);
+    const initial: DkgConfig = {
+      name: 'initial',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      localAgentIntegrations: {
+        hermes: { metadata: { first: 'one', second: 'two' } },
+      },
+    };
+    const owner = await DkgConfigStore.open(files, initial);
+    const revision = owner.captureRevision(
+      current => current.localAgentIntegrations?.hermes,
+    );
+    await owner.update(current => ({
+      ...current,
+      name: 'unrelated edit',
+      localAgentIntegrations: {
+        ...current.localAgentIntegrations,
+        hermes: { metadata: { second: 'two', first: 'one' } },
+      },
+    }), 'configuration-only');
+
+    const result = await owner.updateIfRevision(
+      revision,
+      current => current.localAgentIntegrations?.hermes,
+      current => ({ ...current, sharedMemoryTtlMs: 1234 }),
+      'configuration-only',
+    );
+
+    expect(result.changed).toBe(true);
+    expect(owner.current).toMatchObject({ name: 'unrelated edit', sharedMemoryTtlMs: 1234 });
+  });
+
   it('keeps deletions in an admitted pre-claim save absent from later publications', async () => {
     const files = new DkgHomeFiles(directory);
     const initial: DkgConfig = {
