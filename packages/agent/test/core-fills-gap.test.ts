@@ -199,7 +199,7 @@ function settleVmRecoveryAttempt(
     );
     return;
   }
-  (internals as any).recordVmReconcilePhysicalAttempt(
+  (internals as any).recordVmReconcilePeerVisit(
     target, peerId, expectedCandidatePeerIds, slotHandle,
   );
   if (disposition === 'clean-absent') {

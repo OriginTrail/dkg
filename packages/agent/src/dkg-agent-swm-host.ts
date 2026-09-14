@@ -4827,7 +4827,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
     };
   }
 
-  recordVmReconcilePhysicalAttempt(
+  /** The rotation policy bound to this host's clock, peer identity and backoff limits. */
+  currentVmReconcileRotationPolicy(this: DKGAgent): VmRecoveryRotationPolicy {
+    return this.vmReconcileRotationPolicy(this.vmReconcileRotationNow());
+  }
+
+  /**
+   * One peer visit: the peer was reached, rejected the transfer, or could not
+   * be admitted. Rotation advances either way, which is what separates this
+   * from settling a roster-wide absence or crediting a clean absence.
+   */
+  recordVmReconcilePeerVisit(
     this: DKGAgent,
     target: OrdinalRecoveryTarget,
     peerId: string,
@@ -4837,9 +4847,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): void {
     if (this.vmReconcileRotationClosed) return;
     this.vmRecoverySlots.recordPeerVisit(target, peerId, expectedCandidatePeerIds, slotHandle,
-      this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()), unavailablePeerIds);
+      this.currentVmReconcileRotationPolicy(), unavailablePeerIds);
   }
 
+  /** No peer was visited: settle the observed roster's unavailable peers. */
   settleVmReconcileUnavailablePeers(
     this: DKGAgent,
     target: OrdinalRecoveryTarget,
@@ -4849,20 +4860,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): void {
     if (this.vmReconcileRotationClosed) return;
     this.vmRecoverySlots.settleUnavailablePeers(target, expectedCandidatePeerIds, slotHandle,
-      this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()), unavailablePeerIds);
-  }
-
-  recordVmReconcileUnavailablePeer(
-    this: DKGAgent,
-    target: OrdinalRecoveryTarget,
-    peerId: string,
-    expectedCandidatePeerIds: readonly string[],
-    slotHandle: VmRecoverySlotHandle,
-    unavailablePeerIds: ReadonlySet<string>,
-  ): void {
-    if (this.vmReconcileRotationClosed) return;
-    this.vmRecoverySlots.recordPeerVisit(target, peerId, expectedCandidatePeerIds, slotHandle,
-      this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()), unavailablePeerIds);
+      this.currentVmReconcileRotationPolicy(), unavailablePeerIds);
   }
 
   /**
@@ -4899,7 +4897,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): void {
     if (this.vmReconcileRotationClosed) return;
     this.vmRecoverySlots.creditCleanAbsence(target, peerId, expectedCandidatePeerIds, slotHandle,
-      this.vmReconcileRotationPolicy(this.vmReconcileRotationNow()));
+      this.currentVmReconcileRotationPolicy());
   }
 
   installVmReconcileActiveFetchCooldown(this: DKGAgent, localCgId: string, now: number): symbol {
@@ -5179,7 +5177,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // physical attempt.
     for (const attempt of attempts) {
       if (!attempt.slotHandle) continue;
-      this.recordVmReconcilePhysicalAttempt(
+      this.recordVmReconcilePeerVisit(
         attempt.entry.target,
         peerId,
         attempt.candidatePeerIds,
@@ -5598,7 +5596,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (slotHandle) {
           const unavailablePeerIds = providerPolicy.unavailablePeerIds();
           if (candidatePeerId) {
-            this.recordVmReconcileUnavailablePeer(
+            this.recordVmReconcilePeerVisit(
               target, candidatePeerId, candidatePeerIds, slotHandle, unavailablePeerIds,
             );
           } else {
