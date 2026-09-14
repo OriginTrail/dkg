@@ -692,76 +692,35 @@ export class EVMChainAdapterBase {
 
   private readonly hubContractBindings: EvmHubContractBindings;
   protected readonly adapterContracts: Omit<ContractCache, 'hub' | EvmHubContractKey> = {};
-  private contractsCompatibilityFacade?: ContractCache;
 
   /** Canonical Hub-owned handles for the current generation. */
   protected get hubContracts(): Readonly<EvmHubBindingSet> {
     return this.hubContractBindings.contracts;
   }
 
-  /**
-   * Mutable compatibility view for older subclasses. Property writes route to
-   * the canonical Hub-generation or adapter-owned store instead of creating a
-   * second cache owner.
-   */
-  protected get contracts(): ContractCache {
-    if (this.contractsCompatibilityFacade) return this.contractsCompatibilityFacade;
-    const current = () => ({ ...this.adapterContracts, ...this.hubContracts }) as ContractCache;
-    this.contractsCompatibilityFacade = new Proxy({} as ContractCache, {
-      get: (_target, property) => Reflect.get(current(), property),
-      has: (_target, property) => Reflect.has(current(), property),
-      ownKeys: () => Reflect.ownKeys(current()),
-      getOwnPropertyDescriptor: (_target, property) => {
-        const contracts = current();
-        if (!Reflect.has(contracts, property)) return undefined;
-        return {
-          configurable: true,
-          enumerable: true,
-          writable: true,
-          value: Reflect.get(contracts, property),
-        };
-      },
-      set: (_target, property, value) => {
-        if (typeof property !== 'string') return false;
-        if (this.isHubBindingKey(property)) {
-          this.replaceHubContractBinding(property, value as Contract | undefined);
-        } else {
-          (this.adapterContracts as Record<string, Contract | undefined>)[property] = value;
-        }
-        return true;
-      },
-      deleteProperty: (_target, property) => {
-        if (typeof property !== 'string') return false;
-        if (this.isHubBindingKey(property)) {
-          this.replaceHubContractBinding(property, undefined);
-        } else {
-          delete (this.adapterContracts as Record<string, Contract | undefined>)[property];
-        }
-        return true;
-      },
-    });
-    return this.contractsCompatibilityFacade;
+  /** Read-only compatibility snapshot for subclasses that inspect resolved handles. */
+  protected get contracts(): Readonly<ContractCache> {
+    return Object.freeze({ ...this.adapterContracts, ...this.hubContracts }) as Readonly<ContractCache>;
   }
 
-  protected set contracts(value: ContractCache) {
-    this.replaceAdapterContractBindings(value);
-    this.hubContractBindings.replace(this.selectHubBindings(value));
-  }
-
-  /** @deprecated Existing subclasses may still publish or retire readiness. */
   protected get initialized(): boolean { return this.hubContractBindings.initialized; }
-  protected set initialized(value: boolean) { this.hubContractBindings.setInitialized(value); }
 
   /** Explicit complete installation seam for subclasses. */
   protected installHubContractBindings(value: EvmHubContractInstallation): void {
     this.hubContractBindings.install(value);
   }
 
-  protected replaceHubContractBinding(
-    key: 'hub' | EvmHubContractKey,
-    value: Contract | undefined,
+  /**
+   * @deprecated Compatibility seam for subclasses that also seed adapter-owned
+   * handles. Hub handles and readiness still publish through one validated
+   * generation transition; adapter-owned handles are replaced only after that
+   * transition succeeds.
+   */
+  protected installContractBindings(
+    value: ContractCache & EvmHubContractInstallation,
   ): void {
-    this.hubContractBindings.replaceBinding(key, value);
+    this.installHubContractBindings(value);
+    this.replaceAdapterContractBindings(value);
   }
 
   protected invalidateHubContractBindings(): void { this.hubContractBindings.invalidate(); }
@@ -770,13 +729,6 @@ export class EVMChainAdapterBase {
     return key === 'hub'
       || (typeof key === 'string'
         && Object.prototype.hasOwnProperty.call(EVM_HUB_CONTRACT_SPECS, key));
-  }
-
-  private selectHubBindings(contracts: ContractCache): EvmHubBindingSet {
-    return Object.fromEntries([
-      ['hub', contracts.hub],
-      ...ALL_EVM_HUB_CONTRACT_KEYS.map(key => [key, contracts[key]] as const),
-    ]) as unknown as EvmHubBindingSet;
   }
 
   protected replaceAdapterContractBindings(contracts: ContractCache): void {

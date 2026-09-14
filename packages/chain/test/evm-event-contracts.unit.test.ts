@@ -232,15 +232,14 @@ describe('Hub binding generation ownership', () => {
     }, controller.signal)).rejects.toBe(reason);
   });
 
-  it('rotates the complete generation when the Hub handle changes', () => {
+  it('rotates the complete generation through an atomic Hub installation', () => {
     const group = new EvmHubContractBindings({ hub: first });
     const before = group.generation;
-    expect(() => group.replaceBinding('hub', undefined)).toThrow(/cannot be removed/);
-    group.replaceBinding('hub', second);
+    group.install(completeInstallation({ hub: second }));
     expect(group.generation).not.toBe(before);
     expect(group.contracts.hub).toBe(second);
-    expect(group.resolvedKeys.size).toBe(0);
-    expect(group.initialized).toBe(false);
+    expect(group.resolvedKeys.size).toBe(ALL_EVM_HUB_CONTRACT_KEYS.length);
+    expect(group.initialized).toBe(true);
   });
 
   it('install decides every boot key at once and runs no loader for the installed generation', async () => {
@@ -258,10 +257,10 @@ describe('Hub binding generation ownership', () => {
     expect(loader).not.toHaveBeenCalled();
   });
 
-  it('turns explicit boot-binding replacements into generation transitions', async () => {
+  it('turns explicit boot-binding installations into generation transitions', async () => {
     const group = new EvmHubContractBindings({ hub: first });
     const before = group.generation;
-    group.replaceBinding('chronos', first);
+    group.install(completeInstallation({ chronos: first }));
     expect(group.generation).not.toBe(before);
     expect(group.resolvedKeys.has('chronos')).toBe(true);
     const loader = vi.fn(async () => second);
@@ -273,20 +272,19 @@ describe('Hub binding generation ownership', () => {
     const group = new EvmHubContractBindings({ hub: first });
     group.install(completeInstallation({ chronos: first }));
     const before = await group.resolveSnapshot(['chronos'], async () => first);
-    group.replaceBinding('chronos', second);
+    group.install(completeInstallation({ chronos: second }));
     const after = await group.resolveSnapshot(['chronos'], async () => first);
     expect(after.contracts.chronos).toBe(second);
     expect(after.generationId).not.toBe(before.generationId);
   });
 
-  it('preserves the legacy subclass replacement and readiness transitions at runtime', async () => {
+  it('publishes and retires subclass installations through atomic transitions', async () => {
     class LegacyProbe extends EVMChainAdapter {
-      publishLegacy(bindings: ContractCache): void {
-        this.contracts = bindings;
-        this.initialized = true;
+      publishBindings(bindings: ContractCache & EvmHubContractInstallation): void {
+        this.installContractBindings(bindings);
       }
 
-      retireLegacy(): void { this.initialized = false; }
+      retireBindings(): void { this.invalidateHubContractBindings(); }
 
       async resolveProfileStorage(): Promise<Contract | undefined> {
         return (await this.resolveHubContractBindings(['profileStorage'])).profileStorage;
@@ -304,13 +302,13 @@ describe('Hub binding generation ownership', () => {
     const internal = adapter as any;
     const load = vi.spyOn(internal, 'loadHubContractBinding').mockResolvedValue(first);
     try {
-      adapter.publishLegacy(completeInstallation({ profileStorage: second }));
+      adapter.publishBindings(completeInstallation({ profileStorage: second }));
       const readyGeneration = internal.hubContractBindings.generation;
       expect(adapter.isLegacyReady()).toBe(true);
       await expect(adapter.resolveProfileStorage()).resolves.toBe(second);
       expect(load).not.toHaveBeenCalled();
 
-      adapter.retireLegacy();
+      adapter.retireBindings();
       expect(adapter.isLegacyReady()).toBe(false);
       expect(internal.hubContractBindings.generation).not.toBe(readyGeneration);
       await expect(adapter.resolveProfileStorage()).resolves.toBe(first);
@@ -325,8 +323,6 @@ describe('Hub binding generation ownership', () => {
       installHubBindings(bindings: EvmHubContractInstallation): void {
         this.installHubContractBindings(bindings);
       }
-
-      rotateHubBinding(binding: Contract): void { this.replaceHubContractBinding('chronos', binding); }
 
       invalidateHubBindings(): void { this.invalidateHubContractBindings(); }
 
@@ -344,7 +340,7 @@ describe('Hub binding generation ownership', () => {
       adapter.installHubBindings(completeInstallation({ chronos: first }));
       expect(adapter.lazyBinding()).toBe(first);
 
-      adapter.rotateHubBinding(second);
+      adapter.installHubBindings(completeInstallation({ chronos: second }));
       expect(adapter.lazyBinding()).toBe(first);
 
       adapter.invalidateHubBindings();
@@ -352,7 +348,7 @@ describe('Hub binding generation ownership', () => {
     } finally { adapter.destroy(); }
   });
 
-  it('routes deprecated per-binding mutations through a coherent live facade', () => {
+  it('exposes immutable compatibility snapshots around atomic installations', () => {
     class CompatibilityProbe extends EVMChainAdapter {
       seedLazyBinding(binding: Contract): void { this.adapterContracts.randomSampling = binding; }
 
@@ -360,13 +356,7 @@ describe('Hub binding generation ownership', () => {
         this.installHubContractBindings(bindings);
       }
 
-      rotateHubBinding(binding: Contract): void { this.replaceHubContractBinding('chronos', binding); }
-
-      compatibilityCache(): ContractCache { return this.contracts; }
-
-      seedToken(binding: Contract): void { this.contracts.token = binding; }
-
-      clearToken(): void { delete this.contracts.token; }
+      compatibilityCache(): Readonly<ContractCache> { return this.contracts; }
     }
 
     const adapter = new CompatibilityProbe({
@@ -392,20 +382,13 @@ describe('Hub binding generation ownership', () => {
       expect(cache.randomSampling).toBe(first);
       expect(cache.token).toBeUndefined();
 
-      // Legacy writes and deletes update the explicit binding owner while the
-      // same view keeps reads, enumeration and descriptors coherent.
-      expect(Object.isFrozen(cache)).toBe(false);
-      adapter.seedToken(second);
-      expect(cache.token).toBe(second);
-      expect(Object.getOwnPropertyDescriptor(cache, 'token')?.value).toBe(second);
-      adapter.clearToken();
+      expect(Object.isFrozen(cache)).toBe(true);
+      adapter.installHubBindings(completeInstallation({ chronos: second, token: second }));
+      // Borrowed snapshots cannot turn into a split-generation view.
+      expect(cache.chronos).toBe(first);
       expect(cache.token).toBeUndefined();
-
-      // A Hub-owned transition remains visible through an already borrowed
-      // compatibility view.
-      adapter.rotateHubBinding(second);
-      expect(cache.chronos).toBe(second);
       expect(adapter.compatibilityCache().chronos).toBe(second);
+      expect(adapter.compatibilityCache().token).toBe(second);
     } finally { adapter.destroy(); }
   });
 
@@ -647,7 +630,10 @@ describe('EVM event descriptor registry', () => {
     internal.startHubRotationListener = vi.fn(async () => undefined);
     internal.readContractWith = vi.fn(async (contract: Contract) => {
       if (contract === retired) {
-        internal.replaceHubContractBinding('contextGraphStorage', replacement);
+        internal.installHubContractBindingsForTesting({
+          ...internal.contracts,
+          contextGraphStorage: replacement,
+        });
       }
       return [log];
     });

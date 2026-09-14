@@ -110,27 +110,6 @@ export class EvmHubContractBindings {
     );
   }
 
-  /** Replace the Hub-owned portion of a legacy subclass cache assignment. */
-  replace(contracts: EvmHubBindingSet): void {
-    const initialized = this.current.initialized
-      && REQUIRED_EVM_HUB_CONTRACT_KEYS.every(key => contracts[key] !== undefined);
-    this.current = this.createGeneration(
-      contracts,
-      initialized ? new Set(ALL_EVM_HUB_CONTRACT_KEYS) : new Set(),
-      initialized,
-    );
-  }
-
-  /** Compatibility transition for the adapter's protected readiness facade. */
-  setInitialized(initialized: boolean): void {
-    if (!initialized) {
-      this.invalidate();
-      return;
-    }
-    for (const key of ALL_EVM_HUB_CONTRACT_KEYS) this.current.resolved.add(key);
-    this.current.initialized = true;
-  }
-
   /**
    * Retire the current generation after a Hub rotation or write-side self-heal.
    * Installed handles stay usable by operations that already passed init; new
@@ -244,23 +223,4 @@ export class EvmHubContractBindings {
     return generation;
   }
 
-  replaceBinding(
-    key: 'hub' | EvmHubContractKey,
-    value: Contract | undefined,
-  ): void {
-    if (this.current.contracts[key] === value) return;
-    if (key === 'hub' && value === undefined) {
-      throw new Error('Hub binding cannot be removed');
-    }
-    const contracts = { ...this.current.contracts, [key]: value } as EvmHubBindingSet;
-    if (key === 'hub') {
-      this.current = this.createGeneration(contracts, new Set(), false);
-      return;
-    }
-    const resolved = new Set(this.current.resolved);
-    resolved.add(key);
-    const initialized = this.current.initialized
-      && REQUIRED_EVM_HUB_CONTRACT_KEYS.every(required => contracts[required] !== undefined);
-    this.current = this.createGeneration(contracts, resolved, initialized);
-  }
 }

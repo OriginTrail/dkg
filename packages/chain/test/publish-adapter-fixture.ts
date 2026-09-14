@@ -1,11 +1,11 @@
 import { afterEach } from 'vitest';
 import { PublishMethods } from '../src/evm-adapter-publish.js';
 import type { ContractCache } from '../src/evm-adapter-types.js';
-import { installHubContractBindingsForTesting } from './install-hub-contract-bindings-for-testing.js';
+import { completeContractBindingsForTesting } from './install-hub-contract-bindings-for-testing.js';
 
 class PublishAdapterFixture extends PublishMethods {
   installHubContractBindingsForTesting(value: ContractCache): void {
-    installHubContractBindingsForTesting(this, value);
+    this.installContractBindings(completeContractBindingsForTesting(value, this.contracts.hub));
   }
 }
 

@@ -1,14 +1,14 @@
-import { Contract } from 'ethers';
 import { EVMChainAdapter } from '../dist/index.js';
 
-// Compile against the published declarations: existing subclasses may still
-// mutate individual protected cache slots during the compatibility window.
+// Compile against the published declarations: subclasses can inspect a
+// read-only binding snapshot, but cannot split installation across mutations.
 export class CustomContractAdapter extends EVMChainAdapter {
-  seedToken(token: Contract): void {
-    this.contracts.token = token;
+  hasToken(): boolean {
+    return this.contracts.token !== undefined;
   }
 
-  clearToken(): void {
-    delete this.contracts.token;
+  mutationIsRejected(): void {
+    // @ts-expect-error Hub bindings are getter-only and must be installed atomically.
+    this.contracts.token = this.contracts.hub;
   }
 }

@@ -137,12 +137,12 @@ describe('V10 Publishing Conviction NFT — chain-adapter lifecycle', () => {
 
     // Undeployed NFT: the discovery (strict) path SURFACES it so the daemon can
     // answer 503 — never a 0n a UI would read as "registered nowhere". init() is
-    // idempotent (`if (this.initialized) return`), so clearing the cached
-    // binding after init holds for the next call.
-    (owner as any).contracts = {
+    // idempotent (`if (this.initialized) return`), so atomically installing a
+    // generation where this optional deployment is absent holds for the next call.
+    (owner as any).installHubContractBindings({
       ...(owner as any).contracts,
       dkgPublishingConvictionNFT: undefined,
-    };
+    });
     await expect(owner.getConvictionAgentAccountId(wallet, { strict: true }))
       .rejects.toMatchObject({ code: 'PCA_UNAVAILABLE' });
     // The funded-wallet-selector fail-safe path still returns 0n for the same state.

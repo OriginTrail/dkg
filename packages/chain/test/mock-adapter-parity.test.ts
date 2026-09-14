@@ -90,6 +90,7 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // MockChainAdapter has no Hub registry and therefore no equivalent state to
   // install, invalidate, or snapshot.
   'installHubContractBindings',
+  'installContractBindings',
   'invalidateHubContractBindings',
   'resolveHubContractBindingSnapshot',
   'ensureHubRotationListenerStarted',

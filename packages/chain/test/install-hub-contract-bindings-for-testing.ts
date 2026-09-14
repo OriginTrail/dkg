@@ -1,24 +1,18 @@
 import type { ContractCache } from '../src/evm-adapter-types.js';
+import type { EvmHubContractInstallation } from '../src/evm-hub-contract-bindings.js';
 
-type LegacyContractCacheOwner = {
-  contracts: ContractCache;
-  initialized: boolean;
-};
-
-/** One test-only bridge through the protected legacy subclass facade. */
-export function installHubContractBindingsForTesting(
-  adapter: object,
+/** Build one complete, invariant-valid Hub installation for a test subclass. */
+export function completeContractBindingsForTesting(
   value: ContractCache,
-): void {
-  const owner = adapter as LegacyContractCacheOwner;
-  const fallback = value.hub ?? owner.contracts.hub;
-  owner.contracts = {
+  fallback: ContractCache['hub'],
+): ContractCache & EvmHubContractInstallation {
+  const hub = value.hub ?? fallback;
+  return {
     ...value,
-    hub: fallback,
-    identity: value.identity ?? fallback,
-    profile: value.profile ?? fallback,
-    parametersStorage: value.parametersStorage ?? fallback,
-    knowledgeAssetStorage: value.knowledgeAssetStorage ?? fallback,
+    hub,
+    identity: value.identity ?? hub,
+    profile: value.profile ?? hub,
+    parametersStorage: value.parametersStorage ?? hub,
+    knowledgeAssetStorage: value.knowledgeAssetStorage ?? hub,
   };
-  owner.initialized = true;
 }

@@ -3,6 +3,7 @@
 import { ethers, type Contract } from 'ethers';
 import type { ChainEvent } from './chain-adapter.js';
 import type { EvmHubContractKey } from './evm-hub-contract-bindings.js';
+import { scanKnowledgeAssetCreatedEvents } from './evm-knowledge-asset-created-scanner.js';
 
 /**
  * The read boundary a scan borrows from the adapter: cancellation-aware wide
@@ -61,116 +62,11 @@ export const EVM_EVENT_DESCRIPTORS = [
     },
   },
   {
-    // V10 greenfield (DKGKnowledgeAssets) emits `KnowledgeAssetCreated`
-    // plus a single ERC-721 `Transfer(0x0, owner, tokenId)` per publish
-    // (tokenId == kaId == kaId; no batch mint). Legacy V8/V9
-    // (DKGKnowledgeAssets) emits `KnowledgeAssetCreated` +
-    // `KnowledgeAssetsMinted` (a start/end range + recipient). The bound
-    // contract may be either ABI (see resolveAssetStorage fallback in
-    // init()), so resolve the create event the contract actually exposes
-    // and derive the KA range / publisher from whichever mint surface is
-    // present — otherwise a greenfield node would crash here calling a
-    // non-existent `filters.KnowledgeAssetCreated()`.
+    // The scanner selects one legacy-mint or greenfield-transfer evidence
+    // strategy for the bound deployment and projects the shared event shape.
     aliases: ['KCCreated', 'KnowledgeAssetCreated'],
     binding: 'knowledgeAssetStorage',
-    async *scan(kaStorage: Contract, scan: EvmEventScan) {
-      const hasEvent = (name: string) =>
-        kaStorage.interface.fragments.some(
-          (f) => f.type === 'event' && (f as { name?: string }).name === name,
-        );
-
-      const kcFilter = kaStorage.filters.KnowledgeAssetCreated();
-      // Execute the primary query before auxiliary ownership reads. For an
-      // unbounded scan this pins the returned create set to an equal-or-earlier
-      // head, so no create can appear without ownership evidence merely because
-      // the chain advanced between component queries.
-      const kcLogs: Array<ethers.Log | ethers.EventLog> = [];
-      for await (const log of scan.query(
-        kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter,
-      )) kcLogs.push(log);
-      // Legacy mint range. `KnowledgeAssetsMinted` is still declared on the
-      // greenfield ABI but never emitted by `createKnowledgeAsset`, so
-      // this map stays empty there and the per-log fallback below derives
-      // the (single-KA) range + owner from the create id + Transfer.
-      const mintByTx = new Map<string, { publisherAddress: string; startKAId: string; endKAId: string }>();
-      if (hasEvent('KnowledgeAssetsMinted')) {
-        const mintFilter = kaStorage.filters.KnowledgeAssetsMinted();
-        for await (const ml of scan.query(
-          kaStorage, 'kas.queryFilter(KnowledgeAssetsMinted)', mintFilter,
-        )) {
-          const mp = parseLog(kaStorage, ml);
-          if (mp) {
-            mintByTx.set(ml.transactionHash, {
-              publisherAddress: mp.args.to,
-              startKAId: mp.args.startId.toString(),
-              endKAId: (BigInt(mp.args.endId) - 1n).toString(),
-            });
-          }
-        }
-      }
-
-      // Greenfield publisher resolution: `_safeMint(author, kaId)` emits a
-      // single ERC-721 mint `Transfer(address(0), owner, tokenId)`. The
-      // token owner is the publisher/recipient of record (mirrors the
-      // receipt-parse path). Keyed by tokenId so each KnowledgeAssetCreated
-      // id resolves its own owner.
-      const ownerByTokenId = new Map<string, string>();
-      if (hasEvent('Transfer')) {
-        try {
-          const transferFilter = kaStorage.filters.Transfer(ethers.ZeroAddress);
-          for await (const tl of scan.query(kaStorage, 'kas.queryFilter(Transfer)', transferFilter)) {
-            const tp = parseLog(kaStorage, tl);
-            if (tp && tp.args.tokenId != null) {
-              ownerByTokenId.set(tp.args.tokenId.toString(), String(tp.args.to));
-            }
-          }
-        } catch {
-          scan.signal?.throwIfAborted();
-          // Best-effort — the `author` topic on the create event is the
-          // fallback when Transfer enumeration is unavailable.
-        }
-      }
-
-      for (const log of kcLogs) {
-        const parsed = parseLog(kaStorage, log);
-        if (parsed) {
-          const mint = mintByTx.get(log.transactionHash);
-          const idStr = parsed.args.id.toString();
-          // V10.1: `author` is the EIP-712-attested author identity recovered
-          // by `_verifyAuthorAttestation` on-chain (or `address(0)` for the
-          // unattributed publish path). Surfacing it here lets replicas
-          // rebuild `dkg:Publication` / `dkg:authoredBy` provenance triples
-          // that match what the originating publisher emitted in
-          // `generateKCMetadata` (Round 5 review §10).
-          const author = typeof parsed.args.author === 'string' ? parsed.args.author : '';
-          yield {
-            type: 'KCCreated',
-            blockNumber: log.blockNumber,
-            data: {
-              kaId: idStr,
-              merkleRoot: parsed.args.merkleRoot,
-              merkleRootBytes: parsed.args.merkleRoot,
-              byteSize: parsed.args.byteSize.toString(),
-              txHash: log.transactionHash,
-              // PR #845 (review #9): chain-truth tiebreaker for the
-              // last-writer-wins materialization guard. The receiver's
-              // finalization handler must derive its version from the
-              // verified receipt, NOT a gossip-supplied `msg.txIndex`,
-              // because the latter is trust-based and can be inflated
-              // to lock out a legitimate same-block update.
-              txIndex: log.transactionIndex,
-              // Greenfield: no batch mint → publisher is the KA owner
-              // (Transfer recipient), falling back to the attested author.
-              publisherAddress: mint?.publisherAddress ?? ownerByTokenId.get(idStr) ?? author,
-              author,
-              // Greenfield: single KA, range collapses to [id, id].
-              startKAId: mint?.startKAId ?? idStr,
-              endKAId: mint?.endKAId ?? idStr,
-            },
-          };
-        }
-      }
-    },
+    scan: scanKnowledgeAssetCreatedEvents,
   },
   {
     // V8-only event — emitted by archived KnowledgeAssetsStorage. When the

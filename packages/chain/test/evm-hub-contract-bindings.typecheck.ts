@@ -1,7 +1,10 @@
 import type { Contract } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import type { ContractCache } from '../src/evm-adapter-types.js';
-import type { EvmHubContractBindings } from '../src/evm-hub-contract-bindings.js';
+import type {
+  EvmHubContractBindings,
+  EvmHubContractInstallation,
+} from '../src/evm-hub-contract-bindings.js';
 
 declare const bindings: EvmHubContractBindings;
 declare const handle: Contract;
@@ -20,16 +23,20 @@ bindings.contracts = { hub: handle };
 bindings.contracts.identityStorage = handle;
 
 class Probe extends EVMChainAdapter {
-  seed(bindings: ContractCache): void {
-    // Whole-cache replacement remains a contained compatibility transition.
+  seed(bindings: ContractCache & EvmHubContractInstallation): void {
+    this.installContractBindings(bindings);
+    // @ts-expect-error Hub bindings cannot be replaced through the snapshot.
     this.contracts = bindings;
-    // Legacy per-slot mutation remains source compatible and routes through
-    // the binding owners at runtime.
+    // @ts-expect-error Hub slots cannot be mutated outside an atomic install.
     this.contracts.chronos = handle;
+    // @ts-expect-error Adapter slots are also read-only through the compatibility snapshot.
     this.contracts.randomSampling = handle;
+    // @ts-expect-error Hub slots cannot be deleted outside an atomic install.
     delete this.contracts.token;
     this.adapterContracts.randomSampling = handle;
+    // @ts-expect-error Readiness follows the installed generation.
     this.initialized = true;
+    // @ts-expect-error Invalidation is an explicit registry transition.
     this.initialized = false;
   }
 }
