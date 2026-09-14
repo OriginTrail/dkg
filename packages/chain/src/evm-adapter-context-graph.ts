@@ -1379,9 +1379,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     nameHash: string,
     options: ChainReadOptions = {},
   ): Promise<bigint | null> {
-      const caller = (new Error().stack ?? '')
-        .split('\n')
-        .slice(2, 12)
+    const caller = (new Error().stack ?? '')
+      .split('\n')
+      .slice(2, 12)
       .map((frame) => frame.trim())
       .join(' <- ');
     const existingCount = contextGraphNameHashBoundaryCallerCounts.get(caller);
