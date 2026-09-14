@@ -20,7 +20,8 @@ export interface ShellTabFeature {
 export const CODEX_TAB_FEATURE: ShellTabFeature = Object.freeze({
   id: 'codex',
   label: 'Codex',
-  path: '/ui/codex',
+  // React Router already supplies the /ui basename from main.tsx.
+  path: '/codex',
   enabled: codexEnabled,
   defaultSelection: codexEnabled,
   closable: false,

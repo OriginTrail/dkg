@@ -9,6 +9,7 @@ describe('Codex positive feature gate', () => {
     vi.unstubAllGlobals();
     vi.resetModules();
     document.body.replaceChildren();
+    window.history.replaceState(null, '', '/');
   });
 
   it('wires the injected flag through the route, initial tab, sidebar, and view', async () => {
@@ -35,7 +36,7 @@ describe('Codex positive feature gate', () => {
 
     const React = await import('react');
     const { createRoot } = await import('react-dom/client');
-    const { MemoryRouter, Route, Routes } = await import('react-router-dom');
+    const { BrowserRouter, Route, Routes } = await import('react-router-dom');
     const features = await import('../src/ui/codex/tabFeature.js');
     const routing = await import('../src/ui/hooks/useShellRouting.js');
     const { useTabsStore } = await import('../src/ui/stores/tabs.js');
@@ -50,8 +51,8 @@ describe('Codex positive feature gate', () => {
     }
 
     expect(features.enabledShellTabFeatures().map(feature => feature.id)).toContain('codex');
-    expect(routing.URL_PATH_TO_TAB['/ui/codex']).toEqual({ id: 'codex', label: 'Codex' });
-    expect(routing.TAB_TO_URL_PATH.codex).toBe('/ui/codex');
+    expect(routing.URL_PATH_TO_TAB['/codex']).toEqual({ id: 'codex', label: 'Codex' });
+    expect(routing.TAB_TO_URL_PATH.codex).toBe('/codex');
     expect(useTabsStore.getState()).toMatchObject({
       activeTabId: 'codex',
       tabs: expect.arrayContaining([expect.objectContaining({ id: 'codex', label: 'Codex' })]),
@@ -60,10 +61,11 @@ describe('Codex positive feature gate', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
+    window.history.replaceState(null, '', '/ui/codex');
     await React.act(async () => {
       root.render(React.createElement(
-        MemoryRouter,
-        { initialEntries: ['/ui/codex'] },
+        BrowserRouter,
+        { basename: '/ui' },
         React.createElement(Routes, null, React.createElement(Route, {
           path: '*', element: React.createElement(ShellHarness),
         })),
@@ -74,6 +76,12 @@ describe('Codex positive feature gate', () => {
     const codexButtons = [...container.querySelectorAll('button')]
       .filter(button => button.textContent?.trim() === 'Codex');
     expect(codexButtons.length).toBeGreaterThanOrEqual(2);
+    expect(container.querySelector('.v10-center-tab.active')?.textContent).toContain('Codex');
+    expect(window.location.pathname).toBe('/ui/codex');
+    await React.act(async () => useTabsStore.getState().setActiveTab('dashboard'));
+    expect(window.location.pathname).toBe('/ui');
+    await React.act(async () => codexButtons[0].click());
+    expect(window.location.pathname).toBe('/ui/codex');
     expect(container.querySelector('.v10-center-tab.active')?.textContent).toContain('Codex');
     await React.act(async () => root.unmount());
   });

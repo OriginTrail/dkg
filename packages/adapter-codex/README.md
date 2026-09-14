@@ -14,8 +14,8 @@ DKG UI and native Codex. The adapter never automatically shares or publishes the
 ## Runtime
 
 Node 22+, the Codex CLI, a running DKG node, and a built `packages/node-ui/dist-ui`
-are required. Live chat was verified against Codex Desktop 0.153.1. Private graph
-persistence is covered against this repository's DKG 10.0.16 daemon and real
+are required. Private graph
+persistence is covered against this repository's DKG daemon and real
 Oxigraph worker by the automated compatibility test described under Validation.
 
 Set `DKG_CODEX_CONFIG` to an absolute JSON config path, then run
@@ -43,17 +43,18 @@ user and are never automatically accepted by the adapter.
 
 The bridge binds only to IPv4 loopback. It rejects foreign Host/Origin headers,
 uses an HttpOnly SameSite cookie, and requires a custom header for Codex writes.
-Opening the HTTP page alone cannot mint that cookie. On startup the adapter logs
-the path to its owner-readable `ui-bootstrap.token`; append its contents as the
-URL fragment for the first load, for example on macOS:
+Opening the HTTP page alone cannot mint that cookie. With the service running,
+open its owner-authorized UI using the same configuration:
 
 ```sh
-open "http://127.0.0.1:9210/ui/codex#$(tr -d '\n' < /absolute/path/.dkg/codex/ui-bootstrap.token)"
+DKG_CODEX_CONFIG=/absolute/path/config.json pnpm --filter @origintrail-official/dkg-adapter-codex open
 ```
 
+The launcher reads the owner-only `ui-bootstrap.token` from the state directory
+and opens your browser without printing or saving a credential-bearing link.
 The bootstrap page removes the fragment before exchanging it for the cookie, so
 the token is not sent in the URL, retained by the application, or exposed to the
-DKG API proxy. Reuse the owner launch URL after restarting the adapter.
+DKG API proxy. Run the launcher again after restarting the adapter.
 DKG credentials are read in the server/MCP wrapper and never placed in the browser
 or conversation configuration. Uploaded files are owner-readable only; downloads
 resolve symlinks and stay within the selected workspace or its own attachments.
@@ -78,13 +79,21 @@ node. Rebuild the UI bundle after updating its source.
 Run `node --test packages/adapter-codex/test/*.test.mjs`. UI event reducer tests are
 in `packages/node-ui/test/codex-events.test.ts`. Build with the repository's
 `packages/node-ui` Vite configuration. The full existing UI TypeScript check has
-44 pre-existing diagnostics on this base; the integration adds no new diagnostic
+42 pre-existing diagnostics on this base; the integration adds no new diagnostic
 categories or messages (some existing line numbers move).
 
-`pnpm --filter @origintrail-official/dkg test -- adapter-codex-memory-live.test.ts`
-runs the DKG 10.0.16 compatibility test through the production daemon routes and
+`pnpm --filter @origintrail-official/dkg exec vitest run test/adapter-codex-memory-live.test.ts`
+runs the compatibility test through the current production daemon routes and
 real Oxigraph worker. It covers private unregistered graph creation, WM write and
 read-back, restart rehydration, durable retry, recall, and absence from SWM/VM.
+
+Validated on 2026-09-14 after merging `testnet-canary` at `559257e36`
+(DKG 10.0.17): runtime packages and the UI build pass, all 37 adapter tests and
+34 focused UI tests pass, and the real-daemon memory test passes. A browser
+session with Codex 0.153.4 and the existing local DKG 10.0.16 node also verified
+shell execution, an approved DKG MCP status call, private message receipts, and
+reload at the canonical `/ui/codex` URL. Native hook trust is still a separate
+activation step.
 
 The implementation protocol is based on the [official Codex App Server
 documentation](https://learn.chatgpt.com/docs/app-server) and bindings generated

@@ -5,5 +5,5 @@
   "type": "module",
   "engines": { "node": ">=22" },
   "dependencies": { "@origintrail-official/dkg-core": "workspace:*" },
-  "scripts": { "start": "node src/server.mjs", "test": "node --test test/*.test.mjs" }
+  "scripts": { "start": "node src/server.mjs", "open": "node src/open-ui.mjs", "test": "node --test test/*.test.mjs" }
 }

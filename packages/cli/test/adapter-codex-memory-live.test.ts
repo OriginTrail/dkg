@@ -1,5 +1,5 @@
 /**
- * Codex private memory compatibility — real DKG 10.0.16 daemon, real HTTP
+ * Codex private memory compatibility — the current DKG daemon, real HTTP
  * routes and real Oxigraph worker. No route or graph-store mocks.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { DkgMemory } from '../../adapter-codex/src/memory.mjs';
 import { getJson, startLiveDaemon, stopLiveDaemon, type LiveDaemon } from './helpers/live-daemon.js';
 
-describe('Codex private graph memory against the DKG 10.0.16 daemon', () => {
+describe('Codex private graph memory against the current DKG daemon', () => {
   let daemon: LiveDaemon;
   let stateDir: string;
 
