@@ -2,6 +2,7 @@ import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import { enrichContextGraphListAuthorityV1 } from
   '../src/context-graph-list-authority-enrichment.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
@@ -144,6 +145,32 @@ describe('context graph list authority enrichment', () => {
     expect(fixture.resolveCurrent).not.toHaveBeenCalled();
   });
 
+  it('keeps resolved and omitted rows on the same finalized horizon', async () => {
+    const resolvedId = 'listing-finalized-mixed-hit';
+    const omittedId = 'listing-finalized-mixed-omission';
+    const fixture = listingAgent({
+      ids: [resolvedId, omittedId],
+      resolveFinalized: async () => ({
+        kind: 'finalized-index',
+        targets: new Map([[resolvedId, {
+          expectedNameHash: `0x${'22'.repeat(32)}`,
+          expectedOnChainId: 903n,
+        }]]),
+      }),
+      registrationStatus: async () => 'registered',
+      resolveCurrent: async () => '999',
+    });
+
+    const result = await list(fixture.fakeAgent);
+
+    expect(result.rows).toEqual([
+      expect.objectContaining({ id: resolvedId, onChainId: '903' }),
+      expect.not.objectContaining({ onChainId: expect.anything() }),
+    ]);
+    expect(fixture.readRegistrationStatus).not.toHaveBeenCalled();
+    expect(fixture.resolveCurrent).not.toHaveBeenCalled();
+  });
+
   it('preserves current resolution for remote registered rows on legacy adapters', async () => {
     const id = 'listing-legacy-remote-registered';
     const fixture = listingAgent({
@@ -169,7 +196,7 @@ describe('context graph list authority enrichment', () => {
     );
   });
 
-  it('does not fan 400+ ordinary finalized misses into current RPC resolution', async () => {
+  it('does not fan 400+ registered finalized omissions into current RPC resolution', async () => {
     const ids = Array.from({ length: MISS_COUNT }, (_, index) => `listing-miss-${index}`);
     const fixture = listingAgent({
       ids,
@@ -177,6 +204,8 @@ describe('context graph list authority enrichment', () => {
         kind: 'finalized-index',
         targets: new Map(),
       }),
+      registrationStatus: async () => 'registered',
+      resolveCurrent: async (id) => `9${ids.indexOf(id) + 1}`,
     });
 
     const result = await list(fixture.fakeAgent);
@@ -184,7 +213,7 @@ describe('context graph list authority enrichment', () => {
     expect(result.rows).toHaveLength(MISS_COUNT);
     expect(result.rows.every((row: { onChainId?: string }) => row.onChainId === undefined))
       .toBe(true);
-    expect(fixture.readRegistrationStatus).toHaveBeenCalledTimes(MISS_COUNT);
+    expect(fixture.readRegistrationStatus).not.toHaveBeenCalled();
     expect(fixture.resolveCurrent).not.toHaveBeenCalled();
   });
 
@@ -229,6 +258,7 @@ describe('context graph list authority enrichment', () => {
     const resolveCurrent = vi.fn(async () => null);
     const fakeAgent = {
       subscribedContextGraphs: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {
           resolveFinalizedContextGraphIdsByNameHashes: resolveMany,
@@ -282,6 +312,7 @@ describe('context graph list authority enrichment', () => {
     });
     const fakeAgent = {
       subscribedContextGraphs: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       chain: {
         contextGraphAuthorityIndexRevisionReader: {
           resolveFinalizedContextGraphIdsByNameHashes: resolveMany,
@@ -298,7 +329,7 @@ describe('context graph list authority enrichment', () => {
     expect(resolveMany).toHaveBeenCalledOnce();
   });
 
-  it('repairs a just-mined local registration only after durable registered evidence', async () => {
+  it('does not mix a just-mined local registration into a finalized listing horizon', async () => {
     const registeredId = 'listing-just-mined-registered';
     const unregisteredId = 'listing-local-unregistered';
     const unknownId = 'listing-registration-unknown';
@@ -321,18 +352,12 @@ describe('context graph list authority enrichment', () => {
     const result = await list(fixture.fakeAgent);
 
     expect(result.rows.find((row: { id: string }) => row.id === registeredId))
-      .toEqual(expect.objectContaining({ onChainId: '904' }));
-    expect(fixture.resolveCurrent).toHaveBeenCalledOnce();
-    expect(fixture.resolveCurrent).toHaveBeenCalledWith(
-      registeredId,
-      expect.objectContaining({
-        signal: expect.any(AbortSignal),
-        source: 'agent.contextGraph.list.onChainId',
-      }),
-    );
+      .toEqual(expect.not.objectContaining({ onChainId: expect.anything() }));
+    expect(fixture.readRegistrationStatus).not.toHaveBeenCalled();
+    expect(fixture.resolveCurrent).not.toHaveBeenCalled();
   });
 
-  it('cancels the bounded current repair when its listing budget expires', async () => {
+  it('cancels a legacy-current lookup when its listing budget expires', async () => {
     const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
     Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
       value: 1,
@@ -343,10 +368,7 @@ describe('context graph list authority enrichment', () => {
       let repairSignal: AbortSignal | undefined;
       const fixture = listingAgent({
         ids: [id],
-        resolveFinalized: async () => ({
-          kind: 'finalized-index',
-          targets: new Map(),
-        }),
+        resolveFinalized: async () => ({ kind: 'legacy-current' }),
         registrationStatus: async () => 'registered',
         resolveCurrent: async (_id, options) => {
           repairSignal = options?.signal;

@@ -764,7 +764,7 @@ describe('listContextGraphs merge', () => {
     expect(entry!.callerInvolved).toBeUndefined();
   }, 15000);
 
-  it('batch-enriches mixed listing sources and uses current state for a finalized miss', async () => {
+  it('batch-enriches mixed listing sources and keeps a finalized miss absent', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });
     agent = result.agent;
@@ -838,7 +838,7 @@ describe('listContextGraphs merge', () => {
     expect(rows.find((row) => row.id === ontologyId)?.onChainId).toBe('901');
     expect(rows.find((row) => row.id === metaId)?.onChainId).toBe('902');
     expect(rows.find((row) => row.id === storageId)?.onChainId).toBe('903');
-    expect(rows.find((row) => row.id === justRegisteredId)?.onChainId).toBe('904');
+    expect(rows.find((row) => row.id === justRegisteredId)?.onChainId).toBeUndefined();
     expect(finalizedBatch).toHaveBeenCalledOnce();
     expect(finalizedBatch.mock.calls[0]?.[0]).toEqual(expect.arrayContaining([
       agent.contextGraphNameCommitment(ontologyId),
@@ -846,13 +846,11 @@ describe('listContextGraphs merge', () => {
       agent.contextGraphNameCommitment(storageId),
       agent.contextGraphNameCommitment(justRegisteredId),
     ]));
-    expect(currentResolver).toHaveBeenCalledWith(
-      justRegisteredId,
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
-    expect(currentResolver.mock.calls.some(([id]) => (
-      id === ontologyId || id === metaId || id === storageId
-    ))).toBe(false);
+    // A durable local `registered` marker cannot reopen current-state
+    // resolution after a successful finalized batch omitted the graph. The
+    // complete listing stays on one authority horizon and performs no scalar
+    // RPC fallback for any row.
+    expect(currentResolver).not.toHaveBeenCalled();
   }, 15000);
 
   it('listContextGraphs sets callerInvolved from curator wallet match', async () => {

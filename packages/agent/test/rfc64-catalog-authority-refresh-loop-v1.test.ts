@@ -57,6 +57,120 @@ function revisionSource(
 }
 
 describe('RFC-64 catalog authority refresh loop', () => {
+  it.each([
+    ['STORE_OPERATION_TIMEOUT', 'Managed Oxigraph is recovering; query was not started'],
+    ['STORE_SCHEDULER_BUSY', 'Store scheduler queue full (normal: sparql-http.query)'],
+  ])('single-flights 128 lanes and trips one selector generation on %s', async (
+    code,
+    message,
+  ) => {
+    const { scheduled, scheduler } = createSchedulerHarness();
+    const contextGraphIds = Array.from({ length: 128 }, (_, index) => `cg-${index}`);
+    const failures: Array<readonly [string, unknown]> = [];
+    const attempts: string[] = [];
+    let firstGeneration = true;
+    let active = 0;
+    let peak = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => contextGraphIds,
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        active += 1;
+        peak = Math.max(peak, active);
+        await Promise.resolve();
+        active -= 1;
+        if (firstGeneration) {
+          throw Object.assign(new Error(message), {
+            code,
+            retryable: true,
+            outcome: 'not_started',
+          });
+        }
+        return COMMITTED;
+      },
+      onRefreshFailure: (contextGraphId, error) => {
+        failures.push([contextGraphId, error]);
+      },
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+
+    expect(attempts).toEqual(['cg-0']);
+    expect(failures).toHaveLength(1);
+    expect(peak).toBe(1);
+
+    firstGeneration = false;
+    scheduled[0]!.callback();
+    await loop.whenIdle();
+
+    expect(attempts.slice(1)).toEqual(contextGraphIds);
+    expect(failures).toHaveLength(1);
+    expect(peak).toBe(1);
+    await loop.close();
+  });
+
+  it('does not trip peer lanes for a graph-specific authority failure', async () => {
+    const { scheduler } = createSchedulerHarness();
+    const attempts: string[] = [];
+    const failures: string[] = [];
+    let active = 0;
+    let peak = 0;
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b', 'cg-c'],
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId) => {
+        attempts.push(contextGraphId);
+        active += 1;
+        peak = Math.max(peak, active);
+        await Promise.resolve();
+        active -= 1;
+        if (contextGraphId === 'cg-a') throw new Error('invalid authority for cg-a');
+        return COMMITTED;
+      },
+      onRefreshFailure: (contextGraphId) => { failures.push(contextGraphId); },
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+
+    expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-c']);
+    expect(failures).toEqual(['cg-a']);
+    expect(peak).toBe(1);
+    await loop.close();
+  });
+
+  it('aborts one active refresh and drains queued lanes without starting them', async () => {
+    const { scheduler } = createSchedulerHarness();
+    const contextGraphIds = Array.from({ length: 128 }, (_, index) => `cg-${index}`);
+    const attempts: string[] = [];
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => contextGraphIds,
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      refreshContextGraph: async (contextGraphId, signal) => {
+        attempts.push(contextGraphId);
+        markStarted();
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+        return COMMITTED;
+      },
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await started;
+    await expect(loop.close()).resolves.toBeUndefined();
+
+    expect(attempts).toEqual(['cg-0']);
+  });
+
   it('rejects a request factory that omits a selected graph', async () => {
     const { scheduler } = createSchedulerHarness();
     const failures: unknown[] = [];
@@ -286,7 +400,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     await loop.close();
   });
 
-  it('keeps healthy lanes refreshing while another graph remains stalled', async () => {
+  it('single-flights healthy lanes behind a stalled store refresh', async () => {
     const { scheduled, scheduler } = createSchedulerHarness();
     let releaseStalled!: () => void;
     let markStalledStarted!: () => void;
@@ -313,26 +427,22 @@ describe('RFC-64 catalog authority refresh loop', () => {
     });
 
     loop.start();
-    await Promise.all([stalledStarted, healthyRefreshed]);
+    await stalledStarted;
+    expect(healthyCalls).toBe(0);
+    releaseStalled();
+    await healthyRefreshed;
     expect(healthyCalls).toBe(1);
-    // Let the healthy lane publish its physical-idle transition before the
-    // next cadence callback requests another pass.
-    await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+    await loop.whenIdle();
 
     healthyRefreshed = new Promise<void>((resolve) => { markHealthyRefreshed = resolve; });
     scheduled[0]!.callback();
     await healthyRefreshed;
     expect(healthyCalls).toBe(2);
 
-    let closeSettled = false;
-    const closing = loop.close().then(() => { closeSettled = true; });
-    await Promise.resolve();
-    expect(closeSettled).toBe(false);
-    releaseStalled();
-    await closing;
+    await loop.close();
   });
 
-  it('delegates global admission while keeping per-graph lanes independent', async () => {
+  it('serializes per-graph lanes through global store admission', async () => {
     let releaseA!: () => void;
     let releaseB!: () => void;
     let markAStarted!: () => void;
@@ -364,13 +474,16 @@ describe('RFC-64 catalog authority refresh loop', () => {
     });
 
     loop.start();
-    await Promise.all([startedA, startedB, startedC]);
+    await startedA;
+    expect(attempts).toEqual(['cg-a']);
+    releaseA();
+    await startedB;
+    expect(attempts).toEqual(['cg-a', 'cg-b']);
+    releaseB();
+    await startedC;
     expect(attempts).toEqual(['cg-a', 'cg-b', 'cg-c']);
 
-    const closing = loop.close();
-    releaseB();
-    releaseA();
-    await closing;
+    await loop.close();
   });
 
   it('aborts and physically drains an in-flight pass before close settles', async () => {
@@ -393,8 +506,8 @@ describe('RFC-64 catalog authority refresh loop', () => {
         signal.addEventListener('abort', markAborted, { once: true });
         markStarted();
         // Deliberately ignore cancellation and resolve successfully only when
-        // the physical operation retires. Each per-graph lane must still be
-        // physically drained before loop shutdown settles.
+        // the one admitted physical operation retires. Queued graph lanes
+        // must be cancelled without starting store work.
         await retirement;
         return COMMITTED;
       },
@@ -419,7 +532,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
     releaseRetirement();
     await close;
 
-    expect(attempts).toEqual(['cg-a', 'cg-b']);
+    expect(attempts).toEqual(['cg-a']);
     expect(reported).toEqual([]);
     expect(cleared).toEqual([scheduled[0]!.handle]);
   });
