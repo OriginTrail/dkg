@@ -1300,6 +1300,15 @@ export interface Rfc64CatalogBootstrapConfigV1 {
   readonly retryIntervalMs?: number;
 }
 
+/**
+ * Creates the durable finalization inbox for one agent data directory.
+ * The factory must return a fresh, open store. The agent owns the returned
+ * store and closes it during normal startup rollback or shutdown.
+ */
+export type FinalizationRecoveryStoreFactory = (
+  dataDir: string,
+) => Promise<FinalizationRecoveryStore>;
+
 export interface DKGAgentConfig {
   name: string;
   /**
@@ -1307,9 +1316,7 @@ export interface DKGAgentConfig {
    * may supply a policy-specific store; omission opens the standard SQLite
    * store in dataDir.
    */
-  finalizationRecoveryStoreFactory?: (
-    dataDir: string,
-  ) => Promise<FinalizationRecoveryStore>;
+  finalizationRecoveryStoreFactory?: FinalizationRecoveryStoreFactory;
   /** Selected genesis document. Defaults to the compatibility Base testnet genesis. */
   genesisId?: string;
   /** Active network identity used to isolate libp2p and app workflow boundaries. */

@@ -15,8 +15,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent as RealDKGAgent } from '../src/index.js';
-import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
+import {
+  DKGAgent as RealDKGAgent,
+  type FinalizationRecoveryStore,
+  type FinalizationRecoveryStoreFactory,
+} from '../src/index.js';
 import { openSqliteFinalizationRecoveryStore } from '../src/finalization-recovery-sqlite-store.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens, setMinimumRequiredSignatures } from '../../chain/test/hardhat-harness.js';
@@ -41,7 +44,7 @@ function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 function boundedFinalizationRecoveryStoreFactory(
   capture: (store: FinalizationRecoveryStore) => void,
-) {
+): FinalizationRecoveryStoreFactory {
   return async (dataDir: string): Promise<FinalizationRecoveryStore> => {
     const store = await openSqliteFinalizationRecoveryStore(dataDir, {
       maxEntries: 1,
@@ -83,6 +86,71 @@ async function releaseFinalizationRecoveryCapacity(
   key: string,
 ): Promise<void> {
   await expect(store.transition(key, 0, 'SUPERSEDED')).resolves.toBe(true);
+}
+
+interface CapacityRecoveryReceiver {
+  readonly node: DKGAgent;
+  readonly store: FinalizationRecoveryStore;
+  readonly dataDir: string;
+  fillInbox(): Promise<void>;
+  releaseCapacity(): Promise<void>;
+  close(): Promise<void>;
+}
+
+async function createCapacityRecoveryReceiver(
+  name: string,
+  privateKey: string,
+  prefix: string,
+): Promise<CapacityRecoveryReceiver> {
+  const dataDir = await mkdtemp(join(tmpdir(), `dkg-2091-${prefix}-`));
+  const captured: { store?: FinalizationRecoveryStore } = {};
+  let node: DKGAgent | undefined;
+  try {
+    node = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name,
+      listenPort: 0,
+      skills: [],
+      chainAdapter: createEVMAdapter(privateKey),
+      nodeRole: 'core',
+      dataDir,
+      finalizationRecoveryStoreFactory: boundedFinalizationRecoveryStoreFactory(
+        (store) => { captured.store = store; },
+      ),
+      storeConfig: { backend: 'oxigraph' },
+      syncOnConnectEnabled: false,
+    });
+    await node.start();
+    const store = captured.store;
+    if (store === undefined) {
+      throw new Error(`Recovery store factory was not invoked for ${name}`);
+    }
+    let fillerKey: string | undefined;
+    return {
+      node,
+      store,
+      dataDir,
+      async fillInbox() {
+        if (fillerKey !== undefined) throw new Error(`${name} inbox is already filled`);
+        fillerKey = await fillFinalizationRecoveryInbox(store, prefix);
+      },
+      async releaseCapacity() {
+        if (fillerKey === undefined) throw new Error(`${name} inbox was not filled`);
+        await releaseFinalizationRecoveryCapacity(store, fillerKey);
+      },
+      async close() {
+        try {
+          await node.stop();
+        } finally {
+          await rm(dataDir, { recursive: true, force: true });
+        }
+      },
+    };
+  } catch (error) {
+    try { await node?.stop(); } catch {}
+    await rm(dataDir, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 async function stageRootlessAssertion(
@@ -154,11 +222,6 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
   let nodeA: DKGAgent;
   let nodeB: DKGAgent;
   let nodeC: DKGAgent;
-  const receiverDataDirs: string[] = [];
-  const receiverStores: {
-    coreB?: FinalizationRecoveryStore;
-    coreC?: FinalizationRecoveryStore;
-  } = {};
   let describeSnapshot: string | undefined;
 
   beforeAll(async () => {
@@ -178,13 +241,8 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       try { await nodeB?.stop(); } catch {}
       try { await nodeC?.stop(); } catch {}
     } finally {
-      try {
-        if (describeSnapshot !== undefined) {
-          await revertSnapshot(describeSnapshot);
-        }
-      } finally {
-        await Promise.all(receiverDataDirs.map((directory) =>
-          rm(directory, { recursive: true, force: true })));
+      if (describeSnapshot !== undefined) {
+        await revertSnapshot(describeSnapshot);
       }
     }
   });
@@ -205,11 +263,6 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       skills: [],
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
       nodeRole: 'core',
-      dataDir: receiverDataDirs[0] = await mkdtemp(join(tmpdir(), 'dkg-2091-core-b-')),
-      finalizationRecoveryStoreFactory: boundedFinalizationRecoveryStoreFactory(
-        (store) => { receiverStores.coreB = store; },
-      ),
-      storeConfig: { backend: 'oxigraph' },
       // This suite owns GossipSub/finalization behavior. Receiver startup
       // catch-up can add the same logical rows from the per-KA VM graph; the
       // read-both bag-semantics issue is tracked separately in #1270.
@@ -222,11 +275,6 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       skills: [],
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC2_OP),
       nodeRole: 'core',
-      dataDir: receiverDataDirs[1] = await mkdtemp(join(tmpdir(), 'dkg-2091-core-c-')),
-      finalizationRecoveryStoreFactory: boundedFinalizationRecoveryStoreFactory(
-        (store) => { receiverStores.coreC = store; },
-      ),
-      storeConfig: { backend: 'oxigraph' },
       syncOnConnectEnabled: false,
     });
 
@@ -343,20 +391,84 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
     expect(publishEvent.data.publisherAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
   }, 10_000);
 
+});
+
+describe('E2E: acknowledged-core finalization recovery at inbox capacity', () => {
+  const contextGraphId = 'publish-protocol-capacity-recovery-e2e';
+  let nodeA: DKGAgent;
+  const receivers: CapacityRecoveryReceiver[] = [];
+  let describeSnapshot: string | undefined;
+
+  beforeAll(async () => {
+    describeSnapshot = await takeSnapshot();
+    const { hubAddress } = getSharedContext();
+    await setMinimumRequiredSignatures(
+      createProvider(),
+      hubAddress,
+      HARDHAT_KEYS.DEPLOYER,
+      2,
+    );
+
+    nodeA = await DKGAgent.create({
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'CapacityPublisher',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+      nodeRole: 'core',
+    });
+    receivers.push(
+      await createCapacityRecoveryReceiver('CapacityCoreB', HARDHAT_KEYS.REC1_OP, 'core-b'),
+      await createCapacityRecoveryReceiver('CapacityCoreC', HARDHAT_KEYS.REC2_OP, 'core-c'),
+    );
+
+    await nodeA.start();
+    await sleep(800);
+
+    const addrA = nodeA.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    await Promise.all(receivers.map(({ node }) => node.connectTo(addrA)));
+    await sleep(2000);
+
+    expect(nodeA.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(2);
+    await nodeA.createContextGraph({
+      id: contextGraphId,
+      name: 'Capacity Recovery E2E',
+      description: '',
+    });
+    const registration = await nodeA.registerContextGraph(contextGraphId);
+    await bindAndSubscribePublicContextGraph(nodeA, contextGraphId, registration.onChainId);
+    await Promise.all(receivers.map(({ node }) =>
+      bindAndSubscribePublicContextGraph(node, contextGraphId, registration.onChainId)));
+    await sleep(1500);
+  }, 30_000);
+
+  afterAll(async () => {
+    try {
+      try { await nodeA?.stop(); } catch {}
+      await Promise.all(receivers.map(async (receiver) => {
+        try { await receiver.close(); } catch {}
+      }));
+    } finally {
+      if (describeSnapshot !== undefined) {
+        await revertSnapshot(describeSnapshot);
+      }
+    }
+  });
+
   it('makes a KA readable by UAL on every ACK core after both full inboxes drain', async () => {
     const subject = 'urn:protocol:entity:capacity-recovery';
     const object = '"Recovered after capacity"';
-    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'capacity-recovery', [{
+    await stageRootlessAssertion(nodeA, contextGraphId, 'capacity-recovery', [{
       subject,
       predicate: 'http://schema.org/name',
       object,
     }]);
 
-    await Promise.all([nodeB, nodeC].map(async (node) => {
+    await Promise.all(receivers.map(async ({ node }) => {
       const sharedMemory = await pollUntil(
         () => node.query(
           `SELECT ?name WHERE { <${subject}> <http://schema.org/name> ?name }`,
-          { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
+          { contextGraphId, graphSuffix: '_shared_memory' },
         ),
         (bindings) => bindings.some((binding) => binding.name === object),
         15_000,
@@ -365,26 +477,21 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       await node.getOrCreateFinalizationHandler().stopRecoveryWorker();
     }));
 
-    expect(receiverStores.coreB).toBeDefined();
-    expect(receiverStores.coreC).toBeDefined();
-    const stores = [receiverStores.coreB!, receiverStores.coreC!] as const;
-    const [coreBFillerKey, coreCFillerKey] = await Promise.all([
-      fillFinalizationRecoveryInbox(stores[0], 'core-b'),
-      fillFinalizationRecoveryInbox(stores[1], 'core-c'),
-    ]);
+    const settledBaselines = await Promise.all(receivers.map(async ({ store }) =>
+      (await store.health()).stateCounts.SETTLED ?? 0));
+    await Promise.all(receivers.map((receiver) => receiver.fillInbox()));
 
     const result = await nodeA.publishFromFinalizedAssertion(
-      CONTEXT_GRAPH,
+      contextGraphId,
       'capacity-recovery',
       { clearSharedMemoryAfter: true },
     );
     expect(result.status).toBe('confirmed');
-    expect(new Set(result.v10ACKs?.map((ack) => ack.peerId))).toEqual(new Set([
-      nodeB.peerId,
-      nodeC.peerId,
-    ]));
+    expect(new Set(result.v10ACKs?.map((ack) => ack.peerId))).toEqual(new Set(
+      receivers.map(({ node }) => node.peerId),
+    ));
 
-    await Promise.all([nodeB, nodeC].map(async (node) => {
+    await Promise.all(receivers.map(async ({ node }) => {
       await expect.poll(
         () => node.getFinalizationRecoveryHealth(),
         { timeout: 10_000 },
@@ -395,14 +502,12 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       });
     }));
 
-    await Promise.all([
-      releaseFinalizationRecoveryCapacity(stores[0], coreBFillerKey),
-      releaseFinalizationRecoveryCapacity(stores[1], coreCFillerKey),
-    ]);
-    nodeB.getOrCreateFinalizationHandler().startRecoveryWorker();
-    nodeC.getOrCreateFinalizationHandler().startRecoveryWorker();
+    await Promise.all(receivers.map((receiver) => receiver.releaseCapacity()));
+    for (const { node } of receivers) {
+      node.getOrCreateFinalizationHandler().startRecoveryWorker();
+    }
 
-    await Promise.all([nodeB, nodeC].map(async (node) => {
+    await Promise.all(receivers.map(async ({ node }, index) => {
       await expect.poll(
         () => nodeA.lookupEntity(node.peerId, result.ual),
         { timeout: 20_000, interval: 500 },
@@ -414,7 +519,7 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
         ),
       });
       await expect(node.getFinalizationRecoveryHealth()).resolves.toMatchObject({
-        stateCounts: { SETTLED: 1 },
+        stateCounts: { SETTLED: settledBaselines[index]! + 1 },
         deferredEntries: 0,
       });
     }));

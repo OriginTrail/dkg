@@ -359,10 +359,12 @@ export {
   type ImportedArtifactByteStore,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
+  type FinalizationRecoveryStoreFactory,
   type SharedMemorySyncDiagnostics,
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
 } from './dkg-agent-types.js';
+export type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
 export {
   computeImportedArtifactSelector,
   IMPORTED_ARTIFACT_AUTH_PURPOSE,
