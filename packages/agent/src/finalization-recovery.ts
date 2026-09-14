@@ -2234,7 +2234,10 @@ export class FinalizationRecovery<
           ...(txIndex !== undefined ? { txIndex } : {}),
         };
       }
-      if (this.chain.isV10Ready?.()) {
+      const v10Ready = typeof this.chain.resolveV10FinalizationReadiness === 'function'
+        ? await this.chain.resolveV10FinalizationReadiness()
+        : this.chain.isV10Ready?.();
+      if (v10Ready) {
         return {
           verified: true,
           ...(authorAddress ? { authorAddress } : {}),

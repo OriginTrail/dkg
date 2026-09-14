@@ -36,7 +36,7 @@ function completeInstallation(
 describe('generation-owned Hub bindings and event selection', () => {
   it('shares one capability across aliases and repeated requested event types', () => {
     expect(eventContractKeysFor(['KCCreated', 'KnowledgeAssetCreated', 'KCCreated']))
-      .toEqual(['knowledgeAssetStorage', 'knowledgeAssetsLifecycle']);
+      .toEqual(['knowledgeAssetStorage']);
     expect(eventContractKeysFor(['NameClaimed', 'ContextGraphNameClaimed']))
       .toEqual(['contextGraphNameRegistry']);
   });
@@ -111,8 +111,9 @@ describe('generation-owned Hub bindings and event selection', () => {
 
   it('retries a transient optional-deployment lookup instead of caching absence', async () => {
     const group = new EvmHubContractBindings({ hub: first });
-    const load = vi.fn().mockRejectedValueOnce(new Error('temporary RPC failure')).mockResolvedValue(first);
-    await expect(group.resolve(['chronos'], load)).resolves.toEqual({ chronos: undefined });
+    const failure = new Error('temporary RPC failure');
+    const load = vi.fn().mockRejectedValueOnce(failure).mockResolvedValue(first);
+    await expect(group.resolve(['chronos'], load)).rejects.toBe(failure);
     expect(group.resolvedKeys.has('chronos')).toBe(false);
     await expect(group.resolve(['chronos'], load)).resolves.toEqual({ chronos: first });
     expect(load).toHaveBeenCalledTimes(2);
@@ -313,9 +314,7 @@ describe('EVM event descriptor registry', () => {
   it.each(ALIASES)('%s scans its declared binding and parses every log shape of its descriptor', async (alias, descriptor: EvmEventDescriptor) => {
     const scenario = SCENARIOS[descriptor.aliases[0]];
     expect(evmEventDescriptorFor(alias)).toBe(descriptor);
-    expect(eventContractKeysFor([alias])).toEqual(
-      'capabilities' in descriptor ? descriptor.capabilities : [descriptor.binding],
-    );
+    expect(eventContractKeysFor([alias])).toEqual([descriptor.binding]);
     const contract = new Contract(address, EVENT_ABI);
     const queried: string[] = [];
     const scan: EvmEventScan = {
@@ -341,6 +340,52 @@ describe('EVM event descriptor registry', () => {
       expect(await collectAll(adapter.listenForEvents({ eventTypes: [alias] }))).toEqual([]);
       expect(reader).toHaveBeenCalled();
       for (const call of reader.mock.calls as unknown as unknown[][]) expect(call[0]).toBe(bindings[descriptor.binding]);
+    } finally { adapter.destroy(); }
+  });
+
+  it('uses the same transient optional-binding contract for subset and ordinary consumers', async () => {
+    const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const contract = new Contract(address, EVENT_ABI, adapter.getProvider());
+    const failure = new Error('temporary ProfileStorage RPC failure');
+    let profileAttempts = 0;
+    const internal = adapter as any;
+    internal.loadHubContractBinding = vi.fn(async (spec: EvmHubContractSpec) => {
+      if (spec.name === 'ProfileStorage' && profileAttempts++ < 2) throw failure;
+      return contract;
+    });
+    internal.resolveAndAssignRandomSamplingPair = vi.fn(async () => undefined);
+    internal.startHubRotationListener = vi.fn(async () => undefined);
+    internal.readContract = vi.fn(async () => true);
+    internal.readContractWith = vi.fn(async () => []);
+    try {
+      await expect(collectAll(adapter.listenForEvents({ eventTypes: ['RelayCapabilityUpdated'] })))
+        .rejects.toBe(failure);
+      await expect(adapter.getRelayCapable(7n)).rejects.toBe(failure);
+      await expect(adapter.getRelayCapable(7n)).resolves.toBe(true);
+      expect(profileAttempts).toBe(3);
+    } finally { adapter.destroy(); }
+  });
+
+  it('keeps lifecycle readiness behind the explicit finalization capability', async () => {
+    const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const eventContract = new Contract(address, EVENT_ABI, adapter.getProvider());
+    const lifecycleContract = new Contract('0x0000000000000000000000000000000000000013', [], adapter.getProvider());
+    const loaded: string[] = [];
+    const internal = adapter as any;
+    internal.loadHubContractBinding = vi.fn(async (spec: EvmHubContractSpec) => {
+      loaded.push(spec.name);
+      if (spec.name === 'DKGKnowledgeAssets') return eventContract;
+      if (spec.name === 'KnowledgeAssetsLifecycle') return lifecycleContract;
+      throw new Error(`unexpected binding ${spec.name}`);
+    });
+    internal.startHubRotationListener = vi.fn(async () => undefined);
+    internal.readContractWith = vi.fn(async () => []);
+    try {
+      await expect(collectAll(adapter.listenForEvents({ eventTypes: ['KCCreated'] })))
+        .resolves.toEqual([]);
+      expect(loaded).toEqual(['DKGKnowledgeAssets']);
+      await expect(adapter.resolveV10FinalizationReadiness()).resolves.toBe(true);
+      expect(loaded).toEqual(['DKGKnowledgeAssets', 'KnowledgeAssetsLifecycle']);
     } finally { adapter.destroy(); }
   });
 

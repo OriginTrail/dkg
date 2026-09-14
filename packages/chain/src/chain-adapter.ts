@@ -1913,6 +1913,8 @@ export interface ChainAdapter {
    * breaking the defensive runtime optional-call style.
    */
   isV10Ready(): boolean;
+  /** Resolve the V10 lifecycle capability for finalization without coupling it to event scans. */
+  resolveV10FinalizationReadiness?(options?: ChainReadOptions): Promise<boolean>;
   /**
    * Whether the adapter has resolved the V10 RandomSampling contracts
    * needed by the off-chain prover. Optional for non-prover adapters;

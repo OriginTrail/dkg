@@ -3924,7 +3924,10 @@ export class FinalizationHandler {
       // Skip the legacy ContextGraphExpanded check — the batch verification
       // above is sufficient for V10.
       if (ctxGraphId) {
-        if (typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready()) {
+        const v10Ready = typeof this.chain.resolveV10FinalizationReadiness === 'function'
+          ? await this.chain.resolveV10FinalizationReadiness()
+          : typeof this.chain.isV10Ready === 'function' && this.chain.isV10Ready();
+        if (v10Ready) {
           return { verified: true, authorAddress, txIndex: verifiedTxIndex };
         }
         try {

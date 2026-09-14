@@ -30,7 +30,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import {
   ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings, optionalEvmContract,
   type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSnapshot,
-  type EvmHubContractSpec, type EvmHubContractStore,
+  type EvmHubContractSpec,
 } from './evm-hub-contract-bindings.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
@@ -691,9 +691,16 @@ export class EVMChainAdapterBase {
   protected readonly approvalPolicy: ApprovalPolicy;
 
   private readonly hubContractBindings: EvmHubContractBindings;
-  /** Hub-bound handles are written only by `hubContractBindings`; lazy slots stay adapter-owned. */
-  protected get contracts(): EvmHubContractStore { return this.hubContractBindings.contracts; }
+  /**
+   * @deprecated Existing subclasses may still replace or mutate this cache.
+   * New subclasses should use the explicit install and invalidation methods.
+   */
+  protected get contracts(): ContractCache { return this.hubContractBindings.compatibilityContracts; }
+  protected set contracts(value: ContractCache) { this.hubContractBindings.replaceFromSubclass(value); }
+
+  /** @deprecated Existing subclasses may still publish or retire readiness. */
   protected get initialized(): boolean { return this.hubContractBindings.initialized; }
+  protected set initialized(value: boolean) { this.hubContractBindings.setInitializedFromSubclass(value); }
 
   /** Explicit complete installation seam for subclasses. */
   protected installHubContractBindings(value: EvmHubContractInstallation): void {
@@ -3957,6 +3964,13 @@ export class EVMChainAdapterBase {
 
   isV10Ready(): boolean {
     return !!this.contracts.knowledgeAssetsLifecycle;
+  }
+
+  async resolveV10FinalizationReadiness(options: ChainReadOptions = {}): Promise<boolean> {
+    const { knowledgeAssetsLifecycle } = await this.resolveHubContractBindings(
+      ['knowledgeAssetsLifecycle'], options,
+    );
+    return !!knowledgeAssetsLifecycle;
   }
 
   isRandomSamplingReady(): boolean {

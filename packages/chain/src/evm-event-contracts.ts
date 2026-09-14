@@ -23,7 +23,6 @@ export interface EvmEventScan {
 interface EvmEventDescriptorShape {
   readonly aliases: readonly [string, ...string[]];
   readonly binding: EvmHubContractKey;
-  readonly capabilities?: readonly EvmHubContractKey[];
   scan(contract: Contract, scan: EvmEventScan): AsyncIterable<ChainEvent>;
 }
 
@@ -76,10 +75,6 @@ export const EVM_EVENT_DESCRIPTORS = [
     // non-existent `filters.KnowledgeAssetCreated()`.
     aliases: ['KCCreated', 'KnowledgeAssetCreated'],
     binding: 'knowledgeAssetStorage',
-    // Finalization consumers consult isV10Ready() after this scan. Resolve the
-    // lifecycle capability in the same subset so a cold adapter can classify a
-    // valid V10 KCCreated receipt without looking for a legacy expansion event.
-    capabilities: ['knowledgeAssetStorage', 'knowledgeAssetsLifecycle'],
     async *scan(kaStorage: Contract, scan: EvmEventScan) {
       const hasEvent = (name: string) =>
         kaStorage.interface.fragments.some(
@@ -334,7 +329,7 @@ export function eventContractKeysFor(eventTypes: readonly string[]): readonly Ev
   const keys = new Set<EvmEventCapabilityKey>();
   for (const descriptor of EVM_EVENT_DESCRIPTORS) {
     if (!descriptor.aliases.some(alias => selected.has(alias))) continue;
-    for (const key of 'capabilities' in descriptor ? descriptor.capabilities : [descriptor.binding]) keys.add(key);
+    keys.add(descriptor.binding);
   }
   return [...keys];
 }

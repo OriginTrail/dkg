@@ -1,5 +1,6 @@
 import type { Contract } from 'ethers';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
+import type { ContractCache } from '../src/evm-adapter-types.js';
 import type { EvmHubContractBindings } from '../src/evm-hub-contract-bindings.js';
 
 declare const bindings: EvmHubContractBindings;
@@ -19,13 +20,12 @@ bindings.contracts = { hub: handle };
 bindings.contracts.identityStorage = handle;
 
 class Probe extends EVMChainAdapter {
-  probe(): void {
-    // @ts-expect-error subclasses read Hub-bound handles; they install complete sets instead
+  seed(bindings: ContractCache): void {
+    // Deprecated protected writes remain source-compatible for public-package subclasses.
+    this.contracts = bindings;
     this.contracts.chronos = handle;
     this.contracts.randomSampling = handle;
-    // @ts-expect-error subclasses replace the store through an explicit installation transition
-    this.contracts = { hub: handle };
-    // @ts-expect-error subclasses retire bindings through an explicit invalidation transition
+    this.initialized = true;
     this.initialized = false;
   }
 }

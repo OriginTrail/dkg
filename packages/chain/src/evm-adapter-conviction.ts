@@ -225,7 +225,8 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     await this.init();
     const snapshot = await this.resolveHubContractBindingSnapshot([
       'dkgPublishingConvictionNFT', 'chronos',
-    ]);
+    ]).catch(() => null);
+    if (!snapshot) return false;
     const convictionNft = snapshot.contracts.dkgPublishingConvictionNFT;
     const chronos = snapshot.contracts.chronos;
     if (!convictionNft) return false;

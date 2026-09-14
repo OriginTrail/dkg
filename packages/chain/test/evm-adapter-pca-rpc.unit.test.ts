@@ -1,4 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { getAddress } from 'ethers';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { isChainRpcTransportError } from '../src/chain-rpc-transport-error.js';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
@@ -9,6 +10,7 @@ const PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
 const AGENT = '0x00000000000000000000000000000000000000a1';
 const OWNER = '0x00000000000000000000000000000000000000b1';
+const OWNER_B = '0x00000000000000000000000000000000000000b2';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -295,6 +297,59 @@ describe('EVMChainAdapter PCA read cache', () => {
   afterEach(() => {
     vi.useRealTimers();
     _resetRpcFailoverStatsForTest();
+  });
+
+  it('isolates in-flight PCA reads across a Hub binding generation', async () => {
+    const adapter = new EVMChainAdapter(minimalConfig());
+    const bindingA = { era: 'A' };
+    const bindingB = { era: 'B' };
+    let currentBinding = bindingA;
+    const oldAgent = deferred<bigint>();
+    const oldAccount = deferred<unknown[]>();
+    const internal = adapter as any;
+    internal.loadHubContractBinding = vi.fn(async () => currentBinding);
+    internal.resolveAndAssignRandomSamplingPair = vi.fn(async () => undefined);
+    internal.startHubRotationListener = vi.fn(async () => undefined);
+    internal.readContract = recorder(async (contract: unknown, _label: string, method: string) => {
+      if (method === 'agentToAccountId') {
+        return contract === bindingA ? oldAgent.promise : 22n;
+      }
+      if (method === 'getAccountInfo') {
+        return contract === bindingA
+          ? oldAccount.promise
+          : accountInfoTuple(OWNER_B, 222n);
+      }
+      throw new Error(`unexpected PCA read ${method}`);
+    });
+
+    try {
+      await internal.init();
+      const accountFromA = adapter.getPublishingConvictionAccountInfo(9n);
+      const agentFromA = adapter.getConvictionAgentAccountId(AGENT);
+      await vi.waitFor(() => expect(internal.readContract.calls).toHaveLength(2));
+
+      internal.applyHubRotationEventName('DKGPublishingConvictionNFT');
+      currentBinding = bindingB;
+      await internal.init();
+
+      await expect(adapter.getPublishingConvictionAccountInfo(9n))
+        .resolves.toMatchObject({ owner: OWNER_B, committedTRAC: 222n });
+      await expect(adapter.getConvictionAgentAccountId(AGENT)).resolves.toBe(22n);
+
+      oldAccount.resolve(accountInfoTuple(OWNER, 111n));
+      oldAgent.resolve(11n);
+      await expect(accountFromA).resolves.toMatchObject({ owner: getAddress(OWNER), committedTRAC: 111n });
+      await expect(agentFromA).resolves.toBe(11n);
+
+      await expect(adapter.getPublishingConvictionAccountInfo(9n))
+        .resolves.toMatchObject({ owner: OWNER_B, committedTRAC: 222n });
+      const bAccountReads = internal.readContract.calls.filter(
+        ([contract, , method]: [unknown, string, string]) => contract === bindingB && method === 'getAccountInfo',
+      );
+      expect(bAccountReads).toHaveLength(1);
+    } finally {
+      adapter.destroy();
+    }
   });
 
   it('coalesces concurrent agentToAccountId reads without retaining externally mutable mappings', async () => {
