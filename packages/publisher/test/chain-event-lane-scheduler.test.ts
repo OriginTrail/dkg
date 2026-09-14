@@ -9,7 +9,6 @@ import type {
   LaneCursorPersistence,
   LegacyCursorPersistence,
 } from '../src/chain-event-poller.js';
-import { seedChainEventPollerCursors } from '../src/chain-event-lane-cursor-store.js';
 import { ChainEventLaneRunner } from '../src/chain-event-lane-runner.js';
 import type { ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
 import { makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
@@ -21,7 +20,14 @@ describe('ChainEventPoller scheduler', () => {
       async loadLane() { return undefined; },
       async saveLane(lane, block) { saved.push({ lane, block }); },
     };
-    await seedChainEventPollerCursors(cursor, 42);
+    const { adapter } = makeChain({ head: 100 });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      cursorPersistence: cursor,
+    });
+    await poller.seedConfiguredLaneCursors(42);
 
     expect(saved).toEqual([
       { lane: 'publish', block: 42 },
@@ -42,7 +48,14 @@ describe('ChainEventPoller scheduler', () => {
       async saveLane(lane) { laneCalls.push(lane); },
       async saveLanes(lanes, block) { bulkCalls.push({ lanes: [...lanes], block }); },
     };
-    await seedChainEventPollerCursors(cursor, 42);
+    const { adapter } = makeChain({ head: 100 });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      cursorPersistence: cursor,
+    });
+    await poller.seedConfiguredLaneCursors(42);
 
     expect(laneCalls).toEqual([]);
     expect(bulkCalls).toEqual([{
@@ -67,7 +80,14 @@ describe('ChainEventPoller scheduler', () => {
       async saveLanes() { throw new Error('cursor persistence unavailable'); },
     };
 
-    await expect(seedChainEventPollerCursors(cursor, 42))
+    const { adapter } = makeChain({ head: 100 });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      cursorPersistence: cursor,
+    });
+    await expect(poller.seedConfiguredLaneCursors(42))
       .rejects.toThrow('cursor persistence unavailable');
     expect([...stored]).toEqual([['publish', 7], ['vmReconcile', 9]]);
   });
@@ -81,21 +101,39 @@ describe('ChainEventPoller scheduler', () => {
       async loadLane() { return undefined; },
       async saveLane(lane, block) { saved.push({ lane, block }); },
     };
-    await expect(seedChainEventPollerCursors(cursor, blockNumber))
+    const { adapter } = makeChain({ head: 100 });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      cursorPersistence: cursor,
+    });
+    await expect(poller.seedConfiguredLaneCursors(blockNumber))
       .rejects.toThrow(/positive safe integer/);
     expect(saved).toEqual([]);
   });
 
-  it('refuses to seed every production lane through a legacy aggregate cursor', async () => {
+  // A legacy aggregate cursor cannot restore full-history lanes on its own,
+  // which is why all-lane seeding is poller-scoped: the seed also lives in this
+  // runner's lane state for the rest of its lifetime (proven by the
+  // disabled-full-history case at the end of this file).
+  it('seeds a legacy aggregate cursor once for every configured lane', async () => {
     const saved: number[] = [];
     const cursor: LegacyCursorPersistence = {
       async load() { return undefined; },
       async save(blockNumber) { saved.push(blockNumber); },
     };
+    const { adapter } = makeChain({ head: 100 });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      cursorPersistence: cursor,
+    });
 
-    await expect(seedChainEventPollerCursors(cursor, 42))
-      .rejects.toThrow(/loadLane and saveLane/);
-    expect(saved).toEqual([]);
+    await poller.seedConfiguredLaneCursors(42);
+
+    expect(saved).toEqual([42]);
   });
 
   it('restores the lowest accepted seed on a live-tail lane after reconstructing the poller', async () => {
@@ -104,8 +142,6 @@ describe('ChainEventPoller scheduler', () => {
       async loadLane(lane) { return saved.get(lane); },
       async saveLane(lane, block) { saved.set(lane, block); },
     };
-    await seedChainEventPollerCursors(cursor, 1);
-
     const { adapter, filters } = makeChain({ head: 10_000 });
     const poller = new ChainEventPoller({
       chain: adapter,
@@ -114,6 +150,7 @@ describe('ChainEventPoller scheduler', () => {
       cursorPersistence: cursor,
       onContextGraphCreated: async () => { /* sink */ },
     });
+    await poller.seedConfiguredLaneCursors(1);
 
     await poller.start();
     await poller.waitForCurrentPoll();
@@ -130,8 +167,6 @@ describe('ChainEventPoller scheduler', () => {
       async loadLane(lane) { return saved.get(lane); },
       async saveLane(lane, block) { saved.set(lane, block); },
     };
-    await seedChainEventPollerCursors(cursor, 42);
-
     const { adapter, filters } = makeChain({ head: 100 });
     const poller = new ChainEventPoller({
       chain: adapter,
@@ -140,6 +175,7 @@ describe('ChainEventPoller scheduler', () => {
       cursorPersistence: cursor,
       onKnowledgeAssetCreated: async () => { /* sink */ },
     });
+    await poller.seedConfiguredLaneCursors(42);
 
     await poller.start();
     await poller.waitForCurrentPoll();
