@@ -68,10 +68,14 @@ export function foldSharedMemoryRound(
   options: FoldSharedMemoryRoundOptions = {},
 ): DurableProgressClassification {
   const progress = options.progress ?? classifyDurableProgress(shared);
-  aggregate.diagnostics = mergeFleetSharedMemoryDiagnostics(
+  const mergedDiagnostics = mergeFleetSharedMemoryDiagnostics(
     aggregate.diagnostics,
     options.diagnosticsResult ?? shared,
   );
+  // Keep the accumulator's diagnostics object stable. Both drivers seed their
+  // public result with this same object; replacing it here leaves the result
+  // holding a stale snapshot while later rounds continue updating the new one.
+  Object.assign(aggregate.diagnostics, mergedDiagnostics);
   aggregate.insertedDataTriples += shared.insertedDataTriples;
   if (options.countJobDeferral !== false) {
     aggregate.jobDeferredBackpressure += shared.deferredBackpressure ?? 0;

@@ -397,6 +397,51 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     }
   };
 
+  /**
+   * Fold a shared-memory round and its per-plane proof together. Keeping the
+   * progress classifier, aggregate, pass tracker, and readiness evidence in
+   * one reducer ensures continuation rounds follow exactly the same semantics
+   * as the opening walk.
+   */
+  const foldSharedMemory = ({
+    peerId,
+    sharedResult,
+    fromAuthority,
+    continuation,
+  }: {
+    peerId: string;
+    sharedResult: CatchupSharedMemoryPlane;
+    fromAuthority: boolean;
+    continuation: boolean;
+  }): DurableProgressClassification => {
+    const shared = sharedResult.payload;
+    const progress = foldSharedMemoryRound(sharedAggregation, peerId, shared, {
+      progress: sharedResult.progress,
+      diagnosticsResult: shared.swmCoverage
+        ? {
+          ...shared,
+          swmCoverage: { ...shared.swmCoverage, fromAuthority },
+        }
+        : shared,
+      countJobDeferral: !continuation,
+      trackSucceeded: false,
+    });
+    passTracker.recordPeerRound(peerId, shared.swmCoverage, progress.completedWithoutFailure);
+
+    const evidence = catchupPeerPlaneEvidence(shared, {
+      completedWithoutFailure: progress.completedWithoutFailure,
+      fromAuthority,
+      plane: 'shared-memory',
+    });
+    if (sharedResult.selectedScopeProven) evidence.selectedScopeCompletePeers = 1;
+    addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, evidence);
+    if (fromAuthority) {
+      addCatchupPlaneEvidence(authorityEvidence.sharedMemory, evidence);
+      if (progress.completedWithoutFailure) authorityAnswered.sharedMemory = true;
+    }
+    return progress;
+  };
+
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
   // can from the other peers instead of failing the entire subscribe/catch-up.
   const syncPeer = async (peerId: string, pass: CatchupPassContext): Promise<PeerRound> => {
@@ -545,14 +590,6 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   ): void => {
     let peerDenied = false;
     const shared = sharedResult?.payload ?? null;
-    const sharedCompletedWithoutFailure = sharedResult?.progress.completedWithoutFailure ?? false;
-    if (shared) {
-      passTracker.recordPeerRound(
-        peerId,
-        shared.swmCoverage,
-        sharedCompletedWithoutFailure,
-      );
-    }
     if (durable) {
       dataSynced += durable.insertedDataTriples ?? 0;
       diagnostics.durable.fetchedMetaTriples += durable.fetchedMetaTriples;
@@ -594,21 +631,12 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       }
     }
 
-    if (shared) {
-      const sharedForDiagnostics = shared.swmCoverage
-        ? {
-          ...shared,
-          swmCoverage: {
-            ...shared.swmCoverage,
-            fromAuthority: fromSharedMemoryAuthority,
-          },
-        }
-        : shared;
-      foldSharedMemoryRound(sharedAggregation, peerId, shared, {
-        progress: sharedResult!.progress,
-        diagnosticsResult: sharedForDiagnostics,
-        countJobDeferral: !isContinuationRound,
-        trackSucceeded: false,
+    if (sharedResult) {
+      const sharedProgress = foldSharedMemory({
+        peerId,
+        sharedResult,
+        fromAuthority: fromSharedMemoryAuthority,
+        continuation: isContinuationRound,
       });
       // The DIAGNOSTIC above counts every deferral, including continuation
       // ones — that is the honest observability number. The JOB-LEVEL scalar
@@ -631,25 +659,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // anticipates it ("sized so at least two extra passes fit even when a
       // peer's plane is deferred"), so this is a designed-for state, not an
       // edge case.
-      peerDenied = peerDenied || shared.deniedPhases > 0;
-
-      // Shared memory carries no verified-private-only signal, so the shared
-      // evidence only ever has data/empty set — the same reducer still applies.
-      const sharedEvidence = catchupPeerPlaneEvidence(shared, {
-        completedWithoutFailure: sharedCompletedWithoutFailure,
-        fromAuthority: fromSharedMemoryAuthority,
-        plane: 'shared-memory',
-      });
-      if (sharedResult?.selectedScopeProven) {
-        sharedEvidence.selectedScopeCompletePeers = 1;
-      }
-      addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, sharedEvidence);
-      if (fromSharedMemoryAuthority) {
-        addCatchupPlaneEvidence(authorityEvidence.sharedMemory, sharedEvidence);
-        if (sharedCompletedWithoutFailure) {
-          authorityAnswered.sharedMemory = true;
-        }
-      }
+      peerDenied = peerDenied || sharedProgress.denied;
     }
 
     if (peerDenied) {

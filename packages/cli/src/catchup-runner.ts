@@ -8,7 +8,8 @@ import {
   normalizeSyncAdmissionSource,
   type DKGAgent,
   type CatchupSyncDiagnostics,
-  type ContextGraphCatchupResult,
+  type CatchupResultCore,
+  type SharedMemorySyncAggregate,
   type DurableProgressSummary,
   type DurableProgressClassification,
   type DurableSyncDiagnostics,
@@ -23,66 +24,26 @@ const DURABLE_CATCHUP_PHASE_HEADROOM_MS = 1_000;
 const MIN_DURABLE_CATCHUP_PHASE_BUDGET_MS = 1_000;
 const DURABLE_CATCHUP_SETTLEMENT_GRACE_MS = 30_000;
 
-export interface CatchupJobResult extends Omit<
-  ContextGraphCatchupResult,
-  | 'totalPeers'
-  | 'selectedPeers'
-  | 'sharedMemoryCompletedCleanly'
-  | 'cleanSharedMemoryPeerIds'
-  | 'diagnostics'
-> {
-  connectedPeers: number;
+interface CatchupJobDiagnostics extends CatchupSyncDiagnostics {
+  durable: CatchupSyncDiagnostics['durable'] & {
+    deniedPhases?: number;
+    authorityUnanswered?: boolean;
+  };
+  sharedMemory: SharedMemorySyncAggregate & {
+    authorityUnanswered?: boolean;
+  };
+}
+
+export interface CatchupJobResult extends CatchupResultCore {
   totalPeers?: number;
   selectedPeers?: number;
-  syncCapablePeers: number;
-  peersTried: number;
-  /**
-   * Subset of `peersTried` whose per-peer sync round reached a responder
-   * and did not collapse into a transport failure. A responder can still
-   * time out part-way through, deny access, or serve metadata-only rows; this
-   * counter exists so daemon status mapping can distinguish "curator offline"
-   * from "reachable peer answered but did not complete cleanly".
-   */
-  peersResponded: number;
-  /**
-   * Subset of `peersTried` whose per-peer sync round finished without a
-   * transport failure, timeout, or explicit ACL denial, and with either real
-   * progress or a clean non-metadata-only empty completion.
-   */
-  peersSucceeded: number;
-  /**
-   * Sync-capable peers this run deliberately never contacted because an earlier
-   * wave already proved every requested plane. These are neither failures nor
-   * successes; they exist so status mapping and operators can tell an
-   * early-stopped run from a run where peers were unreachable.
-   */
   peersNotAttempted?: number;
-  /** Context Graph phases deferred by this node's local sync scheduler. */
-  deferredBackpressure: number;
-  dataSynced: number;
-  sharedMemorySynced: number;
-  denied: boolean;
-  deniedPeers: number;
-  /**
-   * Per-plane evidence produced before peer results are aggregated. Aggregate
-   * diagnostics intentionally retain every timeout/denial for observability,
-   * but readiness must not let one bad peer mask another peer that completed
-   * the same plane cleanly and stored verified data.
-   */
   cleanPlaneCompletions?: {
     /** Always carries `verifiedPrivateOnlyPeers`; only the durable plane can produce it. */
     durable: CatchupPlaneCompletionEvidence & { verifiedPrivateOnlyPeers: number };
     sharedMemory: CatchupPlaneCompletionEvidence;
   };
-  diagnostics?: CatchupSyncDiagnostics & {
-    durable: CatchupSyncDiagnostics['durable'] & {
-      deniedPhases?: number;
-      authorityUnanswered?: boolean;
-    };
-    sharedMemory: CatchupSyncDiagnostics['sharedMemory'] & {
-      authorityUnanswered?: boolean;
-    };
-  };
+  diagnostics?: CatchupJobDiagnostics;
 }
 
 export interface CatchupRunRequest {

@@ -628,6 +628,7 @@ import {
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
+  type ContextGraphCatchupDiagnostics,
   type ContextGraphCatchupResult,
   type DurableSyncResult,
   type SharedMemorySyncResult,
@@ -8076,7 +8077,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let deferredBackpressure = 0;
     let dataSynced = 0;
     let noProtocolPeers = 0;
-    const diagnostics: CatchupSyncDiagnostics = {
+    const diagnostics: ContextGraphCatchupDiagnostics = {
       noProtocolPeers: 0,
       durable: {
         fetchedMetaTriples: 0,

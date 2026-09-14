@@ -16,6 +16,7 @@
 
 import type { ethers } from 'ethers';
 import type {
+  SharedMemorySyncDiagnostics,
   SharedMemorySyncAggregate,
 } from './sync/shared-memory-diagnostics.js';
 export type {
@@ -1227,14 +1228,18 @@ export interface DurableSyncDiagnostics {
 export interface CatchupSyncDiagnostics {
   noProtocolPeers: number;
   durable: DurableSyncDiagnostics;
+  /** Broad compatibility contract retained for older CLI/worker producers. */
+  sharedMemory: SharedMemorySyncDiagnostics;
+}
+
+/** Catch-up diagnostics produced by the in-process agent path. */
+export interface ContextGraphCatchupDiagnostics extends CatchupSyncDiagnostics {
   sharedMemory: SharedMemorySyncAggregate;
 }
 
-/** Canonical in-process catch-up result; CLI workers may add optional evidence. */
-export interface ContextGraphCatchupResult {
+/** Fields shared by the in-process and worker-backed catch-up results. */
+export interface CatchupResultCore {
   connectedPeers: number;
-  totalPeers: number;
-  selectedPeers: number;
   syncCapablePeers: number;
   peersTried: number;
   peersResponded: number;
@@ -1242,11 +1247,17 @@ export interface ContextGraphCatchupResult {
   deferredBackpressure: number;
   dataSynced: number;
   sharedMemorySynced: number;
-  sharedMemoryCompletedCleanly: boolean;
-  cleanSharedMemoryPeerIds: readonly string[];
   denied: boolean;
   deniedPeers: number;
-  diagnostics: CatchupSyncDiagnostics;
+}
+
+/** Canonical in-process catch-up result; CLI workers may add optional evidence. */
+export interface ContextGraphCatchupResult extends CatchupResultCore {
+  totalPeers: number;
+  selectedPeers: number;
+  sharedMemoryCompletedCleanly: boolean;
+  cleanSharedMemoryPeerIds: readonly string[];
+  diagnostics: ContextGraphCatchupDiagnostics;
 }
 
 export interface DurableSyncResult extends DurableSyncDiagnostics {
