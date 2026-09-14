@@ -3,6 +3,7 @@ import {
   buildContextGraphListPage,
   canonicalizeContextGraphRowsForPaging,
   CONTEXT_GRAPH_LIST_EXPOSE_HEADERS,
+  CONTEXT_GRAPH_LIST_MAX_LIMIT,
   CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
   handleContextGraphListRoute,
   parseContextGraphListQuery,
@@ -506,8 +507,9 @@ describe('bounded context-graph listing', () => {
     });
   });
 
-  it('returns a bodyless 304 with observability headers for a matching ETag', async () => {
-    const listContextGraphs = vi.fn(async () => rows(120));
+  it('avoids whole-registry serialization across repeated conditional requests', async () => {
+    const listContextGraphs = vi.fn(async () => rows(1_200));
+    const stringify = vi.spyOn(JSON, 'stringify');
     const first = responseRecorder();
     await handleContextGraphListRoute({
       req: { headers: {} },
@@ -521,29 +523,37 @@ describe('bounded context-graph listing', () => {
     expect(first.state.headers).toMatchObject({
       'X-DKG-List-Mode': 'paged',
       'X-DKG-Result-Count': '25',
-      'X-DKG-Total-Count': '120',
+      'X-DKG-Total-Count': '1200',
     });
     expect(first.state.headers?.ETag).toMatch(/^"dkg-cg-list-[0-9a-f]{64}"$/);
     expect(Buffer.byteLength(first.state.body ?? '')).toBe(
       Number(first.state.headers?.['X-DKG-Response-Bytes']),
     );
 
-    const conditional = responseRecorder();
-    await handleContextGraphListRoute({
-      req: { headers: { 'if-none-match': first.state.headers?.ETag } },
-      res: conditional.res,
-      agent: { listContextGraphs },
-      url: new URL('http://localhost/api/context-graph/list?limit=25&projection=summary'),
-      requestAgentAddress: '0x0000000000000000000000000000000000000001',
-    } as unknown as RequestContext);
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      const conditional = responseRecorder();
+      await handleContextGraphListRoute({
+        req: { headers: { 'if-none-match': first.state.headers?.ETag } },
+        res: conditional.res,
+        agent: { listContextGraphs },
+        url: new URL('http://localhost/api/context-graph/list?limit=25&projection=summary'),
+        requestAgentAddress: '0x0000000000000000000000000000000000000001',
+      } as unknown as RequestContext);
 
-    expect(conditional.state.status).toBe(304);
-    expect(conditional.state.body).toBe('');
-    expect(conditional.state.headers).toMatchObject({
-      ETag: first.state.headers?.ETag,
-      'X-DKG-Response-Bytes': '0',
-      'Access-Control-Expose-Headers': CONTEXT_GRAPH_LIST_EXPOSE_HEADERS,
-    });
+      expect(conditional.state.status).toBe(304);
+      expect(conditional.state.body).toBe('');
+      expect(conditional.state.headers).toMatchObject({
+        ETag: first.state.headers?.ETag,
+        'X-DKG-Response-Bytes': '0',
+        'Access-Control-Expose-Headers': CONTEXT_GRAPH_LIST_EXPOSE_HEADERS,
+      });
+    }
+
+    const largeArraySerializations = stringify.mock.calls.filter(([value]) => (
+      Array.isArray(value) && value.length > CONTEXT_GRAPH_LIST_MAX_LIMIT
+    ));
+    stringify.mockRestore();
+    expect(largeArraySerializations).toHaveLength(0);
   });
 
   it('includes page construction in route timing and scopes exposed headers to this route', async () => {

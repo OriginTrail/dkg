@@ -360,14 +360,27 @@ function payloadWithExactSize(
   throw new Error('Context-graph response byte accounting did not converge');
 }
 
+/**
+ * Hash the prepared collection with bounded intermediate allocations. The
+ * digest is deliberately equivalent to serializing the array as JSON, but a
+ * registry-sized JSON string is never retained while calculating it. This is
+ * also the digest carried by cursors, so it must remain stable across walks.
+ */
+function digestPreparedRows(rows: readonly ContextGraphListRow[]): string {
+  const hash = createHash('sha256').update('[', 'utf8');
+  rows.forEach((row, index) => {
+    if (index > 0) hash.update(',', 'utf8');
+    hash.update(serializeJsonResponseBody(row), 'utf8');
+  });
+  return hash.update(']', 'utf8').digest('hex');
+}
+
 export function buildContextGraphListPage(
   rows: ContextGraphListFullRow[],
   query: ContextGraphListQuery,
 ): ContextGraphListPageResult {
   const prepared = prepareRows(rows, query);
-  const collectionDigest = createHash('sha256')
-    .update(serializeJsonResponseBody(prepared), 'utf8')
-    .digest('hex');
+  const collectionDigest = digestPreparedRows(prepared);
   if (
     query.cursorCollectionDigest !== undefined
     && query.cursorCollectionDigest !== collectionDigest
