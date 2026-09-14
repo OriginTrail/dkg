@@ -4307,7 +4307,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       selfPeerId: this.peerId,
       maxRosterPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
       coreEligibilityConcurrency: CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
-      coreMembershipPolicy: 'proof-required',
       isStarted: () => this.started,
       resolveCuratorPeerIds: (localContextGraphId, options) =>
         this.resolveCuratorPeerIdsForCg(localContextGraphId, options),

@@ -1,7 +1,6 @@
 import {
   findCorePeerIds,
   type CoreMembershipEvidence,
-  type CoreMembershipPolicy,
   type CorePeerDirectoryEntry,
 } from '../../p2p/core-peer-discovery.js';
 import type { RandomSamplingPeerPreparation } from './random-sampling-exact-repair.js';
@@ -32,13 +31,17 @@ export interface RandomSamplingCandidateLedger {
  * single capability the agent already owns (graph curators, the Agent Registry,
  * chain membership, admission, connection readiness), so the policy below is
  * testable without a lifecycle instance.
+ *
+ * There is deliberately no Core membership-policy port: this module represents
+ * proof-time discovery only, where chain membership is an invariant rather than
+ * a caller's choice. The legacy fail-open `warm-compatible` mode stays with the
+ * warm-core path that owns it.
  */
 export interface RandomSamplingPeerSourcePorts {
   readonly selfPeerId: string;
   /** Bound on both the curator roster and the discovered Core roster. */
   readonly maxRosterPeerIds: number;
   readonly coreEligibilityConcurrency: number;
-  readonly coreMembershipPolicy: CoreMembershipPolicy;
   /** False once the owning agent has stopped, independently of the signal. */
   isStarted(): boolean;
   resolveCuratorPeerIds(
@@ -122,7 +125,7 @@ export async function resolveRandomSamplingCandidatePeers(
       // Registry graph.
       classifyMembership: (agent, candidateSignal) =>
         ports.classifyCoreMembership(agent, candidateSignal),
-      membershipPolicy: ports.coreMembershipPolicy,
+      membershipPolicy: 'proof-required',
     }).catch((error: unknown) => {
       if (signal.aborted) throw signal.reason ?? error;
       ports.logInfo(

@@ -17,7 +17,6 @@ function makePorts(
     selfPeerId: 'self',
     maxRosterPeerIds: 64,
     coreEligibilityConcurrency: 4,
-    coreMembershipPolicy: 'proof-required',
     isStarted: () => true,
     resolveCuratorPeerIds: vi.fn(async () => ({ peerIds: [] as string[] })),
     findCoreAgents: vi.fn(async () => [] as CorePeerDirectoryEntry[]),
@@ -209,22 +208,23 @@ describe('Random Sampling proof-time peer source', () => {
     expect(ports.classifyCoreMembership).toHaveBeenCalledOnce();
   });
 
-  it('applies the configured membership policy to unavailable chain evidence', async () => {
+  it('always requires positive chain membership, whatever the caller wires', async () => {
     const findCoreAgents = vi.fn(async () => [
       { peerId: 'core-legacy', nodeRole: 'core' },
     ] as CorePeerDirectoryEntry[]);
-    const classifyCoreMembership = vi.fn(async () => 'unavailable' as const);
+
+    // The warm-core path accepts `unavailable` evidence; proof-time discovery is
+    // not a policy choice, so the same profile can never reach a proof roster.
+    for (const evidence of ['unavailable', 'indeterminate', 'non-member'] as const) {
+      await expect(resolve(makePorts({
+        findCoreAgents,
+        classifyCoreMembership: vi.fn(async () => evidence),
+      })), evidence).resolves.toMatchObject({ corePeerIds: [] });
+    }
 
     await expect(resolve(makePorts({
-      coreMembershipPolicy: 'proof-required',
       findCoreAgents,
-      classifyCoreMembership,
-    }))).resolves.toMatchObject({ corePeerIds: [] });
-
-    await expect(resolve(makePorts({
-      coreMembershipPolicy: 'warm-compatible',
-      findCoreAgents,
-      classifyCoreMembership,
+      classifyCoreMembership: vi.fn(async () => 'member' as const),
     }))).resolves.toMatchObject({ corePeerIds: ['core-legacy'] });
   });
 
