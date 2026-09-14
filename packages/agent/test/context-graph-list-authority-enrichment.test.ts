@@ -213,6 +213,34 @@ describe('context graph list authority enrichment', () => {
     expect(resolveCurrent).not.toHaveBeenCalled();
   });
 
+  it('rejects when cancellation lands inside the final chunk reader', async () => {
+    const id = 'listing-cancelled-final-chunk';
+    const nameHash = `0x${'ab'.repeat(32)}`;
+    const controller = new AbortController();
+    const abortReason = new Error('listing authority projection cancelled');
+    const resolveMany = vi.fn(async () => {
+      controller.abort(abortReason);
+      return new Map([[nameHash, 9_001n]]);
+    });
+    const fakeAgent = {
+      subscribedContextGraphs: new Map(),
+      chain: {
+        contextGraphAuthorityIndexRevisionReader: {
+          maxTargetCount: 4_096,
+          resolveFinalizedContextGraphIdsByNameHashes: resolveMany,
+        },
+      },
+      resolveContextGraphNameHashBindingTarget: () => undefined,
+      contextGraphNameCommitment: () => nameHash,
+    };
+
+    await expect(
+      ContextGraphRegistryMethods.prototype.resolveFinalizedContextGraphAuthorityTargetsV1
+        .call(fakeAgent as any, [id], { signal: controller.signal }),
+    ).rejects.toBe(abortReason);
+    expect(resolveMany).toHaveBeenCalledOnce();
+  });
+
   it('repairs a just-mined local registration only after durable registered evidence', async () => {
     const registeredId = 'listing-just-mined-registered';
     const unregisteredId = 'listing-local-unregistered';

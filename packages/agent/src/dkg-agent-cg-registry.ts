@@ -725,6 +725,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           ownedTargets.map(({ expectedNameHash }) => expectedNameHash),
           options,
         );
+        // Custom readers are allowed for tests/integrations and may not honor
+        // the signal themselves. Never publish a chunk that completed after
+        // its caller cancelled, including the final chunk.
+        options.signal?.throwIfAborted();
         // A custom reader may return a superset. Project only the exact target
         // slice owned by this read so a cross-chunk entry cannot overwrite or
         // synthesize another chunk's binding.
