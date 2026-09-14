@@ -9,12 +9,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   OxigraphStore,
   type GraphWriteRevision,
+  type GraphWriteRevisionSource,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import {
-  createMaterializationValidationMemo,
+  MaterializationValidationMemo,
   type MaterializationValidationDescriptor,
 } from '../src/sync/requester/materialization-validation-memo.js';
 import { createSharedMemorySnapshotMaterializer } from
@@ -54,14 +55,24 @@ function memoDescriptor(graph = GRAPH): MaterializationValidationDescriptor {
   return { graph, digest: `sha256:${'a'.repeat(64)}`, count: 1 };
 }
 
-function revisionStore(
+function revisionSource(
   getWriteRevision: () => GraphWriteRevision,
   coverage: 'all-writers' | 'process-local' = 'all-writers',
-): TripleStore {
+): GraphWriteRevisionSource {
   return {
     writeRevisionCoverage: coverage,
     getWriteRevision,
-  } as unknown as TripleStore;
+  };
+}
+
+function validationMemo(
+  source: GraphWriteRevisionSource | null,
+  options: { enabled?: boolean; maxEntries?: number } = {},
+): MaterializationValidationMemo {
+  return new MaterializationValidationMemo(source, {
+    enabled: options.enabled ?? true,
+    maxEntries: options.maxEntries,
+  });
 }
 
 function countingStore(inner: TripleStore) {
@@ -92,8 +103,8 @@ function materializer(store: TripleStore) {
 
 describe('#1963 MaterializationValidationMemo', () => {
   it('reuses a successful validation while the all-writers revision is unchanged', async () => {
-    const memo = createMaterializationValidationMemo(
-      revisionStore(() => ({ generation: 7, stable: true })),
+    const memo = validationMemo(
+      revisionSource(() => ({ generation: 7, stable: true })),
     );
     const descriptor = memoDescriptor();
     let exactValidations = 0;
@@ -107,8 +118,8 @@ describe('#1963 MaterializationValidationMemo', () => {
   });
 
   it('evicts the least recently used entry at its configured bound', async () => {
-    const memo = createMaterializationValidationMemo(
-      revisionStore(() => ({ generation: 1, stable: true })),
+    const memo = validationMemo(
+      revisionSource(() => ({ generation: 1, stable: true })),
       { maxEntries: 1 },
     );
     const descriptorA = memoDescriptor(`${GRAPH}:a`);
@@ -128,7 +139,7 @@ describe('#1963 MaterializationValidationMemo', () => {
     ['unreadable', new Error('revision unavailable')],
   ])('does not populate when the final revision is %s', async (_name, finalRevision) => {
     let calls = 0;
-    const memo = createMaterializationValidationMemo(revisionStore(() => {
+    const memo = validationMemo(revisionSource(() => {
       calls += 1;
       if (calls === 1) return { generation: 1, stable: true };
       if (calls === 2) {
@@ -146,8 +157,8 @@ describe('#1963 MaterializationValidationMemo', () => {
   });
 
   it('does not cache a failed or throwing exact validation', async () => {
-    const memo = createMaterializationValidationMemo(
-      revisionStore(() => ({ generation: 1, stable: true })),
+    const memo = validationMemo(
+      revisionSource(() => ({ generation: 1, stable: true })),
     );
     const descriptor = memoDescriptor();
     await expect(memo.validate(descriptor, async () => false)).resolves.toBe(false);
@@ -158,8 +169,8 @@ describe('#1963 MaterializationValidationMemo', () => {
   });
 
   it('never memoizes a zero-count descriptor', async () => {
-    const memo = createMaterializationValidationMemo(
-      revisionStore(() => ({ generation: 1, stable: true })),
+    const memo = validationMemo(
+      revisionSource(() => ({ generation: 1, stable: true })),
     );
     const descriptor = { ...memoDescriptor(), count: 0 };
     let validations = 0;

@@ -1,9 +1,7 @@
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import {
-  asGraphWriteRevisionSource,
   type GraphWriteRevision,
   type GraphWriteRevisionSource,
-  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
 const DEFAULT_MAX_ENTRIES = 4_096;
@@ -20,15 +18,9 @@ interface MaterializationValidationEntry {
   readonly writeGeneration: number;
 }
 
-export interface MaterializationValidationMemoOptions {
-  readonly enabled?: boolean;
+export interface MaterializationValidationMemoConfig {
+  readonly enabled: boolean;
   readonly maxEntries?: number;
-}
-
-function memoEnabledFromEnvironment(): boolean {
-  const raw = process.env['DKG_SWM_MATERIALIZATION_WITNESS']?.trim();
-  if (!raw) return true;
-  return raw !== '0' && raw.toLowerCase() !== 'false';
 }
 
 /**
@@ -44,13 +36,13 @@ export class MaterializationValidationMemo {
   private readonly writeRevisionSource: GraphWriteRevisionSource | null;
 
   constructor(
-    store: TripleStore,
-    options: MaterializationValidationMemoOptions = {},
+    writeRevisionSource: GraphWriteRevisionSource | null,
+    config: MaterializationValidationMemoConfig,
   ) {
-    const maxEntries = options.maxEntries ?? DEFAULT_MAX_ENTRIES;
+    const maxEntries = config.maxEntries ?? DEFAULT_MAX_ENTRIES;
     this.entries = new BoundedLruCache(maxEntries);
-    this.enabled = options.enabled ?? memoEnabledFromEnvironment();
-    this.writeRevisionSource = asGraphWriteRevisionSource(store);
+    this.enabled = config.enabled;
+    this.writeRevisionSource = writeRevisionSource;
   }
 
   private stableRevision(descriptor: MaterializationValidationDescriptor): GraphWriteRevision | null {
@@ -94,11 +86,4 @@ export class MaterializationValidationMemo {
     });
     return true;
   }
-}
-
-export function createMaterializationValidationMemo(
-  store: TripleStore,
-  options?: MaterializationValidationMemoOptions,
-): MaterializationValidationMemo {
-  return new MaterializationValidationMemo(store, options);
 }
