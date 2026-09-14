@@ -426,6 +426,47 @@ describe('EVM event descriptor registry', () => {
     } finally { adapter.destroy(); }
   });
 
+  it.each([
+    ['zero address', ZeroAddress],
+    ['recognized missing-contract revert', new Error('execution reverted: ContractDoesNotExist("KnowledgeAssetsStorage")')],
+  ] as const)('caches optional asset-storage absence from the real adapter boundary: %s', async (_name, outcome) => {
+    const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const internal = adapter as any;
+    internal.readHubAddress = vi.fn(async () => {
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    });
+    internal.startHubRotationListener = vi.fn(async () => undefined);
+    try {
+      await expect(collectAll(adapter.listenForEvents({ eventTypes: ['KnowledgeBatchCreated'] })))
+        .resolves.toEqual([]);
+      await expect(collectAll(adapter.listenForEvents({ eventTypes: ['KnowledgeBatchCreated'] })))
+        .resolves.toEqual([]);
+      expect(internal.readHubAddress).toHaveBeenCalledOnce();
+      expect(internal.readHubAddress).toHaveBeenCalledWith(
+        'getAssetStorageAddress', 'KnowledgeAssetsStorage', {},
+      );
+    } finally { adapter.destroy(); }
+  });
+
+  it('retries a transient optional asset-storage failure through listenForEvents', async () => {
+    const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const internal = adapter as any;
+    const failure = new Error('temporary asset-storage RPC failure');
+    internal.readHubAddress = vi.fn()
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValue(address);
+    internal.startHubRotationListener = vi.fn(async () => undefined);
+    internal.readContractWith = vi.fn(async () => []);
+    try {
+      await expect(collectAll(adapter.listenForEvents({ eventTypes: ['KnowledgeBatchCreated'] })))
+        .rejects.toBe(failure);
+      await expect(collectAll(adapter.listenForEvents({ eventTypes: ['KnowledgeBatchCreated'] })))
+        .resolves.toEqual([]);
+      expect(internal.readHubAddress).toHaveBeenCalledTimes(2);
+    } finally { adapter.destroy(); }
+  });
+
   it('awaits one shared Hub rotation-listener transition before event reads', async () => {
     const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
     const contract = new Contract(address, EVENT_ABI, adapter.getProvider());

@@ -644,7 +644,7 @@ describe('EVMChainAdapter PCA read cache', () => {
     });
 
     await expect(adapter.convictionAccountCanCover(9n, 10n)).resolves.toBe(true);
-    expect(adapter.resolveHubContractBindingSnapshot).toHaveBeenCalledTimes(2);
+    expect(adapter.resolveHubContractBindingSnapshot).toHaveBeenCalledTimes(1);
     expect(adapter.readContract.calls.map((call: unknown[]) => call[0]))
       .toEqual([nftA, chronosA, nftA]);
   });

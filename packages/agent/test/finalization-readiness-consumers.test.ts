@@ -44,6 +44,39 @@ function readinessChain(outcome: boolean | Error) {
   return { chain, scans, legacy, readiness };
 }
 
+function legacyCompatibilityChain() {
+  const scans: string[][] = [];
+  const chain = {
+    chainId: 'legacy:1',
+    getBlockNumber: async () => BLOCK,
+    listenForEvents: async function* (filter: EventFilter) {
+      scans.push([...filter.eventTypes]);
+      if (filter.eventTypes.includes('KCCreated')) {
+        yield {
+          type: 'KCCreated',
+          blockNumber: BLOCK,
+          data: {
+            txHash: TX_HASH,
+            merkleRoot: ROOT,
+            publisherAddress: PUBLISHER,
+            startKAId: KA_ID.toString(),
+            endKAId: KA_ID.toString(),
+            batchId: KA_ID.toString(),
+          },
+        };
+      }
+      if (filter.eventTypes.includes('ContextGraphExpanded')) {
+        yield {
+          type: 'ContextGraphExpanded',
+          blockNumber: BLOCK,
+          data: { contextGraphId: '42', batchId: KA_ID.toString() },
+        };
+      }
+    },
+  } as unknown as ChainAdapter;
+  return { chain, scans };
+}
+
 describe('finalization readiness consumers', () => {
   it.each([
     { name: 'ready', outcome: true, verified: true, scanCount: 1 },
@@ -87,5 +120,37 @@ describe('finalization readiness consumers', () => {
     expect(scans).toHaveLength(scenario.scanCount);
     expect(readiness).toHaveBeenCalledOnce();
     expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it('FinalizationHandler verifies legacy evidence when readiness methods are absent', async () => {
+    const { chain, scans } = legacyCompatibilityChain();
+    const handler = new FinalizationHandler(new OxigraphStore(), chain);
+    const result = await (handler as any).verifyOnChain(
+      TX_HASH, BLOCK, ROOT, PUBLISHER, KA_ID, KA_ID,
+      createOperationContext('finalization-readiness-test'), '42', KA_ID,
+    );
+    expect(result.verified).toBe(true);
+    expect(scans).toEqual([['KnowledgeBatchCreated', 'KCCreated'], ['ContextGraphExpanded']]);
+  });
+
+  it('FinalizationRecovery verifies legacy evidence when readiness methods are absent', async () => {
+    const { chain, scans } = legacyCompatibilityChain();
+    const recovery = new FinalizationRecovery(
+      undefined,
+      chain,
+      { info: vi.fn(), warn: vi.fn() },
+      { prepare: vi.fn() } as never,
+    );
+    const candidate = {
+      blockNumber: BLOCK,
+      startKAId: KA_ID,
+      endKAId: KA_ID,
+      batchId: KA_ID,
+      msg: { txHash: TX_HASH, kcMerkleRoot: ROOT, publisherAddress: PUBLISHER },
+      scope: { ual: 'did:dkg:test:finalization-readiness' },
+    };
+    const result = await (recovery as any).verifyLegacy(candidate, '42');
+    expect(result.verified).toBe(true);
+    expect(scans).toEqual([['KnowledgeBatchCreated', 'KCCreated'], ['ContextGraphExpanded']]);
   });
 });

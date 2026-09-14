@@ -228,20 +228,19 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    */
   async convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean> {
     await this.init();
-    const nftSnapshot = await this.resolveHubContractBindingSnapshot([
-      'dkgPublishingConvictionNFT',
-    ]).catch(() => null);
-    if (!nftSnapshot) return false;
-    const convictionNft = nftSnapshot.contracts.dkgPublishingConvictionNFT;
-    if (!convictionNft) return false;
     if (accountId <= 0n) return false;
-    if (baseCost <= 0n) return true;
+    if (baseCost <= 0n) {
+      const snapshot = await this.resolveHubContractBindingSnapshot([
+        'dkgPublishingConvictionNFT',
+      ]).catch(() => null);
+      return Boolean(snapshot?.contracts.dkgPublishingConvictionNFT);
+    }
     const snapshot = await this.resolveHubContractBindingSnapshot([
       'dkgPublishingConvictionNFT', 'chronos',
     ]).catch(() => null);
     if (!snapshot) return false;
-    if (snapshot.generationId !== nftSnapshot.generationId
-      || snapshot.contracts.dkgPublishingConvictionNFT !== convictionNft) return false;
+    const convictionNft = snapshot.contracts.dkgPublishingConvictionNFT;
+    if (!convictionNft) return false;
     const chronos = snapshot.contracts.chronos;
     try {
       const info = await this.readPublishingConvictionAccountInfo(

@@ -2317,9 +2317,10 @@ export async function resolveChainV10FinalizationReadiness(
   chain: Pick<ChainAdapter, 'resolveV10FinalizationReadiness' | 'isV10Ready'>,
   options?: ChainReadOptions,
 ): Promise<boolean> {
-  return typeof chain.resolveV10FinalizationReadiness === 'function'
-    ? chain.resolveV10FinalizationReadiness(options)
-    : chain.isV10Ready();
+  if (typeof chain.resolveV10FinalizationReadiness === 'function') {
+    return chain.resolveV10FinalizationReadiness(options);
+  }
+  return typeof chain.isV10Ready === 'function' ? chain.isV10Ready() : false;
 }
 
 // ----- Backward-compat deprecated aliases -----
