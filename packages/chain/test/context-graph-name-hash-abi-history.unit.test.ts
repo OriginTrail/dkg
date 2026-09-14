@@ -13,9 +13,9 @@ const OWNER = '0x000000000000000000000000000000000000000b';
 const NAME_HASH = `0x${'ab'.repeat(32)}`;
 const OTHER_HASH = `0x${'cd'.repeat(32)}`;
 const HEAD_HASH = `0x${'33'.repeat(32)}`;
-const HISTORICAL_HIGH_WATER = CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS >= 77n
+const HISTORICAL_HIGH_WATER = CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS >= 89n
   ? CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n
-  : 77n;
+  : 89n;
 
 type RawLog = {
   readonly blockNumber: number;
@@ -53,7 +53,7 @@ function topicMatches(actual: string, expected: string | readonly string[] | nul
 }
 
 describe('Context Graph name-hash historical ABI path', () => {
-  it('uses the shipped ABI exact-topic filter and parsing while retaining page and high-water fences', async () => {
+  it.each([false, true])('uses the shipped ABI filter and parsing with shared fences (batch: %s)', async (batch) => {
     // A real ethers Contract is important here: both the deferred filter and
     // parseLog are generated from the shipped ContextGraphStorage ABI. The
     // controlled query seam below emulates eth_getLogs topic matching only.
@@ -106,6 +106,7 @@ describe('Context Graph name-hash historical ABI path', () => {
           scanProviders: [{ provider, backendHead: 103 }],
         }),
         queryEventLogsPage: async (_contract, filter, lo, hi) => {
+          expect(await _contract.getAddress()).toBe(STORAGE_ADDRESS);
           const topics = await (filter as {
             getTopicFilter: () => Promise<readonly (string | readonly string[] | null)[]>;
           }).getTopicFilter();
@@ -129,19 +130,29 @@ describe('Context Graph name-hash historical ABI path', () => {
       }),
     });
 
-    await expect(resolver.resolve(NAME_HASH)).resolves.toBe(77n);
+    const missingHash = `0x${'ef'.repeat(32)}`;
+    if (batch) {
+      expect([...await resolver.resolveMany([NAME_HASH, missingHash])])
+        .toEqual([[NAME_HASH, 77n], [missingHash, null]]);
+    } else {
+      await expect(resolver.resolve(NAME_HASH)).resolves.toBe(77n);
+    }
 
-    // The ABI filter is ContextGraphCreated(any id, any owner, NAME_HASH).
-    // OTHER_HASH logs share topic0 but are excluded by indexed topic[3].
+    // Bulk reads all creation events; single lookup retains the exact name
+    // topic. Both remain scoped to the shipped event ABI and storage address.
     expect(pageCalls.map(({ lo, hi }) => [lo, hi])).toEqual([
       [100, 101],
       [102, 103],
     ]);
-    expect(pageCalls.map(({ returnedIds }) => returnedIds)).toEqual([[], [77n]]);
-    expect(pageCalls[0]!.topics).toHaveLength(4);
-    expect(pageCalls[0]!.topics[1]).toBeNull();
-    expect(pageCalls[0]!.topics[2]).toBeNull();
-    expect(pageCalls[0]!.topics[3]?.toString().toLowerCase()).toBe(NAME_HASH);
+    expect(pageCalls.map(({ returnedIds }) => returnedIds)).toEqual(batch ? [[88n], [77n, 89n]] : [[], [77n]]);
+    if (batch) {
+      expect(pageCalls[0]!.topics.slice(1).every((topic) => topic === null)).toBe(true);
+    } else {
+      expect(pageCalls[0]!.topics).toHaveLength(4);
+      expect(pageCalls[0]!.topics[1]).toBeNull();
+      expect(pageCalls[0]!.topics[2]).toBeNull();
+      expect(pageCalls[0]!.topics[3]?.toString().toLowerCase()).toBe(NAME_HASH);
+    }
 
     // The scan is pinned to one registry counter at the exact scan head and
     // fenced against a current counter re-read before returning the binding.
