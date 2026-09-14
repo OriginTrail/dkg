@@ -133,6 +133,13 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
+// Temporary release-candidate attribution: the EVM name-hash resolver is an
+// intentionally expensive cold path. Record each distinct in-process caller
+// once, without graph ids, name hashes, RPC URLs, or wallet material, so a
+// one-node canary can identify which startup owner is repeatedly reaching it.
+const contextGraphNameHashResolutionCallerSignatures = new Set<string>();
+const CONTEXT_GRAPH_NAME_HASH_RESOLUTION_CALLER_SAMPLE_LIMIT = 64;
+
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
@@ -1935,7 +1942,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   async resolveCurrentNameHashContextGraphBinding(
     this: DKGAgent,
     requestedId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; source?: string } = {},
   ): Promise<(
     | { onChainId: string; provenance: 'authoritative' }
     | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
@@ -1973,6 +1980,25 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         );
       }
       return undefined;
+    }
+    if (
+      contextGraphNameHashResolutionCallerSignatures.size
+      < CONTEXT_GRAPH_NAME_HASH_RESOLUTION_CALLER_SAMPLE_LIMIT
+    ) {
+      const caller = (new Error().stack ?? '')
+        .split('\n')
+        .slice(2, 7)
+        .map((frame) => frame.trim())
+        .join(' <- ');
+      const source = options.source ?? 'unspecified';
+      const signature = `${source}\0${caller}`;
+      if (!contextGraphNameHashResolutionCallerSignatures.has(signature)) {
+        contextGraphNameHashResolutionCallerSignatures.add(signature);
+        this.log.info(
+          createOperationContext('system'),
+          `[rpc-attribution] context-graph-name-hash source=${JSON.stringify(source)} caller=${JSON.stringify(caller)}`,
+        );
+      }
     }
     const resolved = options.signal === undefined
       ? await resolve.call(this.chain, target.nameHash)

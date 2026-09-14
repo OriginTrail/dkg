@@ -1193,7 +1193,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   ) | null> {
     const currentBinding = await this.resolveCurrentNameHashContextGraphBinding(
       contextGraphId,
-      { signal: options.signal },
+      { signal: options.signal, source: options.source },
     );
     if (currentBinding !== undefined) return currentBinding;
 
