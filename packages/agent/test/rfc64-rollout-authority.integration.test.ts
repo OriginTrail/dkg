@@ -309,12 +309,15 @@ describe('RFC-64 rollout authority integration', () => {
     try {
       runtime.start(createOperationContext('system'));
       await runtime.whenIdle();
+      // Startup retains one coalesced follow-up for responsibility changes
+      // observed while the initial selection pass is settling.
+      expect(readRevisions).toHaveBeenCalledTimes(2);
       expect(readRevisions).toHaveBeenCalledWith(['9'], {
         signal: expect.any(AbortSignal),
       });
       expect(observedSignal?.aborted).toBe(false);
       expect(governor.snapshot()).toMatchObject({
-        backgroundAdmitted: 1,
+        backgroundAdmitted: 2,
         foregroundAdmitted: 0,
       });
     } finally {
@@ -2014,20 +2017,30 @@ describe('RFC-64 rollout authority integration', () => {
       // pass. The first result is superseded; the follow-up must therefore run
       // and commit instead of accepting the unchanged revision prematurely.
       expect(reconcile).toHaveBeenCalledTimes(2);
-      expect(reconcile).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(AbortSignal));
+      expect(reconcile).toHaveBeenCalledWith(
+        CONTEXT_GRAPH_ID,
+        expect.any(AbortSignal),
+        undefined,
+      );
 
       await vi.advanceTimersByTimeAsync(
         RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
       );
       await runtime.whenIdle();
       expect(reconcile).toHaveBeenCalledTimes(2);
-      expect(reconcile).toHaveBeenCalledWith(CONTEXT_GRAPH_ID, expect.any(AbortSignal));
+      expect(reconcile).toHaveBeenCalledWith(
+        CONTEXT_GRAPH_ID,
+        expect.any(AbortSignal),
+        undefined,
+      );
       await vi.advanceTimersByTimeAsync(
         RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
       );
       await runtime.whenIdle();
-      expect(reconcile).toHaveBeenCalledTimes(2);
-      expect(readRevisions).toHaveBeenCalledTimes(3);
+      // The fourth pass is the configured safety revalidation. It refreshes
+      // unchanged authority before the four-interval freshness deadline.
+      expect(reconcile).toHaveBeenCalledTimes(3);
+      expect(readRevisions).toHaveBeenCalledTimes(4);
       await runtime.close();
       reconcile.mockClear();
       await vi.advanceTimersByTimeAsync(
@@ -2272,7 +2285,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(requestReplays).toHaveBeenCalledWith(contextGraphId);
   });
 
-  it('batches registered responsibility policies once per consumer stage', async () => {
+  it('keeps registered responsibility evidence scoped to each explicit consumer pass', async () => {
     const firstContextGraphId = `${AUTHOR}/bulk-responsibility-first`;
     const secondContextGraphId = `${AUTHOR}/bulk-responsibility-second`;
     const firstNameHash = ethers.keccak256(
@@ -2328,14 +2341,18 @@ describe('RFC-64 rollout authority integration', () => {
     (edge as any).bindSubscriptionOnChainId(firstContextGraphId, firstSubscription, '9');
     (edge as any).bindSubscriptionOnChainId(secondContextGraphId, secondSubscription, '10');
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    await edge.whenRfc64CatalogSupervisorsIdleV1();
 
-    // Responsibility selection and the downstream SWM-gossip metadata proof
-    // are separate consumers. Each stage is one complete bulk read, never one
-    // physical read per graph, and no completed authority evidence is cached.
-    expect(readPolicies).toHaveBeenCalledTimes(2);
-    for (const [targetIds] of readPolicies.mock.calls) {
-      expect(new Set(targetIds)).toEqual(new Set(['9', '10']));
-    }
+    // The two keyed responsibility calls and the authority owner's initial +
+    // coalesced passes each own exactly the immutable targets they selected.
+    // The accepted SWM transport path itself reopens none of these reads.
+    expect(readPolicies.mock.calls.map(([targetIds]) => [...targetIds]))
+      .toEqual([
+        ['9'],
+        ['10'],
+        ['9'],
+        ['10'],
+      ]);
     expect(legacyPolicy).not.toHaveBeenCalled();
     expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -2364,8 +2381,8 @@ describe('RFC-64 rollout authority integration', () => {
     finalizedSourceBlockNumber = '43';
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(firstContextGraphId))
       .resolves.toMatchObject({ policy: { era: '1' } });
-    expect(readPolicies).toHaveBeenCalledTimes(3);
-    expect(new Set(readPolicies.mock.calls[2]?.[0])).toEqual(new Set(['9', '10']));
+    expect(readPolicies).toHaveBeenCalledTimes(5);
+    expect(readPolicies.mock.calls[4]?.[0]).toEqual(['9']);
     expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
       NETWORK_ID,
       firstContextGraphId,
@@ -3507,7 +3524,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(agent.rfc64PublicCatalogStatsV1()).toMatchObject({ started: true });
   });
 
-  it('retains catalog-mode member transport only for the named-subgraph compatibility lane', async () => {
+  it('admits catalog-mode member transport immediately for the named-subgraph compatibility lane', async () => {
     const catalog = await startAgent({
       name: 'catalog-metadata-refresh-fence',
       activation: activation('catalog'),
@@ -3518,7 +3535,9 @@ describe('RFC-64 rollout authority integration', () => {
     expect(catalog.getSubscribedContextGraphs().get(CONTEXT_GRAPH_ID)).toMatchObject({
       subscribed: true,
     });
-    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(false);
+    // Finalized RFC-64 authority is sufficient at the transport boundary, so
+    // catalog-owned SWM no longer waits for a legacy metadata bootstrap read.
+    expect(internals.sharedMemoryGossipRegistered.has(CONTEXT_GRAPH_ID)).toBe(true);
 
     // Catalog mode owns the root lane, but named subgraphs still require the
     // authorized member transport. queueSharedMemoryGossipSubscription remains
@@ -3555,6 +3574,58 @@ describe('RFC-64 rollout authority integration', () => {
     expect(curated).not.toHaveBeenCalled();
     expect(internals.swmHostModeSubscribed.has(hostKey)).toBe(false);
     expect(internals.swmHostModeHandlers.has(hostKey)).toBe(false);
+  });
+
+  it('admits catalog-owned SWM from the accepted RFC-64 snapshot without a legacy read', async () => {
+    const catalog = await startAgent({
+      name: 'catalog-accepted-swm-authority',
+      activation: activation('catalog'),
+    });
+    catalog.subscribeToContextGraph(CONTEXT_GRAPH_ID);
+    vi.spyOn(catalog, 'hasConfirmedMetaState').mockResolvedValue(true);
+    await vi.waitFor(() => {
+      expect(catalog.resolveAcceptedRfc64SharedMemoryAuthorityV1(CONTEXT_GRAPH_ID))
+        .toBe(true);
+    });
+
+    const legacyRead = vi.spyOn(catalog, 'canReadContextGraph')
+      .mockRejectedValue(new Error('legacy registered authority must not run'));
+    await expect(catalog.canUseSharedMemoryForContextGraph(CONTEXT_GRAPH_ID))
+      .resolves.toBe(true);
+    expect(legacyRead).not.toHaveBeenCalled();
+  });
+
+  it('keeps private catalog SWM admission bound to the accepted member roster', async () => {
+    const privateContextGraphId = `${AUTHOR}/private-accepted-swm-authority` as ContextGraphIdV1;
+    const catalog = await startAgent({
+      name: 'private-catalog-accepted-swm-authority',
+      activation: activation('catalog'),
+    });
+    const privateAuthority = composeRfc64UnregisteredCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId: privateContextGraphId,
+      ownerAddress: AUTHOR,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '0',
+      memberAddresses: [AUTHOR, MEMBER],
+      rosterVersion: '0',
+    });
+    catalog.acceptRfc64CatalogAccessSnapshotV1({
+      policy: privateAuthority.policy,
+      policyDigest: privateAuthority.policyDigest,
+      roster: privateAuthority.roster,
+    });
+
+    const legacyRead = vi.spyOn(catalog, 'canReadContextGraph')
+      .mockRejectedValue(new Error('legacy registered authority must not run'));
+    await expect(catalog.canUseSharedMemoryForContextGraph(privateContextGraphId, {
+      callerAgentAddress: MEMBER,
+    })).resolves.toBe(true);
+    await expect(catalog.canUseSharedMemoryForContextGraph(privateContextGraphId, {
+      callerAgentAddress: NONMEMBER,
+    })).resolves.toBe(false);
+    expect(legacyRead).not.toHaveBeenCalled();
   });
 
   it('rehydrates persisted edge intent through exclusive catalog authority', async () => {

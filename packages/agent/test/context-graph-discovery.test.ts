@@ -517,6 +517,48 @@ describe('discoverContextGraphsFromStore', () => {
     expect(sub!.name).toBe('Discovered ContextGraph');
   }, 15000);
 
+  it('shares one discovery pass across concurrent peer-connect callers', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const contextGraphUri = contextGraphDataGraphUri('single-flight-discovery');
+    await store.insert([
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: ontologyGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Single Flight"', graph: ontologyGraph },
+    ]);
+
+    const originalQuery = store.query.bind(store);
+    let releaseFirstQuery!: () => void;
+    const firstQueryBlocked = new Promise<void>((resolve) => { releaseFirstQuery = resolve; });
+    let enteredFirstQuery!: () => void;
+    const firstQueryEntered = new Promise<void>((resolve) => { enteredFirstQuery = resolve; });
+    let discoveryQueries = 0;
+    vi.spyOn(store, 'query').mockImplementation(async (...args) => {
+      const source = args[1]?.source;
+      if (typeof source === 'string' && source.startsWith('agent.contextGraph.discovery.')) {
+        discoveryQueries++;
+        if (discoveryQueries === 1) {
+          enteredFirstQuery();
+          await firstQueryBlocked;
+        }
+      }
+      return originalQuery(...args);
+    });
+
+    const first = agent.discoverContextGraphsFromStore();
+    await firstQueryEntered;
+    const second = agent.discoverContextGraphsFromStore();
+    releaseFirstQuery();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([1, 1]);
+    expect(discoveryQueries).toBe(3);
+    await expect(agent.discoverContextGraphsFromStore()).resolves.toBe(0);
+    expect(discoveryQueries).toBe(6);
+  }, 15000);
+
   it('does not re-discover already known contextGraphs', async () => {
     const store = new OxigraphStore();
     const result = await createTestAgent({ store });

@@ -734,6 +734,56 @@ export class QueryMethods extends DKGAgentBase {
     );
   }
 
+  /**
+   * Resolve the local member's SWM receive authority from the finalized RFC-64
+   * snapshot already accepted by the catalog owner. This is intentionally a
+   * narrow transport admission seam: ordinary queries retain chain-first
+   * precedence, while catalog-owned subscriptions avoid reopening one legacy
+   * name-hash lookup per discovered Context Graph.
+   *
+   * `undefined` means RFC-64 catalog mode does not own this graph and the
+   * caller must use the legacy/registered authority path. `false` means it is
+   * catalog-owned but its finalized authority is not currently accepted (or
+   * the local agent is not in the accepted private roster), so admission must
+   * fail closed without falling back to a current-state RPC read.
+   */
+  resolveAcceptedRfc64SharedMemoryAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    opts: { callerAgentAddress?: string } = {},
+  ): boolean | undefined {
+    const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+    if (
+      receiverAuthority.killSwitchActive
+      || receiverAuthority.mode !== 'catalog'
+    ) return undefined;
+    if (
+      !receiverAuthority.active
+      || receiverAuthority.reconciliationLane !== 'catalog-apply'
+    ) return false;
+
+    const service = this.rfc64PublicCatalogServiceV1;
+    const activeNetworkId = this.config.networkIdentity?.chainId;
+    if (service === undefined || activeNetworkId === undefined) return false;
+    try {
+      assertNetworkIdV1(activeNetworkId);
+      assertContextGraphIdV1(contextGraphId);
+    } catch {
+      return false;
+    }
+    const accepted = service.acceptedPolicySnapshot(activeNetworkId, contextGraphId);
+    if (accepted === null) return false;
+    if (accepted.policy.accessPolicy === 0) return true;
+    if (accepted.roster === null) return false;
+    const effectiveCaller = opts.callerAgentAddress
+      ?? this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress
+      ?? this.defaultAgentAddress;
+    return this.isAgentAddressAllowed(
+      effectiveCaller,
+      accepted.roster.members.map(({ agentAddress }) => agentAddress),
+    );
+  }
+
   private async resolveContextGraphReadAuthorityWithRegistrationTimeout(this: DKGAgent,
     contextGraphId: string,
     opts: {

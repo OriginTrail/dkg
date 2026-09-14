@@ -10545,6 +10545,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     opts: { callerAgentAddress?: string } = {},
   ): Promise<boolean> {
+    const acceptedRfc64Authority = this.resolveAcceptedRfc64SharedMemoryAuthorityV1(
+      contextGraphId,
+      opts,
+    );
+    // The accepted snapshot is itself finalized, name-bound authority for a
+    // catalog-owned graph. It replaces both the legacy registration read and
+    // its metadata-bootstrap proof at this internal transport boundary.
+    if (acceptedRfc64Authority !== undefined) return acceptedRfc64Authority;
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }
