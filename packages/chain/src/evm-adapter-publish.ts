@@ -1056,9 +1056,12 @@ export class PublishMethods extends EVMChainAdapterBase {
     boundNewTokenAmount?: bigint;
     newCatalogRoot?: Uint8Array;
     newCatalogLeafCount?: number;
-  }): Promise<Uint8Array> {
+  }, capturedContracts?: Readonly<EvmHubBindingSet>): Promise<Uint8Array> {
     await this.init();
-    const contracts = this.captureHubContractBindings().contracts;
+    // An in-flight update passes the bindings it captured at its entry so the
+    // digest, approval, and submission all read one Hub generation; standalone
+    // callers (ACK collectors, test helpers) capture their own.
+    const contracts = capturedContracts ?? this.captureHubContractBindings().contracts;
     if (!contracts.knowledgeAssetsLifecycle) {
       throw new Error('KnowledgeAssetsLifecycle contract not deployed');
     }
@@ -1307,7 +1310,7 @@ export class PublishMethods extends EVMChainAdapterBase {
         boundNewTokenAmount: newTokenAmount,
         newCatalogRoot: params.newCatalogRoot,
         newCatalogLeafCount: params.newCatalogLeafCount,
-      });
+      }, contracts);
       const raw = ethers.Signature.from(await signer.signMessage(ackDigest));
       ackSigs = [{ identityId, r: ethers.getBytes(raw.r), vs: ethers.getBytes(raw.yParityAndS) }];
     }

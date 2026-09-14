@@ -1716,6 +1716,12 @@ export interface ChainAdapter {
    */
   removeContextGraphParticipantAgent?(contextGraphId: bigint, agent: string): Promise<TxResult>;
   verify?(params: VerifyParams): Promise<TxResult>;
+  /**
+   * @deprecated Legacy V9→V10 mirror. V10 EVM adapters reject it immediately
+   * without any chain side effect (OT-RFC-43 Option-1); publish through the V10
+   * lifecycle (`createKnowledgeAssets`) instead. Retained for test doubles that
+   * still drive V9-shaped publish flows.
+   */
   publishToContextGraph?(params: PublishToContextGraphParams): Promise<OnChainPublishResult>;
 
   /**

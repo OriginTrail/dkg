@@ -321,16 +321,28 @@ describe('dispatchSerializedV10Write — per-wallet nonce serialization (#953)',
       knowledgeAssetsStorage: {},
       token: {},
     });
-    // Any side effect would have to go through one of these first.
+    // Any side effect would have to go through one of these first. No
+    // precondition can make the mirror succeed, so it must not even enter
+    // init() or inspect the Hub bindings before rejecting.
     const signerSpy = recorder(async () => {
       throw new Error('SIGNER_ACQUIRED_BEFORE_GUARD');
     });
     (a as any).nextAuthorizedSigner = signerSpy;
+    const initSpy = recorder(async () => {
+      throw new Error('INIT_ENTERED_BEFORE_GUARD');
+    });
+    (a as any).init = initSpy;
+    const captureSpy = recorder(() => {
+      throw new Error('BINDINGS_CAPTURED_BEFORE_GUARD');
+    });
+    (a as any).captureHubContractBindings = captureSpy;
 
     await expect(a.publishToContextGraph(minimalPublishParams())).rejects.toThrow(
       'not supported under OT-RFC-43 Option-1',
     );
     expect(signerSpy.calls).toEqual([]);
+    expect(initSpy.calls).toEqual([]);
+    expect(captureSpy.calls).toEqual([]);
   });
 
   it('fails closed when the WAL onBroadcast hook throws — never broadcasts', async () => {

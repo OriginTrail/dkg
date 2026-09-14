@@ -4090,6 +4090,214 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(rotatedAllowance.calls).toHaveLength(0);
   });
 
+  it('update path keeps one Hub generation across the inline ACK digest, pricing, approval, and submission when bindings rotate', async () => {
+    // Mirror of the publish-path rotation regression for the update flow, which
+    // has its own digest, pricing, approval, and submission call sites. No
+    // pre-supplied ACKs, so the inline `computeV10UpdateAckDigest` branch runs.
+    const allowanceByOwner = makeAllowanceByOwner();
+    const { a, walletB, populateSpy, tokenWithSigner, sendSpy } =
+      makeMultiWalletV10Adapter(allowanceByOwner);
+    const kaId = 42n;
+
+    // Generation A — the bindings captured when the update is admitted. The
+    // stored byte size (100) is below the requested 200, so pricing takes the
+    // growth branch and reads Chronos + AskStorage for real.
+    const generationA = {
+      publisher: recorder(async () => walletB.address),
+      roots: recorder(async () => []),
+      tokenAmount: recorder(async () => 5n),
+      updateContext: recorder(async () => [1n, 1n, 100n, 10n, 5n, false, 1n]),
+      kaToContextGraph: recorder(async () => 7n),
+      currentEpoch: recorder(async () => 4n),
+      averageAsk: recorder(async () => 1024n),
+    };
+    installHubBindings(a, {
+      knowledgeAssetStorage: connectable({
+        getLatestMerkleRootPublisher: generationA.publisher,
+        getMerkleRoots: generationA.roots,
+        getTokenAmount: generationA.tokenAmount,
+        getKnowledgeAssetUpdateContext: generationA.updateContext,
+      }),
+      contextGraphStorage: connectable({ kaToContextGraph: generationA.kaToContextGraph }),
+      chronos: connectable({ getCurrentEpoch: generationA.currentEpoch }),
+      askStorage: connectable({ getStakeWeightedAverageAsk: generationA.averageAsk }),
+    });
+    (a as any).provider.getNetwork = recorder(async () => ({ chainId: 31337n }));
+
+    // Pause after admission (signer resolved, bindings captured) and before any
+    // digest or pricing read, then install generation B for everything the
+    // update touches.
+    let signalEntered!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+    const resumed = new Promise<void>((resolve) => { resume = resolve; });
+    (a as any).getIdentityId = recorder(async () => {
+      signalEntered();
+      await resumed;
+      return 0n;
+    });
+
+    const operation = a.updateKnowledgeCollectionV10({
+      kaId,
+      newMerkleRoot: ethers.getBytes(ethers.keccak256(ethers.toUtf8Bytes('umr'))),
+      newByteSize: 200n,
+      newMerkleLeafCount: 1,
+      newTokenAmount: 0n,
+      authorAddress: walletB.address,
+      authorR: new Uint8Array(32),
+      authorVS: new Uint8Array(32),
+      authorSchemeVersion: 1,
+    } as any);
+    await entered;
+
+    const generationB = {
+      populate: recorder(async () => ({ to: PARITY_KA_ADDRESS, data: '0xfeedface' })),
+      getAddress: recorder(async () => PARITY_KA_ADDRESS),
+      allowance: recorder(async () => 0n),
+      approve: recorder(() => undefined),
+      balanceOf: recorder(async () => ABUNDANT_WEI),
+      publisher: recorder(async () => walletB.address),
+      roots: recorder(async () => []),
+      tokenAmount: recorder(async () => 5n),
+      updateContext: recorder(async () => [1n, 1n, 100n, 10n, 5n, false, 1n]),
+      kaToContextGraph: recorder(async () => 7n),
+      currentEpoch: recorder(async () => 4n),
+      averageAsk: recorder(async () => 1024n),
+    };
+    installHubBindings(a, {
+      knowledgeAssetsLifecycle: {
+        connect: recorder(() => connectable({
+          update: { populateTransaction: generationB.populate },
+        })),
+        getAddress: generationB.getAddress,
+      },
+      token: {
+        connect: recorder(() => connectable({
+          allowance: generationB.allowance,
+          approve: generationB.approve,
+          balanceOf: generationB.balanceOf,
+        })),
+        balanceOf: generationB.balanceOf,
+      },
+      knowledgeAssetStorage: connectable({
+        getLatestMerkleRootPublisher: generationB.publisher,
+        getMerkleRoots: generationB.roots,
+        getTokenAmount: generationB.tokenAmount,
+        getKnowledgeAssetUpdateContext: generationB.updateContext,
+      }),
+      contextGraphStorage: connectable({ kaToContextGraph: generationB.kaToContextGraph }),
+      chronos: connectable({ getCurrentEpoch: generationB.currentEpoch }),
+      askStorage: connectable({ getStakeWeightedAverageAsk: generationB.averageAsk }),
+    });
+    resume();
+
+    await expect(operation).rejects.toThrow('SENTINEL_STOP_AFTER_APPROVE');
+
+    // Digest and pricing reads stayed on generation A ...
+    expect(generationA.tokenAmount.calls.length).toBeGreaterThan(0);
+    expect(generationA.updateContext.calls.length).toBeGreaterThan(0);
+    expect(generationA.currentEpoch.calls.length).toBeGreaterThan(0);
+    expect(generationA.averageAsk.calls.length).toBeGreaterThan(0);
+    expect(generationA.kaToContextGraph.calls.length).toBeGreaterThan(0);
+    expect(generationA.roots.calls.length).toBeGreaterThan(0);
+    // ... so did the approval (generation A token, marginal growth cost priced
+    // from generation A: 5 + 1024 * 100 * (10 - 4) / 1024 = 605) ...
+    expect(tokenWithSigner.allowance.calls).toContainEqual([walletB.address, PARITY_KA_ADDRESS]);
+    expect(sendSpy.calls).toHaveLength(1);
+    expect(sendSpy.calls[0]?.[1]).toBe('approve');
+    expect(sendSpy.calls[0]?.[2]).toEqual([PARITY_KA_ADDRESS, 605n]);
+    // ... and the populated update itself.
+    expect(populateSpy.calls).toHaveLength(1);
+    // No generation-B contract was read or written.
+    for (const [name, spy] of Object.entries(generationB)) {
+      expect(spy.calls, `generation B ${name} was used`).toHaveLength(0);
+    }
+  });
+
+  it('createOnChainContextGraph keeps one Hub generation through deposit recovery when bindings rotate', async () => {
+    // Same snapshot pattern as publish/update: the registration-deposit
+    // recovery (OT-RFC-53) must read the deposit, approve, retry, and decode
+    // the creation log on the bindings captured at entry.
+    const a = new EVMChainAdapter(minimalConfig());
+    (a as any).installHubContractBindingsForTesting({ ...(a as any).contracts });
+    const CG_ADDRESS = '0x00000000000000000000000000000000000000c9';
+    const deposit = 100n;
+    const tooLowAllowance = Object.assign(new Error('TooLowAllowance'), {
+      revert: { name: 'TooLowAllowance' },
+    });
+
+    // Generation A — captured when the operation is admitted.
+    const generationA = {
+      getAddress: recorder(async () => CG_ADDRESS),
+      parseLog: recorder(() => ({ name: 'ContextGraphCreated', args: { contextGraphId: 7n } })),
+      deposit: recorder(async () => deposit),
+      allowance: recorder(async () => deposit),
+    };
+    const contextGraphsA = connectable({ getAddress: generationA.getAddress });
+    const tokenA = connectable({ allowance: generationA.allowance });
+    installHubBindings(a, {
+      contextGraphs: contextGraphsA,
+      contextGraphStorage: connectable({ interface: { parseLog: generationA.parseLog } }),
+      parametersStorage: connectable({ contextGraphRegistrationDeposit: generationA.deposit }),
+      token: { connect: recorder(() => tokenA) },
+    });
+
+    // The first create attempt is the pause point; it then reverts with the
+    // deposit-allowance error so the lazy recovery runs after the rotation.
+    let signalEntered!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+    const resumed = new Promise<void>((resolve) => { resume = resolve; });
+    const receipt = {
+      hash: '0xabc', blockNumber: 1, index: 0, status: 1, logs: [{ topics: ['0x01'], data: '0x' }],
+    };
+    const sendSpy = recorder(async (_contract: unknown, method: string) => {
+      if (method === 'createContextGraph' && sendSpy.calls.length === 1) {
+        signalEntered();
+        await resumed;
+        throw tooLowAllowance;
+      }
+      return (method === 'approve' ? {} : receipt) as unknown;
+    });
+    (a as any).sendContractTransaction = sendSpy;
+
+    const operation = a.createOnChainContextGraph({ accessPolicy: 1, publishPolicy: 0 } as any);
+    await entered;
+
+    const allowanceB = recorder(async () => deposit);
+    const generationB = {
+      getAddress: recorder(async () => CG_ADDRESS),
+      parseLog: recorder(() => ({ name: 'ContextGraphCreated', args: { contextGraphId: 8n } })),
+      deposit: recorder(async () => deposit),
+      allowance: allowanceB,
+      tokenConnect: recorder(() => connectable({ allowance: allowanceB })),
+    };
+    installHubBindings(a, {
+      contextGraphs: connectable({ getAddress: generationB.getAddress }),
+      contextGraphStorage: connectable({ interface: { parseLog: generationB.parseLog } }),
+      parametersStorage: connectable({ contextGraphRegistrationDeposit: generationB.deposit }),
+      token: { connect: generationB.tokenConnect },
+    });
+    resume();
+
+    await expect(operation).resolves.toMatchObject({ success: true, contextGraphId: 7n });
+    // Deposit lookup, approval, retry, and log decoding all used generation A ...
+    expect(generationA.deposit.calls).toHaveLength(1);
+    expect(generationA.allowance.calls.length).toBeGreaterThan(0);
+    expect(generationA.parseLog.calls).toHaveLength(1);
+    const handle = (contract: unknown) =>
+      contract === contextGraphsA ? 'contextGraphs:A' : contract === tokenA ? 'token:A' : 'other';
+    expect(sendSpy.calls.map(([contract, method]) => [handle(contract), method])).toEqual([
+      ['contextGraphs:A', 'createContextGraph'],
+      ['token:A', 'approve'],
+      ['contextGraphs:A', 'createContextGraph'],
+    ]);
+    // ... and generation B was never touched.
+    for (const [name, spy] of Object.entries(generationB)) {
+      expect(spy.calls, `generation B ${name} was used`).toHaveLength(0);
+    }
+  });
+
   it('update path: approve fires from the on-chain publisher wallet, NOT a round-robin pick from the pool', async () => {
     // `updateKnowledgeCollectionV10` resolves the signer by looking up
     // `getLatestMerkleRootPublisher(kaId)` first; only if that wallet is not

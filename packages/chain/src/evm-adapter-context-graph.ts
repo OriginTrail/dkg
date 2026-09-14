@@ -870,26 +870,24 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     };
   }
 
+  /**
+   * @deprecated V9→V10 mirror — NOT SUPPORTED under OT-RFC-43 Option-1 / §F2.
+   * Retained only for `ChainAdapter` interface compatibility; it rejects
+   * immediately. Publish through the V10 lifecycle instead.
+   */
   async publishToContextGraph(_params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
-    await this.init();
-    const contracts = this.captureHubContractBindings().contracts;
-    if (!contracts.knowledgeAssets) {
-      throw new Error('KnowledgeAssets contract not deployed.');
-    }
-    if (!contracts.knowledgeAssetsStorage) {
-      throw new Error('KnowledgeAssetsStorage contract not deployed (required for log parsing).');
-    }
-
-    // V9→V10 mirror — NOT SUPPORTED under OT-RFC-43 Option-1 / §F2. A V10
-    // Knowledge Asset id is author-namespaced and the AuthorAttestation digest
-    // binds the reserved packed kaId; this legacy mirror has no allocator and no
-    // reserved id to sign over, so it cannot synthesize a mintable attestation
-    // (the on-chain createKnowledgeAssets rejects a namespace-mismatched id).
-    // Publish through the V10 lifecycle (finalize → swm/share → vm/publish).
+    // A V10 Knowledge Asset id is author-namespaced and the AuthorAttestation
+    // digest binds the reserved packed kaId; this legacy mirror has no allocator
+    // and no reserved id to sign over, so it cannot synthesize a mintable
+    // attestation (the on-chain createKnowledgeAssets rejects a
+    // namespace-mismatched id). Publish through the V10 lifecycle
+    // (finalize → swm/share → vm/publish).
     //
-    // This guard MUST run before ANY on-chain side effect. Throwing after a send
-    // would leave a partially-applied publish on-chain and invite duplicate
-    // publishes on caller retry.
+    // No precondition can make this path succeed, so it performs no
+    // initialization, binding inspection, or other chain work before rejecting:
+    // the guard fires before ANY side effect, and a throw after a send would
+    // leave a partially-applied publish on-chain and invite duplicate publishes
+    // on caller retry.
     throw new Error(
       'publishToContextGraph (V9→V10 mirror) is not supported under OT-RFC-43 Option-1: ' +
         'publish through the V10 lifecycle (finalize → swm/share → vm/publish), which allocates ' +
