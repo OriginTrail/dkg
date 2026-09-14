@@ -233,10 +233,10 @@ describe('Hub binding generation ownership', () => {
     expect(loader).not.toHaveBeenCalled();
   });
 
-  it('turns legacy boot-binding writes into explicit generation transitions', async () => {
+  it('turns explicit boot-binding replacements into generation transitions', async () => {
     const group = new EvmHubContractBindings({ hub: first });
     const before = group.generation;
-    group.compatibilityContracts.chronos = first;
+    group.replaceBinding('chronos', first);
     expect(group.generation).not.toBe(before);
     expect(group.resolvedKeys.has('chronos')).toBe(true);
     const loader = vi.fn(async () => second);
@@ -248,7 +248,7 @@ describe('Hub binding generation ownership', () => {
     const group = new EvmHubContractBindings({ hub: first });
     group.install(completeInstallation({ chronos: first }));
     const before = await group.resolveSnapshot(['chronos'], async () => first);
-    group.compatibilityContracts.chronos = second;
+    group.replaceBinding('chronos', second);
     const after = await group.resolveSnapshot(['chronos'], async () => first);
     expect(after.contracts.chronos).toBe(second);
     expect(after.generationId).not.toBe(before.generationId);
@@ -290,6 +290,40 @@ describe('Hub binding generation ownership', () => {
       expect(internal.hubContractBindings.generation).not.toBe(readyGeneration);
       await expect(adapter.resolveProfileStorage()).resolves.toBe(first);
       expect(load).toHaveBeenCalledOnce();
+    } finally { adapter.destroy(); }
+  });
+
+  it('keeps adapter-owned lazy bindings across Hub installation and invalidation', () => {
+    class OwnershipProbe extends EVMChainAdapter {
+      seedLazyBinding(binding: Contract): void { this.contracts.randomSampling = binding; }
+
+      installHubBindings(bindings: EvmHubContractInstallation): void {
+        this.installHubContractBindings(bindings);
+      }
+
+      rotateHubBinding(binding: Contract): void { this.contracts.chronos = binding; }
+
+      invalidateHubBindings(): void { this.invalidateHubContractBindings(); }
+
+      lazyBinding(): Contract | undefined { return this.contracts.randomSampling; }
+    }
+
+    const adapter = new OwnershipProbe({
+      rpcUrl: 'http://127.0.0.1:59998',
+      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      hubAddress: String(first.target),
+      chainId: 'evm:31337',
+    });
+    try {
+      adapter.seedLazyBinding(first);
+      adapter.installHubBindings(completeInstallation({ chronos: first }));
+      expect(adapter.lazyBinding()).toBe(first);
+
+      adapter.rotateHubBinding(second);
+      expect(adapter.lazyBinding()).toBe(first);
+
+      adapter.invalidateHubBindings();
+      expect(adapter.lazyBinding()).toBe(first);
     } finally { adapter.destroy(); }
   });
 

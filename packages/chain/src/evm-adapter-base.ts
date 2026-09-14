@@ -29,7 +29,7 @@ import type {
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import {
   ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings, optionalEvmContract,
-  type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSnapshot,
+  type EvmHubBindingSet, type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSnapshot,
   type EvmHubContractSpec,
 } from './evm-hub-contract-bindings.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
@@ -691,17 +691,23 @@ export class EVMChainAdapterBase {
   protected readonly approvalPolicy: ApprovalPolicy;
 
   private readonly hubContractBindings: EvmHubContractBindings;
+  private readonly adapterContracts: Omit<ContractCache, 'hub' | EvmHubContractKey> = {};
+  private readonly legacyContractCache: ContractCache;
   /**
    * @deprecated Existing subclasses may still replace this cache or mutate
    * its slots. Boot-binding writes are translated into generation transitions;
    * New subclasses should use the explicit install and invalidation methods.
    */
-  protected get contracts(): ContractCache { return this.hubContractBindings.compatibilityContracts; }
-  protected set contracts(value: ContractCache) { this.hubContractBindings.replaceFromSubclass(value); }
+  protected get contracts(): ContractCache { return this.legacyContractCache; }
+  protected set contracts(value: ContractCache) {
+    const hubBindings = this.selectHubBindings(value);
+    this.replaceAdapterContracts(value);
+    this.hubContractBindings.replace(hubBindings);
+  }
 
   /** @deprecated Existing subclasses may still publish or retire readiness. */
   protected get initialized(): boolean { return this.hubContractBindings.initialized; }
-  protected set initialized(value: boolean) { this.hubContractBindings.setInitializedFromSubclass(value); }
+  protected set initialized(value: boolean) { this.hubContractBindings.setInitialized(value); }
 
   /** Explicit complete installation seam for subclasses. */
   protected installHubContractBindings(value: EvmHubContractInstallation): void {
@@ -709,6 +715,56 @@ export class EVMChainAdapterBase {
   }
 
   protected invalidateHubContractBindings(): void { this.hubContractBindings.invalidate(); }
+
+  private isHubBindingKey(key: PropertyKey): key is 'hub' | EvmHubContractKey {
+    return key === 'hub'
+      || (typeof key === 'string'
+        && Object.prototype.hasOwnProperty.call(EVM_HUB_CONTRACT_SPECS, key));
+  }
+
+  private selectHubBindings(contracts: ContractCache): EvmHubBindingSet {
+    return Object.fromEntries([
+      ['hub', contracts.hub],
+      ...ALL_EVM_HUB_CONTRACT_KEYS.map(key => [key, contracts[key]] as const),
+    ]) as unknown as EvmHubBindingSet;
+  }
+
+  private replaceAdapterContracts(contracts: ContractCache): void {
+    const target = this.adapterContracts as Record<string, Contract | undefined>;
+    const adapterEntries = Object.entries(contracts)
+      .filter(([key]) => !this.isHubBindingKey(key));
+    for (const key of Object.keys(target)) delete target[key];
+    for (const [key, value] of adapterEntries) target[key] = value;
+  }
+
+  /**
+   * Legacy protected facade only. The canonical Hub registry never sees lazy
+   * adapter slots; this proxy translates old subclass writes at the boundary.
+   */
+  private createLegacyContractCache(): ContractCache {
+    const target = this.adapterContracts as Record<string | symbol, Contract | undefined>;
+    return new Proxy(target as unknown as ContractCache, {
+      get: (_target, key) => this.isHubBindingKey(key)
+        ? this.hubContractBindings.contracts[key]
+        : Reflect.get(target, key),
+      set: (_target, key, value: Contract | undefined) => {
+        if (this.isHubBindingKey(key)) {
+          this.hubContractBindings.replaceBinding(key, value);
+        } else {
+          Reflect.set(target, key, value);
+        }
+        return true;
+      },
+      ownKeys: () => [...new Set<string | symbol>([
+        ...Reflect.ownKeys(target),
+        'hub',
+        ...ALL_EVM_HUB_CONTRACT_KEYS,
+      ])],
+      getOwnPropertyDescriptor: (_target, key) => this.isHubBindingKey(key)
+        ? { configurable: true, enumerable: true }
+        : Reflect.getOwnPropertyDescriptor(target, key),
+    });
+  }
 
   /**
    * Single self-refreshing cache for the `RandomSampling` /
@@ -1323,6 +1379,7 @@ export class EVMChainAdapterBase {
     this.hubContractBindings = new EvmHubContractBindings({
       hub: new Contract(config.hubAddress, loadAbi('Hub'), this.signer),
     });
+    this.legacyContractCache = this.createLegacyContractCache();
 
     // Coerce `<=0` to the default. The "disable refresh entirely" mode
     // is intentionally unsupported (see `randomSamplingHubRefreshMs`

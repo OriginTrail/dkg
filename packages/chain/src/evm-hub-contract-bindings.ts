@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Contract } from 'ethers';
-import type { ContractCache } from './evm-adapter-types.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
 
 /** Boot bindings shared by full initialization and event-only capability reads. */
@@ -33,23 +32,13 @@ export const ALL_EVM_HUB_CONTRACT_KEYS = Object.freeze(Object.keys(EVM_HUB_CONTR
 export const REQUIRED_EVM_HUB_CONTRACT_KEYS = Object.freeze(ALL_EVM_HUB_CONTRACT_KEYS.filter(
   (key): key is RequiredEvmHubContractKey => EVM_HUB_CONTRACT_SPECS[key].resolution === 'required',
 ));
-export type EvmHubContractInstallation = ContractCache & Required<Pick<ContractCache, RequiredEvmHubContractKey>>;
+/** Exact state owned by one Hub generation. Adapter lazy caches are separate. */
+export type EvmHubBindingSet = {
+  hub: Contract;
+} & Partial<Record<EvmHubContractKey, Contract>>;
 
-/**
- * The handle store as readers see it. Hub-bound handles are written only by
- * {@link EvmHubContractBindings}; lazily resolved slots stay adapter-owned.
- */
-export type EvmHubContractStore =
-  Readonly<Pick<ContractCache, 'hub' | EvmHubContractKey>> & Omit<ContractCache, 'hub' | EvmHubContractKey>;
-
-const EVM_ADAPTER_LAZY_CONTRACT_KEYS = Object.freeze([
-  'randomSampling',
-  'randomSamplingStorage',
-  'identityStorage',
-  'convictionStakingStorage',
-  'stakingStorage',
-] as const satisfies readonly (Exclude<keyof ContractCache, 'hub' | EvmHubContractKey>)[]);
-type EvmAdapterLazyContractKey = (typeof EVM_ADAPTER_LAZY_CONTRACT_KEYS)[number];
+export type EvmHubContractInstallation = EvmHubBindingSet
+  & Required<Pick<EvmHubBindingSet, RequiredEvmHubContractKey>>;
 
 /** Optional deployments retain their legacy fallback, but never swallow cancellation. */
 export async function optionalEvmContract<T>(load: () => Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
@@ -73,35 +62,28 @@ export async function optionalEvmContract<T>(load: () => Promise<T>, signal?: Ab
  */
 interface EvmHubContractGeneration {
   readonly id: number;
-  readonly contracts: ContractCache;
+  readonly contracts: EvmHubBindingSet;
   readonly resolved: Set<EvmHubContractKey>;
   initialized: boolean;
 }
 
 export interface EvmHubContractSnapshot<K extends EvmHubContractKey> {
   readonly generationId: number;
-  readonly contracts: Readonly<Pick<ContractCache, K>>;
+  readonly contracts: Readonly<Pick<EvmHubBindingSet, K>>;
 }
 
 /** One canonical handle store and Hub generation for subset and full initialization. */
 export class EvmHubContractBindings {
   private nextGenerationId = 1;
   private current: EvmHubContractGeneration;
-  private readonly adapterContracts: Partial<Pick<ContractCache, EvmAdapterLazyContractKey>> = {};
-  private readonly compatibilityView: ContractCache;
 
-  constructor(contracts: ContractCache) {
+  constructor(contracts: EvmHubBindingSet) {
     this.current = this.createGeneration(contracts, new Set(), false);
-    this.copyAdapterContracts(contracts);
-    this.compatibilityView = this.createCompatibilityView();
   }
 
-  get contracts(): EvmHubContractStore { return this.compatibilityView; }
+  get contracts(): Readonly<EvmHubBindingSet> { return this.current.contracts; }
 
   get initialized(): boolean { return this.current.initialized; }
-
-  /** Deprecated subclass view backed by explicit generation and lazy-slot accessors. */
-  get compatibilityContracts(): ContractCache { return this.compatibilityView; }
 
   /** Boot keys the current generation has decided. */
   get resolvedKeys(): ReadonlySet<EvmHubContractKey> { return this.current.resolved; }
@@ -109,8 +91,7 @@ export class EvmHubContractBindings {
   get generation(): object { return this.current; }
 
   /**
-   * The typed installation seam for subclasses and fixtures: a complete,
-   * caller-owned handle set. Every boot key is decided by this call — an
+   * Install a complete caller-owned Hub handle set. Every boot key is decided by this call — an
    * absent optional entry means "not deployed" — so the new generation is
    * ready and no loader runs until the generation changes.
    */
@@ -124,11 +105,10 @@ export class EvmHubContractBindings {
     );
   }
 
-  /** @deprecated Compatibility transition for protected subclass assignment. */
-  replaceFromSubclass(contracts: ContractCache): void {
+  /** Replace the Hub-owned portion of a legacy subclass cache assignment. */
+  replace(contracts: EvmHubBindingSet): void {
     const initialized = this.current.initialized
       && REQUIRED_EVM_HUB_CONTRACT_KEYS.every(key => contracts[key] !== undefined);
-    this.copyAdapterContracts(contracts);
     this.current = this.createGeneration(
       contracts,
       initialized ? new Set(ALL_EVM_HUB_CONTRACT_KEYS) : new Set(),
@@ -136,8 +116,8 @@ export class EvmHubContractBindings {
     );
   }
 
-  /** @deprecated Compatibility transition for protected subclass assignment. */
-  setInitializedFromSubclass(initialized: boolean): void {
+  /** Compatibility transition for the adapter's protected readiness facade. */
+  setInitialized(initialized: boolean): void {
     if (!initialized) {
       this.invalidate();
       return;
@@ -173,7 +153,7 @@ export class EvmHubContractBindings {
     keys: readonly K[],
     load: (spec: EvmHubContractSpec) => Promise<Contract | undefined>,
     signal?: AbortSignal,
-  ): Promise<Readonly<Pick<ContractCache, K>>> {
+  ): Promise<Readonly<Pick<EvmHubBindingSet, K>>> {
     return (await this.resolveSnapshot(keys, load, signal)).contracts;
   }
 
@@ -236,20 +216,20 @@ export class EvmHubContractBindings {
       }
       const contracts = Object.freeze(Object.fromEntries(keys.map(key => [
         key, generation.resolved.has(key) ? generation.contracts[key] : undefined,
-      ]))) as Readonly<Pick<ContractCache, K>>;
+      ]))) as Readonly<Pick<EvmHubBindingSet, K>>;
       return Object.freeze({ generationId: generation.id, contracts });
     }
   }
 
   private createGeneration(
-    contracts: ContractCache,
+    contracts: EvmHubBindingSet,
     resolved: Set<EvmHubContractKey>,
     initialized: boolean,
   ): EvmHubContractGeneration {
     const ownedContracts = Object.fromEntries([
       ['hub', contracts.hub],
       ...ALL_EVM_HUB_CONTRACT_KEYS.map(key => [key, contracts[key]] as const),
-    ]) as unknown as ContractCache;
+    ]) as unknown as EvmHubBindingSet;
     const generation = {
       id: this.nextGenerationId++,
       contracts: ownedContracts,
@@ -259,33 +239,7 @@ export class EvmHubContractBindings {
     return generation;
   }
 
-  private createCompatibilityView(): ContractCache {
-    const view = {} as ContractCache;
-    Object.defineProperty(view, 'hub', this.bindingDescriptor('hub'));
-    for (const key of ALL_EVM_HUB_CONTRACT_KEYS) {
-      Object.defineProperty(view, key, this.bindingDescriptor(key));
-    }
-    for (const key of EVM_ADAPTER_LAZY_CONTRACT_KEYS) {
-      Object.defineProperty(view, key, {
-        enumerable: true,
-        configurable: false,
-        get: () => this.adapterContracts[key],
-        set: (value: Contract | undefined) => { this.adapterContracts[key] = value; },
-      });
-    }
-    return view;
-  }
-
-  private bindingDescriptor(key: 'hub' | EvmHubContractKey): PropertyDescriptor {
-    return {
-      enumerable: true,
-      configurable: false,
-      get: () => this.current.contracts[key],
-      set: (value: Contract | undefined) => this.replaceBindingFromSubclass(key, value),
-    };
-  }
-
-  private replaceBindingFromSubclass(
+  replaceBinding(
     key: 'hub' | EvmHubContractKey,
     value: Contract | undefined,
   ): void {
@@ -293,7 +247,7 @@ export class EvmHubContractBindings {
     if (key === 'hub' && value === undefined) {
       throw new Error('Hub binding cannot be removed');
     }
-    const contracts = { ...this.current.contracts, [key]: value } as ContractCache;
+    const contracts = { ...this.current.contracts, [key]: value } as EvmHubBindingSet;
     if (key === 'hub') {
       this.current = this.createGeneration(contracts, new Set(), false);
       return;
@@ -303,11 +257,5 @@ export class EvmHubContractBindings {
     const initialized = this.current.initialized
       && REQUIRED_EVM_HUB_CONTRACT_KEYS.every(required => contracts[required] !== undefined);
     this.current = this.createGeneration(contracts, resolved, initialized);
-  }
-
-  private copyAdapterContracts(contracts: ContractCache): void {
-    for (const key of EVM_ADAPTER_LAZY_CONTRACT_KEYS) {
-      this.adapterContracts[key] = contracts[key];
-    }
   }
 }

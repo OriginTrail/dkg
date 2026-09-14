@@ -16,7 +16,7 @@ bindings.contracts.hub = handle;
 bindings.initialized = true;
 // @ts-expect-error the store is replaced only through install
 bindings.contracts = { hub: handle };
-// Lazily resolved slots remain adapter-owned.
+// @ts-expect-error Lazily resolved slots are not part of the Hub registry.
 bindings.contracts.identityStorage = handle;
 
 class Probe extends EVMChainAdapter {

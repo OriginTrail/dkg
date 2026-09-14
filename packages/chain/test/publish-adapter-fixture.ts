@@ -1,23 +1,11 @@
 import { afterEach } from 'vitest';
 import { PublishMethods } from '../src/evm-adapter-publish.js';
 import type { ContractCache } from '../src/evm-adapter-types.js';
+import { installHubContractBindingsForTesting } from './install-hub-contract-bindings-for-testing.js';
 
 class PublishAdapterFixture extends PublishMethods {
   installHubContractBindingsForTesting(value: ContractCache): void {
-    const fallback = value.hub ?? this.contracts.hub;
-    this.installHubContractBindings({
-      ...value,
-      hub: fallback,
-      identity: value.identity ?? fallback,
-      profile: value.profile ?? fallback,
-      parametersStorage: value.parametersStorage ?? fallback,
-      knowledgeAssetStorage: value.knowledgeAssetStorage ?? fallback,
-    });
-    this.contracts.randomSampling = value.randomSampling;
-    this.contracts.randomSamplingStorage = value.randomSamplingStorage;
-    this.contracts.identityStorage = value.identityStorage;
-    this.contracts.convictionStakingStorage = value.convictionStakingStorage;
-    this.contracts.stakingStorage = value.stakingStorage;
+    installHubContractBindingsForTesting(this, value);
   }
 }
 
