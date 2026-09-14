@@ -30,54 +30,84 @@ export async function mapWithConcurrency<T, R>(
 
 /**
  * Bounded concurrent `every`. The first false result or rejection settles the
- * predicate immediately and prevents queued callbacks from starting. Work
- * already in flight is observed so a non-cooperative callback cannot create an
- * unhandled rejection; callers can abort those siblings from inside `fn`.
+ * predicate immediately, aborts active siblings and prevents queued callbacks
+ * from starting. Work already in flight is observed so a non-cooperative
+ * callback cannot create an unhandled rejection.
  */
 export async function everyWithConcurrency<T>(
   items: readonly T[],
   limit: number,
-  fn: (item: T, index: number) => Promise<boolean>,
+  fn: (item: T, index: number, signal: AbortSignal) => Promise<boolean>,
+  externalSignal?: AbortSignal,
 ): Promise<boolean> {
+  externalSignal?.throwIfAborted();
   if (items.length === 0) return true;
   const workerCount = !Number.isInteger(limit) || limit <= 0 || limit >= items.length
     ? items.length
     : limit;
+  const stop = new AbortController();
+  const signal = externalSignal === undefined
+    ? stop.signal
+    : AbortSignal.any([externalSignal, stop.signal]);
   let nextIndex = 0;
-  let stopped = false;
+  let settled = false;
 
   return new Promise<boolean>((resolve, reject) => {
     let remainingWorkers = workerCount;
+    let onExternalAbort: (() => void) | undefined;
+    const cleanup = () => {
+      if (onExternalAbort !== undefined) {
+        externalSignal!.removeEventListener('abort', onExternalAbort);
+      }
+    };
+    const settleFalse = () => {
+      if (settled) return;
+      settled = true;
+      stop.abort(new Error('Bounded every predicate returned false'));
+      cleanup();
+      resolve(false);
+    };
+    const settleError = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      stop.abort(error);
+      cleanup();
+      reject(error);
+    };
+    if (externalSignal !== undefined) {
+      onExternalAbort = () => settleError(
+        externalSignal.reason ?? Object.assign(new Error('Bounded every aborted'), { name: 'AbortError' }),
+      );
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+      if (externalSignal.aborted) onExternalAbort();
+    }
     const settleWorker = () => {
       remainingWorkers -= 1;
-      if (remainingWorkers === 0 && !stopped) {
-        stopped = true;
+      if (remainingWorkers === 0 && !settled) {
+        settled = true;
+        cleanup();
         resolve(true);
       }
     };
     const worker = async () => {
       try {
-        while (!stopped) {
+        while (!settled) {
           const index = nextIndex++;
           if (index >= items.length) return;
-          if (!(await fn(items[index]!, index))) {
-            if (!stopped) {
-              stopped = true;
-              resolve(false);
-            }
+          if (!(await fn(items[index]!, index, signal))) {
+            settleFalse();
             return;
           }
         }
       } catch (error) {
-        if (!stopped) {
-          stopped = true;
-          reject(error);
-        }
+        settleError(error);
       } finally {
         settleWorker();
       }
     };
-    for (let index = 0; index < workerCount; index += 1) void worker();
+    if (!settled) {
+      for (let index = 0; index < workerCount; index += 1) void worker();
+    }
   });
 }
 

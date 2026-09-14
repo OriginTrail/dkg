@@ -172,7 +172,7 @@ describe('unscoped query admission', () => {
     deps.store.query.mockResolvedValue({
       type: 'bindings', bindings: ids.slice(550).map((id) => ({ cg: `did:dkg:context-graph:${id}` })),
     });
-    const prepared = vi.fn(async (id: string) => id !== ids[749]);
+    const prepared = vi.fn(async (id: string, _signal: AbortSignal) => id !== ids[749]);
     const prepareReadChecks = vi.fn<NonNullable<UnscopedQueryAdmissionDependencies['prepareReadChecks']>>(async () => prepared);
 
     await expect(canReadUnscopedQuery({ ...deps, prepareReadChecks })).resolves.toBe(false);
@@ -182,7 +182,10 @@ describe('unscoped query admission', () => {
     expect(candidates).toHaveLength(ids.length);
     expect(signal).toBeInstanceOf(AbortSignal);
     expect(prepared.mock.calls.length).toBeLessThan(ids.length);
-    expect(prepared).toHaveBeenCalledWith(ids[749], signal);
+    const deniedSignal = prepared.mock.calls.find(([id]) => id === ids[749])?.[1];
+    expect(deniedSignal).toBeInstanceOf(AbortSignal);
+    expect(deniedSignal).not.toBe(signal);
+    expect(deniedSignal?.aborted).toBe(true);
     expect(fallback).not.toHaveBeenCalled();
   });
 
