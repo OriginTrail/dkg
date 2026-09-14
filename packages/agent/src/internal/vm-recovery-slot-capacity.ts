@@ -22,7 +22,6 @@ export interface VmRecoveryPendingAdmission {
  */
 export class VmRecoverySlotCapacity {
   private readonly occupied = new Map<string, VmRecoveryCapacityOwner>();
-  private readonly live = new Set<VmRecoveryPendingAdmission>();
   private readonly pending = new Map<string,
     | { readonly role: 'requester'; readonly admission: VmRecoveryPendingAdmission; readonly localCgId: string }
     | { readonly role: 'donor'; readonly admission: VmRecoveryPendingAdmission }>();
@@ -59,7 +58,8 @@ export class VmRecoverySlotCapacity {
   }
 
   isActive(admission: VmRecoveryPendingAdmission): boolean {
-    return this.live.has(admission);
+    const requester = this.pending.get(admission.key);
+    return requester?.role === 'requester' && requester.admission === admission;
   }
 
   /** Reserved donor evidence is immutable until its atomic donation commits or rolls back. */
@@ -92,7 +92,6 @@ export class VmRecoverySlotCapacity {
     const donor = occupied < this.maxEntries ? undefined : this.findDonor(requestingCgId, isExpired);
     if (occupied >= this.maxEntries && !donor) return undefined;
     const admission: VmRecoveryPendingAdmission = { key, donor };
-    this.live.add(admission);
     this.pending.set(key, { role: 'requester', admission, localCgId: requestingCgId });
     if (donor) this.pending.set(donor.key, { role: 'donor', admission });
     return admission;
@@ -129,10 +128,7 @@ export class VmRecoverySlotCapacity {
     admission: VmRecoveryPendingAdmission,
     owner: VmRecoveryCapacityOwner,
   ): boolean {
-    if (!this.live.has(admission)
-      || this.pending.get(admission.key)?.admission !== admission
-      || this.pending.get(admission.key)?.role !== 'requester'
-      || this.occupied.has(admission.key)) return false;
+    if (!this.isActive(admission) || this.occupied.has(admission.key)) return false;
     if (admission.donor
       && this.occupied.get(admission.donor.key)?.ownerToken !== admission.donor.ownerToken) return false;
     if (admission.donor) this.occupied.delete(admission.donor.key);
@@ -142,12 +138,15 @@ export class VmRecoverySlotCapacity {
 
   /** Release one admission; returns the keys it no longer reserves. */
   release(admission: VmRecoveryPendingAdmission): string[] {
-    if (!this.live.delete(admission)) return [];
-    const released: string[] = [];
-    for (const key of [admission.key, admission.donor?.key]) {
-      if (key === undefined || this.pending.get(key)?.admission !== admission) continue;
-      this.pending.delete(key);
-      released.push(key);
+    if (!this.isActive(admission)) return [];
+    this.pending.delete(admission.key);
+    const released = [admission.key];
+    if (admission.donor) {
+      const donor = this.pending.get(admission.donor.key);
+      if (donor?.role === 'donor' && donor.admission === admission) {
+        this.pending.delete(admission.donor.key);
+        released.push(admission.donor.key);
+      }
     }
     return released;
   }

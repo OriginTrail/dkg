@@ -13,6 +13,7 @@ export * from './publisher.js';
 export * from './publication-pricing.js';
 export * from './publication-payload-measurement.js';
 export { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
+export { CHAIN_EVENT_POLLER_LANES, type ChainEventPollerLane } from './chain-event-lane-runner.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export {

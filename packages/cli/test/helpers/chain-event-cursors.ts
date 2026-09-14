@@ -2,7 +2,7 @@
 
 import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
 import { DashboardDB, SqliteChainEventCursorStore } from '@origintrail-official/dkg-node-ui';
-import { CHAIN_EVENT_POLLER_LANES } from '../../../publisher/src/chain-event-lane-runner.js';
+import { CHAIN_EVENT_POLLER_LANES } from '@origintrail-official/dkg-publisher';
 import { createProvider, getSharedContext } from '../../../chain/test/evm-test-context.js';
 
 /** Seed every production poller lane at the shared test chain's current head. */
