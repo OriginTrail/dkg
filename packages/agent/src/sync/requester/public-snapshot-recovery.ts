@@ -231,9 +231,18 @@ async function runSnapshotPool(
   return { outcomes, failures };
 }
 
-/** Let the owning sync round account every admitted outcome before rethrowing. */
+/**
+ * Walk one manifest and settle.
+ *
+ * Every RUNTIME failure — a per-position fault, and a revoked execution
+ * boundary before or after the pool drains — comes back as
+ * `{ kind: 'failure', result, error }`, with the progress that was already
+ * settled. A caller therefore never loses accounted work to a rejected
+ * promise. The only rejections left are programmer errors in the call itself:
+ * an out-of-range `concurrency` and a missing snapshot store, both of which
+ * are raised before any position is attempted.
+ */
 export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams): Promise<PublicSnapshotRecoveryOutcome> {
-  params.executionBoundary.assertCurrent();
   const concurrency = params.concurrency ?? SEQUENTIAL_SNAPSHOT_WALK_CONCURRENCY;
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > PUBLIC_SNAPSHOT_FETCH_CONCURRENCY) {
     throw new RangeError(`Public snapshot fetch concurrency must be between 1 and ${PUBLIC_SNAPSHOT_FETCH_CONCURRENCY}`);
@@ -243,6 +252,12 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
     readySnapshots: 0, totalSnapshots: params.entries.length,
     missingCount: 0, missingSample: [] as string[],
   };
+  // A boundary revoked before any work still settles: an empty walk is
+  // progress a caller can account, not a rejected promise.
+  const entryRevocation = boundaryRevocation(params.executionBoundary);
+  if (entryRevocation !== undefined) {
+    return { kind: 'failure', result: { ...progress, completed: false, outcome: 'incomplete' }, error: entryRevocation };
+  }
   if (params.entries.length === 0) {
     return { kind: 'result', result: { ...progress, completed: true, outcome: 'completed' } };
   }
@@ -250,7 +265,9 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
     throw new Error(`Cannot sync shared-memory public snapshot refs for "${params.contextGraphId}" without a public snapshot store`);
   }
   const { outcomes, failures } = await runSnapshotPool(params.entries, concurrency, { ...params, store: params.store });
-  params.executionBoundary.assertCurrent();
+  // Revocation while the pool drained is a runtime failure like any other: it
+  // joins the failure branch instead of discarding the settled positions.
+  const drainRevocation = boundaryRevocation(params.executionBoundary);
   let localYield = false;
   let shortfall: SnapshotShortfall | undefined;
   for (const [index, outcome] of outcomes.entries()) {
@@ -286,9 +303,20 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
     outcome: completed ? 'completed' : shortfall ?? 'incomplete',
     ...(localYield ? { localYield: true as const } : {}),
   };
-  return failures.length > 0
-    ? { kind: 'failure', result, error: combineSyncFailures(failures[0], failures.slice(1)) }
+  const causes = drainRevocation === undefined ? failures : [...failures, drainRevocation];
+  return causes.length > 0
+    ? { kind: 'failure', result, error: combineSyncFailures(causes[0], causes.slice(1)) }
     : { kind: 'result', result };
+}
+
+/** The reason a boundary is no longer current, or `undefined` while it is. */
+function boundaryRevocation(boundary: RecoveryExecutionAdmission): unknown {
+  try {
+    boundary.assertCurrent();
+    return undefined;
+  } catch (error) {
+    return error;
+  }
 }
 
 /**

@@ -133,45 +133,25 @@ export type SnapshotWriteCapacityAdmissionFactory =
   (ports: SnapshotWriteCapacityPorts) => SnapshotWriteCapacityAdmission;
 
 /**
- * The key one store's construction seam travels under.
+ * Package-internal construction dependencies of the file snapshot store.
  *
- * A module-private symbol, so the seam is carried BY the options object a
- * package-internal caller builds for one store and nothing else: no module
- * state to consume in the wrong order, nothing another store or a nested
- * construction can take, and nothing a consumer can name — public
- * configuration stays storage and GC policy, and the coordinator, its ports and
- * its lease protocol stay inside this package.
+ * An explicit, typed seam: the store's public options stay storage and GC
+ * policy, and a caller that needs to substitute write admission — the store's
+ * own integration tests, which hold a reservation open while sibling writes
+ * compete — passes it here instead of hiding it inside an options object. Not
+ * re-exported from the package root, so admission stays a package concern.
  */
-const SNAPSHOT_WRITE_CAPACITY_ADMISSION = Symbol('snapshotWriteCapacityAdmission');
-
-/** Package-internal shape of an options object carrying the seam. */
-interface SnapshotWriteCapacityAdmissionSeam {
-  readonly [SNAPSHOT_WRITE_CAPACITY_ADMISSION]?: SnapshotWriteCapacityAdmissionFactory;
+export interface SnapshotStoreInternalDependencies {
+  readonly createWriteCapacityAdmission?: SnapshotWriteCapacityAdmissionFactory;
 }
 
 /**
- * The store's ONE construction point for write admission: the seam the caller
- * of THIS construction passed, or the coordinator production always builds.
+ * The store's ONE construction point for write admission: the dependency this
+ * construction was given, or the coordinator production always builds.
  */
 export function resolveSnapshotWriteCapacityAdmission(
-  options: object,
+  internal: SnapshotStoreInternalDependencies | undefined,
   ports: SnapshotWriteCapacityPorts,
 ): SnapshotWriteCapacityAdmission {
-  const createAdmission = (options as SnapshotWriteCapacityAdmissionSeam)[SNAPSHOT_WRITE_CAPACITY_ADMISSION];
-  return createAdmission ? createAdmission(ports) : new SnapshotWriteCapacityCoordinator(ports);
-}
-
-/**
- * Package-internal admission seam for the store's integration tests, which have
- * to hold a reservation open while sibling writes compete for capacity.
- *
- * Scoped to the ONE store built from the options it returns: two stores, or a
- * store constructed inside another's setup, each get the admission their own
- * options name, and options without the seam always coordinate.
- */
-export function snapshotStoreOptionsWithAdmission<O extends object>(
-  createAdmission: SnapshotWriteCapacityAdmissionFactory,
-  options: O,
-): O {
-  return { ...options, [SNAPSHOT_WRITE_CAPACITY_ADMISSION]: createAdmission };
+  return internal?.createWriteCapacityAdmission?.(ports) ?? new SnapshotWriteCapacityCoordinator(ports);
 }

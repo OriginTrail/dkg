@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   resolveSnapshotWriteCapacityAdmission,
-  snapshotStoreOptionsWithAdmission,
   SnapshotStorageCapacityError,
   SnapshotWriteCapacityCoordinator,
   type SnapshotWriteCapacityAdmission,
@@ -130,41 +129,35 @@ describe('write capacity admission construction', () => {
     reserve: async () => ({ markMaterialized: () => {}, release: () => {} }),
   });
 
-  it('coordinates for options that carry no seam', () => {
-    // Production configuration cannot name the seam, so it always coordinates.
+  it('coordinates when a construction passes no dependency', () => {
+    // Production never passes internal dependencies, so it always coordinates.
+    expect(resolveSnapshotWriteCapacityAdmission(undefined, ports(() => HARD_RESERVE)))
+      .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
     expect(resolveSnapshotWriteCapacityAdmission({}, ports(() => HARD_RESERVE)))
       .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
-    expect(resolveSnapshotWriteCapacityAdmission(
-      { gc: { enabled: true } },
-      ports(() => HARD_RESERVE),
-    )).toBeInstanceOf(SnapshotWriteCapacityCoordinator);
   });
 
-  it('resolves each options object to the admission it carries, in any order', () => {
+  it('resolves each construction to the admission it was given, in any order', () => {
     const first = admission();
     const second = admission();
-    const firstOptions = snapshotStoreOptionsWithAdmission(() => first, { gc: { enabled: true } });
-    const secondOptions = snapshotStoreOptionsWithAdmission(() => second, { gc: { enabled: true } });
-    // Nothing is consumed and nothing is ordered: a later resolution cannot
-    // take an earlier one's factory, and a plain object between them still
-    // coordinates.
-    expect(resolveSnapshotWriteCapacityAdmission(secondOptions, ports(() => HARD_RESERVE))).toBe(second);
-    expect(resolveSnapshotWriteCapacityAdmission({}, ports(() => HARD_RESERVE)))
+    // Nothing is consumed and nothing is ordered: one construction's dependency
+    // cannot reach another, and a construction without one still coordinates.
+    expect(resolveSnapshotWriteCapacityAdmission(
+      { createWriteCapacityAdmission: () => second }, ports(() => HARD_RESERVE),
+    )).toBe(second);
+    expect(resolveSnapshotWriteCapacityAdmission(undefined, ports(() => HARD_RESERVE)))
       .toBeInstanceOf(SnapshotWriteCapacityCoordinator);
-    expect(resolveSnapshotWriteCapacityAdmission(firstOptions, ports(() => HARD_RESERVE))).toBe(first);
-    expect(resolveSnapshotWriteCapacityAdmission(firstOptions, ports(() => HARD_RESERVE))).toBe(first);
+    const firstInternal = { createWriteCapacityAdmission: () => first };
+    expect(resolveSnapshotWriteCapacityAdmission(firstInternal, ports(() => HARD_RESERVE))).toBe(first);
+    expect(resolveSnapshotWriteCapacityAdmission(firstInternal, ports(() => HARD_RESERVE))).toBe(first);
   });
 
   it('builds the admission from the ports of the store being constructed', () => {
     const received: SnapshotWriteCapacityPorts[] = [];
-    const options = snapshotStoreOptionsWithAdmission(
-      seamPorts => { received.push(seamPorts); return admission(); },
-      { gc: { enabled: true } },
-    );
     const storePorts = ports(() => HARD_RESERVE);
-    resolveSnapshotWriteCapacityAdmission(options, storePorts);
+    resolveSnapshotWriteCapacityAdmission({
+      createWriteCapacityAdmission: (seamPorts) => { received.push(seamPorts); return admission(); },
+    }, storePorts);
     expect(received).toEqual([storePorts]);
-    // The options keep their ordinary shape; the seam is not policy.
-    expect(Object.keys(options)).toEqual(['gc']);
   });
 });

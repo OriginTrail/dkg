@@ -16,6 +16,7 @@ import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameS
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import {
   resolveSnapshotWriteCapacityAdmission,
+  type SnapshotStoreInternalDependencies,
   type SnapshotWriteCapacityAdmission,
   type SnapshotWriteCapacityPorts,
 } from './workspace-snapshot-write-capacity.js';
@@ -185,6 +186,13 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     private readonly directory: string,
     private readonly pageIndexStore?: SnapshotPageIndexStore,
     options: FileWorkspacePublicSnapshotStoreOptions = {},
+    /**
+     * Package-internal construction dependencies. Never part of the public
+     * options: production passes nothing and always coordinates; the store's
+     * own integration tests pass a write-admission factory here, visibly in
+     * the signature and scoped to the one store being constructed.
+     */
+    internal?: SnapshotStoreInternalDependencies,
   ) {
     this.gcConfig = resolveSnapshotGarbageCollectionConfig(options.gc);
     this.log = options.log;
@@ -213,10 +221,9 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
           }
         },
       };
-      // Admission comes from THESE options: the coordinator in production, or
-      // the seam a package-internal caller put on the options it built for this
-      // store. Nothing outside this construction can decide it.
-      this.writeCapacity = resolveSnapshotWriteCapacityAdmission(options, ports);
+      // Admission comes from THIS construction: the coordinator in production,
+      // or the factory a package-internal caller passed for this store alone.
+      this.writeCapacity = resolveSnapshotWriteCapacityAdmission(internal, ports);
       this.gcTimer = setInterval(() => {
         void this.collectGarbage().then((result) => {
           if (

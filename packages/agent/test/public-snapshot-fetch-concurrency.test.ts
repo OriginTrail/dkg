@@ -57,7 +57,7 @@ function fixture(count = 8) {
     syncPublicSnapshotsForMeta({ fetchConcurrency: PUBLIC_SNAPSHOT_FETCH_CONCURRENCY, ...legacyParams(overrides) });
   /** An unchanged consumer: the same call with no pool limit requested. */
   const startLegacy = () => syncPublicSnapshotsForMeta(legacyParams());
-  const startSettled = () => settlePublicSnapshots({
+  const startSettled = (overrides: { executionBoundary?: ReturnType<typeof createRecoveryExecutionAdmission> } = {}) => settlePublicSnapshots({
     concurrency: PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
     entries: refs.map(ref => ({ snapshot: { ref, digest: ref, count: 1 }, reuse: false })),
     contextGraphId: 'pool',
@@ -74,6 +74,7 @@ function fixture(count = 8) {
     },
     deleteCheckpoint: deleted,
     onSnapshotReady: ready,
+    ...overrides,
   });
   const startSync = (
     deadline = Date.now() + 60_000,
@@ -380,6 +381,44 @@ it('joins revoked reads without admitting later checkpoint or materialization mu
     expect(f.started).toEqual([0, 1, 2, 3]);
     expect(f.cache.size).toBe(0); expect(f.deleted).not.toHaveBeenCalled(); expect(f.ready).not.toHaveBeenCalled();
   } finally { f.releaseAll(); await outcome; }
+});
+
+it('settles a boundary revoked mid-flight instead of rejecting with the progress', async () => {
+  // The settled API's whole point is that accounted work survives the failure.
+  // A revocation after admission is a runtime failure like any other: it comes
+  // back through the failure branch, not as a rejected promise.
+  const f = fixture(); const controller = new AbortController(); const revoked = new Error('revoked');
+  const boundary = createRecoveryExecutionAdmission({ signal: controller.signal, assertCurrent: () => {
+    if (controller.signal.aborted) throw revoked;
+  } });
+  const settled = f.startSettled({ executionBoundary: boundary });
+  await f.waitForStarted(4);
+  // One position completes, then the boundary is revoked while the rest drain.
+  f.responses[0]!.resolve(f.page(0));
+  await vi.waitFor(() => expect(f.ready).toHaveBeenCalledTimes(1));
+  controller.abort();
+  f.releaseAll();
+
+  const outcome = await settled;
+  expect(outcome.kind).toBe('failure');
+  if (outcome.kind !== 'failure') return;
+  expect(outcome.error).toBe(revoked);
+  // Complete manifest-ordered progress, including the position that finished.
+  expect(outcome.result).toMatchObject({ totalSnapshots: 8, readySnapshots: 1, completed: false });
+  expect(outcome.result.missingCount).toBe(7);
+});
+
+it('settles a boundary revoked before any position is attempted', async () => {
+  const f = fixture(); const revoked = new Error('revoked before work');
+  const boundary = createRecoveryExecutionAdmission({
+    signal: new AbortController().signal,
+    assertCurrent: () => { throw revoked; },
+  });
+
+  const outcome = await f.startSettled({ executionBoundary: boundary });
+  expect(outcome).toMatchObject({ kind: 'failure', error: revoked });
+  expect(outcome.result).toMatchObject({ totalSnapshots: 8, readySnapshots: 0, completed: false });
+  expect(f.started).toEqual([]);
 });
 
 it.each([0, -1, 1.5, NaN, Infinity, 5])('rejects an invalid or excessive fetch pool limit %s', async fetchConcurrency => {
