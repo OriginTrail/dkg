@@ -153,6 +153,7 @@ export {
   activeRpcRequestContext,
   activeRpcRequestAbortSignal,
   boundedRetryFetchRequest,
+  createBatchedRpcRequestProvider,
   createRpcRequestProvider,
   withOwnedRpcRequestContext,
   withRpcRequestContext,

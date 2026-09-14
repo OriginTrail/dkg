@@ -4,6 +4,7 @@
  * Loopback RPC servers prove whether a request physically reached the provider.
  */
 import { describe, it, expect, afterEach } from 'vitest';
+import { Network } from 'ethers';
 import { metrics } from '@opentelemetry/api';
 import {
   MeterProvider,
@@ -16,6 +17,7 @@ import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { rpcUsageWindowTotal } from '../src/rpc-usage.js';
 import {
   activeRpcRequestContext,
+  createBatchedRpcRequestProvider,
   createRpcRequestProvider,
   withOwnedRpcRequestContext,
   withRpcRequestContext,
@@ -482,6 +484,47 @@ describe('RPC request transport', () => {
     })).toThrow(/batchMaxCount <= 1/u);
   });
 
+  it('requires an explicit batched transport when batching is requested', () => {
+    expect(() => createRpcRequestProvider('http://127.0.0.1:1', {
+      providerOptions: { batchMaxCount: 2 },
+    })).toThrow(/createBatchedRpcRequestProvider/u);
+  });
+
+  it('restores foreground and background admission across concurrent sends', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 2,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      network: Network.from(31_337),
+      admission: governor,
+    });
+    try {
+      const background = withOwnedRpcRequestContext(
+        { requestClass: 'background' },
+        () => provider.send('eth_blockNumber', []),
+      );
+      const foreground = withOwnedRpcRequestContext(
+        { requestClass: 'foreground' },
+        () => provider.send('eth_chainId', []),
+      );
+      await expect(background).resolves.toBe('0x10');
+      await expect(foreground).resolves.toBe(CHAIN_ID_HEX);
+      expect(governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundAdmitted: 1,
+      });
+    } finally {
+      provider.destroy();
+    }
+  });
+
   it('paces concurrent governed sends as independent single-entry HTTP requests', async () => {
     const rpc = await startLoopbackRpc();
     servers.push(rpc);
@@ -549,7 +592,7 @@ describe('RPC request transport', () => {
     const rpc = await startLoopbackRpc();
     servers.push(rpc);
     const observed: string[] = [];
-    const provider = createRpcRequestProvider(rpc.url, {
+    const provider = createBatchedRpcRequestProvider(rpc.url, {
       maxRetries: 0,
       providerOptions: { batchMaxCount: 2 },
       onRequest: (method) => { observed.push(method); },

@@ -311,6 +311,39 @@ async function admitAndObserveRpcAttempt(
   }
 }
 
+function createRpcProviderRequest(
+  url: string,
+  config: RpcRequestProviderConfig,
+): FetchRequest {
+  const request = boundedRetryFetchRequest(url, config.maxRetries);
+  // FetchRequest invokes getUrlFunc once for every physical HTTP attempt:
+  // initial dispatch, ethers retry, redirect, and process retry alike. Owning
+  // admission and accounting at this boundary keeps them exact without
+  // duplicating ethers' dispatch lifecycle across provider and retry hooks.
+  request.getUrlFunc = async (attemptRequest, signal) => {
+    const methods = methodsFromRequestBody(attemptRequest.body);
+    if (config.admission !== undefined && methods.length > 1) {
+      throw new TypeError(
+        'Governed RPC transports require single-entry JSON-RPC dispatch',
+      );
+    }
+    await admitAndObserveRpcAttempt(methods, config);
+    return cancellableRpcGetUrl(attemptRequest, signal);
+  };
+  return request;
+}
+
+function configuredProviderOptions(
+  config: RpcRequestProviderConfig,
+  providerOptions: JsonRpcApiProviderOptions | undefined,
+): JsonRpcApiProviderOptions | undefined {
+  if (config.network == null) return providerOptions;
+  return {
+    ...providerOptions,
+    staticNetwork: config.network as JsonRpcApiProviderOptions['staticNetwork'],
+  };
+}
+
 /**
  * JSON-RPC provider that dispatches each payload in its ISSUER's request
  * context.
@@ -377,46 +410,47 @@ export function createRpcRequestProvider(
   url: string,
   config: RpcRequestProviderConfig,
 ): JsonRpcProvider {
-  const request = boundedRetryFetchRequest(url, config.maxRetries);
-  // FetchRequest invokes getUrlFunc once for every physical HTTP attempt:
-  // initial dispatch, ethers retry, redirect, and process retry alike. Owning
-  // admission and accounting at this boundary keeps them exact without
-  // duplicating ethers' dispatch lifecycle across provider and retry hooks.
-  request.getUrlFunc = async (attemptRequest, signal) => {
-    const methods = methodsFromRequestBody(attemptRequest.body);
-    if (config.admission !== undefined && methods.length > 1) {
-      throw new TypeError(
-        'Governed RPC transports require single-entry JSON-RPC dispatch',
-      );
-    }
-    await admitAndObserveRpcAttempt(methods, config);
-    return cancellableRpcGetUrl(attemptRequest, signal);
-  };
-  if (
-    config.admission !== undefined
-    && (config.providerOptions?.batchMaxCount ?? 1) > 1
-  ) {
+  // Context ownership is defined for one caller per physical request. Do not
+  // silently switch to a plain batching provider when a caller changes a
+  // throughput option: use createBatchedRpcRequestProvider explicitly when
+  // shared batch ownership is intentional.
+  if ((config.providerOptions?.batchMaxCount ?? 1) > 1) {
     throw new TypeError(
-      'Governed RPC transports require providerOptions.batchMaxCount <= 1',
+      'Context-aware RPC transports require providerOptions.batchMaxCount <= 1; '
+      + 'use createBatchedRpcRequestProvider for explicit batching',
     );
   }
   // Ethers batches by default when the option is omitted. A governor accounts
   // and paces billable JSON-RPC entries, so governed providers must disable
   // coalescing at construction rather than acquiring N permits and releasing
   // one N-entry HTTP burst later.
-  const normalizedProviderOptions = config.admission === undefined
-    ? config.providerOptions
-    : { ...config.providerOptions, batchMaxCount: 1 };
-  const providerOptions = config.network == null
-    ? normalizedProviderOptions
-    : {
-        ...normalizedProviderOptions,
-        staticNetwork: config.network as JsonRpcApiProviderOptions['staticNetwork'],
-      };
-  // Inline dispatch is only equivalent where coalescing is already off. A
-  // transport that still batches keeps ethers' drain (and its shared context).
-  const Provider = (normalizedProviderOptions?.batchMaxCount === 1)
-    ? RequestContextJsonRpcProvider
-    : JsonRpcProvider;
-  return new Provider(request, config.network, providerOptions);
+  const normalizedProviderOptions = { ...config.providerOptions, batchMaxCount: 1 };
+  return new RequestContextJsonRpcProvider(
+    createRpcProviderRequest(url, config),
+    config.network,
+    configuredProviderOptions(config, normalizedProviderOptions),
+  );
+}
+
+/**
+ * Build an explicitly shared-batch provider for callers that do not need
+ * per-caller cancellation or admission ownership.
+ *
+ * The context-aware factory above deliberately rejects batching so changing a
+ * performance option cannot silently change request ownership semantics.
+ */
+export function createBatchedRpcRequestProvider(
+  url: string,
+  config: RpcRequestProviderConfig,
+): JsonRpcProvider {
+  if (config.admission !== undefined) {
+    throw new TypeError(
+      'Batched RPC transports cannot use request admission; use createRpcRequestProvider',
+    );
+  }
+  return new JsonRpcProvider(
+    createRpcProviderRequest(url, config),
+    config.network,
+    configuredProviderOptions(config, config.providerOptions),
+  );
 }
