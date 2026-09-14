@@ -78,6 +78,7 @@ function makeCtx(
     routePlugins,
     path: '/api/test',
     publisherState,
+    configStore: { current: {} },
     actor: createRequestActor(
       requestAuthentication({ kind: 'anonymous' }),
       () => 'did:dkg:agent:default',
@@ -102,6 +103,29 @@ describe('handlePluginRoutes', () => {
   });
   afterEach(() => {
     console.error = originalConsoleError;
+  });
+
+  it('preserves the legacy config projection and refreshes it for each request', async () => {
+    let current = { kafka: { contextGraphId: 'first-cg' } };
+    const configStore = { get current() { return current; } };
+    const seen: string[] = [];
+    const plugin: RoutePlugin = {
+      name: 'legacy-config-reader',
+      handle(ctx) {
+        seen.push(ctx.config.kafka?.contextGraphId ?? 'missing');
+      },
+    };
+
+    const first = makeCtx([plugin]);
+    (first.ctx as { configStore: unknown }).configStore = configStore;
+    await handlePluginRoutes(first.ctx);
+
+    current = { kafka: { contextGraphId: 'second-cg' } };
+    const second = makeCtx([plugin]);
+    (second.ctx as { configStore: unknown }).configStore = configStore;
+    await handlePluginRoutes(second.ctx);
+
+    expect(seen).toEqual(['first-cg', 'second-cg']);
   });
 
   it('keeps the deprecated plugin requestToken alias tied to the accepted credential', async () => {
