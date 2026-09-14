@@ -4,15 +4,14 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   FetchRequest,
   JsonRpcProvider,
-  makeError,
 } from 'ethers';
 import type {
   FetchCancelSignal,
   FetchGetUrlFunc,
   JsonRpcApiProviderOptions,
-  JsonRpcError,
   JsonRpcPayload,
   JsonRpcResult,
+  Network,
   Networkish,
 } from 'ethers';
 import { errorMessage } from './evm-adapter-errors.js';
@@ -326,37 +325,50 @@ async function admitAndObserveRpcAttempt(
  * `AbortError` as a transport fault and reports `RPC_ENDPOINTS_EXHAUSTED`
  * carrying the foreign cancellation's message.
  *
- * These transports already disable coalescing (`batchMaxCount: 1`), so the
- * drain contributes no batching — only the shared context and a scheduling
- * turn. Dispatching inline keeps one payload per HTTP request exactly as
- * before while binding admission, accounting, and cancellation to the caller
- * that actually issued the request.
+ * These transports already disable coalescing (`batchMaxCount: 1`). Record one
+ * issuer context for each canonical `send` call and restore it only at the
+ * `_send` boundary. Ethers continues to own request IDs, startup, queuing,
+ * debug/error events, destruction checks, response matching, and RPC errors.
  */
 class RequestContextJsonRpcProvider extends JsonRpcProvider {
-  #nextRequestId = 1;
+  readonly #pendingRequestContexts: Array<{ readonly context: RpcRequestContext }> = [];
 
-  override send(method: string, params: Array<unknown> | Record<string, unknown>): Promise<unknown> {
-    // A destroyed provider keeps ethers' own typed rejection.
-    if (this.destroyed) return super.send(method, params);
-    return this.#dispatch({
-      id: this.#nextRequestId++,
-      jsonrpc: '2.0',
-      method,
-      params,
-    });
+  override _detectNetwork(): Promise<Network> {
+    // Network discovery belongs to the provider lifecycle. It can be triggered
+    // synchronously by the first caller's `_start()`, but must not inherit that
+    // caller's deadline and leave the shared provider retrying forever inside
+    // an already-aborted context.
+    return rpcRequestContext.run(
+      { requestClass: 'foreground' },
+      () => super._detectNetwork(),
+    );
   }
 
-  async #dispatch(payload: JsonRpcPayload): Promise<unknown> {
-    const responses: ReadonlyArray<JsonRpcResult | JsonRpcError> = await this._send(payload);
-    const response = responses.find((entry) => entry.id === payload.id);
-    if (response === undefined) {
-      throw makeError('missing response for request', 'BAD_DATA', {
-        value: responses,
-        info: { payload },
-      });
+  override async send(
+    method: string,
+    params: Array<unknown> | Record<string, unknown>,
+  ): Promise<unknown> {
+    const pending = { context: activeRpcRequestContext() };
+    // JsonRpcProvider.send performs this same lazy start before delegating. Do
+    // it first so bootstrap network detection cannot consume a user payload's
+    // queued context, then delegate the complete request lifecycle unchanged.
+    await this._start();
+    this.#pendingRequestContexts.push(pending);
+    try {
+      return await super.send(method, params);
+    } finally {
+      // Destruction can reject a queued request before `_send` consumes it.
+      const index = this.#pendingRequestContexts.indexOf(pending);
+      if (index >= 0) this.#pendingRequestContexts.splice(index, 1);
     }
-    if ('error' in response) throw this.getRpcError(payload, response);
-    return response.result;
+  }
+
+  override _send(
+    payload: JsonRpcPayload | Array<JsonRpcPayload>,
+  ): Promise<Array<JsonRpcResult>> {
+    const pending = this.#pendingRequestContexts.shift();
+    if (!pending) return super._send(payload);
+    return rpcRequestContext.run(pending.context, () => super._send(payload));
   }
 }
 

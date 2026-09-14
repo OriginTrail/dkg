@@ -24,7 +24,13 @@ import {
 } from '../src/rpc-request-transport.js';
 import { RpcRequestGovernor } from '../src/rpc-request-governor.js';
 import { createRpcTimeoutError } from '../src/chain-rpc-transport-error.js';
-import { startLoopbackRpc, type LoopbackRpc } from './loopback-rpc-harness.js';
+import {
+  CHAIN_ID_HEX,
+  createLoopbackJsonRpcTestHarness,
+  sendJsonRpcResult,
+  startLoopbackRpc,
+  type LoopbackRpc,
+} from './loopback-rpc-harness.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const HUB = '0x0000000000000000000000000000000000000001';
@@ -92,7 +98,7 @@ describe('RPC request transport', () => {
     // the second: an abort landing on the peer's live HTTP attempt surfaces as
     // a transport fault and is reported as exhaustion carrying the FOREIGN
     // cancellation reason.
-    const rpc = await startLoopbackRpc({ hang: ['eth_chainId'] });
+    const rpc = await startLoopbackRpc({ hang: ['eth_blockNumber'] });
     servers.push(rpc);
     const provider = createRpcRequestProvider(rpc.url, {
       maxRetries: 0,
@@ -107,26 +113,120 @@ describe('RPC request transport', () => {
 
     const abandonedRead = withOwnedRpcRequestContext(
       { signal: abandoned.signal },
-      () => provider.send('eth_chainId', []),
+      () => provider.send('eth_blockNumber', []),
     );
     // Settle the abandoned read into a value so its rejection is owned from the
     // start; it fails before the peer assertion below can attach a handler.
     const abandonedOutcome = abandonedRead.then(() => undefined, (error: unknown) => error);
     const peerRead = withOwnedRpcRequestContext(
       { signal: peer.signal },
-      () => provider.send('eth_blockNumber', []),
+      () => provider.send('eth_chainId', []),
     );
     abandoned.abort(abandonment);
 
     try {
-      await expect(peerRead).resolves.toBe('0x10');
-      expect(rpc.aborted('eth_blockNumber')).toBe(0);
+      await expect(peerRead).resolves.toBe(CHAIN_ID_HEX);
+      expect(rpc.aborted('eth_chainId')).toBe(0);
+      await expect(provider.getNetwork()).resolves.toMatchObject({ chainId: 31_337n });
       // The abandoning caller still loses its own physical request.
       expect(await abandonedOutcome).toMatchObject({ name: 'AbortError' });
     } finally {
       if (!peer.signal.aborted) peer.abort(new Error('test teardown'));
       await Promise.allSettled([abandonedOutcome, peerRead]);
       provider.destroy();
+    }
+  });
+
+  it('preserves ethers startup, debug events, network detection, and high-level reads', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const debugActions: string[] = [];
+    await provider.on('debug', (event) => {
+      if ('action' in event) debugActions.push(event.action);
+    });
+
+    try {
+      await expect(provider.send('eth_blockNumber', [])).resolves.toBe('0x10');
+      expect(provider.ready).toBe(true);
+      await expect(provider.getNetwork()).resolves.toMatchObject({ chainId: 31_337n });
+      await expect(provider.getBlockNumber()).resolves.toBe(16);
+      expect(debugActions).toContain('sendRpcPayload');
+      expect(debugActions).toContain('receiveRpcResult');
+    } finally {
+      provider.destroy();
+    }
+  });
+
+  it('rejects an in-flight response after destruction through ethers lifecycle handling', async () => {
+    const harness = createLoopbackJsonRpcTestHarness();
+    let markBlockNumberSeen!: () => void;
+    const blockNumberSeen = new Promise<void>((resolve) => { markBlockNumberSeen = resolve; });
+    let releaseBlockNumber!: () => void;
+    const blockNumberReleased = new Promise<void>((resolve) => { releaseBlockNumber = resolve; });
+    const rpc = await harness.start(async (request, response) => {
+      if (request.method === 'eth_chainId') {
+        sendJsonRpcResult(response, request, CHAIN_ID_HEX);
+        return;
+      }
+      if (request.method === 'eth_blockNumber') {
+        markBlockNumberSeen();
+        await blockNumberReleased;
+        sendJsonRpcResult(response, request, '0x10');
+        return;
+      }
+      sendJsonRpcResult(response, request, '0x');
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const pending = provider.send('eth_blockNumber', []);
+
+    try {
+      await blockNumberSeen;
+      provider.destroy();
+      releaseBlockNumber();
+      await expect(pending).rejects.toMatchObject({
+        code: 'UNSUPPORTED_OPERATION',
+        operation: 'eth_blockNumber',
+      });
+    } finally {
+      releaseBlockNumber();
+      await pending.catch(() => {});
+      provider.destroy();
+      await harness.stopAll();
+    }
+  });
+
+  it('emits ethers missing-response errors for malformed RPC replies', async () => {
+    const harness = createLoopbackJsonRpcTestHarness();
+    const rpc = await harness.start((request, response) => {
+      if (request.method === 'eth_chainId') {
+        sendJsonRpcResult(response, request, CHAIN_ID_HEX);
+        return;
+      }
+      sendJsonRpcResult(response, { ...request, id: request.id + 1 }, '0x10');
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const errors: unknown[] = [];
+    await provider.on('error', (error) => { errors.push(error); });
+
+    try {
+      await expect(provider.send('eth_blockNumber', [])).rejects.toMatchObject({
+        code: 'BAD_DATA',
+      });
+      await expect.poll(() => errors.length).toBe(1);
+      expect(errors[0]).toMatchObject({ code: 'BAD_DATA' });
+    } finally {
+      provider.destroy();
+      await harness.stopAll();
     }
   });
 
