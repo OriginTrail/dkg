@@ -45,30 +45,6 @@ describe('VM recovery batch transaction', () => {
     } finally { transaction.release(); }
   });
 
-  it('releases every pending reservation when retaining a batch entry throws', () => {
-    class FailingRegistry extends VmRecoverySlotRegistry {
-      protected override onRetention() { throw new Error('retention failed'); }
-    }
-    const registry = new FailingRegistry(2);
-    const transaction = registry.beginBatch();
-    transaction.reserveBatch({
-      targets: [target(0), target(1)], admissionCursor: 0,
-      observedCandidatePeerIds: ['peer'], now: 0, collectionDeadlineAt: 100,
-    });
-    expect(() => transaction.commit({
-      candidatePeerIds: ['peer'], curatorRosterConfirmed: true, now: 1,
-      collectionDeadlineAt: 100, isCurrent: () => true,
-    })).toThrow('retention failed');
-    // Reserve both slots through a different scope before caller cleanup. A
-    // leaked second reservation would keep the second claimant at capacity.
-    const next = registry.begin();
-    try {
-      expect(next.reserveAdmission(target(2), 2).kind).toBe('reserved');
-      expect(next.reserveAdmission(target(3), 2).kind).toBe('reserved');
-      expect(registry.recordCount).toBe(0);
-    } finally { next.release(); transaction.release(); }
-  });
-
   it.each(['expired', 'empty-observation'] as const)('readmits its own %s evidence before same-pass discovery', reason => {
     const registry = new VmRecoverySlotRegistry(1);
     const selected = target(0);

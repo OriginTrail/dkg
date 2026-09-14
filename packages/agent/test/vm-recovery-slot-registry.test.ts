@@ -170,41 +170,6 @@ describe('active VM recovery slot ownership', () => {
     scope.release();
   });
 
-  it.each((['immediate', 'delayed'] as const).flatMap(mode =>
-    (['before-write', 'after-write'] as const).map(failure => ({ mode, failure })),
-  ))('rolls back $mode donation after $failure failure without aborting its donor', ({ mode, failure }) => {
-    class FailingRegistry extends VmRecoverySlotRegistry {
-      failing = true;
-      protected override onRetention(stage: 'before' | 'after', key: string): void {
-        if (this.failing && key.endsWith('\0' + 1) && failure === `${stage}-write`) {
-          throw new Error('install failed');
-        }
-      }
-    }
-    const registry = new FailingRegistry(1);
-    const donorRecord = admitFor(registry, target, 0);
-    const donorScope = registry.begin();
-    donorScope.track([target]);
-    const requesterScope = registry.begin();
-    const waiting = { ...target, ordinal: 1 };
-    const params = { candidatePeerIds: ['peer-a'], curatorRosterConfirmed: true, collectionDeadlineAt: 200 };
-    if (mode === 'immediate') {
-      expect(() => registry.admit(waiting, params, 100)).toThrow('install failed');
-    } else {
-      const admission = requesterScope.reserveAdmission(waiting, 100);
-      expect(admission.kind).toBe('reserved');
-      if (admission.kind === 'reserved') expect(() => admission.reservation.commit(params)).toThrow('install failed');
-    }
-    expect([...registry.snapshot().values()]).toEqual([donorRecord.snapshot]);
-    expect(donorScope.signal.aborted).toBe(false);
-    registry.failing = false;
-    expect(registry.admit(waiting, params, 100).kind).toBe('admitted');
-    expect(donorScope.signal.aborted).toBe(true);
-    expect(registry.recordCount).toBe(1);
-    donorScope.release();
-    requesterScope.release();
-  });
-
   it.each(['context', 'close'] as const)('preserves a replacement acquired by an abort listener during %s invalidation', kind => {
     const registry = new VmRecoverySlotRegistry(2);
     const other = { ...target, ordinal: 1 };

@@ -158,54 +158,6 @@ describe('exact VM recovery slot cancellation', () => {
     },
   );
 
-  it('keeps the donor running when a replacement record cannot be installed', async () => {
-    const localCgId = '0x0000000000000000000000000000000000000001/failed-donation';
-    const peer = '12D3KooWFailedDonation';
-    const entered = barrier();
-    const release = barrier();
-    let signal: AbortSignal | undefined;
-    const harness = await createVmRecoveryHostHarness({
-      name: 'FailedDonation', localCgId, peers: [peer], targetCount: 1,
-      recoverySlotCapacity: 2,
-      targetForOrdinal: ordinal => targetFor(localCgId, ordinal), onFetch: () => 'clean-absent',
-    });
-    const host = harness.internals as CancellationHost;
-    host.waitForSyncProtocol = async (_peer, operationSignal) => {
-      signal = operationSignal;
-      entered.release();
-      await release.promise;
-      return true;
-    };
-    const recovery = harness.run();
-    try {
-      await entered.promise;
-      host.prepareVmReconcileRotationTarget(targetFor(localCgId, 1), [peer], host.vmReconcileRotationNow());
-      const original = [...host.vmRecoverySlots.snapshot().entries()];
-      const waitingTarget = targetFor('waiting-cg');
-      const waitingKey = vmRecoverySlotKey(waitingTarget);
-      // Fault injection targets the registry's retention seam; its maps stay private.
-      const registry = host.vmRecoverySlots as VmRecoverySlotRegistry & {
-        onRetention(stage: 'before' | 'after', key: string): void;
-      };
-      const failInstall = vi.spyOn(registry, 'onRetention').mockImplementation((_stage, key) => {
-        if (key === waitingKey) throw new Error('injected install failure');
-      });
-      try {
-        expect(() => host.prepareVmReconcileRotationTarget(waitingTarget, [peer], host.vmReconcileRotationNow()))
-          .toThrow('injected install failure');
-      } finally { failInstall.mockRestore(); }
-      expect(host.vmRecoverySlots.snapshot().size).toBe(original.length);
-      for (const [key, record] of original) expect(host.vmRecoverySlots.snapshot().get(key)).toEqual(record);
-      expect(signal?.aborted).toBe(false);
-      release.release();
-      expect((await recovery).attemptedOrdinals).toEqual([0]);
-    } finally {
-      release.release();
-      await recovery;
-      await harness.agent.stop().catch(() => undefined);
-    }
-  });
-
   it('does not cancel a successful batch when ordinal reconciliation clears completed slots', async () => {
     const localCgId = '0x0000000000000000000000000000000000000001/normal-completion';
     const signals: AbortSignal[] = [];

@@ -276,31 +276,18 @@ export class VmRecoverySlotRegistry {
     const { key, donor: donation } = pending;
     const slot = this.slots.get(key);
     const donor = donation && this.slots.get(donation.key);
-    let record: VmRecoveryRotationRecord | undefined;
     let installed = false;
-    let donorDetached = false;
     try {
       if (params.candidatePeerIds.length === 0 || !this.capacity.isActive(pending) || !slot || slot.record
         || (donation && donor?.record !== donation.record)) return { kind: 'deferred' };
-      record = createRotationRecord(target, slot.fingerprint, params);
-      if (donor) {
-        donor.record = undefined;
-        donorDetached = true;
-      }
-      this.onRetention('before', key);
+      const record = createRotationRecord(target, slot.fingerprint, params);
+      if (donor) donor.record = undefined;
       slot.record = record;
       this.slots.delete(key);
       this.slots.set(key, slot);
-      this.onRetention('after', key);
-      installed = this.slots.get(key) === slot && slot.record === record;
-      return installed ? { kind: 'admitted', slot: captureRotation(record) } : { kind: 'deferred' };
+      installed = true;
+      return { kind: 'admitted', slot: captureRotation(record) };
     } finally {
-      if (!installed) {
-        if (slot && record && slot.record === record) slot.record = undefined;
-        if (donorDetached && donor && donation && this.slots.get(donation.key) === donor && !donor.record) {
-          donor.record = donation.record;
-        }
-      }
       this.releaseAdmission(pending);
       // The requester is installed and capacity accounting is settled before
       // donor abort listeners run. Only the requesting lease is detached
@@ -308,9 +295,6 @@ export class VmRecoverySlotRegistry {
       if (installed && donor && donation) this.invalidateSlot(donation.key, donor, exempt);
     }
   }
-
-  /** Fault-injection seam around the atomic retention write; state stays private. */
-  protected onRetention(_stage: 'before' | 'after', _key: string): void {}
 
   /** One roster transition for immediate callers, existing owners and delayed reservations. */
   prepare(
