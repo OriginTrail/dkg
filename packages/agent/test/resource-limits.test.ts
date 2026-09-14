@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { backpressureRegistry, createOperationContext } from '@origintrail-official/dkg-core';
+import { backpressureRegistry, createOperationContext, MAX_NODE_TIMER_DELAY_MS } from '@origintrail-official/dkg-core';
 import {
   AGENT_RESOURCE_ENV_SPECS, RESOURCE_MAX, ResourceConfigWarnings, ownedResourceEnvNames,
   resolveAgentResourceSnapshots, resolveVmResourceEnvironment, resourceInteger, resourceIntegerEnv,
@@ -19,6 +19,10 @@ const invalidNumbers = [NaN, Infinity, -Infinity, 1.5, -1, Number.MAX_SAFE_INTEG
 afterEach(() => vi.unstubAllEnvs());
 
 describe('bounded resource integers', () => {
+  it('reuses the canonical Node timer ceiling', () => {
+    expect(RESOURCE_MAX.timerMs).toBe(MAX_NODE_TIMER_DELAY_MS);
+  });
+
   it.each([0, 1] as const)('accepts only safe integers in the explicit range with minimum %s', (min) => {
     const bounds = { min, max: 100 };
     const warnings = new ResourceConfigWarnings();

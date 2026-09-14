@@ -1,6 +1,8 @@
+import { MAX_NODE_TIMER_DELAY_MS } from '@origintrail-official/dkg-core';
+
 /** Operational ceilings, not protocol limits. See docs/agent-resource-limits.md. */
 export const RESOURCE_MAX = Object.freeze({
-  timerMs: 2_147_483_647,
+  timerMs: MAX_NODE_TIMER_DELAY_MS,
   shutdownMs: 300_000,
   retryMs: 86_400_000,
   concurrency: 1_024,
