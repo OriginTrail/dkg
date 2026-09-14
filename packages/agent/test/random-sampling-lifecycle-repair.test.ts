@@ -422,10 +422,13 @@ describe('Random Sampling lifecycle repair adapter', () => {
       expect(syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId))
         .toEqual(['peer-curator']);
       expect(RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS).toBeLessThan(90_000);
+      // The trailing count is the salvage evidence: every handshake here stays
+      // pending, so no Core ever passes both gates and the budget path reports
+      // exactly zero proven peers rather than silently dropping a partial roster.
       expect(vi.mocked(agentLike.log.info).mock.calls.map(([, message]) => message))
         .toContainEqual('Random Sampling Core-roster discovery exceeded its '
           + `${RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS}ms budget for food-safety; `
-          + 'continuing with graph-specific providers');
+          + 'continuing with graph-specific providers and 0 Core(s) proven in time');
     } finally {
       vi.useRealTimers();
     }
