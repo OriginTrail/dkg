@@ -228,15 +228,21 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    */
   async convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean> {
     await this.init();
+    const nftSnapshot = await this.resolveHubContractBindingSnapshot([
+      'dkgPublishingConvictionNFT',
+    ]).catch(() => null);
+    if (!nftSnapshot) return false;
+    const convictionNft = nftSnapshot.contracts.dkgPublishingConvictionNFT;
+    if (!convictionNft) return false;
+    if (accountId <= 0n) return false;
+    if (baseCost <= 0n) return true;
     const snapshot = await this.resolveHubContractBindingSnapshot([
       'dkgPublishingConvictionNFT', 'chronos',
     ]).catch(() => null);
     if (!snapshot) return false;
-    const convictionNft = snapshot.contracts.dkgPublishingConvictionNFT;
+    if (snapshot.generationId !== nftSnapshot.generationId
+      || snapshot.contracts.dkgPublishingConvictionNFT !== convictionNft) return false;
     const chronos = snapshot.contracts.chronos;
-    if (!convictionNft) return false;
-    if (accountId <= 0n) return false;
-    if (baseCost <= 0n) return true;
     try {
       const info = await this.readPublishingConvictionAccountInfo(
         accountId, false, snapshot,
@@ -407,11 +413,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     opts?: { extended?: boolean },
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     await this.init();
-    const snapshot = await this.resolveHubContractBindingSnapshot(
-      opts?.extended
-        ? ['dkgPublishingConvictionNFT', 'chronos'] as const
-        : ['dkgPublishingConvictionNFT'] as const,
-    );
+    const snapshot = await this.resolveHubContractBindingSnapshot([
+      'dkgPublishingConvictionNFT',
+    ]);
     // Undeployed NFT → capability error (503). null is reserved below
     // for a genuine account-missing revert so the route can disambiguate.
     const convictionNft = snapshot.contracts.dkgPublishingConvictionNFT;
@@ -428,7 +432,6 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     const convictionNft = snapshot.contracts.dkgPublishingConvictionNFT;
     if (!convictionNft) throw new PcaUnavailableError();
-    const chronos = 'chronos' in snapshot.contracts ? snapshot.contracts.chronos : undefined;
     return this.pcaReadCache.getAccountInfo(accountId, extended, async () => {
       try {
         const t = await this.readContract(
@@ -463,6 +466,14 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
             );
             info.primaryNode = BigInt(acct[9]);
             info.lastPrimaryNodeChangeEpoch = Number(acct[10]);
+            const enrichment = await this.resolveHubContractBindingSnapshot([
+              'dkgPublishingConvictionNFT', 'chronos',
+            ]);
+            if (enrichment.generationId !== snapshot.generationId
+              || enrichment.contracts.dkgPublishingConvictionNFT !== convictionNft) {
+              throw new Error('PCA bindings changed during account enrichment');
+            }
+            const chronos = enrichment.contracts.chronos;
             if (!chronos) throw new HubContractNotFoundError('Chronos', this.hubAddress);
             const currentEpoch: bigint = BigInt(await this.readContract(
               chronos, 'chronos.getCurrentEpoch', 'getCurrentEpoch',

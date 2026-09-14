@@ -81,13 +81,15 @@ export const EVM_EVENT_DESCRIPTORS = [
           (f) => f.type === 'event' && (f as { name?: string }).name === name,
         );
 
-      const isGreenfield = hasEvent('KnowledgeAssetCreated');
-      const createEventName = isGreenfield
-        ? 'KnowledgeAssetCreated'
-        : 'KnowledgeAssetCreated';
-
-      const kcFilter = kaStorage.filters[createEventName]();
-      const kcLogs = scan.query(kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter);
+      const kcFilter = kaStorage.filters.KnowledgeAssetCreated();
+      // Execute the primary query before auxiliary ownership reads. For an
+      // unbounded scan this pins the returned create set to an equal-or-earlier
+      // head, so no create can appear without ownership evidence merely because
+      // the chain advanced between component queries.
+      const kcLogs: Array<ethers.Log | ethers.EventLog> = [];
+      for await (const log of scan.query(
+        kaStorage, 'kas.queryFilter(KnowledgeAssetCreated)', kcFilter,
+      )) kcLogs.push(log);
       // Legacy mint range. `KnowledgeAssetsMinted` is still declared on the
       // greenfield ABI but never emitted by `createKnowledgeAsset`, so
       // this map stays empty there and the per-log fallback below derives
@@ -115,7 +117,7 @@ export const EVM_EVENT_DESCRIPTORS = [
       // receipt-parse path). Keyed by tokenId so each KnowledgeAssetCreated
       // id resolves its own owner.
       const ownerByTokenId = new Map<string, string>();
-      if (isGreenfield) {
+      if (hasEvent('Transfer')) {
         try {
           const transferFilter = kaStorage.filters.Transfer(ethers.ZeroAddress);
           for await (const tl of scan.query(kaStorage, 'kas.queryFilter(Transfer)', transferFilter)) {
@@ -131,7 +133,7 @@ export const EVM_EVENT_DESCRIPTORS = [
         }
       }
 
-      for await (const log of kcLogs) {
+      for (const log of kcLogs) {
         const parsed = parseLog(kaStorage, log);
         if (parsed) {
           const mint = mintByTx.get(log.transactionHash);

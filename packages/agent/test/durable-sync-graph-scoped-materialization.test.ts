@@ -33,6 +33,20 @@ import {
   type VerifiedGraphScopedAsset,
 } from '../src/sync/requester/graph-scoped-materialization.js';
 
+class EVMChainAdapterFixture extends EVMChainAdapter {
+  installHubContractBindingsForTesting(value: any): void {
+    const fallback = value.hub ?? this.contracts.hub;
+    this.installHubContractBindings({
+      ...value,
+      hub: fallback,
+      identity: value.identity ?? fallback,
+      profile: value.profile ?? fallback,
+      parametersStorage: value.parametersStorage ?? fallback,
+      knowledgeAssetStorage: value.knowledgeAssetStorage ?? fallback,
+    });
+  }
+}
+
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
@@ -503,7 +517,7 @@ describe('durable graph-scoped KA materialization', () => {
       chainId: 'otp:2043',
       allowNoAdminSigner: true,
     };
-    const chain: any = new EVMChainAdapter(config);
+    const chain: any = new EVMChainAdapterFixture(config);
     chain.installHubContractBindingsForTesting({ ...chain.contracts });
     chain.init = async () => {};
     chain.getLatestMerkleRoot = async () => root;

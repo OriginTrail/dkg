@@ -572,11 +572,40 @@ describe('EVMChainAdapter PCA read cache', () => {
       throw new Error(`unexpected read ${method}`);
     });
 
+    await expect(adapter.convictionAccountCanCover(9n, 0n)).resolves.toBe(true);
+    expect(chronosAttempts).toBe(0);
     await expect(adapter.convictionAccountCanCover(9n, 10n)).resolves.toBe(false);
     await expect(adapter.convictionAccountCanCover(9n, 10n)).resolves.toBe(true);
     expect(chronosAttempts).toBe(2);
     expect(adapter.readContract.calls.map((call: unknown[]) => call[2]))
       .toEqual(['getAccountInfo', 'getCurrentEpoch', 'getRemainingAllowance']);
+  });
+
+  it('returns base extended-account information when Chronos discovery is transiently unavailable', async () => {
+    const adapter = new EVMChainAdapter(minimalConfig()) as any;
+    const nft = { id: 'nft' };
+    let chronosAttempts = 0;
+    adapter.init = async () => undefined;
+    adapter.loadHubContractBinding = async (spec: { name: string }) => {
+      if (spec.name === 'DKGPublishingConvictionNFT') return nft;
+      if (spec.name === 'Chronos') {
+        chronosAttempts++;
+        throw new Error('temporary Chronos RPC failure');
+      }
+      throw new Error(`unexpected binding ${spec.name}`);
+    };
+    adapter.readContract = recorder(async (contract: unknown, _label: string, method: string) => {
+      expect(contract).toBe(nft);
+      if (method === 'getAccountInfo') return accountInfoTuple(OWNER);
+      if (method === 'accounts') return accountTuple(11n, 1n);
+      throw new Error(`unexpected read ${method}`);
+    });
+
+    await expect(adapter.getPublishingConvictionAccountInfo(9n, { extended: true }))
+      .resolves.toMatchObject({ owner: getAddress(OWNER) });
+    expect(chronosAttempts).toBe(1);
+    expect(adapter.readContract.calls.map((call: unknown[]) => call[2]))
+      .toEqual(['getAccountInfo', 'accounts']);
   });
 
   it('uses one Hub generation for every contract read in a PCA coverage operation', async () => {
@@ -615,7 +644,7 @@ describe('EVMChainAdapter PCA read cache', () => {
     });
 
     await expect(adapter.convictionAccountCanCover(9n, 10n)).resolves.toBe(true);
-    expect(adapter.resolveHubContractBindingSnapshot).toHaveBeenCalledOnce();
+    expect(adapter.resolveHubContractBindingSnapshot).toHaveBeenCalledTimes(2);
     expect(adapter.readContract.calls.map((call: unknown[]) => call[0]))
       .toEqual([nftA, chronosA, nftA]);
   });

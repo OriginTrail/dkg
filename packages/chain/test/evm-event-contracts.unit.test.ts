@@ -516,4 +516,29 @@ describe('EVM event descriptor registry', () => {
     ]);
     await expect(collectAll(descriptor.scan(contract, scanWith(controller.signal)))).rejects.toBe(reason);
   });
+
+  it('reads KCCreated before ownership evidence when an unbounded chain head advances', async () => {
+    const descriptor = evmEventDescriptorFor('KCCreated')!;
+    const contract = new Contract(address, EVENT_ABI);
+    let createObserved = false;
+    const created = logOf('KnowledgeAssetCreated', [6n, ROOT, 2048n, AUTHOR], 101, 'tx-new', 2);
+    const transferred = logOf('Transfer', [ZeroAddress, OWNER, 6n], 101, 'tx-new', 2);
+    const scan: EvmEventScan = {
+      query: (_contract, label) => (async function* queryAtCurrentHead() {
+        if (label === 'kas.queryFilter(KnowledgeAssetCreated)') {
+          createObserved = true;
+          yield created;
+        } else if (label === 'kas.queryFilter(Transfer)' && createObserved) {
+          yield transferred;
+        }
+      }()),
+    };
+
+    await expect(collectAll(descriptor.scan(contract, scan))).resolves.toEqual([
+      expect.objectContaining({
+        type: 'KCCreated',
+        data: expect.objectContaining({ publisherAddress: OWNER }),
+      }),
+    ]);
+  });
 });
