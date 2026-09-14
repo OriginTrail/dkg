@@ -8,6 +8,7 @@ import {
   PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT,
   boundSampledRef,
   type PublicSnapshotMetadata,
+  type PublicSnapshotWalkPlan,
   type PublicSnapshotWalkProgress,
   type PublicSnapshotRecoveryResult,
   type PublicSnapshotRecoveryOutcome,
@@ -15,6 +16,8 @@ import {
 export {
   PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
   type PublicSnapshotMetadata,
+  type PublicSnapshotWalkEntry,
+  type PublicSnapshotWalkPlan,
   type PublicSnapshotWalkProgress,
 } from './public-snapshot-recovery.js';
 import {
@@ -191,14 +194,6 @@ export interface SharedMemoryMetadataFetchOutcome {
   readonly result: SyncPageResult;
   /** True when this exact invocation retained a resumable metadata prefix. */
   readonly continuationYielded: boolean;
-}
-
-/** Immutable manifest order and validated reuse decisions for one pass. */
-export interface PublicSnapshotWalkPlan {
-  readonly entries: readonly {
-    readonly snapshot: PublicSnapshotMetadata;
-    readonly reuse: boolean;
-  }[];
 }
 
 export interface SnapshotWalkPreparation {
@@ -1258,7 +1253,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.resumedPhases += snapshotSync.resumedPhases;
       summary.timedOutPhases += snapshotSync.timedOutPhases;
       summary.completedPhases += snapshotSync.completedPhases;
-      summary.checkpointAdvances += snapshotSync.checkpointAdvances;
       // A voluntary yield is OUR budget decision, not the peer's fault. It is
       // recorded here and deliberately kept out of `timedOutPhases`, which
       // feeds `backoffWorthyFailure` and would back the peer off for it. It is
@@ -1327,7 +1321,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if (!snapshotPhaseUsable) {
         // Retain independently verified data, but keep the phase incomplete
         // while graph-scoped assets or selected evidence remain unproven.
-        const localBudgetOnly = snapshotSync.phaseFailureCause === 'local-budget'
+        const localBudgetOnly = snapshotSync.outcome === 'local-budget-yield'
           && materializationFailures === 0
           && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0)
           && snapshotEvidenceAccepted;
@@ -1456,17 +1450,40 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   return summary;
 }
 
-/** Shared-memory projection of the snapshot-native recovery result. */
-export interface PublicSnapshotSyncResult extends Omit<PublicSnapshotRecoveryResult, 'shortfallCauses'> {
+/**
+ * The pre-#2077 result of the throwing helper: the canonical walk result, plus
+ * the three fields that helper has always also returned.
+ *
+ * They exist for its existing consumers and are derived HERE, at the one
+ * compatibility adapter, rather than translated into every walk result:
+ * `checkpointAdvances` is structurally zero — a walk deletes checkpoints and
+ * advances none — and the two phase fields restate `outcome` in the
+ * shared-memory diagnostics vocabulary.
+ */
+export interface PublicSnapshotSyncResult extends PublicSnapshotRecoveryResult {
   readonly checkpointAdvances: 0;
-  readonly localYield?: true;
+  /** Direct cause for this helper's single incomplete snapshot phase. */
   readonly phaseFailureCause?: SharedMemoryPhaseFailureCause;
+  /** One incomplete phase only when every unresolved ref is due to local admission. */
   readonly localYieldFailedPhases: number;
 }
 
+/** Add what the legacy helper published on top of the canonical walk result. */
+function legacySnapshotSyncResult(result: PublicSnapshotRecoveryResult): PublicSnapshotSyncResult {
+  const localBudgetOnly = result.outcome === 'local-budget-yield';
+  return {
+    ...result,
+    checkpointAdvances: 0,
+    ...(result.completed
+      ? {}
+      : { phaseFailureCause: localBudgetOnly ? 'local-budget' as const : 'transport' as const }),
+    localYieldFailedPhases: localBudgetOnly ? 1 : 0,
+  };
+}
+
 /**
- * Settled shared-memory walk: the same progress the throwing helper returns,
- * paired with the failure when one occurred.
+ * Settled shared-memory walk: the walk's own result, paired with the failure
+ * when one occurred.
  *
  * A walk that materialized 120 of 250 Knowledge Assets and then failed has real
  * progress to report, and a continuation caller that cannot read it treats a
@@ -1475,9 +1492,7 @@ export interface PublicSnapshotSyncResult extends Omit<PublicSnapshotRecoveryRes
  * this module removed — so the settled outcome is where progress and error
  * identity travel together.
  */
-export type PublicSnapshotSyncOutcome =
-  | { readonly kind: 'result'; readonly result: PublicSnapshotSyncResult }
-  | { readonly kind: 'failure'; readonly result: PublicSnapshotSyncResult; readonly error: unknown };
+export type PublicSnapshotSyncOutcome = PublicSnapshotRecoveryOutcome;
 
 /**
  * What a failed legacy walk settled, held BESIDE its throwable.
@@ -1572,7 +1587,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     rememberFailedWalkProgress(outcome.error, outcome.result);
     throw outcome.error;
   }
-  return outcome.result;
+  return legacySnapshotSyncResult(outcome.result);
 }
 
 /**
@@ -1598,7 +1613,7 @@ export async function settlePublicSnapshotsForMeta(
       ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
       : manifestSnapshots
   ).map(snapshot => ({ snapshot, reuse: false }));
-  const outcome: PublicSnapshotRecoveryOutcome = await settlePublicSnapshots({
+  return settlePublicSnapshots({
     entries,
     contextGraphId: params.contextGraphId,
     workAdmission,
@@ -1612,25 +1627,6 @@ export async function settlePublicSnapshotsForMeta(
     deleteCheckpoint: params.deleteCheckpoint,
     onSnapshotReady: params.onSnapshotReady,
   });
-  const result = projectPublicSnapshotRecovery(outcome.result);
-  return outcome.kind === 'failure'
-    ? { kind: 'failure', result, error: outcome.error }
-    : { kind: 'result', result };
-}
-
-function projectPublicSnapshotRecovery(result: PublicSnapshotRecoveryResult): PublicSnapshotSyncResult {
-  const { shortfallCauses = [], ...snapshot } = result;
-  const localYield = shortfallCauses.includes('local-admission');
-  const localBudgetOnly = localYield && !shortfallCauses.includes('independent');
-  return {
-    ...snapshot,
-    checkpointAdvances: 0,
-    ...(localYield ? { localYield: true as const } : {}),
-    ...(result.missingCount === 0
-      ? {}
-      : { phaseFailureCause: localBudgetOnly ? 'local-budget' as const : 'transport' as const }),
-    localYieldFailedPhases: localBudgetOnly ? 1 : 0,
-  };
 }
 
 export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {

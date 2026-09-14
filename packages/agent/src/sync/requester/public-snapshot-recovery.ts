@@ -1,6 +1,10 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { combineSyncFailures } from '../error-tags.js';
+import {
+  sharedMemoryWorkOutcome,
+  type SharedMemoryWorkOutcome,
+} from '../shared-memory-completion.js';
 import type { SyncWorkAdmission } from '../work-admission.js';
 import type { SyncPageResult } from './page-fetch.js';
 import type { RecoveryExecutionAdmission } from './recovery-execution-guard.js';
@@ -17,22 +21,57 @@ const EMPTY_METRICS: SnapshotMetrics = Object.freeze({
 });
 
 /**
- * Why one ref stayed unresolved. `local-yield` is OUR admission decision — the
- * shared allowance ran out before this ref's cache check or dispatch, or the
- * page fetch itself yielded on it — and is never peer evidence. The other two
- * are independent shortfalls produced by the peer or the stream.
+ * Why one position stayed unresolved, in the shared bounded-work vocabulary.
+ *
+ * `local-budget-yield` is OUR admission decision — the shared allowance ran out
+ * before this ref's cache check or dispatch, or the page itself yielded on it —
+ * and is never peer evidence. `timed-out` and `incomplete` are independent
+ * shortfalls the peer or the stream produced. One vocabulary is enough: pages
+ * already report their completion in it, and so does the round below.
  */
-type SnapshotShortfall = 'local-yield' | 'incomplete' | 'short-prefix';
+type SnapshotShortfall = Exclude<SharedMemoryWorkOutcome, 'completed'>;
+
+/** Peer evidence outranks our own yield; a timeout outranks a plain shortfall. */
+const SHORTFALL_RANK: Readonly<Record<SnapshotShortfall, number>> = Object.freeze({
+  'local-budget-yield': 0, incomplete: 1, 'timed-out': 2,
+});
+
+function strongerShortfall(
+  carried: SnapshotShortfall | undefined,
+  settled: SnapshotShortfall,
+): SnapshotShortfall {
+  return carried === undefined || SHORTFALL_RANK[settled] > SHORTFALL_RANK[carried] ? settled : carried;
+}
 
 type SnapshotAttempt =
   | { readonly kind: 'ready'; readonly metrics: SnapshotMetrics }
-  | { readonly kind: 'missing'; readonly reason: SnapshotShortfall; readonly metrics: SnapshotMetrics }
+  | {
+    readonly kind: 'missing';
+    readonly outcome: SnapshotShortfall;
+    /**
+     * Whether this position ends the round's dispatch. A cleanly terminated
+     * short prefix does not: the ref is retried from offset zero next round and
+     * the remaining entries are still worth admitting.
+     */
+    readonly halts: boolean;
+    readonly metrics: SnapshotMetrics;
+  }
   | { readonly kind: 'fatal'; readonly error: unknown; readonly metrics: SnapshotMetrics };
 
 /** One manifest position together with the owner's reuse decision for it. */
 export interface PublicSnapshotWalkEntry {
   readonly snapshot: PublicSnapshotMetadata;
   readonly reuse: boolean;
+}
+
+/**
+ * Immutable manifest order and validated reuse decisions for one pass.
+ *
+ * Owned here with the entry it is made of, so a plan built by a walk owner and
+ * the positions this module attempts cannot drift apart structurally.
+ */
+export interface PublicSnapshotWalkPlan {
+  readonly entries: readonly PublicSnapshotWalkEntry[];
 }
 
 interface SnapshotRecoveryPorts {
@@ -45,17 +84,29 @@ interface SnapshotRecoveryPorts {
   readonly onSnapshotReady?: (snapshot: PublicSnapshotMetadata, source: 'cache' | 'network') => Promise<void>;
 }
 
+/** The canonical result of one settled walk; every caller reads this shape. */
 export interface PublicSnapshotRecoveryResult extends PublicSnapshotWalkProgress, SnapshotMetrics {
   readonly completed: boolean;
-  /** Distinct causes represented by the settled unresolved positions. */
-  readonly shortfallCauses?: readonly ('local-admission' | 'independent')[];
+  /**
+   * How the round itself ended, reduced once from the settled positions in the
+   * shared bounded-work vocabulary. `local-budget-yield` means every unresolved
+   * position was our own admission decision.
+   */
+  readonly outcome: SharedMemoryWorkOutcome;
+  /**
+   * At least one unresolved position was our own admission decision — evidence
+   * the owning round merges, independent of which cause finally classified the
+   * round. A yield mixed with peer evidence still sets this and still leaves
+   * `outcome` on the peer's cause.
+   */
+  readonly localYield?: true;
 }
 
 export type PublicSnapshotRecoveryOutcome =
   | { readonly kind: 'result'; readonly result: PublicSnapshotRecoveryResult }
   | { readonly kind: 'failure'; readonly result: PublicSnapshotRecoveryResult; readonly error: unknown };
 
-interface PublicSnapshotRecoveryParams extends Omit<SnapshotRecoveryPorts, 'store'> {
+export interface PublicSnapshotRecoveryParams extends Omit<SnapshotRecoveryPorts, 'store'> {
   /** Immutable manifest order; the owner has already decided each position's reuse. */
   readonly entries: readonly PublicSnapshotWalkEntry[];
   readonly contextGraphId: string;
@@ -73,6 +124,11 @@ interface PublicSnapshotRecoveryParams extends Omit<SnapshotRecoveryPorts, 'stor
   readonly store?: WorkspacePublicSnapshotStore;
 }
 
+/** The allowance ran out before this position did anything, so it received nothing. */
+const LOCAL_YIELD_BEFORE_WORK: SnapshotAttempt = Object.freeze({
+  kind: 'missing', outcome: 'local-budget-yield', halts: true, metrics: EMPTY_METRICS,
+});
+
 /** One operation owns its metrics and always settles into a discriminated result. */
 async function attemptSnapshot({ snapshot, reuse }: PublicSnapshotWalkEntry, ports: SnapshotRecoveryPorts): Promise<SnapshotAttempt> {
   const boundary = ports.executionBoundary;
@@ -87,7 +143,7 @@ async function attemptSnapshot({ snapshot, reuse }: PublicSnapshotWalkEntry, por
     // full read and digest, and a miss is a network round trip. No
     // `SyncPageResult` exists yet, so `timedOutPhases` structurally cannot
     // move here — a local budget decision never reads as a peer timeout.
-    if (!ports.workAdmission.canAdmitWork()) return { kind: 'missing', reason: 'local-yield', metrics };
+    if (!ports.workAdmission.canAdmitWork()) return LOCAL_YIELD_BEFORE_WORK;
     if (await boundary.read(() => hasValidSnapshot(ports.store, snapshot))) {
       if (ports.onSnapshotReady) {
         boundary.assertCurrent();
@@ -99,7 +155,7 @@ async function attemptSnapshot({ snapshot, reuse }: PublicSnapshotWalkEntry, por
 
     // Cache validation can consume the allowance without producing a hit.
     // Admit no new transport after that local work exhausts the budget.
-    if (!ports.workAdmission.canAdmitWork()) return { kind: 'missing', reason: 'local-yield', metrics };
+    if (!ports.workAdmission.canAdmitWork()) return LOCAL_YIELD_BEFORE_WORK;
     const result = await boundary.read(() => ports.fetchSnapshot(snapshot, boundary.signal));
     metrics = {
       bytesReceived: result.bytesReceived,
@@ -109,16 +165,19 @@ async function attemptSnapshot({ snapshot, reuse }: PublicSnapshotWalkEntry, por
     };
     // Unverified prefixes cannot be resumed against the whole signed digest.
     boundary.admitSyncMutation(() => ports.deleteCheckpoint(result.checkpointKey));
-    // A page that yielded on the shared allowance is our decision as well,
-    // not an independent shortfall; any other incomplete stream is one.
-    if (!result.completed) {
-      return { kind: 'missing', reason: result.localYield ? 'local-yield' : 'incomplete', metrics };
+    // The page already states how it ended in the shared vocabulary — a yield
+    // on our allowance is our decision, a timeout or any other incomplete
+    // stream is the peer's — so classify it with the same derivation every
+    // other bounded-work boundary uses rather than a second taxonomy.
+    const pageOutcome = sharedMemoryWorkOutcome(result);
+    if (pageOutcome !== 'completed') {
+      return { kind: 'missing', outcome: pageOutcome, halts: true, metrics };
     }
     const quads = result.quads.map(quad => ({ ...quad, graph: '' }));
     if (quads.length < snapshot.count) {
       // A cleanly terminated short prefix is missing, not corrupt. Other refs
       // remain useful; retry this immutable ref from offset zero next round.
-      return { kind: 'missing', reason: 'short-prefix', metrics };
+      return { kind: 'missing', outcome: 'incomplete', halts: false, metrics };
     }
     const digest = workspacePublicQuadsDigest(quads);
     if (digest !== snapshot.digest || quads.length !== snapshot.count) {
@@ -158,7 +217,7 @@ async function runSnapshotPool(
         // Completion order owns the triggering cause; reporting remains in
         // manifest order. At most the already-admitted siblings can add errors.
         failures.push(outcome.error);
-      } else if (outcome.kind === 'missing' && outcome.reason !== 'short-prefix') {
+      } else if (outcome.kind === 'missing' && outcome.halts) {
         // Stop taking entries after an incomplete stream or exhausted local
         // allowance. Already admitted siblings still drain through this loop.
         halted = true;
@@ -170,13 +229,6 @@ async function runSnapshotPool(
     () => worker(),
   ));
   return { outcomes, failures };
-}
-
-/** Recover one manifest with a bounded pool and one ordered progress reduction. */
-export async function recoverPublicSnapshots(params: PublicSnapshotRecoveryParams): Promise<PublicSnapshotRecoveryResult> {
-  const outcome = await settlePublicSnapshots(params);
-  if (outcome.kind === 'failure') throw outcome.error;
-  return outcome.result;
 }
 
 /** Let the owning sync round account every admitted outcome before rethrowing. */
@@ -191,14 +243,16 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
     readySnapshots: 0, totalSnapshots: params.entries.length,
     missingCount: 0, missingSample: [] as string[],
   };
-  if (params.entries.length === 0) return { kind: 'result', result: { ...progress, completed: true } };
+  if (params.entries.length === 0) {
+    return { kind: 'result', result: { ...progress, completed: true, outcome: 'completed' } };
+  }
   if (!params.store) {
     throw new Error(`Cannot sync shared-memory public snapshot refs for "${params.contextGraphId}" without a public snapshot store`);
   }
   const { outcomes, failures } = await runSnapshotPool(params.entries, concurrency, { ...params, store: params.store });
   params.executionBoundary.assertCurrent();
   let localYield = false;
-  let hasIndependentShortfall = false;
+  let shortfall: SnapshotShortfall | undefined;
   for (const [index, outcome] of outcomes.entries()) {
     if (outcome) {
       progress.bytesReceived += outcome.metrics.bytesReceived;
@@ -215,20 +269,22 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
       progress.missingSample.push(boundSampledRef(params.entries[index]!.snapshot.ref));
     }
     // Positions abandoned after a halt carry no evidence of their own; only
-    // the outcomes that actually settled attribute the shortfall.
-    if (outcome?.kind === 'missing' && outcome.reason === 'local-yield') localYield = true;
-    else if (outcome) hasIndependentShortfall = true;
+    // the outcomes that actually settled attribute the shortfall. A fatal
+    // position is independent evidence too — the error it carries says which
+    // kind — so it cannot leave the round classified as our own yield.
+    if (!outcome) continue;
+    const settled = outcome.kind === 'missing' ? outcome.outcome : 'incomplete';
+    if (settled === 'local-budget-yield') localYield = true;
+    shortfall = strongerShortfall(shortfall, settled);
   }
-  // The single-phase attribution the owning round records: solely local
-  // admission, or at least one shortfall the peer or the stream produced.
-  const shortfallCauses = [
-    ...(localYield ? ['local-admission' as const] : []),
-    ...(hasIndependentShortfall ? ['independent' as const] : []),
-  ];
+  const completed = progress.missingCount === 0;
   const result: PublicSnapshotRecoveryResult = {
     ...progress,
-    completed: progress.missingCount === 0,
-    ...(shortfallCauses.length === 0 ? {} : { shortfallCauses }),
+    completed,
+    // One classification for the round, reduced from the positions that
+    // settled: peer or stream evidence if any, otherwise our own yield.
+    outcome: completed ? 'completed' : shortfall ?? 'incomplete',
+    ...(localYield ? { localYield: true as const } : {}),
   };
   return failures.length > 0
     ? { kind: 'failure', result, error: combineSyncFailures(failures[0], failures.slice(1)) }

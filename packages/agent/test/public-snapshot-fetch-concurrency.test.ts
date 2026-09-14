@@ -187,7 +187,9 @@ it.each([false, true])('preserves typed failure identity and complete settled ev
       bytesReceived: 400, resumedPhases: 1, timedOutPhases: 1, completedPhases: 2,
       readySnapshots: 2, totalSnapshots: 4, missingCount: 2,
       missingSample: [f.refs[0], f.refs[3]], completed: false,
-      shortfallCauses: ['independent'],
+      // One classification for the round: the peer's timed-out page outranks a
+      // plain shortfall, and no position yielded on our own allowance.
+      outcome: 'timed-out',
     });
   } finally { f.releaseAll(); await run; }
 });
@@ -445,6 +447,26 @@ it('treats a page-level local yield as its own budget decision and stops further
   } finally { f.releaseAll(); await run; }
 });
 
+it('keeps a yield beside the peer evidence that classified the round', async () => {
+  const f = fixture(); const run = f.start();
+  try {
+    await f.waitForStarted(4);
+    // Our own allowance ran out on one position while the peer timed out on
+    // another: the round is the peer's, the yield is still evidence we made.
+    f.responses[1]!.resolve(f.page(1, { completed: false, timedOut: false, localYield: true }));
+    f.responses[3]!.resolve(f.page(3, { completed: false, timedOut: true }));
+    f.responses[0]!.resolve(f.page(0)); f.responses[2]!.resolve(f.page(2));
+    expect(await run).toMatchObject({
+      readySnapshots: 2, missingCount: 6, timedOutPhases: 1, completed: false,
+      outcome: 'timed-out', localYield: true,
+      // The legacy fields this helper has always returned follow that one
+      // classification: the phase is charged to transport, not to our budget.
+      phaseFailureCause: 'transport', localYieldFailedPhases: 0, checkpointAdvances: 0,
+      missingSample: [f.refs[1], f.refs[3], ...f.refs.slice(4)],
+    });
+  } finally { f.releaseAll(); await run; }
+});
+
 it('answers the deprecated reader with the progress of the walk that threw', async () => {
   const f = fixture(4); const failure = new Error('local persistence failed');
   const put = f.store.putSnapshot;
@@ -466,6 +488,21 @@ it('answers the deprecated reader with the progress of the walk that threw', asy
     expect(Object.keys(failure)).toEqual([]);
     expect(readPublicSnapshotWalkProgress(new Error('never walked'))).toBeUndefined();
   } finally { f.releaseAll(); await run.catch(() => {}); }
+});
+
+it('settles an empty manifest as a complete round without a store', async () => {
+  const f = fixture(0);
+  await expect(syncPublicSnapshotsForMeta({
+    ctx: createOperationContext('sync'), remotePeerId: 'peer', contextGraphId: 'pool', metaQuads: [],
+    deadline: Date.now() + 60_000, fetchSyncPages: f.fetchSyncPages,
+    deleteCheckpoint: f.deleted, setCheckpoint: () => {}, onSnapshotReady: f.ready,
+  })).resolves.toEqual({
+    bytesReceived: 0, resumedPhases: 0, timedOutPhases: 0, completedPhases: 0,
+    readySnapshots: 0, totalSnapshots: 0, missingCount: 0, missingSample: [],
+    completed: true, outcome: 'completed', checkpointAdvances: 0, localYieldFailedPhases: 0,
+  });
+  expect(f.started).toEqual([]);
+  expect(f.ready).not.toHaveBeenCalled();
 });
 
 it('counts prepared reuse entries as ready without cache reads, dispatch or callbacks', async () => {
