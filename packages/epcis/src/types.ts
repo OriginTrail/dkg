@@ -121,6 +121,11 @@ export interface QueryEngine {
   ): Promise<{ bindings: Record<string, string>[] }>;
 }
 
+/** Query results expose the stored subject so callers can reuse it in eventID filters. */
+export interface EPCISQueryEvent extends Record<string, unknown> {
+  eventID: string;
+}
+
 export interface EPCISQueryDocumentResponse {
   '@context': Array<string | Record<string, string>>;
   type: 'EPCISQueryDocument';
@@ -129,7 +134,7 @@ export interface EPCISQueryDocumentResponse {
     queryResults: {
       queryName: 'SimpleEventQuery';
       resultsBody: {
-        eventList: Record<string, unknown>[];
+        eventList: EPCISQueryEvent[];
       };
     };
   };

@@ -1,9 +1,10 @@
+import { isSafeIri } from '@origintrail-official/dkg-core';
 import { compactEpcisEventType } from './epcis-vocabulary.js';
 import { createValidator } from './validation.js';
 import { prepareCaptureContentRdf } from './capture-rdf.js';
 import { buildEpcisQuery, EpcisQueryInputError } from './query-builder.js';
 import { parseQueryParams, hasValidDateRange, encodePageToken } from './utils.js';
-import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryDocumentResponse } from './types.js';
+import type { AsyncPublisher, CaptureAcceptedResult, CaptureOptions, PublisherCaptureOpts, QueryEngine, EPCISQueryEvent, EPCISQueryDocumentResponse } from './types.js';
 
 export interface AsyncCaptureConfig {
   contextGraphId: string;
@@ -166,6 +167,15 @@ export function toEpcisEvent(binding: Record<string, string>): Record<string, un
   return event;
 }
 
+/** Add the stored subject as the stable identifier promised by query responses. */
+function decodeQueryEvent(binding: Record<string, string>): EPCISQueryEvent {
+  const eventID = binding.event;
+  if (typeof eventID !== 'string' || !isSafeIri(eventID)) {
+    throw new EpcisQueryError('Events query returned a result without a reusable event IRI', 502);
+  }
+  return { ...toEpcisEvent(binding), eventID };
+}
+
 const GS1_EPCIS_CONTEXT = 'https://ref.gs1.org/standards/epcis/2.0.0/epcis-context.jsonld';
 const DKG_BASE_IRI = 'http://dkg.io/ontology/';
 const DKG_CONTEXT = {
@@ -221,7 +231,7 @@ export async function handleEventsQuery(
 
   const hasMore = result.bindings.length > perPage;
   const bindings = hasMore ? result.bindings.slice(0, perPage) : result.bindings;
-  const eventList = bindings.map(toEpcisEvent);
+  const eventList = bindings.map(decodeQueryEvent);
 
   const body: EPCISQueryDocumentResponse = {
     '@context': [GS1_EPCIS_CONTEXT, DKG_CONTEXT],
