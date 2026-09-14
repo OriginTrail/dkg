@@ -1541,8 +1541,11 @@ describe('RFC-64 rollout authority integration', () => {
     })).resolves.toBe(false);
   });
 
-  it('coalesces first authority acceptance into one freshness-bypassing peer catch-up', async () => {
-    const contextGraphId = `${AUTHOR}/authority-catchup` as ContextGraphIdV1;
+  it('coalesces multiple authority acceptances into one freshness-bypassing peer catch-up', async () => {
+    const contextGraphIds = [
+      `${AUTHOR}/authority-catchup-a`,
+      `${AUTHOR}/authority-catchup-b`,
+    ] as const satisfies readonly ContextGraphIdV1[];
     const remotePeerId = '12D3KooWAuthorityCatchupPeer';
     const edge = await startAgent({
       name: 'authority-accepted-peer-catchup',
@@ -1556,15 +1559,16 @@ describe('RFC-64 rollout authority integration', () => {
       .mockReturnValue(true);
     vi.useFakeTimers();
     try {
-      await edge.createContextGraph({
-        id: contextGraphId,
-        name: 'Authority catch-up',
-        accessPolicy: 0,
-        callerAgentAddress: AUTHOR,
-      });
+      for (const [index, contextGraphId] of contextGraphIds.entries()) {
+        await edge.createContextGraph({
+          id: contextGraphId,
+          name: `Authority catch-up ${index + 1}`,
+          accessPolicy: 0,
+          callerAgentAddress: AUTHOR,
+        });
+      }
       await edge.whenRfc64CatalogResponsibilitiesIdleV1();
-      // An unchanged direct reconciliation must not create another timer.
-      await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+      expect(queueSync).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(3_000);
 
@@ -1575,7 +1579,10 @@ describe('RFC-64 rollout authority integration', () => {
         0,
         { authorityScopeChanged: true },
       );
-      await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+      // Unchanged direct reconciliations must not create another timer.
+      for (const contextGraphId of contextGraphIds) {
+        await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+      }
       await vi.advanceTimersByTimeAsync(3_000);
       expect(queueSync).toHaveBeenCalledOnce();
     } finally {
@@ -3352,6 +3359,59 @@ describe('RFC-64 rollout authority integration', () => {
         stableReason: null,
       }),
     );
+  });
+
+  it('keeps a blocked authority disabled throughout a stalled retry', async () => {
+    const contextGraphId = `${AUTHOR}/blocked-authority-retry` as ContextGraphIdV1;
+    const curator = await startAgent({ name: 'blocked-authority-retry' });
+    (curator as any).defaultAgentAddress = AUTHOR;
+    await curator.createContextGraph({
+      id: contextGraphId,
+      name: 'Blocked authority retry',
+      accessPolicy: 0,
+      callerAgentAddress: AUTHOR,
+    });
+    await curator.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(curator.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+
+    let releaseRetry!: () => void;
+    let retryStarted!: () => void;
+    const retryGate = new Promise<void>((resolve) => { releaseRetry = resolve; });
+    const retryEntered = new Promise<void>((resolve) => { retryStarted = resolve; });
+    vi.spyOn(curator, 'requestRfc64CatalogHeadReplaysFromConnectedPeersV1')
+      .mockResolvedValue(Object.freeze({ requested: 0, failed: 0 }));
+    vi.spyOn(curator, 'getContextGraphOwner')
+      .mockResolvedValueOnce(null)
+      .mockImplementationOnce(async () => {
+        retryStarted();
+        await retryGate;
+        return `did:dkg:agent:${AUTHOR}`;
+      });
+
+    await expect(curator.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId))
+      .rejects.toThrow(/no canonical owner address/u);
+    expect(curator.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: false, track2Enabled: false });
+    expect(curator.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
+      .toMatchObject({ active: false, track2Enabled: false });
+    expect(curator.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId)).toBe(false);
+
+    const retry = curator.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+    await retryEntered;
+    expect(curator.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: false, track2Enabled: false });
+    expect(curator.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
+      .toMatchObject({ active: false, track2Enabled: false });
+    expect(curator.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId)).toBe(false);
+
+    releaseRetry();
+    await expect(retry).resolves.toMatchObject({ source: 'owner-signed-unregistered' });
+    expect(curator.resolveRfc64CatalogServingAuthorityV1(contextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+    expect(curator.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId))
+      .toMatchObject({ active: true, track2Enabled: true });
+    expect(curator.resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId)).toBe(true);
   });
 
   it('reconciles private responsibility when refreshed ACL facts change without a subscription transition', async () => {

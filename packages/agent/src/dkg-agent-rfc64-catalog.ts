@@ -481,6 +481,8 @@ export interface Rfc64CatalogOperationalStatusV1 {
 
 interface Rfc64CatalogAuthorityProgressV1 {
   readonly state: 'resolving' | 'accepted' | 'blocked';
+  /** The resolving lineage began with a currently accepted authority snapshot. */
+  readonly retainsAcceptedAuthorityDuringRefresh: boolean;
   readonly source: Rfc64ReleaseNativeAuthoritySnapshotV1['source'] | null;
   readonly policyDigest: Digest32V1 | null;
   readonly policyEra: DecimalU64V1 | null;
@@ -513,10 +515,10 @@ function projectRfc64ResponsibilityAuthorityWithRefreshFenceV1(input: {
   readonly selectionActive: boolean;
   readonly selectionMode: Rfc64CatalogRolloutModeV1;
   readonly authorityProgressState: Rfc64CatalogAuthorityProgressV1['state'] | undefined;
-  readonly hasAcceptedAuthority: boolean;
+  readonly retainsAcceptedAuthorityDuringRefresh: boolean;
 }): Rfc64CatalogAuthorityPolicyV1 {
   const retainsAcceptedAuthorityWhileRefreshing = input.authorityProgressState === 'resolving'
-    && input.hasAcceptedAuthority;
+    && input.retainsAcceptedAuthorityDuringRefresh;
   return input.selectionActive && input.selectionMode !== 'legacy'
     && input.authorityProgressState !== 'accepted'
     && !retainsAcceptedAuthorityWhileRefreshing
@@ -2300,6 +2302,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const authorityRevision = nextRfc64CatalogAuthorityRevisionV1(this, contextGraphId);
     setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
       state: 'resolving',
+      retainsAcceptedAuthorityDuringRefresh: previousAuthorityProgress?.state === 'accepted'
+        || (
+          previousAuthorityProgress?.state === 'resolving'
+          && previousAuthorityProgress.retainsAcceptedAuthorityDuringRefresh
+        ),
       source: null,
       policyDigest: null,
       policyEra: null,
@@ -2527,6 +2534,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
         state: 'accepted',
+        retainsAcceptedAuthorityDuringRefresh: false,
         source: authority.source,
         policyDigest: authority.policyDigest,
         policyEra: authority.policy.era,
@@ -2552,6 +2560,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       )) {
         setRfc64CatalogAuthorityProgressV1(this, contextGraphId, {
           state: 'blocked',
+          retainsAcceptedAuthorityDuringRefresh: false,
           source: null,
           policyDigest: null,
           policyEra: null,
@@ -2649,22 +2658,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       this,
       this.config.rfc64CatalogExecutionPlan,
     ).read(contextGraphId);
-    const authorityProgressState = rfc64CatalogAuthorityProgressV1
+    const authorityProgress = rfc64CatalogAuthorityProgressV1
       .get(this)
-      ?.get(contextGraphId)
-      ?.state;
-    const service = this.rfc64PublicCatalogServiceV1;
-    const networkId = (
-      this.config.rfc64CatalogDeploymentProfile?.networkId
-      ?? this.config.networkIdentity?.chainId
-    ) as NetworkIdV1 | undefined;
-    const hasAcceptedAuthority = service !== undefined
-      && networkId !== undefined
-      && networkId !== 'none'
-      && service.acceptedPolicySnapshot(
-        networkId,
-        contextGraphId as ContextGraphIdV1,
-      ) !== null;
+      ?.get(contextGraphId);
     return projectRfc64ResponsibilityAuthorityWithRefreshFenceV1({
       authority: resolveRfc64CatalogResponsibilityAuthorityV1({
         ...selection,
@@ -2672,8 +2668,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }),
       selectionActive: selection.active,
       selectionMode: selection.mode,
-      authorityProgressState,
-      hasAcceptedAuthority,
+      authorityProgressState: authorityProgress?.state,
+      retainsAcceptedAuthorityDuringRefresh:
+        authorityProgress?.retainsAcceptedAuthorityDuringRefresh === true,
     });
   }
 
