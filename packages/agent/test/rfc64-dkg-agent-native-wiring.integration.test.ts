@@ -1758,6 +1758,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
 
     receiver.subscribeToContextGraph(CONTEXT_GRAPH_ID);
     await receiver.whenRfc64CatalogResponsibilitiesIdleV1();
+    // Responsibility discovery now hands registered authority to the shared,
+    // coalesced refresh owner. Fence that owner before observing its terminal
+    // blocked status; the responsibility dispatcher alone may correctly leave
+    // the graph in the intermediate `resolving` phase.
+    await receiver.whenRfc64CatalogSupervisorsIdleV1();
 
     await expect(receiver.readRfc64CatalogOperationalStatusV1()).resolves.toContainEqual(
       expect.objectContaining({

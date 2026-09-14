@@ -15,6 +15,7 @@ import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent as RealDKGAgent } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens } from '../../chain/test/hardhat-harness.js';
+import type { SelectResult } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
 type DKGAgent = RealDKGAgent;
@@ -32,6 +33,17 @@ const ENTITY_CTX_1 = 'urn:ctxgraph:entity:1';
 const ENTITY_CTX_2 = 'urn:ctxgraph:entity:2';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+/** Inspect exact persisted partitions while gossip finalization is writing. */
+async function readPhysicalPlacement(node: DKGAgent, sparql: string): Promise<SelectResult> {
+  const result = await node.store.query(sparql, {
+    source: 'test.e2eContextGraph.physicalPlacement',
+  });
+  if (result.type !== 'bindings') {
+    throw new Error(`Physical placement SELECT returned ${result.type} instead of bindings`);
+  }
+  return result;
+}
 
 async function stageRootlessAssertion(
   node: DKGAgent,
@@ -164,7 +176,7 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
 
     const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
 
-    const aData = await nodeA.query(
+    const aData = await readPhysicalPlacement(nodeA,
       `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_CTX_1}> <http://schema.org/name> ?name } }`,
     );
     expect(aData.bindings.length).toBe(1);
@@ -180,14 +192,24 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
 
   it('B receives finalization and promotes to context graph', async () => {
     const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
+    const ctxMetaGraph = `${ctxDataGraph}/_meta`;
 
     const deadline = Date.now() + 20_000;
-    let bData: any;
+    let bData: SelectResult = { type: 'bindings', bindings: [] };
     while (Date.now() < deadline) {
-      bData = await nodeB.query(
-        `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_CTX_1}> <http://schema.org/name> ?name } }`,
-      );
-      if (bData.bindings.length > 0) break;
+      const [data, metadata] = await Promise.all([
+        readPhysicalPlacement(nodeB,
+          `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_CTX_1}> <http://schema.org/name> ?name } }`,
+        ),
+        readPhysicalPlacement(nodeB,
+          `SELECT ?status WHERE { GRAPH <${ctxMetaGraph}> { ?kc <http://dkg.io/ontology/status> ?status } }`,
+        ),
+      ]);
+      bData = data;
+      if (
+        bData.bindings.length > 0
+        && metadata.bindings.some((row) => row['status'] === '"confirmed"')
+      ) break;
       await sleep(500);
     }
 
@@ -198,7 +220,7 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
   it('B has confirmed metadata in context graph meta', async () => {
     const ctxMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}/_meta`;
 
-    const metaResult = await nodeB.query(
+    const metaResult = await readPhysicalPlacement(nodeB,
       `SELECT ?status WHERE { GRAPH <${ctxMetaGraph}> { ?kc <http://dkg.io/ontology/status> ?status } }`,
     );
 
@@ -259,7 +281,7 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
     const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
 
     // Both entities in context graph on A
-    const data = await nodeA.query(
+    const data = await readPhysicalPlacement(nodeA,
       `SELECT ?s ?name WHERE { GRAPH <${ctxDataGraph}> { ?s <http://schema.org/name> ?name } }`,
     );
     const names = data.bindings.map((b: any) => String(b['name']));
@@ -277,7 +299,7 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
     const deadline = Date.now() + 20_000;
     let bData: any;
     while (Date.now() < deadline) {
-      bData = await nodeB.query(
+      bData = await readPhysicalPlacement(nodeB,
         `SELECT ?s ?name WHERE { GRAPH <${ctxDataGraph}> { ?s <http://schema.org/name> ?name } }`,
       );
       if (bData.bindings.length >= 2) break;
@@ -365,21 +387,50 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
       expect(result.status).toBe('confirmed');
 
       const ctxDataGraph = `did:dkg:context-graph:${SAMEG_LABEL}/context/${samegOnChainId}`;
+      const rootDataGraph = `did:dkg:context-graph:${SAMEG_LABEL}`;
+      const rootMeta = `${rootDataGraph}/_meta`;
+      const perCgIdMeta = `${ctxDataGraph}/_meta`;
 
-      // Wait for B's gossip recipient finalization to land.
+      // Wait for every physical copy required by recipient finalization.
+      // Data can arrive before confirmed metadata; do not use chain-query
+      // latency as an implicit wait for the remaining copies.
       const deadline = Date.now() + 25_000;
-      let bPerCgIdData: any;
+      let bRootStoredData: SelectResult = { type: 'bindings', bindings: [] };
+      let bPerCgIdData: SelectResult = { type: 'bindings', bindings: [] };
+      let rootMetaSelect: SelectResult = { type: 'bindings', bindings: [] };
+      let perCgIdMetaSelect: SelectResult = { type: 'bindings', bindings: [] };
       while (Date.now() < deadline) {
-        bPerCgIdData = await nodeB.query(
-          `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_SAMEG}> <http://schema.org/name> ?name } }`,
-        );
-        if (bPerCgIdData.bindings.length > 0) break;
+        [bRootStoredData, bPerCgIdData, rootMetaSelect, perCgIdMetaSelect] = await Promise.all([
+          readPhysicalPlacement(nodeB,
+            `SELECT ?name WHERE { GRAPH <${rootDataGraph}> { <${ENTITY_SAMEG}> <http://schema.org/name> ?name } }`,
+          ),
+          readPhysicalPlacement(nodeB,
+            `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_SAMEG}> <http://schema.org/name> ?name } }`,
+          ),
+          readPhysicalPlacement(nodeB,
+            `SELECT ?status WHERE { GRAPH <${rootMeta}> { <${result.ual}> <http://dkg.io/ontology/status> ?status } }`,
+          ),
+          readPhysicalPlacement(nodeB,
+            `SELECT ?status WHERE { GRAPH <${perCgIdMeta}> { <${result.ual}> <http://dkg.io/ontology/status> ?status } }`,
+          ),
+        ]);
+        if (
+          bRootStoredData.bindings.some((row) => row['name'] === '"Same-Graph Entity"')
+          && bPerCgIdData.bindings.some((row) => row['name'] === '"Same-Graph Entity"')
+          && rootMetaSelect.bindings.some((row) => row['status'] === '"confirmed"')
+          && perCgIdMetaSelect.bindings.some((row) => row['status'] === '"confirmed"')
+        ) break;
         await sleep(500);
       }
       // Per-cgId partition copy MUST be present (the legacy
       // single-write path was always landing here even before PR #779).
       expect(bPerCgIdData.bindings.length).toBe(1);
       expect(bPerCgIdData.bindings[0]['name']).toBe('"Same-Graph Entity"');
+
+      // Prove the exact root copy independently of query routing, which can
+      // include additional same-CG partitions for a label-scoped request.
+      expect(bRootStoredData.bindings.length).toBe(1);
+      expect(bRootStoredData.bindings[0]['name']).toBe('"Same-Graph Entity"');
 
       // Root <cg> copy is the PR #779 fix: label-scoped query on B (no
       // graphSuffix, no per-cgId hint) MUST resolve too. This catches
@@ -399,25 +450,12 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
       // meta graphs so label-only status / UAL / authoredBy lookups
       // converge between publisher and replicas. This is the meta
       // dual-write addition that landed alongside the data dual-write.
-      // Use SELECT-shaped queries (the agent's `query()` API returns
-      // `{ bindings: [{ result: 'true'|'false' }] }` for ASK queries
-      // to keep the response shape uniform across the deny path —
-      // see `emptyQueryResultForKind` rationale at dkg-agent.ts
-      // ~9338).
-      const rootMeta = `did:dkg:context-graph:${SAMEG_LABEL}/_meta`;
-      const perCgIdMeta = `did:dkg:context-graph:${SAMEG_LABEL}/context/${samegOnChainId}/_meta`;
-      const rootMetaSelect = await nodeB.query(
-        `SELECT ?status WHERE { GRAPH <${rootMeta}> { <${result.ual}> <http://dkg.io/ontology/status> ?status } }`,
-      );
-      const rootStatuses = rootMetaSelect.bindings.map((b: any) => String(b['status']));
+      const rootStatuses = rootMetaSelect.bindings.map((b) => String(b['status']));
       expect(
         rootStatuses.some((s: string) => s === '"confirmed"'),
         'PR #779: same-graph publish recipient MUST dual-write confirmed _meta to ROOT meta graph too',
       ).toBe(true);
-      const perCgIdMetaSelect = await nodeB.query(
-        `SELECT ?status WHERE { GRAPH <${perCgIdMeta}> { <${result.ual}> <http://dkg.io/ontology/status> ?status } }`,
-      );
-      const perCgStatuses = perCgIdMetaSelect.bindings.map((b: any) => String(b['status']));
+      const perCgStatuses = perCgIdMetaSelect.bindings.map((b) => String(b['status']));
       expect(perCgStatuses.some((s: string) => s === '"confirmed"')).toBe(true);
     }, 90_000);
   });

@@ -459,6 +459,22 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     });
   });
 
+  it('round-trips durable local context-graph origins through the daemon DashboardDB wiring', async () => {
+    const record = {
+      contextGraphId: 'rfc64-local-origin-daemon-wiring',
+      source: 'local-create',
+      createdAt: 1_789_386_000_000,
+    };
+
+    await captureCreateArg({}, async (createArg) => {
+      const store = createArg.contextGraphMembershipStore;
+      expect(store).toBeDefined();
+      await expect(store.loadLocalOrigins()).resolves.toEqual([]);
+      await store.recordLocalOrigin(record);
+      await expect(store.loadLocalOrigins()).resolves.toEqual([record]);
+    });
+  });
+
   it('passes resolved default StorageACK timing into DKGAgent.create when config is unset', async () => {
     const createArg = await captureCreateArg();
 

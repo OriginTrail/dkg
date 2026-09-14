@@ -4,7 +4,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 
 import type { Rfc64PublicCatalogServiceV1 } from './public-catalog-service-v1.js';
 import type {
-  Rfc64CatalogWorkloadOwnerV1,
+  Rfc64CatalogRefreshableWorkloadOwnerV1,
   Rfc64PublicCatalogRuntimeOwnerV1,
 } from './catalog-runtime-v1.js';
 import { Rfc64AuthorityReadCoordinatorV1 } from
@@ -24,7 +24,7 @@ export interface Rfc64PublicCatalogWorkloadOwnerOptionsV1<
   readonly createService: (
     ctx: OperationContext,
   ) => Service | null;
-  readonly authorityRefresh: Rfc64CatalogWorkloadOwnerV1;
+  readonly authorityRefresh: Rfc64CatalogRefreshableWorkloadOwnerV1;
   readonly authorityReads?: Rfc64AuthorityReadCoordinatorV1;
   readonly onServiceStarted: (ctx: OperationContext) => void;
 }
@@ -52,6 +52,11 @@ implements Rfc64PublicCatalogRuntimeOwnerV1 {
 
   get authorityReads(): Rfc64AuthorityReadCoordinatorV1 {
     return this.#authorityReads;
+  }
+
+  /** Coalesce lifecycle nudges into the authority owner's next explicit pass. */
+  requestAuthorityRefresh(): void {
+    this.#options.authorityRefresh.trigger();
   }
 
   start(ctx: OperationContext): void {

@@ -537,12 +537,65 @@ export interface ContextGraphAuthoritySnapshot {
   readonly sourceBlockHash: string;
 }
 
-/** Explicit daemon-local authority-index scheduling surface. */
+/** Internal physical projection size used by production authority-index readers. */
+export const CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS = 4_096;
+
+/**
+ * Logical finalized-authority capability. Callers provide the complete target
+ * set for one operation; the chain implementation owns validation, physical
+ * chunking, projection, and the single finalized anchor.
+ */
 export interface ContextGraphAuthorityIndexRevisionReader {
+  /**
+   * Resolve one RFC-64 authority binding at the index's finalized anchor.
+   * This intentionally differs from the public current-state name resolver.
+   */
+  resolveFinalizedContextGraphIdByNameHash?(
+    nameHash: string,
+    options?: ChainReadOptions,
+  ): Promise<bigint | null>;
+  /**
+   * Resolve many unique name commitments from one finalized index projection.
+   * Missing and zero-hash commitments are omitted; ambiguity fails closed.
+   */
+  resolveFinalizedContextGraphIdsByNameHashes?(
+    nameHashes: readonly string[],
+    options?: ChainReadOptions,
+  ): Promise<ReadonlyMap<string, bigint>>;
+  /**
+   * Resolve a name commitment and its complete authority state atomically at
+   * one finalized anchor. RFC-64 consumers should prefer this over composing
+   * the single-name ID resolver with a later snapshot read.
+   */
+  resolveFinalizedContextGraphAuthoritySnapshotByNameHash?(
+    nameHash: string,
+    options?: ChainReadOptions,
+  ): Promise<ContextGraphAuthoritySnapshot | null>;
+  /**
+   * Resolve many name commitments and their complete authority state from one
+   * finalized index projection. Missing and zero-hash commitments are omitted;
+   * ambiguity fails the whole projection closed.
+   */
+  resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes?(
+    nameHashes: readonly string[],
+    options?: ChainReadOptions,
+  ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>;
   readContextGraphAuthorityIndexRevisions(
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
     options?: ChainReadOptions,
   ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
+  /**
+   * Read complete authority snapshots for many graphs at one finalized anchor.
+   * Responsibility selection and immediate authority acceptance share this
+   * projection. Optional so older/custom adapters retain their point-read path.
+   */
+  readContextGraphAuthorityIndexSnapshots?(
+    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
+    options?: ChainReadOptions,
+  ): Promise<ReadonlyMap<
+    ContextGraphAuthorityIndexId,
+    ContextGraphAuthoritySnapshot
+  >>;
   /** Await the physical shared-index scans underlying detached/cancelled waiters. */
   whenIdle(): Promise<void>;
 }
@@ -2308,6 +2361,20 @@ export interface ChainAdapter {
     nameHash: string,
     options?: ChainReadOptions,
   ): Promise<bigint | null>;
+
+  /**
+   * Request-scoped bulk equivalent of the exact current name-hash lookup.
+   * Returns every unique lowercase bytes32 key supplied by the caller,
+   * including null for proven misses. A partial or ambiguous batch MUST reject.
+   * Absence from a returned map is never proof of non-registration.
+   * Implementations page historical creation inventory by block range and
+   * share fences across the complete input batch. They must not reuse a
+   * persistent negative snapshot for an independent call.
+   */
+  resolveContextGraphIdsByNameHashes?(
+    nameHashes: readonly string[],
+    options?: ChainReadOptions,
+  ): Promise<ReadonlyMap<string, bigint | null>>;
 }
 
 // ----- Backward-compat deprecated aliases -----

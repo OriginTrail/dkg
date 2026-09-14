@@ -1,3 +1,4 @@
+import { normalizeContextGraphNameHashBatch } from './context-graph-name-hash-resolver.js';
 import type {
   ChainAdapter,
   IdentityProof,
@@ -1957,6 +1958,25 @@ export class MockChainAdapter implements ChainAdapter {
       );
     }
     return matches[0];
+  }
+
+  async resolveContextGraphIdsByNameHashes(
+    nameHashes: readonly string[],
+    options: ChainReadOptions = {},
+  ): Promise<ReadonlyMap<string, bigint | null>> {
+    options.signal?.throwIfAborted();
+    const names = normalizeContextGraphNameHashBatch(nameHashes);
+    const bindings = new Map<string, bigint | null>(names.map((name) => [name, null]));
+    for (const [id, graph] of this.contextGraphs) {
+      options.signal?.throwIfAborted();
+      const name = graph.nameHash?.toLowerCase();
+      if (!name || name === ethers.ZeroHash || !bindings.has(name)) continue;
+      if (bindings.get(name) !== null) {
+        throw new Error(`resolveContextGraphIdsByNameHashes: ambiguous ${name}`);
+      }
+      bindings.set(name, id);
+    }
+    return bindings;
   }
 
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---

@@ -46,6 +46,7 @@
 import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, writeFile, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -1826,13 +1827,12 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
       'owning identity sees the seeded triple (proves A-1 isolation is active)',
     async () => {
       const d = daemon!;
-      const cgId = 'a1-wm-http-' + Math.random().toString(36).slice(2, 8);
-      const create = await fetch(urlFor(d, '/api/context-graph/create'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders(d) },
-        body: JSON.stringify({ id: cgId, name: cgId }),
-      });
-      expect([200, 201]).toContain(create.status);
+      // This test exercises WM identity isolation, so use a system CG whose
+      // read authority is local and deterministic. A newly created ordinary
+      // CG first probes the shared Hardhat name registry; under shard load that
+      // probe can hit its 2.5 s fail-closed timeout, making both the cross-agent
+      // and owner reads return an unrelated empty result.
+      const cgId = SYSTEM_CONTEXT_GRAPHS.ONTOLOGY;
 
       // Codex review on PR #242: without seeded data in A's WM, an
       // empty `cross.bindings` is meaningless — it'd pass even if
@@ -1898,6 +1898,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
         contextGraphId: cgId,
         view: 'working-memory',
         agentAddress: defaultAgentAddress,
+        assertionName,
       });
       expect(cross.status).toBe(200);
       expect(cross.body?.result?.bindings ?? []).toEqual([]);
@@ -1916,6 +1917,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
           contextGraphId: cgId,
           view: 'working-memory',
           agentAddress: defaultAgentAddress,
+          assertionName,
         }),
       });
       expect(adminRes.status).toBe(200);
@@ -1943,6 +1945,7 @@ describe('A-1 — /api/query enforces working-memory isolation across agent toke
           contextGraphId: cgId,
           view: 'working-memory',
           agentAddress: agentB.agentAddress,
+          assertionName,
         }),
       });
       expect(

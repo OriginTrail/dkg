@@ -38,12 +38,9 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
     config: {},
     queryEngine: stubEngine,
     subscribedContextGraphs: new Set<string>(),
-    // `query()` falls through to `canReadContextGraph` / `isPrivateContextGraph`
-    // / `sparqlReferencesPrivateGraphs` — stub to "allow everything" so
-    // the code path reaches the `queryEngine.query(...)` call site.
+    // These scoped queries must reach the engine to verify option forwarding.
     canReadContextGraph: async () => true,
     isPrivateContextGraph: async () => false,
-    sparqlReferencesPrivateGraphs: () => false,
     listPrivateContextGraphIdsNotReadableBy: async () => [],
   });
   // `peerId` on DKGAgent is exposed via a getter — `Object.assign`

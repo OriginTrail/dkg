@@ -15,6 +15,7 @@ export const CREATION_HASH = `0x${'66'.repeat(32)}`;
 export const POLICY_HASH = `0x${'77'.repeat(32)}`;
 export const NEXT_POLICY_HASH = `0x${'78'.repeat(32)}`;
 export const NAME_HASH = `0x${'88'.repeat(32)}`;
+export const LATE_NAME_HASH = `0x${'8a'.repeat(32)}`;
 
 interface AuthorityScenarioCurrentState {
   owner: string;
@@ -170,6 +171,8 @@ export interface AuthorityScenarioOptions {
   readonly deactivated?: boolean;
   readonly reorg?: boolean;
   readonly secondContextGraph?: boolean;
+  readonly zeroHashContextGraphs?: number;
+  readonly lateContextGraphNameHash?: string;
 }
 
 export interface AuthorityScenarioGate {
@@ -311,6 +314,20 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
         index: 0,
         contextGraphId: 9n,
       }] : []),
+      ...Array.from({ length: options.zeroHashContextGraphs ?? 0 }, (_, index) => ({
+        name: 'ContextGraphCreated' as const,
+        blockNumber: 25,
+        blockHash: `0x${'bd'.repeat(32)}`,
+        index,
+        contextGraphId: 20n + BigInt(index),
+        owner: MEMBER,
+        nameHash: ethers.ZeroHash,
+        participantAgents: [MEMBER],
+        accessPolicy: 1n,
+        publishPolicy: 0n,
+        publishAuthority: SECOND_AUTHORITY,
+        publishAuthorityAccountId: 0n,
+      })),
       {
         name: 'PublishPolicyUpdated',
         blockNumber: 33,
@@ -321,6 +338,20 @@ export function createAuthorityScenario(options: AuthorityScenarioOptions = {}) 
         publishAuthority: ethers.ZeroAddress,
         publishAuthorityAccountId: 0n,
       },
+      ...(options.lateContextGraphNameHash === undefined ? [] : [{
+        name: 'ContextGraphCreated' as const,
+        blockNumber: 33,
+        blockHash: NEXT_POLICY_HASH,
+        index: 1,
+        contextGraphId: 11n,
+        owner: MEMBER,
+        nameHash: options.lateContextGraphNameHash,
+        participantAgents: [MEMBER],
+        accessPolicy: 1n,
+        publishPolicy: 0n,
+        publishAuthority: SECOND_AUTHORITY,
+        publishAuthorityAccountId: 8n,
+      }]),
     ];
     if (!replacementAuthorityFork) return rows;
     return rows.filter((row) => (

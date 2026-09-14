@@ -535,6 +535,17 @@ describe('kafka-plugin live daemon E2E — extension', () => {
     const body = await res.json();
     expect(typeof body.captureID).toBe('string');
     const final = await pollUntilFinalized(daemon!, '/api/kafka/streams', body.captureID);
+    if (!['finalized', 'completed'].includes(final.state)) {
+      const [edgeLog, coreLog] = await Promise.all([
+        readFile(join(daemon!.home, 'daemon-stdio.log'), 'utf-8').catch(() => '<no edge log>'),
+        readFile(join(core!.home, 'daemon-stdio.log'), 'utf-8').catch(() => '<no core log>'),
+      ]);
+      throw new Error(
+        `Expected extension publication to finalize; got ${final.state} error=${final.error}\n` +
+        `--- edge daemon log tail ---\n${edgeLog.split('\n').slice(-100).join('\n')}\n` +
+        `--- core daemon log tail ---\n${coreLog.split('\n').slice(-100).join('\n')}`,
+      );
+    }
     expect(['finalized', 'completed']).toContain(final.state);
     expect(final.ual).toBeTruthy();
     const get = await authed(daemon!, 'GET', `/api/kafka/streams/${encodeURIComponent(final.ual!)}`);

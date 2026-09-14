@@ -21,14 +21,19 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     } = fixture([]);
     setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n);
     const historical = vi.spyOn(
-      fence as unknown as { resolveHistorical: (nameHash: string) => Promise<bigint | null> },
-      'resolveHistorical',
-    ).mockResolvedValue(77n);
+      fence as unknown as {
+        resolveHistoricalMany: (
+          nameHashes: readonly string[],
+          historicalNameHashFilter: string | null,
+        ) => Promise<ReadonlyMap<string, bigint | null>>;
+      },
+      'resolveHistoricalMany',
+    ).mockResolvedValue(new Map([[NAME_HASH, 77n]]));
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(77n);
     expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(1);
     expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(0);
-    expect(historical).toHaveBeenCalledWith(NAME_HASH);
+    expect(historical).toHaveBeenCalledWith([NAME_HASH], NAME_HASH);
   });
 
   it('falls back to exact-topic deploy-anchored pages and verifies the live slot', async () => {
@@ -273,7 +278,7 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     expect(scenario.getNameHash).toHaveBeenCalledWith(42n);
   });
 
-  it('discards a historical result when the adapter binding rotates mid-scan', async () => {
+  it('discards and retries a historical result when the adapter binding rotates mid-scan', async () => {
     const fixture = historicalFixture([[42n]]);
     fixture.queryEventLogsPage.mockImplementationOnce(async () => {
       fixture.adapter.invalidatePublishPreflightCache();
@@ -283,10 +288,10 @@ describe('historical Context Graph name-hash reverse resolution', () => {
       };
     });
 
-    await expect(fixture.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /binding changed during (?:historical scan|current-slot resolution)/i,
-    );
-    expect(fixture.getNameHash).not.toHaveBeenCalled();
+    await expect(fixture.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(42n);
+    expect(fixture.queryEventLogsPage).toHaveBeenCalledTimes(2);
+    expect(fixture.getNameHash).toHaveBeenCalledTimes(1);
+    expect(fixture.getNameHash).toHaveBeenCalledWith(42n);
   });
 
   it('discards a historical result when its canonical head changes mid-scan', async () => {

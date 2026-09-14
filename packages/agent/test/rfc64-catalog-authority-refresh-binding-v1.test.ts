@@ -10,6 +10,8 @@ import {
   createRfc64CatalogAuthorityRefreshOwnerV1,
   createRfc64CatalogAuthorityRevisionSourceV1,
 } from '../src/rfc64/catalog-authority-refresh-binding-v1.js';
+import { Rfc64AuthorityReadCoordinatorV1 } from
+  '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 import { Rfc64CatalogAuthorityRevisionReadFailureV1 } from
   '../src/rfc64/catalog-authority-refresh-loop-v1.js';
 import type { Rfc64CatalogExecutionPlanV1 } from
@@ -122,5 +124,54 @@ describe('RFC-64 catalog authority refresh construction binding', () => {
       cause: failure,
       fallbackContextGraphIds: ['unbound'],
     });
+  });
+
+  it('does not release the authority lane until a detached physical scan is idle', async () => {
+    const coordinator = new Rfc64AuthorityReadCoordinatorV1();
+    const controller = new AbortController();
+    const cancellation = new Error('caller cancelled authority refresh');
+    let releasePhysicalScan!: () => void;
+    let markFirstReadStarted!: () => void;
+    const physicalScan = new Promise<void>((resolve) => { releasePhysicalScan = resolve; });
+    const firstReadStarted = new Promise<void>((resolve) => { markFirstReadStarted = resolve; });
+    let calls = 0;
+    const reader: ContextGraphAuthorityIndexRevisionReader = {
+      readContextGraphAuthorityIndexRevisions: vi.fn(async (_ids, options) => {
+        calls += 1;
+        if (calls > 1) {
+          return new Map<ContextGraphAuthorityIndexId, string>([
+            ['9' as ContextGraphAuthorityIndexId, REVISION_9],
+          ]);
+        }
+        markFirstReadStarted();
+        await new Promise<never>((_resolve, reject) => {
+          const signal = options?.signal;
+          const onAbort = () => reject(signal?.reason ?? cancellation);
+          signal?.addEventListener('abort', onAbort, { once: true });
+          if (signal?.aborted) onAbort();
+        });
+      }),
+      whenIdle: vi.fn(async () => { await physicalScan; }),
+    };
+    const source = createRfc64CatalogAuthorityRevisionSourceV1({
+      revisionReader: reader,
+      resolveBinding: () => '9',
+      runAuthorityRead: (signal, read) => coordinator.run(signal, read),
+    })!;
+
+    const first = source.read(['first'], controller.signal);
+    await firstReadStarted;
+    controller.abort(cancellation);
+    await expect(first).rejects.toBe(cancellation);
+
+    const second = source.read(['second'], new AbortController().signal);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+
+    releasePhysicalScan();
+    await expect(second).resolves.toEqual(new Map([['second', REVISION_9]]));
+    expect(calls).toBe(2);
+    await coordinator.close();
   });
 });
