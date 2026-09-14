@@ -503,7 +503,18 @@ const rfc64AuthorityAcceptedCatchupTimersV1 =
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64ResponsibilityAuthorityBatchRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1>();
+interface Rfc64ScheduledResponsibilityStateV1 {
+  readonly targets: Map<string, number>;
+  activityRevision: number;
+  producerHolds: number;
+}
+const rfc64ScheduledResponsibilityStatesV1 =
+  new WeakMap<DKGAgent, Rfc64ScheduledResponsibilityStateV1>();
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
+const RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1 = 'responsibility-batch';
+const RFC64_SCHEDULED_RESPONSIBILITY_QUIET_MS_V1 = 25;
+const RFC64_SCHEDULED_RESPONSIBILITY_MAX_COALESCE_MS_V1 = 1_000;
+const RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1 = 30_000;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
@@ -1105,6 +1116,41 @@ function isCurrentRfc64CatalogResponsibilityRevisionV1(
   revision: number,
 ): boolean {
   return rfc64CatalogResponsibilityRevisionsV1.get(agent)?.get(contextGraphId) === revision;
+}
+
+function rfc64ScheduledResponsibilityStateForV1(
+  agent: DKGAgent,
+): Rfc64ScheduledResponsibilityStateV1 {
+  let state = rfc64ScheduledResponsibilityStatesV1.get(agent);
+  if (state === undefined) {
+    state = { targets: new Map(), activityRevision: 0, producerHolds: 0 };
+    rfc64ScheduledResponsibilityStatesV1.set(agent, state);
+  }
+  return state;
+}
+
+function waitForRfc64ScheduledResponsibilityDelayV1(
+  signal: AbortSignal,
+  delayMs: number,
+): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    timer.unref?.();
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(signal.reason ?? new DOMException(
+        'RFC-64 scheduled responsibility retry aborted',
+        'AbortError',
+      ));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
 }
 
 function setRfc64CatalogAuthorityProgressV1(
@@ -2113,6 +2159,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (
         snapshot === null
         || !snapshot.active
+        || snapshot.contextGraphId !== onChainId
         || snapshot.nameHash !== this.contextGraphWireId(expectedNameHash)
       ) return null;
       return snapshot.accessPolicy === 0
@@ -2135,7 +2182,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     ownerSignal: AbortSignal,
-    options: Readonly<{ deferRegisteredAuthority?: boolean }> = {},
+    options: Readonly<{
+      deferRegisteredAuthority?: boolean;
+      revision?: number;
+      authorityRequest?: Rfc64CatalogAuthorityRefreshRequestV1;
+    }> = {},
   ): Promise<Rfc64CatalogResponsibilitySelectionV1> {
     const registry = rfc64CatalogResponsibilityRegistryForV1(
       this,
@@ -2164,12 +2215,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       }
       return transition.next;
     };
-    const revision = nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
+    const revision = options.revision
+      ?? nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
     if (
       rfc64SystemContextGraphIdsV1.has(contextGraphId)
       || subscription === undefined
     ) {
+      if (!isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
+        return registry.read(contextGraphId);
+      }
       return commit(null);
     }
 
@@ -2177,15 +2232,45 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       let accessPolicy = await this.getExplicitAccessPolicy(contextGraphId);
       let finalizedAuthorityEvidence:
         Rfc64FinalizedAuthoritySnapshotEvidenceV1 | undefined;
-      if (accessPolicy === null && subscription.onChainId !== undefined) {
+      let authorityIndexId = subscription.onChainId;
+      if (options.authorityRequest?.kind === 'finalized-evidence') {
+        finalizedAuthorityEvidence = options.authorityRequest.evidence;
+        const finalizedSnapshot = finalizedAuthorityEvidence.snapshot;
+        if (
+          authorityIndexId !== undefined
+          && finalizedAuthorityEvidence.contextGraphAuthorityIndexId !== authorityIndexId
+        ) {
+          throw new Error('RFC-64 scheduled responsibility evidence belongs to another graph');
+        }
+        authorityIndexId = finalizedAuthorityEvidence.contextGraphAuthorityIndexId;
+        const expectedNameHash = subscription.onChainHash
+          ?? this.contextGraphNameCommitment(contextGraphId);
+        if (
+          finalizedSnapshot === null
+          || finalizedSnapshot.contextGraphId !== authorityIndexId
+          || finalizedSnapshot.nameHash !== this.contextGraphWireId(expectedNameHash)
+        ) {
+          throw new Error('RFC-64 scheduled responsibility evidence has invalid identity');
+        }
+      } else if (
+        accessPolicy === null
+        && options.authorityRequest?.kind !== 'finalized-absence'
+        && authorityIndexId !== undefined
+      ) {
         finalizedAuthorityEvidence = await this
           .readRfc64FinalizedAuthoritySnapshotEvidenceV1(
-            subscription.onChainId,
+            authorityIndexId,
             ownerSignal,
           );
+      }
+      if (
+        accessPolicy === null
+        && authorityIndexId !== undefined
+        && options.authorityRequest?.kind !== 'finalized-absence'
+      ) {
         accessPolicy = await this.resolveRfc64CatalogResponsibilityAccessPolicyV1(
           contextGraphId,
-          subscription.onChainId,
+          authorityIndexId,
           ownerSignal,
           finalizedAuthorityEvidence,
         );
@@ -2203,6 +2288,31 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         return registry.read(contextGraphId);
       }
       const next = commit(reason);
+      if (
+        finalizedAuthorityEvidence?.snapshot !== null
+        && finalizedAuthorityEvidence?.snapshot !== undefined
+        && subscription.onChainId === undefined
+        && this.subscribedContextGraphs.get(contextGraphId) === subscription
+        && isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)
+      ) {
+        const finalizedSnapshot = finalizedAuthorityEvidence.snapshot;
+        const finalizedOnChainId = finalizedAuthorityEvidence
+          .contextGraphAuthorityIndexId;
+        const boundSubscription = {
+          ...subscription,
+          onChainHash: finalizedSnapshot.nameHash,
+        };
+        this.bindSubscriptionOnChainId(
+          contextGraphId,
+          boundSubscription,
+          finalizedOnChainId,
+        );
+        this.setContextGraphSubscription(contextGraphId, boundSubscription);
+        // The canonical setter advanced the responsibility revision. Its
+        // coalesced successor owns authority bootstrap against the durable
+        // binding; this pre-binding revision may not continue past it.
+        return registry.read(contextGraphId);
+      }
       if (
         responsibilityOwnsAuthorityWorkload
         && next.active
@@ -2265,16 +2375,155 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): boolean {
-    return this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
-      `responsibility\0${contextGraphId}`,
-      async (ownerSignal) => {
+    const state = rfc64ScheduledResponsibilityStateForV1(this);
+    const targets = state.targets;
+    const revision = nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
+    targets.set(contextGraphId, revision);
+    state.activityRevision += 1;
+    if (state.producerHolds > 0) return true;
+    const scheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+      RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1,
+      (ownerSignal) => this.runRfc64ScheduledCatalogResponsibilityBatchV1(ownerSignal),
+    );
+    if (!scheduled && targets.get(contextGraphId) === revision) {
+      targets.delete(contextGraphId);
+    }
+    return scheduled;
+  }
+
+  /** Keep one asynchronously produced startup inventory inside one selector pass. */
+  beginRfc64ScheduledCatalogResponsibilityBatchV1(this: DKGAgent): () => void {
+    const state = rfc64ScheduledResponsibilityStateForV1(this);
+    state.producerHolds += 1;
+    state.activityRevision += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      state.producerHolds = Math.max(0, state.producerHolds - 1);
+      state.activityRevision += 1;
+      if (state.producerHolds > 0 || state.targets.size === 0) return;
+      const scheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+        RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1,
+        (ownerSignal) => this.runRfc64ScheduledCatalogResponsibilityBatchV1(ownerSignal),
+      );
+      if (!scheduled) state.targets.clear();
+    };
+  }
+
+  /** One immutable scheduled selection set owns one finalized authority batch. */
+  private async runRfc64ScheduledCatalogResponsibilityBatchV1(
+    this: DKGAgent,
+    ownerSignal: AbortSignal,
+  ): Promise<void> {
+    const state = rfc64ScheduledResponsibilityStateForV1(this);
+    const pending = state.targets;
+    const coalesceDeadline = Date.now()
+      + RFC64_SCHEDULED_RESPONSIBILITY_MAX_COALESCE_MS_V1;
+    let observedActivityRevision = state.activityRevision;
+    try {
+      for (;;) {
+        await waitForRfc64ScheduledResponsibilityDelayV1(
+          ownerSignal,
+          RFC64_SCHEDULED_RESPONSIBILITY_QUIET_MS_V1,
+        );
+        if (
+          state.producerHolds === 0
+          && (
+            state.activityRevision === observedActivityRevision
+            || Date.now() >= coalesceDeadline
+          )
+        ) break;
+        observedActivityRevision = state.activityRevision;
+      }
+      ownerSignal.throwIfAborted();
+    } catch (error) {
+      if (ownerSignal.aborted) pending.clear();
+      throw error;
+    }
+    const targets = Object.freeze([...pending.entries()]);
+    for (const [contextGraphId, revision] of targets) {
+      if (pending.get(contextGraphId) === revision) pending.delete(contextGraphId);
+    }
+    if (targets.length === 0) return;
+
+    let requests: ReadonlyMap<string, Rfc64CatalogAuthorityRefreshRequestV1>;
+    try {
+      requests = await this.createRfc64CatalogAuthorityRefreshRequestsV1(
+        Object.freeze(targets.map(([contextGraphId]) => contextGraphId)),
+        ownerSignal,
+      );
+      ownerSignal.throwIfAborted();
+      for (const [contextGraphId] of targets) {
+        if (!requests.has(contextGraphId)) {
+          throw new Error(
+            `RFC-64 scheduled responsibility batch omitted Context Graph "${contextGraphId}"`,
+          );
+        }
+      }
+    } catch (error) {
+      if (ownerSignal.aborted) {
+        pending.clear();
+        throw ownerSignal.reason ?? error;
+      }
+      try {
+        await waitForRfc64ScheduledResponsibilityDelayV1(
+          ownerSignal,
+          RFC64_SCHEDULED_RESPONSIBILITY_RETRY_MS_V1,
+        );
+        ownerSignal.throwIfAborted();
+      } catch (retryError) {
+        if (ownerSignal.aborted) pending.clear();
+        throw retryError;
+      }
+      for (const [contextGraphId, revision] of targets) {
+        if (
+          isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)
+          && !pending.has(contextGraphId)
+        ) {
+          pending.set(contextGraphId, revision);
+        }
+      }
+      this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+        RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1,
+        (signal) => this.runRfc64ScheduledCatalogResponsibilityBatchV1(signal),
+      );
+      throw error;
+    }
+
+    for (const [contextGraphId, revision] of targets) {
+      if (ownerSignal.aborted) {
+        pending.clear();
+        throw ownerSignal.reason;
+      }
+      if (!isCurrentRfc64CatalogResponsibilityRevisionV1(
+        this,
+        contextGraphId,
+        revision,
+      )) continue;
+      try {
         await this.reconcileRfc64CatalogResponsibilityCoreV1(
           contextGraphId,
           ownerSignal,
-          { deferRegisteredAuthority: true },
+          {
+            deferRegisteredAuthority: true,
+            revision,
+            authorityRequest: requests.get(contextGraphId)!,
+          },
         );
-      },
-    );
+      } catch (error) {
+        if (ownerSignal.aborted) {
+          pending.clear();
+          throw ownerSignal.reason ?? error;
+        }
+        this.log.warn(
+          createOperationContext('system'),
+          `RFC-64 background responsibility work failed for ${JSON.stringify(
+            `responsibility\0${contextGraphId}`,
+          )}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   }
 
   /** Test/operator fence for asynchronous access-policy responsibility reads. */

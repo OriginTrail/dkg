@@ -9,7 +9,9 @@ import {
   assertCanonicalGraphScopedAuthorSealV1,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
+  contextGraphDataGraphUri,
   createOperationContext,
+  DKG_ONTOLOGY,
   deriveCanonicalGraphScopedAuthorSealPlacementV1,
   encodeCanonicalCgSharedPublicRootProjectionV1,
   projectCanonicalGraphScopedAuthorSealRowsV1,
@@ -2486,6 +2488,427 @@ describe('RFC-64 rollout authority integration', () => {
       }),
     ]);
     expect(requestReplays).toHaveBeenCalledWith(contextGraphId);
+  });
+
+  it('coalesces many scheduled responsibility notifications into one finalized batch', async () => {
+    const targets = Array.from({ length: 12 }, (_, index) => {
+      const contextGraphId = `${AUTHOR}/scheduled-responsibility-${index}`;
+      return Object.freeze({
+        contextGraphId,
+        onChainId: String(index + 9),
+        nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+      });
+    });
+    const missing = targets.at(-1)!;
+    const privateTarget = targets.at(-2)!;
+    const inactiveTarget = targets.at(-3)!;
+    const explicitPolicyTarget = targets.at(-4)!;
+    const conflictingBindingTarget = targets.at(-5)!;
+    const nameMismatchTarget = targets.at(-6)!;
+    const idMismatchTarget = targets.at(-7)!;
+    const snapshotsByNameHash = new Map(targets.slice(0, -1).map((target) => [
+      target.nameHash,
+      Object.freeze({
+        ...finalizedAuthoritySnapshot(target.contextGraphId, [], '0'),
+        contextGraphId: target === idMismatchTarget
+          ? `0${target.onChainId}`
+          : target.onChainId,
+        active: target !== inactiveTarget,
+        accessPolicy: target === privateTarget ? 1 : 0,
+        nameHash: target === nameMismatchTarget ? `0x${'55'.repeat(32)}` : target.nameHash,
+      }),
+    ]));
+    const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => new Map(
+      nameHashes.flatMap((nameHash) => {
+        const snapshot = snapshotsByNameHash.get(nameHash);
+        return snapshot === undefined ? [] : [[nameHash, snapshot] as const];
+      }),
+    ));
+    const scalarNameResolution = vi.fn(async () => {
+      throw new Error('scheduled responsibility must not fan out scalar name resolution');
+    });
+    const scalarSnapshot = vi.fn(async () => {
+      throw new Error('scheduled responsibility must not fan out scalar snapshots');
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      resolveContextGraphIdByNameHash: scalarNameResolution,
+      getContextGraphAuthoritySnapshot: scalarSnapshot,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-batch',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+    const requestAuthorityRefresh = vi.spyOn(
+      (edge as any).rfc64PublicCatalogOwnerV1,
+      'requestAuthorityRefresh',
+    ).mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockImplementation(async (contextGraphId) => (
+      contextGraphId === explicitPolicyTarget.contextGraphId ? 'public' : null
+    ));
+    const legacyPolicy = vi.spyOn(edge, 'getContextGraphOnChainPolicy')
+      .mockRejectedValue(new Error('finalized responsibility must not use current policy'));
+    const privateMembership = vi.spyOn(edge, 'hasRfc64VerifiedPrivateMembershipV1')
+      .mockResolvedValue(false);
+
+    for (const target of targets) edge.subscribeToContextGraph(target.contextGraphId);
+    const conflictingSubscription = edge.getSubscribedContextGraphs()
+      .get(conflictingBindingTarget.contextGraphId);
+    expect(conflictingSubscription).toBeDefined();
+    (edge as any).bindSubscriptionOnChainId(
+      conflictingBindingTarget.contextGraphId,
+      conflictingSubscription,
+      '999',
+    );
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(resolveSnapshots).toHaveBeenCalledTimes(2);
+    expect(new Set(resolveSnapshots.mock.calls[0]![0])).toEqual(
+      new Set(targets.map(({ nameHash }) => nameHash)),
+    );
+    expect(new Set(resolveSnapshots.mock.calls[1]![0])).toEqual(
+      new Set(targets
+        .filter((target) => ![
+          missing,
+          conflictingBindingTarget,
+          nameMismatchTarget,
+          idMismatchTarget,
+        ].includes(target))
+        .map(({ nameHash }) => nameHash)),
+    );
+    expect(privateMembership).toHaveBeenCalledWith(privateTarget.contextGraphId);
+    expect(privateMembership).not.toHaveBeenCalledWith(missing.contextGraphId);
+    expect(edge.readRfc64CatalogResponsibilitiesV1().map(({ contextGraphId }) => (
+      contextGraphId
+    )).sort()).toEqual(targets
+      .filter((target) => target !== missing
+        && target !== privateTarget
+        && target !== inactiveTarget
+        && target !== conflictingBindingTarget
+        && target !== nameMismatchTarget
+        && target !== idMismatchTarget)
+      .map(({ contextGraphId }) => contextGraphId)
+      .sort());
+    expect(scalarNameResolution).not.toHaveBeenCalled();
+    expect(scalarSnapshot).not.toHaveBeenCalled();
+    expect(legacyPolicy).not.toHaveBeenCalled();
+    expect(requestAuthorityRefresh).toHaveBeenCalled();
+    for (const target of targets.filter((candidate) => ![
+      missing,
+      conflictingBindingTarget,
+      nameMismatchTarget,
+      idMismatchTarget,
+    ].includes(candidate))) {
+      expect(edge.getSubscribedContextGraphs().get(target.contextGraphId)).toMatchObject({
+        onChainId: target.onChainId,
+        onChainHash: target.nameHash,
+      });
+    }
+    expect(edge.getSubscribedContextGraphs().get(conflictingBindingTarget.contextGraphId))
+      .toMatchObject({ onChainId: '999' });
+    for (const target of [missing, nameMismatchTarget, idMismatchTarget]) {
+      expect(edge.getSubscribedContextGraphs().get(target.contextGraphId)?.onChainId)
+        .toBeUndefined();
+    }
+  });
+
+  it('defers an asynchronously produced thousand-target inventory into one batch', async () => {
+    const contextGraphIds = Array.from(
+      { length: 1_000 },
+      (_, index) => `${AUTHOR}/scheduled-inventory-${index}`,
+    );
+    const expectedNameHashes = contextGraphIds.map((contextGraphId) => (
+      ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase()
+    ));
+    const resolveSnapshots = vi.fn(async () => new Map());
+    const scalarNameResolution = vi.fn(async () => {
+      throw new Error('large scheduled inventory must not use scalar resolution');
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      resolveContextGraphIdByNameHash: scalarNameResolution,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-large-inventory',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+
+    const release = edge.beginRfc64ScheduledCatalogResponsibilityBatchV1();
+    try {
+      for (let index = 0; index < contextGraphIds.length; index++) {
+        edge.scheduleRfc64CatalogResponsibilityReconciliationV1(
+          contextGraphIds[index]!,
+        );
+        if ((index + 1) % 25 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      }
+      expect(resolveSnapshots).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(resolveSnapshots).toHaveBeenCalledOnce();
+    expect(new Set(resolveSnapshots.mock.calls[0]![0])).toEqual(
+      new Set(expectedNameHashes),
+    );
+    expect(scalarNameResolution).not.toHaveBeenCalled();
+  });
+
+  it('holds delayed store discovery auto-subscriptions in one responsibility batch', async () => {
+    const contextGraphIds = Array.from(
+      { length: 64 },
+      (_, index) => `${AUTHOR}/delayed-store-discovery-${index}`,
+    );
+    const expectedNameHashes = contextGraphIds.map((contextGraphId) => (
+      ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase()
+    ));
+    const snapshotsByNameHash = new Map(expectedNameHashes.map((nameHash, index) => [
+      nameHash,
+      Object.freeze({
+        ...finalizedAuthoritySnapshot(contextGraphIds[index]!, [], '0'),
+        contextGraphId: String(index + 200),
+        accessPolicy: 0,
+        nameHash,
+      }),
+    ]));
+    const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => new Map(
+      nameHashes.map((nameHash) => [nameHash, snapshotsByNameHash.get(nameHash)!]),
+    ));
+    const scalarNameResolution = vi.fn(async () => {
+      throw new Error('store discovery responsibility must not use scalar resolution');
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      resolveContextGraphIdByNameHash: scalarNameResolution,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const core = await startAgent({
+      name: 'scheduled-responsibility-store-discovery',
+      config: { chainAdapter, nodeRole: 'core' },
+    });
+    await core.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+    vi.spyOn((core as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(core, 'getExplicitAccessPolicy').mockResolvedValue(null);
+    vi.spyOn(core, 'isPrivateContextGraph').mockImplementation(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      return false;
+    });
+    await core.store.insert(contextGraphIds.map((contextGraphId) => ({
+      subject: contextGraphDataGraphUri(contextGraphId),
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+    })));
+
+    await expect(core.discoverContextGraphsFromStore()).resolves.toBe(64);
+    await core.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(resolveSnapshots).toHaveBeenCalledTimes(2);
+    expect(new Set(resolveSnapshots.mock.calls[0]![0])).toEqual(
+      new Set(expectedNameHashes),
+    );
+    expect(new Set(resolveSnapshots.mock.calls[1]![0])).toEqual(
+      new Set(expectedNameHashes),
+    );
+    expect(scalarNameResolution).not.toHaveBeenCalled();
+    for (const contextGraphId of contextGraphIds) {
+      expect(core.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+        subscribed: true,
+        onChainHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase(),
+      });
+    }
+  });
+
+  it('retries a failed scheduled batch without partial responsibility commits', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-batch-retry`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      contextGraphId: '91',
+      accessPolicy: 0,
+      nameHash,
+    });
+    let failNext = false;
+    const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => {
+      if (failNext) {
+        failNext = false;
+        throw new Error('temporary finalized index outage');
+      }
+      return new Map(nameHashes.includes(nameHash) ? [[nameHash, snapshot]] : []);
+    });
+    const scalarNameResolution = vi.fn(async () => {
+      throw new Error('scheduled batch retry must not fan out scalar resolution');
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      resolveContextGraphIdByNameHash: scalarNameResolution,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-retry',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+
+    vi.useFakeTimers();
+    try {
+      failNext = true;
+      edge.subscribeToContextGraph(contextGraphId);
+      await Promise.resolve();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(resolveSnapshots).toHaveBeenCalledOnce();
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+        expect.objectContaining({ contextGraphId }),
+      );
+
+      await vi.advanceTimersByTimeAsync(30_100);
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      expect(resolveSnapshots).toHaveBeenCalledTimes(3);
+      expect(edge.readRfc64CatalogResponsibilitiesV1()).toContainEqual(
+        expect.objectContaining({ contextGraphId, responsibilityReason: 'edge-subscription' }),
+      );
+      expect(edge.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+        onChainId: '91',
+        onChainHash: nameHash,
+      });
+      expect(scalarNameResolution).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fences a stale finalized batch after the subscription is removed', async () => {
+    const contextGraphId = `${AUTHOR}/scheduled-stale-unsubscribe`;
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
+    const snapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      contextGraphId: '92',
+      accessPolicy: 0,
+      nameHash,
+    });
+    let holdNext = false;
+    let releaseRead: (() => void) | undefined;
+    const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => {
+      if (holdNext) {
+        holdNext = false;
+        await new Promise<void>((resolve) => { releaseRead = resolve; });
+      }
+      return new Map(nameHashes.includes(nameHash) ? [[nameHash, snapshot]] : []);
+    });
+    const scalarNameResolution = vi.fn(async () => {
+      throw new Error('stale scheduled work must not use scalar resolution');
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      resolveContextGraphIdByNameHash: scalarNameResolution,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-stale-unsubscribe',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+
+    holdNext = true;
+    edge.subscribeToContextGraph(contextGraphId);
+    await vi.waitFor(() => expect(releaseRead).toBeDefined());
+    (edge as any).deleteContextGraphSubscription(contextGraphId);
+    releaseRead!();
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(edge.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
+      expect.objectContaining({ contextGraphId }),
+    );
+    expect(scalarNameResolution).not.toHaveBeenCalled();
+  });
+
+  it('clears failed scheduled targets when shutdown aborts retry before reopen', async () => {
+    const staleContextGraphId = `${AUTHOR}/scheduled-close-stale`;
+    const freshContextGraphId = `${AUTHOR}/scheduled-close-fresh`;
+    const staleNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(staleContextGraphId),
+    ).toLowerCase();
+    const freshNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(freshContextGraphId),
+    ).toLowerCase();
+    let rejectReads = false;
+    const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => {
+      if (rejectReads) throw new Error('finalized index remains unavailable');
+      return new Map(nameHashes.includes(freshNameHash) ? [[freshNameHash, Object.freeze({
+        ...finalizedAuthoritySnapshot(freshContextGraphId, [], '0'),
+        contextGraphId: '93',
+        accessPolicy: 0,
+        nameHash: freshNameHash,
+      })]] : []);
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'scheduled-responsibility-close-reopen',
+      config: { chainAdapter },
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+    vi.spyOn((edge as any).rfc64PublicCatalogOwnerV1, 'requestAuthorityRefresh')
+      .mockImplementation(() => undefined);
+    vi.spyOn(edge, 'getExplicitAccessPolicy').mockResolvedValue(null);
+
+    rejectReads = true;
+    edge.subscribeToContextGraph(staleContextGraphId);
+    await vi.waitFor(() => expect(resolveSnapshots).toHaveBeenCalledOnce());
+    (edge as any).deleteContextGraphSubscription(staleContextGraphId);
+    await edge.stop();
+
+    rejectReads = false;
+    await edge.start();
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    resolveSnapshots.mockClear();
+    edge.subscribeToContextGraph(freshContextGraphId);
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+
+    expect(resolveSnapshots).toHaveBeenCalled();
+    expect(resolveSnapshots.mock.calls.every(([nameHashes]) => (
+      !nameHashes.includes(staleNameHash)
+    ))).toBe(true);
+    expect(edge.getSubscribedContextGraphs().get(freshContextGraphId)).toMatchObject({
+      onChainId: '93',
+      onChainHash: freshNameHash,
+    });
   });
 
   it('keeps registered responsibility evidence scoped to each explicit consumer pass', async () => {

@@ -2079,63 +2079,83 @@ export class DKGAgent extends DKGAgentBase {
 
     this.log.debug(ctx, `Discovery scan found ${discoveredEntries.size} CG(s) in store`);
 
-    for (const { id, name, source, onChainId } of discoveredEntries.values()) {
+    // Private classification may await the store once per graph. Complete it
+    // before deferring scheduled responsibility work, so unrelated lifecycle
+    // notifications are not held behind a potentially long discovery scan.
+    const curatedById = new Map<string, boolean>();
+    for (const { id } of discoveredEntries.values()) {
       const existing = this.subscribedContextGraphs.get(id);
-      if (existing) {
-        // Enrich an existing active/hosted record and persist the binding. The
-        // central recorder deliberately does not reactivate an existing
-        // unsubscribed row, preserving explicit unsubscribe semantics.
-        this.recordDiscoveredContextGraph(id, { name, onChainId });
-        const current = this.subscribedContextGraphs.get(id) ?? existing;
-        // A restart re-seeds `subscribedContextGraphs` from persisted state but
-        // does NOT re-add the CG to the SWM-sync scope (`config.syncContextGraphs`,
-        // what `getSyncContextGraphs()` and sync-on-connect's shared-memory pass
-        // iterate). For a PRIVATE CG the member is a participant in, that means a
-        // reconnecting member would data-sync the CG but its on-connect SWM pass
-        // would never cover it — the curator-leader REPLACE gate never sees it, so
-        // the member stays stale forever. Re-track the sync scope here for curated
-        // CGs so this same connect cycle's `newlyDiscovered` set picks it up
-        // (refreshing its meta-synced flag) and the shared-memory pass recovers it.
-        // `trackSyncContextGraph` is idempotent, so public/already-scoped CGs are
-        // unaffected. Gate on `existing.subscribed`: `unsubscribeFromContextGraph`
-        // keeps the record but flips `subscribed` to false and drops the CG from
-        // `syncContextGraphs`, so re-tracking an explicitly-unsubscribed (or
-        // host-only) private CG here would silently undo that operator choice on
-        // every discovery scan. Only re-track CGs the node is still a live
-        // subscriber of.
-        if (current.subscribed && await this.isPrivateContextGraph(id) && this.trackSyncContextGraph(id)) {
-          this.log.info(ctx, `Re-tracked already-subscribed private CG "${id.slice(0, 28)}" into the SWM-sync scope on discovery`);
-        }
-        continue;
+      if (existing === undefined || existing.subscribed) {
+        curatedById.set(id, await this.isPrivateContextGraph(id));
       }
+    }
 
-      // Both public and curated definitions use the same role boundary:
-      //
-      // - Edge nodes catalogue the graph only. A user must explicitly
-      //   subscribe, create, write, or complete join-approved before the edge
-      //   installs gossip handlers and catch-up scope.
-      //
-      // - Core nodes auto-subscribe while core ACK custody still depends on
-      //   the member-subscription machinery. This is a compatibility bridge;
-      //   coreHosted remains an independent, ACK-proven durable obligation.
-      //   Remove this bridge only with the host-mode separation in #1611.
-      //
-      //   NOTE: we use `isPrivateContextGraph` (which reads the
-      //   ontology OR the _meta graph for `dkg:accessPolicy
-      //   "private"`, and also treats any CG with a `DKG_ALLOWED_
-      //   AGENT` allowlist as private) rather than
-      //   `source === 'meta'`, because the ontology-vs-meta
-      //   collision resolver above lets an ontology row shadow a
-      //   meta row when both exist for the same id.
-      const isCurated = await this.isPrivateContextGraph(id);
+    // Recording and the temporary Core auto-subscribe bridge are synchronous.
+    // Defer only this narrow producer burst so every discovered row enters one
+    // immutable finalized responsibility batch regardless of scan duration.
+    const releaseResponsibilityBatch =
+      this.beginRfc64ScheduledCatalogResponsibilityBatchV1();
+    try {
+      for (const { id, name, source, onChainId } of discoveredEntries.values()) {
+        const existing = this.subscribedContextGraphs.get(id);
+        if (existing) {
+          // Enrich an existing active/hosted record and persist the binding. The
+          // central recorder deliberately does not reactivate an existing
+          // unsubscribed row, preserving explicit unsubscribe semantics.
+          this.recordDiscoveredContextGraph(id, { name, onChainId });
+          const current = this.subscribedContextGraphs.get(id) ?? existing;
+          // A restart re-seeds `subscribedContextGraphs` from persisted state but
+          // does NOT re-add the CG to the SWM-sync scope (`config.syncContextGraphs`,
+          // what `getSyncContextGraphs()` and sync-on-connect's shared-memory pass
+          // iterate). For a PRIVATE CG the member is a participant in, that means a
+          // reconnecting member would data-sync the CG but its on-connect SWM pass
+          // would never cover it — the curator-leader REPLACE gate never sees it, so
+          // the member stays stale forever. Re-track the sync scope here for curated
+          // CGs so this same connect cycle's `newlyDiscovered` set picks it up
+          // (refreshing its meta-synced flag) and the shared-memory pass recovers it.
+          // `trackSyncContextGraph` is idempotent, so public/already-scoped CGs are
+          // unaffected. Gate on `existing.subscribed`: `unsubscribeFromContextGraph`
+          // keeps the record but flips `subscribed` to false and drops the CG from
+          // `syncContextGraphs`, so re-tracking an explicitly-unsubscribed (or
+          // host-only) private CG here would silently undo that operator choice on
+          // every discovery scan. Only re-track CGs the node is still a live
+          // subscriber of.
+          if (current.subscribed && curatedById.get(id) === true && this.trackSyncContextGraph(id)) {
+            this.log.info(ctx, `Re-tracked already-subscribed private CG "${id.slice(0, 28)}" into the SWM-sync scope on discovery`);
+          }
+          continue;
+        }
 
-      const recorded = this.recordDiscoveredContextGraph(id, { name, onChainId });
-      const roleOutcome = recorded.subscribed ? 'auto-subscribed for core hosting' : 'catalogued for explicit edge opt-in';
-      this.log.info(
-        ctx,
-        `Discovered ${isCurated ? 'private/allowlisted ' : ''}context graph "${name}" (${id}) from ${source} store — ${roleOutcome}`,
-      );
-      discovered++;
+        // Both public and curated definitions use the same role boundary:
+        //
+        // - Edge nodes catalogue the graph only. A user must explicitly
+        //   subscribe, create, write, or complete join-approved before the edge
+        //   installs gossip handlers and catch-up scope.
+        //
+        // - Core nodes auto-subscribe while core ACK custody still depends on
+        //   the member-subscription machinery. This is a compatibility bridge;
+        //   coreHosted remains an independent, ACK-proven durable obligation.
+        //   Remove this bridge only with the host-mode separation in #1611.
+        //
+        //   NOTE: we use `isPrivateContextGraph` (which reads the
+        //   ontology OR the _meta graph for `dkg:accessPolicy
+        //   "private"`, and also treats any CG with a `DKG_ALLOWED_
+        //   AGENT` allowlist as private) rather than
+        //   `source === 'meta'`, because the ontology-vs-meta
+        //   collision resolver above lets an ontology row shadow a
+        //   meta row when both exist for the same id.
+        const isCurated = curatedById.get(id) === true;
+
+        const recorded = this.recordDiscoveredContextGraph(id, { name, onChainId });
+        const roleOutcome = recorded.subscribed ? 'auto-subscribed for core hosting' : 'catalogued for explicit edge opt-in';
+        this.log.info(
+          ctx,
+          `Discovered ${isCurated ? 'private/allowlisted ' : ''}context graph "${name}" (${id}) from ${source} store — ${roleOutcome}`,
+        );
+        discovered++;
+      }
+    } finally {
+      releaseResponsibilityBatch();
     }
 
     if (discovered > 0) {
