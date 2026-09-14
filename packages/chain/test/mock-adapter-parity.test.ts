@@ -82,6 +82,17 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // RPC capabilities. MockChainAdapter mirrors those public methods directly;
   // it has no provider pool or failover plumbing to dispatch through.
   'requestBrowserWalletRpc',
+  // Private read helpers owned by EVM-only conviction/event transports. The
+  // public capabilities they back are audited separately on the mock.
+  'readPublishingConvictionAccountInfo',
+  'queryEventLogs',
+  // Protected lifecycle seams for the generation-owned Hub binding registry.
+  // MockChainAdapter has no Hub registry and therefore no equivalent state to
+  // install, invalidate, or snapshot.
+  'installHubContractBindings',
+  'installHubContractBindingsForTesting',
+  'invalidateHubContractBindings',
+  'resolveHubContractBindingSnapshot',
 ]);
 
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
