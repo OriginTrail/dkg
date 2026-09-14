@@ -1,16 +1,13 @@
 /**
- * #2079 — the already-materialized witness, against a REAL OxigraphStore.
+ * #1963/#2079 — bounded materialization validation against a REAL OxigraphStore.
  *
- * The witness is a memo of a measurement this node already took. These rows pin
- * the three properties that make that sound, and each is written so that the
- * obvious wrong implementation fails it:
+ * The in-memory memo is a measurement this materializer already took. These
+ * rows pin the boundaries that make skipping both full queries safe:
  *
- *   1. a warm second check does NO CONSTRUCT (the win), while still returning true;
- *   2. the count gate still runs FIRST, so a dropped graph is caught even with a
- *      standing witness (the self-healing property the issue's ASK-only design
- *      would have traded away);
- *   3. an equal-count v1 → v2 replace is NOT certified by the v1 witness (the one
- *      case the count cannot catch).
+ *   1. warm unchanged checks do neither COUNT nor CONSTRUCT;
+ *   2. local mutation, expiry, restart and a missing revision source all force
+ *      exact validation;
+ *   3. digest/count changes and failed validation never produce a cache hit.
  */
 import { describe, expect, it, afterEach } from 'vitest';
 import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -46,29 +43,31 @@ function payload(marker: string, count: number): Quad[] {
   }));
 }
 
-function descriptorFor(quads: Quad[]) {
+function descriptorFor(quads: Quad[], assertionGraph = GRAPH) {
   return {
-    assertionGraph: GRAPH,
+    assertionGraph,
     publicQuadsCount: quads.length,
     publicQuadsDigest: workspacePublicQuadsDigest(quads),
   } as never;
 }
 
-/** Counts CONSTRUCTs so "did the fast path actually skip the expensive read" is observable. */
+/** Counts both exact validation queries so the warm path is directly observable. */
 function countingStore(inner: TripleStore) {
   let constructs = 0;
+  let counts = 0;
   const proxy = new Proxy(inner, {
     get(target, prop, receiver) {
       if (prop === 'query') {
         return async (sparql: string, options?: unknown) => {
           if (sparql.trimStart().startsWith('CONSTRUCT')) constructs += 1;
+          if (sparql.includes('SELECT (COUNT(*) AS ?n)')) counts += 1;
           return (target as TripleStore).query(sparql, options as never);
         };
       }
       return Reflect.get(target, prop, receiver);
     },
   }) as TripleStore;
-  return { store: proxy, constructs: () => constructs };
+  return { store: proxy, constructs: () => constructs, counts: () => counts };
 }
 
 describe('#2079 witness module', () => {
@@ -106,142 +105,238 @@ describe('#2079 witness module', () => {
   });
 });
 
-describe('#2079 isGraphAssetMaterialized fast path', () => {
-  it('skips the CONSTRUCT on a warm second check, and still says materialized', async () => {
+describe('#1963 isGraphAssetMaterialized validation memo', () => {
+  it('avoids 75% of full queries across four unchanged passes', async () => {
     const inner = newStore();
     const quads = payload('v1', 6);
     await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
-    const { store, constructs } = countingStore(inner);
+    const counted = countingStore(inner);
     const mat = createSharedMemorySnapshotMaterializer({
-      store,
+      store: counted.store,
       writeLocks: new Map<string, Promise<void>>(),
       invalidateListContextGraphsCache: () => {},
     });
-    const d = descriptorFor(quads);
+    const descriptor = descriptorFor(quads);
 
-    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
-    const afterCold = constructs();
-    expect(afterCold).toBe(1); // cold: paid the read-back once
+    for (let pass = 0; pass < 4; pass += 1) {
+      expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+    }
 
-    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
-    // THE WIN: warm check performed no further CONSTRUCT.
-    expect(constructs()).toBe(afterCold);
+    expect([counted.counts(), counted.constructs()]).toEqual([1, 1]);
+    const fullQueryReduction = 1 - ((counted.counts() + counted.constructs()) / (4 * 2));
+    expect(fullQueryReduction).toBe(0.75);
   });
 
-  it('still reports NOT materialized when the graph is dropped, despite a standing witness', async () => {
-    // The self-healing property. The TTL sweep, VM publish and the chain-reset
-    // wipe all remove content outside this lock — and the chain-reset scoped
-    // delete deliberately spares `urn:dkg:local:*`, so the witness SURVIVES.
-    // The count gate is the only thing standing between that and an empty
-    // store certified as parity.
-    const store = newStore();
+  it('expires a warm validation and performs both exact queries again', async () => {
+    const inner = newStore();
     const quads = payload('v1', 6);
-    await store.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+    await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+    const counted = countingStore(inner);
+    let now = 1_000;
     const mat = createSharedMemorySnapshotMaterializer({
-      store,
+      store: counted.store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+      validationMemo: { ttlMs: 50, now: () => now },
+    });
+    const descriptor = descriptorFor(quads);
+
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+    now += 49;
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect([counted.counts(), counted.constructs()]).toEqual([1, 1]);
+
+    now += 1;
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
+  });
+
+  it('forces exact validation for a new materializer runtime', async () => {
+    const inner = newStore();
+    const quads = payload('v1', 6);
+    await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+    const counted = countingStore(inner);
+    const descriptor = descriptorFor(quads);
+
+    const first = createSharedMemorySnapshotMaterializer({
+      store: counted.store,
       writeLocks: new Map<string, Promise<void>>(),
       invalidateListContextGraphsCache: () => {},
     });
-    const d = descriptorFor(quads);
-    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+    expect(await first.isGraphAssetMaterialized(descriptor)).toBe(true);
 
-    // Content removed the way an out-of-band path removes it: the witness is
-    // untouched and still asserts this exact digest.
-    await store.dropGraph(GRAPH);
-    expect(await readSwmMaterializationWitness(store, GRAPH, d.publicQuadsDigest)).toBe(true);
-
-    expect(await mat.isGraphAssetMaterialized(d)).toBe(false);
+    const restarted = createSharedMemorySnapshotMaterializer({
+      store: counted.store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    expect(await restarted.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
   });
 
-  it('writes NO witness when the digest does NOT match, and stays false on re-check', async () => {
-    // "Only the branch that VERIFIED it writes it" is the entire soundness
-    // argument — it is why #2079's head-row proposal was killed — and without
-    // this row nothing pins it: making the write unconditional passes every
-    // other test in the repo.
-    //
-    // Under that mutation the damage is sticky, not transient. A mismatch would
-    // write a witness for `descriptor.publicQuadsDigest` — exactly the value
-    // the NEXT round's ASK binds — so once `replaceGraph` fails (it throws on a
-    // missing snapshot, and that throw is caught upstream, so the only
-    // invalidator never runs) the check returns true forever.
-    const store = newStore();
+  it('forces exact validation after a local graph mutation', async () => {
+    const inner = newStore();
     const v1 = payload('v1', 6);
     const v2 = payload('v2', 6);
-    await store.replaceGraph(GRAPH, v1.map((q) => ({ ...q, graph: GRAPH })));
+    await inner.replaceGraph(GRAPH, v1.map((q) => ({ ...q, graph: GRAPH })));
+    const counted = countingStore(inner);
     const mat = createSharedMemorySnapshotMaterializer({
-      store,
+      store: counted.store,
       writeLocks: new Map<string, Promise<void>>(),
       invalidateListContextGraphsCache: () => {},
     });
-    const d2 = descriptorFor(v2);
 
-    // Store holds v1; ask about v2. Count matches, digest does not.
-    expect(await mat.isGraphAssetMaterialized(d2)).toBe(false);
-
-    // No witness may exist for a digest this node never matched.
-    expect(await readSwmMaterializationWitness(store, GRAPH, d2.publicQuadsDigest)).toBe(false);
-
-    // The second call is what kills the mutant: an unconditional write would
-    // have memoized v2 on the first call, and this would come back true while
-    // the store still holds v1.
-    expect(await mat.isGraphAssetMaterialized(d2)).toBe(false);
+    expect(await mat.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    await inner.replaceGraph(GRAPH, v2.map((q) => ({ ...q, graph: GRAPH })));
+    expect(await mat.isGraphAssetMaterialized(descriptorFor(v2))).toBe(true);
+    expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
   });
 
-  it('degrades to a miss when the witness ASK itself fails', async () => {
-    // The ASK is a pure optimisation, so a transient store error must fall
-    // through to the real read-back rather than fail a check that would
-    // otherwise have succeeded. Making the read rethrow currently survives the
-    // whole agent suite, so this pins the containment.
+  it('does not reuse an entry after its own successful graph replacement', async () => {
+    const inner = newStore();
+    const v1 = payload('v1', 6);
+    const v2 = payload('v2', 6);
+    await inner.replaceGraph(GRAPH, v1.map((q) => ({ ...q, graph: GRAPH })));
+    const counted = countingStore(inner);
+    const mat = createSharedMemorySnapshotMaterializer({
+      store: counted.store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+
+    expect(await mat.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    await mat.replaceGraph(GRAPH, v2.map((q) => ({ ...q, graph: GRAPH })));
+    expect(await mat.isGraphAssetMaterialized(descriptorFor(v2))).toBe(true);
+    expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
+  });
+
+  it('cannot hit an older entry after expected digest or count changes', async () => {
+    const inner = newStore();
+    const v1 = payload('v1', 6);
+    const v2 = payload('v2', 6);
+    await inner.replaceGraph(GRAPH, v1.map((q) => ({ ...q, graph: GRAPH })));
+    const counted = countingStore(inner);
+    const mat = createSharedMemorySnapshotMaterializer({
+      store: counted.store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const d1 = descriptorFor(v1);
+
+    expect(await mat.isGraphAssetMaterialized(d1)).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(descriptorFor(v2))).toBe(false);
+    expect(await mat.isGraphAssetMaterialized({
+      ...d1,
+      publicQuadsCount: d1.publicQuadsCount + 1,
+    })).toBe(false);
+    expect([counted.counts(), counted.constructs()]).toEqual([3, 2]);
+
+    expect(await mat.isGraphAssetMaterialized(d1)).toBe(true);
+    expect([counted.counts(), counted.constructs()]).toEqual([4, 3]);
+  });
+
+  it('never caches a failed digest validation', async () => {
+    const inner = newStore();
+    const v1 = payload('v1', 6);
+    const v2 = payload('v2', 6);
+    await inner.replaceGraph(GRAPH, v1.map((q) => ({ ...q, graph: GRAPH })));
+    const counted = countingStore(inner);
+    const mat = createSharedMemorySnapshotMaterializer({
+      store: counted.store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const mismatched = descriptorFor(v2);
+
+    expect(await mat.isGraphAssetMaterialized(mismatched)).toBe(false);
+    expect(await mat.isGraphAssetMaterialized(mismatched)).toBe(false);
+    expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
+  });
+
+  it('preserves the existing operator switch for disabling validation memoization', async () => {
+    const previous = process.env['DKG_SWM_MATERIALIZATION_WITNESS'];
+    process.env['DKG_SWM_MATERIALIZATION_WITNESS'] = '0';
+    try {
+      const inner = newStore();
+      const quads = payload('v1', 6);
+      await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+      const counted = countingStore(inner);
+      const mat = createSharedMemorySnapshotMaterializer({
+        store: counted.store,
+        writeLocks: new Map<string, Promise<void>>(),
+        invalidateListContextGraphsCache: () => {},
+      });
+      const descriptor = descriptorFor(quads);
+
+      expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+      expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+      expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
+    } finally {
+      if (previous === undefined) delete process.env['DKG_SWM_MATERIALIZATION_WITNESS'];
+      else process.env['DKG_SWM_MATERIALIZATION_WITNESS'] = previous;
+    }
+  });
+
+  it('validates every time when the store exposes no write revision', async () => {
     const inner = newStore();
     const quads = payload('v1', 6);
     await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
-
-    let failAsks = false;
-    const store = new Proxy(inner, {
+    const withoutRevision = new Proxy(inner, {
       get(target, prop, receiver) {
-        if (prop === 'query') {
-          return async (sparql: string, options?: unknown) => {
-            if (failAsks && sparql.trimStart().startsWith('ASK')) {
-              throw new Error('store unavailable');
-            }
-            return (target as TripleStore).query(sparql, options as never);
-          };
-        }
+        if (prop === 'getWriteRevision' || prop === 'writeRevisionCoverage') return undefined;
         return Reflect.get(target, prop, receiver);
       },
     }) as TripleStore;
-
+    const counted = countingStore(withoutRevision);
     const mat = createSharedMemorySnapshotMaterializer({
-      store,
+      store: counted.store,
       writeLocks: new Map<string, Promise<void>>(),
       invalidateListContextGraphsCache: () => {},
     });
-    const d = descriptorFor(quads);
+    const descriptor = descriptorFor(quads);
 
-    // Warm the memo, then break only the ASK.
-    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
-    failAsks = true;
-
-    // Still correct — it recomputed instead of throwing.
-    expect(await mat.isGraphAssetMaterialized(d)).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+    expect([counted.counts(), counted.constructs()]).toEqual([2, 2]);
   });
 
-  it('does not certify v2 from a v1 witness when the quad COUNT is unchanged', async () => {
-    // The one case the count cannot catch, so the digest binding must.
-    const store = newStore();
-    const v1 = payload('v1', 6);
-    const v2 = payload('v2', 6); // same count, different content
-    expect(v1.length).toBe(v2.length);
-
-    await store.replaceGraph(GRAPH, v1.map((q) => ({ ...q, graph: GRAPH })));
+  it('evicts the least recently used entry at the configured bound', async () => {
+    const inner = newStore();
+    const graphA = GRAPH + ':a';
+    const graphB = GRAPH + ':b';
+    const quadsA = payload('a', 3);
+    const quadsB = payload('b', 3);
+    await inner.replaceGraph(graphA, quadsA.map((q) => ({ ...q, graph: graphA })));
+    await inner.replaceGraph(graphB, quadsB.map((q) => ({ ...q, graph: graphB })));
+    const counted = countingStore(inner);
     const mat = createSharedMemorySnapshotMaterializer({
-      store,
+      store: counted.store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+      validationMemo: { maxEntries: 1 },
+    });
+
+    expect(await mat.isGraphAssetMaterialized(descriptorFor(quadsA, graphA))).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(descriptorFor(quadsB, graphB))).toBe(true);
+    expect(await mat.isGraphAssetMaterialized(descriptorFor(quadsA, graphA))).toBe(true);
+    expect([counted.counts(), counted.constructs()]).toEqual([3, 3]);
+  });
+
+  it('does not certify a graph dropped after validation', async () => {
+    const inner = newStore();
+    const quads = payload('v1', 6);
+    await inner.replaceGraph(GRAPH, quads.map((q) => ({ ...q, graph: GRAPH })));
+    const counted = countingStore(inner);
+    const mat = createSharedMemorySnapshotMaterializer({
+      store: counted.store,
       writeLocks: new Map<string, Promise<void>>(),
       invalidateListContextGraphsCache: () => {},
     });
-    expect(await mat.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    const descriptor = descriptorFor(quads);
 
-    // Store now holds v1; ask whether v2 is materialized. Count matches (6 = 6).
-    expect(await mat.isGraphAssetMaterialized(descriptorFor(v2))).toBe(false);
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(true);
+    await inner.dropGraph(GRAPH);
+    expect(await mat.isGraphAssetMaterialized(descriptor)).toBe(false);
+    expect([counted.counts(), counted.constructs()]).toEqual([2, 1]);
   });
 });
