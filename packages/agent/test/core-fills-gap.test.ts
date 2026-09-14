@@ -2984,6 +2984,57 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       .toEqual([fallbackPeer]);
   });
 
+  it('falls back to bounded full sync and remembers legacy exact-filter peers', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLegacyCapability', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = '0x0000000000000000000000000000000000000001/legacy-capability';
+    const peerId = '12D3KooWLegacyExactFilterPeer';
+    const connectedPeer = { toString: () => peerId };
+    (internals as any).node = {
+      peerId: '12D3KooWLegacyExactFilterLocal',
+      libp2p: { getConnections: () => [{ remotePeer: connectedPeer }] },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [peerId], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = () => [connectedPeer];
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async () => ({
+      result: {
+        fetchedDataTriples: 0, fetchedMetaTriples: 1, insertedTriples: 0,
+        failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+      },
+      disposition: 'incomplete',
+      responderCapability: 'legacy-filter-unsupported',
+    });
+    const fallbacks: unknown[][] = [];
+    (internals as any).runLegacyDurableSyncDetailed = async (...args: unknown[]) => {
+      fallbacks.push(args);
+      return {
+        result: {
+          fetchedDataTriples: 3, fetchedMetaTriples: 2, insertedTriples: 5,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+      };
+    };
+    (internals as any).reconcileChainOrdinal = async () => ({
+      status: 'reconciled', blockNumber: 100,
+    });
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, [vmRecoveryTarget(localCgId, 0, 'legacy-capability')], 100, () => true,
+    );
+
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(fallbacks).toHaveLength(1);
+    expect(fallbacks[0]?.slice(1, 4)).toEqual([peerId, [localCgId], undefined]);
+    expect((internals as any).vmReconcileExactPeerCapabilities.get(peerId))
+      .toMatchObject({ connectionKey: expect.any(String), expiresAt: expect.any(Number) });
+  });
+
   it('clears cached authoritative curators after a successful empty resolution', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmClearCuratorCache', chainAdapter: chain });

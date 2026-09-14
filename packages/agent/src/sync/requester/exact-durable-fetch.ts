@@ -15,6 +15,14 @@ const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
 
 export type ExactDurableFetchDisposition = 'found' | 'clean-absent' | 'incomplete';
 
+/**
+ * Capability evidence derived from a completed exact request. The only
+ * negative capability is deliberately exposed: a responder that returned a
+ * bounded, clean prefix without the requested descriptor cannot satisfy a
+ * future exact request on the same connection.
+ */
+export type ExactAssetResponderCapability = 'legacy-filter-unsupported';
+
 export type ExactAssetFetchSessionPolicy =
   | Readonly<{
       kind: 'durable-materialization';
@@ -134,31 +142,69 @@ export function classifyExactDurableFetch(params: {
   rejectedKcs: number;
   dataRejectedMissingMeta: number;
 }): ExactDurableFetchDisposition {
-  const cleanPhase = (phase: SyncPageResult) => (
-    phase.completed
-    && !phase.timedOut
-    && phase.nextOffset >= phase.resumedFromOffset
-  );
   if (
     params.requestedAssetCount === 0
     || !params.metaFetched
-    || !cleanPhase(params.metaResult)
-    || !cleanPhase(params.dataResult)
+    || !isCleanExactPhase(params.metaResult)
+    || !isCleanExactPhase(params.dataResult)
     || params.rejectedKcs !== 0
     || params.dataRejectedMissingMeta !== 0
   ) return 'incomplete';
 
-  const freshEmptyPhase = (phase: SyncPageResult) => (
-    phase.responderSessionStartedFresh === true
-    && phase.resumedFromOffset === 0
-    && phase.nextOffset === 0
-    && phase.quads.length === 0
-  );
-  if (freshEmptyPhase(params.metaResult) && freshEmptyPhase(params.dataResult)) {
+  if (isFreshEmptyExactPhase(params.metaResult) && isFreshEmptyExactPhase(params.dataResult)) {
     return 'clean-absent';
   }
 
   return params.descriptorCoverageComplete ? 'found' : 'incomplete';
+}
+
+/**
+ * Detect the rolling-upgrade case where an older responder ignored the
+ * additive exact filter and returned a clean bounded prefix that omitted the
+ * requested descriptor. Fresh empty exact responses remain ordinary clean
+ * absence; incomplete, rejected, or challenge-pinned responses do not produce
+ * capability evidence.
+ */
+export function classifyExactAssetResponderCapability(params: {
+  requestedAssetCount: number;
+  metaResult: SyncPageResult;
+  dataResult: SyncPageResult;
+  metaFetched: boolean;
+  descriptorCoverageComplete: boolean;
+  rejectedKcs: number;
+  dataRejectedMissingMeta: number;
+}): ExactAssetResponderCapability | undefined {
+  if (
+    params.requestedAssetCount === 0
+    || !params.metaFetched
+    || !isCleanExactPhase(params.metaResult)
+    || !isCleanExactPhase(params.dataResult)
+    || params.rejectedKcs !== 0
+    || params.dataRejectedMissingMeta !== 0
+    || params.descriptorCoverageComplete
+    || (isFreshEmptyExactPhase(params.metaResult) && isFreshEmptyExactPhase(params.dataResult))
+  ) return undefined;
+  return 'legacy-filter-unsupported';
+}
+
+function isCleanExactPhase(phase: SyncPageResult): boolean {
+  return phase.completed
+    && !phase.timedOut
+    && phase.nextOffset >= phase.resumedFromOffset;
+}
+
+function isFreshEmptyExactPhase(phase: SyncPageResult): boolean {
+  return phase.responderSessionStartedFresh === true
+    && phase.resumedFromOffset === 0
+    && phase.nextOffset === 0
+    && phase.quads.length === 0;
+}
+
+export function mergeExactAssetResponderCapability(
+  current: ExactAssetResponderCapability | undefined,
+  next: ExactAssetResponderCapability | undefined,
+): ExactAssetResponderCapability | undefined {
+  return current ?? next;
 }
 
 export function mergeExactDurableFetchDisposition(

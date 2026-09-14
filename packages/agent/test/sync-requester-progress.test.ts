@@ -1487,6 +1487,7 @@ describe('exact durable fetch disposition', () => {
     });
 
     expect(detailed.exactFetchDisposition).toBe('clean-absent');
+    expect(detailed).not.toHaveProperty('exactResponderCapability');
     expect(detailed.result.complete).toBe(false);
     expect(projected.complete).toBe(false);
     expect(projected).not.toHaveProperty('exactFetchDisposition');
@@ -1546,6 +1547,7 @@ describe('exact durable fetch disposition', () => {
       data: { nextOffset: 1 },
     });
     expect(detailed.exactFetchDisposition).toBe('incomplete');
+    expect(detailed.exactResponderCapability).toBe('legacy-filter-unsupported');
   });
 
   it('does not verify or store an exact phase rejected by its accumulation limit', async () => {
