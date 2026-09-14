@@ -9,6 +9,13 @@ import type { RpcRequestClass } from './rpc-request-transport.js';
 
 const CONTEXT_GRAPH_NAME_HASH_NEGATIVE_TTL_MS = 30_000;
 
+export function normalizeContextGraphNameHashBatch(nameHashes: readonly string[]): readonly string[] {
+  if (!Array.isArray(nameHashes)) {
+    throw new TypeError('Context Graph name-hash batch must be an array');
+  }
+  return [...new Set(nameHashes.map(normalizeContextGraphNameHash))];
+}
+
 export interface ContextGraphNameHashResolverDependencies {
   /** One concrete adapter-owned lookup for a normalized bytes32 commitment. */
   readonly load: (nameHash: string, signal: AbortSignal) => Promise<bigint | null>;

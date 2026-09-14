@@ -91,11 +91,22 @@ describe('stored context graph candidates for query admission', () => {
     await expect(listStoredContextGraphQueryCandidates(store)).rejects.toThrow('unrecognized stored Context Graph owner');
   });
 
-  it('rejects an oversized inventory without returning a partial candidate set', async () => {
+  it('retains every owner when ordinary KA growth exceeds 512 candidates', async () => {
     const { store } = indexedStore(Array.from({ length: 1_000 }, (_, id) => (
       `${PREFIX}public/_verifiable_memory/author/${id}`
     )));
-    await expect(listStoredContextGraphQueryCandidates(store)).rejects.toThrow('owner candidate limit exceeded');
+    const owners = await listStoredContextGraphQueryCandidates(store);
+    expect(owners).toHaveLength(1_002);
+    expect(owners).toContain('public');
+    expect(owners).toContain('public/_verifiable_memory/author/999');
+  });
+
+  it('lets cancellation interrupt parsing a large local inventory', async () => {
+    const controller = new AbortController();
+    const { store } = indexedStore(Array.from({ length: 2_000 }, (_, id) => `${PREFIX}public/${id}`));
+    setImmediate(() => controller.abort(new Error('cancel during inventory')));
+    await expect(listStoredContextGraphQueryCandidates(store, { signal: controller.signal }))
+      .rejects.toThrow('cancel during inventory');
   });
 
   it('forwards cancellation to the index and rejects late inventory success', async () => {

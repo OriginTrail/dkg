@@ -5,8 +5,12 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
+  contextGraphVerifiableMemoryUri,
+  contextGraphAssertionUri,
+  assertionScopedGraphUri,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { DKGAgent } from '../src/index.js';
 
 const OWNER = '0x0000000000000000000000000000000000000001';
@@ -39,12 +43,23 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     agent = undefined;
   });
 
-  async function fixture(options: { privateGraph?: boolean; publicGraph?: boolean } = {}) {
+  async function fixture(options: {
+    privateGraph?: boolean;
+    publicGraph?: boolean;
+    realChain?: boolean;
+    processLocalStore?: boolean;
+  } = {}) {
     const chain = new MockChainAdapter();
+    const store = new OxigraphStore();
+    if (options.processLocalStore) {
+      // Model an adapter that cannot observe other processes' writes, while
+      // retaining the real local query and scoped-authority implementation.
+      Object.defineProperty(store, 'writeRevisionCoverage', { value: 'process-local' });
+    }
     agent = await DKGAgent.create({
       name: 'QueryPrivateAuthorityPending',
       chainAdapter: chain,
-      store: new OxigraphStore(),
+      store,
     });
     // These local create/query tests need a host identity, not a running peer.
     vi.spyOn(agent, 'peerId', 'get').mockReturnValue('peer-query-authority-pending');
@@ -77,21 +92,29 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
       if (!entry) throw new Error(`Unknown test chain id ${onChainId}`);
       return entry;
     };
-    const resolveRegistration = agent.resolveContextGraphRegistrationBinding.bind(agent);
-    vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockImplementation(async (id) => {
-      const entry = registrations.get(id);
-      return entry
-        ? { kind: 'registered' as const, onChainId: entry.onChainId, provenance: 'numeric-id' as const }
-        : resolveRegistration(id);
-    });
-    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockImplementation(async (id) => {
-      byChainId(id);
-      return true;
-    });
-    const policyRead = vi.spyOn(chain, 'getContextGraphAccessPolicy')
-      .mockImplementation(async (id) => byChainId(id).accessPolicy);
-    const rosterRead = vi.spyOn(chain, 'getContextGraphParticipantAgents')
-      .mockImplementation(async (id) => [...byChainId(id).participantAgents]);
+    const policyRead = vi.spyOn(chain, 'getContextGraphAccessPolicy');
+    const rosterRead = vi.spyOn(chain, 'getContextGraphParticipantAgents');
+    if (!options.realChain) {
+      const resolveRegistration = agent.resolveContextGraphRegistrationBinding.bind(agent);
+      vi.spyOn(agent, 'resolveContextGraphRegistrationBinding').mockImplementation(async (id) => {
+        const entry = registrations.get(id);
+        return entry
+          ? { kind: 'registered' as const, onChainId: entry.onChainId, provenance: 'numeric-id' as const }
+          : resolveRegistration(id);
+      });
+      vi.spyOn(chain, 'resolveContextGraphIdsByNameHashes').mockImplementation(async (names) => {
+        const committed = new Map([...registrations].map(([id, registration]) => [
+          agent!.contextGraphNameCommitment(id), registration.onChainId,
+        ]));
+        return new Map(names.map((name) => [name, committed.get(name) ?? null]));
+      });
+      vi.spyOn(chain, 'isContextGraphActiveOnChain').mockImplementation(async (id) => {
+        byChainId(id);
+        return true;
+      });
+      policyRead.mockImplementation(async (id) => byChainId(id).accessPolicy);
+      rosterRead.mockImplementation(async (id) => [...byChainId(id).participantAgents]);
+    }
 
     if (options.privateGraph !== false) {
       await agent.createContextGraph({
@@ -298,6 +321,10 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     'context/7',
     'tasks/_meta',
     `assertion/${OWNER}/legacy-working-memory`,
+    'assertion/12D3KooWLegacyPeer/draft',
+    'assertion/12D3KooWLegacyPeer/draft/_named_graph/urn%3Aexample%3Anamed',
+    assertionScopedGraphUri(contextGraphAssertionUri(PRIVATE_CG, OWNER, 'draft'), 'urn:example:named')
+      .slice(privatePrefix.length + 1),
     `_verifiable_memory/${OWNER}/3384`,
     `_shared_memory/${OWNER}/3384`,
   ])('denies a registered private graph persisted only as /%s data', async (suffix) => {
@@ -332,6 +359,178 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     await expect(agent.query(markerQuery(privatePrefix), { callerAgentAddress: OUTSIDER }))
       .resolves.toEqual({ bindings: [] });
     expect(queryExecution).not.toHaveBeenCalled();
+  });
+
+  it.each(['authority', 'execution', 'materialization'] as const)(
+    'rejects a private graph created during %s instead of releasing a stale result',
+    async (phase) => {
+    const { agent, registrations, policyRead, queryExecution } = await fixture({ privateGraph: false });
+    let release!: () => void;
+    let entered!: () => void;
+    const waiting = new Promise<void>((resolve) => { entered = resolve; });
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    if (phase === 'authority') {
+      policyRead.mockImplementationOnce(async () => {
+        entered();
+        await blocked;
+        return 0;
+      });
+    } else {
+      const execute = DKGQueryEngine.prototype.query;
+      queryExecution.mockImplementationOnce(async (sparql, options) => {
+        const result = phase === 'materialization'
+          ? await execute.call(agent.queryEngine, sparql, options) : undefined;
+        entered();
+        await blocked;
+        return result ?? execute.call(agent.queryEngine, sparql, options);
+      });
+    }
+    const inFlight = agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER });
+    await Promise.race([waiting, inFlight.then(() => {
+      throw new Error('Query completed before the test reached its pause');
+    })]);
+    try {
+      await agent.createContextGraph({
+        id: PRIVATE_CG, name: 'Created during admission', accessPolicy: 1,
+        callerAgentAddress: OWNER,
+      });
+      registrations.set(PRIVATE_CG, { onChainId: 7n, accessPolicy: 1, participantAgents: [OWNER] });
+      await agent.store.insert([{
+        subject: PRIVATE_MARKER, predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: MARKER_CLASS, graph: `${privatePrefix}/context/7`,
+      }]);
+    } finally {
+      release();
+    }
+    await expect(inFlight).rejects.toThrow(/retry|changed|consisten/i);
+    await expect(agent.canReadContextGraph(PRIVATE_CG, { callerAgentAddress: OUTSIDER }))
+      .resolves.toBe(false);
+  });
+
+  it('rejects a same-URI private alias created and removed during execution', async () => {
+    const { agent, registrations, queryExecution } = await fixture({ privateGraph: false });
+    const alias = `${PUBLIC_CG}/tasks`;
+    const graph = contextGraphDataGraphUri(alias);
+    await agent.store.insert([{
+      subject: PUBLIC_MARKER, predicate: DKG_ONTOLOGY.RDF_TYPE, object: MARKER_CLASS, graph,
+    }]);
+    const execute = DKGQueryEngine.prototype.query;
+    queryExecution.mockImplementationOnce(async (sparql, options) => {
+      await agent.createContextGraph({
+        id: alias, name: 'Private alias of an existing graph URI', accessPolicy: 1,
+        callerAgentAddress: OWNER,
+      });
+      registrations.set(alias, { onChainId: 7n, accessPolicy: 1, participantAgents: [OWNER] });
+      const marker = {
+        subject: PRIVATE_MARKER, predicate: DKG_ONTOLOGY.RDF_TYPE, object: MARKER_CLASS, graph,
+      };
+      await agent.store.insert([marker]);
+      const result = await execute.call(agent.queryEngine, sparql, options);
+      expect(result.bindings).toContainEqual(expect.objectContaining({ s: PRIVATE_MARKER }));
+      await agent.store.delete([marker]);
+      return result;
+    });
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
+      .rejects.toThrow(/retry|changed|consisten/i);
+  });
+
+  it.each([
+    'SELECT ?s WHERE { ?s ?p ?o }',
+    'SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }',
+    'SELECT (COUNT(*) AS ?count) WHERE { { SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } } } }',
+    `SELECT ?s FROM <${contextGraphDataGraphUri(PUBLIC_CG)}> WHERE { ?s ?p ?o }`,
+    `SELECT ?s FROM NAMED <${contextGraphDataGraphUri(PUBLIC_CG)}> WHERE { GRAPH ?g { ?s ?p ?o } }`,
+    'ASK { ?s ?p ?o }',
+    'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }',
+    'DESCRIBE <urn:nos:r3:default>',
+  ])('preserves stable public/default dataset semantics for %s', async (sparql) => {
+    const { agent } = await fixture({ privateGraph: false });
+    await agent.store.insert([{
+      subject: 'urn:nos:r3:default', predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: MARKER_CLASS, graph: '',
+    }]);
+    const expected = await agent.queryEngine.query(sparql);
+    await expect(agent.query(sparql, { callerAgentAddress: OUTSIDER })).resolves.toEqual(expected);
+  });
+
+  it('keeps unscoped public reads available after 600 ordinary KA partitions', async () => {
+    const { agent, chain, policyRead, queryExecution } = await fixture({ privateGraph: false, realChain: true });
+    await chain.createOnChainContextGraph({
+      accessPolicy: 0, publishPolicy: 1, nameHash: agent.contextGraphNameCommitment(PUBLIC_CG),
+    });
+    const singleLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash');
+    const bulkLookup = vi.spyOn(chain, 'resolveContextGraphIdsByNameHashes');
+    await agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER });
+    const smallLookupCount = singleLookup.mock.calls.length;
+    const smallPolicyCount = policyRead.mock.calls.length;
+    singleLookup.mockClear();
+    bulkLookup.mockClear();
+    policyRead.mockClear();
+    queryExecution.mockClear();
+    const count = 600;
+    await agent.store.insert(Array.from({ length: count }, (_, index) => ({
+      subject: `urn:nos:r3:public-ka-${index}`,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: MARKER_CLASS,
+      graph: contextGraphVerifiableMemoryUri(PUBLIC_CG, `${OWNER}/${index + 1}`),
+    })));
+
+    const result = await agent.query(
+      `SELECT ?s WHERE { GRAPH ?g { ?s a <${MARKER_CLASS}> } }`,
+      { callerAgentAddress: OUTSIDER },
+    );
+    expect(result.bindings).toHaveLength(count + 1);
+    expect(queryExecution).toHaveBeenCalledTimes(1);
+    expect(bulkLookup).toHaveBeenCalledTimes(1);
+    expect(bulkLookup.mock.calls[0][0].length).toBeGreaterThan(512);
+    expect(singleLookup.mock.calls.length).toBeLessThanOrEqual(smallLookupCount);
+    expect(policyRead.mock.calls.length).toBeLessThanOrEqual(smallPolicyCount);
+  });
+
+  it('requires an explicit scope when the store cannot certify all writers', async () => {
+    const { agent, queryExecution } = await fixture({ privateGraph: false, processLocalStore: true });
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
+      .rejects.toThrow(/contextGraphId/);
+    expect(queryExecution).not.toHaveBeenCalled();
+    const scoped = await agent.query(anyMarkerQuery, {
+      contextGraphId: PUBLIC_CG, callerAgentAddress: OUTSIDER,
+    });
+    expect(scoped.bindings).toContainEqual(expect.objectContaining({ s: PUBLIC_MARKER }));
+  });
+
+  it('checks a private legacy owner hidden among more than 512 public KA partitions', async () => {
+    const { agent, chain, queryExecution } = await fixture({ privateGraph: false, realChain: true });
+    const graphs = Array.from({ length: 600 }, (_, index) => (
+      contextGraphVerifiableMemoryUri(PUBLIC_CG, `${OWNER}/${index + 1}`)
+    ));
+    const privateAlias = graphs[599].slice('did:dkg:context-graph:'.length);
+    await chain.createOnChainContextGraph({
+      accessPolicy: 1, publishPolicy: 0, participantAgents: [OWNER],
+      nameHash: agent.contextGraphNameCommitment(privateAlias),
+    });
+    await agent.store.insert(graphs.map((graph, index) => ({
+      subject: index === 599 ? PRIVATE_MARKER : `urn:nos:r3:public-ka-${index}`,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: MARKER_CLASS,
+      graph,
+    })));
+    const listGraphsByPrefix = agent.store.listGraphsByPrefix!.bind(agent.store);
+    vi.spyOn(agent.store, 'listGraphsByPrefix').mockImplementation(async (prefix, options) => (
+      (await listGraphsByPrefix(prefix, options)).sort()
+    ));
+    const lookup = vi.spyOn(chain, 'resolveContextGraphIdsByNameHashes');
+
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
+      .resolves.toEqual({ bindings: [] });
+    expect(queryExecution).not.toHaveBeenCalled();
+    expect(lookup.mock.calls.flatMap(([names]) => [...names]))
+      .toContain(agent.contextGraphNameCommitment(privateAlias));
+    const ownerResult = await agent.query(
+      `SELECT ?s WHERE { GRAPH ?g { ?s a <${MARKER_CLASS}> } }`,
+      { callerAgentAddress: OWNER },
+    );
+    expect(ownerResult.bindings).toHaveLength(601);
+    expect(ownerResult.bindings).toContainEqual({ s: PRIVATE_MARKER });
   });
 
   it.each(['policy', 'roster'] as const)('denies even the owner when registered %s authority is unavailable', async (source) => {
@@ -480,6 +679,8 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
   it('denies unscoped reads when another possible metadata owner is unavailable but preserves scoped public reads', async () => {
     const { agent, chain, queryExecution } = await fixture({ privateGraph: false });
     vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
+      .mockRejectedValue(new Error('unknown graph registration unavailable'));
+    vi.spyOn(chain, 'resolveContextGraphIdsByNameHashes')
       .mockRejectedValue(new Error('unknown graph registration unavailable'));
     await agent.store.insert([{
       subject: 'urn:public:task:1',

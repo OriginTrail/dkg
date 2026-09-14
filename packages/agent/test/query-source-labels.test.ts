@@ -7,6 +7,7 @@ import type {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
+  type GraphWriteRevisionSource,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { QueryMethods } from '../src/dkg-agent-query.js';
@@ -97,6 +98,12 @@ function runtimePrivateQueryAgent(options: {
     query: vi.fn(async () => ({ bindings: [{ value: 'visible' }] })),
   };
   const store = {
+    // This fixture has no writers; model the stable local-store capability
+    // required across unscoped admission and query execution.
+    writeRevisionCoverage: 'all-writers' as const,
+    getWriteRevision: vi.fn<GraphWriteRevisionSource['getWriteRevision']>(
+      () => ({ generation: 0, stable: true }),
+    ),
     query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
     listGraphsByPrefix: vi.fn(async () => (
       options.storedContextGraph === true
@@ -121,6 +128,7 @@ function runtimePrivateQueryAgent(options: {
     log: { info() {}, warn() {}, debug() {}, error() {} },
     queryEngine,
     store,
+    contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
     subscribedContextGraphs: options.subscribed === false
       ? new Map()
       : new Map([[RUNTIME_PRIVATE_CG, { synced: true }]]),

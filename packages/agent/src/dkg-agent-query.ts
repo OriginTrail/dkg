@@ -9,6 +9,9 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { canReadUnscopedQuery } from './unscoped-query-admission.js';
+import { prepareUnscopedContextGraphReadChecks } from './prepare-unscoped-context-graph-read-checks.js';
+import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
+import { captureUnscopedQueryConsistency } from './unscoped-query-consistency.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -608,25 +611,59 @@ export class QueryMethods extends DKGAgentBase {
     // Arbitrary unscoped SPARQL can reveal private data through aggregates or
     // projections without a graph column. Admit it only if every possible owner
     // is readable; scoped queries use their existing authority path above.
+    let assertUnscopedQueryUnchanged: (() => void) | undefined;
     if (!opts.contextGraphId) {
+      assertUnscopedQueryUnchanged = captureUnscopedQueryConsistency(
+        this.store,
+        () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+      );
+      const knownContextGraphIds = new Set([
+        ...(this.config?.rfc64CatalogBootstrap?.acceptedPolicies ?? []).flatMap(({ policyEnvelope }) => (
+          policyEnvelope.payload.accessPolicy === 1 ? [policyEnvelope.payload.contextGraphId] : []
+        )),
+        ...this.subscribedContextGraphs.keys(),
+        ...(this.config.syncContextGraphs ?? []),
+      ]);
+      const canReadContextGraph = (contextGraphId: string, signal: AbortSignal) => this.canReadContextGraph(contextGraphId, {
+        callerAgentAddress: callerAgentAddressStr,
+        signal,
+      });
+      const resolveBatch = this.chain.resolveContextGraphIdsByNameHashes;
       const allowed = await canReadUnscopedQuery({
         store: this.store,
-        knownContextGraphIds: [
-          ...(this.config?.rfc64CatalogBootstrap?.acceptedPolicies ?? []).flatMap(({ policyEnvelope }) => (
-            policyEnvelope.payload.accessPolicy === 1 ? [policyEnvelope.payload.contextGraphId] : []
-          )),
-          ...this.subscribedContextGraphs.keys(),
-          ...(this.config.syncContextGraphs ?? []),
-        ],
-        canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
-          callerAgentAddress: callerAgentAddressStr,
-          signal,
-        }),
+        knownContextGraphIds,
+        canReadContextGraph,
+        prepareReadChecks: (ids, signal) => prepareUnscopedContextGraphReadChecks({
+          canReadContextGraph,
+          contextGraphNameCommitment: (id) => this.contextGraphNameCommitment(id),
+          requiresIndividualRead: (id) => (
+            knownContextGraphIds.has(id)
+            || (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)
+            || isCanonicalPositiveContextGraphId(id)
+            || this.resolveContextGraphNameHashBindingTarget(id) !== null
+            || (this.config.syncContextGraphs ?? []).includes(id)
+            || this.resolveRfc64PrivateReadRosterV1(id) !== undefined
+            || (this.config.rfc64CatalogBootstrap?.acceptedPolicies ?? []).some(
+              ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === id,
+            )
+            || (this.config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies ?? []).some(
+              ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === id,
+            )
+          ),
+          findContextGraphIdsWithReadAuthorityFacts: (candidateIds, readSignal) => (
+            this.contextGraphMetaProjection.findContextGraphIdsWithReadAuthorityFacts(candidateIds, { signal: readSignal })
+          ),
+          readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+          resolveContextGraphIdsByNameHashes: resolveBatch === undefined
+            ? undefined
+            : (names, options) => resolveBatch.call(this.chain, names, options),
+        }, ids, signal),
       }, { signal: opts.signal });
       if (!allowed) {
         this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
         return emptyQueryResultForKind(sparql);
       }
+      assertUnscopedQueryUnchanged();
     }
 
     // #1106 (3): an UNAUTHENTICATED / admin caller omitting `agentAddress`
@@ -678,6 +715,9 @@ export class QueryMethods extends DKGAgentBase {
       // engines needing to know about both names.
       minTrust: opts.minTrust ?? opts._minTrust,
     });
+    // Admission checked the earlier inventory. Hold the complete result until
+    // the same store/metadata interval is proven unchanged across execution.
+    assertUnscopedQueryUnchanged?.();
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
   }

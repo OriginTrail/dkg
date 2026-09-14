@@ -102,7 +102,7 @@ describe('unscoped query admission', () => {
     }
   });
 
-  it('rejects 1000 per-KA graphs before any authority lookup instead of truncating possible owners', async () => {
+  it('authorizes the complete public inventory after 1000 ordinary KA partitions', async () => {
     const canReadContextGraph = vi.fn(async () => true);
     const deps = admissionDependencies(canReadContextGraph, ['public-cg']);
     const author = '0x00000000000000000000000000000000000000ff';
@@ -110,10 +110,69 @@ describe('unscoped query admission', () => {
       `did:dkg:context-graph:public-cg/_verifiable_memory/${author}/${index + 1}`
     )));
 
-    // Each KA path can also denote a persisted legacy root. The 512-owner
-    // admission budget must reject the entire inventory before live checks.
-    await expect(canReadUnscopedQuery(deps)).rejects.toThrow('owner candidate limit exceeded');
+    await expect(canReadUnscopedQuery(deps)).resolves.toBe(true);
+    expect(canReadContextGraph).toHaveBeenCalledTimes(1002);
+    expect(canReadContextGraph).toHaveBeenCalledWith(
+      `public-cg/_verifiable_memory/${author}/1000`, expect.any(AbortSignal),
+    );
+  });
+
+  it('prepares the complete deduplicated union of ontology, runtime and stored owners', async () => {
+    const fallback = vi.fn(async () => true);
+    const ids = Array.from({ length: 750 }, (_, index) => `candidate-${index}`);
+    const deps = admissionDependencies(fallback, ids.slice(0, 300));
+    deps.store.listGraphsByPrefix.mockResolvedValue(ids.slice(250, 600).map((id) => `did:dkg:context-graph:${id}`));
+    deps.store.query.mockResolvedValue({
+      type: 'bindings', bindings: ids.slice(550).map((id) => ({ cg: `did:dkg:context-graph:${id}` })),
+    });
+    const prepared = vi.fn(async (id: string) => id !== ids[749]);
+    const prepareReadChecks = vi.fn<NonNullable<UnscopedQueryAdmissionDependencies['prepareReadChecks']>>(async () => prepared);
+
+    await expect(canReadUnscopedQuery({ ...deps, prepareReadChecks })).resolves.toBe(false);
+    expect(prepareReadChecks).toHaveBeenCalledTimes(1);
+    const [candidates, signal] = prepareReadChecks.mock.calls[0];
+    expect(new Set(candidates)).toEqual(new Set(ids));
+    expect(candidates).toHaveLength(ids.length);
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(prepared).toHaveBeenCalledTimes(ids.length);
+    expect(prepared).toHaveBeenCalledWith(ids[749], signal);
+    expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it('rejects incomplete preparation instead of falling back to optimistic reads', async () => {
+    const canReadContextGraph = vi.fn(async () => true);
+    const prepareReadChecks = vi.fn(async () => { throw new Error('incomplete registration snapshot'); });
+    await expect(canReadUnscopedQuery({ ...admissionDependencies(canReadContextGraph), prepareReadChecks }))
+      .rejects.toThrow('incomplete registration snapshot');
     expect(canReadContextGraph).not.toHaveBeenCalled();
+  });
+
+  it('includes prepared authority discovery in the deadline and ignores its late result', async () => {
+    vi.useFakeTimers();
+    const gate = deferred<void>();
+    const canReadContextGraph = vi.fn(async () => true);
+    const prepared = vi.fn(async () => true);
+    let preparationSignal: AbortSignal | undefined;
+    const prepareReadChecks: NonNullable<UnscopedQueryAdmissionDependencies['prepareReadChecks']> = async (_ids, signal) => {
+      preparationSignal = signal;
+      await gate.promise;
+      return prepared;
+    };
+    const pending = canReadUnscopedQuery({ ...admissionDependencies(canReadContextGraph), prepareReadChecks });
+    const observed = pending.catch((error: unknown) => error);
+    try {
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await observed).toMatchObject({ code: 'BOUNDED_OPERATION_TIMEOUT' });
+      expect(preparationSignal?.aborted).toBe(true);
+      gate.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepared).not.toHaveBeenCalled();
+      expect(canReadContextGraph).not.toHaveBeenCalled();
+    } finally {
+      gate.resolve();
+      await observed;
+      vi.useRealTimers();
+    }
   });
 
   it('does no discovery when the caller is already aborted', async () => {

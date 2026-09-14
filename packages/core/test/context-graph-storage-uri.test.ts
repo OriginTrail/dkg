@@ -17,6 +17,7 @@ import {
   validateNewContextGraphId,
 } from '../src/constants.js';
 import { MemoryLayer } from '../src/memory-model.js';
+import { assertionScopedGraphUri } from '../src/assertion-scoped-graphs.js';
 import {
   workspaceKnowledgeAssetOperationSnapshotGraph,
   workspaceOperationPublicSnapshotGraph,
@@ -125,6 +126,102 @@ describe('contextGraphStorageOwnerCandidates', () => {
     const uri = contextGraphAssertionUri('team/repo', AUTHOR, 'fact', 'reports');
     expect(contextGraphStorageOwnerCandidates(uri))
       .toEqual(expect.arrayContaining(['team/repo/reports', 'team/repo']));
+  });
+
+  it.each([
+    { label: 'root assertion', subGraphName: undefined, child: false },
+    { label: 'named-subgraph assertion', subGraphName: 'reports', child: false },
+    { label: 'root assertion named child', subGraphName: undefined, child: true },
+    { label: 'named-subgraph assertion named child', subGraphName: 'reports', child: true },
+  ])('recovers the private owner of a peer-ID $label', ({ subGraphName, child }) => {
+    const id = 'team/private';
+    const assertion = contextGraphAssertionUri(id, '12D3KooWLegacyPeer', 'draft', subGraphName);
+    const graph = child ? assertionScopedGraphUri(assertion, 'urn:legacy:named-graph') : assertion;
+    const owners = contextGraphStorageOwnerCandidates(graph);
+
+    expect(owners).toContain(id);
+    if (subGraphName) expect(owners).toContain(`${id}/${subGraphName}`);
+    // The assertion-shaped path can also be a separately registered legacy CG.
+    expect(owners).toContain(assertion.slice(PREFIX.length));
+  });
+
+  it.each([undefined, 'reports'])('retains a peer-ID assertion owner before a legacy child partition for %s', (subGraphName) => {
+    const id = 'team/private';
+    const assertion = contextGraphAssertionUri(id, '12D3KooWLegacyPeer', 'draft', subGraphName);
+    // Historical underscore partitions remain legal independently of the exact
+    // base64url codec used by the current named-child constructor.
+    const graph = `${assertion}/_named_graph/urn%3Aexample%3Anamed`;
+    const owners = contextGraphStorageOwnerCandidates(graph);
+
+    expect(owners).toContain(id);
+    if (subGraphName) expect(owners).toContain(`${id}/${subGraphName}`);
+    expect(owners).toContain(assertion.slice(PREFIX.length));
+  });
+
+  const peerAssertion = 'team/private/reports/assertion/12D3KooWLegacyPeer/draft';
+  it.each([
+    {
+      label: 'raw slash scope',
+      uri: contextGraphDataUri('team/private'),
+      owners: ['team', 'team/private'],
+    },
+    {
+      label: 'adjacent partitions',
+      uri: contextGraphMetaUri('tenant/_old/_private'),
+      owners: ['tenant', 'tenant/_old', 'tenant/_old/_private', 'tenant/_old/_private/_meta'],
+    },
+    {
+      label: 'context data',
+      uri: contextGraphDataUri('team/context/old', '7'),
+      owners: ['team/context/old', 'team/context/old/context', 'team/context/old/context/7'],
+    },
+    {
+      label: 'context metadata',
+      uri: contextGraphMetaUri('team/context/old', '7'),
+      owners: [
+        'team/context/old', 'team/context/old/context',
+        'team/context/old/context/7', 'team/context/old/context/7/_meta',
+      ],
+    },
+    {
+      label: 'assertion scope',
+      uri: `${PREFIX}${peerAssertion}`,
+      owners: ['team/private', 'team/private/reports', peerAssertion],
+    },
+    {
+      label: 'canonical assertion child',
+      uri: assertionScopedGraphUri(`${PREFIX}${peerAssertion}`, 'urn:graph'),
+      owners: [
+        'team/private', 'team/private/reports', peerAssertion,
+        `${peerAssertion}/_named_graph`, `${peerAssertion}/_named_graph/dXJuOmdyYXBo`,
+      ],
+    },
+    {
+      label: 'legacy assertion child',
+      uri: `${PREFIX}${peerAssertion}/_named_graph/urn%3Aexample%3Anamed`,
+      owners: [
+        'team/private', 'team/private/reports', peerAssertion, `${peerAssertion}/_named_graph`,
+      ],
+    },
+    {
+      label: 'exact tagged catalog scope',
+      uri: contextGraphSharedMemoryUri(buildCatalogAssertionScopeV1({
+        contextGraphId: 'team/private', subGraphName: null,
+      } as CatalogLaneV1)),
+      owners: ['team/private', 'v1/root'],
+    },
+    {
+      label: 'malformed tagged scope with valid legacy parent',
+      uri: contextGraphSharedMemoryUri('v1/root', 'reports%FF'),
+      owners: ['v1/root'],
+    },
+    {
+      label: 'exact encoded snapshot',
+      uri: workspaceKnowledgeAssetOperationSnapshotGraph('team/private', 'share/operation'),
+      owners: ['team/private'],
+    },
+  ])('preserves the complete compatibility union for $label', ({ uri, owners }) => {
+    expect([...(contextGraphStorageOwnerCandidates(uri) ?? [])].sort()).toEqual([...owners].sort());
   });
 
   it.each([null, 'café'])('decodes the exact RFC-64 owner for subgraph %s through storage constructors', (subGraphName) => {

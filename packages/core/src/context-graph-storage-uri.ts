@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  parseContextGraphAssertionUri,
+  parseContextGraphAssertionStorageUri,
+  parseContextGraphContextStorageUri,
   validateContextGraphId,
-  validateSubGraphName,
 } from './constants.js';
+import { assertionScopedGraphParentUri } from './assertion-scoped-graphs.js';
 import {
   AuthorCatalogCodecError,
   parseCatalogAssertionScopeV1,
 } from './author-catalog-codec.js';
 import { parseWorkspaceSnapshotContextGraphId } from './context-graph-snapshot-uri.js';
+import {
+  legacyContextGraphScopeCandidates,
+  legacyContextGraphStorageScopes,
+} from './legacy-context-graph-storage.js';
 
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 
@@ -36,8 +41,9 @@ export function parseContextGraphUri(uri: string): string | undefined {
  */
 export function contextGraphStorageOwnerCandidates(uri: string): readonly string[] | undefined {
   if (!uri.startsWith(CONTEXT_GRAPH_PREFIX)) return undefined;
-  const tail = uri.slice(CONTEXT_GRAPH_PREFIX.length);
   const owners = new Set<string>();
+  const legacyScopes = legacyContextGraphStorageScopes(uri);
+  const assertionGraphs = new Set(legacyScopes.map((scope) => `${CONTEXT_GRAPH_PREFIX}${scope}`));
 
   const addOwner = (id: string) => {
     if (validateContextGraphId(id).valid) owners.add(id);
@@ -54,29 +60,21 @@ export function contextGraphStorageOwnerCandidates(uri: string): readonly string
     }
   };
   const addScope = (scope: string) => {
-    addExactScope(scope);
-    const slash = scope.lastIndexOf('/');
-    if (slash > 0 && validateSubGraphName(scope.slice(slash + 1)).valid) {
-      // Validate independently: adding a legal flat subgraph can exceed the CG
-      // length limit or introduce characters legal only in subgraph names.
-      addExactScope(scope.slice(0, slash));
-    }
+    for (const candidate of legacyContextGraphScopeCandidates(scope)) addExactScope(candidate);
   };
 
-  addScope(tail);
+  for (const scope of legacyScopes) addScope(scope);
 
-  // A legacy root may itself contain one or more underscore segments. Use a
-  // lookahead so adjacent partitions are all examined without consuming the
-  // slash that starts the next interpretation.
-  for (const match of tail.matchAll(/\/(_[^/]*)(?=\/|$)/g)) {
-    addScope(tail.slice(0, match.index));
+  const context = parseContextGraphContextStorageUri(uri);
+  if (context) addExactScope(context.contextGraphId);
+
+  const namedGraphParent = assertionScopedGraphParentUri(uri);
+  if (namedGraphParent !== undefined) assertionGraphs.add(namedGraphParent);
+  // Historical assertion coordinates can also precede legacy child partitions.
+  for (const graph of assertionGraphs) {
+    const assertion = parseContextGraphAssertionStorageUri(graph);
+    if (assertion) addScope(assertion.scope);
   }
-
-  const context = /^(.*)\/context\/([^/]+)(?:\/_meta)?$/.exec(tail);
-  if (context) addExactScope(context[1]);
-
-  const assertion = parseContextGraphAssertionUri(uri);
-  if (assertion) addScope(assertion.scope);
 
   const snapshotOwner = parseWorkspaceSnapshotContextGraphId(uri);
   if (snapshotOwner !== undefined) owners.add(snapshotOwner);

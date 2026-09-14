@@ -9,7 +9,7 @@
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 
 import { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
-import { withRpcRequestContext, withRpcRequestTimeout } from './rpc-request-transport.js';
+import { activeRpcRequestAbortSignal, withRpcRequestContext, withRpcRequestTimeout } from './rpc-request-transport.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
 import { classifyRpcRetryDisposition } from './evm-adapter-rpc.js';
 
@@ -54,7 +54,7 @@ interface ContextGraphNameHashSlotAnchor {
 }
 
 type ContextGraphNameHashCurrentResolution =
-  | { readonly mode: 'current'; readonly id: bigint | null; readonly highWater: bigint }
+  | { readonly mode: 'current'; readonly bindings: ReadonlyMap<string, bigint | null>; readonly highWater: bigint }
   | { readonly mode: 'historical' };
 
 interface ContextGraphNameHashSlotState {
@@ -136,12 +136,12 @@ export interface ContextGraphNameHashAnchoredHistoricalScan {
     ContextGraphNameHashScanProvider
   >;
   readonly readContextGraphCreatedPage: (
-    normalizedNameHash: string,
+    nameHashFilter: string | null,
     lo: number,
     hi: number,
     preferred?: JsonRpcProvider,
   ) => Promise<{
-    readonly ids: readonly bigint[];
+    readonly bindings: readonly { readonly id: bigint; readonly nameHash: string }[];
     readonly provider: JsonRpcProvider;
   }>;
 }
@@ -158,6 +158,7 @@ export interface EvmContextGraphNameHashSource {
   /** Monotonic generation of committed current-slot snapshots. */
   readonly currentSlotRevision: number;
   resolve(normalizedNameHash: string): Promise<bigint | null>;
+  resolveMany(normalizedNameHashes: readonly string[]): Promise<ReadonlyMap<string, bigint | null>>;
   invalidate(): void;
 }
 
@@ -280,24 +281,48 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     // ages while queued fail closed without committing stale state.
     const highWaterSnapshot = await this.loadProviderHighWaters();
     const current = await this.enqueueCurrentSlotResolution(
-      normalizedNameHash,
+      [normalizedNameHash],
       requestScope,
       highWaterSnapshot,
     );
     return current.mode === 'historical'
       ? this.resolveHistorical(normalizedNameHash)
-      : current.id;
+      : current.bindings.get(normalizedNameHash)!;
+  }
+
+  /** Fresh batch proof; cached current slots still require all temporal fences. */
+  async resolveMany(normalizedNameHashes: readonly string[]): Promise<ReadonlyMap<string, bigint | null>> {
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    const names = normalizedNameHashes.filter((name) => name !== ethers.ZeroHash);
+    if (names.length === 0) return new Map(normalizedNameHashes.map((name) => [name, null]));
+    await this.initialize();
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    const requestScope = await this.captureScopeToken();
+    const highWaterSnapshot = await this.loadProviderHighWaters();
+    const current = await this.enqueueCurrentSlotResolution(names, requestScope, highWaterSnapshot);
+    const bindings = current.mode === 'historical'
+      ? await this.resolveHistoricalMany(names, null)
+      : current.bindings;
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    return new Map(normalizedNameHashes.map((name) => {
+      if (name === ethers.ZeroHash) return [name, null] as const;
+      const binding = bindings.get(name);
+      if (binding === undefined) {
+        throw new Error(`resolveContextGraphIdsByNameHashes: incomplete name binding for ${name}`);
+      }
+      return [name, binding] as const;
+    }));
   }
 
   /** Serialize complete current-slot resolutions onto the one adapter-owned index. */
   private enqueueCurrentSlotResolution(
-    normalizedNameHash: string,
+    normalizedNameHashes: readonly string[],
     requestScope: ContextGraphNameHashScopeToken,
     highWaterSnapshot: ContextGraphNameHashProviderHighWaters,
   ): Promise<ContextGraphNameHashCurrentResolution> {
     const run = this.currentSlotTail.then(
-      () => this.resolveCurrentSlots(normalizedNameHash, requestScope, highWaterSnapshot),
-      () => this.resolveCurrentSlots(normalizedNameHash, requestScope, highWaterSnapshot),
+      () => this.resolveCurrentSlots(normalizedNameHashes, requestScope, highWaterSnapshot),
+      () => this.resolveCurrentSlots(normalizedNameHashes, requestScope, highWaterSnapshot),
     );
     this.currentSlotTail = run.then(() => undefined, () => undefined);
     return run;
@@ -309,10 +334,11 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
    * layer.
    */
   private async resolveCurrentSlots(
-    normalizedNameHash: string,
+    normalizedNameHashes: readonly string[],
     requestScope: ContextGraphNameHashScopeToken,
     highWaterSnapshot: ContextGraphNameHashProviderHighWaters,
   ): Promise<ContextGraphNameHashCurrentResolution> {
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const { latestId } = highWaterSnapshot;
     if (latestId < 0n) {
       throw new Error(
@@ -374,14 +400,17 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
       state = nextState;
     }
 
-    const ids = state?.idsByHash.get(normalizedNameHash) ?? [];
-    if (ids.length !== 0 && ids.length !== 1) {
-      throw new Error(
-        `resolveContextGraphIdByNameHash: ambiguous ${normalizedNameHash}; ` +
-        `getNameHash commits it to ${ids.length} numeric ids`,
-      );
+    const bindings = new Map<string, bigint | null>();
+    for (const nameHash of normalizedNameHashes) {
+      const ids = state?.idsByHash.get(nameHash) ?? [];
+      if (ids.length > 1) {
+        throw new Error(
+          `resolveContextGraphIdByNameHash: ambiguous ${nameHash}; ` +
+          `getNameHash commits it to ${ids.length} numeric ids`,
+        );
+      }
+      bindings.set(nameHash, ids[0] ?? null);
     }
-    const id = ids[0] ?? null;
 
     const verification = await this.loadProviderHighWaters();
     this.assertCompleteProviderHighWaterBoundary(
@@ -395,27 +424,61 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
         'during current-slot resolution',
       );
     }
-    if (id !== null) {
-      const currentHash = await this.readCurrentNameHash(
-        id,
-        undefined,
-        verification,
-      );
-      if (currentHash !== normalizedNameHash) {
+    await this.verifyCurrentBindings(bindings, verification);
+    if (normalizedNameHashes.length > 1) {
+      const finalBoundary = await this.loadProviderHighWaters();
+      this.assertCompleteProviderHighWaterBoundary(finalBoundary, 'current-slot resolution');
+      if (finalBoundary.latestId !== latestId) {
+        throw new Error('resolveContextGraphIdsByNameHashes: registry advanced during batch verification');
+      }
+      if ((await this.loadAnchorHash(nextAnchor.blockNumber))?.toLowerCase() !== nextAnchor.blockHash) {
         throw new Error(
-          `resolveContextGraphIdByNameHash: indexed slot ${id.toString()} ` +
-          `currently commits ${currentHash ?? ethers.ZeroHash}, expected ` +
-          normalizedNameHash,
+          'resolveContextGraphIdsByNameHashes: canonical chain anchor changed during batch verification',
         );
       }
     }
 
     await this.assertScopeCurrent(requestScope, 'current-slot resolution');
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     if (nextState !== undefined) {
       this.currentSlotState = nextState;
       this.currentSlotGeneration += 1;
     }
-    return { mode: 'current', id, highWater: latestId };
+    return { mode: 'current', bindings, highWater: latestId };
+  }
+
+  /** Verify only positive bindings, with at most four live slot reads. */
+  private async verifyCurrentBindings(
+    bindings: ReadonlyMap<string, bigint | null>,
+    highWaterSnapshot?: ContextGraphNameHashProviderHighWaters,
+  ): Promise<void> {
+    const entries = [...bindings].filter((entry): entry is [string, bigint] => entry[1] !== null);
+    const stop = new AbortController();
+    let next = 0;
+    await withRpcRequestContext({ signal: stop.signal }, async () => {
+      const worker = async () => {
+        for (;;) {
+          activeRpcRequestAbortSignal()?.throwIfAborted();
+          const entry = entries[next++];
+          if (entry === undefined) return;
+          const [nameHash, id] = entry;
+          const currentHash = await this.readCurrentNameHash(id, undefined, highWaterSnapshot);
+          activeRpcRequestAbortSignal()?.throwIfAborted();
+          if (currentHash !== nameHash) {
+            throw new Error(
+              `resolveContextGraphIdByNameHash: indexed slot ${id.toString()} ` +
+              `currently commits ${currentHash ?? ethers.ZeroHash}, expected ${nameHash}`,
+            );
+          }
+        }
+      };
+      try {
+        await Promise.all(Array.from({ length: Math.min(entries.length, 4) }, worker));
+      } catch (error) {
+        stop.abort(error);
+        throw error;
+      }
+    });
   }
 
   /** Fixed-concurrency staged range loader for the bounded current lane. */
@@ -431,6 +494,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     let firstFailure: unknown;
     const worker = async (): Promise<void> => {
       while (!failed) {
+        activeRpcRequestAbortSignal()?.throwIfAborted();
         const contextGraphId = nextId;
         if (contextGraphId > lastId) return;
         nextId += 1n;
@@ -637,13 +701,21 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
 
   /** Entire historical fence choreography, kept behind the chain source. */
   private async resolveHistorical(normalizedNameHash: string): Promise<bigint | null> {
+    return (await this.resolveHistoricalMany([normalizedNameHash], normalizedNameHash)).get(normalizedNameHash)!;
+  }
+
+  private async resolveHistoricalMany(
+    normalizedNameHashes: readonly string[],
+    nameHashFilter: string | null,
+  ): Promise<ReadonlyMap<string, bigint | null>> {
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const scopeToken = await this.captureScopeToken();
     const scan = await this.prepareHistoricalScan();
     const { fromBlock, head, pageSize } = scan;
     const pages = fromBlock > head
       ? 0
       : Math.ceil((head - fromBlock + 1) / pageSize);
-    if (pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+    if (!Number.isSafeInteger(pages) || pages > CG_REGISTRY_MAX_SCAN_PAGES) {
       throw new Error(
         `resolveContextGraphIdByNameHash: historical ContextGraphCreated scan ` +
         `would need ${pages} eth_getLogs calls over blocks ` +
@@ -677,68 +749,63 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
       headAnchor.scanProviders[0]!.provider,
     ]);
     const assertScanCurrent = async (): Promise<void> => {
+      activeRpcRequestAbortSignal()?.throwIfAborted();
       await this.assertScopeCurrent(scopeToken, 'historical scan');
       await this.assertHistoricalHeadCurrent(headAnchor, usedProviders);
     };
 
-    if (fromBlock > head) {
-      await assertScanCurrent();
-      await assertHistoricalRegistryCurrent();
-      await assertScanCurrent();
-      return null;
-    }
-
-    const ids = new Set<bigint>();
+    const idsByHash = new Map(normalizedNameHashes.map((name) => [name, new Set<bigint>()]));
     let preferred: JsonRpcProvider | undefined;
+    // Bulk reads one complete creation inventory. The page count is determined
+    // by registry history, not by the number of hypothetical KA-path owners.
+    // Single-name callers retain their existing exact-topic scan.
     for (let lo = fromBlock; lo <= head; lo += pageSize) {
+      activeRpcRequestAbortSignal()?.throwIfAborted();
       const hi = Math.min(lo + pageSize - 1, head);
-      const page = await anchoredScan.readContextGraphCreatedPage(
-        normalizedNameHash,
-        lo,
-        hi,
-        preferred,
-      );
+      const page = await anchoredScan.readContextGraphCreatedPage(nameHashFilter, lo, hi, preferred);
+      activeRpcRequestAbortSignal()?.throwIfAborted();
       preferred = page.provider;
       usedProviders.add(page.provider);
-      for (const id of page.ids) {
-        if (id <= 0n) {
+      for (const { id, nameHash } of page.bindings) {
+        if (id <= 0n || id > scannedRegistryHighWater || (nameHashFilter !== null && nameHash !== nameHashFilter)) {
           throw new Error(
-            `resolveContextGraphIdByNameHash: invalid Context Graph id ` +
-            `${id.toString()} for ${normalizedNameHash}`,
+            `resolveContextGraphIdByNameHash: invalid Context Graph id or name binding ${id.toString()} for ${nameHash}`,
           );
         }
-        ids.add(id);
+        idsByHash.get(nameHash)?.add(id);
       }
     }
 
     await assertScanCurrent();
-    if (ids.size === 0) {
-      await assertHistoricalRegistryCurrent();
-      await assertScanCurrent();
-      return null;
-    }
-    if (ids.size !== 1) {
-      throw new Error(
-        `resolveContextGraphIdByNameHash: ambiguous ${normalizedNameHash}; ` +
-        `ContextGraphCreated committed it to ${ids.size} numeric ids`,
-      );
+    const bindings = new Map<string, bigint | null>();
+    for (const [nameHash, ids] of idsByHash) {
+      if (ids.size > 1) {
+        throw new Error(
+          `resolveContextGraphIdByNameHash: ambiguous ${nameHash}; ` +
+          `ContextGraphCreated committed it to ${ids.size} numeric ids`,
+        );
+      }
+      bindings.set(nameHash, ids.values().next().value ?? null);
     }
 
-    const id = ids.values().next().value as bigint;
-    const currentHash = await this.readCurrentNameHash(id);
-    if (currentHash !== normalizedNameHash) {
-      throw new Error(
-        `resolveContextGraphIdByNameHash: slot ${id.toString()} currently commits ` +
-        `${currentHash ?? ethers.ZeroHash}, expected ${normalizedNameHash}`,
-      );
+    // Share provider coverage across positive verifications in a bulk request.
+    const verification = normalizedNameHashes.length > 1 && [...bindings.values()].some((id) => id !== null)
+      ? await this.loadProviderHighWaters()
+      : undefined;
+    if (verification !== undefined) {
+      this.assertCompleteProviderHighWaterBoundary(verification, 'historical scan');
+      if (verification.latestId !== scannedRegistryHighWater) {
+        throw new Error('resolveContextGraphIdsByNameHashes: registry high-water changed during historical batch');
+      }
     }
+    await this.verifyCurrentBindings(bindings, verification);
     await assertScanCurrent();
     await assertHistoricalRegistryCurrent();
     await assertScanCurrent();
-    return id;
+    return bindings;
   }
 
-  /** Build one exact-topic historical scan session behind a domain boundary. */
+  /** Build one historical scan session scoped to the storage and creation event. */
   async prepareHistoricalScan(): Promise<ContextGraphNameHashHistoricalScan> {
     await this.dependencies.initialize();
     const contextGraphStorage = this.dependencies.requireContextGraphStorage();
@@ -762,7 +829,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
         return {
           headAnchor,
           readContextGraphCreatedPage: async (
-            normalizedNameHash,
+            nameHashFilter,
             lo,
             hi,
             preferred,
@@ -770,7 +837,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
             const filter = contextGraphStorage.filters.ContextGraphCreated(
               null,
               null,
-              normalizedNameHash,
+              nameHashFilter,
             );
             const page = await this.dependencies.queryEventLogsPage(
               contextGraphStorage,
@@ -783,17 +850,18 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
               preferred,
               'resolveContextGraphIdByNameHash',
             );
-            const ids: bigint[] = [];
+            const bindings: { id: bigint; nameHash: string }[] = [];
             for (const log of page.logs) {
               const parsed = contextGraphStorage.interface.parseLog({
                 topics: [...log.topics],
                 data: log.data,
               });
-              if (parsed?.name === 'ContextGraphCreated') {
-                ids.push(BigInt(parsed.args.contextGraphId));
+              if (parsed?.name !== 'ContextGraphCreated' || !ethers.isHexString(parsed.args.nameHash, 32)) {
+                throw new Error('resolveContextGraphIdsByNameHashes: invalid ContextGraphCreated log');
               }
+              bindings.push({ id: BigInt(parsed.args.contextGraphId), nameHash: parsed.args.nameHash.toLowerCase() });
             }
-            return { ids, provider: page.provider };
+            return { bindings, provider: page.provider };
           },
         };
       },

@@ -8,10 +8,14 @@
  * historical lookup ordering, consensus, and revalidation end to end.
  */
 
-import { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
+import {
+  ContextGraphNameHashResolver,
+  normalizeContextGraphNameHashBatch,
+} from './context-graph-name-hash-resolver.js';
 import {
   activeRpcRequestContext,
   withOwnedRpcRequestContext,
+  withRpcRequestContext,
 } from './rpc-request-transport.js';
 import {
   type EvmContextGraphNameHashSource,
@@ -39,6 +43,19 @@ export class EvmContextGraphNameHashResolver {
       signal,
       requestClass: activeRpcRequestContext().requestClass,
     });
+  }
+
+  /** One fresh proof for all names; do not populate or consume per-name caches. */
+  async resolveMany(nameHashes: readonly string[], signal?: AbortSignal): Promise<ReadonlyMap<string, bigint | null>> {
+    signal?.throwIfAborted();
+    const normalized = normalizeContextGraphNameHashBatch(nameHashes);
+    if (normalized.length === 0) return new Map();
+    try {
+      return await withRpcRequestContext({ signal }, () => this.source.resolveMany(normalized));
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw error;
+    }
   }
 
   invalidateAll(): void {

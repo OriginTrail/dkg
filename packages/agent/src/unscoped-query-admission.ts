@@ -8,7 +8,6 @@ import {
 } from '@origintrail-official/dkg-core';
 import { runBoundedOperation } from './bounded-operation.js';
 import {
-  assertUnscopedQueryCandidateLimit,
   listStoredContextGraphQueryCandidates,
   UNSCOPED_QUERY_ADMISSION_TIMEOUT_MS,
   type ContextGraphQueryStore,
@@ -20,11 +19,15 @@ export interface UnscopedQueryAdmissionDependencies {
   store: ContextGraphQueryStore;
   knownContextGraphIds: Iterable<string>;
   canReadContextGraph: (id: string, signal: AbortSignal) => Promise<boolean>;
+  prepareReadChecks?: (
+    ids: readonly string[],
+    signal: AbortSignal,
+  ) => Promise<UnscopedQueryAdmissionDependencies['canReadContextGraph']>;
 }
 
 /**
  * Arbitrary unscoped SPARQL is safe only when every possible stored owner is
- * readable. Discover the complete bounded candidate set before checking the
+ * readable. Discover the complete candidate set before checking the
  * same read authority used for scoped queries; metadata alone grants nothing.
  */
 export async function canReadUnscopedQuery(
@@ -55,7 +58,6 @@ export async function canReadUnscopedQuery(
       const addCandidate = (id: string) => {
         signal.throwIfAborted();
         candidates.add(id);
-        assertUnscopedQueryCandidateLimit(candidates.size);
       };
       for (const row of result.bindings) {
         const cgUri = row['cg'];
@@ -72,9 +74,17 @@ export async function canReadUnscopedQuery(
       }
       signal.throwIfAborted();
 
-      const readable = await mapWithConcurrency([...candidates], 4, async (id) => {
+      const ids = [...candidates];
+      // Preparation can share a complete fenced registration read and local
+      // metadata discovery across ordinary KA partitions. It never truncates
+      // owners or caches permission decisions beyond this admission request.
+      const canRead = deps.prepareReadChecks
+        ? await deps.prepareReadChecks(ids, signal)
+        : deps.canReadContextGraph;
+      signal.throwIfAborted();
+      const readable = await mapWithConcurrency(ids, 4, async (id) => {
         signal.throwIfAborted();
-        const allowed = await deps.canReadContextGraph(id, signal);
+        const allowed = await canRead(id, signal);
         signal.throwIfAborted();
         return allowed;
       });
