@@ -69,6 +69,7 @@ function makeIndexedAuthorityAdapter(
     deactivated?: boolean;
     secondContextGraph?: boolean;
     zeroHashContextGraphs?: number;
+    lateContextGraphNameHash?: string;
   }> = {},
 ): IndexedAuthorityHarness {
   const scenario = createAuthorityScenario(options);
@@ -317,6 +318,47 @@ describe('RFC-64 indexed Context Graph authority snapshots', () => {
     await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash!(NAME_HASH))
       .rejects.toThrow('ambiguous across 2 finalized Context Graphs');
 
+    expect(evidence.indexRanges).toEqual([
+      [7, 16], [17, 26], [27, 30],
+      [31, 35],
+    ]);
+  });
+
+  it('resolves many complete name-bound snapshots at one anchor and fails a later duplicate closed', async () => {
+    const { adapter, evidence, advanceAuthorityHead } = makeIndexedAuthorityAdapter({
+      secondContextGraph: true,
+      lateContextGraphNameHash: NAME_HASH,
+    });
+    const reader = adapter.contextGraphAuthorityIndexRevisionReader!;
+    const secondNameHash = `0x${'89'.repeat(32)}`;
+
+    const snapshots = await reader
+      .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes!([
+        NAME_HASH,
+        secondNameHash,
+        ethers.ZeroHash,
+      ]);
+    expect(snapshots.get(NAME_HASH)).toMatchObject({
+      contextGraphId: '9',
+      nameHash: NAME_HASH,
+      owner: OWNER,
+      sourceBlockNumber: '21',
+    });
+    expect(snapshots.get(secondNameHash)).toMatchObject({
+      contextGraphId: '10',
+      nameHash: secondNameHash,
+      owner: MEMBER,
+      sourceBlockNumber: '18',
+    });
+    expect(evidence.blockReads).toEqual(['finalized', 16, 26, 30]);
+    expect(evidence.indexRanges).toEqual([[7, 16], [17, 26], [27, 30]]);
+
+    advanceAuthorityHead();
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes!([
+      NAME_HASH,
+      secondNameHash,
+    ])).rejects.toThrow('ambiguous across 2 finalized Context Graphs');
+    expect(evidence.blockReads.filter((tag) => tag === 'finalized')).toHaveLength(2);
     expect(evidence.indexRanges).toEqual([
       [7, 16], [17, 26], [27, 30],
       [31, 35],

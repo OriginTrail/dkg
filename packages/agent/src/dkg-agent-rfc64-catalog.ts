@@ -24,6 +24,8 @@ import {
   MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
+  assertContextGraphIdV1,
+  assertNetworkIdV1,
   assertSignedAuthorCatalogBucketEnvelopeV1,
   assertSignedAuthorCatalogDirectoryNodeEnvelopeV1,
   assertSignedAuthorCatalogHeadEnvelopeV1,
@@ -155,8 +157,10 @@ import {
   resolveRfc64CatalogResponsibilityReasonV1,
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
-import { rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1 } from
-  './rfc64/catalog-rollout-authority-v1.js';
+import {
+  rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
+  type Rfc64CatalogRolloutModeV1,
+} from './rfc64/catalog-rollout-authority-v1.js';
 import type { Rfc64AuthorityReadCoordinatorSnapshotV1 } from
   './rfc64/authority-rpc-circuit-breaker-v1.js';
 import {
@@ -502,6 +506,23 @@ const RFC64_CATALOG_REPLAY_MAX_QUEUED_V1 = 64;
 const RFC64_CATALOG_REPLAY_MAX_QUEUED_PER_PEER_V1 = 4;
 export const RFC64_CATALOG_TARGET_MAX_ENTRIES_V1 = 1_024;
 export const RFC64_CATALOG_TARGET_MAX_CONTEXT_OVERFLOWS_V1 = 64;
+
+/** Pure projection of responsibility through the accepted-authority refresh fence. */
+function projectRfc64ResponsibilityAuthorityWithRefreshFenceV1(input: {
+  readonly authority: Rfc64CatalogAuthorityPolicyV1;
+  readonly selectionActive: boolean;
+  readonly selectionMode: Rfc64CatalogRolloutModeV1;
+  readonly authorityProgressState: Rfc64CatalogAuthorityProgressV1['state'] | undefined;
+  readonly hasAcceptedAuthority: boolean;
+}): Rfc64CatalogAuthorityPolicyV1 {
+  const retainsAcceptedAuthorityWhileRefreshing = input.authorityProgressState === 'resolving'
+    && input.hasAcceptedAuthority;
+  return input.selectionActive && input.selectionMode !== 'legacy'
+    && input.authorityProgressState !== 'accepted'
+    && !retainsAcceptedAuthorityWhileRefreshing
+    ? projectRfc64CatalogReceiverAuthorityV1(input.authority, { active: false })
+    : input.authority;
+}
 
 interface Rfc64CatalogReplayRuntimeV1 {
   tail: Promise<void>;
@@ -1923,7 +1944,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (contextGraphIds.length === 0) return new Map();
     const indexedReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     const readSnapshots = indexedReader?.readContextGraphAuthorityIndexSnapshots;
-    if (indexedReader === undefined || readSnapshots === undefined) {
+    if (indexedReader === undefined) {
       return new Map(contextGraphIds.map((contextGraphId) => [
         contextGraphId,
         Object.freeze({ kind: 'auto' as const }),
@@ -1938,6 +1959,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     signal.throwIfAborted();
     const registeredCandidates = contextGraphIds.filter((id) => !localFirst.has(id));
+    const canResolveCompleteSnapshots =
+      indexedReader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes !== undefined
+      || (
+        registeredCandidates.length === 1
+        && indexedReader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash !== undefined
+      );
+    if (readSnapshots === undefined && !canResolveCompleteSnapshots) {
+      return new Map(contextGraphIds.map((contextGraphId) => [
+        contextGraphId,
+        Object.freeze({ kind: 'auto' as const }),
+      ]));
+    }
     const resolution = await this.rfc64AuthorityReadCoordinatorV1.run(
       signal,
       async (readSignal) => {
@@ -1965,30 +1998,54 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         return value as ContextGraphAuthorityIndexId;
       }),
     )]);
-    let runtime = rfc64ResponsibilityAuthorityBatchRuntimesV1.get(this);
-    if (runtime === undefined) {
-      runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-        readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
-          undefined,
-          async (readSignal) => {
-            try {
-              return await readSnapshots.call(indexedReader, targets, { signal: readSignal });
-            } finally {
-              await indexedReader.whenIdle();
-            }
-          },
-        ),
-      });
-      rfc64ResponsibilityAuthorityBatchRuntimesV1.set(this, runtime);
-    }
-    const batch = targetIds.length === 0 ? undefined : runtime.createBatch(targetIds);
     const evidenceByTargetId = new Map<
       ContextGraphAuthorityIndexId,
       Rfc64FinalizedAuthoritySnapshotEvidenceV1
     >();
-    if (batch !== undefined) {
-      await Promise.all(targetIds.map(async (targetId) => {
-        evidenceByTargetId.set(targetId, await batch.read(targetId, signal));
+    for (const target of resolution.targets.values()) {
+      if (target.finalizedSnapshot === undefined) continue;
+      const targetId = target.expectedOnChainId.toString(10) as
+        ContextGraphAuthorityIndexId;
+      evidenceByTargetId.set(targetId, Object.freeze({
+        contextGraphAuthorityIndexId: targetId,
+        batchTargetIds: targetIds,
+        snapshot: Object.freeze({
+          ...target.finalizedSnapshot,
+          participantAgents: Object.freeze([
+            ...target.finalizedSnapshot.participantAgents,
+          ]),
+        }),
+      }));
+    }
+    const missingTargetIds = targetIds.filter((targetId) => (
+      !evidenceByTargetId.has(targetId)
+    ));
+    if (missingTargetIds.length > 0) {
+      if (readSnapshots === undefined) {
+        return new Map(contextGraphIds.map((contextGraphId) => [
+          contextGraphId,
+          Object.freeze({ kind: 'auto' as const }),
+        ]));
+      }
+      let runtime = rfc64ResponsibilityAuthorityBatchRuntimesV1.get(this);
+      if (runtime === undefined) {
+        runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
+          readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
+            undefined,
+            async (readSignal) => {
+              try {
+                return await readSnapshots.call(indexedReader, targets, { signal: readSignal });
+              } finally {
+                await indexedReader.whenIdle();
+              }
+            },
+          ),
+        });
+        rfc64ResponsibilityAuthorityBatchRuntimesV1.set(this, runtime);
+      }
+      const missingBatch = runtime.createBatch(missingTargetIds);
+      await Promise.all(missingTargetIds.map(async (targetId) => {
+        evidenceByTargetId.set(targetId, await missingBatch.read(targetId, signal));
       }));
     }
     signal.throwIfAborted();
@@ -2541,6 +2598,86 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
+   * Resolve SWM receive admission from the finalized RFC-64 policy already
+   * accepted by this catalog owner. `undefined` delegates a non-catalog graph
+   * to legacy authority; `false` is a catalog-owned fail-closed decision.
+   */
+  resolveAcceptedRfc64SharedMemoryAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    opts: { callerAgentAddress?: string } = {},
+  ): boolean | undefined {
+    const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+    if (
+      receiverAuthority.killSwitchActive
+      || receiverAuthority.mode !== 'catalog'
+    ) return undefined;
+    if (
+      !receiverAuthority.active
+      || receiverAuthority.reconciliationLane !== 'catalog-apply'
+    ) return false;
+
+    const service = this.rfc64PublicCatalogServiceV1;
+    const activeNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId;
+    if (service === undefined || activeNetworkId === undefined) return false;
+    try {
+      assertNetworkIdV1(activeNetworkId);
+      assertContextGraphIdV1(contextGraphId);
+    } catch {
+      return false;
+    }
+    const accepted = service.acceptedPolicySnapshot(activeNetworkId, contextGraphId);
+    if (accepted === null) return false;
+    if (accepted.policy.accessPolicy === 0) return true;
+    if (accepted.roster === null) return false;
+    const effectiveCaller = opts.callerAgentAddress
+      ?? this.config.rfc64CatalogAccessPolicyAuthority?.localAgentAddress
+      ?? this.defaultAgentAddress;
+    return this.isAgentAddressAllowed(
+      effectiveCaller,
+      accepted.roster.members.map(({ agentAddress }) => agentAddress),
+    );
+  }
+
+  /** Gather catalog-owned state once and feed values into the shared pure fence. */
+  resolveRfc64ResponsibilityAuthorityWithRefreshFenceV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Rfc64CatalogAuthorityPolicyV1 {
+    const selection = rfc64CatalogResponsibilityRegistryForV1(
+      this,
+      this.config.rfc64CatalogExecutionPlan,
+    ).read(contextGraphId);
+    const authorityProgressState = rfc64CatalogAuthorityProgressV1
+      .get(this)
+      ?.get(contextGraphId)
+      ?.state;
+    const service = this.rfc64PublicCatalogServiceV1;
+    const networkId = (
+      this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId
+    ) as NetworkIdV1 | undefined;
+    const hasAcceptedAuthority = service !== undefined
+      && networkId !== undefined
+      && networkId !== 'none'
+      && service.acceptedPolicySnapshot(
+        networkId,
+        contextGraphId as ContextGraphIdV1,
+      ) !== null;
+    return projectRfc64ResponsibilityAuthorityWithRefreshFenceV1({
+      authority: resolveRfc64CatalogResponsibilityAuthorityV1({
+        ...selection,
+        killSwitchActive: this.config.rfc64CatalogExecutionPlan.killSwitchActive,
+      }),
+      selectionActive: selection.active,
+      selectionMode: selection.mode,
+      authorityProgressState,
+      hasAcceptedAuthority,
+    });
+  }
+
+  /**
    * Receiver authority is the configured manifest policy projected through the
    * canonical live subscription registry on edges. Cores deliberately retain
    * manifest-wide receiver activity.
@@ -2581,39 +2718,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       );
       return projectRfc64CatalogReceiverAuthorityV1(configured, { active });
     }
-    const selection = rfc64CatalogResponsibilityRegistryForV1(
-      this,
-      this.config.rfc64CatalogExecutionPlan,
-    ).read(contextGraphId);
-    const resolved = resolveRfc64CatalogResponsibilityAuthorityV1({
-      ...selection,
-      killSwitchActive: this.config.rfc64CatalogExecutionPlan.killSwitchActive,
-    });
-    const authorityProgress = rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId);
-    const service = this.rfc64PublicCatalogServiceV1;
-    const networkId = (
-      this.config.rfc64CatalogDeploymentProfile?.networkId
-      ?? this.config.networkIdentity?.chainId
-    ) as NetworkIdV1 | undefined;
     // A refresh reads a newer finalized snapshot before replacing the one the
     // service has already accepted. The prior snapshot remains the latest
     // finalized authority during that read; temporarily disabling its receiver
     // would make every concurrent SHARE/sync fail closed and create a recovery
     // hole on each periodic refresh. A terminal blocked result still disables
     // the receiver below.
-    const retainsAcceptedAuthorityWhileRefreshing = authorityProgress?.state === 'resolving'
-      && service !== undefined
-      && networkId !== undefined
-      && networkId !== 'none'
-      && service.acceptedPolicySnapshot(
-        networkId,
-        contextGraphId as ContextGraphIdV1,
-      ) !== null;
-    return selection.active && selection.mode !== 'legacy'
-      && authorityProgress?.state !== 'accepted'
-      && !retainsAcceptedAuthorityWhileRefreshing
-      ? projectRfc64CatalogReceiverAuthorityV1(resolved, { active: false })
-      : resolved;
+    return this.resolveRfc64ResponsibilityAuthorityWithRefreshFenceV1(contextGraphId);
   }
 
   /** Serving and explicit repair authority is independent of edge receipt. */
@@ -2630,33 +2741,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (compatibility !== null) return compatibility;
     }
     if (configured !== undefined) return configured;
-    const selection = rfc64CatalogResponsibilityRegistryForV1(
-      this,
-      this.config.rfc64CatalogExecutionPlan,
-    ).read(contextGraphId);
-    const resolved = resolveRfc64CatalogResponsibilityAuthorityV1({
-      ...selection,
-      killSwitchActive: this.config.rfc64CatalogExecutionPlan.killSwitchActive,
-    });
-    const authorityProgress = rfc64CatalogAuthorityProgressV1.get(this)?.get(contextGraphId);
-    const service = this.rfc64PublicCatalogServiceV1;
-    const networkId = (
-      this.config.rfc64CatalogDeploymentProfile?.networkId
-      ?? this.config.networkIdentity?.chainId
-    ) as NetworkIdV1 | undefined;
-    const retainsAcceptedAuthorityWhileRefreshing = authorityProgress?.state === 'resolving'
-      && service !== undefined
-      && networkId !== undefined
-      && networkId !== 'none'
-      && service.acceptedPolicySnapshot(
-        networkId,
-        contextGraphId as ContextGraphIdV1,
-      ) !== null;
-    return selection.active && selection.mode !== 'legacy'
-      && authorityProgress?.state !== 'accepted'
-      && !retainsAcceptedAuthorityWhileRefreshing
-      ? projectRfc64CatalogReceiverAuthorityV1(resolved, { active: false })
-      : resolved;
+    return this.resolveRfc64ResponsibilityAuthorityWithRefreshFenceV1(contextGraphId);
   }
 
   /**

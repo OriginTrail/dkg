@@ -7,6 +7,8 @@ import {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
   isContextGraphMembershipSource,
   type ContextGraphMembershipRecord,
+  type ContextGraphMembershipStore,
+  type LocalContextGraphOriginRecord,
 } from '../src/dkg-agent-types.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
@@ -192,27 +194,106 @@ describe('LocalContextGraphProvenance durable restoration', () => {
     ]));
   });
 
+  it.each(['loadLocalOrigins', 'recordLocalOrigin'] as const)(
+    'uses membership compatibility for writes and restart when only %s is implemented',
+    async (implementedMethod) => {
+      const membershipRows: DurableMembershipRow[] = [];
+      const loadLocalOrigins = vi.fn(async () => [] as LocalContextGraphOriginRecord[]);
+      const recordLocalOrigin = vi.fn(async (_record: LocalContextGraphOriginRecord) => undefined);
+      const store: ContextGraphMembershipStore = {
+        ...(implementedMethod === 'loadLocalOrigins'
+          ? { loadLocalOrigins }
+          : { recordLocalOrigin }),
+        loadAll: async () => membershipRows.map((record) => ({ ...record })),
+        upsert: async (record) => {
+          membershipRows.push({ ...record });
+        },
+        delete: async () => undefined,
+      };
+      const writerProvenance = new LocalContextGraphProvenance();
+      const upsertContextGraphMember = vi.fn(async (record: ContextGraphMembershipRecord) => {
+        await store.upsert({ ...record, updatedAt: 1 });
+      });
+      const writer = {
+        config: { contextGraphMembershipStore: store },
+        peerId: 'writer-peer',
+        localContextGraphProvenance: writerProvenance,
+        enqueueContextGraphMembershipPersistWrite: vi.fn(
+          async (_key: string, write: () => Promise<void>) => write(),
+        ),
+        upsertContextGraphMember,
+        log: { warn: vi.fn() },
+      };
+
+      await (LifecycleSyncMethods.prototype as any)
+        .persistLocalContextGraphOrigin.call(writer, 'one-sided-origin', 'local-create');
+
+      expect(upsertContextGraphMember).toHaveBeenCalledWith(
+        expect.objectContaining({
+          contextGraphId: 'one-sided-origin',
+          principalId: 'did:dkg:local-origin:writer-peer',
+          role: 'local-origin',
+          source: 'local-create',
+        }),
+        { strict: true },
+      );
+      expect(loadLocalOrigins).not.toHaveBeenCalled();
+      expect(recordLocalOrigin).not.toHaveBeenCalled();
+
+      const restoredProvenance = new LocalContextGraphProvenance();
+      const reader = {
+        config: { contextGraphMembershipStore: store },
+        localContextGraphProvenance: restoredProvenance,
+        log: { warn: vi.fn() },
+        rehydrateContextGraphSubscriptions: vi.fn(async () => undefined),
+      };
+
+      await (LifecycleSyncMethods.prototype as any)
+        .rehydrateContextGraphsFromDurableState.call(reader);
+
+      expect(restoredProvenance.hasLocalCreate('one-sided-origin')).toBe(true);
+      expect(loadLocalOrigins).not.toHaveBeenCalled();
+      expect(recordLocalOrigin).not.toHaveBeenCalled();
+    },
+  );
+
   it('prefers graph-level origin after the matching membership source is overwritten', async () => {
     const records = [row('stable-origin', {
       principalType: 'agent',
       status: 'active',
       source: 'allowed-agent',
     })];
+    const persistedOrigins: LocalContextGraphOriginRecord[] = [];
     const provenance = new LocalContextGraphProvenance();
-    const loadLocalOrigins = vi.fn(async () => [{
-      contextGraphId: 'stable-origin',
-      source: 'local-create' as const,
-      createdAt: 1,
-    }]);
+    const loadLocalOrigins = vi.fn(async () => persistedOrigins.map((record) => ({ ...record })));
+    const recordLocalOrigin = vi.fn(async (record: LocalContextGraphOriginRecord) => {
+      persistedOrigins.push({ ...record });
+    });
+    const store: ContextGraphMembershipStore = {
+      loadAll: async () => records,
+      loadLocalOrigins,
+      recordLocalOrigin,
+      upsert: async () => undefined,
+      delete: async () => undefined,
+    };
+    const upsertContextGraphMember = vi.fn(async () => undefined);
+    const writer = {
+      config: { contextGraphMembershipStore: store },
+      peerId: 'writer-peer',
+      localContextGraphProvenance: new LocalContextGraphProvenance(),
+      enqueueContextGraphMembershipPersistWrite: vi.fn(
+        async (_key: string, write: () => Promise<void>) => write(),
+      ),
+      upsertContextGraphMember,
+      log: { warn: vi.fn() },
+    };
+
+    await (LifecycleSyncMethods.prototype as any)
+      .persistLocalContextGraphOrigin.call(writer, 'stable-origin', 'local-create');
+
     const fakeAgent = {
       config: {
-        contextGraphMembershipStore: {
-          loadAll: async () => records,
-          loadLocalOrigins,
-          recordLocalOrigin: async () => undefined,
-          upsert: async () => undefined,
-          delete: async () => undefined,
-        },
+        contextGraphMembershipStore: store,
       },
       localContextGraphProvenance: provenance,
       log: { warn: vi.fn() },
@@ -222,6 +303,8 @@ describe('LocalContextGraphProvenance durable restoration', () => {
     await (LifecycleSyncMethods.prototype as any)
       .rehydrateContextGraphsFromDurableState.call(fakeAgent);
 
+    expect(recordLocalOrigin).toHaveBeenCalledOnce();
+    expect(upsertContextGraphMember).not.toHaveBeenCalled();
     expect(loadLocalOrigins).toHaveBeenCalledOnce();
     expect(provenance.hasLocalCreate('stable-origin')).toBe(true);
   });

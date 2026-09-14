@@ -342,6 +342,7 @@ export {
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
   type LocalContextGraphOriginRecord,
+  type LocalContextGraphOriginPersistence,
   type LocalContextGraphOriginSource,
   type ContextGraphJoinPolicyMode,
   type ContextGraphJoinPolicyRecord,

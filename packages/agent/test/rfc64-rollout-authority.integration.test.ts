@@ -1664,6 +1664,95 @@ describe('RFC-64 rollout authority integration', () => {
     expect(chainAdapter.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
+  it('builds a multi-graph refresh from one atomic name snapshot projection', async () => {
+    const firstContextGraphId = `${AUTHOR}/atomic-refresh-a`;
+    const secondContextGraphId = `${AUTHOR}/atomic-refresh-b`;
+    const localFirstContextGraphId = `${AUTHOR}/atomic-refresh-local`;
+    const firstSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(firstContextGraphId, [AUTHOR], '0'),
+      accessPolicy: 0,
+    });
+    const secondSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(secondContextGraphId, [AUTHOR], '0'),
+      contextGraphId: '10',
+      accessPolicy: 0,
+    });
+    const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => new Map([
+      [nameHashes[0]!, firstSnapshot],
+      [nameHashes[1]!, secondSnapshot],
+    ]));
+    const resolveIds = vi.fn(async () => {
+      throw new Error('atomic refresh must not reopen name-to-id resolution');
+    });
+    const readSnapshots = vi.fn(async () => {
+      throw new Error('atomic refresh must not perform a second snapshot read');
+    });
+    const pointAuthorityRead = vi.fn(async () => {
+      throw new Error('atomic refresh must not perform a point snapshot read');
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      getContextGraphAuthoritySnapshot: pointAuthorityRead,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        resolveFinalizedContextGraphIdsByNameHashes: resolveIds,
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'atomic-multi-name-authority-refresh',
+      config: { chainAdapter },
+    });
+    for (const snapshot of [firstSnapshot, secondSnapshot]) {
+      const contextGraphId = snapshot === firstSnapshot
+        ? firstContextGraphId
+        : secondContextGraphId;
+      edge.recordDiscoveredContextGraph(contextGraphId, {
+        name: contextGraphId,
+        onChainId: snapshot.contextGraphId,
+        onChainHash: snapshot.nameHash,
+      });
+    }
+    vi.spyOn(edge, 'isLocalFirstUnregisteredContextGraph')
+      .mockImplementation(async (contextGraphId) => (
+        contextGraphId === localFirstContextGraphId
+      ));
+
+    const requests = await edge.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [firstContextGraphId, localFirstContextGraphId, secondContextGraphId],
+      new AbortController().signal,
+    );
+
+    expect(resolveSnapshots).toHaveBeenCalledOnce();
+    expect(resolveSnapshots).toHaveBeenCalledWith([
+      firstSnapshot.nameHash,
+      secondSnapshot.nameHash,
+    ], { signal: expect.any(AbortSignal) });
+    expect(requests.get(firstContextGraphId)).toMatchObject({
+      kind: 'finalized-evidence',
+      evidence: {
+        contextGraphAuthorityIndexId: '9',
+        batchTargetIds: ['9', '10'],
+        snapshot: firstSnapshot,
+      },
+    });
+    expect(requests.get(secondContextGraphId)).toMatchObject({
+      kind: 'finalized-evidence',
+      evidence: {
+        contextGraphAuthorityIndexId: '10',
+        batchTargetIds: ['9', '10'],
+        snapshot: secondSnapshot,
+      },
+    });
+    expect(requests.get(localFirstContextGraphId)).toEqual({
+      kind: 'finalized-absence',
+    });
+    expect(resolveIds).not.toHaveBeenCalled();
+    expect(readSnapshots).not.toHaveBeenCalled();
+    expect(pointAuthorityRead).not.toHaveBeenCalled();
+  });
+
   it('shares provider-pool exhaustion across registered authority reconciliations', async () => {
     const readAuthority = vi.fn(async () => {
       throw new RpcEndpointsExhaustedError(

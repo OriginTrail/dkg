@@ -1055,7 +1055,16 @@ export interface LocalContextGraphOriginRecord {
   createdAt: number;
 }
 
-export interface ContextGraphMembershipStore {
+/**
+ * Paired graph-level persistence capability for immutable local-origin facts.
+ * Implementations are selected only when both methods are available.
+ */
+export interface LocalContextGraphOriginPersistence {
+  loadLocalOrigins(): Promise<LocalContextGraphOriginRecord[]>;
+  recordLocalOrigin(record: LocalContextGraphOriginRecord): Promise<void>;
+}
+
+export interface ContextGraphMembershipStore extends Partial<LocalContextGraphOriginPersistence> {
   /**
    * Load persisted membership facts for restart recovery. Optional so custom
    * stores written before membership rehydration remain source-compatible.

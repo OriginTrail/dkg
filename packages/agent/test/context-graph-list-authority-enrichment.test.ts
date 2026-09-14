@@ -2,10 +2,9 @@ import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
-import {
-  ContextGraphResolveMethods,
-  enrichContextGraphListAuthorityV1,
-} from '../src/dkg-agent-cg-resolve.js';
+import { enrichContextGraphListAuthorityV1 } from
+  '../src/context-graph-list-authority-enrichment.js';
+import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 
 const CALLER_ADDRESS = '0x1111111111111111111111111111111111111111';
 const MISS_COUNT = 417;

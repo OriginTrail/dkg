@@ -884,11 +884,11 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   /**
    * Resolve Context Graph authority targets at one explicit finalized horizon.
    *
-   * Indexed adapters project every requested name commitment together. A
-   * single target additionally prefers the atomic name-to-authority snapshot
-   * capability so RFC-64 cannot compose identity and policy from different
-   * finalized heads. Older adapters are identified explicitly; callers then
-   * decide whether their operation permits a current-state compatibility path.
+   * Indexed adapters prefer projecting every requested name commitment and
+   * its complete authority snapshot together. A single target retains its
+   * older atomic capability, while older batch adapters may still return IDs
+   * for a caller-owned follow-up snapshot batch. Callers decide whether an
+   * explicitly legacy adapter permits a current-state compatibility path.
    */
   async resolveFinalizedContextGraphAuthorityTargetsV1(
     this: DKGAgent,
@@ -910,6 +910,32 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader === undefined) return { kind: 'legacy-current' };
+
+    const resolveSnapshots = indexReader
+      .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
+    if (resolveSnapshots !== undefined) {
+      const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
+      options.signal?.throwIfAborted();
+      const snapshotsByNameHash = await resolveSnapshots.call(
+        indexReader,
+        bindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+        options,
+      );
+      // Custom readers may not honor cancellation or may return a superset.
+      // Publish only exact logical targets after the caller's final fence.
+      options.signal?.throwIfAborted();
+      for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+        const finalizedSnapshot = snapshotsByNameHash.get(expectedNameHash);
+        if (finalizedSnapshot !== undefined) {
+          targets.set(contextGraphId, Object.freeze({
+            expectedNameHash,
+            expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
+            finalizedSnapshot,
+          }));
+        }
+      }
+      return { kind: 'finalized-index', targets };
+    }
 
     if (bindingTargets.length === 1) {
       const resolveSnapshot = indexReader

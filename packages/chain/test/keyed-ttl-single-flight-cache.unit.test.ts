@@ -200,6 +200,23 @@ describe('AbortableKeyedSingleFlight', () => {
     await expect(pending).rejects.toMatchObject({
       code: 'SINGLE_FLIGHT_INVALIDATED',
       message: 'wording may change',
+      retryable: false,
+    });
+  });
+
+  it('carries an explicit logical-retry disposition without message matching', async () => {
+    const flight = new AbortableKeyedSingleFlight<string, number>();
+    const pending = flight.run('chain', async (signal) => new Promise<number>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    await Promise.resolve();
+
+    flight.invalidate('chain', 'source generation advanced', { retryable: true });
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'SINGLE_FLIGHT_INVALIDATED',
+      message: 'source generation advanced',
+      retryable: true,
     });
   });
 

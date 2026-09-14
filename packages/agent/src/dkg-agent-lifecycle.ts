@@ -680,7 +680,10 @@ import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
-import { createLocalContextGraphOriginMembershipRecord } from
+import {
+  createLocalContextGraphOriginMembershipRecord,
+  normalizeLocalContextGraphOriginPersistence,
+} from
   './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
 
@@ -9863,11 +9866,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.localContextGraphProvenance.recordLocalCreate(contextGraphId);
     const store = this.config.contextGraphMembershipStore;
     if (store === undefined) return;
+    const originPersistence = normalizeLocalContextGraphOriginPersistence(store);
     try {
-      if (store.recordLocalOrigin !== undefined) {
+      if (originPersistence !== undefined) {
         await this.enqueueContextGraphMembershipPersistWrite(
           `local-origin\0${contextGraphId}`,
-          () => store.recordLocalOrigin!({
+          () => originPersistence.recordLocalOrigin({
             contextGraphId,
             source,
             createdAt: Date.now(),
@@ -10102,6 +10106,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async rehydrateContextGraphsFromDurableState(this: DKGAgent): Promise<void> {
     const ctx = createOperationContext('init');
     const membershipStore = this.config.contextGraphMembershipStore;
+    const originPersistence = normalizeLocalContextGraphOriginPersistence(membershipStore);
     let membershipRows: ContextGraphMembershipSnapshot | null = null;
     if (membershipStore?.loadAll === undefined) {
       this.log.warn(
@@ -10114,9 +10119,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // subscription recovery are independent projections of this immutable
         // snapshot; neither lower-level component owns the other's I/O.
         membershipRows = await membershipStore.loadAll();
-        if (membershipStore.loadLocalOrigins === undefined) {
+        if (originPersistence === undefined) {
           // Compatibility path for custom stores predating the independent
-          // graph-keyed journal. New built-in stores never derive provenance
+          // graph-keyed journal, including one-sided implementations of that
+          // paired capability. New built-in stores never derive provenance
           // from mutable membership rows.
           this.localContextGraphProvenance.restoreMembershipRecords(membershipRows);
         }
@@ -10127,10 +10133,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       }
     }
-    if (membershipStore?.loadLocalOrigins !== undefined) {
+    if (originPersistence !== undefined) {
       try {
         this.localContextGraphProvenance.restoreOriginRecords(
-          await membershipStore.loadLocalOrigins(),
+          await originPersistence.loadLocalOrigins(),
         );
       } catch (error) {
         this.log.warn(

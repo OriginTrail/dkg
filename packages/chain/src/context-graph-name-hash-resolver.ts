@@ -3,6 +3,7 @@
 import { ethers } from 'ethers';
 import {
   AbortableKeyedSingleFlight,
+  SingleFlightInvalidatedError,
   TtlValueCache,
 } from './keyed-ttl-single-flight-cache.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
@@ -80,24 +81,37 @@ export class ContextGraphNameHashResolver {
     const partition = this.partitions[options.requestClass ?? 'foreground'];
     for (;;) {
       const cached = partition.cache.get(nameHash);
-      const resolved = cached ?? await partition.singleFlight.run(
-        nameHash,
-        async (physicalSignal) => {
-          const value = await this.dependencies.load(nameHash, physicalSignal);
-          // A superseded loader may ignore cancellation. Its old absence proof
-          // must not reach waiting callers or repopulate the negative cache.
-          physicalSignal.throwIfAborted();
-          // A cold current-slot load may advance the source generation itself.
-          // Stamp the resulting miss after that commit so the next caller does
-          // not immediately discard a fresh negative cache and repeat every
-          // chain fence. A later, independent state advance still invalidates
-          // the entry through the equality check below.
-          return { value, generation: this.dependencies.generation?.() };
-        },
-        options.signal,
-        (value) => { partition.cache.set(nameHash, value); },
-        'Context Graph name-hash resolution has no active waiters',
-      );
+      let resolved: ContextGraphNameHashResolutionCacheEntry;
+      try {
+        resolved = cached ?? await partition.singleFlight.run(
+          nameHash,
+          async (physicalSignal) => {
+            const value = await this.dependencies.load(nameHash, physicalSignal);
+            // A superseded loader may ignore cancellation. Its old absence proof
+            // must not reach waiting callers or repopulate the negative cache.
+            physicalSignal.throwIfAborted();
+            // A cold current-slot load may advance the source generation itself.
+            // Stamp the resulting miss after that commit so the next caller does
+            // not immediately discard a fresh negative cache and repeat every
+            // chain fence. A later, independent state advance still invalidates
+            // the entry through the equality check below.
+            return { value, generation: this.dependencies.generation?.() };
+          },
+          options.signal,
+          (value) => { partition.cache.set(nameHash, value); },
+          'Context Graph name-hash resolution has no active waiters',
+        );
+      } catch (error) {
+        // Binding rotation invalidates the shared physical read, not this
+        // logical caller. Retry from the fresh generation unless the caller
+        // itself was cancelled.
+        if (
+          error instanceof SingleFlightInvalidatedError
+          && error.retryable
+          && !options.signal?.aborted
+        ) continue;
+        throw error;
+      }
       const currentGeneration = this.dependencies.generation?.();
       if (
         resolved.generation === undefined
@@ -148,6 +162,7 @@ export class ContextGraphNameHashResolver {
       partition.cache.clear();
       partition.singleFlight.invalidateAll(
         CONTEXT_GRAPH_NAME_HASH_INVALIDATED_MESSAGE,
+        { retryable: true },
       );
     }
   }

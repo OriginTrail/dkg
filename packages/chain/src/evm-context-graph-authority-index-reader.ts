@@ -324,6 +324,50 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
     );
   };
 
+  const resolveFinalizedSnapshotsByNameHashes = async (
+    rawNameHashes: readonly string[],
+    options: ChainReadOptions,
+    operationLabel = 'resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes',
+  ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>> => {
+    const nameHashes = snapshotAuthorityNameHashTargetsV1(rawNameHashes);
+    options.signal?.throwIfAborted();
+    if (nameHashes.length === 0) return new Map();
+    return runFinalizedProjection(
+      operationLabel,
+      options,
+      async (scan, { provider, contractAddress }) => {
+        const chainId = (await provider.getNetwork()).chainId.toString(10);
+        const snapshots = new Map<string, ContextGraphAuthoritySnapshot>();
+        for (
+          let offset = 0;
+          offset < nameHashes.length;
+          offset += CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS
+        ) {
+          options.signal?.throwIfAborted();
+          const ownedNameHashes = nameHashes.slice(
+            offset,
+            offset + CONTEXT_GRAPH_AUTHORITY_INDEX_MAX_TARGETS,
+          );
+          const states = await dependencies.index.statesByNameHashes({
+            ...scan,
+            nameHashes: ownedNameHashes,
+          });
+          options.signal?.throwIfAborted();
+          for (const nameHash of ownedNameHashes) {
+            const state = states.get(nameHash);
+            if (state !== undefined) {
+              snapshots.set(
+                nameHash,
+                authoritySnapshotV1(state, chainId, contractAddress),
+              );
+            }
+          }
+        }
+        return snapshots;
+      },
+    );
+  };
+
   return Object.freeze({
     whenIdle(): Promise<void> {
       return lifecycle.whenIdle();
@@ -352,22 +396,19 @@ export function createEvmContextGraphAuthorityIndexRevisionReaderV1(
       options: ChainReadOptions = {},
     ): Promise<ContextGraphAuthoritySnapshot | null> {
       const nameHashes = snapshotAuthorityNameHashTargetsV1([nameHash]);
-      options.signal?.throwIfAborted();
       if (nameHashes.length === 0) return null;
-      return runFinalizedProjection(
-        'resolveFinalizedContextGraphAuthoritySnapshotByNameHash',
+      const snapshots = await resolveFinalizedSnapshotsByNameHashes(
+        nameHashes,
         options,
-        async (scan, { provider, contractAddress }) => {
-          const states = await dependencies.index.statesByNameHashes({
-            ...scan,
-            nameHashes,
-          });
-          const state = states.get(nameHashes[0]!);
-          if (state === undefined) return null;
-          const chainId = (await provider.getNetwork()).chainId.toString(10);
-          return authoritySnapshotV1(state, chainId, contractAddress);
-        },
+        'resolveFinalizedContextGraphAuthoritySnapshotByNameHash',
       );
+      return snapshots.get(nameHashes[0]!) ?? null;
+    },
+    resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+      nameHashes: readonly string[],
+      options: ChainReadOptions = {},
+    ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>> {
+      return resolveFinalizedSnapshotsByNameHashes(nameHashes, options);
     },
     async readContextGraphAuthorityIndexRevisions(
       contextGraphIds: readonly ContextGraphAuthorityIndexId[],

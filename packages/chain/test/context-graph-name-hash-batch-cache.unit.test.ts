@@ -26,7 +26,7 @@ function cacheFixture() {
 }
 
 describe('bulk evidence invalidates conflicting scalar name-hash evidence', () => {
-  it.each(['named', 'all'] as const)('rejects a completed but undelivered miss after %s invalidation', async (scope) => {
+  it('rejects a completed but undelivered miss after named evidence supersedes it', async () => {
     const fresh = deferred<bigint | null>();
     const load = vi.fn<(_name: string, signal: AbortSignal) => Promise<bigint | null>>()
       .mockResolvedValueOnce(null)
@@ -41,8 +41,7 @@ describe('bulk evidence invalidates conflicting scalar name-hash evidence', () =
           // The physical load has finished, but its single-flight result has
           // not been delivered. Invalidate and begin newer work in that gap.
           queueMicrotask(() => {
-            if (scope === 'named') resolver.invalidateNames([NAME_HASH]);
-            else resolver.invalidateAll();
+            resolver.invalidateNames([NAME_HASH]);
             replacement = resolver.resolve(NAME_HASH);
           });
         }
@@ -57,6 +56,36 @@ describe('bulk evidence invalidates conflicting scalar name-hash evidence', () =
     if (oldResult.status === 'rejected') {
       expect(oldResult.reason).toBeInstanceOf(SingleFlightInvalidatedError);
     }
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries a completed but undelivered miss after the source generation rotates', async () => {
+    const fresh = deferred<bigint | null>();
+    const load = vi.fn<(_name: string, signal: AbortSignal) => Promise<bigint | null>>()
+      .mockResolvedValueOnce(null)
+      .mockImplementation(() => fresh.promise);
+    let replacement: Promise<bigint | null> | undefined;
+    let scheduled = false;
+    const resolver = new ContextGraphNameHashResolver({
+      load,
+      generation: () => {
+        if (!scheduled) {
+          scheduled = true;
+          queueMicrotask(() => {
+            resolver.invalidateAll();
+            replacement = resolver.resolve(NAME_HASH);
+          });
+        }
+        return 0;
+      },
+    });
+
+    const oldResult = resolver.resolve(NAME_HASH);
+    await vi.waitFor(() => expect(replacement).toBeDefined());
+    fresh.resolve(66n);
+
+    await expect(oldResult).resolves.toBe(66n);
+    await expect(replacement!).resolves.toBe(66n);
     expect(load).toHaveBeenCalledTimes(2);
   });
 

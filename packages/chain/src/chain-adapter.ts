@@ -571,6 +571,15 @@ export interface ContextGraphAuthorityIndexRevisionReader {
     nameHash: string,
     options?: ChainReadOptions,
   ): Promise<ContextGraphAuthoritySnapshot | null>;
+  /**
+   * Resolve many name commitments and their complete authority state from one
+   * finalized index projection. Missing and zero-hash commitments are omitted;
+   * ambiguity fails the whole projection closed.
+   */
+  resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes?(
+    nameHashes: readonly string[],
+    options?: ChainReadOptions,
+  ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>;
   readContextGraphAuthorityIndexRevisions(
     contextGraphIds: readonly ContextGraphAuthorityIndexId[],
     options?: ChainReadOptions,
