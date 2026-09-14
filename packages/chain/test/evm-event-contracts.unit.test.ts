@@ -328,6 +328,56 @@ describe('Hub binding generation ownership', () => {
     } finally { adapter.destroy(); }
   });
 
+  it('exposes the deprecated contracts facade as a coherent read-only snapshot', () => {
+    class CompatibilityProbe extends EVMChainAdapter {
+      seedLazyBinding(binding: Contract): void { this.adapterContracts.randomSampling = binding; }
+
+      installHubBindings(bindings: EvmHubContractInstallation): void {
+        this.installHubContractBindings(bindings);
+      }
+
+      rotateHubBinding(binding: Contract): void { this.replaceHubContractBinding('chronos', binding); }
+
+      compatibilityCache(): ContractCache { return this.contracts; }
+    }
+
+    const adapter = new CompatibilityProbe({
+      rpcUrl: 'http://127.0.0.1:59998',
+      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      hubAddress: String(first.target),
+      chainId: 'evm:31337',
+    });
+    try {
+      adapter.seedLazyBinding(first);
+      adapter.installHubBindings(completeInstallation({ chronos: first }));
+      const cache = adapter.compatibilityCache() as unknown as Record<string, Contract | undefined>;
+
+      // Every object operation agrees: a key reads, enumerates and answers `in`
+      // the same way, over Hub-owned bindings and adapter-owned lazy slots
+      // alike — the property the previous live Proxy could not hold.
+      for (const key of ['chronos', 'randomSampling', 'hub', 'token']) {
+        expect(key in cache).toBe(true);
+        expect(Object.keys(cache)).toContain(key);
+        expect(Object.getOwnPropertyDescriptor(cache, key)?.value).toBe(cache[key]);
+      }
+      expect(cache.chronos).toBe(first);
+      expect(cache.randomSampling).toBe(first);
+      expect(cache.token).toBeUndefined();
+
+      // Writing and deletion are refused the same way, because the facade is
+      // frozen rather than a view that silently rewrites owner state.
+      expect(Object.isFrozen(cache)).toBe(true);
+      expect(() => { cache.chronos = second; }).toThrow(TypeError);
+      expect(() => { delete cache.randomSampling; }).toThrow(TypeError);
+
+      // It is a snapshot, not a live view: a rotation is invisible to a cache
+      // already handed out, and visible to the next read.
+      adapter.rotateHubBinding(second);
+      expect(cache.chronos).toBe(first);
+      expect(adapter.compatibilityCache().chronos).toBe(second);
+    } finally { adapter.destroy(); }
+  });
+
   it('invalidate retires readiness and decisions while retaining handles unless dropped', async () => {
     const group = new EvmHubContractBindings({ hub: first });
     group.install(completeInstallation({ contextGraphStorage: second }));
