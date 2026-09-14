@@ -12,10 +12,6 @@ type KnowledgeAssetEvidence = {
   readonly endKAId: string;
 };
 
-type KnowledgeAssetEvidenceStrategy =
-  | { readonly kind: 'legacy-mint-range'; readonly evidence: KnowledgeAssetEvidence }
-  | { readonly kind: 'greenfield-transfer'; readonly publisherAddress?: string };
-
 function parseLog(contract: Contract, log: EvmLog): ethers.LogDescription | null {
   return contract.interface.parseLog({ topics: [...log.topics], data: log.data });
 }
@@ -71,18 +67,6 @@ async function collectGreenfieldTransferEvidence(
   return ownerByTokenId;
 }
 
-function selectKnowledgeAssetEvidenceStrategy(
-  log: EvmLog,
-  kaId: string,
-  legacyByTransaction: ReadonlyMap<string, KnowledgeAssetEvidence>,
-  greenfieldOwnerByTokenId: ReadonlyMap<string, string>,
-): KnowledgeAssetEvidenceStrategy {
-  const evidence = legacyByTransaction.get(log.transactionHash);
-  return evidence
-    ? { kind: 'legacy-mint-range', evidence }
-    : { kind: 'greenfield-transfer', publisherAddress: greenfieldOwnerByTokenId.get(kaId) };
-}
-
 function projectKnowledgeAssetCreated(
   kaStorage: Contract,
   log: EvmLog,
@@ -94,16 +78,8 @@ function projectKnowledgeAssetCreated(
 
   const kaId = parsed.args.id.toString();
   const author = typeof parsed.args.author === 'string' ? parsed.args.author : '';
-  const strategy = selectKnowledgeAssetEvidenceStrategy(
-    log,
-    kaId,
-    legacyByTransaction,
-    greenfieldOwnerByTokenId,
-  );
-  const legacy = strategy.kind === 'legacy-mint-range' ? strategy.evidence : undefined;
-  const greenfieldOwner = strategy.kind === 'greenfield-transfer'
-    ? strategy.publisherAddress
-    : undefined;
+  const legacy = legacyByTransaction.get(log.transactionHash);
+  const greenfieldOwner = legacy ? undefined : greenfieldOwnerByTokenId.get(kaId);
 
   return {
     type: 'KCCreated',
@@ -125,7 +101,8 @@ function projectKnowledgeAssetCreated(
 
 /**
  * Scan one KnowledgeAssetCreated deployment generation. The create query runs
- * first, then one evidence strategy is selected for every projected row.
+ * first, then legacy mint evidence takes precedence over transfer ownership
+ * and the attested author fallback for every projected row.
  */
 export async function* scanKnowledgeAssetCreatedEvents(
   kaStorage: Contract,

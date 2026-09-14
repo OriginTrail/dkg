@@ -29,7 +29,8 @@ import type {
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import {
   ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, EvmHubContractBindings, optionalEvmContract,
-  type EvmHubBindingSet, type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSnapshot,
+  type EvmHubBindingSet, type EvmHubBindingSnapshot, type EvmHubContractInstallation,
+  type EvmHubContractKey, type EvmHubContractSnapshot,
   type EvmHubContractSpec,
 } from './evm-hub-contract-bindings.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
@@ -693,14 +694,18 @@ export class EVMChainAdapterBase {
   private readonly hubContractBindings: EvmHubContractBindings;
   protected readonly adapterContracts: Omit<ContractCache, 'hub' | EvmHubContractKey> = {};
 
-  /** Canonical Hub-owned handles for the current generation. */
-  protected get hubContracts(): Readonly<EvmHubBindingSet> {
-    return this.hubContractBindings.contracts;
+  /** Immutable operation-owned view of exactly one Hub generation. */
+  protected captureHubContractBindings(): EvmHubBindingSnapshot {
+    return this.hubContractBindings.capture();
   }
 
   /** Read-only compatibility snapshot for subclasses that inspect resolved handles. */
   protected get contracts(): Readonly<ContractCache> {
-    return Object.freeze({ ...this.adapterContracts, ...this.hubContracts }) as Readonly<ContractCache>;
+    const snapshot = this.captureHubContractBindings();
+    return Object.freeze({
+      ...this.adapterContracts,
+      ...snapshot.contracts,
+    }) as Readonly<ContractCache>;
   }
 
   protected get initialized(): boolean { return this.hubContractBindings.initialized; }
@@ -1403,9 +1408,10 @@ export class EVMChainAdapterBase {
         `Configured publisherAddress ${publisherAddress} is not present in the EVM signer pool.`,
       );
     }
-    if (this.hubContracts.contextGraphs) {
+    const { contextGraphs } = this.captureHubContractBindings().contracts;
+    if (contextGraphs) {
       const authorized = await this.readContract(
-        this.hubContracts.contextGraphs,
+        contextGraphs,
         'contextGraphs.isAuthorizedPublisher',
         'isAuthorizedPublisher',
         contextGraphId,
@@ -1711,6 +1717,8 @@ export class EVMChainAdapterBase {
     tokenAmount: bigint,
     reapproveLabel: string,
     approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
+    tokenContract: Contract | undefined =
+      this.captureHubContractBindings().contracts.token,
   ): Promise<SignedTransactionEnvelope> {
     // Per-endpoint populate+sign failover lives in the shared
     // `populateAndSignAcrossProviders` (so a 429ing primary can't fail-fast the
@@ -1767,6 +1775,7 @@ export class EVMChainAdapterBase {
             reapproveLabel,
             true,
             approvalSender,
+            tokenContract,
           );
           continue; // re-run the WHOLE inner per-provider populate loop, allowance now in place
         }
@@ -2035,7 +2044,7 @@ export class EVMChainAdapterBase {
    *   - `replenishing`: approve a ceiling, refill at a fraction.
    *   - `unlimited`: V9-style one-shot MaxUint256.
    *
-   * Acts as a no-op when `this.hubContracts.token` is absent (read-only
+   * Acts as a no-op when the operation's Token binding is absent (read-only
    * adapters). Extracted from the two near-identical inline blocks in
    * `publishV10` / `updateV10` so the approve branches are exercised by
    * a single seam in unit tests (`mock allowance() / approve()`).
@@ -2051,9 +2060,11 @@ export class EVMChainAdapterBase {
     // returning. See `isTooLowAllowanceError` / `createKnowledgeAssets`.
     force = false,
     approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
+    tokenContract: Contract | undefined =
+      this.captureHubContractBindings().contracts.token,
   ): Promise<void> {
-    if (!this.hubContracts.token) return;
-    const tokenWithSigner = this.hubContracts.token.connect(signer) as Contract;
+    if (!tokenContract) return;
+    const tokenWithSigner = tokenContract.connect(signer) as Contract;
     // Foreground transaction reads preserve the established single-RPC
     // behaviour: with no alternate endpoint to fail over to, a slow healthy
     // allowance read may finish after the multi-RPC stall timeout. Serializer
@@ -2205,11 +2216,12 @@ export class EVMChainAdapterBase {
     ordered: Wallet[],
     contextGraphId: bigint,
   ): Promise<Wallet[]> {
-    if (!this.hubContracts.contextGraphs) return ordered;
+    const { contextGraphs } = this.captureHubContractBindings().contracts;
+    if (!contextGraphs) return ordered;
     const eligible: Wallet[] = [];
     for (const signer of ordered) {
       if (await this.readContract(
-        this.hubContracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
+        contextGraphs, 'contextGraphs.isAuthorizedPublisher',
         'isAuthorizedPublisher', contextGraphId, signer.address,
       )) {
         eligible.push(signer);
@@ -2621,7 +2633,7 @@ export class EVMChainAdapterBase {
   }
 
   private async readTracBalance(address: string): Promise<bigint | null> {
-    const token = this.hubContracts.token;
+    const token = this.captureHubContractBindings().contracts.token;
     if (!token) return null; // no token contract: TRAC does not gate selection
     try {
       return (await this.readContractWith(
@@ -2699,7 +2711,7 @@ export class EVMChainAdapterBase {
    * fail-open per wallet.
    */
   protected async poolHasFundableSigner(contextGraphId: bigint, requiredTracWei: bigint): Promise<boolean> {
-    const contextGraphs = this.hubContracts.contextGraphs;
+    const contextGraphs = this.captureHubContractBindings().contracts.contextGraphs;
     const checks = await Promise.all(
       this.signerPool.map(async (s) => {
         // No ContextGraphs surface ⇒ every operational wallet is a candidate
@@ -2840,9 +2852,10 @@ export class EVMChainAdapterBase {
     options: ChainReadOptions,
   ): Promise<string> {
     const label = `Hub.${method}(${name})`;
+    const hub = this.captureHubContractBindings().contracts.hub;
     return options.signal
-      ? this.readContractWithOptions(this.hubContracts.hub, label, method, [name], { signal: options.signal })
-      : this.readContract(this.hubContracts.hub, label, method, name);
+      ? this.readContractWithOptions(hub, label, method, [name], { signal: options.signal })
+      : this.readContract(hub, label, method, name);
   }
 
   private async readHubContractAddress(name: string, options: ChainReadOptions = {}): Promise<string> {
@@ -2939,13 +2952,6 @@ export class EVMChainAdapterBase {
     return this.hubContractBindings.isCurrent(snapshot);
   }
 
-  /** Chronos is an optional boot binding decided by the registry, never re-read ad hoc. */
-  protected async requireChronos(): Promise<Contract> {
-    const { chronos } = await this.resolveHubContractBindings(['chronos']);
-    if (!chronos) throw new HubContractNotFoundError('Chronos', this.hubAddress);
-    return chronos;
-  }
-
   private async loadHubContractBinding(spec: EvmHubContractSpec, options: ChainReadOptions = {}): Promise<Contract | undefined> {
     if (spec.registry === 'assetStorage') return this.resolveAssetStorage(spec.name, undefined, options);
     if (spec.registry === 'contract') return this.resolveContract(spec.name, undefined, options);
@@ -2978,8 +2984,11 @@ export class EVMChainAdapterBase {
     }
   }
 
-  protected requireV9(): void {
-    if (!this.hubContracts.knowledgeAssets || !this.hubContracts.knowledgeAssetsStorage) {
+  protected requireV9(
+    contracts: Readonly<EvmHubBindingSet> = this.captureHubContractBindings().contracts,
+  ): void {
+    const { knowledgeAssets, knowledgeAssetsStorage } = contracts;
+    if (!knowledgeAssets || !knowledgeAssetsStorage) {
       throw new Error(
         'V9 contracts (KnowledgeAssets, KnowledgeAssetsStorage) not deployed. ' +
         'Deploy them first using the deploy scripts.',
@@ -3029,15 +3038,16 @@ export class EVMChainAdapterBase {
   // =====================================================================
 
   async getDKGKnowledgeAssetsAddress(): Promise<string> {
-    if (!this.hubContracts.knowledgeAssetStorage) {
+    const { knowledgeAssetStorage } = this.captureHubContractBindings().contracts;
+    if (!knowledgeAssetStorage) {
       throw new Error('DKGKnowledgeAssets / DKGKnowledgeAssets not deployed on this chain.');
     }
-    return this.hubContracts.knowledgeAssetStorage.target as string;
+    return knowledgeAssetStorage.target as string;
   }
 
   async getKnowledgeAssetOwner(kaId: bigint): Promise<string> {
     await this.init();
-    const storage = this.hubContracts.knowledgeAssetStorage;
+    const storage = this.captureHubContractBindings().contracts.knowledgeAssetStorage;
     if (!storage) {
       throw new Error('DKGKnowledgeAssets not deployed on this chain.');
     }
@@ -3085,7 +3095,7 @@ export class EVMChainAdapterBase {
     // Mirrors every other contract-reading method (e.g.
     // getKnowledgeAssetsLifecycleAddress).
     await this.init();
-    const storage = this.hubContracts.knowledgeAssetStorage;
+    const storage = this.captureHubContractBindings().contracts.knowledgeAssetStorage;
     if (!storage) {
       throw new Error('DKGKnowledgeAssets not deployed on this chain.');
     }
@@ -3577,10 +3587,11 @@ export class EVMChainAdapterBase {
       return this.cachedKav10Address!.value;
     }
     await this.init();
-    if (!this.hubContracts.knowledgeAssetsLifecycle) {
+    const { knowledgeAssetsLifecycle } = this.captureHubContractBindings().contracts;
+    if (!knowledgeAssetsLifecycle) {
       throw new Error('KnowledgeAssetsLifecycle / KnowledgeAssetsLifecycle contract not deployed on this chain.');
     }
-    const addr = await this.hubContracts.knowledgeAssetsLifecycle.getAddress();
+    const addr = await knowledgeAssetsLifecycle.getAddress();
     this.cachedKav10Address = { value: addr, cachedAt: now };
     return addr;
   }
@@ -3693,10 +3704,6 @@ export class EVMChainAdapterBase {
   async createKnowledgeAssets(params: V10PublishParams): Promise<OnChainPublishResult> {
     await this.init();
 
-    if (!this.hubContracts.knowledgeAssetsLifecycle) {
-      throw new Error('KnowledgeAssetsLifecycle / KnowledgeAssetsLifecycle contract not deployed.');
-    }
-
     // Pre-tx validation of `contextGraphId`. The V10 contract rejects
     // `cgId == 0` at `KnowledgeAssetsLifecycle.sol:379` with `ZeroContextGraphId`;
     // catching this here gives a clearer error than a generic revert and
@@ -3732,7 +3739,12 @@ export class EVMChainAdapterBase {
         { publishEpochs: params.epochs },
       );
     }
-    const ka = this.hubContracts.knowledgeAssetsLifecycle.connect(txSigner) as Contract;
+    const operationBindings = this.captureHubContractBindings();
+    const { knowledgeAssetsLifecycle, knowledgeAssetStorage, token } = operationBindings.contracts;
+    if (!knowledgeAssetsLifecycle) {
+      throw new Error('KnowledgeAssetsLifecycle / KnowledgeAssetsLifecycle contract not deployed.');
+    }
+    const ka = knowledgeAssetsLifecycle.connect(txSigner) as Contract;
     const kaAddress = await ka.getAddress();
 
     // Approval policy: always ensure the operational signer has the
@@ -3745,7 +3757,7 @@ export class EVMChainAdapterBase {
     // the PCA branch covers the cost. Helper handles the
     // `tokenAmount === 0n` floor (`transferFrom(..., 1n)` minimum), the
     // bounded-per-publish vs replenishing vs unlimited dispatch, and the
-    // `this.hubContracts.token === undefined` no-op for read-only adapters.
+    // An absent Token binding remains a no-op for read-only adapters.
     // #953: the approve runs INSIDE the per-wallet serialized window below
     // (it sends its own tx on `txSigner`), not here — see the buildSignedTx
     // closure passed to `dispatchSerializedV10Write`.
@@ -3884,6 +3896,7 @@ export class EVMChainAdapterBase {
           'approve V10 publish TRAC',
           false,
           ctx.sendContractTransaction,
+          token,
         );
         return this.populateAndSignV10WithAllowanceRecovery(
           txSigner,
@@ -3894,6 +3907,7 @@ export class EVMChainAdapterBase {
           params.tokenAmount,
           'approve V10 publish TRAC (forced re-approve, #888)',
           ctx.sendContractTransaction,
+          token,
         );
       },
       () => {
@@ -3919,7 +3933,7 @@ export class EVMChainAdapterBase {
     let endKAId = 0n;
     let publisherAddress = txSigner.address;
     let authorAddress: string | undefined;
-    const kas = this.hubContracts.knowledgeAssetStorage;
+    const kas = knowledgeAssetStorage;
     if (!kas) {
       throw new Error(
         `V10 publish tx ${receipt.hash} succeeded but DKGKnowledgeAssets ` +
@@ -3998,7 +4012,7 @@ export class EVMChainAdapterBase {
   }
 
   isV10Ready(): boolean {
-    return !!this.hubContracts.knowledgeAssetsLifecycle;
+    return !!this.captureHubContractBindings().contracts.knowledgeAssetsLifecycle;
   }
 
   async resolveV10FinalizationReadiness(options: ChainReadOptions = {}): Promise<boolean> {
@@ -4257,9 +4271,10 @@ export class EVMChainAdapterBase {
   protected async startHubRotationListener(): Promise<void> {
     if (this.hubRotationPoller.isStarted) return;
     try {
+      const hub = this.captureHubContractBindings().contracts.hub;
       await this.hubRotationPoller.start(
-        this.hubContracts.hub,
-        await contractAddress(this.hubContracts.hub),
+        hub,
+        await contractAddress(hub),
       );
     } catch (err) {
       console.warn(
@@ -4350,7 +4365,7 @@ export class EVMChainAdapterBase {
   }
 
   protected requireContextGraphStorage(): Contract {
-    const cgs = this.hubContracts.contextGraphStorage;
+    const cgs = this.captureHubContractBindings().contracts.contextGraphStorage;
     if (!cgs) {
       throw new Error(
         'ContextGraphStorage not deployed in this Hub. ' +

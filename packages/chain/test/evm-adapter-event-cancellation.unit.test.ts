@@ -20,7 +20,7 @@ function deferred<T>() {
 }
 function installBindings(adapter: EVMChainAdapter, bindings: Record<string, unknown>): void {
   const internal = adapter as any;
-  internal.installHubContractBindingsForTesting({ ...internal.contracts, ...bindings });
+  internal.installHubContractBindingsForTesting(bindings);
 }
 
 function adapterAt(rpcUrl = 'http://127.0.0.1:59998', rpcUrls?: string[]) {

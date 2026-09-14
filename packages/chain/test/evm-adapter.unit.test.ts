@@ -106,18 +106,27 @@ it('caches optional staking bindings while preserving missing-deployment fallbac
   }
 });
 
-it('requires resolved optional and legacy Hub capabilities before use', async () => {
+it('requires legacy Hub capabilities before use', async () => {
   const adapter: any = new EVMChainAdapter(minimalConfig());
-  const chronos = { target: 'chronos' };
-  adapter.resolveHubContractBindings = vi.fn()
-    .mockResolvedValueOnce({ chronos: undefined })
-    .mockResolvedValueOnce({ chronos });
   try {
-    await expect(adapter.requireChronos()).rejects.toThrow(/Chronos/);
-    await expect(adapter.requireChronos()).resolves.toBe(chronos);
     expect(() => adapter.requireV9()).toThrow(/V9 contracts/);
     await expect(adapter.getDKGKnowledgeAssetsAddress()).rejects.toThrow(
       /DKGKnowledgeAssets.*not deployed/,
+    );
+  } finally {
+    adapter.destroy();
+  }
+});
+
+it('fails clearly when a test uses an undeclared required Hub capability', () => {
+  const adapter = new EVMChainAdapter(minimalConfig());
+  try {
+    adapter.installHubContractBindingsForTesting();
+    const contracts = (adapter as any).contracts;
+    expect(contracts.identity.target).not.toBe(contracts.profile.target);
+    expect(contracts.identity.target).not.toBe(contracts.hub.target);
+    expect(() => contracts.identity.keyHasPurpose).toThrow(
+      /undeclared required Hub binding "identity"/,
     );
   } finally {
     adapter.destroy();
@@ -989,7 +998,7 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
 
 function installHubBindings(adapter: EVMChainAdapter, bindings: Record<string, unknown>): void {
   const internal = adapter as any;
-  internal.installHubContractBindingsForTesting({ ...internal.contracts, ...bindings });
+  internal.installHubContractBindingsForTesting(bindings);
 }
 
 async function flushAsyncWork(turns = 8): Promise<void> {
@@ -4032,6 +4041,53 @@ describe('createKnowledgeAssets / updateKnowledgeCollectionV10 — approval sign
     expect(approveSender).toBe(walletA);
     // R1/OBS-1: signer reconnected per-provider — assert ADDRESS not identity.
     expect((signSpy.calls[0][0] as ethers.Wallet).address).toBe(walletA.address);
+  });
+
+  it('publish path keeps one Hub generation when bindings rotate while the operation is paused', async () => {
+    const allowanceByOwner = makeAllowanceByOwner();
+    const { a, populateSpy } = makeMultiWalletV10Adapter(allowanceByOwner);
+    let signalEntered!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => { signalEntered = resolve; });
+    const resumed = new Promise<void>((resolve) => { resume = resolve; });
+    const dispatch = (a as any).dispatchSerializedV10Write.bind(a);
+    (a as any).dispatchSerializedV10Write = async (...args: unknown[]) => {
+      signalEntered();
+      await resumed;
+      return dispatch(...args);
+    };
+
+    const operation = a.createKnowledgeAssets(makeV10PublishParams());
+    await entered;
+
+    const rotatedPopulate = recorder(async () => ({
+      to: PARITY_KA_ADDRESS,
+      data: '0xfeedface',
+    }));
+    const rotatedAllowance = recorder(async () => 0n);
+    const rotatedBalance = recorder(async () => ABUNDANT_WEI);
+    installHubBindings(a, {
+      knowledgeAssetsLifecycle: {
+        connect: recorder(() => connectable({
+          publish: { populateTransaction: rotatedPopulate },
+        })),
+        getAddress: recorder(async () => PARITY_KA_ADDRESS),
+      },
+      token: {
+        connect: recorder(() => connectable({
+          allowance: rotatedAllowance,
+          approve: recorder(() => undefined),
+          balanceOf: rotatedBalance,
+        })),
+        balanceOf: rotatedBalance,
+      },
+    });
+    resume();
+
+    await expect(operation).rejects.toThrow('SENTINEL_STOP_AFTER_APPROVE');
+    expect(populateSpy.calls).toHaveLength(1);
+    expect(rotatedPopulate.calls).toHaveLength(0);
+    expect(rotatedAllowance.calls).toHaveLength(0);
   });
 
   it('update path: approve fires from the on-chain publisher wallet, NOT a round-robin pick from the pool', async () => {

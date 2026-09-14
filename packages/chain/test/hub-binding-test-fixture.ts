@@ -6,7 +6,7 @@ export type { EVMAdapterConfig };
 
 /** Test-only subclass that publishes a complete, invariant-valid Hub generation. */
 export class EVMChainAdapter extends ProductionEVMChainAdapter {
-  installHubContractBindingsForTesting(value: ContractCache): void {
-    this.installContractBindings(completeContractBindingsForTesting(value, this.contracts.hub));
+  installHubContractBindingsForTesting(overrides: Partial<ContractCache> = {}): void {
+    this.installContractBindings(completeContractBindingsForTesting(this.contracts, overrides));
   }
 }

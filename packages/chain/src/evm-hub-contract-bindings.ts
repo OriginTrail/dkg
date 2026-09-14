@@ -72,6 +72,11 @@ export interface EvmHubContractSnapshot<K extends EvmHubContractKey> {
   readonly contracts: Readonly<Pick<EvmHubBindingSet, K>>;
 }
 
+export interface EvmHubBindingSnapshot {
+  readonly generationId: number;
+  readonly contracts: Readonly<EvmHubBindingSet>;
+}
+
 /** One canonical handle store and Hub generation for subset and full initialization. */
 export class EvmHubContractBindings {
   private nextGenerationId = 1;
@@ -89,6 +94,15 @@ export class EvmHubContractBindings {
   get resolvedKeys(): ReadonlySet<EvmHubContractKey> { return this.current.resolved; }
 
   get generation(): object { return this.current; }
+
+  /** Borrow one immutable handle set from exactly one active generation. */
+  capture(): EvmHubBindingSnapshot {
+    const generation = this.current;
+    return Object.freeze({
+      generationId: generation.id,
+      contracts: Object.freeze({ ...generation.contracts }),
+    });
+  }
 
   /** Whether a borrowed snapshot still belongs to the active Hub generation. */
   isCurrent(snapshot: Pick<EvmHubContractSnapshot<EvmHubContractKey>, 'generationId'>): boolean {

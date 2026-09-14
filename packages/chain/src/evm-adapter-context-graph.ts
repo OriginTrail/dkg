@@ -252,7 +252,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async createContextGraph(params: CreateContextGraphParams): Promise<TxResult> {
     await this.init();
-    const registry = this.hubContracts.contextGraphNameRegistry;
+    const { contextGraphNameRegistry: registry } = this.captureHubContractBindings().contracts;
     const name = params.name ?? params.metadata?.['name'];
     if (!registry || !name) {
       throw new Error(
@@ -302,7 +302,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async revealContextGraphMetadata(contextGraphId: string, name: string, description: string): Promise<TxResult> {
     await this.init();
-    const registry = this.hubContracts.contextGraphNameRegistry;
+    const { contextGraphNameRegistry: registry } = this.captureHubContractBindings().contracts;
     if (!registry) throw new Error('revealContextGraphMetadata: ContextGraphNameRegistry not available');
     const receipt = await this.sendContractTransaction(
       registry,
@@ -317,7 +317,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async hasContextGraphRegistryScanWatermark(): Promise<boolean> {
     await this.init();
-    const registry = this.hubContracts.contextGraphNameRegistry;
+    const { contextGraphNameRegistry: registry } = this.captureHubContractBindings().contracts;
     if (!registry) return false;
     const registryAddress = (await registry.getAddress()).toLowerCase();
     return (await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)) != null;
@@ -328,7 +328,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     options?: ContextGraphChainScanOptions,
   ): Promise<ContextGraphOnChain[]> {
     await this.init();
-    const registry = this.hubContracts.contextGraphNameRegistry;
+    const { contextGraphNameRegistry: registry } = this.captureHubContractBindings().contracts;
     if (!registry) return [];
     const registryAddress = (await registry.getAddress()).toLowerCase();
     const scanPlan = buildPublicContextGraphRegistryScanPlan(fromBlock, options);
@@ -345,7 +345,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
     }
     await this.init();
-    const registry = this.hubContracts.contextGraphNameRegistry;
+    const { contextGraphNameRegistry: registry } = this.captureHubContractBindings().contracts;
     if (!registry) return;
     const registryAddress = (await registry.getAddress()).toLowerCase();
     if (scanPlan.mode === 'repair') {
@@ -685,7 +685,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async createOnChainContextGraph(params: CreateOnChainContextGraphParams): Promise<CreateOnChainContextGraphResult> {
     await this.init();
-    if (!this.hubContracts.contextGraphs || !this.hubContracts.contextGraphStorage) {
+    const contracts = this.captureHubContractBindings().contracts;
+    if (!contracts.contextGraphs || !contracts.contextGraphStorage) {
       throw new Error('ContextGraphs contract not deployed. Deploy ContextGraphs and ContextGraphStorage first.');
     }
 
@@ -696,7 +697,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
     }
 
-    const contextGraphs = this.hubContracts.contextGraphs;
+    const contextGraphs = contracts.contextGraphs;
     const createArgs = [
       params.participantAgents ?? [],
       params.metadataBatchId ?? 0n,
@@ -745,7 +746,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         // publish. `readContract` fails over on transport errors (429/5xx/timeout)
         // and rethrows a decoded revert unchanged; the catch → 0n now fires only
         // when ALL endpoints fail or the deposit is genuinely dormant.
-        const ps = this.hubContracts.parametersStorage as Contract | undefined;
+        const ps = contracts.parametersStorage as Contract | undefined;
         let deposit = 0n;
         try {
           deposit = ps
@@ -765,6 +766,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
           deposit,
           'cg registration deposit',
           true,
+          undefined,
+          contracts.token,
         );
         return submitCreate();
       }
@@ -773,7 +776,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     let contextGraphId: bigint | undefined;
     for (const log of receipt.logs) {
       try {
-        const parsed = this.hubContracts.contextGraphStorage!.interface.parseLog({
+        const parsed = contracts.contextGraphStorage.interface.parseLog({
           topics: [...log.topics],
           data: log.data,
         });
@@ -805,7 +808,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async addContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
     await this.init();
-    const contextGraphs = this.hubContracts.contextGraphs;
+    const { contextGraphs } = this.captureHubContractBindings().contracts;
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
@@ -826,7 +829,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async removeContextGraphParticipantAgent(contextGraphId: bigint, agent: string): Promise<TxResult> {
     await this.init();
-    const contextGraphs = this.hubContracts.contextGraphs;
+    const { contextGraphs } = this.captureHubContractBindings().contracts;
     if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
@@ -847,12 +850,13 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async verify(params: VerifyParams): Promise<TxResult> {
     await this.init();
-    if (!this.hubContracts.contextGraphs) {
+    const { contextGraphs } = this.captureHubContractBindings().contracts;
+    if (!contextGraphs) {
       throw new Error('ContextGraphs contract not deployed.');
     }
 
     const receipt = await this.sendContractTransaction(
-      this.hubContracts.contextGraphs,
+      contextGraphs,
       'registerKnowledgeAsset',
       [params.contextGraphId, params.batchId],
       this.signer,
@@ -869,10 +873,11 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
 
   async publishToContextGraph(params: PublishToContextGraphParams): Promise<OnChainPublishResult> {
     await this.init();
-    if (!this.hubContracts.knowledgeAssets) {
+    const contracts = this.captureHubContractBindings().contracts;
+    if (!contracts.knowledgeAssets) {
       throw new Error('KnowledgeAssets contract not deployed.');
     }
-    if (!this.hubContracts.knowledgeAssetsStorage) {
+    if (!contracts.knowledgeAssetsStorage) {
       throw new Error('KnowledgeAssetsStorage contract not deployed (required for log parsing).');
     }
 
@@ -905,11 +910,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // make this block unreachable, so TS no longer carries the `knowledgeAssets`/
     // `token` presence narrowing here. Kept for type-completeness until the
     // mirror is removed.
-    const ka = this.contracts.knowledgeAssets!.connect(signer) as any;
-    const kaAddress = await this.contracts.knowledgeAssets!.getAddress();
+    const knowledgeAssets = contracts.knowledgeAssets!;
+    const ka = knowledgeAssets.connect(signer) as any;
+    const kaAddress = await knowledgeAssets.getAddress();
 
-    if (this.contracts.token && params.tokenAmount > 0n) {
-      const token = this.contracts.token!.connect(signer) as Contract;
+    if (contracts.token && params.tokenAmount > 0n) {
+      const token = contracts.token!.connect(signer) as Contract;
       const currentAllowance: bigint = await token.allowance(signer.address, kaAddress);
       if (currentAllowance < params.tokenAmount) {
         await this.sendContractTransaction(
@@ -968,7 +974,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // Unreachable below (kept for type-completeness until the mirror is removed);
     // the unsupported-mirror guard above throws before any on-chain side effect.
     const v10ChainId = await this.getEvmChainId();
-    const v10KavAddress = await this.hubContracts.knowledgeAssetsLifecycle!.getAddress();
+    const v10KavAddress = await contracts.knowledgeAssetsLifecycle!.getAddress();
     const authorTypedData = buildAuthorAttestationTypedData({
       chainId: v10ChainId,
       kav10Address: v10KavAddress,

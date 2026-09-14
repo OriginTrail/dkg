@@ -63,7 +63,7 @@ function pcaRpcAdapter(providers: SendProvider[], rpcUrls: string[]): EVMChainAd
 
 function installBindings(adapter: EVMChainAdapter, bindings: Record<string, unknown>): void {
   const internal = adapter as any;
-  internal.installHubContractBindingsForTesting({ ...internal.contracts, ...bindings });
+  internal.installHubContractBindingsForTesting(bindings);
 }
 
 function pcaReadCacheAdapter(values: unknown[]): EVMChainAdapter {

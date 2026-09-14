@@ -26,19 +26,20 @@ export class AckSignMethods extends EVMChainAdapterBase {
       return this.cachedMinRequiredSignatures!.value;
     }
     await this.init();
+    const { parametersStorage } = this.captureHubContractBindings().contracts;
     // FAIL-CLOSED (Codex PR #595 round-5): the agent + publisher
     // verify paths trust whatever this method returns. A silent
     // fallback to a hardcoded `3` (or any other value) when
     // ParametersStorage isn't resolvable would let verify use the
     // wrong quorum without anyone noticing. Refuse to guess.
-    if (!this.hubContracts.parametersStorage) {
+    if (!parametersStorage) {
       throw new Error(
         'getMinimumRequiredSignatures: ParametersStorage contract is not resolvable. ' +
         'Verify cannot enforce ACK quorum without a real chain read — fix the adapter wiring or pass an explicit override.',
       );
     }
     const value = Number(await this.readContract(
-      this.hubContracts.parametersStorage,
+      parametersStorage,
       'parametersStorage.minimumRequiredSignatures',
       'minimumRequiredSignatures',
     ));

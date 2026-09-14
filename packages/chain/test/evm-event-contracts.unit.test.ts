@@ -242,6 +242,25 @@ describe('Hub binding generation ownership', () => {
     expect(group.initialized).toBe(true);
   });
 
+  it('keeps a captured operation view immutable when a later generation installs', () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    group.install(completeInstallation({ knowledgeAssetsLifecycle: first }));
+    const captured = group.capture();
+
+    group.install(completeInstallation({
+      hub: second,
+      knowledgeAssetsLifecycle: second,
+    }));
+
+    expect(captured.generationId).not.toBe(group.capture().generationId);
+    expect(captured.contracts.hub).toBe(first);
+    expect(captured.contracts.knowledgeAssetsLifecycle).toBe(first);
+    expect(group.capture().contracts.hub).toBe(second);
+    expect(group.capture().contracts.knowledgeAssetsLifecycle).toBe(second);
+    expect(Object.isFrozen(captured)).toBe(true);
+    expect(Object.isFrozen(captured.contracts)).toBe(true);
+  });
+
   it('install decides every boot key at once and runs no loader for the installed generation', async () => {
     const group = new EvmHubContractBindings({ hub: first });
     const store = completeInstallation({ contextGraphStorage: second });

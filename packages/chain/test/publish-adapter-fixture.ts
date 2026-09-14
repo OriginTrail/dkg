@@ -4,8 +4,8 @@ import type { ContractCache } from '../src/evm-adapter-types.js';
 import { completeContractBindingsForTesting } from './install-hub-contract-bindings-for-testing.js';
 
 class PublishAdapterFixture extends PublishMethods {
-  installHubContractBindingsForTesting(value: ContractCache): void {
-    this.installContractBindings(completeContractBindingsForTesting(value, this.contracts.hub));
+  installHubContractBindingsForTesting(overrides: Partial<ContractCache> = {}): void {
+    this.installContractBindings(completeContractBindingsForTesting(this.contracts, overrides));
   }
 }
 

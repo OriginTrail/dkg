@@ -28,7 +28,7 @@ import type { PcaMutationInvalidation } from './pca-read-cache.js';
 import { withRpcRequestTimeout } from './rpc-request-transport.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
 import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
-import type { EvmHubContractSnapshot } from './evm-hub-contract-bindings.js';
+import type { EvmHubBindingSet, EvmHubContractSnapshot } from './evm-hub-contract-bindings.js';
 
 type PcaBindingSnapshot =
   | EvmHubContractSnapshot<'dkgPublishingConvictionNFT'>
@@ -84,7 +84,8 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     requiredCostWei: bigint,
     publishEpochs?: number,
   ): Promise<boolean> {
-    if (!this.hubContracts.dkgPublishingConvictionNFT) return false;
+    const { dkgPublishingConvictionNFT } = this.captureHubContractBindings().contracts;
+    if (!dkgPublishingConvictionNFT) return false;
     try {
       const accountId = await withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
@@ -142,7 +143,8 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     opts?: { strict?: boolean },
   ): Promise<bigint> {
     await this.init();
-    const convictionNft = this.hubContracts.dkgPublishingConvictionNFT;
+    const { dkgPublishingConvictionNFT: convictionNft } =
+      this.captureHubContractBindings().contracts;
     if (!convictionNft) {
       // Selector fail-safe: "no PCA contract on this chain" → "no PCA path"
       // (0n), so publishing stays on direct-spend. The discovery path (strict)
@@ -174,7 +176,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
 
   async getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number> {
     await this.init();
-    if (!this.hubContracts.dkgPublishingConvictionNFT) return 0;
+    const { dkgPublishingConvictionNFT: convictionNft } =
+      this.captureHubContractBindings().contracts;
+    if (!convictionNft) return 0;
     if (accountId <= 0n) return 0;
     try {
       // `accounts(uint256)` returns, in order:
@@ -188,7 +192,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       // lastPrimaryNodeChangeEpoch [10] were appended in the RFC-51 bump;
       // `getAccountInfo` does not surface them — GAP-4 reads them here.)
       const tuple = await this.readContract(
-        this.hubContracts.dkgPublishingConvictionNFT, 'pcaNFT.accounts', 'accounts', accountId,
+        convictionNft, 'pcaNFT.accounts', 'accounts', accountId,
       );
       const lock = tuple[5];
       return Number(lock);
@@ -295,8 +299,10 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     return ethers.getAddress(owner);
   }
 
-  requireConvictionNFT(): Contract {
-    const nft = this.hubContracts.dkgPublishingConvictionNFT;
+  requireConvictionNFT(
+    contracts: Readonly<EvmHubBindingSet> = this.captureHubContractBindings().contracts,
+  ): Contract {
+    const nft = contracts.dkgPublishingConvictionNFT;
     if (!nft) {
       throw new PcaUnavailableError();
     }
@@ -323,8 +329,8 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    *      `withHubStaleRetryAny` outer layer drops every boot-bound
    *      handle, re-runs `init()` to repopulate from the live Hub,
    *      and retries the closure once — `op` re-reads
-   *      `this.hubContracts.dkgPublishingConvictionNFT` via
-   *      `requireConvictionNFT()` so the retry uses the new address.
+   *      the operation-owned binding snapshot via `requireConvictionNFT()`
+   *      so the retry uses the new address.
    *
    * NOTE — rc.12 follow-up: other V10 write paths
    * (`createKnowledgeAssets`, `createContextGraph`,
@@ -349,18 +355,19 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
   ): Promise<{ accountId: bigint } & TxResult> {
     await this.init();
     return this.pcaWriteAndInvalidate({ kind: 'account-created', accountIdFromResult: (result) => result.accountId }, async () => {
-      const nft = this.requireConvictionNFT();
+      const contracts = this.captureHubContractBindings().contracts;
+      const nft = this.requireConvictionNFT(contracts);
       const nftAddress = await nft.getAddress();
 
       // createAccount() does transferFrom(msg.sender → stakingStorage,
       // committedTRAC) — the signer must allow the NFT to pull the TRAC.
-      if (this.hubContracts.token) {
+      if (contracts.token) {
         const allowance: bigint = await this.readContract(
-          this.hubContracts.token, 'token.allowance', 'allowance', this.signer.address, nftAddress,
+          contracts.token, 'token.allowance', 'allowance', this.signer.address, nftAddress,
         );
         if (allowance < committedTRAC) {
           await this.sendContractTransaction(
-            this.hubContracts.token,
+            contracts.token,
             'approve',
             [nftAddress, ethers.MaxUint256],
             this.signer,
@@ -497,15 +504,16 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
   async topUpPublishingConvictionAccount(accountId: bigint, amount: bigint): Promise<TxResult> {
     await this.init();
     return this.pcaWriteAndInvalidate({ kind: 'account-changed', accountId }, async () => {
-      const nft = this.requireConvictionNFT();
+      const contracts = this.captureHubContractBindings().contracts;
+      const nft = this.requireConvictionNFT(contracts);
       const nftAddress = await nft.getAddress();
-      if (this.hubContracts.token) {
+      if (contracts.token) {
         const allowance: bigint = await this.readContract(
-          this.hubContracts.token, 'token.allowance', 'allowance', this.signer.address, nftAddress,
+          contracts.token, 'token.allowance', 'allowance', this.signer.address, nftAddress,
         );
         if (allowance < amount) {
           await this.sendContractTransaction(
-            this.hubContracts.token,
+            contracts.token,
             'approve',
             [nftAddress, ethers.MaxUint256],
             this.signer,
@@ -615,13 +623,15 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
 
   async isPublishingConvictionAgent(accountId: bigint, agent: string): Promise<boolean> {
     await this.init();
-    if (!this.hubContracts.dkgPublishingConvictionNFT) return false;
+    const { dkgPublishingConvictionNFT: convictionNft } =
+      this.captureHubContractBindings().contracts;
+    if (!convictionNft) return false;
     if (!ethers.isAddress(agent)) return false;
     // `isAgent` is a pure view that returns false for normal not-approved cases.
     // A CALL_EXCEPTION here is a read failure, not a confirmed negative; callers
     // must surface it as inconclusive so the UI never makes a false coverage claim.
     return Boolean(await this.readContract(
-      this.hubContracts.dkgPublishingConvictionNFT, 'pcaNFT.isAgent', 'isAgent', accountId, agent,
+      convictionNft, 'pcaNFT.isAgent', 'isAgent', accountId, agent,
     ));
   }
 
@@ -640,12 +650,13 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     clearAgentsSupported: boolean;
   }> {
     await this.init();
-    const nft = this.requireConvictionNFT();
+    const contracts = this.captureHubContractBindings().contracts;
+    const nft = this.requireConvictionNFT(contracts);
     const nftAddress = ethers.getAddress(await nft.getAddress());
-    if (!this.hubContracts.token) {
+    if (!contracts.token) {
       throw new Error('Token contract not available on this chain');
     }
-    const tokenAddress = ethers.getAddress(await this.hubContracts.token.getAddress());
+    const tokenAddress = ethers.getAddress(await contracts.token.getAddress());
     // PublishingConviction is the LOGIC contract that owns clearAgents (the NFT
     // wrapper has no entry point for it), so the browser wallet-connect path
     // needs its address to wallet-sign the bulk agent reset.
@@ -686,11 +697,13 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    */
   async getConvictionPrimaryNode(accountId: bigint): Promise<bigint> {
     await this.init();
-    if (!this.hubContracts.dkgPublishingConvictionNFT) return 0n;
+    const { dkgPublishingConvictionNFT: convictionNft } =
+      this.captureHubContractBindings().contracts;
+    if (!convictionNft) return 0n;
     if (accountId <= 0n) return 0n;
     try {
       const tuple = await this.readContract(
-        this.hubContracts.dkgPublishingConvictionNFT, 'pcaNFT.accounts', 'accounts', accountId,
+        convictionNft, 'pcaNFT.accounts', 'accounts', accountId,
       );
       return BigInt(tuple[9]);
     } catch (err: any) {
@@ -710,8 +723,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    */
   async listNodePublishingConvictionAccounts(): Promise<NodePublishingConvictionAccount[]> {
     await this.init();
-    if (!this.hubContracts.dkgPublishingConvictionNFT) throw new PcaUnavailableError();
-    const nft = this.requireConvictionNFT();
+    const contracts = this.captureHubContractBindings().contracts;
+    if (!contracts.dkgPublishingConvictionNFT) throw new PcaUnavailableError();
+    const nft = this.requireConvictionNFT(contracts);
     const owner = this.signer.address;
     // 0n when this node has no on-chain profile yet — then no PCA "funds this node".
     const myIdentity = await this.getIdentityId();
@@ -781,17 +795,19 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    */
   async getPublishingConvictionAgents(accountId: bigint): Promise<string[]> {
     await this.init();
-    if (!this.hubContracts.dkgPublishingConvictionNFT) return [];
+    const { dkgPublishingConvictionNFT: convictionNft } =
+      this.captureHubContractBindings().contracts;
+    if (!convictionNft) return [];
     if (accountId <= 0n) return [];
     const raw: string[] = await this.readContract(
-      this.hubContracts.dkgPublishingConvictionNFT, 'pcaNFT.getRegisteredAgents', 'getRegisteredAgents', accountId,
+      convictionNft, 'pcaNFT.getRegisteredAgents', 'getRegisteredAgents', accountId,
     );
     return (raw ?? []).map((a) => ethers.getAddress(a));
   }
 
   async listPublishingConvictionAccountsForWallets(wallets: string[]): Promise<PcaAccountRelation[]> {
     await this.init();
-    const nft = this.hubContracts.dkgPublishingConvictionNFT;
+    const { dkgPublishingConvictionNFT: nft } = this.captureHubContractBindings().contracts;
     if (!nft) throw new PcaUnavailableError();
 
     const owned = new Set<bigint>();
@@ -867,8 +883,9 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    */
   async getPublishingConvictionContracts(): Promise<PcaContracts> {
     await this.init();
-    const nft = this.requireConvictionNFT();
-    const token = this.hubContracts.token;
+    const contracts = this.captureHubContractBindings().contracts;
+    const nft = this.requireConvictionNFT(contracts);
+    const token = contracts.token;
     if (!token) throw new PcaUnavailableError();
     return {
       nft: ethers.getAddress(await nft.getAddress()),
