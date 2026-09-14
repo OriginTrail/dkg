@@ -26,10 +26,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
-import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
-import { DashboardDB, SqliteChainEventCursorStore } from '@origintrail-official/dkg-node-ui';
-import { CHAIN_EVENT_POLLER_LANES } from '../../../publisher/src/chain-event-lane-runner.js';
-import { createProvider, getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
+import { getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
 import { TEST_SNAPSHOT_STORAGE } from '../../../../scripts/testing/snapshot-storage.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -62,8 +59,6 @@ export interface StartDaemonOpts {
    * pin `DKG_MAX_INFLIGHT` instead of inheriting the developer/CI value).
    */
   env?: Record<string, string | undefined>;
-  /** Start every chain-event lane at the shared chain's current head. */
-  startChainEventPollingAtCurrentHead?: boolean;
   /** Seed durable daemon state after config/wallet setup but before process start. */
   prepareHome?: (home: string) => Promise<void>;
 }
@@ -121,20 +116,6 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
       JSON.stringify({ wallets: [{ address: coreOp.address, privateKey: coreOp.privateKey }] }, null, 2) + '\n',
       { mode: 0o600 },
     );
-  }
-
-  if (opts.startChainEventPollingAtCurrentHead) {
-    const { hubAddress } = getSharedContext();
-    const currentBlock = await createProvider().getBlockNumber();
-    const db = new DashboardDB({ dataDir: home });
-    try {
-      const cursors = new SqliteChainEventCursorStore(db, {
-        scope: buildEvmDeploymentId({ chainId: 'evm:31337', hubAddress }),
-      });
-      for (const lane of CHAIN_EVENT_POLLER_LANES) await cursors.saveLane(lane, currentBlock);
-    } finally {
-      db.close();
-    }
   }
 
   await opts.prepareHome?.(home);

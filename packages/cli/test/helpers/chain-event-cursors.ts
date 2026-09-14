@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
+import { DashboardDB, SqliteChainEventCursorStore } from '@origintrail-official/dkg-node-ui';
+import { CHAIN_EVENT_POLLER_LANES } from '../../../publisher/src/chain-event-lane-runner.js';
+import { createProvider, getSharedContext } from '../../../chain/test/evm-test-context.js';
+
+/** Seed every production poller lane at the shared test chain's current head. */
+export async function prepareChainEventCursorsAtCurrentHead(home: string): Promise<void> {
+  const { hubAddress } = getSharedContext();
+  const currentBlock = await createProvider().getBlockNumber();
+  const db = new DashboardDB({ dataDir: home });
+  try {
+    const cursors = new SqliteChainEventCursorStore(db, {
+      scope: buildEvmDeploymentId({ chainId: 'evm:31337', hubAddress }),
+    });
+    for (const lane of CHAIN_EVENT_POLLER_LANES) await cursors.saveLane(lane, currentBlock);
+  } finally {
+    db.close();
+  }
+}
