@@ -508,10 +508,39 @@ describe('ApiClient', () => {
 
     it('listContextGraphs() calls /api/context-graph/list', async () => {
       const body = { contextGraphs: [{ id: 'p1', uri: 'urn:p1', name: 'Test', isSystem: false }] };
-      const { fetch } = createTrackingFetch({ ok: true, status: 200, body });
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
       globalThis.fetch = fetch;
       const result = await client.listContextGraphs();
       expect(result.contextGraphs).toHaveLength(1);
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/list`);
+    });
+
+    it('listContextGraphs() forwards bounded pagination and filters', async () => {
+      const body = {
+        contextGraphs: [{ id: 'p1', name: 'Test', isSystem: false }],
+        nextCursor: 'next-page',
+      };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.listContextGraphs({
+        limit: 25,
+        cursor: 'cursor-1',
+        projection: 'summary',
+        subscribed: false,
+        synced: true,
+        onChain: false,
+        q: 'alpha graph',
+      });
+      expect(result.nextCursor).toBe('next-page');
+      expect(Object.fromEntries(new URL(calls[0].url).searchParams)).toEqual({
+        limit: '25',
+        cursor: 'cursor-1',
+        projection: 'summary',
+        subscribed: 'false',
+        synced: 'true',
+        onChain: 'false',
+        q: 'alpha graph',
+      });
     });
 
     it('getContextGraphJoinPolicy() GETs the encoded per-CG endpoint', async () => {

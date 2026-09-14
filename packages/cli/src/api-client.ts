@@ -2069,12 +2069,22 @@ export class ApiClient {
     return this.get('/api/agent/identity');
   }
 
-  async listContextGraphs(): Promise<{
+  async listContextGraphs(options: {
+    limit?: number;
+    cursor?: string;
+    projection?: 'full' | 'summary';
+    subscribed?: boolean;
+    synced?: boolean;
+    onChain?: boolean;
+    q?: string;
+  } = {}): Promise<{
     contextGraphs: Array<{
       id: string;
-      uri: string;
+      uri?: string;
       name: string;
+      nameTruncated?: boolean;
       description?: string;
+      descriptionTruncated?: boolean;
       creator?: string;
       createdAt?: string;
       isSystem: boolean;
@@ -2084,8 +2094,26 @@ export class ApiClient {
       accessPolicy?: string;
       callerInvolved?: boolean;
     }>;
+    nextCursor?: string;
+    page?: {
+      returned: number;
+      total: number;
+      limit: number;
+      serializedBytes: number;
+      maxSerializedBytes: number;
+      elapsedMs: number;
+    };
   }> {
-    return this.get('/api/context-graph/list');
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    if (options.projection !== undefined) query.set('projection', options.projection);
+    if (options.subscribed !== undefined) query.set('subscribed', String(options.subscribed));
+    if (options.synced !== undefined) query.set('synced', String(options.synced));
+    if (options.onChain !== undefined) query.set('onChain', String(options.onChain));
+    if (options.q !== undefined) query.set('q', options.q);
+    const encoded = query.toString();
+    return this.get(`/api/context-graph/list${encoded ? `?${encoded}` : ''}`);
   }
 
   async contextGraphExists(id: string): Promise<{ id: string; exists: boolean }> {

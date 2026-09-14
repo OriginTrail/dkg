@@ -16,6 +16,36 @@ Use this page as a lookup pointer, not as a duplicate API definition. The highes
 
 <table><thead><tr><th width="273">Area</th><th>Route family</th></tr></thead><tbody><tr><td>Context graphs</td><td><code>/api/context-graph/*</code></td></tr><tr><td>Knowledge Assets and VM publish</td><td><code>/api/knowledge-assets/*</code></td></tr><tr><td>SWM substrate operations</td><td><code>/api/shared-memory/catchup</code>, <code>/api/shared-memory/host-mode/*</code>, <code>/api/shared-memory/verify-batch</code></td></tr><tr><td>Query</td><td><code>/api/query</code></td></tr><tr><td>Agents and messaging</td><td><code>/api/agents</code>, <code>/api/chat</code>, <code>/api/messages</code>, <code>/api/invoke-skill</code></td></tr><tr><td>Node identity and Core profile registration</td><td><code>/api/identity</code>, <code>/api/identity/ensure</code></td></tr><tr><td>Publishing Conviction Accounts</td><td><code>/api/pca/*</code></td></tr><tr><td>Messaging SLOs</td><td><code>/api/slo</code></td></tr><tr><td>Node status and peers</td><td><code>/api/status</code>, <code>/api/peer-info</code>, <code>/api/wallets/balances</code></td></tr></tbody></table>
 
+## Context Graph Listing
+
+`GET /api/context-graph/list` without query parameters retains the legacy
+`{ "contextGraphs": [...] }` response for existing clients. New clients should
+use the bounded form:
+
+```text
+GET /api/context-graph/list?limit=100&projection=summary
+```
+
+The bounded form orders rows deterministically and returns `nextCursor` while
+more rows remain. Pass that opaque cursor with the same filters and projection
+to read the next page. `limit` defaults to 50 and cannot exceed 100. Every
+bounded response is capped at 64 KiB of serialized JSON; the server may return
+fewer rows than requested to stay below that byte limit.
+
+Supported filters are `subscribed=true|false`, `synced=true|false`,
+`onChain=true|false`, and `q=<id-or-name-substring>`. `projection=summary`
+returns the fields used by list views and caps names at 256 characters and
+descriptions at 512 characters, with `nameTruncated` or
+`descriptionTruncated` when applicable. `projection=full` retains complete row
+fields within the same response bound.
+
+Paged responses include `page.returned`, `page.total`, `page.serializedBytes`,
+`page.maxSerializedBytes`, and `page.elapsedMs`. The same values are exposed as
+`X-DKG-Result-Count`, `X-DKG-Total-Count`, `X-DKG-Response-Bytes`, and
+`X-DKG-Route-Ms` headers. Send the first page's `ETag` in `If-None-Match`; a
+`304 Not Modified` means the complete filtered collection is unchanged, not
+only the first page.
+
 ## Knowledge Asset Lifecycle
 
 Named Knowledge Assets use the lifecycle route family below. The active publishing path is create, write, finalize, share, then publish; VM publishing always operates on a named KA that has already been shared to SWM.

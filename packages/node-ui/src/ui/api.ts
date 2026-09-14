@@ -26,6 +26,14 @@ export * from './identity-wallet-api.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
+const CONTEXT_GRAPH_LIST_PAGE_LIMIT = 100;
+const CONTEXT_GRAPH_LIST_MAX_PAGES = 10_000;
+
+let contextGraphListCache: {
+  etag: string;
+  contextGraphs: any[];
+} | undefined;
+let contextGraphListInFlight: Promise<{ contextGraphs: any[] }> | undefined;
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {
   const trimmed = contextGraphIdOrUri.trim();
@@ -276,13 +284,80 @@ export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
 };
 
 // --- Context graphs (V10) — legacy daemon paths keep working server-side redirects.
+async function fetchContextGraphPages(): Promise<{ contextGraphs: any[] }> {
+  const requestPage = async (cursor?: string, etag?: string): Promise<Response> => {
+    const query = new URLSearchParams({
+      limit: String(CONTEXT_GRAPH_LIST_PAGE_LIMIT),
+      projection: 'summary',
+    });
+    if (cursor) query.set('cursor', cursor);
+    return fetchWithTimeout(`${BASE}/api/context-graph/list?${query}`, {
+      headers: {
+        ...authHeaders(),
+        ...(etag === undefined ? {} : { 'If-None-Match': etag }),
+      },
+    }, CONTEXT_GRAPH_LOAD_TIMEOUT_MS);
+  };
+
+  let response = await requestPage(undefined, contextGraphListCache?.etag);
+  if (response.status === 304 && contextGraphListCache) {
+    return { contextGraphs: contextGraphListCache.contextGraphs.map((row) => ({ ...row })) };
+  }
+  if (!response.ok) {
+    const errBody = await response.json().catch(() => ({}));
+    const msg = (errBody as { error?: string })?.error ?? `HTTP ${response.status}`;
+    throw new HttpError(response.status, msg, errBody);
+  }
+
+  const etag = response.headers.get('etag') ?? undefined;
+  const contextGraphs: any[] = [];
+  const seenCursors = new Set<string>();
+  for (let pageNumber = 0; pageNumber < CONTEXT_GRAPH_LIST_MAX_PAGES; pageNumber += 1) {
+    const data = await response.json() as {
+      contextGraphs?: any[];
+      nextCursor?: string;
+    };
+    contextGraphs.push(...(data.contextGraphs ?? []));
+    if (!data.nextCursor) break;
+    if (seenCursors.has(data.nextCursor)) {
+      throw new Error('Context-graph list returned a repeated pagination cursor');
+    }
+    seenCursors.add(data.nextCursor);
+    response = await requestPage(data.nextCursor);
+    if (!response.ok) {
+      const errBody = await response.json().catch(() => ({}));
+      const msg = (errBody as { error?: string })?.error ?? `HTTP ${response.status}`;
+      throw new HttpError(response.status, msg, errBody);
+    }
+    if (pageNumber === CONTEXT_GRAPH_LIST_MAX_PAGES - 1) {
+      throw new Error('Context-graph list exceeded the pagination safety bound');
+    }
+  }
+
+  const visible = contextGraphs.filter((row: any) => !row.isSystem);
+  if (etag) {
+    contextGraphListCache = {
+      etag,
+      contextGraphs: visible.map((row) => ({ ...row })),
+    };
+  } else {
+    contextGraphListCache = undefined;
+  }
+  return { contextGraphs: visible };
+}
+
 export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
-  const data = await getWithTimeout<{ contextGraphs?: any[] }>(
-    '/api/context-graph/list',
-    CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
-  );
-  const list = data.contextGraphs ?? [];
-  return { contextGraphs: list.filter((p: any) => !p.isSystem) };
+  if (contextGraphListInFlight) {
+    const cached = await contextGraphListInFlight;
+    return { contextGraphs: cached.contextGraphs.map((row) => ({ ...row })) };
+  }
+  const request = fetchContextGraphPages();
+  contextGraphListInFlight = request;
+  try {
+    return await request;
+  } finally {
+    if (contextGraphListInFlight === request) contextGraphListInFlight = undefined;
+  }
 }
 
 // --- Agent Identity ---

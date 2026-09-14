@@ -53,8 +53,17 @@ import {
 
 let server: Server;
 let baseUrl: string;
-const requestLog: Array<{ url: string; method: string; body: string }> = [];
+const requestLog: Array<{
+  url: string;
+  method: string;
+  body: string;
+  headers: Record<string, string | string[] | undefined>;
+}> = [];
 let queryBindings: any[] = [];
+let contextGraphPagination: {
+  etag: string;
+  pages: Record<string, { contextGraphs: any[]; nextCursor?: string }>;
+} | undefined;
 // Scripted per-call responses (status + body) for tests that need a non-200
 // reply, e.g. a fail-closed publish precondition. Each entry is consumed on
 // first match (FIFO). Cleared in beforeEach.
@@ -73,7 +82,7 @@ function startTestServer(): Promise<void> {
       req.on('end', () => {
         const reqUrl = req.url ?? '';
         const reqMethod = req.method ?? '';
-        requestLog.push({ url: reqUrl, method: reqMethod, body });
+        requestLog.push({ url: reqUrl, method: reqMethod, body, headers: req.headers });
 
         // Scripted override (consumed on first match) — lets a test return a
         // specific failure or partial-success response.
@@ -82,6 +91,22 @@ function startTestServer(): Promise<void> {
           const [ov] = responseOverrides.splice(ovIdx, 1);
           res.writeHead(ov.status, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(ov.body));
+          return;
+        }
+
+        if (reqUrl.startsWith('/api/context-graph/list') && contextGraphPagination) {
+          const parsed = new URL(reqUrl, 'http://localhost');
+          const cursor = parsed.searchParams.get('cursor') ?? '';
+          if (cursor === '' && req.headers['if-none-match'] === contextGraphPagination.etag) {
+            res.writeHead(304, { ETag: contextGraphPagination.etag });
+            res.end();
+            return;
+          }
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            ETag: contextGraphPagination.etag,
+          });
+          res.end(JSON.stringify(contextGraphPagination.pages[cursor] ?? { contextGraphs: [] }));
           return;
         }
 
@@ -177,6 +202,7 @@ describe('UI API tests', () => {
     requestLog.length = 0;
     queryBindings = [];
     responseOverrides = [];
+    contextGraphPagination = undefined;
   });
 
   describe('fileUrl', () => {
@@ -217,6 +243,37 @@ describe('UI API tests', () => {
   });
 
   describe('simple GET endpoints', () => {
+    it('walks bounded context-graph pages and reuses them after a 304', async () => {
+      contextGraphPagination = {
+        etag: '"context-graphs-v1"',
+        pages: {
+          '': {
+            contextGraphs: [
+              { id: 'cg-1', isSystem: false },
+              { id: 'agents', isSystem: true },
+            ],
+            nextCursor: 'page-2',
+          },
+          'page-2': { contextGraphs: [{ id: 'cg-2', isSystem: false }] },
+        },
+      };
+
+      await expect(fetchContextGraphs()).resolves.toEqual({
+        contextGraphs: [{ id: 'cg-1', isSystem: false }, { id: 'cg-2', isSystem: false }],
+      });
+      expect(requestLog.map((entry) => entry.url)).toEqual([
+        '/api/context-graph/list?limit=100&projection=summary',
+        '/api/context-graph/list?limit=100&projection=summary&cursor=page-2',
+      ]);
+
+      requestLog.length = 0;
+      await expect(fetchContextGraphs()).resolves.toEqual({
+        contextGraphs: [{ id: 'cg-1', isSystem: false }, { id: 'cg-2', isSystem: false }],
+      });
+      expect(requestLog).toHaveLength(1);
+      expect(requestLog[0]?.headers['if-none-match']).toBe('"context-graphs-v1"');
+    });
+
     it('fetchStatus calls /api/status', async () => {
       const res = await fetchStatus();
       expect(res).toEqual({ peerId: 'abc', synced: true });
