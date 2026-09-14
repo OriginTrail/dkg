@@ -22,16 +22,35 @@ export class VmReconcileSchedulingMethods extends DKGAgentBase {
       // name-hash scan on every sweep even though they can never reconcile
       // against ContextGraphStorage.
       if (VM_RECONCILE_SYSTEM_CONTEXT_GRAPH_IDS.has(localCgId)) continue;
+      const hasBindingCandidate = this.contextGraphBindingState.hasBindingCandidate(
+        localCgId,
+        sub,
+      );
+      // A graph created on this node remains SWM-only until registration (or
+      // authoritative registration recovery) installs its numeric binding.
+      // The unbound VM lane exists for pre-subscribed remote PUBLIC graphs;
+      // admitting local-origin graphs here races create -> register and turns
+      // an explicitly off-chain graph into a historical reverse-name scan.
+      if (
+        this.localContextGraphProvenance.hasLocalCreate(localCgId)
+        && !hasBindingCandidate
+      ) continue;
       // Registration owns the binding transition. Avoid queueing a competing
       // cold resolver while its preparatory transaction may be awaiting a
       // delayed receipt; the registration completion path or next sweep will
       // make the newly authoritative target visible.
       if (this.contextGraphRegistrationsInFlight?.has(localCgId)) continue;
-      if (this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)) bound.add(localCgId);
+      if (hasBindingCandidate) bound.add(localCgId);
       else if (sub.subscribed) unbound.push(localCgId);
     }
     for (const localCgId of this.rfc64SelectedVmReconcileTargetIds()) {
       if (VM_RECONCILE_SYSTEM_CONTEXT_GRAPH_IDS.has(localCgId)) continue;
+      const sub = this.subscribedContextGraphs.get(localCgId);
+      if (
+        this.localContextGraphProvenance.hasLocalCreate(localCgId)
+        && (sub === undefined
+          || !this.contextGraphBindingState.hasBindingCandidate(localCgId, sub))
+      ) continue;
       if (this.contextGraphRegistrationsInFlight?.has(localCgId)) continue;
       bound.add(localCgId);
     }

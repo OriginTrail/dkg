@@ -3411,6 +3411,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(localCgId)) {
       throw new ContextGraphNotFoundError(localCgId);
     }
+    const existingSubscription = this.subscribedContextGraphs.get(localCgId);
+    // Local-origin graphs are deliberately off-chain until registration (or
+    // authoritative registration recovery) installs a numeric binding. Keep
+    // this invariant at the execution boundary too: a job admitted just before
+    // create/register state changed must not fall through to cold name-hash
+    // discovery. Remote unbound subscriptions still use the self-prime path.
+    if (
+      this.localContextGraphProvenance.hasLocalCreate(localCgId)
+      && (existingSubscription === undefined
+        || !this.contextGraphBindingState.hasBindingCandidate(
+          localCgId,
+          existingSubscription,
+        ))
+    ) {
+      throw new ContextGraphNotFoundError(localCgId);
+    }
     // Registration is the exclusive owner of the local -> numeric binding
     // transition. A reconcile admitted just before the selection snapshot
     // changed must retire without starting a competing cold lookup.
@@ -3424,7 +3440,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!this.vmReconcileEnabled()) {
       throw new VmReconcileUnavailableError();
     }
-    let sub = this.subscribedContextGraphs.get(localCgId);
+    let sub = existingSubscription;
     if (!sub?.subscribed && !sub?.coreHosted) {
       if (!this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) {
         throw new ContextGraphNotFoundError(localCgId);
