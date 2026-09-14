@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { assertContextGraphIdV1 } from '../src/author-catalog-codec.js';
+import { validateContextGraphId } from '../src/constants.js';
 import {
   parseWorkspaceSnapshotContextGraphId,
   workspaceKnowledgeAssetOperationSnapshotGraph,
@@ -28,6 +30,17 @@ describe('legacy workspace snapshot graph coordinates', () => {
   });
 
   it.each([
+    { label: 'complete-KA', build: (id: string) => workspaceKnowledgeAssetOperationSnapshotGraph(id, 'operation', 'reports!%FF') },
+    { label: 'entity', build: (id: string) => workspaceOperationPublicSnapshotGraph(id, 'operation', 'urn:entity:1', 'reports!%FF') },
+  ])('round-trips RFC64 owners through the $label snapshot constructor', ({ build }) => {
+    for (const id of ['team/../repo', 'team/./repo']) {
+      expect(validateContextGraphId(id).valid).toBe(false);
+      expect(() => assertContextGraphIdV1(id)).not.toThrow();
+      expect(parseWorkspaceSnapshotContextGraphId(build(id))).toBe(id);
+    }
+  });
+
+  it.each([
     { operation: '', root: '', subgraph: '' },
     { operation: 'operation', root: 'urn:entity:1', subgraph: '_meta' },
     { operation: 'operation?!', root: 'root/entity', subgraph: 'reports/daily' },
@@ -47,9 +60,13 @@ describe('legacy workspace snapshot graph coordinates', () => {
     `${PREFIX}team%2Frepo/_shared_memory_snapshots/_/operation/entity`,
     `${PREFIX}team%2Frepo/_shared_memory_snapshots/_/operation/entity/_shared_memory/extra`,
     `${PREFIX}team%2frepo/_shared_memory_snapshots/_/operation/ka`,
+    `${PREFIX}team%2F%2E%2E%2Frepo/_shared_memory_snapshots/_/operation/ka`,
     `${PREFIX}%74eam/_shared_memory_snapshots/_/operation/ka`,
     `${PREFIX}%FF/_shared_memory_snapshots/_/operation/ka`,
-    `${PREFIX}team%2F..%2Frepo/_shared_memory_snapshots/_/operation/ka`,
+    `${PREFIX}/_shared_memory_snapshots/_/operation/ka`,
+    `${PREFIX}team%20repo/_shared_memory_snapshots/_/operation/ka`,
+    `${PREFIX}team%25repo/_shared_memory_snapshots/_/operation/ka`,
+    `${PREFIX}${'a'.repeat(257)}/_shared_memory_snapshots/_/operation/ka`,
     `${PREFIX}team%2Frepo/_shared_memory_snapshots/reports%FF/operation/ka`,
     `${PREFIX}team%2Frepo/_shared_memory_snapshots/_/operation%ZZ/ka`,
     `${PREFIX}team%2Frepo/_shared_memory_snapshots/_/operation/root%FF/_shared_memory`,

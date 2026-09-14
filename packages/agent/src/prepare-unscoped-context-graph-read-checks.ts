@@ -37,14 +37,17 @@ export async function prepareUnscopedContextGraphReadChecks(
   const decide = async (
     id: string,
     readSignal: AbortSignal,
-    evidence?: { registration: 'unregistered' | 'unavailable'; isMetadataAbsent?: () => boolean },
+    evidence?: { registration: bigint | 'unregistered' | 'unavailable'; isMetadataAbsent?: () => boolean },
   ): Promise<boolean> => {
     signal.throwIfAborted();
     readSignal.throwIfAborted();
     const input = deps.createReadAuthorityInput(id, readSignal);
     const result = await resolveContextGraphReadAuthorityDecision({
       ...input,
-      ...(evidence && {
+      ...(typeof evidence?.registration === 'bigint' && {
+        expectedRegistrationId: evidence.registration,
+      }),
+      ...(evidence && typeof evidence.registration !== 'bigint' && {
         getRegisteredAuthority: async () => evidence.registration === 'unregistered'
           ? { kind: 'unregistered' as const }
           : { kind: 'unavailable' as const, reason: 'chain-name-binding-unavailable' as const },
@@ -126,6 +129,7 @@ export async function prepareUnscopedContextGraphReadChecks(
     throw new Error('Cannot authorize unscoped query: incomplete Context Graph registration batch');
   }
   const absentNames = new Set<string>();
+  const registeredNames = new Map<string, bigint>();
   const seenNames = new Set<string>();
   for (const entry of registrations) {
     signal.throwIfAborted();
@@ -140,6 +144,7 @@ export async function prepareUnscopedContextGraphReadChecks(
     }
     seenNames.add(name);
     if (id === null) absentNames.add(name);
+    else registeredNames.set(name, id);
     if (seenNames.size % 512 === 0) {
       await new Promise<void>((resolveTurn) => setImmediate(resolveTurn));
     }
@@ -157,6 +162,13 @@ export async function prepareUnscopedContextGraphReadChecks(
     signal.throwIfAborted();
     readSignal.throwIfAborted();
     const hash = hashesById.get(id);
+    const expectedRegistrationId = hash === undefined ? undefined : registeredNames.get(hash);
+    if (expectedRegistrationId !== undefined) {
+      // A fresh positive binding must not become an optimistic scalar miss or
+      // a different binding, even if a local route appears during preparation.
+      // The canonical resolver still reads live policy/roster/peer authority.
+      return decide(id, readSignal, { registration: expectedRegistrationId });
+    }
     if (
       hash === undefined
       || !absentNames.has(hash)

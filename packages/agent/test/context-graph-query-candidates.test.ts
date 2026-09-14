@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  workspaceKnowledgeAssetOperationSnapshotGraph,
+  workspaceOperationPublicSnapshotGraph,
+} from '@origintrail-official/dkg-core';
 import { listStoredContextGraphQueryCandidates } from '../src/context-graph-query-candidates.js';
 
 const PREFIX = 'did:dkg:context-graph:';
@@ -84,6 +88,15 @@ describe('stored context graph candidates for query admission', () => {
   it('retains legal legacy owners of undecodable tagged-looking names', async () => {
     const { store } = indexedStore([`${PREFIX}v1/root/reports%FF/_shared_memory`]);
     await expect(listStoredContextGraphQueryCandidates(store)).resolves.toContain('v1/root');
+  });
+
+  it('discovers RFC64 owners from both existing snapshot builders', async () => {
+    const id = 'team/../repo';
+    const { store } = indexedStore([
+      workspaceKnowledgeAssetOperationSnapshotGraph(id, 'operation'),
+      workspaceOperationPublicSnapshotGraph(id, 'operation', 'urn:entity:1'),
+    ]);
+    await expect(listStoredContextGraphQueryCandidates(store)).resolves.toContain(id);
   });
 
   it('rejects a stored CG IRI without any legal owner interpretation', async () => {

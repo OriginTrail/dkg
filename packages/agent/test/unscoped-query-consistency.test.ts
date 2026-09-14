@@ -4,13 +4,75 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { contextGraphDataUri, DKG_ONTOLOGY } from '@origintrail-official/dkg-core';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
-import { captureUnscopedQueryConsistency } from '../src/unscoped-query-consistency.js';
+import { captureUnscopedQueryConsistency, executeUnscopedQuery } from '../src/unscoped-query-consistency.js';
 
 const quad = (graph: string, object = '"public"') => ({
   graph, subject: 'urn:subject', predicate: 'urn:predicate', object,
 });
 
 describe('unscoped query execution consistency', () => {
+  it('owns admission and releases the original result only after execution is checked', async () => {
+    const store = new OxigraphStore();
+    const result = { bindings: [{ value: 'public' }] };
+    const phases: string[] = [];
+    try {
+      expect(await executeUnscopedQuery({
+        store,
+        readMetadataRevision: () => { phases.push('revision'); return 0; },
+        admit: async () => { phases.push('admit'); return true; },
+        execute: async () => { phases.push('execute'); return result; },
+        denied: () => { throw new Error('unexpected denial'); },
+      })).toBe(result);
+      expect(phases).toEqual(['revision', 'admit', 'revision', 'execute', 'revision']);
+    } finally { await store.close(); }
+  });
+
+  it.each(['admission', 'execution'] as const)('withholds data changed during %s', async (phase) => {
+    const store = new OxigraphStore();
+    const execute = vi.fn(async () => {
+      if (phase === 'execution') await store.insert([quad('urn:new', '"private"')]);
+      return { bindings: [{ value: 'private' }] };
+    });
+    try {
+      await expect(executeUnscopedQuery({
+        store, readMetadataRevision: () => 0,
+        admit: async () => {
+          if (phase === 'admission') await store.insert([quad('urn:new', '"private"')]);
+          return true;
+        },
+        execute, denied: () => ({ bindings: [] }),
+      })).rejects.toThrow(/changed/);
+      expect(execute).toHaveBeenCalledTimes(phase === 'execution' ? 1 : 0);
+    } finally { await store.close(); }
+  });
+
+  it('returns the denial shape without executing user SPARQL', async () => {
+    const store = new OxigraphStore();
+    const result = { bindings: [{ result: 'false' }] };
+    const execute = vi.fn(async () => result);
+    try {
+      expect(await executeUnscopedQuery({
+        store, readMetadataRevision: () => 0, admit: async () => false,
+        execute, denied: () => result,
+      })).toBe(result);
+      expect(execute).not.toHaveBeenCalled();
+    } finally { await store.close(); }
+  });
+
+  it.each(['admission', 'execution'] as const)('preserves the original %s failure', async (phase) => {
+    const store = new OxigraphStore();
+    const failure = new Error(`${phase} unavailable`);
+    const execute = vi.fn(async () => { throw failure; });
+    try {
+      await expect(executeUnscopedQuery({
+        store, readMetadataRevision: () => 0,
+        admit: async () => { if (phase === 'admission') throw failure; return true; },
+        execute, denied: () => undefined,
+      })).rejects.toBe(failure);
+      expect(execute).toHaveBeenCalledTimes(phase === 'execution' ? 1 : 0);
+    } finally { await store.close(); }
+  });
+
   it.each([{}, new GraphWriteGenTracker(), {
     getWriteRevision: () => ({ generation: 0, stable: true }),
   }])('rejects missing or process-local coverage before metadata discovery', (store) => {

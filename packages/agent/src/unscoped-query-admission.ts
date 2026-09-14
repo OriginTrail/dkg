@@ -41,14 +41,17 @@ export async function canReadUnscopedQuery(
     try {
       signal.throwIfAborted();
       const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-      const result = await deps.store.query(
-        `SELECT ?cg WHERE {
-          GRAPH <${ontologyGraph}> {
-            ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
-          }
-        }`,
-        { source: 'agent.query.privateGraphAccessPolicy', signal },
-      );
+      const [result, storedIds] = await Promise.all([
+        deps.store.query(
+          `SELECT ?cg WHERE {
+            GRAPH <${ontologyGraph}> {
+              ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
+            }
+          }`,
+          { source: 'agent.query.privateGraphAccessPolicy', signal },
+        ),
+        listStoredContextGraphQueryCandidates(deps.store, { signal }),
+      ]);
       signal.throwIfAborted();
       if (result.type !== 'bindings') {
         throw new Error('Cannot authorize unscoped query: invalid access-policy discovery result');
@@ -69,7 +72,7 @@ export async function canReadUnscopedQuery(
       }
       for (const id of deps.knownContextGraphIds) addCandidate(id);
       signal.throwIfAborted();
-      for (const id of await listStoredContextGraphQueryCandidates(deps.store, { signal })) {
+      for (const id of storedIds) {
         addCandidate(id);
       }
       signal.throwIfAborted();

@@ -27,6 +27,32 @@ function deferred<T>() {
 }
 
 describe('unscoped query admission', () => {
+  it('starts independent discovery together and waits for the complete candidate union', async () => {
+    const ontology = deferred<Awaited<ReturnType<ContextGraphQueryStore['query']>>>();
+    const inventory = deferred<string[]>();
+    const canRead = vi.fn<UnscopedQueryAdmissionDependencies['canReadContextGraph']>(async () => true);
+    const deps = admissionDependencies(canRead, ['runtime']);
+    deps.store.query.mockImplementation(() => ontology.promise);
+    deps.store.listGraphsByPrefix.mockImplementation(() => inventory.promise);
+    const pending = canReadUnscopedQuery(deps);
+    try {
+      await vi.waitFor(() => {
+        expect(deps.store.query).toHaveBeenCalledOnce();
+        expect(deps.store.listGraphsByPrefix).toHaveBeenCalledOnce();
+      });
+      ontology.resolve({ type: 'bindings', bindings: [{ cg: 'did:dkg:context-graph:ontology' }] });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(canRead).not.toHaveBeenCalled();
+      inventory.resolve(['did:dkg:context-graph:stored']);
+      expect(await pending).toBe(true);
+      expect(new Set(canRead.mock.calls.map(([id]) => id))).toEqual(new Set(['ontology', 'runtime', 'stored']));
+    } finally {
+      ontology.resolve({ type: 'bindings', bindings: [] });
+      inventory.resolve([]);
+      await pending;
+    }
+  });
+
   it('checks at most four candidates together and allows all-readable owners after out-of-order completion', async () => {
     const gates = contextGraphIds.map(() => deferred<boolean>());
     let active = 0;
@@ -284,7 +310,10 @@ describe('unscoped query admission', () => {
       gate.resolve();
       await observed;
       await vi.advanceTimersByTimeAsync(0);
-      if (stage === 'ontology') expect(deps.store.listGraphsByPrefix).not.toHaveBeenCalled();
+      expect(deps.store.query).toHaveBeenCalledOnce();
+      expect(deps.store.listGraphsByPrefix).toHaveBeenCalledOnce();
+      expect(deps.store.query.mock.calls[0][1]?.signal?.aborted).toBe(true);
+      expect(deps.store.listGraphsByPrefix.mock.calls[0][1]?.signal?.aborted).toBe(true);
       expect(canReadContextGraph).not.toHaveBeenCalled();
     } finally {
       gate.resolve();

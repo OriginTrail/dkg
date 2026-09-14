@@ -45,13 +45,20 @@ export class EvmContextGraphNameHashResolver {
     });
   }
 
-  /** One fresh proof for all names; do not populate or consume per-name caches. */
+  /** One fresh proof for all names; supersede older scalar evidence before return. */
   async resolveMany(nameHashes: readonly string[], signal?: AbortSignal): Promise<ReadonlyMap<string, bigint | null>> {
     signal?.throwIfAborted();
     const normalized = normalizeContextGraphNameHashBatch(nameHashes);
     if (normalized.length === 0) return new Map();
     try {
-      return await withRpcRequestContext({ signal }, () => this.source.resolveMany(normalized));
+      return await withRpcRequestContext({ signal }, async () => {
+        const bindings = await this.source.resolveMany(normalized);
+        activeRpcRequestContext().signal?.throwIfAborted();
+        // Historical proofs do not advance the current-slot generation. A
+        // subsequent scalar policy check must not reuse an older cached miss.
+        this.resolutionCache.invalidateNames(normalized);
+        return bindings;
+      });
     } catch (error) {
       signal?.throwIfAborted();
       throw error;

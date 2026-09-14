@@ -37,6 +37,8 @@ export interface ContextGraphReadAuthorityInput {
   getPeerId(): string;
   getAllowedPeers(): Promise<string[] | null>;
   getRegisteredAuthority(): Promise<RegisteredContextGraphAuthority>;
+  /** Request-local registration evidence can only reject a contradictory read. */
+  expectedRegistrationId?: bigint;
   isAgentAllowed(agentAddress: string | undefined, roster: readonly string[]): boolean;
   hasLocalAgentInRoster(roster: readonly string[]): boolean;
   resolveRfc64PrivateRoster(): readonly string[] | null | undefined;
@@ -85,6 +87,13 @@ export async function resolveContextGraphReadAuthorityDecision(
       registeredAuthority.reason,
       registeredAuthority.onChainId,
     );
+  }
+  if (
+    input.expectedRegistrationId !== undefined
+    && (registeredAuthority.kind === 'unregistered'
+      || registeredAuthority.onChainId !== input.expectedRegistrationId)
+  ) {
+    return decision('unavailable', 'registered-chain', 'chain-name-binding-changed');
   }
   if (registeredAuthority.kind === 'public') {
     return decision('allowed', 'registered-chain', 'chain-public', registeredAuthority.onChainId);

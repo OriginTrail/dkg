@@ -50,6 +50,10 @@ interface ContextGraphNameHashResolutionCacheEntry {
  * independent lookup.
  */
 export class ContextGraphNameHashResolver {
+  private globalInvalidationRevision = 0;
+
+  private readonly nameInvalidationRevisions = new Map<string, number>();
+
   private readonly partitions: Readonly<Record<RpcRequestClass, {
     readonly cache: TtlValueCache<string, ContextGraphNameHashResolutionCacheEntry>;
     readonly singleFlight: AbortableKeyedSingleFlight<
@@ -74,25 +78,41 @@ export class ContextGraphNameHashResolver {
     options.signal?.throwIfAborted();
     const nameHash = normalizeContextGraphNameHash(rawNameHash);
     if (nameHash === ethers.ZeroHash) return null;
+    const globalRevision = this.globalInvalidationRevision;
+    const nameRevision = this.nameInvalidationRevisions.get(nameHash) ?? 0;
 
     const partition = this.partitions[options.requestClass ?? 'foreground'];
     for (;;) {
       const cached = partition.cache.get(nameHash);
       const resolved = cached ?? await partition.singleFlight.run(
         nameHash,
-        async (physicalSignal) => ({
-          value: await this.dependencies.load(nameHash, physicalSignal),
+        async (physicalSignal) => {
+          const value = await this.dependencies.load(nameHash, physicalSignal);
+          // A superseded loader may ignore cancellation. Its old absence proof
+          // must not reach waiting callers or repopulate the negative cache.
+          physicalSignal.throwIfAborted();
           // A cold current-slot load may advance the source generation itself.
           // Stamp the resulting miss after that commit so the next caller does
           // not immediately discard a fresh negative cache and repeat every
           // chain fence. A later, independent state advance still invalidates
           // the entry through the equality check below.
-          generation: this.dependencies.generation?.(),
-        }),
+          return { value, generation: this.dependencies.generation?.() };
+        },
         options.signal,
         (value) => { partition.cache.set(nameHash, value); },
         'Context Graph name-hash resolution has no active waiters',
       );
+      // Invalidation may follow physical completion but precede this waiter’s
+      // continuation. Reject its old result without disturbing newer work.
+      if (
+        globalRevision !== this.globalInvalidationRevision
+        || nameRevision !== (this.nameInvalidationRevisions.get(nameHash) ?? 0)
+      ) {
+        throw Object.assign(
+          new Error('Context Graph name-hash resolution was invalidated before delivery'),
+          { name: 'AbortError' },
+        );
+      }
       const currentGeneration = this.dependencies.generation?.();
       if (
         resolved.generation === undefined
@@ -104,7 +124,26 @@ export class ContextGraphNameHashResolver {
   }
 
   invalidateAll(): void {
+    this.globalInvalidationRevision += 1;
+    this.nameInvalidationRevisions.clear();
     this.invalidateCaches();
+  }
+
+  /** Reconcile fresh batch evidence without disturbing unrelated scalar work. */
+  invalidateNames(rawNameHashes: readonly string[]): void {
+    const names = normalizeContextGraphNameHashBatch(rawNameHashes);
+    for (const name of names) {
+      this.nameInvalidationRevisions.set(name, (this.nameInvalidationRevisions.get(name) ?? 0) + 1);
+    }
+    for (const partition of Object.values(this.partitions)) {
+      for (const name of names) {
+        partition.cache.delete(name);
+        partition.singleFlight.invalidate(
+          name,
+          'Context Graph name-hash resolution was superseded by a fresh batch',
+        );
+      }
+    }
   }
 
   private createPartition(): {

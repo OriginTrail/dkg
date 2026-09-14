@@ -10,6 +10,26 @@ const invalidated = () => new Error(
 );
 
 /**
+ * Own result release across one unchanged local dataset/metadata interval.
+ * Chain authorization retains the admission-time semantics of scoped reads;
+ * this local revision does not certify an on-chain snapshot or later revocation.
+ */
+export async function executeUnscopedQuery<T>(deps: {
+  store: unknown;
+  readMetadataRevision(): number;
+  admit(): Promise<boolean>;
+  execute(): Promise<T>;
+  denied(): T;
+}): Promise<T> {
+  const assertUnchanged = captureUnscopedQueryConsistency(deps.store, deps.readMetadataRevision);
+  if (!(await deps.admit())) return deps.denied();
+  assertUnchanged();
+  const result = await deps.execute();
+  assertUnchanged();
+  return result;
+}
+
+/**
  * Bind discovery, authorization, and result materialization to one unchanged
  * store interval. The empty prefix includes the physical default graph as well
  * as every named graph; a graph inventory alone cannot detect same-URI or ABA

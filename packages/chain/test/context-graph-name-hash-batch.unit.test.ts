@@ -3,6 +3,7 @@
 import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '../src/mock-adapter.js';
+import { withRpcRequestContext } from '../src/rpc-request-transport.js';
 import {
   callsForMethod,
   deferred,
@@ -80,6 +81,45 @@ describe('bounded Context Graph name-hash batch resolution', () => {
       'getLatestContextGraphId',
     ).length).toBeGreaterThan(readsBeforeBatch);
     expect(callsForMethod(scenario.readContractWithOptions, 'getNameHash')).toHaveLength(2);
+  });
+
+  it('invalidates historical scalar misses in both request classes after a fresh batch hit', async () => {
+    const scenario = historicalFixture([[]]);
+    const requestClasses = ['foreground', 'background'] as const;
+    const scalar = (requestClass: typeof requestClasses[number]) => withRpcRequestContext(
+      { requestClass },
+      () => scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH),
+    );
+    for (const requestClass of requestClasses) {
+      await expect(scalar(requestClass)).resolves.toBeNull();
+    }
+    const cachedPages = scenario.queryEventLogsPage.mock.calls.length;
+    for (const requestClass of requestClasses) {
+      await expect(scalar(requestClass)).resolves.toBeNull();
+    }
+    expect(scenario.queryEventLogsPage).toHaveBeenCalledTimes(cachedPages);
+
+    scenario.setLatestId(66n);
+    scenario.adapter.rebindContract.mockImplementation(() => ({
+      getLatestContextGraphId: async () => 66n,
+      getNameHash: scenario.getNameHash,
+    }));
+    scenario.resolveContractDeployBlock.mockResolvedValue({
+      fromBlock: 100,
+      head: 103,
+      scanProviders: [{ provider: scenario.provider, backendHead: 103 }],
+    });
+    scenario.queryEventLogsPage.mockImplementation(async (...args: unknown[]) => ({
+      logs: Number(args[2]) === 102 ? [{ topics: [], data: '66' }] : [],
+      provider: scenario.provider,
+    }));
+    const batch = await scenario.adapter.resolveContextGraphIdsByNameHashes([NAME_HASH]);
+    expect(batch.get(NAME_HASH)).toBe(66n);
+    const pagesAfterBatch = scenario.queryEventLogsPage.mock.calls.length;
+    for (const requestClass of requestClasses) {
+      await expect(scalar(requestClass)).resolves.toBe(66n);
+    }
+    expect(scenario.queryEventLogsPage.mock.calls.length).toBe(pagesAfterBatch + 4);
   });
 
   describe.each(['one-name', 'with-zero-and-duplicate'] as const)('%s bulk singleton fences', (mode) => {

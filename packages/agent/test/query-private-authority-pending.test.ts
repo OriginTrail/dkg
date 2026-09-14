@@ -8,6 +8,8 @@ import {
   contextGraphVerifiableMemoryUri,
   contextGraphAssertionUri,
   assertionScopedGraphUri,
+  workspaceKnowledgeAssetOperationSnapshotGraph,
+  workspaceOperationPublicSnapshotGraph,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '@origintrail-official/dkg-query';
@@ -487,6 +489,47 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     expect(policyRead.mock.calls.length).toBeLessThanOrEqual(smallPolicyCount);
   });
 
+  it.each([0, 1] as const)('rejects a stale scalar miss after a fresh bulk binding with policy %s', async (accessPolicy) => {
+    const { agent, chain, policyRead, rosterRead, queryExecution } = await fixture({
+      privateGraph: false, publicGraph: false, realChain: true,
+    });
+    const id = 'bulk-positive-stale-scalar';
+    const nameHash = agent.contextGraphNameCommitment(id);
+    const registered = await chain.createOnChainContextGraph({
+      accessPolicy, publishPolicy: 1, nameHash,
+      participantAgents: accessPolicy === 1 ? [OWNER] : [],
+    });
+    const graph = contextGraphDataGraphUri(id);
+    await agent.store.insert([{
+      subject: PRIVATE_MARKER, predicate: DKG_ONTOLOGY.RDF_TYPE, object: MARKER_CLASS, graph,
+    }]);
+    // Real bulk registration and policy/roster adapters remain active; only
+    // model the stale cached miss returned by the independent scalar lookup.
+    const bulkLookup = vi.spyOn(chain, 'resolveContextGraphIdsByNameHashes');
+    const scalarLookup = vi.spyOn(chain, 'resolveContextGraphIdByNameHash').mockResolvedValue(null);
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
+      .resolves.toEqual({ bindings: [] });
+    expect(queryExecution).not.toHaveBeenCalled();
+    expect(bulkLookup).toHaveBeenCalledOnce();
+    expect((await bulkLookup.mock.results[0].value).get(nameHash)).toBe(registered.contextGraphId);
+    expect(scalarLookup).toHaveBeenCalledOnce();
+    expect(policyRead).not.toHaveBeenCalled();
+    expect(rosterRead).not.toHaveBeenCalled();
+
+    scalarLookup.mockRestore();
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: accessPolicy === 0 ? OUTSIDER : OWNER }))
+      .resolves.toEqual({ bindings: [{ g: graph, s: PRIVATE_MARKER }] });
+    expect(queryExecution).toHaveBeenCalledOnce();
+    expect(policyRead).toHaveBeenCalled();
+    if (accessPolicy === 1) {
+      expect(rosterRead).toHaveBeenCalled();
+      queryExecution.mockClear();
+      await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
+        .resolves.toEqual({ bindings: [] });
+      expect(queryExecution).not.toHaveBeenCalled();
+    }
+  });
+
   it('requires an explicit scope when the store cannot certify all writers', async () => {
     const { agent, queryExecution } = await fixture({ privateGraph: false, processLocalStore: true });
     await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
@@ -614,6 +657,30 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     const result = await agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER });
     expect(result.bindings).toEqual([expect.objectContaining({ s: PUBLIC_MARKER })]);
     expect(queryExecution).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { label: 'complete-KA', build: (id: string) => workspaceKnowledgeAssetOperationSnapshotGraph(id, 'operation') },
+    { label: 'entity', build: (id: string) => workspaceOperationPublicSnapshotGraph(id, 'operation', 'urn:entity:1') },
+  ])('applies public and private authority to a valid RFC64 $label snapshot owner', async ({ build }) => {
+    const { agent, registrations, queryExecution } = await fixture({ privateGraph: false, publicGraph: false });
+    const id = 'team/../repo';
+    const graph = build(id);
+    registrations.set(id, { onChainId: 8n, accessPolicy: 0, participantAgents: [] });
+    await agent.store.insert([{
+      subject: PUBLIC_MARKER, predicate: DKG_ONTOLOGY.RDF_TYPE, object: MARKER_CLASS, graph,
+    }]);
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
+      .resolves.toEqual({ bindings: [{ g: graph, s: PUBLIC_MARKER }] });
+    expect(queryExecution).toHaveBeenCalledOnce();
+
+    registrations.set(id, { onChainId: 8n, accessPolicy: 1, participantAgents: [OWNER] });
+    queryExecution.mockClear();
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
+      .resolves.toEqual({ bindings: [] });
+    expect(queryExecution).not.toHaveBeenCalled();
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OWNER }))
+      .resolves.toEqual({ bindings: [{ g: graph, s: PUBLIC_MARKER }] });
   });
 
   it('rejects a persisted ontology-private percent-encoded legacy ID before query execution', async () => {

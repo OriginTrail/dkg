@@ -266,6 +266,16 @@ describe('contextGraphStorageOwnerCandidates', () => {
     expect(contextGraphStorageOwnerCandidates(uri)).toContain(id);
   });
 
+  it('retains RFC64 owners of both encoded snapshot families', () => {
+    const id = 'team/../repo';
+    for (const graph of [
+      workspaceKnowledgeAssetOperationSnapshotGraph(id, 'operation'),
+      workspaceOperationPublicSnapshotGraph(id, 'operation', 'urn:entity:1'),
+    ]) {
+      expect(contextGraphStorageOwnerCandidates(graph)).toContain(id);
+    }
+  });
+
   it.each([undefined, 'reports!%FF'])('recognizes both legacy snapshot layouts for subgraph %s', (subGraphName) => {
     for (const id of ROOTS) {
       for (const uri of [

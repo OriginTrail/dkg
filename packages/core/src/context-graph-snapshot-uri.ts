@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { validateContextGraphId } from './constants.js';
+import {
+  AuthorLaneScopeErrorV1,
+  assertAuthorLaneContextGraphIdV1,
+} from './author-lane-scope-v1.js';
 import { assertSafeIri } from './sparql-safe.js';
 
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
@@ -59,6 +63,15 @@ export function parseWorkspaceSnapshotContextGraphId(uri: string): string | unde
     if (error instanceof URIError) return undefined;
     throw error;
   }
-  if (!validateContextGraphId(decoded[0]).valid) return undefined;
+  // Both legacy and RFC64 callers persist these formats. RFC64 identifiers
+  // permit dot path segments, which remain opaque inside the encoded component.
+  if (!validateContextGraphId(decoded[0]).valid) {
+    try {
+      assertAuthorLaneContextGraphIdV1(decoded[0]);
+    } catch (error) {
+      if (error instanceof AuthorLaneScopeErrorV1) return undefined;
+      throw error;
+    }
+  }
   return decoded[0];
 }

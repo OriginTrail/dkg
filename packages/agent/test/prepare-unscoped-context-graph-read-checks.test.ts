@@ -52,6 +52,50 @@ function dependencies() {
 }
 
 describe('prepared unscoped Context Graph read checks', () => {
+  it.each(['unchanged', 'local-route', 'changed-hash'])(
+    'denies a stale scalar miss after a positive batch despite %s routing', async (route) => {
+      const deps = dependencies();
+      deps.resolveContextGraphIdsByNameHashes.mockResolvedValue(new Map([[commitment('registered'), 7n]]));
+      deps.isPrivateLocalGraph.mockResolvedValue(false);
+      deps.inputs.set('registered', { hasAcceptedRfc64PublicPolicy: true });
+      const signal = new AbortController().signal;
+      const check = await prepareUnscopedContextGraphReadChecks(deps, ['registered'], signal);
+      if (route === 'local-route') deps.registrationNameHash.mockReturnValue(undefined);
+      if (route === 'changed-hash') deps.registrationNameHash.mockReturnValue(commitment('other'));
+      expect(await check('registered', signal)).toBe(false);
+      expect(deps.getRegisteredAuthority).toHaveBeenCalledOnce();
+      expect(deps.isPrivateLocalGraph).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['public', 'private'] as const)('denies a conflicting scalar %s binding after a positive batch', async (kind) => {
+    const deps = dependencies();
+    deps.resolveContextGraphIdsByNameHashes.mockResolvedValue(new Map([[commitment('registered'), 7n]]));
+    deps.getRegisteredAuthority.mockResolvedValue(kind === 'public'
+      ? { kind, onChainId: 8n }
+      : { kind, onChainId: 8n, participantAgents: ['outsider'] });
+    const signal = new AbortController().signal;
+    const check = await prepareUnscopedContextGraphReadChecks(deps, ['registered'], signal);
+    expect(await check('registered', signal)).toBe(false);
+  });
+
+  it.each(['public', 'member', 'outsider', 'unavailable'] as const)(
+    'retains canonical %s authority for a matching positive binding', async (authority) => {
+      const deps = dependencies();
+      deps.resolveContextGraphIdsByNameHashes.mockResolvedValue(new Map([[commitment('registered'), 7n]]));
+      deps.getRegisteredAuthority.mockResolvedValue(authority === 'public'
+        ? { kind: 'public', onChainId: 7n }
+        : authority === 'unavailable'
+          ? { kind: 'unavailable', onChainId: 7n, reason: 'chain-access-policy-unavailable' }
+          : { kind: 'private', onChainId: 7n, participantAgents: [authority === 'member' ? 'outsider' : 'owner'] });
+      const signal = new AbortController().signal;
+      const check = await prepareUnscopedContextGraphReadChecks(deps, ['registered'], signal);
+      expect(await check('registered', signal)).toBe(authority === 'public' || authority === 'member');
+      expect(deps.getRegisteredAuthority).toHaveBeenCalledOnce();
+      expect(deps.isPrivateLocalGraph).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses a complete bulk proof for more than 512 ordinary KA interpretations', async () => {
     const ids = Array.from({ length: 650 }, (_, i) => `public/_verifiable_memory/author/${i}`);
     const deps = dependencies();

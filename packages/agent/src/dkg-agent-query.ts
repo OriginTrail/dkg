@@ -14,7 +14,7 @@ import {
   type ContextGraphReadCheck,
 } from './prepare-unscoped-context-graph-read-checks.js';
 import { selectContextGraphRegistrationRoute } from './dkg-agent-cg-registry.js';
-import { captureUnscopedQueryConsistency } from './unscoped-query-consistency.js';
+import { executeUnscopedQuery } from './unscoped-query-consistency.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -612,39 +612,6 @@ export class QueryMethods extends DKGAgentBase {
       return emptyQueryResultForKind(sparql);
     }
 
-    // Arbitrary unscoped SPARQL can reveal private data through aggregates or
-    // projections without a graph column. Admit it only if every possible owner
-    // is readable; scoped queries use their existing authority path above.
-    let assertUnscopedQueryUnchanged: (() => void) | undefined;
-    if (!opts.contextGraphId) {
-      assertUnscopedQueryUnchanged = captureUnscopedQueryConsistency(
-        this.store,
-        () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
-      );
-      const knownContextGraphIds = QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this);
-      const canReadContextGraph = (contextGraphId: string, signal: AbortSignal) => this.canReadContextGraph(contextGraphId, {
-        callerAgentAddress: callerAgentAddressStr,
-        signal,
-      });
-      const allowed = await canReadUnscopedQuery({
-        store: this.store,
-        knownContextGraphIds,
-        canReadContextGraph,
-        prepareReadChecks: (ids, signal) => (
-          QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
-            this,
-            ids,
-            { callerAgentAddress: callerAgentAddressStr, signal },
-          )
-        ),
-      }, { signal: opts.signal });
-      if (!allowed) {
-        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
-        return emptyQueryResultForKind(sparql);
-      }
-      assertUnscopedQueryUnchanged();
-    }
-
     // #1106 (3): an UNAUTHENTICATED / admin caller omitting `agentAddress`
     // on a working-memory read previously fell back to the bare peerId
     // namespace — but rc.17 WM data is keyed by the agent's EVM wallet, so
@@ -673,7 +640,7 @@ export class QueryMethods extends DKGAgentBase {
         effectiveWmAddress.toLowerCase() === defaultEvmLc ? [this.peerId!] : [this.defaultAgentAddress!];
     }
 
-    const result = await this.queryEngine.query(sparql, {
+    const execute = () => this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
@@ -694,9 +661,31 @@ export class QueryMethods extends DKGAgentBase {
       // engines needing to know about both names.
       minTrust: opts.minTrust ?? opts._minTrust,
     });
-    // Admission checked the earlier inventory. Hold the complete result until
-    // the same store/metadata interval is proven unchanged across execution.
-    assertUnscopedQueryUnchanged?.();
+    // Arbitrary unscoped SPARQL can reveal private data through aggregates or
+    // projections without a graph column. The executor owns admission and both
+    // local consistency checks, including the release of the materialized result.
+    const result = opts.contextGraphId ? await execute() : await executeUnscopedQuery({
+      store: this.store,
+      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+      admit: () => canReadUnscopedQuery({
+        store: this.store,
+        knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
+        canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
+          callerAgentAddress: callerAgentAddressStr,
+          signal,
+        }),
+        prepareReadChecks: (ids, signal) => (
+          QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
+            this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
+          )
+        ),
+      }, { signal: opts.signal }),
+      execute,
+      denied: () => {
+        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
+        return emptyQueryResultForKind(sparql);
+      },
+    });
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
   }
