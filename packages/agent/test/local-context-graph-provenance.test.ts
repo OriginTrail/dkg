@@ -2,10 +2,8 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
-import type {
-  ContextGraphMembershipRecord,
-  ContextGraphMembershipStore,
-} from '../src/dkg-agent-types.js';
+import type { ContextGraphMembershipRecord } from '../src/dkg-agent-types.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { LocalContextGraphProvenance } from
   '../src/local-context-graph-provenance.js';
 import {
@@ -17,16 +15,6 @@ type DurableMembershipRow = ContextGraphMembershipRecord & {
   firstSeenAt?: number;
   updatedAt: number;
 };
-
-function membershipStore(
-  rows: readonly DurableMembershipRow[],
-): ContextGraphMembershipStore {
-  return {
-    loadAll: async () => rows.map((row) => ({ ...row })),
-    upsert: async () => undefined,
-    delete: async () => undefined,
-  };
-}
 
 function row(
   contextGraphId: string,
@@ -81,10 +69,7 @@ describe('LocalContextGraphProvenance durable restoration', () => {
     ] as const;
     const provenance = new LocalContextGraphProvenance();
 
-    await expect(provenance.restoreFromDurableSources({
-      membershipStore: membershipStore(records),
-      warn: vi.fn(),
-    })).resolves.toHaveLength(records.length);
+    provenance.restoreMembershipRecords(records);
 
     expect(provenance.hasLocalCreate('explicit-local')).toBe(true);
     expect(provenance.hasLocalCreate('implicit-local')).toBe(true);
@@ -93,13 +78,46 @@ describe('LocalContextGraphProvenance durable restoration', () => {
     }
   });
 
+  it('loads the lifecycle journal once and distributes one snapshot to both projections', async () => {
+    const records = [row('startup-local', {
+      principalType: 'agent',
+      status: 'active',
+      source: 'local-create',
+    })];
+    const loadAll = vi.fn(async () => records.map((record) => ({ ...record })));
+    const provenance = new LocalContextGraphProvenance();
+    const rehydrateSubscriptions = vi.fn(async () => undefined);
+    const fakeAgent = {
+      config: {
+        contextGraphMembershipStore: {
+          loadAll,
+          upsert: async () => undefined,
+          delete: async () => undefined,
+        },
+      },
+      localContextGraphProvenance: provenance,
+      log: { warn: vi.fn() },
+      rehydrateContextGraphSubscriptions: rehydrateSubscriptions,
+    };
+
+    await (LifecycleSyncMethods.prototype as any)
+      .rehydrateContextGraphsFromDurableState.call(fakeAgent);
+
+    expect(loadAll).toHaveBeenCalledOnce();
+    expect(provenance.hasLocalCreate('startup-local')).toBe(true);
+    expect(rehydrateSubscriptions).toHaveBeenCalledOnce();
+    expect(rehydrateSubscriptions).toHaveBeenCalledWith(expect.arrayContaining([
+      expect.objectContaining({ contextGraphId: 'startup-local' }),
+    ]));
+  });
+
   it.each([
     [
       'loadAll is unavailable',
       {
         upsert: async () => undefined,
         delete: async () => undefined,
-      } satisfies ContextGraphMembershipStore,
+      },
     ],
     [
       'loadAll rejects',
@@ -107,19 +125,26 @@ describe('LocalContextGraphProvenance durable restoration', () => {
         loadAll: async () => { throw new Error('journal unavailable'); },
         upsert: async () => undefined,
         delete: async () => undefined,
-      } satisfies ContextGraphMembershipStore,
+      },
     ],
-  ])('fails closed when the node-local journal %s', async (_label, store) => {
+  ])('startup fails closed when the node-local journal %s', async (_label, store) => {
     const provenance = new LocalContextGraphProvenance();
     const warn = vi.fn();
+    const rehydrateSubscriptions = vi.fn(async () => undefined);
+    const fakeAgent = {
+      config: { contextGraphMembershipStore: store },
+      localContextGraphProvenance: provenance,
+      log: { warn },
+      rehydrateContextGraphSubscriptions: rehydrateSubscriptions,
+    };
 
-    await expect(provenance.restoreFromDurableSources({
-      membershipStore: store,
-      warn,
-    })).resolves.toBeNull();
+    await (LifecycleSyncMethods.prototype as any)
+      .rehydrateContextGraphsFromDurableState.call(fakeAgent);
 
     expect(provenance.hasLocalCreate(LOCAL_ID)).toBe(false);
     expect(warn).toHaveBeenCalledOnce();
+    expect(rehydrateSubscriptions).toHaveBeenCalledOnce();
+    expect(rehydrateSubscriptions).toHaveBeenCalledWith(null);
   });
 
   it.each([
@@ -154,19 +179,7 @@ describe('LocalContextGraphProvenance durable restoration', () => {
       type: 'bindings' as const,
       bindings: [candidate],
     }));
-    // Keep the legacy RDF-shaped properties present so this regression fails
-    // if restoration ever starts consulting synchronized graph state again.
-    const restoreInput = {
-      membershipStore: {
-        upsert: async () => undefined,
-        delete: async () => undefined,
-      } satisfies ContextGraphMembershipStore,
-      warn: vi.fn(),
-      store: { query: untrustedRdfQuery },
-      peerId: 'victim-peer',
-    };
-
-    await provenance.restoreFromDurableSources(restoreInput);
+    provenance.restoreMembershipRecords([]);
     (fixture.agent as any).localContextGraphProvenance = provenance;
     fixture.query.mockImplementation(untrustedRdfQuery as typeof fixture.query);
 

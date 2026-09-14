@@ -678,8 +678,6 @@ import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
-import type { LocalContextGraphProvenanceMembershipSnapshot } from
-  './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
@@ -713,6 +711,48 @@ import { initializeRfc64LegacySwmBoundaryV1 } from
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
+
+type ContextGraphMembershipSnapshot = ReadonlyArray<
+  ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
+>;
+
+interface PersistedJoinApprovalProjection {
+  readonly principalId: string;
+  readonly updatedAt: number;
+  readonly curatorPeerId?: string;
+}
+
+function projectPersistedJoinApprovals(
+  persistedMembershipRows: ContextGraphMembershipSnapshot,
+  persistedContextGraphIds: ReadonlySet<string>,
+  localAgentAddresses: ReadonlySet<string>,
+): ReadonlyMap<string, PersistedJoinApprovalProjection> {
+  const newestApprovalByContextGraph = new Map<string, PersistedJoinApprovalProjection>();
+  for (const membership of persistedMembershipRows) {
+    const principalId = membership.principalId.toLowerCase();
+    if (
+      membership.principalType !== 'agent' ||
+      membership.status !== 'active' ||
+      membership.source !== 'join-approved' ||
+      !persistedContextGraphIds.has(membership.contextGraphId) ||
+      !localAgentAddresses.has(principalId)
+    ) {
+      continue;
+    }
+    const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
+    if (!existing || membership.updatedAt > existing.updatedAt) {
+      newestApprovalByContextGraph.set(membership.contextGraphId, {
+        principalId,
+        updatedAt: membership.updatedAt,
+        curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
+          membership.metadata['curatorPeerId'].trim()
+          ? membership.metadata['curatorPeerId'].trim()
+          : undefined,
+      });
+    }
+  }
+  return newestApprovalByContextGraph;
+}
 
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
@@ -10004,16 +10044,33 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   /** Bootstrap durable Context Graph projections in explicit ownership order. */
   async rehydrateContextGraphsFromDurableState(this: DKGAgent): Promise<void> {
     const ctx = createOperationContext('init');
-    const membershipRows = await this.localContextGraphProvenance.restoreFromDurableSources({
-      membershipStore: this.config.contextGraphMembershipStore,
-      warn: (message) => this.log.warn(ctx, message),
-    });
+    const membershipStore = this.config.contextGraphMembershipStore;
+    let membershipRows: ContextGraphMembershipSnapshot | null = null;
+    if (membershipStore?.loadAll === undefined) {
+      this.log.warn(
+        ctx,
+        'Node-local membership provenance cannot be restored: loadAll is unavailable',
+      );
+    } else {
+      try {
+        // The lifecycle owns the single journal read. Provenance and
+        // subscription recovery are independent projections of this immutable
+        // snapshot; neither lower-level component owns the other's I/O.
+        membershipRows = await membershipStore.loadAll();
+        this.localContextGraphProvenance.restoreMembershipRecords(membershipRows);
+      } catch (error) {
+        this.log.warn(
+          ctx,
+          `Failed to load node-local membership provenance: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     await this.rehydrateContextGraphSubscriptions(membershipRows);
   }
 
   async rehydrateContextGraphSubscriptions(
     this: DKGAgent,
-    persistedMembershipRows: LocalContextGraphProvenanceMembershipSnapshot | null,
+    persistedMembershipRows: ContextGraphMembershipSnapshot | null,
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
@@ -10092,34 +10149,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         const localAgentAddresses = new Set(
           [...this.localAgents.keys()].map((address) => address.toLowerCase()),
         );
-        const newestApprovalByContextGraph = new Map<string, {
-          principalId: string;
-          updatedAt: number;
-          curatorPeerId?: string;
-        }>();
-        for (const membership of persistedMembershipRows) {
-          const principalId = membership.principalId.toLowerCase();
-          if (
-            membership.principalType !== 'agent' ||
-            membership.status !== 'active' ||
-            membership.source !== 'join-approved' ||
-            !persistedContextGraphIds.has(membership.contextGraphId) ||
-            !localAgentAddresses.has(principalId)
-          ) {
-            continue;
-          }
-          const existing = newestApprovalByContextGraph.get(membership.contextGraphId);
-          if (!existing || membership.updatedAt > existing.updatedAt) {
-            newestApprovalByContextGraph.set(membership.contextGraphId, {
-              principalId,
-              updatedAt: membership.updatedAt,
-              curatorPeerId: typeof membership.metadata?.['curatorPeerId'] === 'string' &&
-                membership.metadata['curatorPeerId'].trim()
-                ? membership.metadata['curatorPeerId'].trim()
-                : undefined,
-            });
-          }
-        }
+        const newestApprovalByContextGraph = projectPersistedJoinApprovals(
+          persistedMembershipRows,
+          persistedContextGraphIds,
+          localAgentAddresses,
+        );
         for (const [contextGraphId, approval] of newestApprovalByContextGraph) {
           this.localApprovedAgentByCG.set(contextGraphId, approval.principalId);
           if (approval.curatorPeerId) {
