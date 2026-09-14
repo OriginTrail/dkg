@@ -127,6 +127,42 @@ describe('Context Graph registration durability transition', () => {
     ]);
   });
 
+  it('rejects a duplicate registration while the first attempt owns the transition', async () => {
+    const id = 'registration-duplicate-in-flight';
+    const { agent, ownerAddress } = await fixture(id);
+    agent.registerContextGraphOnChain = vi.fn(async () => successfulRegistration());
+    agent.contextGraphRegistrationsInFlight.add(id);
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .rejects.toThrow(`Context graph "${id}" registration is already in flight`);
+
+    expect(agent.registerContextGraphOnChain).not.toHaveBeenCalled();
+    agent.contextGraphRegistrationsInFlight.delete(id);
+  });
+
+  it('restores pending when the final registered marker cannot be committed', async () => {
+    const id = 'registration-final-marker-failure';
+    const { agent, ownerAddress } = await fixture(id);
+    agent.registerContextGraphOnChain = vi.fn(async () => successfulRegistration());
+    const originalUpdate = agent.store.update?.bind(agent.store);
+    expect(originalUpdate).toBeTypeOf('function');
+    agent.store.update = async (sparql, options) => {
+      if (
+        options?.source === 'agent.contextGraph.registrationStatus.persist'
+        && sparql.includes('"registered"')
+      ) {
+        throw new Error('registered status commit unavailable');
+      }
+      await originalUpdate!(sparql, options);
+    };
+
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .rejects.toThrow('registered status commit unavailable');
+
+    expect(await registrationStatus(agent, id)).toBe('pending');
+    expect(await hasOnChainBinding(agent, id)).toBe(true);
+  });
+
   it('restores unregistered after a definitive mined revert', async () => {
     const id = 'registration-revert';
     const { agent, ownerAddress } = await fixture(id);

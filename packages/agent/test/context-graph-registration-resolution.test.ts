@@ -10,6 +10,18 @@ import {
 } from './context-graph-registration-binding.fixture.js';
 
 describe('Context Graph registration resolution deadlines', () => {
+  it('suspends current and finalized authority discovery while registration is in flight', async () => {
+    const fixture = selectedFixture();
+    Reflect.set(fixture.agent, 'contextGraphRegistrationsInFlight', new Set([LOCAL_ID]));
+
+    await expect(fixture.agent.resolveCurrentNameHashContextGraphBinding(LOCAL_ID))
+      .rejects.toThrow('chain binding discovery is suspended');
+    await expect(fixture.agent.resolveFinalizedContextGraphAuthorityTargetV1(LOCAL_ID))
+      .rejects.toThrow('finalized authority discovery is suspended');
+
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
   it('keeps an explicitly local-created unregistered graph independent of chain RPC', async () => {
     const fixture = selectedFixture();
     fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
