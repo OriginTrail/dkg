@@ -34,6 +34,44 @@ describe('ChainEventPoller scheduler', () => {
     ]);
   });
 
+  it('seeds every production lane through one bulk persistence operation', async () => {
+    const bulkCalls: Array<{ lanes: ChainEventPollerLane[]; block: number }> = [];
+    const laneCalls: ChainEventPollerLane[] = [];
+    const cursor: LaneCursorPersistence = {
+      async loadLane() { return undefined; },
+      async saveLane(lane) { laneCalls.push(lane); },
+      async saveLanes(lanes, block) { bulkCalls.push({ lanes: [...lanes], block }); },
+    };
+    await seedChainEventPollerCursors(cursor, 42);
+
+    expect(laneCalls).toEqual([]);
+    expect(bulkCalls).toEqual([{
+      lanes: [
+        'publish',
+        'allocatorReconcile',
+        'contextGraphDiscovery',
+        'vmReconcile',
+        'collectionUpdates',
+        'allowListUpdates',
+        'profileEvents',
+      ],
+      block: 42,
+    }]);
+  });
+
+  it('leaves every lane cursor at its prior value when a bulk seed fails', async () => {
+    const stored = new Map<ChainEventPollerLane, number>([['publish', 7], ['vmReconcile', 9]]);
+    const cursor: LaneCursorPersistence = {
+      async loadLane(lane) { return stored.get(lane); },
+      async saveLane(lane, block) { stored.set(lane, block); },
+      async saveLanes() { throw new Error('cursor persistence unavailable'); },
+    };
+
+    await expect(seedChainEventPollerCursors(cursor, 42))
+      .rejects.toThrow('cursor persistence unavailable');
+    expect([...stored]).toEqual([['publish', 7], ['vmReconcile', 9]]);
+  });
+
   // Zero is the runner's "no cursor yet" sentinel, so accepting it as a seed
   // would let a live-tail lane resume near the head after a restart instead of
   // at block 1.
