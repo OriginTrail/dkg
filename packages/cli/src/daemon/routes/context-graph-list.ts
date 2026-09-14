@@ -28,6 +28,15 @@ import type { RequestContext } from './context.js';
 export const CONTEXT_GRAPH_LIST_DEFAULT_LIMIT = 50;
 export const CONTEXT_GRAPH_LIST_MAX_LIMIT = 100;
 export const CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES = 64 * 1024;
+export const CONTEXT_GRAPH_LIST_EXPOSE_HEADERS = [
+  'ETag',
+  'X-DKG-List-Mode',
+  'X-DKG-Result-Count',
+  'X-DKG-Total-Count',
+  'X-DKG-Response-Bytes',
+  'X-DKG-Route-Ms',
+  'Server-Timing',
+].join(', ');
 
 export interface ContextGraphListQuery {
   limit: number;
@@ -193,17 +202,27 @@ function hasOnChainId(row: ContextGraphListFullRow): boolean {
   return value !== undefined && value.trim() !== '' && value.trim() !== '0';
 }
 
+function truncateCodePoints(value: string, limit: number): {
+  value: string;
+  truncated: boolean;
+} {
+  const codePoints = [...value];
+  return codePoints.length <= limit
+    ? { value, truncated: false }
+    : { value: codePoints.slice(0, limit).join(''), truncated: true };
+}
+
 function summaryRow(row: ContextGraphListFullRow): ContextGraphListSummaryRow {
-  const rawName = row.name;
-  const rawDescription = row.description;
+  const name = truncateCodePoints(row.name, 256);
+  const description = row.description === undefined
+    ? undefined
+    : truncateCodePoints(row.description, 512);
   return {
     id: row.id,
-    name: rawName.slice(0, 256),
-    ...(rawName.length > 256 ? { nameTruncated: true } : {}),
-    ...(rawDescription === undefined ? {} : { description: rawDescription.slice(0, 512) }),
-    ...(rawDescription !== undefined && rawDescription.length > 512
-      ? { descriptionTruncated: true }
-      : {}),
+    name: name.value,
+    ...(name.truncated ? { nameTruncated: true } : {}),
+    ...(description === undefined ? {} : { description: description.value }),
+    ...(description?.truncated ? { descriptionTruncated: true } : {}),
     ...(row.curator === undefined ? {} : { curator: row.curator }),
     ...(row.accessPolicy === undefined ? {} : { accessPolicy: row.accessPolicy }),
     isSystem: row.isSystem,
@@ -216,23 +235,58 @@ function summaryRow(row: ContextGraphListFullRow): ContextGraphListSummaryRow {
   };
 }
 
+const CANONICAL_ROW_TEXT_FIELDS = [
+  'uri',
+  'name',
+  'description',
+  'creator',
+  'curator',
+  'accessPolicy',
+  'createdAt',
+  'onChainId',
+] as const satisfies ReadonlyArray<keyof ContextGraphListFullRow>;
+
+/**
+ * Compatibility normalization for the paged endpoint only. The legacy route
+ * preserves the agent's byte shape. For duplicate logical identities, prefer
+ * the row with stronger live-state evidence, then use an explicit field order
+ * as the stable final tie-breaker. HTTP object serialization is deliberately
+ * absent from this domain decision.
+ */
+export function canonicalizeContextGraphRowsForPaging(
+  rows: readonly ContextGraphListFullRow[],
+): ContextGraphListFullRow[] {
+  const compare = (left: ContextGraphListFullRow, right: ContextGraphListFullRow): number => {
+    const evidence = [
+      Number(hasOnChainId(left)) - Number(hasOnChainId(right)),
+      Number(left.callerInvolved === true) - Number(right.callerInvolved === true),
+      Number(left.subscribed === true) - Number(right.subscribed === true),
+      Number(left.synced === true) - Number(right.synced === true),
+    ];
+    for (const comparison of evidence) {
+      if (comparison !== 0) return comparison;
+    }
+    for (const field of CANONICAL_ROW_TEXT_FIELDS) {
+      const comparison = String(left[field] ?? '').localeCompare(String(right[field] ?? ''));
+      if (comparison !== 0) return -comparison;
+    }
+    return Number(left.isSystem) - Number(right.isSystem);
+  };
+
+  const canonical = new Map<string, ContextGraphListFullRow>();
+  for (const row of rows) {
+    if (row.id.length === 0) continue;
+    const existing = canonical.get(row.id);
+    if (!existing || compare(row, existing) > 0) canonical.set(row.id, row);
+  }
+  return [...canonical.values()];
+}
+
 function prepareRows(
   rows: ContextGraphListFullRow[],
   query: ContextGraphListQuery,
 ): Array<{ digest: string; row: ContextGraphListRow }> {
-  const unique = new Map<string, ContextGraphListFullRow>();
-  for (const row of rows) {
-    if (row.id.length === 0) continue;
-    const existing = unique.get(row.id);
-    if (
-      !existing
-      || serializeJsonResponseBody(row) < serializeJsonResponseBody(existing)
-    ) {
-      unique.set(row.id, row);
-    }
-  }
-
-  return [...unique.values()]
+  return canonicalizeContextGraphRowsForPaging(rows)
     .filter((row) => query.subscribed === undefined
       || (row.subscribed === true) === query.subscribed)
     .filter((row) => query.synced === undefined
@@ -389,6 +443,7 @@ function responseHeaders(
       'Cache-Control': 'private, no-cache',
     }),
     Vary: 'Authorization',
+    'Access-Control-Expose-Headers': CONTEXT_GRAPH_LIST_EXPOSE_HEADERS,
     'X-DKG-List-Mode': values.mode,
     'X-DKG-Result-Count': String(values.returned),
     'X-DKG-Total-Count': String(values.total),
@@ -398,8 +453,11 @@ function responseHeaders(
   };
 }
 
-export async function handleContextGraphListRoute(ctx: RequestContext): Promise<void> {
-  const startedAt = performance.now();
+export async function handleContextGraphListRoute(
+  ctx: RequestContext,
+  now: () => number = () => performance.now(),
+): Promise<void> {
+  const startedAt = now();
   const parsed = parseContextGraphListQuery(ctx.url.searchParams);
   if (!parsed.ok) {
     jsonResponse(ctx.res, 400, { error: parsed.error });
@@ -409,12 +467,13 @@ export async function handleContextGraphListRoute(ctx: RequestContext): Promise<
   const contextGraphs = await ctx.agent.listContextGraphs({
     callerAgentAddress: ctx.requestAgentAddress ?? null,
   });
-  const elapsedMs = Math.round((performance.now() - startedAt) * 100) / 100;
 
   if (parsed.mode === 'legacy') {
     const payload = { contextGraphs };
-    const serializedBytes = Buffer.byteLength(serializeJsonResponseBody(payload));
-    jsonResponse(ctx.res, 200, payload, undefined, responseHeaders({
+    const body = serializeJsonResponseBody(payload);
+    const serializedBytes = Buffer.byteLength(body);
+    const elapsedMs = Math.round((now() - startedAt) * 100) / 100;
+    jsonSerializedResponse(ctx.res, 200, body, undefined, responseHeaders({
       returned: contextGraphs.length,
       total: contextGraphs.length,
       bytes: serializedBytes,
@@ -438,6 +497,7 @@ export async function handleContextGraphListRoute(ctx: RequestContext): Promise<
     return;
   }
 
+  const elapsedMs = Math.round((now() - startedAt) * 100) / 100;
   const headers = responseHeaders({
     returned: page.payload.page.returned,
     total: page.payload.page.total,

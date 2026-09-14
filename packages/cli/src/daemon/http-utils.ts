@@ -1720,15 +1720,6 @@ export function corsHeaders(origin?: string | null): Record<string, string> {
   const headers: Record<string, string> = {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Headers": "Content-Type, Authorization, If-None-Match",
-    "Access-Control-Expose-Headers": [
-      "ETag",
-      "X-DKG-List-Mode",
-      "X-DKG-Result-Count",
-      "X-DKG-Total-Count",
-      "X-DKG-Response-Bytes",
-      "X-DKG-Route-Ms",
-      "Server-Timing",
-    ].join(", "),
   };
   if (origin !== "*") headers["Vary"] = "Origin";
   return headers;

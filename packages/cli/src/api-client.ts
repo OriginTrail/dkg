@@ -26,6 +26,8 @@ import {
   type ContextGraphListLegacyResponse,
   type ContextGraphListPageOptions,
   type ContextGraphListPageResponse,
+  type ContextGraphListFullRow,
+  type ContextGraphListSummaryRow,
 } from '@origintrail-official/dkg-core';
 import { loadApiClientToken } from './auth.js';
 import {
@@ -2075,8 +2077,11 @@ export class ApiClient {
 
   async listContextGraphs(): Promise<ContextGraphListLegacyResponse>;
   async listContextGraphs(
-    options: ContextGraphListPageOptions,
-  ): Promise<ContextGraphListPageResponse>;
+    options: ContextGraphListPageOptions & { projection: 'summary' },
+  ): Promise<ContextGraphListPageResponse<ContextGraphListSummaryRow>>;
+  async listContextGraphs(
+    options: Omit<ContextGraphListPageOptions, 'projection'> & { projection?: 'full' },
+  ): Promise<ContextGraphListPageResponse<ContextGraphListFullRow>>;
   async listContextGraphs(
     options?: ContextGraphListPageOptions,
   ): Promise<ContextGraphListLegacyResponse | ContextGraphListPageResponse> {

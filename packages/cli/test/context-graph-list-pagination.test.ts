@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildContextGraphListPage,
+  canonicalizeContextGraphRowsForPaging,
+  CONTEXT_GRAPH_LIST_EXPOSE_HEADERS,
   CONTEXT_GRAPH_LIST_MAX_RESPONSE_BYTES,
   handleContextGraphListRoute,
   parseContextGraphListQuery,
 } from '../src/daemon/routes/context-graph-list.js';
+import { jsonResponseHeaders } from '../src/daemon/http-utils.js';
 import type { ContextGraphListFullRow } from '@origintrail-official/dkg-core';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
@@ -114,6 +117,33 @@ describe('bounded context-graph listing', () => {
     expect(first.payload.nextCursor).toBeUndefined();
   });
 
+  it('canonicalizes duplicate domain rows by explicit evidence and field policy', () => {
+    const weak = {
+      ...rows(1)[0]!,
+      id: 'same-id',
+      name: 'z-name',
+      onChainId: undefined,
+      callerInvolved: false,
+      subscribed: false,
+      synced: false,
+    };
+    const strong = {
+      ...weak,
+      name: 'a-name',
+      onChainId: '42',
+      callerInvolved: true,
+      subscribed: true,
+      synced: true,
+    };
+    expect(canonicalizeContextGraphRowsForPaging([weak, strong])).toEqual([strong]);
+    expect(canonicalizeContextGraphRowsForPaging([strong, weak])).toEqual([strong]);
+
+    const firstLexical = { ...weak, name: 'alpha' };
+    const secondLexical = { ...weak, name: 'beta' };
+    expect(canonicalizeContextGraphRowsForPaging([secondLexical, firstLexical]))
+      .toEqual([firstLexical]);
+  });
+
   it('binds cursors to the filters and projection', () => {
     const first = buildContextGraphListPage(
       rows(20),
@@ -215,6 +245,52 @@ describe('bounded context-graph listing', () => {
     });
     expect(boundary).not.toHaveProperty('nameTruncated');
     expect(boundary).not.toHaveProperty('descriptionTruncated');
+  });
+
+  it('truncates astral Unicode on code-point boundaries', () => {
+    const page = buildContextGraphListPage(
+      [
+        {
+          ...rows(1)[0]!,
+          id: 'astral-boundary',
+          name: `${'n'.repeat(255)}😀`,
+          description: '😀'.repeat(512),
+        },
+        {
+          ...rows(1)[0]!,
+          id: 'astral-truncated',
+          name: `${'n'.repeat(255)}😀x`,
+          description: `${'d'.repeat(511)}😀x`,
+        },
+        {
+          ...rows(1)[0]!,
+          id: 'astral-all',
+          name: '😀'.repeat(256),
+          description: '😀'.repeat(513),
+        },
+      ],
+      pagedQuery({ limit: '10', projection: 'summary' }),
+    );
+    expect(page.ok).toBe(true);
+    if (!page.ok) throw new Error(page.error);
+    const boundary = page.payload.contextGraphs.find((row) => row.id === 'astral-boundary')!;
+    const truncated = page.payload.contextGraphs.find((row) => row.id === 'astral-truncated')!;
+    const allAstral = page.payload.contextGraphs.find((row) => row.id === 'astral-all')!;
+    expect([...boundary.name]).toHaveLength(256);
+    expect(boundary).not.toHaveProperty('nameTruncated');
+    expect(boundary).not.toHaveProperty('descriptionTruncated');
+    expect(truncated).toMatchObject({
+      name: `${'n'.repeat(255)}😀`,
+      nameTruncated: true,
+      description: `${'d'.repeat(511)}😀`,
+      descriptionTruncated: true,
+    });
+    expect(/[\uD800-\uDFFF]/u.test([...truncated.name].at(-1) ?? '')).toBe(false);
+    expect(/[\uD800-\uDFFF]/u.test([...(truncated.description ?? '')].at(-1) ?? '')).toBe(false);
+    expect(allAstral.name).toBe('😀'.repeat(256));
+    expect(allAstral).not.toHaveProperty('nameTruncated');
+    expect(allAstral.description).toBe('😀'.repeat(512));
+    expect(allAstral).toHaveProperty('descriptionTruncated', true);
   });
 
   it('shrinks a page by serialized bytes and rejects one oversized full row', () => {
@@ -376,6 +452,36 @@ describe('bounded context-graph listing', () => {
     expect(conditional.state.headers).toMatchObject({
       ETag: first.state.headers?.ETag,
       'X-DKG-Response-Bytes': '0',
+      'Access-Control-Expose-Headers': CONTEXT_GRAPH_LIST_EXPOSE_HEADERS,
     });
+  });
+
+  it('includes page construction in route timing and scopes exposed headers to this route', async () => {
+    const listContextGraphs = vi.fn(async () => rows(3));
+    const response = responseRecorder();
+    (response.res as typeof response.res & { __corsOrigin?: string }).__corsOrigin = 'https://ui.example';
+    const now = vi.fn()
+      .mockReturnValueOnce(10)
+      .mockReturnValueOnce(35.25);
+
+    await handleContextGraphListRoute({
+      req: { headers: {} },
+      res: response.res,
+      agent: { listContextGraphs },
+      url: new URL('http://localhost/api/context-graph/list?projection=summary'),
+      requestAgentAddress: null,
+    } as unknown as RequestContext, now);
+
+    expect(now).toHaveBeenCalledTimes(2);
+    expect(response.state.headers).toMatchObject({
+      'X-DKG-Route-Ms': '25.25',
+      'Server-Timing': 'dkg-context-graph-list;dur=25.25',
+      'Access-Control-Expose-Headers': CONTEXT_GRAPH_LIST_EXPOSE_HEADERS,
+    });
+
+    const unrelated = { __corsOrigin: 'https://ui.example' } as unknown as Parameters<
+      typeof jsonResponseHeaders
+    >[0];
+    expect(jsonResponseHeaders(unrelated)).not.toHaveProperty('Access-Control-Expose-Headers');
   });
 });
