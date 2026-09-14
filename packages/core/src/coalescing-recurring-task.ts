@@ -73,13 +73,6 @@ export class CoalescingRecurringTask {
     return this.request();
   }
 
-  /** Mark a queued follow-up satisfied by the active pass that it joined. */
-  satisfyPendingRequest(): boolean {
-    if (!this.#requested) return false;
-    this.#requested = false;
-    return true;
-  }
-
   /** Schedule one initial or externally delayed request through the same timer owner. */
   schedule(delayMs = 0): boolean {
     if (this.#closed || this.#timer !== null || this.#run !== null) return false;

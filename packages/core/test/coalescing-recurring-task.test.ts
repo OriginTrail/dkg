@@ -169,6 +169,46 @@ describe('CoalescingRecurringTask', () => {
     expect(runner.invalidateAndRequest('too late')).toBe(false);
   });
 
+  it('replaces an armed deadline with an immediate explicit request', async () => {
+    vi.useFakeTimers();
+    let passes = 0;
+    const runner = new CoalescingRecurringTask({
+      runPass: async () => { passes += 1; return 'idle'; },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+    expect(runner.schedule(1_000)).toBe(true);
+    expect(runner.requestNow()).toBe(true);
+    await runner.whenIdle();
+    expect(passes).toBe(1);
+    expect(runner.scheduled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes).toBe(1);
+    await runner.close();
+  });
+
+  it('gives cancel-and-drain an AbortError reason and waits for physical retirement', async () => {
+    let observed!: AbortSignal;
+    let release!: () => void;
+    const physical = new Promise<void>(resolve => { release = resolve; });
+    const runner = new CoalescingRecurringTask({
+      runPass: async signal => { observed = signal; await physical; },
+      onError: () => undefined,
+      closingMessage: 'test closing',
+    });
+    runner.request();
+    await vi.waitFor(() => expect(observed).toBeDefined());
+    let drained = false;
+    const draining = runner.cancelAndDrain('policy changed').then(() => { drained = true; });
+    expect(observed.aborted).toBe(true);
+    expect(observed.reason).toMatchObject({ name: 'AbortError', message: 'policy changed' });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+    release();
+    await draining;
+    await runner.close();
+  });
+
   it('drains close-triggered cancellation without reporting a workload failure', async () => {
     const onError = vi.fn();
     let markStarted!: () => void;
@@ -215,25 +255,6 @@ describe('CoalescingRecurringTask', () => {
 
     expect(onError).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledWith(failure);
-  });
-
-  it('retracts a queued request when the active pass satisfies its caller', async () => {
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    let passes = 0;
-    const runner = new CoalescingRecurringTask({
-      runPass: async () => { passes += 1; await gate; return 'idle'; },
-      onError: () => undefined,
-      closingMessage: 'test closing',
-    });
-    runner.requestNow();
-    await vi.waitFor(() => expect(runner.running).toBe(true));
-    runner.requestNow();
-    expect(runner.satisfyPendingRequest()).toBe(true);
-    release();
-    await runner.whenIdle();
-    expect(passes).toBe(1);
-    await runner.close();
   });
 
   it('drains an invalidated pass without rearming and preserves a newer explicit request', async () => {

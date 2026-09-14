@@ -94,10 +94,7 @@ export class SwmExpiryCleanupWorker {
     this.manualFlight = flight;
     this.continuation = undefined;
     if (this.activePeriodic) this.activePeriodic.joined = flight;
-    // Also queue behind a just-completed pass whose scheduler-finally has not
-    // retired yet; the active periodic path retracts this request if it fully
-    // satisfies the manual cutoff itself.
-    this.task.requestNow();
+    else this.task.requestNow();
     return completion;
   }
 
@@ -183,7 +180,10 @@ export class SwmExpiryCleanupWorker {
         if (joined.cutoffMs !== cutoffMs) this.continuation = undefined;
         if (!this.continuation && joined.cutoffMs === cutoffMs) {
           this.resolveManualFlight(joined);
-          this.task.satisfyPendingRequest();
+        } else {
+          // The joined pass did not satisfy the manual request. Admit exactly
+          // one follow-up through the scheduler's ordinary request boundary.
+          this.task.requestNow();
         }
       }
     } finally {
