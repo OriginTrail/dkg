@@ -1676,7 +1676,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(chainAdapter.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
-  it('builds a multi-graph refresh from one atomic name snapshot projection', async () => {
+  it('uses a durable binding directly while reverse-resolving only unbound names', async () => {
     const firstContextGraphId = `${AUTHOR}/atomic-refresh-a`;
     const secondContextGraphId = `${AUTHOR}/atomic-refresh-b`;
     const localFirstContextGraphId = `${AUTHOR}/atomic-refresh-local`;
@@ -1689,16 +1689,18 @@ describe('RFC-64 rollout authority integration', () => {
       contextGraphId: '10',
       accessPolicy: 0,
     });
-    const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => new Map([
-      [nameHashes[0]!, firstSnapshot],
-      [nameHashes[1]!, secondSnapshot],
-    ]));
+    const resolveSnapshots = vi.fn(async (nameHashes: readonly string[]) => {
+      if (nameHashes.includes(firstSnapshot.nameHash)) {
+        throw new Error('durably bound duplicate name hash is ambiguous');
+      }
+      return new Map([[secondSnapshot.nameHash, secondSnapshot]]);
+    });
     const resolveIds = vi.fn(async () => {
       throw new Error('atomic refresh must not reopen name-to-id resolution');
     });
-    const readSnapshots = vi.fn(async () => {
-      throw new Error('atomic refresh must not perform a second snapshot read');
-    });
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      onChainIds.includes('9') ? [['9', firstSnapshot]] : [],
+    ));
     const pointAuthorityRead = vi.fn(async () => {
       throw new Error('atomic refresh must not perform a point snapshot read');
     });
@@ -1716,16 +1718,11 @@ describe('RFC-64 rollout authority integration', () => {
       name: 'atomic-multi-name-authority-refresh',
       config: { chainAdapter },
     });
-    for (const snapshot of [firstSnapshot, secondSnapshot]) {
-      const contextGraphId = snapshot === firstSnapshot
-        ? firstContextGraphId
-        : secondContextGraphId;
-      edge.recordDiscoveredContextGraph(contextGraphId, {
-        name: contextGraphId,
-        onChainId: snapshot.contextGraphId,
-        onChainHash: snapshot.nameHash,
-      });
-    }
+    edge.recordDiscoveredContextGraph(firstContextGraphId, {
+      name: firstContextGraphId,
+      onChainId: firstSnapshot.contextGraphId,
+      onChainHash: firstSnapshot.nameHash,
+    });
     vi.spyOn(edge, 'isLocalFirstUnregisteredContextGraph')
       .mockImplementation(async (contextGraphId) => (
         contextGraphId === localFirstContextGraphId
@@ -1738,7 +1735,6 @@ describe('RFC-64 rollout authority integration', () => {
 
     expect(resolveSnapshots).toHaveBeenCalledOnce();
     expect(resolveSnapshots).toHaveBeenCalledWith([
-      firstSnapshot.nameHash,
       secondSnapshot.nameHash,
     ], { signal: expect.any(AbortSignal) });
     expect(requests.get(firstContextGraphId)).toMatchObject({
@@ -1761,7 +1757,85 @@ describe('RFC-64 rollout authority integration', () => {
       kind: 'finalized-absence',
     });
     expect(resolveIds).not.toHaveBeenCalled();
-    expect(readSnapshots).not.toHaveBeenCalled();
+    expect(readSnapshots).toHaveBeenCalledOnce();
+    expect(readSnapshots).toHaveBeenCalledWith(['9'], {
+      signal: expect.any(AbortSignal),
+    });
+    expect(pointAuthorityRead).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: 'numeric slot',
+      snapshotPatch: { contextGraphId: '80' },
+    },
+    {
+      label: 'name commitment',
+      snapshotPatch: { nameHash: `0x${'55'.repeat(32)}` },
+    },
+  ])('keeps conflicting bound $label evidence fail closed', async ({ snapshotPatch }) => {
+    const contextGraphId = `${AUTHOR}/bound-conflicting-evidence`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    const conflictingSnapshot = Object.freeze({
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      contextGraphId: '79',
+      accessPolicy: 0,
+      nameHash: expectedNameHash,
+      ...snapshotPatch,
+    });
+    const resolveSnapshots = vi.fn(async () => {
+      throw new Error('bound target must not reverse-resolve an ambiguous name hash');
+    });
+    const readSnapshots = vi.fn(async (onChainIds: readonly string[]) => new Map(
+      onChainIds.includes('79') ? [['79', conflictingSnapshot]] : [],
+    ));
+    const pointAuthorityRead = vi.fn(async () => {
+      throw new Error('conflicting finalized evidence must not reopen a point read');
+    });
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      getContextGraphAuthoritySnapshot: pointAuthorityRead,
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: resolveSnapshots,
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const edge = await startAgent({
+      name: 'bound-conflicting-authority-evidence',
+      config: { chainAdapter },
+    });
+    edge.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '79',
+      onChainHash: expectedNameHash,
+    });
+    const signal = new AbortController().signal;
+
+    const request = (await edge.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    )).get(contextGraphId)!;
+
+    expect(request).toMatchObject({
+      kind: 'finalized-evidence',
+      evidence: { contextGraphAuthorityIndexId: '79' },
+    });
+    await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request,
+    )).rejects.toThrow();
+    expect(edge.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      onChainId: '79',
+      onChainHash: expectedNameHash,
+    });
+    expect(resolveSnapshots).not.toHaveBeenCalled();
+    expect(readSnapshots).toHaveBeenCalledWith(['79'], {
+      signal: expect.any(AbortSignal),
+    });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
   });
 

@@ -905,26 +905,51 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
         ?? (subscription?.onChainHash === undefined
           ? this.contextGraphNameCommitment(localId)
           : this.contextGraphWireId(subscription.onChainHash));
-      return { contextGraphId, expectedNameHash } as const;
+      const authoritativeOnChainId = this.contextGraphBindingState
+        .authorityIndexOnChainIdFor(localId, subscription);
+      return {
+        contextGraphId,
+        expectedNameHash,
+        expectedOnChainId: authoritativeOnChainId === undefined
+          ? undefined
+          : BigInt(authoritativeOnChainId),
+      } as const;
     });
 
     const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     if (indexReader === undefined) return { kind: 'legacy-current' };
 
+    // A canonical durable binding already owns the exact numeric authority
+    // slot. Do not reverse-resolve its name commitment: historical duplicate
+    // commitments make that lookup deliberately ambiguous even though the
+    // locally persisted binding remains authoritative. The caller still owns
+    // a finalized numeric snapshot batch and validates its id/name evidence.
+    const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
+    const reverseBindingTargets = bindingTargets.filter((target) => {
+      if (target.expectedOnChainId === undefined) return true;
+      targets.set(target.contextGraphId, Object.freeze({
+        expectedNameHash: target.expectedNameHash,
+        expectedOnChainId: target.expectedOnChainId,
+      }));
+      return false;
+    });
+    if (reverseBindingTargets.length === 0) {
+      return { kind: 'finalized-index', targets };
+    }
+
     const resolveSnapshots = indexReader
       .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
     if (resolveSnapshots !== undefined) {
-      const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
       options.signal?.throwIfAborted();
       const snapshotsByNameHash = await resolveSnapshots.call(
         indexReader,
-        bindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+        reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
         options,
       );
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
       options.signal?.throwIfAborted();
-      for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+      for (const { contextGraphId, expectedNameHash } of reverseBindingTargets) {
         const finalizedSnapshot = snapshotsByNameHash.get(expectedNameHash);
         if (finalizedSnapshot !== undefined) {
           targets.set(contextGraphId, Object.freeze({
@@ -937,17 +962,16 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       return { kind: 'finalized-index', targets };
     }
 
-    if (bindingTargets.length === 1) {
+    if (reverseBindingTargets.length === 1) {
       const resolveSnapshot = indexReader
         .resolveFinalizedContextGraphAuthoritySnapshotByNameHash;
       if (resolveSnapshot !== undefined) {
-        const [{ contextGraphId, expectedNameHash }] = bindingTargets;
+        const [{ contextGraphId, expectedNameHash }] = reverseBindingTargets;
         const finalizedSnapshot = await resolveSnapshot.call(
           indexReader,
           expectedNameHash,
           options,
         );
-        const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
         if (finalizedSnapshot !== null) {
           targets.set(contextGraphId, Object.freeze({
             expectedNameHash,
@@ -961,17 +985,16 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     const resolveMany = indexReader.resolveFinalizedContextGraphIdsByNameHashes;
     if (resolveMany !== undefined) {
-      const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
       options.signal?.throwIfAborted();
       const resolvedByNameHash = await resolveMany.call(
         indexReader,
-        bindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+        reverseBindingTargets.map(({ expectedNameHash }) => expectedNameHash),
         options,
       );
       // Custom readers may not honor cancellation or may return a superset.
       // Publish only exact logical targets after the caller's final fence.
       options.signal?.throwIfAborted();
-      for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+      for (const { contextGraphId, expectedNameHash } of reverseBindingTargets) {
         const expectedOnChainId = resolvedByNameHash.get(expectedNameHash);
         if (expectedOnChainId !== undefined) {
           targets.set(contextGraphId, Object.freeze({
@@ -985,8 +1008,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     const resolveOne = indexReader.resolveFinalizedContextGraphIdByNameHash;
     if (resolveOne === undefined) return { kind: 'legacy-current' };
-    const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
-    for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+    for (const { contextGraphId, expectedNameHash } of reverseBindingTargets) {
       const expectedOnChainId = await resolveOne.call(
         indexReader,
         expectedNameHash,
