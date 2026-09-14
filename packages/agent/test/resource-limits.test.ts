@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { backpressureRegistry, createOperationContext, MAX_NODE_TIMER_DELAY_MS } from '@origintrail-official/dkg-core';
 import {
   AGENT_RESOURCE_ENV_SPECS, RESOURCE_MAX, ResourceConfigWarnings, ownedResourceEnvNames,
-  resolveAgentResourceSnapshots, resolveVmResourceEnvironment, resourceInteger, resourceIntegerEnv,
+  resolveAgentResourceSnapshots, resolveResourceSettingsInTwoPasses, resolveVmResourceEnvironment,
+  resourceInteger, resourceIntegerEnv, type EnvironmentIntegerSpec,
 } from '../src/resource-limits.js';
 import {
   getSyncBackpressureSnapshot, resolveNonNegativeIntegerSwitch, resolvePositiveIntegerSwitch,
@@ -130,21 +131,36 @@ describe('restart-scoped VM and catch-up environment policy', () => {
     expect(resolveVmResourceEnvironment({ DKG_VM_RECONCILE_INTERVAL_MS: 'Infinity' }).startupMaxDelayMs).toBe(60_000);
   });
 
-  it('refuses a dependent fallback whose source the owner does not resolve first', () => {
-    // The guard behind the {from} contract: a dependency declared later, or
-    // owned by another slice, must fail loudly at startup instead of
-    // silently resolving to undefined.
-    const specs = AGENT_RESOURCE_ENV_SPECS as unknown as Record<string, unknown>;
-    specs.DKG_TEST_DEPENDENT_MS = {
-      owner: 'vm', diagnostic: false, min: 0, max: 10,
-      fallback: { from: 'DKG_CATCHUP_MAX_CONCURRENT_PEERS' },
-    };
-    try {
-      expect(() => resolveVmResourceEnvironment({})).toThrow(/not resolved first/);
-    } finally {
-      delete specs.DKG_TEST_DEPENDENT_MS;
-    }
-    expect(ownedResourceEnvNames('vm')).not.toContain('DKG_TEST_DEPENDENT_MS');
+  it('resolves a dependent fallback whatever order the descriptor declares it in', () => {
+    // Declaration order carries no meaning: resolution runs constant fallbacks
+    // first, then dependent ones. This drives the shared resolver with a
+    // synthetic descriptor whose dependent is declared ABOVE its source — the
+    // reordering that used to throw on the first import.
+    const specs = {
+      DEPENDENT_MS: { owner: 'vm', diagnostic: false, min: 0, max: 1_000, fallback: { from: 'SOURCE_MS' } },
+      SOURCE_MS: { owner: 'vm', diagnostic: true, min: 1, max: 1_000, fallback: 60 },
+    } as const satisfies Record<string, EnvironmentIntegerSpec>;
+    const names = Object.keys(specs);
+    const rejected: string[] = [];
+    const resolve = (env: Record<string, string | undefined>) =>
+      resolveResourceSettingsInTwoPasses(specs, names, env, (name) => rejected.push(name));
+
+    expect(resolve({})).toEqual({ SOURCE_MS: 60, DEPENDENT_MS: 60 });
+    expect(resolve({ SOURCE_MS: '120' })).toEqual({ SOURCE_MS: 120, DEPENDENT_MS: 120 });
+    // A rejected source still hands the dependent the RESOLVED value.
+    expect(resolve({ SOURCE_MS: '-1' })).toEqual({ SOURCE_MS: 60, DEPENDENT_MS: 60 });
+    expect(rejected).toEqual(['SOURCE_MS']);
+    // A configured dependent still wins, and zero stays an explicit mode.
+    expect(resolve({ SOURCE_MS: '120', DEPENDENT_MS: '0' })).toEqual({ SOURCE_MS: 120, DEPENDENT_MS: 0 });
+
+    // The defensive guard still fires for a JS consumer that bypasses the
+    // compile-time check by naming a source the owner never resolves.
+    expect(() => resolveResourceSettingsInTwoPasses(
+      { ORPHAN_MS: { owner: 'vm', diagnostic: false, min: 0, max: 10, fallback: { from: 'ABSENT_MS' } } },
+      ['ORPHAN_MS'],
+      {},
+      () => {},
+    )).toThrow(/ABSENT_MS/);
   });
 
   it('resolves startup jitter through the descriptor, not a bespoke parser', () => {

@@ -77,13 +77,15 @@ export class ResourceConfigWarnings {
 /** The subsystem whose process-scoped snapshot captures a setting. */
 export type ResourceOwner = 'vm' | 'catchup';
 
-interface EnvironmentIntegerSpec extends IntegerBounds {
+export interface EnvironmentIntegerSpec extends IntegerBounds {
   /**
    * The value used when the environment supplies none or an invalid one.
    * `{ from }` derives it from another setting's RESOLVED value, which is how
    * a dependent setting stays in this registry instead of needing its own
-   * parser. The referenced setting must belong to the same owner and be
-   * declared earlier, so it is already resolved; both are checked below.
+   * parser. Resolution runs in two passes — every constant fallback first,
+   * then every dependent one — so declaration order carries no meaning and
+   * reordering this descriptor cannot break startup. The source must have a
+   * constant fallback and the same owner, which is checked at compile time.
    */
   fallback: number | { readonly from: string };
   owner: ResourceOwner;
@@ -125,11 +127,24 @@ export const AGENT_RESOURCE_ENV_SPECS = {
 type AgentResourceEnvSpecs = typeof AGENT_RESOURCE_ENV_SPECS;
 export type AgentResourceEnvName = keyof AgentResourceEnvSpecs;
 
-/** Every dependent fallback names a real setting; a typo is a compile error. */
+/** Settings whose fallback is a constant, resolved in the first pass. */
+type ConstantFallbackEnvName = {
+  [Name in AgentResourceEnvName]:
+    AgentResourceEnvSpecs[Name]['fallback'] extends number ? Name : never;
+}[AgentResourceEnvName];
+
+/**
+ * Every dependent fallback names a real setting that is resolved in the first
+ * pass and owned by the same slice. A typo, a chain of dependent settings, or
+ * a source owned elsewhere is a compile error — not an import-time throw, and
+ * not something descriptor order can change.
+ */
 type DependentFallbacksResolve = {
   [Name in AgentResourceEnvName]:
     AgentResourceEnvSpecs[Name]['fallback'] extends { readonly from: infer From }
-      ? From extends AgentResourceEnvName ? true : never
+      ? From extends ConstantFallbackEnvName
+        ? AgentResourceEnvSpecs[From]['owner'] extends AgentResourceEnvSpecs[Name]['owner'] ? true : never
+        : never
       : true;
 }[AgentResourceEnvName];
 const _dependentFallbacksResolve: DependentFallbacksResolve = true;
@@ -180,27 +195,59 @@ export interface AgentResourceSnapshots {
   readonly catchup: CatchupResourceSnapshot;
 }
 
+/**
+ * Resolve one owner's settings from `specs` in two passes: constant fallbacks
+ * first, then the settings that derive theirs from an already-resolved value.
+ *
+ * Two passes are what make the descriptor an unordered record: moving an entry
+ * cannot change resolution, and a dependent setting cannot observe `undefined`
+ * because its source was declared below it. Exported for the descriptor tests,
+ * which drive it with a deliberately reordered synthetic descriptor.
+ */
+export function resolveResourceSettingsInTwoPasses(
+  specs: Readonly<Record<string, EnvironmentIntegerSpec>>,
+  names: readonly string[],
+  env: Readonly<Record<string, string | undefined>>,
+  onRejected: RejectedResourceSetting,
+): Record<string, number> {
+  const values: Record<string, number> = {};
+  const dependents: string[] = [];
+  for (const name of names) {
+    const spec = specs[name]!;
+    if (typeof spec.fallback !== 'number') { dependents.push(name); continue; }
+    values[name] = resourceIntegerEnv(env[name], spec, name, onRejected) ?? spec.fallback;
+  }
+  for (const name of dependents) {
+    const spec = specs[name]!;
+    const from = (spec.fallback as { readonly from: string }).from;
+    values[name] = resourceIntegerEnv(env[name], spec, name, onRejected)
+      ?? resolvedDependency(from, name, values);
+  }
+  return values;
+}
+
 function resolveOwnedResourceEnvironment<Owner extends ResourceOwner>(
   owner: Owner,
   env: Readonly<Record<string, string | undefined>>,
 ) {
   const warnings = new ResourceConfigWarnings();
+  const names = ownedResourceEnvNames(owner);
+  const resolved = resolveResourceSettingsInTwoPasses(
+    AGENT_RESOURCE_ENV_SPECS, names, env, warnings.reject,
+  );
+  // Descriptor order, not resolution order, is what the slice publishes.
   const values = {} as Record<OwnedResourceEnvName<Owner>, number>;
-  for (const name of ownedResourceEnvNames(owner)) {
-    const spec = AGENT_RESOURCE_ENV_SPECS[name];
-    const fallback = typeof spec.fallback === 'number'
-      ? spec.fallback
-      : resolvedDependency(spec.fallback.from, name, values);
-    values[name] = resourceIntegerEnv(env[name], spec, name, warnings.reject) ?? fallback;
-  }
+  for (const name of names) values[name] = resolved[name]!;
   return { values, rejected: [...warnings.settings] };
 }
 
 /**
- * The resolved value a dependent fallback derives from. Declaration order is
- * resolution order, so a dependency declared later — or owned by another
- * slice, which this loop never resolves — is a declaration error, not a
- * silent zero.
+ * The resolved value a dependent fallback derives from.
+ *
+ * Unreachable while the compile-time `DependentFallbacksResolve` check holds:
+ * every dependent names a constant-fallback setting owned by the same slice,
+ * so the first pass has already resolved it. Kept so a JavaScript consumer
+ * that bypasses those types fails loudly instead of resolving to `undefined`.
  */
 function resolvedDependency(
   from: string,
@@ -210,8 +257,8 @@ function resolvedDependency(
   const resolved = values[from];
   if (resolved === undefined) {
     throw new Error(
-      `${dependent} derives its fallback from ${from}, which is not resolved first `
-      + 'in AGENT_RESOURCE_ENV_SPECS under the same owner',
+      `${dependent} derives its fallback from ${from}, which is not a constant-fallback `
+      + 'setting of the same owner in AGENT_RESOURCE_ENV_SPECS',
     );
   }
   return resolved;
