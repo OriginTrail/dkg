@@ -5,7 +5,10 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { ChainEventPoller } from '../src/chain-event-poller.js';
 import type { ChainEventPollerLane } from '../src/chain-event-poller.js';
-import type { LaneCursorPersistence } from '../src/chain-event-poller.js';
+import type {
+  LaneCursorPersistence,
+  LegacyCursorPersistence,
+} from '../src/chain-event-poller.js';
 import { ChainEventLaneRunner } from '../src/chain-event-lane-runner.js';
 import type { ChainEventPollerLaneSpec } from '../src/chain-event-lane-runner.js';
 import { makeChain, makeHandler } from './helpers/chain-event-lane-fixture.js';
@@ -41,6 +44,42 @@ describe('ChainEventPoller scheduler', () => {
       { lane: 'allowListUpdates', block: 42 },
       { lane: 'profileEvents', block: 42 },
     ]);
+  });
+
+  it.each([-1, 1.5, Number.NaN])('rejects invalid configured cursor seed %s', async (blockNumber) => {
+    const cursor: LaneCursorPersistence = {
+      async loadLane() { return undefined; },
+      async saveLane() { /* sink */ },
+    };
+    const { adapter } = makeChain({ head: 100 });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      cursorPersistence: cursor,
+      onContextGraphCreated: async () => { /* sink */ },
+    });
+
+    await expect(poller.seedConfiguredLaneCursors(blockNumber))
+      .rejects.toThrow(/non-negative safe integer/);
+  });
+
+  it('seeds a legacy aggregate cursor once', async () => {
+    const saved: number[] = [];
+    const cursor: LegacyCursorPersistence = {
+      async load() { return undefined; },
+      async save(blockNumber) { saved.push(blockNumber); },
+    };
+    const { adapter } = makeChain({ head: 100 });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      cursorPersistence: cursor,
+      onContextGraphCreated: async () => { /* sink */ },
+    });
+
+    await poller.seedConfiguredLaneCursors(42);
+
+    expect(saved).toEqual([42]);
   });
 
   it('classifies every poller RPC as background work', async () => {
