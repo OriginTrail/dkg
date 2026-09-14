@@ -389,6 +389,33 @@ describe('manifest-bound durable DATA continuation', () => {
     expect(second).toMatchObject({ deniedPhases: 1, failedPhases: 0, backoffWorthyFailures: 0, complete: false });
   });
 
+  it('classifies a denial on the ordinary page after generation priming as a denied phase', async () => {
+    const { contextGraphId, remotePeerId, x, y } = makeScenario('ordinary-denied', (cg) => ({
+      x: ordered([asset(cg, 1), asset(cg, 3)]),
+      y: ordered([asset(cg, 1), asset(cg, 3), asset(cg, 5)]),
+    }));
+    const harness = createTwoRoundHarness(contextGraphId, remotePeerId);
+    const firstPrefix = x[0]!.payload;
+    await harness.run({ meta: x.flatMap((entry) => entry.meta), dataPage: () => firstPrefix });
+
+    harness.dataRequests.length = 0;
+    const denied: string[] = [];
+    // The prime page is served normally; the sentinel lands on the resumed page,
+    // which is the ordinary response-page branch rather than the prime branch.
+    const second = await harness.run(
+      { meta: y.flatMap((entry) => entry.meta), dataPage: (offset) => offset === 0 ? firstPrefix : '#DENIED' },
+      { onAccessDenied: (cg) => denied.push(cg) },
+    );
+
+    const offsets = harness.dataRequests.map(({ offset }) => offset);
+    expect(offsets[0]).toBe(0);
+    expect(offsets.slice(1).every((offset) => offset > 0)).toBe(true);
+    expect(offsets.length).toBeGreaterThan(1);
+    expect(denied).toEqual([contextGraphId]);
+    // Untagged, this would have been a failed phase with a backoff-worthy peer.
+    expect(second).toMatchObject({ deniedPhases: 1, failedPhases: 0, backoffWorthyFailures: 0, complete: false });
+  });
+
   it.each([
     ['insertion before the prefix', (cg: string) => ({
       x: ordered([asset(cg, 1), asset(cg, 3)]),
