@@ -184,4 +184,39 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
 
     expect(abortCalls(callerRemove)).toBe(1);
   });
+
+  it('reports the canonical admitted-work set and isolates observer failures', async () => {
+    const activity: number[] = [];
+    const lifecycle = new AbortableStoreWorkLifecycle({
+      onActivityChange: (activeOperations) => {
+        activity.push(activeOperations);
+        if (activeOperations === 2) throw new Error('observer failed');
+      },
+    });
+    const releases: Array<() => void> = [];
+    const first = lifecycle.run(undefined, async () => await new Promise<void>((resolve) => {
+      releases.push(resolve);
+    }));
+    const second = lifecycle.run(undefined, async () => await new Promise<void>((resolve) => {
+      releases.push(resolve);
+    }));
+
+    expect(activity).toEqual([1, 2]);
+    releases[0]!();
+    await first;
+    expect(activity).toEqual([1, 2, 1]);
+    releases[1]!();
+    await second;
+    expect(activity).toEqual([1, 2, 1, 0]);
+  });
+
+  it('does not report work rejected before admission by a synchronous start failure', () => {
+    const onActivityChange = vi.fn();
+    const lifecycle = new AbortableStoreWorkLifecycle({ onActivityChange });
+
+    expect(() => lifecycle.run(undefined, () => {
+      throw new Error('start failed');
+    })).toThrow('start failed');
+    expect(onActivityChange).not.toHaveBeenCalled();
+  });
 });

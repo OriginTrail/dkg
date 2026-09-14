@@ -11,7 +11,7 @@
  * rewritten sparql-http endpoints answer a REAL SPARQL ASK, and stop()
  * really releases the port.
  */
-import { afterAll, beforeAll, describe, it, expect } from 'vitest';
+import { afterAll, beforeAll, describe, it, expect, vi } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile, chmod } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -770,6 +770,14 @@ describe('startManagedOxigraph (real download + real server)', () => {
             onClientTimeout: expect.any(Function),
           },
         });
+        const reportStoreActivity = vi.spyOn(result!.handle, 'reportStoreActivity');
+        const onActivityChange = (result!.storeConfig.options as {
+          onActivityChange?: (activeOperations: number) => void;
+        }).onActivityChange;
+        expect(onActivityChange).toBeTypeOf('function');
+        onActivityChange?.(2);
+        onActivityChange?.(0);
+        expect(reportStoreActivity.mock.calls).toEqual([[2], [0]]);
         const runtimeStore = await createTripleStore(result!.storeConfig);
         try {
           expect(() => new SyncSharedProjectionStoreV1(runtimeStore)).not.toThrow();

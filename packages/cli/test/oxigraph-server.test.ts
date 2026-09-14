@@ -550,6 +550,9 @@ describe('startOxigraphServer (real child processes)', () => {
       expect(measurements).toBe(1);
 
       handle.reportStoreActivity(0);
+      await sleep(40);
+      expect(await fetchPid(port)).toBe(firstPid);
+      expect(measurements).toBe(1);
       let replacementPid = firstPid;
       for (let i = 0; i < 100; i++) {
         await sleep(30);

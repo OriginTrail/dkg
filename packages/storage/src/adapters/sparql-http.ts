@@ -293,7 +293,6 @@ export class SparqlHttpStore implements TripleStore {
   private readonly managedOxigraph: boolean;
   private readonly onClientTimeout?: (operation: string) => void;
   private readonly getRecoveryState?: () => SparqlHttpRecoveryState;
-  private readonly onActivityChange?: (activeOperations: number) => void;
   private readonly consistencyProfile: SparqlHttpConsistencyProfile;
   private readonly scheduler: StorePriorityScheduler;
 
@@ -301,8 +300,7 @@ export class SparqlHttpStore implements TripleStore {
   private readonly slowQueryThresholdMs: number;
   private readonly slowQuerySampleRate: number;
   private readonly onSlowQuery?: (event: SparqlHttpSlowQueryEvent) => void;
-  private readonly workLifecycle = new AbortableStoreWorkLifecycle();
-  private activeOperations = 0;
+  private readonly workLifecycle: AbortableStoreWorkLifecycle;
   private readonly managedReadRecovery: ManagedReadRecoveryCoordinatorV1;
   private listGraphsCache: string[] | null = null;
   private listGraphsCachedAt = 0;
@@ -332,7 +330,9 @@ export class SparqlHttpStore implements TripleStore {
     this.rfc64SemanticReadCertifiedV1 = this.managedOxigraph;
     this.onClientTimeout = options.onClientTimeout;
     this.getRecoveryState = options.getRecoveryState;
-    this.onActivityChange = options.onActivityChange;
+    this.workLifecycle = new AbortableStoreWorkLifecycle({
+      onActivityChange: options.onActivityChange,
+    });
     this.consistencyProfile = this.managedOxigraph
       ? 'atomic-readback'
       : resolveConsistencyProfile(options);
@@ -433,7 +433,6 @@ export class SparqlHttpStore implements TripleStore {
     if (recovery?.recovering) {
       return Promise.reject(this.recoveryError(operation, 'not_started'));
     }
-    this.reportActivity(1);
     return this.workLifecycle.run(
       options?.signal,
       (signal) => {
@@ -445,16 +444,7 @@ export class SparqlHttpStore implements TripleStore {
           { storeOperation: operation },
         );
       },
-    ).finally(() => this.reportActivity(-1));
-  }
-
-  private reportActivity(delta: 1 | -1): void {
-    this.activeOperations = Math.max(0, this.activeOperations + delta);
-    try {
-      this.onActivityChange?.(this.activeOperations);
-    } catch {
-      // Maintenance observation must never alter store operation semantics.
-    }
+    );
   }
 
   private readRecoveryState(): SparqlHttpRecoveryState | null {

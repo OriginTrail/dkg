@@ -3,6 +3,7 @@ import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   SparqlHttpStore,
+  StorePriorityScheduler,
   asGraphWriteRevisionSource,
   createManagedOxigraphRuntimeStoreConfigV1,
   createManagedOxigraphSparqlStoreV1,
@@ -1685,6 +1686,55 @@ describe('SparqlHttpStore (test server)', () => {
       expect(activity).toEqual([1, 2, 1]);
       releases[1]!();
       await second;
+      expect(activity).toEqual([1, 2, 1, 0]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('counts queued work before dispatch and removes it when the caller aborts', async () => {
+    const originalFetch = globalThis.fetch;
+    const releases: Array<() => void> = [];
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return await new Promise<Response>((resolve) => {
+        releases.push(() => resolve(new Response(
+          JSON.stringify({ head: {}, boolean: true }),
+          { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+        )));
+      });
+    }) as typeof fetch;
+    try {
+      const activity: number[] = [];
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        backgroundReservedSlots: 0,
+      });
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://queued-activity.test/query',
+        scheduler,
+        onActivityChange: (activeOperations) => activity.push(activeOperations),
+      });
+      const first = store.query('ASK { ?s ?p ?o }');
+      await waitForCondition(() => fetchCalls === 1, 'first query was not dispatched');
+      const queuedController = new AbortController();
+      const queued = store.query(
+        'ASK { ?queued ?p ?o }',
+        { signal: queuedController.signal },
+      );
+      await waitForCondition(() => activity.at(-1) === 2, 'queued work was not counted');
+      expect(fetchCalls).toBe(1);
+
+      queuedController.abort(new Error('queued caller stopped'));
+      await expect(queued).rejects.toThrow('queued caller stopped');
+      expect(activity).toEqual([1, 2, 1]);
+      expect(fetchCalls).toBe(1);
+
+      releases[0]!();
+      await first;
       expect(activity).toEqual([1, 2, 1, 0]);
     } finally {
       globalThis.fetch = originalFetch;

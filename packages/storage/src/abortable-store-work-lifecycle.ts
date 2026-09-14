@@ -127,6 +127,11 @@ function createGeneration(): StoreWorkGeneration {
   };
 }
 
+export interface AbortableStoreWorkLifecycleOptions {
+  /** Exception-isolated observation of the canonical admitted-work set. */
+  readonly onActivityChange?: (activeOperations: number) => void;
+}
+
 /**
  * Owns admission, cancellation, and draining for reusable store adapters.
  *
@@ -139,6 +144,8 @@ function createGeneration(): StoreWorkGeneration {
 export class AbortableStoreWorkLifecycle {
   private generation = createGeneration();
   private closePromise: Promise<void> | null = null;
+
+  constructor(private readonly options: AbortableStoreWorkLifecycleOptions = {}) {}
 
   run<T>(
     callerSignal: AbortSignal | undefined,
@@ -161,8 +168,9 @@ export class AbortableStoreWorkLifecycle {
       throw error;
     }
     generation.inFlight.add(task);
+    this.reportActivity(generation);
     void task.finally(() => {
-      generation.inFlight.delete(task);
+      if (generation.inFlight.delete(task)) this.reportActivity(generation);
       signalScope.dispose();
     }).catch(() => undefined);
     return task;
@@ -186,5 +194,13 @@ export class AbortableStoreWorkLifecycle {
       if (this.closePromise === task) this.closePromise = null;
     }).catch(() => undefined);
     return task;
+  }
+
+  private reportActivity(generation: StoreWorkGeneration): void {
+    try {
+      this.options.onActivityChange?.(generation.inFlight.size);
+    } catch {
+      // Activity is observational and must never alter store work semantics.
+    }
   }
 }

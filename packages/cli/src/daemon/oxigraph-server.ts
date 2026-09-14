@@ -41,6 +41,10 @@ import {
   measureRetainedWalBytes,
   resolveWalAwareReadyTimeoutMs,
 } from './oxigraph-wal.js';
+import {
+  createOxigraphWalMaintenanceCoordinator,
+  type OxigraphWalMaintenanceCoordinator,
+} from './oxigraph-wal-maintenance.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { findListenOwnerPid } from './oxigraph-listen-port.js';
 import {
@@ -163,10 +167,7 @@ const DEFAULT_READY_INTERVAL_MS = 500;
 const DEFAULT_STOP_GRACE_MS = 5_000;
 const DEFAULT_RESTART_BASE_MS = 1_000;
 const DEFAULT_RESTART_MAX_MS = 30_000;
-export const DEFAULT_WAL_RESTART_THRESHOLD_BYTES = 4 * 1024 ** 3;
-const DEFAULT_WAL_MAINTENANCE_CHECK_INTERVAL_MS = 60_000;
-const DEFAULT_WAL_RESTART_IDLE_MS = 30_000;
-const DEFAULT_WAL_RESTART_COOLDOWN_MS = 60 * 60 * 1_000;
+export { DEFAULT_WAL_RESTART_THRESHOLD_BYTES } from './oxigraph-wal-maintenance.js';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
@@ -202,8 +203,10 @@ export async function startOxigraphServer(
     readCgroupOomKill: ioOverrides.readCgroupOomKill ?? readCgroupOomKill,
     measureRetainedWalBytes: ioOverrides.measureRetainedWalBytes ?? measureRetainedWalBytes,
   };
+  let walMaintenance: OxigraphWalMaintenanceCoordinator | undefined;
   const markStoreDown = (): void => {
     invalidateExternalStoreQuadsCache();
+    walMaintenance?.serverUnavailable();
   };
   const log = opts.log ?? (() => {});
   const host = opts.host ?? DEFAULT_HOST;
@@ -241,16 +244,6 @@ export async function startOxigraphServer(
   const restartBase = opts.restartBackoffBaseMs ?? DEFAULT_RESTART_BASE_MS;
   const restartMax = opts.restartBackoffMaxMs ?? DEFAULT_RESTART_MAX_MS;
   const queryTimeoutS = normalizePositiveInteger(opts.queryTimeoutS);
-  const walRestartThresholdBytes = normalizePositiveInteger(opts.walRestartThresholdBytes)
-    ?? DEFAULT_WAL_RESTART_THRESHOLD_BYTES;
-  const walMaintenanceCheckIntervalMs = normalizePositiveInteger(
-    opts.walMaintenanceCheckIntervalMs,
-  ) ?? DEFAULT_WAL_MAINTENANCE_CHECK_INTERVAL_MS;
-  const walRestartIdleMs = normalizePositiveInteger(opts.walRestartIdleMs)
-    ?? DEFAULT_WAL_RESTART_IDLE_MS;
-  const walRestartCooldownMs = normalizePositiveInteger(opts.walRestartCooldownMs)
-    ?? DEFAULT_WAL_RESTART_COOLDOWN_MS;
-
   type LifecycleState =
     | { phase: 'starting'; child: ChildProcess | null; generation: number }
     | { phase: 'ready'; child: ChildProcess; listenerPid: number; generation: number }
@@ -261,10 +254,6 @@ export async function startOxigraphServer(
 
   let lifecycle: LifecycleState = { phase: 'starting', child: null, generation: 0 };
   let restarts = 0;
-  let activeStoreOperations = 0;
-  let idleSince: number | null = null;
-  let lastWalMaintenanceRestartAt = Number.NEGATIVE_INFINITY;
-  let walMaintenanceTimer: ReturnType<typeof setInterval> | undefined;
   // Tail of the child's stderr, surfaced in the startup error so a bind
   // failure (`Address already in use`) is visible to the operator.
   let lastStderr = '';
@@ -476,7 +465,7 @@ export async function startOxigraphServer(
           listenerPid: verifiedListenerPid,
           generation,
         };
-        if (activeStoreOperations === 0) idleSince = Date.now();
+        walMaintenance?.serverReady();
         restarts = 0;
         log(`[oxigraph] server restarted and healthy on ${bind}.`);
         return;
@@ -506,8 +495,7 @@ export async function startOxigraphServer(
   // await): signals the child so a fatal `process.exit()` elsewhere in
   // boot doesn't orphan the server. Safe to call alongside `stop()`.
   const killSync = (): void => {
-    if (walMaintenanceTimer) clearInterval(walMaintenanceTimer);
-    walMaintenanceTimer = undefined;
+    walMaintenance?.stop();
     const candidate = lifecycle.child;
     lifecycle = {
       phase: 'stopping',
@@ -590,48 +578,18 @@ export async function startOxigraphServer(
     void terminateVerifiedListener(request);
     return true;
   };
-
+  walMaintenance = createOxigraphWalMaintenanceCoordinator({
+    location: opts.location,
+    thresholdBytes: opts.walRestartThresholdBytes,
+    checkIntervalMs: opts.walMaintenanceCheckIntervalMs,
+    idleMs: opts.walRestartIdleMs,
+    cooldownMs: opts.walRestartCooldownMs,
+    measureRetainedWalBytes: io.measureRetainedWalBytes,
+    requestRestart,
+    log,
+  });
   const reportStoreActivity = (activeOperations: number): void => {
-    if (!Number.isSafeInteger(activeOperations) || activeOperations < 0) return;
-    activeStoreOperations = activeOperations;
-    if (activeOperations > 0) {
-      idleSince = null;
-    } else if (idleSince === null) {
-      idleSince = Date.now();
-    }
-  };
-
-  const evaluateWalMaintenance = (): void => {
-    const now = Date.now();
-    if (
-      lifecycle.phase !== 'ready'
-      || !childAlive(lifecycle.child)
-      || activeStoreOperations !== 0
-      || idleSince === null
-      || now - idleSince < walRestartIdleMs
-      || now - lastWalMaintenanceRestartAt < walRestartCooldownMs
-    ) return;
-    let walBytes = 0;
-    try {
-      walBytes = io.measureRetainedWalBytes(opts.location);
-    } catch (error) {
-      log(`[oxigraph] retained WAL maintenance measurement failed: ${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
-    if (walBytes < walRestartThresholdBytes) return;
-    const accepted = requestRestart(
-      `${formatWalBytes(walBytes)} retained WAL reached the `
-      + `${formatWalBytes(walRestartThresholdBytes)} maintenance threshold `
-      + `after ${Math.round((now - idleSince) / 1_000)}s idle`,
-    );
-    if (accepted) lastWalMaintenanceRestartAt = now;
-  };
-
-  const startWalMaintenance = (): void => {
-    if (walMaintenanceTimer) return;
-    idleSince = activeStoreOperations === 0 ? Date.now() : null;
-    walMaintenanceTimer = setInterval(evaluateWalMaintenance, walMaintenanceCheckIntervalMs);
-    walMaintenanceTimer.unref?.();
+    walMaintenance?.reportActivity(activeOperations);
   };
 
   const getRecoveryState = (): OxigraphRecoveryState => ({
@@ -649,8 +607,7 @@ export async function startOxigraphServer(
     // spawn (GH#1400) — every stop path, successful or not, comes through
     // here, so no caller has to remember a handoff.
     process.removeListener('exit', exitGuard);
-    if (walMaintenanceTimer) clearInterval(walMaintenanceTimer);
-    walMaintenanceTimer = undefined;
+    walMaintenance?.stop();
     if (lifecycle.phase === 'stopping') return;
     const candidate = lifecycle.child;
     lifecycle = {
@@ -763,7 +720,7 @@ export async function startOxigraphServer(
           listenerPid: verifiedListenerPid,
           generation: lifecycle.generation,
         };
-        startWalMaintenance();
+        walMaintenance?.serverReady();
         log(`Oxigraph server ready on ${bind} after ${attempt} probe(s).`);
         return {
           host,
