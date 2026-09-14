@@ -903,3 +903,14 @@ test('aggregate gate accepts the full-push and docs-only job shapes', () => {
     needs: { plan: { result: 'success' }, 'evm-integration': { result: 'skipped' } },
   }).join('\n'), /merge_group events must use full CI mode/);
 });
+
+test('EPCIS capture/query edits require the live Blazegraph lane', () => {
+  assert.ok(WORKSPACE_RULES['packages/epcis'].lanes.includes('tornado_blazegraph'));
+  assert.ok(WORKSPACE_OWNING_LANES['packages/epcis'].includes('tornado_blazegraph'));
+  const workflow = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const steps = workflow.jobs['tornado-blazegraph'].steps;
+  const run = steps.find(step => step.run?.includes('test/external-event-query.test.ts'));
+  assert.ok(run);
+  assert.match(run.run, /DKG_REQUIRE_BLAZEGRAPH=1[^\n]*test\/external-event-query\.test\.ts/);
+  assert.ok(run.env.BLAZEGRAPH_TEST_URL);
+});

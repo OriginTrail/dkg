@@ -1,6 +1,7 @@
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
-import epcisSchema from './schemas/epcis-json-schema.json' with { type: 'json' };
+import schema from './schemas/epcis-json-schema.json' with { type: 'json' };
+import { epcisDocumentForValidation } from './capture-event-types.js';
 import type { EPCISDocument, EPCISEvent, ValidationResult } from './types.js';
 
 export interface EpcisValidator {
@@ -67,7 +68,7 @@ export function createValidator(): EpcisValidator {
     validateFormats: true,
   });
   (addFormats as unknown as typeof addFormats.default)(ajv);
-  const validateSchema = ajv.compile(epcisSchema);
+  const validateSchema = ajv.compile(schema);
 
   return {
     validate(document: unknown): ValidationResult {
@@ -83,7 +84,7 @@ export function createValidator(): EpcisValidator {
         };
       }
 
-      const isValid = validateSchema(document);
+      const isValid = validateSchema(epcisDocumentForValidation(document));
 
       if (!isValid) {
         const errors = validateSchema.errors?.map(
