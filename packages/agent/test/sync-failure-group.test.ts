@@ -15,6 +15,28 @@ it('preserves single frozen error identity and side-channel tags', () => {
   expect(isKnownRetryableSyncTransportInterruption(combined)).toBe(true);
 });
 
+it('records the peer response a denial implies, at the tagging boundary', () => {
+  // Denial is not orthogonal to responding: the peer answered. The implication
+  // lives in the tag model, so a generic response classifier never has to
+  // remember it, and a denied error can never read as "not responded".
+  const denial = toSyncDeniedError(new Error('peer denied'));
+  expect(isSyncDeniedError(denial)).toBe(true);
+  expect(didSyncPeerRespond(denial)).toBe(true);
+  expect(isKnownRetryableSyncTransportInterruption(denial)).toBe(false);
+  expect(didSyncPeerRespond(combineSyncFailures(new Error('outer'), [denial]))).toBe(true);
+
+  // A frozen throwable still carries both tags through the side channel.
+  const frozen = toSyncDeniedError(Object.freeze(new Error('frozen denial')));
+  expect(didSyncPeerRespond(frozen)).toBe(true);
+
+  // Compatibility: an error tagged `syncDenied` by hand — as callers outside
+  // this module did before denial recorded both — still reads as responded.
+  const legacy = Object.assign(new Error('hand-tagged denial'), { syncDenied: true });
+  expect(isSyncDeniedError(legacy)).toBe(true);
+  expect(didSyncPeerRespond(legacy)).toBe(true);
+  expect(isKnownRetryableSyncTransportInterruption(legacy)).toBe(false);
+});
+
 it('applies any-cause and every-cause rules across nested groups and later group tags', () => {
   const first = toSyncTransportFailureError(Object.freeze(new Error('first reset')));
   const second = toSyncTransportFailureError(Object.freeze(new Error('second reset')));

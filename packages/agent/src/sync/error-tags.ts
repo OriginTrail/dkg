@@ -96,8 +96,17 @@ function toTaggedSyncError(error: unknown, tag: SyncErrorTag): TaggedSyncThrowab
   return taggedError;
 }
 
-function hasOwnSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
-  if (!isTaggableThrowable(error)) return false;
+/**
+ * Tags that IMPLY another one. A denial is a peer's answer, so it is also
+ * evidence that the peer responded; recording that implication once here keeps
+ * every response classifier unaware of denial, and keeps recognising errors
+ * tagged `syncDenied` by hand — or before denial recorded both tags.
+ */
+const SYNC_ERROR_TAG_IMPLIED_BY: Partial<Record<SyncErrorTag, readonly SyncErrorTag[]>> = {
+  syncPeerResponded: ['syncDenied'],
+};
+
+function hasOwnRecordedSyncErrorTag(error: object, tag: SyncErrorTag): boolean {
   if (syncErrorTagSideChannels[tag].has(error)) return true;
   try {
     if ((error as Record<string, unknown>)[tag]) return true;
@@ -105,6 +114,13 @@ function hasOwnSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
     // An unreadable own property must not hide classified concurrent causes.
   }
   return false;
+}
+
+function hasOwnSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
+  if (!isTaggableThrowable(error)) return false;
+  if (hasOwnRecordedSyncErrorTag(error, tag)) return true;
+  return (SYNC_ERROR_TAG_IMPLIED_BY[tag] ?? [])
+    .some((implier) => hasOwnRecordedSyncErrorTag(error, implier));
 }
 
 function hasSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
@@ -119,7 +135,9 @@ function hasSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
 export function toSyncDeniedError<T extends object>(error: T): T;
 export function toSyncDeniedError(error: unknown): TaggedSyncThrowable;
 export function toSyncDeniedError(error: unknown): TaggedSyncThrowable {
-  return toTaggedSyncError(error, 'syncDenied');
+  // Denial records the response it implies, so the tag model cannot express
+  // "denied but not responded" and no classifier has to remember the rule.
+  return toTaggedSyncError(toTaggedSyncError(error, 'syncDenied'), 'syncPeerResponded');
 }
 
 export function isSyncDeniedError(error: unknown): boolean {
@@ -170,8 +188,7 @@ export function isSyncValidationRejection(error: unknown): boolean {
 }
 
 export function didSyncPeerRespond(error: unknown): boolean {
-  if (hasSyncErrorTag(error, 'syncPeerResponded')) return true;
-  return isSyncDeniedError(error);
+  return hasSyncErrorTag(error, 'syncPeerResponded');
 }
 
 export function isSyncTransportFailure(error: unknown): boolean {
@@ -195,10 +212,10 @@ function syncErrorMessage(error: unknown): string {
  */
 export function isKnownRetryableSyncTransportInterruption(error: unknown): boolean {
   const causes = syncFailureCauseView(error);
+  // `syncPeerResponded` already covers denial: see SYNC_ERROR_TAG_IMPLIED_BY.
   if (causes.anyCause(cause =>
     hasOwnSyncErrorTag(cause, 'syncValidationRejected')
     || hasOwnSyncErrorTag(cause, 'syncPeerResponded')
-    || hasOwnSyncErrorTag(cause, 'syncDenied')
     || isChainRpcTransportError(cause)
     || hasOwnSyncErrorTag(cause, 'syncLocalRequestFailure')
   )) return false;

@@ -1197,8 +1197,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         fetchConcurrency: PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
         publicSnapshotStore,
         fetchSyncPages,
+        // Only `deleteCheckpoint` crosses this boundary: the settled walk
+        // retries an immutable ref from offset zero, so it never writes one.
         deleteCheckpoint,
-        setCheckpoint,
         executionBoundary: recoveryBoundary,
         // Fires for BOTH 'cache' and 'network' sources, so a node whose earlier
         // runs already cached the blobs materializes them on the next pass
@@ -1543,13 +1544,12 @@ export function readPublicSnapshotWalkProgress(error: unknown): PublicSnapshotWa
 }
 
 /**
- * Legacy throwing walk. Kept compatible: it rethrows the original error with
- * its identity, class and stack intact and attaches nothing to it, and the
- * progress behind that failure stays readable through
- * {@link readPublicSnapshotWalkProgress}. Callers that can take a settled
- * result use {@link settlePublicSnapshotsForMeta} instead.
+ * Everything {@link settlePublicSnapshotsForMeta} consumes: the ports and
+ * options of the settled walk, owned here rather than inherited from the
+ * deprecated throwing helper, which takes this contract plus its own
+ * compatibility fields.
  */
-export async function syncPublicSnapshotsForMeta(params: {
+export type PublicSnapshotSettleParams = {
   ctx: OperationContext;
   remotePeerId: string;
   contextGraphId: string;
@@ -1569,7 +1569,6 @@ export async function syncPublicSnapshotsForMeta(params: {
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
-  setCheckpoint: (key: string, offset: number) => void;
   /** Shared with the owning requester invocation so every effect uses one guard. */
   executionBoundary?: RecoveryExecutionAdmission;
   /**
@@ -1581,7 +1580,24 @@ export async function syncPublicSnapshotsForMeta(params: {
     snapshot: PublicSnapshotMetadata,
     source: 'cache' | 'network',
   ) => Promise<void>;
-} & PublicSnapshotWalkSource): Promise<PublicSnapshotSyncResult> {
+} & PublicSnapshotWalkSource;
+
+/**
+ * Legacy throwing walk. Kept compatible: it rethrows the original error with
+ * its identity, class and stack intact and attaches nothing to it, and the
+ * progress behind that failure stays readable through
+ * {@link readPublicSnapshotWalkProgress}. Callers that can take a settled
+ * result use {@link settlePublicSnapshotsForMeta} instead.
+ *
+ * Its parameter is the settled contract plus `setCheckpoint`, which only this
+ * compatibility layer's callers still pass; the settled walk never reads it.
+ */
+export async function syncPublicSnapshotsForMeta(
+  params: PublicSnapshotSettleParams & {
+    /** @deprecated Compatibility-only port; the settled walk does not use it. */
+    setCheckpoint: (key: string, offset: number) => void;
+  },
+): Promise<PublicSnapshotSyncResult> {
   const outcome = await settlePublicSnapshotsForMeta(params);
   if (outcome.kind === 'failure') {
     rememberFailedWalkProgress(outcome.error, outcome.result);
@@ -1597,7 +1613,7 @@ export async function syncPublicSnapshotsForMeta(params: {
  * `missingSample` alongside the triggering error.
  */
 export async function settlePublicSnapshotsForMeta(
-  params: Parameters<typeof syncPublicSnapshotsForMeta>[0],
+  params: PublicSnapshotSettleParams,
 ): Promise<PublicSnapshotSyncOutcome> {
   const workAdmission = params.workAdmission ?? composeSyncWorkAdmission({
     deadline: params.deadline,
