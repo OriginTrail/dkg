@@ -75,6 +75,50 @@ async function runScenario(createMaterializer, graphs, descriptors, passes, revi
   };
 }
 
+function validateBenchmarkQueryWorkload({ baseline, memoized, graphCount, passes }) {
+  const expectedBaselineQueries = graphCount * passes;
+  const expectedMemoizedQueries = graphCount;
+  if (!Number.isSafeInteger(expectedBaselineQueries) || expectedBaselineQueries < 1) {
+    throw new Error('benchmark expected query count is not a positive safe integer');
+  }
+  for (const queryKind of ['countQueries', 'constructQueries']) {
+    const baselineQueries = baseline[queryKind];
+    const memoizedQueries = memoized[queryKind];
+    if (!Number.isSafeInteger(baselineQueries) || baselineQueries < 1) {
+      throw new Error('baseline ' + queryKind + ' must be a positive safe integer');
+    }
+    if (!Number.isSafeInteger(memoizedQueries) || memoizedQueries < 1) {
+      throw new Error('memoized ' + queryKind + ' must be a positive safe integer');
+    }
+    if (baselineQueries !== expectedBaselineQueries) {
+      throw new Error(
+        'baseline ' + queryKind + ' expected ' + expectedBaselineQueries + ', got ' + baselineQueries,
+      );
+    }
+    if (memoizedQueries !== expectedMemoizedQueries) {
+      throw new Error(
+        'memoized ' + queryKind + ' expected ' + expectedMemoizedQueries + ', got ' + memoizedQueries,
+      );
+    }
+  }
+
+  const constructReduction = 1 - (memoized.constructQueries / baseline.constructQueries);
+  const countReduction = 1 - (memoized.countQueries / baseline.countQueries);
+  if (!Number.isFinite(constructReduction) || !Number.isFinite(countReduction)) {
+    throw new Error('full-query reduction is not finite');
+  }
+  // Four or more passes can meet the default 70% regression gate. For a
+  // supported smaller run, require its mathematically attainable ideal and
+  // rely on the exact query totals above to keep the assertion fail-closed.
+  const requiredReduction = Math.min(0.7, 1 - (1 / passes));
+  if (constructReduction < requiredReduction || countReduction < requiredReduction) {
+    throw new Error(
+      'full-query reduction did not reach ' + (requiredReduction * 100) + '%',
+    );
+  }
+  return { constructReduction, countReduction, requiredReduction };
+}
+
 async function main() {
   const graphCount = positiveInteger(argumentValue('--graphs'), DEFAULT_GRAPH_COUNT);
   const quadsPerGraph = positiveInteger(argumentValue('--quads'), DEFAULT_QUADS_PER_GRAPH);
@@ -109,11 +153,12 @@ async function main() {
   if (JSON.stringify(baseline.answers) !== JSON.stringify(memoized.answers)) {
     throw new Error('memoized answers differ from exact validation');
   }
-  const constructReduction = 1 - (memoized.constructQueries / baseline.constructQueries);
-  const countReduction = 1 - (memoized.countQueries / baseline.countQueries);
-  if (constructReduction < 0.7 || countReduction < 0.7) {
-    throw new Error('full-query reduction did not reach 70%');
-  }
+  const { constructReduction, countReduction } = validateBenchmarkQueryWorkload({
+    baseline,
+    memoized,
+    graphCount,
+    passes,
+  });
   console.log(JSON.stringify({
     dataset: {
       graphs: graphCount,
@@ -128,7 +173,11 @@ async function main() {
   }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+module.exports = { validateBenchmarkQueryWorkload };
+
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

@@ -16,8 +16,11 @@ import {
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import {
   MaterializationValidationMemo,
-  type MaterializationValidationDescriptor,
 } from '../src/sync/requester/materialization-validation-memo.js';
+import type {
+  GraphScopedSwmMaterializationDescriptor,
+  GraphScopedSwmRecoveryDescriptor,
+} from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from
   '../src/sync/requester/swm-snapshot-materializer.js';
 
@@ -43,16 +46,32 @@ function payload(marker: string, count: number): Quad[] {
   }));
 }
 
-function materializationDescriptor(quads: readonly Quad[], assertionGraph = GRAPH) {
+function materializationDescriptor(
+  quads: readonly Quad[],
+  assertionGraph = GRAPH,
+): GraphScopedSwmRecoveryDescriptor {
   return {
+    metaGraph: 'did:dkg:context-graph:validation-cg/_shared_memory_meta',
+    headSubject: 'did:dkg:context-graph:validation-cg/ka/1#dkg-swm-head',
+    operationSubject: 'did:dkg:context-graph:validation-cg/share/operation-1',
+    kaUal: 'did:dkg:validation-cg/1',
+    assertionVersion: '1',
     assertionGraph,
+    shareOperationId: 'operation-1',
     publicQuadsCount: quads.length,
     publicQuadsDigest: workspacePublicQuadsDigest(quads),
-  } as never;
+    privateTripleCount: 0,
+    publisherPeerId: 'peer-1',
+    metadataQuads: [],
+  };
 }
 
-function memoDescriptor(graph = GRAPH): MaterializationValidationDescriptor {
-  return { graph, digest: `sha256:${'a'.repeat(64)}`, count: 1 };
+function memoDescriptor(graph = GRAPH): GraphScopedSwmMaterializationDescriptor {
+  return {
+    assertionGraph: graph,
+    publicQuadsDigest: `sha256:${'a'.repeat(64)}`,
+    publicQuadsCount: 1,
+  };
 }
 
 function revisionSource(
@@ -81,10 +100,11 @@ function countingStore(inner: TripleStore) {
   const store = new Proxy(inner, {
     get(target, property, receiver) {
       if (property === 'query') {
-        return async (sparql: string, options?: unknown) => {
+        return async (...args: Parameters<TripleStore['query']>) => {
+          const [sparql] = args;
           if (sparql.trimStart().startsWith('CONSTRUCT')) constructs += 1;
           if (sparql.includes('SELECT (COUNT(*) AS ?n)')) counts += 1;
-          return target.query(sparql, options as never);
+          return target.query(...args);
         };
       }
       return Reflect.get(target, property, receiver);
@@ -108,13 +128,16 @@ describe('#1963 MaterializationValidationMemo', () => {
     );
     const descriptor = memoDescriptor();
     let exactValidations = 0;
-    const exactValidation = async () => {
+    let exactDescriptor: GraphScopedSwmMaterializationDescriptor | undefined;
+    const exactValidation = async (validatedDescriptor: GraphScopedSwmMaterializationDescriptor) => {
       exactValidations += 1;
+      exactDescriptor = validatedDescriptor;
       return true;
     };
     await expect(memo.validate(descriptor, exactValidation)).resolves.toBe(true);
     await expect(memo.validate(descriptor, exactValidation)).resolves.toBe(true);
     expect(exactValidations).toBe(1);
+    expect(exactDescriptor).toBe(descriptor);
   });
 
   it('evicts the least recently used entry at its configured bound', async () => {
@@ -172,7 +195,7 @@ describe('#1963 MaterializationValidationMemo', () => {
     const memo = validationMemo(
       revisionSource(() => ({ generation: 1, stable: true })),
     );
-    const descriptor = { ...memoDescriptor(), count: 0 };
+    const descriptor = { ...memoDescriptor(), publicQuadsCount: 0 };
     let validations = 0;
     const exactValidation = async () => { validations += 1; return true; };
     await expect(memo.validate(descriptor, exactValidation)).resolves.toBe(true);

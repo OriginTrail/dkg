@@ -3,14 +3,11 @@ import {
   type GraphWriteRevision,
   type GraphWriteRevisionSource,
 } from '@origintrail-official/dkg-storage';
+import type {
+  GraphScopedSwmMaterializationDescriptor,
+} from '../graph-scoped-swm-recovery.js';
 
 const DEFAULT_MAX_ENTRIES = 4_096;
-
-export interface MaterializationValidationDescriptor {
-  readonly graph: string;
-  readonly digest: string;
-  readonly count: number;
-}
 
 interface MaterializationValidationEntry {
   readonly digest: string;
@@ -45,43 +42,45 @@ export class MaterializationValidationMemo {
     this.writeRevisionSource = writeRevisionSource;
   }
 
-  private stableRevision(descriptor: MaterializationValidationDescriptor): GraphWriteRevision | null {
+  private stableRevision(
+    descriptor: GraphScopedSwmMaterializationDescriptor,
+  ): GraphWriteRevision | null {
     if (
       !this.enabled
-      || descriptor.count === 0
+      || descriptor.publicQuadsCount === 0
       || this.writeRevisionSource?.writeRevisionCoverage !== 'all-writers'
     ) {
       return null;
     }
     try {
-      const revision = this.writeRevisionSource.getWriteRevision(descriptor.graph);
+      const revision = this.writeRevisionSource.getWriteRevision(descriptor.assertionGraph);
       return revision.stable ? revision : null;
     } catch {
       return null;
     }
   }
 
-  async validate(
-    descriptor: MaterializationValidationDescriptor,
-    exactValidation: () => Promise<boolean>,
+  async validate<Descriptor extends GraphScopedSwmMaterializationDescriptor>(
+    descriptor: Descriptor,
+    exactValidation: (descriptor: Descriptor) => Promise<boolean>,
   ): Promise<boolean> {
     const initialRevision = this.stableRevision(descriptor);
-    if (!initialRevision) return exactValidation();
+    if (!initialRevision) return exactValidation(descriptor);
 
-    const entry = this.entries.get(descriptor.graph);
+    const entry = this.entries.get(descriptor.assertionGraph);
     const reusable = entry !== undefined
-      && entry.digest === descriptor.digest
-      && entry.count === descriptor.count
+      && entry.digest === descriptor.publicQuadsDigest
+      && entry.count === descriptor.publicQuadsCount
       && entry.writeGeneration === initialRevision.generation;
     if (reusable) return true;
 
-    const verified = await exactValidation();
+    const verified = await exactValidation(descriptor);
     if (!verified) return false;
     const finalRevision = this.stableRevision(descriptor);
     if (!finalRevision || finalRevision.generation !== initialRevision.generation) return true;
-    this.entries.set(descriptor.graph, {
-      digest: descriptor.digest,
-      count: descriptor.count,
+    this.entries.set(descriptor.assertionGraph, {
+      digest: descriptor.publicQuadsDigest,
+      count: descriptor.publicQuadsCount,
       writeGeneration: finalRevision.generation,
     });
     return true;
