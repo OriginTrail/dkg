@@ -1,3 +1,4 @@
+// Shared by the RFC-64 devnet runtime and focused agent tests.
 import { ethers } from 'ethers';
 import type { Digest32V1, EvmAddressV1 } from '@origintrail-official/dkg-core';
 import {
@@ -10,7 +11,7 @@ import {
   type FinalizedChainLoopbackFixtureConfigV1,
   type FinalizedChainLoopbackRpcV1,
   type FinalizedChainLoopbackContractCallV1,
-} from './rfc64-finalized-chain-loopback-fixture.js';
+} from './chain.js';
 
 export interface FinalizedVmLoopbackAssetV1 {
   readonly assertionRoot: Digest32V1;

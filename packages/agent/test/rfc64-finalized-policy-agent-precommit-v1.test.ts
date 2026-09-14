@@ -33,7 +33,7 @@ import {
 import {
   createFinalizedChainLoopbackRpcV1,
   type FinalizedChainLoopbackFixtureConfigV1,
-} from './support/rfc64-finalized-chain-loopback-fixture.js';
+} from '@origintrail-official/dkg-test-systems/rfc64-finalized-chain-loopback/chain';
 
 const rpcHarness = createLoopbackJsonRpcTestHarness();
 

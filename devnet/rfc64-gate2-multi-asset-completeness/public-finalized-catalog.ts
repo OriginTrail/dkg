@@ -13,6 +13,8 @@ import {
   contextGraphMetaUri,
   type AuthorCatalogScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
+  type Digest32V1,
+  type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 
@@ -87,17 +89,21 @@ async function execute(): Promise<void> {
       runtimeManifestDigest: launchReceipt.manifest.manifestDigest,
       sourceCommit: headBefore,
     });
-    const finalizedChainConfigJson = JSON.stringify({
+    const finalizedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(CONTEXT_GRAPH_ID),
+    ).toLowerCase() as Digest32V1;
+    const finalizedChain = Object.freeze({
+      kind: 'policy' as const,
       accessPolicy: 0,
       contextGraphId: CONTEXT_GRAPH_ID,
-      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase(),
+      nameHash: finalizedNameHash,
       onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
-      ownerAddress: AUTHOR_ADDRESS,
+      ownerAddress: AUTHOR_ADDRESS as EvmAddressV1,
     });
     const receiver = spawnGate2HarnessAgentV1({
       role: 'receiver',
       dataDir: dataDirs.receiver,
-      finalizedChainConfigJson,
+      finalizedChain,
       networkChainId: NETWORK_ID,
       registry: children,
       repoRoot: REPO_ROOT,
@@ -114,6 +120,8 @@ async function execute(): Promise<void> {
     exact(receiverReady.finalizedChainRuntime, true, 'receiver finalized chain runtime');
     exact(authorReady.finalizedVmRuntime, false, 'author finalized VM runtime');
     exact(receiverReady.finalizedVmRuntime, false, 'public receiver VM inventory');
+    exact(authorReady.finalizedRuntimeKind, 'none', 'author finalized runtime kind');
+    exact(receiverReady.finalizedRuntimeKind, 'policy', 'receiver finalized runtime kind');
     requireCondition(authorReady.peerId !== receiverReady.peerId, 'peer identities are distinct');
     requireCondition(
       authorReady.processId !== receiverReady.processId

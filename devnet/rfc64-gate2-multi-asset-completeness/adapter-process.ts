@@ -210,6 +210,7 @@ async function boot(): Promise<void> {
   }
   const tcp = created.multiaddrs.find((address) => address.includes('/tcp/'));
   if (tcp === undefined) throw new Error('real DKGAgent exposed no TCP multiaddr');
+  const finalizedRuntimeKind = finalizedChainRuntime?.kind ?? 'none';
   emit({
     adapterId: GATE2_REAL_DKG_AGENT_ADAPTER_ID,
     agentClass: created.constructor.name,
@@ -221,8 +222,10 @@ async function boot(): Promise<void> {
     protocolVersion: GATE2_ADAPTER_PROTOCOL_VERSION,
     processId: process.pid,
     runtimeBuildManifestDigest,
-    finalizedChainRuntime: finalizedChainConfig !== null,
-    finalizedVmRuntime: finalizedChainRuntime?.kind === 'vm',
+    finalizedRuntimeKind,
+    // Compatibility fields are derived at this process-protocol edge only.
+    finalizedChainRuntime: finalizedRuntimeKind !== 'none',
+    finalizedVmRuntime: finalizedRuntimeKind === 'vm',
     startupRepair: null,
   });
 }

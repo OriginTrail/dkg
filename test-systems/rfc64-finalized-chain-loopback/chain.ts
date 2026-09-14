@@ -1,3 +1,4 @@
+// Shared by the RFC-64 devnet runtime and focused agent tests.
 import {
   createStrictCurrentFinalizedEvmSnapshotScopeV1,
   MockChainAdapter,

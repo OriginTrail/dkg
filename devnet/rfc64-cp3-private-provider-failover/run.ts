@@ -110,10 +110,14 @@ async function execute(): Promise<void> {
         seal: await authorSeal(kaNumber),
       });
     }));
-    const finalizedChainConfigJson = JSON.stringify({
+    const finalizedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(CONTEXT_GRAPH_ID),
+    ).toLowerCase() as Digest32V1;
+    const finalizedChain = Object.freeze({
+      kind: 'vm' as const,
       accessPolicy: 1,
       contextGraphId: CONTEXT_GRAPH_ID,
-      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase(),
+      nameHash: finalizedNameHash,
       onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
       ownerAddress: AUTHOR,
       vmInventory: {
@@ -144,7 +148,7 @@ async function execute(): Promise<void> {
       role: 'receiver',
       catalogLocalAgentAddress: PROVIDER_A,
       dataDir: dataDirs.providerA,
-      finalizedChainConfigJson,
+      finalizedChain,
       masterKeyHex: '3c'.repeat(32),
       bundleServeDelayMs: PROVIDER_A_BUNDLE_DELAY_MS,
     });
@@ -153,7 +157,7 @@ async function execute(): Promise<void> {
       role: 'receiver',
       catalogLocalAgentAddress: PROVIDER_B,
       dataDir: dataDirs.providerB,
-      finalizedChainConfigJson,
+      finalizedChain,
       masterKeyHex: '4d'.repeat(32),
     });
     const receiver = spawnGate2HarnessAgentV1({
@@ -161,7 +165,7 @@ async function execute(): Promise<void> {
       role: 'receiver',
       catalogLocalAgentAddress: RECEIVER,
       dataDir: dataDirs.receiver,
-      finalizedChainConfigJson,
+      finalizedChain,
     });
     const [authorReady, providerAReady, providerBReady, receiverReady] = await Promise.all([
       author.waitFor('ready'),
@@ -171,10 +175,12 @@ async function execute(): Promise<void> {
     ]);
     assertGate2HarnessReadyV1(authorReady, 'author', launch.manifest.manifestDigest);
     exact(authorReady.finalizedChainRuntime, false, 'author finalized chain runtime');
+    exact(authorReady.finalizedRuntimeKind, 'none', 'author finalized runtime kind');
     for (const ready of [providerAReady, providerBReady, receiverReady]) {
       assertGate2HarnessReadyV1(ready, 'receiver', launch.manifest.manifestDigest);
       exact(ready.finalizedChainRuntime, true, 'receiver finalized chain runtime');
       exact(ready.finalizedVmRuntime, true, 'receiver finalized VM runtime');
+      exact(ready.finalizedRuntimeKind, 'vm', 'receiver finalized runtime kind');
     }
     const authorPeerId = requiredString(authorReady.peerId, 'author peer ID');
     const providerAPeerId = requiredString(providerAReady.peerId, 'provider A peer ID');

@@ -15,6 +15,7 @@ import {
   buildGate2RuntimeManifestV1,
   type Gate2RuntimeManifestV1,
 } from './runtime-provenance.ts';
+import type { FinalizedChainHarnessConfigV1 } from './finalized-chain-harness-runtime.ts';
 
 const ADAPTER_PROCESS = join(import.meta.dirname, 'adapter-process.ts');
 const RUNTIME_LOAD_HOOK = join(import.meta.dirname, 'runtime-load-hook.ts');
@@ -60,7 +61,7 @@ export function spawnGate2HarnessAgentV1(input: {
   readonly catalogLocalAgentAddress?: string;
   readonly dataDir: string;
   readonly eventTimeoutMs?: number;
-  readonly finalizedChainConfigJson?: string;
+  readonly finalizedChain?: Readonly<FinalizedChainHarnessConfigV1>;
   readonly masterKeyHex?: string;
   /** Harness-only provider delay used to prove mid-transfer failover. */
   readonly bundleServeDelayMs?: number;
@@ -121,9 +122,12 @@ export function spawnGate2HarnessAgentV1(input: {
         ...(input.networkChainId === undefined
           ? {}
           : { DKG_RFC64_GATE2_NETWORK_CHAIN_ID: input.networkChainId }),
-        ...(input.finalizedChainConfigJson === undefined
+        ...(input.finalizedChain === undefined
           ? {}
-          : { DKG_RFC64_GATE2_FINALIZED_CHAIN_CONFIG: input.finalizedChainConfigJson }),
+          : {
+              DKG_RFC64_GATE2_FINALIZED_CHAIN_CONFIG:
+                JSON.stringify(input.finalizedChain),
+            }),
         NODE_ENV: 'production',
       },
     },

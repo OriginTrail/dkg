@@ -147,6 +147,7 @@
     "jsonld": "^8.3.3"
   },
   "devDependencies": {
+    "@origintrail-official/dkg-test-systems": "workspace:*",
     "@opentelemetry/sdk-metrics": "^2.8.0",
     "@types/js-yaml": "^4.0.9",
     "@vitest/coverage-v8": "^4.0.18",

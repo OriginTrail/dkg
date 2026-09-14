@@ -43,7 +43,7 @@ import {
 import {
   createFinalizedVmLoopbackRpcV1,
   type FinalizedVmLoopbackFixtureConfigV1,
-} from './support/rfc64-finalized-vm-loopback-fixture.js';
+} from '@origintrail-official/dkg-test-systems/rfc64-finalized-chain-loopback/vm';
 import {
   createLoopbackJsonRpcTestHarness,
   sendJsonRpcError,

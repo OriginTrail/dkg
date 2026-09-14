@@ -1,0 +1,15 @@
+{
+  "name": "@origintrail-official/dkg-test-systems",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./rfc64-finalized-chain-loopback/chain": "./chain.ts",
+    "./rfc64-finalized-chain-loopback/vm": "./vm.ts"
+  },
+  "dependencies": {
+    "@origintrail-official/dkg-chain": "workspace:*",
+    "@origintrail-official/dkg-core": "workspace:*",
+    "ethers": "6.16.0"
+  }
+}

@@ -1,5 +1,6 @@
 packages:
   - "packages/*"
+  - "test-systems/rfc64-finalized-chain-loopback"
   - "packages/cli/test-fixtures/sample-kafka-plugin"
   - "packages/cli/test-fixtures/sample-kafka-extension"
   - "demo"

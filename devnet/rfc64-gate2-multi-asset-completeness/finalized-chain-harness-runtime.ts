@@ -13,12 +13,12 @@ import {
   createFinalizedChainLoopbackRpcV1,
   type FinalizedChainLoopbackFixtureConfigV1,
   type FinalizedChainLoopbackRpcV1,
-} from '../../packages/agent/test/support/rfc64-finalized-chain-loopback-fixture.js';
+} from '@origintrail-official/dkg-test-systems/rfc64-finalized-chain-loopback/chain';
 import {
   FinalizedVmLoopbackMockChainAdapterV1,
   createFinalizedVmLoopbackRpcV1,
   type FinalizedVmLoopbackFixtureConfigV1,
-} from '../../packages/agent/test/support/rfc64-finalized-vm-loopback-fixture.js';
+} from '@origintrail-official/dkg-test-systems/rfc64-finalized-chain-loopback/vm';
 
 export const RFC64_GATE2_DEPLOYMENT = Object.freeze({
   networkId: 'otp:20430',
@@ -91,10 +91,21 @@ export function parseFinalizedChainHarnessConfigV1(
     throw new TypeError('finalized chain on-chain context graph id must be non-zero');
   }
   const authority = { accessPolicy, contextGraphId, nameHash, onChainContextGraphId, ownerAddress };
-  // Normalize the legacy wire shape once; all runtime consumers use the mode.
-  return parsed.vmInventory === undefined
-    ? Object.freeze({ ...authority, kind: 'policy' })
-    : Object.freeze({ ...authority, kind: 'vm', vmInventory: parseVmInventory(parsed.vmInventory) });
+  switch (parsed.kind) {
+    case 'policy':
+      if (parsed.vmInventory !== undefined) {
+        throw new TypeError('policy finalized chain harness config must not include vmInventory');
+      }
+      return Object.freeze({ ...authority, kind: 'policy' });
+    case 'vm':
+      return Object.freeze({
+        ...authority,
+        kind: 'vm',
+        vmInventory: parseVmInventory(parsed.vmInventory),
+      });
+    default:
+      throw new TypeError('finalized chain harness config kind must be policy or vm');
+  }
 }
 
 function parseVmInventory(value: unknown): Readonly<FinalizedChainHarnessVmInventoryConfigV1> {

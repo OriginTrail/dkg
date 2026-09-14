@@ -118,7 +118,7 @@ import {
   FinalizedVmLoopbackMockChainAdapterV1,
   createFinalizedVmLoopbackRpcV1,
   type FinalizedVmLoopbackFixtureConfigV1,
-} from './support/rfc64-finalized-vm-loopback-fixture.js';
+} from '@origintrail-official/dkg-test-systems/rfc64-finalized-chain-loopback/vm';
 import { RFC64_M0_RECOVERY_SCENARIO_MANIFEST } from '../scripts/rfc64-m0-recovery-manifest.mjs';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';

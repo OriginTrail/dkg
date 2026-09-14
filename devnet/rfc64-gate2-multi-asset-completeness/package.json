@@ -10,6 +10,7 @@
     "@origintrail-official/dkg-chain": "workspace:*",
     "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
+    "@origintrail-official/dkg-test-systems": "workspace:*",
     "ethers": "^6.16.0"
   },
   "scripts": {

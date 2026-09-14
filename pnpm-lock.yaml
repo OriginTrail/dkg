@@ -414,6 +414,9 @@ importers:
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../../packages/storage
+      '@origintrail-official/dkg-test-systems':
+        specifier: workspace:*
+        version: link:../../test-systems/rfc64-finalized-chain-loopback
       ethers:
         specifier: ^6.16.0
         version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
@@ -619,6 +622,9 @@ importers:
       '@opentelemetry/sdk-metrics':
         specifier: ^2.8.0
         version: 2.8.0(@opentelemetry/api@1.9.1)
+      '@origintrail-official/dkg-test-systems':
+        specifier: workspace:*
+        version: link:../../test-systems/rfc64-finalized-chain-loopback
       '@types/js-yaml':
         specifier: ^4.0.9
         version: 4.0.9
@@ -1371,6 +1377,18 @@ importers:
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
+
+  test-systems/rfc64-finalized-chain-loopback:
+    dependencies:
+      '@origintrail-official/dkg-chain':
+        specifier: workspace:*
+        version: link:../../packages/chain
+      '@origintrail-official/dkg-core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      ethers:
+        specifier: 6.16.0
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
 
 packages:
 

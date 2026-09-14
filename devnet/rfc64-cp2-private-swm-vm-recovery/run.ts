@@ -125,10 +125,14 @@ async function execute(): Promise<void> {
         seal,
       });
     }));
-    const finalizedChainConfigJson = JSON.stringify({
+    const finalizedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(CONTEXT_GRAPH_ID),
+    ).toLowerCase() as Digest32V1;
+    const finalizedChain = Object.freeze({
+      kind: 'vm' as const,
       accessPolicy: 1,
       contextGraphId: CONTEXT_GRAPH_ID,
-      nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase(),
+      nameHash: finalizedNameHash,
       onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
       ownerAddress: AUTHOR,
       vmInventory: {
@@ -145,7 +149,7 @@ async function execute(): Promise<void> {
       catalogLocalAgentAddress: RECEIVER,
       dataDir: dataDirs.receiver,
       eventTimeoutMs: PROCESS_EVENT_TIMEOUT_MS,
-      finalizedChainConfigJson,
+      finalizedChain,
       networkChainId: NETWORK_ID,
       registry,
       repoRoot: REPO_ROOT,
@@ -162,6 +166,8 @@ async function execute(): Promise<void> {
     exact(receiverReady.finalizedChainRuntime, true, 'receiver finalized chain runtime');
     exact(authorReady.finalizedVmRuntime, false, 'author finalized VM runtime');
     exact(receiverReady.finalizedVmRuntime, true, 'receiver finalized VM runtime');
+    exact(authorReady.finalizedRuntimeKind, 'none', 'author finalized runtime kind');
+    exact(receiverReady.finalizedRuntimeKind, 'vm', 'receiver finalized runtime kind');
     const authorPeerId = requiredString(authorReady.peerId, 'author peer ID');
     const receiverPeerId = requiredString(receiverReady.peerId, 'receiver peer ID');
     if (authorPeerId === receiverPeerId) throw new Error('private canary peer IDs are equal');

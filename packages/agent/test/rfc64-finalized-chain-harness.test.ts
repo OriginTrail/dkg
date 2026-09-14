@@ -8,10 +8,12 @@ import {
 import {
   FinalizedChainLoopbackMockChainAdapterV1,
   FINALIZED_CONTEXT_GRAPH_INTERFACE,
-} from './support/rfc64-finalized-chain-loopback-fixture.js';
-import { FinalizedVmLoopbackMockChainAdapterV1 } from './support/rfc64-finalized-vm-loopback-fixture.js';
+} from '@origintrail-official/dkg-test-systems/rfc64-finalized-chain-loopback/chain';
+import { FinalizedVmLoopbackMockChainAdapterV1 } from
+  '@origintrail-official/dkg-test-systems/rfc64-finalized-chain-loopback/vm';
 
 const authority = {
+  kind: 'policy' as const,
   accessPolicy: 0,
   contextGraphId: 'finalized-harness',
   nameHash: `0x${'11'.repeat(32)}`,
@@ -68,7 +70,9 @@ describe('finalized chain harness compositions', () => {
       assertionRoot: `0x${String(index).repeat(64)}`, assertionVersion: String(index + 2),
       authorAddress: `0x${String(index + 6).repeat(40)}`, kaId: String(index),
     }));
-    const config = parseFinalizedChainHarnessConfigV1(JSON.stringify({ ...authority, accessPolicy: 1, vmInventory: { assets } }));
+    const config = parseFinalizedChainHarnessConfigV1(JSON.stringify({
+      ...authority, kind: 'vm', accessPolicy: 1, vmInventory: { assets },
+    }));
     const runtime = await startFinalizedChainHarnessRuntimeV1(config);
     try {
       expect(config.kind).toBe('vm');
@@ -100,7 +104,18 @@ describe('finalized chain harness compositions', () => {
   });
 
   it('rejects an explicitly requested empty VM inventory', () => {
-    expect(() => parseFinalizedChainHarnessConfigV1(JSON.stringify({ ...authority, vmInventory: { assets: [] } })))
+    expect(() => parseFinalizedChainHarnessConfigV1(JSON.stringify({
+      ...authority, kind: 'vm', vmInventory: { assets: [] },
+    })))
       .toThrow('assets must not be empty');
+  });
+
+  it('requires the runtime discriminator instead of inferring it from property presence', () => {
+    const { kind: _kind, ...withoutKind } = authority;
+    expect(() => parseFinalizedChainHarnessConfigV1(JSON.stringify(withoutKind)))
+      .toThrow('kind must be policy or vm');
+    expect(() => parseFinalizedChainHarnessConfigV1(JSON.stringify({
+      ...authority, vmInventory: { assets: [] },
+    }))).toThrow('policy finalized chain harness config must not include vmInventory');
   });
 });
