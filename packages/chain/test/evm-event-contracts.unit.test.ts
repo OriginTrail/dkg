@@ -12,6 +12,7 @@ import {
   type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSpec,
 } from '../src/evm-hub-contract-bindings.js';
 import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
+import type { ContractCache } from '../src/evm-adapter-types.js';
 
 const first = new Contract('0x0000000000000000000000000000000000000001', []);
 const second = new Contract('0x0000000000000000000000000000000000000002', []);
@@ -181,6 +182,45 @@ describe('Hub binding generation ownership', () => {
     const after = await group.resolveSnapshot(['chronos'], async () => first);
     expect(after.contracts.chronos).toBe(second);
     expect(after.generationId).not.toBe(before.generationId);
+  });
+
+  it('preserves the legacy subclass replacement and readiness transitions at runtime', async () => {
+    class LegacyProbe extends EVMChainAdapter {
+      publishLegacy(bindings: ContractCache): void {
+        this.contracts = bindings;
+        this.initialized = true;
+      }
+
+      retireLegacy(): void { this.initialized = false; }
+
+      async resolveProfileStorage(): Promise<Contract | undefined> {
+        return (await this.resolveHubContractBindings(['profileStorage'])).profileStorage;
+      }
+
+      isLegacyReady(): boolean { return this.initialized; }
+    }
+
+    const adapter = new LegacyProbe({
+      rpcUrl: 'http://127.0.0.1:59998',
+      privateKey: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+      hubAddress: String(first.target),
+      chainId: 'evm:31337',
+    });
+    const internal = adapter as any;
+    const load = vi.spyOn(internal, 'loadHubContractBinding').mockResolvedValue(first);
+    try {
+      adapter.publishLegacy(completeInstallation({ profileStorage: second }));
+      const readyGeneration = internal.hubContractBindings.generation;
+      expect(adapter.isLegacyReady()).toBe(true);
+      await expect(adapter.resolveProfileStorage()).resolves.toBe(second);
+      expect(load).not.toHaveBeenCalled();
+
+      adapter.retireLegacy();
+      expect(adapter.isLegacyReady()).toBe(false);
+      expect(internal.hubContractBindings.generation).not.toBe(readyGeneration);
+      await expect(adapter.resolveProfileStorage()).resolves.toBe(first);
+      expect(load).toHaveBeenCalledOnce();
+    } finally { adapter.destroy(); }
   });
 
   it('invalidate retires readiness and decisions while retaining handles unless dropped', async () => {

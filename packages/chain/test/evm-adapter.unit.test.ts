@@ -2277,6 +2277,48 @@ describe('EVMChainAdapter constructor / getters (no init)', () => {
     }
   });
 
+  it('retires a Hub rotation listener that finishes starting after destroy', async () => {
+    vi.useFakeTimers({ now: 0 });
+    const a: any = new EVMChainAdapter(minimalConfig());
+    const iface = new ethers.Interface([
+      'event NewContract(string contractName, address newContractAddress)',
+      'event ContractChanged(string contractName, address newContractAddress)',
+      'event NewAssetStorage(string contractName, address newContractAddress)',
+      'event AssetStorageChanged(string contractName, address newContractAddress)',
+    ]);
+    let releaseAddress!: (value: string) => void;
+    const addressPending = new Promise<string>(resolve => { releaseAddress = resolve; });
+    const provider = {
+      getBlockNumber: recorder(async () => 1_000),
+      getLogs: recorder(async () => []),
+      destroy: recorder(() => undefined),
+    };
+    const getAddress = recorder(() => addressPending);
+    a.providers = [provider];
+    a.rpcUrls = ['https://primary.example'];
+    a.primaryProvider = provider;
+    a.provider = provider;
+    installHubBindings(a, { hub: { interface: iface, getAddress } });
+
+    const starting = a.ensureHubRotationListenerStarted();
+    try {
+      expect(getAddress.calls).toHaveLength(1);
+      a.destroy();
+      releaseAddress('0x0000000000000000000000000000000000000001');
+      await expect(starting).resolves.toBeUndefined();
+      await flushAsyncWork();
+
+      expect(a.hubRotationPoller.isStarted).toBe(false);
+      expect(a.hubRotationPoller.timer).toBeNull();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(provider.getLogs.calls).toHaveLength(0);
+    } finally {
+      releaseAddress('0x0000000000000000000000000000000000000001');
+      a.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   it('invalidateRandomSamplingPair drops both the cache AND the side-channel contract handles (Codex N15)', () => {
     const a = new EVMChainAdapter(minimalConfig());
     (a as any).contracts.randomSampling = { dummy: 'rs' };
