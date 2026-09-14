@@ -1942,24 +1942,20 @@ const SPARQL_VALUE_ORDERED_DATATYPE_VALUES = SPARQL_VALUE_ORDERED_DATATYPES
   .map((datatype) => `<${datatype}>`)
   .join(', ');
 
-const SPARQL_NON_TOTAL_VALUE_DATATYPES = [
-  'http://www.w3.org/2001/XMLSchema#double',
-  'http://www.w3.org/2001/XMLSchema#float',
-] as const;
-
-function hasNonTotalValueOrdering(term: string): boolean {
-  return SPARQL_NON_TOTAL_VALUE_DATATYPES
+function hasValueOrderedDatatype(term: string): boolean {
+  return SPARQL_VALUE_ORDERED_DATATYPES
     .some((datatype) => term.endsWith(`^^<${datatype}>`));
 }
 
 function hasUnsupportedExactGraphCursorTerm(cursor: ExactGraphPageCursor): boolean {
   // SPARQL exposes no portable ordering relation for blank-node identifiers.
-  // Float and double value comparison is not total because NaN compares false
-  // to every value even though ORDER BY still places it. A finite cursor could
-  // therefore skip a later NaN. Falling back preserves the pre-existing
-  // deterministic path for both cases.
+  // Ordered XSD values also cannot be continued portably with `>`: float and
+  // double admit NaN, duration comparison can be partial, and distinct lexical
+  // forms can denote the same date/time or numeric value. ORDER BY can still
+  // place those terms after the cursor even when `>` is false. Falling back
+  // preserves the pre-existing deterministic path for each unsafe boundary.
   return [cursor.s, cursor.p, cursor.o].some((term) => (
-    term.startsWith('_:') || hasNonTotalValueOrdering(term)
+    term.startsWith('_:') || hasValueOrderedDatatype(term)
   ));
 }
 

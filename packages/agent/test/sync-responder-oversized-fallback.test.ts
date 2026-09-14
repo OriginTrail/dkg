@@ -347,7 +347,7 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
           graph,
           subject,
           predicate: `${DKG_NS}label`,
-          object: `"${subjectIndex}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+          object: `"typed-${subjectIndex}"^^<urn:test:opaque>`,
         },
       );
     }
@@ -517,6 +517,64 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     expect(new Set(collected)).toHaveLength(5);
     expect(collected.some((line) => line.includes(`"NaN"^^<${datatypeIri}>`))).toBe(true);
     expect(offsets).toEqual([0, 1, 2, 3, 4]);
+    expect(seekPageQueries).toBe(0);
+  });
+
+  it('uses OFFSET compatibility paging for equal-value xsd:dateTime lexical forms', async () => {
+    const cgId = 'exact-graph-datetime-equal-value-cursor';
+    const graph = `did:dkg:context-graph:${cgId}/context/1`;
+    const datatypeIri = 'http://www.w3.org/2001/XMLSchema#dateTime';
+    const store = new OxigraphStore();
+    await store.insert([
+      '2020-01-01T00:00:00',
+      '2020-01-01T00:00:00+01:00',
+      '2020-01-01T00:00:00Z',
+      '2021-01-01T00:00:00Z',
+    ].map((value) => ({
+      graph,
+      subject: 'urn:test:s',
+      predicate: 'urn:test:p',
+      object: `"${value}"^^<${datatypeIri}>`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 1,
+      snapshotBudget: {
+        maxRows: 100,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+    const offsets: number[] = [];
+    let seekPageQueries = 0;
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: Parameters<OxigraphStore['query']>[1]) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (normalized.includes(`GRAPH <${graph}>`) && normalized.includes('ORDER BY ?s ?p ?o')) {
+        const match = normalized.match(/OFFSET (\d+)/);
+        if (match) offsets.push(Number(match[1]));
+        else if (normalized.includes('FILTER(')) seekPageQueries += 1;
+      }
+      return originalQuery(sparql, options);
+    }) as OxigraphStore['query'];
+
+    const base = {
+      contextGraphId: cgId,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+      limit: 1,
+      syncSessionId: 'datetime-equal-value-cursor-session',
+    };
+    const collected: string[] = [];
+    for (let offset = 0; offset < 4; offset += 1) {
+      const page = linesFromNquads(await cap.invoke({ ...base, offset }));
+      expect(page).toHaveLength(1);
+      collected.push(...page);
+    }
+
+    expect(collected).toHaveLength(4);
+    expect(new Set(collected)).toHaveLength(4);
+    expect(offsets).toEqual([0, 1, 2, 3]);
     expect(seekPageQueries).toBe(0);
   });
 
