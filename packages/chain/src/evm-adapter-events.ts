@@ -14,7 +14,7 @@
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import type { ethers } from 'ethers';
 import type { EventFilter, ChainEvent } from './chain-adapter.js';
-import { eventContractKeysFor, evmEventDescriptorFor, type EvmEventScan } from './evm-event-contracts.js';
+import { selectEvmEventDescriptors, type EvmEventScan } from './evm-event-contracts.js';
 
 export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -51,7 +51,8 @@ export class EventsMethods extends EVMChainAdapterBase {
   async *listenForEvents(filter: EventFilter): AsyncIterable<ChainEvent> {
     const { signal } = filter;
     signal?.throwIfAborted();
-    const keys = eventContractKeysFor(filter.eventTypes);
+    const descriptors = selectEvmEventDescriptors(filter.eventTypes);
+    const keys = [...new Set(descriptors.map(descriptor => descriptor.binding))];
     const contracts = await this.resolveHubContractBindings(keys, { signal });
     signal?.throwIfAborted();
     if (keys.length > 0) await this.ensureHubRotationListenerStarted();
@@ -62,12 +63,11 @@ export class EventsMethods extends EVMChainAdapterBase {
       query: (contract, label, eventFilter) =>
         this.queryEventLogs(contract, label, eventFilter, filter),
     };
-    for (const eventType of filter.eventTypes) {
+    for (const descriptor of descriptors) {
       signal?.throwIfAborted();
-      const descriptor = evmEventDescriptorFor(eventType);
-      const contract = descriptor && contracts[descriptor.binding];
+      const contract = contracts[descriptor.binding];
       // Unsupported names and absent optional deployments yield nothing.
-      if (!descriptor || !contract) continue;
+      if (!contract) continue;
       yield* descriptor.scan(contract, scan);
     }
   }

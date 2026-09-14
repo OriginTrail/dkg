@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ChainEvent } from '../src/chain-adapter.js';
 import { EVMChainAdapter } from './hub-binding-test-fixture.js';
 import {
-  EVM_EVENT_DESCRIPTORS, eventContractKeysFor, evmEventDescriptorFor,
+  EVM_EVENT_DESCRIPTORS, eventContractKeysFor, evmEventDescriptorFor, selectEvmEventDescriptors,
   type EvmEventCapabilityKey, type EvmEventDescriptor, type EvmEventScan,
 } from '../src/evm-event-contracts.js';
 import {
@@ -392,6 +392,23 @@ describe('EVM event descriptor registry', () => {
     expect(eventContractKeysFor([...aliases].reverse())).toEqual(EVENT_CAPABILITY_KEYS);
     expect(eventContractKeysFor(['unsupported-event'])).toEqual([]);
     expect(evmEventDescriptorFor('unsupported-event')).toBeUndefined();
+    expect(selectEvmEventDescriptors(['KnowledgeAssetCreated', 'KCCreated', 'KCCreated']))
+      .toEqual([evmEventDescriptorFor('KCCreated')]);
+  });
+
+  it('scans one canonical descriptor once when multiple aliases request it', async () => {
+    const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const contract = new Contract(address, EVENT_ABI, adapter.getProvider());
+    const internal = adapter as any;
+    internal.installHubContractBindingsForTesting({ ...internal.contracts, knowledgeAssetStorage: contract });
+    internal.startHubRotationListener = vi.fn(async () => undefined);
+    internal.readContractWith = vi.fn(async () => []);
+    try {
+      await expect(collectAll(adapter.listenForEvents({
+        eventTypes: ['KCCreated', 'KnowledgeAssetCreated', 'KCCreated'],
+      }))).resolves.toEqual([]);
+      expect(internal.readContractWith).toHaveBeenCalledTimes(3);
+    } finally { adapter.destroy(); }
   });
 
   it.each(ALIASES)('%s scans its declared binding and parses every log shape of its descriptor', async (alias, descriptor: EvmEventDescriptor) => {

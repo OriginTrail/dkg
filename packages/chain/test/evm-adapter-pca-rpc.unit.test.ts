@@ -352,6 +352,26 @@ describe('EVMChainAdapter PCA read cache', () => {
     }
   });
 
+  it('bulk Hub self-heal retires cached PCA agent lookups', async () => {
+    const adapter = new EVMChainAdapter(minimalConfig());
+    const bindingA = { era: 'A' };
+    const bindingB = { era: 'B' };
+    const internal = adapter as any;
+    internal.init = async () => undefined;
+    installBindings(adapter, { dkgPublishingConvictionNFT: bindingA });
+    internal.readContract = recorder(async (contract: unknown, _label: string, method: string) => {
+      expect(method).toBe('agentToAccountId');
+      return contract === bindingA ? 11n : 22n;
+    });
+
+    await expect(adapter.getConvictionAgentAccountId(AGENT)).resolves.toBe(11n);
+    internal.invalidateAllBoundContracts();
+    installBindings(adapter, { dkgPublishingConvictionNFT: bindingB });
+    await expect(adapter.getConvictionAgentAccountId(AGENT)).resolves.toBe(22n);
+    expect(internal.readContract.calls.map((call: unknown[]) => call[0]))
+      .toEqual([bindingA, bindingB]);
+  });
+
   it('coalesces concurrent agentToAccountId reads without retaining externally mutable mappings', async () => {
     vi.useFakeTimers({ now: 0 });
     const adapter = pcaReadCacheAdapter([7n, 8n]) as any;
@@ -604,6 +624,39 @@ describe('EVMChainAdapter PCA read cache', () => {
     await expect(adapter.getPublishingConvictionAccountInfo(9n, { extended: true }))
       .resolves.toMatchObject({ owner: getAddress(OWNER) });
     expect(chronosAttempts).toBe(1);
+    expect(adapter.readContract.calls.map((call: unknown[]) => call[2]))
+      .toEqual(['getAccountInfo', 'accounts']);
+  });
+
+  it('does not mix extended PCA enrichment across Hub generations', async () => {
+    const adapter = new EVMChainAdapter(minimalConfig()) as any;
+    const nftA = { id: 'nft-a' };
+    const nftB = { id: 'nft-b' };
+    const chronosB = { id: 'chronos-b' };
+    const first = { generationId: 1, contracts: { dkgPublishingConvictionNFT: nftA } };
+    const second = {
+      generationId: 2,
+      contracts: { dkgPublishingConvictionNFT: nftB, chronos: chronosB },
+    };
+    adapter.init = async () => undefined;
+    adapter.resolveHubContractBindingSnapshot = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    adapter.readContract = recorder(async (contract: unknown, _label: string, method: string) => {
+      expect(contract).toBe(nftA);
+      if (method === 'getAccountInfo') return accountInfoTuple(OWNER);
+      if (method === 'accounts') return accountTuple(11n, 1n);
+      throw new Error(`unexpected mixed-generation read ${method}`);
+    });
+
+    const result = await adapter.getPublishingConvictionAccountInfo(9n, { extended: true });
+    expect(result).toMatchObject({
+      owner: getAddress(OWNER),
+      primaryNode: 11n,
+      lastPrimaryNodeChangeEpoch: 1,
+    });
+    expect(result).not.toHaveProperty('currentEpoch');
+    expect(result).not.toHaveProperty('remainingAllowance');
     expect(adapter.readContract.calls.map((call: unknown[]) => call[2]))
       .toEqual(['getAccountInfo', 'accounts']);
   });

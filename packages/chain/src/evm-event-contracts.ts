@@ -32,8 +32,7 @@ function parseLog(contract: Contract, log: ethers.Log | ethers.EventLog): ethers
 
 /**
  * Every supported event is defined exactly once, here. Capability selection
- * for a scan ({@link eventContractKeysFor}) and dispatch by requested alias
- * ({@link evmEventDescriptorFor}) are both derived from this table, so an event
+ * for a scan and dispatch by requested alias are both derived from this table, so an event
  * cannot become dispatchable without its binding, or bound without its scan.
  * Declaration order is the Hub read order of a multi-capability scan.
  */
@@ -325,13 +324,19 @@ export function evmEventDescriptorFor(eventType: string): EvmEventDescriptor | u
   return DESCRIPTOR_BY_ALIAS.get(eventType);
 }
 
+/** Unique descriptors selected by requested aliases, in declaration order. */
+export function selectEvmEventDescriptors(
+  eventTypes: readonly string[],
+): readonly EvmEventDescriptor[] {
+  const selectedAliases = new Set(eventTypes);
+  return EVM_EVENT_DESCRIPTORS.filter(
+    descriptor => descriptor.aliases.some(alias => selectedAliases.has(alias)),
+  );
+}
+
 /** The Hub bindings a scan for these event types must resolve, in declaration order. */
 export function eventContractKeysFor(eventTypes: readonly string[]): readonly EvmEventCapabilityKey[] {
-  const selected = new Set(eventTypes);
   const keys = new Set<EvmEventCapabilityKey>();
-  for (const descriptor of EVM_EVENT_DESCRIPTORS) {
-    if (!descriptor.aliases.some(alias => selected.has(alias))) continue;
-    keys.add(descriptor.binding);
-  }
+  for (const descriptor of selectEvmEventDescriptors(eventTypes)) keys.add(descriptor.binding);
   return [...keys];
 }

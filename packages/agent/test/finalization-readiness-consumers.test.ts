@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, EventFilter } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+  resolveChainV10FinalizationReadiness,
+  type ChainAdapter,
+  type EventFilter,
+} from '@origintrail-official/dkg-chain';
 import { FinalizationHandler } from '../src/finalization-handler.js';
 import { FinalizationRecovery } from '../src/finalization-recovery.js';
 
@@ -78,6 +83,42 @@ function legacyCompatibilityChain() {
 }
 
 describe('finalization readiness consumers', () => {
+  it('accepts the honest optional readiness capability shape', async () => {
+    await expect(resolveChainV10FinalizationReadiness({})).resolves.toBe(false);
+    await expect(resolveChainV10FinalizationReadiness({ isV10Ready: () => true }))
+      .resolves.toBe(true);
+    await expect(resolveChainV10FinalizationReadiness({
+      isV10Ready: () => false,
+      resolveV10FinalizationReadiness: async () => true,
+    })).resolves.toBe(true);
+  });
+
+  it('preserves a MockChainAdapter subclass legacy readiness override', async () => {
+    const scans: string[][] = [];
+    class LegacyMock extends MockChainAdapter {
+      override isV10Ready(): boolean { return false; }
+      override async *listenForEvents(filter: EventFilter) {
+        scans.push([...filter.eventTypes]);
+        if (filter.eventTypes.includes('KCCreated')) {
+          yield {
+            type: 'KCCreated', blockNumber: BLOCK,
+            data: {
+              txHash: TX_HASH, merkleRoot: ROOT, publisherAddress: PUBLISHER,
+              startKAId: KA_ID.toString(), endKAId: KA_ID.toString(), batchId: KA_ID.toString(),
+            },
+          };
+        }
+      }
+    }
+    const handler = new FinalizationHandler(new OxigraphStore(), new LegacyMock());
+    const result = await (handler as any).verifyOnChain(
+      TX_HASH, BLOCK, ROOT, PUBLISHER, KA_ID, KA_ID,
+      createOperationContext('finalization-readiness-test'), '42', KA_ID,
+    );
+    expect(result.verified).toBe(false);
+    expect(scans).toEqual([['KnowledgeBatchCreated', 'KCCreated'], ['ContextGraphExpanded']]);
+  });
+
   it.each([
     { name: 'ready', outcome: true, verified: true, scanCount: 1 },
     { name: 'not ready', outcome: false, verified: false, scanCount: 2 },

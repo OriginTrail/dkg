@@ -2312,9 +2312,14 @@ export interface ChainAdapter {
   ): Promise<bigint | null>;
 }
 
+export interface ChainV10FinalizationReadiness {
+  resolveV10FinalizationReadiness?(options?: ChainReadOptions): Promise<boolean>;
+  isV10Ready?(): boolean;
+}
+
 /** Canonical async readiness boundary with the legacy synchronous fallback. */
 export async function resolveChainV10FinalizationReadiness(
-  chain: Pick<ChainAdapter, 'resolveV10FinalizationReadiness' | 'isV10Ready'>,
+  chain: ChainV10FinalizationReadiness,
   options?: ChainReadOptions,
 ): Promise<boolean> {
   if (typeof chain.resolveV10FinalizationReadiness === 'function') {
