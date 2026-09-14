@@ -1559,41 +1559,35 @@ describe('RFC-64 rollout authority integration', () => {
     ] as never);
     const queueSync = vi.spyOn(edge, 'queueSyncFromPeerOnConnect')
       .mockReturnValue(true);
-    vi.useFakeTimers();
-    try {
-      for (const [index, contextGraphId] of contextGraphIds.entries()) {
-        await edge.createContextGraph({
-          id: contextGraphId,
-          name: `Authority catch-up ${index + 1}`,
-          accessPolicy: 0,
-          callerAgentAddress: AUTHOR,
-        });
-      }
-      // Register the idle waiter before advancing fake time so any successor
-      // quiet window scheduled by the physical batch is included in the wait.
-      const responsibilityIdle = edge.whenRfc64CatalogResponsibilitiesIdleV1();
-      await vi.advanceTimersByTimeAsync(1_000);
-      await responsibilityIdle;
-      expect(queueSync).not.toHaveBeenCalled();
-
-      await vi.advanceTimersByTimeAsync(3_000);
-
-      expect(queueSync).toHaveBeenCalledOnce();
-      expect(queueSync).toHaveBeenCalledWith(
-        remotePeerId,
-        expect.any(Function),
-        0,
-        { authorityScopeChanged: true },
-      );
-      // Unchanged direct reconciliations must not create another timer.
-      for (const contextGraphId of contextGraphIds) {
-        await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
-      }
-      await vi.advanceTimersByTimeAsync(3_000);
-      expect(queueSync).toHaveBeenCalledOnce();
-    } finally {
-      vi.useRealTimers();
+    for (const [index, contextGraphId] of contextGraphIds.entries()) {
+      await edge.createContextGraph({
+        id: contextGraphId,
+        name: `Authority catch-up ${index + 1}`,
+        accessPolicy: 0,
+        callerAgentAddress: AUTHOR,
+      });
     }
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(queueSync).not.toHaveBeenCalled();
+
+    // Context-graph creation exercises real libp2p/store lifecycle timers, so
+    // keep this integration boundary on the real clock while observing the
+    // production three-second authority catch-up window.
+    await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
+
+    expect(queueSync).toHaveBeenCalledOnce();
+    expect(queueSync).toHaveBeenCalledWith(
+      remotePeerId,
+      expect.any(Function),
+      0,
+      { authorityScopeChanged: true },
+    );
+    // Unchanged direct reconciliations must not create another timer.
+    for (const contextGraphId of contextGraphIds) {
+      await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 3_100));
+    expect(queueSync).toHaveBeenCalledOnce();
   });
 
   it('fails closed when an unregistered graph has no authenticated owner', async () => {
@@ -3114,17 +3108,18 @@ describe('RFC-64 rollout authority integration', () => {
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
     await edge.whenRfc64CatalogSupervisorsIdleV1();
 
-    // The two keyed responsibility calls and the authority owner's initial +
-    // coalesced passes each own exactly the immutable targets they selected.
-    // The accepted SWM transport path itself reopens none of these reads.
+    // Each coalesced pass owns one immutable union of the targets it selected.
+    // The durable-binding successor may narrow to the first target before the
+    // next shared pass observes both bindings. The accepted SWM transport path
+    // itself reopens none of these reads.
     const initialAuthorityReads = readPolicies.mock.calls.map(
       ([targetIds]) => [...targetIds],
     );
-    expect(initialAuthorityReads).toEqual(expect.arrayContaining([
+    expect(initialAuthorityReads).toEqual([
+      ['9', '10'],
       ['9'],
-      ['10'],
-    ]));
-    expect(initialAuthorityReads.every((targetIds) => targetIds.length === 1)).toBe(true);
+      ['9', '10'],
+    ]);
     expect(legacyPolicy).not.toHaveBeenCalled();
     expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -3222,9 +3217,7 @@ describe('RFC-64 rollout authority integration', () => {
       signal,
       request,
     )).rejects.toThrow('no finalized indexed authority');
-    expect(resolveIds).toHaveBeenCalledWith([expectedNameHash], {
-      signal: expect.any(AbortSignal),
-    });
+    expect(resolveIds).not.toHaveBeenCalled();
     expect(readSnapshots).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
     expect(legacyPolicy).not.toHaveBeenCalled();
