@@ -1,4 +1,9 @@
-import { EPCIS_DECLARED_EVENT_TYPE, EPCIS_TYPE_PREFIX, resolveEpcisQueryEventType } from './epcis-vocabulary.js';
+import {
+  EPCIS_DECLARED_EVENT_TYPE,
+  EPCIS_STANDARD_EVENT_TYPES,
+  EPCIS_TYPE_PREFIX,
+  resolveEpcisQueryEventType,
+} from './epcis-vocabulary.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -118,10 +123,18 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     else optionalClauses.push(`OPTIONAL { ${binding} }`);
   }
 
-  // Declared captures include every accepted namespace. Only unmarked legacy
-  // RDF retains the GS1 namespace boundary.
+  // Declared captures include every accepted namespace. A document's
+  // `eventList` is the positive discriminator for unmarked JSON-LD events;
+  // standard direct-RDF event roots remain compatible with older data. Keep
+  // this filter inside each GRAPH block so the event-list lookup uses the
+  // same named graph as the event row.
   if (!eventTypeIri) {
-    filterClauses.push(`FILTER(BOUND(?_declaredEventType) || STRSTARTS(STR(?eventType), "${EPCIS_TYPE_PREFIX}"))`);
+    const standardTypes = EPCIS_STANDARD_EVENT_TYPES
+      .map((type) => `epcis:${type}`)
+      .join(', ');
+    sharedRequiredPatterns.push(`FILTER(BOUND(?_declaredEventType)
+      || EXISTS { ?_eventList epcis:eventList ?event }
+      || ?eventType IN (${standardTypes}))`);
   }
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)

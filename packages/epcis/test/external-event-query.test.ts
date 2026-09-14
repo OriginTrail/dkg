@@ -7,6 +7,7 @@ import { handleCaptureAsync, handleEventsQuery, toEpcisEvent } from '../src/hand
 
 const CG = 'external-epcis-type';
 const EPCIS = 'https://gs1.github.io/EPCIS/';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const DATE_CASES = [
   { name: 'without dates', filters: {}, expected: ['early', 'event', 'late'] },
   { name: 'with a lower bound', filters: { from: '2024-03-01T00:00:00Z' }, expected: ['event', 'late'] },
@@ -23,6 +24,27 @@ function eventRows(id: string, eventType: string, time?: string, offset?: string
     ...(offset === undefined ? [] : [{ subject, predicate: `${EPCIS}eventTimeZoneOffset`, object: `"${offset}"`, graph }]),
   ];
 }
+
+it('excludes the EPCISDocument container from an unfiltered event query', async () => {
+  const store = new OxigraphStore();
+  const graph = contextGraphDataUri(CG);
+  try {
+    await store.insert([
+      ...eventRows('event', `${EPCIS}ObjectEvent`, '2024-03-01T08:00:00Z', '+00:00'),
+      ...eventRows('sensor', `${EPCIS}SensorElement`),
+      { subject: 'urn:document', predicate: RDF_TYPE, object: `${EPCIS}EPCISDocument`, graph },
+      { subject: 'urn:document', predicate: `${EPCIS}eventList`, object: 'urn:event:event', graph },
+    ]);
+
+    const result = await store.query(buildEpcisQuery({}, CG));
+    if (result.type !== 'bindings') throw new Error('Expected event bindings');
+    expect(result.bindings.map((row) => row.event)).toEqual(['urn:event:event']);
+    expect(result.bindings.map((row) => row.eventType)).toEqual([`${EPCIS}ObjectEvent`]);
+  } finally {
+    await store.dropGraph(graph);
+    await store.close();
+  }
+});
 
 const blazegraphUrl = process.env.BLAZEGRAPH_TEST_URL;
 if (process.env.DKG_REQUIRE_BLAZEGRAPH === '1' && !blazegraphUrl) throw new Error('BLAZEGRAPH_TEST_URL is required');
