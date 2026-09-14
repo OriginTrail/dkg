@@ -2005,7 +2005,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
 
     const localFirst = new Set<string>();
     for (const contextGraphId of contextGraphIds) {
-      if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
+      if (
+        this.contextGraphRegistrationsInFlight?.has(contextGraphId)
+        || await this.isLocalFirstUnregisteredContextGraph(contextGraphId)
+      ) {
         localFirst.add(contextGraphId);
       }
     }
@@ -2245,6 +2248,15 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const revision = options.revision
       ?? nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    // Registration owns the only authoritative chain transition for this
+    // graph. Retire catalog responsibility until it completes rather than
+    // letting a periodic worker rediscover the same pending name by RPC.
+    if (this.contextGraphRegistrationsInFlight?.has(contextGraphId)) {
+      if (!isCurrentRfc64CatalogResponsibilityRevisionV1(this, contextGraphId, revision)) {
+        return registry.read(contextGraphId);
+      }
+      return commit(null);
+    }
     if (
       rfc64SystemContextGraphIdsV1.has(contextGraphId)
       || subscription === undefined

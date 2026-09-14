@@ -1942,6 +1942,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   ) | undefined> {
     const target = this.resolveContextGraphNameHashBindingTarget(requestedId);
     if (target === null) return undefined;
+    if (this.contextGraphRegistrationsInFlight?.has(target.localId)) {
+      throw new Error(
+        `Context Graph "${target.localId}" registration is in flight; chain binding discovery is suspended`,
+      );
+    }
 
     const currentBinding = this.contextGraphBindingState.currentBindingFor(
       target.localId,

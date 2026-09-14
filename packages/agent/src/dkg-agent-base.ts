@@ -1246,6 +1246,13 @@ export class DKGAgentBase {
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  /**
+   * Process-local fence for a registration operation whose durable marker has
+   * moved (or is about to move) to `pending`. Authority and policy readers use
+   * this to fail closed without launching reverse-name or finalized-index RPC
+   * discovery while the owning request is already resolving the chain state.
+   */
+  protected readonly contextGraphRegistrationsInFlight = new Set<string>();
   /** Canonical owner of the process-local projection of durable create facts. */
   protected readonly localContextGraphProvenance = new LocalContextGraphProvenance();
   /** Process-local reverse candidates plus the monotonic binding fence. */
