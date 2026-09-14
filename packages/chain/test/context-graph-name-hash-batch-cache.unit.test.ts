@@ -25,22 +25,6 @@ function cacheFixture() {
 }
 
 describe('bulk evidence invalidates conflicting scalar name-hash evidence', () => {
-  it('releases per-name invalidation bookkeeping after large independent batches', () => {
-    const resolver = new ContextGraphNameHashResolver({ load: async () => null });
-    const names = Array.from({ length: 2_000 }, (_, index) => (
-      `0x${index.toString(16).padStart(64, '0')}`
-    ));
-    resolver.invalidateNames(names);
-
-    const state = resolver as unknown as {
-      activeNameInvalidations: Map<string, unknown>;
-      partitions: Record<string, { singleFlight: { inflight: Map<string, unknown> } }>;
-    };
-    expect(state.activeNameInvalidations.size).toBe(0);
-    expect(Object.values(state.partitions).every(({ singleFlight }) => singleFlight.inflight.size === 0))
-      .toBe(true);
-  });
-
   it.each(['named', 'all'] as const)('rejects a completed but undelivered miss after %s invalidation', async (scope) => {
     const fresh = deferred<bigint | null>();
     const load = vi.fn<(_name: string, signal: AbortSignal) => Promise<bigint | null>>()

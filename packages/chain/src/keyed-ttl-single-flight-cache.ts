@@ -151,6 +151,7 @@ interface AbortableSingleFlightState<V> {
   promise: Promise<V>;
   waiters: number;
   settled: boolean;
+  invalidated: Error | undefined;
 }
 
 /**
@@ -158,10 +159,10 @@ interface AbortableSingleFlightState<V> {
  *
  * A caller abandoning its wait never poisons peers. When the final waiter
  * leaves, the physical operation is aborted and detached from the key so a
- * later caller can start fresh. Invalidation also aborts and detaches the
- * current physical request; the exact-state check prevents an implementation
- * that ignores cancellation from publishing a stale success through
- * `onSuccess`.
+ * later caller can start fresh. Invalidation aborts and detaches the current
+ * physical request, suppresses stale publication through `onSuccess`, and
+ * rejects enrolled waiters even if the loader ignores cancellation or already
+ * completed before its result could be delivered.
  */
 export class AbortableKeyedSingleFlight<K, V> {
   private readonly inflight = new Map<K, AbortableSingleFlightState<V>>();
@@ -181,6 +182,7 @@ export class AbortableKeyedSingleFlight<K, V> {
         promise: Promise.resolve(undefined as V),
         waiters: 0,
         settled: false,
+        invalidated: undefined,
       };
       const shared = state;
       // Enrol the initiating waiter before physical work can settle.
@@ -192,21 +194,27 @@ export class AbortableKeyedSingleFlight<K, V> {
         })
         .finally(() => {
           shared.settled = true;
-          if (this.inflight.get(key) === shared) this.inflight.delete(key);
+          if (shared.waiters === 0 && this.inflight.get(key) === shared) {
+            this.inflight.delete(key);
+          }
         });
       this.inflight.set(key, shared);
     }
 
     state.waiters += 1;
     try {
-      return await waitForSignal(state.promise, waiterSignal);
+      const value = await waitForSignal(state.promise, waiterSignal);
+      if (state.invalidated !== undefined) throw state.invalidated;
+      return value;
     } finally {
       state.waiters -= 1;
-      if (state.waiters === 0 && !state.settled) {
+      if (state.waiters === 0) {
         if (this.inflight.get(key) === state) this.inflight.delete(key);
-        const abandoned = new Error(abandonmentMessage);
-        abandoned.name = 'AbortError';
-        state.controller.abort(abandoned);
+        if (!state.settled && state.invalidated === undefined) {
+          const abandoned = new Error(abandonmentMessage);
+          abandoned.name = 'AbortError';
+          state.controller.abort(abandoned);
+        }
       }
     }
   }
@@ -214,10 +222,11 @@ export class AbortableKeyedSingleFlight<K, V> {
   invalidate(key: K, reason = 'Shared request was invalidated'): void {
     const state = this.inflight.get(key);
     this.inflight.delete(key);
-    if (state !== undefined && !state.settled) {
+    if (state !== undefined) {
       const invalidated = new Error(reason);
       invalidated.name = 'AbortError';
-      state.controller.abort(invalidated);
+      state.invalidated = invalidated;
+      if (!state.settled) state.controller.abort(invalidated);
     }
   }
 
