@@ -60,6 +60,7 @@ import {
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import type { ContextGraphReconcileResult } from '../src/vm-reconcile-service.js';
 import { createVmReconcilePeerTopology } from '../src/vm-reconcile-peer-topology.js';
+import { VmRecoveryProviderPolicy } from '../src/vm-recovery-provider-policy.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -3033,6 +3034,78 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(fallbacks[0]?.slice(1, 4)).toEqual([peerId, [localCgId], undefined]);
     expect((internals as any).vmReconcileExactPeerCapabilities.get(peerId))
       .toMatchObject({ connectionKey: expect.any(String), expiresAt: expect.any(Number) });
+  });
+
+  it('expires or invalidates remembered legacy capability when the connection changes', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLegacyCapabilityCache', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerId = '12D3KooWLegacyExactFilterCachePeer';
+    let remoteAddress = '/ip4/127.0.0.1/tcp/40101';
+    const remotePeer = { toString: () => peerId };
+    (internals as any).node = {
+      peerId: '12D3KooWLegacyExactFilterCacheLocal',
+      libp2p: {
+        getConnections: () => [{
+          remotePeer,
+          direction: 'inbound',
+          timeline: { open: 1 },
+          remoteAddr: { toString: () => remoteAddress },
+        }],
+        getPeers: () => [remotePeer],
+      },
+    };
+
+    (internals as any).rememberVmReconcileExactFilterUnsupported(peerId);
+    expect((internals as any).vmReconcileExactFilterUnsupported(peerId)).toBe(true);
+
+    remoteAddress = '/ip4/127.0.0.1/tcp/40102';
+    expect((internals as any).vmReconcileExactFilterUnsupported(peerId)).toBe(false);
+    expect((internals as any).vmReconcileExactPeerCapabilities.has(peerId)).toBe(false);
+
+    (internals as any).rememberVmReconcileExactFilterUnsupported(peerId);
+    const entry = (internals as any).vmReconcileExactPeerCapabilities.get(peerId);
+    entry.expiresAt = -1;
+    expect((internals as any).vmReconcileExactFilterUnsupported(peerId)).toBe(false);
+    expect((internals as any).vmReconcileExactPeerCapabilities.has(peerId)).toBe(false);
+  });
+
+  it('filters remembered legacy peers from a fresh exact-recovery candidate selection and bounds the cache', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLegacyCapabilityBound', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peerIds = Array.from(
+      { length: DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES + 1 },
+      (_, index) => `12D3KooWLegacyExactBound${index}`,
+    );
+    const connectedById = new Map(peerIds.map((peerId) => [peerId, {
+      remotePeer: { toString: () => peerId },
+      direction: 'outbound',
+      timeline: { open: 1 },
+      remoteAddr: { toString: () => `/ip4/127.0.0.1/tcp/${41000 + peerIds.indexOf(peerId)}` },
+    }]));
+    (internals as any).node = {
+      peerId: '12D3KooWLegacyExactCapabilityBoundLocal',
+      libp2p: {
+        getConnections: () => [...connectedById.values()],
+        getPeers: () => [...connectedById.values()].map((connection) => connection.remotePeer),
+      },
+    };
+    for (const peerId of peerIds) {
+      (internals as any).rememberVmReconcileExactFilterUnsupported(peerId);
+    }
+
+    const policy = new VmRecoveryProviderPolicy();
+    expect((internals as any).selectVmReconcileExactCandidate(
+      undefined,
+      [peerIds[0], peerIds[peerIds.length - 1]],
+      policy,
+    )).toBe(peerIds[0]);
+    expect((internals as any).vmReconcileExactPeerCapabilities.size)
+      .toBeLessThanOrEqual(DKGAgentBase.VM_RECONCILE_CACHE_MAX_ENTRIES);
+
+    (internals as any).closeVmReconcileRotationState();
+    expect((internals as any).vmReconcileExactPeerCapabilities.size).toBe(0);
   });
 
   it('clears cached authoritative curators after a successful empty resolution', async () => {
