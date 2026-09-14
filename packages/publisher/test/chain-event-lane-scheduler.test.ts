@@ -34,13 +34,18 @@ describe('ChainEventPoller scheduler', () => {
     ]);
   });
 
-  it.each([-1, 1.5, Number.NaN])('rejects invalid configured cursor seed %s', async (blockNumber) => {
+  // Zero is the runner's "no cursor yet" sentinel, so accepting it as a seed
+  // would let a live-tail lane resume near the head after a restart instead of
+  // at block 1.
+  it.each([-1, 0, 1.5, Number.NaN])('rejects invalid configured cursor seed %s', async (blockNumber) => {
+    const saved: Array<{ lane: ChainEventPollerLane; block: number }> = [];
     const cursor: LaneCursorPersistence = {
       async loadLane() { return undefined; },
-      async saveLane() { /* sink */ },
+      async saveLane(lane, block) { saved.push({ lane, block }); },
     };
     await expect(seedChainEventPollerCursors(cursor, blockNumber))
-      .rejects.toThrow(/non-negative safe integer/);
+      .rejects.toThrow(/positive safe integer/);
+    expect(saved).toEqual([]);
   });
 
   it('refuses to seed every production lane through a legacy aggregate cursor', async () => {
@@ -53,6 +58,32 @@ describe('ChainEventPoller scheduler', () => {
     await expect(seedChainEventPollerCursors(cursor, 42))
       .rejects.toThrow(/loadLane and saveLane/);
     expect(saved).toEqual([]);
+  });
+
+  it('restores the lowest accepted seed on a live-tail lane after reconstructing the poller', async () => {
+    const saved = new Map<ChainEventPollerLane, number>();
+    const cursor: LaneCursorPersistence = {
+      async loadLane(lane) { return saved.get(lane); },
+      async saveLane(lane, block) { saved.set(lane, block); },
+    };
+    await seedChainEventPollerCursors(cursor, 1);
+
+    const { adapter, filters } = makeChain({ head: 10_000 });
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 60_000,
+      cursorPersistence: cursor,
+      onContextGraphCreated: async () => { /* sink */ },
+    });
+
+    await poller.start();
+    await poller.waitForCurrentPoll();
+    await poller.stop();
+
+    // Every accepted seed restores exactly: the lane resumes at seed + 1
+    // rather than inside the live-tail window near the head.
+    expect(filters[0]?.fromBlock).toBe(2);
   });
 
   it('restores a seeded allocator lane at seed + 1 after reconstructing the poller', async () => {

@@ -64,8 +64,13 @@ export async function seedLaneCursorStore(
   blockNumber: number,
 ): Promise<void> {
   if (!cursorStore) throw new Error('Chain event cursor persistence is not configured.');
-  if (!Number.isSafeInteger(blockNumber) || blockNumber < 0) {
-    throw new Error('Chain event cursor seed must be a non-negative safe integer.');
+  // The accepted seed domain has to match what a cursor can restore. Zero is
+  // the runner's "no cursor yet" sentinel and the persistence layer's own
+  // invariant (the node database constrains cursor rows to positive block
+  // numbers), so a zero seed would silently degrade to an absent cursor and
+  // let a live-tail lane resume near the head instead of at block 1.
+  if (!Number.isSafeInteger(blockNumber) || blockNumber < 1) {
+    throw new Error('Chain event cursor seed must be a positive safe integer.');
   }
   if (cursorStore.kind === 'legacy') {
     await cursorStore.saveLegacyAggregate(blockNumber);
