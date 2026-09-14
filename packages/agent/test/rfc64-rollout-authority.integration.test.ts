@@ -2466,12 +2466,16 @@ describe('RFC-64 rollout authority integration', () => {
     );
     const request = requests.get(contextGraphId);
 
-    expect(request).toEqual({ finalizedAuthorityEvidence: null });
+    expect(request).toEqual({ kind: 'finalized-absence' });
     expect(Object.isFrozen(request)).toBe(true);
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
       contextGraphId,
       signal,
-      request?.finalizedAuthorityEvidence,
+      request?.kind === 'finalized-evidence'
+        ? request.evidence
+        : request?.kind === 'finalized-absence'
+          ? null
+          : undefined,
     )).rejects.toThrow('no finalized indexed authority');
     expect(resolveIds).toHaveBeenCalledWith([expectedNameHash], { signal });
     expect(readSnapshots).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });

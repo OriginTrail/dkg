@@ -57,6 +57,37 @@ function revisionSource(
 }
 
 describe('RFC-64 catalog authority refresh loop', () => {
+  it('rejects a request factory that omits a selected graph', async () => {
+    const { scheduler } = createSchedulerHarness();
+    const failures: unknown[] = [];
+    const refreshContextGraph = vi.fn(async () => COMMITTED);
+    const loop = new Rfc64CatalogAuthorityRefreshLoopV1({
+      readActiveContextGraphIds: () => ['cg-a', 'cg-b'],
+      authorityRevisionSource: revisionSource(async () => completeRevisionRead(new Map([
+        ['cg-a', 'revision-1'],
+        ['cg-b', 'revision-1'],
+      ]))),
+      onActiveContextGraphIdsReadFailure: () => undefined,
+      onAuthorityRevisionsReadFailure: (error) => { failures.push(error); },
+      createRefreshRequests: async () => new Map([
+        ['cg-a', Object.freeze({ kind: 'legacy' as const })],
+      ]),
+      refreshContextGraph,
+      onRefreshFailure: () => undefined,
+      scheduler,
+    });
+
+    loop.start();
+    await loop.whenIdle();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({
+      message: expect.stringContaining('omitted selected Context Graph "cg-b"'),
+    });
+    expect(refreshContextGraph).not.toHaveBeenCalled();
+    await loop.close();
+  });
+
   it('performs one logical authority read per multi-graph pass and fences the next revision', async () => {
     const { scheduled, scheduler } = createSchedulerHarness();
     let revision = 'revision-1';
@@ -101,7 +132,8 @@ describe('RFC-64 catalog authority refresh loop', () => {
         return new Map(await Promise.all(contextGraphIds.map(async (contextGraphId) => [
           contextGraphId,
           {
-            finalizedAuthorityEvidence: await batch.read(
+            kind: 'finalized-evidence' as const,
+            evidence: await batch.read(
               indexIds.get(contextGraphId)!,
               signal,
             ),
@@ -109,7 +141,9 @@ describe('RFC-64 catalog authority refresh loop', () => {
         ] as const)));
       },
       refreshContextGraph: async (contextGraphId, _signal, request) => {
-        expect(request.finalizedAuthorityEvidence).toMatchObject({
+        expect(request.kind).toBe('finalized-evidence');
+        if (request.kind !== 'finalized-evidence') throw new Error('expected evidence');
+        expect(request.evidence).toMatchObject({
           contextGraphAuthorityIndexId: indexIds.get(contextGraphId),
         });
         return COMMITTED;

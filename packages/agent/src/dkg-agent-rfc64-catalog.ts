@@ -1917,7 +1917,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (contextGraphIds.length === 0) return new Map();
     const indexedReader = this.chain.contextGraphAuthorityIndexRevisionReader;
     const readSnapshots = indexedReader?.readContextGraphAuthorityIndexSnapshots;
-    if (indexedReader === undefined || readSnapshots === undefined) return new Map();
+    if (indexedReader === undefined || readSnapshots === undefined) {
+      return new Map(contextGraphIds.map((contextGraphId) => [
+        contextGraphId,
+        Object.freeze({ kind: 'legacy' as const }),
+      ]));
+    }
 
     const localFirst = new Set<string>();
     for (const contextGraphId of contextGraphIds) {
@@ -1931,7 +1936,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       registeredCandidates,
       { signal },
     );
-    if (resolution.kind === 'legacy-current') return new Map();
+    if (resolution.kind === 'legacy-current') {
+      return new Map(contextGraphIds.map((contextGraphId) => [
+        contextGraphId,
+        Object.freeze({ kind: 'legacy' as const }),
+      ]));
+    }
 
     const targetIds = Object.freeze([...new Set(
       [...resolution.targets.values()].map(({ expectedOnChainId }) => {
@@ -1965,20 +1975,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     return new Map(contextGraphIds.map((contextGraphId) => {
       const target = resolution.targets.get(contextGraphId);
       if (target === undefined) {
-        return [contextGraphId, Object.freeze({ finalizedAuthorityEvidence: null })];
+        return [contextGraphId, Object.freeze({ kind: 'finalized-absence' as const })];
       }
       const targetId = target.expectedOnChainId.toString(10) as
         ContextGraphAuthorityIndexId;
       const evidence = evidenceByTargetId.get(targetId);
-      return [contextGraphId, Object.freeze({
-        // Collapse a batch-owned missing row to the refresh protocol's null
-        // sentinel. Passing an evidence wrapper whose snapshot is null is
-        // equivalent today, but keeping one canonical absence value makes it
-        // impossible for a later consumer to mistake the wrapper for present
-        // authority and reopen a current-state point read.
-        finalizedAuthorityEvidence:
-          evidence === undefined || evidence.snapshot === null ? null : evidence,
-      })];
+      return [contextGraphId, evidence === undefined || evidence.snapshot === null
+        ? Object.freeze({ kind: 'finalized-absence' as const })
+        : Object.freeze({
+          kind: 'finalized-evidence' as const,
+          evidence,
+        })];
     }));
   }
 

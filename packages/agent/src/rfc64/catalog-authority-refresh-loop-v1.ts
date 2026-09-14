@@ -3,7 +3,7 @@
 import { CoalescingRecurringTask } from '../coalescing-recurring-task.js';
 import { RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1 } from
   './catalog-authority-config-v1.js';
-import type { Rfc64CatalogWorkloadOwnerV1 } from './catalog-runtime-v1.js';
+import type { Rfc64CatalogRefreshableWorkloadOwnerV1 } from './catalog-runtime-v1.js';
 import type { Rfc64FinalizedAuthoritySnapshotEvidenceV1 } from
   './finalized-authority-snapshot-batch-runtime-v1.js';
 
@@ -65,10 +65,16 @@ export interface Rfc64CatalogAuthorityRevisionSourceV1 {
 }
 
 export type Rfc64CatalogAuthorityRefreshResultV1 = 'committed' | 'superseded';
-export type Rfc64CatalogAuthorityRefreshRequestV1 = Readonly<{
-  /** Explicit immutable evidence selected by this pass; null is finalized absence. */
-  finalizedAuthorityEvidence?: Rfc64FinalizedAuthoritySnapshotEvidenceV1 | null;
-}>;
+export type Rfc64CatalogAuthorityRefreshRequestV1 =
+  | Readonly<{ kind: 'legacy' }>
+  | Readonly<{ kind: 'finalized-absence' }>
+  | Readonly<{
+      kind: 'finalized-evidence';
+      evidence: Rfc64FinalizedAuthoritySnapshotEvidenceV1;
+    }>;
+
+const LEGACY_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1:
+Rfc64CatalogAuthorityRefreshRequestV1 = Object.freeze({ kind: 'legacy' });
 
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
@@ -176,7 +182,8 @@ class Rfc64CatalogAuthorityRefreshLaneV1 {
 }
 
 /** Bounded independent authority lanes with explicit scheduling and shutdown ownership. */
-export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadOwnerV1 {
+export class Rfc64CatalogAuthorityRefreshLoopV1
+implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
   readonly #scheduler: Rfc64CatalogAuthorityRefreshSchedulerV1;
   readonly #authorityRevisionSource: Rfc64CatalogAuthorityRevisionSourceV1;
   readonly #lanes = new Map<string, Rfc64CatalogAuthorityRefreshLaneV1>();
@@ -310,12 +317,22 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
         || lane.needsRequest(revisions.get(contextGraphId) ?? null, initial || safety);
     });
     const refreshRequests = this.options.createRefreshRequests === undefined
-      ? new Map<string, Rfc64CatalogAuthorityRefreshRequestV1>()
+      ? new Map(selectedContextGraphIds.map((contextGraphId) => [
+          contextGraphId,
+          LEGACY_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1,
+        ]))
       : await this.options.createRefreshRequests(
         Object.freeze(selectedContextGraphIds),
         signal,
       );
     signal.throwIfAborted();
+    for (const contextGraphId of selectedContextGraphIds) {
+      if (!refreshRequests.has(contextGraphId)) {
+        throw new Error(
+          `RFC-64 authority refresh request factory omitted selected Context Graph "${contextGraphId}"`,
+        );
+      }
+    }
 
     for (const contextGraphId of desiredContextGraphIds) {
       if (
@@ -331,7 +348,8 @@ export class Rfc64CatalogAuthorityRefreshLoopV1 implements Rfc64CatalogWorkloadO
       lane.request(
         revision,
         initial || safety,
-        refreshRequests.get(contextGraphId) ?? Object.freeze({}),
+        refreshRequests.get(contextGraphId)
+          ?? LEGACY_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1,
       );
     }
   }

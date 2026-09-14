@@ -10144,8 +10144,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   async rehydrateContextGraphSubscriptions(
     this: DKGAgent,
-    persistedMembershipRows: ContextGraphMembershipSnapshot | null,
+    persistedMembershipRows?: ContextGraphMembershipSnapshot | null,
   ): Promise<void> {
+    // Preserve the exported zero-argument API. The startup owner passes its
+    // already-loaded snapshot explicitly; direct callers delegate to that
+    // owner so provenance and subscriptions still share one ordered bootstrap.
+    if (persistedMembershipRows === undefined) {
+      await this.rehydrateContextGraphsFromDurableState();
+      return;
+    }
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
     const ctx = createOperationContext('init');

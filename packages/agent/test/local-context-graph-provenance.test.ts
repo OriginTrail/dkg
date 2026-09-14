@@ -2,6 +2,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   CONTEXT_GRAPH_MEMBERSHIP_SOURCES,
   isContextGraphMembershipSource,
@@ -17,6 +18,7 @@ import {
   LOCAL_ID,
   selectedFixture,
 } from './context-graph-registration-binding.fixture.js';
+import { DKGAgent } from '../src/index.js';
 
 type DurableMembershipRow = ContextGraphMembershipRecord & {
   firstSeenAt?: number;
@@ -36,6 +38,33 @@ function row(
 }
 
 describe('LocalContextGraphProvenance durable restoration', () => {
+  it('preserves zero-argument subscription rehydration for public callers', async () => {
+    const loadAll = vi.fn(async () => [row('public-api-origin', {
+      principalType: 'agent',
+      status: 'active',
+      source: 'local-create',
+    })]);
+    const agent = await DKGAgent.create({
+      name: 'rehydration-public-api',
+      chainAdapter: new NoChainAdapter(),
+      contextGraphMembershipStore: {
+        loadAll,
+        upsert: async () => undefined,
+        delete: async () => undefined,
+      },
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [],
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+    });
+
+    await agent.rehydrateContextGraphSubscriptions();
+
+    expect(loadAll).toHaveBeenCalledOnce();
+    expect(agent.localContextGraphProvenance.hasLocalCreate('public-api-origin')).toBe(true);
+  });
+
   it('decodes only the closed durable membership-source vocabulary', () => {
     for (const source of CONTEXT_GRAPH_MEMBERSHIP_SOURCES) {
       expect(isContextGraphMembershipSource(source)).toBe(true);
