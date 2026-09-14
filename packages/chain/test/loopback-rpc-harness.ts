@@ -92,7 +92,6 @@ export async function startLoopbackRpc(options: LoopbackOptions = {}): Promise<L
   const throttle = new Set(options.throttle ?? []);
   const hang = new Set(options.hang ?? []);
   const results = { ...DEFAULT_RESULTS, ...(options.results ?? {}) };
-  const counts = new Map<string, number>();
   const abortedCounts = new Map<string, number>();
   const httpRequestMethods: string[][] = [];
 
@@ -107,7 +106,6 @@ export async function startLoopbackRpc(options: LoopbackOptions = {}): Promise<L
       let throttled = false;
       const out: unknown[] = [];
       for (const r of reqs) {
-        counts.set(r.method, (counts.get(r.method) ?? 0) + 1);
         if (throttle.has(r.method)) { throttled = true; continue; }
         const result = r.method in results ? results[r.method] : '0x';
         out.push({ jsonrpc: '2.0', id: r.id, result: result === '' ? null : result });
@@ -139,9 +137,12 @@ export async function startLoopbackRpc(options: LoopbackOptions = {}): Promise<L
   return {
     url: loopback.url,
     server: loopback.server,
-    hits: (method) => counts.get(method) ?? 0,
+    hits: (method) => httpRequestMethods.reduce(
+      (total, methods) => total + methods.filter((recorded) => recorded === method).length,
+      0,
+    ),
     aborted: (method) => abortedCounts.get(method) ?? 0,
-    totalHits: () => [...counts.values()].reduce((a, b) => a + b, 0),
+    totalHits: () => httpRequestMethods.reduce((total, methods) => total + methods.length, 0),
     httpRequestMethods: () => httpRequestMethods.map((methods) => [...methods]),
     close: loopback.close,
   };
