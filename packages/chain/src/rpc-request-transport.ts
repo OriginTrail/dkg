@@ -4,11 +4,15 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   FetchRequest,
   JsonRpcProvider,
+  makeError,
 } from 'ethers';
 import type {
   FetchCancelSignal,
   FetchGetUrlFunc,
   JsonRpcApiProviderOptions,
+  JsonRpcError,
+  JsonRpcPayload,
+  JsonRpcResult,
   Networkish,
 } from 'ethers';
 import { errorMessage } from './evm-adapter-errors.js';
@@ -308,6 +312,54 @@ async function admitAndObserveRpcAttempt(
   }
 }
 
+/**
+ * JSON-RPC provider that dispatches each payload in its ISSUER's request
+ * context.
+ *
+ * `JsonRpcApiProvider.send` only enqueues; the physical `_send` runs from one
+ * shared drain timer created by whichever caller enqueued first. Every payload
+ * that lands in that window therefore reaches `getUrlFunc` — where admission
+ * priority and cancellation are resolved from {@link rpcRequestContext} — under
+ * a FOREIGN caller's context. Cancelling that caller (a read deadline, or
+ * shared physical work abandoned by its last waiter) then aborts an unrelated
+ * caller's live HTTP attempt; the failover classifier reads the resulting
+ * `AbortError` as a transport fault and reports `RPC_ENDPOINTS_EXHAUSTED`
+ * carrying the foreign cancellation's message.
+ *
+ * These transports already disable coalescing (`batchMaxCount: 1`), so the
+ * drain contributes no batching — only the shared context and a scheduling
+ * turn. Dispatching inline keeps one payload per HTTP request exactly as
+ * before while binding admission, accounting, and cancellation to the caller
+ * that actually issued the request.
+ */
+class RequestContextJsonRpcProvider extends JsonRpcProvider {
+  #nextRequestId = 1;
+
+  override send(method: string, params: Array<unknown> | Record<string, unknown>): Promise<unknown> {
+    // A destroyed provider keeps ethers' own typed rejection.
+    if (this.destroyed) return super.send(method, params);
+    return this.#dispatch({
+      id: this.#nextRequestId++,
+      jsonrpc: '2.0',
+      method,
+      params,
+    });
+  }
+
+  async #dispatch(payload: JsonRpcPayload): Promise<unknown> {
+    const responses: ReadonlyArray<JsonRpcResult | JsonRpcError> = await this._send(payload);
+    const response = responses.find((entry) => entry.id === payload.id);
+    if (response === undefined) {
+      throw makeError('missing response for request', 'BAD_DATA', {
+        value: responses,
+        info: { payload },
+      });
+    }
+    if ('error' in response) throw this.getRpcError(payload, response);
+    return response.result;
+  }
+}
+
 /** The canonical provider factory for tracked adapters and untracked probes. */
 export function createRpcRequestProvider(
   url: string,
@@ -349,5 +401,10 @@ export function createRpcRequestProvider(
         ...normalizedProviderOptions,
         staticNetwork: config.network as JsonRpcApiProviderOptions['staticNetwork'],
       };
-  return new JsonRpcProvider(request, config.network, providerOptions);
+  // Inline dispatch is only equivalent where coalescing is already off. A
+  // transport that still batches keeps ethers' drain (and its shared context).
+  const Provider = (normalizedProviderOptions?.batchMaxCount === 1)
+    ? RequestContextJsonRpcProvider
+    : JsonRpcProvider;
+  return new Provider(request, config.network, providerOptions);
 }

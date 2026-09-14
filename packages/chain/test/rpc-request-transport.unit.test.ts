@@ -86,6 +86,50 @@ describe('RPC request transport', () => {
     expect(owned.signal?.aborted).toBe(true);
   });
 
+  it('keeps a concurrent caller alive when a request queued beside it is cancelled', async () => {
+    // Two callers issue a request in the SAME scheduling turn, so both payloads
+    // share one provider dispatch window. Cancelling the first must not reach
+    // the second: an abort landing on the peer's live HTTP attempt surfaces as
+    // a transport fault and is reported as exhaustion carrying the FOREIGN
+    // cancellation reason.
+    const rpc = await startLoopbackRpc({ hang: ['eth_chainId'] });
+    servers.push(rpc);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      providerOptions: { batchMaxCount: 1 },
+    });
+    const abandoned = new AbortController();
+    const peer = new AbortController();
+    const abandonment = Object.assign(
+      new Error('Shared request has no active waiters'),
+      { name: 'AbortError' },
+    );
+
+    const abandonedRead = withOwnedRpcRequestContext(
+      { signal: abandoned.signal },
+      () => provider.send('eth_chainId', []),
+    );
+    // Settle the abandoned read into a value so its rejection is owned from the
+    // start; it fails before the peer assertion below can attach a handler.
+    const abandonedOutcome = abandonedRead.then(() => undefined, (error: unknown) => error);
+    const peerRead = withOwnedRpcRequestContext(
+      { signal: peer.signal },
+      () => provider.send('eth_blockNumber', []),
+    );
+    abandoned.abort(abandonment);
+
+    try {
+      await expect(peerRead).resolves.toBe('0x10');
+      expect(rpc.aborted('eth_blockNumber')).toBe(0);
+      // The abandoning caller still loses its own physical request.
+      expect(await abandonedOutcome).toMatchObject({ name: 'AbortError' });
+    } finally {
+      if (!peer.signal.aborted) peer.abort(new Error('test teardown'));
+      await Promise.allSettled([abandonedOutcome, peerRead]);
+      provider.destroy();
+    }
+  });
+
   it('cancels the active ethers HTTP request when the caller aborts a chain read', async () => {
     const rpc = await startLoopbackRpc({ hang: ['eth_blockNumber'] });
     servers.push(rpc);
