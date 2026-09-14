@@ -135,17 +135,27 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // Declared captures include every accepted namespace. A document's
   // `eventList` is the positive discriminator for unmarked JSON-LD events;
-  // standard direct-RDF event roots remain compatible with older data. Keep
-  // this filter inside each GRAPH block so the event-list lookup uses the
-  // same named graph as the event row.
+  // finalized standard direct-RDF event roots are identified by publication
+  // metadata. Keep this filter inside each GRAPH block so the event-list
+  // lookup uses the same named graph as the event row.
+  let noFilterEventPattern: string | undefined;
+  let privateNoFilterEventPattern: string | undefined;
   if (!eventTypeIri) {
     const standardTypes = EPCIS_NAMESPACES
       .flatMap((prefix) => EPCIS_STANDARD_EVENT_TYPES.map((type) => sparqlIri(`${prefix}${type}`)))
       .join(', ');
-    sharedRequiredPatterns.push(`FILTER(BOUND(?_declaredEventType)
+    noFilterEventPattern = `FILTER(BOUND(?_declaredEventType)
       || EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event }
       || (?eventType IN (${standardTypes})
-        && EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }))`);
+        && EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }))`;
+    privateNoFilterEventPattern = partition === 'swm'
+      ? `FILTER(BOUND(?_declaredEventType)
+        || EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event }
+        || (?eventType IN (${standardTypes})
+          && (EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }
+            || EXISTS { VALUES ?_privateEventEvidencePred { epcis:eventTime epcisCurrent:eventTime }
+              ?event ?_privateEventEvidencePred ?_privateEventEvidence . })))`
+      : noFilterEventPattern;
   }
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
@@ -291,10 +301,18 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   if (!Number.isSafeInteger(offset) || offset > 10_000) {
     throw new EpcisQueryInputError('offset must be a safe integer no greater than 10000');
   }
-  const graphBody = [
+  const graphBody = (eventPattern: string | undefined) => [
     ...sharedRequiredPatterns,
+    ...(eventPattern ? [eventPattern] : []),
     ...optionalClauses,
   ].join('\n      ');
+  const publicGraphBody = graphBody(noFilterEventPattern);
+  // Private SWM payloads are readable before finalization and can contain
+  // legacy standard event roots without a finalized publication metadata
+  // record. The private anchor on the public graph already gates this branch;
+  // require an EPCIS event-time predicate as the additional positive shape
+  // evidence so document and vocabulary resources remain excluded.
+  const privateGraphBody = graphBody(privateNoFilterEventPattern);
 
   // sparql-scan-allow: R3 -- Exact CG graphs, LIMIT <=1000 and checked OFFSET <=10000 bound each request.
   return `${PREFIXES}
@@ -307,7 +325,7 @@ WHERE {
   {
     GRAPH <${publicGraph}> {
       ?event a ?eventType .
-      ${graphBody}
+      ${publicGraphBody}
     }
   }
   union
@@ -317,7 +335,7 @@ WHERE {
     }
     GRAPH <${privateGraph}> {
       ?event a ?eventType .
-      ${graphBody}
+      ${privateGraphBody}
     }
   }
   ${filterClauses.join('\n  ')}
