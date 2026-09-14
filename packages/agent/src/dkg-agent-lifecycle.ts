@@ -531,7 +531,7 @@ import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResu
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
 import { buildManualCclFacts, resolveFactsFromSnapshot, type CclFactResolutionMode } from './ccl-fact-resolution.js';
 import {
-  strip, stripLiteral, jsonLdToQuads,
+  stripLiteral, jsonLdToQuads,
   type JsonLdContent,
 } from './dkg-agent-utils.js';
 import {
@@ -619,7 +619,6 @@ import {
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
-  type ContextGraphMembershipStore,
   type DurableSyncDiagnostics,
   type SharedMemorySyncDiagnostics,
   type CatchupSyncDiagnostics,
@@ -679,6 +678,8 @@ import type { Rfc64SwmRecoveryTargetLeaseV1 } from
   './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
+import type { LocalContextGraphProvenanceMembershipSnapshot } from
+  './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
@@ -2340,7 +2341,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     await this.loadSwmSenderKeyState();
     await this.initializeSwmHostModeStore();
-    await this.rehydrateContextGraphSubscriptions();
+    await this.rehydrateContextGraphsFromDurableState();
 
     this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
 
@@ -10000,77 +10001,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
-  /**
-   * Restore local-create origin independently from subscription activation.
-   *
-   * Membership rows are the primary restart hint. Older/custom membership
-   * stores may not implement loadAll, so the creator RDF fact is also read as
-   * a compatibility fallback. The fallback is accepted only when the creator
-   * is this node's persistent peer identity, the subject is a Context Graph,
-   * and the explicit unregistered marker lives in that graph's exact _meta
-   * graph.
-   */
-  async rehydrateLocalContextGraphProvenance(this: DKGAgent): Promise<Array<
-    ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
-  > | null> {
+  /** Bootstrap durable Context Graph projections in explicit ownership order. */
+  async rehydrateContextGraphsFromDurableState(this: DKGAgent): Promise<void> {
     const ctx = createOperationContext('init');
-    const membershipStore = this.config.contextGraphMembershipStore;
-    let membershipRows: Array<
-      ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
-    > | null = null;
-    if (membershipStore?.loadAll) {
-      try {
-        membershipRows = await membershipStore.loadAll();
-        this.localContextGraphProvenance.restoreMembershipRecords(membershipRows);
-      } catch (error) {
-        this.log.warn(
-          ctx,
-          `Failed to load local-create membership provenance: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    }
-
-    const contextGraphPrefix = 'did:dkg:context-graph:';
-    const selfCreatorDid = assertSafeIri(`did:dkg:agent:${this.peerId}`);
-    try {
-      const result = await this.store.query(`
-        SELECT DISTINCT ?contextGraph ?registrationGraph ?status WHERE {
-          GRAPH ?definitionGraph {
-            ?contextGraph <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> ;
-              <${DKG_ONTOLOGY.DKG_CREATOR}> <${selfCreatorDid}> .
-          }
-          GRAPH ?registrationGraph {
-            ?contextGraph <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status .
-          }
-        }
-      `, { source: 'agent.contextGraph.localCreateProvenance' });
-      if (result.type === 'bindings') {
-        for (const row of result.bindings) {
-          const contextGraphUri = strip(row['contextGraph'] ?? '');
-          if (!contextGraphUri.startsWith(contextGraphPrefix)) continue;
-          const contextGraphId = contextGraphUri.slice(contextGraphPrefix.length);
-          if (!contextGraphId) continue;
-          if (strip(row['registrationGraph'] ?? '') !== contextGraphMetaGraphUri(contextGraphId)) {
-            continue;
-          }
-          if (stripLiteral(row['status'] ?? '') !== 'unregistered') continue;
-          this.localContextGraphProvenance.recordLocalCreate(contextGraphId);
-        }
-      }
-    } catch (error) {
-      // A readable membership projection remains sufficient. Conversely, an
-      // RDF read remains sufficient when loadAll is unavailable. If both are
-      // unavailable, policy resolution keeps failing closed through chain.
-      this.log.warn(
-        ctx,
-        `Failed to restore RDF local-create provenance: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    return membershipRows;
+    const membershipRows = await this.localContextGraphProvenance.restoreFromDurableSources({
+      membershipStore: this.config.contextGraphMembershipStore,
+      store: this.store,
+      peerId: this.peerId,
+      warn: (message) => this.log.warn(ctx, message),
+    });
+    await this.rehydrateContextGraphSubscriptions(membershipRows);
   }
 
-  async rehydrateContextGraphSubscriptions(this: DKGAgent): Promise<void> {
-    const persistedMembershipRows = await this.rehydrateLocalContextGraphProvenance();
+  async rehydrateContextGraphSubscriptions(
+    this: DKGAgent,
+    persistedMembershipRows: LocalContextGraphProvenanceMembershipSnapshot | null,
+  ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) return;
     const ctx = createOperationContext('init');

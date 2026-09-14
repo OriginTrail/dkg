@@ -88,6 +88,27 @@ describe('Context Graph registration resolution deadlines', () => {
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
+  it('rejects local-first proof when a numeric chain binding exists', async () => {
+    const fixture = selectedFixture();
+    fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);
+    fixture.subscription.onChainId = '42';
+    fixture.query.mockResolvedValue({
+      type: 'bindings',
+      bindings: [{ status: '"unregistered"' }],
+    });
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toMatchObject({
+        kind: 'registered',
+        onChainId: 42n,
+      });
+
+    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+    expect(fixture.query.mock.calls.some(([, options]) =>
+      options?.source === 'agent.contextGraph.registrationStatus'
+    )).toBe(false);
+  });
+
   it('does not infer unregistered when the durable local marker is missing', async () => {
     const fixture = selectedFixture();
     fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);

@@ -616,7 +616,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
     const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
 
-    await agent.rehydrateContextGraphSubscriptions();
+    await agent.rehydrateContextGraphSubscriptions(null);
 
     expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
       allowSubscriptionFallback: false,
@@ -897,7 +897,9 @@ describe('private read authorization uses the on-chain participant roster', () =
     const resume = vi.spyOn(agent, 'resumePendingJoinApprovalMetadata')
       .mockResolvedValue(undefined);
 
-    await agent.rehydrateContextGraphSubscriptions();
+    await agent.rehydrateContextGraphSubscriptions(
+      await (agent as any).config.contextGraphMembershipStore.loadAll(),
+    );
 
     expect(subscribe).not.toHaveBeenCalled();
     expect(resume).toHaveBeenCalledWith(contextGraphId, curatorPeerId);
@@ -967,7 +969,9 @@ describe('private read authorization uses the on-chain participant roster', () =
     const resume = vi.spyOn(agent, 'resumePendingJoinApprovalMetadata')
       .mockResolvedValue(undefined);
 
-    await agent.rehydrateContextGraphSubscriptions();
+    await agent.rehydrateContextGraphSubscriptions(
+      await (agent as any).config.contextGraphMembershipStore.loadAll(),
+    );
 
     expect(subscribe).not.toHaveBeenCalled();
     expect(resume).not.toHaveBeenCalled();
