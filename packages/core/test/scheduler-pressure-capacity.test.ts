@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SchedulerPressureTracker } from '../src/backpressure-observability.js';
+import {
+  projectLegacyBackpressureCapacity,
+  SchedulerPressureTracker,
+  type SchedulerPressureCapacitySnapshot,
+} from '../src/backpressure-observability.js';
 import {
   capturePressureCapacity,
   reconcilePressureCapacity,
@@ -7,6 +11,21 @@ import {
 } from '../src/scheduler-pressure-capacity.js';
 
 describe('scheduler pressure capacity ownership', () => {
+  it('projects the canonical capacity union only at the legacy boundary', () => {
+    const uniform: SchedulerPressureCapacitySnapshot = {
+      kind: 'uniform', model: 'partitioned', queueLimit: 4, inflightLimit: 2,
+    };
+    const mixed: SchedulerPressureCapacitySnapshot = {
+      kind: 'mixed', model: 'mixed', queueLimit: null, inflightLimit: null,
+    };
+    expect(projectLegacyBackpressureCapacity(uniform)).toEqual({
+      capacityState: 'uniform', capacityModel: 'partitioned', queueLimit: 4, inflightLimit: 2,
+    });
+    expect(projectLegacyBackpressureCapacity(mixed)).toEqual({
+      capacityState: 'mixed', capacityModel: 'shared', queueLimit: null, inflightLimit: null,
+    });
+  });
+
   it('owns dynamic capacity through ticket lifecycle and semantic equality', () => {
     const tracker = new SchedulerPressureTracker({
       scheduler: 'dynamic-capacity',

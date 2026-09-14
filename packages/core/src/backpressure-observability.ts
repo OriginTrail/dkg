@@ -18,13 +18,41 @@ export type {
   SchedulerPressureCapacityState,
 } from './scheduler-pressure-capacity.js';
 
+/** Canonical capacity state: every discriminant admits exactly one valid limit shape. */
+export type SchedulerPressureCapacitySnapshot =
+  | Readonly<{
+    kind: 'uniform';
+    model: SchedulerLaneCapacityModel;
+    queueLimit: number | null;
+    inflightLimit: number | null;
+  }>
+  | Readonly<{
+    kind: 'mixed';
+    model: 'mixed';
+    queueLimit: null;
+    inflightLimit: null;
+  }>;
+
+interface LegacySnapshotCapacityProjection {
+  capacityState: SchedulerPressureCapacityState;
+  capacityModel: SchedulerLaneCapacityModel;
+  queueLimit: number | null;
+  inflightLimit: number | null;
+}
+
 /**
- * Compatibility projection only: existing snapshots expose two model labels.
- * Mixed owners retain the historical shared label with unknown ceilings; all
- * internal capacity/pressure decisions use the explicit mixed state instead.
+ * The only boundary that converts the honest canonical union into the
+ * historical two-label snapshot/API representation.
  */
-function legacySnapshotCapacityModel(model: SchedulerLaneCapacityModel | 'mixed'): SchedulerLaneCapacityModel {
-  return model === 'mixed' ? 'shared' : model;
+export function projectLegacyBackpressureCapacity(
+  capacity: SchedulerPressureCapacitySnapshot,
+): LegacySnapshotCapacityProjection {
+  return {
+    capacityState: capacity.kind,
+    capacityModel: capacity.kind === 'mixed' ? 'shared' : capacity.model,
+    queueLimit: capacity.queueLimit,
+    inflightLimit: capacity.inflightLimit,
+  };
 }
 
 export type BackpressureState = 'healthy' | 'degraded' | 'saturated' | 'stalled';
@@ -176,6 +204,11 @@ interface LaneRuntime {
 
 /** A depth and the ceiling a lane's state is classified against. */
 interface DepthPressure { queued: number; limit: number }
+
+type LanePressureCapacity = SchedulerPressureCapacitySnapshot & Readonly<{
+  pressureQueued: number;
+  depthPressures: readonly DepthPressure[];
+}>;
 
 /** What a snapshot classifies lanes against: one live policy, or each owner's own backlog. */
 type LaneClassificationCapacity =
@@ -366,13 +399,21 @@ export class SchedulerPressureTracker {
     const snapshots = [...laneNames]
       .sort()
       .map((lane) => this.laneSnapshot(lane, now, capacity));
+    const schedulerCapacity: SchedulerPressureCapacitySnapshot = capacity.kind === 'mixed'
+      ? { kind: 'mixed', model: 'mixed', queueLimit: null, inflightLimit: null }
+      : {
+        kind: 'uniform',
+        model: capacity.capacity.capacityModel ?? 'partitioned',
+        queueLimit: normalizeLimit(capacity.capacity.queueLimit)
+          ?? this.sumLaneLimits('queueLimit', snapshots),
+        inflightLimit: normalizeLimit(capacity.capacity.inflightLimit)
+          ?? this.sumLaneLimits('inflightLimit', snapshots),
+      };
     const totals = {
       queued: snapshots.reduce((sum, lane) => sum + lane.queued, 0),
-      queueLimit: capacity.kind === 'mixed' ? null : normalizeLimit(capacity.capacity.queueLimit)
-        ?? this.sumLaneLimits('queueLimit', snapshots),
+      queueLimit: schedulerCapacity.queueLimit,
       inflight: snapshots.reduce((sum, lane) => sum + lane.inflight, 0),
-      inflightLimit: capacity.kind === 'mixed' ? null : normalizeLimit(capacity.capacity.inflightLimit)
-        ?? this.sumLaneLimits('inflightLimit', snapshots),
+      inflightLimit: schedulerCapacity.inflightLimit,
       oldestQueuedAgeMs: Math.max(0, ...snapshots.map((lane) => lane.oldestQueuedAgeMs)),
       oldestActiveAgeMs: Math.max(0, ...snapshots.map((lane) => lane.oldestActiveAgeMs)),
       rejectedTotal: snapshots.reduce((sum, lane) => sum + lane.rejectedTotal, 0),
@@ -400,12 +441,12 @@ export class SchedulerPressureTracker {
     if (totals.oldestActiveAgeMs >= this.thresholds.stalledActiveAgeMs) {
       state = maxState(state, 'stalled');
     }
+    const legacyCapacity = projectLegacyBackpressureCapacity(schedulerCapacity);
     return {
       scheduler: this.scheduler,
       state,
-      capacityState: capacity.kind,
-      capacityModel: legacySnapshotCapacityModel(capacity.kind === 'mixed'
-        ? 'mixed' : capacity.capacity.capacityModel ?? 'partitioned'),
+      capacityState: legacyCapacity.capacityState,
+      capacityModel: legacyCapacity.capacityModel,
       totals,
       lanes: snapshots,
     };
@@ -457,33 +498,11 @@ export class SchedulerPressureTracker {
     lane: string,
     laneQueued: number,
     resolved: LaneClassificationCapacity,
-  ): {
-    /** Reported ceilings, whether or not depth classification applies. */
-    capacityState: SchedulerPressureCapacityState;
-    capacityModel: SchedulerLaneCapacityModel;
-    queueLimit: number | null;
-    inflightLimit: number | null;
-    /**
-     * Exactly the depth the classifier measured against `queueLimit`, so
-     * `pressureQueued / queueLimit` is always the utilization behind this
-     * lane's own state. A lane no single depth applies to reports its own
-     * backlog rather than a pool it is not being held back by — publishing the
-     * pool there would read as full utilization on a lane waiting for nothing.
-     */
-    pressureQueued: number;
-    /**
-     * Every depth/ceiling pair the lane's state is classified against — at
-     * most one under a uniform policy, one per mixed owner with work waiting
-     * here — and empty when no depth applies at all: an unbounded queue, or an
-     * empty backlog. Carrying the pairs together is what keeps "does depth
-     * apply" from being inferred from a nullable ceiling.
-     */
-    depthPressures: readonly DepthPressure[];
-  } {
+  ): LanePressureCapacity {
     if (resolved.kind === 'mixed') {
       return {
-        capacityState: 'mixed',
-        capacityModel: 'shared',
+        kind: 'mixed',
+        model: 'mixed',
         queueLimit: null,
         inflightLimit: null,
         pressureQueued: laneQueued,
@@ -510,8 +529,8 @@ export class SchedulerPressureTracker {
       ? { queued: shared ? this.queued.size : laneQueued, limit: queueLimit }
       : null;
     return {
-      capacityState: 'uniform',
-      capacityModel: shared ? 'shared' : 'partitioned',
+      kind: 'uniform',
+      model: shared ? 'shared' : 'partitioned',
       queueLimit,
       inflightLimit: shared
         ? normalizeLimit(capacity.inflightLimit)
@@ -555,20 +574,16 @@ export class SchedulerPressureTracker {
     const runtime = this.runtimeFor(lane);
     const queued = [...this.queued.values()].filter((entry) => entry.lane === lane);
     const active = [...this.active.values()].filter((entry) => entry.lane === lane);
+    const laneCapacity = this.laneCapacityFor(lane, queued.length, capacity);
     const {
-      capacityState,
-      capacityModel,
-      queueLimit,
-      inflightLimit,
-      pressureQueued,
-      depthPressures,
-    } = this.laneCapacityFor(lane, queued.length, capacity);
+      queueLimit, inflightLimit, pressureQueued, depthPressures,
+    } = laneCapacity;
     // The concurrency ceiling on a shared row is the pool's, so the count
     // beside it must be too. The classifier reads neither — this pair is
     // reported, not judged — but a row that pairs a lane-local count with a
     // pool ceiling tells an operator the pool is idle while it is the reason
     // nothing drains.
-    const pressureInflight = capacityState === 'uniform' && capacityModel === 'shared'
+    const pressureInflight = laneCapacity.kind === 'uniform' && laneCapacity.model === 'shared'
       ? this.active.size
       : active.length;
     const oldestQueuedAgeMs = queued.length === 0
@@ -603,12 +618,14 @@ export class SchedulerPressureTracker {
     } else if (queueAgeDegraded || depthDegraded) {
       state = 'degraded';
     }
+    const legacyCapacity = projectLegacyBackpressureCapacity(laneCapacity);
     return {
       lane,
       state,
-      ...(capacityModel !== 'partitioned' || capacityState === 'mixed' ? { stateReasons } : {}),
-      capacityState,
-      capacityModel,
+      ...(legacyCapacity.capacityModel !== 'partitioned' || legacyCapacity.capacityState === 'mixed'
+        ? { stateReasons } : {}),
+      capacityState: legacyCapacity.capacityState,
+      capacityModel: legacyCapacity.capacityModel,
       queued: queued.length,
       pressureQueued,
       queueLimit,
