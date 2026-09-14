@@ -32,6 +32,7 @@ import {
   iriComponentV1,
   parseCanonicalAuthorCatalogRowV1,
   parseCanonicalAuthorCatalogScopeV1,
+  parseCatalogAssertionScopeV1,
   snapshotAuthorLaneScopeV1,
   type AssertionCoordinateV1,
   type AuthorCatalogRowV1,
@@ -66,6 +67,51 @@ const VALID_SCOPE = validatedScope(JSON.parse(SCOPE_CANONICAL));
 const VALID_ROW = validatedRow(JSON.parse(ROW_CANONICAL));
 
 describe('RFC-64 author catalog identifiers and graph names', () => {
+  it.each([
+    { contextGraphId: 'plain', subGraphName: null },
+    { contextGraphId: 'team/repo', subGraphName: null },
+    { contextGraphId: 'team/repo', subGraphName: 'café' },
+    { contextGraphId: 'tenant/_meta', subGraphName: 'reports%FF' },
+    { contextGraphId: 'a'.repeat(256), subGraphName: 'b'.repeat(256) },
+  ])('round-trips an exact catalog assertion scope for $contextGraphId / $subGraphName', (value) => {
+    const lane = validatedLane(value);
+    const scope = buildCatalogAssertionScopeV1(lane);
+    const parsed = parseCatalogAssertionScopeV1(scope);
+    expect(parsed).toEqual(lane);
+    expect(Object.keys(parsed)).toEqual(['contextGraphId', 'subGraphName']);
+    expect(Object.isFrozen(parsed)).toBe(true);
+    expect(buildCatalogAssertionScopeV1(parsed)).toBe(scope);
+  });
+
+  it.each([
+    undefined,
+    {},
+    '',
+    'v2/root/plain',
+    'v1/unknown/plain',
+    'v1/root',
+    'v1/root/',
+    'v1/root/plain/',
+    'v1/root/plain/extra',
+    'v1/subgraph/plain',
+    'v1/subgraph/plain/',
+    'v1/subgraph/plain/reports/extra',
+    'v1/root/team%2frepo',
+    'v1/root/%70lain',
+    'v1/root/%FF',
+    'v1/root/private%ZZ',
+    'v1/root/caf%C3%A9',
+    'v1/subgraph/plain/café',
+    'v1/subgraph/plain/caf%c3%a9',
+    'v1/subgraph/plain/cafe%CC%81',
+    'v1/subgraph/plain/reports%FF',
+    'v1/subgraph/plain/reports%2Fdaily',
+    'v1/subgraph/plain/_meta',
+    `v1/root/${'a'.repeat(257)}`,
+  ])('rejects malformed or noncanonical complete assertion scope %s', (scope) => {
+    expect(() => parseCatalogAssertionScopeV1(scope)).toThrow(AuthorCatalogCodecError);
+  });
+
   it('pins the prefix-free root/subgraph names and exact UTF-8 IRI encoding', () => {
     const rootLane = validatedLane({ contextGraphId: 'a/b', subGraphName: null });
     const subgraphLane = validatedLane({ contextGraphId: 'a', subGraphName: 'b' });

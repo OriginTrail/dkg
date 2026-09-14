@@ -22,7 +22,7 @@ import {
   type CatalogLaneV1,
 } from '../src/author-catalog-codec.js';
 import {
-  parseContextGraphStorageUri,
+  contextGraphStorageOwnerCandidates,
   parseContextGraphUri,
 } from '../src/context-graph-storage-uri.js';
 
@@ -72,116 +72,122 @@ describe('parseContextGraphUri', () => {
   });
 });
 
-describe('parseContextGraphStorageUri', () => {
+describe('contextGraphStorageOwnerCandidates', () => {
   it.each(ROOTS)('retains root %s through every supported storage constructor', (id) => {
     for (const [label, build] of STORAGE_BUILDERS) {
       const uri = build(id);
-      const parsed = parseContextGraphStorageUri(uri);
-      expect(parsed?.ownerContextGraphIds, `${label}: ${uri}`).toContain(id);
-      expect(parsed?.ownerContextGraphIds.every((owner) => validateContextGraphId(owner).valid)).toBe(true);
+      const owners = contextGraphStorageOwnerCandidates(uri);
+      expect(owners, `${label}: ${uri}`).toContain(id);
+      expect(owners?.every((owner) => validateContextGraphId(owner).valid)).toBe(true);
     }
   });
 
   it('retains a reserved-suffix legacy root without requiring metadata facts', () => {
     expect(validateContextGraphId('tenant/_meta').valid).toBe(true);
     expect(validateNewContextGraphId('tenant/_meta').valid).toBe(false);
-    const parsed = parseContextGraphStorageUri(contextGraphDataUri('tenant/_meta'));
-    expect(parsed?.ownerContextGraphIds).toEqual(expect.arrayContaining(['tenant/_meta', 'tenant']));
-    expect(parsed?.shapes).toEqual(expect.arrayContaining([
-      { kind: 'bare', scope: 'tenant/_meta' },
-      { kind: 'partition', scope: 'tenant', partition: '_meta' },
-    ]));
+    expect(contextGraphStorageOwnerCandidates(contextGraphDataUri('tenant/_meta')))
+      .toEqual(expect.arrayContaining(['tenant/_meta', 'tenant']));
   });
 
   it('examines every adjacent reserved segment, including ones inside a legacy root', () => {
-    const uri = contextGraphMetaUri('tenant/_old/_private');
-    const parsed = parseContextGraphStorageUri(uri);
-    expect(parsed?.ownerContextGraphIds).toEqual(expect.arrayContaining([
-      'tenant/_old/_private/_meta',
-      'tenant/_old/_private',
-      'tenant/_old',
-      'tenant',
-    ]));
-    expect(parsed?.shapes.filter((shape) => shape.kind === 'partition')).toEqual([
-      { kind: 'partition', scope: 'tenant', partition: '_old' },
-      { kind: 'partition', scope: 'tenant/_old', partition: '_private' },
-      { kind: 'partition', scope: 'tenant/_old/_private', partition: '_meta' },
-    ]);
+    expect(contextGraphStorageOwnerCandidates(contextGraphMetaUri('tenant/_old/_private')))
+      .toEqual(expect.arrayContaining([
+        'tenant/_old/_private/_meta', 'tenant/_old/_private', 'tenant/_old', 'tenant',
+      ]));
   });
 
   it('retains all root, named-subgraph and metadata interpretations of public/tasks/_meta', () => {
-    const parsed = parseContextGraphStorageUri(contextGraphSubGraphMetaUri('public', 'tasks'));
-    expect(parsed?.ownerContextGraphIds).toEqual(expect.arrayContaining([
-      'public/tasks/_meta', 'public/tasks', 'public',
-    ]));
+    expect(contextGraphStorageOwnerCandidates(contextGraphSubGraphMetaUri('public', 'tasks')))
+      .toEqual(expect.arrayContaining(['public/tasks/_meta', 'public/tasks', 'public']));
   });
 
   it('retains both a slash root and its legal wallet parent for memory partitions', () => {
-    const parsed = parseContextGraphStorageUri(contextGraphLayerUri(`${AUTHOR}/project`, MemoryLayer.VerifiableMemory, AUTHOR, 1));
-    expect(parsed?.ownerContextGraphIds).toEqual(expect.arrayContaining([`${AUTHOR}/project`, AUTHOR]));
+    const uri = contextGraphLayerUri(`${AUTHOR}/project`, MemoryLayer.VerifiableMemory, AUTHOR, 1);
+    expect(contextGraphStorageOwnerCandidates(uri))
+      .toEqual(expect.arrayContaining([`${AUTHOR}/project`, AUTHOR]));
   });
 
   it('preserves the exact context scope and a colliding bare root', () => {
-    const parsed = parseContextGraphStorageUri(contextGraphDataUri('team/repo', '7'));
-    expect(parsed?.ownerContextGraphIds).toEqual(expect.arrayContaining(['team/repo', 'team/repo/context/7']));
-    expect(parsed?.shapes).toContainEqual({ kind: 'context', scope: 'team/repo', contextId: '7' });
+    expect(contextGraphStorageOwnerCandidates(contextGraphDataUri('team/repo', '7')))
+      .toEqual(expect.arrayContaining(['team/repo', 'team/repo/context/7']));
   });
 
   it('uses the rightmost context delimiter when the legacy root itself contains context', () => {
-    const parsed = parseContextGraphStorageUri(contextGraphMetaUri('team/context/old', '7'));
-    expect(parsed?.shapes).toContainEqual({ kind: 'context', scope: 'team/context/old', contextId: '7' });
+    expect(contextGraphStorageOwnerCandidates(contextGraphMetaUri('team/context/old', '7')))
+      .toContain('team/context/old');
   });
 
   it('reuses the unsplit legacy assertion coordinate and its optional named parent', () => {
-    const parsed = parseContextGraphStorageUri(contextGraphAssertionUri('team/repo', AUTHOR, 'fact', 'reports'));
-    expect(parsed?.shapes).toContainEqual({ kind: 'assertion', scope: 'team/repo/reports' });
-    expect(parsed?.ownerContextGraphIds).toEqual(expect.arrayContaining(['team/repo/reports', 'team/repo']));
+    const uri = contextGraphAssertionUri('team/repo', AUTHOR, 'fact', 'reports');
+    expect(contextGraphStorageOwnerCandidates(uri))
+      .toEqual(expect.arrayContaining(['team/repo/reports', 'team/repo']));
   });
 
-  it.each([null, 'reports'])('decodes the exact RFC-64 owner for subgraph %s and retains legal raw interpretations', (subGraphName) => {
+  it.each([null, 'café'])('decodes the exact RFC-64 owner for subgraph %s through storage constructors', (subGraphName) => {
     const id = 'team/repo/private';
     const scope = buildCatalogAssertionScopeV1({ contextGraphId: id, subGraphName } as CatalogLaneV1);
-    const parsed = parseContextGraphStorageUri(contextGraphLayerUri(scope, MemoryLayer.SharedWorkingMemory, AUTHOR, 1));
-    expect(parsed?.ownerContextGraphIds).toContain(id);
-    expect(parsed?.shapes).toContainEqual({
-      kind: 'encoded',
-      contextGraphId: id,
-      ...(subGraphName === null ? {} : { subGraphName }),
-    });
+    for (const [label, build] of STORAGE_BUILDERS) {
+      const uri = build(scope);
+      expect(contextGraphStorageOwnerCandidates(uri), `${label}: ${uri}`).toContain(id);
+    }
     if (subGraphName === null) {
       // '%' is valid in a flat subgraph name even though it is forbidden in CG IDs.
-      expect(parsed?.ownerContextGraphIds).toContain('v1/root');
+      expect(contextGraphStorageOwnerCandidates(contextGraphSharedMemoryUri(scope))).toContain('v1/root');
     }
   });
 
   it('retains raw legacy v1/root/private alongside the decoded owner private', () => {
-    const parsed = parseContextGraphStorageUri(contextGraphLayerUri('v1/root/private', MemoryLayer.SharedWorkingMemory, AUTHOR, 1));
-    expect(parsed?.ownerContextGraphIds).toEqual(expect.arrayContaining(['private', 'v1/root/private', 'v1/root']));
+    expect(contextGraphStorageOwnerCandidates(contextGraphSharedMemoryUri('v1/root/private')))
+      .toEqual(expect.arrayContaining(['private', 'v1/root/private', 'v1/root']));
+  });
+
+  it('retains a valid catalog owner without applying the distinct raw legacy grammar', () => {
+    const id = 'team/../repo';
+    const scope = buildCatalogAssertionScopeV1({ contextGraphId: id, subGraphName: null } as CatalogLaneV1);
+    expect(validateContextGraphId(id).valid).toBe(false);
+    expect(contextGraphStorageOwnerCandidates(contextGraphSharedMemoryUri(scope))).toContain(id);
   });
 
   it.each([
+    contextGraphSubGraphUri('v1/root', 'reports%FF'),
+    contextGraphSubGraphMetaUri('v1/root', 'reports%FF'),
+    contextGraphSharedMemoryUri('v1/root', 'reports%FF'),
+    contextGraphLayerUri('v1/root', MemoryLayer.VerifiableMemory, AUTHOR, 1, 'reports%FF'),
     `${PREFIX}v1/root/private%ZZ/_meta`,
-    `${PREFIX}v1/subgraph/private/reports%ZZ/_shared_memory`,
     `${PREFIX}v1/root/%FF/_shared_memory`,
-  ])('fails closed for malformed encoded owner scope %s', (uri) => {
-    expect(() => parseContextGraphStorageUri(uri)).toThrow();
+  ])('retains valid legacy ownership when a tagged interpretation is malformed: %s', (uri) => {
+    expect(contextGraphStorageOwnerCandidates(uri)).toContain('v1/root');
+  });
+
+  it('does not decode a noncanonical catalog component', () => {
+    const owners = contextGraphStorageOwnerCandidates(`${PREFIX}v1/root/team%2frepo/_shared_memory`);
+    expect(owners).toContain('v1/root');
+    expect(owners).not.toContain('team/repo');
+  });
+
+  it('does not decode an arbitrary tagged prefix of an incomplete scope', () => {
+    const owners = contextGraphStorageOwnerCandidates(`${PREFIX}v1/root/private/extra/tail/_shared_memory`);
+    expect(owners).toContain('v1/root/private/extra/tail');
+    expect(owners).not.toContain('private');
+  });
+
+  it('reports no interpretation when malformed tagged components leave no valid legacy owner', () => {
+    expect(contextGraphStorageOwnerCandidates(`${PREFIX}v1/subgraph/team%2Frepo/reports%FF/_shared_memory`))
+      .toBeUndefined();
   });
 
   it('validates a legal parent independently when adding a subgraph exceeds the CG length limit', () => {
     const root = 'a'.repeat(256);
-    const parsed = parseContextGraphStorageUri(contextGraphSubGraphUri(root, 'reports'));
-    expect(parsed?.ownerContextGraphIds).toEqual([root]);
+    expect(contextGraphStorageOwnerCandidates(contextGraphSubGraphUri(root, 'reports'))).toEqual([root]);
   });
 
   it('returns immutable, deduplicated owners', () => {
-    const parsed = parseContextGraphStorageUri(contextGraphMetaUri('tenant'))!;
-    expect(new Set(parsed.ownerContextGraphIds).size).toBe(parsed.ownerContextGraphIds.length);
-    expect(Object.isFrozen(parsed)).toBe(true);
-    expect(Object.isFrozen(parsed.shapes)).toBe(true);
-    expect(Object.isFrozen(parsed.ownerContextGraphIds)).toBe(true);
+    const owners = contextGraphStorageOwnerCandidates(contextGraphMetaUri('tenant'))!;
+    expect(new Set(owners).size).toBe(owners.length);
+    expect(Object.isFrozen(owners)).toBe(true);
   });
 
   it.each(['urn:other:graph', PREFIX, `<${PREFIX}tenant>`])('does not parse unsupported URI %s', (uri) => {
-    expect(parseContextGraphStorageUri(uri)).toBeUndefined();
+    expect(contextGraphStorageOwnerCandidates(uri)).toBeUndefined();
   });
 });

@@ -8,8 +8,13 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { listStoredContextGraphQueryCandidates } from './context-graph-query-candidates.js';
+import {
+  assertUnscopedQueryCandidateLimit,
+  listStoredContextGraphQueryCandidates,
+  UNSCOPED_QUERY_ADMISSION_TIMEOUT_MS,
+} from './context-graph-query-candidates.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import { runBoundedOperation } from './bounded-operation.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -613,6 +618,7 @@ export class QueryMethods extends DKGAgentBase {
     if (!opts.contextGraphId) {
       excludeGraphPrefixes = await this.getDisallowedGraphPrefixes({
         callerAgentAddress: callerAgentAddressStr,
+        signal: opts.signal,
       });
       // Per spec Axiom 1 every shared query must be resolved within a CG.
       // Reject explicit GRAPH/FROM clauses that reference private CGs the
@@ -863,52 +869,81 @@ export class QueryMethods extends DKGAgentBase {
    * Returns graph URI prefixes for CGs the caller cannot prove read access to.
    * Used to exclude them from unscoped queries.
    */
-  async getDisallowedGraphPrefixes(this: DKGAgent, opts: { callerAgentAddress?: string } = {}): Promise<string[]> {
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const result = await this.store.query(
-      `SELECT ?cg WHERE {
-        GRAPH <${ontologyGraph}> {
-          ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
+  async getDisallowedGraphPrefixes(
+    this: DKGAgent,
+    opts: { callerAgentAddress?: string; signal?: AbortSignal } = {},
+  ): Promise<string[]> {
+    return runBoundedOperation(async (boundarySignal) => {
+      // Cancel sibling checks on any failure as well as caller abort/deadline.
+      const stop = new AbortController();
+      const signal = AbortSignal.any([boundarySignal, stop.signal]);
+      try {
+        const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+        const result = await this.store.query(
+          `SELECT ?cg WHERE {
+            GRAPH <${ontologyGraph}> {
+              ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
+            }
+          }`,
+          { source: 'agent.query.privateGraphAccessPolicy', signal },
+        );
+        signal.throwIfAborted();
+        if (result.type !== 'bindings') {
+          throw new Error('Cannot authorize unscoped query: invalid access-policy discovery result');
         }
-      }`,
-      { source: 'agent.query.privateGraphAccessPolicy' },
-    );
-    if (result.type !== 'bindings') {
-      throw new Error('Cannot authorize unscoped query: invalid access-policy discovery result');
-    }
-    const candidateContextGraphIds = new Set<string>();
-    for (const row of result.bindings) {
-      const cgUri = row['cg'];
-      if (!cgUri) continue;
-      const id = parseContextGraphUri(strip(cgUri));
-      if (id !== undefined) candidateContextGraphIds.add(id);
-    }
-    for (const { policyEnvelope } of this.config?.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
-      if (policyEnvelope.payload.accessPolicy === 1) {
-        candidateContextGraphIds.add(policyEnvelope.payload.contextGraphId);
+        const candidateContextGraphIds = new Set<string>();
+        for (const row of result.bindings) {
+          const cgUri = row['cg'];
+          const id = cgUri ? parseContextGraphUri(strip(cgUri)) : undefined;
+          if (id === undefined) {
+            throw new Error('Cannot authorize unscoped query: unrecognized explicit private Context Graph');
+          }
+          candidateContextGraphIds.add(id);
+          assertUnscopedQueryCandidateLimit(candidateContextGraphIds.size);
+        }
+        for (const { policyEnvelope } of this.config?.rfc64CatalogBootstrap?.acceptedPolicies ?? []) {
+          if (policyEnvelope.payload.accessPolicy === 1) {
+            candidateContextGraphIds.add(policyEnvelope.payload.contextGraphId);
+            assertUnscopedQueryCandidateLimit(candidateContextGraphIds.size);
+          }
+        }
+        for (const contextGraphId of [
+          ...this.subscribedContextGraphs.keys(),
+          ...(this.config.syncContextGraphs ?? []),
+        ]) {
+          candidateContextGraphIds.add(contextGraphId);
+          assertUnscopedQueryCandidateLimit(candidateContextGraphIds.size);
+        }
+
+        for (const contextGraphId of await listStoredContextGraphQueryCandidates(this.store, { signal })) {
+          candidateContextGraphIds.add(contextGraphId);
+          assertUnscopedQueryCandidateLimit(candidateContextGraphIds.size);
+        }
+
+        // Use the same authority boundary as scoped queries for EVERY candidate.
+        // Registered-chain failures and pending metadata deny here even when no
+        // RFC-64 policy has been accepted. Public graphs and authorized members
+        // retain the existing resolver's precedence and access decisions.
+        const candidates = [...candidateContextGraphIds];
+        const readAdmissionConcurrency = 4;
+        const readable = await mapWithConcurrency(candidates, readAdmissionConcurrency, async (contextGraphId) => {
+          signal.throwIfAborted();
+          const allowed = await this.canReadContextGraph(contextGraphId, {
+            callerAgentAddress: opts.callerAgentAddress,
+            signal,
+          });
+          signal.throwIfAborted();
+          return allowed;
+        });
+        return candidates.flatMap((id, index) => readable[index] ? [] : [`did:dkg:context-graph:${id}`]);
+      } finally {
+        stop.abort();
       }
-    }
-    for (const contextGraphId of [
-      ...this.subscribedContextGraphs.keys(),
-      ...(this.config.syncContextGraphs ?? []),
-    ]) {
-      candidateContextGraphIds.add(contextGraphId);
-    }
-
-    for (const contextGraphId of await listStoredContextGraphQueryCandidates(this.store)) {
-      candidateContextGraphIds.add(contextGraphId);
-    }
-
-    // Use the same authority boundary as scoped queries for EVERY candidate.
-    // Registered-chain failures and pending metadata deny here even when no
-    // RFC-64 policy has been accepted. Public graphs and authorized members
-    // retain the existing resolver's precedence and access decisions.
-    const candidates = [...candidateContextGraphIds];
-    const readAdmissionConcurrency = 4;
-    const readable = await mapWithConcurrency(candidates, readAdmissionConcurrency, (contextGraphId) => (
-      this.canReadContextGraph(contextGraphId, { callerAgentAddress: opts.callerAgentAddress })
-    ));
-    return candidates.flatMap((id, index) => readable[index] ? [] : [`did:dkg:context-graph:${id}`]);
+    }, {
+      timeoutMs: UNSCOPED_QUERY_ADMISSION_TIMEOUT_MS,
+      label: 'Unscoped query admission; specify contextGraphId to limit the dataset',
+      signal: opts.signal,
+    });
   }
 
   sparqlReferencesPrivateGraphs(this: DKGAgent, sparql: string, disallowedPrefixes: string[]): boolean {

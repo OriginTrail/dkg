@@ -81,8 +81,35 @@ describe('stored context graph candidates for query admission', () => {
     await expect(listStoredContextGraphQueryCandidates(store)).rejects.toThrow('inventory unavailable');
   });
 
-  it('rejects malformed encoded graph names before granting unscoped access', async () => {
-    const { store } = indexedStore([`${PREFIX}v1/root/private%ZZ/_shared_memory`]);
-    await expect(listStoredContextGraphQueryCandidates(store)).rejects.toThrow();
+  it('retains legal legacy owners of undecodable tagged-looking names', async () => {
+    const { store } = indexedStore([`${PREFIX}v1/root/reports%FF/_shared_memory`]);
+    await expect(listStoredContextGraphQueryCandidates(store)).resolves.toContain('v1/root');
+  });
+
+  it('rejects a stored CG IRI without any legal owner interpretation', async () => {
+    const { store } = indexedStore([`${PREFIX}legacy%2Fprivate`]);
+    await expect(listStoredContextGraphQueryCandidates(store)).rejects.toThrow('unrecognized stored Context Graph owner');
+  });
+
+  it('rejects an oversized inventory without returning a partial candidate set', async () => {
+    const { store } = indexedStore(Array.from({ length: 1_000 }, (_, id) => (
+      `${PREFIX}public/_verifiable_memory/author/${id}`
+    )));
+    await expect(listStoredContextGraphQueryCandidates(store)).rejects.toThrow('owner candidate limit exceeded');
+  });
+
+  it('forwards cancellation to the index and rejects late inventory success', async () => {
+    const controller = new AbortController();
+    const { store, listGraphsByPrefix } = indexedStore([]);
+    let release!: (graphs: string[]) => void;
+    listGraphsByPrefix.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    const pending = listStoredContextGraphQueryCandidates(store, { signal: controller.signal });
+    const failure = expect(pending).rejects.toThrow('cancel inventory');
+    controller.abort(new Error('cancel inventory'));
+    release([]);
+    await failure;
+    expect(listGraphsByPrefix).toHaveBeenCalledWith(PREFIX, {
+      source: 'agent.query.rfc64RuntimePrivateGraphs', signal: controller.signal,
+    });
   });
 });

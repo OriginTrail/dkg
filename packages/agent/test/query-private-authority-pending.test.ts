@@ -417,6 +417,57 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     expect(queryExecution).toHaveBeenCalledOnce();
   });
 
+  it('rejects a persisted ontology-private percent-encoded legacy ID before query execution', async () => {
+    const { agent, runtime, queryExecution } = await fixture({ privateGraph: false, publicGraph: false });
+    const legacyId = 'legacy%2Fprivate';
+    const legacyGraph = `did:dkg:context-graph:${legacyId}`;
+    // Persisted ontology rows predate today's new-CG validation. An explicit
+    // private declaration must not disappear merely because its ID cannot be
+    // represented by the current admission parser.
+    await agent.store.insert([
+      {
+        subject: legacyGraph,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"private"',
+        graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      },
+      {
+        subject: PRIVATE_MARKER,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: MARKER_CLASS,
+        graph: legacyGraph,
+      },
+    ]);
+    expect(runtime.subscribedContextGraphs.has(legacyId)).toBe(false);
+    await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
+      .rejects.toThrow();
+    expect(queryExecution).not.toHaveBeenCalled();
+  });
+
+  it('allows an unscoped public query for API-created v1/root with a legal reports%FF subgraph', async () => {
+    const { agent, registrations, queryExecution } = await fixture({ privateGraph: false, publicGraph: false });
+    const contextGraphId = 'v1/root';
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Public legacy ID matching a tagged prefix',
+      accessPolicy: 0,
+      callerAgentAddress: OWNER,
+    });
+    registrations.set(contextGraphId, { onChainId: 8n, accessPolicy: 0, participantAgents: [] });
+    const { uri } = await agent.createSubGraph(contextGraphId, 'reports%FF');
+    await agent.store.insert([{
+      subject: PUBLIC_MARKER,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: MARKER_CLASS,
+      graph: uri,
+    }]);
+    queryExecution.mockClear();
+
+    const result = await agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER });
+    expect(result.bindings).toEqual([{ g: uri, s: PUBLIC_MARKER }]);
+    expect(queryExecution).toHaveBeenCalledOnce();
+  });
+
   it('preserves registered-public authority over stale local private metadata', async () => {
     const { agent, registrations, queryExecution } = await fixture({ publicGraph: false });
     registrations.get(PRIVATE_CG)!.accessPolicy = 0;
@@ -511,7 +562,7 @@ describe('unscoped queries while RFC-64 private authority is pending (#2564)', (
     await expect(agent.query(anyMarkerQuery, { callerAgentAddress: OUTSIDER }))
       .resolves.toEqual({ bindings: [] });
     expect(queryExecution).not.toHaveBeenCalled();
-    expect(readAuthority).toHaveBeenCalledWith(lastPrivateId, { callerAgentAddress: OUTSIDER });
+    expect(readAuthority).toHaveBeenCalledWith(lastPrivateId, expect.objectContaining({ callerAgentAddress: OUTSIDER }));
     const checkedIds = readAuthority.mock.calls.map(([id]) => id);
     expect(checkedIds.indexOf(lastPrivateId)).toBeGreaterThanOrEqual(128);
 

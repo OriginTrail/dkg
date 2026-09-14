@@ -39,7 +39,7 @@ describe('query caller-provided store labels', () => {
     );
     expect(listGraphsByPrefix).toHaveBeenCalledWith(
       'did:dkg:context-graph:',
-      { source: 'agent.query.rfc64RuntimePrivateGraphs' },
+      expect.objectContaining({ source: 'agent.query.rfc64RuntimePrivateGraphs' }),
     );
   });
 
@@ -65,13 +65,16 @@ describe('query caller-provided store labels', () => {
 describe('unscoped query authority concurrency', () => {
   const contextGraphIds = Array.from({ length: 10 }, (_, index) => `authority-candidate-${index}`);
 
-  function authorityAgent(canReadContextGraph: (contextGraphId: string) => Promise<boolean>) {
+  function authorityAgent(canReadContextGraph: (
+    contextGraphId: string,
+    options?: { callerAgentAddress?: string; signal?: AbortSignal },
+  ) => Promise<boolean>) {
     return {
       config: {},
       subscribedContextGraphs: new Map(contextGraphIds.map((id) => [id, { synced: true }])),
       store: {
-        query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
-        listGraphsByPrefix: vi.fn(async () => []),
+        query: vi.fn<TripleStore['query']>(async () => ({ type: 'bindings', bindings: [] })),
+        listGraphsByPrefix: vi.fn<NonNullable<TripleStore['listGraphsByPrefix']>>(async () => []),
       },
       log: { info() {} },
       queryEngine: { query: vi.fn(async () => ({ bindings: [{ value: 'visible' }] })) },
@@ -139,6 +142,162 @@ describe('unscoped query authority concurrency', () => {
       { callerAgentAddress: '0x00000000000000000000000000000000000000ff' },
     )).rejects.toBe(authorityFailure);
     expect(agent.queryEngine.query).not.toHaveBeenCalled();
+  });
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((done) => { resolve = done; });
+    return { promise, resolve };
+  }
+
+  const unscopedQuery = 'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }';
+  const callerAgentAddress = '0x00000000000000000000000000000000000000ff';
+
+  it('rejects 1000 per-KA graphs before any authority lookup instead of truncating possible owners', async () => {
+    const canReadContextGraph = vi.fn(async () => true);
+    const agent = authorityAgent(canReadContextGraph);
+    agent.subscribedContextGraphs.clear();
+    agent.subscribedContextGraphs.set('public-cg', { synced: true });
+    agent.store.listGraphsByPrefix.mockResolvedValue(Array.from({ length: 1000 }, (_, index) => (
+      `did:dkg:context-graph:public-cg/_verifiable_memory/${callerAgentAddress}/${index + 1}`
+    )));
+
+    // Each KA path can also denote a persisted legacy root. The 512-owner
+    // admission budget must reject the entire inventory before live checks.
+    await expect(QueryMethods.prototype.query.call(
+      agent as never, unscopedQuery, { callerAgentAddress },
+    )).rejects.toThrow('owner candidate limit exceeded');
+    expect(canReadContextGraph).not.toHaveBeenCalled();
+    expect(agent.queryEngine.query).not.toHaveBeenCalled();
+  });
+
+  it('does no discovery when the unscoped caller is already aborted', async () => {
+    const canReadContextGraph = vi.fn(async () => true);
+    const agent = authorityAgent(canReadContextGraph);
+    const controller = new AbortController();
+    controller.abort(new Error('caller disconnected'));
+
+    await expect(QueryMethods.prototype.query.call(
+      agent as never, unscopedQuery, { callerAgentAddress, signal: controller.signal },
+    )).rejects.toMatchObject({ name: 'AbortError', message: 'caller disconnected' });
+    expect(agent.store.query).not.toHaveBeenCalled();
+    expect(agent.store.listGraphsByPrefix).not.toHaveBeenCalled();
+    expect(canReadContextGraph).not.toHaveBeenCalled();
+    expect(agent.queryEngine.query).not.toHaveBeenCalled();
+  });
+
+  it('signals all four active checks on caller abort and schedules no more after late success', async () => {
+    const gates = contextGraphIds.map(() => deferred<boolean>());
+    const receivedSignals: AbortSignal[] = [];
+    const observedAborts: string[] = [];
+    const canReadContextGraph = vi.fn(async (id: string, options?: { signal?: AbortSignal }) => {
+      if (options?.signal) {
+        receivedSignals.push(options.signal);
+        options.signal.addEventListener('abort', () => { observedAborts.push(id); }, { once: true });
+      }
+      // Intentionally ignore cancellation until released: the admission boundary
+      // must not depend on every authority implementation settling promptly.
+      return gates[contextGraphIds.indexOf(id)].promise;
+    });
+    const agent = authorityAgent(canReadContextGraph);
+    const controller = new AbortController();
+    const pending = QueryMethods.prototype.query.call(
+      agent as never, unscopedQuery, { callerAgentAddress, signal: controller.signal },
+    );
+    let failure: unknown;
+    const observed = pending.catch((error: unknown) => { failure = error; });
+
+    try {
+      await vi.waitFor(() => expect(canReadContextGraph).toHaveBeenCalledTimes(4));
+      expect(receivedSignals).toHaveLength(4);
+      controller.abort(new Error('caller disconnected'));
+      await vi.waitFor(() => expect(failure).toMatchObject({ name: 'AbortError', message: 'caller disconnected' }));
+      expect(observedAborts).toEqual(contextGraphIds.slice(0, 4));
+      expect(receivedSignals.every((signal) => signal.aborted)).toBe(true);
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+      expect(agent.queryEngine.query).not.toHaveBeenCalled();
+    } finally {
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+    }
+  });
+
+  it('bounds the entire authority admission to five seconds and stops checks after late success', async () => {
+    vi.useFakeTimers();
+    const gates = contextGraphIds.map(() => deferred<boolean>());
+    const receivedSignals: AbortSignal[] = [];
+    const canReadContextGraph = vi.fn(async (id: string, options?: { signal?: AbortSignal }) => {
+      if (options?.signal) receivedSignals.push(options.signal);
+      return gates[contextGraphIds.indexOf(id)].promise;
+    });
+    const agent = authorityAgent(canReadContextGraph);
+    const pending = QueryMethods.prototype.query.call(agent as never, unscopedQuery, { callerAgentAddress });
+    let failure: unknown;
+    const observed = pending.catch((error: unknown) => { failure = error; });
+
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(failure).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(failure).toMatchObject({ code: 'BOUNDED_OPERATION_TIMEOUT', timeoutMs: 5000 });
+      expect(receivedSignals).toHaveLength(4);
+      expect(receivedSignals.every((signal) => signal.aborted)).toBe(true);
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+      await vi.advanceTimersByTimeAsync(0);
+      expect(canReadContextGraph).toHaveBeenCalledTimes(4);
+      expect(agent.queryEngine.query).not.toHaveBeenCalled();
+    } finally {
+      for (const gate of gates) gate.resolve(true);
+      await observed;
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['ontology', 'inventory'] as const)('includes blocked %s discovery in the five-second admission deadline', async (stage) => {
+    vi.useFakeTimers();
+    const gate = deferred<void>();
+    const canReadContextGraph = vi.fn(async () => true);
+    const agent = authorityAgent(canReadContextGraph);
+    let discoverySignal: AbortSignal | undefined;
+    if (stage === 'ontology') {
+      agent.store.query.mockImplementation(async (_sparql, options) => {
+        discoverySignal = options?.signal;
+        await gate.promise;
+        return { type: 'bindings', bindings: [] };
+      });
+    } else {
+      agent.store.listGraphsByPrefix.mockImplementation(async (_prefix, options) => {
+        discoverySignal = options?.signal;
+        await gate.promise;
+        return [];
+      });
+    }
+    const pending = QueryMethods.prototype.query.call(agent as never, unscopedQuery, { callerAgentAddress });
+    let failure: unknown;
+    const observed = pending.catch((error: unknown) => { failure = error; });
+
+    try {
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(failure).toMatchObject({ code: 'BOUNDED_OPERATION_TIMEOUT', timeoutMs: 5000 });
+      expect(discoverySignal?.aborted).toBe(true);
+      expect(canReadContextGraph).not.toHaveBeenCalled();
+      gate.resolve();
+      await observed;
+      await vi.advanceTimersByTimeAsync(0);
+      if (stage === 'ontology') expect(agent.store.listGraphsByPrefix).not.toHaveBeenCalled();
+      expect(canReadContextGraph).not.toHaveBeenCalled();
+      expect(agent.queryEngine.query).not.toHaveBeenCalled();
+    } finally {
+      gate.resolve();
+      await observed;
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -332,7 +491,7 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
     expect(fixture.store.listGraphsByPrefix).toHaveBeenCalledWith(
       'did:dkg:context-graph:',
-      { source: 'agent.query.rfc64RuntimePrivateGraphs' },
+      expect.objectContaining({ source: 'agent.query.rfc64RuntimePrivateGraphs' }),
     );
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });
