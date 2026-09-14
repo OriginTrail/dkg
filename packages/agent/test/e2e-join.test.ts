@@ -210,22 +210,31 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
           `SELECT ?name WHERE { <${subject}> <http://schema.org/name> ?name . }`,
           CG,
         );
+        const catalogStatus = (await joiner.readRfc64CatalogOperationalStatusV1())
+          .find((status) => status.contextGraphId === CG);
         return {
           subscribed: joiner.getSubscribedContextGraphs().get(CG)?.subscribed === true,
           hasData: data.bindings.length > 0,
+          catalogStatus,
         };
       },
-      (state) => state.subscribed && state.hasData,
+      (state) => state.subscribed
+        && state.hasData
+        && state.catalogStatus?.phase === 'complete'
+        && state.catalogStatus.catalogServiceStarted
+        && typeof state.catalogStatus.appliedCatalogHeadDigest === 'string'
+        && state.catalogStatus.appliedCatalogHeadDigest.length > 0,
       60_000,
     );
 
-    expect(caughtUp).toEqual({ subscribed: true, hasData: true });
-    const catalogStatus = (await joiner.readRfc64CatalogOperationalStatusV1())
-      .find((status) => status.contextGraphId === CG);
-    expect(catalogStatus).toMatchObject({
-      phase: 'complete',
-      catalogServiceStarted: true,
-      appliedCatalogHeadDigest: expect.any(String),
+    expect(caughtUp).toMatchObject({
+      subscribed: true,
+      hasData: true,
+      catalogStatus: {
+        phase: 'complete',
+        catalogServiceStarted: true,
+        appliedCatalogHeadDigest: expect.any(String),
+      },
     });
     // The 10.0.16 default installs RFC-64 catalog responsibility for an
     // approved private member. Catch-up must complete without reviving the
