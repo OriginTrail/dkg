@@ -10,5 +10,5 @@
     "@origintrail-official/dkg-storage": "workspace:*",
     "@origintrail-official/dkg-random-sampling": "workspace:*"
   },
-  "devDependencies": { "vitest": "^4.0.18" }
+  "devDependencies": { "vitest": "^5.0.0" }
 }
