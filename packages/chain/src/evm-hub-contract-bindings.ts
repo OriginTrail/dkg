@@ -205,39 +205,26 @@ export class EvmHubContractBindings {
       const generation = this.current;
       const staged = new Map<K, Contract | undefined>();
       const unresolved = keys.filter(key => !generation.resolved.has(key));
-      if (signal) {
-        for (const key of unresolved) {
-          signal.throwIfAborted();
-          const spec = EVM_HUB_CONTRACT_SPECS[key];
-          // Sequential staging leaves no sibling physical request to abandon.
-          try {
-            staged.set(key, await load(spec));
-          } catch (error) {
-            signal.throwIfAborted();
-            if (spec.resolution !== 'optional-deployment') throw error;
-            if (error instanceof HubContractNotFoundError) staged.set(key, undefined);
-            else if (!deferTransientOptionalFailures) throw error;
-          }
-          signal.throwIfAborted();
-        }
-      } else {
-        // Full initialization and other non-cancellable callers own every
-        // sibling request through settlement, then publish one atomic stage.
-        const settled = await Promise.allSettled(unresolved.map(key => load(EVM_HUB_CONTRACT_SPECS[key])));
-        for (const [index, result] of settled.entries()) {
-          const key = unresolved[index];
-          const spec = EVM_HUB_CONTRACT_SPECS[key];
-          if (result.status === 'fulfilled') {
-            staged.set(key, result.value);
-          } else if (spec.resolution !== 'optional-deployment') {
-            throw result.reason;
-          } else if (result.reason instanceof HubContractNotFoundError) {
-            staged.set(key, undefined);
-          } else if (!deferTransientOptionalFailures) {
-            throw result.reason;
-          }
+      // Every caller owns its sibling requests through settlement, then
+      // publishes one atomic stage. Cancellable loaders share the caller's
+      // signal, so cancellation retires the whole group without a partial
+      // commit while preserving concurrent physical reads.
+      const settled = await Promise.allSettled(unresolved.map(key => load(EVM_HUB_CONTRACT_SPECS[key])));
+      signal?.throwIfAborted();
+      for (const [index, result] of settled.entries()) {
+        const key = unresolved[index];
+        const spec = EVM_HUB_CONTRACT_SPECS[key];
+        if (result.status === 'fulfilled') {
+          staged.set(key, result.value);
+        } else if (spec.resolution !== 'optional-deployment') {
+          throw result.reason;
+        } else if (result.reason instanceof HubContractNotFoundError) {
+          staged.set(key, undefined);
+        } else if (!deferTransientOptionalFailures) {
+          throw result.reason;
         }
       }
+      signal?.throwIfAborted();
       if (generation !== this.current) continue;
       // Handles and decided keys commit together, synchronously, after the
       // entire subset succeeds. Preserve anything another caller committed in

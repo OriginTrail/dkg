@@ -69,6 +69,28 @@ describe('generation-owned Hub bindings and event selection', () => {
     expect(unused).not.toHaveBeenCalled();
   });
 
+  it('starts cancellable sibling loads together and commits nothing after abort', async () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const identity = deferred<Contract>();
+    const profile = deferred<Contract>();
+    const started: string[] = [];
+    const controller = new AbortController();
+    const reason = new Error('binding group cancelled');
+    const resolving = group.resolve(['identity', 'profile'], spec => {
+      started.push(spec.name);
+      return spec.name === 'Identity' ? identity.promise : profile.promise;
+    }, controller.signal);
+    expect(started).toEqual(['Identity', 'Profile']);
+    controller.abort(reason);
+    identity.resolve(first);
+    profile.resolve(second);
+    await expect(resolving).rejects.toBe(reason);
+    expect(group.contracts.identity).toBeUndefined();
+    expect(group.contracts.profile).toBeUndefined();
+    expect(group.resolvedKeys.has('identity')).toBe(false);
+    expect(group.resolvedKeys.has('profile')).toBe(false);
+  });
+
   it('restarts a staged group when Hub rotation arrives during a lookup', async () => {
     const group = new EvmHubContractBindings({ hub: first });
     const pending = deferred<Contract>();

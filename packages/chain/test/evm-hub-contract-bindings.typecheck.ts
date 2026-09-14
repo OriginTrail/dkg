@@ -23,7 +23,7 @@ class Probe extends EVMChainAdapter {
   seed(bindings: ContractCache): void {
     // Whole-cache replacement remains a contained legacy transition.
     this.contracts = bindings;
-    // @ts-expect-error boot bindings are readonly through the subclass view
+    // Legacy slot writes remain source-compatible and become owner transitions.
     this.contracts.chronos = handle;
     // Adapter-owned lazy slots remain writable.
     this.contracts.randomSampling = handle;

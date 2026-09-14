@@ -117,6 +117,44 @@ describe('event scan RPC cancellation', () => {
     }
   });
 
+  it('retries cold V10 readiness while Hub rotation listener startup remains disabled', async () => {
+    const hub = new Interface([
+      'function getContractAddress(string name) view returns (address)',
+      'function getAssetStorageAddress(string name) view returns (address)',
+    ]);
+    let lifecycleAddress = ZeroAddress;
+    const lifecycleLookups: string[] = [];
+    const rpc = createLoopbackJsonRpcTestHarness();
+    const server = await rpc.start(async (payload, response) => {
+      let result: unknown = '0x7a69';
+      if (payload.method === 'eth_call') {
+        const call = hub.parseTransaction({ data: (payload.params[0] as { data: string }).data });
+        if (!call) throw new Error('expected Hub lookup');
+        const name = String(call.args[0]);
+        if (name === 'KnowledgeAssetsLifecycle') lifecycleLookups.push(name);
+        result = hub.encodeFunctionResult(call.fragment, [
+          name === 'KnowledgeAssetsLifecycle' ? lifecycleAddress : address,
+        ]);
+      }
+      sendJsonRpcResult(response, payload, result);
+    });
+    const adapter = new EVMChainAdapter({ rpcUrl: server.url,
+      privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const internal = adapter as any;
+    internal.startHubRotationListener = vi.fn(async () => undefined);
+    try {
+      await expect(adapter.resolveV10FinalizationReadiness()).resolves.toBe(false);
+      expect(internal.hubRotationPoller.isStarted).toBe(false);
+      lifecycleAddress = address;
+      await expect(adapter.resolveV10FinalizationReadiness()).resolves.toBe(true);
+      expect(internal.startHubRotationListener).toHaveBeenCalledTimes(2);
+      expect(lifecycleLookups).toEqual(['KnowledgeAssetsLifecycle', 'KnowledgeAssetsLifecycle']);
+    } finally {
+      adapter.destroy();
+      await rpc.stopAll();
+    }
+  });
+
   it('retires an aborted event scan while Hub rotation-listener startup is pending', async () => {
     const adapter = adapterAt();
     const internal = adapter as any;
@@ -396,16 +434,15 @@ describe('event scan RPC cancellation', () => {
   });
 
   it.each([
-    ['ProfileStorage', ['RelayCapabilityUpdated'], ['ProfileStorage'], ['ProfileStorage']],
-    ['DKGKnowledgeAssets', ['KCCreated'], ['DKGKnowledgeAssets'], ['DKGKnowledgeAssets']],
-    ['KnowledgeAssetsStorage', ['KnowledgeBatchCreated'], ['KnowledgeAssetsStorage'], ['KnowledgeAssetsStorage']],
-    ['ContextGraphNameRegistry', ['NameClaimed'], ['ContextGraphNameRegistry'], ['ContextGraphNameRegistry']],
-    ['ContextGraphStorage', ['ContextGraphCreated'], ['ContextGraphStorage'], ['ContextGraphStorage']],
+    ['ProfileStorage', ['RelayCapabilityUpdated'], ['ProfileStorage']],
+    ['DKGKnowledgeAssets', ['KCCreated'], ['DKGKnowledgeAssets']],
+    ['KnowledgeAssetsStorage', ['KnowledgeBatchCreated'], ['KnowledgeAssetsStorage']],
+    ['ContextGraphNameRegistry', ['NameClaimed'], ['ContextGraphNameRegistry']],
+    ['ContextGraphStorage', ['ContextGraphCreated'], ['ContextGraphStorage']],
     ['ContextGraphStorage', ['KCCreated', 'ContextGraphCreated'],
-      ['DKGKnowledgeAssets', 'ContextGraphStorage'],
       ['DKGKnowledgeAssets', 'ContextGraphStorage']],
   ] as const)('physically cancels only the requested event group at %s without fallback', async (
-    stalledName, eventTypes, cancelledNames, capabilityNames,
+    stalledName, eventTypes, capabilityNames,
   ) => {
     const hub = new Interface([
       'function getContractAddress(string name) view returns (address)',
@@ -463,12 +500,15 @@ describe('event scan RPC cancellation', () => {
       expect(requests.filter(request => request.name === stalledName)).toHaveLength(1);
       expect(internal.initialized).toBe(false);
       expect(internal.contracts).toEqual(beforeBindings);
-      expect(requests.map(request => request.name)).toEqual(cancelledNames);
-      // Even bindings resolved before the stalled lookup must be retried:
-      // cancellation discards the entire staged capability group.
+      const cancelledNames = requests.map(request => request.name);
+      expect(cancelledNames).toContain(stalledName);
+      expect(cancelledNames.every(name => new Set<string>(capabilityNames).has(name))).toBe(true);
+      // Any sibling request that reached the server before abort still belongs
+      // to this group; cancellation discards the complete atomic stage.
       stall = false;
       expect(await collect(adapter, { eventTypes: [...eventTypes] })).toEqual([]);
-      expect(requests.map(request => request.name)).toEqual([...cancelledNames, ...capabilityNames]);
+      expect(requests.slice(cancelledNames.length).map(request => request.name).sort())
+        .toEqual([...capabilityNames].sort());
       expect(internal.initialized).toBe(false);
       // Successful subset admission installs into the canonical handle store;
       // cancelled staging above installed nothing and full initialization is pending.
@@ -478,12 +518,12 @@ describe('event scan RPC cancellation', () => {
       }
       expect(internal.contracts.identity).toBeUndefined();
       await collect(adapter, { eventTypes: [...eventTypes] });
-      expect(requests.map(request => request.name)).toEqual([...cancelledNames, ...capabilityNames]);
+      expect(requests).toHaveLength(cancelledNames.length + capabilityNames.length);
       internal.applyHubRotationEventName(stalledName);
+      const beforeRotationRetry = requests.length;
       await collect(adapter, { eventTypes: [...eventTypes] });
-      expect(requests.map(request => request.name)).toEqual([
-        ...cancelledNames, ...capabilityNames, ...capabilityNames,
-      ]);
+      expect(requests.slice(beforeRotationRetry).map(request => request.name).sort())
+        .toEqual([...capabilityNames].sort());
       // Global initialization composes completed event bindings rather than
       // loading them again, and still initializes its non-event capabilities.
       const beforeFullInit = requests.filter(request => request.name === stalledName).length;
