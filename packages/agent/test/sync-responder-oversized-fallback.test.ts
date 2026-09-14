@@ -10,6 +10,7 @@ import {
   type CapturedSyncHandler,
 } from './_helpers/sync-responder.js';
 import { estimateStringRowHeapBytes } from '../src/sync/memory-telemetry.js';
+import { serializeResponderRows } from '../src/sync/responder/graph-plan.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 /**
@@ -329,6 +330,93 @@ describe('oversized responder fallback is store-bounded and set-equivalent', () 
     // Both rows are served through the store-bounded fallback, not a limit error.
     expect(collected.size).toBe(2);
     boundedQuery.assertObserved();
+  });
+
+  it('uses a session cursor after the first oversized exact-graph page', async () => {
+    const cgId = 'exact-graph-keyset';
+    const graph = `did:dkg:context-graph:${cgId}/context/1`;
+    const rows: Quad[] = [];
+    for (let subjectIndex = 0; subjectIndex < 300; subjectIndex += 1) {
+      const subject = `urn:keyset:${subjectIndex.toString().padStart(4, '0')}`;
+      rows.push(
+        { graph, subject, predicate: `${DKG_NS}label`, object: `urn:object:${subjectIndex}` },
+        { graph, subject, predicate: `${DKG_NS}label`, object: `"value-${subjectIndex}"` },
+        { graph, subject, predicate: `${DKG_NS}label`, object: `"value-${subjectIndex}"@en` },
+        {
+          graph,
+          subject,
+          predicate: `${DKG_NS}label`,
+          object: `"${subjectIndex}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+        },
+      );
+    }
+
+    const store = new OxigraphStore();
+    await store.insert(rows);
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 37,
+      snapshotBudget: {
+        maxRows: 10_000,
+        maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+        maxSnapshotRows: 1,
+        maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+      },
+    });
+
+    const pageQueryOffsets: number[] = [];
+    let seekPageQueries = 0;
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: Parameters<OxigraphStore['query']>[1]) => {
+      const normalized = sparql.replace(/\s+/g, ' ').trim();
+      if (
+        normalized.includes(`GRAPH <${graph}>`)
+        && normalized.includes('ORDER BY ?s ?p ?o')
+        && normalized.includes('SELECT ?s ?p ?o WHERE')
+        && normalized.includes('LIMIT')
+      ) {
+        const offsetMatch = normalized.match(/OFFSET (\d+)/);
+        if (offsetMatch) pageQueryOffsets.push(Number(offsetMatch[1]));
+        else if (normalized.includes('FILTER(')) seekPageQueries += 1;
+      }
+      return originalQuery(sparql, options);
+    }) as OxigraphStore['query'];
+
+    const actual: string[] = [];
+    for (let offset = 0; offset < rows.length; offset += 37) {
+      const page = await cap.invoke({
+        contextGraphId: cgId,
+        includeSharedMemory: false,
+        phase: 'data',
+        limit: 37,
+        offset,
+        syncSessionId: 'exact-graph-keyset-session',
+      });
+      const pageLines = linesFromNquads(page);
+      actual.push(...pageLines);
+      if (pageLines.length < 37) break;
+    }
+
+    const expectedResult = await originalQuery(`
+      SELECT ?s ?p ?o WHERE {
+        GRAPH <${graph}> { ?s ?p ?o }
+      }
+      ORDER BY ?s ?p ?o
+    `);
+    if (expectedResult.type !== 'bindings') throw new Error('expected bindings');
+    const expected = serializeResponderRows(expectedResult.bindings.map((row) => ({
+      s: row.s!,
+      p: row.p!,
+      o: row.o!,
+      g: graph,
+    })));
+
+    expect(actual).toEqual(expected.split('\n'));
+    expect(actual).toHaveLength(rows.length);
+    expect(new Set(actual)).toHaveLength(rows.length);
+    // The first page retains the compatibility OFFSET 0 query. Every later
+    // page seeks from the session cursor and therefore has no growing OFFSET.
+    expect(pageQueryOffsets).toEqual([0]);
+    expect(seekPageQueries).toBeGreaterThan(1);
   });
 });
 
