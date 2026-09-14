@@ -2724,7 +2724,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     // would make every concurrent SHARE/sync fail closed and create a recovery
     // hole on each periodic refresh. A terminal blocked result still disables
     // the receiver below.
-    return this.resolveRfc64ResponsibilityAuthorityWithRefreshFenceV1(contextGraphId);
+    return Rfc64CatalogMethods.prototype
+      .resolveRfc64ResponsibilityAuthorityWithRefreshFenceV1
+      .call(this, contextGraphId);
   }
 
   /** Serving and explicit repair authority is independent of edge receipt. */
@@ -2741,7 +2743,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (compatibility !== null) return compatibility;
     }
     if (configured !== undefined) return configured;
-    return this.resolveRfc64ResponsibilityAuthorityWithRefreshFenceV1(contextGraphId);
+    return Rfc64CatalogMethods.prototype
+      .resolveRfc64ResponsibilityAuthorityWithRefreshFenceV1
+      .call(this, contextGraphId);
   }
 
   /**
