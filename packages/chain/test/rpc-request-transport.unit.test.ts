@@ -525,6 +525,36 @@ describe('RPC request transport', () => {
     }
   });
 
+  it('keeps startup network discovery foreground when the first caller is background', async () => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 100,
+      foregroundReservePercent: 50,
+      burstRequests: 4,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    });
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      admission: governor,
+    });
+
+    try {
+      await expect(withRpcRequestContext(
+        { requestClass: 'background' },
+        () => provider.send('eth_blockNumber', []),
+      )).resolves.toBe('0x10');
+      expect(rpc.hits('eth_chainId')).toBe(1);
+      expect(governor.snapshot()).toMatchObject({
+        foregroundAdmitted: 1,
+        backgroundAdmitted: 1,
+      });
+    } finally {
+      provider.destroy();
+    }
+  });
+
   it('paces concurrent governed sends as independent single-entry HTTP requests', async () => {
     const rpc = await startLoopbackRpc();
     servers.push(rpc);
