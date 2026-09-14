@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC, tripleContentV10, type OperationContext } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { RandomSamplingRepairMethods } from '../src/dkg-agent-random-sampling-repair.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS } from '../src/sync/recovery/random-sampling-peer-source.js';
 
-type LifecycleRepairMethod = typeof LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset;
+type LifecycleRepairMethod = typeof RandomSamplingRepairMethods.prototype.repairRandomSamplingKnowledgeAsset;
 type LifecycleRepairInput = Parameters<LifecycleRepairMethod>[0];
 type RegistryAgent = { peerId: string; nodeRole: string; agentAddress?: string };
 
@@ -129,7 +130,7 @@ function makeRepairAgent(overrides: Partial<RepairAgentHarness> = {}): RepairAge
 
 /** Bind the production peer/address authentication adapter into the lifecycle harness. */
 function withProductionCorePeerAuthentication(agent: RepairAgentHarness): RepairAgentHarness {
-  const authenticateCorePeerAddress = LifecycleSyncMethods.prototype.authenticateCorePeerAddress;
+  const authenticateCorePeerAddress = RandomSamplingRepairMethods.prototype.authenticateCorePeerAddress;
   return {
     ...agent,
     authenticateCorePeerAddress: (candidate, signal) => authenticateCorePeerAddress.call(
@@ -173,7 +174,7 @@ function startLifecycleRepair(
   agent: RepairAgentHarness,
   input: LifecycleRepairInput = DEFAULT_REPAIR_INPUT,
 ) {
-  return LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
+  return RandomSamplingRepairMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
     agent as unknown as ThisParameterType<LifecycleRepairMethod>,
     input,
   );
@@ -187,12 +188,25 @@ function runLifecycleRepair(
 }
 
 describe('Random Sampling lifecycle repair adapter', () => {
+  it('assembles the extracted repair mixin onto the composed agent', async () => {
+    // The prover binds `this.repairRandomSamplingKnowledgeAsset` from the
+    // lifecycle mixin, so the extraction only holds while the composed class
+    // still adopts this holder's implementations.
+    const { DKGAgent } = await import('../src/dkg-agent.js');
+
+    for (const method of ['repairRandomSamplingKnowledgeAsset', 'authenticateCorePeerAddress'] as const) {
+      expect(DKGAgent.prototype[method], method)
+        .toBe(RandomSamplingRepairMethods.prototype[method]);
+      expect(LifecycleSyncMethods.prototype, method).not.toHaveProperty(method);
+    }
+  });
+
   it('forwards the exact peer binding and signal, and fails closed without proof', async () => {
     const ensurePeerAgentBinding = vi.fn(async () => true);
     const agentLike = makeRepairAgent({
       networkAdmissionCoordinator: { ensurePeerAgentBinding },
     });
-    const authenticate = LifecycleSyncMethods.prototype.authenticateCorePeerAddress;
+    const authenticate = RandomSamplingRepairMethods.prototype.authenticateCorePeerAddress;
     const candidate = {
       peerId: 'peer-authenticated',
       nodeRole: 'core',
@@ -712,7 +726,7 @@ describe('Random Sampling lifecycle repair adapter', () => {
     };
 
     await expect(
-      (LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
+      (RandomSamplingRepairMethods.prototype.repairRandomSamplingKnowledgeAsset as any).call(
         agentLike,
         {
           kaId: 7n,

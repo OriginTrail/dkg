@@ -96,10 +96,8 @@ import {
   type SubscriptionSource,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
-  tripleContentV10,
   withRetry,
 } from '@origintrail-official/dkg-core';
-import type { RandomSamplingRepairOperation } from '@origintrail-official/dkg-random-sampling';
 import { GraphManager, PrivateContentStore, createTripleStore, asChangelogReader, type ChangelogReader, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { readChangelogDeltaPage } from './sync/responder/graph-plan.js';
 import { decodeChangelogRequest, encodeChangelogResponse } from './sync/changelog/wire.js';
@@ -168,11 +166,6 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
-import {
-  startRandomSamplingExactRepair,
-  type RandomSamplingExactRepairDependencies,
-  type RandomSamplingExactRepairInput,
-} from './sync/recovery/random-sampling-exact-repair.js';
 import {
   reconcileConfiguredContextGraphMetadataV1,
   type ConfiguredContextGraphMetadataReconciliationResult,
@@ -276,14 +269,8 @@ import {
 } from './p2p/warm-core-connections.js';
 import {
   acceptsCoreMembership,
-  type CorePeerDirectoryEntry,
   type CoreMembershipEvidence,
 } from './p2p/core-peer-discovery.js';
-import {
-  createRandomSamplingPeerSource,
-  RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS,
-  type RandomSamplingPeerSource,
-} from './sync/recovery/random-sampling-peer-source.js';
 import {
   deleteSyncPageCheckpoint,
   fetchSyncPages,
@@ -292,7 +279,6 @@ import {
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
 import {
-  createChallengePinnedExactAssetSelection,
   createUalOnlyExactAssetSelection,
   exactAssetUalsForSelection,
   exactAssetFilterKey,
@@ -4295,105 +4281,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return bindRandomSampling(options);
   }
 
-  /** Thin lifecycle adapter for the bounded proof-time exact-repair runner. */
-  repairRandomSamplingKnowledgeAsset(
-    this: DKGAgent,
-    input: RandomSamplingExactRepairInput,
-  ): RandomSamplingRepairOperation {
-    const ctx = createOperationContext('sync');
-    // The peer-source module owns the proof-time policy — parallel curator/Core
-    // discovery, source priority, cancellation, Core membership and peer
-    // preparation. This block only names which agent capability answers each port.
-    const peerSource: RandomSamplingPeerSource = createRandomSamplingPeerSource({
-      selfPeerId: this.peerId,
-      maxRosterPeerIds: DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
-      coreEligibilityConcurrency: CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
-      coreDiscoveryBudgetMs: RANDOM_SAMPLING_CORE_DISCOVERY_BUDGET_MS,
-      isStarted: () => this.started,
-      resolveCuratorPeerIds: (localContextGraphId, options) =>
-        this.resolveCuratorPeerIdsForCg(localContextGraphId, options),
-      findCoreAgents: (options) => this.discovery.findAgents(options),
-      authenticateCorePeerAddress: (agent, signal) =>
-        this.authenticateCorePeerAddress(agent, signal),
-      classifyCoreMembership: (agent) => this.classifyShardingTableCore(agent.agentAddress),
-      observedCandidatePeerIds: (localContextGraphId) =>
-        this.vmReconcileObservedCandidatePeerIds(localContextGraphId),
-      preferredPeerId: (localContextGraphId) => this.preferredSyncPeers.get(localContextGraphId),
-      connectedPeerIds: () => this.node.libp2p.getConnections()
-        .map((connection) => connection.remotePeer.toString()),
-      ensurePeerAdmitted: (peerId, signal) => this.ensurePeerAdmittedForRecovery(
-        peerId,
-        ctx,
-        'Random Sampling exact repair peer',
-        signal,
-      ),
-      ensurePeerConnected: (peerId, signal) => this.ensurePeerConnected(peerId, { signal }),
-      hasSyncProtocol: (peerId, signal) => this.waitForSyncProtocol(peerId, signal),
-      logInfo: (message) => this.log.info(ctx, message),
-    });
-    const dependencies = {
-      chainId: this.chain.chainId,
-      // Proof-time repair gets one challenge deadline. Deferring a later Core
-      // to another bounded window would lose this proof, so traverse the full
-      // already-bounded discovered candidate set in this operation.
-      maxPeers: 'all' as const,
-      stopSignal: this.node.stopSignal,
-      resolveStorageAddress: (_signal) => this.chain.getDKGKnowledgeAssetsAddress
-        ? this.chain.getDKGKnowledgeAssetsAddress()
-        : this.chain.getKnowledgeAssetsLifecycleAddress(),
-      resolveLocalContextGraphId: (cgId, signal) =>
-        this.resolveRandomSamplingLocalContextGraphId(cgId, signal),
-      resolveCandidatePeerIds: (localContextGraphId, signal) =>
-        peerSource.resolveCandidatePeerIds(localContextGraphId, signal),
-      selectPeerWindow: (peerIds, options) => this.selectCatchupPeerWindow(
-        peerIds.map((peerId) => ({ toString: () => peerId })),
-        options,
-      ).map((peer) => peer.toString()),
-      preparePeer: (peerId, signal) => peerSource.preparePeer(peerId, signal),
-      fetchExactKnowledgeAsset: async (
-        peerId,
-        localContextGraphId,
-        expectedCommitment,
-        signal,
-      ) => {
-        const result = await this.syncExactKnowledgeAssetsFromPeerDetailed(
-          peerId,
-          localContextGraphId,
-          createChallengePinnedExactAssetSelection([expectedCommitment]),
-          {
-            signal,
-            isCurrent: () => this.started && !signal.aborted,
-          },
-        );
-        const authenticated = result.authenticatedAssets?.find(
-          ({ asset }) => asset.ual === expectedCommitment.assetUal,
-        );
-        if (authenticated !== undefined) {
-          return {
-            kind: 'found' as const,
-            material: Object.freeze({
-              contents: Object.freeze(authenticated.asset.dataQuads.map((quad) => (
-                tripleContentV10(quad.subject, quad.predicate, quad.object)
-              ))),
-              privateRoots: Object.freeze([...authenticated.privateRoots]),
-            }),
-          };
-        }
-        return {
-          kind: 'miss' as const,
-          // A durable fetch can report `found` based on storage progress even
-          // when it produced no challenge-authenticated material. At this
-          // proof boundary that is necessarily an incomplete miss.
-          disposition: result.disposition === 'clean-absent'
-            ? 'clean-absent' as const
-            : 'incomplete' as const,
-        };
-      },
-      logInfo: (message) => this.log.info(ctx, message),
-    } satisfies RandomSamplingExactRepairDependencies;
-    return startRandomSamplingExactRepair(dependencies, input);
-  }
-
   async tryStartRandomSamplingProver(this: DKGAgent,
     ctx: OperationContext,
     logDisabled: boolean,
@@ -5724,30 +5611,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return await isShardingTableMember(identityId) ? 'member' : 'non-member';
     } catch {
       return 'indeterminate';
-    }
-  }
-
-  /**
-   * Require the candidate's live network-identity handshake to contain a
-   * wallet signature binding the advertised address to this exact peer ID.
-   * A staked address copied into another peer's registry row therefore cannot
-   * enter the proof-time repair roster.
-   */
-  async authenticateCorePeerAddress(
-    this: DKGAgent,
-    agent: CorePeerDirectoryEntry,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    if (!agent.agentAddress) return false;
-    try {
-      return await this.networkAdmissionCoordinator.ensurePeerAgentBinding(
-        agent.peerId,
-        agent.agentAddress,
-        createOperationContext('sync'),
-        { signal },
-      );
-    } catch {
-      return false;
     }
   }
 

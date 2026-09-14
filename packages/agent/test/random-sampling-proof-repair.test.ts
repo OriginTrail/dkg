@@ -17,6 +17,7 @@ import {
   LifecycleSyncMethods,
   authenticateChallengePinnedGraphScopedAssetWithinDeadline,
 } from '../src/dkg-agent-lifecycle.js';
+import { RandomSamplingRepairMethods } from '../src/dkg-agent-random-sampling-repair.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import {
@@ -465,7 +466,7 @@ describe('Random Sampling proof-time exact repair', () => {
     };
 
     const clean = makeAgent(historicalQuad);
-    const repaired = await LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
+    const repaired = await RandomSamplingRepairMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
       clean.agentLike,
       { kaId, cgId: 14n, expectedRoot, expectedLeafCount: 1n },
     ).result;
@@ -482,7 +483,7 @@ describe('Random Sampling proof-time exact repair', () => {
     expect(clean.agentLike.graphScopedStorePhysicalRuns.size).toBe(0);
 
     const tampered = makeAgent({ ...historicalQuad, object: '"tampered"' });
-    await expect(LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
+    await expect(RandomSamplingRepairMethods.prototype.repairRandomSamplingKnowledgeAsset.call(
       tampered.agentLike,
       { kaId, cgId: 14n, expectedRoot, expectedLeafCount: 1n },
     ).result).rejects.toThrow('did not recover');
