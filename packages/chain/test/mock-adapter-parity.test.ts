@@ -455,9 +455,10 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(mock.chainType).toBe(evm.chainType);
   });
 
-  it('isV10Ready is a capability gate — mock returns true (used to exercise V10 unit tests)', () => {
+  it('isV10Ready is a capability gate — mock returns true (used to exercise V10 unit tests)', async () => {
     const mock = new MockChainAdapter();
     expect(mock.isV10Ready()).toBe(true);
+    await expect(mock.resolveV10FinalizationReadiness()).resolves.toBe(true);
   });
 
   it('keeps authority delta refresh unsupported in offline mock mode', () => {

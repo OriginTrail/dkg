@@ -84,6 +84,46 @@ it('accepts a narrow RPC admission capability without a concrete governor', () =
   adapter.destroy();
 });
 
+it('caches optional staking bindings while preserving missing-deployment fallbacks', async () => {
+  const adapter: any = new EVMChainAdapter(minimalConfig());
+  const conviction = { target: 'conviction' };
+  const staking = { target: 'staking' };
+  adapter.resolveContract = vi.fn()
+    .mockRejectedValueOnce(new Error('ConvictionStakingStorage absent'))
+    .mockResolvedValueOnce(conviction)
+    .mockRejectedValueOnce(new Error('StakingStorage absent'))
+    .mockResolvedValueOnce(staking);
+  try {
+    await expect(adapter.getConvictionStakingStorage()).resolves.toBeNull();
+    await expect(adapter.getConvictionStakingStorage()).resolves.toBe(conviction);
+    await expect(adapter.getConvictionStakingStorage()).resolves.toBe(conviction);
+    await expect(adapter.getStakingStorage()).resolves.toBeNull();
+    await expect(adapter.getStakingStorage()).resolves.toBe(staking);
+    await expect(adapter.getStakingStorage()).resolves.toBe(staking);
+    expect(adapter.resolveContract).toHaveBeenCalledTimes(4);
+  } finally {
+    adapter.destroy();
+  }
+});
+
+it('requires resolved optional and legacy Hub capabilities before use', async () => {
+  const adapter: any = new EVMChainAdapter(minimalConfig());
+  const chronos = { target: 'chronos' };
+  adapter.resolveHubContractBindings = vi.fn()
+    .mockResolvedValueOnce({ chronos: undefined })
+    .mockResolvedValueOnce({ chronos });
+  try {
+    await expect(adapter.requireChronos()).rejects.toThrow(/Chronos/);
+    await expect(adapter.requireChronos()).resolves.toBe(chronos);
+    expect(() => adapter.requireV9()).toThrow(/V9 contracts/);
+    await expect(adapter.getDKGKnowledgeAssetsAddress()).rejects.toThrow(
+      /DKGKnowledgeAssets.*not deployed/,
+    );
+  } finally {
+    adapter.destroy();
+  }
+});
+
 it('derives the signer-lane no-progress threshold from the receipt deadline', () => {
   const a = new EVMChainAdapter(minimalConfig({
     receiptTimeoutMs: 1_000,

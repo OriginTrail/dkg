@@ -8,7 +8,7 @@ import {
 } from '../src/evm-event-contracts.js';
 import {
   ALL_EVM_HUB_CONTRACT_KEYS, EVM_HUB_CONTRACT_SPECS, REQUIRED_EVM_HUB_CONTRACT_KEYS,
-  EvmHubContractBindings,
+  EvmHubContractBindings, optionalEvmContract,
   type EvmHubContractInstallation, type EvmHubContractKey, type EvmHubContractSpec,
 } from '../src/evm-hub-contract-bindings.js';
 import { HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
@@ -219,6 +219,30 @@ function decidedAs(handleFor: (key: EvmHubContractKey) => Contract | undefined):
 }
 
 describe('Hub binding generation ownership', () => {
+  it('keeps optional lookup absence distinct from caller cancellation', async () => {
+    await expect(optionalEvmContract(async () => {
+      throw new Error('optional deployment absent');
+    })).resolves.toBeUndefined();
+
+    const controller = new AbortController();
+    const reason = new Error('binding lookup cancelled');
+    await expect(optionalEvmContract(async () => {
+      controller.abort(reason);
+      throw new Error('optional deployment absent');
+    }, controller.signal)).rejects.toBe(reason);
+  });
+
+  it('rotates the complete generation when the Hub handle changes', () => {
+    const group = new EvmHubContractBindings({ hub: first });
+    const before = group.generation;
+    expect(() => group.replaceBinding('hub', undefined)).toThrow(/cannot be removed/);
+    group.replaceBinding('hub', second);
+    expect(group.generation).not.toBe(before);
+    expect(group.contracts.hub).toBe(second);
+    expect(group.resolvedKeys.size).toBe(0);
+    expect(group.initialized).toBe(false);
+  });
+
   it('install decides every boot key at once and runs no loader for the installed generation', async () => {
     const group = new EvmHubContractBindings({ hub: first });
     const store = completeInstallation({ contextGraphStorage: second });
