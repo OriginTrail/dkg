@@ -38,7 +38,6 @@ import {
   startOxigraphServer,
   type OxigraphServerHandle,
   type OxigraphServerIo,
-  type StartOxigraphServerOptions,
 } from './oxigraph-server.js';
 import { resolveWalRestartThresholdBytes } from './oxigraph-wal-maintenance.js';
 import {
@@ -376,29 +375,6 @@ export interface StartManagedOxigraphOptions {
   readyTimeoutMs?: number;
 }
 
-/** Typed adapter from the launch plan to the supervisor boundary. */
-export function buildManagedOxigraphServerStartOptions(input: {
-  readonly plan: ManagedOxigraphPlan;
-  readonly binaryPath: string;
-  readonly log: (message: string) => void;
-  readonly readyTimeoutMs?: number;
-  readonly platform?: NodeJS.Platform;
-  readonly serverIo?: Partial<OxigraphServerIo>;
-}): StartOxigraphServerOptions {
-  return {
-    binaryPath: input.binaryPath,
-    location: input.plan.location,
-    port: input.plan.port,
-    log: input.log,
-    readyTimeoutMs: input.readyTimeoutMs ?? input.plan.readyTimeoutMs,
-    queryTimeoutS: input.plan.queryTimeoutS,
-    memoryLimits: input.plan.memoryLimits,
-    walRestartThresholdBytes: input.plan.walRestartThresholdBytes,
-    platform: input.platform,
-    io: input.serverIo,
-  };
-}
-
 /**
  * Start the managed server if configured. Returns null when the node uses
  * a different backend (so callers can `const m = await start(...); if (m)
@@ -431,14 +407,18 @@ export async function startManagedOxigraph(
   );
   if (plan === null) return null;
 
-  const handle = await startOxigraphServer(buildManagedOxigraphServerStartOptions({
-    plan,
+  const handle = await startOxigraphServer({
     binaryPath: binary.path,
+    location: plan.location,
+    port: plan.port,
     log,
-    readyTimeoutMs: opts.readyTimeoutMs,
+    readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,
+    queryTimeoutS: plan.queryTimeoutS,
+    memoryLimits: plan.memoryLimits,
+    walRestartThresholdBytes: plan.walRestartThresholdBytes,
     platform: opts.platform,
-    serverIo: opts.serverIo,
-  }));
+    io: opts.serverIo,
+  });
 
   const runtimeStoreConfig: TripleStoreConfig = {
     backend: 'sparql-http',

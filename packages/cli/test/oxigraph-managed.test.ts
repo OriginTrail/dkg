@@ -22,7 +22,6 @@ import {
 } from '@origintrail-official/dkg-storage';
 
 import {
-  buildManagedOxigraphServerStartOptions,
   planManagedOxigraph,
   resolveManagedOxigraphPort,
   startManagedOxigraph,
@@ -400,20 +399,15 @@ describe('planManagedOxigraph', () => {
     expect(resolveManagedOxigraphPort({ port: 7878 })).toBe(7878);
   });
 
-  it('forwards the operator WAL threshold across the managed-start boundary', () => {
+  it('keeps the operator WAL threshold in the managed launch plan', () => {
     const plan = planManagedOxigraph({
       store: {
         backend: MANAGED_OXIGRAPH_BACKEND,
         options: { walRestartThresholdBytes: 1_234 },
       },
     }, '/data')!;
-    const startOptions = buildManagedOxigraphServerStartOptions({
-      plan,
-      binaryPath: '/tmp/oxigraph',
-      log: () => {},
-    });
 
-    expect(startOptions.walRestartThresholdBytes).toBe(1_234);
+    expect(plan.walRestartThresholdBytes).toBe(1_234);
   });
 
   it('rejects an out-of-range port and falls back to the default', () => {
