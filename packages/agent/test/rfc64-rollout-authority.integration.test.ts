@@ -3188,12 +3188,17 @@ describe('RFC-64 rollout authority integration', () => {
     rejectReads = true;
     edge.subscribeToContextGraph(staleContextGraphId);
     await vi.waitFor(() => expect(resolveSnapshots).toHaveBeenCalledOnce());
+    // Keep a second notification queued while the failed owner is inside its
+    // long retry delay. The shutdown path must clear this successor as well;
+    // otherwise it can survive the aborted run and be replayed after reopen.
+    edge.subscribeToContextGraph(freshContextGraphId);
     (edge as any).deleteContextGraphSubscription(staleContextGraphId);
     await edge.stop();
 
     rejectReads = false;
     await edge.start();
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    expect(resolveSnapshots).toHaveBeenCalledTimes(1);
     resolveSnapshots.mockClear();
     edge.subscribeToContextGraph(freshContextGraphId);
     await edge.whenRfc64CatalogResponsibilitiesIdleV1();
