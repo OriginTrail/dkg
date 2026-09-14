@@ -135,8 +135,8 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 
 // Temporary release-candidate attribution: the EVM name-hash resolver is an
 // intentionally expensive cold path. Record each distinct in-process caller
-// once, without graph ids, name hashes, RPC URLs, or wallet material, so a
-// one-node canary can identify which startup owner is repeatedly reaching it.
+// with power-of-two counts, without graph ids, name hashes, RPC URLs, or wallet
+// material, so a one-node canary can identify which startup owner repeats it.
 const contextGraphNameHashResolutionCallerCounts = new Map<string, number>();
 const CONTEXT_GRAPH_NAME_HASH_RESOLUTION_CALLER_SAMPLE_LIMIT = 64;
 
@@ -1981,18 +1981,20 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       }
       return undefined;
     }
+    const caller = (new Error().stack ?? '')
+      .split('\n')
+      .slice(2, 7)
+      .map((frame) => frame.trim())
+      .join(' <- ');
+    const source = options.source ?? 'unspecified';
+    const signature = `${source}\0${caller}`;
+    const existingCount = contextGraphNameHashResolutionCallerCounts.get(signature);
     if (
-      contextGraphNameHashResolutionCallerCounts.size
-      < CONTEXT_GRAPH_NAME_HASH_RESOLUTION_CALLER_SAMPLE_LIMIT
+      existingCount !== undefined
+      || contextGraphNameHashResolutionCallerCounts.size
+        < CONTEXT_GRAPH_NAME_HASH_RESOLUTION_CALLER_SAMPLE_LIMIT
     ) {
-      const caller = (new Error().stack ?? '')
-        .split('\n')
-        .slice(2, 7)
-        .map((frame) => frame.trim())
-        .join(' <- ');
-      const source = options.source ?? 'unspecified';
-      const signature = `${source}\0${caller}`;
-      const count = (contextGraphNameHashResolutionCallerCounts.get(signature) ?? 0) + 1;
+      const count = (existingCount ?? 0) + 1;
       contextGraphNameHashResolutionCallerCounts.set(signature, count);
       if ((count & (count - 1)) === 0) {
         this.log.info(

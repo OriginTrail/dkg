@@ -3627,7 +3627,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       try {
         const resolved = await this.resolveCurrentNameHashContextGraphBinding(localCgId, {
           signal,
-          source: 'agent.vm.selfPrimeSubscriptionTarget',
+          source: 'agent.vm.revalidateReverseBinding',
         });
         return resolved?.provenance === 'reverse-name-hash'
           && resolved.onChainId === target.onChainId
