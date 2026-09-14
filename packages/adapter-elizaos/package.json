@@ -21,8 +21,8 @@
     "@origintrail-official/dkg-agent": "workspace:*"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^4.0.18",
-    "vitest": "^4.0.18"
+    "@vitest/coverage-v8": "catalog:",
+    "vitest": "catalog:"
   },
   "publishConfig": {
     "access": "public"

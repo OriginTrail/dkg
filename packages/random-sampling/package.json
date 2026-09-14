@@ -17,9 +17,9 @@
   },
   "devDependencies": {
     "@origintrail-official/dkg-publisher": "workspace:*",
-    "@vitest/coverage-v8": "^4.0.18",
+    "@vitest/coverage-v8": "catalog:",
     "ethers": "^6",
-    "vitest": "^4.0.18"
+    "vitest": "catalog:"
   },
   "publishConfig": {
     "access": "public"

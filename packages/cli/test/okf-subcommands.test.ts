@@ -28,7 +28,7 @@ import {
 // tests cannot: dry-run must NOT connect, WM import vs --share advance,
 // export/verify edge cases, and default import replacement behavior.
 
-describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
+describe('dkg okf subcommands', { concurrent: false, timeout: 180_000 }, () => {
   let stub: Awaited<ReturnType<typeof startStub>>;
   let dkgHome: string;
   const createdCGs = new Set<string>();

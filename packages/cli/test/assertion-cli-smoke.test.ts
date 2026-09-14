@@ -14,7 +14,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', 'dist', 'cli.js');
 const UINT72_OVERFLOW_DECIMAL = '4722366482869645213696';
 
-describe.sequential('assertion CLI smoke', () => {
+describe('assertion CLI smoke', { concurrent: false }, () => {
   let dkgHome: string;
   let server: ReturnType<typeof createServer>;
   let smokeApiPort: string;

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { execSync } from 'node:child_process';
 import type { AutoUpdateConfig } from '../src/config.js';
 
-describe.sequential('auto-update versioned e2e', { timeout: 30_000 }, () => {
+describe('auto-update versioned e2e', { concurrent: false, timeout: 30_000 }, () => {
   let tmpDir: string;
   let bareRepo: string;
   let workDir: string;

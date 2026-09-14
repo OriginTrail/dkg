@@ -38,3 +38,8 @@ packages:
   - "devnet/pr1384-preserve-agents-on-transfer"
   - "devnet/pr1370-admin-op-wallet"
   - "devnet/issue-2052-system-records"
+
+catalog:
+  "@types/node": "^22.19.11"
+  "@vitest/coverage-v8": "^5.0.0"
+  "vitest": "^5.0.0"
