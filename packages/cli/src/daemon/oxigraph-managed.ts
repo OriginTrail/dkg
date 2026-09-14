@@ -35,11 +35,11 @@ import {
   type OxigraphBinaryIo,
 } from './oxigraph-binary.js';
 import {
-  DEFAULT_WAL_RESTART_THRESHOLD_BYTES,
   startOxigraphServer,
   type OxigraphServerHandle,
   type OxigraphServerIo,
 } from './oxigraph-server.js';
+import { resolveWalRestartThresholdBytes } from './oxigraph-wal-maintenance.js';
 import {
   normalizeOxigraphMemoryLimits,
   type OxigraphMemoryLimits,
@@ -277,10 +277,9 @@ export function planManagedOxigraph(
   const options = config.store.options ?? {};
   const port = resolveManagedOxigraphPort(options);
   const readyTimeoutMs = resolvePositiveIntegerOption(options, 'readyTimeoutMs');
-  const walRestartThresholdBytes = resolvePositiveIntegerOption(
-    options,
-    'walRestartThresholdBytes',
-  ) ?? DEFAULT_WAL_RESTART_THRESHOLD_BYTES;
+  const walRestartThresholdBytes = resolveWalRestartThresholdBytes(
+    options.walRestartThresholdBytes,
+  );
   // Oxigraph 0.5.x implements `--timeout-s` with one sleeping OS thread per
   // query. Under sustained load those timer threads can exhaust the process
   // before they expire. Keep the native deadline opt-in; the HTTP adapter's

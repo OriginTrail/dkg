@@ -9,12 +9,13 @@ type IntervalHandle = ReturnType<typeof setInterval>;
 
 export interface OxigraphWalMaintenanceOptions {
   location: string;
-  thresholdBytes?: number;
+  thresholdBytes: number;
   checkIntervalMs?: number;
   idleMs?: number;
   cooldownMs?: number;
   measureRetainedWalBytes: (location: string) => number;
   requestRestart: (reason: string) => boolean;
+  serverAvailable: () => boolean;
   log: (message: string) => void;
   now?: () => number;
   schedule?: (callback: () => void, intervalMs: number) => IntervalHandle;
@@ -23,9 +24,14 @@ export interface OxigraphWalMaintenanceOptions {
 
 export interface OxigraphWalMaintenanceCoordinator {
   reportActivity(activeOperations: number): void;
-  serverReady(): void;
-  serverUnavailable(): void;
+  serverLifecycleChanged(): void;
   stop(): void;
+}
+
+export function resolveWalRestartThresholdBytes(value: unknown): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : DEFAULT_WAL_RESTART_THRESHOLD_BYTES;
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {
@@ -38,10 +44,7 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 export function createOxigraphWalMaintenanceCoordinator(
   options: OxigraphWalMaintenanceOptions,
 ): OxigraphWalMaintenanceCoordinator {
-  const thresholdBytes = positiveInteger(
-    options.thresholdBytes,
-    DEFAULT_WAL_RESTART_THRESHOLD_BYTES,
-  );
+  const thresholdBytes = options.thresholdBytes;
   const checkIntervalMs = positiveInteger(options.checkIntervalMs, DEFAULT_CHECK_INTERVAL_MS);
   const idleMs = positiveInteger(options.idleMs, DEFAULT_IDLE_MS);
   const cooldownMs = positiveInteger(options.cooldownMs, DEFAULT_COOLDOWN_MS);
@@ -49,18 +52,22 @@ export function createOxigraphWalMaintenanceCoordinator(
   const schedule = options.schedule ?? setInterval;
   const cancel = options.cancel ?? clearInterval;
   let activeOperations = 0;
-  let available = false;
   let idleSince: number | null = null;
   let lastRestartAt = Number.NEGATIVE_INFINITY;
-  let timer: IntervalHandle | undefined;
+  let stopped = false;
 
   const evaluate = (): void => {
     const observedAt = now();
+    if (!options.serverAvailable() || activeOperations !== 0) {
+      idleSince = null;
+      return;
+    }
+    if (idleSince === null) {
+      idleSince = observedAt;
+      return;
+    }
     if (
-      !available
-      || activeOperations !== 0
-      || idleSince === null
-      || observedAt - idleSince < idleMs
+      observedAt - idleSince < idleMs
       || observedAt - lastRestartAt < cooldownMs
     ) return;
     let walBytes: number;
@@ -80,34 +87,30 @@ export function createOxigraphWalMaintenanceCoordinator(
     );
     if (accepted) {
       lastRestartAt = observedAt;
-      available = false;
       idleSince = null;
     }
   };
 
+  const timer = schedule(evaluate, checkIntervalMs);
+  timer.unref?.();
+
   return {
     reportActivity(active: number): void {
+      if (stopped) return;
       if (!Number.isSafeInteger(active) || active < 0) return;
       activeOperations = active;
       if (active > 0) idleSince = null;
-      else if (available && idleSince === null) idleSince = now();
+      else if (options.serverAvailable() && idleSince === null) idleSince = now();
     },
-    serverReady(): void {
-      available = true;
-      idleSince = activeOperations === 0 ? now() : null;
-      if (timer) return;
-      timer = schedule(evaluate, checkIntervalMs);
-      timer.unref?.();
-    },
-    serverUnavailable(): void {
-      available = false;
-      idleSince = null;
+    serverLifecycleChanged(): void {
+      if (stopped) return;
+      idleSince = options.serverAvailable() && activeOperations === 0 ? now() : null;
     },
     stop(): void {
-      available = false;
+      if (stopped) return;
+      stopped = true;
       idleSince = null;
-      if (timer) cancel(timer);
-      timer = undefined;
+      cancel(timer);
     },
   };
 }

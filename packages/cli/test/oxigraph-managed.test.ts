@@ -145,6 +145,22 @@ describe('planManagedOxigraph', () => {
     expect(plan!.walRestartThresholdBytes).toBe(1_234);
   });
 
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'normalizes invalid WAL threshold %s before it enters the launch plan',
+    (walRestartThresholdBytes) => {
+      const plan = planManagedOxigraph(
+        {
+          store: {
+            backend: MANAGED_OXIGRAPH_BACKEND,
+            options: { walRestartThresholdBytes },
+          },
+        },
+        '/data',
+      );
+      expect(plan!.walRestartThresholdBytes).toBe(4 * 1024 ** 3);
+    },
+  );
+
   it('omits the unsafe native query timeout for bundled Oxigraph 0.5.x on macOS', () => {
     const plan = planManagedOxigraph(
       {

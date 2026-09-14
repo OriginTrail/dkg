@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createOxigraphWalMaintenanceCoordinator } from '../src/daemon/oxigraph-wal-maintenance.js';
+import {
+  DEFAULT_WAL_RESTART_THRESHOLD_BYTES,
+  createOxigraphWalMaintenanceCoordinator,
+  resolveWalRestartThresholdBytes,
+} from '../src/daemon/oxigraph-wal-maintenance.js';
 
 function controlledCoordinator(overrides: {
   measureRetainedWalBytes?: () => number;
@@ -8,6 +12,7 @@ function controlledCoordinator(overrides: {
 } = {}) {
   let now = 0;
   let tick = () => {};
+  let serverAvailable = false;
   const timer = { unref: vi.fn() } as unknown as ReturnType<typeof setInterval>;
   const cancel = vi.fn();
   const coordinator = createOxigraphWalMaintenanceCoordinator({
@@ -18,6 +23,7 @@ function controlledCoordinator(overrides: {
     cooldownMs: 100,
     measureRetainedWalBytes: overrides.measureRetainedWalBytes ?? (() => 101),
     requestRestart: overrides.requestRestart ?? (() => true),
+    serverAvailable: () => serverAvailable,
     log: overrides.log ?? (() => {}),
     now: () => now,
     schedule: (callback, intervalMs) => {
@@ -29,6 +35,10 @@ function controlledCoordinator(overrides: {
   });
   return {
     coordinator,
+    setServerAvailable: (value: boolean) => {
+      serverAvailable = value;
+      coordinator.serverLifecycleChanged();
+    },
     setNow: (value: number) => { now = value; },
     tick: () => tick(),
     timer,
@@ -37,11 +47,22 @@ function controlledCoordinator(overrides: {
 }
 
 describe('Oxigraph WAL maintenance coordinator', () => {
+  it.each([undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, '100'])(
+    'resolves invalid threshold %s to the canonical 4 GiB default',
+    (value) => {
+      expect(resolveWalRestartThresholdBytes(value)).toBe(DEFAULT_WAL_RESTART_THRESHOLD_BYTES);
+    },
+  );
+
+  it('preserves a safe positive integer threshold', () => {
+    expect(resolveWalRestartThresholdBytes(1234)).toBe(1234);
+  });
+
   it('starts a fresh continuous-idle window after activity reaches zero', () => {
     const measureRetainedWalBytes = vi.fn(() => 101);
     const requestRestart = vi.fn(() => true);
     const controlled = controlledCoordinator({ measureRetainedWalBytes, requestRestart });
-    controlled.coordinator.serverReady();
+    controlled.setServerAvailable(true);
     expect(controlled.timer.unref).toHaveBeenCalledOnce();
 
     controlled.setNow(70);
@@ -67,13 +88,13 @@ describe('Oxigraph WAL maintenance coordinator', () => {
     const measureRetainedWalBytes = vi.fn(() => 101);
     const requestRestart = vi.fn(() => true);
     const controlled = controlledCoordinator({ measureRetainedWalBytes, requestRestart });
-    controlled.coordinator.serverReady();
+    controlled.setServerAvailable(true);
     controlled.setNow(80);
     controlled.tick();
     expect(requestRestart).toHaveBeenCalledOnce();
 
     controlled.setNow(90);
-    controlled.coordinator.serverReady();
+    controlled.setServerAvailable(true);
     controlled.setNow(170);
     controlled.tick();
     expect(requestRestart).toHaveBeenCalledOnce();
@@ -91,7 +112,7 @@ describe('Oxigraph WAL maintenance coordinator', () => {
       measureRetainedWalBytes: () => { throw new Error('measurement failed'); },
       log,
     });
-    controlled.coordinator.serverReady();
+    controlled.setServerAvailable(true);
     controlled.setNow(80);
     controlled.tick();
     expect(log).toHaveBeenCalledWith(expect.stringContaining('measurement failed'));

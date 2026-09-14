@@ -574,6 +574,60 @@ describe('startOxigraphServer (real child processes)', () => {
     await sleep(100);
     expect(measurements).toBe(measurementsAfterStop);
   });
+
+  it.each(['ownership', 'signal'] as const)(
+    'resumes WAL maintenance after a %s verification cancellation',
+    async (failureMode) => {
+      const port = await freePort();
+      const logs: string[] = [];
+      let rejectOwnership = false;
+      let signalAttempts = 0;
+      const handle = await startOxigraphServer(startOpts(port, {
+        log: (line: string) => logs.push(line),
+        walRestartThresholdBytes: 100,
+        walMaintenanceCheckIntervalMs: 20,
+        walRestartIdleMs: 40,
+        walRestartCooldownMs: 80,
+        io: {
+          measureRetainedWalBytes: () => 101,
+          findListenOwnerPid: async (child, listenerPort, host, ownership) => {
+            const actual = await findListenOwnerPid(child, listenerPort, host, ownership);
+            return failureMode === 'ownership' && rejectOwnership && actual !== null
+              ? actual + 100_000
+              : actual;
+          },
+          killProcess: vi.fn(() => {
+            signalAttempts += 1;
+            return failureMode === 'signal' ? false : true;
+          }) as unknown as typeof process.kill,
+        },
+      }));
+      try {
+        rejectOwnership = true;
+        const initialPid = await fetchPid(port);
+        for (let i = 0; i < 100; i += 1) {
+          const cancellations = logs.filter((line) => line.includes(
+            failureMode === 'ownership'
+              ? 'ownership changed'
+              : 'could not signal the verified listener',
+          )).length;
+          if (cancellations >= 2) break;
+          await sleep(20);
+        }
+        const cancellations = logs.filter((line) => line.includes(
+          failureMode === 'ownership'
+            ? 'ownership changed'
+            : 'could not signal the verified listener',
+        )).length;
+        expect(cancellations).toBeGreaterThanOrEqual(2);
+        expect(await fetchPid(port)).toBe(initialPid);
+        expect(handle.getRecoveryState()).toEqual({ recovering: false, generation: 0 });
+        if (failureMode === 'signal') expect(signalAttempts).toBeGreaterThanOrEqual(2);
+      } finally {
+        await handle.stop();
+      }
+    },
+  );
 });
 
 const nativeOxigraphTestBinary = process.env.DKG_OXIGRAPH_TEST_BINARY;
