@@ -274,6 +274,65 @@ describe('UI API tests', () => {
       expect(requestLog[0]?.headers['if-none-match']).toBe('"context-graphs-v1"');
     });
 
+    it('surfaces an unsuccessful first context-graph page', async () => {
+      responseOverrides.push({
+        match: (url) => url.startsWith('/api/context-graph/list'),
+        status: 503,
+        body: { error: 'context graph registry unavailable' },
+      });
+
+      await expect(fetchContextGraphs()).rejects.toThrow('context graph registry unavailable');
+      expect(requestLog).toHaveLength(1);
+    });
+
+    it('surfaces a later-page transport error without returning a partial list', async () => {
+      contextGraphPagination = {
+        etag: '"context-graphs-later-error"',
+        pages: {
+          '': { contextGraphs: [{ id: 'cg-1' }], nextCursor: 'failed-page' },
+        },
+      };
+      responseOverrides.push({
+        match: (url) => url.includes('cursor=failed-page'),
+        status: 502,
+        body: undefined,
+      });
+
+      await expect(fetchContextGraphs()).rejects.toThrow('HTTP 502');
+      expect(requestLog.map((entry) => entry.url)).toEqual([
+        '/api/context-graph/list?limit=100&projection=summary',
+        '/api/context-graph/list?limit=100&projection=summary&cursor=failed-page',
+      ]);
+    });
+
+    it('rejects a repeated context-graph cursor instead of looping', async () => {
+      contextGraphPagination = {
+        etag: '"context-graphs-repeated-cursor"',
+        pages: {
+          '': { contextGraphs: [{ id: 'cg-1' }], nextCursor: 'repeated' },
+          repeated: { contextGraphs: [{ id: 'cg-2' }], nextCursor: 'repeated' },
+        },
+      };
+
+      await expect(fetchContextGraphs()).rejects.toThrow('repeated pagination cursor');
+      expect(requestLog).toHaveLength(2);
+    });
+
+    it('coalesces concurrent context-graph walks and returns independent arrays', async () => {
+      contextGraphPagination = {
+        etag: '"context-graphs-coalesced"',
+        pages: { '': { contextGraphs: [{ id: 'cg-shared' }] } },
+      };
+
+      const first = fetchContextGraphs();
+      const second = fetchContextGraphs();
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+
+      expect(requestLog).toHaveLength(1);
+      expect(firstResult).toEqual(secondResult);
+      expect(firstResult.contextGraphs).not.toBe(secondResult.contextGraphs);
+    });
+
     it('fetchStatus calls /api/status', async () => {
       const res = await fetchStatus();
       expect(res).toEqual({ peerId: 'abc', synced: true });
