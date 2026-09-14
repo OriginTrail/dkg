@@ -143,6 +143,37 @@ describe('DKG Local LLM Node UI surface', () => {
     });
   });
 
+  it('keeps an auto-detected local LLM visible after runtime initialization fails', async () => {
+    globalThis.fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/api/local-agent-integrations')) {
+        return json({ integrations: [localLlmRecord()] });
+      }
+      if (url.endsWith('/api/local-llm/health')) {
+        return json({
+          ok: false,
+          configured: false,
+          ready: false,
+          reachable: true,
+          offline: false,
+          readOnly: true,
+          error: 'Failed to initialize the local DKG LLM runtime',
+          initFailure: 'Failed to initialize the local DKG LLM runtime',
+        });
+      }
+      return json({ error: `Unexpected request: ${url}` }, 500);
+    }) as typeof globalThis.fetch;
+
+    const { integrations } = await fetchLocalAgentIntegrations();
+    expect(integrations).toHaveLength(1);
+    expect(integrations[0]).toMatchObject({
+      id: 'local-llm',
+      chatReady: false,
+      status: 'bridge_offline',
+      error: 'Failed to initialize the local DKG LLM runtime',
+    });
+  });
+
   it('posts the fixed session and active graph, then emits one final event with DKG metadata', async () => {
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
     globalThis.fetch = vi.fn(async (input, init) => {

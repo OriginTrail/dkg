@@ -2823,7 +2823,12 @@ async function mapLocalAgentIntegrationRecord(
   // Reachability alone is insufficient: an unrelated HTTP service can occupy
   // the default port. An explicit but temporarily offline configuration
   // remains visible so its error is useful.
-  if (id === 'local-llm' && health?.configured === false && health.ready !== true) {
+  if (
+    id === 'local-llm'
+    && health?.configured === false
+    && health.ready !== true
+    && !health.initFailure
+  ) {
     return null;
   }
   const degraded = isDegradedLocalAgentHealth(runtimeStatus, health);
