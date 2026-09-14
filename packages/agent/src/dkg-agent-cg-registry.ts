@@ -782,40 +782,6 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   }
 
   /**
-   * Listing is advisory and must reflect a just-mined registration before it
-   * reaches the finalized index. Prefer finalized evidence, then explicitly
-   * fall back to the current resolver for an indexed miss or ordinary reader
-   * failure. Caller cancellation never degrades into another RPC path.
-   */
-  async resolveContextGraphOnChainIdForListing(
-    this: DKGAgent,
-    contextGraphId: string,
-    options: {
-      signal?: AbortSignal;
-      finalizedTarget?: FinalizedContextGraphAuthorityTargetV1 | null;
-    } = {},
-  ): Promise<string | null> {
-    let finalizedTarget = options.finalizedTarget;
-    if (!Object.hasOwn(options, 'finalizedTarget')) {
-      try {
-        const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
-          [contextGraphId],
-          options,
-        );
-        if (resolution.kind === 'finalized-index') {
-          finalizedTarget = resolution.targets.get(contextGraphId) ?? null;
-        }
-      } catch (error) {
-        if (options.signal?.aborted) throw options.signal.reason ?? error;
-      }
-    }
-    if (finalizedTarget !== undefined && finalizedTarget !== null) {
-      return finalizedTarget.expectedOnChainId.toString(10);
-    }
-    return this.getContextGraphOnChainId(contextGraphId, options);
-  }
-
-  /**
    * Canonical registration-discovery boundary for policy consumers.
    *
    * A locally indexed graph must resolve through its current/durable binding

@@ -10,68 +10,6 @@ import {
 } from './context-graph-registration-binding.fixture.js';
 
 describe('Context Graph registration resolution deadlines', () => {
-  it('falls back to the current resolver when the finalized index reader is unavailable', async () => {
-    const fixture = selectedFixture(17n);
-    const resolveFinalized = vi.fn(async () => {
-      throw new Error('reader unavailable');
-    });
-    Object.assign(fixture.agent.chain, {
-      contextGraphAuthorityIndexRevisionReader: {
-        resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
-      },
-    });
-
-    await expect(fixture.agent.resolveContextGraphOnChainIdForListing(LOCAL_ID))
-      .resolves.toBe('17');
-
-    expect(resolveFinalized).toHaveBeenCalledWith(NAME_HASH, {
-      signal: undefined,
-    });
-    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledOnce();
-  });
-
-  it('falls back to the current resolver when a new registration is not finalized yet', async () => {
-    const fixture = selectedFixture(19n);
-    const resolveFinalized = vi.fn(async () => null);
-    Object.assign(fixture.agent.chain, {
-      contextGraphAuthorityIndexRevisionReader: {
-        resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
-      },
-    });
-
-    await expect(fixture.agent.resolveContextGraphOnChainIdForListing(LOCAL_ID))
-      .resolves.toBe('19');
-
-    expect(resolveFinalized).toHaveBeenCalledWith(NAME_HASH, {
-      signal: undefined,
-    });
-    expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledOnce();
-  });
-
-  it('propagates finalized-reader cancellation without calling the current resolver', async () => {
-    const fixture = selectedFixture(17n);
-    const controller = new AbortController();
-    const abortReason = new Error('listing enrichment cancelled');
-    const resolveFinalized = vi.fn(async () => {
-      throw new Error('reader stopped');
-    });
-    Object.assign(fixture.agent.chain, {
-      contextGraphAuthorityIndexRevisionReader: {
-        resolveFinalizedContextGraphIdByNameHash: resolveFinalized,
-      },
-    });
-    controller.abort(abortReason);
-
-    await expect(fixture.agent.resolveContextGraphOnChainIdForListing(LOCAL_ID, {
-      signal: controller.signal,
-    })).rejects.toBe(abortReason);
-
-    expect(resolveFinalized).toHaveBeenCalledWith(NAME_HASH, {
-      signal: controller.signal,
-    });
-    expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
-  });
-
   it('keeps an explicitly local-created unregistered graph independent of chain RPC', async () => {
     const fixture = selectedFixture();
     fixture.agent.localContextGraphProvenance.recordLocalCreate(LOCAL_ID);

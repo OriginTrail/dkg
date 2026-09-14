@@ -1,5 +1,6 @@
 import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 
 const CALLER_ADDRESS = '0x1111111111111111111111111111111111111111';
@@ -37,10 +38,12 @@ function listingAgent(input: {
     | { kind: 'legacy-current' }
   >;
   registrationStatus?: (id: string) => Promise<'registered' | 'unregistered' | null>;
-  resolveCurrent?: (id: string) => Promise<string | null>;
+  resolveCurrent?: (
+    id: string,
+    options?: { signal?: AbortSignal; source?: string },
+  ) => Promise<string | null>;
 }) {
   const resolveCurrent = vi.fn(input.resolveCurrent ?? (async () => null));
-  const resolveForListing = vi.fn(async (id: string) => resolveCurrent(id));
   const readRegistrationStatus = vi.fn(
     input.registrationStatus ?? (async () => null),
   );
@@ -61,7 +64,7 @@ function listingAgent(input: {
     getCgMeta: async (id: string) => projectedMeta(id),
     resolveFinalizedContextGraphAuthorityTargetsV1: resolveFinalized,
     readLocalContextGraphRegistrationStatus: readRegistrationStatus,
-    resolveContextGraphOnChainIdForListing: resolveForListing,
+    getContextGraphOnChainId: resolveCurrent,
     getContextGraphCurator: async () => undefined,
     isPrivateContextGraph: async () => false,
     curatorDidMatchesChecksumAgent: () => false,
@@ -72,7 +75,6 @@ function listingAgent(input: {
     readRegistrationStatus,
     resolveCurrent,
     resolveFinalized,
-    resolveForListing,
   };
 }
 
@@ -101,7 +103,6 @@ describe('context graph list authority enrichment', () => {
       expect.objectContaining({ id, onChainId: '901' }),
     ]);
     expect(fixture.readRegistrationStatus).not.toHaveBeenCalled();
-    expect(fixture.resolveForListing).not.toHaveBeenCalled();
     expect(fixture.resolveCurrent).not.toHaveBeenCalled();
   });
 
@@ -121,7 +122,6 @@ describe('context graph list authority enrichment', () => {
     expect(result.rows.every((row: { onChainId?: string }) => row.onChainId === undefined))
       .toBe(true);
     expect(fixture.readRegistrationStatus).toHaveBeenCalledTimes(MISS_COUNT);
-    expect(fixture.resolveForListing).not.toHaveBeenCalled();
     expect(fixture.resolveCurrent).not.toHaveBeenCalled();
   });
 
@@ -141,7 +141,6 @@ describe('context graph list authority enrichment', () => {
 
     expect(result.rows).toHaveLength(MISS_COUNT);
     expect(fixture.readRegistrationStatus).toHaveBeenCalledTimes(MISS_COUNT);
-    expect(fixture.resolveForListing).not.toHaveBeenCalled();
     expect(fixture.resolveCurrent).not.toHaveBeenCalled();
   });
 
@@ -169,15 +168,53 @@ describe('context graph list authority enrichment', () => {
 
     expect(result.rows.find((row: { id: string }) => row.id === registeredId))
       .toEqual(expect.objectContaining({ onChainId: '904' }));
-    expect(fixture.resolveForListing).toHaveBeenCalledOnce();
-    expect(fixture.resolveForListing).toHaveBeenCalledWith(
+    expect(fixture.resolveCurrent).toHaveBeenCalledOnce();
+    expect(fixture.resolveCurrent).toHaveBeenCalledWith(
       registeredId,
       expect.objectContaining({
         signal: expect.any(AbortSignal),
-        finalizedTarget: null,
+        source: 'agent.contextGraph.list.onChainId',
       }),
     );
-    expect(fixture.resolveCurrent).toHaveBeenCalledOnce();
-    expect(fixture.resolveCurrent).toHaveBeenCalledWith(registeredId);
+  });
+
+  it('cancels the bounded current repair when its listing budget expires', async () => {
+    const originalRowBudget = DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS;
+    Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+      value: 1,
+      configurable: true,
+    });
+    try {
+      const id = 'listing-current-repair-timeout';
+      let repairSignal: AbortSignal | undefined;
+      const fixture = listingAgent({
+        ids: [id],
+        resolveFinalized: async () => ({
+          kind: 'finalized-index',
+          targets: new Map(),
+        }),
+        registrationStatus: async () => 'registered',
+        resolveCurrent: async (_id, options) => {
+          repairSignal = options?.signal;
+          return new Promise<string | null>((_resolve, reject) => {
+            repairSignal?.addEventListener('abort', () => reject(repairSignal?.reason), {
+              once: true,
+            });
+          });
+        },
+      });
+
+      const result = await list(fixture.fakeAgent);
+
+      expect(result.rows).toEqual([expect.objectContaining({ id })]);
+      expect(result.rows[0]?.onChainId).toBeUndefined();
+      expect(repairSignal?.aborted).toBe(true);
+      expect(fixture.resolveCurrent).toHaveBeenCalledOnce();
+    } finally {
+      Object.defineProperty(DKGAgentBase, 'LIST_CONTEXT_GRAPHS_ROW_BUDGET_MS', {
+        value: originalRowBudget,
+        configurable: true,
+      });
+    }
   });
 });

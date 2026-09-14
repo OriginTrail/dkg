@@ -2801,9 +2801,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       );
       if (registrationStatus !== 'registered') return row;
       const onChainId = await optional(
-        (signal) => this.resolveContextGraphOnChainIdForListing(row.id, {
+        (signal) => this.getContextGraphOnChainId(row.id, {
           signal,
-          finalizedTarget: null,
+          source: 'agent.contextGraph.list.onChainId',
         }),
         `on-chain id lookup for ${row.id}`,
       );
