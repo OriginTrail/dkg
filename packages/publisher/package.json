@@ -15,11 +15,6 @@
       "types": "./dist/workspace-resolution.d.ts",
       "import": "./dist/workspace-resolution.js",
       "default": "./dist/workspace-resolution.js"
-    },
-    "./test-support": {
-      "types": "./dist/chain-event-test-support.d.ts",
-      "import": "./dist/chain-event-test-support.js",
-      "default": "./dist/chain-event-test-support.js"
     }
   },
   "scripts": {
