@@ -94,6 +94,7 @@ describe('context graph list row concurrency', () => {
       }, id: string) {
         return this.getContextGraphOnChainId(id);
       },
+      readLocalContextGraphRegistrationStatus: async () => probe.run('registered'),
       getContextGraphOnChainId: async () => probe.run(undefined),
       getCgMeta: async (id: string) => probe.run(projectedMeta(id)),
       getContextGraphCurator: async () => probe.run(undefined),
