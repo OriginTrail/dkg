@@ -67,6 +67,8 @@ export class DkgMemory extends EventEmitter {
   }
   writeSettings() { this.atomic(join(this.dir, 'settings.json'), this.settings); }
   configure(input) {
+    const enabledCaptureSurfaces = ['dkgCapture', 'nativeCapture'];
+    const before = { ...this.settings };
     for (const key of ['dkgCapture', 'dkgRecall', 'nativeCapture', 'nativeRecall', 'searchLocalGraphs']) {
       if (input[key] !== undefined) {
         if (typeof input[key] !== 'boolean') throw new Error(`Invalid ${key}`);
@@ -77,7 +79,14 @@ export class DkgMemory extends EventEmitter {
       if (!Array.isArray(input.extraGraphIds) || input.extraGraphIds.length > 20 || input.extraGraphIds.some((s) => typeof s !== 'string' || !safeIri('did:dkg:context-graph:' + s))) throw new Error('Enter up to 20 valid context graph IDs.');
       this.settings.extraGraphIds = [...new Set(input.extraGraphIds)];
     }
-    this.writeSettings(); return this.settings;
+    this.writeSettings();
+    // Records paused by a capture switch resume as soon as it is turned back
+    // on, so the UI's promise that pending writes continue holds without
+    // waiting for the periodic retry.
+    if (enabledCaptureSurfaces.some((surface) => !before[surface] && this.settings[surface])) {
+      void this.retry().catch(() => {});
+    }
+    return this.settings;
   }
   enabled(surface, kind) { return this.settings[`${surface === 'dkg' ? 'dkg' : 'native'}${kind}`]; }
   recordId(threadId, messageId) { return hash(`${threadId}:${messageId}`); }
@@ -228,6 +237,16 @@ export class DkgMemory extends EventEmitter {
   async persist(r) {
     if (r.status === 'stored') return this.publicRecord(r);
     if (r.awaitingTurn) return this.publicRecord(r);
+    // The surface's CURRENT capture setting decides, not the one that applied
+    // when the record was staged: a turn in flight when the user switches
+    // capture off must not write afterwards. The record stays pending and
+    // resumes only through `retry()` once capture is re-enabled.
+    if (!this.enabled(r.surface, 'Capture')) {
+      r.status = 'pending';
+      r.error = 'Capture is turned off for this surface; this message is kept locally and will be stored if you turn it back on.';
+      this.put(r);
+      return this.publicRecord(r);
+    }
     const earlier = [...this.records.values()].find((other) => other.id !== r.id && other.threadId === r.threadId
       && (other.order && r.order ? other.order < r.order : other.createdAt < r.createdAt) && other.status !== 'stored' && this.enabled(other.surface, 'Capture'));
     if (earlier) { r.error = 'Waiting for an earlier message in this conversation to be stored'; this.put(r); return this.publicRecord(r); }

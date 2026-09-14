@@ -61,6 +61,26 @@ test('pending records survive restart and capture switches pause their retries',
   assert.equal(await restored.capture({ ...message, messageId: 'b', surface: 'native', text: '' }), null);
 });
 
+test('a capture switch during a turn keeps the message pending until capture returns', async t => {
+  const s = setup(t);
+  // Staged while capture is on, committed after the user turns it off: the
+  // record must not reach the node until capture is re-enabled.
+  const staged = s.memory.stageCapture({ ...message, awaitingTurn: true });
+  assert.equal(staged.status, 'pending');
+  s.memory.configure({ dkgCapture: false });
+  s.memory.bindTurn(message.threadId, message.messageId, 'turn-a');
+  const committed = await s.memory.commitCapture(message.threadId, message.messageId);
+  assert.equal(committed.status, 'pending');
+  assert.ok(!s.calls.some(c => c.path === '/api/knowledge-assets'));
+  assert.ok(!s.calls.some(c => c.path.endsWith('/wm/write')));
+
+  // Turning capture back on resumes the paused record on its own.
+  s.memory.configure({ dkgCapture: true });
+  await new Promise(resolve => setImmediate(resolve));
+  await s.memory.retry();
+  assert.equal(s.memory.records.get(staged.id).status, 'stored');
+});
+
 test('refuses an existing public or registered conversation graph', async t => {
   const s = setup(t); s.setGraph({ id: 'codex-private-conversations', accessPolicy: 'public' });
   assert.equal((await s.memory.capture(message)).status, 'pending');

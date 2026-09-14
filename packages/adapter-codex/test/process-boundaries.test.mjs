@@ -57,6 +57,54 @@ test('Codex RPC subprocess initializes, routes events, rejects on exit, and reco
   assert.deepEqual(await rpc.start(), { ready: true });
 });
 
+test('a Codex app-server that refuses initialization is terminated, not orphaned', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-rpc-init-failure-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const pidFile = join(dir, 'pid');
+  const fake = join(dir, 'refusing-app-server.mjs');
+  // Refuses initialization and STAYS ALIVE, emitting notifications the way an
+  // orphan would keep emitting into the next connection.
+  writeFileSync(fake, `
+    import { createInterface } from 'node:readline';
+    import { writeFileSync } from 'node:fs';
+    writeFileSync(process.env.PID_FILE, String(process.pid));
+    const lines = createInterface({ input: process.stdin });
+    lines.on('line', line => {
+      const message = JSON.parse(line);
+      if (message.method === 'initialize') {
+        console.log(JSON.stringify({ id: message.id, error: { code: -32000, message: 'initialization refused' } }));
+        setInterval(() => console.log(JSON.stringify({ method: 'fake/orphanAlive', params: {} })), 5);
+      }
+    });
+    setInterval(() => {}, 1000);
+  `);
+  const rpc = new CodexRpc({ binary: process.execPath, args: [fake],
+    env: { ...process.env, PID_FILE: pidFile } });
+  t.after(() => rpc.close());
+  const notifications = [];
+  rpc.on('notification', message => notifications.push(message.method));
+  const disconnected = once(rpc, 'disconnect');
+
+  await assert.rejects(rpc.start(), /initialization refused/);
+  await disconnected;
+  assert.equal(rpc.child, null);
+
+  const pid = Number(readFileSync(pidFile, 'utf8'));
+  const gone = async () => {
+    for (let attempt = 0; attempt < 200; attempt++) {
+      try { process.kill(pid, 0); } catch { return true; }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    return false;
+  };
+  assert.equal(await gone(), true, 'the refusing app-server was left running');
+  // Nothing the orphan emitted after the failure reached this connection.
+  const seen = notifications.length;
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(notifications.length, seen);
+  assert.ok(!notifications.includes('fake/orphanAlive'));
+});
+
 test('MCP launcher forwards only canonical DKG credentials and environment', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-mcp-boundary-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

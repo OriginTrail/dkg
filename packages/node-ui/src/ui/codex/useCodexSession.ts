@@ -124,11 +124,22 @@ export function codexSessionReducer(
     return state.thread?.id === event.threadId ? { ...state, memory: event.memory } : state;
   }
   if (event.type === 'external-loaded') {
-    return state.thread?.id === event.threadId ? {
+    // A reconnect snapshot repairs whatever the missed SSE window dropped, so
+    // it is authoritative for the lifecycle fields the controls read — not the
+    // thread alone. One exception: a turn this client already saw complete
+    // stays complete, because that completion can be newer than the snapshot.
+    if (state.thread?.id !== event.threadId) return state;
+    const activeTurnId: string | null = event.data.activeTurnId ?? null;
+    return {
       ...state,
       thread: event.data.thread,
       externalActive: Boolean(event.data.externalActive),
-    } : state;
+      activeTurn: activeTurnId !== null && !state.completedTurnIds.includes(activeTurnId)
+        ? activeTurnId
+        : null,
+      pending: event.data.pendingRequests ?? state.pending,
+      memory: event.data.memory ?? state.memory,
+    };
   }
   if (event.type === 'request-resolved') {
     return { ...state, pending: state.pending.filter((request) => request.id !== event.id) };

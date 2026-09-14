@@ -56,14 +56,29 @@ export class CodexRpc extends EventEmitter {
       this.emit('disconnect', error);
     };
     child.once('error', disconnected);
-    child.once('exit', () => disconnected(new Error('Codex disconnected. Reconnect to continue.')));
-    const result = await this.request('initialize', {
-      clientInfo: { name: 'dkg_node_ui', title: 'DKG Node UI', version: '0.1.0' },
-      capabilities: { experimentalApi: true, requestAttestation: false,
-        optOutNotificationMethods: ['item/reasoning/textDelta'] },
-    }, 15_000);
-    this.write({ method: 'initialized', params: {} });
-    return result;
+    const exited = () => disconnected(new Error('Codex disconnected. Reconnect to continue.'));
+    child.once('exit', exited);
+    try {
+      const result = await this.request('initialize', {
+        clientInfo: { name: 'dkg_node_ui', title: 'DKG Node UI', version: '0.1.0' },
+        capabilities: { experimentalApi: true, requestAttestation: false,
+          optOutNotificationMethods: ['item/reasoning/textDelta'] },
+      }, 15_000);
+      this.write({ method: 'initialized', params: {} });
+      return result;
+    } catch (error) {
+      // An initialization error or timeout leaves a child that may still be
+      // alive. Treat it as a full disconnect for THIS child before any
+      // reconnect: otherwise its notifications and server requests keep
+      // reaching this object while `reply()` writes to the next process.
+      child.off('error', disconnected);
+      child.off('exit', exited);
+      disconnected(error);
+      lines.close();
+      child.stdout.destroy();
+      child.kill('SIGTERM');
+      throw error;
+    }
   }
 
   write(message) {
