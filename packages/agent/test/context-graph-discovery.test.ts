@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 
 function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
@@ -14,6 +14,8 @@ function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
 }
 import {
   DKGAgent,
+  type ContextGraphMembershipRecord,
+  type ContextGraphMembershipStore,
   type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
@@ -315,7 +317,115 @@ describe('implicit SWM context graph metadata', () => {
       }
     }`);
     expect(publicMetaProof).toEqual({ type: 'boolean', value: true });
+    const registryResolve = vi.spyOn(
+      (agent as any).chain,
+      'resolveContextGraphIdByNameHash',
+    ).mockRejectedValue(new Error('registry RPC unavailable'));
+    await expect(agent.resolveContextGraphRegistrationBinding(contextGraphId))
+      .resolves.toEqual({ kind: 'unregistered' });
+    expect(registryResolve).not.toHaveBeenCalled();
   }, 15000);
+
+  it('restores implicit SWM provenance without RDF or registry availability', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-implicit-swm-provenance-'));
+    const contextGraphId = 'lazy-swm-restart';
+    const caller = new ethers.Wallet(HARDHAT_KEYS.DEPLOYER).address;
+    const persistedMemberships = new Map<
+      string,
+      ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }
+    >();
+    const persistedOrigins = new Map<string, {
+      contextGraphId: string;
+      source: 'local-create' | 'implicit-swm-write';
+      createdAt: number;
+    }>();
+    const membershipStore: ContextGraphMembershipStore = {
+      loadAll: async () => [...persistedMemberships.values()].map((row) => ({ ...row })),
+      loadLocalOrigins: async () => [...persistedOrigins.values()].map((row) => ({ ...row })),
+      recordLocalOrigin: async (record) => {
+        if (!persistedOrigins.has(record.contextGraphId)) {
+          persistedOrigins.set(record.contextGraphId, { ...record });
+        }
+      },
+      upsert: async (record) => {
+        persistedMemberships.set(
+          `${record.contextGraphId}\0${record.principalType}\0${record.principalId}`,
+          { ...record },
+        );
+      },
+      delete: async (id, principalType, principalId) => {
+        persistedMemberships.delete(`${id}\0${principalType}\0${principalId}`);
+      },
+    };
+    let first: DKGAgent | undefined;
+
+    try {
+      first = await DKGAgent.create({
+        kaNumberAllocator: makeTestKaNumberAllocator(),
+        name: 'ImplicitSwmProvenanceFirst',
+        listenPort: 0,
+        listenHost: '127.0.0.1',
+        dataDir,
+        chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
+        rfc64CatalogActivation: { enabled: false },
+        contextGraphMembershipStore: membershipStore,
+      });
+      agent = first;
+      await first.start();
+      await first.share(contextGraphId, [{
+        subject: 'urn:lazy-swm-restart:root',
+        predicate: 'http://schema.org/name',
+        object: '"Lazy SWM Restart"',
+        graph: '',
+      }], { callerAgentAddress: caller });
+      await first.stop();
+      first = undefined;
+      agent = undefined;
+
+      expect([...persistedMemberships.values()]).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          contextGraphId,
+          principalType: 'agent',
+          source: 'implicit-swm-write',
+          status: 'active',
+        }),
+      ]));
+      expect([...persistedOrigins.values()]).toEqual([
+        expect.objectContaining({
+          contextGraphId,
+          source: 'implicit-swm-write',
+        }),
+      ]);
+
+      const offlineChain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+      const registryResolve = vi.spyOn(offlineChain, 'resolveContextGraphIdByNameHash')
+        .mockRejectedValue(new Error('registry RPC unavailable'));
+      const restarted = await DKGAgent.create({
+        kaNumberAllocator: makeTestKaNumberAllocator(),
+        name: 'ImplicitSwmProvenanceRestarted',
+        listenPort: 0,
+        listenHost: '127.0.0.1',
+        dataDir,
+        chainAdapter: offlineChain,
+        rfc64CatalogActivation: { enabled: false },
+        contextGraphSubscriptionRehydrationEnabled: false,
+        contextGraphMembershipStore: membershipStore,
+      });
+      agent = restarted;
+      await restarted.start();
+
+      await expect(restarted.resolveContextGraphRegistrationBinding(contextGraphId))
+        .resolves.toEqual({ kind: 'unregistered' });
+      await expect(restarted.getContextGraphOnChainPolicy(contextGraphId))
+        .resolves.toEqual({});
+      expect(registryResolve).not.toHaveBeenCalled();
+    } finally {
+      await first?.stop().catch(() => {});
+      await agent?.stop().catch(() => {});
+      agent = undefined;
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('does not overwrite an explicitly created context graph on later SWM writes', async () => {
     const result = await createTestAgent();
@@ -422,6 +532,48 @@ describe('discoverContextGraphsFromStore', () => {
     // false until the catchup runner flips it.
     expect(sub!.synced).toBe(false);
     expect(sub!.name).toBe('Discovered ContextGraph');
+  }, 15000);
+
+  it('shares one discovery pass across concurrent peer-connect callers', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const contextGraphUri = contextGraphDataGraphUri('single-flight-discovery');
+    await store.insert([
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: ontologyGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.SCHEMA_NAME, object: '"Single Flight"', graph: ontologyGraph },
+    ]);
+
+    const originalQuery = store.query.bind(store);
+    let releaseFirstQuery!: () => void;
+    const firstQueryBlocked = new Promise<void>((resolve) => { releaseFirstQuery = resolve; });
+    let enteredFirstQuery!: () => void;
+    const firstQueryEntered = new Promise<void>((resolve) => { enteredFirstQuery = resolve; });
+    let discoveryQueries = 0;
+    vi.spyOn(store, 'query').mockImplementation(async (...args) => {
+      const source = args[1]?.source;
+      if (typeof source === 'string' && source.startsWith('agent.contextGraph.discovery.')) {
+        discoveryQueries++;
+        if (discoveryQueries === 1) {
+          enteredFirstQuery();
+          await firstQueryBlocked;
+        }
+      }
+      return originalQuery(...args);
+    });
+
+    const first = agent.discoverContextGraphsFromStore();
+    await firstQueryEntered;
+    const second = agent.discoverContextGraphsFromStore();
+    releaseFirstQuery();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([1, 1]);
+    expect(discoveryQueries).toBe(3);
+    await expect(agent.discoverContextGraphsFromStore()).resolves.toBe(0);
+    expect(discoveryQueries).toBe(6);
   }, 15000);
 
   it('does not re-discover already known contextGraphs', async () => {
@@ -610,6 +762,97 @@ describe('listContextGraphs merge', () => {
     expect(entry!.subscribed).toBe(false);
     expect(entry!.synced).toBe(false);
     expect(entry!.callerInvolved).toBeUndefined();
+  }, 15000);
+
+  it('batch-enriches mixed listing sources and uses current state for a finalized miss', async () => {
+    const store = new OxigraphStore();
+    const result = await createTestAgent({ store });
+    agent = result.agent;
+    await agent.start();
+
+    const ontologyId = 'listing-batch-ontology';
+    const metaId = 'listing-batch-meta';
+    const storageId = 'listing-batch-storage';
+    const justRegisteredId = 'listing-batch-just-registered';
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    await store.insert([
+      {
+        subject: contextGraphDataGraphUri(ontologyId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri(justRegisteredId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: ontologyGraph,
+      },
+      {
+        subject: contextGraphDataGraphUri(justRegisteredId),
+        predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
+        object: '"registered"',
+        graph: contextGraphMetaGraphUri(justRegisteredId),
+      },
+      {
+        subject: contextGraphDataGraphUri(metaId),
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: contextGraphMetaGraphUri(metaId),
+      },
+      {
+        subject: 'urn:listing-batch-storage:root',
+        predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+        object: '"Storage row"',
+        graph: contextGraphSharedMemoryUri(storageId),
+      },
+    ]);
+    (agent as any).subscribedContextGraphs.set(metaId, {
+      name: 'Meta row',
+      subscribed: true,
+      synced: true,
+    } satisfies ContextGraphSub);
+
+    const finalizedBatch = vi.fn(async (nameHashes: readonly string[]) => new Map([
+      [agent!.contextGraphNameCommitment(ontologyId), 901n],
+      [agent!.contextGraphNameCommitment(metaId), 902n],
+      [agent!.contextGraphNameCommitment(storageId), 903n],
+    ].filter(([nameHash]) => nameHashes.includes(nameHash as string)) as Array<[
+      string,
+      bigint,
+    ]>));
+    Object.defineProperty(agent.chain, 'contextGraphAuthorityIndexRevisionReader', {
+      configurable: true,
+      value: {
+        resolveFinalizedContextGraphIdsByNameHashes: finalizedBatch,
+        readContextGraphAuthorityIndexRevisions: async () => new Map(),
+        whenIdle: async () => undefined,
+      },
+    });
+    const currentResolver = vi.spyOn(agent, 'getContextGraphOnChainId')
+      .mockImplementation(async (contextGraphId) => (
+        contextGraphId === justRegisteredId ? '904' : null
+      ));
+
+    const rows = await agent.listContextGraphs();
+    expect(rows.find((row) => row.id === ontologyId)?.onChainId).toBe('901');
+    expect(rows.find((row) => row.id === metaId)?.onChainId).toBe('902');
+    expect(rows.find((row) => row.id === storageId)?.onChainId).toBe('903');
+    expect(rows.find((row) => row.id === justRegisteredId)?.onChainId).toBe('904');
+    expect(finalizedBatch).toHaveBeenCalledOnce();
+    expect(finalizedBatch.mock.calls[0]?.[0]).toEqual(expect.arrayContaining([
+      agent.contextGraphNameCommitment(ontologyId),
+      agent.contextGraphNameCommitment(metaId),
+      agent.contextGraphNameCommitment(storageId),
+      agent.contextGraphNameCommitment(justRegisteredId),
+    ]));
+    expect(currentResolver).toHaveBeenCalledWith(
+      justRegisteredId,
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(currentResolver.mock.calls.some(([id]) => (
+      id === ontologyId || id === metaId || id === storageId
+    ))).toBe(false);
   }, 15000);
 
   it('listContextGraphs sets callerInvolved from curator wallet match', async () => {

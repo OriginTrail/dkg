@@ -11,6 +11,8 @@ import {
   Rfc64CatalogAuthorityRefreshLoopV1,
   Rfc64CatalogAuthorityRevisionReadFailureV1,
   type Rfc64CatalogAuthorityRefreshResultV1,
+  type Rfc64CatalogAuthorityRefreshRequestV1,
+  type Rfc64CatalogAuthorityRefreshLoopOptionsV1,
   type Rfc64CatalogAuthorityRefreshSchedulerV1,
   type Rfc64CatalogAuthorityRevisionReadV1,
   type Rfc64CatalogAuthorityRevisionSourceV1,
@@ -59,10 +61,19 @@ export function createRfc64CatalogAuthorityRevisionSourceV1(
       try {
         revisions = await binding.runAuthorityRead(
           signal,
-          (readSignal) => reader.readContextGraphAuthorityIndexRevisions(
-            targets.onChainContextGraphIds,
-            { signal: readSignal },
-          ),
+          async (readSignal) => {
+            try {
+              return await reader.readContextGraphAuthorityIndexRevisions(
+                targets.onChainContextGraphIds,
+                { signal: readSignal },
+              );
+            } finally {
+              // A caller cancellation may detach from a physical log scan.
+              // Retain the serializer token until that scan has actually
+              // settled so the next refresh cannot overlap it.
+              await reader.whenIdle();
+            }
+          },
         );
       } catch (error) {
         if (signal.aborted) throw error;
@@ -88,7 +99,11 @@ export interface Rfc64CatalogAuthorityRefreshBindingV1 {
   readonly refreshContextGraph: (
     contextGraphId: string,
     signal: AbortSignal,
+    request: Rfc64CatalogAuthorityRefreshRequestV1,
   ) => Promise<Rfc64CatalogAuthorityRefreshResultV1>;
+  readonly createRefreshRequests?: Rfc64CatalogAuthorityRefreshLoopOptionsV1[
+    'createRefreshRequests'
+  ];
   readonly onActiveContextGraphIdsReadFailure: (error: unknown) => void;
   readonly onAuthorityRevisionsReadFailure: (error: unknown) => void;
   readonly onRefreshFailure: (contextGraphId: string, error: unknown) => void;
@@ -108,6 +123,9 @@ export function createRfc64CatalogAuthorityRefreshOwnerV1(
       binding.revisionSource,
     ),
     refreshContextGraph: binding.refreshContextGraph,
+    ...(binding.createRefreshRequests === undefined
+      ? {}
+      : { createRefreshRequests: binding.createRefreshRequests }),
     onActiveContextGraphIdsReadFailure: binding.onActiveContextGraphIdsReadFailure,
     onAuthorityRevisionsReadFailure: binding.onAuthorityRevisionsReadFailure,
     onRefreshFailure: binding.onRefreshFailure,

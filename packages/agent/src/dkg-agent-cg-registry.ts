@@ -96,7 +96,7 @@ import {
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -375,6 +375,8 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { LocalContextGraphRegistrationStatusStore } from
+  './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
   isCanonicalPositiveContextGraphId,
@@ -400,6 +402,20 @@ export type ContextGraphRegistrationBinding =
         | 'chain-name-binding-unavailable';
       detail?: string;
     };
+
+export type FinalizedContextGraphAuthorityTargetV1 = Readonly<{
+  expectedNameHash: string;
+  expectedOnChainId: bigint;
+  finalizedSnapshot?: ContextGraphAuthoritySnapshot;
+}>;
+
+export type FinalizedContextGraphAuthorityTargetsResolutionV1 = Readonly<
+  | {
+      kind: 'finalized-index';
+      targets: ReadonlyMap<string, FinalizedContextGraphAuthorityTargetV1>;
+    }
+  | { kind: 'legacy-current' }
+>;
 
 function contextGraphBindingAbortReason(signal: AbortSignal): Error {
   if (signal.reason instanceof Error) return signal.reason;
@@ -673,16 +689,39 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   }
 
   /**
+   * Read the durable local registration marker without collapsing a missing
+   * or malformed value into "unregistered". Callers that skip chain discovery
+   * must require the explicit local-first marker.
+   */
+  async readLocalContextGraphRegistrationStatus(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<'registered' | 'unregistered' | 'pending' | null> {
+    return new LocalContextGraphRegistrationStatusStore({
+      store: this.store,
+      markProjectionDirty: (id) => this.contextGraphMetaProjection.markDirty(id),
+    }).read(contextGraphId);
+  }
+
+  /**
+   * Canonical proof for the no-chain local-first path. Origin alone is not
+   * enough: the graph must also lack a bound numeric slot and carry the exact
+   * durable unregistered marker.
+   */
+  async isLocalFirstUnregisteredContextGraph(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<boolean> {
+    return this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
+      && this.subscribedContextGraphs.get(contextGraphId)?.onChainId === undefined
+      && await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'unregistered';
+  }
+
+  /**
    * Check whether a context graph has been registered on-chain.
    */
   async isContextGraphRegistered(this: DKGAgent, contextGraphId: string): Promise<boolean> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
-    const result = await this.store.query(
-      `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } } LIMIT 1`,
-      { source: 'agent.contextGraph.registrationStatus' },
-    );
-    return result.type === 'bindings' && result.bindings[0]?.['status']?.replace(/^"|"$/g, '') === 'registered';
+    return await this.readLocalContextGraphRegistrationStatus(contextGraphId) === 'registered';
   }
 
   /**
@@ -833,10 +872,169 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   async getContextGraphOnChainId(
     this: DKGAgent,
     contextGraphId: string,
-    options: { signal?: AbortSignal; source?: string } = {},
+    options: {
+      signal?: AbortSignal;
+      source?: string;
+    } = {},
   ): Promise<string | null> {
     const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
     return binding?.onChainId ?? null;
+  }
+
+  /**
+   * Resolve Context Graph authority targets at one explicit finalized horizon.
+   *
+   * Indexed adapters prefer projecting every requested name commitment and
+   * its complete authority snapshot together. A single target retains its
+   * older atomic capability, while older batch adapters may still return IDs
+   * for a caller-owned follow-up snapshot batch. Callers decide whether an
+   * explicitly legacy adapter permits a current-state compatibility path.
+   */
+  async resolveFinalizedContextGraphAuthorityTargetsV1(
+    this: DKGAgent,
+    contextGraphIds: readonly string[],
+    options: { signal?: AbortSignal } = {},
+  ): Promise<FinalizedContextGraphAuthorityTargetsResolutionV1> {
+    const uniqueContextGraphIds = [...new Set(contextGraphIds)];
+    const bindingTargets = uniqueContextGraphIds.map((contextGraphId) => {
+      const canonicalTarget = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+      const localId = canonicalTarget?.localId ?? contextGraphId;
+      const subscription = canonicalTarget?.subscription
+        ?? this.subscribedContextGraphs.get(localId);
+      const expectedNameHash = canonicalTarget?.nameHash
+        ?? (subscription?.onChainHash === undefined
+          ? this.contextGraphNameCommitment(localId)
+          : this.contextGraphWireId(subscription.onChainHash));
+      return { contextGraphId, expectedNameHash } as const;
+    });
+
+    const indexReader = this.chain.contextGraphAuthorityIndexRevisionReader;
+    if (indexReader === undefined) return { kind: 'legacy-current' };
+
+    const resolveSnapshots = indexReader
+      .resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes;
+    if (resolveSnapshots !== undefined) {
+      const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
+      options.signal?.throwIfAborted();
+      const snapshotsByNameHash = await resolveSnapshots.call(
+        indexReader,
+        bindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+        options,
+      );
+      // Custom readers may not honor cancellation or may return a superset.
+      // Publish only exact logical targets after the caller's final fence.
+      options.signal?.throwIfAborted();
+      for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+        const finalizedSnapshot = snapshotsByNameHash.get(expectedNameHash);
+        if (finalizedSnapshot !== undefined) {
+          targets.set(contextGraphId, Object.freeze({
+            expectedNameHash,
+            expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
+            finalizedSnapshot,
+          }));
+        }
+      }
+      return { kind: 'finalized-index', targets };
+    }
+
+    if (bindingTargets.length === 1) {
+      const resolveSnapshot = indexReader
+        .resolveFinalizedContextGraphAuthoritySnapshotByNameHash;
+      if (resolveSnapshot !== undefined) {
+        const [{ contextGraphId, expectedNameHash }] = bindingTargets;
+        const finalizedSnapshot = await resolveSnapshot.call(
+          indexReader,
+          expectedNameHash,
+          options,
+        );
+        const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
+        if (finalizedSnapshot !== null) {
+          targets.set(contextGraphId, Object.freeze({
+            expectedNameHash,
+            expectedOnChainId: BigInt(finalizedSnapshot.contextGraphId),
+            finalizedSnapshot,
+          }));
+        }
+        return { kind: 'finalized-index', targets };
+      }
+    }
+
+    const resolveMany = indexReader.resolveFinalizedContextGraphIdsByNameHashes;
+    if (resolveMany !== undefined) {
+      const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
+      options.signal?.throwIfAborted();
+      const resolvedByNameHash = await resolveMany.call(
+        indexReader,
+        bindingTargets.map(({ expectedNameHash }) => expectedNameHash),
+        options,
+      );
+      // Custom readers may not honor cancellation or may return a superset.
+      // Publish only exact logical targets after the caller's final fence.
+      options.signal?.throwIfAborted();
+      for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+        const expectedOnChainId = resolvedByNameHash.get(expectedNameHash);
+        if (expectedOnChainId !== undefined) {
+          targets.set(contextGraphId, Object.freeze({
+            expectedNameHash,
+            expectedOnChainId,
+          }));
+        }
+      }
+      return { kind: 'finalized-index', targets };
+    }
+
+    const resolveOne = indexReader.resolveFinalizedContextGraphIdByNameHash;
+    if (resolveOne === undefined) return { kind: 'legacy-current' };
+    const targets = new Map<string, FinalizedContextGraphAuthorityTargetV1>();
+    for (const { contextGraphId, expectedNameHash } of bindingTargets) {
+      const expectedOnChainId = await resolveOne.call(
+        indexReader,
+        expectedNameHash,
+        options,
+      );
+      if (expectedOnChainId !== null) {
+        targets.set(contextGraphId, Object.freeze({
+          expectedNameHash,
+          expectedOnChainId,
+        }));
+      }
+    }
+    return { kind: 'finalized-index', targets };
+  }
+
+  /**
+   * Single-target authority boundary used by RFC-64. Indexed absence remains
+   * finalized absence; only adapters with no finalized capability use the
+   * explicit legacy current-state resolver.
+   */
+  async resolveFinalizedContextGraphAuthorityTargetV1(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<FinalizedContextGraphAuthorityTargetV1 | null> {
+    // A durable local-first graph deliberately has no chain target. RFC-64
+    // authenticates that lane from its local owner metadata instead.
+    if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) return null;
+
+    const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
+      [contextGraphId],
+      options,
+    );
+    if (resolution.kind === 'finalized-index') {
+      return resolution.targets.get(contextGraphId) ?? null;
+    }
+
+    const explicitNameHash = this.subscribedContextGraphs.get(contextGraphId)?.onChainHash;
+    const expectedNameHash = explicitNameHash
+      ? this.contextGraphWireId(explicitNameHash)
+      : this.contextGraphNameCommitment(contextGraphId);
+    const resolved = await this.getContextGraphOnChainId(contextGraphId, options);
+    return resolved === null
+      ? null
+      : Object.freeze({
+          expectedNameHash,
+          expectedOnChainId: BigInt(resolved),
+        });
   }
 
   /**
@@ -860,6 +1058,26 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const route = selectContextGraphRegistrationRoute(this, contextGraphId);
     if (route.kind === 'system') {
       return { kind: 'unregistered' };
+    }
+
+    // A graph created by this node is explicitly local-first until its own
+    // registration transaction commits. Do not turn SWM signing/gossip into a
+    // chain availability dependency during that phase. The provenance set is
+    // populated only by the local create boundary (and its durable graph-level
+    // origin journal), while the RDF status is the transactionally updated register
+    // boundary; neither fact is inferred from remote discovery.
+    if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
+      try {
+        if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
+          return { kind: 'unregistered' };
+        }
+      } catch (err) {
+        return {
+          kind: 'unavailable',
+          reason: 'local-existence-unavailable',
+          detail: err instanceof Error ? err.message : String(err),
+        };
+      }
     }
 
     const localTarget = route.kind === 'local' ? route.target : null;
@@ -1122,6 +1340,26 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     accessPolicy?: number;
     publishPolicy?: number;
   }> {
+    // Keep the explicitly-created local-first state off the registry lookup
+    // path. The registration guard below used to run only after the cache
+    // re-key step had already called `getContextGraphOnChainId()` (twice on a
+    // cache miss), so a perfectly valid WM -> SWM share still depended on two
+    // name-hash RPC lookups even though its durable marker said unregistered.
+    // Match `resolveContextGraphRegistrationBinding()`'s strict provenance
+    // rule: only this node's local-create projection plus the explicit durable
+    // `unregistered` value can short-circuit. Missing/malformed state and
+    // remotely discovered graphs continue through authoritative resolution.
+    if (this.localContextGraphProvenance.hasLocalCreate(contextGraphId)) {
+      try {
+        if (await this.isLocalFirstUnregisteredContextGraph(contextGraphId)) {
+          return {};
+        }
+      } catch {
+        // Preserve the existing fail-closed/best-effort path on a store read
+        // failure; never infer unregistered from unavailable local state.
+      }
+    }
+
     let accessPolicy = this.onChainAccessPolicyCache.get(contextGraphId);
     // Codex review on #872 — `publishPolicy` is mutable on-chain
     // (`PublishPolicyUpdated`) but the cache is only seeded by

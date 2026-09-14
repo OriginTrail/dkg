@@ -33,10 +33,9 @@ function resolveStrictPublicProof(
   contextGraphId: string,
 ) {
   return resolveActivePublicContextGraphChainProof(
-    (id, operationContext, options) => agent.resolveOnChainAccessPolicyState(
+    (id, operationContext) => agent.resolveFinalizedOnChainAccessPolicyState(
       id,
       operationContext,
-      options,
     ),
     contextGraphId,
     createOperationContext('init'),
@@ -80,7 +79,6 @@ describe('active-public Context Graph chain proof', () => {
       expect(resolvePolicyState).toHaveBeenCalledWith(
         'test-context-graph',
         operationContext,
-        { slotBindingMode: 'chain-attested-repair' },
       );
     },
   );
@@ -108,6 +106,160 @@ describe('active-public Context Graph chain proof', () => {
     });
     expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
     expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
+  });
+
+  it('reuses one finalized authority snapshot instead of point-reading identity and policy', async () => {
+    const contextGraphId = 'indexed/public-cg';
+    const getContextGraphNameHash = vi.fn(async () => {
+      throw new Error('point name-hash read must not run');
+    });
+    const getContextGraphAccessPolicy = vi.fn(async () => {
+      throw new Error('point policy read must not run');
+    });
+    const isContextGraphActiveOnChain = vi.fn(async () => {
+      throw new Error('point liveness read must not run');
+    });
+    const readBatchedSnapshot = vi.fn(async () => ({
+      contextGraphId: '42',
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      active: true,
+      accessPolicy: 0,
+    }));
+    const agent = createChainProofAgentFixture({
+      chain: {
+        contextGraphAuthorityIndexRevisionReader: {},
+        getContextGraphNameHash,
+        getContextGraphAccessPolicy,
+        isContextGraphActiveOnChain,
+      },
+      getContextGraphOnChainId: async () => '42',
+    });
+    Object.assign(agent, {
+      readRfc64BatchedFinalizedAuthoritySnapshotV1: readBatchedSnapshot,
+    });
+
+    await expect(resolveStrictPublicProof(agent, contextGraphId)).resolves.toEqual({
+      state: 'public',
+    });
+    expect(readBatchedSnapshot).toHaveBeenCalledWith('42');
+    expect(getContextGraphNameHash).not.toHaveBeenCalled();
+    expect(isContextGraphActiveOnChain).not.toHaveBeenCalled();
+    expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    expect((agent as any).onChainAccessPolicyCache.get('42')).toBe(0);
+  });
+
+  it('keeps the SWM plaintext policy seam on fresh current-state reads', async () => {
+    const contextGraphId = 'indexed/current-private-cg';
+    const committedNameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId));
+    const getContextGraphNameHash = vi.fn(async () => committedNameHash);
+    const getContextGraphAccessPolicy = vi.fn(async () => 1 as const);
+    const isContextGraphActiveOnChain = vi.fn(async () => true);
+    const readBatchedSnapshot = vi.fn(async () => ({
+      contextGraphId: '42',
+      nameHash: committedNameHash,
+      active: true,
+      accessPolicy: 0,
+    }));
+    const agent = createChainProofAgentFixture({
+      chain: {
+        contextGraphAuthorityIndexRevisionReader: {},
+        getContextGraphNameHash,
+        getContextGraphAccessPolicy,
+        isContextGraphActiveOnChain,
+      },
+      getContextGraphOnChainId: async () => '42',
+    });
+    Object.assign(agent, {
+      readRfc64BatchedFinalizedAuthoritySnapshotV1: readBatchedSnapshot,
+    });
+
+    await expect(agent.isContextGraphPublicOnChain(contextGraphId)).resolves.toBe(false);
+    expect(readBatchedSnapshot).not.toHaveBeenCalled();
+    expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
+    expect(isContextGraphActiveOnChain).toHaveBeenCalledWith(42n);
+    expect(getContextGraphAccessPolicy).toHaveBeenCalledWith(42n);
+  });
+
+  it.each([
+    ['wrong slot', {
+      contextGraphId: '43',
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes('indexed/public-cg')),
+      active: true,
+      accessPolicy: 0,
+    }],
+    ['inactive slot', {
+      contextGraphId: '42',
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes('indexed/public-cg')),
+      active: false,
+      accessPolicy: 0,
+    }],
+    ['reused slot', {
+      contextGraphId: '42',
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes('unrelated/cg')),
+      active: true,
+      accessPolicy: 0,
+    }],
+  ] as const)('fails closed on an indexed %s', async (_label, snapshot) => {
+    const getContextGraphNameHash = vi.fn(async () => snapshot.nameHash);
+    const getContextGraphAccessPolicy = vi.fn(async () => 0 as const);
+    const agent = createChainProofAgentFixture({
+      chain: {
+        contextGraphAuthorityIndexRevisionReader: {},
+        getContextGraphNameHash,
+        getContextGraphAccessPolicy,
+        isContextGraphActiveOnChain: vi.fn(async () => true),
+      },
+      getContextGraphOnChainId: async () => '42',
+    });
+    Object.assign(agent, {
+      readRfc64BatchedFinalizedAuthoritySnapshotV1: vi.fn(async () => snapshot),
+    });
+
+    await expect(resolveStrictPublicProof(agent, 'indexed/public-cg')).resolves.toEqual({
+      state: 'unknown',
+      reason: 'unprovable',
+    });
+    expect(getContextGraphNameHash).not.toHaveBeenCalled();
+    expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
+  });
+
+  it('classifies a finalized authority batch rejection as an RPC failure', async () => {
+    const rpcError = Object.assign(new Error('authority batch unavailable'), {
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+    });
+    const agent = createChainProofAgentFixture({
+      chain: { contextGraphAuthorityIndexRevisionReader: {} },
+      getContextGraphOnChainId: async () => '42',
+    });
+    Object.assign(agent, {
+      readRfc64BatchedFinalizedAuthoritySnapshotV1: vi.fn(async () => {
+        throw rpcError;
+      }),
+    });
+
+    await expect(resolveStrictPublicProof(agent, 'indexed/public-cg')).resolves.toEqual({
+      state: 'unknown',
+      reason: 'rpc-failure',
+      detail: 'authority batch unavailable',
+    });
+  });
+
+  it('does not start an authority batch for an unregistered local graph', async () => {
+    const readBatchedSnapshot = vi.fn();
+    const agent = createChainProofAgentFixture({
+      chain: { contextGraphAuthorityIndexRevisionReader: {} },
+      getContextGraphOnChainId: async () => null,
+      contextGraphExists: async () => true,
+    });
+    Object.assign(agent, {
+      readRfc64BatchedFinalizedAuthoritySnapshotV1: readBatchedSnapshot,
+    });
+
+    await expect(resolveStrictPublicProof(agent, 'local/unregistered')).resolves.toEqual({
+      state: 'not-public',
+      reason: 'unregistered',
+    });
+    expect(readBatchedSnapshot).not.toHaveBeenCalled();
   });
 
   it('requires a name-hash proof for a numeric local mapping but permits a raw slot', async () => {

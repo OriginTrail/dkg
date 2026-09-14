@@ -437,6 +437,7 @@ import {
 import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
 import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admission-lock.js';
 import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
+import { LocalContextGraphProvenance } from './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 function readNonNegativeNumberEnv(name: string, fallback: number): number {
@@ -1245,6 +1246,8 @@ export class DKGAgentBase {
   protected readonly rfc64PublicCatalogReconciliationFailuresV1 =
     new Rfc64PublicCatalogReconciliationFailureRegistryV1();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  /** Canonical owner of the process-local projection of durable create facts. */
+  protected readonly localContextGraphProvenance = new LocalContextGraphProvenance();
   /** Process-local reverse candidates plus the monotonic binding fence. */
   protected readonly contextGraphBindingState = new ContextGraphBindingState();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationInternalStatus | null = null;
@@ -1838,9 +1841,9 @@ export class DKGAgentBase {
   /** Open after RFC-64 ownership and before networking starts. */
   protected async prepareFinalizationRecoveryStore(): Promise<void> {
     if (!this.config.dataDir || this.finalizationRuntime.getRecoveryStore()) return;
-    const store = await openSqliteFinalizationRecoveryStore(
-      this.config.dataDir,
-    );
+    const store = this.config.finalizationRecoveryStoreFactory
+      ? await this.config.finalizationRecoveryStoreFactory(this.config.dataDir)
+      : await openSqliteFinalizationRecoveryStore(this.config.dataDir);
     this.finalizationRuntime.attachRecoveryStore(store);
   }
 

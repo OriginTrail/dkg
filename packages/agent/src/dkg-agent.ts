@@ -365,6 +365,9 @@ import {
   type ContextGraphMemberStatus,
   type ContextGraphMembershipRecord,
   type ContextGraphMembershipStore,
+  type LocalContextGraphOriginRecord,
+  type LocalContextGraphOriginPersistence,
+  type LocalContextGraphOriginSource,
   type ContextGraphJoinPolicyMode,
   type ContextGraphJoinPolicyRecord,
   type ContextGraphJoinPolicyAuditEventType,
@@ -522,6 +525,9 @@ export type {
   ContextGraphMemberStatus,
   ContextGraphMembershipRecord,
   ContextGraphMembershipStore,
+  LocalContextGraphOriginRecord,
+  LocalContextGraphOriginPersistence,
+  LocalContextGraphOriginSource,
   ContextGraphJoinPolicyMode,
   ContextGraphJoinPolicyRecord,
   ContextGraphJoinPolicyAuditEventType,
@@ -876,6 +882,9 @@ export function mergeRfc64CatalogBootstrapsV1(
 }
 
 export class DKGAgent extends DKGAgentBase {
+  /** One store discovery pass is shared by concurrent peer-connect sessions. */
+  private contextGraphStoreDiscoveryInFlight?: Promise<number>;
+
   private constructor(
     config: ResolvedDKGAgentConfig,
     wallet: DKGAgentWallet,
@@ -1129,9 +1138,16 @@ export class DKGAgent extends DKGAgentBase {
           `RFC-64 authority revision scan incomplete: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
-      refreshContextGraph: async (contextGraphId, signal) => (
+      createRefreshRequests: (contextGraphIds, signal) => (
+        this.createRfc64CatalogAuthorityRefreshRequestsV1(contextGraphIds, signal)
+      ),
+      refreshContextGraph: async (contextGraphId, signal, request) => (
         withRpcRequestContext({ requestClass: 'background', signal }, async () => (
-          await this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal) === null
+          await this.reconcileRfc64CatalogAccessAuthorityV1(
+            contextGraphId,
+            signal,
+            request,
+          ) === null
             ? 'superseded'
             : 'committed'
         ))
@@ -1232,6 +1248,12 @@ export class DKGAgent extends DKGAgentBase {
         inputConfig.syncContextGraphPriorities,
       ),
     });
+    if (
+      normalizedConfig.finalizationRecoveryStoreFactory !== undefined
+      && !normalizedConfig.dataDir
+    ) {
+      throw new TypeError('finalizationRecoveryStoreFactory requires dataDir');
+    }
     const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(normalizedConfig);
     const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
     if (
@@ -1956,6 +1978,20 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   async discoverContextGraphsFromStore(): Promise<number> {
+    const existingPass = this.contextGraphStoreDiscoveryInFlight;
+    if (existingPass !== undefined) return existingPass;
+    const pass = this.runContextGraphStoreDiscoveryPass();
+    this.contextGraphStoreDiscoveryInFlight = pass;
+    try {
+      return await pass;
+    } finally {
+      if (this.contextGraphStoreDiscoveryInFlight === pass) {
+        this.contextGraphStoreDiscoveryInFlight = undefined;
+      }
+    }
+  }
+
+  private async runContextGraphStoreDiscoveryPass(): Promise<number> {
     const ctx = createOperationContext('system');
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const prefix = 'did:dkg:context-graph:';

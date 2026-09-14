@@ -2491,6 +2491,77 @@ describe('DashboardDB — context graph memberships', () => {
     expect(remaining).toHaveLength(1);
     expect(remaining[0].principal_id).toBe('peer-1');
   });
+
+  it('keeps local graph origin immutable when membership rows change', () => {
+    db.recordLocalContextGraphOrigin({
+      context_graph_id: 'origin-project',
+      source: 'local-create',
+      created_at: 1000,
+    });
+    db.upsertContextGraphMember({
+      context_graph_id: 'origin-project',
+      principal_type: 'agent',
+      principal_id: '0x1111111111111111111111111111111111111111',
+      role: 'curator',
+      status: 'active',
+      source: 'local-create',
+      updated_at: 1000,
+    });
+    db.upsertContextGraphMember({
+      context_graph_id: 'origin-project',
+      principal_type: 'agent',
+      principal_id: '0x1111111111111111111111111111111111111111',
+      role: 'participant',
+      status: 'active',
+      source: 'allowed-agent',
+      updated_at: 2000,
+    });
+    // Replays and a different creation path cannot replace the first fact.
+    db.recordLocalContextGraphOrigin({
+      context_graph_id: 'origin-project',
+      source: 'implicit-swm-write',
+      created_at: 3000,
+    });
+
+    expect(db.listLocalContextGraphOrigins()).toContainEqual({
+      context_graph_id: 'origin-project',
+      source: 'local-create',
+      created_at: 1000,
+    });
+    expect(db.listContextGraphMembers('origin-project')).toContainEqual(
+      expect.objectContaining({
+        source: 'allowed-agent',
+        updated_at: 2000,
+      }),
+    );
+  });
+
+  it('migrates trusted V36 membership provenance into the graph-level journal', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.upsertContextGraphMember({
+      context_graph_id: 'legacy-origin-project',
+      principal_type: 'agent',
+      principal_id: '0x2222222222222222222222222222222222222222',
+      role: 'curator',
+      status: 'active',
+      source: 'local-create',
+      first_seen_at: 1234,
+      updated_at: 2345,
+    });
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE local_context_graph_origins');
+    raw.pragma('user_version = 36');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.listLocalContextGraphOrigins()).toContainEqual({
+      context_graph_id: 'legacy-origin-project',
+      source: 'local-create',
+      created_at: 1234,
+    });
+  });
 });
 
 // Regression coverage for the agent-to-agent debug chat inbox.

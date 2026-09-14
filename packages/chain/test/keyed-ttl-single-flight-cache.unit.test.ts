@@ -3,6 +3,7 @@ import {
   AbortableKeyedSingleFlight,
   KeyedSingleFlight,
   ReadThroughTtlCache,
+  SingleFlightInvalidatedError,
   TtlValueCache,
 } from '../src/keyed-ttl-single-flight-cache.js';
 
@@ -181,9 +182,42 @@ describe('AbortableKeyedSingleFlight', () => {
     );
     stale.resolve(1);
     fresh.resolve(2);
-    await expect(oldRun).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(oldRun).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
     await expect(newRun).resolves.toBe(2);
     expect(successes).toEqual([2]);
+  });
+
+  it('propagates invalidation through a typed signal independent of its message', async () => {
+    const flight = new AbortableKeyedSingleFlight<string, number>();
+    const pending = flight.run('chain', async (signal) => new Promise<number>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    await Promise.resolve();
+
+    flight.invalidate('chain', 'wording may change');
+
+    await expect(pending).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
+    await expect(pending).rejects.toMatchObject({
+      code: 'SINGLE_FLIGHT_INVALIDATED',
+      message: 'wording may change',
+      retryable: false,
+    });
+  });
+
+  it('carries an explicit logical-retry disposition without message matching', async () => {
+    const flight = new AbortableKeyedSingleFlight<string, number>();
+    const pending = flight.run('chain', async (signal) => new Promise<number>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    await Promise.resolve();
+
+    flight.invalidate('chain', 'source generation advanced', { retryable: true });
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'SINGLE_FLIGHT_INVALIDATED',
+      message: 'source generation advanced',
+      retryable: true,
+    });
   });
 
   it.each(['key', 'all'] as const)(
@@ -213,7 +247,11 @@ describe('AbortableKeyedSingleFlight', () => {
         );
       });
 
-      await expect(oldRun).rejects.toMatchObject({ name: 'AbortError', message: 'newer proof' });
+      await expect(oldRun).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
+      await expect(oldRun).rejects.toMatchObject({
+        code: 'SINGLE_FLIGHT_INVALIDATED',
+        message: 'newer proof',
+      });
       fresh.resolve(2);
       expect(replacement).toBeDefined();
       await expect(replacement!).resolves.toBe(2);

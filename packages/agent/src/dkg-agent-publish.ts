@@ -144,6 +144,7 @@ import {
   resolveLiftWorkspaceSlice,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
+  workspaceHeadIncludesShareOperationId,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   workspacePublicQuadsDigest,
   validateLiftPublishPayload,
@@ -455,6 +456,8 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { createLocalContextGraphOriginMembershipRecord } from
+  './local-context-graph-provenance.js';
 
 type KnowledgeAssetVmPublicationOperationPlan =
   | {
@@ -2662,6 +2665,7 @@ export class PublishMethods extends DKGAgentBase {
     this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
+    await this.persistLocalContextGraphOrigin(contextGraphId, 'implicit-swm-write');
     const promotedSub = this.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
     this.setContextGraphSubscription(contextGraphId, {
       ...promotedSub,
@@ -2672,14 +2676,12 @@ export class PublishMethods extends DKGAgentBase {
     });
 
     if (curatorAgentAddress) {
-      this.upsertContextGraphMember({
+      this.upsertContextGraphMember(createLocalContextGraphOriginMembershipRecord({
         contextGraphId,
-        principalType: 'agent',
         principalId: curatorAgentAddress,
         role: 'curator',
-        status: 'active',
         source: 'implicit-swm-write',
-      });
+      }));
     }
 
     this.log.info(
@@ -4588,9 +4590,9 @@ export class PublishMethods extends DKGAgentBase {
     });
     if (
       !head
-      || head.shareOperationId !== shareOperationId
+      || !workspaceHeadIncludesShareOperationId(head, shareOperationId)
       || head.assertionVersion !== seal.assertionVersion
-      || head.accessPolicy === undefined
+      || head.access.kind !== 'persisted'
     ) {
       throw Object.assign(
         new Error(
@@ -4600,8 +4602,8 @@ export class PublishMethods extends DKGAgentBase {
         { code: 'PUBLISH_INTENT_STALE' },
       );
     }
-    const accessPolicy = head.accessPolicy;
-    const allowedPeers = [...new Set(head.allowedPeers.map((peerId) => peerId.trim()).filter(Boolean))].sort();
+    const accessPolicy = head.access.accessPolicy;
+    const allowedPeers = [...new Set(head.access.allowedPeers.map((peerId) => peerId.trim()).filter(Boolean))].sort();
     const explicitAllowedPeers = [...new Set(
       (opts?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
     )].sort();
@@ -4842,14 +4844,14 @@ export class PublishMethods extends DKGAgentBase {
       (request.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
     )].sort();
     const liveAllowedPeers = [...new Set(
-      (liveHead?.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
+      (liveHead?.access.allowedPeers ?? []).map((peerId) => peerId.trim()).filter(Boolean),
     )].sort();
     if (
       !liveHead
-      || liveHead.shareOperationId !== request.shareOperationId
+      || !workspaceHeadIncludesShareOperationId(liveHead, request.shareOperationId)
       || liveHead.assertionVersion !== request.assertionVersion
-      || liveHead.accessPolicy === undefined
-      || liveHead.accessPolicy !== request.accessPolicy
+      || liveHead.access.kind !== 'persisted'
+      || liveHead.access.accessPolicy !== request.accessPolicy
       || JSON.stringify(liveAllowedPeers) !== JSON.stringify(queuedAllowedPeers)
     ) {
       throw stale(

@@ -981,10 +981,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // Quads are WRITTEN whenever supplied; the draft is also SEALED only when
     // `finalize` is not explicitly false. Default-true preserves the one-shot
     // `{ quads, finalize:true }` shape. An explicit `finalize:false` keeps an
-    // editable WM draft that never touches the chain — the only lifecycle
-    // available to local-only / on-chain-unregistered CGs (finalize binds the
-    // author attestation and reserves the on-chain identity, so it requires the
-    // CG to be registered). OT-RFC-43 §10.5.5.
+    // editable WM draft that never needs chain identity preparation. Finalize
+    // binds the author attestation and reserves a globally collision-safe KA
+    // identity, but it does NOT require or create a Context Graph registration:
+    // a finalized assertion can be shared to SWM while the CG remains
+    // unregistered. Only the later VM publish requires that registration.
+    // OT-RFC-43 §10.5.5.
     const hasQuads = Array.isArray(quads) && quads.length > 0;
     if (hasQuads) {
       if (!quads.every(isWritableQuad)) {

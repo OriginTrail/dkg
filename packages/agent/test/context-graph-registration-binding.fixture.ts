@@ -17,6 +17,8 @@ type BindingAgentMethods = Pick<DKGAgent,
   | 'resolveCurrentNameHashContextGraphBinding'
   | 'resolveContextGraphOnChainIdBinding'
   | 'getContextGraphOnChainId'
+  | 'resolveFinalizedContextGraphAuthorityTargetsV1'
+  | 'resolveFinalizedContextGraphAuthorityTargetV1'
   | 'resolveContextGraphRegistrationBinding'
   | 'prepareContextGraphRegistrationReadPlan'
   | 'canReadContextGraph'
@@ -113,6 +115,11 @@ export function selectedFixture(resolved: bigint | null = 42n) {
     rfc64BackgroundWorkDispatcherV1: new Rfc64BackgroundWorkDispatcherV1(),
     rfc64SwmRecoveryRuntimeV1,
     subscribedContextGraphs: new Map([[LOCAL_ID, subscription]]),
+    localContextGraphProvenance: {
+      created: new Set<string>(),
+      recordLocalCreate(contextGraphId: string) { this.created.add(contextGraphId); },
+      hasLocalCreate(contextGraphId: string) { return this.created.has(contextGraphId); },
+    },
     wireIdToLocalCgId: new Map([[NAME_HASH, LOCAL_ID]]),
     config: {
       syncContextGraphs: [],
