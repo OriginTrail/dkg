@@ -34,7 +34,6 @@ import { daemonState } from './state.js';
 import {
   OpenClawChannelTarget,
   OpenClawChannelHealthReport,
-  type LocalAgentAttachStatePatch,
   cancelPendingLocalAgentAttachJob,
   getOpenClawChannelTargets,
   probeOpenClawChannelHealth,
@@ -58,11 +57,13 @@ import {
 } from './prime-agent.js';
 import {
   localAgentConnectorFor,
+  type LocalAgentAttachStatePatch,
   type LocalAgentConnectPlan,
   type LocalAgentUiAttachDeps,
 } from './local-agent-connectors/index.js';
 
 export type {
+  LocalAgentAttachStatePatch,
   LocalAgentAttachStateSink,
   LocalAgentConnectPlan,
   LocalAgentUiAttachDeps,
@@ -512,7 +513,7 @@ export async function connectLocalAgentIntegrationFromUi(
     config,
     { id: requestedId, ...registration },
   ).record;
-  const withRegistration = (state: LocalAgentIntegrationConfig): LocalAgentIntegrationConfig =>
+  const withRegistration = (state: LocalAgentAttachStatePatch): LocalAgentIntegrationConfig =>
     mergeLocalAgentIntegrationConfig(registration, state, { mergeTransport: requestedId === 'hermes' });
   try {
     if (!connector) {

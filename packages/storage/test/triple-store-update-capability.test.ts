@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   deleteByPatternWithoutCount,
+  TRIPLE_STORE_COORDINATION_OWNER,
   withCountedStoreMutation,
   UnsupportedTripleStoreCapabilityError,
   tryUpdateWithTouchedGraphs,
@@ -54,6 +55,31 @@ describe('withCountedStoreMutation', () => {
     const inner = {} as TripleStore;
     const firstStore = { innerStore: inner } as TripleStore;
     const secondStore = { innerStore: inner } as TripleStore;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const order: string[] = [];
+
+    const first = withCountedStoreMutation(firstStore, 'urn:graph', async () => {
+      order.push('first:start');
+      await blocked;
+      order.push('first:end');
+    });
+    await Promise.resolve();
+    const second = withCountedStoreMutation(secondStore, 'urn:graph', async () => {
+      order.push('second');
+    });
+    await Promise.resolve();
+
+    expect(order).toEqual(['first:start']);
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual(['first:start', 'first:end', 'second']);
+  });
+
+  it('shares one count-sensitive lock through independent opaque wrappers', async () => {
+    const backendIdentity = {};
+    const firstStore = { [TRIPLE_STORE_COORDINATION_OWNER]: backendIdentity } as TripleStore;
+    const secondStore = { [TRIPLE_STORE_COORDINATION_OWNER]: backendIdentity } as TripleStore;
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     const order: string[] = [];

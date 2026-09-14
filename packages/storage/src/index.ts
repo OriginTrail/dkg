@@ -31,6 +31,8 @@ export {
   isStoreWorkPriority,
   registerTripleStoreAdapter,
   findTripleStoreCapability,
+  getTripleStoreCoordinationOwner,
+  TRIPLE_STORE_COORDINATION_OWNER,
   deleteByPatternWithoutCount,
   withCountedStoreMutation,
   createTripleStore,

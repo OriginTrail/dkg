@@ -137,7 +137,18 @@ export interface UpdateOptions extends QueryOptions {
   touchedGraphs?: readonly string[];
 }
 
+/** Explicit coordination identity for wrappers that do not expose an inner store. */
+export const TRIPLE_STORE_COORDINATION_OWNER: unique symbol = Symbol.for(
+  '@origintrail/dkg.storage.coordination-owner',
+);
+
 export interface TripleStore {
+  /**
+   * Optional shared identity for locks that must span separate store wrappers.
+   * Transparent decorators can keep using `innerStore`; opaque wrappers expose
+   * this symbol without revealing their backend.
+   */
+  readonly [TRIPLE_STORE_COORDINATION_OWNER]?: object;
   /**
    * Whether `query(..., { signal })` can reject while a query is already in
    * flight (`interruptible`) or can only observe cancellation before dispatch
@@ -294,21 +305,38 @@ export interface TripleStoreDecorator extends TripleStore {
   readonly innerStore: TripleStore;
 }
 
+function* tripleStoreChain(store: unknown): Generator<object> {
+  let candidate = store;
+  const seen = new Set<unknown>();
+  for (let depth = 0; candidate && depth < 16; depth += 1) {
+    if (typeof candidate !== 'object' || seen.has(candidate)) return;
+    seen.add(candidate);
+    yield candidate;
+    if (!('innerStore' in candidate)) return;
+    candidate = (candidate as { innerStore?: unknown }).innerStore;
+  }
+}
+
 /** Resolve one optional capability through the documented decorator chain. */
 export function findTripleStoreCapability<T>(
   store: unknown,
   isCapability: (candidate: unknown) => candidate is T,
 ): T | null {
-  let candidate = store;
-  const seen = new Set<unknown>();
-  for (let depth = 0; candidate && depth < 16; depth += 1) {
+  for (const candidate of tripleStoreChain(store)) {
     if (isCapability(candidate)) return candidate;
-    if (typeof candidate !== 'object' || seen.has(candidate)) return null;
-    seen.add(candidate);
-    if (!('innerStore' in candidate)) return null;
-    candidate = (candidate as { innerStore?: unknown }).innerStore;
   }
   return null;
+}
+
+/** Resolve the canonical lock owner through an explicit identity or decorator chain. */
+export function getTripleStoreCoordinationOwner(store: TripleStore): object {
+  let owner: object = store;
+  for (const candidate of tripleStoreChain(store)) {
+    const explicit = (candidate as TripleStore)[TRIPLE_STORE_COORDINATION_OWNER];
+    if (explicit && typeof explicit === 'object') return explicit;
+    owner = candidate;
+  }
+  return owner;
 }
 
 /**
@@ -339,20 +367,6 @@ export async function deleteByPatternWithoutCount<Pattern>(
 
 const countedMutationLocks = new WeakMap<object, Map<string, Promise<void>>>();
 
-function countedMutationOwner(store: TripleStore): object {
-  let owner: object = store;
-  let candidate: unknown = store;
-  const seen = new Set<unknown>();
-  for (let depth = 0; candidate && depth < 16; depth += 1) {
-    if (typeof candidate !== 'object' || seen.has(candidate)) break;
-    seen.add(candidate);
-    owner = candidate;
-    if (!('innerStore' in candidate)) break;
-    candidate = (candidate as { innerStore?: unknown }).innerStore;
-  }
-  return owner;
-}
-
 /**
  * Serialize a group of exact-count mutations against the physical store.
  *
@@ -368,7 +382,7 @@ export async function withCountedStoreMutation<T>(
   scope: string,
   mutation: () => Promise<T>,
 ): Promise<T> {
-  const owner = countedMutationOwner(store);
+  const owner = getTripleStoreCoordinationOwner(store);
   let locks = countedMutationLocks.get(owner);
   if (!locks) {
     locks = new Map();

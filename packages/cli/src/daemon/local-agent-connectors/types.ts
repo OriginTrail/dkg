@@ -11,22 +11,27 @@ export interface LocalAgentAttachStateSink {
   persist: (patch: LocalAgentAttachStatePatch) => Promise<void>;
 }
 
-interface LocalAgentConnectPlanBase {
+interface LocalAgentConnectPlanBase<State> {
   /**
    * Desired initial integration state for this connect. Connectors return only
    * the attach-owned fields they decided (transport/runtime); the connect
    * planner layers them over the normalized registration so the route commits
    * one patch through one reducer against the latest configuration snapshot.
    */
-  state: LocalAgentIntegrationConfig;
+  state: State;
   notice?: string;
   /** Deferred setup work that runs only after `state` is committed. */
   afterCommit?: (sink: LocalAgentAttachStateSink) => string | undefined;
 }
 
 export type LocalAgentConnectPlan =
-  | (LocalAgentConnectPlanBase & { ok: true })
-  | (LocalAgentConnectPlanBase & { ok: false; error: string });
+  | (LocalAgentConnectPlanBase<LocalAgentIntegrationConfig> & { ok: true })
+  | (LocalAgentConnectPlanBase<LocalAgentIntegrationConfig> & { ok: false; error: string });
+
+/** Connector-owned plan before the registration fields are layered on top. */
+export type LocalAgentConnectorPlan =
+  | (LocalAgentConnectPlanBase<LocalAgentAttachStatePatch> & { ok: true })
+  | (LocalAgentConnectPlanBase<LocalAgentAttachStatePatch> & { ok: false; error: string });
 
 export interface LocalAgentConnectorContext {
   config: ImmutableDkgConfig;
@@ -42,5 +47,5 @@ export interface LocalAgentConnectorStrategy {
     config: ImmutableDkgConfig,
     body: Record<string, unknown>,
   ) => Promise<Record<string, unknown>>;
-  createPlan: (context: LocalAgentConnectorContext) => Promise<LocalAgentConnectPlan>;
+  createPlan: (context: LocalAgentConnectorContext) => Promise<LocalAgentConnectorPlan>;
 }

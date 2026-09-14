@@ -31,7 +31,6 @@ import {
   dkgDir,
   saveConfig,
   loadConfig,
-  type LocalAgentIntegrationConfig,
   type LocalAgentIntegrationTransport,
 } from '../config.js';
 import {
@@ -473,16 +472,6 @@ export type OpenClawUiAttachDeps = {
   onAttachScheduled?: (id: string, job: Promise<void>) => void;
   verifyMemorySlot?: () => boolean;
 };
-
-/**
- * State owned by a deferred UI attach job. Keeping this patch explicit stops a
- * late completion from replacing capabilities or operator metadata that were
- * edited while setup was running.
- */
-export type LocalAgentAttachStatePatch = Partial<Pick<
-  LocalAgentIntegrationConfig,
-  'enabled' | 'transport' | 'runtime' | 'metadata'
->>;
 
 export function formatOpenClawUiAttachFailure(err: any): string {
   return err?.stderr?.trim?.()

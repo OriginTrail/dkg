@@ -255,7 +255,6 @@ import {
   restartOpenClawGateway,
   waitForOpenClawChatReady,
   type OpenClawUiAttachDeps,
-  type LocalAgentAttachStatePatch,
   formatOpenClawUiAttachFailure,
   scheduleOpenClawUiAttachJob,
   cancelPendingLocalAgentAttachJob,
@@ -311,6 +310,7 @@ import {
   reverseHermesSetupForUi,
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
+  type LocalAgentAttachStatePatch,
 } from '../local-agents.js';
 import { mutableConfigSnapshot } from '../../daemon-config-store.js';
 import {

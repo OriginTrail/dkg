@@ -81,7 +81,7 @@ afterEach(() => {
 });
 
 describe('local-agent configuration transactions', () => {
-  it('keeps node-UI probes outside the config queue without overwriting newer integration edits', async () => {
+  it('commits prepared integration state across unrelated top-level config edits', async () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
     const initial = makeConfig({
       localAgentIntegrations: {
@@ -130,7 +130,6 @@ describe('local-agent configuration transactions', () => {
       edits.push(configStore.update(current => {
         const next = structuredClone(current) as DkgConfig;
         next.name = 'committed during blocked probe';
-        updateLocalAgentIntegration(next, 'hermes', { capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during connect' } });
         return next;
       }, 'configuration-only')
         .then(() => { connectEditCommitted = true; }));
@@ -143,13 +142,13 @@ describe('local-agent configuration transactions', () => {
       expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')).name).toBe('committed during blocked probe');
       expect(connectRes.statusCode).toBe(200);
       expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
-        capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during connect' },
+        capabilities: { chatAttachments: false }, metadata: { operatorLabel: 'initial' },
       });
       expect(configStore.current.localAgentIntegrations?.hermes?.transport).not.toHaveProperty('healthUrl');
       const connectBody = JSON.parse(connectRes.body);
       expect(connectBody.integration).toEqual(getLocalAgentIntegration(configStore.current, 'hermes'));
       expect(configStore.current.localAgentIntegrations?.hermes?.runtime)
-        .toMatchObject({ status: 'degraded', ready: false });
+        .toMatchObject({ status: 'ready', ready: true });
       expect(JSON.parse(readFileSync(configStore.files.configPath, 'utf8')))
         .toEqual(configStore.current);
 
@@ -174,7 +173,6 @@ describe('local-agent configuration transactions', () => {
       edits.push(configStore.update(current => {
         const next = structuredClone(current) as DkgConfig;
         next.name = 'committed during blocked refresh';
-        updateLocalAgentIntegration(next, 'hermes', { runtime: { status: 'degraded', ready: false }, metadata: { operatorLabel: 'edited during refresh' } });
         return next;
       }, 'configuration-only')
         .then(() => { refreshEditCommitted = true; }));
@@ -186,8 +184,8 @@ describe('local-agent configuration transactions', () => {
 
       expect(refreshRes.statusCode).toBe(200);
       expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
-        runtime: { status: 'degraded', ready: false },
-        capabilities: { chatAttachments: true }, metadata: { operatorLabel: 'edited during refresh' },
+        runtime: { status: 'ready', ready: true },
+        capabilities: { chatAttachments: false }, metadata: { operatorLabel: 'initial' },
       });
       expect(JSON.parse(refreshRes.body).integration)
         .toEqual(getLocalAgentIntegration(configStore.current, 'hermes'));
@@ -199,6 +197,90 @@ describe('local-agent configuration transactions', () => {
       rmSync(dkgHome, { recursive: true, force: true });
     }
   });
+
+  it.each(['connect', 'refresh'] as const)(
+    'invalidates a prepared %s result after the same integration changes',
+    async (operation) => {
+      const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
+      const initial = makeConfig({
+        localAgentIntegrations: {
+          hermes: {
+            enabled: true,
+            transport: { kind: 'hermes-openai', gatewayUrl: 'http://127.0.0.1:8642' },
+            capabilities: { chatAttachments: false },
+            metadata: { operatorLabel: 'initial' },
+            runtime: { status: 'connecting', ready: false },
+          },
+        },
+      });
+      const configStore = await DkgConfigStore.open(new DkgHomeFiles(dkgHome), initial);
+      let entered!: () => void;
+      let release!: () => void;
+      const started = new Promise<void>(resolve => { entered = resolve; });
+      const blocked = new Promise<void>(resolve => { release = resolve; });
+      const path = operation === 'connect'
+        ? '/api/local-agent-integrations/connect'
+        : '/api/local-agent-integrations/hermes/refresh';
+      const req = makeJsonRequest('POST', path, operation === 'connect'
+        ? { id: 'hermes', metadata: { source: 'node-ui' } }
+        : {});
+      const res = makeJsonResponse();
+      const deps = operation === 'connect'
+        ? {
+            connectFromUi: async () => {
+              entered();
+              await blocked;
+              return {
+                ok: true as const,
+                state: { runtime: { status: 'ready' as const, ready: true, lastError: null } },
+              };
+            },
+          }
+        : {
+            refreshFromUi: async () => {
+              entered();
+              await blocked;
+              return {
+                patch: { runtime: { status: 'ready' as const, ready: true, lastError: null } },
+              };
+            },
+          };
+      let request: Promise<unknown> | undefined;
+      try {
+        request = handleLocalAgentsRoutes({
+          req,
+          res,
+          configStore,
+          path,
+          bridgeAuthToken: 'bridge-token',
+        } as any, deps);
+        await started;
+        await configStore.update(current => {
+          const next = structuredClone(current) as DkgConfig;
+          updateLocalAgentIntegration(next, 'hermes', {
+            runtime: { status: 'degraded', ready: false, lastError: 'newer edit' },
+            metadata: { operatorLabel: `edited during ${operation}` },
+          });
+          return next;
+        }, 'configuration-only');
+        release();
+        await request;
+
+        expect(res.statusCode).toBe(200);
+        expect(configStore.current.localAgentIntegrations?.hermes).toMatchObject({
+          runtime: { status: 'degraded', ready: false, lastError: 'newer edit' },
+          metadata: { operatorLabel: `edited during ${operation}` },
+        });
+        expect(JSON.parse(res.body).integration)
+          .toEqual(getLocalAgentIntegration(configStore.current, 'hermes'));
+      } finally {
+        release();
+        await Promise.allSettled([request]);
+        rmSync(dkgHome, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('rebases deferred integration state through the canonical config store', async () => {
     const dkgHome = mkdtempSync(join(tmpdir(), 'dkg-home-'));
     const initial = makeConfig({

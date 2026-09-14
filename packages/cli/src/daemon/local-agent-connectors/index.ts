@@ -19,7 +19,9 @@ export function localAgentConnectorFor(
 
 export type {
   LocalAgentAttachStateSink,
+  LocalAgentAttachStatePatch,
   LocalAgentConnectPlan,
+  LocalAgentConnectorPlan,
   LocalAgentConnectorContext,
   LocalAgentConnectorStrategy,
 } from './types.js';
