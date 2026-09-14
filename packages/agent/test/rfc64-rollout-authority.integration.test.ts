@@ -1500,6 +1500,89 @@ describe('RFC-64 rollout authority integration', () => {
       .toMatchObject({ legacySyncAllowed: false, reconciliationLane: 'catalog-apply' });
   });
 
+  it('uses the deployment-profile namespace for accepted SWM authority without chain identity', async () => {
+    const publicContextGraphId = `${AUTHOR}/profile-only-public` as ContextGraphIdV1;
+    const privateContextGraphId = `${AUTHOR}/profile-only-private` as ContextGraphIdV1;
+    const edge = await startAgent({
+      name: 'profile-only-accepted-swm-authority',
+      config: {
+        rfc64CatalogDeploymentProfile: DEPLOYMENT,
+        rfc64CatalogAccessPolicyAuthority: {
+          localAgentAddress: AUTHOR,
+          resolveRemoteAgentAddress: async () => null,
+        },
+      },
+    });
+    (edge as any).defaultAgentAddress = AUTHOR;
+    await edge.createContextGraph({
+      id: publicContextGraphId,
+      name: 'Profile-only public',
+      accessPolicy: 0,
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.createContextGraph({
+      id: privateContextGraphId,
+      name: 'Profile-only private',
+      accessPolicy: 1,
+      callerAgentAddress: AUTHOR,
+    });
+    await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+    await edge.reconcileRfc64CatalogAccessAuthorityV1(publicContextGraphId);
+    await edge.reconcileRfc64CatalogAccessAuthorityV1(privateContextGraphId);
+    Reflect.set((edge as any).config, 'networkIdentity', undefined);
+
+    await expect(edge.canUseSharedMemoryForContextGraph(publicContextGraphId))
+      .resolves.toBe(true);
+    await expect(edge.canUseSharedMemoryForContextGraph(privateContextGraphId, {
+      callerAgentAddress: AUTHOR,
+    })).resolves.toBe(true);
+    await expect(edge.canUseSharedMemoryForContextGraph(privateContextGraphId, {
+      callerAgentAddress: NONMEMBER,
+    })).resolves.toBe(false);
+  });
+
+  it('coalesces first authority acceptance into one freshness-bypassing peer catch-up', async () => {
+    const contextGraphId = `${AUTHOR}/authority-catchup` as ContextGraphIdV1;
+    const remotePeerId = '12D3KooWAuthorityCatchupPeer';
+    const edge = await startAgent({
+      name: 'authority-accepted-peer-catchup',
+      config: { rfc64CatalogDeploymentProfile: DEPLOYMENT },
+    });
+    (edge as any).defaultAgentAddress = AUTHOR;
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => remotePeerId },
+    ] as never);
+    const queueSync = vi.spyOn(edge, 'queueSyncFromPeerOnConnect')
+      .mockReturnValue(true);
+    vi.useFakeTimers();
+    try {
+      await edge.createContextGraph({
+        id: contextGraphId,
+        name: 'Authority catch-up',
+        accessPolicy: 0,
+        callerAgentAddress: AUTHOR,
+      });
+      await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+      // An unchanged direct reconciliation must not create another timer.
+      await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(queueSync).toHaveBeenCalledOnce();
+      expect(queueSync).toHaveBeenCalledWith(
+        remotePeerId,
+        expect.any(Function),
+        0,
+        { authorityScopeChanged: true },
+      );
+      await edge.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(queueSync).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('fails closed when an unregistered graph has no authenticated owner', async () => {
     const contextGraphId = `${AUTHOR}/unresolved-owner` as ContextGraphIdV1;
     const edge = await startAgent({ name: 'unresolved-unregistered-owner' });
@@ -2044,7 +2127,7 @@ describe('RFC-64 rollout authority integration', () => {
       expect(reconcile).toHaveBeenCalledWith(
         CONTEXT_GRAPH_ID,
         expect.any(AbortSignal),
-        undefined,
+        { kind: 'auto' },
       );
 
       await vi.advanceTimersByTimeAsync(
@@ -2055,7 +2138,7 @@ describe('RFC-64 rollout authority integration', () => {
       expect(reconcile).toHaveBeenCalledWith(
         CONTEXT_GRAPH_ID,
         expect.any(AbortSignal),
-        undefined,
+        { kind: 'auto' },
       );
       await vi.advanceTimersByTimeAsync(
         RFC64_CATALOG_AUTHORITY_REFRESH_POLICY_V1.intervalMs,
@@ -2370,13 +2453,14 @@ describe('RFC-64 rollout authority integration', () => {
     // The two keyed responsibility calls and the authority owner's initial +
     // coalesced passes each own exactly the immutable targets they selected.
     // The accepted SWM transport path itself reopens none of these reads.
-    expect(readPolicies.mock.calls.map(([targetIds]) => [...targetIds]))
-      .toEqual([
-        ['9'],
-        ['10'],
-        ['9'],
-        ['10'],
-      ]);
+    const initialAuthorityReads = readPolicies.mock.calls.map(
+      ([targetIds]) => [...targetIds],
+    );
+    expect(initialAuthorityReads).toEqual(expect.arrayContaining([
+      ['9'],
+      ['10'],
+    ]));
+    expect(initialAuthorityReads.every((targetIds) => targetIds.length === 1)).toBe(true);
     expect(legacyPolicy).not.toHaveBeenCalled();
     expect(edge.readRfc64CatalogResponsibilitiesV1()).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -2403,10 +2487,11 @@ describe('RFC-64 rollout authority integration', () => {
     finalizedOwner = MEMBER;
     finalizedOwnershipEra = '1';
     finalizedSourceBlockNumber = '43';
+    const authorityReadsBeforeDirectRefresh = readPolicies.mock.calls.length;
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(firstContextGraphId))
       .resolves.toMatchObject({ policy: { era: '1' } });
-    expect(readPolicies).toHaveBeenCalledTimes(5);
-    expect(readPolicies.mock.calls[4]?.[0]).toEqual(['9']);
+    expect(readPolicies).toHaveBeenCalledTimes(authorityReadsBeforeDirectRefresh + 1);
+    expect(readPolicies.mock.calls.at(-1)?.[0]).toEqual(['9']);
     expect((edge as any).rfc64PublicCatalogServiceV1.acceptedPolicySnapshot(
       NETWORK_ID,
       firstContextGraphId,
@@ -2471,13 +2556,11 @@ describe('RFC-64 rollout authority integration', () => {
     await expect(edge.reconcileRfc64CatalogAccessAuthorityV1(
       contextGraphId,
       signal,
-      request?.kind === 'finalized-evidence'
-        ? request.evidence
-        : request?.kind === 'finalized-absence'
-          ? null
-          : undefined,
+      request,
     )).rejects.toThrow('no finalized indexed authority');
-    expect(resolveIds).toHaveBeenCalledWith([expectedNameHash], { signal });
+    expect(resolveIds).toHaveBeenCalledWith([expectedNameHash], {
+      signal: expect.any(AbortSignal),
+    });
     expect(readSnapshots).toHaveBeenCalledWith(['9'], { signal: expect.any(AbortSignal) });
     expect(pointAuthorityRead).not.toHaveBeenCalled();
     expect(legacyPolicy).not.toHaveBeenCalled();

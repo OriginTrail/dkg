@@ -375,6 +375,8 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { LocalContextGraphRegistrationStatusStore } from
+  './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
   isCanonicalPositiveContextGraphId,
@@ -465,27 +467,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<'registered' | 'unregistered' | 'pending' | null> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
-    const result = await this.store.query(
-      `SELECT ?status WHERE { GRAPH <${cgMetaGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status } }`,
-      { source: 'agent.contextGraph.registrationStatus' },
-    );
-    if (result.type !== 'bindings') return null;
-    const statuses = new Set(result.bindings
-      .map((binding) => binding['status'])
-      .filter((status): status is string => status !== undefined)
-      .map(stripLiteral));
-    if (statuses.size !== 1) {
-      // Multiple values are possible only while a compatibility-store
-      // transition is being recovered. Never let LIMIT-1 ordering select an
-      // older unregistered value and reopen the local-first chain bypass.
-      return statuses.size > 1 ? 'pending' : null;
-    }
-    const status = [...statuses][0];
-    return status === 'registered' || status === 'unregistered' || status === 'pending'
-      ? status
-      : null;
+    return new LocalContextGraphRegistrationStatusStore({
+      store: this.store,
+      markProjectionDirty: (id) => this.contextGraphMetaProjection.markDirty(id),
+    }).read(contextGraphId);
   }
 
   /**

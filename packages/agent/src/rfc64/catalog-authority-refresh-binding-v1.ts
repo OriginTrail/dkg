@@ -61,10 +61,19 @@ export function createRfc64CatalogAuthorityRevisionSourceV1(
       try {
         revisions = await binding.runAuthorityRead(
           signal,
-          (readSignal) => reader.readContextGraphAuthorityIndexRevisions(
-            targets.onChainContextGraphIds,
-            { signal: readSignal },
-          ),
+          async (readSignal) => {
+            try {
+              return await reader.readContextGraphAuthorityIndexRevisions(
+                targets.onChainContextGraphIds,
+                { signal: readSignal },
+              );
+            } finally {
+              // A caller cancellation may detach from a physical log scan.
+              // Retain the serializer token until that scan has actually
+              // settled so the next refresh cannot overlap it.
+              await reader.whenIdle();
+            }
+          },
         );
       } catch (error) {
         if (signal.aborted) throw error;

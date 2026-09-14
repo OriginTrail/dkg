@@ -93,7 +93,7 @@ import {
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, isChainRpcTransportError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -373,6 +373,8 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { LocalContextGraphRegistrationStatusStore } from
+  './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { createLocalContextGraphOriginMembershipRecord } from
   './local-context-graph-provenance.js';
@@ -1053,71 +1055,15 @@ export class ContextGraphMethods extends DKGAgentBase {
     // Check if already registered
     const cgMetaGraph = contextGraphMetaUri(id);
     const contextGraphUri = `did:dkg:context-graph:${id}`;
+    const registrationStatuses = new LocalContextGraphRegistrationStatusStore({
+      store: this.store,
+      markProjectionDirty: (contextGraphId) => (
+        this.contextGraphMetaProjection.markDirty(contextGraphId)
+      ),
+    });
     const persistRegistrationStatus = async (
       status: 'unregistered' | 'pending' | 'registered',
-    ): Promise<void> => {
-      const statusQuad: Quad = {
-        subject: contextGraphUri,
-        predicate: DKG_ONTOLOGY.DKG_REGISTRATION_STATUS,
-        object: `"${status}"`,
-        graph: cgMetaGraph,
-      };
-      const updatedAtomically = await tryUpdateWithTouchedGraphs(
-        this.store,
-        `DELETE {
-          GRAPH <${cgMetaGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?previousStatus
-          }
-        }
-        INSERT {
-          GRAPH <${cgMetaGraph}> {
-            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> "${status}"
-          }
-        }
-        WHERE {
-          OPTIONAL {
-            GRAPH <${cgMetaGraph}> {
-              <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?previousStatus
-            }
-          }
-        }`,
-        [cgMetaGraph],
-        { source: 'agent.contextGraph.registrationStatus.persist' },
-      );
-      if (!updatedAtomically) {
-        // Compatibility path for third-party stores without SPARQL UPDATE:
-        // install and flush the new fence before removing the old value. A
-        // crash or write failure can therefore leave an ambiguous pair, but
-        // never a gap. The canonical reader treats any multi-value state as
-        // pending/fail-closed and the next reconciliation completes the flip.
-        const previousResult = await this.store.query(
-          `SELECT ?status WHERE {
-            GRAPH <${cgMetaGraph}> {
-              <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_REGISTRATION_STATUS}> ?status
-            }
-          }`,
-          { source: 'agent.contextGraph.registrationStatus.previous' },
-        );
-        const previousQuads = previousResult.type === 'bindings'
-          ? previousResult.bindings
-            .map((binding) => binding['status'])
-            .filter((object): object is string => object !== undefined && object !== statusQuad.object)
-            .map((object): Quad => ({ ...statusQuad, object }))
-          : [];
-        await this.store.insert([statusQuad], {
-          source: 'agent.contextGraph.registrationStatus.install',
-        });
-        this.contextGraphMetaProjection.markDirty(id);
-        await this.store.flush?.();
-        if (previousQuads.length > 0) {
-          await this.store.delete(previousQuads, {
-            source: 'agent.contextGraph.registrationStatus.retirePrevious',
-          });
-        }
-      }
-      this.contextGraphMetaProjection.markDirty(id);
-      await this.store.flush?.();
-    };
+    ): Promise<void> => registrationStatuses.set(id, status);
     const registrationStatus = await this.readLocalContextGraphRegistrationStatus(id);
     if (registrationStatus === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;

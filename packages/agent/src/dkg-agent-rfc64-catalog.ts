@@ -1890,11 +1890,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
         readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
           undefined,
-          (readSignal) => readSnapshots.call(
-            indexedReader,
-            targets,
-            { signal: readSignal },
-          ),
+          async (readSignal) => {
+            try {
+              return await readSnapshots.call(
+                indexedReader,
+                targets,
+                { signal: readSignal },
+              );
+            } finally {
+              await indexedReader.whenIdle();
+            }
+          },
         ),
       });
       rfc64ResponsibilityAuthorityBatchRuntimesV1.set(this, runtime);
@@ -1920,7 +1926,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (indexedReader === undefined || readSnapshots === undefined) {
       return new Map(contextGraphIds.map((contextGraphId) => [
         contextGraphId,
-        Object.freeze({ kind: 'legacy' as const }),
+        Object.freeze({ kind: 'auto' as const }),
       ]));
     }
 
@@ -1932,14 +1938,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     }
     signal.throwIfAborted();
     const registeredCandidates = contextGraphIds.filter((id) => !localFirst.has(id));
-    const resolution = await this.resolveFinalizedContextGraphAuthorityTargetsV1(
-      registeredCandidates,
-      { signal },
+    const resolution = await this.rfc64AuthorityReadCoordinatorV1.run(
+      signal,
+      async (readSignal) => {
+        try {
+          return await this.resolveFinalizedContextGraphAuthorityTargetsV1(
+            registeredCandidates,
+            { signal: readSignal },
+          );
+        } finally {
+          await indexedReader.whenIdle();
+        }
+      },
     );
     if (resolution.kind === 'legacy-current') {
       return new Map(contextGraphIds.map((contextGraphId) => [
         contextGraphId,
-        Object.freeze({ kind: 'legacy' as const }),
+        Object.freeze({ kind: 'auto' as const }),
       ]));
     }
 
@@ -1955,7 +1970,13 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
         readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
           undefined,
-          (readSignal) => readSnapshots.call(indexedReader, targets, { signal: readSignal }),
+          async (readSignal) => {
+            try {
+              return await readSnapshots.call(indexedReader, targets, { signal: readSignal });
+            } finally {
+              await indexedReader.whenIdle();
+            }
+          },
         ),
       });
       rfc64ResponsibilityAuthorityBatchRuntimesV1.set(this, runtime);
@@ -2138,13 +2159,16 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           this.rfc64PublicCatalogOwnerV1.requestAuthorityRefresh();
           return next;
         }
-        const reconciliation = finalizedAuthorityEvidence === undefined
-          ? this.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, ownerSignal)
-          : this.reconcileRfc64CatalogAccessAuthorityV1(
-              contextGraphId,
-              ownerSignal,
-              finalizedAuthorityEvidence,
-            );
+        const reconciliation = this.reconcileRfc64CatalogAccessAuthorityV1(
+          contextGraphId,
+          ownerSignal,
+          finalizedAuthorityEvidence === undefined
+            ? Object.freeze({ kind: 'auto' as const })
+            : Object.freeze({
+                kind: 'finalized-evidence' as const,
+                evidence: finalizedAuthorityEvidence,
+              }),
+        );
         await reconciliation.catch((error) => {
           // Observer and dispatcher shutdown are normal lifecycle fences.
           // Preserve their cancellation so the feature owner can drain
@@ -2208,7 +2232,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     signal?: AbortSignal,
-    finalizedAuthorityEvidence?: Rfc64FinalizedAuthoritySnapshotEvidenceV1 | null,
+    authorityRequest: Rfc64CatalogAuthorityRefreshRequestV1 = Object.freeze({ kind: 'auto' }),
   ): Promise<Rfc64ReleaseNativeAuthoritySnapshotV1 | null> {
     const service = this.rfc64PublicCatalogServiceV1;
     if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
@@ -2240,35 +2264,35 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (networkId === undefined || networkId === 'none') {
         throw new Error('RFC-64 release-native authority requires a trusted chain network');
       }
+      const suppliedAuthorityEvidence = authorityRequest.kind === 'finalized-evidence'
+        ? authorityRequest.evidence
+        : undefined;
       const boundOnChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-        ?? (finalizedAuthorityEvidence === undefined
-          || finalizedAuthorityEvidence === null
-          ? undefined
-          : finalizedAuthorityEvidence.contextGraphAuthorityIndexId);
+        ?? suppliedAuthorityEvidence?.contextGraphAuthorityIndexId;
       // This proof is entirely local. Run it before the shared RPC circuit so
       // unrelated provider exhaustion cannot block authority for a graph that
       // this node durably created and has not requested to register on-chain.
       const localFirstUnregistered = boundOnChainId === undefined
         && await this.isLocalFirstUnregisteredContextGraph(contextGraphId);
       if (
-        finalizedAuthorityEvidence !== undefined
-        && finalizedAuthorityEvidence !== null
-        && finalizedAuthorityEvidence.contextGraphAuthorityIndexId !== boundOnChainId
+        suppliedAuthorityEvidence !== undefined
+        && suppliedAuthorityEvidence.contextGraphAuthorityIndexId !== boundOnChainId
       ) {
         throw new Error('RFC-64 finalized authority evidence belongs to another graph');
       }
       // Responsibility bootstrap and scheduled refreshes pass the exact
       // immutable evidence selected by their owner. `null` is finalized
       // absence and must not reopen a legacy current-state lookup.
-      const ownedAuthorityEvidence = finalizedAuthorityEvidence === null
+      const ownedAuthorityEvidence = authorityRequest.kind === 'finalized-absence'
         ? null
-        : boundOnChainId === undefined
-          ? undefined
-          : finalizedAuthorityEvidence
-          ?? await this.readRfc64FinalizedAuthoritySnapshotEvidenceV1(
-            boundOnChainId,
-            signal,
-          );
+        : authorityRequest.kind === 'finalized-evidence'
+          ? authorityRequest.evidence
+          : boundOnChainId === undefined
+            ? undefined
+            : await this.readRfc64FinalizedAuthoritySnapshotEvidenceV1(
+              boundOnChainId,
+              signal,
+            );
       const batchedSnapshot = ownedAuthorityEvidence === null
         ? null
         : ownedAuthorityEvidence?.snapshot;
@@ -2300,24 +2324,28 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         : await this.rfc64AuthorityReadCoordinatorV1.run(
           signal,
           async (readSignal) => {
-            const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(
-              contextGraphId,
-              { signal: readSignal },
-            );
-            if (readSignal?.aborted) throw readSignal.reason;
-            if (target === null) return null;
-            const { expectedNameHash, expectedOnChainId, finalizedSnapshot } = target;
-            const snapshot = parseRfc64AuthoritySnapshotV1(
-              finalizedSnapshot
-                ?? await requireRfc64ContextGraphAuthorityReaderV1(
-                  this.contextGraphAuthorityReaderCapability,
-                ).getContextGraphAuthoritySnapshot(
-                  expectedOnChainId,
-                  { signal: readSignal },
-                ),
-              expectedOnChainId,
-            );
-            return { expectedNameHash, expectedOnChainId, snapshot } as const;
+            try {
+              const target = await this.resolveFinalizedContextGraphAuthorityTargetV1(
+                contextGraphId,
+                { signal: readSignal },
+              );
+              if (readSignal?.aborted) throw readSignal.reason;
+              if (target === null) return null;
+              const { expectedNameHash, expectedOnChainId, finalizedSnapshot } = target;
+              const snapshot = parseRfc64AuthoritySnapshotV1(
+                finalizedSnapshot
+                  ?? await requireRfc64ContextGraphAuthorityReaderV1(
+                    this.contextGraphAuthorityReaderCapability,
+                  ).getContextGraphAuthoritySnapshot(
+                    expectedOnChainId,
+                    { signal: readSignal },
+                  ),
+                expectedOnChainId,
+              );
+              return { expectedNameHash, expectedOnChainId, snapshot } as const;
+            } finally {
+              await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
+            }
           },
         );
       let authority: Rfc64ReleaseNativeAuthoritySnapshotV1;

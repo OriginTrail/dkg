@@ -187,4 +187,62 @@ describe('Context Graph registration durability transition', () => {
 
     expect(await registrationStatus(agent, id)).toBe('pending');
   });
+
+  it('installs and flushes compatibility-store fences before retiring old values', async () => {
+    const id = 'registration-compatibility-order';
+    const { agent, ownerAddress } = await fixture(id);
+    const events: string[] = [];
+    Reflect.set(agent.store, 'update', undefined);
+    const originalInsert = agent.store.insert.bind(agent.store);
+    const originalDelete = agent.store.delete.bind(agent.store);
+    const originalFlush = agent.store.flush?.bind(agent.store);
+    agent.store.insert = async (quads, options) => {
+      if (options?.source?.includes('registrationStatus')) {
+        events.push(`insert:${quads[0]?.object}`);
+      }
+      await originalInsert(quads, options);
+    };
+    agent.store.delete = async (quads, options) => {
+      if (options?.source?.includes('registrationStatus')) {
+        events.push(`delete:${quads[0]?.object}`);
+      }
+      await originalDelete(quads, options);
+    };
+    agent.store.flush = async () => {
+      events.push(`flush:${await agent.readLocalContextGraphRegistrationStatus(id)}`);
+      await originalFlush?.();
+    };
+    agent.registerContextGraphOnChain = vi.fn(async () => successfulRegistration());
+
+    await agent.registerContextGraph(id, { callerAgentAddress: ownerAddress });
+
+    expect(events.slice(0, 4)).toEqual([
+      'insert:"pending"',
+      'flush:pending',
+      'delete:"unregistered"',
+      'flush:pending',
+    ]);
+    expect(events).toContain('insert:"registered"');
+    expect(events.indexOf('insert:"registered"'))
+      .toBeLessThan(events.indexOf('delete:"pending"'));
+    expect(await agent.readLocalContextGraphRegistrationStatus(id)).toBe('registered');
+  });
+
+  it('treats an interrupted compatibility transition as pending, not local-first', async () => {
+    const id = 'registration-compatibility-interrupted';
+    const { agent, ownerAddress } = await fixture(id);
+    Reflect.set(agent.store, 'update', undefined);
+    const originalDelete = agent.store.delete.bind(agent.store);
+    agent.store.delete = async (quads, options) => {
+      if (options?.source === 'agent.contextGraph.registrationStatus.retirePrevious') {
+        throw new Error('compatibility status retirement interrupted');
+      }
+      await originalDelete(quads, options);
+    };
+    await expect(agent.registerContextGraph(id, { callerAgentAddress: ownerAddress }))
+      .rejects.toThrow('compatibility status retirement interrupted');
+
+    expect(await agent.readLocalContextGraphRegistrationStatus(id)).toBe('pending');
+    await expect(agent.isLocalFirstUnregisteredContextGraph(id)).resolves.toBe(false);
+  });
 });

@@ -1144,11 +1144,7 @@ export class DKGAgent extends DKGAgentBase {
           await this.reconcileRfc64CatalogAccessAuthorityV1(
             contextGraphId,
             signal,
-            request.kind === 'legacy'
-              ? undefined
-              : request.kind === 'finalized-absence'
-                ? null
-                : request.evidence,
+            request,
           ) === null
             ? 'superseded'
             : 'committed'

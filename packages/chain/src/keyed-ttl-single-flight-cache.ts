@@ -7,6 +7,18 @@ export interface TtlValueCacheOptions<V> {
 
 export type CacheValue<V> = undefined extends V ? never : V;
 
+export const SINGLE_FLIGHT_INVALIDATED_CODE = 'SINGLE_FLIGHT_INVALIDATED' as const;
+
+/** Stable invalidation signal; diagnostic wording never controls retry policy. */
+export class SingleFlightInvalidatedError extends Error {
+  readonly code = SINGLE_FLIGHT_INVALIDATED_CODE;
+
+  constructor(message = 'Shared request was invalidated') {
+    super(message);
+    this.name = 'SingleFlightInvalidatedError';
+  }
+}
+
 /**
  * Small process-local TTL value cache.
  *
@@ -219,8 +231,7 @@ export class AbortableKeyedSingleFlight<K, V> {
     this.inflight.delete(key);
     this.bumpEpoch(key);
     if (state !== undefined && !state.settled) {
-      const invalidated = new Error(reason);
-      invalidated.name = 'AbortError';
+      const invalidated = new SingleFlightInvalidatedError(reason);
       state.controller.abort(invalidated);
     }
   }

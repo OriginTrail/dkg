@@ -30,7 +30,7 @@ const rfc64CatalogAuthorityRefreshSchedulerV1:
 
 /**
  * Opaque revisions for responsibilities backed by the shared authority index.
- * An omitted responsibility intentionally selects the legacy every-pass path.
+ * An omitted responsibility intentionally selects automatic authority resolution.
  */
 export type Rfc64CatalogAuthorityRevisionReadV1 = ReadonlyMap<string, string>;
 
@@ -66,15 +66,15 @@ export interface Rfc64CatalogAuthorityRevisionSourceV1 {
 
 export type Rfc64CatalogAuthorityRefreshResultV1 = 'committed' | 'superseded';
 export type Rfc64CatalogAuthorityRefreshRequestV1 =
-  | Readonly<{ kind: 'legacy' }>
+  | Readonly<{ kind: 'auto' }>
   | Readonly<{ kind: 'finalized-absence' }>
   | Readonly<{
       kind: 'finalized-evidence';
       evidence: Rfc64FinalizedAuthoritySnapshotEvidenceV1;
     }>;
 
-const LEGACY_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1:
-Rfc64CatalogAuthorityRefreshRequestV1 = Object.freeze({ kind: 'legacy' });
+const AUTO_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1:
+Rfc64CatalogAuthorityRefreshRequestV1 = Object.freeze({ kind: 'auto' });
 
 export interface Rfc64CatalogAuthorityRefreshLoopOptionsV1 {
   readonly readActiveContextGraphIds: () => readonly string[];
@@ -319,7 +319,7 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
     const refreshRequests = this.options.createRefreshRequests === undefined
       ? new Map(selectedContextGraphIds.map((contextGraphId) => [
           contextGraphId,
-          LEGACY_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1,
+          AUTO_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1,
         ]))
       : await this.options.createRefreshRequests(
         Object.freeze(selectedContextGraphIds),
@@ -349,7 +349,7 @@ implements Rfc64CatalogRefreshableWorkloadOwnerV1 {
         revision,
         initial || safety,
         refreshRequests.get(contextGraphId)
-          ?? LEGACY_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1,
+          ?? AUTO_RFC64_CATALOG_AUTHORITY_REFRESH_REQUEST_V1,
       );
     }
   }

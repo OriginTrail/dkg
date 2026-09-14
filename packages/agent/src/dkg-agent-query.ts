@@ -763,7 +763,8 @@ export class QueryMethods extends DKGAgentBase {
     ) return false;
 
     const service = this.rfc64PublicCatalogServiceV1;
-    const activeNetworkId = this.config.networkIdentity?.chainId;
+    const activeNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
+      ?? this.config.networkIdentity?.chainId;
     if (service === undefined || activeNetworkId === undefined) return false;
     try {
       assertNetworkIdV1(activeNetworkId);

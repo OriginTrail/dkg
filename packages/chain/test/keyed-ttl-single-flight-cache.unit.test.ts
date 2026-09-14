@@ -3,6 +3,7 @@ import {
   AbortableKeyedSingleFlight,
   KeyedSingleFlight,
   ReadThroughTtlCache,
+  SingleFlightInvalidatedError,
   TtlValueCache,
 } from '../src/keyed-ttl-single-flight-cache.js';
 
@@ -184,6 +185,22 @@ describe('AbortableKeyedSingleFlight', () => {
     await expect(oldRun).resolves.toBe(1);
     await expect(newRun).resolves.toBe(2);
     expect(successes).toEqual([2]);
+  });
+
+  it('propagates invalidation through a typed signal independent of its message', async () => {
+    const flight = new AbortableKeyedSingleFlight<string, number>();
+    const pending = flight.run('chain', async (signal) => new Promise<number>((_resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    await Promise.resolve();
+
+    flight.invalidate('chain', 'wording may change');
+
+    await expect(pending).rejects.toBeInstanceOf(SingleFlightInvalidatedError);
+    await expect(pending).rejects.toMatchObject({
+      code: 'SINGLE_FLIGHT_INVALIDATED',
+      message: 'wording may change',
+    });
   });
 });
 

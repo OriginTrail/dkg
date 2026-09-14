@@ -3,6 +3,7 @@
 import { ethers } from 'ethers';
 import {
   AbortableKeyedSingleFlight,
+  SingleFlightInvalidatedError,
   TtlValueCache,
 } from './keyed-ttl-single-flight-cache.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
@@ -97,9 +98,7 @@ export class ContextGraphNameHashResolver {
         // generation unless its own deadline/cancellation has fired.
         if (
           !options.signal?.aborted
-          && error instanceof Error
-          && error.name === 'AbortError'
-          && error.message === CONTEXT_GRAPH_NAME_HASH_INVALIDATED_MESSAGE
+          && error instanceof SingleFlightInvalidatedError
         ) continue;
         throw error;
       }

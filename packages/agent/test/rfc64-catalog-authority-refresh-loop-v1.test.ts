@@ -70,7 +70,7 @@ describe('RFC-64 catalog authority refresh loop', () => {
       onActiveContextGraphIdsReadFailure: () => undefined,
       onAuthorityRevisionsReadFailure: (error) => { failures.push(error); },
       createRefreshRequests: async () => new Map([
-        ['cg-a', Object.freeze({ kind: 'legacy' as const })],
+        ['cg-a', Object.freeze({ kind: 'auto' as const })],
       ]),
       refreshContextGraph,
       onRefreshFailure: () => undefined,
