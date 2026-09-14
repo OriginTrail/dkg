@@ -4,7 +4,11 @@ import {
   type ChainAdapter,
   type ChainEvent,
 } from '@origintrail-official/dkg-chain';
-import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
+import {
+  Logger,
+  createAdmittedOperationContext,
+  createOperationContext,
+} from '@origintrail-official/dkg-core';
 import type { PublishHandler } from './publish-handler.js';
 import { ethers } from 'ethers';
 import {
@@ -185,12 +189,13 @@ export class ChainEventPoller {
     this.currentGeneration = generation;
     const { signal } = generation.controller;
     const ctx = createOperationContext('system');
+    const restoreContext = createAdmittedOperationContext(ctx, signal);
     const restore = (async () => {
       // A queued generation owns this wait too: closing/restarting it cannot
       // bypass the physical work still retiring from its predecessor.
       await previous;
       if (this.isCurrentGeneration(generation)) {
-        await this.laneRunner.restoreCurrentlyActive({ operation: ctx, signal });
+        await this.laneRunner.restoreCurrentlyActive(restoreContext);
       }
     })();
     generation.active = restore;
@@ -218,7 +223,7 @@ export class ChainEventPoller {
   private runPoll(generation: ChainEventPollGeneration): void {
     if (!this.isCurrentGeneration(generation) || generation.active) return;
     const { signal } = generation.controller;
-    const context: ChainEventDispatchContext = { operation: createOperationContext('publish'), signal };
+    const context = createAdmittedOperationContext(createOperationContext('publish'), signal);
     const pending = this.poll(context)
       .catch(error => {
         if (!signal.aborted) {

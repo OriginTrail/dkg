@@ -14,6 +14,8 @@ void agent.handleKARegisteredNudge('1', 1n);
 void agent.handleKARegisteredNudge('1', 1n, operation);
 // @ts-expect-error The generation signal cannot be paired with a foreign operation by hand.
 void agent.handleKARegisteredNudge('1', 1n, operation, signal);
+// @ts-expect-error A complete operation/signal object still lacks admission provenance.
+void agent.handleKARegisteredNudge('1', 1n, { operation, signal });
 // @ts-expect-error The dispatch context carries its own cancellation.
 void agent.handleKARegisteredNudge('1', 1n, { operation });
 // @ts-expect-error The dispatch context carries its own operation.

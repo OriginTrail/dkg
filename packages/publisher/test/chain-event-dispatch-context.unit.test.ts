@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter, type ChainEvent, type EventFilter } from '@origintrail-official/dkg-chain';
-import { Logger, TypedEventBus } from '@origintrail-official/dkg-core';
+import {
+  Logger,
+  TypedEventBus,
+  createAdmittedOperationContext,
+  createOperationContext,
+} from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   ChainEventPoller,
@@ -47,7 +52,10 @@ describe('chain event callback dispatch context', () => {
   it('keeps one-argument implementations source-compatible while requiring dispatch context at invocation', async () => {
     const seen: string[] = [];
     const legacy: OnContextGraphCreated = async info => { seen.push(info.contextGraphId); };
-    const dispatch = {} as ChainEventDispatchContext;
+    const dispatch = createAdmittedOperationContext(
+      createOperationContext('publish'),
+      new AbortController().signal,
+    );
     const invokeLegacy = (callback: OnContextGraphCreated) => callback({
       contextGraphId: 'legacy', creator: 'creator', accessPolicy: 0, blockNumber: 1,
     }, dispatch);

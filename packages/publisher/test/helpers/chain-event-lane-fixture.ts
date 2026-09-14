@@ -1,5 +1,9 @@
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { TypedEventBus, createOperationContext } from '@origintrail-official/dkg-core';
+import {
+  TypedEventBus,
+  createAdmittedOperationContext,
+  createOperationContext,
+} from '@origintrail-official/dkg-core';
 import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
 import { PublishHandler } from '../../src/publish-handler.js';
 import type { ChainEventDispatchContext } from '../../src/chain-event-dispatch-context.js';
@@ -62,7 +66,10 @@ export function journalEntry(overrides: Partial<JournalEntry> = {}): JournalEntr
 }
 
 export function createLaneRunContext(): ChainEventDispatchContext {
-  return { operation: createOperationContext('publish'), signal: new AbortController().signal };
+  return createAdmittedOperationContext(
+    createOperationContext('publish'),
+    new AbortController().signal,
+  );
 }
 
 export async function pollOnce(poller: ChainEventPoller): Promise<void> {

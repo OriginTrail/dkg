@@ -1,4 +1,7 @@
-import type { OperationContext } from '@origintrail-official/dkg-core';
+import {
+  createAdmittedOperationContext,
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
 import type { ChainEventDispatchContext } from '../../src/chain-event-dispatch-context.js';
 import type { ChainEventLaneRunner } from '../../src/chain-event-lane-runner.js';
 import type { ChainEventPollerConfig } from '../../src/chain-event-poller.js';
@@ -6,10 +9,12 @@ import type { ChainEventPollerConfig } from '../../src/chain-event-poller.js';
 declare const operation: OperationContext;
 declare const signal: AbortSignal;
 declare const runner: ChainEventLaneRunner;
-const context: ChainEventDispatchContext = { operation, signal };
+const context: ChainEventDispatchContext = createAdmittedOperationContext(operation, signal);
 void runner.poll(context);
 void runner.restoreCurrentlyActive(context);
 
+// @ts-expect-error Operation and signal cannot be structurally re-paired downstream.
+const forgedContext: ChainEventDispatchContext = { operation, signal };
 // @ts-expect-error Every admitted run must have its generation's signal.
 const missingSignal: ChainEventDispatchContext = { operation };
 // @ts-expect-error A standalone runner must explicitly own its run context.
@@ -19,6 +24,7 @@ void runner.restoreCurrentlyActive();
 // @ts-expect-error A signal alone does not identify the run operation.
 void runner.poll({ signal });
 void missingSignal;
+void forgedContext;
 
 // Existing callback implementations may ignore the second argument.
 const legacyCallbacks: Pick<ChainEventPollerConfig,
