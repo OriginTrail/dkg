@@ -4,6 +4,7 @@ import {
 } from '../work-admission.js';
 import {
   settlePublicSnapshots,
+  PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
   PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT,
   boundSampledRef,
   type PublicSnapshotMetadata,
@@ -1193,6 +1194,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             metaQuads: processed.verifiedMeta,
             recoveryOrder: snapshotRecoveryOrder,
           }),
+        // The bounded pool is requested HERE, not defaulted in the walk. This
+        // round owns every port it passes below — the fetch, the store and the
+        // `onSnapshotReady` materializer are all this module's — so it can
+        // state that they are safe to enter concurrently. A caller that hands
+        // in its own ports and asks for nothing stays sequential.
+        fetchConcurrency: PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
         publicSnapshotStore,
         fetchSyncPages,
         deleteCheckpoint,
@@ -1483,7 +1490,15 @@ export async function syncPublicSnapshotsForMeta(params: {
   remotePeerId: string;
   contextGraphId: string;
   deadline: number;
-  /** Callers may lower the bounded pool for a constrained responder or paired measurements. */
+  /**
+   * Opt in to the bounded fetch pool, up to
+   * {@link PUBLIC_SNAPSHOT_FETCH_CONCURRENCY}.
+   *
+   * OMITTED MEANS SEQUENTIAL, as this helper has always behaved: every port the
+   * caller supplies — `fetchSyncPages`, the snapshot store and
+   * `onSnapshotReady` — is entered one at a time. Request a pool only when the
+   * ports tolerate reentrancy.
+   */
   fetchConcurrency?: number;
   /** Shared operation admission; legacy callers use their existing deadline. */
   workAdmission?: SyncWorkAdmission;

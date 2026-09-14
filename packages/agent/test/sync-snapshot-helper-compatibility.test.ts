@@ -3,6 +3,7 @@ import { createOperationContext } from '@origintrail-official/dkg-core';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
+  PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
   settlePublicSnapshotsForMeta,
   syncPublicSnapshotsForMeta,
 } from '@origintrail-official/dkg-agent/dist/sync/requester/shared-memory-sync.js';
@@ -63,6 +64,12 @@ function partialWalkParams(failure: Error) {
     params: {
       ctx: createOperationContext('sync'), remotePeerId: 'legacy-peer', contextGraphId: 'legacy-cg',
       deadline: Date.now() + 60_000, metaQuads: walkMeta, fetchSyncPages,
+      // Asked for, never assumed: the pool is what lets positions on BOTH
+      // sides of the failure settle, which is the progress a continuation
+      // caller needs to read back. A consumer that requests nothing walks
+      // sequentially (public-snapshot-fetch-concurrency.test.ts) and recovers
+      // the progress its own order produced.
+      fetchConcurrency: PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
       publicSnapshotStore: {
         getSnapshot: vi.fn(async (ref: string): Promise<Quad[] | null> => {
           const index = refs.indexOf(ref);

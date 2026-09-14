@@ -59,6 +59,16 @@ interface PublicSnapshotRecoveryParams extends Omit<SnapshotRecoveryPorts, 'stor
   /** Immutable manifest order; the owner has already decided each position's reuse. */
   readonly entries: readonly PublicSnapshotWalkEntry[];
   readonly contextGraphId: string;
+  /**
+   * Pool size for this walk, OPT-IN.
+   *
+   * Omitted means sequential. The fetch, store and materialization ports are
+   * the caller's own, and this walk invoked them one at a time before the
+   * bounded pool existed; a caller that never asked for a pool must not have
+   * its non-reentrant `onSnapshotReady` transaction — or any other port —
+   * entered twice at once. A path that owns its ports requests
+   * {@link PUBLIC_SNAPSHOT_FETCH_CONCURRENCY} explicitly.
+   */
   readonly concurrency?: number;
   readonly store?: WorkspacePublicSnapshotStore;
 }
@@ -172,7 +182,7 @@ export async function recoverPublicSnapshots(params: PublicSnapshotRecoveryParam
 /** Let the owning sync round account every admitted outcome before rethrowing. */
 export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams): Promise<PublicSnapshotRecoveryOutcome> {
   params.executionBoundary.assertCurrent();
-  const concurrency = params.concurrency ?? PUBLIC_SNAPSHOT_FETCH_CONCURRENCY;
+  const concurrency = params.concurrency ?? SEQUENTIAL_SNAPSHOT_WALK_CONCURRENCY;
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > PUBLIC_SNAPSHOT_FETCH_CONCURRENCY) {
     throw new RangeError(`Public snapshot fetch concurrency must be between 1 and ${PUBLIC_SNAPSHOT_FETCH_CONCURRENCY}`);
   }
@@ -232,8 +242,19 @@ export async function settlePublicSnapshots(params: PublicSnapshotRecoveryParams
  */
 export const PUBLIC_SNAPSHOT_MISSING_SAMPLE_LIMIT = 10;
 
-/** Bound each requester round; the shared responder admission policy still applies. */
+/**
+ * Upper bound for a requester round that ASKS for the pool; the shared
+ * responder admission policy still applies. It is the ceiling this module
+ * validates against and the figure a path that owns its ports opts into — never
+ * a default applied to a caller that requested nothing.
+ */
 export const PUBLIC_SNAPSHOT_FETCH_CONCURRENCY = 4;
+
+/**
+ * What an omitted pool limit means: one operation at a time, so a caller's
+ * ports are never entered concurrently without asking.
+ */
+const SEQUENTIAL_SNAPSHOT_WALK_CONCURRENCY = 1;
 /**
  * Stored length of ONE sampled ref.
  *

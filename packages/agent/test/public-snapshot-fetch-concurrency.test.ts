@@ -4,7 +4,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import { runSharedMemorySync, syncPublicSnapshotsForMeta, type PublicSnapshotMetadata } from '../src/sync/requester/shared-memory-sync.js';
 import { createRecoveryExecutionAdmission } from '../src/sync/requester/recovery-execution-guard.js';
-import { settlePublicSnapshots } from '../src/sync/requester/public-snapshot-recovery.js';
+import { PUBLIC_SNAPSHOT_FETCH_CONCURRENCY, settlePublicSnapshots } from '../src/sync/requester/public-snapshot-recovery.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncDeniedError, isSyncTransportFailure, toSyncDeniedError, toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { composeSyncWorkAdmission } from '../src/sync/work-admission.js';
@@ -42,13 +42,23 @@ function fixture(count = 8) {
     if (phase !== 'snapshot') return { ...page(0), quads: [], bytesReceived: 0, checkpointKey: `${cg}:${phase}` };
     const index = refs.indexOf(options!.snapshotRef!); started.push(index); return responses[index]!.promise;
   };
-  const start = (overrides: Partial<Pick<Parameters<typeof syncPublicSnapshotsForMeta>[0], 'deadline' | 'executionBoundary' | 'fetchConcurrency'>> = {}) => syncPublicSnapshotsForMeta({
+  const legacyParams = (overrides: Partial<Pick<Parameters<typeof syncPublicSnapshotsForMeta>[0], 'deadline' | 'executionBoundary' | 'fetchConcurrency'>> = {}) => ({
     ctx: createOperationContext('sync'), remotePeerId: 'peer', contextGraphId: 'pool', metaQuads,
     deadline: Date.now() + 60_000, publicSnapshotStore: store,
     fetchSyncPages,
     deleteCheckpoint: deleted, setCheckpoint: () => {}, onSnapshotReady: ready, ...overrides,
   });
+  /**
+   * A caller that ASKS for the pool. The limit is stated here, not defaulted by
+   * the walk: every pool scenario below is a scenario about a caller that opted
+   * in, and `startLegacy` covers the caller that did not.
+   */
+  const start = (overrides: Partial<Pick<Parameters<typeof syncPublicSnapshotsForMeta>[0], 'deadline' | 'executionBoundary' | 'fetchConcurrency'>> = {}) =>
+    syncPublicSnapshotsForMeta({ fetchConcurrency: PUBLIC_SNAPSHOT_FETCH_CONCURRENCY, ...legacyParams(overrides) });
+  /** An unchanged consumer: the same call with no pool limit requested. */
+  const startLegacy = () => syncPublicSnapshotsForMeta(legacyParams());
   const startSettled = () => settlePublicSnapshots({
+    concurrency: PUBLIC_SNAPSHOT_FETCH_CONCURRENCY,
     entries: refs.map(ref => ({ snapshot: { ref, digest: ref, count: 1 }, reuse: false })),
     contextGraphId: 'pool',
     workAdmission: composeSyncWorkAdmission({
@@ -81,7 +91,7 @@ function fixture(count = 8) {
   });
   const releaseAll = () => responses.forEach((response, i) => response.resolve(page(i)));
   const waitForStarted = (count: number) => vi.waitFor(() => expect(started).toHaveLength(count));
-  return { refs, payloads, responses, started, cacheReads, cache, store, deleted, ready, page, fetchSyncPages, start, startSettled, startSync, releaseAll, waitForStarted };
+  return { refs, payloads, responses, started, cacheReads, cache, store, deleted, ready, page, fetchSyncPages, start, startLegacy, startSettled, startSync, releaseAll, waitForStarted };
 }
 
 it.each(['ordinary error', 'frozen error', 'primitive'] as const)('retains a timed-out sibling and round metrics after a local %s', async kind => {
@@ -211,6 +221,62 @@ it.each(['network', 'cache'] as const)('holds each pool slot through asynchronou
     expect(await run).toMatchObject({ readySnapshots: 8, missingCount: 0, completed: true });
     expect(active).toBe(0); expect(peak).toBe(4);
   } finally { gates.forEach(gate => gate.resolve()); f.releaseAll(); await run.catch(() => {}); }
+});
+
+/**
+ * The mirror of the scenario above for a caller that requested NO pool.
+ *
+ * `onSnapshotReady` stands in for any non-reentrant caller port — the legacy
+ * hook that opens a transaction, awaits a commit and closes it. Before the
+ * bounded pool this helper entered it once at a time; an unchanged consumer
+ * must still see peak concurrency 1, on the cache path as well as the network
+ * one, without being asked to pass a new option for it.
+ */
+it.each(['network', 'cache'] as const)('keeps caller %s ports at peak concurrency 1 when no pool limit is requested', async source => {
+  const f = fixture(4);
+  if (source === 'cache') f.refs.forEach((ref, i) => f.cache.set(ref, f.payloads[i]!));
+  const gates = f.refs.map(() => deferred<void>());
+  const entered: number[] = [];
+  let active = 0; let peak = 0; let settled = false;
+  f.ready.mockImplementation(async snapshot => {
+    const index = f.refs.indexOf(snapshot.ref);
+    entered.push(index); active++; peak = Math.max(peak, active);
+    try { await gates[index]!.promise; } finally { active--; }
+  });
+  f.releaseAll();
+  const run = f.startLegacy();
+  void run.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    await vi.waitFor(() => expect(entered).toHaveLength(1));
+    // Nothing beyond the held position is admitted: no second cache read, no
+    // second dispatch, and above all no second callback.
+    expect(active).toBe(1); expect(settled).toBe(false);
+    expect(f.cacheReads).toEqual([0]);
+    expect(f.started).toEqual(source === 'network' ? [0] : []);
+    gates[0]!.resolve();
+    await vi.waitFor(() => expect(entered).toHaveLength(2));
+    expect(active).toBe(1); expect(peak).toBe(1); expect(settled).toBe(false);
+    gates.forEach(gate => gate.resolve());
+    expect(await run).toMatchObject({ readySnapshots: 4, missingCount: 0, completed: true });
+    expect(entered).toEqual([0, 1, 2, 3]);
+    expect(f.cacheReads).toEqual([0, 1, 2, 3]);
+    expect(f.started).toEqual(source === 'network' ? [0, 1, 2, 3] : []);
+    expect(active).toBe(0); expect(peak).toBe(1);
+  } finally { gates.forEach(gate => gate.resolve()); f.releaseAll(); await run.catch(() => {}); }
+});
+
+/** The production round owns its ports, asks for the pool, and still gets it. */
+it('keeps the production shared-memory round on the bounded pool it requests', async () => {
+  const f = fixture(); const run = f.startSync();
+  try {
+    await f.waitForStarted(4); expect(f.started).toEqual([0, 1, 2, 3]);
+    f.responses[2]!.resolve(f.page(2));
+    await f.waitForStarted(5); expect(f.started).toEqual([0, 1, 2, 3, 4]);
+    f.releaseAll();
+    expect(await run).toMatchObject({
+      bytesReceived: 800, snapshotPhaseBytesReceived: 800, failedPhases: 0,
+    });
+  } finally { f.releaseAll(); await run; }
 });
 
 it('admits four snapshot fetches and reuses each slot without exceeding the cap', async () => {
