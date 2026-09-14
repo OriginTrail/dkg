@@ -11,8 +11,12 @@
  * 6. Edge node as context graph participant
  */
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
 import { DKGAgent as RealDKGAgent } from '../src/index.js';
+import type { FinalizationRecoveryStore } from '../src/finalization-recovery-store.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens, setMinimumRequiredSignatures } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
@@ -33,6 +37,58 @@ const ENTITY_2 = 'urn:protocol:entity:2';
 const ENTITY_3 = 'urn:protocol:entity:3';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
+function finalizationRecoveryStore(node: DKGAgent): FinalizationRecoveryStore {
+  const runtime = (node as unknown as {
+    finalizationRuntime: {
+      getRecoveryStore(): FinalizationRecoveryStore | undefined;
+    };
+  }).finalizationRuntime;
+  const store = runtime.getRecoveryStore();
+  if (!store) throw new Error(`Agent ${node.peerId} has no finalization recovery store`);
+  return store;
+}
+
+async function fillFinalizationRecoveryInbox(
+  store: FinalizationRecoveryStore,
+  prefix: string,
+): Promise<string[]> {
+  const keys: string[] = [];
+  for (let index = 0; index < 128; index += 1) {
+    const key = `${prefix}-capacity-${index}`;
+    const serial = index + 1;
+    const result = await store.receive({
+      key,
+      chainId: 'evm:31337',
+      contextGraphId: `${prefix}-filler-graph-${serial}`,
+      sourcePeerId: `${prefix}-filler-peer-${serial}`,
+      ual: `did:dkg:evm:31337/0x${'11'.repeat(20)}/${serial}`,
+      txHash: `0x${serial.toString(16).padStart(64, '0')}`,
+      assertionVersion: '1',
+      merkleRoot: `0x${'22'.repeat(32)}`,
+      kaId: String(serial),
+      batchId: String(serial),
+      rawMessage: new Uint8Array([serial]),
+    });
+    expect(result.status).toBe('inserted');
+    keys.push(key);
+  }
+  await expect(store.health()).resolves.toMatchObject({
+    degradedReason: 'capacity-exhausted',
+    stateCounts: { RECEIVED: 128 },
+    deferredEntries: 0,
+  });
+  return keys;
+}
+
+async function releaseFinalizationRecoveryCapacity(
+  store: FinalizationRecoveryStore,
+  keys: readonly string[],
+): Promise<void> {
+  for (const key of keys) {
+    await expect(store.transition(key, 0, 'SUPERSEDED')).resolves.toBe(true);
+  }
+}
 
 async function stageRootlessAssertion(
   node: DKGAgent,
@@ -103,14 +159,31 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
   let nodeA: DKGAgent;
   let nodeB: DKGAgent;
   let nodeC: DKGAgent;
+  const receiverDataDirs: string[] = [];
 
   afterAll(async () => {
     try { await nodeA?.stop(); } catch {}
     try { await nodeB?.stop(); } catch {}
     try { await nodeC?.stop(); } catch {}
+    const { hubAddress } = getSharedContext();
+    await setMinimumRequiredSignatures(
+      createProvider(),
+      hubAddress,
+      HARDHAT_KEYS.DEPLOYER,
+      1,
+    );
+    await Promise.all(receiverDataDirs.map((directory) =>
+      rm(directory, { recursive: true, force: true })));
   });
 
   it('bootstraps 3 agents with shared chain and connects them', async () => {
+    const { hubAddress } = getSharedContext();
+    await setMinimumRequiredSignatures(
+      createProvider(),
+      hubAddress,
+      HARDHAT_KEYS.DEPLOYER,
+      2,
+    );
     nodeA = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'ProtoA',
@@ -126,6 +199,8 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       skills: [],
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC1_OP),
       nodeRole: 'core',
+      dataDir: receiverDataDirs[0] = await mkdtemp(join(tmpdir(), 'dkg-2091-core-b-')),
+      storeConfig: { backend: 'oxigraph' },
       // This suite owns GossipSub/finalization behavior. Receiver startup
       // catch-up can add the same logical rows from the per-KA VM graph; the
       // read-both bag-semantics issue is tracked separately in #1270.
@@ -138,6 +213,8 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
       skills: [],
       chainAdapter: createEVMAdapter(HARDHAT_KEYS.REC2_OP),
       nodeRole: 'core',
+      dataDir: receiverDataDirs[1] = await mkdtemp(join(tmpdir(), 'dkg-2091-core-c-')),
+      storeConfig: { backend: 'oxigraph' },
       syncOnConnectEnabled: false,
     });
 
@@ -253,6 +330,86 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
     const publishEvent = events[events.length - 1];
     expect(publishEvent.data.publisherAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
   }, 10_000);
+
+  it('makes a KA readable by UAL on every ACK core after both 128-entry inboxes drain', async () => {
+    const subject = 'urn:protocol:entity:capacity-recovery';
+    const object = '"Recovered after capacity"';
+    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'capacity-recovery', [{
+      subject,
+      predicate: 'http://schema.org/name',
+      object,
+    }]);
+
+    for (const node of [nodeB, nodeC]) {
+      const sharedMemory = await pollUntil(
+        () => node.query(
+          `SELECT ?name WHERE { <${subject}> <http://schema.org/name> ?name }`,
+          { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
+        ),
+        (bindings) => bindings.some((binding) => binding.name === object),
+        15_000,
+      );
+      expect(sharedMemory).toContainEqual({ name: object });
+      await node.getOrCreateFinalizationHandler().stopRecoveryWorker();
+    }
+
+    const receiverStores = [
+      finalizationRecoveryStore(nodeB),
+      finalizationRecoveryStore(nodeC),
+    ] as const;
+    const [coreBFillerKeys, coreCFillerKeys] = await Promise.all([
+      fillFinalizationRecoveryInbox(receiverStores[0], 'core-b'),
+      fillFinalizationRecoveryInbox(receiverStores[1], 'core-c'),
+    ]);
+
+    const result = await nodeA.publishFromFinalizedAssertion(
+      CONTEXT_GRAPH,
+      'capacity-recovery',
+      { clearSharedMemoryAfter: true },
+    );
+    expect(result.status).toBe('confirmed');
+    expect(new Set(result.v10ACKs?.map((ack) => ack.peerId))).toEqual(new Set([
+      nodeB.peerId,
+      nodeC.peerId,
+    ]));
+
+    for (const node of [nodeB, nodeC]) {
+      await expect.poll(
+        () => node.getFinalizationRecoveryHealth(),
+        { timeout: 10_000 },
+      ).toMatchObject({
+        degradedReason: 'capacity-exhausted',
+        stateCounts: { RECEIVED: 128 },
+        deferredEntries: 1,
+      });
+    }
+
+    await Promise.all([
+      releaseFinalizationRecoveryCapacity(receiverStores[0], coreBFillerKeys),
+      releaseFinalizationRecoveryCapacity(receiverStores[1], coreCFillerKeys),
+    ]);
+    nodeB.getOrCreateFinalizationHandler().startRecoveryWorker();
+    nodeC.getOrCreateFinalizationHandler().startRecoveryWorker();
+
+    for (const node of [nodeB, nodeC]) {
+      await expect.poll(
+        () => nodeA.lookupEntity(node.peerId, result.ual),
+        { timeout: 20_000, interval: 500 },
+      ).toMatchObject({
+        status: 'OK',
+        resultCount: 1,
+        ntriples: expect.stringContaining(
+          `<${subject}> <http://schema.org/name> ${object} .`,
+        ),
+      });
+      await expect(node.getFinalizationRecoveryHealth()).resolves.toMatchObject({
+        // Terminal retention is capped at 128 rows, so settling the recovered
+        // KA prunes the oldest of the 128 superseded capacity fillers.
+        stateCounts: { SETTLED: 1, SUPERSEDED: 127 },
+        deferredEntries: 0,
+      });
+    }
+  }, 60_000);
 });
 
 // ========================================================================
