@@ -137,7 +137,7 @@ import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 // intentionally expensive cold path. Record each distinct in-process caller
 // once, without graph ids, name hashes, RPC URLs, or wallet material, so a
 // one-node canary can identify which startup owner is repeatedly reaching it.
-const contextGraphNameHashResolutionCallerSignatures = new Set<string>();
+const contextGraphNameHashResolutionCallerCounts = new Map<string, number>();
 const CONTEXT_GRAPH_NAME_HASH_RESOLUTION_CALLER_SAMPLE_LIMIT = 64;
 
 import { ProfileManager } from './profile-manager.js';
@@ -1982,7 +1982,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       return undefined;
     }
     if (
-      contextGraphNameHashResolutionCallerSignatures.size
+      contextGraphNameHashResolutionCallerCounts.size
       < CONTEXT_GRAPH_NAME_HASH_RESOLUTION_CALLER_SAMPLE_LIMIT
     ) {
       const caller = (new Error().stack ?? '')
@@ -1992,11 +1992,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         .join(' <- ');
       const source = options.source ?? 'unspecified';
       const signature = `${source}\0${caller}`;
-      if (!contextGraphNameHashResolutionCallerSignatures.has(signature)) {
-        contextGraphNameHashResolutionCallerSignatures.add(signature);
+      const count = (contextGraphNameHashResolutionCallerCounts.get(signature) ?? 0) + 1;
+      contextGraphNameHashResolutionCallerCounts.set(signature, count);
+      if ((count & (count - 1)) === 0) {
         this.log.info(
           createOperationContext('system'),
-          `[rpc-attribution] context-graph-name-hash source=${JSON.stringify(source)} caller=${JSON.stringify(caller)}`,
+          `[rpc-attribution] context-graph-name-hash count=${count} source=${JSON.stringify(source)} caller=${JSON.stringify(caller)}`,
         );
       }
     }

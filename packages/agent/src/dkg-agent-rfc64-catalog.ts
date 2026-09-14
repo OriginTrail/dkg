@@ -3797,7 +3797,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             ? null
             : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
           getOnChainContextGraphId: (contextGraphId, signal) =>
-            this.getContextGraphOnChainId(contextGraphId, { signal }),
+            this.getContextGraphOnChainId(contextGraphId, {
+              signal,
+              source: 'agent.rfc64.finalizedPolicyPrecommit',
+            }),
           getEvmChainId: () => this.chain.getEvmChainId(),
         });
         const finalizedVmPrecommit = createRfc64FinalizedVmAgentPrecommitV1({
@@ -3806,7 +3809,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
             ? null
             : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
           getOnChainContextGraphId: (contextGraphId, signal) =>
-            this.getContextGraphOnChainId(contextGraphId, { signal }),
+            this.getContextGraphOnChainId(contextGraphId, {
+              signal,
+              source: 'agent.rfc64.finalizedVmPrecommit',
+            }),
           getEvmChainId: () => this.chain.getEvmChainId(),
           getKnowledgeAssetStorageAddress: async () => {
             if (typeof this.chain.getDKGKnowledgeAssetsAddress !== 'function') {

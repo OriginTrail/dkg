@@ -92,6 +92,8 @@ type ContextGraphRegistryScanPlan =
   | ContextGraphRegistryRepairScanPlan;
 
 const CONTEXT_GRAPH_REGISTRY_REPAIR_MINIMUM_INTERVAL_MS = 24 * 60 * 60 * 1_000;
+const contextGraphNameHashBoundaryCallerCounts = new Map<string, number>();
+const CONTEXT_GRAPH_NAME_HASH_BOUNDARY_CALLER_SAMPLE_LIMIT = 64;
 
 function normalizePageBudget(value: number | undefined): number | undefined {
   return Number.isFinite(value) && (value ?? 0) >= 1
@@ -1377,6 +1379,23 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     nameHash: string,
     options: ChainReadOptions = {},
   ): Promise<bigint | null> {
+    if (
+      contextGraphNameHashBoundaryCallerCounts.size
+      < CONTEXT_GRAPH_NAME_HASH_BOUNDARY_CALLER_SAMPLE_LIMIT
+    ) {
+      const caller = (new Error().stack ?? '')
+        .split('\n')
+        .slice(2, 8)
+        .map((frame) => frame.trim())
+        .join(' <- ');
+      const count = (contextGraphNameHashBoundaryCallerCounts.get(caller) ?? 0) + 1;
+      contextGraphNameHashBoundaryCallerCounts.set(caller, count);
+      if ((count & (count - 1)) === 0) {
+        console.info(
+          `[rpc-attribution] resolveContextGraphIdByNameHash count=${count} caller=${JSON.stringify(caller)}`,
+        );
+      }
+    }
     return this.getContextGraphNameHashResolver().resolve(nameHash, options.signal);
   }
 

@@ -946,7 +946,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     let onChainId: string | null = null;
     let resolvedFromLocalCg = false;
     if (typeof this.getContextGraphOnChainId === 'function') {
-      onChainId = await this.getContextGraphOnChainId(contextGraphId);
+      onChainId = await this.getContextGraphOnChainId(contextGraphId, {
+        source: 'agent.contextGraph.finalizedAccessPolicy',
+      });
       if (onChainId) resolvedFromLocalCg = true;
     }
     if (!onChainId && /^\d+$/.test(trimmed)) {
@@ -1142,7 +1144,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     let onChainId: string | null = null;
     let resolvedFromLocalCg = false;
     if (typeof this.getContextGraphOnChainId === 'function') {
-      onChainId = await this.getContextGraphOnChainId(contextGraphId);
+      onChainId = await this.getContextGraphOnChainId(contextGraphId, {
+        source: 'agent.contextGraph.liveAccessPolicy',
+      });
       if (onChainId) resolvedFromLocalCg = true;
     }
     if (!onChainId && /^\d+$/.test(trimmed)) {

@@ -3458,6 +3458,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // duplicate, changed commitment, or RPC failure rejects the target.
       const revalidated = await this.resolveCurrentNameHashContextGraphBinding(localCgId, {
         signal,
+        source: 'agent.vm.revalidateSubscriptionTarget',
       });
       if (!isCurrent()) throw new VmReconcileQueueClosedError();
       sub = this.subscribedContextGraphs.get(localCgId);
@@ -3626,6 +3627,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       try {
         const resolved = await this.resolveCurrentNameHashContextGraphBinding(localCgId, {
           signal,
+          source: 'agent.vm.selfPrimeSubscriptionTarget',
         });
         return resolved?.provenance === 'reverse-name-hash'
           && resolved.onChainId === target.onChainId
