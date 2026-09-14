@@ -75,7 +75,11 @@ export class EventsMethods extends EVMChainAdapterBase {
       const contract = bindings.contracts[descriptor.binding];
       // Unsupported names and absent optional deployments yield nothing.
       if (!contract) continue;
-      yield* descriptor.scan(contract, scan);
+      for await (const event of descriptor.scan(contract, scan)) {
+        signal?.throwIfAborted();
+        requireCurrentBindings();
+        yield event;
+      }
       signal?.throwIfAborted();
       requireCurrentBindings();
     }

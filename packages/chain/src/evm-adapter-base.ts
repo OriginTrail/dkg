@@ -692,6 +692,7 @@ export class EVMChainAdapterBase {
 
   private readonly hubContractBindings: EvmHubContractBindings;
   protected readonly adapterContracts: Omit<ContractCache, 'hub' | EvmHubContractKey> = {};
+  private contractsCompatibilityFacade?: ContractCache;
 
   /** Canonical Hub-owned handles for the current generation. */
   protected get hubContracts(): Readonly<EvmHubBindingSet> {
@@ -699,12 +700,47 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Read-only compatibility snapshot for tests and older subclasses. Runtime
-   * code reads Hub-owned and adapter-owned bindings through their explicit
-   * stores, so this object is never a live proxy or a second cache owner.
+   * Mutable compatibility view for older subclasses. Property writes route to
+   * the canonical Hub-generation or adapter-owned store instead of creating a
+   * second cache owner.
    */
-  protected get contracts(): Readonly<ContractCache> {
-    return Object.freeze({ ...this.adapterContracts, ...this.hubContracts }) as ContractCache;
+  protected get contracts(): ContractCache {
+    if (this.contractsCompatibilityFacade) return this.contractsCompatibilityFacade;
+    const current = () => ({ ...this.adapterContracts, ...this.hubContracts }) as ContractCache;
+    this.contractsCompatibilityFacade = new Proxy({} as ContractCache, {
+      get: (_target, property) => Reflect.get(current(), property),
+      has: (_target, property) => Reflect.has(current(), property),
+      ownKeys: () => Reflect.ownKeys(current()),
+      getOwnPropertyDescriptor: (_target, property) => {
+        const contracts = current();
+        if (!Reflect.has(contracts, property)) return undefined;
+        return {
+          configurable: true,
+          enumerable: true,
+          writable: true,
+          value: Reflect.get(contracts, property),
+        };
+      },
+      set: (_target, property, value) => {
+        if (typeof property !== 'string') return false;
+        if (this.isHubBindingKey(property)) {
+          this.replaceHubContractBinding(property, value as Contract | undefined);
+        } else {
+          (this.adapterContracts as Record<string, Contract | undefined>)[property] = value;
+        }
+        return true;
+      },
+      deleteProperty: (_target, property) => {
+        if (typeof property !== 'string') return false;
+        if (this.isHubBindingKey(property)) {
+          this.replaceHubContractBinding(property, undefined);
+        } else {
+          delete (this.adapterContracts as Record<string, Contract | undefined>)[property];
+        }
+        return true;
+      },
+    });
+    return this.contractsCompatibilityFacade;
   }
 
   protected set contracts(value: ContractCache) {

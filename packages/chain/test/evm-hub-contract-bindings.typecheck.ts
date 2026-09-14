@@ -23,8 +23,11 @@ class Probe extends EVMChainAdapter {
   seed(bindings: ContractCache): void {
     // Whole-cache replacement remains a contained compatibility transition.
     this.contracts = bindings;
-    // @ts-expect-error compatibility snapshots are read-only
+    // Legacy per-slot mutation remains source compatible and routes through
+    // the binding owners at runtime.
     this.contracts.chronos = handle;
+    this.contracts.randomSampling = handle;
+    delete this.contracts.token;
     this.adapterContracts.randomSampling = handle;
     this.initialized = true;
     this.initialized = false;

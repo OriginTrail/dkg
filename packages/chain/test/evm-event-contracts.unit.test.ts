@@ -352,7 +352,7 @@ describe('Hub binding generation ownership', () => {
     } finally { adapter.destroy(); }
   });
 
-  it('exposes the deprecated contracts facade as a coherent read-only snapshot', () => {
+  it('routes deprecated per-binding mutations through a coherent live facade', () => {
     class CompatibilityProbe extends EVMChainAdapter {
       seedLazyBinding(binding: Contract): void { this.adapterContracts.randomSampling = binding; }
 
@@ -363,6 +363,10 @@ describe('Hub binding generation ownership', () => {
       rotateHubBinding(binding: Contract): void { this.replaceHubContractBinding('chronos', binding); }
 
       compatibilityCache(): ContractCache { return this.contracts; }
+
+      seedToken(binding: Contract): void { this.contracts.token = binding; }
+
+      clearToken(): void { delete this.contracts.token; }
     }
 
     const adapter = new CompatibilityProbe({
@@ -388,16 +392,19 @@ describe('Hub binding generation ownership', () => {
       expect(cache.randomSampling).toBe(first);
       expect(cache.token).toBeUndefined();
 
-      // Writing and deletion are refused the same way, because the facade is
-      // frozen rather than a view that silently rewrites owner state.
-      expect(Object.isFrozen(cache)).toBe(true);
-      expect(() => { cache.chronos = second; }).toThrow(TypeError);
-      expect(() => { delete cache.randomSampling; }).toThrow(TypeError);
+      // Legacy writes and deletes update the explicit binding owner while the
+      // same view keeps reads, enumeration and descriptors coherent.
+      expect(Object.isFrozen(cache)).toBe(false);
+      adapter.seedToken(second);
+      expect(cache.token).toBe(second);
+      expect(Object.getOwnPropertyDescriptor(cache, 'token')?.value).toBe(second);
+      adapter.clearToken();
+      expect(cache.token).toBeUndefined();
 
-      // It is a snapshot, not a live view: a rotation is invisible to a cache
-      // already handed out, and visible to the next read.
+      // A Hub-owned transition remains visible through an already borrowed
+      // compatibility view.
       adapter.rotateHubBinding(second);
-      expect(cache.chronos).toBe(first);
+      expect(cache.chronos).toBe(second);
       expect(adapter.compatibilityCache().chronos).toBe(second);
     } finally { adapter.destroy(); }
   });
@@ -623,6 +630,36 @@ describe('EVM event descriptor registry', () => {
       expect(await collectAll(adapter.listenForEvents({ eventTypes: [alias] }))).toEqual([]);
       expect(reader).toHaveBeenCalled();
       for (const call of reader.mock.calls as unknown as unknown[][]) expect(call[0]).toBe(bindings[descriptor.binding]);
+    } finally { adapter.destroy(); }
+  });
+
+  it('rejects an event from a retired binding before exposing it and delivers the replacement once', async () => {
+    const adapter = new EVMChainAdapter({ rpcUrl: 'http://127.0.0.1:59998', privateKey: PRIVATE_KEY, hubAddress: address, chainId: 'evm:31337' });
+    const retired = new Contract(address, EVENT_ABI, adapter.getProvider());
+    const replacement = new Contract('0x0000000000000000000000000000000000000014', EVENT_ABI, adapter.getProvider());
+    const log = SCENARIOS.ContextGraphCreated.logs['cgStorage.queryFilter(ContextGraphCreated)'][0];
+    const expected = SCENARIOS.ContextGraphCreated.expected;
+    const internal = adapter as any;
+    internal.installHubContractBindingsForTesting({
+      ...internal.contracts,
+      contextGraphStorage: retired,
+    });
+    internal.startHubRotationListener = vi.fn(async () => undefined);
+    internal.readContractWith = vi.fn(async (contract: Contract) => {
+      if (contract === retired) {
+        internal.replaceHubContractBinding('contextGraphStorage', replacement);
+      }
+      return [log];
+    });
+    try {
+      const stale = adapter.listenForEvents({
+        eventTypes: ['ContextGraphCreated'],
+      })[Symbol.asyncIterator]();
+      await expect(stale.next()).rejects.toThrow('Hub contract bindings changed during event scan');
+      await expect(collectAll(adapter.listenForEvents({
+        eventTypes: ['ContextGraphCreated'],
+      }))).resolves.toEqual(expected);
+      expect(internal.readContractWith).toHaveBeenCalledTimes(2);
     } finally { adapter.destroy(); }
   });
 
