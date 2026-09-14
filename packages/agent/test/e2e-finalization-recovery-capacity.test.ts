@@ -4,10 +4,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import {
-  DKGAgent as RealDKGAgent,
   type FinalizationRecoveryStore,
   type FinalizationRecoveryStoreFactory,
 } from '../src/index.js';
+import {
+  bindAndSubscribePublicContextGraph,
+  DKGAgent,
+  pollUntil,
+  sleep,
+  stageRootlessAssertion,
+  type DKGAgent as DKGAgentType,
+} from './_helpers/publish-protocol.js';
 import { openSqliteFinalizationRecoveryStore } from
   '../src/finalization-recovery-sqlite-store.js';
 import {
@@ -19,20 +26,6 @@ import {
   takeSnapshot,
 } from '../../chain/test/evm-test-context.js';
 import { setMinimumRequiredSignatures } from '../../chain/test/hardhat-harness.js';
-
-type DKGAgent = RealDKGAgent;
-const DKGAgent = {
-  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
-    return RealDKGAgent.create({
-      rfc64CatalogActivation: { enabled: false },
-      ...config,
-    });
-  },
-};
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function boundedFinalizationRecoveryStoreFactory(
   capture: (store: FinalizationRecoveryStore) => void,
@@ -72,7 +65,7 @@ async function fillFinalizationRecoveryInbox(
 }
 
 interface CapacityRecoveryReceiver {
-  readonly node: DKGAgent;
+  readonly node: DKGAgentType;
   readonly store: FinalizationRecoveryStore;
   fillInbox(): Promise<void>;
   releaseCapacity(): Promise<void>;
@@ -86,7 +79,7 @@ async function createCapacityRecoveryReceiver(
 ): Promise<CapacityRecoveryReceiver> {
   const dataDir = await mkdtemp(join(tmpdir(), `dkg-2091-${prefix}-`));
   const captured: { store?: FinalizationRecoveryStore } = {};
-  let node: DKGAgent | undefined;
+  let node: DKGAgentType | undefined;
   try {
     node = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(),
@@ -132,51 +125,9 @@ async function createCapacityRecoveryReceiver(
   }
 }
 
-async function stageRootlessAssertion(
-  node: DKGAgent,
-  contextGraphId: string,
-  name: string,
-  quads: Array<{ subject: string; predicate: string; object: string }>,
-): Promise<void> {
-  await node.assertion.create(contextGraphId, name);
-  await node.assertion.write(contextGraphId, name, quads);
-  await node.assertion.promote(contextGraphId, name);
-}
-
-async function bindAndSubscribePublicContextGraph(
-  node: DKGAgent,
-  contextGraphId: string,
-  onChainId: string,
-): Promise<void> {
-  await (node as any).store.insert([{
-    subject: `did:dkg:context-graph:${contextGraphId}`,
-    predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
-    object: `"${onChainId}"`,
-    graph: 'did:dkg:context-graph:ontology',
-  }]);
-  node.subscribeToContextGraph(contextGraphId);
-}
-
-async function pollUntil(
-  queryFn: () => Promise<{ bindings: any[] }>,
-  predicate: (bindings: any[]) => boolean,
-  timeoutMs: number,
-  intervalMs = 500,
-): Promise<any[]> {
-  const deadline = Date.now() + timeoutMs;
-  let lastResult: any[] = [];
-  while (Date.now() < deadline) {
-    const result = await queryFn();
-    lastResult = result.bindings;
-    if (predicate(lastResult)) return lastResult;
-    await sleep(intervalMs);
-  }
-  return lastResult;
-}
-
 describe('E2E: acknowledged-core finalization recovery at inbox capacity', () => {
   const contextGraphId = 'publish-protocol-capacity-recovery-e2e';
-  let nodeA: DKGAgent;
+  let nodeA: DKGAgentType;
   const receivers: CapacityRecoveryReceiver[] = [];
   let describeSnapshot: string | undefined;
 

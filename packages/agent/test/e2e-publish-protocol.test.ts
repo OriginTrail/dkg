@@ -12,73 +12,22 @@
  */
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
-import { DKGAgent as RealDKGAgent } from '../src/index.js';
+import {
+  bindAndSubscribePublicContextGraph,
+  DKGAgent,
+  pollUntil,
+  sleep,
+  stageRootlessAssertion,
+  type DKGAgent as DKGAgentType,
+} from './_helpers/publish-protocol.js';
 import { createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 import { mintTokens, setMinimumRequiredSignatures } from '../../chain/test/hardhat-harness.js';
 import { ethers } from 'ethers';
-
-type DKGAgent = RealDKGAgent;
-const DKGAgent = {
-  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
-    return RealDKGAgent.create({
-      rfc64CatalogActivation: { enabled: false },
-      ...config,
-    });
-  },
-};
 
 const CONTEXT_GRAPH = 'publish-protocol-e2e';
 const ENTITY_1 = 'urn:protocol:entity:1';
 const ENTITY_2 = 'urn:protocol:entity:2';
 const ENTITY_3 = 'urn:protocol:entity:3';
-
-function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
-
-async function stageRootlessAssertion(
-  node: DKGAgent,
-  contextGraphId: string,
-  name: string,
-  quads: Array<{ subject: string; predicate: string; object: string }>,
-) {
-  await node.assertion.create(contextGraphId, name);
-  await node.assertion.write(contextGraphId, name, quads);
-  return node.assertion.promote(contextGraphId, name);
-}
-
-async function bindAndSubscribePublicContextGraph(
-  node: DKGAgent,
-  contextGraphId: string,
-  onChainId: string,
-) {
-  // Role-aware activation intentionally fails closed until the local label is
-  // bound to a live public on-chain CG. These protocol tests isolate SWM and
-  // finalization behavior, so bind the registration deterministically instead
-  // of racing background ontology discovery before subscribing the replicas.
-  await (node as any).store.insert([{
-    subject: `did:dkg:context-graph:${contextGraphId}`,
-    predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
-    object: `"${onChainId}"`,
-    graph: 'did:dkg:context-graph:ontology',
-  }]);
-  node.subscribeToContextGraph(contextGraphId);
-}
-
-async function pollUntil(
-  queryFn: () => Promise<{ bindings: any[] }>,
-  predicate: (bindings: any[]) => boolean,
-  timeoutMs: number,
-  intervalMs = 500,
-): Promise<any[]> {
-  const deadline = Date.now() + timeoutMs;
-  let lastResult: any[] = [];
-  while (Date.now() < deadline) {
-    const result = await queryFn();
-    lastResult = result.bindings;
-    if (predicate(lastResult)) return lastResult;
-    await sleep(intervalMs);
-  }
-  return lastResult;
-}
 
 let _fileSnapshot: string;
 beforeAll(async () => {
@@ -100,9 +49,9 @@ afterAll(async () => {
 
 describe('E2E: ContextGraph publish with receiver signature collection', () => {
   const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  let nodeA: DKGAgent;
-  let nodeB: DKGAgent;
-  let nodeC: DKGAgent;
+  let nodeA: DKGAgentType;
+  let nodeB: DKGAgentType;
+  let nodeC: DKGAgentType;
   let describeSnapshot: string | undefined;
 
   beforeAll(async () => {
@@ -286,9 +235,9 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
 
 describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-node (OT-RFC-44)', () => {
   const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  let nodeA: DKGAgent;
-  let nodeB: DKGAgent;
-  let nodeC: DKGAgent;
+  let nodeA: DKGAgentType;
+  let nodeB: DKGAgentType;
+  let nodeC: DKGAgentType;
   const MCG = 'design-b-multi-entity-e2e';
 
   afterAll(async () => {
@@ -393,8 +342,8 @@ describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-n
 
 describe('E2E: Context graph publish with receiver + participant signatures', () => {
   const chainA = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  let nodeA: DKGAgent;
-  let nodeB: DKGAgent;
+  let nodeA: DKGAgentType;
+  let nodeB: DKGAgentType;
   let contextGraphId: string;
 
   afterAll(async () => {
@@ -511,7 +460,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
 // ========================================================================
 
 describe('E2E: Publish KC directly to context graph', () => {
-  let nodeA: DKGAgent;
+  let nodeA: DKGAgentType;
 
   afterAll(async () => {
     try { await nodeA?.stop(); } catch {}
@@ -563,7 +512,7 @@ describe('E2E: Publish KC directly to context graph', () => {
 // ========================================================================
 
 describe('E2E: Publish rejected with insufficient receiver signatures', () => {
-  let nodeA: DKGAgent;
+  let nodeA: DKGAgentType;
   let _describeSnapshot: string;
 
   beforeAll(async () => {
@@ -625,7 +574,7 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
 // ========================================================================
 
 describe('E2E: Context graph registration rejected with insufficient participant sigs', () => {
-  let nodeA: DKGAgent;
+  let nodeA: DKGAgentType;
 
   afterAll(async () => {
     try { await nodeA?.stop(); } catch {}
@@ -684,8 +633,8 @@ describe('E2E: Context graph registration rejected with insufficient participant
 
 describe('E2E: Edge node participates in context graph governance', () => {
   const chainCore = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  let coreNode: DKGAgent;
-  let edgeNode: DKGAgent;
+  let coreNode: DKGAgentType;
+  let edgeNode: DKGAgentType;
   let contextGraphId: string;
 
   afterAll(async () => {
